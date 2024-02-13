@@ -1,0 +1,131 @@
+# To use:
+#
+#     pre-commit run -a
+#
+# Or:
+#
+#     pre-commit install  # (runs every time you commit in git)
+#
+# To update this file:
+#
+#     pre-commit autoupdate
+#
+# See https://github.com/pre-commit/pre-commit
+
+# extern content
+exclude: extern
+
+repos:
+
+# Clang format the codebase automatically
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: "v17.0.6"
+  hooks:
+  - id: clang-format
+    types_or: [c++, c, cuda]
+
+# Ruff, the Python auto-correcting linter/formatter written in Rust
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.1.9
+  hooks:
+  - id: ruff
+    args: ["--fix", "--show-fixes", "--line-length", "120"]
+  - id: ruff-format
+
+# Check static types with mypy
+- repo: https://github.com/pre-commit/mirrors-mypy
+  rev: "v1.8.0"
+  hooks:
+  - id: mypy
+    args: []
+    exclude: ^(tests|docs)/
+    additional_dependencies:
+    - markdown-it-py<3 # Drop this together with dropping Python 3.7 support.
+    - nox
+    - rich
+    - types-setuptools
+
+# CMake formatting
+- repo: https://github.com/cheshirekow/cmake-format-precommit
+  rev: "v0.6.13"
+  hooks:
+  - id: cmake-format
+    additional_dependencies: [pyyaml]
+    types: [file]
+    files: (\.cmake|CMakeLists.txt)(.in)?$
+
+# Standard hooks
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: "v4.5.0"
+  hooks:
+  - id: check-added-large-files
+  - id: check-case-conflict
+  - id: check-docstring-first
+  - id: check-merge-conflict
+  - id: check-symlinks
+  - id: check-toml
+  - id: check-yaml
+  - id: debug-statements
+  - id: end-of-file-fixer
+  - id: mixed-line-ending
+  - id: requirements-txt-fixer
+  - id: trailing-whitespace
+
+# Also code format the docs
+- repo: https://github.com/asottile/blacken-docs
+  rev: "1.16.0"
+  hooks:
+  - id: blacken-docs
+    additional_dependencies:
+    - black==23.*
+
+# Changes tabs to spaces
+- repo: https://github.com/Lucas-C/pre-commit-hooks
+  rev: "v1.5.4"
+  hooks:
+  - id: remove-tabs
+
+# Avoid directional quotes
+- repo: https://github.com/sirosen/texthooks
+  rev: "0.6.3"
+  hooks:
+  - id: fix-ligatures
+  - id: fix-smartquotes
+
+# Checking for common mistakes
+- repo: https://github.com/pre-commit/pygrep-hooks
+  rev: "v1.10.0"
+  hooks:
+  - id: rst-backticks
+  - id: rst-directive-colons
+  - id: rst-inline-touching-normal
+
+# Checks the manifest for missing files (native support)
+- repo: https://github.com/mgedmin/check-manifest
+  rev: "0.49"
+  hooks:
+  - id: check-manifest
+    # This is a slow hook, so only run this if --hook-stage manual is passed
+    stages: [manual]
+    additional_dependencies: [cmake, ninja]
+
+# Check for spelling
+# Use tools/codespell_ignore_lines_from_errors.py
+# to rebuild .codespell-ignore-lines
+- repo: https://github.com/codespell-project/codespell
+  rev: "v2.2.6"
+  hooks:
+  - id: codespell
+
+# Check for common shell mistakes
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: "v0.9.0.6"
+  hooks:
+  - id: shellcheck
+
+# PyLint has native support - not always usable, but works for us
+- repo: https://github.com/PyCQA/pylint
+  rev: "v3.0.3"
+  hooks:
+  - id: pylint
+    files: ^pybind11
