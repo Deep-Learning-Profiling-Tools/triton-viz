@@ -21,8 +21,8 @@ class LoadRecord:
 @dataclass
 class TensorRecord:
     ptr: int
-    shape: List
-    stride: List
+    shape: Tuple
+    stride: Tuple
     dtype: str
 
 
