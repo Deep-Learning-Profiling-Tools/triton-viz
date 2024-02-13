@@ -7,6 +7,7 @@ import triton.language as tl
 from .data import LaunchRecord, GridRecord, LoadRecord, TensorRecord
 from triton.runtime.jit import _normalize_ty
 from triton._C.libtriton import interpreter as _interpreter
+from typing import Tuple, List
 
 
 # TODO: duplicate
@@ -39,7 +40,6 @@ def str_to_ty(name):
 
 
 class TensorHandle:
-
     def __init__(self, data, dtype, stride=None, shape=None):
         self.data = data
         self.dtype = dtype
@@ -51,7 +51,6 @@ class TensorHandle:
 
 
 class BlockPointerHandle:
-
     def __init__(self, base, shape, strides, offsets, tensor_shape, order):
         self.base = base
         self.shape = shape
@@ -69,7 +68,9 @@ class BlockPointerHandle:
         for dim in range(len(tensor_shape)):
             bcast_dims = [1] * len(tensor_shape)
             bcast_dims[dim] = tensor_shape[dim]
-            off = (self.offsets[dim].data + np.arange(tensor_shape[dim])).reshape(bcast_dims)
+            off = (self.offsets[dim].data + np.arange(tensor_shape[dim])).reshape(
+                bcast_dims
+            )
             ptrs = ptrs + (n_bytes * off * self.strides[dim].data).astype(np.uint64)
             if dim in boundary_check:
                 masks = np.logical_and(masks, off < self.shape[dim].data)
@@ -78,17 +79,42 @@ class BlockPointerHandle:
 
 
 class Builder:
-
     def __init__(self) -> None:
         self.arch = None
-        self.launch_records = []
+        self.launch_records: List[LaunchRecord] = []
+        self.sampling_grid_idx = None
+        self.grid_idx = None
         # pass
 
+    def set_sampling_grid_idx(self, idx):
+        self.sampling_grid_idx = idx
+
     def add_record(self, record):
-        self.launch_records[-1].records.append(record)
+        def _to_1d_grid(idx: Tuple):
+            # assuming originally 1d, 2d, or 3d input
+            if len(idx) == 1:
+                return idx[0]
+            elif len(idx) == 2:
+                return idx[0] * self.grid_dim[1] + idx[1]
+            elif len(idx) == 3:
+                return (
+                    idx[0] * self.grid_dim[1] * self.grid_dim[2]
+                    + idx[1] * self.grid_dim[2]
+                    + idx[2]
+                )
+
+        if not self.sampling_grid_idx or _to_1d_grid(
+            self.sampling_grid_idx
+        ) == _to_1d_grid(self.grid_idx):
+            self.launch_records[-1].records.append(record)
 
     def set_tensor_handle(self, tensor_handle: TensorHandle):
-        tensor_record = TensorRecord(tensor_handle.data, tensor_handle.shape, tensor_handle.stride, tensor_handle.dtype)
+        tensor_record = TensorRecord(
+            tensor_handle.data,
+            tensor_handle.shape,
+            tensor_handle.stride,
+            tensor_handle.dtype,
+        )
         self.launch_records[-1].tensors.append(tensor_record)
 
     def sort_tensor_handles(self):
@@ -188,14 +214,21 @@ class Builder:
         mask = TensorHandle(np.ones_like(ptr.data, dtype=bool), tl.int1)
         return self.create_masked_store(ptr, val, mask, None, None)
 
-    def create_masked_load(self, ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
+    def create_masked_load(
+        self, ptrs, mask, other, cache_modifier, eviction_policy, is_volatile
+    ):
         dtype_tt = ptrs.dtype.element_ty
         dtype_np = self.np_dtype(dtype_tt)
         if other is None:
             other = TensorHandle(np.ones_like(ptrs.data, dtype=dtype_np), dtype_tt)
         ret = _interpreter.load(ptrs.data, mask.data, other.data, dtype_np)
         tensor_ptr = self.get_tensor_ptr(ptrs.data[0])
-        load_record = LoadRecord(ptr=tensor_ptr.ptr, shape=ptrs.data.shape, offsets=ptrs.data - tensor_ptr.ptr, masks=mask.data)
+        load_record = LoadRecord(
+            ptr=tensor_ptr.ptr,
+            shape=ptrs.data.shape,
+            offsets=ptrs.data - tensor_ptr.ptr,
+            masks=mask.data,
+        )
         self.add_record(load_record)
         return TensorHandle(ret, dtype_tt)
 
@@ -214,7 +247,9 @@ class Builder:
     create_fp_to_ui = lambda self, src, dst_type: self.cast_impl(src, dst_type)
     create_fp_ext = lambda self, src, dst_type: self.cast_impl(src, dst_type)
     create_fp_trunc = lambda self, src, dst_type: self.cast_impl(src, dst_type)
-    create_int_cast = lambda self, src, dst_type, is_signed: self.cast_impl(src, dst_type)
+    create_int_cast = lambda self, src, dst_type, is_signed: self.cast_impl(
+        src, dst_type
+    )
 
     def create_fp_to_fp(self, src, dst_type):
         assert "float8 not NotImplemented yet"
@@ -277,7 +312,9 @@ class Builder:
     def ternary_op(self, lhs, rhs, other, op):
         return TensorHandle(op(lhs.data, rhs.data, other.data), other.dtype)
 
-    create_select = lambda self, cond, lhs, rhs: self.ternary_op(cond, lhs, rhs, np.where)
+    create_select = lambda self, cond, lhs, rhs: self.ternary_op(
+        cond, lhs, rhs, np.where
+    )
 
     # unary functions
     def unary_op(self, arg, op):
@@ -292,7 +329,9 @@ class Builder:
     create_iabs = lambda self, arg: self.unary_op(arg, np.abs)
 
     # tensor operators
-    create_reshape = lambda self, arg, shape, allowReorder: TensorHandle(arg.data.reshape(shape), arg.dtype)
+    create_reshape = lambda self, arg, shape, allowReorder: TensorHandle(
+        arg.data.reshape(shape), arg.dtype
+    )
     create_trans = lambda self, arg: self.unary_op(arg, np.transpose)
 
     def create_dot(self, a, b, d, allow_tf32, maxNumImpreciseAcc):
@@ -305,18 +344,35 @@ class Builder:
 
     def create_addptr(self, ptr, offset):
         dtype_tt = ptr.dtype.element_ty
-        return TensorHandle(ptr.data + (dtype_tt.primitive_bitwidth // 8) * offset.data.astype(np.uint64), ptr.dtype)
+        return TensorHandle(
+            ptr.data
+            + (dtype_tt.primitive_bitwidth // 8) * offset.data.astype(np.uint64),
+            ptr.dtype,
+        )
 
-    def create_tensor_pointer_load(self, ptr, boundary_check, padding_option, cache_modifier, eviction_policy,
-                                   is_volatile):
+    def create_tensor_pointer_load(
+        self,
+        ptr,
+        boundary_check,
+        padding_option,
+        cache_modifier,
+        eviction_policy,
+        is_volatile,
+    ):
         ptrs, masks = ptr.materialize_pointers(boundary_check)
         assert padding_option is None
         other = None
-        return self.create_masked_load(ptrs, masks, other, cache_modifier, eviction_policy, is_volatile)
+        return self.create_masked_load(
+            ptrs, masks, other, cache_modifier, eviction_policy, is_volatile
+        )
 
-    def create_tensor_pointer_store(self, ptr, value, boundary_check, cache_modifier, eviction_policy):
+    def create_tensor_pointer_store(
+        self, ptr, value, boundary_check, cache_modifier, eviction_policy
+    ):
         ptrs, masks = ptr.materialize_pointers(boundary_check)
-        return self.create_masked_store(ptrs, value, masks, cache_modifier, eviction_policy)
+        return self.create_masked_store(
+            ptrs, value, masks, cache_modifier, eviction_policy
+        )
 
     def create_expand_dims(self, arg, axis):
         return TensorHandle(np.expand_dims(arg.data, axis), arg.dtype)
@@ -334,7 +390,9 @@ class Builder:
     #     pass
 
     def create_splat(self, arg, shape):
-        return TensorHandle(np.full(shape, arg.data[0], dtype=self.np_dtype(arg.dtype)), arg.dtype)
+        return TensorHandle(
+            np.full(shape, arg.data[0], dtype=self.np_dtype(arg.dtype)), arg.dtype
+        )
 
     # def create_atomic_cas(self, ptr, cmp, val, sem):
     #     pass
@@ -379,21 +437,28 @@ class Builder:
     #     pass
 
     def create_make_block_ptr(self, base, shape, strides, offsets, tensor_shape, order):
-        return BlockPointerHandle(base, shape, strides, np.array(offsets), tensor_shape, order)
+        return BlockPointerHandle(
+            base, shape, strides, np.array(offsets), tensor_shape, order
+        )
 
     def create_advance(self, ptr, offsets):
         assert len(ptr.offsets) == len(offsets)
-        ret = BlockPointerHandle(ptr.base, ptr.shape, ptr.strides, ptr.offsets, ptr.tensor_shape, ptr.order)
+        ret = BlockPointerHandle(
+            ptr.base, ptr.shape, ptr.strides, ptr.offsets, ptr.tensor_shape, ptr.order
+        )
         for i in range(len(offsets)):
             ret.offsets[i].data += offsets[i].data
         return ret
 
 
 def patch_attr(obj, name, member, builder):
-    new_member = lambda *args, member=member, **kwargs: (member(*args,
-                                                                ** {k: v
-                                                                    for k, v in kwargs.items()
-                                                                    if k != "_builder"}, _builder=builder))
+    new_member = lambda *args, member=member, **kwargs: (
+        member(
+            *args,
+            **{k: v for k, v in kwargs.items() if k != "_builder"},
+            _builder=builder,
+        )
+    )
     setattr(obj, name, new_member)
 
 
@@ -446,7 +511,6 @@ def _patch_lang_math(lang, builder):
     }
 
     def make_numpy(name):
-
         def impl(*args, **kwargs):
             ret_type = args[0].type  # TODO: incorrect
             ret_dtype = args[0].dtype  # TODO: incorrect
@@ -459,13 +523,14 @@ def _patch_lang_math(lang, builder):
         return impl
 
     def make_fallback(name):
-
         def fallback(*args, **kwargs):
-            raise NotImplementedError(f"""
+            raise NotImplementedError(
+                f"""
 {name} not supported in interpreter mode: no known numpy implementation.
 If you think that {name} in fact does have a numpy implementation, please add it
 to the mapping in python/triton/interpreter/new_interpreter.py:_patch_lang_math.
-""")
+"""
+            )
 
         return fallback
 
@@ -479,12 +544,25 @@ to the mapping in python/triton/interpreter/new_interpreter.py:_patch_lang_math.
 # TODO: wrap everything in triton tensors
 def _implicit_cvt(arg):
     if isinstance(arg, int):
-        ty = str_to_ty(triton.runtime.jit.JITFunction._type_of(triton.runtime.jit.JITFunction._key_of(arg)))
+        ty = str_to_ty(
+            triton.runtime.jit.JITFunction._type_of(
+                triton.runtime.jit.JITFunction._key_of(arg)
+            )
+        )
         handle = TensorHandle(np.array([arg], dtype=np.int32), ty)
         return tl.tensor(handle, ty)
     if hasattr(arg, "data_ptr"):
-        ty = str_to_ty(triton.runtime.jit.JITFunction._type_of(triton.runtime.jit.JITFunction._key_of(arg)))
-        handle = TensorHandle(np.array([arg.data_ptr()], dtype=np.uint64), ty, stride=arg.stride(), shape=arg.shape)
+        ty = str_to_ty(
+            triton.runtime.jit.JITFunction._type_of(
+                triton.runtime.jit.JITFunction._key_of(arg)
+            )
+        )
+        handle = TensorHandle(
+            np.array([arg.data_ptr()], dtype=np.uint64),
+            ty,
+            stride=arg.stride(),
+            shape=arg.shape,
+        )
         return tl.tensor(handle, ty)
     return arg
 
@@ -501,23 +579,32 @@ builder = Builder()
 
 
 class GridExecutor:
-
     def __init__(self, fn, arg_names, grid):
         self.fn = fn
         self.arg_names = arg_names
         self.grid = grid
-        __annotations__ = {name: _normalize_ty(ty) for name, ty in fn.__annotations__.items()}
-        self.constexprs = [name for name in arg_names if __annotations__.get(name) == "constexpr"]
+        __annotations__ = {
+            name: _normalize_ty(ty) for name, ty in fn.__annotations__.items()
+        }
+        self.constexprs = [
+            name for name in arg_names if __annotations__.get(name) == "constexpr"
+        ]
 
     def _patch_lang(self, builder):
-        lang = [value for _, value in self.fn.__globals__.items() if value in [tl, tl.core]]
-        assert len(lang) == 1, "triton.language must be visible from within jit'd function"
+        lang = [
+            value for _, value in self.fn.__globals__.items() if value in [tl, tl.core]
+        ]
+        assert (
+            len(lang) == 1
+        ), "triton.language must be visible from within jit'd function"
         _patch_lang_tensor(getattr(lang[0], "tensor"), builder)
         _patch_lang_core(lang[0], builder)
         _patch_lang_math(lang[0], builder)
 
     def __call__(self, *args_dev, **kwargs):
-        args_hst = [_unwrap(arg).cpu() if hasattr(arg, "data_ptr") else arg for arg in args_dev]
+        args_hst = [
+            _unwrap(arg).cpu() if hasattr(arg, "data_ptr") else arg for arg in args_dev
+        ]
         # removes reserved keywords from kwargs
         kwargs = {k: v for k, v in kwargs.items() if k not in RESERVED_KWS}
         # remaps core language functions to interpreted ones
@@ -525,11 +612,14 @@ class GridExecutor:
         # we need to copy arguments to the host for the interpreter
         # implicitly convert tensor arguments to their base pointers
         args = inspect.getcallargs(self.fn, *args_hst, **kwargs)
-        args = {name: arg if name in self.constexprs else _implicit_cvt(arg) for name, arg in args.items()}
+        args = {
+            name: arg if name in self.constexprs else _implicit_cvt(arg)
+            for name, arg in args.items()
+        }
         # iterate through grid
         grid = self.grid(args) if callable(self.grid) else self.grid
         assert len(grid) <= 3
-        grid = grid + (1, ) * (3 - len(grid))
+        grid = grid + (1,) * (3 - len(grid))
         builder.set_grid_dim(*grid)
         for _, arg in args.items():
             if isinstance(arg, tl.tensor):
@@ -556,9 +646,3 @@ class InterpretedFunction:
         grid = kwargs["grid"]
         kwargs = {k: v for k, v in kwargs.items() if k not in RESERVED_KWS + ["grid"]}
         GridExecutor(self._fn, self._arg_names, grid)(*args, **kwargs)
-
-
-def dump(path: str):
-    launch_records = builder.launch_records
-    for record in launch_records:
-        print(record)

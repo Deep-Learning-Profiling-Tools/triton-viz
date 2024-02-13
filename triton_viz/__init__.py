@@ -1,4 +1,3 @@
-from .trace import trace
-from .interpreter import dump
+from .trace import trace, dump, sample
 
-__all__ = ["trace", "dump"]
+__all__ = ["trace", "dump", "sample"]
