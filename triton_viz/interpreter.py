@@ -4,10 +4,11 @@ import numpy as np
 
 import triton
 import triton.language as tl
+from dataclasses import dataclass
 from .data import LaunchRecord, GridRecord, LoadRecord, TensorRecord
 from triton.runtime.jit import _normalize_ty
 from triton._C.libtriton import interpreter as _interpreter
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 
 # TODO: duplicate
@@ -78,13 +79,22 @@ class BlockPointerHandle:
         return ptrs, masks
 
 
+@dataclass(frozen=True)
+class InterpreterOptions:
+    extern_libs: Optional[dict] = None
+    debug: bool = False
+    arch: Optional[str] = None
+    allow_fp8e4nv: bool = False
+    max_num_imprecise_acc_default: int = 0
+
+
 class Builder:
     def __init__(self) -> None:
         self.arch = None
         self.launch_records: List[LaunchRecord] = []
         self.sampling_grid_idx = None
         self.grid_idx = None
-        # pass
+        self.options = InterpreterOptions()
 
     def set_sampling_grid_idx(self, idx):
         self.sampling_grid_idx = idx
@@ -222,7 +232,7 @@ class Builder:
         if other is None:
             other = TensorHandle(np.ones_like(ptrs.data, dtype=dtype_np), dtype_tt)
         ret = _interpreter.load(ptrs.data, mask.data, other.data, dtype_np)
-        tensor_ptr = self.get_tensor_ptr(ptrs.data[0])
+        tensor_ptr = self.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
         load_record = LoadRecord(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
