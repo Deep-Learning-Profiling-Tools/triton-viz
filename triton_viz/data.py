@@ -14,8 +14,32 @@ class StoreRecord:
 class LoadRecord:
     ptr: int
     shape: Tuple
-    offsets: List[tuple]
+    offsets: List[Tuple]
     masks: List[bool]
+
+
+@dataclass
+class BinaryOps:
+    op: str
+    shape: Tuple
+
+
+@dataclass
+class MakeRange:
+    start: int
+    end: int
+
+
+@dataclass
+class ExpandDims:
+    input_shape: Tuple
+    index: int
+
+
+@dataclass
+class DotRecord:
+    input_shape: Tuple
+    other_shape: Tuple
 
 
 @dataclass
