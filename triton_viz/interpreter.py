@@ -113,8 +113,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         return
     # Remaps core language functions to interpreted ones
     _patch_lang(self.fn)
-    # We need to copy arguments to the host for the interpreter.
-    # Implicitly convert tensor arguments to their base pointers
+    # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs)
     call_args = {}
     tensors = []
@@ -132,7 +131,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     Tensor(ret.handle.data, ret.dtype, arg.stride(), arg.shape)
                 )
             call_args[name] = ret
-    # Flatten kwargs
     call_args.pop("self", None)
     # Iterate through grid
     grid = self.grid(call_args) if callable(self.grid) else self.grid
