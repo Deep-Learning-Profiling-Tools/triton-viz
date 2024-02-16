@@ -3,7 +3,7 @@ from typing import List, Tuple
 
 
 @dataclass
-class StoreRecord:
+class Store:
     ptr: int
     shape: Tuple
     offsets: List[Tuple]
@@ -11,7 +11,7 @@ class StoreRecord:
 
 
 @dataclass
-class LoadRecord:
+class Load:
     ptr: int
     shape: Tuple
     offsets: List[tuple]
@@ -19,20 +19,20 @@ class LoadRecord:
 
 
 @dataclass
-class TensorRecord:
+class Tensor:
     ptr: int
-    shape: Tuple
-    stride: Tuple
     dtype: str
+    stride: Tuple
+    shape: Tuple
 
 
 @dataclass
-class GridRecord:
+class Grid:
     idx: Tuple
 
 
 @dataclass
-class LaunchRecord:
+class Launch:
     grid: Tuple
-    tensors: List[TensorRecord]
+    tensors: List[Tensor]
     records: List
