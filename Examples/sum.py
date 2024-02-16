@@ -5,6 +5,7 @@ import triton.language as tl
 import triton_viz
 
 
+@triton_viz.trace
 @triton.jit
 def sum_kernel(
     x_ptr,

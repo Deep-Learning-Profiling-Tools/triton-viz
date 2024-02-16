@@ -1,7 +1,8 @@
 from triton.runtime import KernelInterface
+from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
-from .interpreter import InterpretedFunction, builder
+from .interpreter import patch, record_builder
 from typing import Tuple
 
 
@@ -11,9 +12,8 @@ class Trace(KernelInterface):
         self._fn = InterpretedFunction(kernel.fn)
 
     def run(self, *args, **kwargs):
-        # Take out warmpup from kwargs
-        kwargs.pop("warmup", 0)
-        return self._fn.run(*args, **kwargs)
+        with patch():
+            return self._fn.run(*args, **kwargs)
 
 
 def trace(kernel):
@@ -21,10 +21,9 @@ def trace(kernel):
 
 
 def dump(path: str):
-    launch_records = builder.launch_records
-    for record in launch_records:
-        print(record)
+    for launch in record_builder.launches:
+        print(launch)
 
 
 def sample(idx: Tuple):
-    builder.set_sampling_grid_idx(idx)
+    record_builder.set_sampling_grid_idx(idx)
