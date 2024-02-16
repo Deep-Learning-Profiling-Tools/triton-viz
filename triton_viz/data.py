@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Any
 
 
 @dataclass
@@ -40,6 +40,14 @@ class ExpandDims:
 class DotRecord:
     input_shape: Tuple
     other_shape: Tuple
+
+
+@dataclass
+class Reduce:
+    input_shape: Tuple
+    index: int
+    op: Any
+    keep_dims: bool
 
 
 @dataclass
