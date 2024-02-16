@@ -37,7 +37,7 @@ class ExpandDims:
 
 
 @dataclass
-class DotRecord:
+class Dot:
     input_shape: Tuple
     other_shape: Tuple
 
