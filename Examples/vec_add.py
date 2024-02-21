@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 import triton_viz
+import argparse
 
 
 @triton_viz.trace
@@ -36,7 +37,6 @@ def add_kernel(
 def add(x: torch.Tensor, y: torch.Tensor):
     # We need to preallocate the output.
     output = torch.empty_like(x)
-    assert x.is_cuda and y.is_cuda and output.is_cuda
     n_elements = output.numel()
     # The SPMD launch grid denotes the number of kernel instances that run in parallel.
     # It is analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
@@ -52,10 +52,14 @@ def add(x: torch.Tensor, y: torch.Tensor):
     return output
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--device", type=str, default="cpu")
+device = parser.parse_args().device
+
 torch.manual_seed(0)
 size = 98432
-x = torch.rand(size, device="cuda")
-y = torch.rand(size, device="cuda")
+x = torch.rand(size, device=device)
+y = torch.rand(size, device=device)
 output_torch = x + y
 triton_viz.sample((0,))
 output_triton = add(x, y)

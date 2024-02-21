@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 import triton_viz
+import argparse
 
 
 @triton_viz.trace
@@ -23,11 +24,15 @@ def sum_kernel(
     tl.store(y_ptr + tl.arange(0, BLOCK_SIZE), x_sum)
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--device", type=str, default="cpu")
+device = parser.parse_args().device
+
 triton_viz.sample((0,))
 BLOCK_SIZE = 128
 CHANNEL_SIZE = 8
-x = torch.ones((BLOCK_SIZE, CHANNEL_SIZE), device="cuda", dtype=torch.long)
-y = torch.zeros((BLOCK_SIZE), device="cuda", dtype=torch.long)
+x = torch.ones((BLOCK_SIZE, CHANNEL_SIZE), device=device, dtype=torch.long)
+y = torch.zeros((BLOCK_SIZE), device=device, dtype=torch.long)
 
 sum_kernel[(1,)](x, y, CHANNEL_SIZE, CHANNEL_SIZE, BLOCK_SIZE)
 
