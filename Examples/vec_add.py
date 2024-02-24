@@ -71,3 +71,4 @@ print(
 )
 
 triton_viz.dump("./vec_add.json")
+triton_viz.draw("out.png")

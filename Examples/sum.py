@@ -37,3 +37,4 @@ y = torch.zeros((BLOCK_SIZE), device=device, dtype=torch.long)
 sum_kernel[(1,)](x, y, CHANNEL_SIZE, CHANNEL_SIZE, BLOCK_SIZE)
 
 triton_viz.dump("./sum.json")
+triton_viz.draw("out.png")
