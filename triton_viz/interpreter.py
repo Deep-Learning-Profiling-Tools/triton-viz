@@ -124,9 +124,9 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         return
     # Remaps core language functions to interpreted ones
     _patch_lang(self.fn)
-    tl.sum = _w_new_reduce(tl.sum, "sum")
-    tl.min = _w_new_reduce(tl.min, "min")
-    tl.max = _w_new_reduce(tl.max, "max")
+    tl.sum = _create_reduce(tl.sum, "sum")
+    tl.min = _create_reduce(tl.min, "min")
+    tl.max = _create_reduce(tl.max, "max")
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs)
     call_args = {}
@@ -216,7 +216,7 @@ def _create_make_range(fn):
     return wrapper
 
 
-def _binary_op(fn):
+def _create_binary_op(fn):
     @wraps(fn)
     def wrapper(lhs, rhs, op):
         ret = fn(lhs, rhs, op)
@@ -257,7 +257,7 @@ def _create_expand_dims(fn):
     return wrapper
 
 
-def _w_new_reduce(fn, op_name):
+def _create_reduce(fn, op_name):
     @wraps(fn)
     def wrapper(input, axis, keep_dims=False):
         ret = fn(input, axis, keep_dims)
@@ -277,24 +277,24 @@ def _w_new_reduce(fn, op_name):
 @contextmanager
 def patch():
     old_grid_executor_call = GridExecutor.__call__
-    GridExecutor.__call__ = _grid_executor_call
     old_create_make_range = builder.create_make_range
-    builder.create_make_range = _create_make_range(builder.create_make_range)
     old_create_masked_load = builder.create_masked_load
-    builder.create_masked_load = _create_masked_load(builder.create_masked_load)
     old_create_expand_dims = builder.create_expand_dims
-    builder.create_expand_dims = _create_expand_dims(builder.create_expand_dims)
     old_binary_op = builder.binary_op
-    builder.binary_op = _binary_op(builder.binary_op)
     old_create_dot = builder.create_dot
-    builder.create_dot = _create_dot(builder.create_dot)
     old_create_masked_store = builder.create_masked_store
+    GridExecutor.__call__ = _grid_executor_call
+    builder.create_make_range = _create_make_range(builder.create_make_range)
+    builder.create_masked_load = _create_masked_load(builder.create_masked_load)
+    builder.create_expand_dims = _create_expand_dims(builder.create_expand_dims)
+    builder.binary_op = _create_binary_op(builder.binary_op)
+    builder.create_dot = _create_dot(builder.create_dot)
     builder.create_masked_store = _create_masked_store(builder.create_masked_store)
     yield
     GridExecutor.__call__ = old_grid_executor_call
     builder.create_make_range = old_create_make_range
-    builder.create_expand_dims = old_create_expand_dims
     builder.create_masked_load = old_create_masked_load
+    builder.create_expand_dims = old_create_expand_dims
     builder.binary_op = old_binary_op
     builder.create_dot = old_create_dot
     builder.create_masked_store = old_create_masked_store
