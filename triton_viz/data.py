@@ -21,7 +21,8 @@ class Load:
 @dataclass
 class BinaryOps:
     op: str
-    shape: Tuple
+    input_shape: Tuple
+    output_shape: Tuple
 
 
 @dataclass
@@ -34,12 +35,14 @@ class MakeRange:
 class ExpandDims:
     input_shape: Tuple
     index: int
+    output_shape: Tuple
 
 
 @dataclass
 class Dot:
     input_shape: Tuple
     other_shape: Tuple
+    output_shape: Tuple
 
 
 @dataclass
@@ -48,6 +51,7 @@ class Reduce:
     index: int
     op: Any
     keep_dims: bool
+    output_shape: Tuple
 
 
 @dataclass
