@@ -1,8 +1,19 @@
 import inspect
-
+import triton.language as tl
 import numpy as np
 
-from .data import Launch, Grid, Load, Tensor
+from .data import (
+    Launch,
+    Grid,
+    Tensor,
+    Load,
+    Store,
+    BinaryOps,
+    MakeRange,
+    ExpandDims,
+    Dot,
+    Reduce,
+)
 from triton.runtime.interpreter import (
     GridExecutor,
     _unwrap,
@@ -113,6 +124,9 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         return
     # Remaps core language functions to interpreted ones
     _patch_lang(self.fn)
+    tl.sum = _create_reduce(tl.sum, "sum")
+    tl.min = _create_reduce(tl.min, "min")
+    tl.max = _create_reduce(tl.max, "max")
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs)
     call_args = {}
@@ -176,12 +190,111 @@ def _create_masked_load(fn):
     return wrapper
 
 
+def _create_masked_store(fn):
+    @wraps(fn)
+    def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
+        tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
+        store_record = Store(
+            ptr=tensor_ptr.ptr,
+            shape=ptrs.data.shape,
+            offsets=ptrs.data - tensor_ptr.ptr,
+            masks=mask.data,
+        )
+        record_builder.add_record(store_record)
+        return fn(ptrs, value, mask, cache_modifier, eviction_policy)
+
+    return wrapper
+
+
+def _create_make_range(fn):
+    @wraps(fn)
+    def wrapper(start, stop):
+        range_record = MakeRange(start=start, end=stop)
+        record_builder.add_record(range_record)
+        return fn(start, stop)
+
+    return wrapper
+
+
+def _create_binary_op(fn):
+    @wraps(fn)
+    def wrapper(lhs, rhs, op):
+        ret = fn(lhs, rhs, op)
+        binary_op_record = BinaryOps(
+            op=op.__name__, input_shape=(lhs.data.shape), output_shape=ret.data.shape
+        )
+        record_builder.add_record(binary_op_record)
+        return ret
+
+    return wrapper
+
+
+def _create_dot(fn):
+    @wraps(fn)
+    def wrapper(a, b, d, allow_tf32, maxNumImpreciseAcc):
+        ret = fn(a, b, d, allow_tf32, maxNumImpreciseAcc)
+        dot_record = Dot(
+            input_shape=(a.data.shape, b.data.shape),
+            other_shape=d.data.shape,
+            output_shape=ret.data.shape,
+        )
+        record_builder.add_record(dot_record)
+        return ret
+
+    return wrapper
+
+
+def _create_expand_dims(fn):
+    @wraps(fn)
+    def wrapper(arg, axis):
+        ret = fn(arg, axis)
+        expand_dims_record = ExpandDims(
+            input_shape=arg.data.shape, index=axis, output_shape=ret.data.shape
+        )
+        record_builder.add_record(expand_dims_record)
+        return ret
+
+    return wrapper
+
+
+def _create_reduce(fn, op_name):
+    @wraps(fn)
+    def wrapper(input, axis, keep_dims=False):
+        ret = fn(input, axis, keep_dims)
+        reduce_record = Reduce(
+            input_shape=input.handle.data.shape,
+            index=axis,
+            op=op_name,
+            keep_dims=keep_dims,
+            output_shape=ret.handle.data.shape,
+        )
+        record_builder.add_record(reduce_record)
+        return ret
+
+    return wrapper
+
+
 @contextmanager
 def patch():
     old_grid_executor_call = GridExecutor.__call__
+    old_create_make_range = builder.create_make_range
     old_create_masked_load = builder.create_masked_load
+    old_create_expand_dims = builder.create_expand_dims
+    old_binary_op = builder.binary_op
+    old_create_dot = builder.create_dot
+    old_create_masked_store = builder.create_masked_store
     GridExecutor.__call__ = _grid_executor_call
+    builder.create_make_range = _create_make_range(builder.create_make_range)
     builder.create_masked_load = _create_masked_load(builder.create_masked_load)
+    builder.create_expand_dims = _create_expand_dims(builder.create_expand_dims)
+    builder.binary_op = _create_binary_op(builder.binary_op)
+    builder.create_dot = _create_dot(builder.create_dot)
+    builder.create_masked_store = _create_masked_store(builder.create_masked_store)
     yield
     GridExecutor.__call__ = old_grid_executor_call
+    builder.create_make_range = old_create_make_range
     builder.create_masked_load = old_create_masked_load
+    builder.create_expand_dims = old_create_expand_dims
+    builder.binary_op = old_binary_op
+    builder.create_dot = old_create_dot
+    builder.create_masked_store = old_create_masked_store
