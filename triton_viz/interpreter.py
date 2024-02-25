@@ -26,8 +26,10 @@ from typing import Tuple, List, Optional
 from contextlib import contextmanager
 from functools import wraps
 
+
 def _unwrap(tensor):
-    return  tensor.item() if torch.numel(tensor)==1 else tensor.data
+    return tensor.item() if torch.numel(tensor) == 1 else tensor.data
+
 
 def _unpatch_lang():
     import importlib

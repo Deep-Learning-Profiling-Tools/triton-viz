@@ -65,12 +65,12 @@ y = torch.rand(size, device=device)
 output_torch = x + y
 triton_viz.sample((args.grid,))
 output_triton = add(x, y)
-    # print(output_torch)
-    # print(output_triton)
-    # print(
-    #     f"The maximum difference between torch and triton is "
-    #     f"{torch.max(torch.abs(output_torch - output_triton))}"
-    # )
+# print(output_torch)
+# print(output_triton)
+# print(
+#     f"The maximum difference between torch and triton is "
+#     f"{torch.max(torch.abs(output_torch - output_triton))}"
+# )
 
 triton_viz.dump("./vec_add.json")
 triton_viz.draw(f"out{args.grid}.png")

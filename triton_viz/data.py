@@ -1,21 +1,22 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Any
+import numpy as np
 
 
 @dataclass
 class Store:
-    ptr: int
+    ptr: np.Array
     shape: Tuple
-    offsets: List[Tuple]
-    masks: List[bool]
+    offsets: np.Array
+    masks: np.Array
 
 
 @dataclass
 class Load:
-    ptr: int
+    ptr: np.Array
     shape: Tuple
-    offsets: List[Tuple]
-    masks: List[bool]
+    offsets: np.Array
+    masks: np.Array
 
 
 @dataclass
@@ -56,7 +57,7 @@ class Reduce:
 
 @dataclass
 class Tensor:
-    ptr: int
+    ptr: np.Array
     dtype: str
     stride: Tuple
     shape: Tuple
