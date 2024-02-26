@@ -5,18 +5,18 @@ import numpy as np
 
 @dataclass
 class Store:
-    ptr: np.Array
+    ptr: int
     shape: Tuple
-    offsets: np.Array
-    masks: np.Array
+    offsets: np.array
+    masks: np.array
 
 
 @dataclass
 class Load:
-    ptr: np.Array
+    ptr: int
     shape: Tuple
-    offsets: np.Array
-    masks: np.Array
+    offsets: np.array
+    masks: np.array
 
 
 @dataclass
@@ -57,7 +57,7 @@ class Reduce:
 
 @dataclass
 class Tensor:
-    ptr: np.Array
+    ptr: int
     dtype: str
     stride: Tuple
     shape: Tuple

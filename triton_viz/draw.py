@@ -64,7 +64,7 @@ def draw_launch(launch: Launch) -> Diagram:
     # Map tensor pointers to a table.
     tensor_table = {}
     for t in launch.tensors:
-        tensor_table[t.ptr[0]] = t
+        tensor_table[t.ptr] = t
 
     def draw(x):
         "Dispatch"
@@ -162,7 +162,7 @@ def add_whiskers(d: Diagram, shape: Tuple) -> Diagram:
     return d.center_xy()
 
 
-def delinearize(shape: Tuple, x: np.Array, dtype, mask) -> List[np.Array]:
+def delinearize(shape: Tuple, x: np.array, dtype, mask) -> List[np.array]:
     if len(shape) == 1:
         shape = (1, shape[0])
     x = x.copy() // (dtype.element_ty.primitive_bitwidth // 8)
@@ -179,7 +179,7 @@ trail = Trail.from_offsets([V2(0, 1), V2(1, 0), V2(0, -1), V2(-1, 0)], closed=Tr
 
 
 def cover(
-    d: Diagram, shape: Tuple, dtype, load: Tensor, mask: np.Array, color: Color
+    d: Diagram, shape: Tuple, dtype, load: Tensor, mask: np.array, color: Color
 ) -> Diagram:
     "Draw the values from load on top of the loading tensor"
     x, y = delinearize(shape, load, dtype, mask)
@@ -193,7 +193,7 @@ def cover(
     ).with_envelope(d)
 
 
-def mask(d: Diagram, shape: Tuple, mask: np.Array, color: Color) -> Diagram:
+def mask(d: Diagram, shape: Tuple, mask: np.array, color: Color) -> Diagram:
     "Color the values from mask on top of the loaded tensor"
     if len(mask.shape) == 1:
         mask = mask.reshape(1, -1)
@@ -276,7 +276,7 @@ def draw_store(x, tensor_table) -> Optional[Diagram]:
 def store_load(
     x: Union[Store, Load], tensor_table: Dict[int, Tensor]
 ) -> Tuple[Diagram, Diagram]:
-    tensor: Tensor = tensor_table[x.ptr[0]]
+    tensor: Tensor = tensor_table[x.ptr]
     inp = base_tensor(tensor.shape, DEFAULT)
     inp = cover(inp, tensor.shape, tensor.dtype, x.offsets, x.masks, ACTIVE)
     inp = reshape(inp)

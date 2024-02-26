@@ -14,21 +14,24 @@ from .data import (
     Dot,
     Reduce,
 )
-import torch
 from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
     RESERVED_KWS,
     builder,
-    _patch_lang,
 )
 from typing import Tuple, List, Optional
 from contextlib import contextmanager
 from functools import wraps
 
 
-def _unwrap(tensor):
-    return tensor.item() if torch.numel(tensor) == 1 else tensor.data
+def _patch_lang(fn):
+    from triton.runtime.interpreter import _patch_lang as patch_lang
+
+    patch_lang(fn)
+    tl.sum = _create_reduce(tl.sum, "sum")
+    tl.min = _create_reduce(tl.min, "min")
+    tl.max = _create_reduce(tl.max, "max")
 
 
 def _unpatch_lang():
@@ -119,18 +122,13 @@ record_builder = RecordBuilder()
 
 
 def _grid_executor_call(self, *args_dev, **kwargs):
-    args_hst = [
-        _unwrap(arg).cpu() if hasattr(arg, "data_ptr") else arg for arg in args_dev
-    ]
+    args_hst = self._init_args_hst(args_dev)
     # Removes reserved keywords from kwargs
     kwargs = {k: v for k, v in kwargs.items() if k not in RESERVED_KWS}
     if kwargs.pop("warmup", False):
         return
     # Remaps core language functions to interpreted ones
     _patch_lang(self.fn)
-    tl.sum = _create_reduce(tl.sum, "sum")
-    tl.min = _create_reduce(tl.min, "min")
-    tl.max = _create_reduce(tl.max, "max")
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs)
     call_args = {}
@@ -140,11 +138,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
             call_args[name] = arg
         else:
             ret = _implicit_cvt(arg)
-            if isinstance(arg, int):
-                tensors.append(
-                    Tensor(ret.handle.data, ret.dtype, stride=None, shape=None)
-                )
-            elif hasattr(arg, "data_ptr"):
+            if hasattr(arg, "data_ptr"):
                 tensors.append(
                     Tensor(ret.handle.data, ret.dtype, arg.stride(), arg.shape)
                 )
@@ -165,9 +159,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 record_builder.set_grid_idx(x, y, z)
                 self.fn(**call_args)
     # Copy arguments back to propagate side-effects
-    for arg_dev, arg_hst in zip(args_dev, args_hst):
-        if hasattr(arg_dev, "data_ptr"):
-            _unwrap(arg_dev).copy_(arg_hst.to(arg_dev.device))
+    self._restore_args_dev(args_dev, args_hst)
     _unpatch_lang()
 
 
@@ -176,7 +168,7 @@ def _create_masked_load(fn):
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
         tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
         load_record = Load(
-            ptr=tensor_ptr.ptr,
+            ptr=tensor_ptr.ptr[0],
             shape=ptrs.data.shape,
             offsets=ptrs.data - tensor_ptr.ptr,
             masks=mask.data,
@@ -199,7 +191,7 @@ def _create_masked_store(fn):
     def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
         tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
         store_record = Store(
-            ptr=tensor_ptr.ptr,
+            ptr=tensor_ptr.ptr[0],
             shape=ptrs.data.shape,
             offsets=ptrs.data - tensor_ptr.ptr,
             masks=mask.data,

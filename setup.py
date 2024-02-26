@@ -11,6 +11,7 @@ setup(
     install_requires=[
         "setuptools",
         "triton",
-        "git+https://github.com/chalk-diagrams.git@associative",
+        "pycairo",
+        "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git@associative",
     ],
 )
