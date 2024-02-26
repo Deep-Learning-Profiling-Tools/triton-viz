@@ -14,9 +14,9 @@ from .data import (
     Dot,
     Reduce,
 )
+import torch
 from triton.runtime.interpreter import (
     GridExecutor,
-    _unwrap,
     _implicit_cvt,
     RESERVED_KWS,
     builder,
@@ -25,6 +25,10 @@ from triton.runtime.interpreter import (
 from typing import Tuple, List, Optional
 from contextlib import contextmanager
 from functools import wraps
+
+
+def _unwrap(tensor):
+    return tensor.item() if torch.numel(tensor) == 1 else tensor.data
 
 
 def _unpatch_lang():

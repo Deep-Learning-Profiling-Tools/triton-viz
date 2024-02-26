@@ -8,5 +8,9 @@ setup(
     author="Deep Learning Profiling Tools Team",
     author_email="kzhou6@gmu.edu",
     url="https://github.com/Deep-Learning-Profiling-Tools/triton-viz",
-    install_requires=["setuptools", "triton"],
+    install_requires=[
+        "setuptools",
+        "triton",
+        "git+https://github.com/chalk-diagrams.git@associative",
+    ],
 )

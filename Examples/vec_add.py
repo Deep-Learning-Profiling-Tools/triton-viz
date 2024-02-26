@@ -54,20 +54,23 @@ def add(x: torch.Tensor, y: torch.Tensor):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--device", type=str, default="cpu")
-device = parser.parse_args().device
+parser.add_argument("--grid", type=int, default=0)
+args = parser.parse_args()
+device = args.device
 
 torch.manual_seed(0)
-size = 98432
+size = 5000
 x = torch.rand(size, device=device)
 y = torch.rand(size, device=device)
 output_torch = x + y
-triton_viz.sample((0,))
+triton_viz.sample((args.grid,))
 output_triton = add(x, y)
-print(output_torch)
-print(output_triton)
-print(
-    f"The maximum difference between torch and triton is "
-    f"{torch.max(torch.abs(output_torch - output_triton))}"
-)
+# print(output_torch)
+# print(output_triton)
+# print(
+#     f"The maximum difference between torch and triton is "
+#     f"{torch.max(torch.abs(output_torch - output_triton))}"
+# )
 
 triton_viz.dump("./vec_add.json")
+triton_viz.draw(f"out{args.grid}.png")
