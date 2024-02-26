@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Any
+import numpy.typing as npt
 import numpy as np
 
 
@@ -7,16 +8,16 @@ import numpy as np
 class Store:
     ptr: int
     shape: Tuple
-    offsets: np.array
-    masks: np.array
+    offsets: npt.NDArray[np.int_]
+    masks: npt.NDArray[np.bool_]
 
 
 @dataclass
 class Load:
     ptr: int
     shape: Tuple
-    offsets: np.array
-    masks: np.array
+    offsets: npt.NDArray[np.int_]
+    masks: npt.NDArray[np.bool_]
 
 
 @dataclass

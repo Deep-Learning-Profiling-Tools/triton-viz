@@ -12,6 +12,7 @@ from triton_viz.data import (
 )
 from .interpreter import record_builder
 import numpy as np
+import numpy.typing as npt
 import planar
 import math
 import chalk
@@ -162,7 +163,7 @@ def add_whiskers(d: Diagram, shape: Tuple) -> Diagram:
     return d.center_xy()
 
 
-def delinearize(shape: Tuple, x: np.array, dtype, mask) -> List[np.array]:
+def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
     if len(shape) == 1:
         shape = (1, shape[0])
     x = x.copy() // (dtype.element_ty.primitive_bitwidth // 8)
@@ -179,7 +180,7 @@ trail = Trail.from_offsets([V2(0, 1), V2(1, 0), V2(0, -1), V2(-1, 0)], closed=Tr
 
 
 def cover(
-    d: Diagram, shape: Tuple, dtype, load: Tensor, mask: np.array, color: Color
+    d: Diagram, shape: Tuple, dtype, load: Tensor, mask: npt.NDArray, color: Color
 ) -> Diagram:
     "Draw the values from load on top of the loading tensor"
     x, y = delinearize(shape, load, dtype, mask)
@@ -193,7 +194,7 @@ def cover(
     ).with_envelope(d)
 
 
-def mask(d: Diagram, shape: Tuple, mask: np.array, color: Color) -> Diagram:
+def mask(d: Diagram, shape: Tuple, mask: npt.NDArray, color: Color) -> Diagram:
     "Color the values from mask on top of the loaded tensor"
     if len(mask.shape) == 1:
         mask = mask.reshape(1, -1)

@@ -140,7 +140,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
             ret = _implicit_cvt(arg)
             if hasattr(arg, "data_ptr"):
                 tensors.append(
-                    Tensor(ret.handle.data, ret.dtype, arg.stride(), arg.shape)
+                    Tensor(ret.handle.data[0], ret.dtype, arg.stride(), arg.shape)
                 )
             call_args[name] = ret
     call_args.pop("self", None)
@@ -168,7 +168,7 @@ def _create_masked_load(fn):
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
         tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
         load_record = Load(
-            ptr=tensor_ptr.ptr[0],
+            ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
             offsets=ptrs.data - tensor_ptr.ptr,
             masks=mask.data,
@@ -191,7 +191,7 @@ def _create_masked_store(fn):
     def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
         tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
         store_record = Store(
-            ptr=tensor_ptr.ptr[0],
+            ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
             offsets=ptrs.data - tensor_ptr.ptr,
             masks=mask.data,
