@@ -1,9 +1,11 @@
 import torch
-
 import triton
 import triton.language as tl
 import triton_viz
 import argparse
+from triton_viz.interpreter import record_builder
+import numpy as np
+from triton_viz.data import Load
 
 
 @triton_viz.trace
@@ -51,23 +53,47 @@ def add(x: torch.Tensor, y: torch.Tensor):
     # running asynchronously at this point.
     return output
 
+    # Directly use x and y here even though they are defined later in the file
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--device", type=str, default="cpu")
-device = parser.parse_args().device
 
-torch.manual_seed(0)
-size = 98432
-x = torch.rand(size, device=device)
-y = torch.rand(size, device=device)
-output_torch = x + y
-triton_viz.sample((0,))
-output_triton = add(x, y)
-print(output_torch)
-print(output_triton)
-print(
-    f"The maximum difference between torch and triton is "
-    f"{torch.max(torch.abs(output_torch - output_triton))}"
-)
+def test_add():
+    torch.manual_seed(0)
+    device = "cpu"
+    size = 5000
+    BLOCK_SIZE = 1024
+    x = torch.rand(size, device=device)
+    y = torch.rand(size, device=device)
+    result = add(x, y)
+    t_size = x.element_size()
+    expected_offsets = [i * t_size for i in np.arange(0, BLOCK_SIZE)]
+    expected_offsets_shape = len(expected_offsets)
+    expected = x + y
+    for launch in record_builder.launches:
+        for op in launch.records:
+            if isinstance(op, Load):
+                result_offset = op.offsets.tolist()
+                result_offset_shape = len(result_offset)
+                break
+    assert torch.allclose(result, expected)
+    assert result.shape == expected.shape
+    assert result_offset == expected_offsets
+    assert result_offset_shape == expected_offsets_shape
 
-triton_viz.dump("./vec_add.json")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--grid", type=int, default=0)
+    args = parser.parse_args()
+    device = args.device
+
+    torch.manual_seed(0)
+    size = 5000
+    x = torch.rand(size, device=device)
+    y = torch.rand(size, device=device)
+    output_torch = x + y
+    triton_viz.sample((args.grid,))
+    output_triton = add(x, y)
+
+    triton_viz.dump("./vec_add.json")
+    triton_viz.draw(f"out{args.grid}.png")
