@@ -1,21 +1,23 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Any
+import numpy.typing as npt
+import numpy as np
 
 
 @dataclass
 class Store:
     ptr: int
     shape: Tuple
-    offsets: List[Tuple]
-    masks: List[bool]
+    offsets: npt.NDArray[np.int_]
+    masks: npt.NDArray[np.bool_]
 
 
 @dataclass
 class Load:
     ptr: int
     shape: Tuple
-    offsets: List[Tuple]
-    masks: List[bool]
+    offsets: npt.NDArray[np.int_]
+    masks: npt.NDArray[np.bool_]
 
 
 @dataclass
