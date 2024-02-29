@@ -97,4 +97,3 @@ if __name__ == "__main__":
 
     triton_viz.dump("./vec_add.json")
     triton_viz.draw(f"out{args.grid}.png")
-

@@ -87,4 +87,3 @@ if __name__ == "__main__":
     dot_kernel[(2, 2)](x, y, z, BLOCK_SIZE)
     triton_viz.dump("./dot.json")
     triton_viz.draw(f"dot{args.grid}.png")
-

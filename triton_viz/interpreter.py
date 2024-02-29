@@ -129,9 +129,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         return
     # Remaps core language functions to interpreted ones
     _patch_lang(self.fn)
-    tl.sum = _create_reduce(tl.sum, "sum")
-    tl.min = _create_reduce(tl.min, "min")
-    tl.max = _create_reduce(tl.max, "max")
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs)
     call_args = {}
