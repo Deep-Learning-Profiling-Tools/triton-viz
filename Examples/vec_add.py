@@ -56,28 +56,32 @@ def add(x: torch.Tensor, y: torch.Tensor):
     # Directly use x and y here even though they are defined later in the file
 
 
-def test_add():
+def perform_vec_add(device, size):
     torch.manual_seed(0)
+    x = torch.rand(size, device=device)
+    y = torch.rand(size, device=device)
+    output = add(x, y)  # Assuming add() is your custom function
+    return x, y, output
+
+
+def test_add():
     device = "cpu"
     size = 5000
     BLOCK_SIZE = 1024
-    x = torch.rand(size, device=device)
-    y = torch.rand(size, device=device)
-    result = add(x, y)
-    t_size = x.element_size()
+    input_vector1, input_vector2, result = perform_vec_add(device, size)
+    t_size = input_vector1.element_size()
+    expected = input_vector1 + input_vector2
     expected_offsets = [i * t_size for i in np.arange(0, BLOCK_SIZE)]
-    expected_offsets_shape = len(expected_offsets)
-    expected = x + y
-    for launch in record_builder.launches:
-        for op in launch.records:
-            if isinstance(op, Load):
-                result_offset = op.offsets.tolist()
-                result_offset_shape = len(result_offset)
-                break
+    expected_offsets_len = len(expected_offsets)
+    for op in record_builder.launches[0].records:
+        if isinstance(op, Load):
+            result_offset = op.offsets.tolist()
+            result_offset_len = len(result_offset)
+            break
     assert torch.allclose(result, expected)
     assert result.shape == expected.shape
     assert result_offset == expected_offsets
-    assert result_offset_shape == expected_offsets_shape
+    assert result_offset_len == expected_offsets_len
 
 
 if __name__ == "__main__":
@@ -86,14 +90,10 @@ if __name__ == "__main__":
     parser.add_argument("--grid", type=int, default=0)
     args = parser.parse_args()
     device = args.device
-
-    torch.manual_seed(0)
-    size = 5000
-    x = torch.rand(size, device=device)
-    y = torch.rand(size, device=device)
-    output_torch = x + y
     triton_viz.sample((args.grid,))
-    output_triton = add(x, y)
+
+    size = 5000
+    input_vector1, input_vector2, output_triton = perform_vec_add(device, size)
 
     triton_viz.dump("./vec_add.json")
     triton_viz.draw(f"out{args.grid}.png")
