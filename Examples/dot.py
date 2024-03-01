@@ -1,9 +1,11 @@
 import torch
-
+import numpy as np
 import triton
 import triton.language as tl
 import triton_viz
 import argparse
+from triton_viz.interpreter import record_builder
+from triton_viz.data import Dot
 
 
 @triton_viz.trace
@@ -46,19 +48,41 @@ def dot_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
     )
 
 
-argparser = argparse.ArgumentParser()
-argparser.add_argument("--device", type=str, default="cpu")
-argparser.add_argument("--grid", type=int, default=0)
-args = argparser.parse_args()
-device = args.device
+def perform_dot(device, BLOCK_SIZE):
+    x = torch.randn((2 * BLOCK_SIZE, 2 * BLOCK_SIZE), device=device)
+    y = torch.randn((2 * BLOCK_SIZE, 2 * BLOCK_SIZE), device=device)
+    z = torch.zeros((2 * BLOCK_SIZE, 2 * BLOCK_SIZE - 10), device=device)
+    dot_kernel[(2, 2)](x, y, z, BLOCK_SIZE)
+    return x, y, z
 
-triton_viz.sample((args.grid // 2, args.grid % 2))
-BLOCK_SIZE = 32
-x = torch.randn((2 * BLOCK_SIZE, 2 * BLOCK_SIZE), device=device)
-y = torch.randn((2 * BLOCK_SIZE, 2 * BLOCK_SIZE), device=device)
-z = torch.zeros((2 * BLOCK_SIZE, 2 * BLOCK_SIZE - 10), device=device)
 
-dot_kernel[(2, 2)](x, y, z, BLOCK_SIZE)
+def test_dot():
+    BLOCK_SIZE = 32
+    device = "cpu"
+    input_matrix1, input_matrix2, result = perform_dot(device, BLOCK_SIZE)
+    initial_expected = torch.from_numpy(np.dot(input_matrix1, input_matrix2))
+    expected_output = initial_expected[:, : 2 * BLOCK_SIZE - 10]
+    for op in record_builder.launches[0].records:
+        if isinstance(op, Dot):
+            result_input_shape = op.input_shape
+            result_output_shape = op.output_shape
+            result_other_shape = op.other_shape
+    assert torch.allclose(result, expected_output, atol=1e-5, rtol=1e-3)
+    assert result_input_shape == ((BLOCK_SIZE, BLOCK_SIZE), (BLOCK_SIZE, BLOCK_SIZE))
+    assert result_output_shape == (BLOCK_SIZE, BLOCK_SIZE)
+    assert result_other_shape == (BLOCK_SIZE, BLOCK_SIZE)
 
-triton_viz.dump("./dot.json")
-triton_viz.draw(f"dot{args.grid}.png")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--grid", type=int, default=0)
+    args = parser.parse_args()
+    device = args.device
+
+    triton_viz.sample((args.grid // 2, args.grid % 2))
+    BLOCK_SIZE = 32
+    input_matrix1, input_matrix2, result = perform_dot(device, BLOCK_SIZE)
+
+    triton_viz.dump("./dot.json")
+    triton_viz.draw(f"dot{args.grid}.png")
