@@ -52,6 +52,9 @@ def _unpatch_lang():
 
 class RecordBuilder:
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self):
         self._launches: List[Launch] = []
         self._sampling_grid_idx: Optional[Tuple] = None
         self._grid_idx = (0, 0, 0)
