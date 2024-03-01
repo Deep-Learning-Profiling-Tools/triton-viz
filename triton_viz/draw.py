@@ -5,7 +5,7 @@ from triton_viz.data import (
     Grid,
     Store,
     Load,
-    BinaryOps,
+    BinaryOp,
     MakeRange,
     Reduce,
     Dot,
@@ -77,7 +77,7 @@ def draw_launch(launch: Launch) -> Diagram:
             return draw_store(x, tensor_table)
         if isinstance(x, Load):
             return draw_load(x, tensor_table)
-        if isinstance(x, BinaryOps):
+        if isinstance(x, BinaryOp):
             # Not sure if we should draw binops
             return None  # draw_binary_op(x)
         if isinstance(x, MakeRange):
@@ -286,7 +286,7 @@ def store_load(
     return inp, out
 
 
-def draw_binary_op(x: BinaryOps) -> Optional[Diagram]:
+def draw_binary_op(x: BinaryOp) -> Optional[Diagram]:
     if x.input_shape == (1,):
         return None
     inp = reshape(base_tensor(x.input_shape, color=ACTIVE))
@@ -296,7 +296,7 @@ def draw_binary_op(x: BinaryOps) -> Optional[Diagram]:
     return pair_draw(out, inp, x.op).center_xy()
 
 
-def draw_dot(x: BinaryOps) -> Optional[Diagram]:
+def draw_dot(x: BinaryOp) -> Optional[Diagram]:
     if x.input_shape == (1,):
         return None
     inp = reshape(base_tensor(x.input_shape[0], color=ACTIVE))

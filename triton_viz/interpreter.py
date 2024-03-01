@@ -8,7 +8,7 @@ from .data import (
     Tensor,
     Load,
     Store,
-    BinaryOps,
+    BinaryOp,
     MakeRange,
     ExpandDims,
     Dot,
@@ -160,7 +160,8 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 self.fn(**call_args)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst)
-    _unpatch_lang()
+    # FIXME: Temporary disable unpatching
+    # _unpatch_lang()
 
 
 def _create_masked_load(fn):
@@ -216,7 +217,7 @@ def _create_binary_op(fn):
     @wraps(fn)
     def wrapper(lhs, rhs, op):
         ret = fn(lhs, rhs, op)
-        binary_op_record = BinaryOps(
+        binary_op_record = BinaryOp(
             op=op.__name__, input_shape=(lhs.data.shape), output_shape=ret.data.shape
         )
         record_builder.add_record(binary_op_record)
