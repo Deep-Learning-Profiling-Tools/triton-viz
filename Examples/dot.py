@@ -16,32 +16,37 @@ def dot_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
     b = tl.program_id(2)
     bid = b * 4 * BLOCK_SIZE * BLOCK_SIZE
     x_val = tl.load(
-        x_ptr + bid
+        x_ptr
+        + bid
         + (r + tl.arange(0, BLOCK_SIZE)[:, None]) * 2 * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, :]
     )
     y_val = tl.load(
-        y_ptr+ bid
+        y_ptr
+        + bid
         + tl.arange(0, BLOCK_SIZE)[:, None] * 2 * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, :]
         + c
     )
     z = tl.dot(x_val, y_val)
     x_val = tl.load(
-        x_ptr+ bid
+        x_ptr
+        + bid
         + (r + tl.arange(0, BLOCK_SIZE)[:, None]) * 2 * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, :]
         + BLOCK_SIZE
     )
     y_val = tl.load(
-        y_ptr+ bid
+        y_ptr
+        + bid
         + (BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[:, None]) * 2 * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, :]
         + c
     )
     z = z + tl.dot(x_val, y_val)
     tl.store(
-        z_ptr + (b * (2 * BLOCK_SIZE) * (2 * BLOCK_SIZE - 10))
+        z_ptr
+        + (b * (2 * BLOCK_SIZE) * (2 * BLOCK_SIZE - 10))
         + (r + tl.arange(0, BLOCK_SIZE)[:, None]) * (2 * BLOCK_SIZE - 10)
         + tl.arange(0, BLOCK_SIZE)[None, :]
         + c,

@@ -1,7 +1,9 @@
 import gradio as gr
 import triton_viz
 import tempfile
+
 cache = {}
+
 
 def launch():
     program_records, tt = triton_viz.collect_grid()
@@ -30,9 +32,9 @@ def launch():
                 cache[idx] = name
             return cache[idx].name
 
-        s1.change(update, inputs = {s1, s2, s3}, outputs=img, show_progress=False)
-        s2.change(update, inputs = {s1, s2, s3}, outputs=img, show_progress=False)
-        s3.change(update, inputs = {s1, s2, s3}, outputs=img, show_progress=False)
-        demo.load(update, inputs = {s1, s2, s3}, outputs=img)
+        s1.change(update, inputs={s1, s2, s3}, outputs=img, show_progress=False)
+        s2.change(update, inputs={s1, s2, s3}, outputs=img, show_progress=False)
+        s3.change(update, inputs={s1, s2, s3}, outputs=img, show_progress=False)
+        demo.load(update, inputs={s1, s2, s3}, outputs=img)
 
     demo.launch(server_name="0.0.0.0", server_port=8500)

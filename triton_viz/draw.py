@@ -1,6 +1,5 @@
 from colour import Color
 from triton_viz.data import (
-    Launch,
     Tensor,
     Grid,
     Store,
@@ -17,7 +16,7 @@ import planar
 import math
 import chalk
 from typing import Tuple, Union, Optional, List, Dict
-from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, PathGroup, Trail, P2, V2, concat
+from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, V2, concat
 from dataclasses import dataclass
 from numpy.typing import ArrayLike
 
@@ -26,18 +25,20 @@ planar.EPSILON = 0.0
 chalk.set_svg_draw_height(500)
 
 BG = Color("white")
+WHITE = Color("white")
 DEFAULT = Color("grey")
 BLACK = Color("black")
 GREY = Color("grey")
-pallette = "#f29f05,#f25c05,#d6568c,#4d8584,#a62f03,#400d01,#274001,#828a00,".split(",")
-ACTIVE = list([Color(p) for p in pallette])
+palette = "#f29f05,#f25c05,#d6568c,#4d8584,#a62f03,#400d01,#274001,#828a00,".split(",")
+ACTIVE = list([Color(p) for p in palette])
 
 MRATIO = 1 / 3
 
 
 # Generic render helpers
 
-def box(d: Diagram, width: float, height: float, outer = 0.2) -> Diagram:
+
+def box(d: Diagram, width: float, height: float, outer=0.2) -> Diagram:
     "Put diagram in a box of shape height, width"
     h, w = d.get_envelope().height, d.get_envelope().width
     m = max(h, w)
@@ -55,10 +56,12 @@ def reshape(d: Diagram) -> Diagram:
         d = d.scale_y(math.log(h + 1, 2) / h).scale_x(math.log(w + 1, 2) / w)
     return d
 
+
 def collect_grid():
     for launch in record_builder.launches[-1:]:
         records, tensor_table = collect_launch(launch)
     return records, tensor_table
+
 
 def collect_launch(launch):
     tensor_table = {}
@@ -78,6 +81,7 @@ def collect_launch(launch):
     all_grids[last_grid.idx] = program_records
     return all_grids, tensor_table
 
+
 def draw_record(program_record, tensor_table, output):
     draw_launch(program_record, tensor_table, output)
 
@@ -93,15 +97,14 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
             return draw_store(x, tensor_table)
         if isinstance(x, Load):
             return draw_load(x, tensor_table)
-        if isinstance(x, BinaryOp):
-            # Not sure if we should draw binops
-            return None  # draw_binary_op(x)
+        if isinstance(x, BinaryOps):
+            return draw_binary_op(x)
         if isinstance(x, MakeRange):
             return draw_make_range(x)
         if isinstance(x, Reduce):
             return draw_reduce(x)
         if isinstance(x, Dot):
-            return None #draw_dot(x)
+            return None  # draw_dot(x)
 
     def draw_record(x):
         "Render one record"
@@ -112,14 +115,12 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
         return (chalk.vstrut(0.2) / y).center_xy()
 
     dr = empty()
-    dg = empty()
-    last_grid = None
     for r in program_records:
-        dr = vcat([dr, draw_record(r)] , 0.0)
+        dr = vcat([dr, draw_record(r)], 0.0)
     dr = dr.center_xy()
     env = dr.get_envelope()
     dr = rectangle(env.width + 1, env.height + 1).fill_color(BG).center_xy() + dr
-    dr.render_svg(base, 2500)    
+    dr.render_svg(base, 2500)
 
 
 def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
@@ -127,7 +128,6 @@ def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
         shape = (1, 1, shape[0])
     x = x.copy() // (dtype.element_ty.primitive_bitwidth // 8)
     vals = []
-    p = 1
     for s in list(reversed(shape[1:])) + [10000]:
         vals.append(((x % s) * mask - (1 - mask)).ravel())
         x = x // s
@@ -136,12 +136,15 @@ def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
 
 trail = Trail.from_offsets([V2(0, 1), V2(1, 0), V2(0, -1), V2(-1, 0)], closed=True)
 
-def cover(shape: Tuple, dtype, load: Tensor, mask: npt.NDArray, color: Color
+
+def cover(
+    shape: Tuple, dtype, load: Tensor, mask: npt.NDArray, color: Color
 ) -> Diagram:
     shape = make_3d(shape)
     "Draw the values from load on top of the loading tensor"
     x, y, z = delinearize(shape, load, dtype, mask)
     return draw_tensor_3d(shape, z, y, x, color)
+
 
 def pair_draw(x: Diagram, y: Diagram, command: str) -> Diagram:
     "Draw two diagrams next to each other with a command in the middle."
@@ -159,6 +162,7 @@ def draw_tensor(x: Tensor) -> Optional[Diagram]:
 
 def draw_grid(x: Grid) -> Optional[Diagram]:
     return None
+
 
 def draw_make_range(x: MakeRange) -> Optional[Diagram]:
     return None
@@ -204,6 +208,7 @@ def draw_store(x, tensor_table) -> Optional[Diagram]:
     out = reshape(out)
     return pair_draw(out, inp, "store")
 
+
 def make_3d(shape):
     "Make a 3d shape"
     if len(shape) == 1:
@@ -212,28 +217,24 @@ def make_3d(shape):
         return (1, shape[0], shape[1])
     return shape
 
+
 def store_load(
-    x: Union[Store, Load], tensor_table: Dict[int, Tensor]
+    x: Union[Store, Load], tensor_table: Dict[int, Tuple[Tensor, int]]
 ) -> Tuple[Diagram, Diagram]:
     tensor, tensor_id = tensor_table[x.ptr]
-    
-    #inp = base_tensor(tensor.shape, DEFAULT)
+
+    # inp = base_tensor(tensor.shape, DEFAULT)
     color = ACTIVE[tensor_id]
     inp = cover(tensor.shape, tensor.dtype, x.offsets, x.masks, color)
     inp = reshape(inp)
     s = make_3d(x.offsets.shape)
-    out = draw_tensor_3d(s, *x.masks.reshape(*s).nonzero(), color)
+    a, b, c = x.masks.reshape(*s).nonzero()
+    out = draw_tensor_3d(s, a, b, c, color)
     return inp, out
 
 
-def draw_binary_op(x: BinaryOp) -> Optional[Diagram]:
-    if x.input_shape == (1,):
-        return None
-    inp = reshape(base_tensor(x.input_shape, color=ACTIVE))
-    inp = add_whiskers(inp, x.input_shape)
-    out = reshape(base_tensor(x.output_shape, color=ACTIVE))
-    out = add_whiskers(out, x.output_shape)
-    return pair_draw(out, inp, x.op).center_xy()
+def draw_binary_op(x: BinaryOps) -> Optional[Diagram]:
+    return None
 
 
 def draw_dot(x: BinaryOp) -> Optional[Diagram]:
@@ -245,13 +246,12 @@ def draw_dot(x: BinaryOp) -> Optional[Diagram]:
     inp2 = draw_tensor_3d(x.input_shape[1], None, None, None)
     # inp2 = reshape(base_tensor(x.input_shape[0], color=ACTIVE))
     # inp2 = add_whiskers(inp2, x.input_shape[0])
-    out =  draw_tensor_3d(x.output_shape, None, None, None)
+    out = draw_tensor_3d(x.output_shape, None, None, None)
     # out = reshape(base_tensor(x.output_shape, color=ACTIVE))
     # out = add_whiskers(out, x.output_shape)
     return hcat(
         [box(inp, 1.5, 2), box(inp2, 1.5, 2), box(out, 1.5, 2)], 1
     ).center_xy() + text("dot", 0.2).fill_color(BLACK).line_width(0).translate(0, -1)
-
 
 
 # For 3d
@@ -282,14 +282,14 @@ class D3:
 V3 = D3
 
 
-def homogenous(trails: List[List[D3]]):
-    "Convert list of directions to a np.array of homogenous coordinates"
+def homogeneous(trails: List[List[D3]]):
+    "Convert list of directions to a np.array of homogeneous coordinates"
     return np.array([[[*o.to_np(), 1] for o in offsets] for offsets in trails])
 
 
 def cube():
     "3 faces of a cube drawn as offsets from the origin."
-    return homogenous(
+    return homogeneous(
         [
             [D3(*v) for v in offset]
             for offset in [
@@ -305,22 +305,26 @@ def to_trail(trail: ArrayLike, locations: ArrayLike):
     return [
         (
             Path(
-                [Trail.from_offsets([V2(*v[:2]) for v in trail]).close().at(V2(*l[:2]))]
+                [
+                    Trail.from_offsets([V2(*v[:2]) for v in trail])
+                    .close()
+                    .at(V2(*loc[:2]))
+                ]
             ),
-            l[2],
+            loc[2],
         )
-        for l in locations
+        for loc in locations
     ]
 
 
 def project(projection, shape3, positions):
-    p = homogenous([positions for _ in range(shape3.shape[0])])
+    p = homogeneous([positions for _ in range(shape3.shape[0])])
     locations = p @ projection.T
     trails = shape3 @ projection.T
-    return [out for t, l in zip(trails, locations) for out in to_trail(t, l)]
+    return [out for t, loc in zip(trails, locations) for out in to_trail(t, loc)]
 
 
-def draw_tensor_3d(shape, a, b, c, color):
+def draw_tensor_3d(shape, a, b, c, color=WHITE):
     shape = make_3d(shape)
 
     # Big Cube
@@ -332,9 +336,11 @@ def draw_tensor_3d(shape, a, b, c, color):
 
     # Isometric projection of tensor
     projection = lookAt(
-        V3(s_[0] / 1.5 + s_[1] + s_[2], 
-           s_[0] + s_[1] / 1.5 + s_[2], 
-           s_[0] + s_[1] + s_[2] / 1.5).to_np(),
+        V3(
+            s_[0] / 1.5 + s_[1] + s_[2],
+            s_[0] + s_[1] / 1.5 + s_[2],
+            s_[0] + s_[1] + s_[2] / 1.5,
+        ).to_np(),
         V3(0, 0, 0).to_np(),
         V3(0, 0, 1).to_np(),
     )
@@ -352,7 +358,11 @@ def draw_tensor_3d(shape, a, b, c, color):
     )
     if a is not None:
         out = group(a, b, c)
-        d2 = [ (b, l) for i in range(len(out)) for b, l in  make_cube(projection, out[i][0], out[i][1], color)]
+        d2 = [
+            (b, loc)
+            for i in range(len(out))
+            for b, loc in make_cube(projection, out[i][0], out[i][1], color)
+        ]
         d2.sort(key=lambda x: x[1], reverse=True)
         d2 = concat([b.with_envelope(empty()) for b, _ in d2])
         d = d2.with_envelope(d) + d
@@ -361,18 +371,17 @@ def draw_tensor_3d(shape, a, b, c, color):
 
 def lines(s):
     "Draw lines to mimic a cube of cubes"
-    bs = [np.array([1, 0, 0]), 
-          np.array([0, 1, 0]), 
-          np.array([0, 0, 1])]
-    return [ homogenous(
-        [[
-            D3(*p)
-            for _ in range(s[i])
-            for p in [a / s[i], b, -b]  
-        ] 
-        for b in bs
-        if not np.all(a == b)
-        ]) for i, a in enumerate(bs) ]
+    bs = [np.array([1, 0, 0]), np.array([0, 1, 0]), np.array([0, 0, 1])]
+    return [
+        homogeneous(
+            [
+                [D3(*p) for _ in range(s[i]) for p in [a / s[i], b, -b]]
+                for b in bs
+                if not np.all(a == b)
+            ]
+        )
+        for i, a in enumerate(bs)
+    ]
 
 
 def make_cube(projection, start, end, color):
@@ -382,19 +391,29 @@ def make_cube(projection, start, end, color):
     s2 = end - start + 1
     s = scale3(*s2)
     small_cube = cube() @ s.T
-    l = [project(projection, l2 @ s.T, [V3(*start)]) 
-         for l2 in lines(s2) if l2.shape[1] > 0]
+    loc = [
+        project(projection, l2 @ s.T, [V3(*start)])
+        for l2 in lines(s2)
+        if l2.shape[1] > 0
+    ]
     outer2 = project(projection, small_cube, [V3(*start)])
-    ls = l
-    d = empty()
-    box = [(p.stroke().fill_color(color).fill_opacity(0.4).line_width(0), l) for p, l in outer2]
-    line = [(p.stroke().line_width(0.0002).line_color(GREY), l_)  for l in ls for p, l_ in l]
-    return [(b, l) for b, l in box + line]
+    ls = loc
+    box = [
+        (p.stroke().fill_color(color).fill_opacity(0.4).line_width(0), loc)
+        for p, loc in outer2
+    ]
+    line = [
+        (p.stroke().line_width(0.001).line_color(GREY), l_)
+        for loc in ls
+        for p, l_ in loc
+    ]
+    return [(b, loc) for b, loc in box + line]
 
 
-def group(x: ArrayLike, y: ArrayLike, z: ArrayLike) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
+def group(
+    x: ArrayLike, y: ArrayLike, z: ArrayLike
+) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
     "Groups together cubes into bigger cubes"
-    i = 0
     x = list(zip(zip(x, y, z), zip(x, y, z)))
 
     start = x
@@ -409,15 +428,16 @@ def group(x: ArrayLike, y: ArrayLike, z: ArrayLike) -> List[Tuple[Tuple[float, f
             for k in range(2):
                 a = x[0][k]
                 b = x[1][k]
-                if (k == 0 or a[j % 3] == b[j %3] - 1) and \
-                    a[(j + 1) %3] == b[(j + 1)%3] and \
-                    a[(j + 2) %3] == b[(j + 2)%3]:
+                if (
+                    (k == 0 or a[j % 3] == b[j % 3] - 1)
+                    and a[(j + 1) % 3] == b[(j + 1) % 3]
+                    and a[(j + 2) % 3] == b[(j + 2) % 3]
+                ):
                     m += 1
-            if m ==2:
+            if m == 2:
                 x = [[x[0][0], x[1][1]]] + rest
             else:
                 start.append(x[0])
                 x = [x[1]] + rest
         start += x
     return start
-
