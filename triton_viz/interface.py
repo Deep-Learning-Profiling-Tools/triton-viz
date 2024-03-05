@@ -18,7 +18,7 @@ def launch():
             s1 = gr.Slider(0, m[0], value=0, step=1, label="Program Id 0")
             s2 = gr.Slider(0, m[1], value=0, step=1, label="Program Id 1")
             s3 = gr.Slider(0, m[2], value=0, step=1, label="Program Id 2")
-        img = gr.Image(height=500)
+        img = gr.Image(height=800, width=500)
 
         def update(inp):
             a = inp[s1]
@@ -37,4 +37,4 @@ def launch():
         s3.change(update, inputs={s1, s2, s3}, outputs=img, show_progress=False)
         demo.load(update, inputs={s1, s2, s3}, outputs=img)
 
-    demo.launch(server_name="0.0.0.0", server_port=8500)
+    demo.launch(share=True, debug=True)
