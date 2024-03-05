@@ -13,9 +13,9 @@ def launch():
         m[1] = max(k[1], m[1])
         m[2] = max(k[2], m[2])
     with gr.Blocks(css=".gradio-container button {overflow: auto}") as demo:
-        with gr.Column():
+        with gr.Row():
             img = gr.Image(height=800, width=500)
-            with gr.Row():
+            with gr.Column():
                 s1 = gr.Slider(0, m[0], value=0, step=1, label="Program Id 0")
                 s2 = gr.Slider(0, m[1], value=0, step=1, label="Program Id 1")
                 s3 = gr.Slider(0, m[2], value=0, step=1, label="Program Id 2")
