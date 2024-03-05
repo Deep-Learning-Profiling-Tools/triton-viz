@@ -12,6 +12,6 @@ setup(
         "setuptools",
         "triton",
         "gradio",
-        "chalk-diagrams",
+        "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git",
     ],
 )
