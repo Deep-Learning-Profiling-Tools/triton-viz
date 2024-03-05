@@ -13,13 +13,17 @@ from triton_viz.data import Dot
 def dot_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
     r = tl.program_id(0) * BLOCK_SIZE
     c = tl.program_id(1) * BLOCK_SIZE
+    b = tl.program_id(2)
+    bid = b * 4 * BLOCK_SIZE * BLOCK_SIZE
     x_val = tl.load(
         x_ptr
+        + bid
         + (r + tl.arange(0, BLOCK_SIZE)[:, None]) * 2 * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, :]
     )
     y_val = tl.load(
         y_ptr
+        + bid
         + tl.arange(0, BLOCK_SIZE)[:, None] * 2 * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, :]
         + c
@@ -27,12 +31,14 @@ def dot_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
     z = tl.dot(x_val, y_val)
     x_val = tl.load(
         x_ptr
+        + bid
         + (r + tl.arange(0, BLOCK_SIZE)[:, None]) * 2 * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, :]
         + BLOCK_SIZE
     )
     y_val = tl.load(
         y_ptr
+        + bid
         + (BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[:, None]) * 2 * BLOCK_SIZE
         + tl.arange(0, BLOCK_SIZE)[None, :]
         + c
@@ -40,6 +46,7 @@ def dot_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
     z = z + tl.dot(x_val, y_val)
     tl.store(
         z_ptr
+        + (b * (2 * BLOCK_SIZE) * (2 * BLOCK_SIZE - 10))
         + (r + tl.arange(0, BLOCK_SIZE)[:, None]) * (2 * BLOCK_SIZE - 10)
         + tl.arange(0, BLOCK_SIZE)[None, :]
         + c,
@@ -76,13 +83,9 @@ def test_dot():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--grid", type=int, default=0)
     args = parser.parse_args()
     device = args.device
 
-    triton_viz.sample((args.grid // 2, args.grid % 2))
     BLOCK_SIZE = 32
     input_matrix1, input_matrix2, result = perform_dot(device, BLOCK_SIZE)
-
-    triton_viz.dump("./dot.json")
-    triton_viz.draw(f"dot{args.grid}.png")
+    triton_viz.launch()
