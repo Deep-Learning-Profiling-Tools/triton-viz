@@ -54,6 +54,7 @@ def dot_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
         mask=tl.arange(0, BLOCK_SIZE)[None, :] + c < 2 * BLOCK_SIZE - 10,
     )
 
+
 def perform_dot(device, BLOCK_SIZE):
     x = torch.randn((2 * BLOCK_SIZE, 2 * BLOCK_SIZE), device=device)
     y = torch.randn((2 * BLOCK_SIZE, 2 * BLOCK_SIZE), device=device)
@@ -88,4 +89,3 @@ if __name__ == "__main__":
     BLOCK_SIZE = 32
     input_matrix1, input_matrix2, result = perform_dot(device, BLOCK_SIZE)
     triton_viz.launch()
-    

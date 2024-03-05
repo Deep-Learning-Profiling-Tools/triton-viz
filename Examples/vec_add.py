@@ -55,6 +55,7 @@ def add(x: torch.Tensor, y: torch.Tensor):
 
     # Directly use x and y here even though they are defined later in the file
 
+
 def perform_vec_add(device, size):
     torch.manual_seed(0)
     x = torch.rand(size, device=device)

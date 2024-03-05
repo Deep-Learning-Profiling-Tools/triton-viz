@@ -32,10 +32,6 @@ def perform_sum(device, BLOCK_SIZE, CHANNEL_SIZE):
     sum_kernel[(1,)](x, y, CHANNEL_SIZE, CHANNEL_SIZE, BLOCK_SIZE)
     return x, y
 
-BLOCK_SIZE = 128
-CHANNEL_SIZE = 8
-x = torch.ones((BLOCK_SIZE, CHANNEL_SIZE), device=device, dtype=torch.long)
-y = torch.zeros((BLOCK_SIZE), device=device, dtype=torch.long)
 
 def test_sum():
     BLOCK_SIZE = 128
@@ -60,6 +56,7 @@ def test_sum():
     assert result_output_shape == expected_output.shape
     assert sorted(result_variables.values()) == sorted(variables.values())
     assert result_op == expected_op_name
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
