@@ -17,7 +17,10 @@ import planar
 import math
 import chalk
 from typing import Tuple, Union, Optional, List, Dict
-from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, P2, V2
+from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, PathGroup, Trail, P2, V2, concat
+from dataclasses import dataclass
+from numpy.typing import ArrayLike
+
 
 planar.EPSILON = 0.0
 chalk.set_svg_draw_height(500)
@@ -25,20 +28,21 @@ chalk.set_svg_draw_height(500)
 BG = Color("white")
 DEFAULT = Color("grey")
 BLACK = Color("black")
-ACTIVE = Color("red")
+GREY = Color("grey")
+pallette = "#f29f05,#f25c05,#d6568c,#4d8584,#a62f03,#400d01,#274001,#828a00,".split(",")
+ACTIVE = list([Color(p) for p in pallette])
 
 MRATIO = 1 / 3
 
 
 # Generic render helpers
-def box(d: Diagram, width: float, height: float) -> Diagram:
+
+def box(d: Diagram, width: float, height: float, outer = 0.2) -> Diagram:
     "Put diagram in a box of shape height, width"
     h, w = d.get_envelope().height, d.get_envelope().width
     m = max(h, w)
-    d = (
-        rectangle(0.2 + m, 0.2 + m).line_width(0).fill_color(BG).center_xy()
-        + d.center_xy()
-    )
+    back = rectangle(outer + m, outer + m).line_width(0).fill_color(BG).center_xy()
+    d = (back + d.center_xy()).with_envelope(back)
     return d.scale_x(width / m).scale_y(height / m)
 
 
@@ -51,22 +55,34 @@ def reshape(d: Diagram) -> Diagram:
         d = d.scale_y(math.log(h + 1, 2) / h).scale_x(math.log(w + 1, 2) / w)
     return d
 
+def collect_grid():
+    for launch in record_builder.launches[-1:]:
+        records, tensor_table = collect_launch(launch)
+    return records, tensor_table
 
-def draw(output: str, size: int = 2500):
-    "Draw the last record to a file (PNG)."
-    for record in record_builder.launches[-1:]:
-        diagram: Diagram = draw_launch(record)
-    diagram.render(output, 2500)
-
-
-def draw_launch(launch: Launch) -> Diagram:
-    "Render Launch to a diagram."
-
-    # Map tensor pointers to a table.
+def collect_launch(launch):
     tensor_table = {}
-    for t in launch.tensors:
-        tensor_table[t.ptr] = t
+    for i, t in enumerate(launch.tensors):
+        tensor_table[t.ptr] = (t, i)
 
+    all_grids = {}
+    last_grid = None
+    program_records = []
+    for r in launch.records:
+        if isinstance(r, Grid):
+            if last_grid is not None:
+                all_grids[last_grid.idx] = program_records
+                program_records = []
+            last_grid = r
+        program_records.append(r)
+    all_grids[last_grid.idx] = program_records
+    return all_grids, tensor_table
+
+def draw_record(program_record, tensor_table, output):
+    draw_launch(program_record, tensor_table, output)
+
+
+def draw_launch(program_records, tensor_table, base) -> Diagram:
     def draw(x):
         "Dispatch"
         if isinstance(x, Tensor):
@@ -85,7 +101,7 @@ def draw_launch(launch: Launch) -> Diagram:
         if isinstance(x, Reduce):
             return draw_reduce(x)
         if isinstance(x, Dot):
-            return draw_dot(x)
+            return None #draw_dot(x)
 
     def draw_record(x):
         "Render one record"
@@ -93,119 +109,39 @@ def draw_launch(launch: Launch) -> Diagram:
         if y is None:
             return empty()
 
-        return y.center_xy()
+        return (chalk.vstrut(0.2) / y).center_xy()
 
-    d = vcat([draw_record(r) for r in launch.records], 0.2)
-    env = d.get_envelope()
-    return (
-        rectangle(1.1 * env.width, 1.1 * env.height).fill_color(BG).center_xy()
-        + d.center_xy()
-    )
-
-
-def base_tensor(shape: Tuple, color=DEFAULT) -> Diagram:
-    "Draw a 2d base tensor"
-    d = empty()
-    if len(shape) == 2:
-        d = rectangle(shape[1], shape[0])
-    elif len(shape) == 1:
-        shape = (shape[0], 1)
-        d = rectangle(*shape)
-    else:
-        assert "bad shape", shape
-    d = d.align_tl()
-    return d.fill_color(color)
-
-
-def add_whiskers(d: Diagram, shape: Tuple) -> Diagram:
-    "Add whiskers to a 2d tensor for rows and columns"
-    w, h = d.get_envelope().width, d.get_envelope().height
-    if len(shape) == 1:
-        shape = (1, shape[0])
-    step0, step1 = 1, 1
-    delta0, delta1 = 1, 1
-    if shape[0] > 128:
-        step0 = 16
-        delta0 = 4
-    if shape[1] > 128:
-        step1 = 16
-        delta1 = 4
-    whisker = Trail.rectangle(0.01 * delta1, 0.5)
-    top_whiskers = Path(
-        [
-            whisker.at(P2(w * ((i + 0.5) / shape[1]), 0))
-            for i in range(0, shape[1], step1)
-        ]
-    )
-    tw = (
-        top_whiskers.stroke()
-        .line_width(0)
-        .fill_color(BLACK)
-        .with_envelope(rectangle(w, 0.5).align_l())
-    )
-    d = vcat([tw, d], 0.1)
-    whisker = Trail.rectangle(0.5, 0.01 * delta0)
-    left_whiskers = Path(
-        [
-            whisker.at(P2(0.0, h * ((i + 0.5) / shape[0])))
-            for i in range(0, shape[0], step0)
-        ]
-    )
-    lw = (
-        left_whiskers.stroke()
-        .line_width(0)
-        .fill_color(BLACK)
-        .align_b()
-        .translate(0, -0.5 * (h / shape[0]))
-    )
-    lw = lw.with_envelope(rectangle(0.5, h).align_t())
-    d = hcat([lw, d.align_b()], 0.1)
-    return d.center_xy()
+    dr = empty()
+    dg = empty()
+    last_grid = None
+    for r in program_records:
+        dr = vcat([dr, draw_record(r)] , 0.0)
+    dr = dr.center_xy()
+    env = dr.get_envelope()
+    dr = rectangle(env.width + 1, env.height + 1).fill_color(BG).center_xy() + dr
+    dr.render_svg(base, 2500)    
 
 
 def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
     if len(shape) == 1:
-        shape = (1, shape[0])
+        shape = (1, 1, shape[0])
     x = x.copy() // (dtype.element_ty.primitive_bitwidth // 8)
     vals = []
-    for s in shape[1:] + (10000,):
+    p = 1
+    for s in list(reversed(shape[1:])) + [10000]:
         vals.append(((x % s) * mask - (1 - mask)).ravel())
         x = x // s
-    if len(shape) == 1:
-        vals = [np.zeros(len(vals[0]))] + vals
     return vals
 
 
 trail = Trail.from_offsets([V2(0, 1), V2(1, 0), V2(0, -1), V2(-1, 0)], closed=True)
 
-
-def cover(
-    d: Diagram, shape: Tuple, dtype, load: Tensor, mask: npt.NDArray, color: Color
+def cover(shape: Tuple, dtype, load: Tensor, mask: npt.NDArray, color: Color
 ) -> Diagram:
+    shape = make_3d(shape)
     "Draw the values from load on top of the loading tensor"
-    x, y = delinearize(shape, load, dtype, mask)
-    path = []
-    for x1, y1 in zip(x.tolist(), y.tolist()):
-        if x1 == -1 and y1 == -1:
-            continue
-        path.append(trail.at(P2(x1, y1)))
-    return d + Path(loc_trails=path).stroke().fill_color(color).line_width(
-        0
-    ).with_envelope(d)
-
-
-def mask(d: Diagram, shape: Tuple, mask: npt.NDArray, color: Color) -> Diagram:
-    "Color the values from mask on top of the loaded tensor"
-    if len(mask.shape) == 1:
-        mask = mask.reshape(1, -1)
-    y, x = mask.nonzero()
-    path = []
-    for x, y in zip(x.tolist(), y.tolist()):
-        path.append(trail.at(P2(x, y)))
-    return d + Path(loc_trails=path).stroke().fill_color(color).line_width(
-        0
-    ).with_envelope(d)
-
+    x, y, z = delinearize(shape, load, dtype, mask)
+    return draw_tensor_3d(shape, z, y, x, color)
 
 def pair_draw(x: Diagram, y: Diagram, command: str) -> Diagram:
     "Draw two diagrams next to each other with a command in the middle."
@@ -222,18 +158,15 @@ def draw_tensor(x: Tensor) -> Optional[Diagram]:
 
 
 def draw_grid(x: Grid) -> Optional[Diagram]:
-    return text("Program: " + ", ".join(map(str, x.idx)), 0.5).fill_color(
-        BLACK
-    ).line_width(0) + rectangle(3, 1).line_width(0)
-
+    return None
 
 def draw_make_range(x: MakeRange) -> Optional[Diagram]:
     return None
 
 
 def draw_reduce(x: Reduce) -> Optional[Diagram]:
-    inp = reshape(base_tensor(x.input_shape))
-    inp = add_whiskers(inp, x.input_shape)
+    color = ACTIVE[0]
+    inp = draw_tensor_3d(make_3d(x.input_shape), None, None, None, color)
     if x.index == 0 and len(x.input_shape) == 2:
         inp = hcat(
             [
@@ -243,7 +176,7 @@ def draw_reduce(x: Reduce) -> Optional[Diagram]:
                 .fill_color(BLACK),
                 inp,
             ],
-            0.3,
+            0.5,
         )
     else:
         inp = vcat(
@@ -254,35 +187,42 @@ def draw_reduce(x: Reduce) -> Optional[Diagram]:
                 .fill_color(BLACK),
                 inp,
             ],
-            0.3,
+            0.5,
         )
-
-    out = reshape(base_tensor(x.output_shape))
-    out = add_whiskers(out, x.output_shape)
-    return pair_draw(inp, out, x.op)
+    out = draw_tensor_3d(x.output_shape, None, None, None, color)
+    return pair_draw(reshape(inp), reshape(out), x.op)
 
 
 def draw_load(x, tensor_table) -> Optional[Diagram]:
     inp, out = store_load(x, tensor_table)
-    out = add_whiskers(reshape(out), x.offsets.shape)
+    out = reshape(out)
     return pair_draw(inp, out, "load")
 
 
 def draw_store(x, tensor_table) -> Optional[Diagram]:
     inp, out = store_load(x, tensor_table)
-    out = add_whiskers(reshape(out), x.offsets.shape)
+    out = reshape(out)
     return pair_draw(out, inp, "store")
 
+def make_3d(shape):
+    "Make a 3d shape"
+    if len(shape) == 1:
+        return (1, 1, shape[0])
+    if len(shape) == 2:
+        return (1, shape[0], shape[1])
+    return shape
 
 def store_load(
     x: Union[Store, Load], tensor_table: Dict[int, Tensor]
 ) -> Tuple[Diagram, Diagram]:
-    tensor: Tensor = tensor_table[x.ptr]
-    inp = base_tensor(tensor.shape, DEFAULT)
-    inp = cover(inp, tensor.shape, tensor.dtype, x.offsets, x.masks, ACTIVE)
+    tensor, tensor_id = tensor_table[x.ptr]
+    
+    #inp = base_tensor(tensor.shape, DEFAULT)
+    color = ACTIVE[tensor_id]
+    inp = cover(tensor.shape, tensor.dtype, x.offsets, x.masks, color)
     inp = reshape(inp)
-    out = base_tensor(x.offsets.shape, DEFAULT)
-    out = mask(out, x.offsets.shape, x.masks, ACTIVE)
+    s = make_3d(x.offsets.shape)
+    out = draw_tensor_3d(s, *x.masks.reshape(*s).nonzero(), color)
     return inp, out
 
 
@@ -299,12 +239,185 @@ def draw_binary_op(x: BinaryOp) -> Optional[Diagram]:
 def draw_dot(x: BinaryOp) -> Optional[Diagram]:
     if x.input_shape == (1,):
         return None
-    inp = reshape(base_tensor(x.input_shape[0], color=ACTIVE))
-    inp = add_whiskers(inp, x.input_shape[0])
-    inp2 = reshape(base_tensor(x.input_shape[0], color=ACTIVE))
-    inp2 = add_whiskers(inp2, x.input_shape[0])
-    out = reshape(base_tensor(x.output_shape, color=ACTIVE))
-    out = add_whiskers(out, x.output_shape)
+    inp = draw_tensor_3d(x.input_shape[0], None, None, None)
+    # inp = reshape(base_tensor(x.input_shape[0], color=ACTIVE))
+    # inp = add_whiskers(inp, x.input_shape[0])
+    inp2 = draw_tensor_3d(x.input_shape[1], None, None, None)
+    # inp2 = reshape(base_tensor(x.input_shape[0], color=ACTIVE))
+    # inp2 = add_whiskers(inp2, x.input_shape[0])
+    out =  draw_tensor_3d(x.output_shape, None, None, None)
+    # out = reshape(base_tensor(x.output_shape, color=ACTIVE))
+    # out = add_whiskers(out, x.output_shape)
     return hcat(
-        [box(inp, 1, 2.5 / 3), box(inp2, 1, 2.5 / 3), box(out, 3, 2.5)], 1
+        [box(inp, 1.5, 2), box(inp2, 1.5, 2), box(out, 1.5, 2)], 1
     ).center_xy() + text("dot", 0.2).fill_color(BLACK).line_width(0).translate(0, -1)
+
+
+
+# For 3d
+
+
+def lookAt(eye: ArrayLike, center: ArrayLike, up: ArrayLike):
+    "Python version of the haskell lookAt function in linear.projections"
+    f = (center - eye) / np.linalg.norm(center - eye)
+    s = np.cross(f, up) / np.linalg.norm(np.cross(f, up))
+    u = np.cross(s, f)
+    return np.array([[*s, 0], [*u, 0], [*-f, 0], [0, 0, 0, 1]])
+
+
+def scale3(x, y, z):
+    return np.array([[x, 0, 0, 0], [0, y, 0, 0], [0, 0, z, 0], [0, 0, 0, 1]])
+
+
+@dataclass
+class D3:
+    x: float
+    y: float
+    z: float
+
+    def to_np(self):
+        return np.array([self.x, self.y, self.z])
+
+
+V3 = D3
+
+
+def homogenous(trails: List[List[D3]]):
+    "Convert list of directions to a np.array of homogenous coordinates"
+    return np.array([[[*o.to_np(), 1] for o in offsets] for offsets in trails])
+
+
+def cube():
+    "3 faces of a cube drawn as offsets from the origin."
+    return homogenous(
+        [
+            [D3(*v) for v in offset]
+            for offset in [
+                [(1, 0, 0), (0, 1, 0), (-1, 0, 0), (0, -1, 0)],
+                [(1, 0, 0), (0, 0, 1), (-1, 0, 0), (0, 0, -1)],
+                [(0, 0, 1), (0, 1, 0), (0, 0, -1), (0, -1, 0)],
+            ]
+        ]
+    )
+
+
+def to_trail(trail: ArrayLike, locations: ArrayLike):
+    return [
+        (
+            Path(
+                [Trail.from_offsets([V2(*v[:2]) for v in trail]).close().at(V2(*l[:2]))]
+            ),
+            l[2],
+        )
+        for l in locations
+    ]
+
+
+def project(projection, shape3, positions):
+    p = homogenous([positions for _ in range(shape3.shape[0])])
+    locations = p @ projection.T
+    trails = shape3 @ projection.T
+    return [out for t, l in zip(trails, locations) for out in to_trail(t, l)]
+
+
+def draw_tensor_3d(shape, a, b, c, color):
+    shape = make_3d(shape)
+
+    # Big Cube
+    s = scale3(*shape)
+    big_cube = cube() @ s.T
+    back = scale3(0, shape[1], shape[2])
+    back_cube = cube() @ back.T
+    s_ = shape
+
+    # Isometric projection of tensor
+    projection = lookAt(
+        V3(s_[0] / 1.5 + s_[1] + s_[2], 
+           s_[0] + s_[1] / 1.5 + s_[2], 
+           s_[0] + s_[1] + s_[2] / 1.5).to_np(),
+        V3(0, 0, 0).to_np(),
+        V3(0, 0, 1).to_np(),
+    )
+    outer = project(projection, big_cube, [V3(0, 0, 0)])
+    outer2 = project(projection, back_cube, [V3(shape[0], 0, 0)])
+    d = (
+        concat([p.stroke().fill_color(GREY).fill_opacity(0.1) for p, _ in outer2])
+        .line_width(0.005)
+        .line_color(GREY)
+    )
+    d += (
+        concat([p.stroke().fill_color(GREY).fill_opacity(0.05) for p, _ in outer])
+        .line_width(0.01)
+        .line_color(BLACK)
+    )
+    if a is not None:
+        out = group(a, b, c)
+        d2 = [ (b, l) for i in range(len(out)) for b, l in  make_cube(projection, out[i][0], out[i][1], color)]
+        d2.sort(key=lambda x: x[1], reverse=True)
+        d2 = concat([b.with_envelope(empty()) for b, _ in d2])
+        d = d2.with_envelope(d) + d
+    return d
+
+
+def lines(s):
+    "Draw lines to mimic a cube of cubes"
+    bs = [np.array([1, 0, 0]), 
+          np.array([0, 1, 0]), 
+          np.array([0, 0, 1])]
+    return [ homogenous(
+        [[
+            D3(*p)
+            for _ in range(s[i])
+            for p in [a / s[i], b, -b]  
+        ] 
+        for b in bs
+        if not np.all(a == b)
+        ]) for i, a in enumerate(bs) ]
+
+
+def make_cube(projection, start, end, color):
+    "Draws a cube from start position to end position."
+    start = np.array(start).astype(int)
+    end = np.array(end).astype(int)
+    s2 = end - start + 1
+    s = scale3(*s2)
+    small_cube = cube() @ s.T
+    l = [project(projection, l2 @ s.T, [V3(*start)]) 
+         for l2 in lines(s2) if l2.shape[1] > 0]
+    outer2 = project(projection, small_cube, [V3(*start)])
+    ls = l
+    d = empty()
+    box = [(p.stroke().fill_color(color).fill_opacity(0.4).line_width(0), l) for p, l in outer2]
+    line = [(p.stroke().line_width(0.0002).line_color(GREY), l_)  for l in ls for p, l_ in l]
+    return [(b, l) for b, l in box + line]
+
+
+def group(x: ArrayLike, y: ArrayLike, z: ArrayLike) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
+    "Groups together cubes into bigger cubes"
+    i = 0
+    x = list(zip(zip(x, y, z), zip(x, y, z)))
+
+    start = x
+    for j in range(2, -1, -1):
+        x = start
+        start = []
+        while True:
+            if len(x) <= 1:
+                break
+            _, _, rest = x[0], x[1], x[2:]
+            m = 0
+            for k in range(2):
+                a = x[0][k]
+                b = x[1][k]
+                if (k == 0 or a[j % 3] == b[j %3] - 1) and \
+                    a[(j + 1) %3] == b[(j + 1)%3] and \
+                    a[(j + 2) %3] == b[(j + 2)%3]:
+                    m += 1
+            if m ==2:
+                x = [[x[0][0], x[1][1]]] + rest
+            else:
+                start.append(x[0])
+                x = [x[1]] + rest
+        start += x
+    return start
+
