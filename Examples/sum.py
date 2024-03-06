@@ -68,6 +68,4 @@ if __name__ == "__main__":
     BLOCK_SIZE = 128
     CHANNEL_SIZE = 8
     input_matrix, result = perform_sum(device, BLOCK_SIZE, CHANNEL_SIZE)
-
-    triton_viz.dump("./sum.json")
-    triton_viz.draw("out.png")
+    triton_viz.launch()

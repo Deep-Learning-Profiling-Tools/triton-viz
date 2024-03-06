@@ -51,7 +51,7 @@ def add(x: torch.Tensor, y: torch.Tensor):
     add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
     # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
     # running asynchronously at this point.
-    return output
+    return output, grid
 
     # Directly use x and y here even though they are defined later in the file
 
@@ -87,13 +87,9 @@ def test_add():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--grid", type=int, default=0)
     args = parser.parse_args()
     device = args.device
-    triton_viz.sample((args.grid,))
 
     size = 5000
     input_vector1, input_vector2, output_triton = perform_vec_add(device, size)
-
-    triton_viz.dump("./vec_add.json")
-    triton_viz.draw(f"out{args.grid}.png")
+    triton_viz.launch()
