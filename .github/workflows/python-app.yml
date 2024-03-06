@@ -65,7 +65,9 @@ jobs:
         
     - name: Lint with pre-commit
       run: |
+        cd triton_viz
         pre-commit run --all-files
+        
     - name: Test with pytest
       run: |
         pytest Examples
