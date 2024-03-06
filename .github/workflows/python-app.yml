@@ -14,7 +14,6 @@ permissions:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -27,47 +26,45 @@ jobs:
       with:
         python-version: "3.10"
         
-    - name: Cache Python virtual environment and pip cache
+    - name: Create virtual environment
+      run: |
+        python -m venv triton_env
+        source triton_env/bin/activate
+
+    - name: Cache virtual environment
+      id: cache-triton_env
       uses: actions/cache@v2
       with:
         path: |
-          ~/venv
+          triton_env
           ~/.cache/pip
-        key: ${{ runner.os }}-venv-${{ hashFiles('triton_viz/**/requirements.txt', 'triton_viz/**.py', 'triton_viz/**/setup.py') }}-${{ github.sha }}
+        key: ${{ runner.os }}-triton_env-${{ hashFiles('triton_viz/requirements.txt') }}-v1
         restore-keys: |
-          ${{ runner.os }}-venv-${{ hashFiles('triton_viz/**/requirements.txt', 'triton_viz/**.py', 'triton_viz/**/setup.py') }}-
-          ${{ runner.os }}-venv-
-
-    - name: Create and activate virtual environment
-      run: |
-        python -m venv ~/venv
-        source ~/venv/bin/activate
+          ${{ runner.os }}-triton_env-${{ hashFiles('triton_viz/requirements.txt') }}-
 
     - name: Upgrade pip
       run: |
         pip install --upgrade pip
-        
-    - name: Clone and install dependency project (e.g., triton)
+
+    - name: Installing dependencies
+      if: steps.cache-triton_env.outputs.cache-hit != 'true'
       run: |
-        git clone https://github.com/openai/triton.git ~/triton
-        cd ~/triton/python
+        git clone https://github.com/openai/triton.git triton
+        cd triton/python
         pip install .
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-
-    - name: Install triton_viz
-      run: |
-        cd $GITHUB_WORKSPACE/triton_viz
+        cd triton_viz
         pip install .
-
-    - name: Install main project (triton_viz) dependencies
+        cd triton_viz
+        pip install -r triton_viz/requirements.txt
+        
+    - name: Lint with pre-commit
       run: |
-        pip install pytest pre-commit pyarrow
-        
-    #- name: Lint with pre-commit
-     # run: |
-      #  cd triton_viz
-       # pre-commit run --all-files
-        
+        cd triton_viz
+        pre-commit run --all-files
+    
     - name: Test with pytest
       run: |
+        source triton_env/bin/activate
+        cd triton_viz
         pytest Examples
