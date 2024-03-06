@@ -60,7 +60,7 @@ def perform_vec_add(device, size):
     torch.manual_seed(0)
     x = torch.rand(size, device=device)
     y = torch.rand(size, device=device)
-    output = add(x, y)  # Assuming add() is your custom function
+    output, grid = add(x, y)  # Assuming add() is your custom function
     return x, y, output
 
 
