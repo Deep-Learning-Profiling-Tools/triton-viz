@@ -5,7 +5,7 @@ name: Python application
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "tejas3070-patch-1" ]
   pull_request:
     branches: [ "main" ]
 
@@ -19,16 +19,49 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+      with:
+        path: 'triton_viz'
+        
     - name: Set up Python 3.10
       uses: actions/setup-python@v3
       with:
         python-version: "3.10"
-    - name: Install dependencies
+        
+    - name: Cache Python virtual environment and pip cache
+      uses: actions/cache@v2
+      with:
+        path: |
+          ~/venv
+          ~/.cache/pip
+        key: ${{ runner.os }}-venv-${{ hashFiles('triton_viz/**/requirements.txt', 'triton_viz/**.py', 'triton_viz/**/setup.py') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-venv-${{ hashFiles('triton_viz/**/requirements.txt', 'triton_viz/**.py', 'triton_viz/**/setup.py') }}-
+          ${{ runner.os }}-venv-
+
+    - name: Create and activate virtual environment
       run: |
-        python -m pip install --upgrade pip
+        python -m venv ~/venv
+        source ~/venv/bin/activate
+
+    - name: Upgrade pip
+      run: |
+        pip install --upgrade pip
+        
+    - name: Clone and install dependency project (e.g., triton)
+      run: |
+        git clone https://github.com/openai/triton.git ~/triton
+        cd ~/triton/python
         pip install .
-        pip install pytest
-        pip install pre-commit
+
+    - name: Install triton_viz
+      run: |
+        cd $GITHUB_WORKSPACE/triton_viz
+        pip install .
+
+    - name: Install main project (triton_viz) dependencies
+      run: |
+        pip install -r requirements.txt
+        
     - name: Lint with pre-commit
       run: |
         pre-commit run --all-files
