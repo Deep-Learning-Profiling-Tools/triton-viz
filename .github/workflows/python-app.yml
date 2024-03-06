@@ -6,8 +6,8 @@ name: Python application
 on:
   push:
     branches: [ "main", "tejas3070-patch-1" ]
-  pull_request:
-    branches: [ "main" ]
+  #pull_request:
+    #branches: [ "main" ]
 
 permissions:
   contents: read
@@ -20,6 +20,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
       with:
+        ref: tejas3070-patch-1
         path: 'triton_viz'
         
     - name: Set up Python 3.10
@@ -51,7 +52,7 @@ jobs:
       run: |
         git clone https://github.com/openai/triton.git ~/triton
         cd ~/triton/python
-        pip install .
+        MAX_JOBS=16 pip install .
 
     - name: Install triton_viz
       run: |
