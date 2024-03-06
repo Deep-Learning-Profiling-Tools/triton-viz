@@ -52,7 +52,7 @@ jobs:
       run: |
         git clone https://github.com/openai/triton.git ~/triton
         cd ~/triton/python
-        MAX_JOBS=16 pip install .
+        pip install .
 
     - name: Install triton_viz
       run: |
