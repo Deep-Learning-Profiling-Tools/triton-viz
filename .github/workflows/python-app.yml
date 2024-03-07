@@ -31,8 +31,8 @@ jobs:
       run: |
         python -m venv ~/work/triton-viz/triton-viz/main_ci
 		    echo "VENV_PATH=~/work/triton-viz/triton-viz/main_ci" >> $GITHUB_ENV
-		
-	- name: Clone Triton and Install
+
+    - name: Clone Triton and Install
       run: |
         git clone https://github.com/openai/triton.git triton-main_ci
 		    source ~/work/triton-viz/triton-viz/main_ci/bin/activate
