@@ -51,7 +51,7 @@ jobs:
     - name: Check Triton Installation
       id: check_triton
       run: |
-        source $VENV_PATH/bin/activate
+        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         if python -c "import triton" &> /dev/null; then
           echo "Triton already installed, skipping installation step."
           echo "SKIP_INSTALL=true" >> $GITHUB_ENV
@@ -61,7 +61,7 @@ jobs:
       if: env.SKIP_INSTALL != 'true'
       run: |
         git clone https://github.com/openai/triton.git triton-main_ci
-        source $VENV_PATH/bin/activate
+        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         cd triton-main_ci/python
         pip install -e .
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
@@ -70,19 +70,19 @@ jobs:
     - name: Install Dependencies if Cache Missed
       if: steps.cache-dependencies.outputs.cache-hit != 'true'
       run: |
-        source $VENV_PATH/bin/activate
+        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         cd triton_viz
         pip install -e .
         pip install -r requirements.txt
 
     - name: Lint with pre-commit
       run: |
-        source $VENV_PATH/bin/activate
+        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         cd triton_viz
         pre-commit run --all-files
 
     - name: Test with pytest
       run: |
-        source $VENV_PATH/bin/activate
+        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         cd triton_viz
         pytest Examples
