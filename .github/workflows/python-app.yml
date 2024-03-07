@@ -56,6 +56,8 @@ jobs:
       if: steps.cache-dependencies.outputs.cache-hit != 'true'
       run: |
         source $VIRTUAL_ENV_PATH/bin/activate
+        cd triton_viz
+        pip install .
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
         pip install -r triton_viz/requirements.txt
         pip uninstall pytorch-triton -y
