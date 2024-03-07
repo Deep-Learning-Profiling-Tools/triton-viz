@@ -27,54 +27,47 @@ jobs:
       with:
         python-version: "3.10"
 
-    - name: Cache virtual environment
-      id: cache-triton_env
+    - name: Clone Triton Repository
+      run: |
+        git clone https://github.com/openai/triton.git triton-test
+
+    - name: Create Virtual Environment
+      run: |
+        python -m venv /home/runner/work/_temp/triton-test-env
+        echo "VIRTUAL_ENV_PATH=/home/runner/work/_temp/triton-test-env" >> $GITHUB_ENV
+
+    - name: Activate Virtual Environment and Install Triton
+      run: |
+        source $VIRTUAL_ENV_PATH/bin/activate
+        cd triton-test/python
+        pip install .
+
+    - name: Cache Dependencies
       uses: actions/cache@v2
       with:
         path: |
-          triton_env
+          ${{ env.VIRTUAL_ENV_PATH }}
           ~/.cache/pip
-        key: ${{ runner.os }}-triton_env-${{ hashFiles('triton_viz/requirements.txt') }}-v1
+        key: ${{ runner.os }}-triton-${{ hashFiles('triton_viz/requirements.txt') }}-${{ github.sha }}
         restore-keys: |
-          ${{ runner.os }}-triton_env-${{ hashFiles('triton_viz/requirements.txt') }}-
+          ${{ runner.os }}-triton-${{ hashFiles('triton_viz/requirements.txt') }}
 
-    - name: Create virtual environment
+    - name: Install Dependencies if Cache Missed
+      if: steps.cache-dependencies.outputs.cache-hit != 'true'
       run: |
-        python -m venv triton_env
-        echo "ENV_NAME=triton_env" >> $GITHUB_ENV
-        echo "TRITON_DIR=triton-$ENV_NAME" >> $GITHUB_ENV
-
-    - name: Upgrade pip
-      run: |
-        source triton_env/bin/activate
-        pip install --upgrade pip
-
-    - name: Clone and install Triton from source
-      if: steps.cache-triton_env.outputs.cache-hit != 'true'
-      run: |
-        git clone https://github.com/openai/triton.git ${{ env.TRITON_DIR }}
-        cd ${{ env.TRITON_DIR }}/python
-        source ../../triton_env/bin/activate
-        pip install .
-
-    - name: Install additional dependencies
-      if: steps.cache-triton_env.outputs.cache-hit != 'true'
-      run: |
-        source triton_env/bin/activate
+        source $VIRTUAL_ENV_PATH/bin/activate
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
+        pip install -r triton_viz/requirements.txt
         pip uninstall pytorch-triton -y
-        cd triton_viz
-        pip install .
-        pip install -r requirements.txt
 
     - name: Lint with pre-commit
       run: |
-        source triton_env/bin/activate
+        source $VIRTUAL_ENV_PATH/bin/activate
         cd triton_viz
         pre-commit run --all-files
 
     - name: Test with pytest
       run: |
-        source triton_env/bin/activate
+        source $VIRTUAL_ENV_PATH/bin/activate
         cd triton_viz
         pytest Examples
