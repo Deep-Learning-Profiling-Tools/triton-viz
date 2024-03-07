@@ -62,6 +62,7 @@ jobs:
 
     - name: Lint with pre-commit
       run: |
+        source triton_env/bin/activate
         cd triton_viz
         pre-commit run --all-files
 
