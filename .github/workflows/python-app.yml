@@ -30,7 +30,6 @@ jobs:
     - name: Create virtual environment
       run: |
         python -m venv triton_env
-        source triton_env/bin/activate
 
     - name: Cache virtual environment
       id: cache-triton_env
@@ -50,6 +49,7 @@ jobs:
     - name: Installing dependencies
       if: steps.cache-triton_env.outputs.cache-hit != 'true'
       run: |
+        source triton_env/bin/activate
         git clone https://github.com/openai/triton.git triton
         cd triton/python
         pip install .
