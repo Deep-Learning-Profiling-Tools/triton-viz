@@ -51,7 +51,7 @@ jobs:
       id: check_triton
       run: |
         source ~/work/triton-viz/triton-viz/main_ci/bin/activate
-        if python -c "import triton" &> /dev/null; then
+        if python -c "import triton"; then
           echo "Triton already installed, skipping installation step."
           echo "SKIP_INSTALL=true" >> $GITHUB_ENV
         fi
