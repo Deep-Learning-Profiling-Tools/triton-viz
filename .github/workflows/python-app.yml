@@ -37,7 +37,7 @@ jobs:
       with:
         path: |
           ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('triton_viz/setup.py') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/setup.py') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
