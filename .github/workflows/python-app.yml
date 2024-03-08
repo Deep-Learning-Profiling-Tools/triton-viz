@@ -41,7 +41,7 @@ jobs:
       uses: actions/cache@v2
       with:
         path: |
-          ${{ env.VENV_PATH }}
+          ~/work/triton-viz/triton-viz/main_ci/lib/python3.10/site-packages
           ~/.cache/pip
         key: ${{ runner.os }}-python-3.10-${{ hashFiles('triton_viz/requirements.txt') }}
         restore-keys: |
