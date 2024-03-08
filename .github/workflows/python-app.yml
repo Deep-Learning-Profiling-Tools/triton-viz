@@ -84,4 +84,7 @@ jobs:
       run: |
         source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         cd triton_viz
+        cd Examples
+        rm -rf sum.py
+        cd ..
         pytest Examples
