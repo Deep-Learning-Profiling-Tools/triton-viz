@@ -52,6 +52,15 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-python-3.10-
 
+    - name: Disk usage after cache step
+      run: df -h
+
+    - name: Temporary directories space usage
+      run: du -sh /tmp/*
+
+    - name: Check space of working directory
+      run: du -sh /home/runner/work/*
+
     # Explicit check for Triton installation before proceeding with git clone and pip install
     - name: Check Triton Installation
       id: check_triton
