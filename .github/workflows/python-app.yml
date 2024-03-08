@@ -5,7 +5,7 @@ name: Python application
 
 on:
   push:
-    branches: [ "main", "tejas3070-patch-1" ]
+    branches: [ "main" ]
   pull_request:
      branches: [ "main" ]
 
