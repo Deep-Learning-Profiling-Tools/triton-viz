@@ -6,8 +6,8 @@ name: Python application
 on:
   push:
     branches: [ "main", "tejas3070-patch-1" ]
-  # pull_request:
-  #   branches: [ "main" ]
+  pull_request:
+     branches: [ "main" ]
 
 permissions:
   contents: read
@@ -27,61 +27,41 @@ jobs:
       with:
         python-version: "3.10"
 
-    - name: Create Virtual Environment
-      run: |
-        python -m venv ~/work/triton-viz/triton-viz/main_ci
-        echo "VENV_PATH=~/work/triton-viz/triton-viz/main_ci" >> $GITHUB_ENV
-
     - name: Clean up before caching
       run: |
-        find ~/work/triton-viz/triton-viz/main_ci -name '*.pyc' -delete
-        find ~/work/triton-viz/triton-viz/main_ci -name '__pycache__' -type d -exec rm -rf {} +
+        find . -name '*.pyc' -delete
+        find . -name '__pycache__' -type d -exec rm -rf {} +
 
     - name: Cache Dependencies
+      id: cache-dependencies
       uses: actions/cache@v3
       with:
         path: |
-          ~/work/triton-viz/triton-viz/main_ci/lib/python3.10/site-packages
-        key: ${{ runner.os }}-python-3.10-${{ hashFiles('triton_viz/requirements.txt') }}
+          ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('triton_viz/setup.py') }}
         restore-keys: |
-          ${{ runner.os }}-python-3.10-
-
-    # Explicit check for Triton installation before proceeding with git clone and pip install
-    - name: Check Triton Installation
-      id: check_triton
-      run: |
-        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
-        if python -c "import triton"; then
-          echo "Triton already installed, skipping installation step."
-          echo "SKIP_INSTALL=true" >> $GITHUB_ENV
-        fi
+          ${{ runner.os }}-pip-
 
     - name: Clone Triton and Install
-      if: env.SKIP_INSTALL != 'true'
       run: |
-        git clone https://github.com/openai/triton.git triton-main_ci
-        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
-        cd triton-main_ci/python
+        git clone https://github.com/openai/triton.git
+        cd triton/python
         pip install -e .
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-        pip uninstall pytorch-triton -y
-
+        
     - name: Install Dependencies if Cache Missed
       if: steps.cache-dependencies.outputs.cache-hit != 'true'
       run: |
-        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         cd triton_viz
         pip install -e .
-        pip install -r requirements.txt
-
+        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
+        pip uninstall pytorch-triton -y
+        
     - name: Lint with pre-commit
       run: |
-        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         cd triton_viz
         pre-commit run --all-files
 
     - name: Test with pytest
       run: |
-        source ~/work/triton-viz/triton-viz/main_ci/bin/activate
         cd triton_viz
         pytest Examples
