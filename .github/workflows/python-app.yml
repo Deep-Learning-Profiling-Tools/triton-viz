@@ -37,6 +37,11 @@ jobs:
         find ~/work/triton-viz/triton-viz/main_ci -name '*.pyc' -delete
         find ~/work/triton-viz/triton-viz/main_ci -name '__pycache__' -type d -exec rm -rf {} +
 
+    - name: Disk usage
+      run: |
+        df -h
+        du -chd 2 /home/runner/work/triton-viz/triton-viz/ | sort -rh | head -20
+
     - name: Cache Dependencies
       uses: actions/cache@v2
       with:
