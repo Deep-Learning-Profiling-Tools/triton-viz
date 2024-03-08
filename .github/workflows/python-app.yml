@@ -37,29 +37,14 @@ jobs:
         find ~/work/triton-viz/triton-viz/main_ci -name '*.pyc' -delete
         find ~/work/triton-viz/triton-viz/main_ci -name '__pycache__' -type d -exec rm -rf {} +
 
-    - name: Disk usage
-      run: |
-        df -h
-        du -chd 2 /home/runner/work/triton-viz/triton-viz/ | sort -rh | head -20
-
     - name: Cache Dependencies
       uses: actions/cache@v2
       with:
         path: |
           ~/work/triton-viz/triton-viz/main_ci/lib/python3.10/site-packages
-          ~/.cache/pip
         key: ${{ runner.os }}-python-3.10-${{ hashFiles('triton_viz/requirements.txt') }}
         restore-keys: |
           ${{ runner.os }}-python-3.10-
-
-    - name: Disk usage after cache step
-      run: df -h
-
-    - name: Temporary directories space usage
-      run: du -sh /tmp/*
-
-    - name: Check space of working directory
-      run: du -sh /home/runner/work/*
 
     # Explicit check for Triton installation before proceeding with git clone and pip install
     - name: Check Triton Installation
