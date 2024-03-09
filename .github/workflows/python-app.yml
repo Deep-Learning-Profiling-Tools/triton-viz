@@ -36,6 +36,7 @@ jobs:
           ${{ runner.os }}-pip-
 
     - name: Clone Triton and Install
+      if: steps.cache-pip.outputs.cache-hit != 'true'
       run: |
         pip list
         git clone https://github.com/openai/triton.git
@@ -47,14 +48,14 @@ jobs:
       run: |
         cd triton_viz
         pip install -e .
-        pre-commit install
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
         pip uninstall pytorch-triton -y
 
     - name: Lint with pre-commit
       run: |
         cd triton_viz
-        pre-commit run --all-files
+        pre_commit_path=$(pip show pre-commit | grep Location | cut -d' ' -f2)
+        echo "${pre_commit_path}/pre-commit run --all-files"
 
     - name: Test with pytest
       run: |
