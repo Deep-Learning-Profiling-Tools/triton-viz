@@ -36,7 +36,6 @@ jobs:
           ${{ runner.os }}-pip-
 
     - name: Clone Triton and Install
-      if: steps.cache-pip.outputs.cache-hit != 'true'
       run: |
         git clone https://github.com/openai/triton.git
         cd triton/python
