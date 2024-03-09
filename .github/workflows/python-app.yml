@@ -42,12 +42,12 @@ jobs:
         pip install -e .
 
     - name: Install Dependencies if Cache Missed
-      if: steps.cache-pip.outputs.cache-hit != 'true'
+      #if: steps.cache-pip.outputs.cache-hit != 'true'
       run: |
         cd triton_viz
-        pip install -e .
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-        pip uninstall pytorch-triton -y
+        /usr/bin/python3.10 -m pip install -e .
+        /usr/bin/python3.10 -m pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
+        /usr/bin/python3.10 -m pip uninstall pytorch-triton -y
         
     - name: Lint with pre-commit
       run: |
