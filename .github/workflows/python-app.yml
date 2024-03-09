@@ -21,8 +21,10 @@ jobs:
       with:
         path: 'triton_viz'
 
-    - name: Install Python
-      run: sudo apt install python3.10 -y
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.10'
 
     - name: Cache Dependencies
       uses: actions/cache@v3
@@ -32,27 +34,23 @@ jobs:
         key: ${{ runner.os }}-pip-3.10-${{ hashFiles('**/setup.py') }}
         restore-keys: |
           ${{ runner.os }}-pip-
-
     - name: Clone Triton and Install
       run: |
-        pip list
         git clone https://github.com/openai/triton.git
         cd triton/python
         pip install -e .
-
     - name: Install Dependencies if Cache Missed
       if: steps.cache-pip.outputs.cache-hit != 'true'
       run: |
         cd triton_viz
         pip install -e .
+        pre-commit install
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
         pip uninstall pytorch-triton -y
-
     - name: Lint with pre-commit
       run: |
         cd triton_viz
         pre-commit run --all-files
-
     - name: Test with pytest
       run: |
         cd triton_viz
