@@ -31,7 +31,6 @@ jobs:
       id: cache-pip
       with:
         path: /opt/hostedtoolcache/Python/3.10.13/x64/lib/python3.10/site-packages
-              /opt/hostedtoolcache/Python/3.10.13/x64/bin
         key: ${{ runner.os }}-pip-3.10-${{ hashFiles('**/setup.py') }}
         restore-keys: |
           ${{ runner.os }}-pip-
