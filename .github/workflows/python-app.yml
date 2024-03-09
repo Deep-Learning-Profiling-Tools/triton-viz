@@ -30,7 +30,7 @@ jobs:
       uses: actions/cache@v3
       id: cache-pip
       with:
-        path: /opt/hostedtoolcache/triton-viz/3.10
+        path: /opt/hostedtoolcache/Python/3.10.13/x64/lib/python3.10/site-packages
         key: ${{ runner.os }}-pip-3.10-${{ hashFiles('**/setup.py') }}
         restore-keys: |
           ${{ runner.os }}-pip-
