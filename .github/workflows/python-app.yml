@@ -15,26 +15,23 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: [3.10]
-
+    
     steps:
     - uses: actions/checkout@v3
       with:
         path: 'triton_viz'
 
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Set up Python 3.10
       uses: actions/setup-python@v3
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: '3.10'
 
     - name: Cache Dependencies
       uses: actions/cache@v3
       id: cache-pip
       with:
-        path: /opt/hostedtoolcache/triton-viz/${{ matrix.python-version }}
-        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/setup.py') }}
+        path: /opt/hostedtoolcache/triton-viz/3.10
+        key: ${{ runner.os }}-pip-3.10-${{ hashFiles('**/setup.py') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
