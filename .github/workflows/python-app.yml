@@ -34,24 +34,32 @@ jobs:
         key: ${{ runner.os }}-pip-3.10-${{ hashFiles('**/setup.py') }}
         restore-keys: |
           ${{ runner.os }}-pip-
+          
     - name: Clone Triton and Install
+      working-directory: python
       run: |
         git clone https://github.com/openai/triton.git
         cd triton/python
         pip install -e .
+        
     - name: Install Dependencies if Cache Missed
       if: steps.cache-pip.outputs.cache-hit != 'true'
+      working-directory: python
       run: |
         cd triton_viz
         pip install -e .
         pre-commit install
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
         pip uninstall pytorch-triton -y
+        
     - name: Lint with pre-commit
+      working-directory: python
       run: |
         cd triton_viz
         pre-commit run --all-files
+        
     - name: Test with pytest
+      working-directory: python
       run: |
         cd triton_viz
         pytest Examples
