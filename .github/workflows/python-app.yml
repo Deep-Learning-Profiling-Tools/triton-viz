@@ -51,11 +51,16 @@ jobs:
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
         pip uninstall pytorch-triton -y
 
+    - name: Install Dependencies again
+      run: |
+        pip install pre-commit
+        pip install pyarrow
+        pip install pytest
+        
     - name: Lint with pre-commit
       run: |
         cd triton_viz
-        pre_commit_path=$(pip show pre-commit | grep Location | cut -d' ' -f2)
-        echo "${pre_commit_path}/pre-commit run --all-files"
+        pre-commit run --all-files"
 
     - name: Test with pytest
       run: |
