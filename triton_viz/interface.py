@@ -3,7 +3,6 @@ import triton_viz
 import tempfile
 
 
-
 def launch():
     cache = {}
     program_records, tt = triton_viz.collect_grid()
@@ -19,7 +18,7 @@ def launch():
                 s1 = gr.Slider(0, m[0], value=0, step=1, label="Program Id 0")
                 s2 = gr.Slider(0, m[1], value=0, step=1, label="Program Id 1")
                 s3 = gr.Slider(0, m[2], value=0, step=1, label="Program Id 2")
-        
+
         def update(inp):
             a = inp[s1]
             b = inp[s2]

@@ -13,5 +13,8 @@ setup(
         "triton",
         "gradio",
         "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git",
+        "pyarrow",
+        "pre-commit",
+        "pytest",
     ],
 )
