@@ -15,57 +15,49 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.10]
 
     steps:
     - uses: actions/checkout@v3
       with:
         path: 'triton_viz'
 
-    - name: Set up Python 3.10
+    - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v3
       with:
-        python-version: "3.10"
-
-    - name: Clean up before caching
-      run: |
-        find . -name '*.pyc' -delete
-        find . -name '__pycache__' -type d -exec rm -rf {} +
+        python-version: ${{ matrix.python-version }}
 
     - name: Cache Dependencies
-      uses: actions/cache@v2
-      id: cache-venv
+      uses: actions/cache@v3
+      id: cache-pip
       with:
-        path: ./.venv/
-        key: ${{ runner.os }}-venv-${{ hashFiles('**/setup.py') }}
+        path: /opt/hostedtoolcache/triton-viz/${{ matrix.python-version }}
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/setup.py') }}
         restore-keys: |
-          ${{ runner.os }}-venv-
-
-    - name: Install Dependencies if Cache Missed
-      if: steps.cache-venv.outputs.cache-hit != 'true'
-      run: |
-        python -m venv ./.venv
-        source ./.venv/bin/activate
-        cd triton_viz
-        pip install -e .
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-        pip uninstall pytorch-triton -y
-        pip uninstall triton -y
+          ${{ runner.os }}-pip-
 
     - name: Clone Triton and Install
       run: |
         git clone https://github.com/openai/triton.git
-        source ./.venv/bin/activate
         cd triton/python
         pip install -e .
 
+    - name: Install Dependencies if Cache Missed
+      if: steps.cache-pip.outputs.cache-hit != 'true'
+      run: |
+        cd triton_viz
+        pip install -e .
+        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
+        pip uninstall pytorch-triton -y
+
     - name: Lint with pre-commit
       run: |
-        source ./.venv/bin/activate
         cd triton_viz
         pre-commit run --all-files
 
     - name: Test with pytest
       run: |
-        source ./.venv/bin/activate
         cd triton_viz
         pytest Examples
