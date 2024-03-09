@@ -14,7 +14,7 @@ setup(
         "gradio",
         "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git",
         "pyarrow",
-        "pytest",
         "pre-commit",
+        "pytest",
     ],
 )
