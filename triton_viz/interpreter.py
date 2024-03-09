@@ -31,7 +31,7 @@ def _patch_lang(fn):
     patch_lang(fn)
     tl.sum = _create_reduce(tl.sum, "sum")
     tl.min = _create_reduce(tl.min, "min")
-    tl.max = _create_reduce(tl.min, "max")
+    tl.max = _create_reduce(tl.max, "max")
 
 
 def _unpatch_lang():
@@ -261,7 +261,7 @@ def _create_reduce(fn, op_name):
     @wraps(fn)
     def wrapper(input, axis=None, **kwargs):
         ret = fn(input, axis=axis, **kwargs)
-        keep_dims = kwargs.pop("keep_dims", False)
+        keep_dims = kwargs.get("keep_dims", False)
         reduce_record = Reduce(
             input_shape=input.handle.data.shape,
             index=axis,
