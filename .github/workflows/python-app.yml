@@ -47,7 +47,7 @@ jobs:
         pip install -e .
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
         pip uninstall pytorch-triton -y
-        
+
     - name: Lint with pre-commit
       run: |
         cd triton_viz
