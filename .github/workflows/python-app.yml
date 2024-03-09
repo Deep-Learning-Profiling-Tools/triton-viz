@@ -30,13 +30,13 @@ jobs:
       uses: actions/cache@v3
       id: cache-pip
       with:
-        path: /opt/hostedtoolcache/Python/3.10.13/x64/lib/python3.10/site-packages
+        path: /opt/hostedtoolcache/Python/3.10.13/x64
+        #/opt/hostedtoolcache/Python/3.10.13/x64/lib/python3.10/site-packages
         key: ${{ runner.os }}-pip-3.10-${{ hashFiles('**/setup.py') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
     - name: Clone Triton and Install
-      if: steps.cache-pip.outputs.cache-hit != 'true'
       run: |
         git clone https://github.com/openai/triton.git
         cd triton/python
@@ -53,7 +53,6 @@ jobs:
 
     - name: Lint with pre-commit
       run: |
-        echo "/opt/hostedtoolcache/Python/3.10.13/x64/bin" >> $GITHUB_PATH
         cd triton_viz
         pre-commit run --all-files
 
