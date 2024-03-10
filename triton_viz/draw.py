@@ -83,7 +83,7 @@ def collect_launch(launch):
 
 
 def draw_record(program_record, tensor_table, output):
-    draw_launch(program_record, tensor_table, output)
+    return draw_launch(program_record, tensor_table, output)
 
 
 def draw_launch(program_records, tensor_table, base) -> Diagram:
@@ -122,6 +122,7 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
     dr = rectangle(env.width + 1, env.height + 1).fill_color(BG).center_xy() + dr
     dr.render_svg(base, 2500)
     return env.width, env.height
+
 
 def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
     if len(shape) == 1:
@@ -332,12 +333,10 @@ def draw_tensor_3d(shape, a, b, c, color=WHITE):
     big_cube = cube() @ s.T
     back = scale3(0, shape[1], shape[2])
     back_cube = cube() @ back.T
-    s_ = shape
 
     # Isometric projection of tensor
     projection = lookAt(
-        V3(-1.0, -0.25, 0.1
-        ).to_np(),
+        V3(-1.0, -0.3, -0.15).to_np(),
         V3(0, 0, 0).to_np(),
         V3(0, 1, 0).to_np(),
     )
