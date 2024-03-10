@@ -121,7 +121,7 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
     env = dr.get_envelope()
     dr = rectangle(env.width + 1, env.height + 1).fill_color(BG).center_xy() + dr
     dr.render_svg(base, 2500)
-
+    return env.width, env.height
 
 def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
     if len(shape) == 1:
@@ -336,13 +336,10 @@ def draw_tensor_3d(shape, a, b, c, color=WHITE):
 
     # Isometric projection of tensor
     projection = lookAt(
-        V3(
-            s_[0] / 1.5 + s_[1] + s_[2],
-            s_[0] + s_[1] / 1.5 + s_[2],
-            s_[0] + s_[1] + s_[2] / 1.5,
+        V3(-1.0, -0.25, 0.1
         ).to_np(),
         V3(0, 0, 0).to_np(),
-        V3(0, 0, 1).to_np(),
+        V3(0, 1, 0).to_np(),
     )
     outer = project(projection, big_cube, [V3(0, 0, 0)])
     outer2 = project(projection, back_cube, [V3(shape[0], 0, 0)])
@@ -415,6 +412,7 @@ def group(
 ) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
     "Groups together cubes into bigger cubes"
     x = list(zip(zip(x, y, z), zip(x, y, z)))
+    x = [(a, b) for a, b in x if not (a[0] == -1 and a[1] == -1 and a[2] == -1)]
 
     start = x
     for j in range(2, -1, -1):
