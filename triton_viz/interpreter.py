@@ -259,8 +259,9 @@ def _create_expand_dims(fn):
 
 def _create_reduce(fn, op_name):
     @wraps(fn)
-    def wrapper(input, axis, keep_dims=False):
-        ret = fn(input, axis, keep_dims)
+    def wrapper(input, axis=None, **kwargs):
+        ret = fn(input, axis=axis, **kwargs)
+        keep_dims = kwargs.get("keep_dims", False)
         reduce_record = Reduce(
             input_shape=input.handle.data.shape,
             index=axis,
