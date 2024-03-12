@@ -114,9 +114,14 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
 
         return (chalk.vstrut(0.2) / y).center_xy()
 
-    dr = empty()
+    records = []
     for r in program_records:
-        dr = vcat([dr, draw_record(r)], 0.0)
+        dr = draw_record(r)
+        # env = dr.get_envelope()
+        # dr = dr.center_xy().with_envelope(rectangle(env.width, env.height).center_xy())
+        records.append(dr)
+
+    dr = vcat(records)
     dr = dr.center_xy()
     env = dr.get_envelope()
     dr = rectangle(env.width + 1, env.height + 1).fill_color(BG).center_xy() + dr
