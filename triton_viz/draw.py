@@ -19,11 +19,13 @@ from typing import Tuple, Union, Optional, List, Dict
 from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, V2, concat
 from dataclasses import dataclass
 from numpy.typing import ArrayLike
+import sys
+
+sys.setrecursionlimit(100000)
 
 
 planar.EPSILON = 0.0
 chalk.set_svg_draw_height(500)
-
 BG = Color("white")
 WHITE = Color("white")
 DEFAULT = Color("grey")
@@ -419,8 +421,17 @@ def group(
     x = [(a, b) for a, b in x if not (a[0] == -1 and a[1] == -1 and a[2] == -1)]
 
     start = x
+
+    def remove_dups(ls):
+        "Remove duplicates"
+        out = []
+        for l in ls:
+            if not out or l != out[-1]:
+                out.append(l)
+        return out
+
     for j in range(2, -1, -1):
-        x = start
+        x = remove_dups(start)
         start = []
         while True:
             if len(x) <= 1:

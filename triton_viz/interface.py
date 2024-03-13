@@ -3,7 +3,7 @@ import triton_viz
 import tempfile
 
 
-def launch():
+def launch(share=True):
     cache = {}
     program_records, tt = triton_viz.collect_grid()
     m = [0, 0, 0]
@@ -80,4 +80,4 @@ def launch():
         b1.click(precompute, inputs={s1, s2, s3}, outputs=img, show_progress=True)
         demo.load(update, inputs={s1, s2, s3}, outputs=[img, b1])
 
-    demo.launch(share=True, debug=False, height=800, quiet=True, show_api=False)
+    demo.launch(share=share, debug=False, height=800, quiet=True, show_api=False)
