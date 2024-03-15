@@ -73,6 +73,7 @@ def test_add():
     expected = input_vector1 + input_vector2
     expected_offsets = [i * t_size for i in np.arange(0, BLOCK_SIZE)]
     expected_offsets_len = len(expected_offsets)
+    print(record_builder.launches[0].records)
     for op in record_builder.launches[0].records:
         if isinstance(op, Load):
             result_offset = op.offsets.tolist()

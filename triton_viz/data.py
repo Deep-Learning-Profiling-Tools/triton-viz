@@ -32,6 +32,7 @@ class Store(Op):
     shape: Tuple
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
+    invalid_access_mask: npt.NDArray[np.bool_]
 
 
 @dataclass
@@ -40,6 +41,7 @@ class Load(Op):
     shape: Tuple
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
+    invalid_access_mask: npt.NDArray[np.bool_]
 
 
 @dataclass

@@ -171,13 +171,24 @@ def _create_masked_load(fn):
     @wraps(fn)
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
         tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
+        offsets = ptrs.data - tensor_ptr.ptr
+        tensor_size = np.prod(tensor_ptr.shape)
+        total_span = offsets[-1] - offsets[0]
+        num_intervals = len(offsets) - 1
+        difference = total_span / num_intervals
+        max_valid_offset = difference * tensor_size
+        valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
+        invalid_access_mask = np.logical_not(valid_access_mask)
+        corrected_offsets = np.where(valid_access_mask, offsets, 0)
         load_record = Load(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
-            offsets=ptrs.data - tensor_ptr.ptr,
-            masks=mask.data,
+            offsets=corrected_offsets,
+            masks=valid_access_mask,
+            invalid_access_mask=invalid_access_mask,
         )
         record_builder.add_record(load_record)
+
         return fn(
             ptrs,
             mask,
@@ -190,18 +201,45 @@ def _create_masked_load(fn):
     return wrapper
 
 
+# def _create_masked_store(fn):
+# @wraps(fn)
+# def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
+# tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
+# store_record = Store(
+# ptr=tensor_ptr.ptr,
+# shape=ptrs.data.shape,
+# offsets=ptrs.data - tensor_ptr.ptr,
+# masks=mask.data,
+# )
+# record_builder.add_record(store_record)
+# return fn(ptrs, value, mask, cache_modifier, eviction_policy)
+
+# return wrapper
+
+
 def _create_masked_store(fn):
     @wraps(fn)
-    def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
+    def wrapper(ptrs, mask, other, cache_modifier, eviction_policy):
         tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
+        offsets = ptrs.data - tensor_ptr.ptr
+        tensor_size = np.prod(tensor_ptr.shape)
+        total_span = offsets[-1] - offsets[0]
+        num_intervals = len(offsets) - 1
+        difference = total_span / num_intervals
+        max_valid_offset = difference * tensor_size
+        valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
+        invalid_access_mask = np.logical_not(valid_access_mask)
+        corrected_offsets = np.where(valid_access_mask, offsets, 0)
         store_record = Store(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
-            offsets=ptrs.data - tensor_ptr.ptr,
-            masks=mask.data,
+            offsets=corrected_offsets,
+            masks=valid_access_mask,
+            invalid_access_mask=invalid_access_mask,
         )
         record_builder.add_record(store_record)
-        return fn(ptrs, value, mask, cache_modifier, eviction_policy)
+
+        return fn(ptrs, mask, other, cache_modifier, eviction_policy)
 
     return wrapper
 
