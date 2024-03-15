@@ -70,18 +70,50 @@ def test_add():
     BLOCK_SIZE = 1024
     input_vector1, input_vector2, result = perform_vec_add(device, size)
     t_size = input_vector1.element_size()
-    expected = input_vector1 + input_vector2
     expected_offsets = [i * t_size for i in np.arange(0, BLOCK_SIZE)]
     expected_offsets_len = len(expected_offsets)
+    expected = input_vector1 + input_vector2
+    expected_masks = np.ones(expected_offsets_len, dtype=bool)
+    expected_invalid_masks = np.logical_not(expected_masks)
     for op in record_builder.launches[0].records:
         if isinstance(op, Load):
-            result_offset = op.offsets.tolist()
-            result_offset_len = len(result_offset)
+            result_offsets = op.offsets.tolist()
+            result_offsets_len = len(result_offsets)
+            result_masks = op.masks
+            result_invalid_masks = op.invalid_access_masks
             break
     assert torch.allclose(result, expected)
     assert result.shape == expected.shape
-    assert result_offset == expected_offsets
-    assert result_offset_len == expected_offsets_len
+    assert result_offsets == expected_offsets
+    assert result_offsets_len == expected_offsets_len
+    assert (result_masks == expected_masks).all()
+    assert (result_invalid_masks == expected_invalid_masks).all()
+
+
+def test_out_of_bounds_add():
+    device = "cpu"
+    size = 960
+    BLOCK_SIZE = 1024
+    input_vector1, input_vector2, result = perform_vec_add(device, size)
+    t_size = input_vector1.element_size()
+    expected_offsets = [(i * t_size) if i < size else 0 for i in range(BLOCK_SIZE)]
+    expected_offsets_len = len(expected_offsets)
+    expected = input_vector1 + input_vector2
+    expected_masks = [True if i < size else False for i in range(BLOCK_SIZE)]
+    expected_invalid_masks = np.logical_not(expected_masks)
+    for op in record_builder.launches[0].records:
+        if isinstance(op, Load):
+            result_offsets = op.offsets.tolist()
+            result_offsets_len = len(result_offsets)
+            result_masks = op.masks
+            result_invalid_masks = op.invalid_access_masks
+            break
+    assert torch.allclose(result, expected)
+    assert result.shape == expected.shape
+    assert result_offsets == expected_offsets
+    assert result_offsets_len == expected_offsets_len
+    assert (result_masks == expected_masks).all()
+    assert (result_invalid_masks == expected_invalid_masks).all()
 
 
 if __name__ == "__main__":

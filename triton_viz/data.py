@@ -87,7 +87,6 @@ class Tensor:
     stride: Tuple
     shape: Tuple
     element_size: int
-    n_elements: int
 
 
 @dataclass

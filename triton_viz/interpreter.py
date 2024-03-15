@@ -142,29 +142,15 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         else:
             ret = _implicit_cvt(arg)
             if hasattr(arg, "data_ptr"):
-                if hasattr(arg, "element_size"):
-                    element_size = arg.element_size()  # PyTorch
-                elif hasattr(arg, "itemsize"):  # Numpy
-                    element_size = arg.itemsize
-                else:
-                    element_size = None  # default value/error handling
-                if hasattr(arg, "numel"):  # PyTorch
-                    n_elements = arg.numel()
-                elif hasattr(arg, "size"):  # NumPy
-                    n_elements = arg.size
-                else:
-                    n_elements = 1
-                    for dim_size in arg.shape:
-                        n_elements *= dim_size
-                tensor = Tensor(
-                    ret.handle.data[0],
-                    ret.dtype,
-                    arg.stride(),
-                    arg.shape,
-                    element_size,
-                    n_elements,
+                tensors.append(
+                    Tensor(
+                        ret.handle.data[0],
+                        ret.dtype,
+                        arg.stride(),
+                        arg.shape,
+                        arg.element_size(),
+                    )
                 )
-                tensors.append(tensor)
             call_args[name] = ret
     call_args.pop("self", None)
     # Iterate through grid
@@ -191,7 +177,7 @@ def check_out_of_bounds_access(ptrs):
     first_ptr = np.reshape(ptrs.data, (-1))[0]
     tensor_ptr = record_builder.get_tensor_ptr(first_ptr)
     offsets = ptrs.data - tensor_ptr.ptr
-    max_valid_offset = tensor_ptr.n_elements * tensor_ptr.element_size
+    max_valid_offset = np.prod(tensor_ptr.shape) * tensor_ptr.element_size
     valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
     invalid_access_mask = np.logical_not(valid_access_mask)
     corrected_offsets = np.where(valid_access_mask, offsets, 0)
