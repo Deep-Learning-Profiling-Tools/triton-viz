@@ -146,14 +146,19 @@ def _grid_executor_call(self, *args_dev, **kwargs):
             # Tensor(ret.handle.data[0], ret.dtype, arg.stride(), arg.shape)
             if hasattr(arg, "data_ptr"):
                 if hasattr(arg, "element_size"):
-                    element_size = arg.element_size()
-                elif hasattr(arg, "itemsize"):  # Check if it's a NumPy array
+                    element_size = arg.element_size()  # PyTorch
+                elif hasattr(arg, "itemsize"):  # Numpy
                     element_size = arg.itemsize
                 else:
-                    element_size = None  # Or some default value/error handling
-                n_elements = 1
-                for dim_size in arg.shape:
-                    n_elements *= dim_size
+                    element_size = None  # default value/error handling
+                if hasattr(arg, "numel"):  # PyTorch
+                    n_elements = arg.numel()
+                elif hasattr(arg, "size"):  # NumPy
+                    n_elements = arg.size
+                else:
+                    n_elements = 1
+                    for dim_size in arg.shape:
+                        n_elements *= dim_size
                 tensor = Tensor(
                     ret.handle.data[0],
                     ret.dtype,
