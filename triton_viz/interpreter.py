@@ -201,22 +201,6 @@ def _create_masked_load(fn):
     return wrapper
 
 
-# def _create_masked_store(fn):
-# @wraps(fn)
-# def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
-# tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
-# store_record = Store(
-# ptr=tensor_ptr.ptr,
-# shape=ptrs.data.shape,
-# offsets=ptrs.data - tensor_ptr.ptr,
-# masks=mask.data,
-# )
-# record_builder.add_record(store_record)
-# return fn(ptrs, value, mask, cache_modifier, eviction_policy)
-
-# return wrapper
-
-
 def _create_masked_store(fn):
     @wraps(fn)
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy):
