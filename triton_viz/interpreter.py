@@ -167,16 +167,23 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     # _unpatch_lang()
 
 
+def calculate_tensor_params(ptrs):
+    first_ptr = np.reshape(ptrs.data, (-1))[0]
+    tensor_ptr = record_builder.get_tensor_ptr(first_ptr)
+    offsets = ptrs.data - tensor_ptr.ptr
+    dtype = str(tensor_ptr.dtype)
+    type_size_mapping = {"int32": 4, "int64": 8, "fp32": 4, "fp64": 8}
+    base_type = dtype.replace("pointer<", "").replace(">", "")
+    element_size = type_size_mapping[base_type]
+    total_elements = np.prod(tensor_ptr.shape)
+    max_valid_offset = total_elements * element_size
+    return tensor_ptr, offsets, max_valid_offset
+
+
 def _create_masked_load(fn):
     @wraps(fn)
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
-        tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
-        offsets = ptrs.data - tensor_ptr.ptr
-        tensor_size = np.prod(tensor_ptr.shape)
-        total_span = offsets[-1] - offsets[0]
-        num_intervals = len(offsets) - 1
-        difference = total_span / num_intervals
-        max_valid_offset = difference * tensor_size
+        tensor_ptr, offsets, max_valid_offset = calculate_tensor_params(ptrs)
         valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
         invalid_access_mask = np.logical_not(valid_access_mask)
         corrected_offsets = np.where(valid_access_mask, offsets, 0)
@@ -185,7 +192,7 @@ def _create_masked_load(fn):
             shape=ptrs.data.shape,
             offsets=corrected_offsets,
             masks=valid_access_mask,
-            invalid_access_mask=invalid_access_mask,
+            invalid_access_masks=invalid_access_mask,
         )
         record_builder.add_record(load_record)
 
@@ -204,13 +211,7 @@ def _create_masked_load(fn):
 def _create_masked_store(fn):
     @wraps(fn)
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy):
-        tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
-        offsets = ptrs.data - tensor_ptr.ptr
-        tensor_size = np.prod(tensor_ptr.shape)
-        total_span = offsets[-1] - offsets[0]
-        num_intervals = len(offsets) - 1
-        difference = total_span / num_intervals
-        max_valid_offset = difference * tensor_size
+        tensor_ptr, offsets, max_valid_offset = calculate_tensor_params(ptrs)
         valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
         invalid_access_mask = np.logical_not(valid_access_mask)
         corrected_offsets = np.where(valid_access_mask, offsets, 0)
@@ -219,7 +220,7 @@ def _create_masked_store(fn):
             shape=ptrs.data.shape,
             offsets=corrected_offsets,
             masks=valid_access_mask,
-            invalid_access_mask=invalid_access_mask,
+            invalid_access_masks=invalid_access_mask,
         )
         record_builder.add_record(store_record)
 
