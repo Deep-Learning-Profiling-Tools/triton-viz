@@ -141,10 +141,28 @@ def _grid_executor_call(self, *args_dev, **kwargs):
             call_args[name] = arg
         else:
             ret = _implicit_cvt(arg)
+            # if hasattr(arg, "data_ptr"):
+            # tensors.append(
+            # Tensor(ret.handle.data[0], ret.dtype, arg.stride(), arg.shape)
             if hasattr(arg, "data_ptr"):
-                tensors.append(
-                    Tensor(ret.handle.data[0], ret.dtype, arg.stride(), arg.shape)
+                if hasattr(arg, "element_size"):
+                    element_size = arg.element_size()
+                elif hasattr(arg, "itemsize"):  # Check if it's a NumPy array
+                    element_size = arg.itemsize
+                else:
+                    element_size = None  # Or some default value/error handling
+                n_elements = 1
+                for dim_size in arg.shape:
+                    n_elements *= dim_size
+                tensor = Tensor(
+                    ret.handle.data[0],
+                    ret.dtype,
+                    arg.stride(),
+                    arg.shape,
+                    element_size,
+                    n_elements,
                 )
+                tensors.append(tensor)
             call_args[name] = ret
     call_args.pop("self", None)
     # Iterate through grid
@@ -167,26 +185,26 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     # _unpatch_lang()
 
 
-def calculate_tensor_params(ptrs):
+def check_out_of_bounds_access(ptrs):
     first_ptr = np.reshape(ptrs.data, (-1))[0]
     tensor_ptr = record_builder.get_tensor_ptr(first_ptr)
     offsets = ptrs.data - tensor_ptr.ptr
-    dtype = str(tensor_ptr.dtype)
-    type_size_mapping = {"int32": 4, "int64": 8, "fp32": 4, "fp64": 8}
-    base_type = dtype.replace("pointer<", "").replace(">", "")
-    element_size = type_size_mapping[base_type]
-    total_elements = np.prod(tensor_ptr.shape)
-    max_valid_offset = total_elements * element_size
-    return tensor_ptr, offsets, max_valid_offset
+    max_valid_offset = tensor_ptr.n_elements * tensor_ptr.element_size
+    valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
+    invalid_access_mask = np.logical_not(valid_access_mask)
+    corrected_offsets = np.where(valid_access_mask, offsets, 0)
+    return tensor_ptr, valid_access_mask, invalid_access_mask, corrected_offsets
 
 
 def _create_masked_load(fn):
     @wraps(fn)
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
-        tensor_ptr, offsets, max_valid_offset = calculate_tensor_params(ptrs)
-        valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
-        invalid_access_mask = np.logical_not(valid_access_mask)
-        corrected_offsets = np.where(valid_access_mask, offsets, 0)
+        (
+            tensor_ptr,
+            valid_access_mask,
+            invalid_access_mask,
+            corrected_offsets,
+        ) = check_out_of_bounds_access(ptrs)
         load_record = Load(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
@@ -211,10 +229,12 @@ def _create_masked_load(fn):
 def _create_masked_store(fn):
     @wraps(fn)
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy):
-        tensor_ptr, offsets, max_valid_offset = calculate_tensor_params(ptrs)
-        valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
-        invalid_access_mask = np.logical_not(valid_access_mask)
-        corrected_offsets = np.where(valid_access_mask, offsets, 0)
+        (
+            tensor_ptr,
+            valid_access_mask,
+            invalid_access_mask,
+            corrected_offsets,
+        ) = check_out_of_bounds_access(ptrs)
         store_record = Store(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
