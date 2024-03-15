@@ -141,9 +141,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
             call_args[name] = arg
         else:
             ret = _implicit_cvt(arg)
-            # if hasattr(arg, "data_ptr"):
-            # tensors.append(
-            # Tensor(ret.handle.data[0], ret.dtype, arg.stride(), arg.shape)
             if hasattr(arg, "data_ptr"):
                 if hasattr(arg, "element_size"):
                     element_size = arg.element_size()  # PyTorch
