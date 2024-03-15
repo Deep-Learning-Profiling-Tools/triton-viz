@@ -143,7 +143,13 @@ def _grid_executor_call(self, *args_dev, **kwargs):
             ret = _implicit_cvt(arg)
             if hasattr(arg, "data_ptr"):
                 tensors.append(
-                    Tensor(ret.handle.data[0], ret.dtype, arg.stride(), arg.shape)
+                    Tensor(
+                        ret.handle.data[0],
+                        ret.dtype,
+                        arg.stride(),
+                        arg.shape,
+                        arg.element_size(),
+                    )
                 )
             call_args[name] = ret
     call_args.pop("self", None)
@@ -167,17 +173,35 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     # _unpatch_lang()
 
 
+def check_out_of_bounds_access(ptrs):
+    first_ptr = np.reshape(ptrs.data, (-1))[0]
+    tensor_ptr = record_builder.get_tensor_ptr(first_ptr)
+    offsets = ptrs.data - tensor_ptr.ptr
+    max_valid_offset = np.prod(tensor_ptr.shape) * tensor_ptr.element_size
+    valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
+    invalid_access_mask = np.logical_not(valid_access_mask)
+    corrected_offsets = np.where(valid_access_mask, offsets, 0)
+    return tensor_ptr, valid_access_mask, invalid_access_mask, corrected_offsets
+
+
 def _create_masked_load(fn):
     @wraps(fn)
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
-        tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
+        (
+            tensor_ptr,
+            valid_access_mask,
+            invalid_access_mask,
+            corrected_offsets,
+        ) = check_out_of_bounds_access(ptrs)
         load_record = Load(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
-            offsets=ptrs.data - tensor_ptr.ptr,
-            masks=mask.data,
+            offsets=corrected_offsets,
+            masks=valid_access_mask,
+            invalid_access_masks=invalid_access_mask,
         )
         record_builder.add_record(load_record)
+
         return fn(
             ptrs,
             mask,
@@ -192,16 +216,23 @@ def _create_masked_load(fn):
 
 def _create_masked_store(fn):
     @wraps(fn)
-    def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
-        tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
+    def wrapper(ptrs, mask, other, cache_modifier, eviction_policy):
+        (
+            tensor_ptr,
+            valid_access_mask,
+            invalid_access_mask,
+            corrected_offsets,
+        ) = check_out_of_bounds_access(ptrs)
         store_record = Store(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
-            offsets=ptrs.data - tensor_ptr.ptr,
-            masks=mask.data,
+            offsets=corrected_offsets,
+            masks=valid_access_mask,
+            invalid_access_masks=invalid_access_mask,
         )
         record_builder.add_record(store_record)
-        return fn(ptrs, value, mask, cache_modifier, eviction_policy)
+
+        return fn(ptrs, mask, other, cache_modifier, eviction_policy)
 
     return wrapper
 
