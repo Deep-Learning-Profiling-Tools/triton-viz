@@ -119,7 +119,7 @@ record_builder = RecordBuilder()
 def _check_storage_contiguous(tensor):
     # Note that this is different from if a tensor is accessed contiguously, so we cannot use tensor.is_contiguous()
     # 1. Sort strides from smallest to largest
-    # 2. If the tensor is contiguous, the stride product should be equal to the shape product, except for the last dimension
+    # 2. If the tensor is contiguous, the stride product should be the same of the shape product of all previous dimensions
     stride_prod = 1
     shape_prod = 1
     indices = sorted(range(len(tensor.stride())), key=tensor.stride().__getitem__)
