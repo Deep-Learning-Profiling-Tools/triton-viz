@@ -118,12 +118,21 @@ record_builder = RecordBuilder()
 
 def _check_storage_contiguous(tensor):
     # Note that this is different from if a tensor is accessed contiguously, so we cannot use tensor.is_contiguous()
+    # 1. Sort strides from smallest to largest
+    # 2. If the tensor is contiguous, the stride product should be equal to the shape product, except for the last dimension
     stride_prod = 1
     shape_prod = 1
-    for i in range(len(tensor.shape)):
-        stride_prod *= tensor.stride(i)
-        shape_prod *= tensor.shape[i]
-    return stride_prod == shape_prod
+    indices = sorted(range(len(tensor.stride())), key=tensor.stride().__getitem__)
+    for i, index in enumerate(indices):
+        stride = tensor.stride(index)
+        shape = tensor.shape[index]
+        if i == 0 and stride != 1:
+            return False
+        stride_prod *= stride
+        if i != 0 and stride_prod != shape_prod:
+            return False
+        shape_prod *= shape
+    return True
 
 
 def _grid_executor_call(self, *args_dev, **kwargs):
