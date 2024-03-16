@@ -144,7 +144,9 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         else:
             ret = _implicit_cvt(arg)
             if hasattr(arg, "data_ptr"):
-                assert _check_storage_contiguous(arg), "triton-viz only supports contiguouly stored tensors for now"
+                assert _check_storage_contiguous(
+                    arg
+                ), "triton-viz only supports contiguouly stored tensors for now"
                 tensors.append(
                     Tensor(
                         ret.handle.data[0],
