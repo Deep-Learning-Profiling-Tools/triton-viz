@@ -37,17 +37,9 @@ def _patch_lang(fn):
 def _unpatch_lang():
     import importlib
     import sys
-    import triton.language
 
-    modules = [
-        triton.language,
-        triton.language.core,
-        triton.language.standard,
-        triton.language.math,
-    ]
-    for module in modules:
-        if module.__name__ in sys.modules:
-            importlib.reload(module)
+    if tl.__name__ in sys.modules:
+        importlib.reload(tl)
 
 
 class RecordBuilder:
@@ -143,7 +135,13 @@ def _grid_executor_call(self, *args_dev, **kwargs):
             ret = _implicit_cvt(arg)
             if hasattr(arg, "data_ptr"):
                 tensors.append(
-                    Tensor(ret.handle.data[0], ret.dtype, arg.stride(), arg.shape)
+                    Tensor(
+                        ret.handle.data[0],
+                        ret.dtype,
+                        arg.stride(),
+                        arg.shape,
+                        arg.element_size(),
+                    )
                 )
             call_args[name] = ret
     call_args.pop("self", None)
@@ -163,21 +161,38 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 self.fn(**call_args)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst)
-    # FIXME: Temporary disable unpatching
-    # _unpatch_lang()
+    _unpatch_lang()
+
+
+def check_out_of_bounds_access(ptrs):
+    first_ptr = np.reshape(ptrs.data, (-1))[0]
+    tensor_ptr = record_builder.get_tensor_ptr(first_ptr)
+    offsets = ptrs.data - tensor_ptr.ptr
+    max_valid_offset = np.prod(tensor_ptr.shape) * tensor_ptr.element_size
+    valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
+    invalid_access_mask = np.logical_not(valid_access_mask)
+    corrected_offsets = np.where(valid_access_mask, offsets, 0)
+    return tensor_ptr, valid_access_mask, invalid_access_mask, corrected_offsets
 
 
 def _create_masked_load(fn):
     @wraps(fn)
     def wrapper(ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
-        tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
+        (
+            tensor_ptr,
+            valid_access_mask,
+            invalid_access_mask,
+            corrected_offsets,
+        ) = check_out_of_bounds_access(ptrs)
         load_record = Load(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
-            offsets=ptrs.data - tensor_ptr.ptr,
-            masks=mask.data,
+            offsets=corrected_offsets,
+            masks=valid_access_mask,
+            invalid_access_masks=invalid_access_mask,
         )
         record_builder.add_record(load_record)
+
         return fn(
             ptrs,
             mask,
@@ -192,16 +207,23 @@ def _create_masked_load(fn):
 
 def _create_masked_store(fn):
     @wraps(fn)
-    def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
-        tensor_ptr = record_builder.get_tensor_ptr(np.reshape(ptrs.data, (-1))[0])
+    def wrapper(ptrs, mask, other, cache_modifier, eviction_policy):
+        (
+            tensor_ptr,
+            valid_access_mask,
+            invalid_access_mask,
+            corrected_offsets,
+        ) = check_out_of_bounds_access(ptrs)
         store_record = Store(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
-            offsets=ptrs.data - tensor_ptr.ptr,
-            masks=mask.data,
+            offsets=corrected_offsets,
+            masks=valid_access_mask,
+            invalid_access_masks=invalid_access_mask,
         )
         record_builder.add_record(store_record)
-        return fn(ptrs, value, mask, cache_modifier, eviction_policy)
+
+        return fn(ptrs, mask, other, cache_modifier, eviction_policy)
 
     return wrapper
 
@@ -291,11 +313,13 @@ def patch():
     builder.binary_op = _create_binary_op(builder.binary_op)
     builder.create_dot = _create_dot(builder.create_dot)
     builder.create_masked_store = _create_masked_store(builder.create_masked_store)
-    yield
-    GridExecutor.__call__ = old_grid_executor_call
-    builder.create_make_range = old_create_make_range
-    builder.create_masked_load = old_create_masked_load
-    builder.create_expand_dims = old_create_expand_dims
-    builder.binary_op = old_binary_op
-    builder.create_dot = old_create_dot
-    builder.create_masked_store = old_create_masked_store
+    try:
+        yield
+    finally:
+        GridExecutor.__call__ = old_grid_executor_call
+        builder.create_make_range = old_create_make_range
+        builder.create_masked_load = old_create_masked_load
+        builder.create_expand_dims = old_create_expand_dims
+        builder.binary_op = old_binary_op
+        builder.create_dot = old_create_dot
+        builder.create_masked_store = old_create_masked_store
