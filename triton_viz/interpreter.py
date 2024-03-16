@@ -37,17 +37,9 @@ def _patch_lang(fn):
 def _unpatch_lang():
     import importlib
     import sys
-    import triton.language
 
-    modules = [
-        triton.language,
-        triton.language.core,
-        triton.language.standard,
-        triton.language.math,
-    ]
-    for module in modules:
-        if module.__name__ in sys.modules:
-            importlib.reload(module)
+    if tl.__name__ in sys.modules:
+        importlib.reload(tl)
 
 
 class RecordBuilder:
@@ -169,8 +161,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 self.fn(**call_args)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst)
-    # FIXME: Temporary disable unpatching
-    # _unpatch_lang()
+    _unpatch_lang()
 
 
 def check_out_of_bounds_access(ptrs):
