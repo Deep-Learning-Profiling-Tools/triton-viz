@@ -121,7 +121,7 @@ def _check_storage_contiguous(tensor):
     stride_prod = 1
     shape_prod = 1
     for i in range(len(tensor.shape)):
-        stride_prod *= tensor.stride[i]
+        stride_prod *= tensor.stride(i)
         shape_prod *= tensor.shape[i]
     return stride_prod == shape_prod
 
