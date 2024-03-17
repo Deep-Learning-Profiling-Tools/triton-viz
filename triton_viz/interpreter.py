@@ -116,6 +116,25 @@ class RecordBuilder:
 record_builder = RecordBuilder()
 
 
+def _check_storage_contiguous(tensor):
+    # Note that this is different from if a tensor is accessed contiguously, so we cannot use tensor.is_contiguous()
+    # 1. Sort strides from smallest to largest
+    # 2. If the tensor is contiguous, the stride product should be the same of the shape product of all previous dimensions
+    stride_prod = 1
+    shape_prod = 1
+    indices = sorted(range(len(tensor.stride())), key=tensor.stride().__getitem__)
+    for i, index in enumerate(indices):
+        stride = tensor.stride(index)
+        shape = tensor.shape[index]
+        if i == 0 and stride != 1:
+            return False
+        stride_prod *= stride
+        if i != 0 and stride_prod != shape_prod:
+            return False
+        shape_prod *= shape
+    return True
+
+
 def _grid_executor_call(self, *args_dev, **kwargs):
     args_hst = self._init_args_hst(args_dev)
     # Removes reserved keywords from kwargs
@@ -134,6 +153,9 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         else:
             ret = _implicit_cvt(arg)
             if hasattr(arg, "data_ptr"):
+                assert _check_storage_contiguous(
+                    arg
+                ), "triton-viz only supports contiguouly stored tensors for now"
                 tensors.append(
                     Tensor(
                         ret.handle.data[0],
