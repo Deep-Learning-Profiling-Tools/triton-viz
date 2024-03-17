@@ -59,4 +59,4 @@ jobs:
     - name: Test with pytest
       run: |
         cd triton_viz
-        python -m pytest Examples
+        python -m pytest examples
