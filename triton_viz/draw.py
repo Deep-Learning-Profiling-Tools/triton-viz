@@ -61,15 +61,15 @@ def reshape(d: Diagram) -> Diagram:
 
 def collect_grid():
     for launch in record_builder.launches[-1:]:
-        records, tensor_table = collect_launch(launch)
-    return records, tensor_table
+        records, tensor_table, failures = collect_launch(launch)
+    return records, tensor_table, failures
 
 
 def collect_launch(launch):
     tensor_table = {}
     for i, t in enumerate(launch.tensors):
         tensor_table[t.ptr] = (t, i)
-
+    failures = {}
     all_grids = {}
     last_grid = None
     program_records = []
@@ -80,8 +80,11 @@ def collect_launch(launch):
                 program_records = []
             last_grid = r
         program_records.append(r)
+        if isinstance(r, Store) or isinstance(r, Load):
+            if (r.invalid_access_masks & r.original_mask).any():
+                failures[last_grid.idx] = True
     all_grids[last_grid.idx] = program_records
-    return all_grids, tensor_table
+    return all_grids, tensor_table, failures
 
 
 def draw_record(program_record, tensor_table, output):
@@ -230,13 +233,15 @@ def store_load(
     x: Union[Store, Load], tensor_table: Dict[int, Tuple[Tensor, int]]
 ) -> Tuple[Diagram, Diagram]:
     tensor, tensor_id = tensor_table[x.ptr]
-
     # inp = base_tensor(tensor.shape, DEFAULT)
     color = ACTIVE[tensor_id]
-    inp = cover(tensor.shape, tensor.dtype, x.offsets, x.masks, color)
+    invalid = x.invalid_access_masks.any()
+    if invalid:
+        color = Color("red")
+    inp = cover(tensor.shape, tensor.dtype, x.original_offsets, x.original_mask, color)
     inp = reshape(inp)
-    s = make_3d(x.offsets.shape)
-    a, b, c = x.masks.reshape(*s).nonzero()
+    s = make_3d(x.original_offsets.shape)
+    a, b, c = x.original_mask.reshape(*s).nonzero()
     out = draw_tensor_3d(s, a, b, c, color)
     return inp, out
 

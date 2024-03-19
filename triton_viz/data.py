@@ -33,6 +33,8 @@ class Store(Op):
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
     invalid_access_masks: npt.NDArray[np.bool_]
+    original_offsets: npt.NDArray[np.int_]
+    original_mask: npt.NDArray[np.bool_]
 
 
 @dataclass
@@ -42,6 +44,8 @@ class Load(Op):
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
     invalid_access_masks: npt.NDArray[np.bool_]
+    original_offsets: npt.NDArray[np.int_]
+    original_mask: npt.NDArray[np.bool_]
 
 
 @dataclass

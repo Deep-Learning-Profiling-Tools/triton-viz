@@ -120,7 +120,6 @@ def _check_storage_contiguous(tensor):
     # Note that this is different from if a tensor is accessed contiguously, so we cannot use tensor.is_contiguous()
     # 1. Sort strides from smallest to largest
     # 2. If the tensor is contiguous, the stride product should be the same of the shape product of all previous dimensions
-    stride_prod = 1
     shape_prod = 1
     indices = sorted(range(len(tensor.stride())), key=tensor.stride().__getitem__)
     for i, index in enumerate(indices):
@@ -128,8 +127,7 @@ def _check_storage_contiguous(tensor):
         shape = tensor.shape[index]
         if i == 0 and stride != 1:
             return False
-        stride_prod *= stride
-        if i != 0 and stride_prod != shape_prod:
+        if i != 0 and stride != shape_prod:
             return False
         shape_prod *= shape
     return True
@@ -194,7 +192,13 @@ def check_out_of_bounds_access(ptrs):
     valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
     invalid_access_mask = np.logical_not(valid_access_mask)
     corrected_offsets = np.where(valid_access_mask, offsets, 0)
-    return tensor_ptr, valid_access_mask, invalid_access_mask, corrected_offsets
+    return (
+        tensor_ptr,
+        valid_access_mask,
+        invalid_access_mask,
+        corrected_offsets,
+        offsets,
+    )
 
 
 def _create_masked_load(fn):
@@ -205,13 +209,16 @@ def _create_masked_load(fn):
             valid_access_mask,
             invalid_access_mask,
             corrected_offsets,
+            original_offsets,
         ) = check_out_of_bounds_access(ptrs)
         load_record = Load(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
             offsets=corrected_offsets,
-            masks=valid_access_mask,
+            masks=valid_access_mask & mask.data,
             invalid_access_masks=invalid_access_mask,
+            original_offsets=original_offsets,
+            original_mask=mask.data,
         )
         record_builder.add_record(load_record)
 
@@ -235,13 +242,16 @@ def _create_masked_store(fn):
             valid_access_mask,
             invalid_access_mask,
             corrected_offsets,
+            original_offsets,
         ) = check_out_of_bounds_access(ptrs)
         store_record = Store(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
             offsets=corrected_offsets,
-            masks=valid_access_mask,
+            masks=valid_access_mask & (mask.data == 1),
             invalid_access_masks=invalid_access_mask,
+            original_offsets=original_offsets,
+            original_mask=(mask.data == 1),
         )
         record_builder.add_record(store_record)
 
