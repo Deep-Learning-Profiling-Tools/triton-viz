@@ -425,9 +425,9 @@ def group(
     def remove_dups(ls):
         "Remove duplicates"
         out = []
-        for l in ls:
-            if not out or l != out[-1]:
-                out.append(l)
+        for y in ls:
+            if not out or y != out[-1]:
+                out.append(y)
         return out
 
     for j in range(2, -1, -1):
