@@ -5,7 +5,7 @@ import tempfile
 
 def launch(share=True):
     cache = {}
-    program_records, tt = triton_viz.collect_grid()
+    program_records, tt, failures = triton_viz.collect_grid()
     m = [0, 0, 0]
     size = [0, 0]
     for k in program_records.keys():
@@ -35,6 +35,15 @@ def launch(share=True):
                 s2 = gr.Slider(0, m[1] - 1, value=0, step=1, label="Program Id 1")
                 s3 = gr.Slider(0, m[2] - 1, value=0, step=1, label="Program Id 2")
                 b1 = gr.Button("Precompute")
+                gr.Markdown(f"## Program Ids: {tuple(m)}")
+
+                if failures:
+                    gr.Markdown(
+                        show_label=False,
+                        value="## Invalid memory access in "
+                        + "\n * "
+                        + "\n* ".join(list(map(str, failures.keys()))),
+                    )
 
         def cache_block(idx):
             name = tempfile.NamedTemporaryFile(suffix=".svg")
@@ -81,3 +90,4 @@ def launch(share=True):
         demo.load(update, inputs={s1, s2, s3}, outputs=[img, b1])
 
     demo.launch(share=share, debug=False, height=800, quiet=True, show_api=False)
+    return failures
