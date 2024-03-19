@@ -411,7 +411,7 @@ def make_cube(projection, start, end, color):
         for p, loc in outer2
     ]
     line = [
-        (p.stroke().line_width(0.001).line_color(GREY), l_)
+        (p.stroke().line_width(0.001).line_color(BLACK), l_)
         for loc in ls
         for p, l_ in loc
     ]

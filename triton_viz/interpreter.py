@@ -236,7 +236,7 @@ def _create_masked_load(fn):
 
 def _create_masked_store(fn):
     @wraps(fn)
-    def wrapper(ptrs, mask, other, cache_modifier, eviction_policy):
+    def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
         (
             tensor_ptr,
             valid_access_mask,
@@ -248,14 +248,14 @@ def _create_masked_store(fn):
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
             offsets=corrected_offsets,
-            masks=valid_access_mask & (mask.data == 1),
+            masks=valid_access_mask & mask.data,
             invalid_access_masks=invalid_access_mask,
             original_offsets=original_offsets,
-            original_mask=(mask.data == 1),
+            original_mask=mask.data,
         )
         record_builder.add_record(store_record)
 
-        return fn(ptrs, mask, other, cache_modifier, eviction_policy)
+        return fn(ptrs, value, mask, cache_modifier, eviction_policy)
 
     return wrapper
 

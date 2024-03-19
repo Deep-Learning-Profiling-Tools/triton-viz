@@ -35,11 +35,14 @@ def launch(share=True):
                 s2 = gr.Slider(0, m[1] - 1, value=0, step=1, label="Program Id 1")
                 s3 = gr.Slider(0, m[2] - 1, value=0, step=1, label="Program Id 2")
                 b1 = gr.Button("Precompute")
+                gr.Markdown(f"## Program Ids: {tuple(m)}")
+
                 if failures:
-                    gr.Label(
+                    gr.Markdown(
                         show_label=False,
-                        value="Invalid memory access in "
-                        + " ".join(str(list(failures.keys()))),
+                        value="## Invalid memory access in "
+                        + "\n * "
+                        + "\n* ".join(list(map(str, failures.keys()))),
                     )
 
         def cache_block(idx):
