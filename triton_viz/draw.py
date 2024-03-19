@@ -19,11 +19,13 @@ from typing import Tuple, Union, Optional, List, Dict
 from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, V2, concat
 from dataclasses import dataclass
 from numpy.typing import ArrayLike
+import sys
+
+sys.setrecursionlimit(100000)
 
 
 planar.EPSILON = 0.0
 chalk.set_svg_draw_height(500)
-
 BG = Color("white")
 WHITE = Color("white")
 DEFAULT = Color("grey")
@@ -83,7 +85,7 @@ def collect_launch(launch):
 
 
 def draw_record(program_record, tensor_table, output):
-    draw_launch(program_record, tensor_table, output)
+    return draw_launch(program_record, tensor_table, output)
 
 
 def draw_launch(program_records, tensor_table, base) -> Diagram:
@@ -114,13 +116,19 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
 
         return (chalk.vstrut(0.2) / y).center_xy()
 
-    dr = empty()
+    records = []
     for r in program_records:
-        dr = vcat([dr, draw_record(r)], 0.0)
+        dr = draw_record(r)
+        # env = dr.get_envelope()
+        # dr = dr.center_xy().with_envelope(rectangle(env.width, env.height).center_xy())
+        records.append(dr)
+
+    dr = vcat(records)
     dr = dr.center_xy()
     env = dr.get_envelope()
     dr = rectangle(env.width + 1, env.height + 1).fill_color(BG).center_xy() + dr
     dr.render_svg(base, 2500)
+    return env.width, env.height
 
 
 def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
@@ -332,17 +340,12 @@ def draw_tensor_3d(shape, a, b, c, color=WHITE):
     big_cube = cube() @ s.T
     back = scale3(0, shape[1], shape[2])
     back_cube = cube() @ back.T
-    s_ = shape
 
     # Isometric projection of tensor
     projection = lookAt(
-        V3(
-            s_[0] / 1.5 + s_[1] + s_[2],
-            s_[0] + s_[1] / 1.5 + s_[2],
-            s_[0] + s_[1] + s_[2] / 1.5,
-        ).to_np(),
+        V3(-1.0, -0.3, -0.15).to_np(),
         V3(0, 0, 0).to_np(),
-        V3(0, 0, 1).to_np(),
+        V3(0, 1, 0).to_np(),
     )
     outer = project(projection, big_cube, [V3(0, 0, 0)])
     outer2 = project(projection, back_cube, [V3(shape[0], 0, 0)])
@@ -415,10 +418,20 @@ def group(
 ) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
     "Groups together cubes into bigger cubes"
     x = list(zip(zip(x, y, z), zip(x, y, z)))
+    x = [(a, b) for a, b in x if not (a[0] == -1 and a[1] == -1 and a[2] == -1)]
 
     start = x
+
+    def remove_dups(ls):
+        "Remove duplicates"
+        out = []
+        for y in ls:
+            if not out or y != out[-1]:
+                out.append(y)
+        return out
+
     for j in range(2, -1, -1):
-        x = start
+        x = remove_dups(start)
         start = []
         while True:
             if len(x) <= 1:
