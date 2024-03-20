@@ -29,9 +29,9 @@ def _patch_lang(fn):
     from triton.runtime.interpreter import _patch_lang as patch_lang
 
     patch_lang(fn)
-    tl.sum = _create_reduce(tl.sum, "sum")
-    tl.min = _create_reduce(tl.min, "min")
-    tl.max = _create_reduce(tl.max, "max")
+    tl.sum = _create_reduce(tl.reduce, "sum")
+    tl.min = _create_reduce(tl.reduce, "min")
+    tl.max = _create_reduce(tl.reduce, "max")
 
 
 def _unpatch_lang():
@@ -184,18 +184,18 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     _unpatch_lang()
 
 
-def check_out_of_bounds_access(ptrs):
+def check_out_of_bounds_access(ptrs, masks):
     first_ptr = np.reshape(ptrs.data, (-1))[0]
     tensor_ptr = record_builder.get_tensor_ptr(first_ptr)
     offsets = ptrs.data - tensor_ptr.ptr
     max_valid_offset = np.prod(tensor_ptr.shape) * tensor_ptr.element_size
-    valid_access_mask = (offsets >= 0) & (offsets < max_valid_offset)
-    invalid_access_mask = np.logical_not(valid_access_mask)
-    corrected_offsets = np.where(valid_access_mask, offsets, 0)
+    valid_access_masks = (offsets >= 0) & (offsets < max_valid_offset)
+    invalid_access_masks = (~valid_access_masks) & (~masks.data)
+    corrected_offsets = np.where(valid_access_masks, offsets, 0)
     return (
         tensor_ptr,
-        valid_access_mask,
-        invalid_access_mask,
+        valid_access_masks & masks.data,
+        invalid_access_masks,
         corrected_offsets,
         offsets,
     )
@@ -203,28 +203,28 @@ def check_out_of_bounds_access(ptrs):
 
 def _create_masked_load(fn):
     @wraps(fn)
-    def wrapper(ptrs, mask, other, cache_modifier, eviction_policy, is_volatile):
+    def wrapper(ptrs, masks, other, cache_modifier, eviction_policy, is_volatile):
         (
             tensor_ptr,
-            valid_access_mask,
-            invalid_access_mask,
+            valid_access_masks,
+            invalid_access_masks,
             corrected_offsets,
             original_offsets,
-        ) = check_out_of_bounds_access(ptrs)
+        ) = check_out_of_bounds_access(ptrs, masks)
         load_record = Load(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
             offsets=corrected_offsets,
-            masks=valid_access_mask & mask.data,
-            invalid_access_masks=invalid_access_mask,
+            access_masks=valid_access_masks,
+            invalid_access_masks=invalid_access_masks,
             original_offsets=original_offsets,
-            original_mask=mask.data,
+            original_masks=masks.data,
         )
         record_builder.add_record(load_record)
 
         return fn(
             ptrs,
-            mask,
+            masks,
             other,
             cache_modifier,
             eviction_policy,
@@ -236,26 +236,26 @@ def _create_masked_load(fn):
 
 def _create_masked_store(fn):
     @wraps(fn)
-    def wrapper(ptrs, value, mask, cache_modifier, eviction_policy):
+    def wrapper(ptrs, value, masks, cache_modifier, eviction_policy):
         (
             tensor_ptr,
-            valid_access_mask,
-            invalid_access_mask,
+            valid_access_masks,
+            invalid_access_masks,
             corrected_offsets,
             original_offsets,
-        ) = check_out_of_bounds_access(ptrs)
+        ) = check_out_of_bounds_access(ptrs, masks)
         store_record = Store(
             ptr=tensor_ptr.ptr,
             shape=ptrs.data.shape,
             offsets=corrected_offsets,
-            masks=valid_access_mask & mask.data,
-            invalid_access_masks=invalid_access_mask,
+            access_masks=valid_access_masks,
+            invalid_access_masks=invalid_access_masks,
             original_offsets=original_offsets,
-            original_mask=mask.data,
+            original_masks=masks.data,
         )
         record_builder.add_record(store_record)
 
-        return fn(ptrs, value, mask, cache_modifier, eviction_policy)
+        return fn(ptrs, value, valid_access_masks, cache_modifier, eviction_policy)
 
     return wrapper
 
@@ -311,11 +311,15 @@ def _create_expand_dims(fn):
     return wrapper
 
 
-def _create_reduce(fn, op_name):
+def _create_reduce(fn, op_name: str):
     @wraps(fn)
-    def wrapper(input, axis=None, **kwargs):
-        ret = fn(input, axis=axis, **kwargs)
-        keep_dims = kwargs.get("keep_dims", False)
+    def wrapper(input, axis=None, keep_dims=False):
+        mapping = {
+            "max": tl.standard._elementwise_max,
+            "min": tl.standard._elementwise_min,
+            "sum": tl.standard._sum_combine,
+        }
+        ret = fn(input, axis=axis, combine_fn=mapping[op_name], keep_dims=keep_dims)
         reduce_record = Reduce(
             input_shape=input.handle.data.shape,
             index=axis,

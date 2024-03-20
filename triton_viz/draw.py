@@ -80,9 +80,11 @@ def collect_launch(launch):
                 program_records = []
             last_grid = r
         program_records.append(r)
-        if isinstance(r, Store) or isinstance(r, Load):
-            if (r.invalid_access_masks & r.original_mask).any():
-                failures[last_grid.idx] = True
+        if (
+            isinstance(r, (Store, Load))
+            and (r.invalid_access_masks & r.original_masks).any()
+        ):
+            failures[last_grid.idx] = True
     all_grids[last_grid.idx] = program_records
     return all_grids, tensor_table, failures
 
@@ -238,10 +240,10 @@ def store_load(
     invalid = x.invalid_access_masks.any()
     if invalid:
         color = Color("red")
-    inp = cover(tensor.shape, tensor.dtype, x.original_offsets, x.original_mask, color)
+    inp = cover(tensor.shape, tensor.dtype, x.original_offsets, x.original_masks, color)
     inp = reshape(inp)
     s = make_3d(x.original_offsets.shape)
-    a, b, c = x.original_mask.reshape(*s).nonzero()
+    a, b, c = x.original_masks.reshape(*s).nonzero()
     out = draw_tensor_3d(s, a, b, c, color)
     return inp, out
 
