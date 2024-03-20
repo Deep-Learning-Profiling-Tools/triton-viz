@@ -13,20 +13,20 @@ Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep l
   <summary>Table of Contents</summary>
   <ol>
     <li>
-      <a href="#about">About</a>
+      <a href="#About">About</a>
     <li>
-      <a href="#getting-started">Getting Started</a>
+      <a href="#Getting-Started">Getting Started</a>
       <ul>
-        <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation-of-triton_viz">Installation of Triton_Viz</a></li>
+        <li><a href="#Prerequisites">Prerequisites</a></li>
+        <li><a href="#Installation-of-Triton_Viz">Installation of Triton_Viz</a></li>
       </ul>
     <li>
-      <a href="#working with Examples">Working with Examples</a>
+      <a href="#Working-with-Examples">Working with Examples</a>
     <ul>
-        <li><a href="#More puzzles">More Puzzles</a></li>
+        <li><a href="#More-Puzzles">More Puzzles</a></li>
       </ul>
     </li>
-    <li><a href="#license">License</a></li>
+    <li><a href="#License">License</a></li>
   </ol>
 </details>
 
