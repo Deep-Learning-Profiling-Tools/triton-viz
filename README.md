@@ -47,7 +47,10 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 
 ### Prerequisites
 -Python installed(preferably the latest available version).
-[Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
+</br>
+-[Triton](https://github.com/openai/triton/blob/main/README.md) installed.Follow the installation instructions in the linked repository.
+</br>
+</br>
 -Upon successfully installing Triton,Install Torch using the following command
 ```sh
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
