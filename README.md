@@ -3,11 +3,11 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-    <img src="Logo.png" alt="Logo" width="80" height="80">
+    <img src="Logo.jpg" alt="Logo" width="320" height="320">
+</div>
 <br/>
   
-Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of providing deep insights into model performance and efficiency, Triton-Viz leverages NVIDIA's Triton Inference Server to gather and visualize metrics critical to optimizing deep learning models.
-
+Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of making GPU programming on Triton more intuitive.
 <!-- TABLE OF CONTENTS -->
 <details>
   <summary>Table of Contents</summary>
