@@ -78,6 +78,6 @@ python <file_name>.py
 If you're interested in Fun Puzzles to work with in Triton, do check out:[Triton Puzzles](https://github.com/srush/Triton-Puzzles)
 
 ## License
-Triton-Viz is open-sourced under the MIT License. See the See `LICENSE.txt` for details.
+Triton-Viz is licensed under the MIT License. See the [LICENSE](LICENSE) for details.
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
