@@ -13,12 +13,12 @@ Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep l
   <summary>Table of Contents</summary>
   <ol>
     <li>
-      <a href="#about-the-project">About</a>
+      <a href="#about">About</a>
     <li>
       <a href="#getting-started">Getting Started</a>
       <ul>
         <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation of triton_viz">Installation of Triton_Viz</a></li>
+        <li><a href="#installation_of_triton_viz">Installation of Triton_Viz</a></li>
       </ul>
     <li>
       <a href="#working with Examples">Working with Examples</a>
