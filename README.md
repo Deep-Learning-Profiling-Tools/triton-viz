@@ -18,7 +18,7 @@ Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep l
       <a href="#getting-started">Getting Started</a>
       <ul>
         <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation-of-triton-viz">Installation of Triton_Viz</a></li>
+        <li><a href="#installation-of-triton_viz">Installation of Triton_Viz</a></li>
       </ul>
     <li>
       <a href="#working with Examples">Working with Examples</a>
