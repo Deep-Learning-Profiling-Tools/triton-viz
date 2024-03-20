@@ -79,7 +79,7 @@ def test_add():
         if isinstance(op, Load):
             result_offsets = op.offsets.tolist()
             result_offsets_len = len(result_offsets)
-            result_masks = op.masks
+            result_masks = op.access_masks
             result_invalid_masks = op.invalid_access_masks
             break
     assert torch.allclose(result, expected)
@@ -99,13 +99,13 @@ def test_out_of_bounds_add():
     expected_offsets = [(i * t_size) if i < size else 0 for i in range(BLOCK_SIZE)]
     expected_offsets_len = len(expected_offsets)
     expected = input_vector1 + input_vector2
-    expected_masks = [True if i < size else False for i in range(BLOCK_SIZE)]
+    expected_masks = [i < size for i in range(BLOCK_SIZE)]
     expected_invalid_masks = np.logical_not(expected_masks)
     for op in record_builder.launches[0].records:
         if isinstance(op, Load):
             result_offsets = op.offsets.tolist()
             result_offsets_len = len(result_offsets)
-            result_masks = op.masks
+            result_masks = op.access_masks
             result_invalid_masks = op.invalid_access_masks
             break
     assert torch.allclose(result, expected)
