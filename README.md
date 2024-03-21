@@ -35,7 +35,7 @@ Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep l
 Triton-Viz is a visualization and analysis toolkit specifically designed to complement the development and optimization of applications written in OpenAI's Triton, an open-source programming language aimed at simplifying the task of coding for accelerators such as GPUs.
 Triton-Viz emerges as a pivotal tool for developers working in the realms of AI and high-performance computing, offering a suite of features to enhance the debugging, performance analysis, and understanding of Triton code.
 Given that Triton allows developers to program at a higher level while still targeting low-level accelerator devices, managing and optimizing resources like memory becomes a crucial aspect of development.
-Triton-Viz addresses these challenges by providing real-time visualization of tensor operations and their memory usage. 
+Triton-Viz addresses these challenges by providing real-time visualization of tensor operations and their memory usage.
 Its interface is designed to be intuitive for users familiar with high-level array programming languages like Numpy and PyTorch.
 
 The toolkit aids in identifying bottlenecks and inefficient memory operations,which are often the primary hurdles in achieving optimal performance on GPUs and other accelerators.
