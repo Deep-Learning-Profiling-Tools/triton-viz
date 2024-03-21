@@ -237,7 +237,7 @@ def store_load(
     tensor, tensor_id = tensor_table[x.ptr]
     # inp = base_tensor(tensor.shape, DEFAULT)
     color = ACTIVE[tensor_id]
-    invalid = x.invalid_access_masks.any()
+    invalid = (x.invalid_access_masks).any()
     if invalid:
         color = Color("red")
     inp = cover(tensor.shape, tensor.dtype, x.original_offsets, x.original_masks, color)

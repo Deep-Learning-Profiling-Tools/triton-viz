@@ -190,7 +190,7 @@ def check_out_of_bounds_access(ptrs, masks):
     offsets = ptrs.data - tensor_ptr.ptr
     max_valid_offset = np.prod(tensor_ptr.shape) * tensor_ptr.element_size
     valid_access_masks = (offsets >= 0) & (offsets < max_valid_offset)
-    invalid_access_masks = (~valid_access_masks) & (~masks.data)
+    invalid_access_masks = (~valid_access_masks) & masks.data
     corrected_offsets = np.where(valid_access_masks, offsets, 0)
     return (
         tensor_ptr,
