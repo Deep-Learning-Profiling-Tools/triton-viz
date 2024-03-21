@@ -1,5 +1,5 @@
 <a name="readme-top"></a>
-# Triton-Viz: A Visualization toolkit for GPU programming on Triton
+# Triton-Viz: A Visualization Toolkit for GPU programming on Triton
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
@@ -35,39 +35,41 @@ Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep l
 Triton-Viz is a visualization and analysis toolkit specifically designed to complement the development and optimization of applications written in OpenAI's Triton, an open-source programming language aimed at simplifying the task of coding for accelerators such as GPUs.
 Triton-Viz emerges as a pivotal tool for developers working in the realms of AI and high-performance computing, offering a suite of features to enhance the debugging, performance analysis, and understanding of Triton code.
 Given that Triton allows developers to program at a higher level while still targeting low-level accelerator devices, managing and optimizing resources like memory becomes a crucial aspect of development.
-Triton-Viz addresses these challenges by providing real-time visualization of tensor operations and their memory usage.Its interface is designed to be intuitive for users familiar with high-level array programming languages like Numpy and PyTorch.
+Triton-Viz addresses these challenges by providing real-time visualization of tensor operations and their memory usage. 
+Its interface is designed to be intuitive for users familiar with high-level array programming languages like Numpy and PyTorch.
 
 The toolkit aids in identifying bottlenecks and inefficient memory operations,which are often the primary hurdles in achieving optimal performance on GPUs and other accelerators.
 By visualizing how Triton code translates into actual device-level operations, Triton-Viz empowers developers to make informed decisions about code structure, memory management, and parallel execution patterns.
-Whether you're a novice learning the intricacies of accelerator programming or an expert tuning algorithms for maximum efficiency,Triton-Viz serves as an essential tool for all.
+Whether you're a novice learning the intricacies of accelerator programming or an expert tuning algorithms for maximum efficiency, Triton-Viz serves as an essential tool for all.
 
-The best part about this tool is that while it does focus on visualizing GPU operations,users are not required to have GPU resources to run examples on their system.
+The best part about this tool is that while it does focus on visualizing GPU operations, users are not required to have GPU resources to run examples on their system.
 
 ## Getting Started
 
 ### Prerequisites
-- Python installed(preferably the latest available version).
+- Python installed (preferably the latest available version).
 - [Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
 
-Upon successfully installing Triton, install Torch using the following command
+Upon successfully installing Triton, install Torch using the following command:
 ```sh
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
 ```
 
-Upon successful installation of Torch make sure to uninstall 'pytorch-triton' using the following command.
+Upon successful installation of Torch make sure to uninstall `pytorch-triton` using the following command:
 ```sh
 pip uninstall pytorch-triton
 ```
-### Installation of Triton_Viz
+### Installation of Triton-Viz
 Clone the repository to your local machine:
+
 ```sh
 git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
 cd triton-viz
 pip install -e .
 ```
-You're all set !
+You're all set!
 
-## Working with Examples:
+## Working with Examples
 
 ```sh
 cd examples
