@@ -36,19 +36,18 @@ def add_kernel(
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
-def add(x: torch.Tensor, y: torch.Tensor):
+def add(x: torch.Tensor, y: torch.Tensor, access_size: int, BLOCK_SIZE: int = 1024):
     # We need to preallocate the output.
     output = torch.empty_like(x)
-    n_elements = output.numel()
     # The SPMD launch grid denotes the number of kernel instances that run in parallel.
     # It is analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
     # In this case, we use a 1D grid where the size is the number of blocks:
-    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    grid = lambda meta: (triton.cdiv(access_size, meta["BLOCK_SIZE"]),)
     # NOTE:
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
     #  - Don't forget to pass meta-parameters as keywords arguments.
-    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
+    add_kernel[grid](x, y, output, access_size, BLOCK_SIZE=BLOCK_SIZE)
     # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
     # running asynchronously at this point.
     return output, grid
@@ -56,11 +55,14 @@ def add(x: torch.Tensor, y: torch.Tensor):
     # Directly use x and y here even though they are defined later in the file
 
 
-def perform_vec_add(device, size):
+def perform_vec_add(device, size, access_size=None):
     torch.manual_seed(0)
     x = torch.rand(size, device=device)
     y = torch.rand(size, device=device)
-    output, grid = add(x, y)  # Assuming add() is your custom function
+    access_size = size if access_size is None else access_size
+    output, _ = add(
+        x, y, access_size=access_size
+    )  # Assuming add() is your custom function
     return x, y, output
 
 
@@ -94,25 +96,31 @@ def test_out_of_bounds_add():
     device = "cpu"
     size = 960
     BLOCK_SIZE = 1024
-    input_vector1, input_vector2, result = perform_vec_add(device, size)
+    input_vector1, input_vector2, result = perform_vec_add(
+        device, size=size, access_size=BLOCK_SIZE
+    )
     t_size = input_vector1.element_size()
     expected_offsets = [(i * t_size) if i < size else 0 for i in range(BLOCK_SIZE)]
     expected_offsets_len = len(expected_offsets)
     expected = input_vector1 + input_vector2
-    expected_masks = [i < size for i in range(BLOCK_SIZE)]
-    # expected_invalid_masks = np.logical_not(expected_masks)
+    expected_original_masks = [True for i in range(BLOCK_SIZE)]
+    expected_valid_masks = [i < size for i in range(BLOCK_SIZE)]
+    expected_invalid_masks = [i >= size for i in range(BLOCK_SIZE)]
     for op in record_builder.launches[0].records:
         if isinstance(op, Load):
             result_offsets = op.offsets.tolist()
             result_offsets_len = len(result_offsets)
-            result_masks = op.access_masks
-            # result_invalid_masks = op.invalid_access_masks
+            result_original_masks = op.original_masks
+            result_valid_masks = op.access_masks
+            result_invalid_masks = op.invalid_access_masks
             break
     assert torch.allclose(result, expected)
     assert result.shape == expected.shape
     assert result_offsets == expected_offsets
     assert result_offsets_len == expected_offsets_len
-    assert (result_masks == expected_masks).all()
+    assert (result_original_masks == expected_original_masks).all()
+    assert (result_valid_masks == expected_valid_masks).all()
+    assert (result_invalid_masks == expected_invalid_masks).all()
     # Not sure what this test is checking?
     # assert (result_invalid_masks == expected_invalid_masks).all()
 
