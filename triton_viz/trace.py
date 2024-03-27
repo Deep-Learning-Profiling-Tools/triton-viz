@@ -21,6 +21,7 @@ def trace(kernel):
 
 
 def dump(path: str):
+    # TODO: Dump the record_builder to a file
     for launch in record_builder.launches:
         print(launch)
 

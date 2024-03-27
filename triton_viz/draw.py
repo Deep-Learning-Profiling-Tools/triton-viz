@@ -31,8 +31,17 @@ WHITE = Color("white")
 DEFAULT = Color("grey")
 BLACK = Color("black")
 GREY = Color("grey")
-palette = "#f29f05,#f25c05,#d6568c,#4d8584,#a62f03,#400d01,#274001,#828a00,".split(",")
-ACTIVE = list([Color(p) for p in palette])
+palette = [
+    "#f29f05",
+    "#f25c05",
+    "#d6568c",
+    "#4d8584",
+    "#a62f03",
+    "#400d01",
+    "#274001",
+    "#828a00",
+]
+ACTIVE = [Color(p) for p in palette]
 
 MRATIO = 1 / 3
 
@@ -52,9 +61,7 @@ def box(d: Diagram, width: float, height: float, outer=0.2) -> Diagram:
 def reshape(d: Diagram) -> Diagram:
     "Use log-scale if ratio is too sharp"
     h, w = d.get_envelope().height, d.get_envelope().width
-    if h / w > MRATIO:
-        d = d.scale_y(math.log(h + 1, 2) / h).scale_x(math.log(w + 1, 2) / w)
-    elif w / h > MRATIO:
+    if (h / w > MRATIO) or (w / h > MRATIO):
         d = d.scale_y(math.log(h + 1, 2) / h).scale_x(math.log(w + 1, 2) / w)
     return d
 

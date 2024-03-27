@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,14 +36,11 @@ jobs:
         pip install pre-commit
         pre-commit run --all-files
 
-    - name: Cache Dependencies
-      uses: actions/cache@v3
-      id: cache-pip
-      with:
-        path: /opt/hostedtoolcache/Python/3.10.13/x64
-        key: ${{ runner.os }}-pip-3.10-${{ hashFiles('**/setup.py') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+    - name: Install Dependencies
+      if: steps.cache-pip.outputs.cache-hit != 'true'
+      run: |
+        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
+        pip uninstall pytorch-triton -y
 
     - name: Clone Triton and Install
       run: |
@@ -47,14 +48,10 @@ jobs:
         cd triton/python
         pip install -e .
 
-    - name: Install Dependencies if Cache Missed
-      if: steps.cache-pip.outputs.cache-hit != 'true'
+    - name: Install Triton-Viz
       run: |
         cd triton_viz
         pip install -e .
-        pre-commit install
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-        pip uninstall pytorch-triton -y
 
     - name: Test with pytest
       run: |
