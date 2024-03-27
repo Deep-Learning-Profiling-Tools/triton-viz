@@ -31,6 +31,7 @@ def add_kernel(
     # multiple of the block size.
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
+    # To test non-builtin functions, i.e., tl.zeros
     output = tl.zeros(x.shape, dtype=x.dtype)
     output = output + x + y
     # Write x + y back to DRAM.
