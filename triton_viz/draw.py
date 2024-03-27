@@ -31,7 +31,16 @@ WHITE = Color("white")
 DEFAULT = Color("grey")
 BLACK = Color("black")
 GREY = Color("grey")
-palette = ["#f29f05", "#f25c05", "#d6568c", "#4d8584", "#a62f03", "#400d01", "#274001", "#828a00"]
+palette = [
+    "#f29f05",
+    "#f25c05",
+    "#d6568c",
+    "#4d8584",
+    "#a62f03",
+    "#400d01",
+    "#274001",
+    "#828a00",
+]
 ACTIVE = [Color(p) for p in palette]
 
 MRATIO = 1 / 3

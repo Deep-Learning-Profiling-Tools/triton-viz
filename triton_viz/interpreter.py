@@ -350,12 +350,20 @@ def patch():
     old_create_masked_store = interpreter_builder.create_masked_store
     GridExecutor.__call__ = _grid_executor_call
     JITFunction.__call__ = _jit_function_call
-    interpreter_builder.create_make_range = _create_make_range(interpreter_builder.create_make_range)
-    interpreter_builder.create_masked_load = _create_masked_load(interpreter_builder.create_masked_load)
-    interpreter_builder.create_expand_dims = _create_expand_dims(interpreter_builder.create_expand_dims)
+    interpreter_builder.create_make_range = _create_make_range(
+        interpreter_builder.create_make_range
+    )
+    interpreter_builder.create_masked_load = _create_masked_load(
+        interpreter_builder.create_masked_load
+    )
+    interpreter_builder.create_expand_dims = _create_expand_dims(
+        interpreter_builder.create_expand_dims
+    )
     interpreter_builder.binary_op = _create_binary_op(interpreter_builder.binary_op)
     interpreter_builder.create_dot = _create_dot(interpreter_builder.create_dot)
-    interpreter_builder.create_masked_store = _create_masked_store(interpreter_builder.create_masked_store)
+    interpreter_builder.create_masked_store = _create_masked_store(
+        interpreter_builder.create_masked_store
+    )
     try:
         yield
     finally:
