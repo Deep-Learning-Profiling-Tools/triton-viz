@@ -1,10 +1,13 @@
 import gradio as gr
 import triton_viz
 import tempfile
+from .analysis import analyzer
+import pandas as pd
 
 
 def launch(share=True):
     cache = {}
+    analysis_data = analyzer()
     program_records, tt, failures = triton_viz.collect_grid()
     m = [0, 0, 0]
     size = [0, 0]
@@ -35,8 +38,10 @@ def launch(share=True):
                 s2 = gr.Slider(0, m[1] - 1, value=0, step=1, label="Program Id 1")
                 s3 = gr.Slider(0, m[2] - 1, value=0, step=1, label="Program Id 2")
                 b1 = gr.Button("Precompute")
-                gr.Markdown(f"## Program Ids: {tuple(m)}")
-
+                # gr.Markdown(f"## Program Ids: {tuple(m)}")
+                df = pd.DataFrame(analysis_data, columns=["Metric", "Value"])
+                gr.Markdown("## Analysis")
+                gr.Dataframe(df)
                 if failures:
                     gr.Markdown(
                         show_label=False,
