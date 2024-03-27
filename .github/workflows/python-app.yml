@@ -54,7 +54,6 @@ jobs:
       run: |
         cd triton_viz
         pip install -e .
-        pre-commit install
 
     - name: Clone Triton and Install
       run: |
