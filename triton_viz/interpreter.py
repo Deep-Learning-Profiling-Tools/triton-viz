@@ -20,15 +20,15 @@ from triton.runtime.interpreter import (
     RESERVED_KWS,
     interpreter_builder,
 )
+from triton.runtime.interpreter import _patch_lang as triton_patch_lang
+from triton.runtime import JITFunction
 from typing import Tuple, List, Optional
 from contextlib import contextmanager
 from functools import wraps
 
 
 def _patch_lang(fn):
-    from triton.runtime.interpreter import _patch_lang as patch_lang
-
-    patch_lang(fn)
+    triton_patch_lang(fn)
     tl.sum = _create_reduce(tl.reduce, "sum")
     tl.min = _create_reduce(tl.reduce, "min")
     tl.max = _create_reduce(tl.reduce, "max")
@@ -184,6 +184,11 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     _unpatch_lang()
 
 
+def _jit_function_call(self, *args, **kwargs):
+    triton_patch_lang(self.fn)
+    return self.fn(*args, **kwargs)
+
+
 def check_out_of_bounds_access(ptrs, masks):
     first_ptr = np.reshape(ptrs.data, (-1))[0]
     tensor_ptr = record_builder.get_tensor_ptr(first_ptr)
@@ -336,6 +341,7 @@ def _create_reduce(fn, op_name: str):
 @contextmanager
 def patch():
     old_grid_executor_call = GridExecutor.__call__
+    old_jit_function_call = JITFunction.__call__
     old_create_make_range = interpreter_builder.create_make_range
     old_create_masked_load = interpreter_builder.create_masked_load
     old_create_expand_dims = interpreter_builder.create_expand_dims
@@ -343,24 +349,18 @@ def patch():
     old_create_dot = interpreter_builder.create_dot
     old_create_masked_store = interpreter_builder.create_masked_store
     GridExecutor.__call__ = _grid_executor_call
-    interpreter_builder.create_make_range = _create_make_range(
-        interpreter_builder.create_make_range
-    )
-    interpreter_builder.create_masked_load = _create_masked_load(
-        interpreter_builder.create_masked_load
-    )
-    interpreter_builder.create_expand_dims = _create_expand_dims(
-        interpreter_builder.create_expand_dims
-    )
+    JITFunction.__call__ = _jit_function_call
+    interpreter_builder.create_make_range = _create_make_range(interpreter_builder.create_make_range)
+    interpreter_builder.create_masked_load = _create_masked_load(interpreter_builder.create_masked_load)
+    interpreter_builder.create_expand_dims = _create_expand_dims(interpreter_builder.create_expand_dims)
     interpreter_builder.binary_op = _create_binary_op(interpreter_builder.binary_op)
     interpreter_builder.create_dot = _create_dot(interpreter_builder.create_dot)
-    interpreter_builder.create_masked_store = _create_masked_store(
-        interpreter_builder.create_masked_store
-    )
+    interpreter_builder.create_masked_store = _create_masked_store(interpreter_builder.create_masked_store)
     try:
         yield
     finally:
         GridExecutor.__call__ = old_grid_executor_call
+        JITFunction.__call__ = old_jit_function_call
         interpreter_builder.create_make_range = old_create_make_range
         interpreter_builder.create_masked_load = old_create_masked_load
         interpreter_builder.create_expand_dims = old_create_expand_dims
