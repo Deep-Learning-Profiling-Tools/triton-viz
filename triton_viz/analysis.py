@@ -31,16 +31,17 @@ def analyze_records():
                 mask_false = np.count_nonzero(np.logical_not(record.access_masks))
                 total_store_bytes_true += mask_true * element_size
                 total_store_bytes_attempted += (mask_true + mask_false) * element_size
-                overall_load_ratio = (
-                    total_load_bytes_true / total_load_bytes_attempted
-                    if total_load_bytes_attempted > 0
-                    else 0
-                )
-                overall_store_ratio = (
-                    total_store_bytes_true / total_store_bytes_attempted
-                    if total_store_bytes_attempted > 0
-                    else 0
-                )
+
+    overall_load_ratio = (
+        total_load_bytes_true / total_load_bytes_attempted
+        if total_load_bytes_attempted > 0
+        else 0
+    )
+    overall_store_ratio = (
+        total_store_bytes_true / total_store_bytes_attempted
+        if total_store_bytes_attempted > 0
+        else 0
+    )
     data = [["Grid Size", tuple(grid_size)]]
     data += [[op_type, count] for op_type, count in op_type_counts.items()]
     data.append(["Masked Load Ratio", overall_load_ratio])
