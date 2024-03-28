@@ -1,13 +1,13 @@
 import gradio as gr
 import triton_viz
 import tempfile
-from .analysis import analyzer
+from .analysis import analyze_records
 import pandas as pd
 
 
 def launch(share=True):
     cache = {}
-    analysis_data = analyzer()
+    analysis_data = analyze_records()
     program_records, tt, failures = triton_viz.collect_grid()
     m = [0, 0, 0]
     size = [0, 0]
