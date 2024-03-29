@@ -123,8 +123,6 @@ def test_out_of_bounds_add():
     assert (result_original_masks == expected_original_masks).all()
     assert (result_valid_masks == expected_valid_masks).all()
     assert (result_invalid_masks == expected_invalid_masks).all()
-    # Not sure what this test is checking?
-    # assert (result_invalid_masks == expected_invalid_masks).all()
 
 
 if __name__ == "__main__":

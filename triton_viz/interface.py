@@ -2,6 +2,7 @@ import gradio as gr
 import triton_viz
 import tempfile
 from .analysis import analyze_records
+from .tooltip import create_tooltip
 import pandas as pd
 
 
@@ -38,10 +39,10 @@ def launch(share=True):
                 s2 = gr.Slider(0, m[1] - 1, value=0, step=1, label="Program Id 1")
                 s3 = gr.Slider(0, m[2] - 1, value=0, step=1, label="Program Id 2")
                 b1 = gr.Button("Precompute")
-                # gr.Markdown(f"## Program Ids: {tuple(m)}")
-                df = pd.DataFrame(analysis_data, columns=["Metric", "Value"])
                 gr.Markdown("## Analysis")
-                gr.Dataframe(df)
+                df = pd.DataFrame(analysis_data, columns=["Metric", "Value"])
+                analysis_with_tooltip = create_tooltip(df)
+                gr.HTML(analysis_with_tooltip)
                 if failures:
                     gr.Markdown(
                         show_label=False,

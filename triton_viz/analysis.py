@@ -44,6 +44,8 @@ def analyze_records():
     )
     data = [["Grid Size", tuple(grid_size)]]
     data += [[op_type, count] for op_type, count in op_type_counts.items()]
-    data.append(["Masked Load Ratio", overall_load_ratio])
-    data.append(["Masked Store Ratio", overall_store_ratio])
+    data.append(["Total number of bytes loaded", total_load_bytes_true])
+    data.append(["Masked Load Ratio", round(overall_load_ratio, 3)])
+    data.append(["Total number of bytes stored", total_store_bytes_true])
+    data.append(["Masked Store Ratio", round(overall_store_ratio, 3)])
     return data
