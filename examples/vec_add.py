@@ -3,12 +3,13 @@ import triton
 import triton.language as tl
 import triton_viz
 import argparse
-from triton_viz.interpreter import record_builder
+from triton_viz.core.trace import launches
 import numpy as np
-from triton_viz.data import Load
+from triton_viz.clients.sanitizer.data import OutOfBoundsRecord
+from triton_viz.clients import Sanitizer
 
 
-@triton_viz.trace
+@triton_viz.trace(clients=Sanitizer(abort_on_error=False))
 @triton.jit
 def add_kernel(
     x_ptr,  # *Pointer* to first input vector.
@@ -79,12 +80,12 @@ def test_add():
     expected = input_vector1 + input_vector2
     expected_masks = np.ones(expected_offsets_len, dtype=bool)
     expected_invalid_masks = np.logical_not(expected_masks)
-    for op in record_builder.launches[0].records:
-        if isinstance(op, Load):
-            result_offsets = op.offsets.tolist()
+    for record in launches[0].records:
+        if isinstance(record, OutOfBoundsRecord):
+            result_offsets = record.offsets.tolist()
             result_offsets_len = len(result_offsets)
-            result_masks = op.access_masks
-            result_invalid_masks = op.invalid_access_masks
+            result_masks = record.masks
+            result_invalid_masks = record.invalid_access_masks
             break
     assert torch.allclose(result, expected)
     assert result.shape == expected.shape
@@ -108,12 +109,12 @@ def test_out_of_bounds_add():
     expected_original_masks = [True for i in range(BLOCK_SIZE)]
     expected_valid_masks = [i < size for i in range(BLOCK_SIZE)]
     expected_invalid_masks = [i >= size for i in range(BLOCK_SIZE)]
-    for op in record_builder.launches[0].records:
-        if isinstance(op, Load):
-            result_offsets = op.offsets.tolist()
+    for op in launches[0].records:
+        if isinstance(op, OutOfBoundsRecord):
+            result_offsets = op.corrected_offsets.tolist()
             result_offsets_len = len(result_offsets)
-            result_original_masks = op.original_masks
-            result_valid_masks = op.access_masks
+            result_original_masks = op.masks
+            result_valid_masks = op.valid_access_masks
             result_invalid_masks = op.invalid_access_masks
             break
     assert torch.allclose(result, expected)

@@ -1,24 +1,27 @@
 from colour import Color
-from triton_viz.data import (
+from triton_viz.core.data import (
     Tensor,
     Grid,
     Store,
     Load,
     Op,
     MakeRange,
-    Reduce,
+    ReduceMin,
+    ReduceMax,
+    ReduceSum,
     Dot,
 )
-from .interpreter import record_builder
 import numpy as np
 import numpy.typing as npt
 import planar
 import math
 import chalk
-from typing import Tuple, Union, Optional, List, Dict
+from typing import Tuple, Optional, List, Dict, Union
 from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, V2, concat
 from dataclasses import dataclass
 from numpy.typing import ArrayLike
+from ..core.trace import Trace
+from ..clients.sanitizer.data import OutOfBoundsRecord
 import sys
 
 sys.setrecursionlimit(100000)
@@ -45,6 +48,7 @@ ACTIVE = [Color(p) for p in palette]
 
 MRATIO = 1 / 3
 
+LAST_RECORD_ONLY = True
 
 # Generic render helpers
 
@@ -67,9 +71,16 @@ def reshape(d: Diagram) -> Diagram:
 
 
 def collect_grid():
-    for launch in record_builder.launches[-1:]:
-        records, tensor_table, failures = collect_launch(launch)
-    return records, tensor_table, failures
+    records = []
+    tensor_tables = []
+    failures = []
+    for launch in Trace.launches:
+        cur_records, cur_tensor_table, cur_failures = collect_launch(launch)
+        records.append(cur_records)
+        tensor_tables.append(cur_tensor_table)
+        failures.append(cur_failures)
+    assert LAST_RECORD_ONLY, "Only last record is supported for now"
+    return records[-1], tensor_tables[-1], failures[-1]
 
 
 def collect_launch(launch):
@@ -88,8 +99,8 @@ def collect_launch(launch):
             last_grid = r
         program_records.append(r)
         if (
-            isinstance(r, (Store, Load))
-            and (r.invalid_access_masks & r.original_masks).any()
+            isinstance(r, (OutOfBoundsRecord))
+            and (r.invalid_access_masks & r.op.masks).any()
         ):
             failures[last_grid.idx] = True
     all_grids[last_grid.idx] = program_records
@@ -107,10 +118,13 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
             return draw_tensor(x)
         if isinstance(x, Grid):
             return draw_grid(x)
-        if isinstance(x, Store):
-            return draw_store(x, tensor_table)
-        if isinstance(x, Load):
-            return draw_load(x, tensor_table)
+        if isinstance(x, OutOfBoundsRecord):
+            if isinstance(x.op, Load):
+                return draw_load(x, tensor_table)
+            elif isinstance(x.op, Store):
+                return draw_store(x, tensor_table)
+            else:
+                return None
         if isinstance(x, Op):
             return draw_op(x)
         if isinstance(x, MakeRange):
@@ -188,7 +202,7 @@ def draw_make_range(x: MakeRange) -> Optional[Diagram]:
     return None
 
 
-def draw_reduce(x: Reduce) -> Optional[Diagram]:
+def draw_reduce(x: Union[ReduceMin, ReduceMax, ReduceSum]) -> Optional[Diagram]:
     color = ACTIVE[0]
     inp = draw_tensor_3d(make_3d(x.input_shape), None, None, None, color)
     if x.index == 0 and len(x.input_shape) == 2:
@@ -214,7 +228,7 @@ def draw_reduce(x: Reduce) -> Optional[Diagram]:
             0.5,
         )
     out = draw_tensor_3d(x.output_shape, None, None, None, color)
-    return pair_draw(reshape(inp), reshape(out), x.op)
+    return pair_draw(reshape(inp), reshape(out), x.reduce_type)
 
 
 def draw_load(x, tensor_table) -> Optional[Diagram]:
@@ -239,18 +253,18 @@ def make_3d(shape):
 
 
 def store_load(
-    x: Union[Store, Load], tensor_table: Dict[int, Tuple[Tensor, int]]
+    x: OutOfBoundsRecord, tensor_table: Dict[int, Tuple[Tensor, int]]
 ) -> Tuple[Diagram, Diagram]:
-    tensor, tensor_id = tensor_table[x.ptr]
+    tensor, tensor_id = tensor_table[x.tensor.data_ptr]
     # inp = base_tensor(tensor.shape, DEFAULT)
     color = ACTIVE[tensor_id]
     invalid = x.invalid_access_masks.any()
     if invalid:
         color = Color("red")
-    inp = cover(tensor.shape, tensor.dtype, x.original_offsets, x.original_masks, color)
+    inp = cover(tensor.shape, tensor.dtype, x.offsets, x.masks, color)
     inp = reshape(inp)
-    s = make_3d(x.original_offsets.shape)
-    a, b, c = x.original_masks.reshape(*s).nonzero()
+    s = make_3d(x.offsets.shape)
+    a, b, c = x.masks.reshape(*s).nonzero()
     out = draw_tensor_3d(s, a, b, c, color)
     return inp, out
 

@@ -8,8 +8,8 @@ import pandas as pd
 
 def launch(share=True):
     cache = {}
-    analysis_data = analyze_records()
     program_records, tt, failures = triton_viz.collect_grid()
+    analysis_data = analyze_records(program_records)
     m = [0, 0, 0]
     size = [0, 0]
     for k in program_records.keys():

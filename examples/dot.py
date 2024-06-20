@@ -4,11 +4,11 @@ import triton
 import triton.language as tl
 import triton_viz
 import argparse
-from triton_viz.interpreter import record_builder
-from triton_viz.data import Dot
+from triton_viz.core.trace import launches
+from triton_viz.core.data import Dot
 
 
-@triton_viz.trace
+@triton_viz.trace(clients="tracer")
 @triton.jit
 def dot_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
     r = tl.program_id(0) * BLOCK_SIZE
@@ -69,13 +69,13 @@ def test_dot():
     input_matrix1, input_matrix2, result = perform_dot(device, BLOCK_SIZE)
     initial_expected = torch.from_numpy(np.dot(input_matrix1, input_matrix2))
     expected_output = initial_expected[:, : 2 * BLOCK_SIZE - 10]
-    for op in record_builder.launches[0].records:
+    for op in launches[0].records:
         if isinstance(op, Dot):
             result_input_shape = op.input_shape
             result_output_shape = op.output_shape
             result_other_shape = op.other_shape
     assert torch.allclose(result, expected_output, atol=1e-5, rtol=1e-3)
-    assert result_input_shape == ((BLOCK_SIZE, BLOCK_SIZE), (BLOCK_SIZE, BLOCK_SIZE))
+    assert result_input_shape == (BLOCK_SIZE, BLOCK_SIZE)
     assert result_output_shape == (BLOCK_SIZE, BLOCK_SIZE)
     assert result_other_shape == (BLOCK_SIZE, BLOCK_SIZE)
 

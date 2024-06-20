@@ -4,11 +4,12 @@ import triton
 import triton.language as tl
 import triton_viz
 import argparse
-from triton_viz.interpreter import record_builder
-from triton_viz.data import Reduce
+from triton_viz.core.trace import launches
+from triton_viz.core import ReduceSum
+from triton_viz.clients import Tracer
 
 
-@triton_viz.trace
+@triton_viz.trace(clients=Tracer(grid_idx=(0,)))
 @triton.jit
 def sum_kernel(
     x_ptr,
@@ -41,21 +42,21 @@ def test_sum():
     expected_output = torch.from_numpy(
         np.sum(input_matrix.numpy(), axis=1, keepdims=False)
     )
-    expected_op_name = np.sum.__name__
+    expected_op_name = "reduce_sum"
     result_variables = {}
     variables = {"axis": 1, "keepdims": False}
-    for op in record_builder.launches[0].records:
-        if isinstance(op, Reduce):
-            result_input_shape = op.input_shape
-            result_output_shape = op.output_shape
-            result_op = op.op
-            result_variables["index"] = op.index
-            result_variables["keep_dims"] = op.keep_dims
+    for record in launches[0].records:
+        if isinstance(record, ReduceSum):
+            result_input_shape = record.input_shape
+            result_output_shape = record.output_shape
+            result_op_name = record.name
+            result_variables["index"] = record.index
+            result_variables["keep_dims"] = record.keep_dims
     assert torch.allclose(result, expected_output)
     assert result_input_shape == input_matrix.shape
     assert result_output_shape == expected_output.shape
     assert sorted(result_variables.values()) == sorted(variables.values())
-    assert result_op == expected_op_name
+    assert result_op_name == expected_op_name
 
 
 if __name__ == "__main__":
@@ -64,7 +65,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     device = args.device
 
-    triton_viz.sample((0,))
     BLOCK_SIZE = 128
     CHANNEL_SIZE = 8
     input_matrix, result = perform_sum(device, BLOCK_SIZE, CHANNEL_SIZE)

@@ -66,7 +66,7 @@ def create_tooltip(df):
         html += f"<th>{col}</th>"
     html += "</tr></thead><tbody>"
 
-    for index, row in df.iterrows():
+    for _, row in df.iterrows():
         tooltip_text = tooltip_descriptions.get(
             row["Metric"], "No description available."
         )
