@@ -19,7 +19,7 @@ from triton.runtime.interpreter import (
     _implicit_cvt,
     RESERVED_KWS,
     interpreter_builder,
-    InterpretedFunction
+    InterpretedFunction,
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
