@@ -7,12 +7,15 @@ tooltip_descriptions = {
     "ExpandDims": "Shows the total number of expand_dims operations performed in this kernel.",
     "Dot": "Shows the total number of dot operations performed in this kernel.",
     "Reduce": "Shows the total number of reduce operations performed in this kernel.",
-    "Total number of bytes loaded": "Shows the total number of bytes loaded (mask=True).Note:On GPUs, this metric does not equate to the total number of bytes loaded from global memory (DRAM), as some data accesses may be handled through GPU caches.",
+    "Total number of bytes loaded": "Shows the total number of bytes loaded (mask=True). Note: On GPUs, this metric does not equate to the total number of bytes loaded from global memory (DRAM), as some data accesses may be handled through GPU caches.",
     "Masked Load Ratio": "Ratio of total number of bytes loaded (mask=True)/total number of bytes loaded (mask=True) + (mask=False).",
     "Total number of bytes stored": "Shows the total number of bytes stored (mask=True).",
     "Masked Store Ratio": "Ratio of total number of bytes stored (mask=True)/total number of bytes stored (mask=True) + (mask=False).",
 }
 
+def get_tooltip_data(df):
+    """Return the tooltip data in a format suitable for JSON serialization."""
+    return df.to_dict()
 
 def create_tooltip(df):
     styles = """
