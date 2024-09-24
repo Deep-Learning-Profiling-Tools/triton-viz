@@ -49,14 +49,14 @@ class Sanitizer(Client):
             tensor = self._get_tensor(first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, oob)
-            ptr.data = first_ptr + oob[-1]
+            ptr.data = tensor.data_ptr() + oob[-1]
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, check_out_of_bounds_access(ptr.data, mask.data, tensor))
-            ptr.data = first_ptr + oob[-1]
+            ptr.data = tensor.data_ptr() + oob[-1]
 
         if op_type is Load:
             return pre_load_callback, None
