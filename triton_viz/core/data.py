@@ -3,6 +3,7 @@ from typing import ClassVar
 import traceback
 import numpy.typing as npt
 import numpy as np
+import torch
 
 TRITON_FRAMES = [
     "triton/runtime",
@@ -83,6 +84,15 @@ class Dot(Op):
     input_shape: tuple
     other_shape: tuple
     output_shape: tuple
+    input_data: list[list[float]]
+    other_data: list[list[float]]
+    intermediate_results: dict[tuple[int, int], float] = field(
+        default_factory=dict
+    )  # Only storing the result now
+
+    def update_intermediate(self, row: int, col: int, result: float):
+        # Store only the result as a float
+        self.intermediate_results[(row, col)] = result
 
 
 @dataclass
@@ -180,6 +190,7 @@ class Tensor:
     stride: tuple
     shape: tuple
     element_size: int
+    data: torch.Tensor
 
 
 @dataclass
