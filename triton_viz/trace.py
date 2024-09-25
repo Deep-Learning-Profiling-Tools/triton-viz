@@ -8,12 +8,17 @@ from typing import Tuple
 
 class Trace(KernelInterface):
     def __init__(self, kernel: JITFunction) -> None:
+        self.src = kernel.src
         assert isinstance(kernel, JITFunction), "Kernel must be a JITFunction"
+
         self._fn = InterpretedFunction(kernel.fn)
 
     def run(self, *args, **kwargs):
         with patch():
             return self._fn.run(*args, **kwargs)
+
+    def get_src(self):
+        return self.src
 
 
 def trace(kernel):

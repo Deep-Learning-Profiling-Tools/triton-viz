@@ -1,99 +1,203 @@
-import gradio as gr
-import triton_viz
-import tempfile
+import threading
+from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
-from .tooltip import create_tooltip
+from .draw import get_visualization_data
+from .tooltip import get_tooltip_data
 import pandas as pd
+import os
+import torch
+from flask_cloudflared import _run_cloudflared
+import requests
+import time
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(os.path.dirname(__file__), "templates"),
+    static_folder=os.path.join(os.path.dirname(__file__), "static"),
+)
+
+# Global variables to store the data
+global_data = None
+raw_tensor_data = None
+precomputed_c_values = {}
+current_fullscreen_op = None
+
+
+def precompute_c_values(op_data):
+    input_data = op_data["input_data"]
+    other_data = op_data["other_data"]
+    rows, inner_dim = input_data.shape
+    cols = other_data.shape[1]
+
+    precomputed = {}
+    for i in range(rows):
+        for j in range(cols):
+            precomputed[(i, j)] = [0] * (inner_dim + 1)
+            for k in range(1, inner_dim + 1):
+                precomputed[(i, j)][k] = torch.dot(
+                    input_data[i, :k], other_data[:k, j]
+                ).item()
+
+    return precomputed
+
+
+def update_global_data():
+    global global_data, raw_tensor_data, precomputed_c_values
+    analysis_data = analyze_records()
+    viz_data = get_visualization_data()
+    global_data = {
+        "ops": {
+            "visualization_data": viz_data["visualization_data"],
+            "failures": viz_data["failures"],
+            "kernel_src": viz_data["kernel_src"],
+        }
+    }
+    raw_tensor_data = viz_data["raw_tensor_data"]
+
+    # Precompute C values for each Dot operation
+    precomputed_c_values = {}
+    for uuid, op_data in raw_tensor_data.items():
+        if "input_data" in op_data and "other_data" in op_data:
+            precomputed_c_values[uuid] = precompute_c_values(op_data)
+
+    df = pd.DataFrame(analysis_data, columns=["Metric", "Value"])
+    analysis_with_tooltip = get_tooltip_data(df)
+    global_data["analysis"] = analysis_with_tooltip
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/data")
+def get_data():
+    global global_data
+    if global_data is None:
+        update_global_data()
+    return jsonify(global_data)
+
+
+@app.route("/api/update_data")
+def update_data():
+    update_global_data()
+    return jsonify({"status": "Data updated successfully"})
+
+
+@app.route("/api/setop", methods=["POST"])
+def set_current_op():
+    global current_fullscreen_op
+    data = request.json
+    current_fullscreen_op = data.get("uuid")
+    return jsonify(
+        {"status": "Current op set successfully", "uuid": current_fullscreen_op}
+    )
+
+
+@app.route("/api/getValue", methods=["POST"])
+def get_value():
+    global raw_tensor_data, precomputed_c_values, current_fullscreen_op
+    print(current_fullscreen_op)
+    data = request.json
+    uuid = data.get("uuid")
+    matrix_name = data.get("matrixName")
+    row = data.get("row")
+    col = data.get("col")
+
+    if uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+
+    op_data = raw_tensor_data[uuid]
+
+    if matrix_name == "A":
+        value = (
+            op_data["input_data"][row, col].item() if "input_data" in op_data else None
+        )
+        return jsonify({"value": value})
+    elif matrix_name == "B":
+        value = (
+            op_data["other_data"][row, col].item() if "other_data" in op_data else None
+        )
+        return jsonify({"value": value})
+    elif matrix_name == "C":
+        current_step = data.get("currentStep", 0)
+
+        if uuid not in precomputed_c_values:
+            return jsonify({"error": "Precomputed values not found"}), 404
+
+        precomputed = precomputed_c_values[uuid]
+        current_value = precomputed[(row, col)][current_step]
+
+        return jsonify(
+            {
+                "value": current_value,
+            }
+        )
+    else:
+        return jsonify({"error": "Invalid matrix name"}), 400
+
+
+@app.route("/api/getLoadValue", methods=["POST"])
+def get_load_value():
+    global raw_tensor_data, current_fullscreen_op
+
+    data = request.json
+    uuid = data.get("uuid")
+    x = data.get("x")
+    y = data.get("y")
+    z = data.get("z")
+    print(x, y, z)
+    if uuid is None or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+
+    op_data = raw_tensor_data[uuid]
+
+    if "global_tensor" in op_data and (
+        x is not None and y is not None and z is not None
+    ):
+        try:
+            value = 0.0
+            if op_data["dims"] == 3:
+                value = op_data["global_tensor"][x, y, z].item()
+            elif op_data["dims"] == 2:
+                value = op_data["global_tensor"][x, y].item()
+            elif op_data["dims"] == 1:
+                value = op_data["global_tensor"][x].item()
+
+            return jsonify({"value": value})
+        except IndexError:
+            return jsonify({"error": "Coordinates out of bounds"}), 200
+    else:
+        return jsonify({"error": "Global tensor data not found"}), 200
+
+
+def run_flask_with_cloudflared():
+    cloudflared_port = 8000  # You can change this port if needed
+    tunnel_url = _run_cloudflared(cloudflared_port, 8001)  # not too important
+    print(f"Cloudflare tunnel URL: {tunnel_url}")
+    app.run(port=cloudflared_port)
 
 
 def launch(share=True):
-    cache = {}
-    analysis_data = analyze_records()
-    program_records, tt, failures = triton_viz.collect_grid()
-    m = [0, 0, 0]
-    size = [0, 0]
-    for k in program_records.keys():
-        m[0] = max(k[0] + 1, m[0])
-        m[1] = max(k[1] + 1, m[1])
-        m[2] = max(k[2] + 1, m[2])
-    w, h = triton_viz.draw_record(program_records[(0, 0, 0)], tt, "tmp.svg")
-    size[0] = w
-    size[1] = h
-    height = 600 * size[1] / size[0]
-    with gr.Blocks(
-        css=".gradio-container button {overflow: auto} img.with-caption {height: %fpx !important; } .thumbnails { display: none; }  "
-        % height
-    ) as demo:
-        with gr.Row():
-            with gr.Column(scale=3, min_width=500):
-                img = gr.Gallery(
-                    height=500,
-                    min_width=500,
-                    show_label=False,
-                    selected_index=0,
-                    preview=True,
-                    object_fit="cover",
-                )
-            with gr.Column(scale=1):
-                s1 = gr.Slider(0, m[0] - 1, value=0, step=1, label="Program Id 0")
-                s2 = gr.Slider(0, m[1] - 1, value=0, step=1, label="Program Id 1")
-                s3 = gr.Slider(0, m[2] - 1, value=0, step=1, label="Program Id 2")
-                b1 = gr.Button("Precompute")
-                gr.Markdown("## Analysis")
-                df = pd.DataFrame(analysis_data, columns=["Metric", "Value"])
-                analysis_with_tooltip = create_tooltip(df)
-                gr.HTML(analysis_with_tooltip)
-                if failures:
-                    gr.Markdown(
-                        show_label=False,
-                        value="## Invalid memory access in "
-                        + "\n * "
-                        + "\n* ".join(list(map(str, failures.keys()))),
-                    )
+    print("Launching Triton viz tool")
+    if share:
+        flask_thread = threading.Thread(target=run_flask_with_cloudflared)
+        flask_thread.start()
 
-        def cache_block(idx):
-            name = tempfile.NamedTemporaryFile(suffix=".svg")
-            w, h = triton_viz.draw_record(program_records[idx], tt, name.name)
-            size[0] = w
-            size[1] = h
-            cache[idx] = (name, len(cache))
+        # Wait for the server to start
+        time.sleep(5)
 
-        def update(inp):
-            a = inp[s1]
-            b = inp[s2]
-            c = inp[s3]
-            idx = (a, b, c)
+        # Try to get the tunnel URL by making a request to the local server
+        try:
+            response = requests.get("http://localhost:8000")
+            print(f"Your app is now available at: {response.url}")
+        except requests.exceptions.RequestException:
+            print("Please wait for URL:")
+    else:
+        app.run(port=5001)
 
-            if idx not in cache:
-                cache_block(idx)
-                return gr.Gallery(
-                    value=[(cache[k][0].name, str(k)) for k in cache.keys()],
-                    selected_index=cache[idx][1],
-                    height=700,
-                ), gr.Slider()
-            # * size[1]/size[0]
-            return gr.Gallery(selected_index=cache[idx][1]), gr.Slider()
 
-        def precompute(inp):
-            a = inp[s1]
-            b = inp[s2]
-            c = inp[s3]
-            idx = (a, b, c)
-            for i in range(m[0]):
-                for j in range(m[1]):
-                    for k in range(m[2]):
-                        if (i, j, k) not in cache:
-                            cache_block((i, j, k))
-            return gr.Gallery(
-                value=[(cache[k][0].name, str(k)) for k in cache.keys()],
-                selected_index=cache[idx][1],
-            )
-
-        s1.change(update, inputs={s1, s2, s3}, outputs=[img, b1], show_progress=False)
-        s2.change(update, inputs={s1, s2, s3}, outputs=[img, b1], show_progress=False)
-        s3.change(update, inputs={s1, s2, s3}, outputs=[img, b1], show_progress=False)
-        b1.click(precompute, inputs={s1, s2, s3}, outputs=img, show_progress=True)
-        demo.load(update, inputs={s1, s2, s3}, outputs=[img, b1])
-
-    demo.launch(share=share, debug=False, height=800, quiet=True, show_api=False)
-    return failures
+# This function can be called to stop the Flask server if needed
+def stop_server(flask_thread):
+    # Implement a way to stop the Flask server
+    pass

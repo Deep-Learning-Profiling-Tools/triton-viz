@@ -44,6 +44,19 @@ def _unpatch_lang():
 
 
 class RecordBuilder:
+    def to_dict(self):
+        """Convert the recorded data to a dictionary format for JSON serialization."""
+        return {
+            "launches": [
+                {
+                    "grid": launch.grid,
+                    "tensors": [tensor.__dict__ for tensor in launch.tensors],
+                    "records": [record.__dict__ for record in launch.records],
+                }
+                for launch in self._launches
+            ]
+        }
+
     def __init__(self) -> None:
         self.reset()
 
@@ -136,7 +149,9 @@ def _check_storage_contiguous(tensor):
 
 def _grid_executor_call(self, *args_dev, **kwargs):
     # Removes reserved keywords from kwargs
+    # kwargs  has src_map and src src is the raw straight spurce code, src_map is a mapping between source code line and an op
     kwargs = {k: v for k, v in kwargs.items() if k not in RESERVED_KWS}
+
     if kwargs.pop("warmup", False):
         return
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
@@ -162,6 +177,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                         arg.stride(),
                         arg.shape,
                         arg.element_size(),
+                        arg,
                     )
                 )
             call_args[name] = ret
@@ -291,15 +307,31 @@ def _create_binary_op(fn):
 
 def _create_dot(fn):
     @wraps(fn)
-    def wrapper(a, b, d, allow_tf32, maxNumImpreciseAcc):
-        ret = fn(a, b, d, allow_tf32, maxNumImpreciseAcc)
+    def wrapper(a, b, c, allow_tf32, max_num_imprecise_acc):
         dot_record = Dot(
-            input_shape=(a.data.shape, b.data.shape),
-            other_shape=d.data.shape,
-            output_shape=ret.data.shape,
+            input_shape=a.data.shape,
+            other_shape=b.data.shape,
+            output_shape=c.data.shape,
+            input_data=a.data.tolist(),
+            other_data=b.data.tolist(),
         )
         record_builder.add_record(dot_record)
-        return ret
+
+        def capture_intermediate(row, col, result):
+            dot_record.update_intermediate(row, col, float(result))
+
+        # Modify the original function to call capture_intermediate at each step
+        def modified_fn(a, b, c, allow_tf32, max_num_imprecise_acc):
+            for i in range(a.data.shape[0]):
+                for j in range(b.data.shape[1]):
+                    A_row = a.data[i, :]
+                    B_column = b.data[:, j]
+                    result = np.dot(A_row, B_column)
+                    capture_intermediate(i, j, result)
+                    c.data[i, j] = result
+
+        modified_fn(a, b, c, allow_tf32, max_num_imprecise_acc)
+        return c
 
     return wrapper
 
@@ -377,3 +409,8 @@ def patch():
         interpreter_builder.binary_op = old_binary_op
         interpreter_builder.create_dot = old_create_dot
         interpreter_builder.create_masked_store = old_create_masked_store
+
+
+def get_recorded_data():
+    """Return the recorded data in a format suitable for JSON serialization."""
+    return record_builder.to_dict()
