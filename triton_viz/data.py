@@ -1,8 +1,10 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Dict
 import traceback
 import numpy.typing as npt
 import numpy as np
+
+import torch
 
 
 @dataclass
@@ -73,6 +75,15 @@ class Dot(Op):
     input_shape: Tuple
     other_shape: Tuple
     output_shape: Tuple
+    input_data: List[List[float]]
+    other_data: List[List[float]]
+    intermediate_results: Dict[Tuple[int, int], float] = field(
+        default_factory=dict
+    )  # Only storing the result now
+
+    def update_intermediate(self, row: int, col: int, result: float):
+        # Store only the result as a float
+        self.intermediate_results[(row, col)] = result
 
 
 @dataclass
@@ -91,6 +102,7 @@ class Tensor:
     stride: Tuple
     shape: Tuple
     element_size: int
+    data: torch.Tensor
 
 
 @dataclass

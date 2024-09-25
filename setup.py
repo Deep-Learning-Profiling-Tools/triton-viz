@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="triton-viz",
-    version="0.1",
+    version="0.2",
     packages=find_packages(),
     description="A visualization tool for Triton",
     author="Deep Learning Profiling Tools Team",
@@ -11,10 +11,11 @@ setup(
     install_requires=[
         "setuptools",
         "triton",
-        "gradio",
-        "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git",
+        "flask",
         "pyarrow",
         "pre-commit",
         "pytest",
+        "flask_cloudflared",
+        "requests",
     ],
 )
