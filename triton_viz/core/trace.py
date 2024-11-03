@@ -16,6 +16,7 @@ class Trace(KernelInterface):
     def __init__(self, kernel: JITFunction, clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]]) -> None:
         assert isinstance(kernel, JITFunction), "Kernel must be a JITFunction"
         self.fn = InterpretedFunction(kernel.fn)
+        self.arg_names = kernel.arg_names
         init_clients: list[Client] = []
         clients = (clients,) if not isinstance(clients, tuple) else clients
         for client in clients:
@@ -36,6 +37,13 @@ class Trace(KernelInterface):
         with self.client_manager.patch():
             kwargs.update({"client_manager": self.client_manager})
             ret = self.fn.run(*args, **kwargs)
+            self.finalize()
+            return ret
+
+    def warmup(self, *args, **kwargs):
+        with self.client_manager.patch():
+            kwargs.update({"client_manager": self.client_manager})
+            ret = self.fn.warmup(*args, **kwargs)
             self.finalize()
             return ret
 
