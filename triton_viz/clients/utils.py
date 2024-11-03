@@ -23,6 +23,10 @@ def check_storage_contiguous(tensor: torch.Tensor):
     # Note that this is different from if a tensor is accessed contiguously, so we cannot use tensor.is_contiguous()
     # 1. Sort strides from smallest to largest
     # 2. If the tensor is contiguous, the stride product should be the same of the shape product of all previous dimensions
+    from triton.runtime.jit import TensorWrapper
+    if isinstance(tensor, TensorWrapper):
+        tensor = tensor.base
+    assert type(tensor) == torch.Tensor, f"Only torch.Tensor is supported, but found {type(tensor)}"
     shape_prod = 1
     indices = sorted(range(len(tensor.stride())), key=tensor.stride().__getitem__)
     for i, index in enumerate(indices):
