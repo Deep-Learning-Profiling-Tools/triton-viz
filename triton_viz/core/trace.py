@@ -2,6 +2,7 @@ from triton.runtime import KernelInterface
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
+import os
 from typing import Tuple, Union
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
@@ -9,6 +10,8 @@ from .data import Launch
 
 
 launches: list[Launch] = []
+ENABLE_TRITON_SANITIZER = os.getenv('ENABLE_TRITON_SANITIZER', '0') == '1'
+SANITIZER_WARNING_TOGGLED = False
 
 
 class Trace(KernelInterface):
@@ -52,7 +55,14 @@ def trace(clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]] = (
     :param clients: A tuple of clients to run with the kernel.
     """
     def decorator(kernel: JITFunction) -> Trace:
-        return Trace(kernel, clients)
+        global ENABLE_TRITON_SANITIZER, SANITIZER_WARNING_TOGGLED
+        if ENABLE_TRITON_SANITIZER:
+            return Trace(kernel, clients)
+        else:
+            if not SANITIZER_WARNING_TOGGLED:
+                SANITIZER_WARNING_TOGGLED = True
+                print("Triton Sanitizer is disabled. Enable it by setting the environment variable ENABLE_TRITON_SANITIZER=1")
+            return kernel
     return decorator
 
 
