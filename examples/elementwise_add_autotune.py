@@ -25,7 +25,7 @@ def elementwise_add_kernel(
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    
+
     # Prevent out-of-bounds access
     mask = offsets < n_elements
     x = tl.load(x_ptr + offsets, mask=mask)
