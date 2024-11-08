@@ -16,7 +16,7 @@ def launch(share=True):
         m[0] = max(k[0] + 1, m[0])
         m[1] = max(k[1] + 1, m[1])
         m[2] = max(k[2] + 1, m[2])
-    w, h = triton_viz.draw_record(program_records[(0, 0, 0)], tt, "tmp.svg")
+    w, h = triton_viz.draw_record(program_records[(0, 0, 0)], tt, "tmp.png")
     size[0] = w
     size[1] = h
     height = 600 * size[1] / size[0]
@@ -52,7 +52,7 @@ def launch(share=True):
                     )
 
         def cache_block(idx):
-            name = tempfile.NamedTemporaryFile(suffix=".svg")
+            name = tempfile.NamedTemporaryFile(suffix=".png")
             w, h = triton_viz.draw_record(program_records[idx], tt, name.name)
             size[0] = w
             size[1] = h

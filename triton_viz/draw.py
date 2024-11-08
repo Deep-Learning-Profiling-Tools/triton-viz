@@ -139,7 +139,7 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
     dr = dr.center_xy()
     env = dr.get_envelope()
     dr = rectangle(env.width + 1, env.height + 1).fill_color(BG).center_xy() + dr
-    dr.render_svg(base, 2500)
+    dr.render(base, 2500)
     return env.width, env.height
 
 
