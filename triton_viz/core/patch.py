@@ -127,7 +127,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 and ((grid[0] < 10) or (x % (grid[0] // 10) == 0)) \
                 and ((grid[1] < 10) or (y % (grid[1] // 10) == 0)) \
                 and ((grid[2] < 10) or (z % (grid[2] // 10) == 0)):
-                    msg = f'wuhao: x: {x} / {grid[0]}'
+                    msg = f'Current grid: x: {x} / {grid[0]}'
                     if grid[1] > 1:
                         msg += f' y: {y} / {grid[1]}'
                     if grid[2] > 1:
