@@ -1,6 +1,7 @@
 import triton.language as tl
 from contextlib import contextmanager
 from typing import Callable, Type, Dict
+from tqdm import tqdm
 
 from .config import report_grid_execution_progress
 from .data import Op, Store, Load, Dot, BinaryOp, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum
@@ -118,30 +119,14 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
-    if report_grid_execution_progress:
-        print('====grid started!====')
-    for x in range(grid[0]):
-        for y in range(grid[1]):
-            for z in range(grid[2]):
-                if report_grid_execution_progress \
-                and ((grid[0] < 10) or (x % (grid[0] // 10) == 0)) \
-                and ((grid[1] < 10) or (y % (grid[1] // 10) == 0)) \
-                and ((grid[2] < 10) or (z % (grid[2] // 10) == 0)):
-                    msg = f'Current grid: x: {x} / {grid[0]}'
-                    if grid[1] > 1:
-                        msg += f' y: {y} / {grid[1]}'
-                    if grid[2] > 1:
-                        msg += f' z: {z} / {grid[2]}'
-                    print(msg, end='\r')
+    for x in tqdm(range(grid[0]), desc='Grid X', leave=False, disable=not report_grid_execution_progress):
+        for y in tqdm(range(grid[1]), desc='Grid Y', leave=False, disable=not (report_grid_execution_progress and grid[1] > 1)):
+            for z in tqdm(range(grid[2]), desc='Grid Z', leave=False, disable=not (report_grid_execution_progress and grid[2] > 1)):
                 interpreter_builder.set_grid_idx(x, y, z)
                 client_manager.grid_idx_callback((x, y, z))
                 self.fn(**call_args)
-            if report_grid_execution_progress and grid[2] > 1:
-                print('\n')
-        if report_grid_execution_progress and grid[1] > 1:
-            print('\n')
     if report_grid_execution_progress:
-        print('====grid finished!====')
+        print('====grid complete====')
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
     _unpatch_lang()
