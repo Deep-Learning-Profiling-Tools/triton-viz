@@ -125,8 +125,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 interpreter_builder.set_grid_idx(x, y, z)
                 client_manager.grid_idx_callback((x, y, z))
                 self.fn(**call_args)
-    if report_grid_execution_progress:
-        print('====grid complete====')
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
     _unpatch_lang()
