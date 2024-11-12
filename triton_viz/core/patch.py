@@ -2,7 +2,7 @@ import triton.language as tl
 from contextlib import contextmanager
 from typing import Callable, Type, Dict
 
-import triton_viz
+from .config import report_grid_execution_progress
 from .data import Op, Store, Load, Dot, BinaryOp, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum
 import inspect
 from triton.runtime.interpreter import (
@@ -118,12 +118,12 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
-    if triton_viz.config.report_grid_execution_progress:
+    if report_grid_execution_progress:
         print('====grid started!====')
     for x in range(grid[0]):
         for y in range(grid[1]):
             for z in range(grid[2]):
-                if triton_viz.config.report_grid_execution_progress \
+                if report_grid_execution_progress \
                 and ((grid[0] < 10) or (x % (grid[0] // 10) == 0)) \
                 and ((grid[1] < 10) or (y % (grid[1] // 10) == 0)) \
                 and ((grid[2] < 10) or (z % (grid[2] // 10) == 0)):
@@ -136,11 +136,11 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 interpreter_builder.set_grid_idx(x, y, z)
                 client_manager.grid_idx_callback((x, y, z))
                 self.fn(**call_args)
-            if triton_viz.config.report_grid_execution_progress and grid[2] > 1:
+            if report_grid_execution_progress and grid[2] > 1:
                 print('\n')
-        if triton_viz.config.report_grid_execution_progress and grid[1] > 1:
+        if report_grid_execution_progress and grid[1] > 1:
             print('\n')
-    if triton_viz.config.report_grid_execution_progress:
+    if report_grid_execution_progress:
         print('====grid finished!====')
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
