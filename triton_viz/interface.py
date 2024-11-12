@@ -95,5 +95,12 @@ def launch(share=True, server_name=None):
         b1.click(precompute, inputs={s1, s2, s3}, outputs=img, show_progress=True)
         demo.load(update, inputs={s1, s2, s3}, outputs=[img, b1])
 
-    demo.launch(share=share, debug=False, height=800, quiet=True, show_api=False, server_name=server_name)
+    demo.launch(
+        share=share,
+        debug=False,
+        height=800,
+        quiet=True,
+        show_api=False,
+        server_name=server_name,
+    )
     return failures
