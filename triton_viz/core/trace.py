@@ -4,14 +4,14 @@ from triton import JITFunction
 
 import os
 from typing import Tuple, Union
+
+import triton_viz
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
 
 
 launches: list[Launch] = []
-ENABLE_TRITON_SANITIZER = os.getenv('ENABLE_TRITON_SANITIZER', '0') == '1'
-SANITIZER_WARNING_TOGGLED = False
 
 
 class Trace(KernelInterface):
@@ -59,12 +59,11 @@ def trace(clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]] = (
     :param clients: A tuple of clients to run with the kernel.
     """
     def decorator(kernel: JITFunction) -> Trace:
-        global ENABLE_TRITON_SANITIZER, SANITIZER_WARNING_TOGGLED
-        if ENABLE_TRITON_SANITIZER:
+        if triton_viz.config.trace_enabled:
             return Trace(kernel, clients)
         else:
-            if not SANITIZER_WARNING_TOGGLED:
-                SANITIZER_WARNING_TOGGLED = True
+            if not triton_viz.config.trace_warning_toggled:
+                triton_viz.config.trace_warning_toggled = True
                 print("Triton Sanitizer is disabled. Enable it by setting the environment variable ENABLE_TRITON_SANITIZER=1")
             return kernel
     return decorator
