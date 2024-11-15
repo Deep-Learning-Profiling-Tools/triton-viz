@@ -1,7 +1,9 @@
 import triton.language as tl
 from contextlib import contextmanager
 from typing import Callable, Type, Dict
+from tqdm import tqdm
 
+from .config import report_grid_execution_progress
 from .data import Op, Store, Load, Dot, BinaryOp, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum
 import inspect
 from triton.runtime.interpreter import (
@@ -117,9 +119,9 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
-    for x in range(grid[0]):
-        for y in range(grid[1]):
-            for z in range(grid[2]):
+    for x in tqdm(range(grid[0]), desc='Grid X', leave=False, disable=not report_grid_execution_progress):
+        for y in tqdm(range(grid[1]), desc='Grid Y', leave=False, disable=not (report_grid_execution_progress and grid[1] > 1)):
+            for z in tqdm(range(grid[2]), desc='Grid Z', leave=False, disable=not (report_grid_execution_progress and grid[2] > 1)):
                 interpreter_builder.set_grid_idx(x, y, z)
                 client_manager.grid_idx_callback((x, y, z))
                 self.fn(**call_args)
