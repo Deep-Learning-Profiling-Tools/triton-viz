@@ -93,14 +93,14 @@ def _unpatch_lang():
 
 
 def _grid_executor_call(self, *args_dev, **kwargs):
+    if kwargs.pop("warmup", False):
+        return
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
     argspec = inspect.getfullargspec(self.fn)
-    triton_viz_args = ["client_manager", "warmup"]
+    triton_viz_args = ["client_manager"]
     kwargs = {k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args}
-    if kwargs.pop("warmup", False):
-        return
     client_manager = kwargs.pop("client_manager")
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
     # Remaps core language functions to interpreted ones
