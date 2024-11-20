@@ -9,7 +9,6 @@ import inspect
 from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
-    RESERVED_KWS,
     interpreter_builder,
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
@@ -94,8 +93,19 @@ def _unpatch_lang():
 
 
 def _grid_executor_call(self, *args_dev, **kwargs):
-    # Removes reserved keywords from kwargs
-    kwargs = {k: v for k, v in kwargs.items() if k not in RESERVED_KWS}
+    # Removes not used reserved keywords from kwargs
+    # Triton doesn't support keyword-only, variable positional or variable keyword arguments
+    # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
+    argspec = inspect.getfullargspec(self.fn)
+    new_kwargs = {}
+    triton_viz_args = ["client_manager", "warmup"]
+    reserved_kws = ["num_warps", "num_stages", "num_ctas", "enable_fp_fusion", "grid", "maxnreg"]
+    for k, v in kwargs.items():
+        if k in argspec.args or k in triton_viz_args:
+            new_kwargs[k] = v
+        else:
+            assert k in reserved_kws, f"Unknown keyword argument {k}!"
+    kwargs = new_kwargs
     if kwargs.pop("warmup", False):
         return
     client_manager = kwargs.pop("client_manager")
