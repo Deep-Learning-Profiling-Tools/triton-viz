@@ -17,7 +17,6 @@ from .data import (
 from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
-    RESERVED_KWS,
     interpreter_builder,
     InterpretedFunction,
 )
@@ -136,7 +135,8 @@ def _check_storage_contiguous(tensor):
 
 def _grid_executor_call(self, *args_dev, **kwargs):
     # Removes reserved keywords from kwargs
-    kwargs = {k: v for k, v in kwargs.items() if k not in RESERVED_KWS}
+    argspec = inspect.getfullargspec(self.fn)
+    kwargs = {k: v for k, v in kwargs.items() if k in argspec.args}
     if kwargs.pop("warmup", False):
         return
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
