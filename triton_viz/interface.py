@@ -6,7 +6,7 @@ from .tooltip import create_tooltip
 import pandas as pd
 
 
-def launch(share=True):
+def launch(share=True, server_name=None):
     cache = {}
     analysis_data = analyze_records()
     program_records, tt, failures = triton_viz.collect_grid()
@@ -95,5 +95,12 @@ def launch(share=True):
         b1.click(precompute, inputs={s1, s2, s3}, outputs=img, show_progress=True)
         demo.load(update, inputs={s1, s2, s3}, outputs=[img, b1])
 
-    demo.launch(share=share, debug=False, height=800, quiet=True, show_api=False)
+    demo.launch(
+        share=share,
+        debug=False,
+        height=800,
+        quiet=True,
+        show_api=False,
+        server_name=server_name,
+    )
     return failures
