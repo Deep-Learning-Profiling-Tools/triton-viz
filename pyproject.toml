@@ -1,2 +1,34 @@
 [tool.ruff]
 ignore = ["E731"]
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triton-viz"
+version = "1.1.1"
+description = "A visualization tool for Triton"
+authors = [
+  {name = "Deep Learning Profiling Tools Team", email = "kzhou6@gmu.edu"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.7"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+    "setuptools",
+    "triton",
+    "gradio",
+    "pyarrow",
+    "pre-commit",
+    "pytest",
+  "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git"
+]
+
+[project.urls]
+homepage = "https://github.com/Deep-Learning-Profiling-Tools/triton-viz"
