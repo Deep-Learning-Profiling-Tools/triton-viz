@@ -21,12 +21,12 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 dependencies = [
-    "setuptools",
-    "triton",
-    "gradio",
-    "pyarrow",
-    "pre-commit",
-    "pytest",
+  "setuptools",
+  "triton",
+  "gradio",
+  "pyarrow",
+  "pre-commit",
+  "pytest",
   "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git"
 ]
 
