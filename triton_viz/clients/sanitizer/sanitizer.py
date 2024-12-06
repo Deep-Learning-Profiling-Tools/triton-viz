@@ -6,6 +6,57 @@ from typing import Tuple, Callable, Optional, Type
 import numpy as np
 
 
+def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
+    """
+    Print detailed logs for a given OOB record.
+
+    Parameters
+    ----------
+    oob_record : OutOfBoundsRecord
+        The record containing information about out-of-bounds accesses.
+    max_display : int
+        Maximum number of invalid accesses to display in detail.
+    """
+    if issubclass(oob_record.op_type, Store):
+        op_type = "Store"
+    elif issubclass(oob_record.op_type, Load):
+        op_type = "Load"
+    else:
+        assert False, "Not supported op type: " + str(oob_record.op_type)
+
+    # Read the tensor from the record
+    tensor = oob_record.tensor
+
+    # Convert memoryviews to NumPy arrays
+    offsets_arr = np.array(oob_record.offsets)
+    invalid_access_masks_arr = np.array(oob_record.invalid_access_masks)
+
+    # Basic info about the OOB event
+    print("============================================================")
+    print("                 Out-Of-Bounds Access Detected              ")
+    print("============================================================")
+    print(f"Operation: {op_type}")
+    print(f"Tensor Info: dtype={tensor.dtype}, shape={tensor.shape}, device={tensor.device}")
+    print(f"Tensor base memory address: {tensor.data_ptr()}")
+    print("Valid Access Range: [0, %d)" % (np.prod(tensor.shape) * tensor.element_size()))
+    print("------------------------------------------------------------")
+
+    # Determine all invalid indices
+    invalid_indices = np.where(invalid_access_masks_arr.flatten())[0]
+
+    assert len(invalid_indices) != 0, "No invalid accesses found in this record."
+
+    print(f"Total invalid accesses: {len(invalid_indices)}")
+
+    invalid_offsets = offsets_arr.flatten()[invalid_indices]
+
+    print("Invalid offsets:")
+    print(invalid_offsets)
+
+    print("============================================================")
+    print("            End of Out-Of-Bounds Record Details             ")
+    print("============================================================")
+
 class Sanitizer(Client):
     def __init__(self, callpath: Optional[bool] = True, abort_on_error: Optional[bool] = True):
         self.callpath = callpath
@@ -24,11 +75,13 @@ class Sanitizer(Client):
         return self.tensors[ret_idx]
 
     def _report(self, op_type, record):
+        oob_record = OutOfBoundsRecord(op_type, *record)
         if self.abort_on_error:
             if np.any(record[4]):
-                raise ValueError(f"Out of bounds access detected: {record}")
+                print_oob_record(oob_record)
+                assert False, "Out-of-bounds access detected. See detailed report above."
         else:
-            self.records.append(OutOfBoundsRecord(op_type, *record))
+            self.records.append(oob_record)
 
     def arg_callback(self, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
