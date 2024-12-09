@@ -15,3 +15,7 @@ class OutOfBoundsRecord:
     valid_access_masks: NDArray[np.bool_]
     invalid_access_masks: NDArray[np.bool_]
     corrected_offsets: NDArray[np.int_]
+    filename: str
+    lineno: int
+    func_name: str
+    line_of_code: str

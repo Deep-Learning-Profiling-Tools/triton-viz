@@ -4,6 +4,7 @@ from ..utils import check_out_of_bounds_access, check_storage_contiguous
 from .data import OutOfBoundsRecord
 from typing import Tuple, Callable, Optional, Type
 import numpy as np
+import traceback
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -39,6 +40,8 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print(f"Tensor Info: dtype={tensor.dtype}, shape={tensor.shape}, device={tensor.device}")
     print(f"Tensor base memory address: {tensor.data_ptr()}")
     print("Valid Access Range: [0, %d)" % (np.prod(tensor.shape) * tensor.element_size()))
+    print(f"File: {oob_record.filename}, Line: {oob_record.lineno}, in {oob_record.func_name}")
+    print(f"  Code: {oob_record.line_of_code}")
     print("------------------------------------------------------------")
 
     # Determine all invalid indices
@@ -75,7 +78,19 @@ class Sanitizer(Client):
         return self.tensors[ret_idx]
 
     def _report(self, op_type, record):
-        oob_record = OutOfBoundsRecord(op_type, *record)
+        oob_filename, oob_lineno, oob_func_name, oob_line_of_code = "", -1, "", ""
+        stack_summary = traceback.extract_stack()
+        for i, frame in enumerate(stack_summary):
+            if '_jit_function_call' in frame.name \
+                and 'triton_viz/core/patch.py' in frame.filename:
+                oob_stack_index = i + 1
+                if oob_stack_index >= 0:
+                    oob_filename = stack_summary[oob_stack_index].filename
+                    oob_lineno = stack_summary[oob_stack_index].lineno
+                    oob_func_name = stack_summary[oob_stack_index].name
+                    oob_line_of_code = stack_summary[oob_stack_index].line
+                break
+        oob_record = OutOfBoundsRecord(op_type, *record, oob_filename, oob_lineno, oob_func_name, oob_line_of_code)
         if self.abort_on_error:
             if np.any(record[4]):
                 print_oob_record(oob_record)
