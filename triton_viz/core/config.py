@@ -12,4 +12,3 @@ sanitizer_backend = os.getenv("TRITON_SANITIZER_BACKEND", "")
 global_warning_toggled = dict()
 global_warning_toggled['sanitizer'] = False
 global_warning_toggled['trace'] = False
-

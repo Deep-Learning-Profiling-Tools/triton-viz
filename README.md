@@ -43,19 +43,24 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 ## Getting Started
 
 ### Prerequisites
+
 - Python installed (preferably the latest available version).
 - [Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
 
 Upon successfully installing Triton, install Torch using the following command:
+
 ```sh
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
 ```
 
 Upon successful installation of Torch make sure to uninstall `pytorch-triton` using the following command:
+
 ```sh
 pip uninstall pytorch-triton
 ```
+
 ### Installation of Triton-Viz
+
 Clone the repository to your local machine:
 
 ```sh
@@ -63,6 +68,7 @@ git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
 cd triton-viz
 pip install -e .
 ```
+
 You're all set!
 
 ## Working with Examples
@@ -71,9 +77,12 @@ You're all set!
 cd examples
 python <file_name>.py
 ```
+
 ## More Puzzles
+
 If you're interested in fun puzzles to work with in Triton, do check out: [Triton Puzzles](https://github.com/srush/Triton-Puzzles)
 
 ## License
+
 Triton-Viz is licensed under the MIT License. See the [LICENSE](LICENSE) for details.
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
