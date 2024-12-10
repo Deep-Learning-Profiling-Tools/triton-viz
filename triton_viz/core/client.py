@@ -2,7 +2,7 @@ from contextlib import contextmanager
 
 from abc import ABC, abstractmethod
 
-from .data import Op, Launch
+from .data import Op, Load, Store, Launch
 from .patch import patch_op, unpatch_op, op_list, patch_calls
 from typing import Tuple, Callable, Type, Optional
 
@@ -41,8 +41,8 @@ class ClientManager:
         with patch_calls():
             for client in self.clients:
                 for op in op_list:
-                    before_callback, after_callback = client.register_op_callback(op)
-                    patch_op(op, before_callback, after_callback)
+                    before_callback, after_callback, op_callback = client.register_op_callback(op)
+                    patch_op(op, before_callback, after_callback, op_callback)
             try:
                 yield
             finally:

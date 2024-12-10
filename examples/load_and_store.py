@@ -3,9 +3,9 @@ import triton.language as tl
 import torch
 
 import triton_viz
-from triton_viz.clients import FakeExecutor
+from triton_viz.clients import Sanitizer
 
-@triton_viz.trace(clients=FakeExecutor())
+@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
 @triton.jit
 def simple_kernel(X_ptr, Y_ptr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
