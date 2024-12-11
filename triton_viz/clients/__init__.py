@@ -1,7 +1,6 @@
 from .profiler.profiler import Profiler
 from .profiler.data import LoadStoreBytes, OpTypeCounts
 from .sanitizer.sanitizer import Sanitizer
-from .sanitizer.fake_executor import FakeExecutor
 from .sanitizer.data import OutOfBoundsRecord
 from .tracer.tracer import Tracer
 
