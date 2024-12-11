@@ -8,7 +8,7 @@ from ...core.client import Client
 from ...core.data import Op, Load, Store
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
 from .data import OutOfBoundsRecord
-from ...core.config import sanitizer_backend, global_warning_toggled
+from ...core.config import sanitizer_backend
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -64,6 +64,31 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print("            End of Out-Of-Bounds Record Details             ")
     print("============================================================")
 
+def get_traceback_info():
+    oob_filename, oob_lineno, oob_func_name, oob_line_of_code = "", -1, "", ""
+    stack_summary = traceback.extract_stack()
+    for i, frame in enumerate(stack_summary):
+        if '_jit_function_call' in frame.name \
+            and 'triton_viz/core/patch.py' in frame.filename:
+            oob_stack_index = i + 1
+            if oob_stack_index >= 0:
+                oob_filename = stack_summary[oob_stack_index].filename
+                oob_lineno = stack_summary[oob_stack_index].lineno
+                oob_func_name = stack_summary[oob_stack_index].name
+                oob_line_of_code = stack_summary[oob_stack_index].line
+            break
+    return oob_filename, oob_lineno, oob_func_name, oob_line_of_code
+
+def _get_tensor(tensor_list, data_ptr):
+        # From a give ptr, get where the original tensor is stored
+        # Tensors have been sorted by ptr
+        ret_idx = 0
+        for i in range(len(tensor_list)):
+            if data_ptr < tensor_list[i].data_ptr():
+                break
+            ret_idx = i
+        return tensor_list[ret_idx]
+
 class SanitizerBruteForce(Client):
     def __init__(self, callpath: Optional[bool] = True, abort_on_error: Optional[bool] = True):
         self.callpath = callpath
@@ -71,30 +96,9 @@ class SanitizerBruteForce(Client):
         self.tensors: list = []
         self.records: list = []
 
-    def _get_tensor(self, data_ptr):
-        # From a give ptr, get where the original tensor is stored
-        # Tensors have been sorted by ptr
-        ret_idx = 0
-        for i in range(len(self.tensors)):
-            if data_ptr < self.tensors[i].data_ptr():
-                break
-            ret_idx = i
-        return self.tensors[ret_idx]
-
     def _report(self, op_type, record):
-        oob_filename, oob_lineno, oob_func_name, oob_line_of_code = "", -1, "", ""
-        stack_summary = traceback.extract_stack()
-        for i, frame in enumerate(stack_summary):
-            if '_jit_function_call' in frame.name \
-                and 'triton_viz/core/patch.py' in frame.filename:
-                oob_stack_index = i + 1
-                if oob_stack_index >= 0:
-                    oob_filename = stack_summary[oob_stack_index].filename
-                    oob_lineno = stack_summary[oob_stack_index].lineno
-                    oob_func_name = stack_summary[oob_stack_index].name
-                    oob_line_of_code = stack_summary[oob_stack_index].line
-                break
-        oob_record = OutOfBoundsRecord(op_type, *record, oob_filename, oob_lineno, oob_func_name, oob_line_of_code)
+        traceback_info = get_traceback_info()
+        oob_record = OutOfBoundsRecord(op_type, *record, *traceback_info)
         if self.abort_on_error:
             if np.any(record[4]):
                 print_oob_record(oob_record)
@@ -119,7 +123,7 @@ class SanitizerBruteForce(Client):
         def pre_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
-            tensor = self._get_tensor(first_ptr)
+            tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, oob)
             ptr.data = tensor.data_ptr() + oob[-1]
@@ -127,7 +131,7 @@ class SanitizerBruteForce(Client):
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
-            tensor = self._get_tensor(first_ptr)
+            tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, check_out_of_bounds_access(ptr.data, mask.data, tensor))
             ptr.data = tensor.data_ptr() + oob[-1]
@@ -149,6 +153,7 @@ class SanitizerZ3(Client):
     '''
     def __init__(self, abort_on_error):
         self.abort_on_error = abort_on_error
+        self.tensors: list = []
         # constraints definition
         self.word_length = 4    # dtype=float32, word_length = 4 (bytes). TODO: support other dtypes
         self.constraints = []
@@ -191,6 +196,8 @@ class SanitizerZ3(Client):
         if not hasattr(arg, "data_ptr"):
             return
         assert check_storage_contiguous(arg), "The address sanitizer only supports contiguouly stored tensors for now"
+        self.tensors.append(arg)
+
         nbytes = arg.element_size() * arg.numel()
 
         # add constraints
@@ -211,10 +218,11 @@ class SanitizerZ3(Client):
             mask_array = np.reshape(mask.data, (-1))
 
             valid_addresses = base_array[mask_array]
-            if len(valid_addresses) != 0:
-                lower_bound = valid_addresses.min()
-                upper_bound = valid_addresses.max()
-                self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
+            if len(valid_addresses) == 0:
+                return
+            lower_bound = valid_addresses.min()
+            upper_bound = valid_addresses.max()
+            self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
 
         def op_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
             dtype_tt = ptr.get_element_ty()
@@ -229,9 +237,10 @@ class SanitizerZ3(Client):
             mask_array = np.reshape(mask.data, (-1))
 
             valid_addresses = base_array[mask_array]
+            if len(valid_addresses) == 0:
+                return
             lower_bound = valid_addresses.min()
             upper_bound = valid_addresses.max()
-
             self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
 
         if op_type is Load:
@@ -245,14 +254,11 @@ class SanitizerZ3(Client):
         return []
 
 def Sanitizer(abort_on_error=False):
-    available_backends = ["null", "brute_force", "z3"]
     if sanitizer_backend == "brute_force":
         return SanitizerBruteForce(abort_on_error)
     elif sanitizer_backend == "z3":
         return SanitizerZ3(abort_on_error)
+    elif sanitizer_backend == "off":
+        return None
     else:
-        if not global_warning_toggled['sanitizer']:
-            global_warning_toggled['sanitizer'] = True
-            print("TRITON_SANITIZER_BACKEND not set. Defaulting to 'brute_force'.")
-            print(f"Available backends are: {', '.join(available_backends)}")
-        return SanitizerBruteForce(abort_on_error)
+        assert False, f"Invalid TRITON_SANITIZER_BACKEND: {sanitizer_backend}."

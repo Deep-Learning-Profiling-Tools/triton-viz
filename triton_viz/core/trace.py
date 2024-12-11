@@ -5,7 +5,8 @@ from triton import JITFunction
 import os
 from typing import Tuple, Union
 
-from .config import trace_enabled, global_warning_toggled
+# from .config import trace_enabled, global_warning_toggled
+from .config import sanitizer_backend
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
@@ -59,13 +60,10 @@ def trace(clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]] = (
     :param clients: A tuple of clients to run with the kernel.
     """
     def decorator(kernel: JITFunction) -> Trace:
-        if trace_enabled:
-            return Trace(kernel, clients)
-        else:
-            if not global_warning_toggled['trace']:
-                global_warning_toggled['trace'] = True
-                print("Triton Sanitizer is disabled. Enable it by setting the environment variable ENABLE_TRITON_SANITIZER=1")
+        if sanitizer_backend == "off":
+            print("Triton Sanitizer is disabled since TRITON_SANITIZER_BACKEND=off.")
             return kernel
+        return Trace(kernel, clients)
     return decorator
 
 
