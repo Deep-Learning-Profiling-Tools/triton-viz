@@ -2,7 +2,7 @@ from contextlib import contextmanager
 
 from abc import ABC, abstractmethod
 
-from .data import Op, Load, Store, Launch
+from .data import Op, Launch
 from .patch import patch_op, unpatch_op, op_list, patch_calls
 from typing import Tuple, Callable, Type, Optional
 
