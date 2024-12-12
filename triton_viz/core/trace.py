@@ -5,7 +5,6 @@ from triton import JITFunction
 import os
 from typing import Tuple, Union
 
-# from .config import trace_enabled, global_warning_toggled
 from .config import sanitizer_backend
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
