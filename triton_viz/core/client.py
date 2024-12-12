@@ -41,8 +41,8 @@ class ClientManager:
         with patch_calls():
             for client in self.clients:
                 for op in op_list:
-                    before_callback, after_callback, op_callback = client.register_op_callback(op)
-                    patch_op(op, before_callback, after_callback, op_callback)
+                    before_callback, after_callback, op_overrider = client.register_op_callback(op)
+                    patch_op(op, before_callback, after_callback, op_overrider)
             try:
                 yield
             finally:

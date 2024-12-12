@@ -43,11 +43,11 @@ class Profiler(Client):
             self._report_load_store_bytes("store", ptr, mask)
 
         if isinstance(op, Load):
-            return pre_load_callback, None
+            return pre_load_callback, None, None
         elif isinstance(op, Store):
-            return pre_store_callback, None
+            return pre_store_callback, None, None
 
-        return None, None
+        return None, None, None
 
     def finalize(self) -> list:
         return [self.load_bytes, self.store_bytes]

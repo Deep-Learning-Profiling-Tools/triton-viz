@@ -224,12 +224,12 @@ class SanitizerZ3(Client):
             upper_bound = valid_addresses.max()
             self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
 
-        def op_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
+        def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
             dtype_tt = ptr.get_element_ty()
             dtype_np = _get_np_dtype(dtype_tt)
             return TensorHandle(np.zeros_like(ptr.data, dtype=dtype_np), dtype_tt)
 
-        def op_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
+        def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             pass
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
@@ -244,9 +244,9 @@ class SanitizerZ3(Client):
             self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
 
         if op_type is Load:
-            return pre_load_callback, None, op_load_callback
+            return pre_load_callback, None, op_load_overrider
         elif op_type is Store:
-            return pre_store_callback, None, op_store_callback
+            return pre_store_callback, None, op_store_overrider
         else:
             return None, None, None
 

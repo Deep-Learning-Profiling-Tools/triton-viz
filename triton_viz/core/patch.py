@@ -31,17 +31,17 @@ reduce_map: Dict[Type[Op], Callable] = {
 
 
 class PatchOp:
-    def __init__(self, op, before_callback, after_callback, op_callback):
+    def __init__(self, op, before_callback, after_callback, op_overrider):
         self.op = op
         self.before_callback = before_callback
         self.after_callback = after_callback
-        self.op_callback = op_callback
+        self.op_overrider = op_overrider
 
     def __call__(self, *args, **kwargs):
         if self.before_callback:
             self.before_callback(*args, **kwargs)
-        if self.op_callback:
-            ret = self.op_callback(*args, **kwargs)
+        if self.op_overrider:
+            ret = self.op_overrider(*args, **kwargs)
         else:
             ret = self.op(*args, **kwargs)
         if self.after_callback:
@@ -50,7 +50,7 @@ class PatchOp:
         return ret
 
 
-def patch_op(op_type: Type[Op], before_callback: Callable, after_callback: Callable, op_callback: Callable):
+def patch_op(op_type: Type[Op], before_callback: Callable, after_callback: Callable, op_overrider: Callable):
     """
     Register a callback to be called before and after an operator is executed.
 
@@ -62,12 +62,12 @@ def patch_op(op_type: Type[Op], before_callback: Callable, after_callback: Calla
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = original_ops[op_type].__name__
         current_op = getattr(interpreter_builder, op_name)
-        patched_op = PatchOp(current_op, before_callback, after_callback, op_callback)
+        patched_op = PatchOp(current_op, before_callback, after_callback, op_overrider)
         setattr(interpreter_builder, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     elif op_type in [ReduceMax, ReduceMin, ReduceSum]:
         op_name = reduce_map[op_type].__name__
         current_op = getattr(tl, op_name)
-        patched_op = PatchOp(current_op, before_callback, after_callback, op_callback)
+        patched_op = PatchOp(current_op, before_callback, after_callback, op_overrider)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")

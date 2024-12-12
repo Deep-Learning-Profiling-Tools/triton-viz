@@ -78,15 +78,15 @@ class Tracer(Client):
             self.records.append(Dot(input_shape, other_shape, ret_shape))
 
         if op_type is Load:
-            return pre_load_callback, None
+            return pre_load_callback, None, None
         elif op_type is Store:
-            return pre_store_callback, None
+            return pre_store_callback, None, None
         elif op_type is ReduceSum:
-            return None, post_reduce_sum_callback
+            return None, post_reduce_sum_callback, None
         elif op_type is Dot:
-            return None, post_dot_callback
+            return None, post_dot_callback, None
 
-        return None, None
+        return None, None, None
 
     def finalize(self) -> list:
         return self.records
