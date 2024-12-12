@@ -64,7 +64,7 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print("            End of Out-Of-Bounds Record Details             ")
     print("============================================================")
 
-def get_traceback_info():
+def _get_traceback_info():
     oob_filename, oob_lineno, oob_func_name, oob_line_of_code = "", -1, "", ""
     stack_summary = traceback.extract_stack()
     for i, frame in enumerate(stack_summary):
@@ -97,7 +97,7 @@ class SanitizerBruteForce(Client):
         self.records: list = []
 
     def _report(self, op_type, record):
-        traceback_info = get_traceback_info()
+        traceback_info = _get_traceback_info()
         oob_record = OutOfBoundsRecord(op_type, *record, *traceback_info)
         if self.abort_on_error:
             if np.any(record[4]):
@@ -261,4 +261,4 @@ def Sanitizer(abort_on_error=False):
     elif sanitizer_backend == "off":
         return None
     else:
-        assert False, f"Invalid TRITON_SANITIZER_BACKEND: {sanitizer_backend}."
+        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {sanitizer_backend}")
