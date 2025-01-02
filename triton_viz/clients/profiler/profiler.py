@@ -35,7 +35,7 @@ class Profiler(Client):
             self.store_bytes.total_bytes_attempted += total_bytes_attempted
             self.store_bytes.total_bytes_true += total_bytes_true
 
-    def register_op_callback(self, op: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
+    def register_op_callback(self, op: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
         def pre_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
             self._report_load_store_bytes("load", ptr, mask)
 
@@ -43,11 +43,11 @@ class Profiler(Client):
             self._report_load_store_bytes("store", ptr, mask)
 
         if isinstance(op, Load):
-            return pre_load_callback, None
+            return pre_load_callback, None, None
         elif isinstance(op, Store):
-            return pre_store_callback, None
+            return pre_store_callback, None, None
 
-        return None, None
+        return None, None, None
 
     def finalize(self) -> list:
         return [self.load_bytes, self.store_bytes]
