@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "setuptools",
-  "triton",
+  "triton @ git+https://github.com/openai/triton.git@b99a3006d8e45bc3a588aad82a513e1cc9c7c692#subdirectory=python",
   "gradio",
   "pyarrow",
   "pre-commit",
