@@ -10,6 +10,8 @@ available_backends = ["off", "brute_force", "z3"]
 if sanitizer_backend == "":
     print(f"TRITON_SANITIZER_BACKEND not set. Available backends are: {available_backends}. Defaulting to 'off'.")
     sanitizer_backend = "off"
-elif sanitizer_backend not in available_backends:
+if sanitizer_backend == "off":
+    print("Triton Sanitizer is disabled since TRITON_SANITIZER_BACKEND=off.")
+if sanitizer_backend not in available_backends:
     raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {sanitizer_backend}. Available backends are: {available_backends}")
 
