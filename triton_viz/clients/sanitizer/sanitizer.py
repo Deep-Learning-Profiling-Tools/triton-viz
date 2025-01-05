@@ -7,7 +7,7 @@ from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 from ...core.client import Client
 from ...core.data import Op, Load, Store
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
-from .data import OutOfBoundsRecord
+from .data import OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
 
 
@@ -77,7 +77,12 @@ def _get_traceback_info():
                 oob_func_name = stack_summary[oob_stack_index].name
                 oob_line_of_code = stack_summary[oob_stack_index].line
             break
-    return oob_filename, oob_lineno, oob_func_name, oob_line_of_code
+    return {
+        'filename': oob_filename,
+        'lineno': oob_lineno,
+        'func_name': oob_func_name,
+        'line_of_code': oob_line_of_code
+    }
 
 def _get_tensor(tensor_list, data_ptr):
         # From a give ptr, get where the original tensor is stored
@@ -98,7 +103,7 @@ class SanitizerBruteForce(Client):
 
     def _report(self, op_type, record):
         traceback_info = _get_traceback_info()
-        oob_record = OutOfBoundsRecord(op_type, *record, *traceback_info)
+        oob_record = OutOfBoundsRecordBruteForce(op_type=op_type, **record, **traceback_info)
         if self.abort_on_error:
             if np.any(record[4]):
                 print_oob_record(oob_record)
@@ -189,7 +194,7 @@ class SanitizerZ3(Client):
 
         if s.check() == sat:
             self._print_constraints()
-            print('out-of-bound memory access detected: {s.model()[x]}')
+            print(f'out-of-bound memory access detected: {s.model()[x]}')
             # assert False, f'out-of-bound memory access detected: {s.model()[x]}'
 
     def arg_callback(self, arg, arg_cvt):

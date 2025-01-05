@@ -9,14 +9,14 @@ def check_out_of_bounds_access(ptrs: npt.NDArray, masks: npt.NDArray[np.bool_], 
     valid_access_masks = (offsets >= 0) & (offsets < max_valid_offset)
     invalid_access_masks = (~valid_access_masks) & masks
     corrected_offsets = np.where(valid_access_masks, offsets, 0)
-    return (
-        tensor,
-        offsets,
-        masks,
-        valid_access_masks & masks,
-        invalid_access_masks,
-        corrected_offsets,
-    )
+    return {
+        'tensor': tensor,
+        'offsets': offsets,
+        'masks': masks,
+        'valid_access_masks': valid_access_masks & masks,
+        'invalid_access_masks': invalid_access_masks,
+        'corrected_offsets': corrected_offsets,
+    }
 
 
 def check_storage_contiguous(tensor: torch.Tensor):
