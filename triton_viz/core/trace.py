@@ -60,7 +60,6 @@ def trace(clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]] = (
     """
     def decorator(kernel: JITFunction) -> Trace:
         if sanitizer_backend == "off":
-            print("Triton Sanitizer is disabled since TRITON_SANITIZER_BACKEND=off.")
             return kernel
         return Trace(kernel, clients)
     return decorator
