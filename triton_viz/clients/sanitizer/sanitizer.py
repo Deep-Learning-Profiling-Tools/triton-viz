@@ -7,7 +7,7 @@ from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 from ...core.client import Client
 from ...core.data import Op, Load, Store
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
-from .data import OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
+from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
 
 
@@ -40,8 +40,9 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print(f"Tensor Info: dtype={tensor.dtype}, shape={tensor.shape}, device={tensor.device}")
     print(f"Tensor base memory address: {tensor.data_ptr()}")
     print("Valid Access Range: [0, %d)" % (np.prod(tensor.shape) * tensor.element_size()))
-    print(f"File: {oob_record.filename}, Line: {oob_record.lineno}, in {oob_record.func_name}")
-    print(f"  Code: {oob_record.line_of_code}")
+    for traceback_info in oob_record.user_code_tracebacks:
+        print(f"File: {traceback_info.filename}, Line: {traceback_info.lineno}, in {traceback_info.func_name}")
+        print(f"  Code: {traceback_info.line_of_code}")
     print("------------------------------------------------------------")
 
     if isinstance(oob_record, OutOfBoundsRecordBruteForce):
@@ -94,39 +95,32 @@ def _get_traceback_info():
     jit_index = None
     grid_index = None
 
+    user_code_tracebacks = []
     # scan the call stack
     for i, frame in enumerate(stack_summary):
-        if (jit_index is None
-            and '_jit_function_call' in frame.name
+        user_code_index = None
+        if ('_jit_function_call' in frame.name
             and 'triton_viz/core/patch.py' in frame.filename):
-            jit_index = i + 1  # the next stack is triton user code
-
-        if (grid_index is None
-            and '_grid_executor_call' in frame.name
+            user_code_index = i + 1  # the next stack is triton user code
+        elif ('_grid_executor_call' in frame.name
             and 'triton_viz/core/patch.py' in frame.filename):
-            grid_index = i + 1 # the next stack is triton user code
+            user_code_index = i + 1 # the next stack is triton user code
 
-    # Choose jit_index if it exists, otherwise choose grid_index
-    chosen_index = None
-    if jit_index is not None:
-        chosen_index = jit_index
-    elif grid_index is not None:
-        chosen_index = grid_index
+        if user_code_index is not None:
+            frame = stack_summary[user_code_index]
+            oob_filename = frame.filename
+            oob_lineno = frame.lineno
+            oob_func_name = frame.name
+            oob_line_of_code = frame.line
+            traceback_info = TracebackInfo(
+                filename=oob_filename,
+                lineno=oob_lineno,
+                func_name=oob_func_name,
+                line_of_code=oob_line_of_code
+            )
+            user_code_tracebacks.append(traceback_info)
 
-    # extract information from the chosen stack
-    if chosen_index is not None and 0 <= chosen_index and chosen_index < len(stack_summary):
-        frame = stack_summary[chosen_index]
-        oob_filename = frame.filename
-        oob_lineno = frame.lineno
-        oob_func_name = frame.name
-        oob_line_of_code = frame.line
-
-    return {
-        'filename': oob_filename,
-        'lineno': oob_lineno,
-        'func_name': oob_func_name,
-        'line_of_code': oob_line_of_code
-    }
+    return user_code_tracebacks
 
 def _get_tensor(tensor_list, data_ptr):
         # From a give ptr, get where the original tensor is stored
@@ -147,7 +141,7 @@ class SanitizerBruteForce(Client):
 
     def _report(self, op_type, record):
         traceback_info = _get_traceback_info()
-        oob_record = OutOfBoundsRecordBruteForce(op_type=op_type, **record, **traceback_info)
+        oob_record = OutOfBoundsRecordBruteForce(op_type=op_type, user_code_tracebacks=traceback_info, **record)
         if self.abort_on_error:
             if np.any(oob_record.invalid_access_masks):
                 print_oob_record(oob_record)
@@ -175,7 +169,7 @@ class SanitizerBruteForce(Client):
             tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, oob)
-            ptr.data = tensor.data_ptr() + oob[-1]
+            ptr.data = tensor.data_ptr() + oob['corrected_offsets']
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
@@ -183,7 +177,7 @@ class SanitizerBruteForce(Client):
             tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, check_out_of_bounds_access(ptr.data, mask.data, tensor))
-            ptr.data = tensor.data_ptr() + oob[-1]
+            ptr.data = tensor.data_ptr() + oob['corrected_offsets']
 
         if op_type is Load:
             return pre_load_callback, None, None
@@ -222,10 +216,11 @@ class SanitizerZ3(Client):
         traceback_info = _get_traceback_info()
         oob_record = OutOfBoundsRecordZ3(
             op_type=op_type,
+            user_code_tracebacks=traceback_info,
             tensor=tensor,
             violation_index=violation_index,
             constraints=self.constraints,
-            **traceback_info)
+        )
         if self.abort_on_error:
             print_oob_record(oob_record)
             raise ValueError("Out-of-bounds access detected. See detailed report above.")

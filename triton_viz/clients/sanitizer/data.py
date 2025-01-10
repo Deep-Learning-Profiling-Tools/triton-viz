@@ -8,13 +8,17 @@ import z3
 
 
 @dataclass
-class OutOfBoundsRecord:
-    op_type: Type[Union[Store, Load]]
-    tensor: torch.Tensor
+class TracebackInfo:
     filename: str
     lineno: int
     func_name: str
     line_of_code: str
+
+@dataclass
+class OutOfBoundsRecord:
+    op_type: Type[Union[Store, Load]]
+    tensor: torch.Tensor
+    user_code_tracebacks: List[TracebackInfo]
 
 @dataclass
 class OutOfBoundsRecordBruteForce(OutOfBoundsRecord):
