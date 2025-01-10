@@ -198,7 +198,6 @@ class SanitizerZ3(Client):
         self.abort_on_error = abort_on_error
         self.tensors: list = []
         # constraints definition
-        self.word_length = 4    # dtype=float32, word_length = 4 (bytes). TODO: support other dtypes
         self.constraints = []
         self.is_combined_constraint_valid = False
         self.combined_constraint = None
@@ -261,7 +260,7 @@ class SanitizerZ3(Client):
         # add constraints
         x = Int('x')
         lowerbound_constraint = x >= arg.data_ptr()
-        upperbound_constraint = x <= arg.data_ptr() + nbytes - self.word_length
+        upperbound_constraint = x <= arg.data_ptr() + nbytes - arg.element_size()
         self._update_constraints(And(lowerbound_constraint, upperbound_constraint))
 
     def grid_callback(self, grid: Tuple[int]):
