@@ -81,7 +81,7 @@ def _get_traceback_info():
     jit_index = None
     grid_index = None
 
-    # scann the call stack
+    # scan the call stack
     for i, frame in enumerate(stack_summary):
         if (jit_index is None
             and '_jit_function_call' in frame.name
