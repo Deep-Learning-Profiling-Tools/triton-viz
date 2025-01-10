@@ -7,7 +7,7 @@ from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 from ...core.client import Client
 from ...core.data import Op, Load, Store
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
-from .data import OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
+from .data import OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
 
 
@@ -32,10 +32,6 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     # Read the tensor from the record
     tensor = oob_record.tensor
 
-    # Convert memoryviews to NumPy arrays
-    offsets_arr = np.array(oob_record.offsets)
-    invalid_access_masks_arr = np.array(oob_record.invalid_access_masks)
-
     # Basic info about the OOB event
     print("============================================================")
     print("                 Out-Of-Bounds Access Detected              ")
@@ -48,17 +44,34 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print(f"  Code: {oob_record.line_of_code}")
     print("------------------------------------------------------------")
 
-    # Determine all invalid indices
-    invalid_indices = np.where(invalid_access_masks_arr.flatten())[0]
+    if isinstance(oob_record, OutOfBoundsRecordBruteForce):
+        # Convert memoryviews to NumPy arrays
+        offsets_arr = np.array(oob_record.offsets)
+        invalid_access_masks_arr = np.array(oob_record.invalid_access_masks)
 
-    assert len(invalid_indices) != 0, "No invalid accesses found in this record."
+        # Determine all invalid indices
+        invalid_indices = np.where(invalid_access_masks_arr.flatten())[0]
+        assert len(invalid_indices) != 0, "No invalid accesses found in this record."
 
-    print(f"Total invalid accesses: {len(invalid_indices)}")
+        # Print OOB details
+        print(f"Total invalid accesses: {len(invalid_indices)}")
+        invalid_offsets = offsets_arr.flatten()[invalid_indices]
+        print("Invalid offsets:")
+        print(invalid_offsets)
 
-    invalid_offsets = offsets_arr.flatten()[invalid_indices]
+    elif isinstance(oob_record, OutOfBoundsRecordZ3):
+        # Read the violation index and constraints
+        invalid_index = oob_record.violation_index
+        constraints = oob_record.constraints
 
-    print("Invalid offsets:")
-    print(invalid_offsets)
+        # Print OOB details
+        print(f"Invalid access detected at index: {invalid_index}")
+        print("Constraints:")
+        for constraint in constraints:
+            print(constraint)
+
+    else:
+        raise NotImplementedError("Invalid OutOfBoundsRecord type: " + str(type(oob_record)))
 
     print("============================================================")
     print("            End of Out-Of-Bounds Record Details             ")
@@ -105,7 +118,7 @@ class SanitizerBruteForce(Client):
         traceback_info = _get_traceback_info()
         oob_record = OutOfBoundsRecordBruteForce(op_type=op_type, **record, **traceback_info)
         if self.abort_on_error:
-            if np.any(record[4]):
+            if np.any(oob_record.invalid_access_masks):
                 print_oob_record(oob_record)
                 assert False, "Out-of-bounds access detected. See detailed report above."
         else:
@@ -174,7 +187,21 @@ class SanitizerZ3(Client):
         for constraint in self.constraints:
             print(constraint)
 
-    def _check_if_range_statisfy_constraints(self, start, end):
+    def _report(self, op_type, tensor, violation_index):
+        traceback_info = _get_traceback_info()
+        oob_record = OutOfBoundsRecordZ3(
+            op_type=op_type,
+            tensor=tensor,
+            violation_index=violation_index,
+            constraints=self.constraints,
+            **traceback_info)
+        if self.abort_on_error:
+            print_oob_record(oob_record)
+            raise ValueError("Out-of-bounds access detected. See detailed report above.")
+        else:
+            self.records.append(oob_record)
+
+    def _check_if_range_statisfy_constraints(self, start, end, op_type):
         # create a cache for the combined constraint
         if not self.is_combined_constraint_valid:
             self.combined_constraint = Or(*self.constraints)
@@ -192,10 +219,10 @@ class SanitizerZ3(Client):
         s.add(Not(self.combined_constraint))
         s.add(interval_constraint)
 
+        # if found out-of-bound access, report it
         if s.check() == sat:
-            self._print_constraints()
-            print(f'out-of-bound memory access detected: {s.model()[x]}')
-            # assert False, f'out-of-bound memory access detected: {s.model()[x]}'
+            tensor = _get_tensor(self.tensors, start)
+            self._report(op_type, tensor, s.model()[x])
 
     def arg_callback(self, arg, arg_cvt):
         if not hasattr(arg, "data_ptr"):
@@ -227,7 +254,7 @@ class SanitizerZ3(Client):
                 return
             lower_bound = valid_addresses.min()
             upper_bound = valid_addresses.max()
-            self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
+            self._check_if_range_statisfy_constraints(lower_bound, upper_bound, op_type)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
             dtype_tt = ptr.get_element_ty()
@@ -246,7 +273,7 @@ class SanitizerZ3(Client):
                 return
             lower_bound = valid_addresses.min()
             upper_bound = valid_addresses.max()
-            self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
+            self._check_if_range_statisfy_constraints(lower_bound, upper_bound, op_type)
 
         if op_type is Load:
             return pre_load_callback, None, op_load_overrider
