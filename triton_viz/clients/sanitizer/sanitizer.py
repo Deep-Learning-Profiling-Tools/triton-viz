@@ -66,12 +66,12 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
 
 def _get_traceback_info():
     """
-    # Why do both _grid_executor_call and _jit_function_call appear in the call stacks?
+    Why do both _grid_executor_call and _jit_function_call appear in the call stacks?
 
-    # 1) Main kernel dispatch (kernel[grid](...)) triggers _grid_executor_call.
-    # 2) Inlined @triton.jit functions trigger _jit_function_call.
-    # 3) Some code sees only _grid_executor_call if no separate JIT function is present or patched.
-    # 4) Complex kernels (e.g., fused_attention) may show both: outer dispatch and inner JIT calls.
+    1) Main kernel dispatch (kernel[grid](...)) triggers _grid_executor_call.
+    2) Inlined @triton.jit functions trigger _jit_function_call.
+    3) Some code sees only _grid_executor_call if no separate JIT function is present or patched.
+    4) Complex kernels (e.g., fused_attention) may show both: outer dispatch and inner JIT calls.
     """
     oob_filename, oob_lineno, oob_func_name, oob_line_of_code = "", -1, "", ""
 
