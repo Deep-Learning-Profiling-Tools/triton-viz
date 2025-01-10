@@ -78,18 +78,49 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print("============================================================")
 
 def _get_traceback_info():
+    """
+    Why do both _grid_executor_call and _jit_function_call appear in the call stacks?
+
+    1) Main kernel dispatch (kernel[grid](...)) triggers _grid_executor_call.
+    2) Inlined @triton.jit functions trigger _jit_function_call.
+    3) Some code sees only _grid_executor_call if no separate JIT function is present or patched.
+    4) Complex kernels (e.g., fused_attention) may show both: outer dispatch and inner JIT calls.
+    """
     oob_filename, oob_lineno, oob_func_name, oob_line_of_code = "", -1, "", ""
+
     stack_summary = traceback.extract_stack()
+
+    # record the index of two key functions in core/patch.py
+    jit_index = None
+    grid_index = None
+
+    # scan the call stack
     for i, frame in enumerate(stack_summary):
-        if '_jit_function_call' in frame.name \
-            and 'triton_viz/core/patch.py' in frame.filename:
-            oob_stack_index = i + 1
-            if oob_stack_index >= 0:
-                oob_filename = stack_summary[oob_stack_index].filename
-                oob_lineno = stack_summary[oob_stack_index].lineno
-                oob_func_name = stack_summary[oob_stack_index].name
-                oob_line_of_code = stack_summary[oob_stack_index].line
-            break
+        if (jit_index is None
+            and '_jit_function_call' in frame.name
+            and 'triton_viz/core/patch.py' in frame.filename):
+            jit_index = i + 1  # the next stack is triton user code
+
+        if (grid_index is None
+            and '_grid_executor_call' in frame.name
+            and 'triton_viz/core/patch.py' in frame.filename):
+            grid_index = i + 1 # the next stack is triton user code
+
+    # Choose jit_index if it exists, otherwise choose grid_index
+    chosen_index = None
+    if jit_index is not None:
+        chosen_index = jit_index
+    elif grid_index is not None:
+        chosen_index = grid_index
+
+    # extract information from the chosen stack
+    if chosen_index is not None and 0 <= chosen_index and chosen_index < len(stack_summary):
+        frame = stack_summary[chosen_index]
+        oob_filename = frame.filename
+        oob_lineno = frame.lineno
+        oob_func_name = frame.name
+        oob_line_of_code = frame.line
+
     return {
         'filename': oob_filename,
         'lineno': oob_lineno,
