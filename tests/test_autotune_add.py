@@ -50,7 +50,7 @@ def test_autotune_add_inrange():
 
     print("test_autotune_add_inrange() passed: No out-of-bound access.")
 
-def test_autotune_add_oob():
+def test_autotune_add_out_of_bound():
     """
     This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
     It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
