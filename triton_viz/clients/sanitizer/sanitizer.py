@@ -7,7 +7,7 @@ from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 from ...core.client import Client
 from ...core.data import Op, Load, Store
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
-from .data import OutOfBoundsRecord
+from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
 
 
@@ -32,10 +32,6 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     # Read the tensor from the record
     tensor = oob_record.tensor
 
-    # Convert memoryviews to NumPy arrays
-    offsets_arr = np.array(oob_record.offsets)
-    invalid_access_masks_arr = np.array(oob_record.invalid_access_masks)
-
     # Basic info about the OOB event
     print("============================================================")
     print("                 Out-Of-Bounds Access Detected              ")
@@ -44,21 +40,39 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print(f"Tensor Info: dtype={tensor.dtype}, shape={tensor.shape}, device={tensor.device}")
     print(f"Tensor base memory address: {tensor.data_ptr()}")
     print("Valid Access Range: [0, %d)" % (np.prod(tensor.shape) * tensor.element_size()))
-    print(f"File: {oob_record.filename}, Line: {oob_record.lineno}, in {oob_record.func_name}")
-    print(f"  Code: {oob_record.line_of_code}")
+    for traceback_info in oob_record.user_code_tracebacks:
+        print(f"File: {traceback_info.filename}, Line: {traceback_info.lineno}, in {traceback_info.func_name}")
+        print(f"  Code: {traceback_info.line_of_code}")
     print("------------------------------------------------------------")
 
-    # Determine all invalid indices
-    invalid_indices = np.where(invalid_access_masks_arr.flatten())[0]
+    if isinstance(oob_record, OutOfBoundsRecordBruteForce):
+        # Convert memoryviews to NumPy arrays
+        offsets_arr = np.array(oob_record.offsets)
+        invalid_access_masks_arr = np.array(oob_record.invalid_access_masks)
 
-    assert len(invalid_indices) != 0, "No invalid accesses found in this record."
+        # Determine all invalid indices
+        invalid_indices = np.where(invalid_access_masks_arr.flatten())[0]
+        assert len(invalid_indices) != 0, "No invalid accesses found in this record."
 
-    print(f"Total invalid accesses: {len(invalid_indices)}")
+        # Print OOB details
+        print(f"Total invalid accesses: {len(invalid_indices)}")
+        invalid_offsets = offsets_arr.flatten()[invalid_indices]
+        print("Invalid offsets:")
+        print(invalid_offsets)
 
-    invalid_offsets = offsets_arr.flatten()[invalid_indices]
+    elif isinstance(oob_record, OutOfBoundsRecordZ3):
+        # Read the violation index and constraints
+        violation_address = oob_record.violation_address
+        constraints = oob_record.constraints
 
-    print("Invalid offsets:")
-    print(invalid_offsets)
+        # Print OOB details
+        print(f"Invalid access detected at address: {violation_address}")
+        print("Constraints:")
+        for constraint in constraints:
+            print(constraint)
+
+    else:
+        raise NotImplementedError("Invalid OutOfBoundsRecord type: " + str(type(oob_record)))
 
     print("============================================================")
     print("            End of Out-Of-Bounds Record Details             ")
@@ -81,39 +95,32 @@ def _get_traceback_info():
     jit_index = None
     grid_index = None
 
+    user_code_tracebacks = []
     # scan the call stack
     for i, frame in enumerate(stack_summary):
-        if (jit_index is None
-            and '_jit_function_call' in frame.name
+        user_code_index = None
+        if ('_jit_function_call' in frame.name
             and 'triton_viz/core/patch.py' in frame.filename):
-            jit_index = i + 1  # the next stack is triton user code
-
-        if (grid_index is None
-            and '_grid_executor_call' in frame.name
+            user_code_index = i + 1  # the next stack is triton user code
+        elif ('_grid_executor_call' in frame.name
             and 'triton_viz/core/patch.py' in frame.filename):
-            grid_index = i + 1 # the next stack is triton user code
+            user_code_index = i + 1 # the next stack is triton user code
 
-    # Choose jit_index if it exists, otherwise choose grid_index
-    chosen_index = None
-    if jit_index is not None:
-        chosen_index = jit_index
-    elif grid_index is not None:
-        chosen_index = grid_index
+        if user_code_index is not None:
+            frame = stack_summary[user_code_index]
+            oob_filename = frame.filename
+            oob_lineno = frame.lineno
+            oob_func_name = frame.name
+            oob_line_of_code = frame.line
+            traceback_info = TracebackInfo(
+                filename=oob_filename,
+                lineno=oob_lineno,
+                func_name=oob_func_name,
+                line_of_code=oob_line_of_code
+            )
+            user_code_tracebacks.append(traceback_info)
 
-    # extract information from the chosen stack
-    if chosen_index is not None and 0 <= chosen_index and chosen_index < len(stack_summary):
-        frame = stack_summary[chosen_index]
-        oob_filename = frame.filename
-        oob_lineno = frame.lineno
-        oob_func_name = frame.name
-        oob_line_of_code = frame.line
-
-    return {
-        'filename': oob_filename,
-        'lineno': oob_lineno,
-        'func_name': oob_func_name,
-        'line_of_code': oob_line_of_code
-    }
+    return user_code_tracebacks
 
 def _get_tensor(tensor_list, data_ptr):
         # From a give ptr, get where the original tensor is stored
@@ -134,9 +141,9 @@ class SanitizerBruteForce(Client):
 
     def _report(self, op_type, record):
         traceback_info = _get_traceback_info()
-        oob_record = OutOfBoundsRecord(op_type, *record, *traceback_info)
+        oob_record = OutOfBoundsRecordBruteForce(op_type=op_type, user_code_tracebacks=traceback_info, **record)
         if self.abort_on_error:
-            if np.any(record[4]):
+            if np.any(oob_record.invalid_access_masks):
                 print_oob_record(oob_record)
                 assert False, "Out-of-bounds access detected. See detailed report above."
         else:
@@ -162,7 +169,7 @@ class SanitizerBruteForce(Client):
             tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, oob)
-            ptr.data = tensor.data_ptr() + oob[-1]
+            ptr.data = tensor.data_ptr() + oob['corrected_offsets']
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
@@ -170,7 +177,7 @@ class SanitizerBruteForce(Client):
             tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, check_out_of_bounds_access(ptr.data, mask.data, tensor))
-            ptr.data = tensor.data_ptr() + oob[-1]
+            ptr.data = tensor.data_ptr() + oob['corrected_offsets']
 
         if op_type is Load:
             return pre_load_callback, None, None
@@ -191,7 +198,6 @@ class SanitizerZ3(Client):
         self.abort_on_error = abort_on_error
         self.tensors: list = []
         # constraints definition
-        self.word_length = 4    # dtype=float32, word_length = 4 (bytes). TODO: support other dtypes
         self.constraints = []
         self.is_combined_constraint_valid = False
         self.combined_constraint = None
@@ -205,7 +211,22 @@ class SanitizerZ3(Client):
         for constraint in self.constraints:
             print(constraint)
 
-    def _check_if_range_statisfy_constraints(self, start, end):
+    def _report(self, op_type, tensor, violation_address):
+        traceback_info = _get_traceback_info()
+        oob_record = OutOfBoundsRecordZ3(
+            op_type=op_type,
+            user_code_tracebacks=traceback_info,
+            tensor=tensor,
+            violation_address=violation_address,
+            constraints=self.constraints,
+        )
+        if self.abort_on_error:
+            print_oob_record(oob_record)
+            raise ValueError("Out-of-bounds access detected. See detailed report above.")
+        else:
+            self.records.append(oob_record)
+
+    def _check_if_range_statisfy_constraints(self, start, end, op_type):
         # create a cache for the combined constraint
         if not self.is_combined_constraint_valid:
             self.combined_constraint = Or(*self.constraints)
@@ -223,10 +244,10 @@ class SanitizerZ3(Client):
         s.add(Not(self.combined_constraint))
         s.add(interval_constraint)
 
+        # if found out-of-bound access, report it
         if s.check() == sat:
-            self._print_constraints()
-            print('out-of-bound memory access detected: {s.model()[x]}')
-            # assert False, f'out-of-bound memory access detected: {s.model()[x]}'
+            tensor = _get_tensor(self.tensors, start)
+            self._report(op_type, tensor, s.model()[x])
 
     def arg_callback(self, arg, arg_cvt):
         if not hasattr(arg, "data_ptr"):
@@ -239,7 +260,7 @@ class SanitizerZ3(Client):
         # add constraints
         x = Int('x')
         lowerbound_constraint = x >= arg.data_ptr()
-        upperbound_constraint = x <= arg.data_ptr() + nbytes - self.word_length
+        upperbound_constraint = x <= arg.data_ptr() + nbytes - arg.element_size()
         self._update_constraints(And(lowerbound_constraint, upperbound_constraint))
 
     def grid_callback(self, grid: Tuple[int]):
@@ -258,7 +279,7 @@ class SanitizerZ3(Client):
                 return
             lower_bound = valid_addresses.min()
             upper_bound = valid_addresses.max()
-            self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
+            self._check_if_range_statisfy_constraints(lower_bound, upper_bound, op_type)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
             dtype_tt = ptr.get_element_ty()
@@ -277,7 +298,7 @@ class SanitizerZ3(Client):
                 return
             lower_bound = valid_addresses.min()
             upper_bound = valid_addresses.max()
-            self._check_if_range_statisfy_constraints(lower_bound, upper_bound)
+            self._check_if_range_statisfy_constraints(lower_bound, upper_bound, op_type)
 
         if op_type is Load:
             return pre_load_callback, None, op_load_overrider
