@@ -18,7 +18,7 @@ class Trace(KernelInterface):
 
     def __init__(self, kernel: JITFunction, clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]]) -> None:
         assert isinstance(kernel, JITFunction), "Kernel must be a JITFunction"
-        self.interpreter = InterpretedFunction(kernel.fn)
+        self.interpreter_fn = InterpretedFunction(kernel.fn)
         self.fn = kernel
         self.arg_names = kernel.arg_names
         init_clients: list[Client] = []
@@ -40,7 +40,7 @@ class Trace(KernelInterface):
     def run(self, *args, **kwargs):
         with self.client_manager.patch():
             kwargs.update({"client_manager": self.client_manager})
-            ret = self.interpreter.run(*args, **kwargs)
+            ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()
             return ret
 
