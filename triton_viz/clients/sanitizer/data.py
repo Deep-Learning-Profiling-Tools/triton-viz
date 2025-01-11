@@ -30,5 +30,24 @@ class OutOfBoundsRecordBruteForce(OutOfBoundsRecord):
 
 @dataclass
 class OutOfBoundsRecordZ3(OutOfBoundsRecord):
+    """
+    Attributes:
+        constraints (List[z3.z3.BoolRef]):
+            A collection of Z3 constraint expressions defining valid ranges 
+            for memory access. Any address falling outside these ranges is considered invalid.
+
+        violation_address (int):
+            The exact address where an invalid memory access was detected.
+            For example:
+            Invalid access detected at index: 200
+
+            A few simplified constraints might look like:
+              And(x >= 50, x <= 60)
+              And(x >= 70, x <= 80)
+              ...
+
+            In this scenario, 200 is an out-of-bounds address because it
+            falls outside the valid ranges described by these constraints.
+    """
     constraints: List[z3.z3.BoolRef]
-    violation_index: int
+    violation_address: int

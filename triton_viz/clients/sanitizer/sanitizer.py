@@ -62,11 +62,11 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
 
     elif isinstance(oob_record, OutOfBoundsRecordZ3):
         # Read the violation index and constraints
-        invalid_index = oob_record.violation_index
+        violation_address = oob_record.violation_address
         constraints = oob_record.constraints
 
         # Print OOB details
-        print(f"Invalid access detected at index: {invalid_index}")
+        print(f"Invalid access detected at address: {violation_address}")
         print("Constraints:")
         for constraint in constraints:
             print(constraint)
@@ -211,13 +211,13 @@ class SanitizerZ3(Client):
         for constraint in self.constraints:
             print(constraint)
 
-    def _report(self, op_type, tensor, violation_index):
+    def _report(self, op_type, tensor, violation_address):
         traceback_info = _get_traceback_info()
         oob_record = OutOfBoundsRecordZ3(
             op_type=op_type,
             user_code_tracebacks=traceback_info,
             tensor=tensor,
-            violation_index=violation_index,
+            violation_address=violation_address,
             constraints=self.constraints,
         )
         if self.abort_on_error:
