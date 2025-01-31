@@ -29,6 +29,10 @@ class Op:
 
 
 @dataclass
+class ProgramId(Op):
+    name: ClassVar[str] = "program_id"
+
+@dataclass
 class Store(Op):
     name: ClassVar[str] = "store"
     ptr: int

@@ -1,46 +1,71 @@
 import torch
 import triton
 import triton.language as tl
-
-# Example import of the Trace decorator with a sanitizer client
-# Adjust according to your actual project structure
 import triton_viz
 from triton_viz.clients import Sanitizer
 
 
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
-@triton.jit
-def add_kernel_no_mask(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    """
-    A Triton kernel that loads and stores values without boundary checks (mask).
-    This can lead to out-of-bound access if n_elements exceeds the buffer size.
-    """
-    pid = tl.program_id(0) # pid = [x, y]
-    block_start = pid * BLOCK_SIZE # block_start = [x * BLOCK_SIZE, y * BLOCK_SIZE]
-    offsets = block_start + tl.arange(0, BLOCK_SIZE) # block_start = [x * BLOCK_SIZE, y * BLOCK_SIZE + BLOCK_SIZE]
+def test_program_id():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def program_id_kernel(X):
+        pid = tl.program_id(0)
+        print('pid:', pid)
+    a = torch.randn(16, dtype=torch.float32, device='cuda')
+    program_id_kernel[(16,)](a)
 
-    # No mask is applied here, so loading/storing beyond the valid range can occur.
-    x_val = tl.load(x_ptr + offsets) # x_addr = [x_ptr + x * BLOCK_SIZE, x_ptr + y * BLOCK_SIZE + BLOCK_SIZE]
-    y_val = tl.load(y_ptr + offsets)
-    tl.store(out_ptr + offsets, x_val + y_val)
+def test_tl_add():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def add_kernel(X, Y, Z):
+        pid = tl.program_id(0)
+        x = tl.load(X + pid)
+        y = tl.load(Y + pid)
+        z = x + y
+        tl.store(Z + pid, z)
+    a = torch.randn(16, dtype=torch.float32, device='cuda')
+    b = torch.randn(16, dtype=torch.float32, device='cuda')
+    c = torch.empty_like(a, device='cuda')
+    add_kernel[(16,)](a, b, c)
 
-def test_autotune_add_inrange():
-    """
-    This test uses n_elements = 128, matching the size of the input tensors.
-    It should NOT cause any out-of-bound access.
-    """
-    x = torch.randn(128, device='cuda')
-    y = torch.randn(128, device='cuda')
-    out = torch.empty_like(x)
+def test_tl_subtract():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def subtract_kernel(X, Y, Z):
+        pid = tl.program_id(0)
+        x = tl.load(X + pid)
+        y = tl.load(Y + pid)
+        z = x - y
+        tl.store(Z + pid, z)
+    a = torch.randn(16, dtype=torch.float32, device='cuda')
+    b = torch.randn(16, dtype=torch.float32, device='cuda')
+    c = torch.empty_like(a, device='cuda')
+    subtract_kernel[(16,)](a, b, c)
 
-    # The kernel launch uses n_elements=128, aligned with the tensor size.
-    grid = lambda META: (triton.cdiv(128, META['BLOCK_SIZE']),)
-    add_kernel_no_mask[grid](
-        x_ptr=x,
-        y_ptr=y,
-        out_ptr=out,
-        n_elements=128,
-        BLOCK_SIZE=16
-    )
+def test_tl_multiply():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def multiply_kernel(X, Y, Z):
+        pid = tl.program_id(0)
+        x = tl.load(X + pid)
+        y = tl.load(Y + pid)
+        z = x * y
+        tl.store(Z + pid, z)
+    a = torch.randn(16, dtype=torch.float32, device='cuda')
+    b = torch.randn(16, dtype=torch.float32, device='cuda')
+    c = torch.empty_like(a, device='cuda')
+    multiply_kernel[(16,)](a, b, c)
 
-    print("test_autotune_add_inrange() passed: No out-of-bound access.")
+def test_tl_divide():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def divide_kernel(X, Y, Z):
+        pid = tl.program_id(0)
+        x = tl.load(X + pid)
+        y = tl.load(Y + pid)
+        z = x / y
+        tl.store(Z + pid, z)
+    a = torch.randn(16, dtype=torch.float32, device='cuda')
+    b = torch.randn(16, dtype=torch.float32, device='cuda')
+    c = torch.empty_like(a, device='cuda')
+    divide_kernel[(16,)](a, b, c)

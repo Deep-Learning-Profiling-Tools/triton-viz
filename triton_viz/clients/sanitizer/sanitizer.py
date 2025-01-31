@@ -5,7 +5,7 @@ from z3 import Solver, Int, And, Or, Not, sat
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, Load, Store
+from ...core.data import Op, Load, Store, BinaryOp, ProgramId
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -310,11 +310,75 @@ class SanitizerZ3(Client):
     def finalize(self) -> list:
         return []
 
+class SanitizerSymbolicExecution(Client):
+    def __init__(self, abort_on_error):
+        self.abort_on_error = abort_on_error
+
+    def arg_callback(self, arg, arg_cvt):
+        pass
+
+    def grid_callback(self, grid: Tuple[int]):
+        pass
+
+    def grid_idx_callback(self, grid_idx: Tuple[int]):
+        pass
+
+    def register_op_callback(self, op_type: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
+        def pre_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
+            pass
+
+        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
+            pass
+
+        def pre_binary_op_callback(lhs, rhs, op):
+            import numpy as np
+            if op is np.add:
+                print("Addition detected:", lhs, rhs)
+            elif op is np.subtract:
+                print("Subtraction detected:", lhs, rhs)
+            elif op is np.multiply:
+                print("Multiplication detected:", lhs, rhs)
+            elif op is np.divide:
+                print("Division detected:", lhs, rhs)
+            else:
+                print(lhs, rhs, op)
+
+        def pre_program_id_callback(axis):
+            print("Program ID detected. Axis:", axis)
+
+        def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
+            dtype_tt = ptr.get_element_ty()
+            dtype_np = _get_np_dtype(dtype_tt)
+            return TensorHandle(np.zeros_like(ptr.data, dtype=dtype_np), dtype_tt)
+
+        def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
+            pass
+
+        def op_binary_op_overrider():
+            pass
+
+        if op_type is Load:
+            return pre_load_callback, None, None
+        elif op_type is Store:
+            return pre_store_callback, None, None
+        elif op_type is BinaryOp:
+            return pre_binary_op_callback, None, None
+        elif op_type is ProgramId:
+            return pre_program_id_callback, None, None
+        else:
+            return None, None, None
+
+    def finalize(self) -> list:
+        return []
+
+
 def Sanitizer(abort_on_error=False):
     if sanitizer_backend == "brute_force":
         return SanitizerBruteForce(abort_on_error)
     elif sanitizer_backend == "z3":
         return SanitizerZ3(abort_on_error)
+    elif sanitizer_backend == "symexec":
+        return SanitizerSymbolicExecution(abort_on_error)
     elif sanitizer_backend == "off":
         return None
     else:
