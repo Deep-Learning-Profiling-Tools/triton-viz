@@ -319,8 +319,8 @@ class SymbolicPointer:
     - offset_interval: a tuple representing *closed* interval. e.g. (low, high)
     """
     def __init__(self, base_expr: str, offset_interval: tuple):
-        self.base_expr = base_expr
-        self.offset_interval = offset_interval  # (low, high)
+        self.base_expr: str = base_expr
+        self.offset_interval: Tuple[int, int] = offset_interval  # (low, high)
 
     def __str__(self):
         low, high = self.offset_interval
@@ -342,8 +342,8 @@ class SymbolicScalar:
     - interval: a tuple representing *closed* interval. e.g. (low, high)
     """
     def __init__(self, expr: str, interval: tuple):
-        self.expr = expr
-        self.interval = interval  # (low, high)
+        self.expr: str = expr
+        self.interval: Tuple[int, int] = interval  # (low, high)
 
     def __str__(self):
         low, high = self.interval
