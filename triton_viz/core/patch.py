@@ -4,7 +4,7 @@ from typing import Callable, Type, Dict
 from tqdm import tqdm
 
 from .config import report_grid_execution_progress
-from .data import Op, ProgramId, Store, Load, Dot, BinaryOp, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum
+from .data import Op, ProgramId, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum
 import inspect
 from triton.runtime.interpreter import (
     GridExecutor,
@@ -14,13 +14,15 @@ from triton.runtime.interpreter import (
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
 
-op_list = [ProgramId, Store, Load, Dot, BinaryOp, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum]
+op_list = [ProgramId, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum]
 original_ops = {
     ProgramId: interpreter_builder.create_get_program_id,
     Store: interpreter_builder.create_masked_store,
+    RawLoad: interpreter_builder.create_load,
     Load: interpreter_builder.create_masked_load,
     Dot: interpreter_builder.create_dot,
     BinaryOp: interpreter_builder.binary_op,
+    AddPtr: interpreter_builder.create_addptr,
     ExpandDims: interpreter_builder.create_expand_dims,
     MakeRange: interpreter_builder.create_make_range,
 }

@@ -2,10 +2,12 @@ import traceback
 from typing import Tuple, Callable, Optional, Type
 import numpy as np
 from z3 import Solver, Int, And, Or, Not, sat
+import triton
+import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, Load, Store, BinaryOp, ProgramId
+from ...core.data import Op, RawLoad, Load, Store, BinaryOp, ProgramId, AddPtr
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -310,61 +312,203 @@ class SanitizerZ3(Client):
     def finalize(self) -> list:
         return []
 
+class SymbolicPointer:
+    """
+    Abstract Pointer:
+    - base_expr: a string representing base address. e.g. "base_0x1000"
+    - offset_interval: a tuple representing *closed* interval. e.g. (low, high)
+    """
+    def __init__(self, base_expr: str, offset_interval: tuple):
+        self.base_expr = base_expr
+        self.offset_interval = offset_interval  # (low, high)
+
+    def __str__(self):
+        low, high = self.offset_interval
+        return (
+            f"SymbolicPointer(\n"
+            f"  base_expr='{self.base_expr}',\n"
+            f"  offset_interval=[{low}, {high}]\n"
+            f")"
+        )
+
+    def __repr__(self):
+        return self.__str__()
+
+
+class SymbolicScalar:
+    """
+    Abstract Scalar:
+    - expr: a string representing the scalar. e.g. "x", "(x+1)", "pid_0"
+    - interval: a tuple representing *closed* interval. e.g. (low, high)
+    """
+    def __init__(self, expr: str, interval: tuple):
+        self.expr = expr
+        self.interval = interval  # (low, high)
+
+    def __str__(self):
+        low, high = self.interval
+        return (
+            f"SymbolicScalar(\n"
+            f"  expr='{self.expr}',\n"
+            f"  interval=[{low}, {high}]\n"
+            f")"
+        )
+
+    def __repr__(self):
+        return self.__str__()
+
+
+class SymbolicInterpreter:
+    def __init__(self):
+        self.trace = []
+
+    def to_symbolic(self, var):
+        # case 1: Already symbolic
+        if isinstance(var, SymbolicPointer) or isinstance(var, SymbolicScalar):
+            return var
+
+        # case 2: TensorHandle
+        if isinstance(var, TensorHandle):
+            scala_dtypes = [
+                tl.int8, tl.int16, tl.int32, tl.int64,
+                tl.uint8, tl.uint16, tl.uint32, tl.uint64
+            ]
+            if var.dtype in scala_dtypes:
+                # case 2.1: immediate value
+                return SymbolicScalar(
+                    str(var.data),
+                    (var.data.size - 1, var.data.size - 1)
+                )
+            elif isinstance(var.dtype, tl.pointer_type):
+                # case 2.2: pointer
+                return SymbolicPointer(
+                    f"base_{str(var.data)}",
+                    (0, 0)
+                )
+            else:
+                raise ValueError("Unsupported TensorHandle dtype", var.dtype)
+
+        # case default: raise ValueError
+        raise ValueError("Unknown handle_or_symbol type", var)
+
+    def symbolic_program_id(self, axis):
+        print(axis)
+
+    def symbolic_add(self, lhs: SymbolicScalar, rhs: SymbolicScalar):
+        lhs_low, lhs_high = lhs.interval
+        rhs_low, rhs_high = rhs.interval
+
+        new_expr = f"({lhs.expr}+{rhs.expr})"
+        new_interval = (lhs_low + rhs_low, lhs_high + rhs_high)
+        return SymbolicScalar(new_expr, new_interval)
+
+    def symbolic_sub(self, lhs, rhs):
+        raise NotImplementedError(f"symbolic_sub: {lhs} - {rhs} not implemented!")
+
+    def symbolic_mul(self, lhs, rhs):
+        raise NotImplementedError(f"symbolic_mul: {lhs} * {rhs} not implemented!")
+
+    def symbolic_div(self, lhs, rhs):
+        raise NotImplementedError(f"symbolic_div: {lhs} / {rhs} not implemented!")
+
+    def symbolic_addptr(self, ptr: SymbolicPointer, offset: SymbolicScalar):
+        """
+        ptr + int
+        """
+        if not isinstance(ptr, SymbolicPointer):
+            raise ValueError("symbolic_addptr: LHS is not a pointer", ptr)
+        if not isinstance(offset, SymbolicScalar):
+            raise ValueError("symbolic_addptr: RHS offset is not a scalar", offset)
+
+        (old_low, old_high) = ptr.offset_interval
+        (offset_low, offset_high) = offset.interval
+
+        elem_size = 4 # TODO: get the element size from somewhere
+        new_low = old_low + offset_low * elem_size
+        new_high = old_high + offset_high * elem_size
+
+        # create a new pointer
+        new_ptr = SymbolicPointer(
+            base_expr=ptr.base_expr,
+            offset_interval=(new_low, new_high)
+        )
+        return new_ptr
+
+    def symbolic_load(self, ptr_sym: SymbolicPointer):
+        if isinstance(ptr_sym, SymbolicPointer):
+            info = f"LOAD from {ptr_sym}"
+            self.trace.append(info)
+            print(info)
+        elif isinstance(ptr_sym, SymbolicScalar):
+            raise TypeError("Cannot load directly from a scalar")
+        else:
+            raise TypeError("Unknown pointer type", type(ptr_sym))
+
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
         self.abort_on_error = abort_on_error
+        self.grid = None
+        self.symexec = SymbolicInterpreter()
 
     def arg_callback(self, arg, arg_cvt):
         pass
 
     def grid_callback(self, grid: Tuple[int]):
-        pass
+        self.grid = grid
 
     def grid_idx_callback(self, grid_idx: Tuple[int]):
         pass
 
     def register_op_callback(self, op_type: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
-        def pre_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
-            pass
+        def op_program_id_overrider(axis):
+            assert self.grid, "Grid not initialized!"
+            expr = f"pid_{axis}"
+            pid_range = (0, self.grid[axis] - 1)
+            return SymbolicScalar(expr, pid_range)
 
-        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
-            pass
-
-        def pre_binary_op_callback(lhs, rhs, op):
-            import numpy as np
-            if op is np.add:
-                print("Addition detected:", lhs, rhs)
-            elif op is np.subtract:
-                print("Subtraction detected:", lhs, rhs)
-            elif op is np.multiply:
-                print("Multiplication detected:", lhs, rhs)
-            elif op is np.divide:
-                print("Division detected:", lhs, rhs)
-            else:
-                print(lhs, rhs, op)
-
-        def pre_program_id_callback(axis):
-            print("Program ID detected. Axis:", axis)
+        def op_raw_load_overrider(ptr, _0, _1, is_volatile):
+            if not isinstance(ptr, SymbolicPointer):
+                raise ValueError("symbolic_load: ptr is not a pointer", ptr)
+            self.symexec.symbolic_load(ptr)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
-            dtype_tt = ptr.get_element_ty()
-            dtype_np = _get_np_dtype(dtype_tt)
-            return TensorHandle(np.zeros_like(ptr.data, dtype=dtype_np), dtype_tt)
+            raise NotImplementedError("symbolic_masked_load: not implemented")
 
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
-            pass
+            raise NotImplementedError("symbolic_store: not implemented")
 
-        def op_binary_op_overrider():
-            pass
+        def op_binary_op_overrider(lhs, rhs, op):
+            lhs = self.symexec.to_symbolic(lhs)
+            rhs = self.symexec.to_symbolic(rhs)
+            if op is np.add:
+                self.symexec.symbolic_add(lhs, rhs)
+            elif op is np.subtract:
+                self.symexec.symbolic_sub(lhs, rhs)
+            elif op is np.multiply:
+                self.symexec.symbolic_mul(lhs, rhs)
+            elif op is np.divide:
+                self.symexec.symbolic_div(lhs, rhs)
+            else:
+                print(lhs, rhs, op)
+                raise NotImplementedError()
 
-        if op_type is Load:
-            return pre_load_callback, None, None
+        def op_addptr_overrider(ptr, offset):
+            ptr = self.symexec.to_symbolic(ptr)
+            offset = self.symexec.to_symbolic(offset)
+            return self.symexec.symbolic_addptr(ptr, offset)
+
+        if op_type is RawLoad:
+            return None, None, op_raw_load_overrider
+        elif op_type is Load:
+            return None, None, op_load_overrider
         elif op_type is Store:
-            return pre_store_callback, None, None
+            return None, None, op_store_overrider
         elif op_type is BinaryOp:
-            return pre_binary_op_callback, None, None
+            return None, None, op_binary_op_overrider
         elif op_type is ProgramId:
-            return pre_program_id_callback, None, None
+            return None, None, op_program_id_overrider
+        elif op_type is AddPtr:
+            return None, None, op_addptr_overrider
         else:
             return None, None, None
 

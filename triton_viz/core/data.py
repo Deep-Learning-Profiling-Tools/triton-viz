@@ -41,6 +41,10 @@ class Store(Op):
 
 
 @dataclass
+class RawLoad(Op):
+    name: ClassVar[str] = "raw_load"
+
+@dataclass
 class Load(Op):
     name: ClassVar[str] = "load"
     ptr: int
@@ -54,6 +58,10 @@ class BinaryOp(Op):
     op: str
     input_shape: Tuple
     output_shape: Tuple
+
+@dataclass
+class AddPtr(Op):
+    name: ClassVar[str] = "addptr"
 
 
 @dataclass
