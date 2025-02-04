@@ -444,6 +444,12 @@ class SymbolicInterpreter:
         else:
             raise TypeError("Unknown pointer type", type(ptr_sym))
 
+    def symbolic_masked_load(self, ptr_sym, mask_sym, other_sym):
+        raise NotImplementedError("symbolic_masked_load: not implemented")
+
+    def symbolic_store(self, ptr_sym, value_sym, mask_sym):
+        raise NotImplementedError("symbolic_store: not implemented")
+
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
         self.abort_on_error = abort_on_error
@@ -472,10 +478,10 @@ class SanitizerSymbolicExecution(Client):
             self.symexec.symbolic_load(ptr)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
-            raise NotImplementedError("symbolic_masked_load: not implemented")
+            self.symexec.symbolic_masked_load(ptr, mask, other)
 
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
-            raise NotImplementedError("symbolic_store: not implemented")
+            self.symexec.symbolic_store(ptr, value, mask)
 
         def op_binary_op_overrider(lhs, rhs, op):
             lhs = self.symexec.to_symbolic(lhs)
