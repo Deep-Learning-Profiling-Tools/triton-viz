@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, Store, BinaryOp, ProgramId, AddPtr
+from ...core.data import Op, RawLoad, Load, Store, BinaryOp, ProgramId, AddPtr, MakeRange
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -497,7 +497,12 @@ class SanitizerSymbolicExecution(Client):
             offset = self.symexec.to_symbolic(offset)
             return self.symexec.symbolic_addptr(ptr, offset)
 
-        if op_type is RawLoad:
+        def op_make_range_overrider(start, end):
+            raise NotImplementedError("symbolic_make_range: not implemented")
+
+        if op_type is ProgramId:
+            return None, None, op_program_id_overrider
+        elif op_type is RawLoad:
             return None, None, op_raw_load_overrider
         elif op_type is Load:
             return None, None, op_load_overrider
@@ -505,10 +510,10 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_store_overrider
         elif op_type is BinaryOp:
             return None, None, op_binary_op_overrider
-        elif op_type is ProgramId:
-            return None, None, op_program_id_overrider
         elif op_type is AddPtr:
             return None, None, op_addptr_overrider
+        elif op_type is MakeRange:
+            return None, None, op_make_range_overrider
         else:
             return None, None, None
 
