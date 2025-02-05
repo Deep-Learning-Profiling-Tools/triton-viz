@@ -5,15 +5,16 @@ import triton_viz
 from triton_viz.clients import Sanitizer
 
 
-def test_program_id():
+def test_tl_addptr():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
     @triton.jit
-    def program_id_kernel(X):
-        pid = tl.program_id(0)
+    def program_id_kernel(x):
+        addr = x + 1
+        tl.load(addr)
     a = torch.randn(16, dtype=torch.float32, device='cuda')
     program_id_kernel[(16,)](a)
 
-def test_tl_addptr():
+def test_tl_program_id():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
     @triton.jit
     def add_kernel(x):
@@ -22,6 +23,15 @@ def test_tl_addptr():
         tl.load(addr)
     a = torch.randn(16, dtype=torch.float32, device='cuda')
     add_kernel[(16,)](a)
+
+def test_tl_make_range():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def make_range_kernel(x, BLOCK_SIZE: tl.constexpr):
+        offset = x + tl.arange(0, BLOCK_SIZE)
+        tl.load(offset)
+    a = torch.randn(16, dtype=torch.float32, device='cuda')
+    make_range_kernel[(1,)](a, BLOCK_SIZE=16)
 
 def test_vec_add():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
