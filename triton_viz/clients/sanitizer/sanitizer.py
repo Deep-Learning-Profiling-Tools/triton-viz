@@ -321,6 +321,8 @@ class SymbolicExpr:
         "less": "<",
         "less_equal": "<="
     }
+    BASIC_OPS = ("const", "var", "pid", "arange")
+    INDIRECT_OPS = ("load",)
     def __init__(self, op, *args, value=None, name=None):
         """
         :param op: Operation type, e.g. "const", "var", "add", "sub", "mul", "div", "pid", "arange"
@@ -328,7 +330,7 @@ class SymbolicExpr:
         :param value: For "const" op, the constant value
         :param name: For "var" op, the variable name. For "pid", it can be used to distinguish different axes.
         """
-        self.supported_ops = ("const", "var", "pid", "arange") + tuple(self.OP_SYMBOL_TABLE.keys())
+        self.supported_ops = self.BASIC_OPS + self.INDIRECT_OPS + tuple(self.OP_SYMBOL_TABLE.keys())
         assert op in self.supported_ops, f"Unsupported op: {op}"
         self.op = op
         self.args = args
@@ -414,10 +416,14 @@ class SymbolicExpr:
         return self.__str__()
 
 def to_symbolic(var):
-    scala_dtypes = [
-            tl.int8, tl.int16, tl.int32, tl.int64,
-            tl.uint8, tl.uint16, tl.uint32, tl.uint64
-    ]
+    triton_scala_dtypes = (
+        tl.int8, tl.int16, tl.int32, tl.int64,
+        tl.uint8, tl.uint16, tl.uint32, tl.uint64,
+        tl.float16, tl.float32, tl.float64
+    )
+    builtin_scala_types = (
+        int, float
+    )
     # if already symbolic
     if isinstance(var, SymbolicExpr):
         return var
@@ -425,7 +431,7 @@ def to_symbolic(var):
     # if construct from a TensorHandle
     if isinstance(var, TensorHandle):
         # if an immediate
-        if var.dtype in scala_dtypes:
+        if var.dtype in triton_scala_dtypes:
             return SymbolicExpr("const", value=var.data)
         # if a pointer
         elif isinstance(var.dtype, tl.pointer_type):
@@ -433,7 +439,7 @@ def to_symbolic(var):
         else:
             raise ValueError("Unsupported TensorHandle dtype", var.dtype)
 
-    if isinstance(var, int):
+    if isinstance(var, builtin_scala_types):
         return SymbolicExpr("const", value=var)
 
     raise ValueError("Unknown type:", type(var))
