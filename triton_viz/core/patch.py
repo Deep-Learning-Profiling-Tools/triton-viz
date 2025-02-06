@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from typing import Callable, Type, Dict
 from tqdm import tqdm
 
-from .config import report_grid_execution_progress
+from .config import report_grid_execution_progress, sanitizer_backend
 from .data import Op, ProgramId, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum
 import inspect
 from triton.runtime.interpreter import (
@@ -102,6 +102,16 @@ def _unpatch_lang():
 def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
+    def run_grid_loops():
+        for x in tqdm(range(grid[0]), desc='Grid X', leave=False, disable=not report_grid_execution_progress):
+            for y in tqdm(range(grid[1]), desc='Grid Y', leave=False, disable=not (report_grid_execution_progress and grid[1] > 1)):
+                for z in tqdm(range(grid[2]), desc='Grid Z', leave=False, disable=not (report_grid_execution_progress and grid[2] > 1)):
+                    interpreter_builder.set_grid_idx(x, y, z)
+                    client_manager.grid_idx_callback((x, y, z))
+                    self.fn(**call_args)
+                    # if symbolic execution, only do one iteration
+                    if sanitizer_backend == "symexec":
+                        return
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
@@ -129,12 +139,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
-    for x in tqdm(range(grid[0]), desc='Grid X', leave=False, disable=not report_grid_execution_progress):
-        for y in tqdm(range(grid[1]), desc='Grid Y', leave=False, disable=not (report_grid_execution_progress and grid[1] > 1)):
-            for z in tqdm(range(grid[2]), desc='Grid Z', leave=False, disable=not (report_grid_execution_progress and grid[2] > 1)):
-                interpreter_builder.set_grid_idx(x, y, z)
-                client_manager.grid_idx_callback((x, y, z))
-                self.fn(**call_args)
+    run_grid_loops()
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
     _unpatch_lang()
