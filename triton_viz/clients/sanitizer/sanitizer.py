@@ -328,7 +328,7 @@ class SymbolicExpr:
         :param value: For "const" op, the constant value
         :param name: For "var" op, the variable name. For "pid", it can be used to distinguish different axes.
         """
-        self.supported_ops = ("const", "var", "add", "sub", "mul", "div", "pid", "arange")
+        self.supported_ops = ("const", "var", "pid", "arange") + tuple(self.OP_SYMBOL_TABLE.keys())
         assert op in self.supported_ops, f"Unsupported op: {op}"
         self.op = op
         self.args = args
@@ -350,6 +350,14 @@ class SymbolicExpr:
     def __truediv__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("div", self, other)
+
+    def __lt__(self, other):
+        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
+        return SymbolicExpr("less", self, other)
+
+    def __le__(self, other):
+        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
+        return SymbolicExpr("less_equal", self, other)
 
     def to_plain_str(self):
         if self.op == "const":
