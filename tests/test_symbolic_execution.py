@@ -34,6 +34,33 @@ def test_tl_make_range():
     a = torch.randn(16, dtype=torch.float32, device='cuda')
     make_range_kernel[(1,)](a, BLOCK_SIZE=16)
 
+def test_tl_add():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def program_id_kernel(x):
+        addr = x + 1
+        tl.load(addr)
+    a = torch.randn(16, dtype=torch.float32, device='cuda')
+    program_id_kernel[(16,)](a)
+
+def test_tl_sub():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def sub_kernel(x):
+        addr = x - 1
+        tl.load(addr)
+    a = torch.randn(16, dtype=torch.float32, device='cuda')
+    sub_kernel[(16,)](a)
+
+def test_tl_mul():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def mul_kernel(x, BLOCK_SIZE: tl.constexpr):
+        addr = x + (tl.arange(0, BLOCK_SIZE) * 2)
+        tl.load(addr)
+    a = torch.randn(32, dtype=torch.float32, device='cuda')
+    mul_kernel[(1,)](a, BLOCK_SIZE=16)
+
 def test_vec_add():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
     @triton.jit
