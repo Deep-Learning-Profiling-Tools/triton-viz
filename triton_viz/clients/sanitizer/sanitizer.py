@@ -343,7 +343,7 @@ class SymbolicExpr:
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("div", self, other)
 
-    def __str__(self):
+    def to_plain_str(self):
         if self.op == "const":
             return str(self.value)
         elif self.op == "var":
@@ -363,6 +363,37 @@ class SymbolicExpr:
             return f"({str(self.args[0])} {op_symbol} {str(self.args[1])})"
         else:
             return f"{self.op}({', '.join(str(a) for a in self.args)})"
+
+    def to_tree_str(self, indent: int = 0) -> str:
+        """Visualize AST using Tree format."""
+        prefix = "  " * indent
+
+        if self.op == "const":
+            s = f"{prefix}const: {self.value}"
+        elif self.op == "var":
+            s = f"{prefix}var: {self.value}"
+        elif self.op == "pid":
+            s = f"{prefix}pid_{self.name}: {self.value}"
+        elif self.op == "arange":
+            # For "arange" node, we have two child nodes: start and end
+            s = f"{prefix}arange:"
+            s += "\n" + self.args[0].to_tree_str(indent + 1)
+            s += "\n" + self.args[1].to_tree_str(indent + 1)
+        elif self.op in ("add", "sub", "mul", "div"):
+            op_symbol = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[self.op]
+            s = f"{prefix}{op_symbol}"
+            # Call recursively for each operand
+            for arg in self.args:
+                s += "\n" + arg.to_tree_str(indent + 1)
+        else:
+            # just list op and sub-nodes
+            s = f"{prefix}{self.op}:"
+            for arg in self.args:
+                s += "\n" + arg.to_tree_str(indent + 1)
+        return s
+
+    def __str__(self):
+        return self.to_tree_str()
 
     def __repr__(self):
         return self.__str__()
@@ -418,7 +449,7 @@ class SanitizerSymbolicExecution(Client):
         def op_raw_load_overrider(ptr, _0, _1, is_volatile):
             if isinstance(ptr, TensorHandle):
                 ptr = ptr.data
-            print('loading:', ptr)
+            print('loading:\n', ptr)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
             print('masked loading:', ptr)
