@@ -313,6 +313,14 @@ class SanitizerZ3(Client):
         return []
 
 class SymbolicExpr:
+    OP_SYMBOL_TABLE = {
+        "add": "+",
+        "sub": "-",
+        "mul": "*",
+        "div": "/",
+        "less": "<",
+        "less_equal": "<="
+    }
     def __init__(self, op, *args, value=None, name=None):
         """
         :param op: Operation type, e.g. "const", "var", "add", "sub", "mul", "div", "pid", "arange"
@@ -353,13 +361,8 @@ class SymbolicExpr:
         elif self.op == "arange":
             # For an "arange" node, args[0] is start and args[1] is end
             return f"arange({self.args[0]}, {self.args[1]})"
-        elif self.op in ("add", "sub", "mul", "div"):
-            op_symbol = {
-                "add": "+",
-                "sub": "-",
-                "mul": "*",
-                "div": "/"
-            }[self.op]
+        elif self.op in self.OP_SYMBOL_TABLE.keys():
+            op_symbol = self.OP_SYMBOL_TABLE[self.op]
             return f"({str(self.args[0])} {op_symbol} {str(self.args[1])})"
         else:
             return f"{self.op}({', '.join(str(a) for a in self.args)})"
@@ -380,7 +383,7 @@ class SymbolicExpr:
             s += "\n" + self.args[0].to_tree_str(indent + 1)
             s += "\n" + self.args[1].to_tree_str(indent + 1)
         elif self.op in ("add", "sub", "mul", "div"):
-            op_symbol = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[self.op]
+            op_symbol = self.OP_SYMBOL_TABLE[self.op]
             s = f"{prefix}{op_symbol}"
             # Call recursively for each operand
             for arg in self.args:
@@ -468,6 +471,10 @@ class SanitizerSymbolicExecution(Client):
                 return lhs * rhs
             elif op is np.divide:
                 return lhs / rhs
+            elif op is np.less:
+                return lhs < rhs
+            elif op is np.less_equal:
+                return lhs <= rhs
             else:
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
 
