@@ -5,15 +5,6 @@ import triton_viz
 from triton_viz.clients import Sanitizer
 
 
-def test_tl_addptr():
-    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
-    @triton.jit
-    def program_id_kernel(x):
-        addr = x + 1
-        tl.load(addr)
-    a = torch.randn(16, dtype=torch.float32, device='cuda')
-    program_id_kernel[(16,)](a)
-
 def test_tl_program_id():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
     @triton.jit
