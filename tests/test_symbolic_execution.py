@@ -28,6 +28,7 @@ def test_tl_make_range():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
     @triton.jit
     def make_range_kernel(x, BLOCK_SIZE: tl.constexpr):
+        tl.load(x)
         offset = x + tl.arange(0, BLOCK_SIZE)
         tl.load(offset)
     a = torch.randn(16, dtype=torch.float32, device='cuda')

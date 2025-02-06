@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, Store, BinaryOp, ProgramId, AddPtr, MakeRange
+from ...core.data import Op, RawLoad, Load, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat
 from ..utils import check_out_of_bounds_access, check_storage_contiguous
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -372,16 +372,16 @@ class SymbolicExpr:
         return self.__str__()
 
 def to_symbolic(var):
+    scala_dtypes = [
+            tl.int8, tl.int16, tl.int32, tl.int64,
+            tl.uint8, tl.uint16, tl.uint32, tl.uint64
+    ]
     # if already symbolic
     if isinstance(var, SymbolicExpr):
         return var
 
     # if construct from a TensorHandle
     if isinstance(var, TensorHandle):
-        scala_dtypes = [
-            tl.int8, tl.int16, tl.int32, tl.int64,
-            tl.uint8, tl.uint16, tl.uint32, tl.uint64
-        ]
         # if an immediate
         if var.dtype in scala_dtypes:
             return SymbolicExpr("const", value=var.data)
@@ -390,6 +390,9 @@ def to_symbolic(var):
             return SymbolicExpr("const", value=var.data)
         else:
             raise ValueError("Unsupported TensorHandle dtype", var.dtype)
+
+    if isinstance(var, int):
+        return SymbolicExpr("const", value=var)
 
     raise ValueError("Unknown type:", type(var))
 
@@ -413,6 +416,8 @@ class SanitizerSymbolicExecution(Client):
             return SymbolicExpr("pid", value=self.grid[axis], name=axis)
 
         def op_raw_load_overrider(ptr, _0, _1, is_volatile):
+            if isinstance(ptr, TensorHandle):
+                ptr = ptr.data
             print('loading:', ptr)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
@@ -441,7 +446,12 @@ class SanitizerSymbolicExecution(Client):
             return ptr + offset
 
         def op_make_range_overrider(start, end):
-            raise NotImplementedError("symbolic_make_range: not implemented")
+            start = to_symbolic(start)
+            end = to_symbolic(end)
+            return SymbolicExpr("arange", start, end)
+
+        def op_splat_overrider(arg, shape):
+            return arg
 
         if op_type is ProgramId:
             return None, None, op_program_id_overrider
@@ -457,6 +467,8 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_addptr_overrider
         elif op_type is MakeRange:
             return None, None, op_make_range_overrider
+        elif op_type is Splat:
+            return None, None, op_splat_overrider
         else:
             return None, None, None
 

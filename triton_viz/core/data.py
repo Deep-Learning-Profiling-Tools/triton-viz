@@ -32,6 +32,7 @@ class Op:
 class ProgramId(Op):
     name: ClassVar[str] = "program_id"
 
+
 @dataclass
 class Store(Op):
     name: ClassVar[str] = "store"
@@ -43,6 +44,7 @@ class Store(Op):
 @dataclass
 class RawLoad(Op):
     name: ClassVar[str] = "raw_load"
+
 
 @dataclass
 class Load(Op):
@@ -58,6 +60,7 @@ class BinaryOp(Op):
     op: str
     input_shape: Tuple
     output_shape: Tuple
+
 
 @dataclass
 class AddPtr(Op):
@@ -112,6 +115,11 @@ class ReduceMax(Reduce):
 class ReduceSum(Reduce):
     name: ClassVar[str] = "reduce_sum"
     reduce_type: ClassVar[str] = "sum"
+
+
+@dataclass
+class Splat(Op):
+    name: ClassVar[str] = "splat"
 
 
 @dataclass
