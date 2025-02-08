@@ -8,7 +8,7 @@ from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
 from ...core.data import Op, RawLoad, Load, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat
-from ..utils import check_out_of_bounds_access, check_storage_contiguous
+from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
 
@@ -448,9 +448,22 @@ class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
         self.abort_on_error = abort_on_error
         self.grid = None
+        self.tensors = []
 
     def arg_callback(self, arg, arg_cvt):
-        pass
+        if not hasattr(arg, "data_ptr"):
+            return
+        self.tensors.append(arg)
+        if arg.is_contiguous or check_storage_contiguous(arg):
+            start = arg.data_ptr()
+            end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
+            physical_addresses = [(start, end)]
+        elif check_inner_stride_equal_to_one(arg):
+            physical_addresses = get_physical_addr_from_tensor_slice(arg)
+        else:
+            raise ValueError("The address sanitizer only supports contiguouly stored tensors for now!")
+
+        print(f"tensor physical address:", physical_addresses)
 
     def grid_callback(self, grid: Tuple[int]):
         self.grid = grid
