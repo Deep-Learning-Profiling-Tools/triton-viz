@@ -425,34 +425,35 @@ class SymbolicExpr:
     def data(self):
         return self.__str__()
 
-def to_symbolic(var):
-    triton_scala_dtypes = (
-        tl.int8, tl.int16, tl.int32, tl.int64,
-        tl.uint8, tl.uint16, tl.uint32, tl.uint64,
-        tl.float16, tl.float32, tl.float64
-    )
-    builtin_scala_types = (
-        int, float
-    )
-    # if already symbolic
-    if isinstance(var, SymbolicExpr):
-        return var
+    @classmethod
+    def from_value(cls, var):
+        triton_scala_dtypes = (
+            tl.int8, tl.int16, tl.int32, tl.int64,
+            tl.uint8, tl.uint16, tl.uint32, tl.uint64,
+            tl.float16, tl.float32, tl.float64
+        )
+        builtin_scala_types = (
+            int, float
+        )
+        # if already symbolic
+        if isinstance(var, cls):
+            return var
 
-    # if construct from a TensorHandle
-    if isinstance(var, TensorHandle):
-        # if an immediate
-        if var.dtype in triton_scala_dtypes:
-            return SymbolicExpr("const", value=var.data)
-        # if a pointer
-        elif isinstance(var.dtype, tl.pointer_type):
-            return SymbolicExpr("const", value=var.data)
-        else:
-            raise ValueError("Unsupported TensorHandle dtype", var.dtype)
+        # if construct from a TensorHandle
+        if isinstance(var, TensorHandle):
+            # if an immediate
+            if var.dtype in triton_scala_dtypes:
+                return cls("const", value=var.data)
+            # if a pointer
+            elif isinstance(var.dtype, tl.pointer_type):
+                return cls("const", value=var.data)
+            else:
+                raise ValueError("Unsupported TensorHandle dtype", var.dtype)
 
-    if isinstance(var, builtin_scala_types):
-        return SymbolicExpr("const", value=var)
+        if isinstance(var, builtin_scala_types):
+            return cls("const", value=var)
 
-    raise ValueError("Unknown type:", type(var))
+        raise ValueError("Unknown type:", type(var))
 
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
@@ -504,8 +505,8 @@ class SanitizerSymbolicExecution(Client):
             print('storing:', ptr)
 
         def op_binary_op_overrider(lhs, rhs, op):
-            lhs = to_symbolic(lhs)
-            rhs = to_symbolic(rhs)
+            lhs = SymbolicExpr.from_value(lhs)
+            rhs = SymbolicExpr.from_value(rhs)
             if op is np.add:
                 return lhs + rhs
             elif op is np.subtract:
@@ -522,13 +523,13 @@ class SanitizerSymbolicExecution(Client):
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
 
         def op_addptr_overrider(ptr, offset):
-            ptr = to_symbolic(ptr)
-            offset = to_symbolic(offset)
+            ptr = SymbolicExpr.from_value(ptr)
+            offset = SymbolicExpr.from_value(offset)
             return ptr + offset
 
         def op_make_range_overrider(start, end):
-            start = to_symbolic(start)
-            end = to_symbolic(end)
+            start = SymbolicExpr.from_value(start)
+            end = SymbolicExpr.from_value(end)
             return SymbolicExpr("arange", start, end)
 
         def op_splat_overrider(arg, shape):
