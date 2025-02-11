@@ -321,6 +321,9 @@ class SymbolicExpr:
         "less": "<",
         "less_equal": "<="
     }
+    OP_ARGS_TABLE = {
+        "load": ["ptr", "mask", "other"],
+    }
     BASIC_OPS = ("const", "var", "pid", "arange")
     INDIRECT_OPS = ("load",)
     def __init__(self, op, *args, value=None, name=None):
@@ -379,7 +382,8 @@ class SymbolicExpr:
 
     def to_tree_str(self, indent: int = 0) -> str:
         """Visualize AST using Tree format."""
-        prefix = "  " * indent
+        indent_str = "  "
+        prefix = indent_str * indent
 
         if self.op == "const":
             s = f"{prefix}const: {self.value}"
@@ -392,6 +396,12 @@ class SymbolicExpr:
             s = f"{prefix}arange:"
             s += "\n" + self.args[0].to_tree_str(indent + 1)
             s += "\n" + self.args[1].to_tree_str(indent + 1)
+        elif self.op == "load":
+            s = f"{prefix}load:"
+            s += f"\n{indent_str}{prefix}ptr:\n" + self.args[0].to_tree_str(indent + 2)
+            s += f"\n{indent_str}{prefix}mask:\n" + self.args[1].to_tree_str(indent + 2)
+            if len(self.args) == 3:
+                s += f"{indent_str}{prefix}other:\n" + self.args[2].to_tree_str(indent + 2)
         elif self.op in ("add", "sub", "mul", "div"):
             op_symbol = self.OP_SYMBOL_TABLE[self.op]
             s = f"{prefix}{op_symbol}"
@@ -480,9 +490,15 @@ class SanitizerSymbolicExecution(Client):
             if isinstance(ptr, TensorHandle):
                 ptr = ptr.data
             print('loading:\n', ptr)
+            return SymbolicExpr("load", ptr)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
-            print('masked loading:', ptr)
+            if other is None:
+                ret = SymbolicExpr("load", ptr, mask)
+            else:
+                ret = SymbolicExpr("load", ptr, mask, other)
+            print('masked loading:\n', ret)
+            return ret
 
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             print('storing:', ptr)
