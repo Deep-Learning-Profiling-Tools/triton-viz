@@ -323,6 +323,7 @@ class SymbolicExpr:
         "less": "<",
         "less_equal": "<="
     }
+    BINARY_OPS = BINARY_OP_SYMBOL_TABLE.keys()
     OP_SYMBOL_TABLE = BINARY_OP_SYMBOL_TABLE
     OP_ARGS_TABLE = {
         "load": ["ptr", "mask", "other"],
@@ -350,9 +351,10 @@ class SymbolicExpr:
             self.start = args[0]
             self.end = args[1]
         elif self.op == "load":
-            assert len(args) in (2, 3), "load op expects two or three arguments!"
+            assert len(args) in (1, 2, 3), "load op expects up to three arguments!"
             self.ptr = args[0]
-            self.mask = args[1]
+            if len(args) >= 2:
+                self.mask = args[1]
             if len(args) == 3:
                 self.other = args[2]
         elif self.op in self.BINARY_OP_SYMBOL_TABLE.keys():
@@ -401,7 +403,8 @@ class SymbolicExpr:
         elif self.op == "load":
             s = f"{prefix}load:"
             s += f"\n{indent_str}{prefix}ptr:\n" + self.ptr.to_tree_str(indent + 2)
-            s += f"\n{indent_str}{prefix}mask:\n" + self.mask.to_tree_str(indent + 2)
+            if self.mask is not None:
+                s += f"\n{indent_str}{prefix}mask:\n" + self.mask.to_tree_str(indent + 2)
             if self.other is not None:
                 s += f"{indent_str}{prefix}other:\n" + self.other.to_tree_str(indent + 2)
         elif self.op in ("add", "sub", "mul", "div"):
@@ -457,6 +460,68 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
+    def eval(self):
+        # ================== Helper Function ==================
+        # broadcasting val to a list of length n
+        def to_list(val, n):
+            if isinstance(val, list):
+                if len(val) == n:
+                    return val
+                elif len(val) == 1:
+                    return val * n
+                else:
+                    raise ValueError(f"Broadcast failed. Expected len(val): 1. Actual len(val): {len(val)}.")
+            else:
+                return [val] * n
+
+        # judge if a range is a singleton, i.e. low == high
+        def is_singleton(interval):
+            return interval[0] == interval[1]
+
+        def compute_binary_op(lhs, rhs, op):
+            if not is_singleton(lhs) and not is_singleton(rhs):
+                raise NotImplementedError("Binary operation does not support two intervals yet.")
+            return (0, 0)
+
+        # ================== Evaluation =======================
+        if self.op == 'const':
+            return (self.value, self.value)
+        elif self.op == "pid":
+            # expand into a list of (val, val)
+            assert self.grid, "Grid not initialized!"
+            assert self.axis < len(self.grid), f"axis {self.axis} not found in grid!"
+            return [(v, v) for v in range(self.grid[self.axis])]
+        elif self.op == "arange":
+            start_val, end_val = self.start.eval(), self.end.eval()
+            if isinstance(start_val, list):
+                raise NotImplementedError("Arange does not support start index with list yet.")
+            elif isinstance(start_val, tuple):
+                if not is_singleton(start_val):
+                    raise NotImplementedError("Arange does not support start index with interval yet.")
+                start_val = start_val[0]
+            if isinstance(end_val, list):
+                raise NotImplementedError("Arange does not support end index with list yet.")
+            elif isinstance(end_val, tuple):
+                if not is_singleton(end_val):
+                    raise NotImplementedError("Arange does not support end index with interval yet.")
+                end_val = end_val[0]
+            return (start_val, end_val)
+        elif self.op in self.BINARY_OPS:
+            lhs = self.lhs.eval()
+            rhs = self.rhs.eval()
+            if isinstance(lhs, list) or isinstance(rhs, list):
+                n = len(lhs) if isinstance(lhs, list) else len(rhs)
+                lhs = to_list(lhs, n)
+                rhs = to_list(rhs, n)
+                result = []
+                for l, r in zip(lhs, rhs):
+                    result.append(compute_binary_op(l, r, self.op))
+                return result
+            else:
+                return compute_binary_op(lhs, rhs, self.op)
+        else:
+            raise NotImplementedError(f"Unsupported operation: {self.op}")
+
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
         self.abort_on_error = abort_on_error
@@ -493,6 +558,7 @@ class SanitizerSymbolicExecution(Client):
             if isinstance(ptr, TensorHandle):
                 ptr = ptr.data
             print('loading:\n', ptr)
+            print('loading value:', ptr.eval())
             return SymbolicExpr("load", ptr)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
