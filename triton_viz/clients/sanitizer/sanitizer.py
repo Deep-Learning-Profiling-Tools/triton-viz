@@ -326,18 +326,20 @@ class SymbolicExpr:
     }
     BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load",)
-    def __init__(self, op, *args, value=None, name=None):
+    def __init__(self, op, *args, value=None, grid=None, axis=None):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
         :param args: Sub-expressions (for compound operations)
         :param value: For "const" op, the constant value
+        :param grid, axis: For "pid" op, the grid and axis
         """
         self.supported_ops = self.BASIC_OPS + self.INDIRECT_OPS + tuple(self.OP_SYMBOL_TABLE.keys())
         assert op in self.supported_ops, f"Unsupported op: {op}"
         self.op = op
         self.args = args
         self.value = value
-        self.name = name
+        self.grid = grid
+        self.axis = axis
 
     def __add__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
@@ -371,7 +373,7 @@ class SymbolicExpr:
         if self.op == "const":
             s = f"{prefix}const: {self.value}"
         elif self.op == "pid":
-            s = f"{prefix}pid_{self.name}: {self.value}"
+            s = f"{prefix}pid_{self.axis}: {self.grid[self.axis]}"
         elif self.op == "arange":
             # For "arange" node, we have two child nodes: start and end
             s = f"{prefix}arange:"
@@ -466,7 +468,7 @@ class SanitizerSymbolicExecution(Client):
     def register_op_callback(self, op_type: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
-            return SymbolicExpr("pid", value=self.grid[axis], name=axis)
+            return SymbolicExpr("pid", grid=self.grid, axis=axis)
 
         def op_raw_load_overrider(ptr, _0, _1, is_volatile):
             if isinstance(ptr, TensorHandle):
