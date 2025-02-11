@@ -324,14 +324,13 @@ class SymbolicExpr:
     OP_ARGS_TABLE = {
         "load": ["ptr", "mask", "other"],
     }
-    BASIC_OPS = ("const", "var", "pid", "arange")
+    BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load",)
     def __init__(self, op, *args, value=None, name=None):
         """
-        :param op: Operation type, e.g. "const", "var", "add", "sub", "mul", "div", "pid", "arange"
+        :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
         :param args: Sub-expressions (for compound operations)
         :param value: For "const" op, the constant value
-        :param name: For "var" op, the variable name. For "pid", it can be used to distinguish different axes.
         """
         self.supported_ops = self.BASIC_OPS + self.INDIRECT_OPS + tuple(self.OP_SYMBOL_TABLE.keys())
         assert op in self.supported_ops, f"Unsupported op: {op}"
@@ -364,22 +363,6 @@ class SymbolicExpr:
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("less_equal", self, other)
 
-    def to_plain_str(self):
-        if self.op == "const":
-            return str(self.value)
-        elif self.op == "var":
-            return f"{self.op}({self.value})"
-        elif self.op == "pid":
-            return f"pid_{self.name}({self.value})"
-        elif self.op == "arange":
-            # For an "arange" node, args[0] is start and args[1] is end
-            return f"arange({self.args[0]}, {self.args[1]})"
-        elif self.op in self.OP_SYMBOL_TABLE.keys():
-            op_symbol = self.OP_SYMBOL_TABLE[self.op]
-            return f"({str(self.args[0])} {op_symbol} {str(self.args[1])})"
-        else:
-            return f"{self.op}({', '.join(str(a) for a in self.args)})"
-
     def to_tree_str(self, indent: int = 0) -> str:
         """Visualize AST using Tree format."""
         indent_str = "  "
@@ -387,8 +370,6 @@ class SymbolicExpr:
 
         if self.op == "const":
             s = f"{prefix}const: {self.value}"
-        elif self.op == "var":
-            s = f"{prefix}var: {self.value}"
         elif self.op == "pid":
             s = f"{prefix}pid_{self.name}: {self.value}"
         elif self.op == "arange":
