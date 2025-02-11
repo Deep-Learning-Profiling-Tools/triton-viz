@@ -313,7 +313,9 @@ class SanitizerZ3(Client):
         return []
 
 class SymbolicExpr:
-    OP_SYMBOL_TABLE = {
+    BASIC_OPS = ("const", "pid", "arange")
+    INDIRECT_OPS = ("load",)
+    BINARY_OP_SYMBOL_TABLE = {
         "add": "+",
         "sub": "-",
         "mul": "*",
@@ -321,25 +323,42 @@ class SymbolicExpr:
         "less": "<",
         "less_equal": "<="
     }
+    OP_SYMBOL_TABLE = BINARY_OP_SYMBOL_TABLE
     OP_ARGS_TABLE = {
         "load": ["ptr", "mask", "other"],
     }
-    BASIC_OPS = ("const", "pid", "arange")
-    INDIRECT_OPS = ("load",)
-    def __init__(self, op, *args, value=None, grid=None, axis=None):
+    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + tuple(OP_SYMBOL_TABLE.keys())
+    def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
         :param args: Sub-expressions (for compound operations)
         :param value: For "const" op, the constant value
         :param grid, axis: For "pid" op, the grid and axis
         """
-        self.supported_ops = self.BASIC_OPS + self.INDIRECT_OPS + tuple(self.OP_SYMBOL_TABLE.keys())
-        assert op in self.supported_ops, f"Unsupported op: {op}"
+        assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
         self.op = op
-        self.args = args
-        self.value = value
-        self.grid = grid
-        self.axis = axis
+        # check if the number of arguments is correct
+        if self.op == "const":
+            assert len(args) == 1, "const op expects one argument!"
+            self.value = args[0]
+        elif self.op == "pid":
+            assert len(args) == 2, "pid op expects two arguments!"
+            self.grid = args[0]
+            self.axis = args[1]
+        elif self.op == "arange":
+            assert len(args) == 2, "arange op expects two arguments!"
+            self.start = args[0]
+            self.end = args[1]
+        elif self.op == "load":
+            assert len(args) in (2, 3), "load op expects two or three arguments!"
+            self.ptr = args[0]
+            self.mask = args[1]
+            if len(args) == 3:
+                self.other = args[2]
+        elif self.op in self.BINARY_OP_SYMBOL_TABLE.keys():
+            assert len(args) == 2, f"{self.op} op expects two arguments!"
+            self.lhs = args[0]
+            self.rhs = args[1]
 
     def __add__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
@@ -377,19 +396,19 @@ class SymbolicExpr:
         elif self.op == "arange":
             # For "arange" node, we have two child nodes: start and end
             s = f"{prefix}arange:"
-            s += "\n" + self.args[0].to_tree_str(indent + 1)
-            s += "\n" + self.args[1].to_tree_str(indent + 1)
+            s += "\n" + self.start.to_tree_str(indent + 1)
+            s += "\n" + self.end.to_tree_str(indent + 1)
         elif self.op == "load":
             s = f"{prefix}load:"
-            s += f"\n{indent_str}{prefix}ptr:\n" + self.args[0].to_tree_str(indent + 2)
-            s += f"\n{indent_str}{prefix}mask:\n" + self.args[1].to_tree_str(indent + 2)
-            if len(self.args) == 3:
-                s += f"{indent_str}{prefix}other:\n" + self.args[2].to_tree_str(indent + 2)
+            s += f"\n{indent_str}{prefix}ptr:\n" + self.ptr.to_tree_str(indent + 2)
+            s += f"\n{indent_str}{prefix}mask:\n" + self.mask.to_tree_str(indent + 2)
+            if self.other is not None:
+                s += f"{indent_str}{prefix}other:\n" + self.other.to_tree_str(indent + 2)
         elif self.op in ("add", "sub", "mul", "div"):
             op_symbol = self.OP_SYMBOL_TABLE[self.op]
             s = f"{prefix}{op_symbol}"
             # Call recursively for each operand
-            for arg in self.args:
+            for arg in (self.lhs, self.rhs):
                 s += "\n" + arg.to_tree_str(indent + 1)
         else:
             # just list op and sub-nodes
@@ -426,15 +445,15 @@ class SymbolicExpr:
         if isinstance(var, TensorHandle):
             # if an immediate
             if var.dtype in triton_scala_dtypes:
-                return cls("const", value=var.data)
+                return cls("const", var.data)
             # if a pointer
             elif isinstance(var.dtype, tl.pointer_type):
-                return cls("const", value=var.data)
+                return cls("const", var.data)
             else:
                 raise ValueError("Unsupported TensorHandle dtype", var.dtype)
 
         if isinstance(var, builtin_scala_types):
-            return cls("const", value=var)
+            return cls("const", var)
 
         raise ValueError("Unknown type:", type(var))
 
@@ -468,7 +487,7 @@ class SanitizerSymbolicExecution(Client):
     def register_op_callback(self, op_type: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
-            return SymbolicExpr("pid", grid=self.grid, axis=axis)
+            return SymbolicExpr("pid", self.grid, axis)
 
         def op_raw_load_overrider(ptr, _0, _1, is_volatile):
             if isinstance(ptr, TensorHandle):
