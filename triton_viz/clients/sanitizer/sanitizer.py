@@ -392,7 +392,7 @@ class SymbolicExpr:
         prefix = indent_str * indent
 
         if self.op == "const":
-            s = f"{prefix}const: {self.value}"
+            s = f"{prefix}const: {self.value}, {type(self.value)}"
         elif self.op == "pid":
             s = f"{prefix}pid_{self.axis}: {self.grid[self.axis]}"
         elif self.op == "arange":
@@ -451,7 +451,9 @@ class SymbolicExpr:
                 return cls("const", var.data)
             # if a pointer
             elif isinstance(var.dtype, tl.pointer_type):
-                return cls("const", var.data)
+                if len(var.data) != 1:
+                    raise ValueError("Unsupported tl.pointer_type with length more than one!")
+                return cls("const", var.data.item())
             else:
                 raise ValueError("Unsupported TensorHandle dtype", var.dtype)
 
@@ -481,7 +483,25 @@ class SymbolicExpr:
         def compute_binary_op(lhs, rhs, op):
             if not is_singleton(lhs) and not is_singleton(rhs):
                 raise NotImplementedError("Binary operation does not support two intervals yet.")
-            return (0, 0)
+            if op == "add":
+                # both are singletons
+                if is_singleton(lhs) and is_singleton(rhs):
+                    lhs = lhs[0]
+                    rhs = rhs[0]
+                    return (lhs + rhs, lhs + rhs)
+                # only lhs is singleton
+                elif is_singleton(lhs):
+                    lhs = lhs[0]
+                    return (lhs + rhs[0], lhs + rhs[1])
+                # only rhs is singleton
+                elif is_singleton(rhs):
+                    rhs = rhs[0]
+                    return (lhs[0] + rhs, lhs[1] + rhs)
+                # both are intervals
+                else:
+                    raise NotImplementedError("Add operation does not support two intervals yet.")
+            else:
+                raise NotImplementedError(f"Unsupported binary operation: {op}")
 
         # ================== Evaluation =======================
         if self.op == 'const':
