@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat
+from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat
 from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -632,6 +632,9 @@ class SanitizerSymbolicExecution(Client):
             print('masked loading:\n', ret)
             return ret
 
+        def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
+            return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
+
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             print('masked storing:', ptr)
 
@@ -676,6 +679,8 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_raw_load_overrider
         elif op_type is Load:
             return None, None, op_load_overrider
+        elif op_type is RawStore:
+            return None, None, op_raw_store_overrider
         elif op_type is Store:
             return None, None, op_store_overrider
         elif op_type is BinaryOp:
