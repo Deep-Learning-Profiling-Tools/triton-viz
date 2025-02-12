@@ -13,7 +13,7 @@ def test_tl_program_id():
         addr = x + pid
         tl.load(addr)
     a = torch.randn(16, dtype=torch.float32, device='cuda')
-    add_kernel[(16,)](a)
+    add_kernel[(2,)](a)
 
 def test_tl_make_range():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
@@ -32,7 +32,7 @@ def test_tl_add():
         addr = x + 1
         tl.load(addr)
     a = torch.randn(16, dtype=torch.float32, device='cuda')
-    program_id_kernel[(16,)](a)
+    program_id_kernel[(2,)](a)
 
 def test_tl_sub():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
@@ -41,7 +41,7 @@ def test_tl_sub():
         addr = x - 1
         tl.load(addr)
     a = torch.randn(16, dtype=torch.float32, device='cuda')
-    sub_kernel[(16,)](a)
+    sub_kernel[(2,)](a)
 
 def test_tl_mul():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
