@@ -353,10 +353,8 @@ class SymbolicExpr:
         elif self.op == "load":
             assert len(args) in (1, 2, 3), "load op expects up to three arguments!"
             self.ptr = args[0]
-            if len(args) >= 2:
-                self.mask = args[1]
-            if len(args) == 3:
-                self.other = args[2]
+            self.mask = args[1] if len(args) >= 2 else None
+            self.other = args[2] if len(args) >= 3 else None
         elif self.op in self.BINARY_OP_SYMBOL_TABLE.keys():
             assert len(args) == 2, f"{self.op} op expects two arguments!"
             self.lhs = args[0]
@@ -575,6 +573,9 @@ class SymbolicExpr:
                 return result
             else:
                 return compute_binary_op(lhs, rhs, self.op)
+        elif self.op == "load":
+            # TODO: implement mask and other here
+            return self.ptr.eval()
         else:
             raise NotImplementedError(f"Unsupported operation: {self.op}")
 
@@ -610,15 +611,21 @@ class SanitizerSymbolicExecution(Client):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
 
-        def op_raw_load_overrider(ptr, _0, _1, is_volatile):
-            if isinstance(ptr, TensorHandle):
-                ptr = ptr.data
-            print('loading:\n', ptr)
-            print('loading value:', ptr.eval())
-            return SymbolicExpr("load", ptr)
+        def op_raw_load_overrider(ptr, cache_modifier, eviction_policy, is_volatile):
+            return self.op_load_overrider(ptr, None, None, cache_modifier, eviction_policy, is_volatile)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
-            if other is None:
+            # make sure ptr is a SymbolicExpr
+            if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
+                ptr = SymbolicExpr("load", SymbolicExpr.from_value(ptr))
+            elif isinstance(ptr, SymbolicExpr):
+                ptr = SymbolicExpr("load", ptr)
+            else:
+                raise ValueError(f"Unsupported ptr type: {type(ptr)}")
+
+            if mask is None:
+                ret = SymbolicExpr("load", ptr)
+            elif other is None:
                 ret = SymbolicExpr("load", ptr, mask)
             else:
                 ret = SymbolicExpr("load", ptr, mask, other)
