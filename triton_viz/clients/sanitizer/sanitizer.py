@@ -448,6 +448,8 @@ class SymbolicExpr:
         if isinstance(var, TensorHandle):
             # if an immediate
             if var.dtype in triton_scala_dtypes:
+                if len(var.data) == 1:
+                    return cls("const", var.data.item())
                 return cls("const", var.data)
             # if a pointer
             elif isinstance(var.dtype, tl.pointer_type):
@@ -500,6 +502,40 @@ class SymbolicExpr:
                 # both are intervals
                 else:
                     raise NotImplementedError("Add operation does not support two intervals yet.")
+            elif op == "sub":
+                # both are singletons
+                if is_singleton(lhs) and is_singleton(rhs):
+                    lhs = lhs[0]
+                    rhs = rhs[0]
+                    return (lhs - rhs, lhs - rhs)
+                # only lhs is singleton
+                elif is_singleton(lhs):
+                    lhs = lhs[0]
+                    return (lhs - rhs[0], lhs - rhs[1])
+                # only rhs is singleton
+                elif is_singleton(rhs):
+                    rhs = rhs[0]
+                    return (lhs[0] - rhs, lhs[1] - rhs)
+                # both are intervals
+                else:
+                    raise NotImplementedError("Sub operation does not support two intervals yet.")
+            elif op == "mul":
+                # both are singletons
+                if is_singleton(lhs) and is_singleton(rhs):
+                    lhs = lhs[0]
+                    rhs = rhs[0]
+                    return (lhs * rhs, lhs * rhs)
+                # only lhs is singleton
+                elif is_singleton(lhs):
+                    lhs = lhs[0]
+                    return (lhs * rhs[0], lhs * rhs[1])
+                # only rhs is singleton
+                elif is_singleton(rhs):
+                    rhs = rhs[0]
+                    return (lhs[0] * rhs, lhs[1] * rhs)
+                # both are intervals
+                else:
+                    raise NotImplementedError("Mul operation does not support two intervals yet.")
             else:
                 raise NotImplementedError(f"Unsupported binary operation: {op}")
 
@@ -590,7 +626,7 @@ class SanitizerSymbolicExecution(Client):
             return ret
 
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
-            print('storing:', ptr)
+            print('masked storing:', ptr)
 
         def op_binary_op_overrider(lhs, rhs, op):
             lhs = SymbolicExpr.from_value(lhs)
@@ -611,13 +647,17 @@ class SanitizerSymbolicExecution(Client):
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
 
         def op_addptr_overrider(ptr, offset):
+            dtype_tt = ptr.get_element_ty()
+            element_bitwidth = dtype_tt.primitive_bitwidth
+            element_bytewidth = max(1, element_bitwidth // 8)
             ptr = SymbolicExpr.from_value(ptr)
             offset = SymbolicExpr.from_value(offset)
-            return ptr + offset
+            element_bytewidth = SymbolicExpr.from_value(element_bytewidth)
+            return ptr + offset * element_bytewidth
 
         def op_make_range_overrider(start, end):
             start = SymbolicExpr.from_value(start)
-            end = SymbolicExpr.from_value(end)
+            end = SymbolicExpr.from_value(end - 1)
             return SymbolicExpr("arange", start, end)
 
         def op_splat_overrider(arg, shape):
