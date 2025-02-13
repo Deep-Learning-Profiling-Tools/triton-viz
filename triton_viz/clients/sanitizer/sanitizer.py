@@ -312,9 +312,31 @@ class SanitizerZ3(Client):
     def finalize(self) -> list:
         return []
 
+class SymbolicExprDataWrapper:
+    '''
+    This wrapper is used as a workaround of triton interpreter legacy code.
+    In def _get_bool(self) of class tensor,
+        "data = self.handle.data
+        return bool(data) if data.size == 1 else True"
+    Since we replaced TensorHandle with SymbolicExpr,
+    we need to wrap SymbolicExpr with a class that has size attribute, and data.size != 1.
+    '''
+    def __init__(self, value):
+        self.value = value
+
+    @property
+    def size(self):
+        return 2
+
+    def __str__(self):
+        return self.value
+
+    def __repr__(self):
+        return self.value
+
 class SymbolicExpr:
     BASIC_OPS = ("const", "pid", "arange")
-    INDIRECT_OPS = ("load",)
+    INDIRECT_OPS = ("load", "store")
     BINARY_OP_SYMBOL_TABLE = {
         "add": "+",
         "sub": "-",
@@ -351,10 +373,16 @@ class SymbolicExpr:
             self.start = args[0]
             self.end = args[1]
         elif self.op == "load":
-            assert len(args) in (1, 2, 3), "load op expects up to three arguments!"
+            assert len(args) in (1, 2, 3), "load op expects 1, 2 or 3 arguments!"
             self.ptr = args[0]
             self.mask = args[1] if len(args) >= 2 else None
             self.other = args[2] if len(args) >= 3 else None
+        elif self.op == "store":
+            assert len(args) in (2, 3, 4), "store op expects 2, 3 or 4 arguments!"
+            self.ptr = args[0]
+            self.value = args[1]
+            self.mask = args[2] if len(args) >= 3 else None
+            self.other = args[3] if len(args) >= 4 else None
         elif self.op in self.BINARY_OP_SYMBOL_TABLE.keys():
             assert len(args) == 2, f"{self.op} op expects two arguments!"
             self.lhs = args[0]
@@ -405,17 +433,22 @@ class SymbolicExpr:
                 s += f"\n{indent_str}{prefix}mask:\n" + self.mask.to_tree_str(indent + 2)
             if self.other is not None:
                 s += f"{indent_str}{prefix}other:\n" + self.other.to_tree_str(indent + 2)
-        elif self.op in ("add", "sub", "mul", "div"):
-            op_symbol = self.OP_SYMBOL_TABLE[self.op]
+        elif self.op == "store":
+            s = f"{prefix}store:"
+            s += f"\n{indent_str}{prefix}ptr:\n" + self.ptr.to_tree_str(indent + 2)
+            s += f"\n{indent_str}{prefix}value:\n" + self.value.to_tree_str(indent + 2)
+            if self.mask is not None:
+                s += f"\n{indent_str}{prefix}mask:\n" + self.mask.to_tree_str(indent + 2)
+            if self.other is not None:
+                s += f"{indent_str}{prefix}other:\n" + self.other.to_tree_str(indent + 2)
+        elif self.op in self.BINARY_OPS:
+            op_symbol = self.BINARY_OP_SYMBOL_TABLE[self.op]
             s = f"{prefix}{op_symbol}"
             # Call recursively for each operand
             for arg in (self.lhs, self.rhs):
                 s += "\n" + arg.to_tree_str(indent + 1)
         else:
-            # just list op and sub-nodes
-            s = f"{prefix}{self.op}:"
-            for arg in self.args:
-                s += "\n" + arg.to_tree_str(indent + 1)
+            raise ValueError(f"Unsupported op: {self.op}")
         return s
 
     def __str__(self):
@@ -426,7 +459,7 @@ class SymbolicExpr:
 
     @property
     def data(self):
-        return self.__str__()
+        return SymbolicExprDataWrapper(self.__str__())
 
     @classmethod
     def from_value(cls, var):
@@ -576,6 +609,9 @@ class SymbolicExpr:
         elif self.op == "load":
             # TODO: implement mask and other here
             return self.ptr.eval()
+        elif self.op == "store":
+            # TODO: implement mask and other here
+            return self.ptr.eval()
         else:
             raise NotImplementedError(f"Unsupported operation: {self.op}")
 
@@ -612,7 +648,7 @@ class SanitizerSymbolicExecution(Client):
             return SymbolicExpr("pid", self.grid, axis)
 
         def op_raw_load_overrider(ptr, cache_modifier, eviction_policy, is_volatile):
-            return self.op_load_overrider(ptr, None, None, cache_modifier, eviction_policy, is_volatile)
+            return op_load_overrider(ptr, None, None, cache_modifier, eviction_policy, is_volatile)
 
         def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
             # make sure ptr is a SymbolicExpr
@@ -629,14 +665,27 @@ class SanitizerSymbolicExecution(Client):
                 ret = SymbolicExpr("load", ptr, mask)
             else:
                 ret = SymbolicExpr("load", ptr, mask, other)
-            print('masked loading:\n', ret)
+            print('loading:\n', ret.eval())
             return ret
 
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
             return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
 
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
-            print('masked storing:', ptr)
+            # make sure ptr is a SymbolicExpr
+            if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
+                ptr = SymbolicExpr("load", SymbolicExpr.from_value(ptr))
+            elif isinstance(ptr, SymbolicExpr):
+                ptr = SymbolicExpr("load", ptr)
+            else:
+                raise ValueError(f"Unsupported ptr type: {type(ptr)}")
+
+            value = SymbolicExpr.from_value(value)
+            if mask is None:
+                ret = SymbolicExpr("store", ptr, value)
+            else:
+                ret = SymbolicExpr("store", ptr, value, mask)
+            print('storing:', ret.eval())
 
         def op_binary_op_overrider(lhs, rhs, op):
             lhs = SymbolicExpr.from_value(lhs)
