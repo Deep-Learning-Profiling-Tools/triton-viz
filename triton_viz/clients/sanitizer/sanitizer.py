@@ -343,7 +343,8 @@ class SymbolicExpr:
         "mul": "*",
         "div": "/",
         "less": "<",
-        "less_equal": "<="
+        "less_equal": "<=",
+        "not_equal": "!=",
     }
     BINARY_OPS = BINARY_OP_SYMBOL_TABLE.keys()
     OP_SYMBOL_TABLE = BINARY_OP_SYMBOL_TABLE
@@ -411,6 +412,10 @@ class SymbolicExpr:
     def __le__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("less_equal", self, other)
+
+    def __ne__(self, other):
+        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
+        return SymbolicExpr("not_equal", self, other)
 
     def to_tree_str(self, indent: int = 0) -> str:
         """Visualize AST using Tree format."""
@@ -702,6 +707,8 @@ class SanitizerSymbolicExecution(Client):
                 return lhs < rhs
             elif op is np.less_equal:
                 return lhs <= rhs
+            elif op is np.not_equal:
+                return lhs != rhs
             else:
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
 
