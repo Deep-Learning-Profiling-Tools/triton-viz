@@ -103,10 +103,10 @@ def _get_traceback_info():
         user_code_index = None
         if ('_jit_function_call' in frame.name
             and 'triton_viz/core/patch.py' in frame.filename):
-            user_code_index = i + 1  # the next stack is triton user code
+            user_code_index = i + 2 # _grid_executor_call -> run_grid_loops -> user code
         elif ('_grid_executor_call' in frame.name
             and 'triton_viz/core/patch.py' in frame.filename):
-            user_code_index = i + 1 # the next stack is triton user code
+            user_code_index = i + 2 # the same as above
 
         if user_code_index is not None:
             frame = stack_summary[user_code_index]
