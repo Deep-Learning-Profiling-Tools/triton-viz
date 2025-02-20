@@ -625,21 +625,71 @@ class SanitizerSymbolicExecution(Client):
         self.abort_on_error = abort_on_error
         self.grid = None
         self.tensors = []
+        self.constraints = []
+        self.cached_constraint_valid = False
+        self.cached_constraint = None
+
+    def _create_range_constraint(self, addr):
+        low, high = addr
+        x = Int('x')
+        low_constraint = x >= low
+        high_constraint = x <= high
+        return And(low_constraint, high_constraint)
+
+    def _add_constraints(self, addr):
+        self.constraints.append(self._create_range_constraint(addr))
+        self.cached_constraint_valid = False
+
+    def _check_range_satisfiable(self, addr, op_type):
+        # maintain a cache for the union of all constraints
+        if not self.cached_constraint_valid:
+            self.cached_constraint = Or(*self.constraints)
+            self.cached_constraint_valid = True
+
+        constraint_to_check = self._create_range_constraint(addr)
+
+        # Use Z3 Solver to find constraint conflicts
+        s = Solver()
+        s.add(Not(self.cached_constraint))
+        s.add(constraint_to_check)
+
+        # report out-of-bound access
+        if s.check() == sat:
+            tensor = _get_tensor(self.tensors, addr[0])
+            violation_addr = s.model()[Int('x')]
+            self._report(op_type, tensor, violation_addr)
+
+    def _report(self, op_type, tensor, violation_address):
+        traceback_info = _get_traceback_info()
+        oob_record = OutOfBoundsRecordZ3(
+            op_type=op_type,
+            user_code_tracebacks=traceback_info,
+            tensor=tensor,
+            violation_address=violation_address,
+            constraints=self.constraints,
+        )
+        if self.abort_on_error:
+            print_oob_record(oob_record)
+            raise ValueError("Out-of-bounds access detected. See detailed report above.")
+        else:
+            self.records.append(oob_record)
 
     def arg_callback(self, arg, arg_cvt):
         if not hasattr(arg, "data_ptr"):
             return
-        self.tensors.append(arg)
         if arg.is_contiguous or check_storage_contiguous(arg):
             start = arg.data_ptr()
             end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
-            physical_addresses = [(start, end)]
+            tensor_physical_addresses = [(start, end)]
         elif check_inner_stride_equal_to_one(arg):
-            physical_addresses = get_physical_addr_from_tensor_slice(arg)
+            tensor_physical_addresses = get_physical_addr_from_tensor_slice(arg)
         else:
             raise ValueError("The address sanitizer only supports contiguouly stored tensors for now!")
 
-        print(f"tensor physical address:", physical_addresses)
+        self.tensors.append(arg)
+
+        for tensor_addr in tensor_physical_addresses:
+            self._add_constraints(tensor_addr)
 
     def grid_callback(self, grid: Tuple[int]):
         self.grid = grid
@@ -670,7 +720,11 @@ class SanitizerSymbolicExecution(Client):
                 ret = SymbolicExpr("load", ptr, mask)
             else:
                 ret = SymbolicExpr("load", ptr, mask, other)
-            print('loading:\n', ret.eval())
+
+            # check memory access using z3
+            for mem_access_addr in ret.eval():
+                self._check_range_satisfiable(mem_access_addr, Load)
+
             return ret
 
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
@@ -691,6 +745,8 @@ class SanitizerSymbolicExecution(Client):
             else:
                 ret = SymbolicExpr("store", ptr, value, mask)
             print('storing:', ret.eval())
+            for mem_access_addr in ret.eval():
+                self._check_range_satisfiable(mem_access_addr, Store)
 
         def op_binary_op_overrider(lhs, rhs, op):
             lhs = SymbolicExpr.from_value(lhs)
