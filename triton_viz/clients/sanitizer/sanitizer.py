@@ -343,6 +343,7 @@ class SymbolicExpr:
         "mul": "*",
         "div": "/",
         "idiv": "//",
+        "mod": "%",
         "less": "<",
         "less_equal": "<=",
         "not_equal": "!=",
@@ -409,6 +410,10 @@ class SymbolicExpr:
     def __floordiv__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("idiv", self, other)
+
+    def __mod__(self, other):
+        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
+        return SymbolicExpr("mod", self, other)
 
     def __lt__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
@@ -770,6 +775,8 @@ class SanitizerSymbolicExecution(Client):
                 return lhs <= rhs
             elif op is np.not_equal:
                 return lhs != rhs
+            elif op is np.fmod:
+                return lhs % rhs
             else:
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
 
