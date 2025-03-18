@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat
+from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat, Idiv
 from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -342,6 +342,7 @@ class SymbolicExpr:
         "sub": "-",
         "mul": "*",
         "div": "/",
+        "idiv": "//",
         "less": "<",
         "less_equal": "<=",
         "not_equal": "!=",
@@ -404,6 +405,10 @@ class SymbolicExpr:
     def __truediv__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("div", self, other)
+
+    def __floordiv__(self, other):
+        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
+        return SymbolicExpr("idiv", self, other)
 
     def __lt__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
@@ -785,6 +790,11 @@ class SanitizerSymbolicExecution(Client):
         def op_splat_overrider(arg, shape):
             return arg
 
+        def op_idiv_overrider(lhs, rhs):
+            lhs = SymbolicExpr.from_value(lhs)
+            rhs = SymbolicExpr.from_value(rhs)
+            return lhs // rhs
+
         if op_type is ProgramId:
             return None, None, op_program_id_overrider
         elif op_type is RawLoad:
@@ -803,6 +813,8 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_make_range_overrider
         elif op_type is Splat:
             return None, None, op_splat_overrider
+        elif op_type is Idiv:
+            return None, None, op_idiv_overrider
         else:
             return None, None, None
 

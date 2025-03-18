@@ -124,7 +124,13 @@ class ReduceSum(Reduce):
 
 @dataclass
 class Splat(Op):
+    # Broadcasts a scalar to a tensor
     name: ClassVar[str] = "splat"
+
+
+@dataclass
+class Idiv(Op):
+    name: ClassVar[str] = "idiv"
 
 
 @dataclass
