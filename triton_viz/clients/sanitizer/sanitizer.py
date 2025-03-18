@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat, Idiv
+from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat, Idiv, CastImpl
 from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -802,6 +802,10 @@ class SanitizerSymbolicExecution(Client):
             rhs = SymbolicExpr.from_value(rhs)
             return lhs // rhs
 
+        def op_cast_impl_overrider(src, dst_type):
+            src = SymbolicExpr.from_value(src)
+            return src
+
         if op_type is ProgramId:
             return None, None, op_program_id_overrider
         elif op_type is RawLoad:
@@ -822,6 +826,8 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_splat_overrider
         elif op_type is Idiv:
             return None, None, op_idiv_overrider
+        elif op_type is CastImpl:
+            return None, None, op_cast_impl_overrider
         else:
             return None, None, None
 

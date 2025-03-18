@@ -134,6 +134,11 @@ class Idiv(Op):
 
 
 @dataclass
+class CastImpl(Op):
+    name: ClassVar[str] = "cast_impl"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str

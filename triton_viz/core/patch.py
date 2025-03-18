@@ -4,7 +4,7 @@ from typing import Callable, Type, Dict
 from tqdm import tqdm
 
 from .config import report_grid_execution_progress, sanitizer_backend
-from .data import Op, ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv
+from .data import Op, ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv, CastImpl
 import inspect
 from triton.runtime.interpreter import (
     GridExecutor,
@@ -14,7 +14,7 @@ from triton.runtime.interpreter import (
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
 
-op_list = [ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv]
+op_list = [ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv, CastImpl]
 original_ops = {
     ProgramId: interpreter_builder.create_get_program_id,
     RawStore: interpreter_builder.create_store,
@@ -28,6 +28,7 @@ original_ops = {
     MakeRange: interpreter_builder.create_make_range,
     Splat: interpreter_builder.create_splat,
     Idiv: interpreter_builder.create_idiv,
+    CastImpl: interpreter_builder.cast_impl,
 }
 reduce_map: Dict[Type[Op], Callable] = {
     ReduceMax: tl.max,
