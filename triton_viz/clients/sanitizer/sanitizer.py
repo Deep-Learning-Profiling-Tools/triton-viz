@@ -610,6 +610,10 @@ class SymbolicExpr:
                 # both are intervals
                 else:
                     raise NotImplementedError("Mul operation does not support two intervals yet.")
+            elif op == 'idiv':
+                if not is_singleton(rhs):
+                    raise NotImplementedError("IDiv operation does not support interval divisor yet.")
+                return (lhs[0] // rhs[0], lhs[1] // rhs[0])
             elif op == 'less':
                 assert is_singleton(rhs), "rhs must be a singleton for less operation."
                 rhs = rhs[0]
@@ -679,6 +683,10 @@ class SymbolicExpr:
                     masked_addrs.append(apply_mask_to_interval(addr, mask_value[-1], True))
                 else:
                     raise ValueError(f"Unsupported mask value: {mask_value}")
+            if self.op == "load":
+                print("tl.load:", masked_addrs)
+            else:
+                print("tl.store:", masked_addrs)
             return masked_addrs
         else:
             raise NotImplementedError(f"Unsupported operation: {self.op}")
