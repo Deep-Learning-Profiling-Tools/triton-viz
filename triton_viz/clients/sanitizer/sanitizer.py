@@ -528,6 +528,34 @@ class SymbolicExpr:
         def is_singleton(interval):
             return interval[0] == interval[1]
 
+        def check_mask_bitmap_monotonous(mask_bitmap, flag):
+            # mask bitmaps are like: [True, True, ... True, False, False, ... False]
+            # The first piece is all True, and the second piece is all False.
+            flipped = False
+            for bit in mask_bitmap:
+                if flag == bit:
+                    continue
+                elif not flipped:
+                    flag = not flag
+                    flipped = True
+                else:
+                    return False
+            return True
+
+        def apply_mask_to_interval(interval, mask_bitmap, true_then_false):
+            # check if mask is either
+            # [True, True, ... True, False, False, ... False] or
+            # [False, False, ... False, True, True, ... True]
+            assert check_mask_bitmap_monotonous(mask_bitmap, true_then_false), "Mask bitmap is not monotonous!"
+            assert (interval[1] - interval[0]) % (len(mask_bitmap) - 1) == 0, "interval diff must be a multiple of mask bitmap length!"
+            word_bytes = (interval[1] - interval[0]) // (len(mask_bitmap) - 1)
+            if true_then_false:
+                # mask will truncate the end of interval
+                return (interval[0], interval[0] + word_bytes * (sum(mask_bitmap) - 1))
+            else:
+                # mask will truncate the start of interval
+                return (interval[1] - word_bytes * (sum(mask_bitmap) - 1), interval[1])
+
         def compute_binary_op(lhs, rhs, op):
             if not is_singleton(lhs) and not is_singleton(rhs):
                 raise NotImplementedError("Binary operation does not support two intervals yet.")
@@ -582,6 +610,16 @@ class SymbolicExpr:
                 # both are intervals
                 else:
                     raise NotImplementedError("Mul operation does not support two intervals yet.")
+            elif op == 'less':
+                assert is_singleton(rhs), "rhs must be a singleton for less operation."
+                rhs = rhs[0]
+                if rhs <= lhs[0]:
+                    return (False, False)
+                elif rhs > lhs[1]:
+                    return (True, True)
+                else:
+                    mask = tuple(i < rhs for i in range(lhs[0], lhs[1] + 1))
+                    return (False, True, mask)
             else:
                 raise NotImplementedError(f"Unsupported binary operation: {op}")
 
@@ -621,12 +659,27 @@ class SymbolicExpr:
                 return result
             else:
                 return compute_binary_op(lhs, rhs, self.op)
-        elif self.op == "load":
-            # TODO: implement mask and other here
-            return self.ptr.eval()
-        elif self.op == "store":
-            # TODO: implement mask and other here
-            return self.ptr.eval()
+        elif self.op == "load" or self.op == "store":
+            addrs = self.ptr.eval()
+            if not isinstance(addrs, list):
+                addrs = [addrs]
+            if self.mask:
+                mask_values = self.mask.eval()
+                assert len(addrs) == len(mask_values), "length of addrs and mask must be the same!"
+            else:
+                mask_values = [(True, True) for _ in range(len(addrs))]
+
+            masked_addrs = []
+            for mask_value, addr in zip(mask_values, addrs):
+                if mask_value == (True, True):
+                    masked_addrs.append(addr)
+                elif mask_value == (False, False):
+                    continue
+                elif mask_value[:2] == (False, True):
+                    masked_addrs.append(apply_mask_to_interval(addr, mask_value[-1], True))
+                else:
+                    raise ValueError(f"Unsupported mask value: {mask_value}")
+            return masked_addrs
         else:
             raise NotImplementedError(f"Unsupported operation: {self.op}")
 
