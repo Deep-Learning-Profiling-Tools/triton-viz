@@ -556,6 +556,7 @@ class SymbolicExpr:
                 # mask will truncate the start of interval
                 return (interval[1] - word_bytes * (sum(mask_bitmap) - 1), interval[1])
 
+        # ================== Binary Ops Evaluation =======================
         def compute_binary_op(lhs, rhs, op):
             if not is_singleton(lhs) and not is_singleton(rhs):
                 raise NotImplementedError("Binary operation does not support two intervals yet.")
@@ -614,6 +615,12 @@ class SymbolicExpr:
                 if not is_singleton(rhs):
                     raise NotImplementedError("IDiv operation does not support interval divisor yet.")
                 return (lhs[0] // rhs[0], lhs[1] // rhs[0])
+            elif op == 'mod':
+                if not is_singleton(rhs):
+                    raise NotImplementedError("Mod operation does not support interval divisor yet.")
+                if not is_singleton(lhs):
+                    raise NotImplementedError("Mod operation does not support interval dividend yet.")
+                return (lhs[0] % rhs[0], lhs[0] % rhs[0])
             elif op == 'less':
                 assert is_singleton(rhs), "rhs must be a singleton for less operation."
                 rhs = rhs[0]
