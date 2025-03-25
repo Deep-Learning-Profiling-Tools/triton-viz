@@ -349,6 +349,8 @@ class SymbolicExpr:
         "mod": "%",
         "less": "<",
         "less_equal": "<=",
+        "greater": ">",
+        "greater_equal": ">=",
         "not_equal": "!=",
     }
     BINARY_OPS = BINARY_OP_SYMBOL_TABLE.keys()
@@ -844,6 +846,10 @@ class SanitizerSymbolicExecution(Client):
                 return lhs < rhs
             elif op is np.less_equal:
                 return lhs <= rhs
+            elif op is np.greater:
+                return lhs > rhs
+            elif op is np.greater_equal:
+                return lhs >= rhs
             elif op is np.not_equal:
                 return lhs != rhs
             elif op is np.fmod:
