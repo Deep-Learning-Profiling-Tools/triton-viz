@@ -636,6 +636,16 @@ class SymbolicExpr:
                 else:
                     mask = tuple(i < rhs for i in range(lhs[0], lhs[1] + 1))
                     return (False, True, mask)
+            elif op == 'greater':
+                assert is_singleton(rhs), "rhs must be a singleton for greater operation."
+                rhs = rhs[0]
+                if rhs >= lhs[1]:
+                    return (False, False)
+                elif rhs < lhs[0]:
+                    return (True, True)
+                else:
+                    mask = tuple(i > rhs for i in range(lhs[0], lhs[1] + 1))
+                    return (False, True, mask)
             else:
                 raise NotImplementedError(f"Unsupported binary operation: {op}")
 
