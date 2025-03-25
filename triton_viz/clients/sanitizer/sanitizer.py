@@ -328,6 +328,9 @@ class SymbolicExprDataWrapper:
     def size(self):
         return 2
 
+    def __int__(self):
+        return 12345
+
     def __str__(self):
         return self.value
 
