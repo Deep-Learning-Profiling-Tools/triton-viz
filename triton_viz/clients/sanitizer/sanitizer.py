@@ -368,6 +368,7 @@ class SymbolicExpr:
         """
         assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
         self.op = op
+        self.attrs = {}
         # check if the number of arguments is correct
         if self.op == "const":
             assert len(args) == 1, "const op expects one argument!"
@@ -395,6 +396,9 @@ class SymbolicExpr:
             assert len(args) == 2, f"{self.op} op expects two arguments!"
             self.lhs = args[0]
             self.rhs = args[1]
+
+    def set_attr(self, name, values):
+        self.attrs[name] = values
 
     def __add__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
