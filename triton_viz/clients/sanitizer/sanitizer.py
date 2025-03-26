@@ -369,6 +369,7 @@ class SymbolicExpr:
         assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
         self.op = op
         self.attrs = {}
+        self.dtype_tt = None
         # check if the number of arguments is correct
         if self.op == "const":
             assert len(args) == 1, "const op expects one argument!"
@@ -399,6 +400,12 @@ class SymbolicExpr:
 
     def set_attr(self, name, values):
         self.attrs[name] = values
+
+    def get_element_ty(self):
+        return self.dtype_tt
+
+    def set_element_ty(self, dtype_tt):
+        self.dtype_tt = dtype_tt
 
     def __add__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
@@ -495,7 +502,7 @@ class SymbolicExpr:
         builtin_scala_types = (
             int, float
         )
-        # if already symbolic
+        # if already SymbolicExpr
         if isinstance(var, cls):
             return var
 
@@ -872,13 +879,29 @@ class SanitizerSymbolicExecution(Client):
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
 
         def op_addptr_overrider(ptr, offset):
+            '''
+            In addptr operator, ptr is a pointer address with dtype_tt, and offset is a scalar.
+            '''
+            # Read dtype_tt from ptr.
+            # Here, ptr is either a TensorHandle or a SymbolicExpr.
             dtype_tt = ptr.get_element_ty()
+            assert dtype_tt, f"dtype_tt of ptr not found! ptr content: {ptr}"
+
+            # Read bitwidth from dtype_tt, and then convert it to bytewidth.
             element_bitwidth = dtype_tt.primitive_bitwidth
             element_bytewidth = max(1, element_bitwidth // 8)
+
+            # convert ptr to SymbolicExpr
             ptr = SymbolicExpr.from_value(ptr)
+
+            # convert offset to SymbolicExpr
             offset = SymbolicExpr.from_value(offset)
             element_bytewidth = SymbolicExpr.from_value(element_bytewidth)
-            return ptr + offset * element_bytewidth
+
+            # calculate the new address, and store the dtype_tt information in its SymbolicExpr.
+            ret = ptr + offset * element_bytewidth
+            ret.set_element_ty(dtype_tt)
+            return ret
 
         def op_make_range_overrider(start, end):
             start = SymbolicExpr.from_value(start)
