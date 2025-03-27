@@ -4,7 +4,7 @@ from typing import Callable, Type, Dict
 from tqdm import tqdm
 
 from .config import report_grid_execution_progress, sanitizer_backend
-from .data import Op, ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv, CastImpl
+from .data import Op, ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, TernaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv, CastImpl
 import inspect
 from triton.runtime.interpreter import (
     GridExecutor,
@@ -14,7 +14,7 @@ from triton.runtime.interpreter import (
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
 
-op_list = [ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv, CastImpl]
+op_list = [ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, TernaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv, CastImpl]
 original_ops = {
     ProgramId: interpreter_builder.create_get_program_id,
     RawStore: interpreter_builder.create_store,
@@ -23,6 +23,7 @@ original_ops = {
     Load: interpreter_builder.create_masked_load,
     Dot: interpreter_builder.create_dot,
     BinaryOp: interpreter_builder.binary_op,
+    TernaryOp: interpreter_builder.ternary_op,
     AddPtr: interpreter_builder.create_addptr,
     ExpandDims: interpreter_builder.create_expand_dims,
     MakeRange: interpreter_builder.create_make_range,

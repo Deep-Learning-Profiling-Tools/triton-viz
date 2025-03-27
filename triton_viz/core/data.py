@@ -68,6 +68,11 @@ class BinaryOp(Op):
 
 
 @dataclass
+class TernaryOp(Op):
+    name: ClassVar[str] = "ternary_op"
+
+
+@dataclass
 class AddPtr(Op):
     name: ClassVar[str] = "addptr"
 

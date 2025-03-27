@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, ProgramId, AddPtr, MakeRange, ReduceSum, Splat, Idiv, CastImpl
+from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, TernaryOp, ProgramId, AddPtr, MakeRange, ReduceSum, Splat, Idiv, CastImpl
 from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -354,8 +354,9 @@ class SymbolicExpr:
         "not_equal": "!=",
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
+    TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum",)
-    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + BINARY_OPS + REDUCE_OPS
+    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + BINARY_OPS + TERNARY_OPS + REDUCE_OPS
     def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
@@ -390,10 +391,18 @@ class SymbolicExpr:
             self.value = args[1]
             self.mask = args[2] if len(args) >= 3 else None
             self.other = args[3] if len(args) >= 4 else None
-        elif self.op in self.BINARY_OP_SYMBOL_TABLE.keys():
+        elif self.op in self.BINARY_OPS:
             assert len(args) == 2, f"{self.op} op expects two arguments!"
             self.lhs = args[0]
             self.rhs = args[1]
+        elif self.op in self.TERNARY_OPS:
+            assert len(args) == 3, f"{self.op} op expects three arguments!"
+            if self.op == "where":
+                self.cond = args[0]
+                self.lhs = args[1]
+                self.rhs = args[2]
+            else:
+                raise NotImplementedError(f"Unsupported ternary op: {self.op}")
         elif self.op == "sum":
             self.input = args[0]
             self.axis = args[1]
@@ -481,6 +490,14 @@ class SymbolicExpr:
             # Call recursively for each operand
             for arg in (self.lhs, self.rhs):
                 s += "\n" + arg.to_tree_str(indent + 1)
+        elif self.op in self.TERNARY_OPS:
+            if self.op == "where":
+                s = f"{prefix}where:"
+                s += f"\n{indent_str}{prefix}cond:\n" + self.cond.to_tree_str(indent + 2)
+                s += f"\n{indent_str}{prefix}lhs:\n" + self.lhs.to_tree_str(indent + 2)
+                s += f"\n{indent_str}{prefix}rhs:\n" + self.rhs.to_tree_str(indent + 2)
+            else:
+                raise NotImplementedError(f"Unsupported ternary op: {self.op}")
         elif self.op == "sum":
             s = f"{prefix}sum:"
             s += f"\n{indent_str}{prefix}input:\n" + self.input.to_tree_str(indent + 2)
@@ -891,6 +908,15 @@ class SanitizerSymbolicExecution(Client):
             else:
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
 
+        def op_ternary_op_overrider(lhs, rhs, other, op):
+            lhs = SymbolicExpr.from_value(lhs)
+            rhs = SymbolicExpr.from_value(rhs)
+            other = SymbolicExpr.from_value(other)
+            if op is np.where:
+                return SymbolicExpr("where", lhs, rhs, other)
+            else:
+                raise NotImplementedError(f"Unsupported ternary operation: {op} between {lhs}, {rhs} and {other}")
+
         def op_addptr_overrider(ptr, offset):
             '''
             In addptr operator, ptr is a pointer address with dtype_tt, and offset is a scalar.
@@ -950,6 +976,8 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_store_overrider
         elif op_type is BinaryOp:
             return None, None, op_binary_op_overrider
+        elif op_type is TernaryOp:
+            return None, None, op_ternary_op_overrider
         elif op_type is AddPtr:
             return None, None, op_addptr_overrider
         elif op_type is MakeRange:
