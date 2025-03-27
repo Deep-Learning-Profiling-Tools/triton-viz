@@ -38,17 +38,27 @@ reduce_map: Dict[Type[Op], Callable] = {
 
 
 class PatchOp:
-    def __init__(self, op, before_callback, after_callback, op_overrider):
+    def __init__(self, op, op_type, before_callback, after_callback, op_overrider):
         self.op = op
+        self.op_type = op_type
         self.before_callback = before_callback
         self.after_callback = after_callback
         self.op_overrider = op_overrider
 
     def __call__(self, *args, **kwargs):
+        def to_tensor(ret, dtype):
+            # see triton.runtime.interpreter:ReduceOps.sum
+            return tl.core.tensor(ret, dtype)
+
         if self.before_callback:
             self.before_callback(*args, **kwargs)
         if self.op_overrider:
-            ret = self.op_overrider(*args, **kwargs)
+            if self.op_type == ReduceSum:
+                # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
+                # Then, convert return value from TensorHandle to tl.tensor
+                ret = to_tensor(self.op_overrider(args[0].handle, *args[1:], **kwargs), args[0].dtype)
+            else:
+                ret = self.op_overrider(*args, **kwargs)
         else:
             ret = self.op(*args, **kwargs)
         if self.after_callback:
@@ -69,12 +79,12 @@ def patch_op(op_type: Type[Op], before_callback: Callable, after_callback: Calla
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = original_ops[op_type].__name__
         current_op = getattr(interpreter_builder, op_name)
-        patched_op = PatchOp(current_op, before_callback, after_callback, op_overrider)
+        patched_op = PatchOp(current_op, op_type, before_callback, after_callback, op_overrider)
         setattr(interpreter_builder, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
-    elif op_type in [ReduceMax, ReduceMin, ReduceSum]:
+    elif op_type in reduce_map:
         op_name = reduce_map[op_type].__name__
         current_op = getattr(tl, op_name)
-        patched_op = PatchOp(current_op, before_callback, after_callback, op_overrider)
+        patched_op = PatchOp(current_op, op_type, before_callback, after_callback, op_overrider)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")

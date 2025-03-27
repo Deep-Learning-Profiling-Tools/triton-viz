@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, ProgramId, AddPtr, MakeRange, Splat, Idiv, CastImpl
+from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, ProgramId, AddPtr, MakeRange, ReduceSum, Splat, Idiv, CastImpl
 from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -353,12 +353,9 @@ class SymbolicExpr:
         "greater_equal": ">=",
         "not_equal": "!=",
     }
-    BINARY_OPS = BINARY_OP_SYMBOL_TABLE.keys()
-    OP_SYMBOL_TABLE = BINARY_OP_SYMBOL_TABLE
-    OP_ARGS_TABLE = {
-        "load": ["ptr", "mask", "other"],
-    }
-    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + tuple(OP_SYMBOL_TABLE.keys())
+    BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
+    REDUCE_OPS = ("sum",)
+    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + BINARY_OPS + REDUCE_OPS
     def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
@@ -397,6 +394,12 @@ class SymbolicExpr:
             assert len(args) == 2, f"{self.op} op expects two arguments!"
             self.lhs = args[0]
             self.rhs = args[1]
+        elif self.op == "sum":
+            self.input = args[0]
+            self.axis = args[1]
+            self.keepdims = args[2]
+        else:
+            raise NotImplementedError(f"Unsupported op: {self.op}")
 
     def set_attr(self, name, values):
         self.attrs[name] = values
@@ -478,6 +481,11 @@ class SymbolicExpr:
             # Call recursively for each operand
             for arg in (self.lhs, self.rhs):
                 s += "\n" + arg.to_tree_str(indent + 1)
+        elif self.op == "sum":
+            s = f"{prefix}sum:"
+            s += f"\n{indent_str}{prefix}input:\n" + self.input.to_tree_str(indent + 2)
+            s += f"\n{indent_str}{prefix}axis: {self.axis}"
+            s += f"\n{indent_str}{prefix}keepdims: {self.keepdims}"
         else:
             raise ValueError(f"Unsupported op: {self.op}")
         return s
@@ -851,7 +859,8 @@ class SanitizerSymbolicExecution(Client):
                 ret = SymbolicExpr("store", ptr, value)
             else:
                 ret = SymbolicExpr("store", ptr, value, mask)
-            print('storing:', ret.eval())
+
+            # check memory access using z3
             for mem_access_addr in ret.eval():
                 self._check_range_satisfiable(mem_access_addr, Store)
 
@@ -911,6 +920,11 @@ class SanitizerSymbolicExecution(Client):
             end = SymbolicExpr.from_value(end - 1)
             return SymbolicExpr("arange", start, end)
 
+        def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
+            input = SymbolicExpr.from_value(input)
+            ret = SymbolicExpr("sum", input, axis, keep_dims, kwargs)
+            return ret
+
         def op_splat_overrider(arg, shape):
             return arg
 
@@ -939,6 +953,8 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_addptr_overrider
         elif op_type is MakeRange:
             return None, None, op_make_range_overrider
+        elif op_type is ReduceSum:
+            return None, None, op_reduce_sum_overrider
         elif op_type is Splat:
             return None, None, op_splat_overrider
         elif op_type is Idiv:
