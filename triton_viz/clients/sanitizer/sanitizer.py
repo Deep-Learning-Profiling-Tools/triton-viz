@@ -702,7 +702,10 @@ class SymbolicExpr:
                 addrs = [addrs]
             if self.mask:
                 mask_values = self.mask.eval()
-                assert len(addrs) == len(mask_values), "length of addrs and mask must be the same!"
+                if not isinstance(mask_values, list):
+                    # if mask_values is a single scalar, broadcast mask_values
+                    mask_values = [mask_values for _ in range(len(addrs))]
+                assert len(addrs) == len(mask_values), f"length of addrs ({len(addrs)}) and mask ({len(mask_values)}) must be the same!"
             else:
                 mask_values = [(True, True) for _ in range(len(addrs))]
 
