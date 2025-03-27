@@ -705,9 +705,12 @@ class SymbolicExpr:
             else:
                 return compute_binary_op(lhs, rhs, self.op)
         elif self.op == "load" or self.op == "store":
+            # get addrs value
             addrs = self.ptr.eval()
             if not isinstance(addrs, list):
                 addrs = [addrs]
+
+            # get masks value
             if self.mask:
                 mask_values = self.mask.eval()
                 if not isinstance(mask_values, list):
@@ -717,6 +720,7 @@ class SymbolicExpr:
             else:
                 mask_values = [(True, True) for _ in range(len(addrs))]
 
+            # apply masks to addrs
             masked_addrs = []
             for mask_value, addr in zip(mask_values, addrs):
                 if mask_value == (True, True):
@@ -727,10 +731,7 @@ class SymbolicExpr:
                     masked_addrs.append(apply_mask_to_interval(addr, mask_value[-1], True))
                 else:
                     raise ValueError(f"Unsupported mask value: {mask_value}")
-            if self.op == "load":
-                print("tl.load:", masked_addrs)
-            else:
-                print("tl.store:", masked_addrs)
+
             return masked_addrs
         else:
             raise NotImplementedError(f"Unsupported operation: {self.op}")
