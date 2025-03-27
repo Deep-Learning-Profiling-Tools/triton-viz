@@ -46,17 +46,14 @@ class PatchOp:
         self.op_overrider = op_overrider
 
     def __call__(self, *args, **kwargs):
-        def to_tensor(ret, dtype):
-            # see triton.runtime.interpreter:ReduceOps.sum
-            return tl.core.tensor(ret, dtype)
-
         if self.before_callback:
             self.before_callback(*args, **kwargs)
         if self.op_overrider:
             if self.op_type == ReduceSum:
+                # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
-                ret = to_tensor(self.op_overrider(args[0].handle, *args[1:], **kwargs), args[0].dtype)
+                ret = tl.core.tensor(self.op_overrider(args[0].handle, *args[1:], **kwargs), args[0].dtype)
             else:
                 ret = self.op_overrider(*args, **kwargs)
         else:
