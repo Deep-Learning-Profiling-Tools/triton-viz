@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, TernaryOp, ProgramId, AddPtr, MakeRange, ReduceSum, Splat, Idiv, CastImpl
+from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, TernaryOp, ProgramId, AddPtr, MakeRange, ReduceSum, Splat, Idiv, Rsqrt, CastImpl
 from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -340,6 +340,7 @@ class SymbolicExprDataWrapper:
 class SymbolicExpr:
     BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load", "store")
+    UNARY_OPS = ("rsqrt",)
     BINARY_OP_SYMBOL_TABLE = {
         "add": "+",
         "sub": "-",
@@ -356,7 +357,7 @@ class SymbolicExpr:
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum",)
-    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + BINARY_OPS + TERNARY_OPS + REDUCE_OPS
+    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + UNARY_OPS + BINARY_OPS + TERNARY_OPS + REDUCE_OPS
     def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
@@ -391,6 +392,9 @@ class SymbolicExpr:
             self.value = args[1]
             self.mask = args[2] if len(args) >= 3 else None
             self.other = args[3] if len(args) >= 4 else None
+        elif self.op in self.UNARY_OPS:
+            assert len(args) == 1, f"{self.op} op expects one argument!"
+            self.arg = args[0]
         elif self.op in self.BINARY_OPS:
             assert len(args) == 2, f"{self.op} op expects two arguments!"
             self.lhs = args[0]
@@ -484,6 +488,9 @@ class SymbolicExpr:
                 s += f"\n{indent_str}{prefix}mask:\n" + self.mask.to_tree_str(indent + 2)
             if self.other is not None:
                 s += f"{indent_str}{prefix}other:\n" + self.other.to_tree_str(indent + 2)
+        elif self.op in self.UNARY_OPS:
+            s = f"{prefix}{self.op}:"
+            s += f"\n{indent_str}{prefix}arg:\n" + self.arg.to_tree_str(indent + 1)
         elif self.op in self.BINARY_OPS:
             op_symbol = self.BINARY_OP_SYMBOL_TABLE[self.op]
             s = f"{prefix}{op_symbol}"
@@ -960,6 +967,10 @@ class SanitizerSymbolicExecution(Client):
             rhs = SymbolicExpr.from_value(rhs)
             return lhs // rhs
 
+        def op_rsqrt_overrider(arg):
+            arg = SymbolicExpr.from_value(arg)
+            return SymbolicExpr("rsqrt", arg)
+
         def op_cast_impl_overrider(src, dst_type):
             src = SymbolicExpr.from_value(src)
             return src
@@ -988,6 +999,8 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_splat_overrider
         elif op_type is Idiv:
             return None, None, op_idiv_overrider
+        elif op_type is Rsqrt:
+            return None, None, op_rsqrt_overrider
         elif op_type is CastImpl:
             return None, None, op_cast_impl_overrider
         else:

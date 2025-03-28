@@ -139,6 +139,11 @@ class Idiv(Op):
 
 
 @dataclass
+class Rsqrt(Op):
+    name: ClassVar[str] = "rsqrt"
+
+
+@dataclass
 class CastImpl(Op):
     name: ClassVar[str] = "cast_impl"
 
