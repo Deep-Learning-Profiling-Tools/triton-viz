@@ -4,7 +4,14 @@ from typing import Callable, Type, Dict
 from tqdm import tqdm
 
 from .config import report_grid_execution_progress, sanitizer_backend
-from .data import Op, ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, TernaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv, Rsqrt, CastImpl
+from .data import (
+    Op, RawLoad, Load, RawStore, Store,
+    BinaryOp, TernaryOp, ProgramId,
+    AddPtr, MakeRange, ReduceSum,
+    Dot, ExpandDims, ReduceMax, ReduceMin,
+    Splat, MakeBlockPointer, TensorPointerLoad,
+    TensorPointerStore, Idiv, Rsqrt,
+    CastImpl)
 import inspect
 from triton.runtime.interpreter import (
     GridExecutor,
@@ -14,7 +21,13 @@ from triton.runtime.interpreter import (
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
 
-op_list = [ProgramId, RawStore, Store, RawLoad, Load, Dot, BinaryOp, TernaryOp, AddPtr, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum, Splat, Idiv, Rsqrt, CastImpl]
+op_list = [
+    ProgramId, RawStore, Store, RawLoad, Load,
+    Dot, BinaryOp, TernaryOp, AddPtr, ExpandDims,
+    MakeRange, ReduceMax, ReduceMin, ReduceSum,
+    Splat, MakeBlockPointer, TensorPointerLoad,
+    TensorPointerStore, Idiv, Rsqrt, CastImpl,
+]
 original_ops = {
     ProgramId: interpreter_builder.create_get_program_id,
     RawStore: interpreter_builder.create_store,
@@ -28,6 +41,9 @@ original_ops = {
     ExpandDims: interpreter_builder.create_expand_dims,
     MakeRange: interpreter_builder.create_make_range,
     Splat: interpreter_builder.create_splat,
+    MakeBlockPointer: interpreter_builder.create_make_block_ptr,
+    TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
+    TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
     Idiv: interpreter_builder.create_idiv,
     Rsqrt: interpreter_builder.create_rsqrt,
     CastImpl: interpreter_builder.cast_impl,

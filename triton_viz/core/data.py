@@ -134,6 +134,21 @@ class Splat(Op):
 
 
 @dataclass
+class MakeBlockPointer(Op):
+    name: ClassVar[str] = "make_block_ptr"
+
+
+@dataclass
+class TensorPointerLoad(Op):
+    name: ClassVar[str] = "tensor_pointer_load"
+
+
+@dataclass
+class TensorPointerStore(Op):
+    name: ClassVar[str] = "tensor_pointer_store"
+
+
+@dataclass
 class Idiv(Op):
     name: ClassVar[str] = "idiv"
 

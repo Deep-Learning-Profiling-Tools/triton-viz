@@ -7,7 +7,13 @@ import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 
 from ...core.client import Client
-from ...core.data import Op, RawLoad, Load, RawStore, Store, BinaryOp, TernaryOp, ProgramId, AddPtr, MakeRange, ReduceSum, Splat, Idiv, Rsqrt, CastImpl
+from ...core.data import (
+    Op, RawLoad, Load, RawStore, Store,
+    BinaryOp, TernaryOp, ProgramId,
+    AddPtr, MakeRange, ReduceSum,
+    Splat, MakeBlockPointer, TensorPointerLoad,
+    TensorPointerStore, Idiv, Rsqrt,
+    CastImpl)
 from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
 from ...core.config import sanitizer_backend
@@ -357,7 +363,8 @@ class SymbolicExpr:
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum",)
-    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + UNARY_OPS + BINARY_OPS + TERNARY_OPS + REDUCE_OPS
+    POINTER_OPS = ("make_block_ptr",)
+    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + UNARY_OPS + BINARY_OPS + TERNARY_OPS + REDUCE_OPS + POINTER_OPS
     def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
@@ -411,6 +418,14 @@ class SymbolicExpr:
             self.input = args[0]
             self.axis = args[1]
             self.keepdims = args[2]
+        elif self.op == "make_block_ptr":
+            assert len(args) == 6, "make_block_ptr op expects six arguments!"
+            self.base = args[0]
+            self.shape = args[1]
+            self.strides = args[2]
+            self.offsets = args[3]
+            self.block_shape = args[4]
+            self.order = args[5]
         else:
             raise NotImplementedError(f"Unsupported op: {self.op}")
 
@@ -962,6 +977,36 @@ class SanitizerSymbolicExecution(Client):
         def op_splat_overrider(arg, shape):
             return arg
 
+        def op_make_block_ptr_overrider(base, shape, strides, offsets, tensor_shape, order):
+            base = SymbolicExpr.from_value(base)
+            assert len(shape) == len(strides) == len(offsets) == len(tensor_shape) == len(order), \
+                f"Length of shape ({len(shape)}), strides ({len(strides)}), offsets ({len(offsets)}), tensor_shape ({len(tensor_shape)}) and order ({len(order)}) must be the same!"
+            shape = [SymbolicExpr.from_value(shape_i) for shape_i in shape]
+            strides = [SymbolicExpr.from_value(strides_i) for strides_i in strides]
+            offsets = [SymbolicExpr.from_value(offset_i) for offset_i in offsets]
+            tensor_shape = [SymbolicExpr.from_value(tensor_shape_i) for tensor_shape_i in tensor_shape]
+            order = [SymbolicExpr.from_value(order_i) for order_i in order]
+
+            ret = SymbolicExpr(
+                "make_block_ptr",
+                base,
+                shape,
+                strides,
+                offsets,
+                tensor_shape,
+                order)
+
+            ret.set_element_ty(base.get_element_ty())
+            print(ret)
+
+            return ret
+
+        def op_tensor_pointer_load_overrider(ptr, boundary_check, padding_option, cache_modifier, eviction_policy, is_volatile):
+            raise NotImplementedError("TensorPointerLoad is not supported yet.")
+
+        def op_tensor_pointer_store_overrider(ptr, value, boundary_check, cache_modifier, eviction_policy):
+            raise NotImplementedError("TensorPointerStore is not supported yet.")
+
         def op_idiv_overrider(lhs, rhs):
             lhs = SymbolicExpr.from_value(lhs)
             rhs = SymbolicExpr.from_value(rhs)
@@ -997,6 +1042,12 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_reduce_sum_overrider
         elif op_type is Splat:
             return None, None, op_splat_overrider
+        elif op_type is MakeBlockPointer:
+            return None, None, op_make_block_ptr_overrider
+        elif op_type is TensorPointerLoad:
+            return None, None, op_tensor_pointer_load_overrider
+        elif op_type is TensorPointerStore:
+            return None, None, op_tensor_pointer_store_overrider
         elif op_type is Idiv:
             return None, None, op_idiv_overrider
         elif op_type is Rsqrt:
