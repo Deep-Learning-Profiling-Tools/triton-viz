@@ -8,7 +8,7 @@ from .data import (
     Op, RawLoad, Load, RawStore, Store,
     BinaryOp, TernaryOp, ProgramId,
     AddPtr, MakeRange, ReduceSum,
-    Dot, ExpandDims, ReduceMax, ReduceMin,
+    Dot, ExpandDims, Broadcast, ReduceMax, ReduceMin,
     Splat, MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt,
     CastImpl)
@@ -24,7 +24,7 @@ from triton.runtime import JITFunction
 op_list = [
     ProgramId, RawStore, Store, RawLoad, Load,
     Dot, BinaryOp, TernaryOp, AddPtr, ExpandDims,
-    MakeRange, ReduceMax, ReduceMin, ReduceSum,
+    MakeRange, Broadcast, ReduceMax, ReduceMin, ReduceSum,
     Splat, MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt, CastImpl,
 ]
@@ -40,6 +40,7 @@ original_ops = {
     AddPtr: interpreter_builder.create_addptr,
     ExpandDims: interpreter_builder.create_expand_dims,
     MakeRange: interpreter_builder.create_make_range,
+    Broadcast: interpreter_builder.create_broadcast,
     Splat: interpreter_builder.create_splat,
     MakeBlockPointer: interpreter_builder.create_make_block_ptr,
     TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,

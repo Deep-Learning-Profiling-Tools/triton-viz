@@ -10,7 +10,7 @@ from ...core.client import Client
 from ...core.data import (
     Op, RawLoad, Load, RawStore, Store,
     BinaryOp, TernaryOp, ProgramId,
-    AddPtr, MakeRange, ReduceSum,
+    AddPtr, MakeRange, ExpandDims, Broadcast, ReduceSum,
     Splat, MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt,
     CastImpl)
@@ -365,7 +365,17 @@ class SymbolicExpr:
     TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum",)
     POINTER_OPS = ("make_block_ptr",)
-    SUPPORTED_OPS = BASIC_OPS + INDIRECT_OPS + UNARY_OPS + BINARY_OPS + TERNARY_OPS + REDUCE_OPS + POINTER_OPS
+    BROADCAST_OPS = ("splat", "expand_dims", "broadcast")
+    SUPPORTED_OPS = (
+        BASIC_OPS +
+        INDIRECT_OPS +
+        UNARY_OPS +
+        BINARY_OPS +
+        TERNARY_OPS +
+        REDUCE_OPS +
+        POINTER_OPS +
+        BROADCAST_OPS
+    )
     def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
@@ -377,6 +387,7 @@ class SymbolicExpr:
         self.op = op
         self.attrs = {}
         self.dtype_tt = None
+        self.shape = []
         # check if the number of arguments is correct
         if self.op == "const":
             assert len(args) == 1, "const op expects one argument!"
@@ -389,6 +400,16 @@ class SymbolicExpr:
             assert len(args) == 2, "arange op expects two arguments!"
             self.start = args[0]
             self.end = args[1]
+            if self.end != self.start:
+                start_value_tuple = self.start.eval()
+                assert start_value_tuple[0] == start_value_tuple[1]
+                start_value = start_value_tuple[0]
+
+                end_value_tuple = self.end.eval()
+                assert end_value_tuple[0] == end_value_tuple[1]
+                end_value = end_value_tuple[0]
+
+                self.shape = [end_value - start_value + 1]
         elif self.op == "load":
             assert len(args) in (1, 2, 3), "load op expects 1, 2 or 3 arguments!"
             self.ptr = args[0]
@@ -407,6 +428,14 @@ class SymbolicExpr:
             assert len(args) == 2, f"{self.op} op expects two arguments!"
             self.lhs = args[0]
             self.rhs = args[1]
+            if not self.lhs.shape: # lhs is a scalar
+                ret_shape = self.rhs.shape
+            elif not self.rhs.shape: # rhs is a scalar
+                ret_shape = self.lhs.shape
+            else: # both are blocks
+                assert self.lhs.shape == self.rhs.shape, f"lhs shape {self.lhs.shape} should be equal to rhs shape {self.rhs.shape}"
+                ret_shape = self.lhs.shape
+            self.shape = ret_shape
         elif self.op in self.TERNARY_OPS:
             assert len(args) == 3, f"{self.op} op expects three arguments!"
             if self.op == "where":
@@ -427,6 +456,19 @@ class SymbolicExpr:
             self.offsets = args[3]
             self.block_shape = args[4]
             self.order = args[5]
+        elif self.op in self.BROADCAST_OPS:
+            self.arg = args[0]
+            self.dtype_tt = self.arg.dtype_tt
+            if self.op == "splat":
+                assert len(args) == 2, "splat op expects two arguments!"
+                self.shape = args[1]
+            elif self.op == "expand_dims":
+                assert len(args) == 2, "expand_dims op expects two arguments!"
+                self.axis = args[1]
+                self.arg.shape.insert(self.axis, 1)
+            elif self.op == "broadcast":
+                assert len(args) == 2, "broadcast op expects two arguments!"
+                self.shape = args[1]
         else:
             raise NotImplementedError(f"Unsupported op: {self.op}")
 
@@ -530,6 +572,18 @@ class SymbolicExpr:
             s += f"\n{indent_str}{prefix}input:\n" + self.input.to_tree_str(indent + 2)
             s += f"\n{indent_str}{prefix}axis: {self.axis}"
             s += f"\n{indent_str}{prefix}keepdims: {self.keepdims}"
+        elif self.op == "splat":
+            s = f"{prefix}splat:"
+            s += f"\n{indent_str}{prefix}arg:\n" + self.arg.to_tree_str(indent + 2)
+            s += f"\n{indent_str}{prefix}shape: {self.shape}"
+        elif self.op == "expand_dims":
+            s = f"{prefix}expand_dims:"
+            s += f"\n{indent_str}{prefix}arg:\n" + self.arg.to_tree_str(indent + 2)
+            s += f"\n{indent_str}{prefix}axis: {self.axis}"
+        elif self.op == "broadcast":
+            s = f"{prefix}broadcast:"
+            s += f"\n{indent_str}{prefix}arg:\n" + self.arg.to_tree_str(indent + 2)
+            s += f"\n{indent_str}{prefix}shape: {self.shape}"
         else:
             raise ValueError(f"Unsupported op: {self.op}")
         return s
@@ -777,6 +831,28 @@ class SymbolicExpr:
                     raise ValueError(f"Unsupported mask value: {mask_value}")
 
             return masked_addrs
+        elif self.op == "splat":
+            return self.arg.eval()
+        elif self.op == "expand_dims":
+            return self.arg.eval()
+        elif self.op == "broadcast":
+            arg_val = self.arg.eval()
+            if isinstance(arg_val, list) and len(arg_val) > 1:
+                raise NotImplementedError("Broadcast operation does not support program_idz yet.")
+            if len(self.shape) == 1:
+                raise NotImplementedError("Broadcast operation now only supports 2D tensors!")
+            elif len(self.shape) == 2:
+                if self.arg.shape[0] == 1:
+                    # broadcast row
+                    return [(arg_val[0], arg_val[1]) for _ in range(self.shape[0])]
+                elif self.arg.shape[1] == 1:
+                    # broadcast column
+                    ret = []
+                    for x in range(arg_val[0], arg_val[1] + 1):
+                        ret.append((x, x))
+                    return ret
+            else:
+                raise NotImplementedError("Broadcast operation for 3D or more is not supported yet.")
         else:
             raise NotImplementedError(f"Unsupported operation: {self.op}")
 
@@ -976,13 +1052,22 @@ class SanitizerSymbolicExecution(Client):
             end = SymbolicExpr.from_value(end - 1)
             return SymbolicExpr("arange", start, end)
 
+        def op_expand_dims_overrider(arg, axis):
+            arg = SymbolicExpr.from_value(arg)
+            return SymbolicExpr("expand_dims", arg, axis)
+
+        def op_broadcast_overrider(arg, shape):
+            arg = SymbolicExpr.from_value(arg)
+            return SymbolicExpr("broadcast", arg, shape)
+
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
             input = SymbolicExpr.from_value(input)
             ret = SymbolicExpr("sum", input, axis, keep_dims, kwargs)
             return ret
 
         def op_splat_overrider(arg, shape):
-            return arg
+            arg = SymbolicExpr.from_value(arg)
+            return SymbolicExpr("splat", arg, shape)
 
         def op_make_block_ptr_overrider(base, shape, strides, offsets, tensor_shape, order):
             base = SymbolicExpr.from_value(base)
@@ -1045,6 +1130,10 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_addptr_overrider
         elif op_type is MakeRange:
             return None, None, op_make_range_overrider
+        elif op_type is ExpandDims:
+            return None, None, op_expand_dims_overrider
+        elif op_type is Broadcast:
+            return None, None, op_broadcast_overrider
         elif op_type is ReduceSum:
             return None, None, op_reduce_sum_overrider
         elif op_type is Splat:

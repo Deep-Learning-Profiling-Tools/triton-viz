@@ -93,6 +93,11 @@ class ExpandDims(Op):
 
 
 @dataclass
+class Broadcast(Op):
+    name: ClassVar[str] = "broadcast"
+
+
+@dataclass
 class Dot(Op):
     name: ClassVar[str] = "dot"
     input_shape: Tuple

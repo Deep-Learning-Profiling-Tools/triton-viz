@@ -118,3 +118,28 @@ def test_vec_add_mask():
 
     grid = lambda meta: (triton.cdiv(access_size, meta["BLOCK_SIZE"]),)
     add_kernel[grid](a, b, output, size, BLOCK_SIZE=BLOCK_SIZE)
+
+def test_new_axis_column():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def new_axis_kernel(out_ptr, BLOCK_ROW_SIZE: tl.constexpr):
+        pid = out_ptr + tl.program_id(0) * BLOCK_ROW_SIZE + tl.arange(0, BLOCK_ROW_SIZE)[:, None]
+        tl.load(pid)
+
+    BLOCK_ROW_SIZE = 8
+    out = torch.empty((BLOCK_ROW_SIZE, 1), dtype=torch.int32, device='cuda')
+    grid = lambda meta: (1,)
+    new_axis_kernel[grid](out, BLOCK_ROW_SIZE=BLOCK_ROW_SIZE)
+
+
+def test_new_axis_row():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def new_axis_kernel(out_ptr, BLOCK_ROW_SIZE: tl.constexpr):
+        pid = out_ptr + tl.program_id(0) * BLOCK_ROW_SIZE + tl.arange(0, BLOCK_ROW_SIZE)[None, :]
+        tl.load(pid)
+
+    BLOCK_ROW_SIZE = 8
+    out = torch.empty((BLOCK_ROW_SIZE, 1), dtype=torch.int32, device='cuda')
+    grid = lambda meta: (1,)
+    new_axis_kernel[grid](out, BLOCK_ROW_SIZE=BLOCK_ROW_SIZE)
