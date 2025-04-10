@@ -359,6 +359,7 @@ class SymbolicExpr:
         "greater": ">",
         "greater_equal": ">=",
         "not_equal": "!=",
+        "equal": "==",
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
@@ -473,6 +474,10 @@ class SymbolicExpr:
     def __ne__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("not_equal", self, other)
+
+    def __eq__(self, other):
+        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
+        return SymbolicExpr("equal", self, other)
 
     def to_tree_str(self, indent: int = 0) -> str:
         """Visualize AST using Tree format."""
@@ -925,6 +930,8 @@ class SanitizerSymbolicExecution(Client):
                 return lhs >= rhs
             elif op is np.not_equal:
                 return lhs != rhs
+            elif op is np.equal:
+                return lhs == rhs
             elif op is np.fmod:
                 return lhs % rhs
             else:
