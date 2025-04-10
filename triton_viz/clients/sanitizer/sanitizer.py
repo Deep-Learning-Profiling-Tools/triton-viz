@@ -390,8 +390,9 @@ class SymbolicExpr:
         self.shape = []
         # check if the number of arguments is correct
         if self.op == "const":
-            assert len(args) == 1, "const op expects one argument!"
             self.value = args[0]
+            if len(args) >= 2:
+                self.dtype_tt = args[1]
         elif self.op == "pid":
             assert len(args) == 2, "pid op expects two arguments!"
             self.grid = args[0]
@@ -618,12 +619,13 @@ class SymbolicExpr:
             if var.dtype in triton_scala_dtypes:
                 if len(var.data) == 1:
                     return cls("const", var.data.item())
-                return cls("const", var.data)
+                else:
+                    return cls("const", var.data)
             # if a pointer
             elif isinstance(var.dtype, tl.pointer_type):
                 if len(var.data) != 1:
                     raise ValueError("Unsupported tl.pointer_type with length more than one!")
-                return cls("const", var.data.item())
+                return cls("const", var.data.item(), var.get_element_ty())
             else:
                 raise ValueError("Unsupported TensorHandle dtype", var.dtype)
 
