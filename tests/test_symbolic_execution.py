@@ -143,3 +143,30 @@ def test_new_axis_row():
     out = torch.empty((BLOCK_ROW_SIZE, 1), dtype=torch.int32, device='cuda')
     grid = lambda meta: (1,)
     new_axis_kernel[grid](out, BLOCK_ROW_SIZE=BLOCK_ROW_SIZE)
+
+def test_tl_maximum():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def maximum_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        # read data from x_ptr and y_ptr
+        x = tl.load(x_ptr + offsets, mask=mask)
+        y = tl.load(y_ptr + offsets, mask=mask)
+        # calculate maximum
+        out = tl.maximum(x, y)
+        # write back
+        tl.store(out_ptr + offsets, out, mask=mask)
+
+    size = 20
+    BLOCK_SIZE = 8
+    a = torch.randn(size, dtype=torch.float32, device='cuda')
+    b = torch.randn(size, dtype=torch.float32, device='cuda')
+
+    out = torch.empty_like(a, device='cuda')
+
+    grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
+
+    maximum_kernel[grid](a, b, out, size, BLOCK_SIZE=BLOCK_SIZE)

@@ -360,6 +360,7 @@ class SymbolicExpr:
         "greater_equal": ">=",
         "not_equal": "!=",
         "equal": "==",
+        "maximum": "max",
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
@@ -1012,6 +1013,8 @@ class SanitizerSymbolicExecution(Client):
                 return lhs == rhs
             elif op is np.fmod:
                 return lhs % rhs
+            elif op is np.maximum:
+                return SymbolicExpr("maximum", lhs, rhs)
             else:
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
 
