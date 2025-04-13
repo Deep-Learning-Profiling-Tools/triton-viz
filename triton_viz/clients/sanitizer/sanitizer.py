@@ -1143,46 +1143,31 @@ class SanitizerSymbolicExecution(Client):
             src = SymbolicExpr.from_value(src)
             return src
 
-        if op_type is ProgramId:
-            return None, None, op_program_id_overrider
-        elif op_type is RawLoad:
-            return None, None, op_raw_load_overrider
-        elif op_type is Load:
-            return None, None, op_load_overrider
-        elif op_type is RawStore:
-            return None, None, op_raw_store_overrider
-        elif op_type is Store:
-            return None, None, op_store_overrider
-        elif op_type is UnaryOp:
-            return None, None, op_unary_op_overrider
-        elif op_type is BinaryOp:
-            return None, None, op_binary_op_overrider
-        elif op_type is TernaryOp:
-            return None, None, op_ternary_op_overrider
-        elif op_type is AddPtr:
-            return None, None, op_addptr_overrider
-        elif op_type is MakeRange:
-            return None, None, op_make_range_overrider
-        elif op_type is ExpandDims:
-            return None, None, op_expand_dims_overrider
-        elif op_type is Broadcast:
-            return None, None, op_broadcast_overrider
-        elif op_type is ReduceSum:
-            return None, None, op_reduce_sum_overrider
-        elif op_type is Splat:
-            return None, None, op_splat_overrider
-        elif op_type is MakeBlockPointer:
-            return None, None, op_make_block_ptr_overrider
-        elif op_type is TensorPointerLoad:
-            return None, None, op_tensor_pointer_load_overrider
-        elif op_type is TensorPointerStore:
-            return None, None, op_tensor_pointer_store_overrider
-        elif op_type is Idiv:
-            return None, None, op_idiv_overrider
-        elif op_type is Rsqrt:
-            return None, None, op_rsqrt_overrider
-        elif op_type is CastImpl:
-            return None, None, op_cast_impl_overrider
+        OP_TYPE_TO_OVERRIDER = {
+            ProgramId: op_program_id_overrider,
+            RawLoad: op_raw_load_overrider,
+            Load: op_load_overrider,
+            RawStore: op_raw_store_overrider,
+            Store: op_store_overrider,
+            UnaryOp: op_unary_op_overrider,
+            BinaryOp: op_binary_op_overrider,
+            TernaryOp: op_ternary_op_overrider,
+            AddPtr: op_addptr_overrider,
+            MakeRange: op_make_range_overrider,
+            ExpandDims: op_expand_dims_overrider,
+            Broadcast: op_broadcast_overrider,
+            ReduceSum: op_reduce_sum_overrider,
+            Splat: op_splat_overrider,
+            MakeBlockPointer: op_make_block_ptr_overrider,
+            TensorPointerLoad: op_tensor_pointer_load_overrider,
+            TensorPointerStore: op_tensor_pointer_store_overrider,
+            Idiv: op_idiv_overrider,
+            Rsqrt: op_rsqrt_overrider,
+            CastImpl: op_cast_impl_overrider,
+        }
+
+        if op_type in OP_TYPE_TO_OVERRIDER:
+            return None, None, OP_TYPE_TO_OVERRIDER[op_type]
         else:
             return None, None, None
 
