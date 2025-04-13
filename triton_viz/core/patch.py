@@ -6,7 +6,7 @@ from tqdm import tqdm
 from .config import report_grid_execution_progress, sanitizer_backend
 from .data import (
     Op, RawLoad, Load, RawStore, Store,
-    BinaryOp, TernaryOp, ProgramId,
+    UnaryOp, BinaryOp, TernaryOp, ProgramId,
     AddPtr, MakeRange, ReduceSum,
     Dot, ExpandDims, Broadcast, ReduceMax, ReduceMin,
     Splat, MakeBlockPointer, TensorPointerLoad,
@@ -23,7 +23,7 @@ from triton.runtime import JITFunction
 
 op_list = [
     ProgramId, RawStore, Store, RawLoad, Load,
-    Dot, BinaryOp, TernaryOp, AddPtr, ExpandDims,
+    Dot, UnaryOp, BinaryOp, TernaryOp, AddPtr, ExpandDims,
     MakeRange, Broadcast, ReduceMax, ReduceMin, ReduceSum,
     Splat, MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt, CastImpl,
@@ -35,6 +35,7 @@ original_ops = {
     RawLoad: interpreter_builder.create_load,
     Load: interpreter_builder.create_masked_load,
     Dot: interpreter_builder.create_dot,
+    UnaryOp: interpreter_builder.unary_op,
     BinaryOp: interpreter_builder.binary_op,
     TernaryOp: interpreter_builder.ternary_op,
     AddPtr: interpreter_builder.create_addptr,

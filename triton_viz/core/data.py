@@ -60,6 +60,11 @@ class Load(Op):
 
 
 @dataclass
+class UnaryOp(Op):
+    name: ClassVar[str] = "unary_op"
+
+
+@dataclass
 class BinaryOp(Op):
     name: ClassVar[str] = "binary_op"
     op: str

@@ -89,9 +89,7 @@ def test_vec_add():
     BLOCK_SIZE = 8
     a = torch.randn(size, dtype=torch.float32, device='cuda')
     b = torch.randn(size, dtype=torch.float32, device='cuda')
-
     output = torch.empty_like(a, device='cuda')
-
     grid = lambda meta: (triton.cdiv(access_size, meta["BLOCK_SIZE"]),)
     add_kernel[grid](a, b, output, BLOCK_SIZE=BLOCK_SIZE)
 
@@ -113,9 +111,7 @@ def test_vec_add_mask():
     BLOCK_SIZE = 8
     a = torch.randn(size, dtype=torch.float32, device='cuda')
     b = torch.randn(size, dtype=torch.float32, device='cuda')
-
     output = torch.empty_like(a, device='cuda')
-
     grid = lambda meta: (triton.cdiv(access_size, meta["BLOCK_SIZE"]),)
     add_kernel[grid](a, b, output, size, BLOCK_SIZE=BLOCK_SIZE)
 
@@ -164,9 +160,27 @@ def test_tl_maximum():
     BLOCK_SIZE = 8
     a = torch.randn(size, dtype=torch.float32, device='cuda')
     b = torch.randn(size, dtype=torch.float32, device='cuda')
-
     out = torch.empty_like(a, device='cuda')
-
     grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
-
     maximum_kernel[grid](a, b, out, size, BLOCK_SIZE=BLOCK_SIZE)
+
+def test_tl_log():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def log_kernel(x_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask)
+        y = tl.log(x)
+        tl.store(out_ptr + offsets, y, mask=mask)
+
+    size = 16
+    BLOCK_SIZE = 8
+    eps = 0.01
+
+    a = torch.rand(size, dtype=torch.float32, device='cuda') + eps
+    out = torch.empty_like(a, device='cuda')
+    grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
+    log_kernel[grid](a, out, size, BLOCK_SIZE=BLOCK_SIZE)

@@ -1,14 +1,14 @@
 from .trace import trace, clear
 from .data import (
     Op, ProgramId, RawStore, Store, RawLoad,
-    Load, BinaryOp, TernaryOp, AddPtr, MakeRange,
+    Load, UnaryOp, BinaryOp, TernaryOp, AddPtr, MakeRange,
     ExpandDims, Broadcast, Dot, Reduce, ReduceSum, ReduceMax,
     ReduceMin, Splat, MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt, CastImpl)
 
 __all__ = [
     "trace", "clear", "Op", "ProgramId", "RawStore",
-    "Store", "RawLoad", "Load", "BinaryOp", "TernaryOp",
+    "Store", "RawLoad", "Load", "UnaryOp", "BinaryOp", "TernaryOp",
     "AddPtr", "MakeRange", "ExpandDims", "Broadcast", "Dot", "Reduce",
     "ReduceSum", "ReduceMax", "ReduceMin", "Splat", "MakeBlockPointer",
     "TensorPointerLoad", "TensorPointerStore", "Idiv", "Rsqrt", "CastImpl",

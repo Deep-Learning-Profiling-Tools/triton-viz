@@ -9,7 +9,7 @@ from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 from ...core.client import Client
 from ...core.data import (
     Op, RawLoad, Load, RawStore, Store,
-    BinaryOp, TernaryOp, ProgramId,
+    UnaryOp, BinaryOp, TernaryOp, ProgramId,
     AddPtr, MakeRange, ExpandDims, Broadcast, ReduceSum,
     Splat, MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt,
@@ -346,7 +346,8 @@ class SymbolicExprDataWrapper:
 class SymbolicExpr:
     BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load", "store")
-    UNARY_OPS = ("rsqrt",)
+    UNARY_OPS = ("cos", "exp", "exp2", "abs", "floor", "ceil", "log", 
+                 "log2", "sqrt", "sin", "rsqrt",)
     BINARY_OP_SYMBOL_TABLE = {
         "add": "+",
         "sub": "-",
@@ -988,6 +989,31 @@ class SanitizerSymbolicExecution(Client):
             for mem_access_addr in ret.eval():
                 self._check_range_satisfiable(mem_access_addr, Store)
 
+        def op_unary_op_overrider(arg, op):
+            arg = SymbolicExpr.from_value(arg)
+            if op is np.cos:
+                return SymbolicExpr("cos", arg)
+            elif op is np.exp:
+                return SymbolicExpr("exp", arg)
+            elif op is np.exp2:
+                return SymbolicExpr("exp2", arg)
+            elif op is np.abs:
+                return SymbolicExpr("abs", arg)
+            elif op is np.floor:
+                return SymbolicExpr("floor", arg)
+            elif op is np.ceil:
+                return SymbolicExpr("ceil", arg)
+            elif op is np.log:
+                return SymbolicExpr("log", arg)
+            elif op is np.log2:
+                return SymbolicExpr("log2", arg)
+            elif op is np.sqrt:
+                return SymbolicExpr("sqrt", arg)
+            elif op is np.sin:
+                return SymbolicExpr("sin", arg)
+            else:
+                raise NotImplementedError(f"Unsupported unary operation: {op} on {arg}")
+
         def op_binary_op_overrider(lhs, rhs, op):
             lhs = SymbolicExpr.from_value(lhs)
             rhs = SymbolicExpr.from_value(rhs)
@@ -1127,6 +1153,8 @@ class SanitizerSymbolicExecution(Client):
             return None, None, op_raw_store_overrider
         elif op_type is Store:
             return None, None, op_store_overrider
+        elif op_type is UnaryOp:
+            return None, None, op_unary_op_overrider
         elif op_type is BinaryOp:
             return None, None, op_binary_op_overrider
         elif op_type is TernaryOp:
