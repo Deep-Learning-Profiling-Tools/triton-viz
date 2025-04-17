@@ -1,4 +1,4 @@
-import traceback
+import sys, os, datetime, traceback
 from typing import Tuple, Callable, Optional, Type
 import numpy as np
 from z3 import Solver, Int, And, Or, Not, sat
@@ -868,7 +868,23 @@ class SanitizerSymbolicExecution(Client):
         self.constraints = []
         self.cached_constraint_valid = False
         self.cached_constraint = None
+        self.DEBUG = os.getenv('Z3_DEBUG', '0').lower() in ('1', 'true', 'yes', 'on')
+        self.unique_load_store_id = 0
+        if self.DEBUG:
+            self.constraint_log_file = self.create_constraint_log_file("load_store")
+            self.tensor_addr_log_file = self.create_constraint_log_file("tensor_addr")
 
+    def create_constraint_log_file(self, description):
+        folder_name = sys.argv[-1].replace(":", "_")
+        folder_name = os.path.join("constraint_logs", folder_name)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = os.path.join(folder_name, timestamp)
+        if not os.path.exists(folder_name):
+            os.makedirs(folder_name)
+        file_name = f"{description}.txt"
+        file_path = os.path.join(folder_name, file_name)
+        return open(file_path, 'w')
+        
     def _create_range_constraint(self, addr):
         low, high = addr
         x = Int('x')
@@ -929,7 +945,11 @@ class SanitizerSymbolicExecution(Client):
         self.tensors.append(arg)
 
         for tensor_addr in tensor_physical_addresses:
-            self._add_constraints(tensor_addr)
+            if self.DEBUG:
+                self.tensor_addr_log_file.write(f"{tensor_addr}\n")
+                self.tensor_addr_log_file.flush()
+            else:
+                self._add_constraints(tensor_addr)
 
     def grid_callback(self, grid: Tuple[int]):
         self.grid = grid
@@ -962,8 +982,17 @@ class SanitizerSymbolicExecution(Client):
                 ret = SymbolicExpr("load", ptr, mask, other)
 
             # check memory access using z3
+            if self.DEBUG:
+                ret_value = ret.eval()
+                print('total constraints: ', len(ret_value))
+                print('unique_load_store_id:', self.unique_load_store_id)
+                self.unique_load_store_id += 1
             for mem_access_addr in ret.eval():
-                self._check_range_satisfiable(mem_access_addr, Load)
+                if self.DEBUG:
+                    self.constraint_log_file.write(f"{mem_access_addr}\n")
+                    self.constraint_log_file.flush()
+                else:
+                    self._check_range_satisfiable(mem_access_addr, Load)
 
             return ret
 
@@ -987,7 +1016,11 @@ class SanitizerSymbolicExecution(Client):
 
             # check memory access using z3
             for mem_access_addr in ret.eval():
-                self._check_range_satisfiable(mem_access_addr, Store)
+                if self.DEBUG:
+                    self.constraint_log_file.write(f"{mem_access_addr}\n")
+                    self.constraint_log_file.flush()
+                else:
+                    self._check_range_satisfiable(mem_access_addr, Store)
 
         def op_unary_op_overrider(arg, op):
             arg = SymbolicExpr.from_value(arg)
