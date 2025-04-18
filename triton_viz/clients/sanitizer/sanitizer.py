@@ -487,6 +487,11 @@ class SymbolicExpr:
     def set_element_ty(self, dtype_tt):
         self.dtype_tt = dtype_tt
 
+    def get_dtype_bytewidth(self, dtype_tt):
+        element_bitwidth = dtype_tt.primitive_bitwidth
+        element_bytewidth = max(1, element_bitwidth // 8)
+        return element_bytewidth
+
     def __add__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("add", self, other)
@@ -700,6 +705,20 @@ class SymbolicExpr:
                 # mask will truncate the start of interval
                 return (interval[1] - word_bytes * (sum(mask_bitmap) - 1), interval[1])
 
+        def merge_adjacent_intervals(intervals, bytewidth):
+            # Merge adjacent intervals
+            merged_intervals = []
+            for interval in intervals:
+                if not merged_intervals:
+                    merged_intervals.append(interval)
+                else:
+                    last_interval = merged_intervals[-1]
+                    if interval[0] == last_interval[1] + bytewidth:
+                        merged_intervals[-1] = (last_interval[0], interval[1])
+                    else:
+                        merged_intervals.append(interval)
+            return merged_intervals
+
         # ================== Binary Ops Evaluation =======================
         def compute_binary_op(lhs, rhs, op):
             if not is_singleton(lhs) and not is_singleton(rhs):
@@ -851,6 +870,9 @@ class SymbolicExpr:
                     masked_addrs.append(apply_mask_to_interval(addr, mask_value[-1], True))
                 else:
                     raise ValueError(f"Unsupported mask value: {mask_value}")
+
+            # merge adjacent intervals created by program_id
+            masked_addrs = merge_adjacent_intervals(masked_addrs, self.get_dtype_bytewidth(self.ptr.get_element_ty()))
 
             return masked_addrs
         elif self.op == "splat":
