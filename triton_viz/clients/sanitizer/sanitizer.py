@@ -418,12 +418,14 @@ class SymbolicExpr:
             self.ptr = args[0]
             self.mask = args[1] if len(args) >= 2 else None
             self.other = args[2] if len(args) >= 3 else None
+            self.set_element_ty(self.ptr.get_element_ty())
         elif self.op == "store":
             assert len(args) in (2, 3, 4), "store op expects 2, 3 or 4 arguments!"
             self.ptr = args[0]
             self.value = args[1]
             self.mask = args[2] if len(args) >= 3 else None
             self.other = args[3] if len(args) >= 4 else None
+            self.set_element_ty(self.ptr.get_element_ty())
         elif self.op in self.UNARY_OPS:
             assert len(args) == 1, f"{self.op} op expects one argument!"
             self.arg = args[0]
