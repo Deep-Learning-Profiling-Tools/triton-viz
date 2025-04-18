@@ -1,6 +1,7 @@
 import sys, os, datetime, traceback
 from typing import Tuple, Callable, Optional, Type
 import numpy as np
+from anytree import Node, RenderTree
 from z3 import Solver, Int, And, Or, Not, sat
 import triton
 import triton.language as tl
@@ -526,72 +527,87 @@ class SymbolicExpr:
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("equal", self, other)
 
-    def to_tree_str(self, indent: int = 0) -> str:
-        """Visualize AST using Tree format."""
-        indent_str = "  "
-        prefix = indent_str * indent
+    def to_anytree(self):
+        """Convert this SymbolicExpr into an anytree Node."""
+        # Generate the node label
+        label = self._node_label()
+        root = Node(label)
 
+        # Recursively add child nodes
+        for child_name, child_expr in self._children():
+            # Build the child subtree
+            child_node = child_expr.to_anytree()
+            # Prefix the child node’s name with the field name
+            child_node.name = f"{child_name}: {child_node.name}"
+            child_node.parent = root
+
+        return root
+
+    def _node_label(self):
+        """Generate a short label for this node."""
         if self.op == "const":
-            s = f"{prefix}const: {self.value}, {type(self.value)}"
+            label = f"const={self.value}"
         elif self.op == "pid":
-            s = f"{prefix}pid_{self.axis}: {self.grid[self.axis]}"
-        elif self.op == "arange":
-            # For "arange" node, we have two child nodes: start and end
-            s = f"{prefix}arange:"
-            s += "\n" + self.start.to_tree_str(indent + 1)
-            s += "\n" + self.end.to_tree_str(indent + 1)
-        elif self.op == "load":
-            s = f"{prefix}load:"
-            s += f"\n{indent_str}{prefix}ptr:\n" + self.ptr.to_tree_str(indent + 2)
-            if self.mask is not None:
-                s += f"\n{indent_str}{prefix}mask:\n" + self.mask.to_tree_str(indent + 2)
-            if self.other is not None:
-                s += f"{indent_str}{prefix}other:\n" + self.other.to_tree_str(indent + 2)
-        elif self.op == "store":
-            s = f"{prefix}store:"
-            s += f"\n{indent_str}{prefix}ptr:\n" + self.ptr.to_tree_str(indent + 2)
-            s += f"\n{indent_str}{prefix}value:\n" + self.value.to_tree_str(indent + 2)
-            if self.mask is not None:
-                s += f"\n{indent_str}{prefix}mask:\n" + self.mask.to_tree_str(indent + 2)
-            if self.other is not None:
-                s += f"{indent_str}{prefix}other:\n" + self.other.to_tree_str(indent + 2)
-        elif self.op in self.UNARY_OPS:
-            s = f"{prefix}{self.op}:"
-            s += f"\n{indent_str}{prefix}arg:\n" + self.arg.to_tree_str(indent + 1)
-        elif self.op in self.BINARY_OPS:
-            op_symbol = self.BINARY_OP_SYMBOL_TABLE[self.op]
-            s = f"{prefix}{op_symbol}"
-            # Call recursively for each operand
-            for arg in (self.lhs, self.rhs):
-                s += "\n" + arg.to_tree_str(indent + 1)
-        elif self.op in self.TERNARY_OPS:
-            if self.op == "where":
-                s = f"{prefix}where:"
-                s += f"\n{indent_str}{prefix}cond:\n" + self.cond.to_tree_str(indent + 2)
-                s += f"\n{indent_str}{prefix}lhs:\n" + self.lhs.to_tree_str(indent + 2)
-                s += f"\n{indent_str}{prefix}rhs:\n" + self.rhs.to_tree_str(indent + 2)
-            else:
-                raise NotImplementedError(f"Unsupported ternary op: {self.op}")
-        elif self.op == "sum":
-            s = f"{prefix}sum:"
-            s += f"\n{indent_str}{prefix}input:\n" + self.input.to_tree_str(indent + 2)
-            s += f"\n{indent_str}{prefix}axis: {self.axis}"
-            s += f"\n{indent_str}{prefix}keepdims: {self.keepdims}"
-        elif self.op == "splat":
-            s = f"{prefix}splat:"
-            s += f"\n{indent_str}{prefix}arg:\n" + self.arg.to_tree_str(indent + 2)
-            s += f"\n{indent_str}{prefix}shape: {self.shape}"
-        elif self.op == "expand_dims":
-            s = f"{prefix}expand_dims:"
-            s += f"\n{indent_str}{prefix}arg:\n" + self.arg.to_tree_str(indent + 2)
-            s += f"\n{indent_str}{prefix}axis: {self.axis}"
-        elif self.op == "broadcast":
-            s = f"{prefix}broadcast:"
-            s += f"\n{indent_str}{prefix}arg:\n" + self.arg.to_tree_str(indent + 2)
-            s += f"\n{indent_str}{prefix}shape: {self.shape}"
+            label = f"pid_{self.axis}={self.grid[self.axis]}"
         else:
-            raise ValueError(f"Unsupported op: {self.op}")
-        return s
+            label = self.op
+
+        # Add the dtype to the label if available
+        label = f"{label} [dtype={self.get_element_ty()}]"
+
+        return label
+
+    def _children(self):
+        """
+        Return a list of (field_name, SymbolicExpr) pairs for each child,
+        depending on the operation type.
+        """
+        children = []
+        if self.op == "const" or self.op == "pid":
+            pass
+        elif self.op == "arange":
+            children.append(("start", self.start))
+            children.append(("end", self.end))
+        elif self.op == "load":
+            children.append(("ptr", self.ptr))
+            if self.mask is not None:
+                children.append(("mask", self.mask))
+            if self.other is not None:
+                children.append(("other", self.other))
+        elif self.op == "store":
+            children.append(("ptr", self.ptr))
+            children.append(("value", self.value))
+            if self.mask is not None:
+                children.append(("mask", self.mask))
+            if self.other is not None:
+                children.append(("other", self.other))
+        elif self.op in self.UNARY_OPS:
+            children.append(("arg", self.arg))
+        elif self.op in self.BINARY_OPS:
+            children.append(("lhs", self.lhs))
+            children.append(("rhs", self.rhs))
+        elif self.op == "where":
+            children.append(("cond", self.cond))
+            children.append(("lhs", self.lhs))
+            children.append(("rhs", self.rhs))
+        elif self.op == "sum":
+            children.append(("input", self.input))
+            # Axis and keepdims are included in the label, not as separate nodes
+        elif self.op in ("splat", "expand_dims", "broadcast"):
+            children.append(("arg", self.arg))
+        else:
+            raise NotImplementedError(f"Unsupported operation: {self.op}")
+        return children
+
+    def to_tree_str(self) -> str:
+        """
+        Render the AST as an ASCII tree using anytree.RenderTree.
+        """
+        root = self.to_anytree()
+        lines = []
+        for prefix, _, node in RenderTree(root):
+            lines.append(f"{prefix}{node.name}")
+        return "\n".join(lines)
 
     def __str__(self):
         return self.to_tree_str()
