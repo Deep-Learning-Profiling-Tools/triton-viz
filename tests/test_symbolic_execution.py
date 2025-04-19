@@ -62,15 +62,15 @@ def test_tl_div():
     a = torch.randn(32, dtype=torch.float32, device='cuda')
     div_kernel[(1,)](a, BLOCK_SIZE=16)
 
-# def test_tl_mod():
-#     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
-#     @triton.jit
-#     def mod_kernel(x, BLOCK_SIZE: tl.constexpr):
-#         tl.load(x)
-#         tl.load(x + (tl.arange(0, BLOCK_SIZE) % 10))
-#         tl.load(x + tl.arange(0, BLOCK_SIZE))
-#     a = torch.randn(32, dtype=torch.float32, device='cuda')
-#     mod_kernel[(1,)](a, BLOCK_SIZE=16)
+def test_tl_mod():
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def mod_kernel(x, BLOCK_SIZE: tl.constexpr):
+        tl.load(x)
+        tl.load(x + (tl.arange(0, BLOCK_SIZE) % 10))
+        tl.load(x + tl.arange(0, BLOCK_SIZE))
+    a = torch.randn(32, dtype=torch.float32, device='cuda')
+    mod_kernel[(1,)](a, BLOCK_SIZE=16)
 
 def test_vec_add():
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))

@@ -781,9 +781,11 @@ class SymbolicExpr:
             elif op == 'mod':
                 if not is_singleton(rhs):
                     raise NotImplementedError("Mod operation does not support interval divisor yet.")
-                if not is_singleton(lhs):
-                    raise NotImplementedError("Mod operation does not support interval dividend yet.")
-                return (lhs[0] % rhs[0], lhs[0] % rhs[0])
+                if not is_singleton(lhs): # lhs is an interval
+                    ret = [(i % rhs[0], i % rhs[0]) for i in range(lhs[0], lhs[1] + 1)]                    
+                    return ret
+                else:
+                    return (lhs[0] % rhs[0], lhs[0] % rhs[0])
             elif op == 'less':
                 assert is_singleton(rhs), "rhs must be a singleton for less operation."
                 rhs = rhs[0]
