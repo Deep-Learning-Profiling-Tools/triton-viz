@@ -1063,59 +1063,47 @@ class SanitizerSymbolicExecution(Client):
                     self._check_range_satisfiable(mem_access_addr, Store)
 
         def op_unary_op_overrider(arg, op):
+            _unary_map = {
+                np.cos:   "cos",
+                np.exp:   "exp",
+                np.exp2:  "exp2",
+                np.abs:   "abs",
+                np.floor: "floor",
+                np.ceil:  "ceil",
+                np.log:   "log",
+                np.log2:  "log2",
+                np.sqrt:  "sqrt",
+                np.sin:   "sin",
+            }
             arg = SymbolicExpr.from_value(arg)
-            if op is np.cos:
-                return SymbolicExpr("cos", arg)
-            elif op is np.exp:
-                return SymbolicExpr("exp", arg)
-            elif op is np.exp2:
-                return SymbolicExpr("exp2", arg)
-            elif op is np.abs:
-                return SymbolicExpr("abs", arg)
-            elif op is np.floor:
-                return SymbolicExpr("floor", arg)
-            elif op is np.ceil:
-                return SymbolicExpr("ceil", arg)
-            elif op is np.log:
-                return SymbolicExpr("log", arg)
-            elif op is np.log2:
-                return SymbolicExpr("log2", arg)
-            elif op is np.sqrt:
-                return SymbolicExpr("sqrt", arg)
-            elif op is np.sin:
-                return SymbolicExpr("sin", arg)
-            else:
+            try:
+                name = _unary_map[op]
+            except KeyError:
                 raise NotImplementedError(f"Unsupported unary operation: {op} on {arg}")
+            return SymbolicExpr(name, arg)
 
         def op_binary_op_overrider(lhs, rhs, op):
+            _binary_map = {
+                np.add:           lambda lhs, rhs: lhs + rhs,
+                np.subtract:      lambda lhs, rhs: lhs - rhs,
+                np.multiply:      lambda lhs, rhs: lhs * rhs,
+                np.divide:        lambda lhs, rhs: lhs / rhs,
+                np.less:          lambda lhs, rhs: lhs < rhs,
+                np.less_equal:    lambda lhs, rhs: lhs <= rhs,
+                np.greater:       lambda lhs, rhs: lhs > rhs,
+                np.greater_equal: lambda lhs, rhs: lhs >= rhs,
+                np.not_equal:     lambda lhs, rhs: lhs != rhs,
+                np.equal:         lambda lhs, rhs: lhs == rhs,
+                np.fmod:          lambda lhs, rhs: lhs % rhs,
+                np.maximum:       lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
+            }
             lhs = SymbolicExpr.from_value(lhs)
             rhs = SymbolicExpr.from_value(rhs)
-            if op is np.add:
-                return lhs + rhs
-            elif op is np.subtract:
-                return lhs - rhs
-            elif op is np.multiply:
-                return lhs * rhs
-            elif op is np.divide:
-                return lhs / rhs
-            elif op is np.less:
-                return lhs < rhs
-            elif op is np.less_equal:
-                return lhs <= rhs
-            elif op is np.greater:
-                return lhs > rhs
-            elif op is np.greater_equal:
-                return lhs >= rhs
-            elif op is np.not_equal:
-                return lhs != rhs
-            elif op is np.equal:
-                return lhs == rhs
-            elif op is np.fmod:
-                return lhs % rhs
-            elif op is np.maximum:
-                return SymbolicExpr("maximum", lhs, rhs)
-            else:
+            try:
+                func = _binary_map[op]
+            except KeyError:
                 raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
+            return func(lhs, rhs)
 
         def op_ternary_op_overrider(lhs, rhs, other, op):
             lhs = SymbolicExpr.from_value(lhs)
