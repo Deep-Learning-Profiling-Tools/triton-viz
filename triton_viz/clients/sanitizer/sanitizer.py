@@ -910,6 +910,7 @@ class SanitizerSymbolicExecution(Client):
         self.constraints = []
         self.cached_constraint_valid = False
         self.cached_constraint = None
+        self.addr_check_buffer = []
         self.DEBUG = os.getenv('Z3_DEBUG', '0').lower() in ('1', 'true', 'yes', 'on')
         self.unique_load_store_id = 0
         if self.DEBUG:
@@ -939,23 +940,52 @@ class SanitizerSymbolicExecution(Client):
         self.cached_constraint_valid = False
 
     def _check_range_satisfiable(self, addr, op_type):
-        # maintain a cache for the union of all constraints
+        """
+        Instead of solving immediately on each call, buffer the addr/op_type,
+        and flush (run the batch check) once the buffer is full.
+        """
+        self.addr_check_buffer.append((addr, op_type))
+
+    def _flush_buffered_checks(self):
+        """
+        Perform a single batch OR check over all buffered addresses.
+        """
+        if not self.addr_check_buffer:
+            return
+        print('buffer size:', len(self.addr_check_buffer))
+        # 1) maintain a cache for the union of all constraints
+        # Ensure the global cached_constraint is constructed only once
         if not self.cached_constraint_valid:
             self.cached_constraint = Or(*self.constraints)
             self.cached_constraint_valid = True
 
-        constraint_to_check = self._create_range_constraint(addr)
+        # 2) Build per-address constraints for every buffered addr
+        per_addr_constraints = [
+            self._create_range_constraint(addr)
+            for addr, _ in self.addr_check_buffer
+        ]
 
-        # Use Z3 Solver to find constraint conflicts
+        batch_constraint = Or(*per_addr_constraints)
+
+        # 3) Invoke Z3 once with both the negated global constraint and the batch
         s = Solver()
-        s.add(Not(self.cached_constraint))
-        s.add(constraint_to_check)
-
-        # report out-of-bound access
+        s.add(Not(self.cached_constraint), batch_constraint)
         if s.check() == sat:
-            tensor = _get_tensor(self.tensors, addr[0])
-            violation_addr = s.model()[Int('x')]
-            self._report(op_type, tensor, violation_addr)
+            model = s.model()
+            # Retrieve the violating x value from the model
+            x_val = model[Int('x')].as_long()
+
+            # Determine which addr triggered the violation
+            # TODO: use binary search to speed up the search
+            for addr, op_type in self.addr_check_buffer:
+                lo, hi = addr[1], addr[1] + self._get_addr_size(addr)
+                if lo <= x_val < hi:
+                    tensor = _get_tensor(self.tensors, addr[0])
+                    self._report(op_type, tensor, x_val)
+                    break
+
+        # 4) Clear the buffer
+        self.addr_check_buffer.clear()
 
     def _report(self, op_type, tensor, violation_address):
         traceback_info = _get_traceback_info()
@@ -1235,6 +1265,7 @@ class SanitizerSymbolicExecution(Client):
             return None, None, None
 
     def finalize(self) -> list:
+        self._flush_buffered_checks()
         return []
 
 
