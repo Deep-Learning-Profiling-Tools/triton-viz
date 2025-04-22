@@ -336,7 +336,7 @@ class SymbolicExprDataWrapper:
         return 2
 
     def __int__(self):
-        return 12345
+        raise NotImplementedError("SymbolicExprDataWrapper cannot be converted to int")
 
     def __str__(self):
         return self.value
