@@ -2,7 +2,7 @@ import sys, os, datetime, traceback
 from typing import Tuple, Callable, Optional, Type
 import numpy as np
 from anytree import Node, RenderTree
-from z3 import Solver, Int, And, Or, Not, sat
+from z3 import Solver, Int, IntVal, If, Sum, And, Or, Not, sat
 import triton
 import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
@@ -404,16 +404,7 @@ class SymbolicExpr:
             assert len(args) == 2, "arange op expects two arguments!"
             self.start = args[0]
             self.end = args[1]
-            if self.end != self.start:
-                start_value_tuple = self.start.eval()
-                assert start_value_tuple[0] == start_value_tuple[1]
-                start_value = start_value_tuple[0]
-
-                end_value_tuple = self.end.eval()
-                assert end_value_tuple[0] == end_value_tuple[1]
-                end_value = end_value_tuple[0]
-
-                self.shape = [end_value - start_value + 1]
+            # TODO: setup self.shape here
         elif self.op == "load":
             assert len(args) in (1, 2, 3), "load op expects 1, 2 or 3 arguments!"
             self.ptr = args[0]
@@ -660,247 +651,100 @@ class SymbolicExpr:
         raise ValueError("Unknown type:", type(var))
 
     def eval(self):
-        # ================== Helper Function ==================
-        # broadcasting val to a list of length n
-        def to_list(val, n):
-            if isinstance(val, list):
-                if len(val) == n:
-                    return val
-                elif len(val) == 1:
-                    return val * n
-                else:
-                    raise ValueError(f"Broadcast failed. Expected len(val): 1. Actual len(val): {len(val)}.")
-            else:
-                return [val] * n
+        """
+        Returns a tuple (expr, constraints):
+        - expr: Z3 expression corresponding to the root node
+        - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
+        """
+        self._arange_counter = 0 # Used to name arange variables
+        self._arange_dict = {} # make sure each arange only has one name
+        self._vars = {}
+        self._constraints = []
+        expr = self._to_z3(self)
+        return expr, self._constraints
 
-        # judge if a range is a singleton, i.e. low == high
-        def is_singleton(interval):
-            return interval[0] == interval[1]
+    def _to_z3(self, node):
+        # Recursively convert the current node to a Z3 expression
+        if node.op == "const":
+            return IntVal(node.value)
 
-        def check_mask_bitmap_monotonous(mask_bitmap, flag):
-            # mask bitmaps are like: [True, True, ... True, False, False, ... False]
-            # The first piece is all True, and the second piece is all False.
-            flipped = False
-            for bit in mask_bitmap:
-                if flag == bit:
-                    continue
-                elif not flipped:
-                    flag = not flag
-                    flipped = True
-                else:
-                    return False
-            return True
+        if node.op == "pid":
+            name = f"pid_{node.axis}"
+            if name not in self._vars:
+                v = Int(name)
+                self._vars[name] = v
+                # Add constraint: 0 ≤ pid < grid[axis]
+                self._constraints.append(v >= 0)
+                self._constraints.append(v < node.grid[node.axis])
+            return self._vars[name]
 
-        def apply_mask_to_interval(interval, mask_bitmap, true_then_false):
-            # check if mask is either
-            # [True, True, ... True, False, False, ... False] or
-            # [False, False, ... False, True, True, ... True]
-            assert check_mask_bitmap_monotonous(mask_bitmap, true_then_false), "Mask bitmap is not monotonous!"
-            assert (interval[1] - interval[0]) % (len(mask_bitmap) - 1) == 0, "interval diff must be a multiple of mask bitmap length!"
-            word_bytes = (interval[1] - interval[0]) // (len(mask_bitmap) - 1)
-            if true_then_false:
-                # mask will truncate the end of interval
-                return (interval[0], interval[0] + word_bytes * (sum(mask_bitmap) - 1))
-            else:
-                # mask will truncate the start of interval
-                return (interval[1] - word_bytes * (sum(mask_bitmap) - 1), interval[1])
+        if node.op == "arange":
+            if id(node) in self._arange_dict:
+                return self._arange_dict[id(node)]
+            idx = self._arange_counter
+            self._arange_counter += 1
+            name = f"arange_{idx}"
+            v = Int(name)
+            self._vars[name] = v
+            start = node.start.value
+            end = node.end.value
+            self._constraints.append(v >= start)
+            self._constraints.append(v < end)
+            self._arange_dict[id(node)] = v
+            return v
 
-        def merge_adjacent_intervals(intervals, bytewidth):
-            # Merge adjacent intervals
-            merged_intervals = []
-            for interval in intervals:
-                if not merged_intervals:
-                    merged_intervals.append(interval)
-                else:
-                    last_interval = merged_intervals[-1]
-                    if interval[0] == last_interval[1] + bytewidth:
-                        merged_intervals[-1] = (last_interval[0], interval[1])
-                    else:
-                        merged_intervals.append(interval)
-            return merged_intervals
+        # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
+        if node.op == "abs":
+            c = self._to_z3(node.arg)
+            return If(c >= 0, c, -c)
+        if node.op in self.UNARY_OPS:
+            c = self._to_z3(node.arg)
+            if node.op == "abs":           return If(c >= 0, c, -c)
+            raise NotImplementedError(f"Unary op {node.op} is not implemented")
 
-        # ================== Binary Ops Evaluation =======================
-        def compute_binary_op(lhs, rhs, op):
-            if not is_singleton(lhs) and not is_singleton(rhs):
-                raise NotImplementedError("Binary operation does not support two intervals yet.")
-            if op == "add":
-                # both are singletons
-                if is_singleton(lhs) and is_singleton(rhs):
-                    lhs = lhs[0]
-                    rhs = rhs[0]
-                    return (lhs + rhs, lhs + rhs)
-                # only lhs is singleton
-                elif is_singleton(lhs):
-                    lhs = lhs[0]
-                    return (lhs + rhs[0], lhs + rhs[1])
-                # only rhs is singleton
-                elif is_singleton(rhs):
-                    rhs = rhs[0]
-                    return (lhs[0] + rhs, lhs[1] + rhs)
-                # both are intervals
-                else:
-                    raise NotImplementedError("Add operation does not support two intervals yet.")
-            elif op == "sub":
-                # both are singletons
-                if is_singleton(lhs) and is_singleton(rhs):
-                    lhs = lhs[0]
-                    rhs = rhs[0]
-                    return (lhs - rhs, lhs - rhs)
-                # only lhs is singleton
-                elif is_singleton(lhs):
-                    lhs = lhs[0]
-                    return (lhs - rhs[0], lhs - rhs[1])
-                # only rhs is singleton
-                elif is_singleton(rhs):
-                    rhs = rhs[0]
-                    return (lhs[0] - rhs, lhs[1] - rhs)
-                # both are intervals
-                else:
-                    raise NotImplementedError("Sub operation does not support two intervals yet.")
-            elif op == "mul":
-                # both are singletons
-                if is_singleton(lhs) and is_singleton(rhs):
-                    lhs = lhs[0]
-                    rhs = rhs[0]
-                    return (lhs * rhs, lhs * rhs)
-                # only lhs is singleton
-                elif is_singleton(lhs):
-                    lhs = lhs[0]
-                    return (lhs * rhs[0], lhs * rhs[1])
-                # only rhs is singleton
-                elif is_singleton(rhs):
-                    rhs = rhs[0]
-                    return (lhs[0] * rhs, lhs[1] * rhs)
-                # both are intervals
-                else:
-                    raise NotImplementedError("Mul operation does not support two intervals yet.")
-            elif op == 'idiv':
-                if not is_singleton(rhs):
-                    raise NotImplementedError("IDiv operation does not support interval divisor yet.")
-                return (lhs[0] // rhs[0], lhs[1] // rhs[0])
-            elif op == 'mod':
-                if not is_singleton(rhs):
-                    raise NotImplementedError("Mod operation does not support interval divisor yet.")
-                if not is_singleton(lhs): # lhs is an interval
-                    ret = [(i % rhs[0], i % rhs[0]) for i in range(lhs[0], lhs[1] + 1)]                    
-                    return ret
-                else:
-                    return (lhs[0] % rhs[0], lhs[0] % rhs[0])
-            elif op == 'less':
-                assert is_singleton(rhs), "rhs must be a singleton for less operation."
-                rhs = rhs[0]
-                if rhs <= lhs[0]:
-                    return (False, False)
-                elif rhs > lhs[1]:
-                    return (True, True)
-                else:
-                    mask = tuple(i < rhs for i in range(lhs[0], lhs[1] + 1))
-                    return (False, True, mask)
-            elif op == 'greater':
-                assert is_singleton(rhs), "rhs must be a singleton for greater operation."
-                rhs = rhs[0]
-                if rhs >= lhs[1]:
-                    return (False, False)
-                elif rhs < lhs[0]:
-                    return (True, True)
-                else:
-                    mask = tuple(i > rhs for i in range(lhs[0], lhs[1] + 1))
-                    return (False, True, mask)
-            else:
-                raise NotImplementedError(f"Unsupported binary operation: {op}")
+        # Binary arithmetic, comparison, etc.
+        if node.op in self.BINARY_OPS:
+            l = self._to_z3(node.lhs)
+            r = self._to_z3(node.rhs)
+            if node.op == "add":           return l + r
+            if node.op == "sub":           return l - r
+            if node.op == "mul":           return l * r
+            if node.op in ("idiv"):        return l / r
+            if node.op == "mod":           return l % r
+            if node.op == "less":          return l < r
+            if node.op == "less_equal":    return l <= r
+            if node.op == "greater":       return l > r
+            if node.op == "greater_equal": return l >= r
+            if node.op == "equal":         return l == r
+            if node.op == "not_equal":     return l != r
+            if node.op == "maximum":       return If(l >= r, l, r)
 
-        # ================== Evaluation =======================
-        if self.op == 'const':
-            return (self.value, self.value)
-        elif self.op == "pid":
-            # expand into a list of (val, val)
-            assert self.grid, "Grid not initialized!"
-            assert self.axis < len(self.grid), f"axis {self.axis} not found in grid!"
-            return [(v, v) for v in range(self.grid[self.axis])]
-        elif self.op == "arange":
-            start_val, end_val = self.start.eval(), self.end.eval()
-            if isinstance(start_val, list):
-                raise NotImplementedError("Arange does not support start index with list yet.")
-            elif isinstance(start_val, tuple):
-                if not is_singleton(start_val):
-                    raise NotImplementedError("Arange does not support start index with interval yet.")
-                start_val = start_val[0]
-            if isinstance(end_val, list):
-                raise NotImplementedError("Arange does not support end index with list yet.")
-            elif isinstance(end_val, tuple):
-                if not is_singleton(end_val):
-                    raise NotImplementedError("Arange does not support end index with interval yet.")
-                end_val = end_val[0]
-            return (start_val, end_val)
-        elif self.op in self.BINARY_OPS:
-            lhs = self.lhs.eval()
-            rhs = self.rhs.eval()
-            if isinstance(lhs, list) or isinstance(rhs, list):
-                n = len(lhs) if isinstance(lhs, list) else len(rhs)
-                lhs = to_list(lhs, n)
-                rhs = to_list(rhs, n)
-                result = []
-                for l, r in zip(lhs, rhs):
-                    result.append(compute_binary_op(l, r, self.op))
-                return result
-            else:
-                return compute_binary_op(lhs, rhs, self.op)
-        elif self.op == "load" or self.op == "store":
-            # get addrs value
-            addrs = self.ptr.eval()
-            if not isinstance(addrs, list):
-                addrs = [addrs]
+        # where(cond, lhs, rhs)
+        if node.op == "where":
+            c = self._to_z3(node.cond)
+            l = self._to_z3(node.lhs)
+            r = self._to_z3(node.rhs)
+            return If(c, l, r)
 
-            # get masks value
-            if self.mask:
-                mask_values = self.mask.eval()
-                if not isinstance(mask_values, list):
-                    # if mask_values is a single scalar, broadcast mask_values
-                    mask_values = [mask_values for _ in range(len(addrs))]
-                assert len(addrs) == len(mask_values), f"length of addrs ({len(addrs)}) and mask ({len(mask_values)}) must be the same!"
-            else:
-                mask_values = [(True, True) for _ in range(len(addrs))]
+        # sum(input, axis, keepdims)
+        if node.op == "sum":
+            arr = self._to_z3(node.input)
+            return Sum(arr)
 
-            # apply masks to addrs
-            masked_addrs = []
-            for mask_value, addr in zip(mask_values, addrs):
-                if mask_value == (True, True):
-                    masked_addrs.append(addr)
-                elif mask_value == (False, False):
-                    continue
-                elif mask_value[:2] == (False, True):
-                    masked_addrs.append(apply_mask_to_interval(addr, mask_value[-1], True))
-                else:
-                    raise ValueError(f"Unsupported mask value: {mask_value}")
+        if node.op == "load" or node.op == "store":
+            # Load and store operations
+            ptr = self._to_z3(node.ptr)
+            if node.mask is not None:
+                mask = self._to_z3(node.mask)
+                self._constraints.append(mask)
+            return ptr
 
-            # merge adjacent intervals created by program_id
-            masked_addrs = merge_adjacent_intervals(masked_addrs, self.get_dtype_bytewidth(self.ptr.get_element_ty()))
+        if node.op == "splat":
+            arg = self._to_z3(node.arg)
+            return arg
 
-            return masked_addrs
-        elif self.op == "splat":
-            return self.arg.eval()
-        elif self.op == "expand_dims":
-            return self.arg.eval()
-        elif self.op == "broadcast":
-            arg_val = self.arg.eval()
-            if isinstance(arg_val, list) and len(arg_val) > 1:
-                raise NotImplementedError("Broadcast operation does not support program_idz yet.")
-            if len(self.shape) == 1:
-                raise NotImplementedError("Broadcast operation now only supports 2D tensors!")
-            elif len(self.shape) == 2:
-                if self.arg.shape[0] == 1:
-                    # broadcast row
-                    return [(arg_val[0], arg_val[1]) for _ in range(self.shape[0])]
-                elif self.arg.shape[1] == 1:
-                    # broadcast column
-                    ret = []
-                    for x in range(arg_val[0], arg_val[1] + 1):
-                        ret.append((x, x))
-                    return ret
-            else:
-                raise NotImplementedError("Broadcast operation for 3D or more is not supported yet.")
-        else:
-            raise NotImplementedError(f"Unsupported operation: {self.op}")
+        # Other operations can be implemented as needed
+        raise NotImplementedError(f"Eval for op {node.op} is not implemented")
 
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
@@ -908,84 +752,19 @@ class SanitizerSymbolicExecution(Client):
         self.grid = None
         self.tensors = []
         self.constraints = []
-        self.cached_constraint_valid = False
-        self.cached_constraint = None
-        self.addr_check_buffer = []
-        self.DEBUG = os.getenv('Z3_DEBUG', '0').lower() in ('1', 'true', 'yes', 'on')
+        self.tensor_addrs = []
         self.unique_load_store_id = 0
-        if self.DEBUG:
-            self.constraint_log_file = self.create_constraint_log_file("load_store")
-            self.tensor_addr_log_file = self.create_constraint_log_file("tensor_addr")
 
-    def create_constraint_log_file(self, description):
-        folder_name = sys.argv[-1].replace(":", "_")
-        folder_name = os.path.join("constraint_logs", folder_name)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        folder_name = os.path.join(folder_name, timestamp)
-        if not os.path.exists(folder_name):
-            os.makedirs(folder_name)
-        file_name = f"{description}.txt"
-        file_path = os.path.join(folder_name, file_name)
-        return open(file_path, 'w')
-        
-    def _create_range_constraint(self, addr):
-        low, high = addr
-        x = Int('x')
-        low_constraint = x >= low
-        high_constraint = x <= high
-        return And(low_constraint, high_constraint)
-
-    def _add_constraints(self, addr):
-        self.constraints.append(self._create_range_constraint(addr))
-        self.cached_constraint_valid = False
-
-    def _check_range_satisfiable(self, addr, op_type):
-        """
-        Instead of solving immediately on each call, buffer the addr/op_type,
-        and flush (run the batch check) once the buffer is full.
-        """
-        self.addr_check_buffer.append((addr, op_type))
-
-    def _flush_buffered_checks(self):
-        """
-        Perform a single batch OR check over all buffered addresses.
-        """
-        if not self.addr_check_buffer:
-            return
-        print('buffer size:', len(self.addr_check_buffer))
-        # 1) maintain a cache for the union of all constraints
-        # Ensure the global cached_constraint is constructed only once
-        if not self.cached_constraint_valid:
-            self.cached_constraint = Or(*self.constraints)
-            self.cached_constraint_valid = True
-
-        # 2) Build per-address constraints for every buffered addr
-        per_addr_constraints = [
-            self._create_range_constraint(addr)
-            for addr, _ in self.addr_check_buffer
-        ]
-
-        batch_constraint = Or(*per_addr_constraints)
-
-        # 3) Invoke Z3 once with both the negated global constraint and the batch
+    def _check_range_satisfiable(self, access_addr, expr_constraints):
+        out_of_bound_constraint = Not(Or(
+            *(And(start <= access_addr, access_addr <= end)
+                for start, end in self.tensor_addrs)
+        ))
         s = Solver()
-        s.add(Not(self.cached_constraint), batch_constraint)
+        s.add(out_of_bound_constraint)
+        s.add(And(*expr_constraints))
         if s.check() == sat:
-            model = s.model()
-            # Retrieve the violating x value from the model
-            x_val = model[Int('x')].as_long()
-
-            # Determine which addr triggered the violation
-            # TODO: use binary search to speed up the search
-            for addr, op_type in self.addr_check_buffer:
-                lo, hi = addr[1], addr[1] + self._get_addr_size(addr)
-                if lo <= x_val < hi:
-                    tensor = _get_tensor(self.tensors, addr[0])
-                    self._report(op_type, tensor, x_val)
-                    break
-
-        # 4) Clear the buffer
-        self.addr_check_buffer.clear()
+            print('out of bound access detected!')
 
     def _report(self, op_type, tensor, violation_address):
         traceback_info = _get_traceback_info()
@@ -1015,13 +794,7 @@ class SanitizerSymbolicExecution(Client):
             raise ValueError("The address sanitizer only supports contiguouly stored tensors for now!")
 
         self.tensors.append(arg)
-
-        for tensor_addr in tensor_physical_addresses:
-            if self.DEBUG:
-                self.tensor_addr_log_file.write(f"{tensor_addr}\n")
-                self.tensor_addr_log_file.flush()
-            else:
-                self._add_constraints(tensor_addr)
+        self.tensor_addrs.extend(tensor_physical_addresses)
 
     def grid_callback(self, grid: Tuple[int]):
         self.grid = grid
@@ -1054,18 +827,7 @@ class SanitizerSymbolicExecution(Client):
                 ret = SymbolicExpr("load", ptr, mask, other)
 
             # check memory access using z3
-            if self.DEBUG:
-                ret_value = ret.eval()
-                print('total constraints: ', len(ret_value))
-                print('unique_load_store_id:', self.unique_load_store_id)
-                self.unique_load_store_id += 1
-            for mem_access_addr in ret.eval():
-                if self.DEBUG:
-                    self.constraint_log_file.write(f"{mem_access_addr}\n")
-                    self.constraint_log_file.flush()
-                else:
-                    self._check_range_satisfiable(mem_access_addr, Load)
-
+            self._check_range_satisfiable(*ret.eval())
             return ret
 
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
@@ -1087,12 +849,8 @@ class SanitizerSymbolicExecution(Client):
                 ret = SymbolicExpr("store", ptr, value, mask)
 
             # check memory access using z3
-            for mem_access_addr in ret.eval():
-                if self.DEBUG:
-                    self.constraint_log_file.write(f"{mem_access_addr}\n")
-                    self.constraint_log_file.flush()
-                else:
-                    self._check_range_satisfiable(mem_access_addr, Store)
+            self._check_range_satisfiable(*ret.eval())
+            return ret
 
         def op_unary_op_overrider(arg, op):
             _unary_map = {
@@ -1265,7 +1023,6 @@ class SanitizerSymbolicExecution(Client):
             return None, None, None
 
     def finalize(self) -> list:
-        self._flush_buffered_checks()
         return []
 
 
