@@ -2,7 +2,7 @@ import sys, os, datetime, traceback
 from typing import Tuple, Callable, Optional, Type
 import numpy as np
 from anytree import Node, RenderTree
-from z3 import Solver, Int, IntVal, If, Sum, And, Or, Not, sat
+from z3 import Solver, Int, IntVal, If, Sum, And, Or, Not, sat, simplify
 import triton
 import triton.language as tl
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
@@ -328,15 +328,19 @@ class SymbolicExprDataWrapper:
     Since we replaced TensorHandle with SymbolicExpr,
     we need to wrap SymbolicExpr with a class that has size attribute, and data.size != 1.
     '''
-    def __init__(self, value):
+    def __init__(self, value, symbolic_expr):
         self.value = value
+        self.symbolic_expr = symbolic_expr
 
     @property
     def size(self):
         return 2
 
     def __int__(self):
-        raise NotImplementedError("SymbolicExprDataWrapper cannot be converted to int")
+        int_val = self.symbolic_expr.eval()
+        if not isinstance(int_val, int):
+            raise ValueError(f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int")
+        return int_val
 
     def __str__(self):
         return self.value
@@ -613,7 +617,7 @@ class SymbolicExpr:
 
     @property
     def data(self):
-        return SymbolicExprDataWrapper(self.__str__())
+        return SymbolicExprDataWrapper(self.__str__(), self)
 
     @classmethod
     def from_value(cls, var):
@@ -661,6 +665,9 @@ class SymbolicExpr:
         self._vars = {}
         self._constraints = []
         expr = self._to_z3(self)
+        if not self._constraints:
+            assert expr.is_int(), "The address expression should be an integer"
+            return simplify(expr).as_long()
         return expr, self._constraints
 
     def _to_z3(self, node):
