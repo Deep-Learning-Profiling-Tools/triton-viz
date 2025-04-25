@@ -753,9 +753,8 @@ class SymbolicExpr:
                 self._constraints.append(mask)
             return ptr
 
-        if node.op == "splat":
-            arg = self._to_z3(node.arg)
-            return arg
+        if node.op in ("splat", "expand_dims", "broadcast"):
+            return self._to_z3(node.arg)
 
         # Other operations can be implemented as needed
         raise NotImplementedError(f"Eval for op {node.op} is not implemented")
