@@ -367,6 +367,7 @@ class SymbolicExpr:
         "not_equal": "!=",
         "equal": "==",
         "maximum": "max",
+        "bitwise_and": "&",
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
@@ -732,6 +733,7 @@ class SymbolicExpr:
             if node.op == "equal":         return l == r
             if node.op == "not_equal":     return l != r
             if node.op == "maximum":       return If(l >= r, l, r)
+            if node.op == "bitwise_and":   return And(l, r)
 
         # where(cond, lhs, rhs)
         if node.op == "where":
@@ -899,6 +901,7 @@ class SanitizerSymbolicExecution(Client):
                 np.equal:         lambda lhs, rhs: lhs == rhs,
                 np.fmod:          lambda lhs, rhs: lhs % rhs,
                 np.maximum:       lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
+                np.bitwise_and:   lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
             }
             lhs = SymbolicExpr.from_value(lhs)
             rhs = SymbolicExpr.from_value(rhs)
