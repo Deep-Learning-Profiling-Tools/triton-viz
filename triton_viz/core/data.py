@@ -78,8 +78,11 @@ class TernaryOp(Op):
 
 
 @dataclass
-class AddPtr(Op):
-    name: ClassVar[str] = "addptr"
+class Dot(Op):
+    name: ClassVar[str] = "dot"
+    input_shape: Tuple
+    other_shape: Tuple
+    output_shape: Tuple
 
 
 @dataclass
@@ -87,6 +90,11 @@ class MakeRange(Op):
     name: ClassVar[str] = "make_range"
     start: int
     end: int
+
+
+@dataclass
+class AddPtr(Op):
+    name: ClassVar[str] = "addptr"
 
 
 @dataclass
@@ -100,14 +108,6 @@ class ExpandDims(Op):
 @dataclass
 class Broadcast(Op):
     name: ClassVar[str] = "broadcast"
-
-
-@dataclass
-class Dot(Op):
-    name: ClassVar[str] = "dot"
-    input_shape: Tuple
-    other_shape: Tuple
-    output_shape: Tuple
 
 
 @dataclass

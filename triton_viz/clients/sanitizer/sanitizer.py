@@ -11,7 +11,7 @@ from ...core.client import Client
 from ...core.data import (
     Op, RawLoad, Load, RawStore, Store,
     UnaryOp, BinaryOp, TernaryOp, ProgramId,
-    AddPtr, MakeRange, ExpandDims, Broadcast, ReduceSum,
+    Dot, MakeRange, AddPtr, ExpandDims, Broadcast, ReduceSum,
     Splat, MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt,
     CastImpl)
@@ -370,7 +370,7 @@ class SymbolicExpr:
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
-    REDUCE_OPS = ("sum",)
+    REDUCE_OPS = ("sum", "dot")
     POINTER_OPS = ("make_block_ptr",)
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast")
     SUPPORTED_OPS = (
@@ -445,10 +445,17 @@ class SymbolicExpr:
                 self.rhs = args[2]
             else:
                 raise NotImplementedError(f"Unsupported ternary op: {self.op}")
-        elif self.op == "sum":
-            self.input = args[0]
-            self.axis = args[1]
-            self.keepdims = args[2]
+        elif self.op in self.REDUCE_OPS:
+            if self.op == "sum":
+                self.input = args[0]
+                self.axis = args[1]
+                self.keepdims = args[2]
+            elif self.op == "dot":
+                self.a = args[0]
+                self.b = args[1]
+                if len(args) >= 3: self.d = args[2]
+            else:
+                raise NotImplementedError(f"Unsupported reduce op: {self.op}")
         elif self.op == "make_block_ptr":
             assert len(args) == 6, "make_block_ptr op expects six arguments!"
             self.base = args[0]
@@ -936,6 +943,12 @@ class SanitizerSymbolicExecution(Client):
             ret.set_element_ty(dtype_tt)
             return ret
 
+        def op_dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
+            a = SymbolicExpr.from_value(a)
+            b = SymbolicExpr.from_value(b)
+            d = SymbolicExpr.from_value(d)
+            return SymbolicExpr("dot", a, b, d)
+
         def op_make_range_overrider(start, end):
             start = SymbolicExpr.from_value(start)
             end = SymbolicExpr.from_value(end - 1)
@@ -1010,8 +1023,9 @@ class SanitizerSymbolicExecution(Client):
             UnaryOp: op_unary_op_overrider,
             BinaryOp: op_binary_op_overrider,
             TernaryOp: op_ternary_op_overrider,
-            AddPtr: op_addptr_overrider,
+            Dot: op_dot_overrider,
             MakeRange: op_make_range_overrider,
+            AddPtr: op_addptr_overrider,
             ExpandDims: op_expand_dims_overrider,
             Broadcast: op_broadcast_overrider,
             ReduceSum: op_reduce_sum_overrider,

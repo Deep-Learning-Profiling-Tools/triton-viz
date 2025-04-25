@@ -7,9 +7,9 @@ from .config import report_grid_execution_progress, sanitizer_backend
 from .data import (
     Op, RawLoad, Load, RawStore, Store,
     UnaryOp, BinaryOp, TernaryOp, ProgramId,
-    AddPtr, MakeRange, ReduceSum,
-    Dot, ExpandDims, Broadcast, ReduceMax, ReduceMin,
-    Splat, MakeBlockPointer, TensorPointerLoad,
+    Dot, MakeRange, AddPtr, ReduceSum,
+    Splat, ExpandDims, Broadcast, ReduceMax, ReduceMin,
+    MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt,
     CastImpl)
 import inspect
@@ -23,9 +23,10 @@ from triton.runtime import JITFunction
 
 op_list = [
     ProgramId, RawStore, Store, RawLoad, Load,
-    Dot, UnaryOp, BinaryOp, TernaryOp, AddPtr, ExpandDims,
-    MakeRange, Broadcast, ReduceMax, ReduceMin, ReduceSum,
-    Splat, MakeBlockPointer, TensorPointerLoad,
+    UnaryOp, BinaryOp, TernaryOp, Dot, MakeRange,
+    AddPtr, Splat, ExpandDims, Broadcast,
+    ReduceMax, ReduceMin, ReduceSum,
+    MakeBlockPointer, TensorPointerLoad,
     TensorPointerStore, Idiv, Rsqrt, CastImpl,
 ]
 original_ops = {
@@ -38,9 +39,10 @@ original_ops = {
     UnaryOp: interpreter_builder.unary_op,
     BinaryOp: interpreter_builder.binary_op,
     TernaryOp: interpreter_builder.ternary_op,
+    Dot: interpreter_builder.create_dot,
+    MakeRange: interpreter_builder.create_make_range,
     AddPtr: interpreter_builder.create_addptr,
     ExpandDims: interpreter_builder.create_expand_dims,
-    MakeRange: interpreter_builder.create_make_range,
     Broadcast: interpreter_builder.create_broadcast,
     Splat: interpreter_builder.create_splat,
     MakeBlockPointer: interpreter_builder.create_make_block_ptr,
