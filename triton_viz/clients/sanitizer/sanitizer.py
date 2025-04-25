@@ -811,7 +811,7 @@ class SanitizerSymbolicExecution(Client):
         self.tensor_addrs.extend(tensor_physical_addresses)
 
     def grid_callback(self, grid: Tuple[int]):
-        self.grid = grid
+        self.grid = tuple(int(g) for g in grid)
 
     def grid_idx_callback(self, grid_idx: Tuple[int]):
         pass
