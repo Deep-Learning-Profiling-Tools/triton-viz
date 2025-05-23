@@ -198,127 +198,6 @@ class SanitizerBruteForce(Client):
     def finalize(self) -> list:
         return self.records
 
-
-class SanitizerZ3(Client):
-    '''
-    Fake Execution Sanitizer. This client is used to detect out-of-bound memory accesses.
-    '''
-    def __init__(self, abort_on_error):
-        self.abort_on_error = abort_on_error
-        self.tensors: list = []
-        # constraints definition
-        self.constraints = []
-        self.is_combined_constraint_valid = False
-        self.combined_constraint = None
-
-    def _update_constraints(self, new_constraint):
-        self.constraints.append(new_constraint)
-        self.is_combined_constraint_valid = False
-
-    def _print_constraints(self):
-        print('Constraints:')
-        for constraint in self.constraints:
-            print(constraint)
-
-    def _report(self, op_type, tensor, violation_address):
-        traceback_info = _get_traceback_info()
-        oob_record = OutOfBoundsRecordZ3(
-            op_type=op_type,
-            user_code_tracebacks=traceback_info,
-            tensor=tensor,
-            violation_address=violation_address,
-            constraints=self.constraints,
-        )
-        if self.abort_on_error:
-            print_oob_record(oob_record)
-            raise ValueError("Out-of-bounds access detected. See detailed report above.")
-        else:
-            self.records.append(oob_record)
-
-    def _check_if_range_statisfy_constraints(self, start, end, op_type):
-        # create a cache for the combined constraint
-        if not self.is_combined_constraint_valid:
-            self.combined_constraint = Or(*self.constraints)
-            self.is_combined_constraint_valid = True
-
-        # create an interval constraint
-        x = Int('x')
-        lowerbound_constraint = x >= start
-        upperbound_constraint = x <= end
-        interval_constraint = And(lowerbound_constraint, upperbound_constraint)
-
-        # if the interval does not satisfy the constraints
-        # then we have an out-of-bound memory access
-        s = Solver()
-        s.add(Not(self.combined_constraint))
-        s.add(interval_constraint)
-
-        # if found out-of-bound access, report it
-        if s.check() == sat:
-            tensor = _get_tensor(self.tensors, start)
-            self._report(op_type, tensor, s.model()[x])
-
-    def arg_callback(self, arg, arg_cvt):
-        if not hasattr(arg, "data_ptr"):
-            return
-        assert check_storage_contiguous(arg), "The address sanitizer only supports contiguouly stored tensors for now"
-        self.tensors.append(arg)
-
-        nbytes = arg.element_size() * arg.numel()
-
-        # add constraints
-        x = Int('x')
-        lowerbound_constraint = x >= arg.data_ptr()
-        upperbound_constraint = x <= arg.data_ptr() + nbytes - arg.element_size()
-        self._update_constraints(And(lowerbound_constraint, upperbound_constraint))
-
-    def grid_callback(self, grid: Tuple[int]):
-        pass
-
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
-        pass
-
-    def register_op_callback(self, op_type: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
-        def pre_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
-            base_array = np.reshape(ptr.data, (-1))
-            mask_array = np.reshape(mask.data, (-1))
-
-            valid_addresses = base_array[mask_array]
-            if len(valid_addresses) == 0:
-                return
-            lower_bound = valid_addresses.min()
-            upper_bound = valid_addresses.max()
-            self._check_if_range_statisfy_constraints(lower_bound, upper_bound, op_type)
-
-        def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
-            dtype_tt = ptr.get_element_ty()
-            dtype_np = _get_np_dtype(dtype_tt)
-            return TensorHandle(np.zeros_like(ptr.data, dtype=dtype_np), dtype_tt)
-
-        def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
-            pass
-
-        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
-            base_array = np.reshape(ptr.data, (-1))
-            mask_array = np.reshape(mask.data, (-1))
-
-            valid_addresses = base_array[mask_array]
-            if len(valid_addresses) == 0:
-                return
-            lower_bound = valid_addresses.min()
-            upper_bound = valid_addresses.max()
-            self._check_if_range_statisfy_constraints(lower_bound, upper_bound, op_type)
-
-        if op_type is Load:
-            return pre_load_callback, None, op_load_overrider
-        elif op_type is Store:
-            return pre_store_callback, None, op_store_overrider
-        else:
-            return None, None, None
-
-    def finalize(self) -> list:
-        return []
-
 class SymbolicExprDataWrapper:
     '''
     This wrapper is used as a workaround of triton interpreter legacy code.
@@ -1064,8 +943,6 @@ class SanitizerSymbolicExecution(Client):
 def Sanitizer(abort_on_error=False):
     if sanitizer_backend == "brute_force":
         return SanitizerBruteForce(abort_on_error)
-    elif sanitizer_backend == "z3":
-        return SanitizerZ3(abort_on_error)
     elif sanitizer_backend == "symexec":
         return SanitizerSymbolicExecution(abort_on_error)
     elif sanitizer_backend == "off":
