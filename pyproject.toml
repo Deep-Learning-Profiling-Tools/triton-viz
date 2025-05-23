@@ -27,7 +27,9 @@ dependencies = [
   "pyarrow",
   "pre-commit",
   "pytest",
-  "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git"
+  "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git",
+  "z3-solver",
+  "anytree",
 ]
 
 [project.urls]

@@ -29,11 +29,26 @@ class Op:
 
 
 @dataclass
+class ProgramId(Op):
+    name: ClassVar[str] = "program_id"
+
+
+@dataclass
+class RawStore(Op):
+    name: ClassVar[str] = "raw_store"
+
+
+@dataclass
 class Store(Op):
     name: ClassVar[str] = "store"
     ptr: int
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
+
+
+@dataclass
+class RawLoad(Op):
+    name: ClassVar[str] = "raw_load"
 
 
 @dataclass
@@ -45,10 +60,28 @@ class Load(Op):
 
 
 @dataclass
+class UnaryOp(Op):
+    name: ClassVar[str] = "unary_op"
+
+
+@dataclass
 class BinaryOp(Op):
     name: ClassVar[str] = "binary_op"
     op: str
     input_shape: Tuple
+    output_shape: Tuple
+
+
+@dataclass
+class TernaryOp(Op):
+    name: ClassVar[str] = "ternary_op"
+
+
+@dataclass
+class Dot(Op):
+    name: ClassVar[str] = "dot"
+    input_shape: Tuple
+    other_shape: Tuple
     output_shape: Tuple
 
 
@@ -60,6 +93,11 @@ class MakeRange(Op):
 
 
 @dataclass
+class AddPtr(Op):
+    name: ClassVar[str] = "addptr"
+
+
+@dataclass
 class ExpandDims(Op):
     name: ClassVar[str] = "expand_dims"
     input_shape: Tuple
@@ -68,11 +106,8 @@ class ExpandDims(Op):
 
 
 @dataclass
-class Dot(Op):
-    name: ClassVar[str] = "dot"
-    input_shape: Tuple
-    other_shape: Tuple
-    output_shape: Tuple
+class Broadcast(Op):
+    name: ClassVar[str] = "broadcast"
 
 
 @dataclass
@@ -100,6 +135,42 @@ class ReduceMax(Reduce):
 class ReduceSum(Reduce):
     name: ClassVar[str] = "reduce_sum"
     reduce_type: ClassVar[str] = "sum"
+
+
+@dataclass
+class Splat(Op):
+    # Broadcasts a scalar to a tensor
+    name: ClassVar[str] = "splat"
+
+
+@dataclass
+class MakeBlockPointer(Op):
+    name: ClassVar[str] = "make_block_ptr"
+
+
+@dataclass
+class TensorPointerLoad(Op):
+    name: ClassVar[str] = "tensor_pointer_load"
+
+
+@dataclass
+class TensorPointerStore(Op):
+    name: ClassVar[str] = "tensor_pointer_store"
+
+
+@dataclass
+class Idiv(Op):
+    name: ClassVar[str] = "idiv"
+
+
+@dataclass
+class Rsqrt(Op):
+    name: ClassVar[str] = "rsqrt"
+
+
+@dataclass
+class CastImpl(Op):
+    name: ClassVar[str] = "cast_impl"
 
 
 @dataclass

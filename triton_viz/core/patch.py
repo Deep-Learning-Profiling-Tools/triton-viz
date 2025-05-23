@@ -3,8 +3,15 @@ from contextlib import contextmanager
 from typing import Callable, Type, Dict
 from tqdm import tqdm
 
-from .config import report_grid_execution_progress
-from .data import Op, Store, Load, Dot, BinaryOp, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum
+from .config import report_grid_execution_progress, sanitizer_backend
+from .data import (
+    Op, RawLoad, Load, RawStore, Store,
+    UnaryOp, BinaryOp, TernaryOp, ProgramId,
+    Dot, MakeRange, AddPtr, ReduceSum,
+    Splat, ExpandDims, Broadcast, ReduceMax, ReduceMin,
+    MakeBlockPointer, TensorPointerLoad,
+    TensorPointerStore, Idiv, Rsqrt,
+    CastImpl)
 import inspect
 from triton.runtime.interpreter import (
     GridExecutor,
@@ -14,14 +21,36 @@ from triton.runtime.interpreter import (
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
 
-op_list = [Store, Load, Dot, BinaryOp, ExpandDims, MakeRange, ReduceMax, ReduceMin, ReduceSum]
+op_list = [
+    ProgramId, RawStore, Store, RawLoad, Load,
+    UnaryOp, BinaryOp, TernaryOp, Dot, MakeRange,
+    AddPtr, Splat, ExpandDims, Broadcast,
+    ReduceMax, ReduceMin, ReduceSum,
+    MakeBlockPointer, TensorPointerLoad,
+    TensorPointerStore, Idiv, Rsqrt, CastImpl,
+]
 original_ops = {
+    ProgramId: interpreter_builder.create_get_program_id,
+    RawStore: interpreter_builder.create_store,
     Store: interpreter_builder.create_masked_store,
+    RawLoad: interpreter_builder.create_load,
     Load: interpreter_builder.create_masked_load,
     Dot: interpreter_builder.create_dot,
+    UnaryOp: interpreter_builder.unary_op,
     BinaryOp: interpreter_builder.binary_op,
-    ExpandDims: interpreter_builder.create_expand_dims,
+    TernaryOp: interpreter_builder.ternary_op,
+    Dot: interpreter_builder.create_dot,
     MakeRange: interpreter_builder.create_make_range,
+    AddPtr: interpreter_builder.create_addptr,
+    ExpandDims: interpreter_builder.create_expand_dims,
+    Broadcast: interpreter_builder.create_broadcast,
+    Splat: interpreter_builder.create_splat,
+    MakeBlockPointer: interpreter_builder.create_make_block_ptr,
+    TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
+    TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
+    Idiv: interpreter_builder.create_idiv,
+    Rsqrt: interpreter_builder.create_rsqrt,
+    CastImpl: interpreter_builder.cast_impl,
 }
 reduce_map: Dict[Type[Op], Callable] = {
     ReduceMax: tl.max,
@@ -31,8 +60,9 @@ reduce_map: Dict[Type[Op], Callable] = {
 
 
 class PatchOp:
-    def __init__(self, op, before_callback, after_callback, op_overrider):
+    def __init__(self, op, op_type, before_callback, after_callback, op_overrider):
         self.op = op
+        self.op_type = op_type
         self.before_callback = before_callback
         self.after_callback = after_callback
         self.op_overrider = op_overrider
@@ -41,7 +71,13 @@ class PatchOp:
         if self.before_callback:
             self.before_callback(*args, **kwargs)
         if self.op_overrider:
-            ret = self.op_overrider(*args, **kwargs)
+            if self.op_type == ReduceSum:
+                # see triton.runtime.interpreter:ReduceOps.sum
+                # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
+                # Then, convert return value from TensorHandle to tl.tensor
+                ret = tl.core.tensor(self.op_overrider(args[0].handle, *args[1:], **kwargs), args[0].dtype)
+            else:
+                ret = self.op_overrider(*args, **kwargs)
         else:
             ret = self.op(*args, **kwargs)
         if self.after_callback:
@@ -62,12 +98,12 @@ def patch_op(op_type: Type[Op], before_callback: Callable, after_callback: Calla
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = original_ops[op_type].__name__
         current_op = getattr(interpreter_builder, op_name)
-        patched_op = PatchOp(current_op, before_callback, after_callback, op_overrider)
+        patched_op = PatchOp(current_op, op_type, before_callback, after_callback, op_overrider)
         setattr(interpreter_builder, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
-    elif op_type in [ReduceMax, ReduceMin, ReduceSum]:
+    elif op_type in reduce_map:
         op_name = reduce_map[op_type].__name__
         current_op = getattr(tl, op_name)
-        patched_op = PatchOp(current_op, before_callback, after_callback, op_overrider)
+        patched_op = PatchOp(current_op, op_type, before_callback, after_callback, op_overrider)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
@@ -99,6 +135,16 @@ def _unpatch_lang():
 def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
+    def run_grid_loops():
+        for x in tqdm(range(grid[0]), desc='Grid X', leave=False, disable=not report_grid_execution_progress):
+            for y in tqdm(range(grid[1]), desc='Grid Y', leave=False, disable=not (report_grid_execution_progress and grid[1] > 1)):
+                for z in tqdm(range(grid[2]), desc='Grid Z', leave=False, disable=not (report_grid_execution_progress and grid[2] > 1)):
+                    interpreter_builder.set_grid_idx(x, y, z)
+                    client_manager.grid_idx_callback((x, y, z))
+                    self.fn(**call_args)
+                    # if symbolic execution, only do one iteration
+                    if sanitizer_backend == "symexec":
+                        return
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
@@ -126,12 +172,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
-    for x in tqdm(range(grid[0]), desc='Grid X', leave=False, disable=not report_grid_execution_progress):
-        for y in tqdm(range(grid[1]), desc='Grid Y', leave=False, disable=not (report_grid_execution_progress and grid[1] > 1)):
-            for z in tqdm(range(grid[2]), desc='Grid Z', leave=False, disable=not (report_grid_execution_progress and grid[2] > 1)):
-                interpreter_builder.set_grid_idx(x, y, z)
-                client_manager.grid_idx_callback((x, y, z))
-                self.fn(**call_args)
+    run_grid_loops()
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
     _unpatch_lang()
