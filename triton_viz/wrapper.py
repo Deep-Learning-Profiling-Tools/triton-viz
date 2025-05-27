@@ -13,7 +13,6 @@ def sanitizer_wrapper(kernel):
     return tracer(kernel)
 
 def _patched_jit(fn=None, **jit_kw):
-    print("Patching triton.jit with sanitizer wrapper")
     if fn is None: # @triton.jit(**opts)
         def _decorator(f):
             k = _original_jit(**jit_kw)(f)
@@ -30,8 +29,10 @@ import triton.runtime.interpreter as _interp
 _interp.jit = _patched_jit
 
 # run user script
-# argv = ['triton-sanitizer', 'user_script.py', ...]
-print(sys.argv)
+# argv is like: ['triton-sanitizer', 'user_script.py', 'arg1', 'arg2', ...]
+if len(sys.argv) < 2:
+    print("Usage: triton-sanitizer <script.py> [args...]")
+    sys.exit(1)
 script = sys.argv[1]
 sys.argv = sys.argv[1:]
 runpy.run_path(script, run_name="__main__")
