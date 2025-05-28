@@ -34,3 +34,6 @@ dependencies = [
 
 [project.urls]
 homepage = "https://github.com/Deep-Learning-Profiling-Tools/triton-viz"
+
+[project.scripts]
+triton-sanitizer = "triton_viz.wrapper:apply"
