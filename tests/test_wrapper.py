@@ -17,45 +17,6 @@ import triton
 import triton.language as tl
 
 
-def test_jit_patched_and_trace_called():
-    """Main test: verify jit is patched and trace is called exactly once."""
-    # Remove the already-loaded wrapper (relevant when pytest runs multiple times)
-    sys.modules.pop("triton_viz.wrapper", None)
-
-    # triton-viz must be imported before patching trace
-    import triton_viz
-
-    # A simple counter for how many times trace is called
-    trace_calls = {"count": 0}
-
-    def fake_trace(*args, **kwargs):
-        """Return a decorator that leaves the function unchanged and count calls."""
-        trace_calls["count"] += 1
-
-        def _decorator(fn):
-            return fn
-        return _decorator
-
-    # Monkey-patch triton_viz.trace and reload wrapper
-    triton_viz.trace = fake_trace
-    wrapper = importlib.import_module("triton_viz.wrapper")
-
-    # Now start the actual test
-    # --- 1) jit must be replaced ---
-    assert triton.jit is wrapper._patched_jit
-    assert tl.jit is wrapper._patched_jit
-    import triton.runtime.interpreter as _interp
-    assert _interp.jit is wrapper._patched_jit
-
-    # --- 2) Define a dummy kernel to trigger @triton.jit once ---
-    @triton.jit
-    def dummy_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
-        pass
-    dummy_kernel[(1,)](None, None, None, BLOCK_SIZE=1)
-
-    # --- 3) Verify that the fake trace was called exactly once ---
-    assert trace_calls["count"] == 1, "triton_viz.trace was not invoked correctly"
-
 def test_cli_invocation():
     """
     Simulate running:
@@ -111,7 +72,9 @@ def test_cli_invocation():
         )
 
         # --- 4) Assertion: trace must be called exactly once
+        # Check if the process exited successfully
         assert proc.returncode == 0, f"CLI exited with {proc.returncode}\n{proc.stderr}"
+        # Check if trace was called once and only once
         trace_count = proc.stdout.count("TRACE_CALLED")
         assert trace_count == 1, (
             "triton_viz.trace should be invoked exactly once via CLI path"

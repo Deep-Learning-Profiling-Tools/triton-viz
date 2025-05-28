@@ -22,20 +22,21 @@ def _patched_jit(fn=None, **jit_kw):
         k = _original_jit(fn)
         return sanitizer_wrapper(k)
 
-# patching the original triton.jit
-triton.jit = _patched_jit
-triton.language.jit = _patched_jit
-import triton.runtime.interpreter as _interp
-_interp.jit = _patched_jit
+def apply():
+    """
+    Apply the sanitizer wrapper to triton.jit and run the user script.
+    """
+    # patching the original triton.jit
+    triton.jit = _patched_jit
+    triton.language.jit = _patched_jit
+    import triton.runtime.interpreter as _interp
+    _interp.jit = _patched_jit
 
-# run user script
-# argv is like: ['triton-sanitizer', 'user_script.py', 'arg1', 'arg2', ...]
-if len(sys.argv) < 2:
-    print("Usage: triton-sanitizer <script.py> [args...]")
-    sys.exit(1)
-script = sys.argv[1]
-sys.argv = sys.argv[1:]
-runpy.run_path(script, run_name="__main__")
-
-def _entrypoint():
-    pass
+    # run user script
+    # argv is like: ['triton-sanitizer', 'user_script.py', 'arg1', 'arg2', ...]
+    if len(sys.argv) < 2:
+        print("Usage: triton-sanitizer <script.py> [args...]")
+        sys.exit(1)
+    script = sys.argv[1]
+    sys.argv = sys.argv[1:]
+    runpy.run_path(script, run_name="__main__")
