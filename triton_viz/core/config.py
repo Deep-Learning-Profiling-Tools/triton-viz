@@ -13,11 +13,10 @@ class Config(types.ModuleType):
         if env_backend:
             self.sanitizer_backend = env_backend  # verify using setter
         else:
-            print(
-                f"TRITON_SANITIZER_BACKEND not set. "
-                f"Available backends are: {AVAILABLE_SANITIZER_BACKENDS}. Defaulting to 'off'."
+            raise ValueError(
+                f"TRITON_SANITIZER_BACKEND is not set!"
+                f"Available backends are: {AVAILABLE_SANITIZER_BACKENDS}"
             )
-            self._sanitizer_backend = "off"
 
         # --- Grid execution progress flag ---
         env_flag = os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0")
