@@ -32,9 +32,18 @@ class Client(ABC):
 
 
 class ClientManager:
-    def __init__(self, clients: list[Client]):
+    def __init__(self, clients: list[Client] = []):
         self.clients = clients
         self.launch = Launch()
+
+    def add_clients(self, new_clients: Tuple[Client]) -> None:
+        for new_client in new_clients:
+            duplicate = any(
+                isinstance(existing_client, new_client.__class__)
+                for existing_client in self.clients
+            )
+            if not duplicate:
+                self.clients.append(new_client)
 
     @contextmanager
     def patch(self):
