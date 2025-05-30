@@ -1,11 +1,11 @@
-import sys, os, datetime, traceback
+import traceback
+from abc import ABC
 from typing import Tuple, Callable, Optional, Type
 import numpy as np
 from anytree import Node, RenderTree
 from z3 import Solver, Int, IntVal, If, Sum, And, Or, Not, sat, simplify
-import triton
 import triton.language as tl
-from triton.runtime.interpreter import _get_np_dtype, TensorHandle
+from triton.runtime.interpreter import TensorHandle
 
 from ...core.client import Client
 from ...core.data import (
@@ -17,7 +17,7 @@ from ...core.data import (
     CastImpl)
 from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
 from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
-from ...core.config import sanitizer_backend
+from ...core import config as cfg
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -939,13 +939,37 @@ class SanitizerSymbolicExecution(Client):
     def finalize(self) -> list:
         return []
 
+class NullSanitizer:
+    """
+    A do-nothing object returned when the sanitizer backend is 'off'.
+    Any attribute access raises an explicit error so misuse is obvious.
+    """
+    def __getattr__(self, name):
+        raise RuntimeError(
+            "Sanitizer backend is off; no sanitizer functionality is available."
+        )
 
-def Sanitizer(abort_on_error=False):
-    if sanitizer_backend == "brute_force":
-        return SanitizerBruteForce(abort_on_error)
-    elif sanitizer_backend == "symexec":
-        return SanitizerSymbolicExecution(abort_on_error)
-    elif sanitizer_backend == "off":
-        return None
-    else:
-        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {sanitizer_backend}")
+class Sanitizer(ABC):
+    """
+    Factory class that returns the concrete sanitizer implementation
+    based on the value of ``cfg.sanitizer_backend``.
+    """
+    def __new__(cls, abort_on_error: bool = False):
+        backend = cfg.sanitizer_backend
+
+        if backend == "brute_force":
+            return SanitizerBruteForce(abort_on_error)
+
+        if backend == "symexec":
+            return SanitizerSymbolicExecution(abort_on_error)
+
+        if backend == "off":
+            return NullSanitizer()
+
+        raise ValueError(
+            f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} "
+        )
+
+Sanitizer.register(SanitizerBruteForce)
+Sanitizer.register(SanitizerSymbolicExecution)
+Sanitizer.register(NullSanitizer)
