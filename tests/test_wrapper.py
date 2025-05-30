@@ -1,11 +1,3 @@
-"""
-Test that triton_viz.wrapper works correctly:
-1. It should patch triton.jit / triton.language.jit /
-   triton.runtime.interpreter.jit with wrapper._patched_jit
-2. The first use of @triton.jit must invoke triton_viz.trace(Sanitizer)
-"""
-
-import importlib
 import sys
 import tempfile
 from pathlib import Path
@@ -17,6 +9,12 @@ import triton
 import triton.language as tl
 
 
+"""
+Test that triton_viz.wrapper works correctly:
+1. It should patch triton.jit / triton.language.jit /
+   triton.runtime.interpreter.jit with wrapper._patched_jit
+2. The first use of @triton.jit must invoke triton_viz.trace(Sanitizer)
+"""
 def test_cli_invocation():
     """
     Simulate running:
