@@ -32,8 +32,8 @@ class Client(ABC):
 
 
 class ClientManager:
-    def __init__(self, clients: list[Client] = []):
-        self.clients = clients
+    def __init__(self, clients: Optional[list[Client]] = None):
+        self.clients = clients if clients is not None else []
         self.launch = Launch()
 
     def add_clients(self, new_clients: Tuple[Client]) -> None:
