@@ -59,18 +59,18 @@ class Trace(KernelInterface):
         launches.append(self.client_manager.launch)
 
 
-def trace(client: Union[str, Client]):
+def trace(clients: Union[str, Client]):
     """
     Create a trace object that can be used to run a kernel with instrumentation clients.
 
     :param kernel: The kernel to run.
     :param client: A client to run with the kernel.
     """
-    if not client:
+    if not clients:
         raise ValueError("At least one client must be specified!")
 
-    if not isinstance(client, (str, Client)):
-        raise TypeError(f"Expected str or Client, got {type(client)}")
+    if not isinstance(clients, (str, Client)):
+        raise TypeError(f"Expected str or Client, got {type(clients)}")
 
     def decorator(kernel) -> Trace:
         # When sanitizer is off, skip tracing and return the original kernel unchanged
@@ -79,12 +79,12 @@ def trace(client: Union[str, Client]):
 
         # First-time wrapping
         if isinstance(kernel, JITFunction):
-            return Trace(kernel, client)
+            return Trace(kernel, clients)
 
         # If the object is already a Trace, just append the new client(s)
         if isinstance(kernel, Trace):
             trace = kernel
-            trace.add_client(client)
+            trace.add_client(clients)
             return trace
 
         # If the object is neither a JITFunction nor Trace, raise an error
