@@ -44,9 +44,7 @@ jobs:
 
     - name: Clone Triton and Install
       run: |
-        git clone https://github.com/openai/triton.git
-        cd triton/python
-        pip install -e .
+        pip install triton==3.1.0
 
     - name: Install Triton-Viz
       run: |
