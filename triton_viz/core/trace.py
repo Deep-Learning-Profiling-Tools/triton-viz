@@ -32,19 +32,17 @@ class Trace(KernelInterface):
         else:
             raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def add_clients(self, new_clients: Union[Client, Tuple[Client]]) -> None:
-        if not isinstance(new_clients, Tuple):
-            new_clients = (new_clients,)
-        client_instances = [self._normalize_client(c) for c in new_clients]
-        self.client_manager.add_clients(client_instances)
+    def add_client(self, new_client: Union[Client, str]) -> None:
+        new_client_instance = self._normalize_client(new_client)
+        self.client_manager.add_clients([new_client_instance])
 
-    def __init__(self, kernel: JITFunction, clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]]) -> None:
+    def __init__(self, kernel: JITFunction, client: Union[str, Client]) -> None:
         assert isinstance(kernel, JITFunction), "Kernel must be a JITFunction"
         self.interpreter_fn = InterpretedFunction(kernel.fn)
         self.fn = kernel
         self.arg_names = kernel.arg_names
         self.client_manager = ClientManager()
-        self.add_clients(clients)
+        self.add_client(client)
 
     def run(self, *args, **kwargs):
         with self.client_manager.patch():
@@ -61,15 +59,18 @@ class Trace(KernelInterface):
         launches.append(self.client_manager.launch)
 
 
-def trace(clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]]):
+def trace(client: Union[str, Client]):
     """
     Create a trace object that can be used to run a kernel with instrumentation clients.
 
     :param kernel: The kernel to run.
-    :param clients: A tuple of clients to run with the kernel.
+    :param client: A client to run with the kernel.
     """
-    if not clients:
+    if not client:
         raise ValueError("At least one client must be specified!")
+
+    if not isinstance(client, (str, Client)):
+        raise TypeError(f"Expected str or Client, got {type(client)}")
 
     def decorator(kernel) -> Trace:
         # When sanitizer is off, skip tracing and return the original kernel unchanged
@@ -78,12 +79,12 @@ def trace(clients: Union[Tuple[Union[str, Client], ...], Union[str, Client]]):
 
         # First-time wrapping
         if isinstance(kernel, JITFunction):
-            return Trace(kernel, clients)
+            return Trace(kernel, client)
 
         # If the object is already a Trace, just append the new client(s)
         if isinstance(kernel, Trace):
             trace = kernel
-            trace.add_clients(clients)
+            trace.add_client(client)
             return trace
 
         # If the object is neither a JITFunction nor Trace, raise an error

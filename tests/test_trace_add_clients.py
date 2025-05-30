@@ -20,9 +20,10 @@ def test_trace_decorator_add_clients():
     The final Trace object should contain exactly one instance each of
     Sanitizer, Profiler, and Tracer (total = 3 clients).
     """
-    @triton_viz.trace(("sanitizer", "profiler"))
+    @triton_viz.trace("sanitizer")
+    @triton_viz.trace("profiler")
     @triton_viz.trace("tracer")
-    @triton_viz.trace(("sanitizer",))    # Duplicate Sanitizer (should be ignored)
+    @triton_viz.trace(Sanitizer(abort_on_error=True))    # Duplicate Sanitizer (should be ignored)
     @triton.jit
     def my_kernel(x_ptr, y_ptr, out_ptr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
