@@ -5,9 +5,9 @@ name: Python application
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "keren/v2.0" ]
   pull_request:
-     branches: [ "main" ]
+     branches: [ "main", "keren/v2.0" ]
 
 permissions:
   contents: read
@@ -56,4 +56,4 @@ jobs:
     - name: Test with pytest
       run: |
         cd triton_viz
-        python -m pytest examples
+        python -m pytest tests
