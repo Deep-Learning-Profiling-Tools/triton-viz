@@ -24,7 +24,7 @@ def kernel_A(ptr, n):
     tl.store(ptr + pid, val)
 
 def test_print_nested_functions():
-    x = torch.arange(4, dtype=torch.float32)
+    x = torch.arange(4, device='cuda', dtype=torch.float32)
     print("Input:", x)
 
     # We'll launch a grid bigger than x.numel() to force a out-of-bounds error

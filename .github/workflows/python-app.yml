@@ -5,9 +5,9 @@ name: Python application
 
 on:
   push:
-    branches: [ "main", "keren/v2.0" ]
+    branches: []
   pull_request:
-     branches: [ "main", "keren/v2.0" ]
+    branches: []
 
 permissions:
   contents: read
