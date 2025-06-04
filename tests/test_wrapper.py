@@ -59,6 +59,7 @@ def test_cli_invocation():
         # load sitecustomize.py
         env = os.environ.copy()
         env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
+        env["TRITON_SANITIZER_BACKEND"] = "symexec"
 
         # run the dummy program using triton-sanitizer
         cmd = ["triton-sanitizer", str(tmp_path / "dummy_program.py")]

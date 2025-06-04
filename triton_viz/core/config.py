@@ -9,14 +9,7 @@ class Config(types.ModuleType):
         super().__init__(name)
 
         # --- Sanitizer backend ---
-        env_backend = os.getenv("TRITON_SANITIZER_BACKEND", "")
-        if env_backend:
-            self.sanitizer_backend = env_backend  # verify using setter
-        else:
-            raise ValueError(
-                f"TRITON_SANITIZER_BACKEND is not set!"
-                f"Available backends are: {AVAILABLE_SANITIZER_BACKENDS}"
-            )
+        self._sanitizer_backend = os.getenv("TRITON_SANITIZER_BACKEND", "") or None
 
         # --- Grid execution progress flag ---
         env_flag = os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0")
@@ -25,6 +18,11 @@ class Config(types.ModuleType):
     # ---------- sanitizer_backend ----------
     @property
     def sanitizer_backend(self) -> str:
+        if self._sanitizer_backend is None:
+            raise RuntimeError(
+                f"TRITON_SANITIZER_BACKEND is not set!"
+                f"Available backends are: {AVAILABLE_SANITIZER_BACKENDS}"
+            )
         return self._sanitizer_backend
 
     @sanitizer_backend.setter

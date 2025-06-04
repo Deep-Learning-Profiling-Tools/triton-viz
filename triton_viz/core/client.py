@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from .data import Op, Launch
 from .patch import patch_op, unpatch_op, op_list, patch_calls
-from typing import Tuple, Callable, Type, Optional
+from typing import Tuple, Callable, Type, Optional, List
 
 
 class Client(ABC):
@@ -32,9 +32,18 @@ class Client(ABC):
 
 
 class ClientManager:
-    def __init__(self, clients: list[Client]):
-        self.clients = clients
+    def __init__(self, clients: Optional[List[Client]] = None):
+        self.clients = clients if clients is not None else []
         self.launch = Launch()
+
+    def add_clients(self, new_clients: List[Client]) -> None:
+        for new_client in new_clients:
+            duplicate = any(
+                isinstance(existing_client, new_client.__class__)
+                for existing_client in self.clients
+            )
+            if not duplicate:
+                self.clients.append(new_client)
 
     @contextmanager
     def patch(self):

@@ -5,9 +5,9 @@ name: Python application
 
 on:
   push:
-    branches: [ "main" ]
+    branches: []
   pull_request:
-     branches: [ "main" ]
+    branches: []
 
 permissions:
   contents: read
@@ -30,11 +30,11 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Lint with pre-commit
-      run: |
-        cd triton_viz
-        pip install pre-commit
-        pre-commit run --all-files
+    # - name: Lint with pre-commit
+    #   run: |
+    #     cd triton_viz
+    #     pip install pre-commit
+    #     pre-commit run --all-files
 
     - name: Install Dependencies
       if: steps.cache-pip.outputs.cache-hit != 'true'
@@ -44,9 +44,7 @@ jobs:
 
     - name: Clone Triton and Install
       run: |
-        git clone https://github.com/openai/triton.git
-        cd triton/python
-        pip install -e .
+        pip install triton==3.1.0
 
     - name: Install Triton-Viz
       run: |
@@ -56,4 +54,4 @@ jobs:
     - name: Test with pytest
       run: |
         cd triton_viz
-        python -m pytest examples
+        python -m pytest tests

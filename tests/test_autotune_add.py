@@ -2,10 +2,12 @@ import torch
 import triton
 import triton.language as tl
 
-# Example import of the Trace decorator with a sanitizer client
-# Adjust according to your actual project structure
 import triton_viz
 from triton_viz.clients import Sanitizer
+from triton_viz import config as cfg
+
+
+cfg.sanitizer_backend = "symexec"
 
 @triton.autotune(
     configs=[
