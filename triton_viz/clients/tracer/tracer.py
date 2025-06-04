@@ -17,7 +17,11 @@ def _convert_grid_idx(grid_idx) -> Optional[Tuple[int, int, int]]:
 
 
 class Tracer(Client):
-    def __init__(self, callpath: Optional[bool] = True, grid_idx: Optional[Union[Tuple[int], int]] = None):
+    def __init__(
+        self,
+        callpath: Optional[bool] = True,
+        grid_idx: Optional[Union[Tuple[int], int]] = None,
+    ):
         self.callpath = callpath
         self.grid_idx = _convert_grid_idx(grid_idx)
         self.records: list = []
@@ -47,20 +51,28 @@ class Tracer(Client):
     def grid_callback(self, grid: Tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
-        def pre_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
+    def register_op_callback(
+        self, op_type: Type[Op]
+    ) -> Tuple[Optional[Callable], Optional[Callable]]:
+        def pre_load_callback(
+            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
+        ):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
-            self.records.append(Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data))
+            self.records.append(
+                Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            )
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
-            self.records.append(Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data))
+            self.records.append(
+                Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            )
 
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:

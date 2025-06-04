@@ -9,14 +9,41 @@ from triton.runtime.interpreter import TensorHandle
 
 from ...core.client import Client
 from ...core.data import (
-    Op, RawLoad, Load, RawStore, Store,
-    UnaryOp, BinaryOp, TernaryOp, ProgramId,
-    Dot, MakeRange, AddPtr, ExpandDims, Broadcast, ReduceSum,
-    Splat, MakeBlockPointer, TensorPointerLoad,
-    TensorPointerStore, Idiv, Rsqrt,
-    CastImpl)
-from ..utils import check_out_of_bounds_access, check_storage_contiguous, get_physical_addr_from_tensor_slice, check_inner_stride_equal_to_one
-from .data import TracebackInfo, OutOfBoundsRecord, OutOfBoundsRecordBruteForce, OutOfBoundsRecordZ3
+    Op,
+    RawLoad,
+    Load,
+    RawStore,
+    Store,
+    UnaryOp,
+    BinaryOp,
+    TernaryOp,
+    ProgramId,
+    Dot,
+    MakeRange,
+    AddPtr,
+    ExpandDims,
+    Broadcast,
+    ReduceSum,
+    Splat,
+    MakeBlockPointer,
+    TensorPointerLoad,
+    TensorPointerStore,
+    Idiv,
+    Rsqrt,
+    CastImpl,
+)
+from ..utils import (
+    check_out_of_bounds_access,
+    check_storage_contiguous,
+    get_physical_addr_from_tensor_slice,
+    check_inner_stride_equal_to_one,
+)
+from .data import (
+    TracebackInfo,
+    OutOfBoundsRecord,
+    OutOfBoundsRecordBruteForce,
+    OutOfBoundsRecordZ3,
+)
 from ...core import config as cfg
 
 
@@ -46,11 +73,17 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print("                 Out-Of-Bounds Access Detected              ")
     print("============================================================")
     print(f"Operation: {op_type}")
-    print(f"Tensor Info: dtype={tensor.dtype}, shape={tensor.shape}, device={tensor.device}")
+    print(
+        f"Tensor Info: dtype={tensor.dtype}, shape={tensor.shape}, device={tensor.device}"
+    )
     print(f"Tensor base memory address: {tensor.data_ptr()}")
-    print("Valid Access Range: [0, %d)" % (np.prod(tensor.shape) * tensor.element_size()))
+    print(
+        "Valid Access Range: [0, %d)" % (np.prod(tensor.shape) * tensor.element_size())
+    )
     for traceback_info in oob_record.user_code_tracebacks:
-        print(f"File: {traceback_info.filename}, Line: {traceback_info.lineno}, in {traceback_info.func_name}")
+        print(
+            f"File: {traceback_info.filename}, Line: {traceback_info.lineno}, in {traceback_info.func_name}"
+        )
         print(f"  Code: {traceback_info.line_of_code}")
     print("------------------------------------------------------------")
 
@@ -81,11 +114,14 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
             print(constraint)
 
     else:
-        raise NotImplementedError("Invalid OutOfBoundsRecord type: " + str(type(oob_record)))
+        raise NotImplementedError(
+            "Invalid OutOfBoundsRecord type: " + str(type(oob_record))
+        )
 
     print("============================================================")
     print("            End of Out-Of-Bounds Record Details             ")
     print("============================================================")
+
 
 def _get_traceback_info():
     """
@@ -108,12 +144,18 @@ def _get_traceback_info():
     # scan the call stack
     for i, frame in enumerate(stack_summary):
         user_code_index = None
-        if ('_jit_function_call' in frame.name
-            and 'triton_viz/core/patch.py' in frame.filename):
-            user_code_index = i + 2 # _grid_executor_call -> run_grid_loops -> user code
-        elif ('_grid_executor_call' in frame.name
-            and 'triton_viz/core/patch.py' in frame.filename):
-            user_code_index = i + 2 # the same as above
+        if (
+            "_jit_function_call" in frame.name
+            and "triton_viz/core/patch.py" in frame.filename
+        ):
+            user_code_index = (
+                i + 2
+            )  # _grid_executor_call -> run_grid_loops -> user code
+        elif (
+            "_grid_executor_call" in frame.name
+            and "triton_viz/core/patch.py" in frame.filename
+        ):
+            user_code_index = i + 2  # the same as above
 
         if user_code_index is not None:
             frame = stack_summary[user_code_index]
@@ -125,24 +167,28 @@ def _get_traceback_info():
                 filename=oob_filename,
                 lineno=oob_lineno,
                 func_name=oob_func_name,
-                line_of_code=oob_line_of_code
+                line_of_code=oob_line_of_code,
             )
             user_code_tracebacks.append(traceback_info)
 
     return user_code_tracebacks
 
+
 def _get_tensor(tensor_list, data_ptr):
-        # From a give ptr, get where the original tensor is stored
-        # Tensors have been sorted by ptr
-        ret_idx = 0
-        for i in range(len(tensor_list)):
-            if data_ptr < tensor_list[i].data_ptr():
-                break
-            ret_idx = i
-        return tensor_list[ret_idx]
+    # From a give ptr, get where the original tensor is stored
+    # Tensors have been sorted by ptr
+    ret_idx = 0
+    for i in range(len(tensor_list)):
+        if data_ptr < tensor_list[i].data_ptr():
+            break
+        ret_idx = i
+    return tensor_list[ret_idx]
+
 
 class SanitizerBruteForce(Client):
-    def __init__(self, callpath: Optional[bool] = True, abort_on_error: Optional[bool] = True):
+    def __init__(
+        self, callpath: Optional[bool] = True, abort_on_error: Optional[bool] = True
+    ):
         self.callpath = callpath
         self.abort_on_error = abort_on_error
         self.tensors: list = []
@@ -150,11 +196,15 @@ class SanitizerBruteForce(Client):
 
     def _report(self, op_type, record):
         traceback_info = _get_traceback_info()
-        oob_record = OutOfBoundsRecordBruteForce(op_type=op_type, user_code_tracebacks=traceback_info, **record)
+        oob_record = OutOfBoundsRecordBruteForce(
+            op_type=op_type, user_code_tracebacks=traceback_info, **record
+        )
         if self.abort_on_error:
             if np.any(oob_record.invalid_access_masks):
                 print_oob_record(oob_record)
-                assert False, "Out-of-bounds access detected. See detailed report above."
+                assert (
+                    False
+                ), "Out-of-bounds access detected. See detailed report above."
         else:
             self.records.append(oob_record)
 
@@ -171,22 +221,28 @@ class SanitizerBruteForce(Client):
     def grid_callback(self, grid: Tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
-        def pre_load_callback(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
+    def register_op_callback(
+        self, op_type: Type[Op]
+    ) -> Tuple[Optional[Callable], Optional[Callable]]:
+        def pre_load_callback(
+            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
+        ):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
             tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
             self._report(op_type, oob)
-            ptr.data = tensor.data_ptr() + oob['corrected_offsets']
+            ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
             tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
-            self._report(op_type, check_out_of_bounds_access(ptr.data, mask.data, tensor))
-            ptr.data = tensor.data_ptr() + oob['corrected_offsets']
+            self._report(
+                op_type, check_out_of_bounds_access(ptr.data, mask.data, tensor)
+            )
+            ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
         if op_type is Load:
             return pre_load_callback, None, None
@@ -198,15 +254,17 @@ class SanitizerBruteForce(Client):
     def finalize(self) -> list:
         return self.records
 
+
 class SymbolicExprDataWrapper:
-    '''
+    """
     This wrapper is used as a workaround of triton interpreter legacy code.
     In def _get_bool(self) of class tensor,
         "data = self.handle.data
         return bool(data) if data.size == 1 else True"
     Since we replaced TensorHandle with SymbolicExpr,
     we need to wrap SymbolicExpr with a class that has size attribute, and data.size != 1.
-    '''
+    """
+
     def __init__(self, value, symbolic_expr):
         self.value = value
         self.symbolic_expr = symbolic_expr
@@ -218,7 +276,9 @@ class SymbolicExprDataWrapper:
     def __int__(self):
         int_val = self.symbolic_expr.eval()
         if not isinstance(int_val, int):
-            raise ValueError(f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int")
+            raise ValueError(
+                f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int"
+            )
         return int_val
 
     def __str__(self):
@@ -227,11 +287,23 @@ class SymbolicExprDataWrapper:
     def __repr__(self):
         return self.value
 
+
 class SymbolicExpr:
     BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load", "store")
-    UNARY_OPS = ("cos", "exp", "exp2", "abs", "floor", "ceil", "log", 
-                 "log2", "sqrt", "sin", "rsqrt",)
+    UNARY_OPS = (
+        "cos",
+        "exp",
+        "exp2",
+        "abs",
+        "floor",
+        "ceil",
+        "log",
+        "log2",
+        "sqrt",
+        "sin",
+        "rsqrt",
+    )
     BINARY_OP_SYMBOL_TABLE = {
         "add": "+",
         "sub": "-",
@@ -254,15 +326,16 @@ class SymbolicExpr:
     POINTER_OPS = ("make_block_ptr",)
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast")
     SUPPORTED_OPS = (
-        BASIC_OPS +
-        INDIRECT_OPS +
-        UNARY_OPS +
-        BINARY_OPS +
-        TERNARY_OPS +
-        REDUCE_OPS +
-        POINTER_OPS +
-        BROADCAST_OPS
+        BASIC_OPS
+        + INDIRECT_OPS
+        + UNARY_OPS
+        + BINARY_OPS
+        + TERNARY_OPS
+        + REDUCE_OPS
+        + POINTER_OPS
+        + BROADCAST_OPS
     )
+
     def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
@@ -309,12 +382,14 @@ class SymbolicExpr:
             assert len(args) == 2, f"{self.op} op expects two arguments!"
             self.lhs = args[0]
             self.rhs = args[1]
-            if not self.lhs.shape: # lhs is a scalar
+            if not self.lhs.shape:  # lhs is a scalar
                 ret_shape = self.rhs.shape
-            elif not self.rhs.shape: # rhs is a scalar
+            elif not self.rhs.shape:  # rhs is a scalar
                 ret_shape = self.lhs.shape
-            else: # both are blocks
-                assert self.lhs.shape == self.rhs.shape, f"lhs shape {self.lhs.shape} should be equal to rhs shape {self.rhs.shape}"
+            else:  # both are blocks
+                assert (
+                    self.lhs.shape == self.rhs.shape
+                ), f"lhs shape {self.lhs.shape} should be equal to rhs shape {self.rhs.shape}"
                 ret_shape = self.lhs.shape
             self.shape = ret_shape
         elif self.op in self.TERNARY_OPS:
@@ -333,7 +408,8 @@ class SymbolicExpr:
             elif self.op == "dot":
                 self.a = args[0]
                 self.b = args[1]
-                if len(args) >= 3: self.d = args[2]
+                if len(args) >= 3:
+                    self.d = args[2]
             else:
                 raise NotImplementedError(f"Unsupported reduce op: {self.op}")
         elif self.op == "make_block_ptr":
@@ -424,7 +500,7 @@ class SymbolicExpr:
         for child_name, child_expr in self._children():
             # Build the child subtree
             child_node = child_expr.to_anytree()
-            # Prefix the child node’s name with the field name
+            # Prefix the child node's name with the field name
             child_node.name = f"{child_name}: {child_node.name}"
             child_node.parent = root
 
@@ -509,13 +585,19 @@ class SymbolicExpr:
     @classmethod
     def from_value(cls, var):
         triton_scala_dtypes = (
-            tl.int8, tl.int16, tl.int32, tl.int64,
-            tl.uint8, tl.uint16, tl.uint32, tl.uint64,
-            tl.float16, tl.float32, tl.float64
+            tl.int8,
+            tl.int16,
+            tl.int32,
+            tl.int64,
+            tl.uint8,
+            tl.uint16,
+            tl.uint32,
+            tl.uint64,
+            tl.float16,
+            tl.float32,
+            tl.float64,
         )
-        builtin_scala_types = (
-            int, float
-        )
+        builtin_scala_types = (int, float)
         # if already SymbolicExpr
         if isinstance(var, cls):
             return var
@@ -531,7 +613,9 @@ class SymbolicExpr:
             # if a pointer
             elif isinstance(var.dtype, tl.pointer_type):
                 if len(var.data) != 1:
-                    raise ValueError("Unsupported tl.pointer_type with length more than one!")
+                    raise ValueError(
+                        "Unsupported tl.pointer_type with length more than one!"
+                    )
                 return cls("const", var.data.item(), var.get_element_ty())
             else:
                 raise ValueError("Unsupported TensorHandle dtype", var.dtype)
@@ -547,8 +631,8 @@ class SymbolicExpr:
         - expr: Z3 expression corresponding to the root node
         - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
         """
-        self._arange_counter = 0 # Used to name arange variables
-        self._arange_dict = {} # make sure each arange only has one name
+        self._arange_counter = 0  # Used to name arange variables
+        self._arange_dict = {}  # make sure each arange only has one name
         self._vars = {}
         self._constraints = []
         expr = self._to_z3(self)
@@ -593,26 +677,40 @@ class SymbolicExpr:
             return If(c >= 0, c, -c)
         if node.op in self.UNARY_OPS:
             c = self._to_z3(node.arg)
-            if node.op == "abs":           return If(c >= 0, c, -c)
+            if node.op == "abs":
+                return If(c >= 0, c, -c)
             raise NotImplementedError(f"Unary op {node.op} is not implemented")
 
         # Binary arithmetic, comparison, etc.
         if node.op in self.BINARY_OPS:
             l = self._to_z3(node.lhs)
             r = self._to_z3(node.rhs)
-            if node.op == "add":           return l + r
-            if node.op == "sub":           return l - r
-            if node.op == "mul":           return l * r
-            if node.op in ("idiv"):        return l / r
-            if node.op == "mod":           return l % r
-            if node.op == "less":          return l < r
-            if node.op == "less_equal":    return l <= r
-            if node.op == "greater":       return l > r
-            if node.op == "greater_equal": return l >= r
-            if node.op == "equal":         return l == r
-            if node.op == "not_equal":     return l != r
-            if node.op == "maximum":       return If(l >= r, l, r)
-            if node.op == "bitwise_and":   return And(l, r)
+            if node.op == "add":
+                return l + r
+            if node.op == "sub":
+                return l - r
+            if node.op == "mul":
+                return l * r
+            if node.op in ("idiv"):
+                return l / r
+            if node.op == "mod":
+                return l % r
+            if node.op == "less":
+                return l < r
+            if node.op == "less_equal":
+                return l <= r
+            if node.op == "greater":
+                return l > r
+            if node.op == "greater_equal":
+                return l >= r
+            if node.op == "equal":
+                return l == r
+            if node.op == "not_equal":
+                return l != r
+            if node.op == "maximum":
+                return If(l >= r, l, r)
+            if node.op == "bitwise_and":
+                return And(l, r)
 
         # where(cond, lhs, rhs)
         if node.op == "where":
@@ -640,6 +738,7 @@ class SymbolicExpr:
         # Other operations can be implemented as needed
         raise NotImplementedError(f"Eval for op {node.op} is not implemented")
 
+
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
         self.abort_on_error = abort_on_error
@@ -650,15 +749,19 @@ class SanitizerSymbolicExecution(Client):
         self.unique_load_store_id = 0
 
     def _check_range_satisfiable(self, access_addr, expr_constraints):
-        out_of_bound_constraint = Not(Or(
-            *(And(start <= access_addr, access_addr <= end)
-                for start, end in self.tensor_addrs)
-        ))
+        out_of_bound_constraint = Not(
+            Or(
+                *(
+                    And(start <= access_addr, access_addr <= end)
+                    for start, end in self.tensor_addrs
+                )
+            )
+        )
         s = Solver()
         s.add(out_of_bound_constraint)
         s.add(And(*expr_constraints))
         if s.check() == sat:
-            print('out of bound access detected!')
+            print("out of bound access detected!")
 
     def _report(self, op_type, tensor, violation_address):
         traceback_info = _get_traceback_info()
@@ -671,7 +774,9 @@ class SanitizerSymbolicExecution(Client):
         )
         if self.abort_on_error:
             print_oob_record(oob_record)
-            raise ValueError("Out-of-bounds access detected. See detailed report above.")
+            raise ValueError(
+                "Out-of-bounds access detected. See detailed report above."
+            )
         else:
             self.records.append(oob_record)
 
@@ -685,7 +790,9 @@ class SanitizerSymbolicExecution(Client):
         elif check_inner_stride_equal_to_one(arg):
             tensor_physical_addresses = get_physical_addr_from_tensor_slice(arg)
         else:
-            raise ValueError("The address sanitizer only supports contiguouly stored tensors for now!")
+            raise ValueError(
+                "The address sanitizer only supports contiguouly stored tensors for now!"
+            )
 
         self.tensors.append(arg)
         self.tensor_addrs.extend(tensor_physical_addresses)
@@ -696,15 +803,21 @@ class SanitizerSymbolicExecution(Client):
     def grid_idx_callback(self, grid_idx: Tuple[int]):
         pass
 
-    def register_op_callback(self, op_type: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
+    def register_op_callback(
+        self, op_type: Type[Op]
+    ) -> Tuple[Optional[Callable], Optional[Callable]]:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
 
         def op_raw_load_overrider(ptr, cache_modifier, eviction_policy, is_volatile):
-            return op_load_overrider(ptr, None, None, cache_modifier, eviction_policy, is_volatile)
+            return op_load_overrider(
+                ptr, None, None, cache_modifier, eviction_policy, is_volatile
+            )
 
-        def op_load_overrider(ptr, mask, other, cache_modifier, eviction_policy, is_volatile):
+        def op_load_overrider(
+            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
+        ):
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
                 ptr = SymbolicExpr("load", SymbolicExpr.from_value(ptr))
@@ -760,16 +873,16 @@ class SanitizerSymbolicExecution(Client):
 
         def op_unary_op_overrider(arg, op):
             _unary_map = {
-                np.cos:   "cos",
-                np.exp:   "exp",
-                np.exp2:  "exp2",
-                np.abs:   "abs",
+                np.cos: "cos",
+                np.exp: "exp",
+                np.exp2: "exp2",
+                np.abs: "abs",
                 np.floor: "floor",
-                np.ceil:  "ceil",
-                np.log:   "log",
-                np.log2:  "log2",
-                np.sqrt:  "sqrt",
-                np.sin:   "sin",
+                np.ceil: "ceil",
+                np.log: "log",
+                np.log2: "log2",
+                np.sqrt: "sqrt",
+                np.sin: "sin",
             }
             arg = SymbolicExpr.from_value(arg)
             try:
@@ -780,26 +893,28 @@ class SanitizerSymbolicExecution(Client):
 
         def op_binary_op_overrider(lhs, rhs, op):
             _binary_map = {
-                np.add:           lambda lhs, rhs: lhs + rhs,
-                np.subtract:      lambda lhs, rhs: lhs - rhs,
-                np.multiply:      lambda lhs, rhs: lhs * rhs,
-                np.divide:        lambda lhs, rhs: lhs / rhs,
-                np.less:          lambda lhs, rhs: lhs < rhs,
-                np.less_equal:    lambda lhs, rhs: lhs <= rhs,
-                np.greater:       lambda lhs, rhs: lhs > rhs,
+                np.add: lambda lhs, rhs: lhs + rhs,
+                np.subtract: lambda lhs, rhs: lhs - rhs,
+                np.multiply: lambda lhs, rhs: lhs * rhs,
+                np.divide: lambda lhs, rhs: lhs / rhs,
+                np.less: lambda lhs, rhs: lhs < rhs,
+                np.less_equal: lambda lhs, rhs: lhs <= rhs,
+                np.greater: lambda lhs, rhs: lhs > rhs,
                 np.greater_equal: lambda lhs, rhs: lhs >= rhs,
-                np.not_equal:     lambda lhs, rhs: lhs != rhs,
-                np.equal:         lambda lhs, rhs: lhs == rhs,
-                np.fmod:          lambda lhs, rhs: lhs % rhs,
-                np.maximum:       lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
-                np.bitwise_and:   lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
+                np.not_equal: lambda lhs, rhs: lhs != rhs,
+                np.equal: lambda lhs, rhs: lhs == rhs,
+                np.fmod: lambda lhs, rhs: lhs % rhs,
+                np.maximum: lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
+                np.bitwise_and: lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
             }
             lhs = SymbolicExpr.from_value(lhs)
             rhs = SymbolicExpr.from_value(rhs)
             try:
                 func = _binary_map[op]
             except KeyError:
-                raise NotImplementedError(f"Unsupported binary operation: {op} between {lhs} and {rhs}")
+                raise NotImplementedError(
+                    f"Unsupported binary operation: {op} between {lhs} and {rhs}"
+                )
             return func(lhs, rhs)
 
         def op_ternary_op_overrider(lhs, rhs, other, op):
@@ -809,12 +924,14 @@ class SanitizerSymbolicExecution(Client):
             if op is np.where:
                 return SymbolicExpr("where", lhs, rhs, other)
             else:
-                raise NotImplementedError(f"Unsupported ternary operation: {op} between {lhs}, {rhs} and {other}")
+                raise NotImplementedError(
+                    f"Unsupported ternary operation: {op} between {lhs}, {rhs} and {other}"
+                )
 
         def op_addptr_overrider(ptr, offset):
-            '''
+            """
             In addptr operator, ptr is a pointer address with dtype_tt, and offset is a scalar.
-            '''
+            """
             # Read dtype_tt from ptr.
             # Here, ptr is either a TensorHandle or a SymbolicExpr.
             dtype_tt = ptr.get_element_ty()
@@ -864,34 +981,48 @@ class SanitizerSymbolicExecution(Client):
             arg = SymbolicExpr.from_value(arg)
             return SymbolicExpr("splat", arg, shape)
 
-        def op_make_block_ptr_overrider(base, shape, strides, offsets, tensor_shape, order):
+        def op_make_block_ptr_overrider(
+            base, shape, strides, offsets, tensor_shape, order
+        ):
             base = SymbolicExpr.from_value(base)
-            assert len(shape) == len(strides) == len(offsets) == len(tensor_shape) == len(order), \
-                f"Length of shape ({len(shape)}), strides ({len(strides)}), offsets ({len(offsets)}), tensor_shape ({len(tensor_shape)}) and order ({len(order)}) must be the same!"
+            assert (
+                len(shape)
+                == len(strides)
+                == len(offsets)
+                == len(tensor_shape)
+                == len(order)
+            ), f"Length of shape ({len(shape)}), strides ({len(strides)}), offsets ({len(offsets)}), tensor_shape ({len(tensor_shape)}) and order ({len(order)}) must be the same!"
             shape = [SymbolicExpr.from_value(shape_i) for shape_i in shape]
             strides = [SymbolicExpr.from_value(strides_i) for strides_i in strides]
             offsets = [SymbolicExpr.from_value(offset_i) for offset_i in offsets]
-            tensor_shape = [SymbolicExpr.from_value(tensor_shape_i) for tensor_shape_i in tensor_shape]
+            tensor_shape = [
+                SymbolicExpr.from_value(tensor_shape_i)
+                for tensor_shape_i in tensor_shape
+            ]
             order = [SymbolicExpr.from_value(order_i) for order_i in order]
 
             ret = SymbolicExpr(
-                "make_block_ptr",
-                base,
-                shape,
-                strides,
-                offsets,
-                tensor_shape,
-                order)
+                "make_block_ptr", base, shape, strides, offsets, tensor_shape, order
+            )
 
             ret.set_element_ty(base.get_element_ty())
             print(ret)
 
             return ret
 
-        def op_tensor_pointer_load_overrider(ptr, boundary_check, padding_option, cache_modifier, eviction_policy, is_volatile):
+        def op_tensor_pointer_load_overrider(
+            ptr,
+            boundary_check,
+            padding_option,
+            cache_modifier,
+            eviction_policy,
+            is_volatile,
+        ):
             raise NotImplementedError("TensorPointerLoad is not supported yet.")
 
-        def op_tensor_pointer_store_overrider(ptr, value, boundary_check, cache_modifier, eviction_policy):
+        def op_tensor_pointer_store_overrider(
+            ptr, value, boundary_check, cache_modifier, eviction_policy
+        ):
             raise NotImplementedError("TensorPointerStore is not supported yet.")
 
         def op_idiv_overrider(lhs, rhs):
@@ -939,21 +1070,25 @@ class SanitizerSymbolicExecution(Client):
     def finalize(self) -> list:
         return []
 
+
 class NullSanitizer:
     """
     A do-nothing object returned when the sanitizer backend is 'off'.
     Any attribute access raises an explicit error so misuse is obvious.
     """
+
     def __getattr__(self, name):
         raise RuntimeError(
             "Sanitizer backend is off; no sanitizer functionality is available."
         )
+
 
 class Sanitizer(ABC):
     """
     Factory class that returns the concrete sanitizer implementation
     based on the value of ``cfg.sanitizer_backend``.
     """
+
     def __new__(cls, abort_on_error: bool = False):
         backend = cfg.sanitizer_backend
 
@@ -966,9 +1101,8 @@ class Sanitizer(ABC):
         if backend == "off":
             return NullSanitizer()
 
-        raise ValueError(
-            f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} "
-        )
+        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
+
 
 Sanitizer.register(SanitizerBruteForce)
 Sanitizer.register(SanitizerSymbolicExecution)

@@ -5,9 +5,11 @@ name: Python application
 
 on:
   push:
-    branches: []
+    branches-ignore:
+      - '**'
   pull_request:
-    branches: []
+    branches-ignore:
+      - '**'
 
 permissions:
   contents: read

@@ -14,11 +14,13 @@ class TracebackInfo:
     func_name: str
     line_of_code: str
 
+
 @dataclass
 class OutOfBoundsRecord:
     op_type: Type[Union[Store, Load]]
     tensor: torch.Tensor
     user_code_tracebacks: List[TracebackInfo]
+
 
 @dataclass
 class OutOfBoundsRecordBruteForce(OutOfBoundsRecord):
@@ -28,12 +30,13 @@ class OutOfBoundsRecordBruteForce(OutOfBoundsRecord):
     invalid_access_masks: NDArray[np.bool_]
     corrected_offsets: NDArray[np.int_]
 
+
 @dataclass
 class OutOfBoundsRecordZ3(OutOfBoundsRecord):
     """
     Attributes:
         constraints (List[z3.z3.BoolRef]):
-            A collection of Z3 constraint expressions defining valid ranges 
+            A collection of Z3 constraint expressions defining valid ranges
             for memory access. Any address falling outside these ranges is considered invalid.
 
         violation_address (int):
@@ -49,5 +52,6 @@ class OutOfBoundsRecordZ3(OutOfBoundsRecord):
             In this scenario, 200 is an out-of-bounds address because it
             falls outside the valid ranges described by these constraints.
     """
+
     constraints: List[z3.z3.BoolRef]
     violation_address: int

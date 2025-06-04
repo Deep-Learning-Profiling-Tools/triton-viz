@@ -23,7 +23,9 @@ class Client(ABC):
         pass
 
     @abstractmethod
-    def register_op_callback(self, op: Type[Op]) -> Tuple[Optional[Callable], Optional[Callable]]:
+    def register_op_callback(
+        self, op: Type[Op]
+    ) -> Tuple[Optional[Callable], Optional[Callable]]:
         pass
 
     @abstractmethod
@@ -50,7 +52,11 @@ class ClientManager:
         with patch_calls():
             for client in self.clients:
                 for op in op_list:
-                    before_callback, after_callback, op_overrider = client.register_op_callback(op)
+                    (
+                        before_callback,
+                        after_callback,
+                        op_overrider,
+                    ) = client.register_op_callback(op)
                     patch_op(op, before_callback, after_callback, op_overrider)
             try:
                 yield

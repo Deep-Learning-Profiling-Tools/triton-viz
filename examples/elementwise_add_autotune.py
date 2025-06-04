@@ -8,11 +8,11 @@ from triton_viz.clients import Sanitizer
 # Custom kernel for element-wise addition with autotuning
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 32}, num_warps=1),
-        triton.Config({'BLOCK_SIZE': 64}, num_warps=2),
-        triton.Config({'BLOCK_SIZE': 128}, num_warps=4),
+        triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+        triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
+        triton.Config({"BLOCK_SIZE": 128}, num_warps=4),
     ],
-    key=['n_elements'],  # Key for selecting the optimal config based on input size
+    key=["n_elements"],  # Key for selecting the optimal config based on input size
     warmup=5,
     rep=5,
 )
@@ -37,10 +37,11 @@ def elementwise_add_kernel(
     # Store the result
     tl.store(output_ptr + offsets, output, mask=mask)
 
+
 # Create PyTorch tensors as input
 n_elements = 100000
-x = torch.randn(n_elements, device='cuda')
-y = torch.randn(n_elements, device='cuda')
+x = torch.randn(n_elements, device="cuda")
+y = torch.randn(n_elements, device="cuda")
 output = torch.empty_like(x)
 
 # Launch the Triton kernel

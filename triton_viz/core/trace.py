@@ -2,8 +2,7 @@ from triton.runtime import KernelInterface
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
-import os
-from typing import Tuple, Union
+from typing import Union
 
 from . import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
@@ -15,7 +14,6 @@ launches: list[Launch] = []
 
 
 class Trace(KernelInterface):
-
     @staticmethod
     def _normalize_client(client: Union[str, Client]) -> Client:
         if isinstance(client, str):
@@ -89,6 +87,7 @@ def trace(clients: Union[str, Client]):
 
         # If the object is neither a JITFunction nor Trace, raise an error
         raise TypeError(f"Expected JITFunction, got {type(kernel)}")
+
     return decorator
 
 

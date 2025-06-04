@@ -5,9 +5,6 @@ import textwrap
 import os
 import subprocess
 
-import triton
-import triton.language as tl
-
 
 """
 Test that triton_viz.wrapper works correctly:
@@ -15,6 +12,8 @@ Test that triton_viz.wrapper works correctly:
    triton.runtime.interpreter.jit with wrapper._patched_jit
 2. The first use of @triton.jit must invoke triton_viz.trace(Sanitizer)
 """
+
+
 def test_cli_invocation():
     """
     Simulate running:
@@ -75,6 +74,6 @@ def test_cli_invocation():
         assert proc.returncode == 0, f"CLI exited with {proc.returncode}\n{proc.stderr}"
         # Check if trace was called once and only once
         trace_count = proc.stdout.count("TRACE_CALLED")
-        assert trace_count == 1, (
-            "triton_viz.trace should be invoked exactly once via CLI path"
-        )
+        assert (
+            trace_count == 1
+        ), "triton_viz.trace should be invoked exactly once via CLI path"
