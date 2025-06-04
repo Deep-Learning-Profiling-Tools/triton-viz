@@ -4,6 +4,7 @@ import os, sys, types
 # Back-end options recognised by the sanitizer
 AVAILABLE_SANITIZER_BACKENDS = ("off", "brute_force", "symexec")
 
+
 class Config(types.ModuleType):
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -59,6 +60,7 @@ class Config(types.ModuleType):
     @property
     def available_backends(self):
         return AVAILABLE_SANITIZER_BACKENDS
+
 
 # Replace the current module object with a live Config instance
 sys.modules[__name__] = Config(__name__)

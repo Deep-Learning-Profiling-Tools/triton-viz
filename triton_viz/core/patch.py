@@ -5,13 +5,31 @@ from tqdm import tqdm
 
 from . import config as cfg
 from .data import (
-    Op, RawLoad, Load, RawStore, Store,
-    UnaryOp, BinaryOp, TernaryOp, ProgramId,
-    Dot, MakeRange, AddPtr, ReduceSum,
-    Splat, ExpandDims, Broadcast, ReduceMax, ReduceMin,
-    MakeBlockPointer, TensorPointerLoad,
-    TensorPointerStore, Idiv, Rsqrt,
-    CastImpl)
+    Op,
+    RawLoad,
+    Load,
+    RawStore,
+    Store,
+    UnaryOp,
+    BinaryOp,
+    TernaryOp,
+    ProgramId,
+    Dot,
+    MakeRange,
+    AddPtr,
+    ReduceSum,
+    Splat,
+    ExpandDims,
+    Broadcast,
+    ReduceMax,
+    ReduceMin,
+    MakeBlockPointer,
+    TensorPointerLoad,
+    TensorPointerStore,
+    Idiv,
+    Rsqrt,
+    CastImpl,
+)
 import inspect
 from triton.runtime.interpreter import (
     GridExecutor,
@@ -22,12 +40,29 @@ from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
 
 op_list = [
-    ProgramId, RawStore, Store, RawLoad, Load,
-    UnaryOp, BinaryOp, TernaryOp, Dot, MakeRange,
-    AddPtr, Splat, ExpandDims, Broadcast,
-    ReduceMax, ReduceMin, ReduceSum,
-    MakeBlockPointer, TensorPointerLoad,
-    TensorPointerStore, Idiv, Rsqrt, CastImpl,
+    ProgramId,
+    RawStore,
+    Store,
+    RawLoad,
+    Load,
+    UnaryOp,
+    BinaryOp,
+    TernaryOp,
+    Dot,
+    MakeRange,
+    AddPtr,
+    Splat,
+    ExpandDims,
+    Broadcast,
+    ReduceMax,
+    ReduceMin,
+    ReduceSum,
+    MakeBlockPointer,
+    TensorPointerLoad,
+    TensorPointerStore,
+    Idiv,
+    Rsqrt,
+    CastImpl,
 ]
 original_ops = {
     ProgramId: interpreter_builder.create_get_program_id,
@@ -55,7 +90,7 @@ original_ops = {
 reduce_map: Dict[Type[Op], Callable] = {
     ReduceMax: tl.max,
     ReduceMin: tl.min,
-    ReduceSum: tl.sum
+    ReduceSum: tl.sum,
 }
 
 
@@ -75,7 +110,10 @@ class PatchOp:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
-                ret = tl.core.tensor(self.op_overrider(args[0].handle, *args[1:], **kwargs), args[0].dtype)
+                ret = tl.core.tensor(
+                    self.op_overrider(args[0].handle, *args[1:], **kwargs),
+                    args[0].dtype,
+                )
             else:
                 ret = self.op_overrider(*args, **kwargs)
         else:
@@ -86,7 +124,12 @@ class PatchOp:
         return ret
 
 
-def patch_op(op_type: Type[Op], before_callback: Callable, after_callback: Callable, op_overrider: Callable):
+def patch_op(
+    op_type: Type[Op],
+    before_callback: Callable,
+    after_callback: Callable,
+    op_overrider: Callable,
+):
     """
     Register a callback to be called before and after an operator is executed.
 
@@ -98,12 +141,20 @@ def patch_op(op_type: Type[Op], before_callback: Callable, after_callback: Calla
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = original_ops[op_type].__name__
         current_op = getattr(interpreter_builder, op_name)
-        patched_op = PatchOp(current_op, op_type, before_callback, after_callback, op_overrider)
-        setattr(interpreter_builder, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
+        patched_op = PatchOp(
+            current_op, op_type, before_callback, after_callback, op_overrider
+        )
+        setattr(
+            interpreter_builder,
+            op_name,
+            lambda *args, **kwargs: patched_op(*args, **kwargs),
+        )
     elif op_type in reduce_map:
         op_name = reduce_map[op_type].__name__
         current_op = getattr(tl, op_name)
-        patched_op = PatchOp(current_op, op_type, before_callback, after_callback, op_overrider)
+        patched_op = PatchOp(
+            current_op, op_type, before_callback, after_callback, op_overrider
+        )
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
@@ -135,22 +186,41 @@ def _unpatch_lang():
 def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
+
     def run_grid_loops():
-        for x in tqdm(range(grid[0]), desc='Grid X', leave=False, disable=not cfg.report_grid_execution_progress):
-            for y in tqdm(range(grid[1]), desc='Grid Y', leave=False, disable=not (cfg.report_grid_execution_progress and grid[1] > 1)):
-                for z in tqdm(range(grid[2]), desc='Grid Z', leave=False, disable=not (cfg.report_grid_execution_progress and grid[2] > 1)):
+        for x in tqdm(
+            range(grid[0]),
+            desc="Grid X",
+            leave=False,
+            disable=not cfg.report_grid_execution_progress,
+        ):
+            for y in tqdm(
+                range(grid[1]),
+                desc="Grid Y",
+                leave=False,
+                disable=not (cfg.report_grid_execution_progress and grid[1] > 1),
+            ):
+                for z in tqdm(
+                    range(grid[2]),
+                    desc="Grid Z",
+                    leave=False,
+                    disable=not (cfg.report_grid_execution_progress and grid[2] > 1),
+                ):
                     interpreter_builder.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
                     self.fn(**call_args)
                     # if symbolic execution, only do one iteration
                     if cfg.sanitizer_backend == "symexec":
                         return
+
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
     argspec = inspect.getfullargspec(self.fn)
     triton_viz_args = ["client_manager"]
-    kwargs = {k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args}
+    kwargs = {
+        k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
+    }
     client_manager = kwargs.pop("client_manager")
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
     # Remaps core language functions to interpreted ones

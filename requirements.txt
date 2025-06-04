@@ -1,7 +1,7 @@
+chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git
+gradio
+pre-commit
+pyarrow
+pytest
 setuptools
 triton
-gradio
-chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git
-pyarrow
-pre-commit
-pytest

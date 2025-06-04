@@ -9,6 +9,7 @@ from triton_viz import config as cfg
 # Make sure sanitizer is on.
 cfg.sanitizer_backend = "symexec"
 
+
 def test_trace_decorator_add_clients():
     """
     Test goal:
@@ -20,19 +21,22 @@ def test_trace_decorator_add_clients():
     The final Trace object should contain exactly one instance each of
     Sanitizer, Profiler, and Tracer (total = 3 clients).
     """
+
     @triton_viz.trace("sanitizer")
     @triton_viz.trace("profiler")
     @triton_viz.trace("tracer")
-    @triton_viz.trace(Sanitizer(abort_on_error=True))    # Duplicate Sanitizer (should be ignored)
+    @triton_viz.trace(
+        Sanitizer(abort_on_error=True)
+    )  # Duplicate Sanitizer (should be ignored)
     @triton.jit
     def my_kernel(x_ptr, y_ptr, out_ptr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(out_ptr + offs,
-                 tl.load(x_ptr + offs) + tl.load(y_ptr + offs))
+        tl.store(out_ptr + offs, tl.load(x_ptr + offs) + tl.load(y_ptr + offs))
 
     # Should be wrapped as a Trace object.
     from triton_viz.core.trace import Trace
+
     assert isinstance(my_kernel, Trace)
 
     # Verify client de-duplication and addition logic
