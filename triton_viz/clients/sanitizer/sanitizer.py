@@ -1,9 +1,12 @@
 import traceback
 from abc import ABC
 from typing import Tuple, Callable, Optional, Type
+from collections import namedtuple
+
 import numpy as np
 from anytree import Node, RenderTree
 from z3 import Solver, Int, IntVal, If, Sum, And, Or, Not, sat, simplify
+
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
@@ -288,6 +291,40 @@ class SymbolicExprDataWrapper:
         return self.value
 
 
+Spec = namedtuple(
+    "Spec",
+    [
+        "req",  # Required Arguments (tuple)
+        "opt",  # Optional Arguments (tuple)
+        "post",  # post-hook: def(self) -> None
+    ],
+    defaults=((), (), None),
+)
+
+
+def _load_dtype(self):
+    self.set_element_ty(self.children["ptr"].get_element_ty())
+
+
+def _store_dtype(self):
+    self.set_element_ty(self.children["ptr"].get_element_ty())
+
+
+def _broadcast_dtype(self):
+    self.dtype_tt = self.children["arg"].dtype_tt
+
+
+def _binary_shape(self):
+    lhs, rhs = self.children["lhs"], self.children["rhs"]
+    if not lhs.shape:
+        self.shape = rhs.shape
+    elif not rhs.shape:
+        self.shape = lhs.shape
+    else:
+        assert lhs.shape == rhs.shape, f"lhs shape {lhs.shape} != rhs shape {rhs.shape}"
+        self.shape = lhs.shape
+
+
 class SymbolicExpr:
     BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load", "store")
@@ -336,6 +373,71 @@ class SymbolicExpr:
         + BROADCAST_OPS
     )
 
+    OP_SPEC = {
+        # Core / primitive ops
+        "arange": Spec(req=("start", "end")),
+
+        # Memory access ops
+        "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_dtype),
+        "store": Spec(req=("ptr", "value"), opt=("mask", "other"), post=_store_dtype),
+
+        # Unary ops
+        **{
+            op: Spec(req=("arg",))
+            for op in (
+                "cos",
+                "exp",
+                "exp2",
+                "abs",
+                "floor",
+                "ceil",
+                "log",
+                "log2",
+                "sqrt",
+                "sin",
+                "rsqrt",
+            )
+        },
+
+        #  Binary ops
+        **{
+            op: Spec(req=("lhs", "rhs"), post=_binary_shape)
+            for op in (
+                "add",
+                "sub",
+                "mul",
+                "div",
+                "idiv",
+                "mod",
+                "less",
+                "less_equal",
+                "greater",
+                "greater_equal",
+                "not_equal",
+                "equal",
+                "maximum",
+                "bitwise_and",
+            )
+        },
+
+        # Ternary ops
+        "where": Spec(req=("cond", "lhs", "rhs")),
+
+        # Reduction ops
+        "sum": Spec(req=("input", "axis", "keepdims")),
+        "dot": Spec(req=("a", "b"), opt=("d",)),
+
+        # Pointer utilities
+        "make_block_ptr": Spec(
+            req=("base", "shape", "strides", "offsets", "block_shape", "order")
+        ),
+
+        # Broadcasting / shape manipulation
+        "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
+        "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+    }
+
     def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
@@ -356,88 +458,33 @@ class SymbolicExpr:
                 self.dtype_tt = args[1]
         elif self.op == "pid":
             assert len(args) == 2, "pid op expects two arguments!"
-            self.children['grid'] = args[0]
-            self.children['axis'] = args[1]
-        elif self.op == "arange":
-            assert len(args) == 2, "arange op expects two arguments!"
-            self.children['start'] = args[0]
-            self.children['end'] = args[1]
-            # TODO: setup self.shape here
-        elif self.op == "load":
-            assert len(args) in (1, 2, 3), "load op expects 1, 2 or 3 arguments!"
-            self.children['ptr'] = args[0]
-            self.children['mask'] = args[1] if len(args) >= 2 else None
-            self.children['other'] = args[2] if len(args) >= 3 else None
-            self.set_element_ty(self.ptr.get_element_ty())
-        elif self.op == "store":
-            assert len(args) in (2, 3, 4), "store op expects 2, 3 or 4 arguments!"
-            self.children['ptr'] = args[0]
-            self.children['value'] = args[1]
-            self.children['mask'] = args[2] if len(args) >= 3 else None
-            self.children['other'] = args[3] if len(args) >= 4 else None
-            self.set_element_ty(self.ptr.get_element_ty())
-        elif self.op in self.UNARY_OPS:
-            assert len(args) == 1, f"{self.op} op expects one argument!"
-            self.children['arg'] = args[0]
-        elif self.op in self.BINARY_OPS:
-            assert len(args) == 2, f"{self.op} op expects two arguments!"
-            self.children['lhs'] = args[0]
-            self.children['rhs'] = args[1]
-            if not self.lhs.shape:  # lhs is a scalar
-                ret_shape = self.rhs.shape
-            elif not self.rhs.shape:  # rhs is a scalar
-                ret_shape = self.lhs.shape
-            else:  # both are blocks
-                assert (
-                    self.lhs.shape == self.rhs.shape
-                ), f"lhs shape {self.lhs.shape} should be equal to rhs shape {self.rhs.shape}"
-                ret_shape = self.lhs.shape
-            self.shape = ret_shape
-        elif self.op in self.TERNARY_OPS:
-            assert len(args) == 3, f"{self.op} op expects three arguments!"
-            if self.op == "where":
-                self.children['cond'] = args[0]
-                self.children['lhs'] = args[1]
-                self.children['rhs'] = args[2]
-            else:
-                raise NotImplementedError(f"Unsupported ternary op: {self.op}")
-        elif self.op in self.REDUCE_OPS:
-            if self.op == "sum":
-                assert len(args) == 3, "sum op expects three arguments!"
-                self.children['input'] = args[0]
-                self.children['axis'] = args[1]
-                self.children['keepdims'] = args[2]
-            elif self.op == "dot":
-                assert len(args) in (2, 3), "dot op expects two or three arguments!"
-                self.children['a'] = args[0]
-                self.children['b'] = args[1]
-                if len(args) >= 3:
-                    self.children['d'] = args[2]
-            else:
-                raise NotImplementedError(f"Unsupported reduce op: {self.op}")
-        elif self.op == "make_block_ptr":
-            assert len(args) == 6, "make_block_ptr op expects six arguments!"
-            self.children['base'] = args[0]
-            self.children['shape'] = args[1]
-            self.children['strides'] = args[2]
-            self.children['offsets'] = args[3]
-            self.children['block_shape'] = args[4]
-            self.children['order'] = args[5]
-        elif self.op in self.BROADCAST_OPS:
-            self.children['arg'] = args[0]
-            self.dtype_tt = self.arg.dtype_tt
-            if self.op == "splat":
-                assert len(args) == 2, "splat op expects two arguments!"
-                self.children['shape'] = args[1]
-            elif self.op == "expand_dims":
-                assert len(args) == 2, "expand_dims op expects two arguments!"
-                self.children['axis'] = args[1]
-                self.arg.shape.insert(self.axis, 1)
-            elif self.op == "broadcast":
-                assert len(args) == 2, "broadcast op expects two arguments!"
-                self.children['shape'] = args[1]
+            self.grid = args[0]
+            self.axis = args[1]
         else:
+            self._init_from_spec(*args)
+
+    def _init_from_spec(self, *args):
+        if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
+        spec = self.OP_SPEC[self.op]
+
+        # check if args number match the spec
+        min_n = len(spec.req)
+        max_n = min_n + len(spec.opt)
+        if not (min_n <= len(args) <= max_n):
+            raise ValueError(f"{self.op} expects {min_n}–{max_n} args, got {len(args)}")
+
+        # store in self.children
+        names = list(spec.req) + list(spec.opt)
+        for name, val in zip(names, args):
+            val = SymbolicExpr.from_value(val)
+            self.children[name] = val
+        for name in names[len(args):]:
+            self.children[name] = None
+
+        # post-hook
+        if spec.post:
+            spec.post(self)
 
     def __getattr__(self, name):
         if name in self.children:
@@ -505,11 +552,12 @@ class SymbolicExpr:
         root = Node(label)
 
         # Recursively add child nodes
-        for child_name, child_expr in self.children.items():
-            # Build the child subtree
-            child_node = child_expr.to_anytree()
-            # Prefix the child node's name with the field name
-            child_node.name = f"{child_name}: {child_node.name}"
+        for child_key, child_symbolic_expr in self.children.items():
+            if child_symbolic_expr is None:
+                Node(f"{child_key}: None", parent=root)
+                continue
+            child_node = child_symbolic_expr.to_anytree()
+            child_node.name = f"{child_key}: {child_node.name}"
             child_node.parent = root
 
         return root
@@ -588,6 +636,9 @@ class SymbolicExpr:
 
         if isinstance(var, builtin_scala_types):
             return cls("const", var)
+
+        if isinstance(var, tl.core.tuple):
+            return ConstTupleExpr(var)
 
         raise ValueError("Unknown type:", type(var))
 
@@ -704,6 +755,11 @@ class SymbolicExpr:
         # Other operations can be implemented as needed
         raise NotImplementedError(f"Eval for op {node.op} is not implemented")
 
+
+
+class ConstTupleExpr(SymbolicExpr):
+    def __init__(self, value):
+        super().__init__("const", tuple(value))
 
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
