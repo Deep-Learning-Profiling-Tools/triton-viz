@@ -57,7 +57,7 @@ jobs:
 
     - name: Test with pytest
       env: |
-        TRITON_INTERPRET=1
+        TRITON_INTERPRET: "1"
       run: |
         cd triton_viz
         python -m pytest tests
