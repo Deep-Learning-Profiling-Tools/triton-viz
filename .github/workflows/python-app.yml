@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env: |
+    env:
       TRITON_INTERPRET: "1"
 
     steps:
