@@ -23,6 +23,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env: |
+      TRITON_INTERPRET: "1"
 
     steps:
     - uses: actions/checkout@v3
@@ -56,8 +58,6 @@ jobs:
         pip install -e .
 
     - name: Test with pytest
-      env: |
-        TRITON_INTERPRET: "1"
       run: |
         cd triton_viz
         python -m pytest tests
