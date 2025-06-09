@@ -5,11 +5,13 @@ name: Python application
 
 on:
   push:
-    branches-ignore:
-      - '**'
+    branches:
+      - main
+      - keren/v2.0
   pull_request:
-    branches-ignore:
-      - '**'
+    branches:
+      - main
+      - keren/v2.0
 
 permissions:
   contents: read
@@ -54,6 +56,8 @@ jobs:
         pip install -e .
 
     - name: Test with pytest
+      env: |
+        TRITON_INTERPRET=1
       run: |
         cd triton_viz
         python -m pytest tests
