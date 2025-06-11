@@ -10,18 +10,6 @@ from triton_viz import config as cfg
 
 cfg.sanitizer_backend = "symexec"
 
-# skip benchmarking in CPU-only environments,
-# as do_bench relies on GPUs
-if not torch.backends.cuda.is_built():
-    import triton.testing
-    triton.testing.do_bench = lambda *_, **__: [0.0, 0.0, 0.0]
-    from triton.runtime import autotuner
-    orig_init = autotuner.Autotuner.__init__
-    def patched_init(self, *args, **kwargs):
-        orig_init(self, *args, **kwargs)
-        self.do_bench = lambda *_, **__: [0.0, 0.0, 0.0]
-    autotuner.Autotuner.__init__ = patched_init
-
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
