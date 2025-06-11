@@ -9,7 +9,7 @@ from triton_viz import config as cfg
 
 
 if not torch.backends.cuda.is_built():
-    pytest.skip("This test requires a CUDA-enabled environment.")
+    pytest.skip("This test requires a CUDA-enabled environment.", allow_module_level=True)
 
 cfg.sanitizer_backend = "symexec"
 
