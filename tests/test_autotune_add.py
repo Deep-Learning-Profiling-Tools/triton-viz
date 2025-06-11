@@ -8,7 +8,9 @@ from triton_viz.clients import Sanitizer
 from triton_viz import config as cfg
 
 
-if not torch.backends.cuda.is_built():
+try:
+    torch.cuda.current_device()
+except:
     pytest.skip("This test requires a CUDA-enabled environment.", allow_module_level=True)
 
 cfg.sanitizer_backend = "symexec"
