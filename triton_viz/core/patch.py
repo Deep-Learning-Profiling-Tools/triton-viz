@@ -116,6 +116,12 @@ class PatchOp:
                 )
             else:
                 ret = self.op_overrider(*args, **kwargs)
+                from ..clients.sanitizer.sanitizer import SymbolicExpr
+
+                if isinstance(ret, SymbolicExpr):
+                    ret._concrete_fn = self.op
+                    ret._concrete_args = args
+                    ret._concrete_kwargs = kwargs
         else:
             ret = self.op(*args, **kwargs)
         if self.after_callback:

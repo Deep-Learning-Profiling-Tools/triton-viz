@@ -348,7 +348,12 @@ class SymbolicExpr:
         self.attrs = {}
         self.dtype_tt = None
         self.shape = []
-        # check if the number of arguments is correct
+        self.children = {}  # Used for storing child expressions
+        # Functions and arguments for concretization
+        self._concrete_fn = None
+        self._concrete_args = ()
+        self._concrete_kwargs = {}
+        # leaf nodes
         if self.op == "const":
             self.value = args[0]
             if len(args) >= 2:
@@ -738,6 +743,38 @@ class SymbolicExpr:
         # Other operations can be implemented as needed
         raise NotImplementedError(f"Eval for op {node.op} is not implemented")
 
+    def has_op(self, op_name: str) -> bool:
+        if self.op == op_name:
+            return True
+        for child_key, child_symbolic_expr in self.children.items():
+            if child_symbolic_expr.has_op(op_name):
+                return True
+        return False
+
+    @staticmethod
+    def _concretize_item(obj):
+        return obj.concretize() if isinstance(obj, SymbolicExpr) else obj
+
+    def concretize(self):
+        """
+        Concretize the symbolic expression into a concrete value.
+        This is used to evaluate the symbolic expression and return a concrete value.
+        """
+        if self.op == "splat":
+            print("op:", self.op)
+            print("arg:", self._concrete_args)
+            print("kwargs:", self._concrete_kwargs)
+        if self.op == "const":
+            return self.value
+        if self._concrete_fn is None:
+            raise RuntimeError("Concrete function is not set for this SymbolicExpr.")
+        new_args = [self._concretize_item(a) for a in self._concrete_args]
+        new_kw = {k: self._concretize_item(v) for k, v in self._concrete_kwargs.items()}
+        return self._concrete_fn(*new_args, **new_kw)
+
+class ConstTupleExpr(SymbolicExpr):
+    def __init__(self, value):
+        super().__init__("const", tuple(value))
 
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
@@ -818,6 +855,12 @@ class SanitizerSymbolicExecution(Client):
         def op_load_overrider(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
+            # deal with indirect loads
+            if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
+                print("indirect loading:", ptr)
+                # ptr = ptr.concretize()
+                # print('concretized ptr:', ptr)
+
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
                 ptr = SymbolicExpr("load", SymbolicExpr.from_value(ptr))
