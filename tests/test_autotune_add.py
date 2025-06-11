@@ -1,3 +1,4 @@
+import pytest
 import torch
 import triton
 import triton.language as tl
@@ -7,8 +8,12 @@ from triton_viz.clients import Sanitizer
 from triton_viz import config as cfg
 
 
-cfg.sanitizer_backend = "symexec"
+try:
+    torch.cuda.current_device()
+except:
+    pytest.skip("This test requires a CUDA-enabled environment.", allow_module_level=True)
 
+cfg.sanitizer_backend = "symexec"
 
 @triton.autotune(
     configs=[
@@ -39,8 +44,8 @@ def test_autotune_add_inrange():
     This test uses n_elements = 128, matching the size of the input tensors.
     It should NOT cause any out-of-bound access.
     """
-    x = torch.randn(128, device="cuda")
-    y = torch.randn(128, device="cuda")
+    x = torch.randn(128)
+    y = torch.randn(128)
     out = torch.empty_like(x)
 
     # The kernel launch uses n_elements=128, aligned with the tensor size.
@@ -55,8 +60,8 @@ def test_autotune_add_out_of_bound():
     This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
     It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
     """
-    x = torch.randn(128, device="cuda")
-    y = torch.randn(128, device="cuda")
+    x = torch.randn(128)
+    y = torch.randn(128)
     out = torch.empty_like(x)
 
     # The kernel launch uses n_elements=256, exceeding the valid tensor size.

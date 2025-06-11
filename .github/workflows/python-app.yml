@@ -5,11 +5,13 @@ name: Python application
 
 on:
   push:
-    branches-ignore:
-      - '**'
+    branches:
+      - main
+      - keren/v2.0
   pull_request:
-    branches-ignore:
-      - '**'
+    branches:
+      - main
+      - keren/v2.0
 
 permissions:
   contents: read
@@ -21,6 +23,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TRITON_INTERPRET: "1"
 
     steps:
     - uses: actions/checkout@v3
@@ -44,7 +48,7 @@ jobs:
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
         pip uninstall pytorch-triton -y
 
-    - name: Clone Triton and Install
+    - name: Install Triton
       run: |
         pip install triton==3.1.0
 
