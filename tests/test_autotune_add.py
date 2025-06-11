@@ -8,6 +8,9 @@ from triton_viz.clients import Sanitizer
 from triton_viz import config as cfg
 
 
+if not torch.backends.cuda.is_built():
+    pytest.skip("This test requires a CUDA-enabled environment.")
+
 cfg.sanitizer_backend = "symexec"
 
 @triton.autotune(
@@ -34,10 +37,6 @@ def add_kernel_no_mask(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constex
     tl.store(out_ptr + offsets, x_val + y_val)
 
 
-@pytest.mark.skipif(
-    not torch.backends.cuda.is_built(),
-    reason="This test requires a CUDA-enabled environment.",
-)
 def test_autotune_add_inrange():
     """
     This test uses n_elements = 128, matching the size of the input tensors.
@@ -54,10 +53,6 @@ def test_autotune_add_inrange():
     print("test_autotune_add_inrange() passed: No out-of-bound access.")
 
 
-@pytest.mark.skipif(
-    not torch.backends.cuda.is_built(),
-    reason="This test requires a CUDA-enabled environment.",
-)
 def test_autotune_add_out_of_bound():
     """
     This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
