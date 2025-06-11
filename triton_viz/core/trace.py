@@ -34,10 +34,20 @@ class Trace(KernelInterface):
         new_client_instance = self._normalize_client(new_client)
         self.client_manager.add_clients([new_client_instance])
 
-    def __init__(self, kernel: JITFunction, client: Union[str, Client]) -> None:
-        assert isinstance(kernel, JITFunction), "Kernel must be a JITFunction"
-        self.interpreter_fn = InterpretedFunction(kernel.fn)
+    def __init__(
+        self,
+        kernel: Union[JITFunction, InterpretedFunction],
+        client: Union[str, Client],
+    ) -> None:
         self.fn = kernel
+        if isinstance(kernel, InterpretedFunction):
+            self.interpreter_fn = kernel
+        elif isinstance(kernel, JITFunction):
+            self.interpreter_fn = InterpretedFunction(kernel.fn)
+        else:
+            raise TypeError(
+                f"Kernel must be JITFunction or InterpretedFunction, got {type(kernel)}"
+            )
         self.arg_names = kernel.arg_names
         self.client_manager = ClientManager()
         self.add_client(client)
@@ -76,7 +86,7 @@ def trace(clients: Union[str, Client]):
             return kernel
 
         # First-time wrapping
-        if isinstance(kernel, JITFunction):
+        if isinstance(kernel, (JITFunction, InterpretedFunction)):
             return Trace(kernel, clients)
 
         # If the object is already a Trace, just append the new client(s)
@@ -85,8 +95,9 @@ def trace(clients: Union[str, Client]):
             trace.add_client(clients)
             return trace
 
-        # If the object is neither a JITFunction nor Trace, raise an error
-        raise TypeError(f"Expected JITFunction, got {type(kernel)}")
+        raise TypeError(
+            f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}"
+        )
 
     return decorator
 

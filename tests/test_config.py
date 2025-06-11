@@ -1,4 +1,5 @@
-import pytest
+import pytest, os
+os.environ["TRITON_SANITIZER_BACKEND"] = "off"
 import triton_viz.core.config as cfg
 
 
