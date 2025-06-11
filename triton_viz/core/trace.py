@@ -34,7 +34,11 @@ class Trace(KernelInterface):
         new_client_instance = self._normalize_client(new_client)
         self.client_manager.add_clients([new_client_instance])
 
-    def __init__(self, kernel: Union[JITFunction, InterpretedFunction], client: Union[str, Client]) -> None:
+    def __init__(
+        self,
+        kernel: Union[JITFunction, InterpretedFunction],
+        client: Union[str, Client],
+    ) -> None:
         self.fn = kernel
         if isinstance(kernel, InterpretedFunction):
             self.interpreter_fn = kernel
@@ -91,7 +95,9 @@ def trace(clients: Union[str, Client]):
             trace.add_client(clients)
             return trace
 
-        raise TypeError(f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}")
+        raise TypeError(
+            f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}"
+        )
 
     return decorator
 
