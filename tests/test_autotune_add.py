@@ -11,9 +11,12 @@ from triton_viz import config as cfg
 try:
     torch.cuda.current_device()
 except:
-    pytest.skip("This test requires a CUDA-enabled environment.", allow_module_level=True)
+    pytest.skip(
+        "This test requires a CUDA-enabled environment.", allow_module_level=True
+    )
 
 cfg.sanitizer_backend = "symexec"
+
 
 @triton.autotune(
     configs=[

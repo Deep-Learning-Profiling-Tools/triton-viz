@@ -9,6 +9,7 @@ from triton_viz import config as cfg
 
 cfg.sanitizer_backend = "symexec"
 
+
 @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
 @triton.jit
 def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
@@ -20,12 +21,13 @@ def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
     out_val = tl.load(src_ptr + indices)
     tl.store(dst_ptr + offsets, out_val)
 
-def test_indirect_load_inrange():
-    idx  = torch.arange(128, dtype=torch.int32)
-    src  = torch.rand(128)
-    dst  = torch.empty_like(src)
 
-    grid = lambda META: (triton.cdiv(128, META['BLOCK_SIZE']),)
+def test_indirect_load_inrange():
+    idx = torch.arange(128, dtype=torch.int32)
+    src = torch.rand(128)
+    dst = torch.empty_like(src)
+
+    grid = lambda META: (triton.cdiv(128, META["BLOCK_SIZE"]),)
     indirect_load_kernel[grid](idx, src, dst, BLOCK_SIZE=32)
 
     # assert torch.allclose(dst, src), "indirect load failed"
