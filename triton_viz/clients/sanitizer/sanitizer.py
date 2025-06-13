@@ -964,25 +964,25 @@ class SanitizerSymbolicExecution(Client):
                 np.maximum: lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
                 np.bitwise_and: lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
             }
-            lhs = SymbolicExpr.from_value(lhs)
-            rhs = SymbolicExpr.from_value(rhs)
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
             try:
                 func = _binary_map[op]
             except KeyError:
                 raise NotImplementedError(
-                    f"Unsupported binary operation: {op} between {lhs} and {rhs}"
+                    f"Unsupported binary operation: {op} between {lhs_sym} and {rhs_sym}"
                 )
-            return func(lhs, rhs)
+            return func(lhs_sym, rhs_sym)
 
         def op_ternary_op_overrider(lhs, rhs, other, op):
-            lhs = SymbolicExpr.from_value(lhs)
-            rhs = SymbolicExpr.from_value(rhs)
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
             other = SymbolicExpr.from_value(other)
             if op is np.where:
-                return SymbolicExpr("where", lhs, rhs, other)
+                return SymbolicExpr("where", lhs_sym, rhs_sym, other)
             else:
                 raise NotImplementedError(
-                    f"Unsupported ternary operation: {op} between {lhs}, {rhs} and {other}"
+                    f"Unsupported ternary operation: {op} between {lhs_sym}, {rhs_sym} and {other}"
                 )
 
         def op_addptr_overrider(ptr, offset):
@@ -999,44 +999,44 @@ class SanitizerSymbolicExecution(Client):
             element_bytewidth = max(1, element_bitwidth // 8)
 
             # convert ptr to SymbolicExpr
-            ptr = SymbolicExpr.from_value(ptr)
+            ptr_sym = SymbolicExpr.from_value(ptr)
 
             # convert offset to SymbolicExpr
-            offset = SymbolicExpr.from_value(offset)
-            element_bytewidth = SymbolicExpr.from_value(element_bytewidth)
+            offset_sym = SymbolicExpr.from_value(offset)
+            element_bytewidth_sym = SymbolicExpr.from_value(element_bytewidth)
 
             # calculate the new address, and store the dtype_tt information in its SymbolicExpr.
-            ret = ptr + offset * element_bytewidth
+            ret = ptr_sym + offset_sym * element_bytewidth_sym
             ret.set_element_ty(dtype_tt)
             return ret
 
         def op_dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
-            a = SymbolicExpr.from_value(a)
-            b = SymbolicExpr.from_value(b)
-            d = SymbolicExpr.from_value(d)
-            return SymbolicExpr("dot", a, b, d)
+            a_sym = SymbolicExpr.from_value(a)
+            b_sym = SymbolicExpr.from_value(b)
+            d_sym = SymbolicExpr.from_value(d)
+            return SymbolicExpr("dot", a_sym, b_sym, d_sym)
 
         def op_make_range_overrider(start, end):
-            start = SymbolicExpr.from_value(start)
-            end = SymbolicExpr.from_value(end - 1)
-            return SymbolicExpr("arange", start, end)
+            return SymbolicExpr(
+                "arange",
+                SymbolicExpr.from_value(start),
+                SymbolicExpr.from_value(end - 1),
+            )
 
         def op_expand_dims_overrider(arg, axis):
-            arg = SymbolicExpr.from_value(arg)
-            return SymbolicExpr("expand_dims", arg, axis)
+            return SymbolicExpr("expand_dims", SymbolicExpr.from_value(arg), axis)
 
         def op_broadcast_overrider(arg, shape):
-            arg = SymbolicExpr.from_value(arg)
-            return SymbolicExpr("broadcast", arg, shape)
+            return SymbolicExpr("broadcast", SymbolicExpr.from_value(arg), shape)
 
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
-            input = SymbolicExpr.from_value(input)
-            ret = SymbolicExpr("sum", input, axis, keep_dims, kwargs)
+            ret = SymbolicExpr(
+                "sum", SymbolicExpr.from_value(input), axis, keep_dims, kwargs
+            )
             return ret
 
         def op_splat_overrider(arg, shape):
-            arg = SymbolicExpr.from_value(arg)
-            return SymbolicExpr("splat", arg, shape)
+            return SymbolicExpr("splat", SymbolicExpr.from_value(arg), shape)
 
         def op_make_block_ptr_overrider(
             base, shape, strides, offsets, tensor_shape, order
@@ -1083,17 +1083,13 @@ class SanitizerSymbolicExecution(Client):
             raise NotImplementedError("TensorPointerStore is not supported yet.")
 
         def op_idiv_overrider(lhs, rhs):
-            lhs = SymbolicExpr.from_value(lhs)
-            rhs = SymbolicExpr.from_value(rhs)
-            return lhs // rhs
+            return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
 
         def op_rsqrt_overrider(arg):
-            arg = SymbolicExpr.from_value(arg)
-            return SymbolicExpr("rsqrt", arg)
+            return SymbolicExpr("rsqrt", SymbolicExpr.from_value(arg))
 
         def op_cast_impl_overrider(src, dst_type):
-            src = SymbolicExpr.from_value(src)
-            return src
+            return SymbolicExpr.from_value(src)
 
         OP_TYPE_TO_OVERRIDER = {
             ProgramId: op_program_id_overrider,
