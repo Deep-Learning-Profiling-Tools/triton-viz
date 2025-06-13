@@ -376,11 +376,10 @@ class SymbolicExpr:
     OP_SPEC = {
         # Core / primitive ops
         "arange": Spec(req=("start", "end")),
-
+        "pid": Spec(req=("grid", "axis")),
         # Memory access ops
         "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_dtype),
         "store": Spec(req=("ptr", "value"), opt=("mask", "other"), post=_store_dtype),
-
         # Unary ops
         **{
             op: Spec(req=("arg",))
@@ -398,7 +397,6 @@ class SymbolicExpr:
                 "rsqrt",
             )
         },
-
         #  Binary ops
         **{
             op: Spec(req=("lhs", "rhs"), post=_binary_shape)
@@ -419,19 +417,15 @@ class SymbolicExpr:
                 "bitwise_and",
             )
         },
-
         # Ternary ops
         "where": Spec(req=("cond", "lhs", "rhs")),
-
         # Reduction ops
         "sum": Spec(req=("input", "axis", "keepdims")),
         "dot": Spec(req=("a", "b"), opt=("d",)),
-
         # Pointer utilities
         "make_block_ptr": Spec(
             req=("base", "shape", "strides", "offsets", "block_shape", "order")
         ),
-
         # Broadcasting / shape manipulation
         "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
@@ -450,20 +444,18 @@ class SymbolicExpr:
         self.attrs = {}
         self.dtype_tt = None
         self.shape = []
-        self.children = {}  # Used for storing child expressions
+        
         # Functions and arguments for concretization
         self._concrete_fn = None
         self._concrete_args = ()
         self._concrete_kwargs = {}
-        # leaf nodes
-        if self.op == "const":
+
+        # deal with args
+        self.children = {}  # Used for storing child expressions
+        if self.op == "const": # leaf nodes
             self.value = args[0]
             if len(args) >= 2:
                 self.dtype_tt = args[1]
-        elif self.op == "pid":
-            assert len(args) == 2, "pid op expects two arguments!"
-            self.grid = args[0]
-            self.axis = args[1]
         else:
             self._init_from_spec(*args)
 
@@ -476,14 +468,14 @@ class SymbolicExpr:
         min_n = len(spec.req)
         max_n = min_n + len(spec.opt)
         if not (min_n <= len(args) <= max_n):
-            raise ValueError(f"{self.op} expects {min_n}–{max_n} args, got {len(args)}")
+            raise ValueError(f"{self.op} expects {min_n} - {max_n} args, got {len(args)}")
 
         # store in self.children
         names = list(spec.req) + list(spec.opt)
         for name, val in zip(names, args):
             val = SymbolicExpr.from_value(val)
             self.children[name] = val
-        for name in names[len(args):]:
+        for name in names[len(args) :]:
             self.children[name] = None
 
         # post-hook
@@ -796,6 +788,7 @@ class ConstTupleExpr(SymbolicExpr):
 class ConstTupleExpr(SymbolicExpr):
     def __init__(self, value):
         super().__init__("const", tuple(value))
+
 
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):
