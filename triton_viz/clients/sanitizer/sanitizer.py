@@ -314,15 +314,24 @@ def _broadcast_dtype(self):
     self.dtype_tt = self.children["arg"].dtype_tt
 
 
-def _binary_shape(self):
-    lhs, rhs = self.children["lhs"], self.children["rhs"]
+def _binary_dtype(expr):
+    expr.dtype_tt = expr.lhs.dtype_tt
+
+
+def _binary_shape(expr):
+    lhs, rhs = expr.children["lhs"], expr.children["rhs"]
     if not lhs.shape:
-        self.shape = rhs.shape
+        expr.shape = rhs.shape
     elif not rhs.shape:
-        self.shape = lhs.shape
+        expr.shape = lhs.shape
     else:
         assert lhs.shape == rhs.shape, f"lhs shape {lhs.shape} != rhs shape {rhs.shape}"
-        self.shape = lhs.shape
+        expr.shape = lhs.shape
+
+
+def _binary_post(expr):
+    _binary_shape(expr)
+    _binary_dtype(expr)
 
 
 class SymbolicExpr:
@@ -592,49 +601,60 @@ class SymbolicExpr:
     def data(self):
         return SymbolicExprDataWrapper(self.__str__(), self)
 
+    triton_scala_dtypes = (
+        tl.int8,
+        tl.int16,
+        tl.int32,
+        tl.int64,
+        tl.uint8,
+        tl.uint16,
+        tl.uint32,
+        tl.uint64,
+        tl.float16,
+        tl.float32,
+        tl.float64,
+    )
+    builtin_scala_types = (int, float)
+    tuple_types = (tl.core.tuple, tuple)
+
+    @staticmethod
+    def _infer_literal_dtype(var):
+        if isinstance(var, SymbolicExpr.tuple_types):
+            first_dtype = SymbolicExpr._infer_literal_dtype(var[0])
+            for v in var[1:]:  # assume only one consistent dtype in the tuple
+                if SymbolicExpr._infer_literal_dtype(v) != first_dtype:
+                    raise ValueError(
+                        f"All elements in the tuple must have the same dtype, but found {first_dtype} and {SymbolicExpr.from_value(v).dtype_tt}"
+                    )
+            return first_dtype
+        if isinstance(var, TensorHandle):
+            if len(var.data) != 1:
+                raise ValueError(
+                    f"Unsupported var.data: {var.data} with length more than one!"
+                )
+            if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
+                return var.dtype
+            if isinstance(var.dtype, tl.pointer_type):  # if a pointer
+                return var.get_element_ty()
+        if isinstance(var, SymbolicExpr.builtin_scala_types):
+            return tl.int32 if isinstance(var, int) else tl.float32
+        raise ValueError(f"Unsupported type: {type(var)}")
+
     @classmethod
     def from_value(cls, var):
-        triton_scala_dtypes = (
-            tl.int8,
-            tl.int16,
-            tl.int32,
-            tl.int64,
-            tl.uint8,
-            tl.uint16,
-            tl.uint32,
-            tl.uint64,
-            tl.float16,
-            tl.float32,
-            tl.float64,
-        )
-        builtin_scala_types = (int, float)
-        # if already SymbolicExpr
-        if isinstance(var, cls):
+        if isinstance(var, cls):  # if already SymbolicExpr
             return var
 
-        # if construct from a TensorHandle
-        if isinstance(var, TensorHandle):
-            # if an immediate
-            if var.dtype in triton_scala_dtypes:
-                if len(var.data) == 1:
-                    return cls("const", var.data.item())
-                else:
-                    return cls("const", var.data)
-            # if a pointer
-            elif isinstance(var.dtype, tl.pointer_type):
-                if len(var.data) != 1:
-                    raise ValueError(
-                        "Unsupported tl.pointer_type with length more than one!"
-                    )
-                return cls("const", var.data.item(), var.get_element_ty())
-            else:
-                raise ValueError("Unsupported TensorHandle dtype", var.dtype)
+        dtype_tt = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
-        if isinstance(var, builtin_scala_types):
-            return cls("const", var)
-
-        if isinstance(var, tl.core.tuple):
-            return ConstTupleExpr(var)
+        if isinstance(var, (tl.core.tuple, tuple)):  # if a tuple
+            return cls("const", tuple(var), dtype_tt)
+        if isinstance(var, TensorHandle):  # if a TensorHandle
+            return cls("const", var.data.item(), dtype_tt)
+        if isinstance(
+            var, SymbolicExpr.builtin_scala_types
+        ):  # if a python builtin type
+            return cls("const", var, dtype_tt)
 
         raise ValueError("Unknown type:", type(var))
 
