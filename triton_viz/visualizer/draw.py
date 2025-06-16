@@ -129,7 +129,7 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
             return draw_op(x)
         if isinstance(x, MakeRange):
             return draw_make_range(x)
-        if isinstance(x, Reduce):
+        if isinstance(x, (ReduceMin, ReduceMax, ReduceSum)):
             return draw_reduce(x)
         if isinstance(x, Dot):
             return None  # draw_dot(x)

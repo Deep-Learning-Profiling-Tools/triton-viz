@@ -139,10 +139,6 @@ def _get_traceback_info():
 
     stack_summary = traceback.extract_stack()
 
-    # record the index of two key functions in core/patch.py
-    jit_index = None
-    grid_index = None
-
     user_code_tracebacks = []
     # scan the call stack
     for i, frame in enumerate(stack_summary):
@@ -376,11 +372,9 @@ class SymbolicExpr:
     OP_SPEC = {
         # Core / primitive ops
         "arange": Spec(req=("start", "end")),
-
         # Memory access ops
         "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_dtype),
         "store": Spec(req=("ptr", "value"), opt=("mask", "other"), post=_store_dtype),
-
         # Unary ops
         **{
             op: Spec(req=("arg",))
@@ -398,7 +392,6 @@ class SymbolicExpr:
                 "rsqrt",
             )
         },
-
         #  Binary ops
         **{
             op: Spec(req=("lhs", "rhs"), post=_binary_shape)
@@ -419,19 +412,15 @@ class SymbolicExpr:
                 "bitwise_and",
             )
         },
-
         # Ternary ops
         "where": Spec(req=("cond", "lhs", "rhs")),
-
         # Reduction ops
         "sum": Spec(req=("input", "axis", "keepdims")),
         "dot": Spec(req=("a", "b"), opt=("d",)),
-
         # Pointer utilities
         "make_block_ptr": Spec(
             req=("base", "shape", "strides", "offsets", "block_shape", "order")
         ),
-
         # Broadcasting / shape manipulation
         "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
@@ -479,7 +468,7 @@ class SymbolicExpr:
         for name, val in zip(names, args):
             val = SymbolicExpr.from_value(val)
             self.children[name] = val
-        for name in names[len(args):]:
+        for name in names[len(args) :]:
             self.children[name] = None
 
         # post-hook
@@ -700,41 +689,41 @@ class SymbolicExpr:
 
         # Binary arithmetic, comparison, etc.
         if node.op in self.BINARY_OPS:
-            l = self._to_z3(node.lhs)
-            r = self._to_z3(node.rhs)
+            lhs = self._to_z3(node.lhs)
+            rhs = self._to_z3(node.rhs)
             if node.op == "add":
-                return l + r
+                return lhs + rhs
             if node.op == "sub":
-                return l - r
+                return lhs - rhs
             if node.op == "mul":
-                return l * r
+                return lhs * rhs
             if node.op in ("idiv"):
-                return l / r
+                return lhs / rhs
             if node.op == "mod":
-                return l % r
+                return lhs % rhs
             if node.op == "less":
-                return l < r
+                return lhs < rhs
             if node.op == "less_equal":
-                return l <= r
+                return lhs <= rhs
             if node.op == "greater":
-                return l > r
+                return lhs > rhs
             if node.op == "greater_equal":
-                return l >= r
+                return lhs >= rhs
             if node.op == "equal":
-                return l == r
+                return lhs == rhs
             if node.op == "not_equal":
-                return l != r
+                return lhs != rhs
             if node.op == "maximum":
-                return If(l >= r, l, r)
+                return If(lhs >= rhs, lhs, rhs)
             if node.op == "bitwise_and":
-                return And(l, r)
+                return And(lhs, rhs)
 
         # where(cond, lhs, rhs)
         if node.op == "where":
-            c = self._to_z3(node.cond)
-            l = self._to_z3(node.lhs)
-            r = self._to_z3(node.rhs)
-            return If(c, l, r)
+            cond = self._to_z3(node.cond)
+            lhs = self._to_z3(node.lhs)
+            rhs = self._to_z3(node.rhs)
+            return If(cond, lhs, rhs)
 
         # sum(input, axis, keepdims)
         if node.op == "sum":
@@ -756,10 +745,10 @@ class SymbolicExpr:
         raise NotImplementedError(f"Eval for op {node.op} is not implemented")
 
 
-
 class ConstTupleExpr(SymbolicExpr):
     def __init__(self, value):
         super().__init__("const", tuple(value))
+
 
 class SanitizerSymbolicExecution(Client):
     def __init__(self, abort_on_error):

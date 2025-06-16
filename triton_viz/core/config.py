@@ -1,4 +1,6 @@
-import os, sys, types
+import os
+import sys
+import types
 
 
 # Back-end options recognised by the sanitizer
