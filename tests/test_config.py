@@ -1,6 +1,9 @@
-import pytest, os
-os.environ["TRITON_SANITIZER_BACKEND"] = "off"
+import os
+import pytest
+
 import triton_viz.core.config as cfg
+
+os.environ["TRITON_SANITIZER_BACKEND"] = "off"
 
 
 def test_switch_backend():
