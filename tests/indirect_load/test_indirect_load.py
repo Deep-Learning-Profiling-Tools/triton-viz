@@ -8,6 +8,7 @@ from triton_viz import config as cfg
 
 
 cfg.sanitizer_backend = "symexec"
+# cfg.sanitizer_backend = "off"
 
 
 @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
