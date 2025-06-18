@@ -330,6 +330,14 @@ def _binary_post(expr):
     _binary_dtype(expr)
 
 
+def _pid_post(expr):
+    expr.dtype_tt = tl.int32  # Program ID is always int32
+
+
+def _arange_post(expr):
+    expr.dtype_tt = tl.int32  # tl.arange is always int32
+
+
 class SymbolicExpr:
     BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load", "store")
@@ -380,8 +388,8 @@ class SymbolicExpr:
 
     OP_SPEC = {
         # Core / primitive ops
-        "arange": Spec(req=("start", "end")),
-        "pid": Spec(req=("grid", "axis")),
+        "arange": Spec(req=("start", "end"), post=_arange_post),
+        "pid": Spec(req=("grid", "axis"), post=_pid_post),
         # Memory access ops
         "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_dtype),
         "store": Spec(req=("ptr", "value"), opt=("mask", "other"), post=_store_dtype),
@@ -404,7 +412,7 @@ class SymbolicExpr:
         },
         #  Binary ops
         **{
-            op: Spec(req=("lhs", "rhs"), post=_binary_shape)
+            op: Spec(req=("lhs", "rhs"), post=_binary_post)
             for op in (
                 "add",
                 "sub",
@@ -449,7 +457,7 @@ class SymbolicExpr:
         self.attrs = {}
         self.dtype_tt = None
         self.shape = []
-        
+
         # Functions and arguments for concretization
         self._concrete_fn = None
         self._concrete_args = ()
@@ -457,7 +465,7 @@ class SymbolicExpr:
 
         # deal with args
         self.children = {}  # Used for storing child expressions
-        if self.op == "const": # leaf nodes
+        if self.op == "const":  # leaf nodes
             self.value = args[0]
             if len(args) >= 2:
                 self.dtype_tt = args[1]
@@ -473,7 +481,9 @@ class SymbolicExpr:
         min_n = len(spec.req)
         max_n = min_n + len(spec.opt)
         if not (min_n <= len(args) <= max_n):
-            raise ValueError(f"{self.op} expects {min_n} - {max_n} args, got {len(args)}")
+            raise ValueError(
+                f"{self.op} expects {min_n} - {max_n} args, got {len(args)}"
+            )
 
         # store in self.children
         names = list(spec.req) + list(spec.opt)
@@ -701,9 +711,6 @@ class SymbolicExpr:
             return v
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
-        if node.op == "abs":
-            c = self._to_z3(node.arg)
-            return If(c >= 0, c, -c)
         if node.op in self.UNARY_OPS:
             c = self._to_z3(node.arg)
             if node.op == "abs":
