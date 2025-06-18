@@ -716,9 +716,9 @@ class SymbolicExpr:
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if node.op in self.UNARY_OPS:
-            c = self._to_z3(node.arg)
+            val = self._to_z3(node.arg)
             if node.op == "abs":
-                return If(c >= 0, c, -c)
+                return If(val >= 0, val, -val)
             raise NotImplementedError(f"Unary op {node.op} is not implemented")
 
         # Binary arithmetic, comparison, etc.
@@ -781,7 +781,7 @@ class SymbolicExpr:
     def has_op(self, op_name: str) -> bool:
         if self.op == op_name:
             return True
-        for child_key, child_symbolic_expr in self.children.items():
+        for _, child_symbolic_expr in self.children.items():
             if child_symbolic_expr.has_op(op_name):
                 return True
         return False
@@ -925,18 +925,18 @@ class SanitizerSymbolicExecution(Client):
 
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
-                ptr = SymbolicExpr("load", SymbolicExpr.from_value(ptr))
+                ptr_sym = SymbolicExpr.from_value(ptr)
             elif isinstance(ptr, SymbolicExpr):
-                ptr = SymbolicExpr("load", ptr)
+                ptr_sym = ptr
             else:
                 raise ValueError(f"Unsupported ptr type: {type(ptr)}")
 
             if mask is None:
-                ret = SymbolicExpr("load", ptr)
+                ret = SymbolicExpr("load", ptr_sym)
             elif other is None:
-                ret = SymbolicExpr("load", ptr, mask)
+                ret = SymbolicExpr("load", ptr_sym, mask)
             else:
-                ret = SymbolicExpr("load", ptr, mask, other)
+                ret = SymbolicExpr("load", ptr_sym, mask, other)
 
             # check memory access using z3
             ret_eval = ret.eval()
@@ -954,17 +954,17 @@ class SanitizerSymbolicExecution(Client):
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
-                ptr = SymbolicExpr("load", SymbolicExpr.from_value(ptr))
+                ptr_sym = SymbolicExpr.from_value(ptr)
             elif isinstance(ptr, SymbolicExpr):
-                ptr = SymbolicExpr("load", ptr)
+                ptr_sym = ptr
             else:
                 raise ValueError(f"Unsupported ptr type: {type(ptr)}")
 
             value = SymbolicExpr.from_value(value)
             if mask is None:
-                ret = SymbolicExpr("store", ptr, value)
+                ret = SymbolicExpr("store", ptr_sym, value)
             else:
-                ret = SymbolicExpr("store", ptr, value, mask)
+                ret = SymbolicExpr("store", ptr_sym, value, mask)
 
             # check memory access using z3
             ret_eval = ret.eval()
@@ -989,12 +989,14 @@ class SanitizerSymbolicExecution(Client):
                 np.sqrt: "sqrt",
                 np.sin: "sin",
             }
-            arg = SymbolicExpr.from_value(arg)
+            arg_sym = SymbolicExpr.from_value(arg)
             try:
                 name = _unary_map[op]
             except KeyError:
-                raise NotImplementedError(f"Unsupported unary operation: {op} on {arg}")
-            return SymbolicExpr(name, arg)
+                raise NotImplementedError(
+                    f"Unsupported unary operation: {op} on {arg_sym}"
+                )
+            return SymbolicExpr(name, arg_sym)
 
         def op_binary_op_overrider(lhs, rhs, op):
             _binary_map = {
