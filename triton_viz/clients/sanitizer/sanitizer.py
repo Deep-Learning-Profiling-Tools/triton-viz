@@ -578,7 +578,9 @@ class SymbolicExpr:
         if self.op == "const":
             label = f"const={self.value}"
         elif self.op == "pid":
-            label = f"pid_{self.axis}={self.grid[self.axis]}"
+            axis_val = self.axis.to_py()
+            grid_val = self.grid.to_py()
+            label = f"pid_{axis_val}={grid_val[axis_val]}"
         else:
             label = self.op
 
@@ -686,13 +688,15 @@ class SymbolicExpr:
             return IntVal(node.value)
 
         if node.op == "pid":
-            name = f"pid_{node.axis}"
+            axis_val = node.axis.to_py()
+            grid_val = node.grid.to_py()
+            name = f"pid_{axis_val}"
             if name not in self._vars:
                 v = Int(name)
                 self._vars[name] = v
                 # Add constraint: 0 ≤ pid < grid[axis]
                 self._constraints.append(v >= 0)
-                self._constraints.append(v < node.grid[node.axis])
+                self._constraints.append(v < grid_val[axis_val])
             return self._vars[name]
 
         if node.op == "arange":
@@ -781,6 +785,28 @@ class SymbolicExpr:
             if child_symbolic_expr.has_op(op_name):
                 return True
         return False
+
+    def to_py(self):
+        """
+        Valid only for nodes with op == 'const':
+        - If `value` is a TensorHandle:
+            • Scalar  -> return int/float
+            • Multi-element -> return a Python list
+        - Otherwise, return the original Python object
+          (e.g., int, float, tuple, list, etc.).
+        """
+        if self.op != "const":
+            raise TypeError("SymbolicExpr.to_py() can be used only on 'const' nodes")
+
+        v = self.value
+        if isinstance(v, TensorHandle):
+            if len(v.data) == 1:
+                return v.data.item()  # scalar case
+            else:
+                raise NotImplementedError(
+                    "SymbolicExpr.to_py() for multi-element tensors is not implemented yet!"
+                )
+        return v
 
     @staticmethod
     def _concretize_item(obj):
