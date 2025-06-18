@@ -1139,16 +1139,38 @@ class SanitizerSymbolicExecution(Client):
         return []
 
 
-class NullSanitizer:
+class NullSanitizer(Client):
     """
     A do-nothing object returned when the sanitizer backend is 'off'.
     Any attribute access raises an explicit error so misuse is obvious.
     """
 
-    def __getattr__(self, name):
+    def __init__(self, abort_on_error):
+        pass
+
+    def _disabled(self, method: str):
         raise RuntimeError(
-            "Sanitizer backend is off; no sanitizer functionality is available."
+            f"[NullSanitizer] '{method}' was called, "
+            "but sanitizer backend is off; no functionality is available."
         )
+
+    def arg_callback(self, *a, **k):
+        self._disabled("arg_callback")
+
+    def finalize(self, *a, **k):
+        self._disabled("finalize")
+
+    def grid_callback(self, *a, **k):
+        self._disabled("grid_callback")
+
+    def grid_idx_callback(self, *a, **k):
+        self._disabled("grid_idx_callback")
+
+    def register_op_callback(self, *a, **k):
+        self._disabled("register_op_callback")
+
+    def __getattr__(self, name):
+        self._disabled(name)
 
 
 class Sanitizer(ABC):
@@ -1167,7 +1189,7 @@ class Sanitizer(ABC):
             return SanitizerSymbolicExecution(abort_on_error)
 
         if backend == "off":
-            return NullSanitizer()
+            return NullSanitizer(abort_on_error)
 
         raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
 
