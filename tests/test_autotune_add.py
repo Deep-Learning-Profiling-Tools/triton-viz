@@ -10,7 +10,7 @@ from triton_viz import config as cfg
 
 try:
     torch.cuda.current_device()
-except:
+except RuntimeError:
     pytest.skip(
         "This test requires a CUDA-enabled environment.", allow_module_level=True
     )

@@ -139,10 +139,6 @@ def _get_traceback_info():
 
     stack_summary = traceback.extract_stack()
 
-    # record the index of two key functions in core/patch.py
-    jit_index = None
-    grid_index = None
-
     user_code_tracebacks = []
     # scan the call stack
     for i, frame in enumerate(stack_summary):
@@ -716,41 +712,41 @@ class SymbolicExpr:
 
         # Binary arithmetic, comparison, etc.
         if node.op in self.BINARY_OPS:
-            l = self._to_z3(node.lhs)
-            r = self._to_z3(node.rhs)
+            lhs = self._to_z3(node.lhs)
+            rhs = self._to_z3(node.rhs)
             if node.op == "add":
-                return l + r
+                return lhs + rhs
             if node.op == "sub":
-                return l - r
+                return lhs - rhs
             if node.op == "mul":
-                return l * r
+                return lhs * rhs
             if node.op in ("idiv"):
-                return l / r
+                return lhs / rhs
             if node.op == "mod":
-                return l % r
+                return lhs % rhs
             if node.op == "less":
-                return l < r
+                return lhs < rhs
             if node.op == "less_equal":
-                return l <= r
+                return lhs <= rhs
             if node.op == "greater":
-                return l > r
+                return lhs > rhs
             if node.op == "greater_equal":
-                return l >= r
+                return lhs >= rhs
             if node.op == "equal":
-                return l == r
+                return lhs == rhs
             if node.op == "not_equal":
-                return l != r
+                return lhs != rhs
             if node.op == "maximum":
-                return If(l >= r, l, r)
+                return If(lhs >= rhs, lhs, rhs)
             if node.op == "bitwise_and":
-                return And(l, r)
+                return And(lhs, rhs)
 
         # where(cond, lhs, rhs)
         if node.op == "where":
-            c = self._to_z3(node.cond)
-            l = self._to_z3(node.lhs)
-            r = self._to_z3(node.rhs)
-            return If(c, l, r)
+            cond = self._to_z3(node.cond)
+            lhs = self._to_z3(node.lhs)
+            rhs = self._to_z3(node.rhs)
+            return If(cond, lhs, rhs)
 
         # sum(input, axis, keepdims)
         if node.op == "sum":
@@ -803,7 +799,6 @@ class SymbolicExpr:
 class ConstTupleExpr(SymbolicExpr):
     def __init__(self, value):
         super().__init__("const", tuple(value))
-
 
 class ConstTupleExpr(SymbolicExpr):
     def __init__(self, value):

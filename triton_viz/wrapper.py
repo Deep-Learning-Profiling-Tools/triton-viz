@@ -1,4 +1,5 @@
-import runpy, sys
+import runpy
+import sys
 import triton
 import triton_viz
 from triton_viz.clients import Sanitizer

@@ -74,7 +74,6 @@ original_ops = {
     UnaryOp: interpreter_builder.unary_op,
     BinaryOp: interpreter_builder.binary_op,
     TernaryOp: interpreter_builder.ternary_op,
-    Dot: interpreter_builder.create_dot,
     MakeRange: interpreter_builder.create_make_range,
     AddPtr: interpreter_builder.create_addptr,
     ExpandDims: interpreter_builder.create_expand_dims,
