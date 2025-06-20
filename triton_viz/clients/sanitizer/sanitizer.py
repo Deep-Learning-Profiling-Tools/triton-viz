@@ -930,6 +930,40 @@ class SymbolicExpr:
 
         return result
 
+def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
+    """
+    Post-order traversal that replaces *all* minimal `load` sub-trees
+    with constant nodes produced by `concretize`.
+    """
+    if not isinstance(expr, SymbolicExpr):
+        raise TypeError("replace_min_load_subtree expects a SymbolicExpr instance!")
+
+    # check subtrees
+    for name, child in list(expr.children.items()):
+        if child is None:
+            continue
+        # replace subtree if load found
+        expr.children[name] = replace_load_subtree(child)
+
+    # check self
+    if expr.op == "load" and all(
+        (child is None) or not child.has_op("load")
+        for child in expr.children.values()
+    ):
+        concrete = expr.concretize()
+
+        if not isinstance(concrete, TensorHandle):
+            raise TypeError(f"Unexpected dtype: {type(concrete)}!")
+
+        # inplace replace to "const" node
+        expr.op = "const"
+        expr.value = concrete.data
+        expr.dtype_tt = concrete.dtype
+        expr.children.clear()
+        expr.concrete_fn = None
+
+    return expr
+
 
 class ConstTupleExpr(SymbolicExpr):
     def __init__(self, value):
@@ -1017,9 +1051,7 @@ class SanitizerSymbolicExecution(Client):
         ):
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
-                print("indirect loading:", ptr)
-                # ptr = ptr.concretize()
-                # print('concretized ptr:', ptr)
+                replace_load_subtree(ptr)
 
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
