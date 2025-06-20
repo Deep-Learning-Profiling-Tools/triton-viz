@@ -338,6 +338,10 @@ def _arange_post(expr):
     expr.dtype_tt = tl.int32  # tl.arange is always int32
 
 
+def _cast_impl_post(expr):
+    expr.dtype_tt = expr.dst_type
+
+
 class SymbolicExpr:
     BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load", "store")
@@ -375,6 +379,7 @@ class SymbolicExpr:
     REDUCE_OPS = ("sum", "dot")
     POINTER_OPS = ("make_block_ptr",)
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast")
+    CAST_OPS = ("cast_impl",)
     SUPPORTED_OPS = (
         BASIC_OPS
         + INDIRECT_OPS
@@ -384,6 +389,7 @@ class SymbolicExpr:
         + REDUCE_OPS
         + POINTER_OPS
         + BROADCAST_OPS
+        + CAST_OPS
     )
 
     OP_SPEC = {
@@ -443,6 +449,8 @@ class SymbolicExpr:
         "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
         "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        # Casting
+        "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
     }
 
     def __init__(self, op, *args):
@@ -628,6 +636,8 @@ class SymbolicExpr:
 
     @staticmethod
     def _infer_literal_dtype(var):
+        if isinstance(var, tl.core.dtype):
+            return var
         if isinstance(var, SymbolicExpr.tuple_types):
             first_dtype = SymbolicExpr._infer_literal_dtype(var[0])
             for v in var[1:]:  # assume only one consistent dtype in the tuple
@@ -663,6 +673,9 @@ class SymbolicExpr:
         if isinstance(
             var, SymbolicExpr.builtin_scala_types
         ):  # if a python builtin type
+            return cls("const", var, dtype_tt)
+        if isinstance(var, tl.core.dtype):
+            # If it's a triton dtype, we can create a const node with it
             return cls("const", var, dtype_tt)
 
         raise ValueError("Unknown type:", type(var))
@@ -828,7 +841,10 @@ class SymbolicExpr:
     @property
     def binary_numpy_op(self):
         """Return the numpy operation corresponding to this binary op."""
-        if self._binary_numpy_op is None and self.op in SymbolicExpr._binary_numpy_op_cache:
+        if (
+            self._binary_numpy_op is None
+            and self.op in SymbolicExpr._binary_numpy_op_cache
+        ):
             self._binary_numpy_op = SymbolicExpr._binary_numpy_op_cache[self.op]
         return self._binary_numpy_op
 
@@ -1191,7 +1207,7 @@ class SanitizerSymbolicExecution(Client):
             return SymbolicExpr("rsqrt", SymbolicExpr.from_value(arg))
 
         def op_cast_impl_overrider(src, dst_type):
-            return SymbolicExpr.from_value(src)
+            return SymbolicExpr("cast_impl", src, dst_type)
 
         OP_TYPE_TO_OVERRIDER = {
             ProgramId: op_program_id_overrider,
