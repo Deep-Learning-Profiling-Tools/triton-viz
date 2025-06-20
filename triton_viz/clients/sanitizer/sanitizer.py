@@ -298,12 +298,8 @@ Spec = namedtuple(
 )
 
 
-def _load_dtype(self):
-    self.set_element_ty(self.children["ptr"].get_element_ty())
-
-
-def _store_dtype(self):
-    self.set_element_ty(self.children["ptr"].get_element_ty())
+def _load_post(self):
+    self.dtype_tt = self.ptr.dtype_tt.element_ty
 
 
 def _broadcast_dtype(self):
@@ -397,8 +393,8 @@ class SymbolicExpr:
         "arange": Spec(req=("start", "end"), post=_arange_post),
         "pid": Spec(req=("grid", "axis"), post=_pid_post),
         # Memory access ops
-        "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_dtype),
-        "store": Spec(req=("ptr", "value"), opt=("mask", "other"), post=_store_dtype),
+        "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_post),
+        "store": Spec(req=("ptr", "value"), opt=("mask", "other")),
         # Unary ops
         **{
             op: Spec(req=("arg",))
@@ -514,17 +510,6 @@ class SymbolicExpr:
     def set_attr(self, name, values):
         self.attrs[name] = values
 
-    def get_element_ty(self):
-        return self.dtype_tt
-
-    def set_element_ty(self, dtype_tt):
-        self.dtype_tt = dtype_tt
-
-    def get_dtype_bytewidth(self, dtype_tt):
-        element_bitwidth = dtype_tt.primitive_bitwidth
-        element_bytewidth = max(1, element_bitwidth // 8)
-        return element_bytewidth
-
     def __add__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr("add", self, other)
@@ -594,7 +579,7 @@ class SymbolicExpr:
             label = self.op
 
         # Add the dtype to the label if available
-        label = f"{label} [dtype={self.get_element_ty()}]"
+        label = f"{label} [dtype={self.dtype_tt}]"
 
         return label
 
@@ -654,7 +639,7 @@ class SymbolicExpr:
             if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
                 return var.dtype
             if isinstance(var.dtype, tl.pointer_type):  # if a pointer
-                return var.get_element_ty()
+                return var.dtype
         if isinstance(var, SymbolicExpr.builtin_scala_types):
             return tl.int32 if isinstance(var, int) else tl.float32
         raise ValueError(f"Unsupported type: {type(var)}")
@@ -1181,7 +1166,7 @@ class SanitizerSymbolicExecution(Client):
                 "make_block_ptr", base, shape, strides, offsets, tensor_shape, order
             )
 
-            ret.set_element_ty(base.get_element_ty())
+            ret.dtype_tt = base.get_element_ty()
 
             return ret
 
