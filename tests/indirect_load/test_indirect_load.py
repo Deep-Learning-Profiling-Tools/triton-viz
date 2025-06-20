@@ -70,13 +70,14 @@ def test_triple_indirect_load_inrange():
         BLOCK_SIZE=32,
     )
 
+
 @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
 @triton.jit
 def dual_offset_load_kernel(
-    idx_a_ptr,       # int32*
-    idx_b_ptr,       # int32*
-    src_ptr,         # fp32*
-    dst_ptr,         # fp32*
+    idx_a_ptr,  # int32*
+    idx_b_ptr,  # int32*
+    src_ptr,  # fp32*
+    dst_ptr,  # fp32*
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -94,7 +95,7 @@ def test_dual_offset_load_inrange():
     N = 128
     device = "cuda"
 
-    src  = torch.rand(N, device=device, dtype=torch.float32)
+    src = torch.rand(N, device=device, dtype=torch.float32)
     # Generate indices so that a + b is always in-range (0 ≤ a + b < N)
     idx_a = torch.randint(0, N // 2, (N,), device=device, dtype=torch.int32)
     idx_b = torch.randint(0, N // 2, (N,), device=device, dtype=torch.int32)
@@ -102,7 +103,10 @@ def test_dual_offset_load_inrange():
 
     grid = lambda META: (triton.cdiv(N, META["BLOCK_SIZE"]),)
     dual_offset_load_kernel[grid](
-        idx_a, idx_b, src, dst,
+        idx_a,
+        idx_b,
+        src,
+        dst,
         BLOCK_SIZE=32,
     )
 

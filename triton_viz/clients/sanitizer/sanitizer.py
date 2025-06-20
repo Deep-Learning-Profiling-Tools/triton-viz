@@ -930,6 +930,7 @@ class SymbolicExpr:
 
         return result
 
+
 def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     """
     Post-order traversal that replaces *all* minimal `load` sub-trees
@@ -947,8 +948,7 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
 
     # check self
     if expr.op == "load" and all(
-        (child is None) or not child.has_op("load")
-        for child in expr.children.values()
+        (child is None) or not child.has_op("load") for child in expr.children.values()
     ):
         concrete = expr.concretize()
 
