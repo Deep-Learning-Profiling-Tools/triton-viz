@@ -875,7 +875,12 @@ class SymbolicExpr:
         # concretize logic
         if obj.concrete_fn is None:
             if obj.op == "const":
-                result = TensorHandle(obj.value, obj.dtype_tt)
+                if obj.dtype_tt == tl.pointer_type:
+                    result = TensorHandle(
+                        np.array([obj.value], dtype=np.uint64), obj.dtype_tt
+                    )
+                else:
+                    result = TensorHandle(obj.value, obj.dtype_tt)
             else:
                 raise RuntimeError(f"{obj.op}'s concrete function is not set!")
         elif obj.op == "pid":
