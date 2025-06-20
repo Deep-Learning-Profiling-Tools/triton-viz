@@ -118,9 +118,7 @@ class PatchOp:
                 from ..clients.sanitizer.sanitizer import SymbolicExpr
 
                 if isinstance(ret, SymbolicExpr):
-                    ret._concrete_fn = self.op
-                    ret._concrete_args = args
-                    ret._concrete_kwargs = kwargs
+                    ret.concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
         if self.after_callback:

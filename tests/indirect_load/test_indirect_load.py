@@ -8,7 +8,6 @@ from triton_viz import config as cfg
 
 
 cfg.sanitizer_backend = "symexec"
-# cfg.sanitizer_backend = "off"
 
 
 @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
@@ -30,9 +29,6 @@ def test_indirect_load_inrange():
 
     grid = lambda META: (triton.cdiv(128, META["BLOCK_SIZE"]),)
     indirect_load_kernel[grid](idx, src, dst, BLOCK_SIZE=32)
-
-    # assert torch.allclose(dst, src), "indirect load failed"
-    print("✓ test passed")
 
 
 # def test_indirect_load_out_of_bound():
