@@ -895,6 +895,33 @@ class SymbolicExpr:
             result = obj.concrete_fn(
                 obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
             )
+        elif obj.op == "load":
+            from ...core.patch import original_ops
+
+            ptr_concrete = obj.ptr.concretize()
+            # concretize mask
+            # create an all-True mask if mask is None
+            if obj.mask is None:
+                mask_concrete = TensorHandle(
+                    np.ones_like(ptr_concrete.data, dtype=bool), tl.int1
+                )
+            else:
+                mask_concrete = obj.mask.concretize()
+
+            # concretize the 'other' argument if it exists
+            if obj.other is None:
+                other_concrete = None
+            else:
+                other_concrete = obj.other.concretize()
+
+            result = original_ops[Load](
+                ptr_concrete,
+                mask_concrete,
+                other_concrete,
+                None,  # cache_modifier
+                None,  # eviction_policy
+                None,  # is_volatile
+            )
         else:
             concrete_args = [
                 SymbolicExpr.concretize(v) for k, v in obj.children.items()
