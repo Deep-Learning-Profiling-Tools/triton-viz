@@ -459,6 +459,7 @@ class SymbolicExpr:
         self.shape = []
 
         # Functions and arguments for concretization
+        self._binary_numpy_op = None
         self._concrete_fn = None
         self._concrete_args = ()
         self._concrete_kwargs = {}
@@ -808,30 +809,80 @@ class SymbolicExpr:
                 )
         return v
 
-    @staticmethod
-    def _concretize_item(obj):
-        return obj.concretize() if isinstance(obj, SymbolicExpr) else obj
+    _concrete_fn_cache = {}
+    _binary_numpy_op_cache = {}
 
-    def concretize(self):
-        """
-        Concretize the symbolic expression into a concrete value.
-        This is used to evaluate the symbolic expression and return a concrete value.
-        """
-        if self.op == "splat":
-            print("op:", self.op)
-            print("arg:", self._concrete_args)
-            print("kwargs:", self._concrete_kwargs)
-        if self.op == "const":
-            return self.value
-        if self._concrete_fn is None:
-            raise RuntimeError("Concrete function is not set for this SymbolicExpr.")
-        new_args = [self._concretize_item(a) for a in self._concrete_args]
-        new_kw = {k: self._concretize_item(v) for k, v in self._concrete_kwargs.items()}
-        return self._concrete_fn(*new_args, **new_kw)
+    @property
+    def concrete_fn(self):
+        """Return the concrete evaluation function bound to this node."""
+        if self._concrete_fn is None and self.op in SymbolicExpr._concrete_fn_cache:
+            self._concrete_fn = SymbolicExpr._concrete_fn_cache[self.op]
+        return self._concrete_fn
 
-class ConstTupleExpr(SymbolicExpr):
-    def __init__(self, value):
-        super().__init__("const", tuple(value))
+    @concrete_fn.setter
+    def concrete_fn(self, fn):
+        """Bind / override the concrete evaluation function."""
+        self._concrete_fn = fn
+        SymbolicExpr._concrete_fn_cache[self.op] = fn
+
+    @property
+    def binary_numpy_op(self):
+        """Return the numpy operation corresponding to this binary op."""
+        if self._binary_numpy_op is None and self.op in SymbolicExpr._binary_numpy_op_cache:
+            self._binary_numpy_op = SymbolicExpr._binary_numpy_op_cache[self.op]
+        return self._binary_numpy_op
+
+    @binary_numpy_op.setter
+    def binary_numpy_op(self, op):
+        """Bind / override the numpy operation for this binary op."""
+        self._binary_numpy_op = op
+        SymbolicExpr._binary_numpy_op_cache[self.op] = op
+
+    def concretize(self_or_cls, obj=None):
+        """
+        Usage:
+        1. expr.concretize()               — Evaluate this SymbolicExpr instance to its concrete value.
+        2. SymbolicExpr.concretize(x)      — Recursively concretize any object x (which may contain nested SymbolicExprs).
+        """
+        if obj is None:  # expr.concretize()
+            obj = self_or_cls
+        elif isinstance(
+            self_or_cls, SymbolicExpr
+        ):  # expr.concretize(x), which is erroneous
+            raise TypeError(
+                "Either use expr.concretize() or SymbolicExpr.concretize(x)!"
+            )
+
+        # Non-SymbolicExpr -> return as-is
+        if not isinstance(obj, SymbolicExpr):
+            return obj
+
+        # concretize logic
+        if obj.concrete_fn is None:
+            if obj.op == "const":
+                result = TensorHandle(obj.value, obj.dtype_tt)
+            else:
+                raise RuntimeError(f"{obj.op}'s concrete function is not set!")
+        elif obj.op == "pid":
+            result = obj.concrete_fn(obj.axis.to_py())
+        elif obj.op == "arange":
+            result = obj.concrete_fn(obj.start.to_py(), obj.end.to_py() + 1)
+        elif obj.op == "splat":
+            result = obj.concrete_fn(
+                obj.arg.concretize(), obj.children["shape"].to_py()
+            )
+        elif obj.op in SymbolicExpr.BINARY_OPS:
+            result = obj.concrete_fn(
+                obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
+            )
+        else:
+            concrete_args = [
+                SymbolicExpr.concretize(v) for k, v in obj.children.items()
+            ]
+            result = obj.concrete_fn(*concrete_args)
+
+        return result
+
 
 class ConstTupleExpr(SymbolicExpr):
     def __init__(self, value):
@@ -1022,7 +1073,9 @@ class SanitizerSymbolicExecution(Client):
                 raise NotImplementedError(
                     f"Unsupported binary operation: {op} between {lhs_sym} and {rhs_sym}"
                 )
-            return func(lhs_sym, rhs_sym)
+            result = func(lhs_sym, rhs_sym)
+            result.binary_numpy_op = op  # Store the numpy operation for later use
+            return result
 
         def op_ternary_op_overrider(lhs, rhs, other, op):
             lhs_sym = SymbolicExpr.from_value(lhs)
@@ -1113,7 +1166,6 @@ class SanitizerSymbolicExecution(Client):
             )
 
             ret.set_element_ty(base.get_element_ty())
-            print(ret)
 
             return ret
 
