@@ -338,6 +338,10 @@ def _cast_impl_post(expr):
     expr.dtype_tt = expr.dst_type
 
 
+def _addptr_post(expr):
+    expr.dtype_tt = expr.ptr.dtype_tt
+
+
 class SymbolicExpr:
     BASIC_OPS = ("const", "pid", "arange")
     INDIRECT_OPS = ("load", "store")
@@ -373,7 +377,7 @@ class SymbolicExpr:
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum", "dot")
-    POINTER_OPS = ("make_block_ptr",)
+    POINTER_OPS = ("make_block_ptr", "addptr")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast")
     CAST_OPS = ("cast_impl",)
     SUPPORTED_OPS = (
@@ -441,6 +445,7 @@ class SymbolicExpr:
         "make_block_ptr": Spec(
             req=("base", "shape", "strides", "offsets", "block_shape", "order")
         ),
+        "addptr": Spec(req=("ptr", "offsets"), post=_addptr_post),
         # Broadcasting / shape manipulation
         "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
@@ -774,6 +779,15 @@ class SymbolicExpr:
         if node.op in ("splat", "expand_dims", "broadcast"):
             return self._to_z3(node.arg)
 
+        if node.op == "addptr":
+            # Add pointer operation
+            ptr_z3 = self._to_z3(node.ptr)
+            offsets_z3 = self._to_z3(node.offsets)
+            element_bytewidth = max(
+                1, node.ptr.dtype_tt.element_ty.primitive_bitwidth // 8
+            )
+            return ptr_z3 + offsets_z3 * element_bytewidth
+
         # Other operations can be implemented as needed
         raise NotImplementedError(f"Eval for op {node.op} is not implemented")
 
@@ -1090,29 +1104,9 @@ class SanitizerSymbolicExecution(Client):
                 )
 
         def op_addptr_overrider(ptr, offset):
-            """
-            In addptr operator, ptr is a pointer address with dtype_tt, and offset is a scalar.
-            """
-            # Read dtype_tt from ptr.
-            # Here, ptr is either a TensorHandle or a SymbolicExpr.
-            dtype_tt = ptr.get_element_ty()
-            assert dtype_tt, f"dtype_tt of ptr not found! ptr content: {ptr}"
-
-            # Read bitwidth from dtype_tt, and then convert it to bytewidth.
-            element_bitwidth = dtype_tt.primitive_bitwidth
-            element_bytewidth = max(1, element_bitwidth // 8)
-
-            # convert ptr to SymbolicExpr
             ptr_sym = SymbolicExpr.from_value(ptr)
-
-            # convert offset to SymbolicExpr
             offset_sym = SymbolicExpr.from_value(offset)
-            element_bytewidth_sym = SymbolicExpr.from_value(element_bytewidth)
-
-            # calculate the new address, and store the dtype_tt information in its SymbolicExpr.
-            ret = ptr_sym + offset_sym * element_bytewidth_sym
-            ret.set_element_ty(dtype_tt)
-            return ret
+            return SymbolicExpr("addptr", ptr_sym, offset_sym)
 
         def op_dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
             a_sym = SymbolicExpr.from_value(a)
