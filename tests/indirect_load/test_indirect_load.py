@@ -53,7 +53,7 @@ def triple_indirect_load_kernel(
 
 def test_triple_indirect_load_inrange():
     N = 128
-    device = "cuda"
+    device = "cpu"
 
     src = torch.rand(N, device=device, dtype=torch.float32)
     idx2 = torch.randint(0, N, (N,), device=device, dtype=torch.int32)
@@ -93,7 +93,7 @@ def dual_offset_load_kernel(
 
 def test_dual_offset_load_inrange():
     N = 128
-    device = "cuda"
+    device = "cpu"
 
     src = torch.rand(N, device=device, dtype=torch.float32)
     # Generate indices so that a + b is always in-range (0 ≤ a + b < N)
