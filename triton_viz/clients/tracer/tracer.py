@@ -53,7 +53,7 @@ class Tracer(Client):
 
     def register_op_callback(
         self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable]]:
+    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):

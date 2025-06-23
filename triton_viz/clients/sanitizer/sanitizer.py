@@ -1,6 +1,5 @@
 import traceback
-from abc import ABC
-from typing import Tuple, Callable, Optional, Type
+from typing import Tuple, Callable, Optional, Type, Dict
 from collections import namedtuple
 
 import numpy as np
@@ -184,7 +183,46 @@ def _get_tensor(tensor_list, data_ptr):
     return tensor_list[ret_idx]
 
 
-class SanitizerBruteForce(Client):
+class Sanitizer(Client):
+    """
+    Factory class that returns the concrete sanitizer implementation
+    based on the value of ``cfg.sanitizer_backend``.
+    """
+
+    def __new__(cls, abort_on_error: bool = False):
+        if cls is not Sanitizer:
+            return super().__new__(cls)
+
+        backend = cfg.sanitizer_backend
+
+        if backend == "brute_force":
+            return SanitizerBruteForce(abort_on_error)
+
+        if backend == "symexec":
+            return SanitizerSymbolicExecution(abort_on_error)
+
+        if backend == "off":
+            return NullSanitizer(abort_on_error)
+
+        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
+
+    def arg_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def finalize(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def grid_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def grid_idx_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def register_op_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+
+class SanitizerBruteForce(Sanitizer):
     def __init__(
         self, callpath: Optional[bool] = True, abort_on_error: Optional[bool] = True
     ):
@@ -222,7 +260,7 @@ class SanitizerBruteForce(Client):
 
     def register_op_callback(
         self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable]]:
+    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -750,7 +788,7 @@ class ConstTupleExpr(SymbolicExpr):
         super().__init__("const", tuple(value))
 
 
-class SanitizerSymbolicExecution(Client):
+class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error):
         self.abort_on_error = abort_on_error
         self.grid = None
@@ -816,7 +854,7 @@ class SanitizerSymbolicExecution(Client):
 
     def register_op_callback(
         self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable]]:
+    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
@@ -1049,7 +1087,7 @@ class SanitizerSymbolicExecution(Client):
             src = SymbolicExpr.from_value(src)
             return src
 
-        OP_TYPE_TO_OVERRIDER = {
+        OP_TYPE_TO_OVERRIDER: Dict[Type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
             Load: op_load_overrider,
@@ -1082,7 +1120,7 @@ class SanitizerSymbolicExecution(Client):
         return []
 
 
-class NullSanitizer(Client):
+class NullSanitizer(Sanitizer):
     """
     A do-nothing object returned when the sanitizer backend is 'off'.
     Any attribute access raises an explicit error so misuse is obvious.
@@ -1114,29 +1152,3 @@ class NullSanitizer(Client):
 
     def __getattr__(self, name):
         self._disabled(name)
-
-
-class Sanitizer(ABC):
-    """
-    Factory class that returns the concrete sanitizer implementation
-    based on the value of ``cfg.sanitizer_backend``.
-    """
-
-    def __new__(cls, abort_on_error: bool = False):
-        backend = cfg.sanitizer_backend
-
-        if backend == "brute_force":
-            return SanitizerBruteForce(abort_on_error)
-
-        if backend == "symexec":
-            return SanitizerSymbolicExecution(abort_on_error)
-
-        if backend == "off":
-            return NullSanitizer(abort_on_error)
-
-        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
-
-
-Sanitizer.register(SanitizerBruteForce)
-Sanitizer.register(SanitizerSymbolicExecution)
-Sanitizer.register(NullSanitizer)
