@@ -189,20 +189,20 @@ class Sanitizer(Client):
     based on the value of ``cfg.sanitizer_backend``.
     """
 
-    def __new__(cls, abort_on_error: bool = False):
+    def __new__(cls, abort_on_error: bool = False, *args, **kwargs):
         if cls is not Sanitizer:
             return super().__new__(cls)
 
         backend = cfg.sanitizer_backend
 
         if backend == "brute_force":
-            return SanitizerBruteForce(abort_on_error)
+            return object.__new__(SanitizerBruteForce)
 
         if backend == "symexec":
-            return SanitizerSymbolicExecution(abort_on_error)
+            return object.__new__(SanitizerSymbolicExecution)
 
         if backend == "off":
-            return NullSanitizer(abort_on_error)
+            return object.__new__(NullSanitizer)
 
         raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
 
@@ -224,7 +224,9 @@ class Sanitizer(Client):
 
 class SanitizerBruteForce(Sanitizer):
     def __init__(
-        self, callpath: Optional[bool] = True, abort_on_error: Optional[bool] = True
+        self,
+        abort_on_error: bool,
+        callpath: Optional[bool] = True,
     ):
         self.callpath = callpath
         self.abort_on_error = abort_on_error
@@ -789,7 +791,7 @@ class ConstTupleExpr(SymbolicExpr):
 
 
 class SanitizerSymbolicExecution(Sanitizer):
-    def __init__(self, abort_on_error):
+    def __init__(self, abort_on_error: bool):
         self.abort_on_error = abort_on_error
         self.grid = None
         self.tensors = []
@@ -1126,7 +1128,7 @@ class NullSanitizer(Sanitizer):
     Any attribute access raises an explicit error so misuse is obvious.
     """
 
-    def __init__(self, abort_on_error):
+    def __init__(self, *args, **kwargs):
         pass
 
     def _disabled(self, method: str):
