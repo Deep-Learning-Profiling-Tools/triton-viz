@@ -1,7 +1,13 @@
 import os
 import sys
 import types
+from typing import TYPE_CHECKING, Literal, Tuple
 
+
+if TYPE_CHECKING:
+    sanitizer_backend: Literal["off", "brute_force", "symexec"]
+    report_grid_execution_progress: bool
+    available_backends: Tuple[str, ...]
 
 # Back-end options recognised by the sanitizer
 AVAILABLE_SANITIZER_BACKENDS = ("off", "brute_force", "symexec")

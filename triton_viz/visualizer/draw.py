@@ -21,7 +21,7 @@ from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, V2, 
 from dataclasses import dataclass
 from numpy.typing import ArrayLike
 from ..core.trace import Trace
-from ..clients.sanitizer.data import OutOfBoundsRecord
+from ..clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import sys
 
 sys.setrecursionlimit(100000)
@@ -99,7 +99,7 @@ def collect_launch(launch):
             last_grid = r
         program_records.append(r)
         if (
-            isinstance(r, (OutOfBoundsRecord))
+            isinstance(r, (OutOfBoundsRecordBruteForce))
             and (r.invalid_access_masks & r.op.masks).any()
         ):
             failures[last_grid.idx] = True
@@ -118,7 +118,7 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
             return draw_tensor(x)
         if isinstance(x, Grid):
             return draw_grid(x)
-        if isinstance(x, OutOfBoundsRecord):
+        if isinstance(x, OutOfBoundsRecordBruteForce):
             if isinstance(x.op, Load):
                 return draw_load(x, tensor_table)
             elif isinstance(x.op, Store):
@@ -253,7 +253,7 @@ def make_3d(shape):
 
 
 def store_load(
-    x: OutOfBoundsRecord, tensor_table: Dict[int, Tuple[Tensor, int]]
+    x: OutOfBoundsRecordBruteForce, tensor_table: Dict[int, Tuple[Tensor, int]]
 ) -> Tuple[Diagram, Diagram]:
     tensor, tensor_id = tensor_table[x.tensor.data_ptr]
     # inp = base_tensor(tensor.shape, DEFAULT)

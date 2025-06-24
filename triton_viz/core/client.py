@@ -25,7 +25,7 @@ class Client(ABC):
     @abstractmethod
     def register_op_callback(
         self, op: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable]]:
+    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
         pass
 
     @abstractmethod
