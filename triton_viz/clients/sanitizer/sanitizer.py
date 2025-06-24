@@ -191,6 +191,8 @@ class Sanitizer(Client):
     based on the value of ``cfg.sanitizer_backend``.
     """
 
+    NAME = "sanitizer"
+
     def __new__(cls, abort_on_error: bool = False, *args, **kwargs):
         if cls is not Sanitizer:
             return super().__new__(cls)

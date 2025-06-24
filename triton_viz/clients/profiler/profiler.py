@@ -7,6 +7,8 @@ import numpy as np
 
 
 class Profiler(Client):
+    NAME = "profiler"
+
     def __init__(self, callpath: bool = True):
         self.callpath = callpath
         self.load_bytes = LoadStoreBytes("load", 0, 0)

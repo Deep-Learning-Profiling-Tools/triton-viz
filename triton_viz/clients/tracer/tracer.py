@@ -17,6 +17,8 @@ def _convert_grid_idx(grid_idx) -> tuple[int, int, int] | None:
 
 
 class Tracer(Client):
+    NAME = "tracer"
+
     def __init__(
         self,
         callpath: bool = True,

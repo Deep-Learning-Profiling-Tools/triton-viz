@@ -29,8 +29,7 @@ class Trace(KernelInterface):
             raise TypeError(f"Expected str or Client, got {type(client)}")
 
     def add_client(self, new_client: str | Client) -> None:
-        new_client_instance = self._normalize_client(new_client)
-        self.client_manager.add_clients([new_client_instance])
+        self.client_manager.add_clients([self._normalize_client(new_client)])
 
     def __init__(
         self,
