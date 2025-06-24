@@ -50,7 +50,7 @@ def check_inner_stride_equal_to_one(tensor: torch.Tensor):
     return sorted(tensor.stride())[0] == 1
 
 
-def get_physical_addr_from_tensor_slice(tensor: torch.Tensor):
+def get_physical_addr_from_tensor_slice(tensor: torch.Tensor) -> list[tuple[int, int]]:
     if sorted(tensor.stride())[0] != 1:
         raise ValueError("inner dim must be contiguous!")
     dims = tensor.dim()

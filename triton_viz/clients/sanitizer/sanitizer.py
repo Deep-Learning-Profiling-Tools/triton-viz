@@ -1,10 +1,12 @@
 import traceback
-from typing import Tuple, Callable, Optional, Type, Dict
+from typing import Tuple, Callable, Optional, Type, Dict, List
 from collections import namedtuple
 
 import numpy as np
+from torch import Tensor
 from anytree import Node, RenderTree
 from z3 import Solver, Int, IntVal, If, Sum, And, Or, Not, sat, simplify
+from z3.z3 import BoolRef, ArithRef
 
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
@@ -225,12 +227,12 @@ class Sanitizer(Client):
 class SanitizerBruteForce(Sanitizer):
     def __init__(
         self,
-        abort_on_error: bool,
+        abort_on_error: bool = False,
         callpath: Optional[bool] = True,
     ):
         self.callpath = callpath
         self.abort_on_error = abort_on_error
-        self.tensors: list = []
+        self.tensors: List[Tensor] = []
         self.records: list = []
 
     def _report(self, op_type, record):
@@ -671,23 +673,25 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self):
+    def eval(self) -> Tuple[ArithRef, List]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression corresponding to the root node
         - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
         """
         self._arange_counter = 0  # Used to name arange variables
-        self._arange_dict = {}  # make sure each arange only has one name
-        self._vars = {}
-        self._constraints = []
+        self._arange_dict: Dict[
+            int, ArithRef
+        ] = {}  # make sure each arange only has one name
+        self._vars: Dict[str, ArithRef] = {}
+        self._constraints: List[BoolRef] = []
         expr = self._to_z3(self)
         if not self._constraints:
             assert expr.is_int(), "The address expression should be an integer"
             return simplify(expr).as_long()
         return expr, self._constraints
 
-    def _to_z3(self, node):
+    def _to_z3(self, node) -> ArithRef:
         # Recursively convert the current node to a Z3 expression
         if node.op == "const":
             return IntVal(node.value)
@@ -791,12 +795,12 @@ class ConstTupleExpr(SymbolicExpr):
 
 
 class SanitizerSymbolicExecution(Sanitizer):
-    def __init__(self, abort_on_error: bool):
+    def __init__(self, abort_on_error: bool = False):
         self.abort_on_error = abort_on_error
-        self.grid = None
-        self.tensors = []
-        self.constraints = []
-        self.tensor_addrs = []
+        self.grid: Optional[Tuple[int, ...]]
+        self.tensors: List[Tensor] = []
+        self.constraints: List[BoolRef] = []
+        self.tensor_addrs: List[Tuple[Int, Int]] = []
         self.unique_load_store_id = 0
 
     def _check_range_satisfiable(self, access_addr, expr_constraints):
@@ -848,7 +852,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.tensors.append(arg)
         self.tensor_addrs.extend(tensor_physical_addresses)
 
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: Tuple[int]) -> None:
         self.grid = tuple(int(g) for g in grid)
 
     def grid_idx_callback(self, grid_idx: Tuple[int]):
@@ -1137,19 +1141,19 @@ class NullSanitizer(Sanitizer):
             "but sanitizer backend is off; no functionality is available."
         )
 
-    def arg_callback(self, *a, **k):
+    def arg_callback(self, *args, **kwargs):
         self._disabled("arg_callback")
 
-    def finalize(self, *a, **k):
+    def finalize(self, *args, **kwargs):
         self._disabled("finalize")
 
-    def grid_callback(self, *a, **k):
+    def grid_callback(self, *args, **kwargs):
         self._disabled("grid_callback")
 
-    def grid_idx_callback(self, *a, **k):
+    def grid_idx_callback(self, *args, **kwargs):
         self._disabled("grid_idx_callback")
 
-    def register_op_callback(self, *a, **k):
+    def register_op_callback(self, *args, **kwargs):
         self._disabled("register_op_callback")
 
     def __getattr__(self, name):
