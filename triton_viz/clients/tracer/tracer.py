@@ -1,10 +1,10 @@
 from ...core.client import Client
 from ...core.data import Op, Load, Store, ReduceSum, Dot
-from typing import Tuple, Callable, Optional, Type, Union
+from collections.abc import Callable
 import numpy as np
 
 
-def _convert_grid_idx(grid_idx) -> Optional[Tuple[int, int, int]]:
+def _convert_grid_idx(grid_idx) -> tuple[int, int, int] | None:
     if grid_idx is None:
         return grid_idx
 
@@ -19,8 +19,8 @@ def _convert_grid_idx(grid_idx) -> Optional[Tuple[int, int, int]]:
 class Tracer(Client):
     def __init__(
         self,
-        callpath: Optional[bool] = True,
-        grid_idx: Optional[Union[Tuple[int], int]] = None,
+        callpath: bool = True,
+        grid_idx: tuple[int] | int | None = None,
     ):
         self.callpath = callpath
         self.grid_idx = _convert_grid_idx(grid_idx)
@@ -42,18 +42,18 @@ class Tracer(Client):
         if hasattr(arg, "data_ptr"):
             self.tensors.append(arg)
 
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         if self.grid_idx is not None and grid_idx != self.grid_idx:
             self.sample = False
         else:
             self.sample = True
 
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(
-        self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+        self, op_type: type[Op]
+    ) -> tuple[Callable | None, Callable | None, Callable | None]:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):

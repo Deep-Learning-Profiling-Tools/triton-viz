@@ -1,6 +1,6 @@
 import traceback
-from typing import Tuple, Callable, Optional, Type, Dict, List
 from collections import namedtuple
+from collections.abc import Callable
 
 import numpy as np
 from torch import Tensor
@@ -228,11 +228,11 @@ class SanitizerBruteForce(Sanitizer):
     def __init__(
         self,
         abort_on_error: bool = False,
-        callpath: Optional[bool] = True,
+        callpath: bool = True,
     ):
         self.callpath = callpath
         self.abort_on_error = abort_on_error
-        self.tensors: List[Tensor] = []
+        self.tensors: list[Tensor] = []
         self.records: list = []
 
     def _report(self, op_type, record):
@@ -256,15 +256,15 @@ class SanitizerBruteForce(Sanitizer):
             ), "The address sanitizer only supports contiguouly stored tensors for now"
             self.tensors.append(arg)
 
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
 
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(
-        self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+        self, op_type: type[Op]
+    ) -> tuple[Callable | None, Callable | None, Callable | None]:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -712,18 +712,18 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> Tuple[ArithRef, List]:
+    def eval(self) -> tuple[ArithRef, list]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression corresponding to the root node
         - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
         """
         self._arange_counter = 0  # Used to name arange variables
-        self._arange_dict: Dict[
+        self._arange_dict: dict[
             int, ArithRef
         ] = {}  # make sure each arange only has one name
-        self._vars: Dict[str, ArithRef] = {}
-        self._constraints: List[BoolRef] = []
+        self._vars: dict[str, ArithRef] = {}
+        self._constraints: list[BoolRef] = []
         expr = self._to_z3(self)
         if not self._constraints:
             assert expr.is_int(), "The address expression should be an integer"
@@ -865,8 +865,8 @@ class SymbolicExpr:
                 )
         return v
 
-    _concrete_fn_cache = {}
-    _binary_numpy_op_cache = {}
+    _concrete_fn_cache: dict[str, Callable] = {}
+    _binary_numpy_op_cache: dict[str, Callable] = {}
 
     @property
     def concrete_fn(self):
@@ -1009,19 +1009,15 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     return expr
 
 
-class ConstTupleExpr(SymbolicExpr):
-    def __init__(self, value):
-        super().__init__("const", tuple(value))
-
-
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
         self.abort_on_error = abort_on_error
-        self.grid: Optional[Tuple[int, ...]]
-        self.tensors: List[Tensor] = []
-        self.constraints: List[BoolRef] = []
-        self.tensor_addrs: List[Tuple[Int, Int]] = []
+        self.grid: tuple[int, ...] | None
+        self.tensors: list[Tensor] = []
+        self.constraints: list[BoolRef] = []
+        self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id = 0
+
 
     def _check_range_satisfiable(self, access_addr, expr_constraints):
         out_of_bound_constraint = Not(
@@ -1072,15 +1068,15 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.tensors.append(arg)
         self.tensor_addrs.extend(tensor_physical_addresses)
 
-    def grid_callback(self, grid: Tuple[int]) -> None:
+    def grid_callback(self, grid: tuple[int]) -> None:
         self.grid = tuple(int(g) for g in grid)
 
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
 
     def register_op_callback(
-        self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+        self, op_type: type[Op]
+    ) -> tuple[Callable | None, Callable | None, Callable | None]:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
@@ -1296,7 +1292,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         def op_cast_impl_overrider(src, dst_type):
             return SymbolicExpr("cast_impl", src, dst_type)
 
-        OP_TYPE_TO_OVERRIDER: Dict[Type[Op], Callable] = {
+        OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
             Load: op_load_overrider,

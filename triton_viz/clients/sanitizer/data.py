@@ -1,7 +1,6 @@
 from ...core.data import Store, Load
 import numpy as np
 from numpy.typing import NDArray
-from typing import Type, Union, List
 from dataclasses import dataclass
 import torch
 import z3
@@ -17,9 +16,9 @@ class TracebackInfo:
 
 @dataclass
 class OutOfBoundsRecord:
-    op_type: Type[Union[Store, Load]]
+    op_type: type[Store | Load]
     tensor: torch.Tensor
-    user_code_tracebacks: List[TracebackInfo]
+    user_code_tracebacks: list[TracebackInfo]
 
 
 @dataclass
@@ -35,7 +34,7 @@ class OutOfBoundsRecordBruteForce(OutOfBoundsRecord):
 class OutOfBoundsRecordZ3(OutOfBoundsRecord):
     """
     Attributes:
-        constraints (List[z3.z3.BoolRef]):
+        constraints (list[z3.z3.BoolRef]):
             A collection of Z3 constraint expressions defining valid ranges
             for memory access. Any address falling outside these ranges is considered invalid.
 
@@ -53,5 +52,5 @@ class OutOfBoundsRecordZ3(OutOfBoundsRecord):
             falls outside the valid ranges described by these constraints.
     """
 
-    constraints: List[z3.z3.BoolRef]
+    constraints: list[z3.z3.BoolRef]
     violation_address: int

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from .data import Op, Launch
 from .patch import patch_op, unpatch_op, op_list, patch_calls
-from typing import Tuple, Callable, Type, Optional, List
+from collections.abc import Callable
 
 
 class Client(ABC):
@@ -15,17 +15,17 @@ class Client(ABC):
         pass
 
     @abstractmethod
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: tuple[int]):
         pass
 
     @abstractmethod
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
 
     @abstractmethod
     def register_op_callback(
-        self, op: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+        self, op: type[Op]
+    ) -> tuple[Callable | None, Callable | None, Callable | None]:
         pass
 
     @abstractmethod
@@ -34,11 +34,11 @@ class Client(ABC):
 
 
 class ClientManager:
-    def __init__(self, clients: Optional[List[Client]] = None):
+    def __init__(self, clients: list[Client] | None = None):
         self.clients = clients if clients is not None else []
         self.launch = Launch()
 
-    def add_clients(self, new_clients: List[Client]) -> None:
+    def add_clients(self, new_clients: list[Client]) -> None:
         for new_client in new_clients:
             duplicate = any(
                 isinstance(existing_client, new_client.__class__)
@@ -75,11 +75,11 @@ class ClientManager:
         for client in self.clients:
             client.arg_callback(arg, arg_cvt)
 
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: tuple[int]):
         self.launch.grid = grid
         for client in self.clients:
             client.grid_callback(grid)
 
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         for client in self.clients:
             client.grid_idx_callback(grid_idx)

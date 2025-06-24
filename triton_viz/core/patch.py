@@ -1,6 +1,6 @@
 import triton.language as tl
 from contextlib import contextmanager
-from typing import Callable, Type, Dict
+from collections.abc import Callable
 from tqdm import tqdm
 
 from . import config as cfg
@@ -86,7 +86,7 @@ original_ops = {
     Rsqrt: interpreter_builder.create_rsqrt,
     CastImpl: interpreter_builder.cast_impl,
 }
-reduce_map: Dict[Type[Op], Callable] = {
+reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
     ReduceMin: tl.min,
     ReduceSum: tl.sum,
@@ -128,7 +128,7 @@ class PatchOp:
 
 
 def patch_op(
-    op_type: Type[Op],
+    op_type: type[Op],
     before_callback: Callable,
     after_callback: Callable,
     op_overrider: Callable,
@@ -163,7 +163,7 @@ def patch_op(
         raise ValueError(f"Patching operator {op_type} not supported")
 
 
-def unpatch_op(op_type: Type[Op]):
+def unpatch_op(op_type: type[Op]):
     """
     Unregister a callback for an operator.
 

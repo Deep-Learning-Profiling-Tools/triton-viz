@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple, ClassVar, Optional, Any
+from typing import ClassVar
 import traceback
 import numpy.typing as npt
 import numpy as np
@@ -15,7 +15,7 @@ TRITON_FRAMES = [
 @dataclass
 class Op:
     name: ClassVar[str] = "op"
-    call_path: List[traceback.StackSummary] = field(init=False, default_factory=list)
+    call_path: list[traceback.StackSummary] = field(init=False, default_factory=list)
 
     def __post_init__(self):
         self.call_path = traceback.extract_stack()[:-2]
@@ -68,8 +68,8 @@ class UnaryOp(Op):
 class BinaryOp(Op):
     name: ClassVar[str] = "binary_op"
     op: str
-    input_shape: Tuple
-    output_shape: Tuple
+    input_shape: tuple
+    output_shape: tuple
 
 
 @dataclass
@@ -80,9 +80,9 @@ class TernaryOp(Op):
 @dataclass
 class Dot(Op):
     name: ClassVar[str] = "dot"
-    input_shape: Tuple
-    other_shape: Tuple
-    output_shape: Tuple
+    input_shape: tuple
+    other_shape: tuple
+    output_shape: tuple
 
 
 @dataclass
@@ -100,9 +100,9 @@ class AddPtr(Op):
 @dataclass
 class ExpandDims(Op):
     name: ClassVar[str] = "expand_dims"
-    input_shape: Tuple
+    input_shape: tuple
     index: int
-    output_shape: Tuple
+    output_shape: tuple
 
 
 @dataclass
@@ -113,10 +113,10 @@ class Broadcast(Op):
 @dataclass
 class Reduce(Op):
     name: ClassVar[str] = "reduce"
-    input_shape: Tuple
+    input_shape: tuple
     index: int
     keep_dims: bool
-    output_shape: Tuple
+    output_shape: tuple
 
 
 @dataclass
@@ -177,18 +177,18 @@ class CastImpl(Op):
 class Tensor:
     ptr: int
     dtype: str
-    stride: Tuple
-    shape: Tuple
+    stride: tuple
+    shape: tuple
     element_size: int
 
 
 @dataclass
 class Grid:
-    idx: Tuple
+    idx: tuple
 
 
 @dataclass
 class Launch:
-    grid: Optional[Tuple] = None
-    tensors: List[Tensor] = field(default_factory=list)
-    records: List[Any] = field(default_factory=list)
+    grid: tuple | None = None
+    tensors: list[Tensor] = field(default_factory=list)
+    records: list = field(default_factory=list)

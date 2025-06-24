@@ -1,13 +1,13 @@
 from ...core.client import Client
 from ...core.data import Op, Load, Store
 from .data import LoadStoreBytes
-from typing import Tuple, Callable, Optional, Type
+from collections.abc import Callable
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
 
 
 class Profiler(Client):
-    def __init__(self, callpath: Optional[bool] = True):
+    def __init__(self, callpath: bool = True):
         self.callpath = callpath
         self.load_bytes = LoadStoreBytes("load", 0, 0)
         self.store_bytes = LoadStoreBytes("store", 0, 0)
@@ -15,10 +15,10 @@ class Profiler(Client):
     def arg_callback(self, arg, arg_cvt):
         pass
 
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
 
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: tuple[int]):
         pass
 
     def _report_load_store_bytes(self, type, ptr: TensorHandle, mask: TensorHandle):
@@ -36,8 +36,8 @@ class Profiler(Client):
             self.store_bytes.total_bytes_true += total_bytes_true
 
     def register_op_callback(
-        self, op: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+        self, op: type[Op]
+    ) -> tuple[Callable | None, Callable | None, Callable | None]:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
