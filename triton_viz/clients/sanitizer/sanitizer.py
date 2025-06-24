@@ -1,11 +1,12 @@
 import traceback
-from abc import ABC
-from typing import Tuple, Callable, Optional, Type
+from typing import Tuple, Callable, Optional, Type, Dict, List
 from collections import namedtuple
 
 import numpy as np
+from torch import Tensor
 from anytree import Node, RenderTree
 from z3 import Solver, Int, IntVal, If, Sum, And, Or, Not, sat, simplify
+from z3.z3 import BoolRef, ArithRef
 
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
@@ -184,13 +185,54 @@ def _get_tensor(tensor_list, data_ptr):
     return tensor_list[ret_idx]
 
 
-class SanitizerBruteForce(Client):
+class Sanitizer(Client):
+    """
+    Factory class that returns the concrete sanitizer implementation
+    based on the value of ``cfg.sanitizer_backend``.
+    """
+
+    def __new__(cls, abort_on_error: bool = False, *args, **kwargs):
+        if cls is not Sanitizer:
+            return super().__new__(cls)
+
+        backend = cfg.sanitizer_backend
+
+        if backend == "brute_force":
+            return object.__new__(SanitizerBruteForce)
+
+        if backend == "symexec":
+            return object.__new__(SanitizerSymbolicExecution)
+
+        if backend == "off":
+            return object.__new__(NullSanitizer)
+
+        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
+
+    def arg_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def finalize(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def grid_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def grid_idx_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def register_op_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+
+class SanitizerBruteForce(Sanitizer):
     def __init__(
-        self, callpath: Optional[bool] = True, abort_on_error: Optional[bool] = True
+        self,
+        abort_on_error: bool = False,
+        callpath: Optional[bool] = True,
     ):
         self.callpath = callpath
         self.abort_on_error = abort_on_error
-        self.tensors: list = []
+        self.tensors: List[Tensor] = []
         self.records: list = []
 
     def _report(self, op_type, record):
@@ -222,7 +264,7 @@ class SanitizerBruteForce(Client):
 
     def register_op_callback(
         self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable]]:
+    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -670,23 +712,25 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self):
+    def eval(self) -> Tuple[ArithRef, List]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression corresponding to the root node
         - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
         """
         self._arange_counter = 0  # Used to name arange variables
-        self._arange_dict = {}  # make sure each arange only has one name
-        self._vars = {}
-        self._constraints = []
+        self._arange_dict: Dict[
+            int, ArithRef
+        ] = {}  # make sure each arange only has one name
+        self._vars: Dict[str, ArithRef] = {}
+        self._constraints: List[BoolRef] = []
         expr = self._to_z3(self)
         if not self._constraints:
             assert expr.is_int(), "The address expression should be an integer"
             return simplify(expr).as_long()
         return expr, self._constraints
 
-    def _to_z3(self, node):
+    def _to_z3(self, node) -> ArithRef:
         # Recursively convert the current node to a Z3 expression
         if node.op == "const":
             return IntVal(node.value)
@@ -970,13 +1014,13 @@ class ConstTupleExpr(SymbolicExpr):
         super().__init__("const", tuple(value))
 
 
-class SanitizerSymbolicExecution(Client):
-    def __init__(self, abort_on_error):
+class SanitizerSymbolicExecution(Sanitizer):
+    def __init__(self, abort_on_error: bool = False):
         self.abort_on_error = abort_on_error
-        self.grid = None
-        self.tensors = []
-        self.constraints = []
-        self.tensor_addrs = []
+        self.grid: Optional[Tuple[int, ...]]
+        self.tensors: List[Tensor] = []
+        self.constraints: List[BoolRef] = []
+        self.tensor_addrs: List[Tuple[Int, Int]] = []
         self.unique_load_store_id = 0
 
     def _check_range_satisfiable(self, access_addr, expr_constraints):
@@ -1028,7 +1072,7 @@ class SanitizerSymbolicExecution(Client):
         self.tensors.append(arg)
         self.tensor_addrs.extend(tensor_physical_addresses)
 
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: Tuple[int]) -> None:
         self.grid = tuple(int(g) for g in grid)
 
     def grid_idx_callback(self, grid_idx: Tuple[int]):
@@ -1036,7 +1080,7 @@ class SanitizerSymbolicExecution(Client):
 
     def register_op_callback(
         self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable]]:
+    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
@@ -1252,7 +1296,7 @@ class SanitizerSymbolicExecution(Client):
         def op_cast_impl_overrider(src, dst_type):
             return SymbolicExpr("cast_impl", src, dst_type)
 
-        OP_TYPE_TO_OVERRIDER = {
+        OP_TYPE_TO_OVERRIDER: Dict[Type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
             Load: op_load_overrider,
@@ -1285,13 +1329,13 @@ class SanitizerSymbolicExecution(Client):
         return []
 
 
-class NullSanitizer(Client):
+class NullSanitizer(Sanitizer):
     """
     A do-nothing object returned when the sanitizer backend is 'off'.
     Any attribute access raises an explicit error so misuse is obvious.
     """
 
-    def __init__(self, abort_on_error):
+    def __init__(self, *args, **kwargs):
         pass
 
     def _disabled(self, method: str):
@@ -1300,46 +1344,20 @@ class NullSanitizer(Client):
             "but sanitizer backend is off; no functionality is available."
         )
 
-    def arg_callback(self, *a, **k):
+    def arg_callback(self, *args, **kwargs):
         self._disabled("arg_callback")
 
-    def finalize(self, *a, **k):
+    def finalize(self, *args, **kwargs):
         self._disabled("finalize")
 
-    def grid_callback(self, *a, **k):
+    def grid_callback(self, *args, **kwargs):
         self._disabled("grid_callback")
 
-    def grid_idx_callback(self, *a, **k):
+    def grid_idx_callback(self, *args, **kwargs):
         self._disabled("grid_idx_callback")
 
-    def register_op_callback(self, *a, **k):
+    def register_op_callback(self, *args, **kwargs):
         self._disabled("register_op_callback")
 
     def __getattr__(self, name):
         self._disabled(name)
-
-
-class Sanitizer(ABC):
-    """
-    Factory class that returns the concrete sanitizer implementation
-    based on the value of ``cfg.sanitizer_backend``.
-    """
-
-    def __new__(cls, abort_on_error: bool = False):
-        backend = cfg.sanitizer_backend
-
-        if backend == "brute_force":
-            return SanitizerBruteForce(abort_on_error)
-
-        if backend == "symexec":
-            return SanitizerSymbolicExecution(abort_on_error)
-
-        if backend == "off":
-            return NullSanitizer(abort_on_error)
-
-        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
-
-
-Sanitizer.register(SanitizerBruteForce)
-Sanitizer.register(SanitizerSymbolicExecution)
-Sanitizer.register(NullSanitizer)

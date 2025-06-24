@@ -36,11 +36,11 @@ jobs:
       with:
         python-version: '3.10'
 
-    # - name: Lint with pre-commit
-    #   run: |
-    #     cd triton_viz
-    #     pip install pre-commit
-    #     pre-commit run --all-files
+    - name: Lint with pre-commit
+      run: |
+        cd triton_viz
+        pip install pre-commit
+        pre-commit run --all-files
 
     - name: Install Dependencies
       if: steps.cache-pip.outputs.cache-hit != 'true'
