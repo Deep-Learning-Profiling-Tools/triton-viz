@@ -4,7 +4,9 @@ import triton.language as tl
 
 def test_addptr_expr_eval():
     base = SymbolicExpr.from_value(1000)  # Synthetic base address
-    base.dtype_tt = tl.pointer_type(tl.int32)  # Simulate a pointer type, int32 = 4 bytes
+    base.dtype_tt = tl.pointer_type(
+        tl.int32
+    )  # Simulate a pointer type, int32 = 4 bytes
     offset = SymbolicExpr.from_value(3)
     expr = SymbolicExpr("addptr", base, offset)
     print(expr)
