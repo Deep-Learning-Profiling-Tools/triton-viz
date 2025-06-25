@@ -15,7 +15,7 @@ def _sum_offsets_from_addptr(expr):
 
     cur = expr
     while cur.op == "addptr":
-        off = cur.offsets
+        off = cur.offset
         if off.op != "const":  # If any offset is not constant, we cannot sum it.
             non_const_offset = off
             break

@@ -317,7 +317,7 @@ class SymbolicExprDataWrapper:
         return 2
 
     def __int__(self):
-        int_val = self.symbolic_expr.eval()
+        int_val, _ = self.symbolic_expr.eval()
         if not isinstance(int_val, int):
             raise ValueError(
                 f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int"
@@ -489,7 +489,7 @@ class SymbolicExpr:
         "make_block_ptr": Spec(
             req=("base", "shape", "strides", "offsets", "block_shape", "order")
         ),
-        "addptr": Spec(req=("ptr", "offsets"), post=_addptr_post),
+        "addptr": Spec(req=("ptr", "offset"), post=_addptr_post),
         # Broadcasting / shape manipulation
         "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
@@ -714,7 +714,7 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> tuple[ArithRef, list]:
+    def eval(self) -> tuple[ArithRef | list[ArithRef], list[BoolRef]]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression corresponding to the root node
@@ -727,14 +727,19 @@ class SymbolicExpr:
         self._vars: dict[str, ArithRef] = {}
         self._constraints: list[BoolRef] = []
         expr = self._to_z3(self)
-        if not self._constraints:
-            assert expr.is_int(), "The address expression should be an integer"
-            return simplify(expr).as_long()
+
+        if isinstance(expr, list):
+            expr = [simplify(e).as_long() for e in expr]
+        else:
+            expr = simplify(expr)
+
         return expr, self._constraints
 
-    def _to_z3(self, node) -> ArithRef:
+    def _to_z3(self, node: "SymbolicExpr") -> ArithRef:
         # Recursively convert the current node to a Z3 expression
         if node.op == "const":
+            if isinstance(node.value, np.ndarray):
+                return [IntVal(int(v)) for v in node.value.flat]
             return IntVal(node.value)
 
         if node.op == "pid":
@@ -828,11 +833,14 @@ class SymbolicExpr:
         if node.op == "addptr":
             # Add pointer operation
             ptr_z3 = self._to_z3(node.ptr)
-            offsets_z3 = self._to_z3(node.offsets)
+            offset_z3 = self._to_z3(node.offset)
             element_bytewidth = max(
                 1, node.ptr.dtype_tt.element_ty.primitive_bitwidth // 8
             )
-            return ptr_z3 + offsets_z3 * element_bytewidth
+            if isinstance(offset_z3, list):
+                return [ptr_z3 + o * element_bytewidth for o in offset_z3]
+            else:
+                return ptr_z3 + offset_z3 * element_bytewidth
 
         # Other operations can be implemented as needed
         raise NotImplementedError(f"Eval for op {node.op} is not implemented")
@@ -1013,15 +1021,25 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
 
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
-        self.abort_on_error = abort_on_error
+        self.abort_on_error: bool = abort_on_error
+        self.records: list[OutOfBoundsRecordZ3] = []
         self.grid: tuple[int, ...] | None
         self.tensors: list[Tensor] = []
         self.constraints: list[BoolRef] = []
         self.tensor_addrs: list[tuple[Int, Int]] = []
-        self.unique_load_store_id = 0
-        self.need_full_grid = False
+        self.unique_load_store_id: int = 0
+        self.need_full_grid: bool = False
 
-    def _check_range_satisfiable(self, access_addr, expr_constraints):
+    def _check_range_satisfiable(
+        self,
+        access_addr: int | list[int] | ArithRef | list[ArithRef],
+        expr_constraints: list,
+    ):
+        if isinstance(access_addr, list):
+            for addr in access_addr:
+                self._check_range_satisfiable(addr, expr_constraints)
+            return
+
         out_of_bound_constraint = Not(
             Or(
                 *(
@@ -1111,13 +1129,8 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("load", ptr_sym, mask, other)
 
             # check memory access using z3
-            # ret_eval = ret.eval()
-            # if isinstance(ret_eval, int):
-            #     self._check_range_satisfiable(ret_eval, [])
-            # elif isinstance(ret_eval, tuple):
-            #     self._check_range_satisfiable(*ret_eval)
-            # else:
-            #     raise ValueError(f"Unsupported ret_eval type: {type(ret_eval)}")
+            ret_eval, ret_constraints = ret.eval()
+            self._check_range_satisfiable(ret_eval, ret_constraints)
 
             return ret
 
@@ -1144,13 +1157,8 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("store", ptr_sym, value, mask)
 
             # check memory access using z3
-            # ret_eval = ret.eval()
-            # if isinstance(ret_eval, int):
-            #     self._check_range_satisfiable(ret_eval, [])
-            # elif isinstance(ret_eval, tuple):
-            #     self._check_range_satisfiable(*ret_eval)
-            # else:
-            #     raise ValueError(f"Unsupported ret_eval type: {type(ret_eval)}")
+            ret_eval, ret_constraints = ret.eval()
+            self._check_range_satisfiable(ret_eval, ret_constraints)
 
             return ret
 
