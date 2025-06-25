@@ -1109,13 +1109,14 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("load", ptr_sym, mask, other)
 
             # check memory access using z3
-            ret_eval = ret.eval()
-            if isinstance(ret_eval, int):
-                self._check_range_satisfiable(ret_eval, [])
-            elif isinstance(ret_eval, tuple):
-                self._check_range_satisfiable(*ret_eval)
-            else:
-                raise ValueError(f"Unsupported ret_eval type: {type(ret_eval)}")
+            # ret_eval = ret.eval()
+            # if isinstance(ret_eval, int):
+            #     self._check_range_satisfiable(ret_eval, [])
+            # elif isinstance(ret_eval, tuple):
+            #     self._check_range_satisfiable(*ret_eval)
+            # else:
+            #     raise ValueError(f"Unsupported ret_eval type: {type(ret_eval)}")
+
             return ret
 
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
@@ -1139,13 +1140,14 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("store", ptr_sym, value, mask)
 
             # check memory access using z3
-            ret_eval = ret.eval()
-            if isinstance(ret_eval, int):
-                self._check_range_satisfiable(ret_eval, [])
-            elif isinstance(ret_eval, tuple):
-                self._check_range_satisfiable(*ret_eval)
-            else:
-                raise ValueError(f"Unsupported ret_eval type: {type(ret_eval)}")
+            # ret_eval = ret.eval()
+            # if isinstance(ret_eval, int):
+            #     self._check_range_satisfiable(ret_eval, [])
+            # elif isinstance(ret_eval, tuple):
+            #     self._check_range_satisfiable(*ret_eval)
+            # else:
+            #     raise ValueError(f"Unsupported ret_eval type: {type(ret_eval)}")
+
             return ret
 
         def op_unary_op_overrider(arg, op):
