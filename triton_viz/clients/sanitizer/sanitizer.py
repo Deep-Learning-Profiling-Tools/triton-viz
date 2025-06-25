@@ -1097,7 +1097,9 @@ class SanitizerSymbolicExecution(Sanitizer):
                 replace_load_subtree(ptr)
 
             # make sure ptr dtype is valid
-            if isinstance(ptr, TensorHandle) and not isinstance(ptr.dtype, tl.pointer_type):
+            if isinstance(ptr, TensorHandle) and not isinstance(
+                ptr.dtype, tl.pointer_type
+            ):
                 raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
             ptr_sym = SymbolicExpr.from_value(ptr)
 
@@ -1129,7 +1131,9 @@ class SanitizerSymbolicExecution(Sanitizer):
                 replace_load_subtree(ptr)
 
             # make sure ptr is a SymbolicExpr
-            if isinstance(ptr, TensorHandle) and not isinstance(ptr.dtype, tl.pointer_type):
+            if isinstance(ptr, TensorHandle) and not isinstance(
+                ptr.dtype, tl.pointer_type
+            ):
                 raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
             ptr_sym = SymbolicExpr.from_value(ptr)
 

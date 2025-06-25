@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import Sanitizer, Profiler, Tracer
+from triton_viz.clients import Sanitizer
 from triton_viz import config as cfg
 
 
@@ -42,6 +42,6 @@ def test_trace_decorator_add_clients():
     # Verify client de-duplication and addition logic
     clients = my_kernel.client_manager.clients
     assert len(clients) == 3
-    assert sum(c == 'sanitizer' for c in clients) == 1
-    assert sum(c == 'profiler' for c in clients) == 1
-    assert sum(c == 'tracer' for c in clients) == 1
+    assert sum(c == "sanitizer" for c in clients) == 1
+    assert sum(c == "profiler" for c in clients) == 1
+    assert sum(c == "tracer" for c in clients) == 1
