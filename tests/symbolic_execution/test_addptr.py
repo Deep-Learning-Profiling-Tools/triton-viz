@@ -9,8 +9,7 @@ def test_addptr_expr_eval():
     )  # Simulate a pointer type, int32 = 4 bytes
     offset = SymbolicExpr.from_value(3)
     expr = SymbolicExpr("addptr", base, offset)
-    print(expr)
-    assert expr.eval() == 1000 + 3 * 4
+    assert expr.eval()[0] == 1000 + 3 * 4
 
 
 # def test_addptr_overrider():
