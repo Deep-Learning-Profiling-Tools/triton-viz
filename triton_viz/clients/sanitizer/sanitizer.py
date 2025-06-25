@@ -1122,6 +1122,11 @@ class SanitizerSymbolicExecution(Sanitizer):
             return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
 
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
+            # deal with indirect loads
+            if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
+                self.need_full_grid = True
+                replace_load_subtree(ptr)
+
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and not isinstance(ptr.dtype, tl.pointer_type):
                 raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
