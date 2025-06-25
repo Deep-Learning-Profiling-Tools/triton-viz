@@ -42,6 +42,6 @@ def test_trace_decorator_add_clients():
     # Verify client de-duplication and addition logic
     clients = my_kernel.client_manager.clients
     assert len(clients) == 3
-    assert sum(isinstance(c, Sanitizer) for c in clients) == 1
-    assert sum(isinstance(c, Profiler) for c in clients) == 1
-    assert sum(isinstance(c, Tracer) for c in clients) == 1
+    assert sum(c == 'sanitizer' for c in clients) == 1
+    assert sum(c == 'profiler' for c in clients) == 1
+    assert sum(c == 'tracer' for c in clients) == 1
