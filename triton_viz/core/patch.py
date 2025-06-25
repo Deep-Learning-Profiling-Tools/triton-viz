@@ -197,7 +197,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
 
-    def run_grid_loops():
+    def run_grid_loops(grid):
         for x in tqdm(
             range(grid[0]),
             desc="Grid X",
@@ -220,7 +220,10 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     client_manager.grid_idx_callback((x, y, z))
                     self.fn(**call_args)
                     # if symbolic execution, only do one iteration
-                    if cfg.sanitizer_backend == "symexec":
+                    if (
+                        cfg.sanitizer_backend == "symexec"
+                        and not client_manager.get_client("sanitizer").need_full_grid
+                    ):
                         return
 
     # Removes not used reserved keywords from kwargs
@@ -252,7 +255,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
-    run_grid_loops()
+    run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
     _unpatch_lang()

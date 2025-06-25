@@ -3,14 +3,15 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import Sanitizer
 from triton_viz import config as cfg
+
+from utils import CaptureSanitizer
 
 
 cfg.sanitizer_backend = "symexec"
 
 
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+@triton_viz.trace(clients=(san1 := CaptureSanitizer(abort_on_error=True)))
 @triton.jit
 def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -30,8 +31,16 @@ def test_indirect_load():
     grid = lambda META: (triton.cdiv(128, META["BLOCK_SIZE"]),)
     indirect_load_kernel[grid](idx, src, dst, BLOCK_SIZE=32)
 
+    expected_offsets = idx.cpu().numpy().tolist()  # Ground truth
+    observed_offsets = [
+        x for sublist in san1.observed_offsets for x in sublist
+    ]  # Flatten the list of lists
+    assert (
+        expected_offsets == observed_offsets
+    ), "Observed offsets do not match expected offsets."
 
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+
+@triton_viz.trace(clients=(san2 := CaptureSanitizer(abort_on_error=True)))
 @triton.jit
 def triple_indirect_load_kernel(
     idx1_ptr,  # int32*
@@ -51,7 +60,7 @@ def triple_indirect_load_kernel(
     tl.store(dst_ptr + offsets, out_val)
 
 
-def test_triple_indirect_load_inrange():
+def test_triple_indirect_load():
     N = 128
     device = "cpu"
 
@@ -70,8 +79,16 @@ def test_triple_indirect_load_inrange():
         BLOCK_SIZE=32,
     )
 
+    expected_offsets = idx2[idx1].cpu().numpy().tolist()  # Ground Truth
+    observed_offsets = [
+        x for sublist in san2.observed_offsets for x in sublist
+    ]  # Flatten the list of lists
+    assert (
+        expected_offsets == observed_offsets
+    ), "Observed offsets do not match expected offsets."
 
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+
+@triton_viz.trace(clients=(san3 := CaptureSanitizer(abort_on_error=True)))
 @triton.jit
 def dual_offset_load_kernel(
     idx_a_ptr,  # int32*
@@ -91,7 +108,7 @@ def dual_offset_load_kernel(
     tl.store(dst_ptr + offsets, out_val)
 
 
-def test_dual_offset_load_inrange():
+def test_dual_offset_load():
     N = 128
     device = "cpu"
 
@@ -110,17 +127,10 @@ def test_dual_offset_load_inrange():
         BLOCK_SIZE=32,
     )
 
-
-# def test_indirect_load_out_of_bound():
-#     """
-#     This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
-#     It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
-#     """
-#     x = torch.arange(128, device="cuda", dtype=torch.int32)
-#     out = torch.empty_like(x)
-
-#     # The kernel launch uses n_elements=256, which exceeds the size of x.
-#     grid = lambda META: (triton.cdiv(256, META["BLOCK_SIZE"]),)
-#     indirect_load_kernel[grid](x_ptr=x, out_ptr=out, n_elements=256)
-
-#     print("test_indirect_load_out_of_bound() passed: Out-of-bound access detected.")
+    expected_offsets = (idx_a + idx_b).cpu().numpy().tolist()  # Ground Truth
+    observed_offsets = [
+        x for sublist in san3.observed_offsets for x in sublist
+    ]  # Flatten the list of lists
+    assert (
+        expected_offsets == observed_offsets
+    ), "Observed offsets do not match expected offsets."

@@ -1019,7 +1019,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.constraints: list[BoolRef] = []
         self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id = 0
-
+        self.need_full_grid = False
 
     def _check_range_satisfiable(self, access_addr, expr_constraints):
         out_of_bound_constraint = Not(
@@ -1093,6 +1093,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         ):
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
+                self.need_full_grid = True
                 replace_load_subtree(ptr)
 
             # make sure ptr is a SymbolicExpr
