@@ -94,7 +94,14 @@ reduce_map: dict[type[Op], Callable] = {
 
 
 class PatchOp:
-    def __init__(self, op, op_type, before_callback, after_callback, op_overrider):
+    def __init__(
+        self,
+        op: Callable,
+        op_type: type[Op],
+        before_callback: Callable | None,
+        after_callback: Callable | None,
+        op_overrider: Callable | None,
+    ):
         self.op = op
         self.op_type = op_type
         self.before_callback = before_callback
@@ -129,9 +136,9 @@ class PatchOp:
 
 def patch_op(
     op_type: type[Op],
-    before_callback: Callable,
-    after_callback: Callable,
-    op_overrider: Callable,
+    before_callback: Callable | None,
+    after_callback: Callable | None,
+    op_overrider: Callable | None,
 ):
     """
     Register a callback to be called before and after an operator is executed.
