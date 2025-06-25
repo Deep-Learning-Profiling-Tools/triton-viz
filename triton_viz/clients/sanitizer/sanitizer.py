@@ -1096,13 +1096,10 @@ class SanitizerSymbolicExecution(Sanitizer):
                 self.need_full_grid = True
                 replace_load_subtree(ptr)
 
-            # make sure ptr is a SymbolicExpr
-            if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
-                ptr_sym = SymbolicExpr.from_value(ptr)
-            elif isinstance(ptr, SymbolicExpr):
-                ptr_sym = ptr
-            else:
-                raise ValueError(f"Unsupported ptr type: {type(ptr)}")
+            # make sure ptr dtype is valid
+            if isinstance(ptr, TensorHandle) and not isinstance(ptr.dtype, tl.pointer_type):
+                raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
+            ptr_sym = SymbolicExpr.from_value(ptr)
 
             if mask is None:
                 ret = SymbolicExpr("load", ptr_sym)
@@ -1126,12 +1123,9 @@ class SanitizerSymbolicExecution(Sanitizer):
 
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             # make sure ptr is a SymbolicExpr
-            if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
-                ptr_sym = SymbolicExpr.from_value(ptr)
-            elif isinstance(ptr, SymbolicExpr):
-                ptr_sym = ptr
-            else:
-                raise ValueError(f"Unsupported ptr type: {type(ptr)}")
+            if isinstance(ptr, TensorHandle) and not isinstance(ptr.dtype, tl.pointer_type):
+                raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
+            ptr_sym = SymbolicExpr.from_value(ptr)
 
             value = SymbolicExpr.from_value(value)
             if mask is None:
