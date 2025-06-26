@@ -30,6 +30,7 @@ from .data import (
     Rsqrt,
     CastImpl,
 )
+from ..clients.sanitizer.sanitizer import SymbolicExpr
 import inspect
 from triton.runtime.interpreter import (
     GridExecutor,
@@ -122,8 +123,6 @@ class PatchOp:
                 )
             else:
                 ret = self.op_overrider(*args, **kwargs)
-                from ..clients.sanitizer.sanitizer import SymbolicExpr
-
                 if isinstance(ret, SymbolicExpr):
                     ret.concrete_fn = self.op
         else:
