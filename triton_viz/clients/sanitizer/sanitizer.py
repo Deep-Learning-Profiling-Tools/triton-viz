@@ -837,7 +837,17 @@ class SymbolicExpr:
             element_bytewidth = max(
                 1, node.ptr.dtype_tt.element_ty.primitive_bitwidth // 8
             )
-            if isinstance(offset_z3, list):
+            if isinstance(ptr_z3, list) and isinstance(
+                offset_z3, list
+            ):  # both ptr and offset are lists
+                if len(ptr_z3) != len(offset_z3):  # check if they have the same length
+                    raise ValueError(
+                        f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
+                    )
+                return [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
+            if isinstance(ptr_z3, list):  # ptr is list, offset is scalar
+                return [p + offset_z3 * element_bytewidth for p in ptr_z3]
+            if isinstance(offset_z3, list):  # offset is list, ptr is scalar
                 return [ptr_z3 + o * element_bytewidth for o in offset_z3]
             else:
                 return ptr_z3 + offset_z3 * element_bytewidth

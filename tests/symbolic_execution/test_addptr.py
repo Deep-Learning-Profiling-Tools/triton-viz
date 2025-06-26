@@ -1,5 +1,11 @@
-from triton_viz.clients.sanitizer.sanitizer import SymbolicExpr
+import numpy as np
 import triton.language as tl
+from triton.runtime.interpreter import TensorHandle
+from triton_viz.clients.sanitizer.sanitizer import (
+    SymbolicExpr,
+    SanitizerSymbolicExecution,
+)
+from triton_viz.core.data import AddPtr
 
 
 def test_addptr_expr_eval():
@@ -12,12 +18,14 @@ def test_addptr_expr_eval():
     assert expr.eval()[0] == 1000 + 3 * 4
 
 
-# def test_addptr_overrider():
-#     # 通过 sanitizer 的 overrider 走一遍
-#     ptr_dtype = tl.pointer_type(tl.int32)
-#     ptr_th    = TensorHandle(1000, ptr_dtype)
-#     sanitizer = SanitizerSymbolicExecution(abort_on_error=False)
-#     _, _, addptr_fn = sanitizer.register_op_callback(AddPtr)
-#     expr = addptr_fn(ptr_th, 3)                   # 3 是 offset
-#     assert expr.op == "addptr"
-#     assert expr.eval() == 1000 + 3 * 4            # element_bytewidth = 4
+def test_addptr_overrider():
+    # Run through sanitizer's overrider
+    ptr_dtype = tl.pointer_type(tl.int32)
+    ptr_th = TensorHandle(np.array([1000]), ptr_dtype)
+    offset_th = TensorHandle(np.array([3]), tl.int32)
+    sanitizer = SanitizerSymbolicExecution(abort_on_error=False)
+    _, _, addptr_fn = sanitizer.register_op_callback(AddPtr)
+    assert addptr_fn is not None
+    expr = addptr_fn(ptr_th, offset_th)  # offset = 3
+    assert expr.op == "addptr"
+    assert expr.eval()[0] == 1000 + 3 * 4  # element_bytewidth = 4
