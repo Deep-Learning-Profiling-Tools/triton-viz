@@ -3,6 +3,7 @@ import sys
 import triton
 import triton_viz
 from triton_viz.clients import Sanitizer
+from triton_viz import config as cfg
 
 
 # store the original triton.jit
@@ -47,3 +48,13 @@ def apply():
     script = sys.argv[1]
     sys.argv = sys.argv[1:]
     runpy.run_path(script, run_name="__main__")
+
+
+def enable_sanitizer():
+    cfg.sanitizer_backend = "symexec"
+
+    triton.jit = _patched_jit
+    triton.language.jit = _patched_jit
+    import triton.runtime.interpreter as _interp
+
+    _interp.jit = _patched_jit
