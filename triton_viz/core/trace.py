@@ -2,8 +2,6 @@ from triton.runtime import KernelInterface
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
-from typing import Union
-
 from . import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
@@ -15,7 +13,7 @@ launches: list[Launch] = []
 
 class Trace(KernelInterface):
     @staticmethod
-    def _normalize_client(client: Union[str, Client]) -> Client:
+    def _normalize_client(client: str | Client) -> Client:
         if isinstance(client, str):
             name = client.lower()
             if name == "sanitizer":
@@ -30,14 +28,13 @@ class Trace(KernelInterface):
         else:
             raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def add_client(self, new_client: Union[Client, str]) -> None:
-        new_client_instance = self._normalize_client(new_client)
-        self.client_manager.add_clients([new_client_instance])
+    def add_client(self, new_client: str | Client) -> None:
+        self.client_manager.add_clients([self._normalize_client(new_client)])
 
     def __init__(
         self,
-        kernel: Union[JITFunction, InterpretedFunction],
-        client: Union[str, Client],
+        kernel: JITFunction | InterpretedFunction,
+        client: str | Client,
     ) -> None:
         self.fn = kernel
         if isinstance(kernel, InterpretedFunction):
@@ -67,7 +64,7 @@ class Trace(KernelInterface):
         launches.append(self.client_manager.launch)
 
 
-def trace(clients: Union[str, Client]):
+def trace(clients: str | Client):
     """
     Create a trace object that can be used to run a kernel with instrumentation clients.
 

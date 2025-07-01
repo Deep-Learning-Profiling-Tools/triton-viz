@@ -1,6 +1,6 @@
 import traceback
-from typing import Tuple, Callable, Optional, Type, Dict, List
 from collections import namedtuple
+from collections.abc import Callable
 
 import numpy as np
 from torch import Tensor
@@ -191,6 +191,8 @@ class Sanitizer(Client):
     based on the value of ``cfg.sanitizer_backend``.
     """
 
+    NAME = "sanitizer"
+
     def __new__(cls, abort_on_error: bool = False, *args, **kwargs):
         if cls is not Sanitizer:
             return super().__new__(cls)
@@ -228,11 +230,11 @@ class SanitizerBruteForce(Sanitizer):
     def __init__(
         self,
         abort_on_error: bool = False,
-        callpath: Optional[bool] = True,
+        callpath: bool = True,
     ):
         self.callpath = callpath
         self.abort_on_error = abort_on_error
-        self.tensors: List[Tensor] = []
+        self.tensors: list[Tensor] = []
         self.records: list = []
 
     def _report(self, op_type, record):
@@ -256,15 +258,15 @@ class SanitizerBruteForce(Sanitizer):
             ), "The address sanitizer only supports contiguouly stored tensors for now"
             self.tensors.append(arg)
 
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
 
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(
-        self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+        self, op_type: type[Op]
+    ) -> tuple[Callable | None, Callable | None, Callable | None]:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -315,7 +317,7 @@ class SymbolicExprDataWrapper:
         return 2
 
     def __int__(self):
-        int_val = self.symbolic_expr.eval()
+        int_val, _ = self.symbolic_expr.eval()
         if not isinstance(int_val, int):
             raise ValueError(
                 f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int"
@@ -340,27 +342,48 @@ Spec = namedtuple(
 )
 
 
-def _load_dtype(self):
-    self.set_element_ty(self.children["ptr"].get_element_ty())
-
-
-def _store_dtype(self):
-    self.set_element_ty(self.children["ptr"].get_element_ty())
+def _load_post(self):
+    self.dtype_tt = self.ptr.dtype_tt.element_ty
 
 
 def _broadcast_dtype(self):
     self.dtype_tt = self.children["arg"].dtype_tt
 
 
-def _binary_shape(self):
-    lhs, rhs = self.children["lhs"], self.children["rhs"]
+def _binary_dtype(expr):
+    expr.dtype_tt = expr.lhs.dtype_tt
+
+
+def _binary_shape(expr):
+    lhs, rhs = expr.children["lhs"], expr.children["rhs"]
     if not lhs.shape:
-        self.shape = rhs.shape
+        expr.shape = rhs.shape
     elif not rhs.shape:
-        self.shape = lhs.shape
+        expr.shape = lhs.shape
     else:
         assert lhs.shape == rhs.shape, f"lhs shape {lhs.shape} != rhs shape {rhs.shape}"
-        self.shape = lhs.shape
+        expr.shape = lhs.shape
+
+
+def _binary_post(expr):
+    _binary_shape(expr)
+    _binary_dtype(expr)
+
+
+def _pid_post(expr):
+    expr.dtype_tt = tl.int32  # Program ID is always int32
+
+
+def _arange_post(expr):
+    expr.dtype_tt = tl.int32  # tl.arange is always int32
+
+
+def _cast_impl_post(expr):
+    expr.dtype_tt = expr.dst_type
+
+
+def _addptr_post(expr):
+    expr.dtype_tt = expr.ptr.dtype_tt
 
 
 class SymbolicExpr:
@@ -398,8 +421,9 @@ class SymbolicExpr:
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum", "dot")
-    POINTER_OPS = ("make_block_ptr",)
+    POINTER_OPS = ("make_block_ptr", "addptr")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast")
+    CAST_OPS = ("cast_impl",)
     SUPPORTED_OPS = (
         BASIC_OPS
         + INDIRECT_OPS
@@ -409,14 +433,16 @@ class SymbolicExpr:
         + REDUCE_OPS
         + POINTER_OPS
         + BROADCAST_OPS
+        + CAST_OPS
     )
 
     OP_SPEC = {
         # Core / primitive ops
-        "arange": Spec(req=("start", "end")),
+        "arange": Spec(req=("start", "end"), post=_arange_post),
+        "pid": Spec(req=("grid", "axis"), post=_pid_post),
         # Memory access ops
-        "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_dtype),
-        "store": Spec(req=("ptr", "value"), opt=("mask", "other"), post=_store_dtype),
+        "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_post),
+        "store": Spec(req=("ptr", "value"), opt=("mask", "other")),
         # Unary ops
         **{
             op: Spec(req=("arg",))
@@ -436,7 +462,7 @@ class SymbolicExpr:
         },
         #  Binary ops
         **{
-            op: Spec(req=("lhs", "rhs"), post=_binary_shape)
+            op: Spec(req=("lhs", "rhs"), post=_binary_post)
             for op in (
                 "add",
                 "sub",
@@ -463,10 +489,13 @@ class SymbolicExpr:
         "make_block_ptr": Spec(
             req=("base", "shape", "strides", "offsets", "block_shape", "order")
         ),
+        "addptr": Spec(req=("ptr", "offset"), post=_addptr_post),
         # Broadcasting / shape manipulation
         "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
         "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        # Casting
+        "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
     }
 
     def __init__(self, op, *args):
@@ -481,16 +510,19 @@ class SymbolicExpr:
         self.attrs = {}
         self.dtype_tt = None
         self.shape = []
+
+        # Functions and arguments for concretization
+        self._binary_numpy_op = None
+        self._concrete_fn = None
+        self._concrete_args = ()
+        self._concrete_kwargs = {}
+
+        # deal with args
         self.children = {}  # Used for storing child expressions
-        # check if the number of arguments is correct
-        if self.op == "const":
+        if self.op == "const":  # leaf nodes
             self.value = args[0]
             if len(args) >= 2:
                 self.dtype_tt = args[1]
-        elif self.op == "pid":
-            assert len(args) == 2, "pid op expects two arguments!"
-            self.grid = args[0]
-            self.axis = args[1]
         else:
             self._init_from_spec(*args)
 
@@ -503,7 +535,9 @@ class SymbolicExpr:
         min_n = len(spec.req)
         max_n = min_n + len(spec.opt)
         if not (min_n <= len(args) <= max_n):
-            raise ValueError(f"{self.op} expects {min_n}–{max_n} args, got {len(args)}")
+            raise ValueError(
+                f"{self.op} expects {min_n} - {max_n} args, got {len(args)}"
+            )
 
         # store in self.children
         names = list(spec.req) + list(spec.opt)
@@ -524,17 +558,6 @@ class SymbolicExpr:
 
     def set_attr(self, name, values):
         self.attrs[name] = values
-
-    def get_element_ty(self):
-        return self.dtype_tt
-
-    def set_element_ty(self, dtype_tt):
-        self.dtype_tt = dtype_tt
-
-    def get_dtype_bytewidth(self, dtype_tt):
-        element_bitwidth = dtype_tt.primitive_bitwidth
-        element_bytewidth = max(1, element_bitwidth // 8)
-        return element_bytewidth
 
     def __add__(self, other):
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
@@ -598,12 +621,14 @@ class SymbolicExpr:
         if self.op == "const":
             label = f"const={self.value}"
         elif self.op == "pid":
-            label = f"pid_{self.axis}={self.grid[self.axis]}"
+            axis_val = self.axis.to_py()
+            grid_val = self.grid.to_py()
+            label = f"pid_{axis_val}={grid_val[axis_val]}"
         else:
             label = self.op
 
         # Add the dtype to the label if available
-        label = f"{label} [dtype={self.get_element_ty()}]"
+        label = f"{label} [dtype={self.dtype_tt}]"
 
         return label
 
@@ -627,83 +652,106 @@ class SymbolicExpr:
     def data(self):
         return SymbolicExprDataWrapper(self.__str__(), self)
 
+    triton_scala_dtypes = (
+        tl.int8,
+        tl.int16,
+        tl.int32,
+        tl.int64,
+        tl.uint8,
+        tl.uint16,
+        tl.uint32,
+        tl.uint64,
+        tl.float16,
+        tl.float32,
+        tl.float64,
+    )
+    builtin_scala_types = (int, float)
+    tuple_types = (tl.core.tuple, tuple)
+
+    @staticmethod
+    def _infer_literal_dtype(var):
+        if isinstance(var, tl.core.dtype):
+            return var
+        if isinstance(var, SymbolicExpr.tuple_types):
+            first_dtype = SymbolicExpr._infer_literal_dtype(var[0])
+            for v in var[1:]:  # assume only one consistent dtype in the tuple
+                if SymbolicExpr._infer_literal_dtype(v) != first_dtype:
+                    raise ValueError(
+                        f"All elements in the tuple must have the same dtype, but found {first_dtype} and {SymbolicExpr.from_value(v).dtype_tt}"
+                    )
+            return first_dtype
+        if isinstance(var, TensorHandle):
+            if len(var.data) != 1:
+                raise ValueError(
+                    f"Unsupported var.data: {var.data} with length more than one!"
+                )
+            if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
+                return var.dtype
+            if isinstance(var.dtype, tl.pointer_type):  # if a pointer
+                return var.dtype
+        if isinstance(var, SymbolicExpr.builtin_scala_types):
+            return tl.int32 if isinstance(var, int) else tl.float32
+        raise ValueError(f"Unsupported type: {type(var)}")
+
     @classmethod
     def from_value(cls, var):
-        triton_scala_dtypes = (
-            tl.int8,
-            tl.int16,
-            tl.int32,
-            tl.int64,
-            tl.uint8,
-            tl.uint16,
-            tl.uint32,
-            tl.uint64,
-            tl.float16,
-            tl.float32,
-            tl.float64,
-        )
-        builtin_scala_types = (int, float)
-        # if already SymbolicExpr
-        if isinstance(var, cls):
+        if isinstance(var, cls):  # if already SymbolicExpr
             return var
 
-        # if construct from a TensorHandle
-        if isinstance(var, TensorHandle):
-            # if an immediate
-            if var.dtype in triton_scala_dtypes:
-                if len(var.data) == 1:
-                    return cls("const", var.data.item())
-                else:
-                    return cls("const", var.data)
-            # if a pointer
-            elif isinstance(var.dtype, tl.pointer_type):
-                if len(var.data) != 1:
-                    raise ValueError(
-                        "Unsupported tl.pointer_type with length more than one!"
-                    )
-                return cls("const", var.data.item(), var.get_element_ty())
-            else:
-                raise ValueError("Unsupported TensorHandle dtype", var.dtype)
+        dtype_tt = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
-        if isinstance(var, builtin_scala_types):
-            return cls("const", var)
-
-        if isinstance(var, tl.core.tuple):
-            return ConstTupleExpr(var)
+        if isinstance(var, (tl.core.tuple, tuple)):  # if a tuple
+            return cls("const", tuple(var), dtype_tt)
+        if isinstance(var, TensorHandle):  # if a TensorHandle
+            return cls("const", var.data.item(), dtype_tt)
+        if isinstance(
+            var, SymbolicExpr.builtin_scala_types
+        ):  # if a python builtin type
+            return cls("const", var, dtype_tt)
+        if isinstance(var, tl.core.dtype):
+            # If it's a triton dtype, we can create a const node with it
+            return cls("const", var, dtype_tt)
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> Tuple[ArithRef, List]:
+    def eval(self) -> tuple[ArithRef | list[ArithRef], list[BoolRef]]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression corresponding to the root node
         - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
         """
         self._arange_counter = 0  # Used to name arange variables
-        self._arange_dict: Dict[
+        self._arange_dict: dict[
             int, ArithRef
         ] = {}  # make sure each arange only has one name
-        self._vars: Dict[str, ArithRef] = {}
-        self._constraints: List[BoolRef] = []
+        self._vars: dict[str, ArithRef] = {}
+        self._constraints: list[BoolRef] = []
         expr = self._to_z3(self)
-        if not self._constraints:
-            assert expr.is_int(), "The address expression should be an integer"
-            return simplify(expr).as_long()
+
+        if isinstance(expr, list):
+            expr = [simplify(e).as_long() for e in expr]
+        else:
+            expr = simplify(expr)
+
         return expr, self._constraints
 
-    def _to_z3(self, node) -> ArithRef:
+    def _to_z3(self, node: "SymbolicExpr") -> ArithRef:
         # Recursively convert the current node to a Z3 expression
         if node.op == "const":
+            if isinstance(node.value, np.ndarray):
+                return [IntVal(int(v)) for v in node.value.flat]
             return IntVal(node.value)
 
         if node.op == "pid":
-            name = f"pid_{node.axis}"
+            axis_val = node.axis.to_py()
+            grid_val = node.grid.to_py()
+            name = f"pid_{axis_val}"
             if name not in self._vars:
                 v = Int(name)
                 self._vars[name] = v
                 # Add constraint: 0 ≤ pid < grid[axis]
                 self._constraints.append(v >= 0)
-                self._constraints.append(v < node.grid[node.axis])
+                self._constraints.append(v < grid_val[axis_val])
             return self._vars[name]
 
         if node.op == "arange":
@@ -722,13 +770,10 @@ class SymbolicExpr:
             return v
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
-        if node.op == "abs":
-            c = self._to_z3(node.arg)
-            return If(c >= 0, c, -c)
         if node.op in self.UNARY_OPS:
-            c = self._to_z3(node.arg)
+            val = self._to_z3(node.arg)
             if node.op == "abs":
-                return If(c >= 0, c, -c)
+                return If(val >= 0, val, -val)
             raise NotImplementedError(f"Unary op {node.op} is not implemented")
 
         # Binary arithmetic, comparison, etc.
@@ -785,25 +830,226 @@ class SymbolicExpr:
         if node.op in ("splat", "expand_dims", "broadcast"):
             return self._to_z3(node.arg)
 
+        if node.op == "addptr":
+            # Add pointer operation
+            ptr_z3 = self._to_z3(node.ptr)
+            offset_z3 = self._to_z3(node.offset)
+            element_bytewidth = max(
+                1, node.ptr.dtype_tt.element_ty.primitive_bitwidth // 8
+            )
+            if isinstance(ptr_z3, list) and isinstance(
+                offset_z3, list
+            ):  # both ptr and offset are lists
+                if len(ptr_z3) != len(offset_z3):  # check if they have the same length
+                    raise ValueError(
+                        f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
+                    )
+                return [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
+            if isinstance(ptr_z3, list):  # ptr is list, offset is scalar
+                return [p + offset_z3 * element_bytewidth for p in ptr_z3]
+            if isinstance(offset_z3, list):  # offset is list, ptr is scalar
+                return [ptr_z3 + o * element_bytewidth for o in offset_z3]
+            else:
+                return ptr_z3 + offset_z3 * element_bytewidth
+
         # Other operations can be implemented as needed
         raise NotImplementedError(f"Eval for op {node.op} is not implemented")
 
+    def has_op(self, op_name: str) -> bool:
+        if self.op == op_name:
+            return True
+        for _, child_symbolic_expr in self.children.items():
+            if child_symbolic_expr.has_op(op_name):
+                return True
+        return False
 
-class ConstTupleExpr(SymbolicExpr):
-    def __init__(self, value):
-        super().__init__("const", tuple(value))
+    def to_py(self):
+        """
+        Valid only for nodes with op == 'const':
+        - If `value` is a TensorHandle:
+            • Scalar  -> return int/float
+            • Multi-element -> return a Python list
+        - Otherwise, return the original Python object
+          (e.g., int, float, tuple, list, etc.).
+        """
+        if self.op != "const":
+            raise TypeError("SymbolicExpr.to_py() can be used only on 'const' nodes")
+
+        v = self.value
+        if isinstance(v, TensorHandle):
+            if len(v.data) == 1:
+                return v.data.item()  # scalar case
+            else:
+                raise NotImplementedError(
+                    "SymbolicExpr.to_py() for multi-element tensors is not implemented yet!"
+                )
+        return v
+
+    _concrete_fn_cache: dict[str, Callable] = {}
+    _binary_numpy_op_cache: dict[str, Callable] = {}
+
+    @property
+    def concrete_fn(self):
+        """Return the concrete evaluation function bound to this node."""
+        if self._concrete_fn is None and self.op in SymbolicExpr._concrete_fn_cache:
+            self._concrete_fn = SymbolicExpr._concrete_fn_cache[self.op]
+        return self._concrete_fn
+
+    @concrete_fn.setter
+    def concrete_fn(self, fn):
+        """Bind / override the concrete evaluation function."""
+        self._concrete_fn = fn
+        SymbolicExpr._concrete_fn_cache[self.op] = fn
+
+    @property
+    def binary_numpy_op(self):
+        """Return the numpy operation corresponding to this binary op."""
+        if (
+            self._binary_numpy_op is None
+            and self.op in SymbolicExpr._binary_numpy_op_cache
+        ):
+            self._binary_numpy_op = SymbolicExpr._binary_numpy_op_cache[self.op]
+        return self._binary_numpy_op
+
+    @binary_numpy_op.setter
+    def binary_numpy_op(self, op):
+        """Bind / override the numpy operation for this binary op."""
+        self._binary_numpy_op = op
+        SymbolicExpr._binary_numpy_op_cache[self.op] = op
+
+    def concretize(self_or_cls, obj=None):
+        """
+        Usage:
+        1. expr.concretize()               — Evaluate this SymbolicExpr instance to its concrete value.
+        2. SymbolicExpr.concretize(x)      — Recursively concretize any object x (which may contain nested SymbolicExprs).
+        """
+        if obj is None:  # expr.concretize()
+            obj = self_or_cls
+        elif isinstance(
+            self_or_cls, SymbolicExpr
+        ):  # expr.concretize(x), which is erroneous
+            raise TypeError(
+                "Either use expr.concretize() or SymbolicExpr.concretize(x)!"
+            )
+
+        # Non-SymbolicExpr -> return as-is
+        if not isinstance(obj, SymbolicExpr):
+            return obj
+
+        # concretize logic
+        if obj.concrete_fn is None:
+            if obj.op == "const":
+                if obj.dtype_tt == tl.pointer_type:
+                    result = TensorHandle(
+                        np.array([obj.value], dtype=np.uint64), obj.dtype_tt
+                    )
+                else:
+                    result = TensorHandle(obj.value, obj.dtype_tt)
+            else:
+                raise RuntimeError(f"{obj.op}'s concrete function is not set!")
+        elif obj.op == "pid":
+            result = obj.concrete_fn(obj.axis.to_py())
+        elif obj.op == "arange":
+            result = obj.concrete_fn(obj.start.to_py(), obj.end.to_py() + 1)
+        elif obj.op == "splat":
+            result = obj.concrete_fn(
+                obj.arg.concretize(), obj.children["shape"].to_py()
+            )
+        elif obj.op in SymbolicExpr.BINARY_OPS:
+            result = obj.concrete_fn(
+                obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
+            )
+        elif obj.op == "load":
+            from ...core.patch import original_ops
+
+            ptr_concrete = obj.ptr.concretize()
+            # concretize mask
+            # create an all-True mask if mask is None
+            if obj.mask is None:
+                mask_concrete = TensorHandle(
+                    np.ones_like(ptr_concrete.data, dtype=bool), tl.int1
+                )
+            else:
+                mask_concrete = obj.mask.concretize()
+
+            # concretize the 'other' argument if it exists
+            if obj.other is None:
+                other_concrete = None
+            else:
+                other_concrete = obj.other.concretize()
+
+            result = original_ops[Load](
+                ptr_concrete,
+                mask_concrete,
+                other_concrete,
+                None,  # cache_modifier
+                None,  # eviction_policy
+                None,  # is_volatile
+            )
+        else:
+            concrete_args = [
+                SymbolicExpr.concretize(v) for k, v in obj.children.items()
+            ]
+            result = obj.concrete_fn(*concrete_args)
+
+        return result
+
+
+def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
+    """
+    Post-order traversal that replaces *all* minimal `load` sub-trees
+    with constant nodes produced by `concretize`.
+    """
+    if not isinstance(expr, SymbolicExpr):
+        raise TypeError("replace_min_load_subtree expects a SymbolicExpr instance!")
+
+    # check subtrees
+    for name, child in list(expr.children.items()):
+        if child is None:
+            continue
+        # replace subtree if load found
+        expr.children[name] = replace_load_subtree(child)
+
+    # check self
+    if expr.op == "load" and all(
+        (child is None) or not child.has_op("load") for child in expr.children.values()
+    ):
+        concrete = expr.concretize()
+
+        if not isinstance(concrete, TensorHandle):
+            raise TypeError(f"Unexpected dtype: {type(concrete)}!")
+
+        # inplace replace to "const" node
+        expr.op = "const"
+        expr.value = concrete.data
+        expr.dtype_tt = concrete.dtype
+        expr.children.clear()
+        expr.concrete_fn = None
+
+    return expr
 
 
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
-        self.abort_on_error = abort_on_error
-        self.grid: Optional[Tuple[int, ...]]
-        self.tensors: List[Tensor] = []
-        self.constraints: List[BoolRef] = []
-        self.tensor_addrs: List[Tuple[Int, Int]] = []
-        self.unique_load_store_id = 0
+        self.abort_on_error: bool = abort_on_error
+        self.records: list[OutOfBoundsRecordZ3] = []
+        self.grid: tuple[int, ...] | None
+        self.tensors: list[Tensor] = []
+        self.constraints: list[BoolRef] = []
+        self.tensor_addrs: list[tuple[Int, Int]] = []
+        self.unique_load_store_id: int = 0
+        self.need_full_grid: bool = False
 
-    def _check_range_satisfiable(self, access_addr, expr_constraints):
+    def _check_range_satisfiable(
+        self,
+        access_addr: int | list[int] | ArithRef | list[ArithRef],
+        expr_constraints: list,
+    ):
+        if isinstance(access_addr, list):
+            for addr in access_addr:
+                self._check_range_satisfiable(addr, expr_constraints)
+            return
+
         out_of_bound_constraint = Not(
             Or(
                 *(
@@ -852,15 +1098,15 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.tensors.append(arg)
         self.tensor_addrs.extend(tensor_physical_addresses)
 
-    def grid_callback(self, grid: Tuple[int]) -> None:
+    def grid_callback(self, grid: tuple[int]) -> None:
         self.grid = tuple(int(g) for g in grid)
 
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
 
     def register_op_callback(
-        self, op_type: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+        self, op_type: type[Op]
+    ) -> tuple[Callable | None, Callable | None, Callable | None]:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
@@ -873,57 +1119,57 @@ class SanitizerSymbolicExecution(Sanitizer):
         def op_load_overrider(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
-            # make sure ptr is a SymbolicExpr
-            if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
-                ptr = SymbolicExpr("load", SymbolicExpr.from_value(ptr))
-            elif isinstance(ptr, SymbolicExpr):
-                ptr = SymbolicExpr("load", ptr)
-            else:
-                raise ValueError(f"Unsupported ptr type: {type(ptr)}")
+            # deal with indirect loads
+            if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
+                self.need_full_grid = True
+                replace_load_subtree(ptr)
+
+            # make sure ptr dtype is valid
+            if isinstance(ptr, TensorHandle) and not isinstance(
+                ptr.dtype, tl.pointer_type
+            ):
+                raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
+            ptr_sym = SymbolicExpr.from_value(ptr)
 
             if mask is None:
-                ret = SymbolicExpr("load", ptr)
+                ret = SymbolicExpr("load", ptr_sym)
             elif other is None:
-                ret = SymbolicExpr("load", ptr, mask)
+                ret = SymbolicExpr("load", ptr_sym, mask)
             else:
-                ret = SymbolicExpr("load", ptr, mask, other)
+                ret = SymbolicExpr("load", ptr_sym, mask, other)
 
             # check memory access using z3
-            ret_eval = ret.eval()
-            if isinstance(ret_eval, int):
-                self._check_range_satisfiable(ret_eval, [])
-            elif isinstance(ret_eval, tuple):
-                self._check_range_satisfiable(*ret_eval)
-            else:
-                raise ValueError(f"Unsupported ret_eval type: {type(ret_eval)}")
+            ret_eval, ret_constraints = ret.eval()
+            self._check_range_satisfiable(ret_eval, ret_constraints)
+
             return ret
 
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
             return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
 
         def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
+            # deal with indirect loads
+            if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
+                self.need_full_grid = True
+                replace_load_subtree(ptr)
+
             # make sure ptr is a SymbolicExpr
-            if isinstance(ptr, TensorHandle) and isinstance(ptr.dtype, tl.pointer_type):
-                ptr = SymbolicExpr("load", SymbolicExpr.from_value(ptr))
-            elif isinstance(ptr, SymbolicExpr):
-                ptr = SymbolicExpr("load", ptr)
-            else:
-                raise ValueError(f"Unsupported ptr type: {type(ptr)}")
+            if isinstance(ptr, TensorHandle) and not isinstance(
+                ptr.dtype, tl.pointer_type
+            ):
+                raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
+            ptr_sym = SymbolicExpr.from_value(ptr)
 
             value = SymbolicExpr.from_value(value)
             if mask is None:
-                ret = SymbolicExpr("store", ptr, value)
+                ret = SymbolicExpr("store", ptr_sym, value)
             else:
-                ret = SymbolicExpr("store", ptr, value, mask)
+                ret = SymbolicExpr("store", ptr_sym, value, mask)
 
             # check memory access using z3
-            ret_eval = ret.eval()
-            if isinstance(ret_eval, int):
-                self._check_range_satisfiable(ret_eval, [])
-            elif isinstance(ret_eval, tuple):
-                self._check_range_satisfiable(*ret_eval)
-            else:
-                raise ValueError(f"Unsupported ret_eval type: {type(ret_eval)}")
+            ret_eval, ret_constraints = ret.eval()
+            self._check_range_satisfiable(ret_eval, ret_constraints)
+
             return ret
 
         def op_unary_op_overrider(arg, op):
@@ -939,12 +1185,14 @@ class SanitizerSymbolicExecution(Sanitizer):
                 np.sqrt: "sqrt",
                 np.sin: "sin",
             }
-            arg = SymbolicExpr.from_value(arg)
+            arg_sym = SymbolicExpr.from_value(arg)
             try:
                 name = _unary_map[op]
             except KeyError:
-                raise NotImplementedError(f"Unsupported unary operation: {op} on {arg}")
-            return SymbolicExpr(name, arg)
+                raise NotImplementedError(
+                    f"Unsupported unary operation: {op} on {arg_sym}"
+                )
+            return SymbolicExpr(name, arg_sym)
 
         def op_binary_op_overrider(lhs, rhs, op):
             _binary_map = {
@@ -962,79 +1210,61 @@ class SanitizerSymbolicExecution(Sanitizer):
                 np.maximum: lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
                 np.bitwise_and: lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
             }
-            lhs = SymbolicExpr.from_value(lhs)
-            rhs = SymbolicExpr.from_value(rhs)
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
             try:
                 func = _binary_map[op]
             except KeyError:
                 raise NotImplementedError(
-                    f"Unsupported binary operation: {op} between {lhs} and {rhs}"
+                    f"Unsupported binary operation: {op} between {lhs_sym} and {rhs_sym}"
                 )
-            return func(lhs, rhs)
+            result = func(lhs_sym, rhs_sym)
+            result.binary_numpy_op = op  # Store the numpy operation for later use
+            return result
 
         def op_ternary_op_overrider(lhs, rhs, other, op):
-            lhs = SymbolicExpr.from_value(lhs)
-            rhs = SymbolicExpr.from_value(rhs)
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
             other = SymbolicExpr.from_value(other)
             if op is np.where:
-                return SymbolicExpr("where", lhs, rhs, other)
+                return SymbolicExpr("where", lhs_sym, rhs_sym, other)
             else:
                 raise NotImplementedError(
-                    f"Unsupported ternary operation: {op} between {lhs}, {rhs} and {other}"
+                    f"Unsupported ternary operation: {op} between {lhs_sym}, {rhs_sym} and {other}"
                 )
 
         def op_addptr_overrider(ptr, offset):
-            """
-            In addptr operator, ptr is a pointer address with dtype_tt, and offset is a scalar.
-            """
-            # Read dtype_tt from ptr.
-            # Here, ptr is either a TensorHandle or a SymbolicExpr.
-            dtype_tt = ptr.get_element_ty()
-            assert dtype_tt, f"dtype_tt of ptr not found! ptr content: {ptr}"
-
-            # Read bitwidth from dtype_tt, and then convert it to bytewidth.
-            element_bitwidth = dtype_tt.primitive_bitwidth
-            element_bytewidth = max(1, element_bitwidth // 8)
-
-            # convert ptr to SymbolicExpr
-            ptr = SymbolicExpr.from_value(ptr)
-
-            # convert offset to SymbolicExpr
-            offset = SymbolicExpr.from_value(offset)
-            element_bytewidth = SymbolicExpr.from_value(element_bytewidth)
-
-            # calculate the new address, and store the dtype_tt information in its SymbolicExpr.
-            ret = ptr + offset * element_bytewidth
-            ret.set_element_ty(dtype_tt)
-            return ret
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            offset_sym = SymbolicExpr.from_value(offset)
+            return SymbolicExpr("addptr", ptr_sym, offset_sym)
 
         def op_dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
-            a = SymbolicExpr.from_value(a)
-            b = SymbolicExpr.from_value(b)
-            d = SymbolicExpr.from_value(d)
-            return SymbolicExpr("dot", a, b, d)
+            a_sym = SymbolicExpr.from_value(a)
+            b_sym = SymbolicExpr.from_value(b)
+            d_sym = SymbolicExpr.from_value(d)
+            return SymbolicExpr("dot", a_sym, b_sym, d_sym)
 
         def op_make_range_overrider(start, end):
-            start = SymbolicExpr.from_value(start)
-            end = SymbolicExpr.from_value(end - 1)
-            return SymbolicExpr("arange", start, end)
+            return SymbolicExpr(
+                "arange",
+                SymbolicExpr.from_value(start),
+                SymbolicExpr.from_value(end - 1),
+            )
 
         def op_expand_dims_overrider(arg, axis):
-            arg = SymbolicExpr.from_value(arg)
-            return SymbolicExpr("expand_dims", arg, axis)
+            return SymbolicExpr("expand_dims", SymbolicExpr.from_value(arg), axis)
 
         def op_broadcast_overrider(arg, shape):
-            arg = SymbolicExpr.from_value(arg)
-            return SymbolicExpr("broadcast", arg, shape)
+            return SymbolicExpr("broadcast", SymbolicExpr.from_value(arg), shape)
 
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
-            input = SymbolicExpr.from_value(input)
-            ret = SymbolicExpr("sum", input, axis, keep_dims, kwargs)
+            ret = SymbolicExpr(
+                "sum", SymbolicExpr.from_value(input), axis, keep_dims, kwargs
+            )
             return ret
 
         def op_splat_overrider(arg, shape):
-            arg = SymbolicExpr.from_value(arg)
-            return SymbolicExpr("splat", arg, shape)
+            return SymbolicExpr("splat", SymbolicExpr.from_value(arg), shape)
 
         def op_make_block_ptr_overrider(
             base, shape, strides, offsets, tensor_shape, order
@@ -1060,8 +1290,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 "make_block_ptr", base, shape, strides, offsets, tensor_shape, order
             )
 
-            ret.set_element_ty(base.get_element_ty())
-            print(ret)
+            ret.dtype_tt = base.get_element_ty()
 
             return ret
 
@@ -1081,19 +1310,15 @@ class SanitizerSymbolicExecution(Sanitizer):
             raise NotImplementedError("TensorPointerStore is not supported yet.")
 
         def op_idiv_overrider(lhs, rhs):
-            lhs = SymbolicExpr.from_value(lhs)
-            rhs = SymbolicExpr.from_value(rhs)
-            return lhs // rhs
+            return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
 
         def op_rsqrt_overrider(arg):
-            arg = SymbolicExpr.from_value(arg)
-            return SymbolicExpr("rsqrt", arg)
+            return SymbolicExpr("rsqrt", SymbolicExpr.from_value(arg))
 
         def op_cast_impl_overrider(src, dst_type):
-            src = SymbolicExpr.from_value(src)
-            return src
+            return SymbolicExpr("cast_impl", src, dst_type)
 
-        OP_TYPE_TO_OVERRIDER: Dict[Type[Op], Callable] = {
+        OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
             Load: op_load_overrider,

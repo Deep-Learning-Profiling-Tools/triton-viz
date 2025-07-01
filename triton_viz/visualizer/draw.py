@@ -16,7 +16,6 @@ import numpy.typing as npt
 import planar
 import math
 import chalk
-from typing import Tuple, Optional, List, Dict, Union
 from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, V2, concat
 from dataclasses import dataclass
 from numpy.typing import ArrayLike
@@ -157,7 +156,7 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
     return env.width, env.height
 
 
-def delinearize(shape: Tuple, x: npt.NDArray, dtype, mask) -> List[npt.NDArray]:
+def delinearize(shape: tuple, x: npt.NDArray, dtype, mask) -> list[npt.NDArray]:
     if len(shape) == 1:
         shape = (1, 1, shape[0])
     x = x.copy() // (dtype.element_ty.primitive_bitwidth // 8)
@@ -172,7 +171,7 @@ trail = Trail.from_offsets([V2(0, 1), V2(1, 0), V2(0, -1), V2(-1, 0)], closed=Tr
 
 
 def cover(
-    shape: Tuple, dtype, load: Tensor, mask: npt.NDArray, color: Color
+    shape: tuple, dtype, load: Tensor, mask: npt.NDArray, color: Color
 ) -> Diagram:
     shape = make_3d(shape)
     "Draw the values from load on top of the loading tensor"
@@ -190,19 +189,19 @@ def pair_draw(x: Diagram, y: Diagram, command: str) -> Diagram:
 # Individual renderers
 
 
-def draw_tensor(x: Tensor) -> Optional[Diagram]:
+def draw_tensor(x: Tensor) -> Diagram | None:
     return None
 
 
-def draw_grid(x: Grid) -> Optional[Diagram]:
+def draw_grid(x: Grid) -> Diagram | None:
     return None
 
 
-def draw_make_range(x: MakeRange) -> Optional[Diagram]:
+def draw_make_range(x: MakeRange) -> Diagram | None:
     return None
 
 
-def draw_reduce(x: Union[ReduceMin, ReduceMax, ReduceSum]) -> Optional[Diagram]:
+def draw_reduce(x: ReduceMin | ReduceMax | ReduceSum) -> Diagram | None:
     color = ACTIVE[0]
     inp = draw_tensor_3d(make_3d(x.input_shape), None, None, None, color)
     if x.index == 0 and len(x.input_shape) == 2:
@@ -231,13 +230,13 @@ def draw_reduce(x: Union[ReduceMin, ReduceMax, ReduceSum]) -> Optional[Diagram]:
     return pair_draw(reshape(inp), reshape(out), x.reduce_type)
 
 
-def draw_load(x, tensor_table) -> Optional[Diagram]:
+def draw_load(x, tensor_table) -> Diagram | None:
     inp, out = store_load(x, tensor_table)
     out = reshape(out)
     return pair_draw(inp, out, "load")
 
 
-def draw_store(x, tensor_table) -> Optional[Diagram]:
+def draw_store(x, tensor_table) -> Diagram | None:
     inp, out = store_load(x, tensor_table)
     out = reshape(out)
     return pair_draw(out, inp, "store")
@@ -253,8 +252,8 @@ def make_3d(shape):
 
 
 def store_load(
-    x: OutOfBoundsRecordBruteForce, tensor_table: Dict[int, Tuple[Tensor, int]]
-) -> Tuple[Diagram, Diagram]:
+    x: OutOfBoundsRecordBruteForce, tensor_table: dict[int, tuple[Tensor, int]]
+) -> tuple[Diagram, Diagram]:
     tensor, tensor_id = tensor_table[x.tensor.data_ptr]
     # inp = base_tensor(tensor.shape, DEFAULT)
     color = ACTIVE[tensor_id]
@@ -269,11 +268,11 @@ def store_load(
     return inp, out
 
 
-def draw_op(x: Op) -> Optional[Diagram]:
+def draw_op(x: Op) -> Diagram | None:
     return None
 
 
-def draw_dot(x: Dot) -> Optional[Diagram]:
+def draw_dot(x: Dot) -> Diagram | None:
     if x.input_shape == (1,):
         return None
     inp = draw_tensor_3d(x.input_shape[0], None, None, None)
@@ -318,7 +317,7 @@ class D3:
 V3 = D3
 
 
-def homogeneous(trails: List[List[D3]]):
+def homogeneous(trails: list[list[D3]]):
     "Convert list of directions to a np.array of homogeneous coordinates"
     return np.array([[[*o.to_np(), 1] for o in offsets] for offsets in trails])
 
@@ -443,7 +442,7 @@ def make_cube(projection, start, end, color):
 
 def group(
     x: ArrayLike, y: ArrayLike, z: ArrayLike
-) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
+) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
     "Groups together cubes into bigger cubes"
     x = list(zip(zip(x, y, z), zip(x, y, z)))
     x = [(a, b) for a, b in x if not (a[0] == -1 and a[1] == -1 and a[2] == -1)]

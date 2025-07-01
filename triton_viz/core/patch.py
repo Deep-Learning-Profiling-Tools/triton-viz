@@ -1,6 +1,6 @@
 import triton.language as tl
 from contextlib import contextmanager
-from typing import Callable, Type, Dict
+from collections.abc import Callable
 from tqdm import tqdm
 
 from . import config as cfg
@@ -86,7 +86,7 @@ original_ops = {
     Rsqrt: interpreter_builder.create_rsqrt,
     CastImpl: interpreter_builder.cast_impl,
 }
-reduce_map: Dict[Type[Op], Callable] = {
+reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
     ReduceMin: tl.min,
     ReduceSum: tl.sum,
@@ -94,7 +94,14 @@ reduce_map: Dict[Type[Op], Callable] = {
 
 
 class PatchOp:
-    def __init__(self, op, op_type, before_callback, after_callback, op_overrider):
+    def __init__(
+        self,
+        op: Callable,
+        op_type: type[Op],
+        before_callback: Callable | None,
+        after_callback: Callable | None,
+        op_overrider: Callable | None,
+    ):
         self.op = op
         self.op_type = op_type
         self.before_callback = before_callback
@@ -115,6 +122,10 @@ class PatchOp:
                 )
             else:
                 ret = self.op_overrider(*args, **kwargs)
+                from ..clients.sanitizer.sanitizer import SymbolicExpr
+
+                if isinstance(ret, SymbolicExpr):
+                    ret.concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
         if self.after_callback:
@@ -124,10 +135,10 @@ class PatchOp:
 
 
 def patch_op(
-    op_type: Type[Op],
-    before_callback: Callable,
-    after_callback: Callable,
-    op_overrider: Callable,
+    op_type: type[Op],
+    before_callback: Callable | None,
+    after_callback: Callable | None,
+    op_overrider: Callable | None,
 ):
     """
     Register a callback to be called before and after an operator is executed.
@@ -159,7 +170,7 @@ def patch_op(
         raise ValueError(f"Patching operator {op_type} not supported")
 
 
-def unpatch_op(op_type: Type[Op]):
+def unpatch_op(op_type: type[Op]):
     """
     Unregister a callback for an operator.
 
@@ -186,7 +197,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
 
-    def run_grid_loops():
+    def run_grid_loops(grid):
         for x in tqdm(
             range(grid[0]),
             desc="Grid X",
@@ -209,7 +220,10 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     client_manager.grid_idx_callback((x, y, z))
                     self.fn(**call_args)
                     # if symbolic execution, only do one iteration
-                    if cfg.sanitizer_backend == "symexec":
+                    if (
+                        cfg.sanitizer_backend == "symexec"
+                        and not client_manager.get_client("sanitizer").need_full_grid
+                    ):
                         return
 
     # Removes not used reserved keywords from kwargs
@@ -241,7 +255,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
-    run_grid_loops()
+    run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
     _unpatch_lang()

@@ -1,31 +1,32 @@
 from contextlib import contextmanager
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import ClassVar
 
 from .data import Op, Launch
 from .patch import patch_op, unpatch_op, op_list, patch_calls
-from typing import Tuple, Callable, Type, Optional, List
 
 
 class Client(ABC):
-    name: str
+    NAME: ClassVar[str]
 
     @abstractmethod
     def arg_callback(self, arg, arg_cvt):
         pass
 
     @abstractmethod
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: tuple[int]):
         pass
 
     @abstractmethod
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
 
     @abstractmethod
     def register_op_callback(
-        self, op: Type[Op]
-    ) -> Tuple[Optional[Callable], Optional[Callable], Optional[Callable]]:
+        self, op: type[Op]
+    ) -> tuple[Callable | None, Callable | None, Callable | None]:
         pass
 
     @abstractmethod
@@ -34,23 +35,28 @@ class Client(ABC):
 
 
 class ClientManager:
-    def __init__(self, clients: Optional[List[Client]] = None):
-        self.clients = clients if clients is not None else []
+    def __init__(self, clients: list[Client] | None = None):
+        self.clients: dict[str, Client] = {}
+        if clients:
+            self.add_clients(clients)
         self.launch = Launch()
 
-    def add_clients(self, new_clients: List[Client]) -> None:
-        for new_client in new_clients:
+    def get_client(self, name: str) -> Client | None:
+        return self.clients.get(name)
+
+    def add_clients(self, new_clients_list: list[Client]) -> None:
+        for new_client in new_clients_list:
             duplicate = any(
                 isinstance(existing_client, new_client.__class__)
-                for existing_client in self.clients
+                for existing_client in self.clients.values()
             )
             if not duplicate:
-                self.clients.append(new_client)
+                self.clients[new_client.NAME] = new_client
 
     @contextmanager
     def patch(self):
         with patch_calls():
-            for client in self.clients:
+            for client in self.clients.values():
                 for op in op_list:
                     (
                         before_callback,
@@ -66,20 +72,20 @@ class ClientManager:
 
     def finalize(self) -> None:
         self.launch.records = []
-        for client in self.clients:
+        for client in self.clients.values():
             self.launch.records += client.finalize()
 
     def arg_callback(self, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
             self.launch.tensors.append(arg)
-        for client in self.clients:
+        for client in self.clients.values():
             client.arg_callback(arg, arg_cvt)
 
-    def grid_callback(self, grid: Tuple[int]):
+    def grid_callback(self, grid: tuple[int]):
         self.launch.grid = grid
-        for client in self.clients:
+        for client in self.clients.values():
             client.grid_callback(grid)
 
-    def grid_idx_callback(self, grid_idx: Tuple[int]):
-        for client in self.clients:
+    def grid_idx_callback(self, grid_idx: tuple[int]):
+        for client in self.clients.values():
             client.grid_idx_callback(grid_idx)
