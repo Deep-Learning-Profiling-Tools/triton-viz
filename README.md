@@ -85,4 +85,18 @@ If you're interested in fun puzzles to work with in Triton, do check out: [Trito
 ## License
 
 Triton-Viz is licensed under the MIT License. See the [LICENSE](LICENSE) for details.
+
+## Publication
+If you find this repo useful for your research, please cite our paper:
+
+```
+@inproceedings{ramesh2025tritonviz,
+  author={Ramesh, Tejas and Rush, Alexander and Liu, Xu and Yin, Binqian and Zhou, Keren and Jiao, Shuyin},
+  title={Triton-Viz: Visualizing GPU Programming in AI Courses},
+  booktitle = {Proceedings of the 56th ACM Technical Symposium on Computer Science Education (SIGCSE TS '25)},
+  numpages = {7},
+  location = {Pittsburgh, Pennsylvania, United States},
+  series = {SIGCSE TS '25}
+}
+```
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

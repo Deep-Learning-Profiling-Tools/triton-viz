@@ -6,7 +6,7 @@ from .tooltip import create_tooltip
 import pandas as pd
 
 
-def launch(share=True):
+def launch(share=True, server_name=None):
     cache = {}
     program_records, tt, failures = triton_viz.collect_grid()
     analysis_data = analyze_records(program_records)
@@ -16,7 +16,7 @@ def launch(share=True):
         m[0] = max(k[0] + 1, m[0])
         m[1] = max(k[1] + 1, m[1])
         m[2] = max(k[2] + 1, m[2])
-    w, h = triton_viz.draw_record(program_records[(0, 0, 0)], tt, "tmp.svg")
+    w, h = triton_viz.draw_record(program_records[(0, 0, 0)], tt, "tmp.png")
     size[0] = w
     size[1] = h
     height = 600 * size[1] / size[0]
@@ -52,7 +52,7 @@ def launch(share=True):
                     )
 
         def cache_block(idx):
-            name = tempfile.NamedTemporaryFile(suffix=".svg")
+            name = tempfile.NamedTemporaryFile(suffix=".png")
             w, h = triton_viz.draw_record(program_records[idx], tt, name.name)
             size[0] = w
             size[1] = h
@@ -95,5 +95,12 @@ def launch(share=True):
         b1.click(precompute, inputs={s1, s2, s3}, outputs=img, show_progress=True)
         demo.load(update, inputs={s1, s2, s3}, outputs=[img, b1])
 
-    demo.launch(share=share, debug=False, height=800, quiet=True, show_api=False)
+    demo.launch(
+        share=share,
+        debug=False,
+        height=800,
+        quiet=True,
+        show_api=False,
+        server_name=server_name,
+    )
     return failures
