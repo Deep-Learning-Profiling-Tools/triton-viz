@@ -5,9 +5,14 @@ from typing import TYPE_CHECKING, Literal
 
 
 if TYPE_CHECKING:
+    sanitizer_activated: bool
     sanitizer_backend: Literal["off", "brute_force", "symexec"]
     report_grid_execution_progress: bool
     available_backends: tuple[str, ...]
+
+    def reset() -> None:
+        ...
+
 
 # Back-end options recognised by the sanitizer
 AVAILABLE_SANITIZER_BACKENDS = ("off", "brute_force", "symexec")
@@ -16,6 +21,11 @@ AVAILABLE_SANITIZER_BACKENDS = ("off", "brute_force", "symexec")
 class Config(types.ModuleType):
     def __init__(self, name: str) -> None:
         super().__init__(name)
+        self.reset()
+
+    def reset(self) -> None:
+        # --- Sanitizer activation flag ---
+        self.sanitizer_activated = False
 
         # --- Sanitizer backend ---
         self._sanitizer_backend = os.getenv("TRITON_SANITIZER_BACKEND", "") or None
@@ -27,6 +37,8 @@ class Config(types.ModuleType):
     # ---------- sanitizer_backend ----------
     @property
     def sanitizer_backend(self) -> str:
+        if not self.sanitizer_activated:
+            return "not_activated"
         if self._sanitizer_backend is None:
             raise RuntimeError(
                 f"TRITON_SANITIZER_BACKEND is not set!"
