@@ -197,6 +197,8 @@ class Sanitizer(Client):
         if cls is not Sanitizer:
             return super().__new__(cls)
 
+        cfg.sanitizer_activated = True
+
         backend = cfg.sanitizer_backend
 
         if backend == "brute_force":
