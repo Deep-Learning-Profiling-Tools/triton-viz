@@ -1,6 +1,7 @@
 import traceback
 from collections import namedtuple
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 from torch import Tensor
@@ -239,6 +240,9 @@ class Sanitizer(Client):
     def register_op_callback(self, *args, **kwargs):  # type: ignore[override]
         raise NotImplementedError
 
+    def register_for_loop_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
 
 class SanitizerBruteForce(Sanitizer):
     def __init__(
@@ -305,6 +309,9 @@ class SanitizerBruteForce(Sanitizer):
             return OpCallbacks(before_callback=pre_store_callback)
 
         return OpCallbacks()
+
+    def register_for_loop_callback(self):
+        return None, None, None, None
 
     def finalize(self) -> list:
         return self.records
@@ -540,6 +547,9 @@ class SymbolicExpr:
         else:
             self._init_from_spec(*args)
 
+        # affine loop optimization
+        self._loop_ctx: LoopContext | None = None
+
     def _init_from_spec(self, *args):
         if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
@@ -686,6 +696,8 @@ class SymbolicExpr:
     def _infer_literal_dtype(var):
         if isinstance(var, tl.core.dtype):
             return var
+        if isinstance(var, tl.core.tensor):
+            return var.dtype
         if isinstance(var, SymbolicExpr.tuple_types):
             first_dtype = SymbolicExpr._infer_literal_dtype(var[0])
             for v in var[1:]:  # assume only one consistent dtype in the tuple
@@ -708,6 +720,14 @@ class SymbolicExpr:
         if var is None:
             return tl.int32  # Default dtype for None
         raise ValueError(f"Unsupported type: {type(var)}")
+
+    _loop_ctx_provider: Callable[[], "LoopContext|None"] | None = None
+
+    @classmethod
+    def set_loop_ctx_provider(cls, fn: Callable[[], "LoopContext|None"]):
+        """Register a function that, on each call,
+        returns the current active `LoopContext` (or `None` if none exists)."""
+        cls._loop_ctx_provider = fn
 
     @classmethod
     def from_value(cls, var):
@@ -757,6 +777,8 @@ class SymbolicExpr:
     def _to_z3(self, node: "SymbolicExpr") -> ArithRef:
         # Recursively convert the current node to a Z3 expression
         if node.op == "const":
+            if node._loop_ctx:  # if the node is a loop iterator
+                return node._loop_ctx.idx_z3
             if isinstance(node.value, np.ndarray):
                 return [IntVal(int(v)) for v in node.value.flat]
             return IntVal(node.value)
@@ -1048,6 +1070,15 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     return expr
 
 
+@dataclass
+class LoopContext:
+    lineno: int
+    length: int
+    idx_z3: ArithRef
+    values: list[int] = field(default_factory=list)
+    addrs: list[ArithRef] = field(default_factory=list)
+
+
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
         self.abort_on_error: bool = abort_on_error
@@ -1058,6 +1089,10 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id: int = 0
         self.need_full_grid: bool = False
+        self.loop_stack: list[LoopContext] = []
+        SymbolicExpr.set_loop_ctx_provider(
+            lambda: self.loop_stack[-1] if self.loop_stack else None
+        )
 
     def _check_range_satisfiable(
         self,
@@ -1155,8 +1190,18 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("load", ptr_sym, mask, other)
 
             # check memory access using z3
-            ret_eval, ret_constraints = ret.eval()
-            self._check_range_satisfiable(ret_eval, ret_constraints)
+            if self.loop_stack:
+                z3_addr, z3_constraints = ret.eval()
+                # substitute loop iterable to ctx.idx_z3
+                print("z3 addr:", z3_addr)
+                # self.loop_stack[-1].addrs.extend(
+                #     z3_addr_subst
+                #     if isinstance(z3_addr_subst, list)
+                #     else [z3_addr_subst]
+                # )
+            else:
+                ret_eval, ret_constraints = ret.eval()
+                self._check_range_satisfiable(ret_eval, ret_constraints)
 
             return ret
 
@@ -1361,6 +1406,44 @@ class SanitizerSymbolicExecution(Sanitizer):
         else:
             return OpCallbacks()
 
+    def register_for_loop_callback(self):
+        def loop_hook_before(lineno, iterable):
+            if not isinstance(iterable, range):
+                print("not a for-loop, skipping affine loop optimization.")
+                return
+            length = len(iterable)
+            idx_z3 = Int(f"loop_i_{lineno}")
+            self.loop_stack.append(LoopContext(lineno, length, idx_z3))
+            if cfg.verbose:
+                print(f"[Sanitizer] ▶ enter loop@{lineno}, len={length}")
+
+        def loop_hook_iter_overrider(lineno, idx):
+            if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+                self.loop_stack[-1].values.append(idx)
+
+            sym = SymbolicExpr("const", idx, tl.int32)
+            sym._loop_ctx = self.loop_stack[-1]  # Make a tag
+
+            return tl.core.tensor(sym, tl.int32)
+
+        def loop_hook_iter_listener(lineno, idx):
+            if cfg.verbose:
+                print(f"[Sanitizer] ▶ loop@{lineno} idx={idx}")
+
+        def loop_hook_after(lineno):
+            ctx = self.loop_stack.pop()
+            if ctx.values:
+                self.constraints.append(Or(*[ctx.idx_z3 == v for v in set(ctx.values)]))
+            if cfg.verbose:
+                print(f"[Sanitizer] ▶ leave loop@{lineno} end")
+
+        return (
+            loop_hook_before,
+            loop_hook_iter_overrider,
+            loop_hook_iter_listener,
+            loop_hook_after,
+        )
+
     def finalize(self) -> list:
         return []
 
@@ -1394,6 +1477,9 @@ class NullSanitizer(Sanitizer):
 
     def register_op_callback(self, *args, **kwargs):
         self._disabled("register_op_callback")
+
+    def register_for_loop_callback(self, *args, **kwargs):
+        self._disabled("register_for_loop_callback")
 
     def __getattr__(self, name):
         self._disabled(name)

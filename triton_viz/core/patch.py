@@ -32,12 +32,14 @@ from .data import (
     CastImpl,
 )
 import inspect
+import ast
 from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
     interpreter_builder,
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
+from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
 from triton.runtime import JITFunction
 
 op_list = [
@@ -168,8 +170,169 @@ def unpatch_op(op_type: type[Op]):
         setattr(interpreter_builder, op_name, original_ops[op_type])
 
 
+class _LoopIter:
+    def __init__(self, iterable, lineno, hooks):
+        self._it = iter(iterable)
+        self._lineno = lineno
+        self._hooks = hooks
+        # triggering before_loop
+        if self._hooks.before_loop:
+            self._hooks.before_loop(self._lineno, iterable)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        idx = None
+        try:
+            idx = next(self._it)
+        except StopIteration:
+            # Exiting the loop and triggering after_loop
+            if self._hooks.after_loop:
+                self._hooks.after_loop(self._lineno)
+            raise
+
+        # trigger loop overriders and loop listeners
+        idx = self._hooks.loop_iter(self._lineno, idx)
+        return idx
+
+
+class _CombinedLoopHooks:
+    """
+    Combine for_loop callbacks from all clients.
+    """
+
+    def __init__(self):
+        self._before: list[Callable] = []
+        self._iter_listeners: list[Callable] = []
+        self._iter_overrider: Callable | None = None
+        self._after: list[Callable] = []
+
+    # Register hooks
+    def add_before(self, hook):
+        self._before.append(hook)
+
+    def add_iter_listener(self, hook):
+        self._iter_listeners.append(hook)
+
+    def set_iter_overrider(self, hook):
+        if self._iter_overrider is not None:
+            raise RuntimeError("Only one loop_iter overrider allowed")
+        self._iter_overrider = hook
+
+    def add_after(self, hook):
+        self._after.append(hook)
+
+    # Call combined hooks
+    def before_loop(self, lineno, iterable):
+        for hook in self._before:
+            hook(lineno, iterable)
+
+    def loop_iter(self, lineno, idx):
+        # override iteration index
+        if self._iter_overrider is not None:
+            new_idx = self._iter_overrider(lineno, idx)
+            if new_idx is not None:
+                idx = new_idx
+
+        # call all iteration listeners
+        for hook in self._iter_listeners:
+            hook(lineno, idx)
+
+        return idx
+
+    def after_loop(self, lineno):
+        for hook in self._after:
+            hook(lineno)
+
+    def loop_iter_wrapper(self, iterable, lineno):
+        return _LoopIter(iterable, lineno, self)
+
+    def clear(self):
+        self._before.clear()
+        self._iter_listeners.clear()
+        self._iter_overrider = None
+        self._after.clear()
+
+
+__triton_viz_hooks = _CombinedLoopHooks()
+_orig_visit_for: Callable | None = None
+_orig_patch_lang: Callable | None = None
+_loops_patched: bool = False
+
+
+def _visit_For(self, node: ast.For):  # type: ignore[override]
+    """
+
+    for i in R:
+        ...
+    ==>
+    for i in __triton_viz_hooks_loop(R, lineno):
+        ...
+    where __triton_viz_hooks_loop returns a _LoopIter object.
+    """
+    self.generic_visit(node)
+
+    # __triton_viz_hooks.loop_iter(range(...), lineno)
+    new_iter = ast.Call(
+        func=ast.Attribute(
+            value=ast.Name(id="__triton_viz_hooks", ctx=ast.Load()),
+            attr="loop_iter_wrapper",
+            ctx=ast.Load(),
+        ),
+        args=[node.iter, ast.Constant(value=node.lineno)],
+        keywords=[],
+    )
+
+    new_for = ast.For(
+        target=node.target,
+        iter=new_iter,
+        body=node.body,
+        orelse=node.orelse,
+        type_comment=node.type_comment,
+    )
+    return ast.fix_missing_locations(new_for)
+
+
+def patch_for_loop(
+    before_loop_callback: Callable | None,
+    loop_iter_overrider: Callable | None,
+    loop_iter_listener: Callable | None,
+    after_loop_callback: Callable | None,
+):
+    global _orig_visit_for, _orig_patch_lang, _loops_patched
+    if not _loops_patched:
+        _orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
+        _OrigASTTransformer.visit_For = _visit_For  # type: ignore[assignment]
+        _loops_patched = True
+
+    # Registering hooks
+    if before_loop_callback is not None:
+        __triton_viz_hooks.add_before(before_loop_callback)
+    if loop_iter_overrider is not None:
+        __triton_viz_hooks.set_iter_overrider(loop_iter_overrider)
+    if loop_iter_listener is not None:
+        __triton_viz_hooks.add_iter_listener(loop_iter_listener)
+    if after_loop_callback is not None:
+        __triton_viz_hooks.add_after(after_loop_callback)
+
+
+def unpatch_for_loop():
+    global _loops_patched
+    if not _loops_patched:
+        return
+
+    if _orig_visit_for is not None:
+        _OrigASTTransformer.visit_For = _orig_visit_for
+
+    __triton_viz_hooks.clear()
+
+    _loops_patched = False
+
+
 def _patch_lang(fn):
     triton_patch_lang(fn)
+    fn.__globals__["__triton_viz_hooks"] = __triton_viz_hooks
 
 
 def _unpatch_lang():

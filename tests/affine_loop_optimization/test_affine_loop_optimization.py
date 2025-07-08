@@ -2,7 +2,15 @@ import torch
 import triton
 import triton.language as tl
 
+import triton_viz
+from triton_viz.clients import Sanitizer
+from triton_viz.core import config as cfg
 
+
+cfg.sanitizer_backend = "symexec"
+
+
+@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
 @triton.jit
 def copy_row_kernel(
     in_ptr,
