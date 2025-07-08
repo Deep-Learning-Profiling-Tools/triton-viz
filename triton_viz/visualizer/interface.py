@@ -53,7 +53,9 @@ def launch(share=True, server_name=None):
 
         def cache_block(idx):
             name = tempfile.NamedTemporaryFile(suffix=".png")
-            w, h = triton_viz.draw_record(program_records[idx], tt, name.name)
+            w, h = triton_viz.visualizer.draw_record(
+                program_records[idx], tt, name.name
+            )
             size[0] = w
             size[1] = h
             cache[idx] = (name, len(cache))

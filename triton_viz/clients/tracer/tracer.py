@@ -1,5 +1,5 @@
 from ...core.client import Client
-from ...core.data import Op, Load, Store, ReduceSum, Dot
+from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
 from collections.abc import Callable
 import numpy as np
 
@@ -49,6 +49,9 @@ class Tracer(Client):
             self.sample = False
         else:
             self.sample = True
+
+        # Create a Grid record for this grid index
+        self.records.append(Grid(idx=grid_idx))
 
     def grid_callback(self, grid: tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())

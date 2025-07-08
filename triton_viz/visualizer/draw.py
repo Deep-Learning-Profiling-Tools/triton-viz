@@ -97,7 +97,7 @@ def collect_launch(launch):
         )
     failures = {}
     all_grids = {}
-    last_grid = Grid((0, 0, 0))
+    last_grid = None
     program_records = []
     for r in launch.records:
         if isinstance(r, Grid):
@@ -155,8 +155,13 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
         dr = draw_record(r)
         # env = dr.get_envelope()
         # dr = dr.center_xy().with_envelope(rectangle(env.width, env.height).center_xy())
-        records.append(dr)
-
+        if not dr.get_envelope().is_empty:
+            records.append(dr)
+    if not records:
+        print(
+            "[triton-viz] No visualization records for this grid yet; skipping drawing"
+        )
+        return 1.0, 1.0
     dr = vcat(records)
     dr = dr.center_xy()
     env = dr.get_envelope()

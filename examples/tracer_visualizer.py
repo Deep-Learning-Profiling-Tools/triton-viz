@@ -26,7 +26,7 @@ def add_kernel(
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
-def test_add():
+if __name__ == "__main__":
     cfg.reset()
     device = "cpu"
     size = 5000
