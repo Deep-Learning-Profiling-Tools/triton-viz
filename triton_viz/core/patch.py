@@ -263,7 +263,6 @@ _loops_patched: bool = False
 
 def _visit_For(self, node: ast.For):  # type: ignore[override]
     """
-
     for i in R:
         ...
     ==>
