@@ -26,7 +26,7 @@ def add_kernel(
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
-def test_add():
+if __name__ == "__main__":
     cfg.reset()
     device = "cpu"
     size = 5000
@@ -38,4 +38,4 @@ def test_add():
     grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
     add_kernel[grid](x, y, output, size, BLOCK_SIZE)
     assert (x + y == output).all()
-    # triton_viz.launch()
+    triton_viz.launch()

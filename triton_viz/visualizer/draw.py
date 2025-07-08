@@ -19,7 +19,7 @@ import chalk
 from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, V2, concat
 from dataclasses import dataclass
 from numpy.typing import ArrayLike
-from ..core.trace import Trace
+from ..core.trace import launches
 from ..clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import sys
 
@@ -73,7 +73,7 @@ def collect_grid():
     records = []
     tensor_tables = []
     failures = []
-    for launch in Trace.launches:
+    for launch in launches:
         cur_records, cur_tensor_table, cur_failures = collect_launch(launch)
         records.append(cur_records)
         tensor_tables.append(cur_tensor_table)
@@ -85,7 +85,16 @@ def collect_grid():
 def collect_launch(launch):
     tensor_table = {}
     for i, t in enumerate(launch.tensors):
-        tensor_table[t.ptr] = (t, i)
+        tensor_table[t.data_ptr()] = (
+            Tensor(
+                ptr=t.data_ptr(),
+                dtype=str(t.dtype),
+                stride=tuple(t.stride()),
+                shape=tuple(t.shape),
+                element_size=t.element_size(),
+            ),
+            i,
+        )
     failures = {}
     all_grids = {}
     last_grid = None
@@ -146,8 +155,13 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
         dr = draw_record(r)
         # env = dr.get_envelope()
         # dr = dr.center_xy().with_envelope(rectangle(env.width, env.height).center_xy())
-        records.append(dr)
-
+        if not dr.get_envelope().is_empty:
+            records.append(dr)
+    if not records:
+        print(
+            "[triton-viz] No visualization records for this grid yet; skipping drawing"
+        )
+        return 1.0, 1.0
     dr = vcat(records)
     dr = dr.center_xy()
     env = dr.get_envelope()

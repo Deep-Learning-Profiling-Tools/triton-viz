@@ -8,7 +8,7 @@ import pandas as pd
 
 def launch(share=True, server_name=None):
     cache = {}
-    program_records, tt, failures = triton_viz.collect_grid()
+    program_records, tt, failures = triton_viz.visualizer.collect_grid()
     analysis_data = analyze_records(program_records)
     m = [0, 0, 0]
     size = [0, 0]
@@ -16,7 +16,7 @@ def launch(share=True, server_name=None):
         m[0] = max(k[0] + 1, m[0])
         m[1] = max(k[1] + 1, m[1])
         m[2] = max(k[2] + 1, m[2])
-    w, h = triton_viz.draw_record(program_records[(0, 0, 0)], tt, "tmp.png")
+    w, h = triton_viz.visualizer.draw_record(program_records[(0, 0, 0)], tt, "tmp.png")
     size[0] = w
     size[1] = h
     height = 600 * size[1] / size[0]
@@ -53,7 +53,9 @@ def launch(share=True, server_name=None):
 
         def cache_block(idx):
             name = tempfile.NamedTemporaryFile(suffix=".png")
-            w, h = triton_viz.draw_record(program_records[idx], tt, name.name)
+            w, h = triton_viz.visualizer.draw_record(
+                program_records[idx], tt, name.name
+            )
             size[0] = w
             size[1] = h
             cache[idx] = (name, len(cache))
