@@ -13,25 +13,25 @@ class Client(ABC):
 
     @abstractmethod
     def arg_callback(self, arg, arg_cvt):
-        pass
+        ...
 
     @abstractmethod
     def grid_callback(self, grid: tuple[int]):
-        pass
+        ...
 
     @abstractmethod
     def grid_idx_callback(self, grid_idx: tuple[int]):
-        pass
+        ...
 
     @abstractmethod
     def register_op_callback(
         self, op: type[Op]
     ) -> tuple[Callable | None, Callable | None, Callable | None]:
-        pass
+        ...
 
     @abstractmethod
     def finalize(self) -> list:
-        pass
+        ...
 
 
 class ClientManager:
