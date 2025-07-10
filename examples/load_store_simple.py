@@ -1,6 +1,3 @@
-import cairocffi
-cairocffi.install_as_pycairo()
-
 import torch
 import triton
 import triton.language as tl
@@ -10,6 +7,10 @@ from triton_viz.core import config as cfg
 from triton_viz.core.trace import launches
 from triton_viz.visualizer import draw
 import os
+
+import cairocffi
+
+cairocffi.install_as_pycairo()
 
 
 @triton_viz.trace(clients=Tracer())
@@ -38,24 +39,24 @@ if __name__ == "__main__":
     output = torch.empty_like(x)
     grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
     simple_kernel[grid](x, output, size, BLOCK_SIZE)
-    
+
     # Manual visualization to bypass interface issues
     if launches:
         launch = launches[-1]
         print(f"Number of records: {len(launch.records)}")
-        
+
         # Collect and visualize
         try:
             program_records, tensor_table, failures = draw.collect_grid()
             print(f"Grid records collected: {list(program_records.keys())}")
-            
+
             # Try to draw for grid (0, 0, 0)
             if (0, 0, 0) in program_records:
                 records = program_records[(0, 0, 0)]
                 print(f"Number of records for grid (0,0,0): {len(records)}")
                 for i, record in enumerate(records):
                     print(f"  Record {i}: {type(record).__name__}")
-                
+
                 # Visualize
                 output_file = "test_visualization.png"
                 w, h = draw.draw_record(records, tensor_table, output_file)
@@ -64,4 +65,5 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error during visualization: {e}")
             import traceback
+
             traceback.print_exc()
