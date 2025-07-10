@@ -4,9 +4,11 @@ import tempfile
 from .analysis import analyze_records
 from .tooltip import create_tooltip
 import pandas as pd
+import cairocffi
 
 
 def launch(share=True, server_name=None):
+    cairocffi.install_as_pycairo()
     cache = {}
     program_records, tt, failures = triton_viz.visualizer.collect_grid()
     analysis_data = analyze_records(program_records)

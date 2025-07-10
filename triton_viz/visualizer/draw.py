@@ -16,7 +16,7 @@ import numpy.typing as npt
 import planar
 import math
 import chalk
-from chalk import Diagram, rectangle, text, hcat, vcat, empty, Path, Trail, V2, concat
+from chalk import Diagram, rectangle, hcat, vcat, empty, Path, Trail, V2, concat
 from dataclasses import dataclass
 from numpy.typing import ArrayLike
 from ..core.trace import launches
@@ -133,6 +133,10 @@ def draw_launch(program_records, tensor_table, base) -> Diagram:
                 return draw_store(x, tensor_table)
             else:
                 return None
+        if isinstance(x, Load):
+            return draw_load_simple(x, tensor_table)
+        if isinstance(x, Store):
+            return draw_store_simple(x, tensor_table)
         if isinstance(x, Op):
             return draw_op(x)
         if isinstance(x, MakeRange):
@@ -195,9 +199,8 @@ def cover(
 
 def pair_draw(x: Diagram, y: Diagram, command: str) -> Diagram:
     "Draw two diagrams next to each other with a command in the middle."
-    return hcat([box(x, 3, 2.5), box(y, 3, 2.5)], 1).center_xy() + text(
-        command, 0.2
-    ).fill_color(BLACK).line_width(0).translate(0, -1)
+    # Temporarily disable text due to chalk library issue
+    return hcat([box(x, 3, 2.5), box(y, 3, 2.5)], 1).center_xy()
 
 
 # Individual renderers
@@ -256,6 +259,68 @@ def draw_store(x, tensor_table) -> Diagram | None:
     return pair_draw(out, inp, "store")
 
 
+def draw_load_simple(x: Load, tensor_table) -> Diagram | None:
+    tensor, tensor_id = tensor_table[x.ptr]
+    color = ACTIVE[tensor_id]
+
+    # Create a simple visualization without using cover function
+    # since we don't have access to the Triton dtype object
+    shape = make_3d(tensor.shape)
+    # Delinearize offsets based on tensor shape
+    offsets_normalized = x.offsets // tensor.element_size
+    z_vals = offsets_normalized % shape[2]
+    y_vals = (offsets_normalized // shape[2]) % shape[1]
+    x_vals = (offsets_normalized // (shape[2] * shape[1])) % shape[0]
+
+    # Apply mask
+    valid_indices = x.masks.nonzero()[0]
+    if len(valid_indices) > 0:
+        x_vals = x_vals[valid_indices]
+        y_vals = y_vals[valid_indices]
+        z_vals = z_vals[valid_indices]
+        inp = draw_tensor_3d(shape, x_vals, y_vals, z_vals, color)
+    else:
+        inp = draw_tensor_3d(shape, None, None, None, color)
+
+    inp = reshape(inp)
+
+    s = make_3d(x.offsets.shape)
+    a, b, c = x.masks.reshape(*s).nonzero()
+    out = draw_tensor_3d(s, a, b, c, color)
+    return pair_draw(inp, reshape(out), "load")
+
+
+def draw_store_simple(x: Store, tensor_table) -> Diagram | None:
+    tensor, tensor_id = tensor_table[x.ptr]
+    color = ACTIVE[tensor_id]
+
+    # Create a simple visualization without using cover function
+    # since we don't have access to the Triton dtype object
+    shape = make_3d(tensor.shape)
+    # Delinearize offsets based on tensor shape
+    offsets_normalized = x.offsets // tensor.element_size
+    z_vals = offsets_normalized % shape[2]
+    y_vals = (offsets_normalized // shape[2]) % shape[1]
+    x_vals = (offsets_normalized // (shape[2] * shape[1])) % shape[0]
+
+    # Apply mask
+    valid_indices = x.masks.nonzero()[0]
+    if len(valid_indices) > 0:
+        x_vals = x_vals[valid_indices]
+        y_vals = y_vals[valid_indices]
+        z_vals = z_vals[valid_indices]
+        inp = draw_tensor_3d(shape, x_vals, y_vals, z_vals, color)
+    else:
+        inp = draw_tensor_3d(shape, None, None, None, color)
+
+    inp = reshape(inp)
+
+    s = make_3d(x.offsets.shape)
+    a, b, c = x.masks.reshape(*s).nonzero()
+    out = draw_tensor_3d(s, a, b, c, color)
+    return pair_draw(reshape(out), inp, "store")
+
+
 def make_3d(shape):
     "Make a 3d shape"
     if len(shape) == 1:
@@ -300,7 +365,7 @@ def draw_dot(x: Dot) -> Diagram | None:
     # out = add_whiskers(out, x.output_shape)
     return hcat(
         [box(inp, 1.5, 2), box(inp2, 1.5, 2), box(out, 1.5, 2)], 1
-    ).center_xy() + text("dot", 0.2).fill_color(BLACK).line_width(0).translate(0, -1)
+    ).center_xy()  # Temporarily disable text due to chalk library issue
 
 
 # For 3d
