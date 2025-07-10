@@ -31,6 +31,7 @@ dependencies = [
   "z3-solver",
   "anytree",
   "cairocffi",
+  "flask",
 ]
 
 [project.urls]
