@@ -32,6 +32,7 @@ dependencies = [
   "anytree",
   "cairocffi",
   "flask",
+  "flask_cloudflared",
 ]
 
 [project.urls]
