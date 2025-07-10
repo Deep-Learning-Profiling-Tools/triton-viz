@@ -12,8 +12,8 @@ import time
 
 app = Flask(
     __name__,
-    template_folder=os.path.join(os.path.dirname(__file__), "templates"),
-    static_folder=os.path.join(os.path.dirname(__file__), "static"),
+    template_folder=os.path.join(os.path.dirname(__file__), "..", "templates"),
+    static_folder=os.path.join(os.path.dirname(__file__), "..", "static"),
 )
 
 # Global variables to store the data
@@ -43,7 +43,15 @@ def precompute_c_values(op_data):
 
 def update_global_data():
     global global_data, raw_tensor_data, precomputed_c_values
-    analysis_data = analyze_records()
+    
+    # Collect all records from launches
+    from ..core.trace import launches
+    all_records = []
+    for launch in launches:
+        all_records.extend(launch.records)
+    
+    # Pass the records to analyze_records
+    analysis_data = analyze_records(all_records)
     viz_data = get_visualization_data()
     global_data = {
         "ops": {
@@ -67,7 +75,13 @@ def update_global_data():
 
 @app.route("/")
 def index():
+    update_global_data()
     return render_template("index.html")
+
+@app.route("/debug")
+def debug_page():
+    update_global_data()
+    return render_template("debug.html")
 
 
 @app.route("/api/data")
@@ -181,6 +195,7 @@ def run_flask_with_cloudflared():
 def launch(share=True):
     print("Launching Triton viz tool")
     if share:
+        print("--------")
         flask_thread = threading.Thread(target=run_flask_with_cloudflared)
         flask_thread.start()
 
@@ -190,10 +205,17 @@ def launch(share=True):
         # Try to get the tunnel URL by making a request to the local server
         try:
             response = requests.get("http://localhost:8000")
-            print(f"Your app is now available at: {response.url}")
+            public_url = response.url
+            print(f"Running on local URL:  http://localhost:8000")
+            print(f"Running on public URL: {public_url}")
+            print("\nThis share link expires in 72 hours. For free permanent hosting and GPU upgrades, check out Spaces: https://huggingface.co/spaces")
+            print("--------")
         except requests.exceptions.RequestException:
-            print("Please wait for URL:")
+            print("Setting up public URL... Please wait.")
     else:
+        print("--------")
+        print(f"Running on local URL:  http://localhost:5001")
+        print("--------")
         app.run(port=5001)
 
 

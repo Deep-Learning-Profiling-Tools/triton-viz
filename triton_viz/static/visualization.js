@@ -386,4 +386,14 @@ async function fetchData() {
     }
 }
 
-initializeApp();
+// Initialize app when DOM is loaded
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        initializeApp();
+        fetchData();
+    });
+} else {
+    // DOM is already loaded
+    initializeApp();
+    fetchData();
+}

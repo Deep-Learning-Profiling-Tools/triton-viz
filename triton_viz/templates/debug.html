@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Debug Visualization</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: #1e1e28;
+            color: #c8c8c8;
+            font-family: Arial, sans-serif;
+        }
+        #log {
+            background: #333;
+            padding: 10px;
+            margin: 10px 0;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .error { color: #ff6b6b; }
+        .success { color: #4caf50; }
+        .info { color: #2196f3; }
+        canvas {
+            border: 1px solid #666;
+            display: block;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Triton Viz Debug Page</h1>
+    <div id="status">Initializing...</div>
+    <div id="log"></div>
+    <canvas id="canvas" width="1600" height="900"></canvas>
+    <div id="visualization-container"></div>
+
+    <script>
+        const log = document.getElementById('log');
+        const status = document.getElementById('status');
+        
+        function addLog(message, type = 'info') {
+            const timestamp = new Date().toISOString().substr(11, 12);
+            log.innerHTML += `<span class="${type}">[${timestamp}] ${message}</span>\n`;
+            log.scrollTop = log.scrollHeight;
+        }
+        
+        // Override console methods to capture logs
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalWarn = console.warn;
+        
+        console.log = function(...args) {
+            originalLog.apply(console, args);
+            addLog('LOG: ' + args.join(' '), 'info');
+        };
+        
+        console.error = function(...args) {
+            originalError.apply(console, args);
+            addLog('ERROR: ' + args.join(' '), 'error');
+        };
+        
+        console.warn = function(...args) {
+            originalWarn.apply(console, args);
+            addLog('WARN: ' + args.join(' '), 'info');
+        };
+        
+        window.addEventListener('error', (e) => {
+            addLog(`JS Error: ${e.message} at ${e.filename}:${e.lineno}:${e.colno}`, 'error');
+        });
+        
+        addLog('Page loaded', 'success');
+        status.textContent = 'Loading visualization module...';
+    </script>
+    
+    <script type="module">
+        import('./static/visualization.js')
+            .then(() => {
+                addLog('Visualization module loaded successfully', 'success');
+                status.textContent = 'Visualization loaded!';
+            })
+            .catch(err => {
+                addLog('Failed to load visualization module: ' + err, 'error');
+                status.textContent = 'Failed to load visualization';
+            });
+    </script>
+</body>
+</html>
