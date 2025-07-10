@@ -157,19 +157,27 @@ def delinearized(
     if isinstance(dtype, str):
         # Common dtype sizes in bytes
         dtype_sizes = {
-            'torch.float32': 4, 'float32': 4,
-            'torch.float64': 8, 'float64': 8,
-            'torch.int32': 4, 'int32': 4,
-            'torch.int64': 8, 'int64': 8,
-            'torch.float16': 2, 'float16': 2,
-            'torch.bfloat16': 2, 'bfloat16': 2,
-            'torch.int8': 1, 'int8': 1,
-            'torch.uint8': 1, 'uint8': 1,
+            "torch.float32": 4,
+            "float32": 4,
+            "torch.float64": 8,
+            "float64": 8,
+            "torch.int32": 4,
+            "int32": 4,
+            "torch.int64": 8,
+            "int64": 8,
+            "torch.float16": 2,
+            "float16": 2,
+            "torch.bfloat16": 2,
+            "bfloat16": 2,
+            "torch.int8": 1,
+            "int8": 1,
+            "torch.uint8": 1,
+            "uint8": 1,
         }
         element_size = dtype_sizes.get(dtype, 4)  # Default to 4 bytes
     else:
         element_size = dtype.element_ty.primitive_bitwidth // 8
-    
+
     x = x.copy() // element_size
     z = ((x // (shape[1] * shape[2])) * mask - (1 - mask)).ravel()
     y = (((x // shape[2]) % shape[1]) * mask - (1 - mask)).ravel()

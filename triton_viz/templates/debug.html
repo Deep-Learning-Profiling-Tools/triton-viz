@@ -41,41 +41,41 @@
     <script>
         const log = document.getElementById('log');
         const status = document.getElementById('status');
-        
+
         function addLog(message, type = 'info') {
             const timestamp = new Date().toISOString().substr(11, 12);
             log.innerHTML += `<span class="${type}">[${timestamp}] ${message}</span>\n`;
             log.scrollTop = log.scrollHeight;
         }
-        
+
         // Override console methods to capture logs
         const originalLog = console.log;
         const originalError = console.error;
         const originalWarn = console.warn;
-        
+
         console.log = function(...args) {
             originalLog.apply(console, args);
             addLog('LOG: ' + args.join(' '), 'info');
         };
-        
+
         console.error = function(...args) {
             originalError.apply(console, args);
             addLog('ERROR: ' + args.join(' '), 'error');
         };
-        
+
         console.warn = function(...args) {
             originalWarn.apply(console, args);
             addLog('WARN: ' + args.join(' '), 'info');
         };
-        
+
         window.addEventListener('error', (e) => {
             addLog(`JS Error: ${e.message} at ${e.filename}:${e.lineno}:${e.colno}`, 'error');
         });
-        
+
         addLog('Page loaded', 'success');
         status.textContent = 'Loading visualization module...';
     </script>
-    
+
     <script type="module">
         import('./static/visualization.js')
             .then(() => {
