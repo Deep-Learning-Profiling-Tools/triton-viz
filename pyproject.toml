@@ -30,6 +30,7 @@ dependencies = [
   "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git",
   "z3-solver",
   "anytree",
+  "cairocffi",
 ]
 
 [project.urls]
