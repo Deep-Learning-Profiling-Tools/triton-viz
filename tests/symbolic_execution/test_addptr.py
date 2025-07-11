@@ -24,8 +24,8 @@ def test_addptr_overrider():
     ptr_th = TensorHandle(np.array([1000]), ptr_dtype)
     offset_th = TensorHandle(np.array([3]), tl.int32)
     sanitizer = SanitizerSymbolicExecution(abort_on_error=False)
-    _, _, addptr_fn = sanitizer.register_op_callback(AddPtr)
-    assert addptr_fn is not None
-    expr = addptr_fn(ptr_th, offset_th)  # offset = 3
+    op_callbacks = sanitizer.register_op_callback(AddPtr)
+    assert op_callbacks.op_overrider is not None
+    expr = op_callbacks.op_overrider(ptr_th, offset_th)  # offset = 3
     assert expr.op == "addptr"
     assert expr.eval()[0] == 1000 + 3 * 4  # element_bytewidth = 4

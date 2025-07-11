@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from .data import Op, Launch
 from .patch import patch_op, unpatch_op, op_list, patch_calls
+from .callbacks import OpCallbacks
 
 
 class Client(ABC):
@@ -24,9 +25,7 @@ class Client(ABC):
         ...
 
     @abstractmethod
-    def register_op_callback(
-        self, op: type[Op]
-    ) -> tuple[Callable | None, Callable | None, Callable | None]:
+    def register_op_callback(self, op: type[Op]) -> OpCallbacks:
         ...
 
     @abstractmethod
@@ -58,12 +57,8 @@ class ClientManager:
         with patch_calls():
             for client in self.clients.values():
                 for op in op_list:
-                    (
-                        before_callback,
-                        after_callback,
-                        op_overrider,
-                    ) = client.register_op_callback(op)
-                    patch_op(op, before_callback, after_callback, op_overrider)
+                    callbacks = client.register_op_callback(op)
+                    patch_op(op, callbacks)
             try:
                 yield
             finally:
