@@ -4,6 +4,7 @@ from collections.abc import Callable
 from tqdm import tqdm
 
 from . import config as cfg
+from .callbacks import OpCallbacks
 from .data import (
     Op,
     RawLoad,
@@ -98,62 +99,50 @@ class PatchOp:
         self,
         op: Callable,
         op_type: type[Op],
-        before_callback: Callable | None,
-        after_callback: Callable | None,
-        op_overrider: Callable | None,
+        callbacks: OpCallbacks,
     ):
         self.op = op
         self.op_type = op_type
-        self.before_callback = before_callback
-        self.after_callback = after_callback
-        self.op_overrider = op_overrider
+        self.callbacks = callbacks
 
     def __call__(self, *args, **kwargs):
-        if self.before_callback:
-            self.before_callback(*args, **kwargs)
-        if self.op_overrider:
+        if self.callbacks.before_callback:
+            self.callbacks.before_callback(*args, **kwargs)
+        if self.callbacks.op_overrider:
             if self.op_type == ReduceSum:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
                 ret = tl.core.tensor(
-                    self.op_overrider(args[0].handle, *args[1:], **kwargs),
+                    self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
                     args[0].dtype,
                 )
             else:
-                ret = self.op_overrider(*args, **kwargs)
+                ret = self.callbacks.op_overrider(*args, **kwargs)
                 from ..clients.sanitizer.sanitizer import SymbolicExpr
 
                 if isinstance(ret, SymbolicExpr):
                     ret.concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
-        if self.after_callback:
+        if self.callbacks.after_callback:
             # Pass ret so that we don't have to derive output shape from args
-            self.after_callback(ret, *args, **kwargs)
+            self.callbacks.after_callback(ret, *args, **kwargs)
         return ret
 
 
-def patch_op(
-    op_type: type[Op],
-    before_callback: Callable | None,
-    after_callback: Callable | None,
-    op_overrider: Callable | None,
-):
+def patch_op(op_type: type[Op], callbacks: OpCallbacks):
     """
     Register a callback to be called before and after an operator is executed.
 
-    :param op_name: The name of the operator to register the callback for.
-    :param before_callback: The callback to be called before the operator is executed.
-    :param after_callback: The callback to be called after the operator is executed.
+    :param op_type: The type of the operator to register the callback for.
+    :param callbacks: The OpCallbacks object containing before_callback, after_callback, and op_overrider.
     """
     if op_type in original_ops:
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = original_ops[op_type].__name__
         current_op = getattr(interpreter_builder, op_name)
-        patched_op = PatchOp(
-            current_op, op_type, before_callback, after_callback, op_overrider
-        )
+        patched_op = PatchOp(current_op, op_type, callbacks)
         setattr(
             interpreter_builder,
             op_name,
@@ -162,9 +151,7 @@ def patch_op(
     elif op_type in reduce_map:
         op_name = reduce_map[op_type].__name__
         current_op = getattr(tl, op_name)
-        patched_op = PatchOp(
-            current_op, op_type, before_callback, after_callback, op_overrider
-        )
+        patched_op = PatchOp(current_op, op_type, callbacks)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")

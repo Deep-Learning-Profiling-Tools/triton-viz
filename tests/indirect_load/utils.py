@@ -43,9 +43,11 @@ class CaptureSanitizer(SanitizerSymbolicExecution):
         return self._offset_lists
 
     def register_op_callback(self, op_type):
-        pre, post, orig_overrider = super().register_op_callback(op_type)
-        if op_type not in (Load, RawLoad) or orig_overrider is None:
-            return pre, post, orig_overrider
+        op_callbacks = super().register_op_callback(op_type)
+        if op_type not in (Load, RawLoad) or op_callbacks.op_overrider is None:
+            return op_callbacks
+
+        orig_overrider = op_callbacks.op_overrider
 
         def new_load_overrider(ptr, *a, **k):
             # exec original overrider
@@ -65,4 +67,11 @@ class CaptureSanitizer(SanitizerSymbolicExecution):
                     self._offset_lists.append(offs.tolist())
             return load_expr
 
-        return pre, post, new_load_overrider
+        # Return OpCallbacks with the new overrider, preserving other callbacks
+        from triton_viz.core.callbacks import OpCallbacks
+
+        return OpCallbacks(
+            before_callback=op_callbacks.before_callback,
+            after_callback=op_callbacks.after_callback,
+            op_overrider=new_load_overrider,
+        )

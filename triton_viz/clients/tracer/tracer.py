@@ -1,6 +1,6 @@
 from ...core.client import Client
+from ...core.callbacks import OpCallbacks
 from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
-from collections.abc import Callable
 import numpy as np
 
 
@@ -56,9 +56,7 @@ class Tracer(Client):
     def grid_callback(self, grid: tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(
-        self, op_type: type[Op]
-    ) -> tuple[Callable | None, Callable | None, Callable | None]:
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -95,15 +93,15 @@ class Tracer(Client):
             self.records.append(Dot(input_shape, other_shape, ret_shape))
 
         if op_type is Load:
-            return pre_load_callback, None, None
+            return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
-            return pre_store_callback, None, None
+            return OpCallbacks(before_callback=pre_store_callback)
         elif op_type is ReduceSum:
-            return None, post_reduce_sum_callback, None
+            return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:
-            return None, post_dot_callback, None
+            return OpCallbacks(after_callback=post_dot_callback)
 
-        return None, None, None
+        return OpCallbacks()
 
     def finalize(self) -> list:
         return self.records

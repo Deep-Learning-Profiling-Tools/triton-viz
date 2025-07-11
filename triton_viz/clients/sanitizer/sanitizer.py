@@ -12,6 +12,7 @@ import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
 from ...core.client import Client
+from ...core.callbacks import OpCallbacks
 from ...core.data import (
     Op,
     RawLoad,
@@ -266,9 +267,7 @@ class SanitizerBruteForce(Sanitizer):
     def grid_callback(self, grid: tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(
-        self, op_type: type[Op]
-    ) -> tuple[Callable | None, Callable | None, Callable | None]:
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -290,11 +289,11 @@ class SanitizerBruteForce(Sanitizer):
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
         if op_type is Load:
-            return pre_load_callback, None, None
+            return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
-            return pre_store_callback, None, None
+            return OpCallbacks(before_callback=pre_store_callback)
 
-        return None, None, None
+        return OpCallbacks()
 
     def finalize(self) -> list:
         return self.records
@@ -1106,9 +1105,7 @@ class SanitizerSymbolicExecution(Sanitizer):
     def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
 
-    def register_op_callback(
-        self, op_type: type[Op]
-    ) -> tuple[Callable | None, Callable | None, Callable | None]:
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
@@ -1345,9 +1342,9 @@ class SanitizerSymbolicExecution(Sanitizer):
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
-            return None, None, OP_TYPE_TO_OVERRIDER[op_type]
+            return OpCallbacks(op_overrider=OP_TYPE_TO_OVERRIDER[op_type])
         else:
-            return None, None, None
+            return OpCallbacks()
 
     def finalize(self) -> list:
         return []
