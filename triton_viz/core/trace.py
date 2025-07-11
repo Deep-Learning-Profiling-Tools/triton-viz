@@ -64,15 +64,15 @@ class Trace(KernelInterface):
         launches.append(self.client_manager.launch)
 
 
-def trace(clients: str | Client):
+def trace(clients: str | Client | None = None):
     """
     Create a trace object that can be used to run a kernel with instrumentation clients.
 
     :param kernel: The kernel to run.
-    :param client: A client to run with the kernel.
+    :param client: A client to run with the kernel. Defaults to Tracer() if not specified.
     """
-    if not clients:
-        raise ValueError("At least one client must be specified!")
+    if clients is None:
+        clients = Tracer()
 
     if not isinstance(clients, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(clients)}")
