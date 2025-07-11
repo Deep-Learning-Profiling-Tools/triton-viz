@@ -44,6 +44,7 @@ repos:
     - nox
     - rich
     - types-setuptools
+    - types-requests
 
 # CMake formatting
 - repo: https://github.com/cheshirekow/cmake-format-precommit

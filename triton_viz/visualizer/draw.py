@@ -4,24 +4,19 @@ from triton_viz.core.data import (
     Grid,
     Store,
     Load,
-    Op,
-    MakeRange,
-    ReduceMin,
-    ReduceMax,
-    ReduceSum,
     Dot,
+    ExpandDims,
 )
 import numpy as np
-import numpy.typing as npt
 import planar
 import math
 import chalk
-from chalk import Diagram, rectangle, hcat, vcat, empty, Path, Trail, V2, concat
-from dataclasses import dataclass
-from numpy.typing import ArrayLike
+from chalk import Diagram, rectangle
 from ..core.trace import launches
 from ..clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import sys
+import torch
+import uuid
 
 sys.setrecursionlimit(100000)
 
@@ -92,6 +87,7 @@ def collect_launch(launch):
                 stride=tuple(t.stride()),
                 shape=tuple(t.shape),
                 element_size=t.element_size(),
+                data=t,
             ),
             i,
         )
@@ -115,214 +111,38 @@ def collect_launch(launch):
     return all_grids, tensor_table, failures
 
 
-def draw_record(program_record, tensor_table, output):
-    return draw_launch(program_record, tensor_table, output)
+def extract_load_coords(
+    record: Load, global_tensor: Tensor
+) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    # Extract coordinates for the global tensor
+    global_shape = make_3d(global_tensor.shape)
+    global_z, global_y, global_x = delinearized(
+        global_shape,
+        record.offsets,
+        global_tensor.dtype,
+        record.masks,
+    )
+
+    global_coords = [
+        (float(xi), float(yi), float(zi))
+        for xi, yi, zi in zip(global_z, global_y, global_x)
+        if xi != -1 and yi != -1 and zi != -1
+    ]
+
+    # Extract coordinates for the slice tensor
+    # Infer shape from masks array
+    slice_shape = make_3d(record.masks.shape)
+    slice_z, slice_y, slice_x = record.masks.reshape(*slice_shape).nonzero()
+
+    slice_coords = [
+        (float(xi), float(yi), float(zi))
+        for xi, yi, zi in zip(slice_x, slice_y, slice_z)
+    ]
+
+    return global_coords, slice_coords
 
 
-def draw_launch(program_records, tensor_table, base) -> Diagram:
-    def draw(x):
-        "Dispatch"
-        if isinstance(x, Tensor):
-            return draw_tensor(x)
-        if isinstance(x, Grid):
-            return draw_grid(x)
-        if isinstance(x, OutOfBoundsRecordBruteForce):
-            if isinstance(x.op, Load):
-                return draw_load(x, tensor_table)
-            elif isinstance(x.op, Store):
-                return draw_store(x, tensor_table)
-            else:
-                return None
-        if isinstance(x, Load):
-            return draw_load_simple(x, tensor_table)
-        if isinstance(x, Store):
-            return draw_store_simple(x, tensor_table)
-        if isinstance(x, Op):
-            return draw_op(x)
-        if isinstance(x, MakeRange):
-            return draw_make_range(x)
-        if isinstance(x, (ReduceMin, ReduceMax, ReduceSum)):
-            return draw_reduce(x)
-        if isinstance(x, Dot):
-            return None  # draw_dot(x)
-
-    def draw_record(x):
-        "Render one record"
-        y = draw(x)
-        if y is None:
-            return empty()
-
-        return (chalk.vstrut(0.2) / y).center_xy()
-
-    records = []
-    for r in program_records:
-        dr = draw_record(r)
-        # env = dr.get_envelope()
-        # dr = dr.center_xy().with_envelope(rectangle(env.width, env.height).center_xy())
-        if not dr.get_envelope().is_empty:
-            records.append(dr)
-    if not records:
-        print(
-            "[triton-viz] No visualization records for this grid yet; skipping drawing"
-        )
-        return 1.0, 1.0
-    dr = vcat(records)
-    dr = dr.center_xy()
-    env = dr.get_envelope()
-    dr = rectangle(env.width + 1, env.height + 1).fill_color(BG).center_xy() + dr
-    dr.render(base, 2500)
-    return env.width, env.height
-
-
-def delinearize(shape: tuple, x: npt.NDArray, dtype, mask) -> list[npt.NDArray]:
-    if len(shape) == 1:
-        shape = (1, 1, shape[0])
-    x = x.copy() // (dtype.element_ty.primitive_bitwidth // 8)
-    vals = []
-    for s in list(reversed(shape[1:])) + [10000]:
-        vals.append(((x % s) * mask - (1 - mask)).ravel())
-        x = x // s
-    return vals
-
-
-trail = Trail.from_offsets([V2(0, 1), V2(1, 0), V2(0, -1), V2(-1, 0)], closed=True)
-
-
-def cover(
-    shape: tuple, dtype, load: Tensor, mask: npt.NDArray, color: Color
-) -> Diagram:
-    shape = make_3d(shape)
-    "Draw the values from load on top of the loading tensor"
-    x, y, z = delinearize(shape, load, dtype, mask)
-    return draw_tensor_3d(shape, z, y, x, color)
-
-
-def pair_draw(x: Diagram, y: Diagram, command: str) -> Diagram:
-    "Draw two diagrams next to each other with a command in the middle."
-    # Temporarily disable text due to chalk library issue
-    return hcat([box(x, 3, 2.5), box(y, 3, 2.5)], 1).center_xy()
-
-
-# Individual renderers
-
-
-def draw_tensor(x: Tensor) -> Diagram | None:
-    return None
-
-
-def draw_grid(x: Grid) -> Diagram | None:
-    return None
-
-
-def draw_make_range(x: MakeRange) -> Diagram | None:
-    return None
-
-
-def draw_reduce(x: ReduceMin | ReduceMax | ReduceSum) -> Diagram | None:
-    color = ACTIVE[0]
-    inp = draw_tensor_3d(make_3d(x.input_shape), None, None, None, color)
-    if x.index == 0 and len(x.input_shape) == 2:
-        inp = hcat(
-            [
-                rectangle(0.1, inp.get_envelope().height)
-                .align_t()
-                .line_width(0)
-                .fill_color(BLACK),
-                inp,
-            ],
-            0.5,
-        )
-    else:
-        inp = vcat(
-            [
-                rectangle(inp.get_envelope().width, 0.1)
-                .align_l()
-                .line_width(0)
-                .fill_color(BLACK),
-                inp,
-            ],
-            0.5,
-        )
-    out = draw_tensor_3d(x.output_shape, None, None, None, color)
-    return pair_draw(reshape(inp), reshape(out), x.reduce_type)
-
-
-def draw_load(x, tensor_table) -> Diagram | None:
-    inp, out = store_load(x, tensor_table)
-    out = reshape(out)
-    return pair_draw(inp, out, "load")
-
-
-def draw_store(x, tensor_table) -> Diagram | None:
-    inp, out = store_load(x, tensor_table)
-    out = reshape(out)
-    return pair_draw(out, inp, "store")
-
-
-def draw_load_simple(x: Load, tensor_table) -> Diagram | None:
-    tensor, tensor_id = tensor_table[x.ptr]
-    color = ACTIVE[tensor_id]
-
-    # Create a simple visualization without using cover function
-    # since we don't have access to the Triton dtype object
-    shape = make_3d(tensor.shape)
-    # Delinearize offsets based on tensor shape
-    offsets_normalized = x.offsets // tensor.element_size
-    z_vals = offsets_normalized % shape[2]
-    y_vals = (offsets_normalized // shape[2]) % shape[1]
-    x_vals = (offsets_normalized // (shape[2] * shape[1])) % shape[0]
-
-    # Apply mask
-    valid_indices = x.masks.nonzero()[0]
-    if len(valid_indices) > 0:
-        x_vals = x_vals[valid_indices]
-        y_vals = y_vals[valid_indices]
-        z_vals = z_vals[valid_indices]
-        inp = draw_tensor_3d(shape, x_vals, y_vals, z_vals, color)
-    else:
-        inp = draw_tensor_3d(shape, None, None, None, color)
-
-    inp = reshape(inp)
-
-    s = make_3d(x.offsets.shape)
-    a, b, c = x.masks.reshape(*s).nonzero()
-    out = draw_tensor_3d(s, a, b, c, color)
-    return pair_draw(inp, reshape(out), "load")
-
-
-def draw_store_simple(x: Store, tensor_table) -> Diagram | None:
-    tensor, tensor_id = tensor_table[x.ptr]
-    color = ACTIVE[tensor_id]
-
-    # Create a simple visualization without using cover function
-    # since we don't have access to the Triton dtype object
-    shape = make_3d(tensor.shape)
-    # Delinearize offsets based on tensor shape
-    offsets_normalized = x.offsets // tensor.element_size
-    z_vals = offsets_normalized % shape[2]
-    y_vals = (offsets_normalized // shape[2]) % shape[1]
-    x_vals = (offsets_normalized // (shape[2] * shape[1])) % shape[0]
-
-    # Apply mask
-    valid_indices = x.masks.nonzero()[0]
-    if len(valid_indices) > 0:
-        x_vals = x_vals[valid_indices]
-        y_vals = y_vals[valid_indices]
-        z_vals = z_vals[valid_indices]
-        inp = draw_tensor_3d(shape, x_vals, y_vals, z_vals, color)
-    else:
-        inp = draw_tensor_3d(shape, None, None, None, color)
-
-    inp = reshape(inp)
-
-    s = make_3d(x.offsets.shape)
-    a, b, c = x.masks.reshape(*s).nonzero()
-    out = draw_tensor_3d(s, a, b, c, color)
-    return pair_draw(reshape(out), inp, "store")
-
-
-def make_3d(shape):
-    "Make a 3d shape"
+def make_3d(shape: tuple[int, ...]):
     if len(shape) == 1:
         return (1, 1, shape[0])
     if len(shape) == 2:
@@ -330,233 +150,139 @@ def make_3d(shape):
     return shape
 
 
-def store_load(
-    x: OutOfBoundsRecordBruteForce, tensor_table: dict[int, tuple[Tensor, int]]
-) -> tuple[Diagram, Diagram]:
-    tensor, tensor_id = tensor_table[x.tensor.data_ptr]
-    # inp = base_tensor(tensor.shape, DEFAULT)
-    color = ACTIVE[tensor_id]
-    invalid = x.invalid_access_masks.any()
-    if invalid:
-        color = Color("red")
-    inp = cover(tensor.shape, tensor.dtype, x.offsets, x.masks, color)
-    inp = reshape(inp)
-    s = make_3d(x.offsets.shape)
-    a, b, c = x.masks.reshape(*s).nonzero()
-    out = draw_tensor_3d(s, a, b, c, color)
-    return inp, out
+def delinearized(
+    shape: tuple[int, int, int], x: np.ndarray, dtype, mask
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Handle dtype as string by extracting element size
+    if isinstance(dtype, str):
+        # Common dtype sizes in bytes
+        dtype_sizes = {
+            "torch.float32": 4,
+            "float32": 4,
+            "torch.float64": 8,
+            "float64": 8,
+            "torch.int32": 4,
+            "int32": 4,
+            "torch.int64": 8,
+            "int64": 8,
+            "torch.float16": 2,
+            "float16": 2,
+            "torch.bfloat16": 2,
+            "bfloat16": 2,
+            "torch.int8": 1,
+            "int8": 1,
+            "torch.uint8": 1,
+            "uint8": 1,
+        }
+        element_size = dtype_sizes.get(dtype, 4)  # Default to 4 bytes
+    else:
+        element_size = dtype.element_ty.primitive_bitwidth // 8
+
+    x = x.copy() // element_size
+    z = ((x // (shape[1] * shape[2])) * mask - (1 - mask)).ravel()
+    y = (((x // shape[2]) % shape[1]) * mask - (1 - mask)).ravel()
+    x = ((x % shape[2]) * mask - (1 - mask)).ravel()
+    return z, y, x
 
 
-def draw_op(x: Op) -> Diagram | None:
-    return None
+def prepare_visualization_data(program_records, tensor_table):
+    """Prepare visualization data for the frntend and raw tensor data for the server."""
+    # global idx
+    visualization_data = []
+    raw_tensor_data = {}
+    for record in program_records:
+        record_uuid = str(uuid.uuid4())[:8]
+
+        if isinstance(record, ExpandDims):
+            print(record.input_shape, record.output_shape, record.index)
+        if isinstance(record, Dot):
+            visualization_data.append(
+                {
+                    "type": "Dot",
+                    "input_shape": record.input_shape,
+                    "other_shape": record.other_shape,
+                    "output_shape": record.output_shape,
+                    "uuid": record_uuid,
+                }
+            )
+
+            raw_tensor_data[record_uuid] = {
+                "input_data": torch.tensor(record.input_data),
+                "other_data": torch.tensor(record.other_data),
+                "intermediate_results": record.intermediate_results,
+            }
+
+        elif isinstance(record, Load):
+            global_tensor, slice_tensor = tensor_table[record.ptr]
+            print(global_tensor)
+            global_coords, slice_coords = extract_load_coords(record, global_tensor)
+
+            visualization_data.append(
+                {
+                    "type": "Load",
+                    "global_shape": global_tensor.shape,
+                    "slice_shape": record.masks.shape,
+                    "global_coords": global_coords,
+                    "slice_coords": slice_coords,
+                    "uuid": record_uuid,
+                }
+            )
+
+            raw_tensor_data[record_uuid] = {
+                "global_tensor": global_tensor.data.cpu(),  # Ensure it's on CPU
+                "dims": len(global_tensor.data.cpu().shape),
+            }
+            print(record.masks.shape)
+
+        elif isinstance(record, Store):
+            global_tensor, slice_tensor = tensor_table[record.ptr]
+
+            global_coords, slice_coords = extract_load_coords(record, global_tensor)
+
+            visualization_data.append(
+                {
+                    "type": "Store",
+                    "global_shape": global_tensor.shape,
+                    "slice_shape": record.masks.shape,
+                    "global_coords": global_coords,
+                    "slice_coords": slice_coords,
+                    "uuid": record_uuid,
+                }
+            )
+
+    return visualization_data, raw_tensor_data, ""
 
 
-def draw_dot(x: Dot) -> Diagram | None:
-    if x.input_shape == (1,):
-        return None
-    inp = draw_tensor_3d(x.input_shape[0], None, None, None)
-    # inp = reshape(base_tensor(x.input_shape[0], color=ACTIVE))
-    # inp = add_whiskers(inp, x.input_shape[0])
-    inp2 = draw_tensor_3d(x.input_shape[1], None, None, None)
-    # inp2 = reshape(base_tensor(x.input_shape[0], color=ACTIVE))
-    # inp2 = add_whiskers(inp2, x.input_shape[0])
-    out = draw_tensor_3d(x.output_shape, None, None, None)
-    # out = reshape(base_tensor(x.output_shape, color=ACTIVE))
-    # out = add_whiskers(out, x.output_shape)
-    return hcat(
-        [box(inp, 1.5, 2), box(inp2, 1.5, 2), box(out, 1.5, 2)], 1
-    ).center_xy()  # Temporarily disable text due to chalk library issue
+def get_visualization_data():
+    """Return the visualization data and raw tensor data."""
+    records, tensor_table, failures = collect_grid()
+    visualization_data = {}
+    raw_tensor_data = {}
 
-
-# For 3d
-
-
-def lookAt(eye: ArrayLike, center: ArrayLike, up: ArrayLike):
-    "Python version of the haskell lookAt function in linear.projections"
-    f = (center - eye) / np.linalg.norm(center - eye)
-    s = np.cross(f, up) / np.linalg.norm(np.cross(f, up))
-    u = np.cross(s, f)
-    return np.array([[*s, 0], [*u, 0], [*-f, 0], [0, 0, 0, 1]])
-
-
-def scale3(x, y, z):
-    return np.array([[x, 0, 0, 0], [0, y, 0, 0], [0, 0, z, 0], [0, 0, 0, 1]])
-
-
-@dataclass
-class D3:
-    x: float
-    y: float
-    z: float
-
-    def to_np(self):
-        return np.array([self.x, self.y, self.z])
-
-
-V3 = D3
-
-
-def homogeneous(trails: list[list[D3]]):
-    "Convert list of directions to a np.array of homogeneous coordinates"
-    return np.array([[[*o.to_np(), 1] for o in offsets] for offsets in trails])
-
-
-def cube():
-    "3 faces of a cube drawn as offsets from the origin."
-    return homogeneous(
-        [
-            [D3(*v) for v in offset]
-            for offset in [
-                [(1, 0, 0), (0, 1, 0), (-1, 0, 0), (0, -1, 0)],
-                [(1, 0, 0), (0, 0, 1), (-1, 0, 0), (0, 0, -1)],
-                [(0, 0, 1), (0, 1, 0), (0, 0, -1), (0, -1, 0)],
-            ]
-        ]
-    )
-
-
-def to_trail(trail: ArrayLike, locations: ArrayLike):
-    return [
-        (
-            Path(
-                [
-                    Trail.from_offsets([V2(*v[:2]) for v in trail])
-                    .close()
-                    .at(V2(*loc[:2]))
-                ]
-            ),
-            loc[2],
+    for grid_idx, program_records in records.items():
+        viz_data, raw_data, kernel_src = prepare_visualization_data(
+            program_records, tensor_table
         )
-        for loc in locations
-    ]
+        visualization_data[str(grid_idx)] = viz_data
+        raw_tensor_data.update(raw_data)
+
+    # Get the kernel source code
+
+    return {
+        "visualization_data": visualization_data,
+        "raw_tensor_data": raw_tensor_data,
+        "failures": failures,
+        "kernel_src": kernel_src,
+    }
 
 
-def project(projection, shape3, positions):
-    p = homogeneous([positions for _ in range(shape3.shape[0])])
-    locations = p @ projection.T
-    trails = shape3 @ projection.T
-    return [out for t, loc in zip(trails, locations) for out in to_trail(t, loc)]
-
-
-def draw_tensor_3d(shape, a, b, c, color=WHITE):
-    shape = make_3d(shape)
-
-    # Big Cube
-    s = scale3(*shape)
-    big_cube = cube() @ s.T
-    back = scale3(0, shape[1], shape[2])
-    back_cube = cube() @ back.T
-
-    # Isometric projection of tensor
-    projection = lookAt(
-        V3(-1.0, -0.3, -0.15).to_np(),
-        V3(0, 0, 0).to_np(),
-        V3(0, 1, 0).to_np(),
-    )
-    outer = project(projection, big_cube, [V3(0, 0, 0)])
-    outer2 = project(projection, back_cube, [V3(shape[0], 0, 0)])
-    d = (
-        concat([p.stroke().fill_color(GREY).fill_opacity(0.1) for p, _ in outer2])
-        .line_width(0.005)
-        .line_color(GREY)
-    )
-    d += (
-        concat([p.stroke().fill_color(GREY).fill_opacity(0.05) for p, _ in outer])
-        .line_width(0.01)
-        .line_color(BLACK)
-    )
-    if a is not None:
-        out = group(a, b, c)
-        d2 = [
-            (b, loc)
-            for i in range(len(out))
-            for b, loc in make_cube(projection, out[i][0], out[i][1], color)
-        ]
-        d2.sort(key=lambda x: x[1], reverse=True)
-        d2 = concat([b.with_envelope(empty()) for b, _ in d2])
-        d = d2.with_envelope(d) + d
-    return d
-
-
-def lines(s):
-    "Draw lines to mimic a cube of cubes"
-    bs = [np.array([1, 0, 0]), np.array([0, 1, 0]), np.array([0, 0, 1])]
-    return [
-        homogeneous(
-            [
-                [D3(*p) for _ in range(s[i]) for p in [a / s[i], b, -b]]
-                for b in bs
-                if not np.all(a == b)
-            ]
-        )
-        for i, a in enumerate(bs)
-    ]
-
-
-def make_cube(projection, start, end, color):
-    "Draws a cube from start position to end position."
-    start = np.array(start).astype(int)
-    end = np.array(end).astype(int)
-    s2 = end - start + 1
-    s = scale3(*s2)
-    small_cube = cube() @ s.T
-    loc = [
-        project(projection, l2 @ s.T, [V3(*start)])
-        for l2 in lines(s2)
-        if l2.shape[1] > 0
-    ]
-    outer2 = project(projection, small_cube, [V3(*start)])
-    ls = loc
-    box = [
-        (p.stroke().fill_color(color).fill_opacity(0.4).line_width(0), loc)
-        for p, loc in outer2
-    ]
-    line = [
-        (p.stroke().line_width(0.001).line_color(BLACK), l_)
-        for loc in ls
-        for p, l_ in loc
-    ]
-    return [(b, loc) for b, loc in box + line]
-
-
-def group(
-    x: ArrayLike, y: ArrayLike, z: ArrayLike
-) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
-    "Groups together cubes into bigger cubes"
-    x = list(zip(zip(x, y, z), zip(x, y, z)))
-    x = [(a, b) for a, b in x if not (a[0] == -1 and a[1] == -1 and a[2] == -1)]
-
-    start = x
-
-    def remove_dups(ls):
-        "Remove duplicates"
-        out = []
-        for y in ls:
-            if not out or y != out[-1]:
-                out.append(y)
-        return out
-
-    for j in range(2, -1, -1):
-        x = remove_dups(start)
-        start = []
-        while True:
-            if len(x) <= 1:
-                break
-            _, _, rest = x[0], x[1], x[2:]
-            m = 0
-            for k in range(2):
-                a = x[0][k]
-                b = x[1][k]
-                if (
-                    (k == 0 or a[j % 3] == b[j % 3] - 1)
-                    and a[(j + 1) % 3] == b[(j + 1) % 3]
-                    and a[(j + 2) % 3] == b[(j + 2) % 3]
-                ):
-                    m += 1
-            if m == 2:
-                x = [[x[0][0], x[1][1]]] + rest
-            else:
-                start.append(x[0])
-                x = [x[1]] + rest
-        start += x
-    return start
+def serialize_for_json(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, torch.Tensor):
+        return obj.cpu().numpy().tolist()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
