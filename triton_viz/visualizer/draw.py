@@ -9,7 +9,6 @@ from triton_viz.core.data import (
 )
 import numpy as np
 import planar
-import math
 from ..core.trace import launches
 from ..clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import sys
