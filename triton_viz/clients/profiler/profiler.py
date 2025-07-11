@@ -2,7 +2,6 @@ from ...core.client import Client
 from ...core.callbacks import OpCallbacks
 from ...core.data import Op, Load, Store
 from .data import LoadStoreBytes
-from collections.abc import Callable
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
 

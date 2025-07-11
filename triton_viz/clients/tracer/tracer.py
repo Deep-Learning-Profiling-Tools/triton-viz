@@ -1,7 +1,6 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks
 from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
-from collections.abc import Callable
 import numpy as np
 
 

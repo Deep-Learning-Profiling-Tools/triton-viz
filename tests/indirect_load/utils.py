@@ -69,8 +69,9 @@ class CaptureSanitizer(SanitizerSymbolicExecution):
 
         # Return OpCallbacks with the new overrider, preserving other callbacks
         from triton_viz.core.callbacks import OpCallbacks
+
         return OpCallbacks(
             before_callback=op_callbacks.before_callback,
             after_callback=op_callbacks.after_callback,
-            op_overrider=new_load_overrider
+            op_overrider=new_load_overrider,
         )
