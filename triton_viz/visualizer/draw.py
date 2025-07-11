@@ -10,8 +10,6 @@ from triton_viz.core.data import (
 import numpy as np
 import planar
 import math
-import chalk
-from chalk import Diagram, rectangle
 from ..core.trace import launches
 from ..clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import sys
@@ -22,7 +20,6 @@ sys.setrecursionlimit(100000)
 
 
 planar.EPSILON = 0.0
-chalk.set_svg_draw_height(500)
 BG = Color("white")
 WHITE = Color("white")
 DEFAULT = Color("grey")
@@ -45,23 +42,6 @@ MRATIO = 1 / 3
 LAST_RECORD_ONLY = True
 
 # Generic render helpers
-
-
-def box(d: Diagram, width: float, height: float, outer=0.2) -> Diagram:
-    "Put diagram in a box of shape height, width"
-    h, w = d.get_envelope().height, d.get_envelope().width
-    m = max(h, w)
-    back = rectangle(outer + m, outer + m).line_width(0).fill_color(BG).center_xy()
-    d = (back + d.center_xy()).with_envelope(back)
-    return d.scale_x(width / m).scale_y(height / m)
-
-
-def reshape(d: Diagram) -> Diagram:
-    "Use log-scale if ratio is too sharp"
-    h, w = d.get_envelope().height, d.get_envelope().width
-    if (h / w > MRATIO) or (w / h > MRATIO):
-        d = d.scale_y(math.log(h + 1, 2) / h).scale_x(math.log(w + 1, 2) / w)
-    return d
 
 
 def collect_grid():
