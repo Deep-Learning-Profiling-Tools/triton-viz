@@ -1,5 +1,0 @@
-pre-commit
-pyarrow
-pytest
-setuptools
-triton
