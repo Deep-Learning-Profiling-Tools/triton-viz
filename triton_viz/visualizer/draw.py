@@ -1,4 +1,3 @@
-from colour import Color
 from triton_viz.core.data import (
     Tensor,
     Grid,
@@ -8,7 +7,6 @@ from triton_viz.core.data import (
     ExpandDims,
 )
 import numpy as np
-import planar
 from ..core.trace import launches
 from ..clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import sys
@@ -16,27 +14,6 @@ import torch
 import uuid
 
 sys.setrecursionlimit(100000)
-
-
-planar.EPSILON = 0.0
-BG = Color("white")
-WHITE = Color("white")
-DEFAULT = Color("grey")
-BLACK = Color("black")
-GREY = Color("grey")
-palette = [
-    "#f29f05",
-    "#f25c05",
-    "#d6568c",
-    "#4d8584",
-    "#a62f03",
-    "#400d01",
-    "#274001",
-    "#828a00",
-]
-ACTIVE = [Color(p) for p in palette]
-
-MRATIO = 1 / 3
 
 LAST_RECORD_ONLY = True
 
