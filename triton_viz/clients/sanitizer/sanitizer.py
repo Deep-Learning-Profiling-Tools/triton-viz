@@ -1070,13 +1070,31 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     return expr
 
 
+def _make_signature(addr_expr, constraints) -> str:
+    """
+    Convert (addr, constraints) into a stable string signature.
+    • addr_expr can be a single z3 expr or list[expr]
+    • constraints is list[expr]
+    """
+    if isinstance(addr_expr, list):
+        addr_repr = "|".join(sorted(simplify(e).sexpr() for e in addr_expr))
+    else:
+        addr_repr = simplify(addr_expr).sexpr()
+
+    constr_repr = "|".join(sorted(simplify(c).sexpr() for c in constraints))
+    return addr_repr + "##" + constr_repr
+
+
 @dataclass
 class LoopContext:
     lineno: int
     length: int
     idx_z3: ArithRef
     values: list[int] = field(default_factory=list)
-    addrs: list[ArithRef] = field(default_factory=list)
+    signature_cache: set[str] = field(default_factory=set)
+    pending_checks: list[tuple[ArithRef | list[ArithRef], list[BoolRef]]] = field(
+        default_factory=list
+    )
 
 
 class SanitizerSymbolicExecution(Sanitizer):
@@ -1190,18 +1208,26 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("load", ptr_sym, mask, other)
 
             # check memory access using z3
-            if self.loop_stack:
-                z3_addr, z3_constraints = ret.eval()
-                # substitute loop iterable to ctx.idx_z3
-                print("z3 addr:", z3_addr)
-                # self.loop_stack[-1].addrs.extend(
-                #     z3_addr_subst
-                #     if isinstance(z3_addr_subst, list)
-                #     else [z3_addr_subst]
-                # )
-            else:
-                ret_eval, ret_constraints = ret.eval()
-                self._check_range_satisfiable(ret_eval, ret_constraints)
+            z3_addr, z3_constraints = ret.eval()
+            if self.loop_stack:  # affine loop optimization
+                ctx = self.loop_stack[-1]
+                # check if addr already appeared before in the loop
+                signature = _make_signature(z3_addr, z3_constraints)
+                if signature in ctx.signature_cache:  # if appeared before
+                    if cfg.verbose:
+                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
+                    return ret
+                else:  # new addr expr
+                    if cfg.verbose:
+                        print(
+                            "[Sanitizer]  ↪ new addr in loop, will check later",
+                            z3_addr,
+                            z3_constraints,
+                        )
+                    ctx.signature_cache.add(signature)
+                    ctx.pending_checks.append((z3_addr, z3_constraints))
+            else:  # non-loop case
+                self._check_range_satisfiable(z3_addr, z3_constraints)
 
             return ret
 
@@ -1228,8 +1254,26 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("store", ptr_sym, value, mask)
 
             # check memory access using z3
-            ret_eval, ret_constraints = ret.eval()
-            self._check_range_satisfiable(ret_eval, ret_constraints)
+            z3_addr, z3_constraints = ret.eval()
+            if self.loop_stack:  # affine loop optimization
+                ctx = self.loop_stack[-1]
+                # check if addr already appeared before in the loop
+                signature = _make_signature(z3_addr, z3_constraints)
+                if signature in ctx.signature_cache:  # if appeared before
+                    if cfg.verbose:
+                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
+                    return ret
+                else:  # new addr expr
+                    if cfg.verbose:
+                        print(
+                            "[Sanitizer]  ↪ new addr in loop, will check later",
+                            z3_addr,
+                            z3_constraints,
+                        )
+                    ctx.signature_cache.add(signature)
+                    ctx.pending_checks.append((z3_addr, z3_constraints))
+            else:  # non-loop case
+                self._check_range_satisfiable(z3_addr, z3_constraints)
 
             return ret
 
@@ -1418,11 +1462,13 @@ class SanitizerSymbolicExecution(Sanitizer):
                 print(f"[Sanitizer] ▶ enter loop@{lineno}, len={length}")
 
         def loop_hook_iter_overrider(lineno, idx):
+            # collect iterator values
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
                 self.loop_stack[-1].values.append(idx)
 
+            # Make a tagged SymbolicExpr
             sym = SymbolicExpr("const", idx, tl.int32)
-            sym._loop_ctx = self.loop_stack[-1]  # Make a tag
+            sym._loop_ctx = self.loop_stack[-1]
 
             return tl.core.tensor(sym, tl.int32)
 
@@ -1432,10 +1478,29 @@ class SanitizerSymbolicExecution(Sanitizer):
 
         def loop_hook_after(lineno):
             ctx = self.loop_stack.pop()
+            # add constraints for loop_i
             if ctx.values:
                 self.constraints.append(Or(*[ctx.idx_z3 == v for v in set(ctx.values)]))
+
+            # execute pending checks
+            global_constraints = list(self.constraints)
+            for addr_expr, expr_constraints in ctx.pending_checks:
+                if cfg.verbose:
+                    print(
+                        "[Sanitizer] ▶ checking:",
+                        addr_expr,
+                        f" with global constraints: {global_constraints} ",
+                        f" and expression-related constraints: {expr_constraints} ",
+                    )
+                self._check_range_satisfiable(
+                    addr_expr, global_constraints + expr_constraints
+                )
+
             if cfg.verbose:
-                print(f"[Sanitizer] ▶ leave loop@{lineno} end")
+                print(
+                    f"[Sanitizer] ▶ leave loop@{lineno} end. "
+                    f"(checked {len(ctx.pending_checks)} unique addr patterns)"
+                )
 
         return (
             loop_hook_before,
