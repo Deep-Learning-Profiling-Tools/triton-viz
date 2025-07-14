@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TRITON_INTERPRET: "1"
+      TRITON_VERSION: "3.3.1"
 
     steps:
     - uses: actions/checkout@v3
@@ -50,7 +51,7 @@ jobs:
 
     - name: Install Triton
       run: |
-        pip install triton==3.3.1
+        pip install triton==${{ env.TRITON_VERSION }}
 
     - name: Install Triton-Viz
       run: |

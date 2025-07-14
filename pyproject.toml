@@ -23,16 +23,15 @@ classifiers = [
 dependencies = [
   "setuptools",
   "triton",
-  "gradio",
   "pyarrow",
   "pre-commit",
   "pytest",
-  "chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git",
   "z3-solver",
   "anytree",
   "cairocffi",
   "flask",
   "flask_cloudflared",
+  "tqdm",
 ]
 
 [project.urls]

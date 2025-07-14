@@ -1,7 +1,0 @@
-chalk-diagrams @ git+https://github.com/chalk-diagrams/chalk.git
-gradio
-pre-commit
-pyarrow
-pytest
-setuptools
-triton
