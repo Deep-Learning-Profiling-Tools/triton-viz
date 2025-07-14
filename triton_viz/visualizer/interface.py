@@ -2,8 +2,6 @@ import threading
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data
-from .tooltip import get_tooltip_data
-import pandas as pd
 import os
 import torch
 from flask_cloudflared import _run_cloudflared
@@ -69,9 +67,15 @@ def update_global_data():
         if "input_data" in op_data and "other_data" in op_data:
             precomputed_c_values[uuid] = precompute_c_values(op_data)
 
-    df = pd.DataFrame(analysis_data, columns=["Metric", "Value"])
-    analysis_with_tooltip = get_tooltip_data(df)
-    global_data["analysis"] = analysis_with_tooltip
+    # Convert analysis_data to a dictionary format similar to pandas DataFrame.to_dict()
+    # analysis_data is a list of lists where each inner list contains [metric, value] pairs
+    df_dict = {"Metric": [], "Value": []}
+    for record in analysis_data:
+        for metric, value in record:
+            df_dict["Metric"].append(metric)
+            df_dict["Value"].append(value)
+
+    global_data["analysis"] = df_dict
 
 
 @app.route("/")

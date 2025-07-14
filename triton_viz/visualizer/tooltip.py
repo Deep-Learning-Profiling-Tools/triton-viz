@@ -14,12 +14,7 @@ tooltip_descriptions = {
 }
 
 
-def get_tooltip_data(df):
-    """Return the tooltip data in a format suitable for JSON serialization."""
-    return df.to_dict()
-
-
-def create_tooltip(df):
+def create_tooltip(df_dict):
     styles = """
     <style>
         .dataframe {
@@ -67,16 +62,20 @@ def create_tooltip(df):
     """
 
     html = styles + '<table class="dataframe"><thead><tr>'
-    for col in df.columns:
+    for col in df_dict.keys():
         html += f"<th>{col}</th>"
     html += "</tr></thead><tbody>"
 
-    for _, row in df.iterrows():
-        tooltip_text = tooltip_descriptions.get(
-            row["Metric"], "No description available."
-        )
-        html += f'<tr><td class="tooltip">{row["Metric"]}<span class="tooltiptext">{tooltip_text}</span></td>'
-        html += f'<td>{row["Value"]}</td></tr>'
+    # Iterate through rows by index
+    metrics = df_dict.get("Metric", [])
+    values = df_dict.get("Value", [])
+
+    for i in range(len(metrics)):
+        metric = metrics[i]
+        value = values[i]
+        tooltip_text = tooltip_descriptions.get(metric, "No description available.")
+        html += f'<tr><td class="tooltip">{metric}<span class="tooltiptext">{tooltip_text}</span></td>'
+        html += f"<td>{value}</td></tr>"
 
     html += "</tbody></table>"
 
