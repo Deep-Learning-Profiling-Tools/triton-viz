@@ -5,8 +5,19 @@ from collections.abc import Callable
 import numpy as np
 from torch import Tensor
 from anytree import Node, RenderTree
-from z3 import Solver, Int, IntVal, If, Sum, And, Or, Not, sat, simplify
-from z3.z3 import BoolRef, ArithRef
+from z3 import (
+    Solver,
+    Int,
+    IntVal,
+    If,
+    Sum,
+    And,
+    Or,
+    Not,
+    sat,
+    simplify,
+)
+from z3.z3 import BoolRef, ArithRef, IntNumRef
 
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
@@ -319,11 +330,13 @@ class SymbolicExprDataWrapper:
 
     def __int__(self):
         int_val, _ = self.symbolic_expr.eval()
-        if not isinstance(int_val, int):
-            raise ValueError(
-                f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int"
-            )
-        return int_val
+        if isinstance(int_val, IntNumRef):
+            return int_val.as_long()
+        if isinstance(int_val, int):
+            return int_val
+        raise ValueError(
+            f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int"
+        )
 
     def __str__(self):
         return self.value
@@ -667,7 +680,7 @@ class SymbolicExpr:
         tl.float64,
     )
     builtin_scala_types = (int, float)
-    tuple_types = (tl.core.tuple, tuple)
+    tuple_types = (tl.core.tuple, tuple, list)
 
     @staticmethod
     def _infer_literal_dtype(var):
@@ -692,6 +705,8 @@ class SymbolicExpr:
                 return var.dtype
         if isinstance(var, SymbolicExpr.builtin_scala_types):
             return tl.int32 if isinstance(var, int) else tl.float32
+        if var is None:
+            return tl.int32  # Default dtype for None
         raise ValueError(f"Unsupported type: {type(var)}")
 
     @classmethod
@@ -701,7 +716,7 @@ class SymbolicExpr:
 
         dtype_tt = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
-        if isinstance(var, (tl.core.tuple, tuple)):  # if a tuple
+        if isinstance(var, SymbolicExpr.tuple_types):  # if a tuple
             return cls("const", tuple(var), dtype_tt)
         if isinstance(var, TensorHandle):  # if a TensorHandle
             return cls("const", var.data.item(), dtype_tt)
@@ -712,6 +727,9 @@ class SymbolicExpr:
         if isinstance(var, tl.core.dtype):
             # If it's a triton dtype, we can create a const node with it
             return cls("const", var, dtype_tt)
+        if var is None:
+            # If it's None, we can create a const node with default dtype
+            return cls("const", None, dtype_tt)
 
         raise ValueError("Unknown type:", type(var))
 
@@ -1064,6 +1082,8 @@ class SanitizerSymbolicExecution(Sanitizer):
         s.add(And(*expr_constraints))
         if s.check() == sat:
             print("out of bound access detected!")
+            if self.abort_on_error:
+                raise ValueError("Out-of-bounds access detected!")
 
     def _report(self, op_type, tensor, violation_address):
         traceback_info = _get_traceback_info()
@@ -1257,9 +1277,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             return SymbolicExpr("broadcast", SymbolicExpr.from_value(arg), shape)
 
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
-            ret = SymbolicExpr(
-                "sum", SymbolicExpr.from_value(input), axis, keep_dims, kwargs
-            )
+            ret = SymbolicExpr("sum", SymbolicExpr.from_value(input), axis, keep_dims)
             return ret
 
         def op_splat_overrider(arg, shape):
