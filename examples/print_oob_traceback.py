@@ -26,7 +26,7 @@ def kernel_A(ptr, n):
     tl.store(ptr + pid, val)
 
 
-def test_print_nested_functions():
+if __name__ == "__main__":
     x = torch.arange(4, dtype=torch.float32)
     print("Input:", x)
 
