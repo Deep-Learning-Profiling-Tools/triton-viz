@@ -1068,22 +1068,15 @@ class SanitizerSymbolicExecution(Sanitizer):
             for addr in access_addr:
                 self._check_range_satisfiable(addr, expr_constraints)
             return
-
-        out_of_bound_constraint = Not(
-            Or(
-                *(
-                    And(start <= access_addr, access_addr <= end)
-                    for start, end in self.tensor_addrs
-                )
-            )
-        )
-        s = Solver()
-        s.add(out_of_bound_constraint)
-        s.add(And(*expr_constraints))
-        if s.check() == sat:
+        self._solver.push()
+        self._solver.add(self._addr_sym == access_addr)
+        self._solver.add(Not(self._addr_ok))
+        self._solver.add(And(*expr_constraints))
+        if self._solver.check() == sat:
             print("out of bound access detected!")
             if self.abort_on_error:
                 raise ValueError("Out-of-bounds access detected!")
+        self._solver.pop()
 
     def _report(self, op_type, tensor, violation_address):
         traceback_info = _get_traceback_info()
@@ -1121,6 +1114,10 @@ class SanitizerSymbolicExecution(Sanitizer):
 
     def grid_callback(self, grid: tuple[int]) -> None:
         self.grid = tuple(int(g) for g in grid)
+        addr = Int("addr")
+        self._addr_ok = Or(*[And(addr >= s, addr <= e) for s, e in self.tensor_addrs])
+        self._solver = Solver()
+        self._addr_sym = addr
 
     def grid_idx_callback(self, grid_idx: tuple[int]):
         pass
