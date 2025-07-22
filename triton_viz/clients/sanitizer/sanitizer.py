@@ -1103,7 +1103,6 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.records: list[OutOfBoundsRecordZ3] = []
         self.grid: tuple[int, ...] | None
         self.tensors: list[Tensor] = []
-        self.constraints: list[BoolRef] = []
         self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id: int = 0
         self.need_full_grid: bool = False
@@ -1138,7 +1137,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             user_code_tracebacks=traceback_info,
             tensor=tensor,
             violation_address=violation_address,
-            constraints=self.constraints,
+            constraints=[],
         )
         if self.abort_on_error:
             print_oob_record(oob_record)
@@ -1479,21 +1478,23 @@ class SanitizerSymbolicExecution(Sanitizer):
         def loop_hook_after(lineno):
             ctx = self.loop_stack.pop()
             # add constraints for loop_i
+            iterator_constraints: list[BoolRef] = []
             if ctx.values:
-                self.constraints.append(Or(*[ctx.idx_z3 == v for v in set(ctx.values)]))
+                iterator_constraints.append(
+                    Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
+                )
 
             # execute pending checks
-            global_constraints = list(self.constraints)
             for addr_expr, expr_constraints in ctx.pending_checks:
                 if cfg.verbose:
                     print(
                         "[Sanitizer] ▶ checking:",
                         addr_expr,
-                        f" with global constraints: {global_constraints} ",
+                        f" with iterator constraints: {iterator_constraints} ",
                         f" and expression-related constraints: {expr_constraints} ",
                     )
                 self._check_range_satisfiable(
-                    addr_expr, global_constraints + expr_constraints
+                    addr_expr, expr_constraints + iterator_constraints
                 )
 
             if cfg.verbose:

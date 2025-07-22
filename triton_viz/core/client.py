@@ -2,6 +2,7 @@ from contextlib import contextmanager
 
 from abc import ABC, abstractmethod
 from typing import ClassVar
+from collections.abc import Callable
 
 from .data import Op, Launch
 from .patch import (
