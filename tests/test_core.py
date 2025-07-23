@@ -20,8 +20,10 @@ try:
 
     _create_driver()
     cuda_ok = True
+    print("cuda_ok!")
 except RuntimeError:
     cuda_ok = False
+    print("cuda not ok!")
 
 cfg.sanitizer_backend = "symexec"
 
