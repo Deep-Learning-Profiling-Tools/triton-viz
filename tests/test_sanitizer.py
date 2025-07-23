@@ -228,10 +228,9 @@ def triple_indirect_load_kernel(
     tl.store(dst_ptr + offsets, out_val)
 
 
-def test_triple_indirect_load():
+def test_triple_indirect_load(device):
     cfg.sanitizer_backend = "symexec"
     N = 128
-    device = "cpu"
 
     src = torch.rand(N, device=device, dtype=torch.float32)
     idx2 = torch.randint(0, N, (N,), device=device, dtype=torch.int32)
@@ -277,10 +276,9 @@ def dual_offset_load_kernel(
     tl.store(dst_ptr + offsets, out_val)
 
 
-def test_dual_offset_load():
+def test_dual_offset_load(device):
     cfg.sanitizer_backend = "symexec"
     N = 128
-    device = "cpu"
 
     src = torch.rand(N, device=device, dtype=torch.float32)
     # Generate indices so that a + b is always in-range (0 ≤ a + b < N)
