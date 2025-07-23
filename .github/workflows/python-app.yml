@@ -7,11 +7,9 @@ on:
   push:
     branches:
       - main
-      - keren/v2.0
   pull_request:
     branches:
       - main
-      - keren/v2.0
 
 permissions:
   contents: read
