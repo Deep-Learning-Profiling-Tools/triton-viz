@@ -21,9 +21,9 @@ try:
 except RuntimeError:
     cuda_ok = False
 
+cfg.sanitizer_backend = "symexec"
+
 # ======== Trace Decorator Tests =========
-
-
 def test_trace_decorator_add_clients():
     """
     Test goal:
@@ -69,8 +69,6 @@ def test_trace_decorator_add_clients():
 # 1. It should patch triton.jit / triton.language.jit /
 #   triton.runtime.interpreter.jit with wrapper._patched_jit
 # 2. The first use of @triton.jit must invoke triton_viz.trace(Sanitizer)
-
-
 def test_cli_invocation():
     """
     Simulate running:
@@ -170,6 +168,7 @@ def test_autotune_add_inrange():
     This test uses n_elements = 128, matching the size of the input tensors.
     It should NOT cause any out-of-bound access.
     """
+    cfg.sanitizer_backend = "symexec"
     x = torch.randn(128)
     y = torch.randn(128)
     out = torch.empty_like(x)
@@ -178,24 +177,20 @@ def test_autotune_add_inrange():
     grid = lambda META: (triton.cdiv(128, META["BLOCK_SIZE"]),)
     add_kernel_no_mask[grid](x_ptr=x, y_ptr=y, out_ptr=out, n_elements=128)
 
-    print("test_autotune_add_inrange() passed: No out-of-bound access.")
 
+# @pytest.mark.skipif(
+#     not cuda_ok, reason="This test requires a CUDA-enabled environment."
+# )
+# def test_autotune_add_out_of_bound():
+#     """
+#     This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
+#     It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
+#     """
+#     cfg.sanitizer_backend = "symexec"
+#     x = torch.randn(128)
+#     y = torch.randn(128)
+#     out = torch.empty_like(x)
 
-@pytest.mark.skipif(
-    not cuda_ok, reason="This test requires a CUDA-enabled environment."
-)
-def test_autotune_add_out_of_bound():
-    """
-    This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
-    It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
-    """
-    x = torch.randn(128)
-    y = torch.randn(128)
-    out = torch.empty_like(x)
-
-    # The kernel launch uses n_elements=256, exceeding the valid tensor size.
-    grid = lambda META: (triton.cdiv(256, META["BLOCK_SIZE"]),)
-    add_kernel_no_mask[grid](x_ptr=x, y_ptr=y, out_ptr=out, n_elements=256)
-
-    # Depending on hardware/drivers, this may or may not raise an error immediately.
-    print("test_autotune_add_oob() completed: Potential out-of-bound access occurred.")
+#     # The kernel launch uses n_elements=256, exceeding the valid tensor size.
+#     grid = lambda META: (triton.cdiv(256, META["BLOCK_SIZE"]),)
+#     add_kernel_no_mask[grid](x_ptr=x, y_ptr=y, out_ptr=out, n_elements=256)

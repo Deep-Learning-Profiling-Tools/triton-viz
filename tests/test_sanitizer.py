@@ -18,10 +18,9 @@ from triton_viz.clients.sanitizer.sanitizer import (
     SanitizerSymbolicExecution,
 )
 
+cfg.sanitizer_backend = "symexec"
 
 # ======== Init ===========
-
-
 def test_init_brute_force():
     cfg.sanitizer_backend = "brute_force"
     s1 = Sanitizer(abort_on_error=True)
