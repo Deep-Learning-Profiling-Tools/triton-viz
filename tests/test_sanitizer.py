@@ -20,6 +20,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
 
 cfg.sanitizer_backend = "symexec"
 
+
 # ======== Init ===========
 def test_init_brute_force():
     cfg.sanitizer_backend = "brute_force"

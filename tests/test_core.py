@@ -23,6 +23,7 @@ except RuntimeError:
 
 cfg.sanitizer_backend = "symexec"
 
+
 # ======== Trace Decorator Tests =========
 def test_trace_decorator_add_clients():
     """
