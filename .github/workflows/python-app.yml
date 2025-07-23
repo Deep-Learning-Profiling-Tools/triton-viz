@@ -5,9 +5,11 @@ name: Python application
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
   pull_request:
-     branches: [ "main" ]
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -19,6 +21,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TRITON_INTERPRET: "1"
+      TRITON_VERSION: "3.3.1"
 
     steps:
     - uses: actions/checkout@v3
@@ -42,11 +47,9 @@ jobs:
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
         pip uninstall pytorch-triton -y
 
-    - name: Clone Triton and Install
+    - name: Install Triton
       run: |
-        git clone https://github.com/openai/triton.git
-        cd triton/python
-        pip install -e .
+        pip install triton==${{ env.TRITON_VERSION }}
 
     - name: Install Triton-Viz
       run: |
@@ -56,4 +59,4 @@ jobs:
     - name: Test with pytest
       run: |
         cd triton_viz
-        python -m pytest examples
+        python -m pytest tests

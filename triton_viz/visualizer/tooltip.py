@@ -7,14 +7,14 @@ tooltip_descriptions = {
     "ExpandDims": "Shows the total number of expand_dims operations performed in this kernel.",
     "Dot": "Shows the total number of dot operations performed in this kernel.",
     "Reduce": "Shows the total number of reduce operations performed in this kernel.",
-    "Total number of bytes loaded": "Shows the total number of bytes loaded (mask=True).Note:On GPUs, this metric does not equate to the total number of bytes loaded from global memory (DRAM), as some data accesses may be handled through GPU caches.",
+    "Total number of bytes loaded": "Shows the total number of bytes loaded (mask=True). Note: On GPUs, this metric does not equate to the total number of bytes loaded from global memory (DRAM), as some data accesses may be handled through GPU caches.",
     "Masked Load Ratio": "Ratio of total number of bytes loaded (mask=True)/total number of bytes loaded (mask=True) + (mask=False).",
     "Total number of bytes stored": "Shows the total number of bytes stored (mask=True).",
     "Masked Store Ratio": "Ratio of total number of bytes stored (mask=True)/total number of bytes stored (mask=True) + (mask=False).",
 }
 
 
-def create_tooltip(df):
+def create_tooltip(df_dict):
     styles = """
     <style>
         .dataframe {
@@ -62,16 +62,20 @@ def create_tooltip(df):
     """
 
     html = styles + '<table class="dataframe"><thead><tr>'
-    for col in df.columns:
+    for col in df_dict.keys():
         html += f"<th>{col}</th>"
     html += "</tr></thead><tbody>"
 
-    for index, row in df.iterrows():
-        tooltip_text = tooltip_descriptions.get(
-            row["Metric"], "No description available."
-        )
-        html += f'<tr><td class="tooltip">{row["Metric"]}<span class="tooltiptext">{tooltip_text}</span></td>'
-        html += f'<td>{row["Value"]}</td></tr>'
+    # Iterate through rows by index
+    metrics = df_dict.get("Metric", [])
+    values = df_dict.get("Value", [])
+
+    for i in range(len(metrics)):
+        metric = metrics[i]
+        value = values[i]
+        tooltip_text = tooltip_descriptions.get(metric, "No description available.")
+        html += f'<tr><td class="tooltip">{metric}<span class="tooltiptext">{tooltip_text}</span></td>'
+        html += f"<td>{value}</td></tr>"
 
     html += "</tbody></table>"
 
