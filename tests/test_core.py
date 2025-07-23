@@ -16,7 +16,9 @@ from triton_viz import config as cfg
 
 
 try:
-    torch.cuda.current_device()
+    from triton.runtime.driver import _create_driver
+
+    _create_driver()
     cuda_ok = True
 except RuntimeError:
     cuda_ok = False
@@ -179,19 +181,19 @@ def test_autotune_add_inrange():
     add_kernel_no_mask[grid](x_ptr=x, y_ptr=y, out_ptr=out, n_elements=128)
 
 
-# @pytest.mark.skipif(
-#     not cuda_ok, reason="This test requires a CUDA-enabled environment."
-# )
-# def test_autotune_add_out_of_bound():
-#     """
-#     This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
-#     It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
-#     """
-#     cfg.sanitizer_backend = "symexec"
-#     x = torch.randn(128)
-#     y = torch.randn(128)
-#     out = torch.empty_like(x)
+@pytest.mark.skipif(
+    not cuda_ok, reason="This test requires a CUDA-enabled environment."
+)
+def test_autotune_add_out_of_bound():
+    """
+    This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
+    It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
+    """
+    cfg.sanitizer_backend = "symexec"
+    x = torch.randn(128)
+    y = torch.randn(128)
+    out = torch.empty_like(x)
 
-#     # The kernel launch uses n_elements=256, exceeding the valid tensor size.
-#     grid = lambda META: (triton.cdiv(256, META["BLOCK_SIZE"]),)
-#     add_kernel_no_mask[grid](x_ptr=x, y_ptr=y, out_ptr=out, n_elements=256)
+    # The kernel launch uses n_elements=256, exceeding the valid tensor size.
+    grid = lambda META: (triton.cdiv(256, META["BLOCK_SIZE"]),)
+    add_kernel_no_mask[grid](x_ptr=x, y_ptr=y, out_ptr=out, n_elements=256)
