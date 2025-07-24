@@ -1085,6 +1085,21 @@ def _make_signature(addr_expr, constraints) -> str:
     return addr_repr + "##" + constr_repr
 
 
+def check_if_affine(seq):
+    """Check whether seq forms an arithmetic sequence;
+    if it does, return (True, LowerBound, step, UpperBound);,
+    otherwise return (False, None, None, None).
+    """
+    n = len(seq)
+    if n == 0 or n == 1:
+        return False, None, None, None
+    step = seq[1] - seq[0]
+    for i in range(2, n):
+        if seq[i] - seq[i - 1] != step:
+            return False, None, None, None
+    return True, seq[0], step, seq[-1]
+
+
 @dataclass
 class LoopContext:
     lineno: int
@@ -1480,9 +1495,19 @@ class SanitizerSymbolicExecution(Sanitizer):
             # add constraints for loop_i
             iterator_constraints: list[BoolRef] = []
             if ctx.values:
-                iterator_constraints.append(
-                    Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
-                )
+                is_affine, start, step, end = check_if_affine(ctx.values)
+                if is_affine:
+                    iterator_constraints.append(
+                        And(
+                            ctx.idx_z3 >= start,
+                            ctx.idx_z3 <= end,
+                            (ctx.idx_z3 - start) % step == 0,
+                        )
+                    )
+                else:
+                    iterator_constraints.append(
+                        Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
+                    )
 
             # execute pending checks
             for addr_expr, expr_constraints in ctx.pending_checks:
