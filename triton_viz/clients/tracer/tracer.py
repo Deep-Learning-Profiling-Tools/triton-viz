@@ -103,5 +103,8 @@ class Tracer(Client):
 
         return OpCallbacks()
 
+    def register_for_loop_callback(self):
+        return None, None, None
+
     def finalize(self) -> list:
         return self.records

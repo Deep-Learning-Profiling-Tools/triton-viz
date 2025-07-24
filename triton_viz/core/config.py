@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 
 if TYPE_CHECKING:
+    verbose: bool
     sanitizer_activated: bool
     sanitizer_backend: Literal["off", "brute_force", "symexec"]
     report_grid_execution_progress: bool
@@ -24,6 +25,9 @@ class Config(types.ModuleType):
         self.reset()
 
     def reset(self) -> None:
+        # --- Verbose mode flag ---
+        self.verbose = os.getenv("TRITON_VIZ_VERBOSE", "0") == "1"
+
         # --- Sanitizer activation flag ---
         self.sanitizer_activated = False
 
@@ -31,8 +35,9 @@ class Config(types.ModuleType):
         self._sanitizer_backend = os.getenv("TRITON_SANITIZER_BACKEND", "") or None
 
         # --- Grid execution progress flag ---
-        env_flag = os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0")
-        self.report_grid_execution_progress = env_flag == "1"  # verify using setter
+        self.report_grid_execution_progress = (
+            os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
+        )  # verify using setter
 
     # ---------- sanitizer_backend ----------
     @property
