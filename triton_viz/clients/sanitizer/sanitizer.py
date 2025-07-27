@@ -547,7 +547,7 @@ class SymbolicExpr:
         else:
             self._init_from_spec(*args)
 
-        # affine loop optimization
+        # for-loop iterator association
         self._loop_ctx: LoopContext | None = None
 
     def _init_from_spec(self, *args):
@@ -1208,9 +1208,9 @@ class SanitizerSymbolicExecution(Sanitizer):
 
             # check memory access using z3
             z3_addr, z3_constraints = ret.eval()
-            if self.loop_stack:  # affine loop optimization
+            if self.loop_stack:  # for-loop iterator association
                 ctx = self.loop_stack[-1]
-                # check if addr already appeared before in the loop
+                # check if addr already appeared before in the for-loop
                 signature = _make_signature(z3_addr, z3_constraints)
                 if signature in ctx.signature_cache:  # if appeared before
                     if cfg.verbose:
@@ -1219,7 +1219,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 else:  # new addr expr
                     if cfg.verbose:
                         print(
-                            "[Sanitizer]  ↪ new addr in loop, will check later",
+                            "[Sanitizer]  ↪ new addr in for-loop, will check later",
                             z3_addr,
                             z3_constraints,
                         )
@@ -1254,7 +1254,7 @@ class SanitizerSymbolicExecution(Sanitizer):
 
             # check memory access using z3
             z3_addr, z3_constraints = ret.eval()
-            if self.loop_stack:  # affine loop optimization
+            if self.loop_stack:  # for-loop iterator association
                 ctx = self.loop_stack[-1]
                 # check if addr already appeared before in the loop
                 signature = _make_signature(z3_addr, z3_constraints)
@@ -1452,7 +1452,8 @@ class SanitizerSymbolicExecution(Sanitizer):
     def register_for_loop_callback(self):
         def loop_hook_before(lineno, iterable):
             if not isinstance(iterable, range):
-                print("not a for-loop, skipping affine loop optimization.")
+                if cfg.verbose:
+                    print("not a for-loop, skipping for-loop iterator association.")
                 return
             length = len(iterable)
             idx_z3 = Int(f"loop_i_{lineno}")

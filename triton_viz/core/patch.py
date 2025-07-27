@@ -255,10 +255,34 @@ class _CombinedLoopHooks:
         self._after.clear()
 
 
-__triton_viz_hooks = _CombinedLoopHooks()
-_orig_visit_for: Callable | None = None
-_orig_patch_lang: Callable | None = None
-_loops_patched: bool = False
+class _LoopPatcher:
+    """Manages loop patching state and hooks."""
+
+    def __init__(self):
+        self.hooks = _CombinedLoopHooks()
+        self._orig_visit_for: Callable | None = None
+        self._patched: bool = False
+
+    def patch(self):
+        """Apply loop patching."""
+        if not self._patched:
+            self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
+            _OrigASTTransformer.visit_For = _visit_For  # type: ignore[assignment]
+            self._patched = True
+
+    def unpatch(self):
+        """Remove loop patching."""
+        if not self._patched:
+            return
+
+        if self._orig_visit_for is not None:
+            _OrigASTTransformer.visit_For = self._orig_visit_for
+
+        self.hooks.clear()
+        self._patched = False
+
+
+_loop_patcher = _LoopPatcher()
 
 
 def _visit_For(self, node: ast.For):  # type: ignore[override]
@@ -266,16 +290,20 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     for i in R:
         ...
     ==>
-    for i in __triton_viz_hooks_loop(R, lineno):
+    for i in _triton_viz_loop_patcher.hooks.loop_iter_wrapper(R, lineno):
         ...
-    where __triton_viz_hooks_loop returns a _LoopIter object.
+    where _triton_viz_loop_patcher.hooks.loop_iter_wrapper returns a _LoopIter object.
     """
     self.generic_visit(node)
 
-    # __triton_viz_hooks.loop_iter(range(...), lineno)
+    # _triton_viz_loop_patcher.hooks.loop_iter(range(...), lineno)
     new_iter = ast.Call(
         func=ast.Attribute(
-            value=ast.Name(id="__triton_viz_hooks", ctx=ast.Load()),
+            value=ast.Attribute(
+                value=ast.Name(id="_triton_viz_loop_patcher", ctx=ast.Load()),
+                attr="hooks",
+                ctx=ast.Load(),
+            ),
             attr="loop_iter_wrapper",
             ctx=ast.Load(),
         ),
@@ -299,39 +327,26 @@ def patch_for_loop(
     loop_iter_listener: Callable | None,
     after_loop_callback: Callable | None,
 ):
-    global _orig_visit_for, _orig_patch_lang, _loops_patched
-    if not _loops_patched:
-        _orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
-        _OrigASTTransformer.visit_For = _visit_For  # type: ignore[assignment]
-        _loops_patched = True
+    _loop_patcher.patch()
 
     # Registering hooks
     if before_loop_callback is not None:
-        __triton_viz_hooks.add_before(before_loop_callback)
+        _loop_patcher.hooks.add_before(before_loop_callback)
     if loop_iter_overrider is not None:
-        __triton_viz_hooks.set_iter_overrider(loop_iter_overrider)
+        _loop_patcher.hooks.set_iter_overrider(loop_iter_overrider)
     if loop_iter_listener is not None:
-        __triton_viz_hooks.add_iter_listener(loop_iter_listener)
+        _loop_patcher.hooks.add_iter_listener(loop_iter_listener)
     if after_loop_callback is not None:
-        __triton_viz_hooks.add_after(after_loop_callback)
+        _loop_patcher.hooks.add_after(after_loop_callback)
 
 
 def unpatch_for_loop():
-    global _loops_patched
-    if not _loops_patched:
-        return
-
-    if _orig_visit_for is not None:
-        _OrigASTTransformer.visit_For = _orig_visit_for
-
-    __triton_viz_hooks.clear()
-
-    _loops_patched = False
+    _loop_patcher.unpatch()
 
 
 def _patch_lang(fn):
     triton_patch_lang(fn)
-    fn.__globals__["__triton_viz_hooks"] = __triton_viz_hooks
+    fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
 
 
 def _unpatch_lang():
