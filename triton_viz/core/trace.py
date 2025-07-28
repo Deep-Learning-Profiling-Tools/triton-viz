@@ -83,7 +83,7 @@ class NKITrace(KernelInterface, TraceInterface):
         elif isinstance(kernel, NKIInterpretedFunction):
             interpreter_fn = kernel
         else:
-            interpreter_fn = NKIInterpretedFunction(kernel.func)
+            interpreter_fn = NKIInterpretedFunction(kernel)
             self.func = kernel
         TraceInterface.__init__(self, client, interpreter_fn)
 
