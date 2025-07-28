@@ -132,14 +132,14 @@ class Builder:
         self.grid_z = z
 
     def ndarray(self, shape, dtype, *, buffer=None, name="", **kwargs):
-        if name is None:
-            # file name + function name + line number
-            frame = inspect.currentframe().f_back
-            file_name = frame.f_code.co_filename
-            function_name = frame.f_code.co_name
-            line_number = frame.f_lineno
-            name = f"{file_name}_{function_name}_{line_number}"
         if buffer == nl.shared_hbm:
+            if name is None:
+                # file name + function name + line number
+                frame = inspect.currentframe().f_back
+                file_name = frame.f_code.co_filename
+                function_name = frame.f_code.co_name
+                line_number = frame.f_lineno
+                name = f"{file_name}_{function_name}_{line_number}"
             if name in self.shared_hbm_arrays:
                 # Return the existing shared HBM array
                 ret = self.shared_hbm_arrays[name]
