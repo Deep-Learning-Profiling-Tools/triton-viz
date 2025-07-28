@@ -136,6 +136,8 @@ class NKIInterpretedFunction:
         elif len(grid_dims) != 3:
             raise ValueError(f"Grid must be 1, 2, or 3 dimensions, got {len(grid_dims)}")
         nki_builder.set_grid_dims(grid_dims)
+
+        kwargs.pop("warmup", None)  # Remove warmup from kwargs if it exists
         
         for x in range(grid_dims[0]):
             for y in range(grid_dims[1]):
