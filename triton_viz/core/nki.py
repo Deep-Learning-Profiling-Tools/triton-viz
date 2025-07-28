@@ -4,47 +4,79 @@ import neuronxcc.nki.language as nl
 import inspect
 
 
+# Multi-dimensional slice class
 class NLSlice:
     def __init__(self, start=None, stop=None, step: int = 1):
-        self.start = start
-        self.stop = stop
-        self.step = step
+        self.start = [start] if isinstance(start, int) else start
+        self.stop = [stop] if isinstance(stop, int) else stop
+        self.step = [step] if isinstance(step, int) else step
 
     def __repr__(self):
-        return f"NLSlice(start={self.start}, stop={self.stop}, step={self.step})"
-
-    def to_tuple(self):
-        return (self.start, self.stop, self.step) if self.step is not None else (self.start, self.stop)
+        repr = ""
+        for start, stop, step in zip(self.start, self.stop, self.step):
+            if start is None:
+                start = "None"
+            if stop is None:
+                stop = "None"
+            if step is None:
+                step = "None"
+            repr += f"(start={start}, stop={stop}, step={step}) " 
+        return repr
 
     def __add__(self, other):
+        new_start = []
+        new_stop = []
+        new_step = []
         if isinstance(other, NLSlice):
-            return NLSlice(
-                start=self.start + other.start if self.start is not None else None,
-                stop=self.stop + other.stop if self.stop is not None else None,
-                step=self.step + other.step if self.step is not None else None
-            )
+            for start, stop, step in zip(self.start, self.stop, self.step):
+                new_start.append(start + other.start if start is not None else None)
+                new_stop.append(stop + other.stop if stop is not None else None)
+                new_step.append(step + other.step if step is not None else None)
+            return NLSlice(start=new_start, stop=new_stop, step=new_step)
         elif isinstance(other, int):
-            return NLSlice(
-                start=self.start + other if self.start is not None else None,
-                stop=self.stop + other if self.stop is not None else None,
-                step=self.step
-            )
+            for start, stop, step in zip(self.start, self.stop, self.step):
+                new_start.append(start + other if start is not None else None)
+                new_stop.append(stop + other if stop is not None else None)
+                new_step.append(step)
+            return NLSlice(start=new_start, stop=new_stop, step=new_step)
         raise TypeError(f"Unsupported operand type(s) for +: 'NLSlice' and '{type(other).__name__}'")
 
     def __radd__(self, other):
+        new_start = []
+        new_stop = []
+        new_step = []
         if isinstance(other, NLSlice):
-            return NLSlice(
-                start=other.start + self.start if self.start is not None else None,
-                stop=other.stop + self.stop if self.stop is not None else None,
-                step=other.step + self.step if self.step is not None else None
-            )
+            for start, stop, step in zip(self.start, self.stop, self.step):
+                new_start.append(other.start + start if start is not None else None)
+                new_stop.append(other.stop + stop if stop is not None else None)
+                new_step.append(other.step + step if step is not None else None)
+            return NLSlice(start=new_start, stop=new_stop, step=new_step)
         elif isinstance(other, int):
-            return NLSlice(
-                start=other + self.start if self.start is not None else None,
-                stop=other + self.stop if self.stop is not None else None,
-                step=self.step
-            )
+            for start, stop, step in zip(self.start, self.stop, self.step):
+                new_start.append(other + start if start is not None else None)
+                new_stop.append(other + stop if stop is not None else None)
+                new_step.append(step)
+            return NLSlice(start=new_start, stop=new_stop, step=new_step)
         raise TypeError(f"Unsupported operand type(s) for +: '{type(other).__name__}' and 'NLSlice'")
+
+    def __getitem__(self, keys):
+        new_start = []
+        new_stop = []
+        new_step = []
+        for k in keys:
+            # check if k is None:
+            if k is None:
+                new_start.append(None)
+                new_stop.append(None)
+                new_step.append(None)
+            elif isinstance(k, slice):
+                new_start.append(k.start)
+                new_stop.append(k.stop)
+                new_step.append(k.step)
+            else:
+                raise TypeError(f"Unsupported key type: {type(k)}")
+
+        return NLSlice(start=new_start, stop=new_stop, step=new_step)
 
 class NDArray:
     def __init__(self, buffer=None, name="", **kwargs):
