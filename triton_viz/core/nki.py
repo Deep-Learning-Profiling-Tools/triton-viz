@@ -129,7 +129,26 @@ class NDArray:
                     new_keys.append(slice(k.start, k.stop, k.step))
                 else:
                     new_keys.append(k)
+        # new_keys=[slice([0, None], [128, None], [1, None]), slice([None, 0], [None, 512], [None, 1])]
+        if all(isinstance(k, slice) for k in new_keys):
+
+            def coalesce(*args):
+                for arg in args:
+                    if arg is not None:
+                        return arg
+                return None
+
+            # Combine slices per axis, preferring non-None values
+            new_keys = tuple(
+                slice(
+                    coalesce(*(k.start[i] for k in new_keys)),
+                    coalesce(*(k.stop[i] for k in new_keys)),
+                    coalesce(*(k.step[i] for k in new_keys)),
+                )
+                for i in range(len(new_keys[0].start))
+            )
         sliced_value = self._value[tuple(new_keys)]
+
 
         # Create a new NDArray with the sliced data
         return NDArray(value=sliced_value, name=f"{self.name}_slice")
