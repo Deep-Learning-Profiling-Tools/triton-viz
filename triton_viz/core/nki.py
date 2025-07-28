@@ -1,6 +1,7 @@
 import numpy as np
 
 import neuronxcc.nki.language as nl
+import inspect
 
 
 class NDArray:
@@ -114,11 +115,13 @@ class NDArray:
 
 
 class Builder:
-    def __init__(self, grid_dims=None):
+    def __init__(self, fn, grid_dims=None):
+        self.fn = fn
         self.grid_dims = grid_dims if grid_dims is not None else (1, 1, 1)
         self.grid_x = None
         self.grid_y = None
         self.grid_z = None
+        self.shared_hbm_arrays = {}
 
     def set_grid_dims(self, grid_dims):
         self.grid_dims = grid_dims
@@ -129,6 +132,15 @@ class Builder:
         self.grid_z = z
 
     def ndarray(self, shape, dtype, *, buffer=None, name="", **kwargs):
+        if name is None:
+            # file name + function name + line number
+            frame = inspect.currentframe().f_back
+            file_name = frame.f_code.co_filename
+            function_name = frame.f_code.co_name
+            line_number = frame.f_lineno
+            name = f"{file_name}_{function_name}_{line_number}"
+        if buffer == nl.shared_hbm and name in self.shared_hbm_arrays:
+            return self.shared_hbm_arrays[name]
         return NDArray(buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs)
 
     def arange(self, *args):
