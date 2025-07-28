@@ -36,13 +36,20 @@ class NDArray:
     def __repr__(self):
         return f"NDArray(shape={self.shape}, dtype={self.dtype}, name={self.name})"
 
-    def __getitem__(self, key):
+    def __getitem__(self, keys):
         """Implement slicing operations for NDArray"""
         if self._value is None:
             raise AttributeError("NDArray has no value to slice")
 
         # Apply the slicing to the underlying numpy array
-        sliced_value = self._value[key]
+        new_keys = []
+        if isinstance(keys, tuple):
+            for k in keys:
+                if isinstance(k, NDArray):
+                    new_keys.append(k._value)
+                else:
+                    new_keys.append(k)
+        sliced_value = self._value[tuple(new_keys)]
 
         # Create a new NDArray with the sliced data
         return NDArray(value=sliced_value, name=f"{self.name}_slice")
