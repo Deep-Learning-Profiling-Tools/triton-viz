@@ -11,7 +11,7 @@ class NDArray:
         if "shape" in kwargs and "dtype" in kwargs:
             shape = kwargs.pop("shape")
             dtype = kwargs.pop("dtype")
-            self._value = np.ndarray(shape, dtype=dtype, buffer=buffer, **kwargs)
+            self._value = np.ndarray(shape, dtype=dtype)
         elif "value" in kwargs:
             self._value = kwargs["value"]
         else:
