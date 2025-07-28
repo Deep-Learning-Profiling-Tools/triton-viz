@@ -77,10 +77,14 @@ class NKITrace(KernelInterface, TraceInterface):
         from .nki import NKIInterpretedFunction
 
         if isinstance(kernel, GenericKernel):
+            # This is wrong
             interpreter_fn = NKIInterpretedFunction(kernel.func)
+            self.func = kernel.func
         elif isinstance(kernel, NKIInterpretedFunction):
             interpreter_fn = kernel
-        self.func = kernel.func
+        else:
+            interpreter_fn = NKIInterpretedFunction(kernel.func)
+            self.func = kernel
         TraceInterface.__init__(self, client, interpreter_fn)
 
     def __getitem__(self, *grid):
