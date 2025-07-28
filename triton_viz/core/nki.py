@@ -63,6 +63,7 @@ class NLSlice:
         new_start = []
         new_stop = []
         new_step = []
+        idx = 0
         for k in keys:
             # check if k is None:
             if k is None:
@@ -70,9 +71,11 @@ class NLSlice:
                 new_stop.append(None)
                 new_step.append(None)
             elif isinstance(k, slice):
-                new_start.append(k.start)
-                new_stop.append(k.stop)
-                new_step.append(k.step)
+                assert k.start is None and k.stop is None and k.step is None, "Slice must be complete"
+                new_start.append(self.start[idx])
+                new_stop.append(self.stop[idx])
+                new_step.append(self.step[idx])
+                idx += 1
             else:
                 raise TypeError(f"Unsupported key type: {type(k)}")
 
