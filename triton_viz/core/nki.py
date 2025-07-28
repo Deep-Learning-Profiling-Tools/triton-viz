@@ -54,6 +54,7 @@ class NDArray:
         # Create a new NDArray with the sliced data
         return NDArray(value=sliced_value, name=f"{self.name}_slice")
 
+
     # Define operator +/-/*//
     def __add__(self, other):
         if isinstance(other, NDArray):
@@ -201,6 +202,9 @@ class NKIInterpretedFunction:
         kwargs.pop("client_manager", None)  # Remove client_manager from kwargs if it exists
 
         patch()
+
+        # convert args to NDArray if they are not already
+        args = [arg if isinstance(arg, NDArray) else NDArray(value=arg) for arg in args]
         for x in range(grid_dims[0]):
             for y in range(grid_dims[1]):
                 for z in range(grid_dims[2]):
