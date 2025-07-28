@@ -211,4 +211,4 @@ class NKIInterpretedFunction:
                     nki_builder.set_grid_idx(x, y, z)
                     result = self.fn(*args, **kwargs)
         unpatch()
-        return result
+        return result.value
