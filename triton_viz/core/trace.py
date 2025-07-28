@@ -64,7 +64,7 @@ class TritonTrace(KernelInterface, TraceInterface):
         else:
             raise TypeError(f"Kernel must be JITFunction or InterpretedFunction, got {type(kernel)}")
         TraceInterface.__init__(self, client, interpreter_fn)
-        self.fn = (kernel,)
+        self.fn = kernel
         self.arg_names = kernel.arg_names
 
     def warmup(self, *args, **kwargs):
@@ -80,6 +80,7 @@ class NKITrace(KernelInterface, TraceInterface):
             interpreter_fn = NKIInterpretedFunction(kernel.func)
         elif isinstance(kernel, NKIInterpretedFunction):
             interpreter_fn = kernel
+        self.func = kernel.func
         TraceInterface.__init__(self, client, interpreter_fn)
 
     def __getitem__(self, *grid):

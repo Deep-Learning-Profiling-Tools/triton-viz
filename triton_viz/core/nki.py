@@ -122,7 +122,7 @@ class Builder:
 nki_builder = Builder()
 
 
-class NKIInterpreterFunction:
+class NKIInterpretedFunction:
     def __init__(self, fn):
         self.fn = fn
 
