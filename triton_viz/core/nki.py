@@ -1,5 +1,7 @@
 import numpy as np
 
+import neuronxcc.nki.language as nl
+
 
 class NDArray:
     def __init__(self, buffer=None, name="", **kwargs):
@@ -122,6 +124,21 @@ class Builder:
 nki_builder = Builder()
 
 
+def patch():
+    nl.ndarray = lambda *args, **kwargs: nki_builder.ndarray(*args, **kwargs)
+    nl.program_id = lambda axis: nki_builder.program_id(axis)
+    nl.arange = lambda *args: nki_builder.arange(*args)
+    nl.load = lambda src, **kwargs: nki_builder.load(src, **kwargs)
+    nl.store = lambda dst, value, **kwargs: nki_builder.store(dst, value, **kwargs)
+
+
+def unpatch():
+    # reload the original functions
+    import importlib
+
+    importlib.reload(nl)
+
+
 class NKIInterpretedFunction:
     def __init__(self, fn):
         self.fn = fn
@@ -139,10 +156,12 @@ class NKIInterpretedFunction:
 
         kwargs.pop("warmup", None)  # Remove warmup from kwargs if it exists
         kwargs.pop("client_manager", None)  # Remove client_manager from kwargs if it exists
-        
+
+        patch()
         for x in range(grid_dims[0]):
             for y in range(grid_dims[1]):
                 for z in range(grid_dims[2]):
                     nki_builder.set_grid_idx(x, y, z)
                     result = self.fn(*args, **kwargs)
+        unpatch()
         return result
