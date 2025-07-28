@@ -284,7 +284,7 @@ class Builder:
     def store(self, dst: NDArray, value: NDArray, *, mask=None, **kwargs):
         if mask is not None:
             value = value[mask]
-        dst._value = value._value
+        dst._value[:] = value._value[:]
         return dst
 
 
