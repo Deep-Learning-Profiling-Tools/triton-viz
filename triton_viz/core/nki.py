@@ -139,9 +139,17 @@ class Builder:
             function_name = frame.f_code.co_name
             line_number = frame.f_lineno
             name = f"{file_name}_{function_name}_{line_number}"
-        if buffer == nl.shared_hbm and name in self.shared_hbm_arrays:
-            return self.shared_hbm_arrays[name]
-        return NDArray(buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs)
+        if buffer == nl.shared_hbm:
+            if name in self.shared_hbm_arrays:
+                # Return the existing shared HBM array
+                ret = self.shared_hbm_arrays[name]
+            else:
+                # Create a new shared HBM array and store it
+                ret = NDArray(buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs)
+                self.shared_hbm_arrays[name] = ret
+        else:
+            ret = NDArray(buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs)
+        return ret
 
     def arange(self, *args):
         if len(args) == 1:
