@@ -115,12 +115,12 @@ class NDArray:
 
 
 class Builder:
-    def __init__(self, fn, grid_dims=None):
-        self.fn = fn
+    def __init__(self, grid_dims=None):
         self.grid_dims = grid_dims if grid_dims is not None else (1, 1, 1)
         self.grid_x = None
         self.grid_y = None
         self.grid_z = None
+        self.fn = None
         self.shared_hbm_arrays = {}
 
     def set_grid_dims(self, grid_dims):
@@ -209,6 +209,8 @@ class NKIInterpretedFunction:
         elif len(grid_dims) != 3:
             raise ValueError(f"Grid must be 1, 2, or 3 dimensions, got {len(grid_dims)}")
         nki_builder.set_grid_dims(grid_dims)
+        nki_builder.shared_hbm_arrays = {}
+        nki_builder.fn = self.fn
 
         kwargs.pop("warmup", None)  # Remove warmup from kwargs if it exists
         kwargs.pop("client_manager", None)  # Remove client_manager from kwargs if it exists
