@@ -55,12 +55,26 @@ class NDArray:
             return NDArray(value=self._value + other, name=f"{self.name}_add_scalar")
         raise TypeError(f"Unsupported operand type(s) for +: 'NDArray' and '{type(other).__name__}'")
 
+    def __radd__(self, other):
+        if isinstance(other, NDArray):
+            return NDArray(value=other._value + self._value, name=f"{other.name}_add_{self.name}")
+        elif np.isscalar(other):
+            return NDArray(value=other + self._value, name=f"scalar_add_{self.name}")
+        raise TypeError(f"Unsupported operand type(s) for +: '{type(other).__name__}' and 'NDArray'")
+
     def __sub__(self, other):
         if isinstance(other, NDArray):
             return NDArray(value=self._value - other._value, name=f"{self.name}_sub_{other.name}")
         elif np.isscalar(other):
             return NDArray(value=self._value - other, name=f"{self.name}_sub_scalar")
         raise TypeError(f"Unsupported operand type(s) for -: 'NDArray' and '{type(other).__name__}'")
+
+    def __rsub__(self, other):
+        if isinstance(other, NDArray):
+            return NDArray(value=other._value - self._value, name=f"{other.name}_sub_{self.name}")
+        elif np.isscalar(other):
+            return NDArray(value=other - self._value, name=f"scalar_sub_{self.name}")
+        raise TypeError(f"Unsupported operand type(s) for -: '{type(other).__name__}' and 'NDArray'")
 
     def __mul__(self, other):
         if isinstance(other, NDArray):
@@ -69,12 +83,26 @@ class NDArray:
             return NDArray(value=self._value * other, name=f"{self.name}_mul_scalar")
         raise TypeError(f"Unsupported operand type(s) for *: 'NDArray' and '{type(other).__name__}'")
 
+    def __rmul__(self, other):
+        if isinstance(other, NDArray):
+            return NDArray(value=other._value * self._value, name=f"{other.name}_mul_{self.name}")
+        elif np.isscalar(other):
+            return NDArray(value=other * self._value, name=f"scalar_mul_{self.name}")
+        raise TypeError(f"Unsupported operand type(s) for *: '{type(other).__name__}' and 'NDArray'")
+
     def __truediv__(self, other):
         if isinstance(other, NDArray):
             return NDArray(value=self._value / other._value, name=f"{self.name}_div_{other.name}")
         elif np.isscalar(other):
             return NDArray(value=self._value / other, name=f"{self.name}_div_scalar")
         raise TypeError(f"Unsupported operand type(s) for /: 'NDArray' and '{type(other).__name__}'")
+
+    def __rtruediv__(self, other):
+        if isinstance(other, NDArray):
+            return NDArray(value=other._value / self._value, name=f"{other.name}_div_{self.name}")
+        elif np.isscalar(other):
+            return NDArray(value=other / self._value, name=f"scalar_div_{self.name}")
+        raise TypeError(f"Unsupported operand type(s) for /: '{type(other).__name__}' and 'NDArray'")
 
 
 class Builder:
