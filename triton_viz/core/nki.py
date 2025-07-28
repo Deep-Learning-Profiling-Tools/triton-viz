@@ -4,6 +4,9 @@ import neuronxcc.nki.language as nl
 import inspect
 
 
+# Q1: slicing semantic is weird
+# Q2: why cannot we execute the .func function?
+
 # Multi-dimensional slice class
 class NLSlice:
     def __init__(self, start=None, stop=None, step: int = 1):
