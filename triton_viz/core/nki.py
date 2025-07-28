@@ -138,6 +138,7 @@ class NKIInterpretedFunction:
         nki_builder.set_grid_dims(grid_dims)
 
         kwargs.pop("warmup", None)  # Remove warmup from kwargs if it exists
+        kwargs.pop("client_manager", None)  # Remove client_manager from kwargs if it exists
         
         for x in range(grid_dims[0]):
             for y in range(grid_dims[1]):
