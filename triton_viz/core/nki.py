@@ -35,7 +35,7 @@ class NLSlice:
             return NLSlice(start=new_start, stop=new_stop, step=new_step)
         elif isinstance(other, int):
             for start, stop, step in zip(self.start, self.stop, self.step):
-                new_start.append(start + other if start is not None else None)
+                new_start.append(start + other if start is not None else other)
                 new_stop.append(stop + other if stop is not None else None)
                 new_step.append(step)
             return NLSlice(start=new_start, stop=new_stop, step=new_step)
@@ -53,7 +53,7 @@ class NLSlice:
             return NLSlice(start=new_start, stop=new_stop, step=new_step)
         elif isinstance(other, int):
             for start, stop, step in zip(self.start, self.stop, self.step):
-                new_start.append(other + start if start is not None else None)
+                new_start.append(other + start if start is not None else other)
                 new_stop.append(other + stop if stop is not None else None)
                 new_step.append(step)
             return NLSlice(start=new_start, stop=new_stop, step=new_step)
