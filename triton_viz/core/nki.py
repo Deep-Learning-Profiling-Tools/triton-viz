@@ -128,6 +128,13 @@ class NKIInterpretedFunction:
 
     def run(self, *args, **kwargs):
         grid_dims = kwargs.pop("grid", (1, 1, 1))  # Remove grid from kwargs to avoid passing it to the function
+        # make it 3d if not
+        if len(grid_dims) == 1:
+            grid_dims = (grid_dims[0], 1, 1)
+        elif len(grid_dims) == 2:
+            grid_dims = (grid_dims[0], grid_dims[1], 1)
+        elif len(grid_dims) != 3:
+            raise ValueError(f"Grid must be 1, 2, or 3 dimensions, got {len(grid_dims)}")
         nki_builder.set_grid_dims(grid_dims)
         
         for x in range(grid_dims[0]):
