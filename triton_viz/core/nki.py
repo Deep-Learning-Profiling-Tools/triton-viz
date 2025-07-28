@@ -4,6 +4,48 @@ import neuronxcc.nki.language as nl
 import inspect
 
 
+class NLSlice:
+    def __init__(self, start=None, stop=None, step: int = 1):
+        self.start = start
+        self.stop = stop
+        self.step = step
+
+    def __repr__(self):
+        return f"NLSlice(start={self.start}, stop={self.stop}, step={self.step})"
+
+    def to_tuple(self):
+        return (self.start, self.stop, self.step) if self.step is not None else (self.start, self.stop)
+
+    def __add__(self, other):
+        if isinstance(other, NLSlice):
+            return NLSlice(
+                start=self.start + other.start if self.start is not None else None,
+                stop=self.stop + other.stop if self.stop is not None else None,
+                step=self.step + other.step if self.step is not None else None
+            )
+        elif isinstance(other, int):
+            return NLSlice(
+                start=self.start + other if self.start is not None else None,
+                stop=self.stop + other if self.stop is not None else None,
+                step=self.step
+            )
+        raise TypeError(f"Unsupported operand type(s) for +: 'NLSlice' and '{type(other).__name__}'")
+
+    def __radd__(self, other):
+        if isinstance(other, NLSlice):
+            return NLSlice(
+                start=other.start + self.start if self.start is not None else None,
+                stop=other.stop + self.stop if self.stop is not None else None,
+                step=other.step + self.step if self.step is not None else None
+            )
+        elif isinstance(other, int):
+            return NLSlice(
+                start=other + self.start if self.start is not None else None,
+                stop=other + self.stop if self.stop is not None else None,
+                step=self.step
+            )
+        raise TypeError(f"Unsupported operand type(s) for +: '{type(other).__name__}' and 'NLSlice'")
+
 class NDArray:
     def __init__(self, buffer=None, name="", **kwargs):
         self.buffer = buffer
@@ -48,6 +90,8 @@ class NDArray:
             for k in keys:
                 if isinstance(k, NDArray):
                     new_keys.append(k._value)
+                elif isinstance(k, NLSlice):
+                    new_keys.append(slice(k.start, k.stop, k.step))
                 else:
                     new_keys.append(k)
         sliced_value = self._value[tuple(new_keys)]
@@ -153,12 +197,17 @@ class Builder:
 
     def arange(self, *args):
         if len(args) == 1:
-            value = np.arange(args[0])
+            start = 0
+            stop = args[0]
         elif len(args) == 2:
-            value = np.arange(args[0], args[1])
+            start = args[0]
+            stop = args[1]
         else:
             raise ValueError("arange expects 1 or 2 arguments")
-        return NDArray(value=value, name="arange")
+        return NLSlice(
+            start=start,
+            stop=stop,
+        ) 
 
     def program_id(self, axis: int):
         if axis == 0:
