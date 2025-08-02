@@ -1225,7 +1225,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
                 self.cache_args.append(arg)
             return
-        if arg.is_contiguous or check_storage_contiguous(arg):
+        if arg.is_contiguous() or check_storage_contiguous(arg):
             start = arg.data_ptr()
             end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
             tensor_physical_addresses = [(start, end)]
