@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     verbose: bool
     sanitizer_activated: bool
     sanitizer_backend: Literal["off", "brute_force", "symexec"]
+    virtual_memory: bool
     report_grid_execution_progress: bool
     available_backends: tuple[str, ...]
 
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
         ...
 
 
-# Back-end options recognised by the sanitizer
+# Back-end options recognized by the sanitizer
 AVAILABLE_SANITIZER_BACKENDS = ("off", "brute_force", "symexec")
 
 
@@ -38,6 +39,13 @@ class Config(types.ModuleType):
         self.report_grid_execution_progress = (
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
+
+        # --- Virtual memory flag ---
+        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
+
+    @property
+    def virtual_memory(self) -> bool:
+        return self._virtual_memory
 
     # ---------- sanitizer_backend ----------
     @property
