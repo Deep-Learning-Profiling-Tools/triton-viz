@@ -512,7 +512,7 @@ class SymbolicExpr:
         ),
         "addptr": Spec(req=("ptr", "offset"), post=_addptr_post),
         # Broadcasting / shape manipulation
-        "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        "splat": Spec(req=("shape", "arg"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
         "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         # Casting
@@ -1348,7 +1348,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             d_sym = SymbolicExpr.from_value(d)
             return SymbolicExpr("dot", a_sym, b_sym, d_sym)
 
-        def op_make_range_overrider(start, end):
+        def op_make_range_overrider(ret_ty, start, end):
             return SymbolicExpr(
                 "arange",
                 SymbolicExpr.from_value(start),
@@ -1365,8 +1365,8 @@ class SanitizerSymbolicExecution(Sanitizer):
             ret = SymbolicExpr("sum", SymbolicExpr.from_value(input), axis, keep_dims)
             return ret
 
-        def op_splat_overrider(arg, shape):
-            return SymbolicExpr("splat", SymbolicExpr.from_value(arg), shape)
+        def op_splat_overrider(shape, arg):
+            return SymbolicExpr("splat", shape, SymbolicExpr.from_value(arg))
 
         def op_make_block_ptr_overrider(
             base, shape, strides, offsets, tensor_shape, order
