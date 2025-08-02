@@ -1,6 +1,7 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks
 from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
+from typing import Callable
 import numpy as np
 
 
@@ -40,7 +41,13 @@ class Tracer(Client):
             ret_idx = i
         return self.tensors[ret_idx]
 
-    def arg_callback(self, arg, arg_cvt):
+    def pre_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def arg_callback(self, name, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
             self.tensors.append(arg)
 
@@ -107,4 +114,5 @@ class Tracer(Client):
         return None, None, None
 
     def finalize(self) -> list:
+        self.tensors.clear()
         return self.records

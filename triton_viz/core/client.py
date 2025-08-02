@@ -14,13 +14,28 @@ from .patch import (
     patch_calls,
 )
 from .callbacks import OpCallbacks
+from .patch import patch_lang, unpatch_lang
 
 
 class Client(ABC):
     NAME: ClassVar[str]
 
     @abstractmethod
-    def arg_callback(self, arg, arg_cvt):
+    def pre_run_callback(self, fn: Callable) -> bool:
+        '''
+        Returns True if the function should continue running, False if it should be skipped.
+        '''
+        ...
+
+    @abstractmethod
+    def post_run_callback(self, fn: Callable) -> bool:
+        '''
+        Returns True if the function should continue running, False if it should be skipped.
+        '''
+        ...
+
+    @abstractmethod
+    def arg_callback(self, name, arg, arg_cvt):
         ...
 
     @abstractmethod
@@ -66,7 +81,7 @@ class ClientManager:
                 self.clients[new_client.NAME] = new_client
 
     @contextmanager
-    def patch(self):
+    def patch(self, fn):
         with patch_calls():
             for client in self.clients.values():
                 for op in op_list:
@@ -88,23 +103,38 @@ class ClientManager:
                     loop_iter_listener,
                     after_loop_callback,
                 )
+                # Remaps core language functions to interpreted ones
+                patch_lang(fn)
             try:
                 yield
             finally:
                 for op in op_list:
                     unpatch_op(op)
                 unpatch_for_loop()
+                unpatch_lang()
+
+    def pre_run_callback(self, fn: Callable) -> bool:
+        rets = []
+        for client in self.clients.values():
+            rets.append(client.pre_run_callback(fn))
+        return any(rets)
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        rets = []
+        for client in self.clients.values():
+            rets.append(client.post_run_callback(fn))
+        return any(rets)
 
     def finalize(self) -> None:
         self.launch.records = []
         for client in self.clients.values():
             self.launch.records += client.finalize()
 
-    def arg_callback(self, arg, arg_cvt):
+    def arg_callback(self, name, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
-            self.launch.tensors.append(arg)
+            self.launch.tensors.add(arg)
         for client in self.clients.values():
-            client.arg_callback(arg, arg_cvt)
+            client.arg_callback(name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int]):
         self.launch.grid = grid

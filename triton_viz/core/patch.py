@@ -111,7 +111,7 @@ class PatchOp:
         if self.callbacks.before_callback:
             self.callbacks.before_callback(*args, **kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type == ReduceSum:
+            if self.op_type in reduce_map:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -344,12 +344,12 @@ def unpatch_for_loop():
     _loop_patcher.unpatch()
 
 
-def _patch_lang(fn):
+def patch_lang(fn):
     triton_patch_lang(fn)
     fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
 
 
-def _unpatch_lang():
+def unpatch_lang():
     import importlib
     import sys
 
@@ -360,7 +360,7 @@ def _unpatch_lang():
 def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
-
+    
     def run_grid_loops(grid):
         for x in tqdm(
             range(grid[0]),
@@ -382,12 +382,10 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 ):
                     interpreter_builder.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
+                    if not client_manager.pre_run_callback(self.fn):
+                        return
                     self.fn(**call_args)
-                    # if symbolic execution, only do one iteration
-                    if (
-                        cfg.sanitizer_backend == "symexec"
-                        and not client_manager.get_client("sanitizer").need_full_grid
-                    ):
+                    if not client_manager.post_run_callback(self.fn):
                         return
 
     # Removes not used reserved keywords from kwargs
@@ -400,18 +398,17 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     }
     client_manager = kwargs.pop("client_manager")
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
-    # Remaps core language functions to interpreted ones
-    _patch_lang(self.fn)
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
     call_args = {}
     for name, arg in args.items():
         if name in self.constexprs:
             call_args[name] = arg
+            ret = arg
         else:
             ret = _implicit_cvt(arg)
-            client_manager.arg_callback(arg, ret)
-            call_args[name] = ret
+        client_manager.arg_callback(name, arg, ret)
+        call_args[name] = ret
     call_args.pop("self", None)
     # Iterate through grid
     grid = self.grid(call_args) if callable(self.grid) else self.grid
@@ -422,11 +419,10 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
-    _unpatch_lang()
 
 
 def _jit_function_call(self, *args, **kwargs):
-    triton_patch_lang(self.fn)
+    patch_lang(self.fn)
     return self.fn(*args, **kwargs)
 
 
