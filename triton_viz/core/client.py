@@ -39,11 +39,11 @@ class Client(ABC):
         ...
 
     @abstractmethod
-    def grid_callback(self, grid: tuple[int]):
+    def grid_callback(self, grid: tuple[int, ...]):
         ...
 
     @abstractmethod
-    def grid_idx_callback(self, grid_idx: tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         ...
 
     @abstractmethod
@@ -141,6 +141,6 @@ class ClientManager:
         for client in self.clients.values():
             client.grid_callback(grid)
 
-    def grid_idx_callback(self, grid_idx: tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         for client in self.clients.values():
             client.grid_idx_callback(grid_idx)

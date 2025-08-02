@@ -1,6 +1,7 @@
 import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
+from typing import Any
 from tqdm import tqdm
 
 from . import config as cfg
@@ -209,26 +210,26 @@ class _CombinedLoopHooks:
         self._after: list[Callable] = []
 
     # Register hooks
-    def add_before(self, hook):
+    def add_before(self, hook: Callable) -> None:
         self._before.append(hook)
 
-    def add_iter_listener(self, hook):
+    def add_iter_listener(self, hook: Callable) -> None:
         self._iter_listeners.append(hook)
 
-    def set_iter_overrider(self, hook):
+    def set_iter_overrider(self, hook: Callable) -> None:
         if self._iter_overrider is not None:
             raise RuntimeError("Only one loop_iter overrider allowed")
         self._iter_overrider = hook
 
-    def add_after(self, hook):
+    def add_after(self, hook: Callable) -> None:
         self._after.append(hook)
 
     # Call combined hooks
-    def before_loop(self, lineno, iterable):
+    def before_loop(self, lineno: int, iterable: Any) -> None:
         for hook in self._before:
             hook(lineno, iterable)
 
-    def loop_iter(self, lineno, idx):
+    def loop_iter(self, lineno: int, idx: Any) -> Any:
         # override iteration index
         if self._iter_overrider is not None:
             new_idx = self._iter_overrider(lineno, idx)
@@ -241,14 +242,14 @@ class _CombinedLoopHooks:
 
         return idx
 
-    def after_loop(self, lineno):
+    def after_loop(self, lineno: int) -> None:
         for hook in self._after:
             hook(lineno)
 
-    def loop_iter_wrapper(self, iterable, lineno):
+    def loop_iter_wrapper(self, iterable: Any, lineno: int) -> "_LoopIter":
         return _LoopIter(iterable, lineno, self)
 
-    def clear(self):
+    def clear(self) -> None:
         self._before.clear()
         self._iter_listeners.clear()
         self._iter_overrider = None
@@ -263,14 +264,14 @@ class _LoopPatcher:
         self._orig_visit_for: Callable | None = None
         self._patched: bool = False
 
-    def patch(self):
+    def patch(self) -> None:
         """Apply loop patching."""
         if not self._patched:
             self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
             _OrigASTTransformer.visit_For = _visit_For  # type: ignore[assignment]
             self._patched = True
 
-    def unpatch(self):
+    def unpatch(self) -> None:
         """Remove loop patching."""
         if not self._patched:
             return

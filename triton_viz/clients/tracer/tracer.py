@@ -51,7 +51,7 @@ class Tracer(Client):
         if hasattr(arg, "data_ptr"):
             self.tensors.append(arg)
 
-    def grid_idx_callback(self, grid_idx: tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         if self.grid_idx is not None and grid_idx != self.grid_idx:
             self.sample = False
         else:
@@ -60,7 +60,7 @@ class Tracer(Client):
         # Create a Grid record for this grid index
         self.records.append(Grid(idx=grid_idx))
 
-    def grid_callback(self, grid: tuple[int]):
+    def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:

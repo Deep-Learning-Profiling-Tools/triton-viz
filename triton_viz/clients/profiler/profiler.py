@@ -24,10 +24,10 @@ class Profiler(Client):
     def arg_callback(self, name, arg, arg_cvt):
         pass
 
-    def grid_idx_callback(self, grid_idx: tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         pass
 
-    def grid_callback(self, grid: tuple[int]):
+    def grid_callback(self, grid: tuple[int, ...]):
         pass
 
     def _report_load_store_bytes(self, type, ptr: TensorHandle, mask: TensorHandle):
