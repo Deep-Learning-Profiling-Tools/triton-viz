@@ -1150,7 +1150,7 @@ class SanitizerSymbolicExecution(Sanitizer):
     def arg_callback(self, arg, arg_cvt):
         if not hasattr(arg, "data_ptr"):
             return
-        if arg.is_contiguous or check_storage_contiguous(arg):
+        if arg.is_contiguous() or check_storage_contiguous(arg):
             start = arg.data_ptr()
             end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
             tensor_physical_addresses = [(start, end)]
