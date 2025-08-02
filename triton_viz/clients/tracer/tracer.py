@@ -1,6 +1,7 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks
 from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
+from typing import Callable
 import numpy as np
 
 
@@ -40,11 +41,17 @@ class Tracer(Client):
             ret_idx = i
         return self.tensors[ret_idx]
 
-    def arg_callback(self, arg, arg_cvt):
+    def pre_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def arg_callback(self, name, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
             self.tensors.append(arg)
 
-    def grid_idx_callback(self, grid_idx: tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         if self.grid_idx is not None and grid_idx != self.grid_idx:
             self.sample = False
         else:
@@ -53,7 +60,7 @@ class Tracer(Client):
         # Create a Grid record for this grid index
         self.records.append(Grid(idx=grid_idx))
 
-    def grid_callback(self, grid: tuple[int]):
+    def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
@@ -107,4 +114,5 @@ class Tracer(Client):
         return None, None, None
 
     def finalize(self) -> list:
+        self.tensors.clear()
         return self.records
