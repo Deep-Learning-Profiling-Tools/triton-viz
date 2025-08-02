@@ -1,6 +1,7 @@
 import traceback
 from collections import namedtuple
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 from torch import Tensor
@@ -239,6 +240,9 @@ class Sanitizer(Client):
     def register_op_callback(self, *args, **kwargs):  # type: ignore[override]
         raise NotImplementedError
 
+    def register_for_loop_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
 
 class SanitizerBruteForce(Sanitizer):
     def __init__(
@@ -305,6 +309,9 @@ class SanitizerBruteForce(Sanitizer):
             return OpCallbacks(before_callback=pre_store_callback)
 
         return OpCallbacks()
+
+    def register_for_loop_callback(self):
+        return None, None, None, None
 
     def finalize(self) -> list:
         return self.records
@@ -540,6 +547,9 @@ class SymbolicExpr:
         else:
             self._init_from_spec(*args)
 
+        # for-loop iterator association
+        self._loop_ctx: LoopContext | None = None
+
     def _init_from_spec(self, *args):
         if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
@@ -686,6 +696,8 @@ class SymbolicExpr:
     def _infer_literal_dtype(var):
         if isinstance(var, tl.core.dtype):
             return var
+        if isinstance(var, tl.core.tensor):
+            return var.dtype
         if isinstance(var, SymbolicExpr.tuple_types):
             first_dtype = SymbolicExpr._infer_literal_dtype(var[0])
             for v in var[1:]:  # assume only one consistent dtype in the tuple
@@ -708,6 +720,14 @@ class SymbolicExpr:
         if var is None:
             return tl.int32  # Default dtype for None
         raise ValueError(f"Unsupported type: {type(var)}")
+
+    _loop_ctx_provider: Callable[[], "LoopContext|None"] | None = None
+
+    @classmethod
+    def set_loop_ctx_provider(cls, fn: Callable[[], "LoopContext|None"]):
+        """Register a function that, on each call,
+        returns the current active `LoopContext` (or `None` if none exists)."""
+        cls._loop_ctx_provider = fn
 
     @classmethod
     def from_value(cls, var):
@@ -757,6 +777,8 @@ class SymbolicExpr:
     def _to_z3(self, node: "SymbolicExpr") -> ArithRef:
         # Recursively convert the current node to a Z3 expression
         if node.op == "const":
+            if node._loop_ctx:  # if the node is a loop iterator
+                return node._loop_ctx.idx_z3
             if isinstance(node.value, np.ndarray):
                 return [IntVal(int(v)) for v in node.value.flat]
             return IntVal(node.value)
@@ -1048,16 +1070,46 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     return expr
 
 
+def _make_signature(addr_expr, constraints) -> str:
+    """
+    Convert (addr, constraints) into a stable string signature.
+    • addr_expr can be a single z3 expr or list[expr]
+    • constraints is list[expr]
+    """
+    if isinstance(addr_expr, list):
+        addr_repr = "|".join(sorted(simplify(e).sexpr() for e in addr_expr))
+    else:
+        addr_repr = simplify(addr_expr).sexpr()
+
+    constr_repr = "|".join(sorted(simplify(c).sexpr() for c in constraints))
+    return addr_repr + "##" + constr_repr
+
+
+@dataclass
+class LoopContext:
+    lineno: int
+    length: int
+    idx_z3: ArithRef
+    values: list[int] = field(default_factory=list)
+    signature_cache: set[str] = field(default_factory=set)
+    pending_checks: list[tuple[ArithRef | list[ArithRef], list[BoolRef]]] = field(
+        default_factory=list
+    )
+
+
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
         self.abort_on_error: bool = abort_on_error
         self.records: list[OutOfBoundsRecordZ3] = []
         self.grid: tuple[int, ...] | None
         self.tensors: list[Tensor] = []
-        self.constraints: list[BoolRef] = []
         self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id: int = 0
         self.need_full_grid: bool = False
+        self.loop_stack: list[LoopContext] = []
+        SymbolicExpr.set_loop_ctx_provider(
+            lambda: self.loop_stack[-1] if self.loop_stack else None
+        )
 
     def _check_range_satisfiable(
         self,
@@ -1085,7 +1137,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             user_code_tracebacks=traceback_info,
             tensor=tensor,
             violation_address=violation_address,
-            constraints=self.constraints,
+            constraints=[],
         )
         if self.abort_on_error:
             print_oob_record(oob_record)
@@ -1155,8 +1207,26 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("load", ptr_sym, mask, other)
 
             # check memory access using z3
-            ret_eval, ret_constraints = ret.eval()
-            self._check_range_satisfiable(ret_eval, ret_constraints)
+            z3_addr, z3_constraints = ret.eval()
+            if self.loop_stack:  # for-loop iterator association
+                ctx = self.loop_stack[-1]
+                # check if addr already appeared before in the for-loop
+                signature = _make_signature(z3_addr, z3_constraints)
+                if signature in ctx.signature_cache:  # if appeared before
+                    if cfg.verbose:
+                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
+                    return ret
+                else:  # new addr expr
+                    if cfg.verbose:
+                        print(
+                            "[Sanitizer]  ↪ new addr in for-loop, will check later",
+                            z3_addr,
+                            z3_constraints,
+                        )
+                    ctx.signature_cache.add(signature)
+                    ctx.pending_checks.append((z3_addr, z3_constraints))
+            else:  # non-loop case
+                self._check_range_satisfiable(z3_addr, z3_constraints)
 
             return ret
 
@@ -1183,8 +1253,26 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("store", ptr_sym, value, mask)
 
             # check memory access using z3
-            ret_eval, ret_constraints = ret.eval()
-            self._check_range_satisfiable(ret_eval, ret_constraints)
+            z3_addr, z3_constraints = ret.eval()
+            if self.loop_stack:  # for-loop iterator association
+                ctx = self.loop_stack[-1]
+                # check if addr already appeared before in the loop
+                signature = _make_signature(z3_addr, z3_constraints)
+                if signature in ctx.signature_cache:  # if appeared before
+                    if cfg.verbose:
+                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
+                    return ret
+                else:  # new addr expr
+                    if cfg.verbose:
+                        print(
+                            "[Sanitizer]  ↪ new addr in loop, will check later",
+                            z3_addr,
+                            z3_constraints,
+                        )
+                    ctx.signature_cache.add(signature)
+                    ctx.pending_checks.append((z3_addr, z3_constraints))
+            else:  # non-loop case
+                self._check_range_satisfiable(z3_addr, z3_constraints)
 
             return ret
 
@@ -1361,6 +1449,68 @@ class SanitizerSymbolicExecution(Sanitizer):
         else:
             return OpCallbacks()
 
+    def register_for_loop_callback(self):
+        def loop_hook_before(lineno, iterable):
+            if not isinstance(iterable, range):
+                if cfg.verbose:
+                    print("not a for-loop, skipping for-loop iterator association.")
+                return
+            length = len(iterable)
+            idx_z3 = Int(f"loop_i_{lineno}")
+            self.loop_stack.append(LoopContext(lineno, length, idx_z3))
+            if cfg.verbose:
+                print(f"[Sanitizer] ▶ enter loop@{lineno}, len={length}")
+
+        def loop_hook_iter_overrider(lineno, idx):
+            # collect iterator values
+            if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+                self.loop_stack[-1].values.append(idx)
+
+            # Make a tagged SymbolicExpr
+            sym = SymbolicExpr("const", idx, tl.int32)
+            sym._loop_ctx = self.loop_stack[-1]
+
+            return tl.core.tensor(sym, tl.int32)
+
+        def loop_hook_iter_listener(lineno, idx):
+            if cfg.verbose:
+                print(f"[Sanitizer] ▶ loop@{lineno} idx={idx}")
+
+        def loop_hook_after(lineno):
+            ctx = self.loop_stack.pop()
+            # add constraints for loop_i
+            iterator_constraints: list[BoolRef] = []
+            if ctx.values:
+                iterator_constraints.append(
+                    Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
+                )
+
+            # execute pending checks
+            for addr_expr, expr_constraints in ctx.pending_checks:
+                if cfg.verbose:
+                    print(
+                        "[Sanitizer] ▶ checking:",
+                        addr_expr,
+                        f" with iterator constraints: {iterator_constraints} ",
+                        f" and expression-related constraints: {expr_constraints} ",
+                    )
+                self._check_range_satisfiable(
+                    addr_expr, expr_constraints + iterator_constraints
+                )
+
+            if cfg.verbose:
+                print(
+                    f"[Sanitizer] ▶ leave loop@{lineno} end. "
+                    f"(checked {len(ctx.pending_checks)} unique addr patterns)"
+                )
+
+        return (
+            loop_hook_before,
+            loop_hook_iter_overrider,
+            loop_hook_iter_listener,
+            loop_hook_after,
+        )
+
     def finalize(self) -> list:
         return []
 
@@ -1394,6 +1544,9 @@ class NullSanitizer(Sanitizer):
 
     def register_op_callback(self, *args, **kwargs):
         self._disabled("register_op_callback")
+
+    def register_for_loop_callback(self, *args, **kwargs):
+        self._disabled("register_for_loop_callback")
 
     def __getattr__(self, name):
         self._disabled(name)

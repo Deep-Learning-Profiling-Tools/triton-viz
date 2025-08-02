@@ -2,9 +2,17 @@ from contextlib import contextmanager
 
 from abc import ABC, abstractmethod
 from typing import ClassVar
+from collections.abc import Callable
 
 from .data import Op, Launch
-from .patch import patch_op, unpatch_op, op_list, patch_calls
+from .patch import (
+    patch_op,
+    unpatch_op,
+    patch_for_loop,
+    unpatch_for_loop,
+    op_list,
+    patch_calls,
+)
 from .callbacks import OpCallbacks
 
 
@@ -25,6 +33,12 @@ class Client(ABC):
 
     @abstractmethod
     def register_op_callback(self, op: type[Op]) -> OpCallbacks:
+        ...
+
+    @abstractmethod
+    def register_for_loop_callback(
+        self,
+    ) -> tuple[Callable | None, Callable | None, Callable | None, Callable | None]:
         ...
 
     @abstractmethod
@@ -56,13 +70,30 @@ class ClientManager:
         with patch_calls():
             for client in self.clients.values():
                 for op in op_list:
+                    # patch ops
+
                     callbacks = client.register_op_callback(op)
                     patch_op(op, callbacks)
+
+                # patch for loops
+                (
+                    before_loop_callback,
+                    loop_iter_overrider,
+                    loop_iter_listener,
+                    after_loop_callback,
+                ) = client.register_for_loop_callback()
+                patch_for_loop(
+                    before_loop_callback,
+                    loop_iter_overrider,
+                    loop_iter_listener,
+                    after_loop_callback,
+                )
             try:
                 yield
             finally:
                 for op in op_list:
                     unpatch_op(op)
+                unpatch_for_loop()
 
     def finalize(self) -> None:
         self.launch.records = []
