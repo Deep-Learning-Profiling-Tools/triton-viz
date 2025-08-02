@@ -360,7 +360,7 @@ def unpatch_lang():
 def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
-    
+
     def run_grid_loops(grid):
         for x in tqdm(
             range(grid[0]),

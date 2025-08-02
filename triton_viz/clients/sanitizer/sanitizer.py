@@ -255,6 +255,7 @@ class Sanitizer(Client):
 def _get_last_grid(grid: tuple[int]) -> tuple[int]:
     return (grid[0] - 1, grid[1] - 1, grid[2] - 1)
 
+
 class SanitizerBruteForce(Sanitizer):
     def __init__(
         self,
@@ -1014,10 +1015,13 @@ class SymbolicExpr:
             result = obj.concrete_fn(obj.axis.to_py())
         elif obj.op == "arange":
             # FIXME: The "+1" is a workaround for the exclusive end in arange
-            result = obj.concrete_fn(obj.ret_ty.to_py(), obj.start.to_py(), obj.end.to_py() + 1)
+            result = obj.concrete_fn(
+                obj.ret_ty.to_py(), obj.start.to_py(), obj.end.to_py() + 1
+            )
         elif obj.op == "splat":
             result = obj.concrete_fn(
-               obj.children["shape"].to_py(), obj.arg.concretize(), 
+                obj.children["shape"].to_py(),
+                obj.arg.concretize(),
             )
         elif obj.op in SymbolicExpr.BINARY_OPS:
             result = obj.concrete_fn(
@@ -1122,7 +1126,7 @@ class LoopContext:
 
 @dataclass(frozen=True)
 class _FnSymbolicCache:
-    fn:   Callable
+    fn: Callable
     grid: tuple[int, ...]
     args: tuple
 
@@ -1135,6 +1139,7 @@ class _FnSymbolicCache:
 
 
 _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
+
 
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
@@ -1196,7 +1201,9 @@ class SanitizerSymbolicExecution(Sanitizer):
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
             # First time we launch this program, compute the hash
-            fn_hash = hash(_FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args)))
+            fn_hash = hash(
+                _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
+            )
             self._clear_cache()
             if fn_hash not in _fn_symbolic_cache_set:
                 _fn_symbolic_cache_set.add(fn_hash)

@@ -22,16 +22,16 @@ class Client(ABC):
 
     @abstractmethod
     def pre_run_callback(self, fn: Callable) -> bool:
-        '''
+        """
         Returns True if the function should continue running, False if it should be skipped.
-        '''
+        """
         ...
 
     @abstractmethod
     def post_run_callback(self, fn: Callable) -> bool:
-        '''
+        """
         Returns True if the function should continue running, False if it should be skipped.
-        '''
+        """
         ...
 
     @abstractmethod

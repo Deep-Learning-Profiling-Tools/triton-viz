@@ -17,7 +17,7 @@ class Profiler(Client):
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
-    
+
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 

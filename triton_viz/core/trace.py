@@ -15,6 +15,7 @@ def dummy_benchmarker(fn, quantiles):
     fn()
     return (1.0, 1.0, 1.0)
 
+
 class Trace(KernelInterface):
     @staticmethod
     def _normalize_client(client: str | Client) -> Client:
