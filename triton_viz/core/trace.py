@@ -1,4 +1,4 @@
-from triton.runtime import KernelInterface
+from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
@@ -9,6 +9,11 @@ from .data import Launch
 
 
 launches: list[Launch] = []
+
+
+def dummy_benchmarker(fn, quantiles):
+    fn()
+    return (1.0, 1.0, 1.0)
 
 
 class Trace(KernelInterface):
@@ -37,9 +42,16 @@ class Trace(KernelInterface):
         client: str | Client,
     ) -> None:
         self.fn = kernel
-        if isinstance(kernel, InterpretedFunction):
+        if isinstance(kernel, Autotuner):
+            self.base_fn = kernel.base_fn
+            kernel._do_bench = dummy_benchmarker
+            kernel.fn = InterpretedFunction(kernel.base_fn)
+            self.interpreter_fn = kernel
+        elif isinstance(kernel, InterpretedFunction):
+            self.base_fn = kernel.fn
             self.interpreter_fn = kernel
         elif isinstance(kernel, JITFunction):
+            self.base_fn = kernel.fn
             self.interpreter_fn = InterpretedFunction(kernel.fn)
         else:
             raise TypeError(
@@ -50,7 +62,7 @@ class Trace(KernelInterface):
         self.add_client(client)
 
     def run(self, *args, **kwargs):
-        with self.client_manager.patch():
+        with self.client_manager.patch(self.base_fn):
             kwargs.update({"client_manager": self.client_manager})
             ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()
@@ -83,7 +95,7 @@ def trace(clients: str | Client | None = None):
             return kernel
 
         # First-time wrapping
-        if isinstance(kernel, (JITFunction, InterpretedFunction)):
+        if isinstance(kernel, (JITFunction, InterpretedFunction, Autotuner)):
             return Trace(kernel, clients)
 
         # If the object is already a Trace, just append the new client(s)

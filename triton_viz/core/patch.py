@@ -1,6 +1,7 @@
 import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
+from typing import Any
 from tqdm import tqdm
 
 from . import config as cfg
@@ -111,7 +112,7 @@ class PatchOp:
         if self.callbacks.before_callback:
             self.callbacks.before_callback(*args, **kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type == ReduceSum:
+            if self.op_type in reduce_map:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -209,26 +210,26 @@ class _CombinedLoopHooks:
         self._after: list[Callable] = []
 
     # Register hooks
-    def add_before(self, hook):
+    def add_before(self, hook: Callable) -> None:
         self._before.append(hook)
 
-    def add_iter_listener(self, hook):
+    def add_iter_listener(self, hook: Callable) -> None:
         self._iter_listeners.append(hook)
 
-    def set_iter_overrider(self, hook):
+    def set_iter_overrider(self, hook: Callable) -> None:
         if self._iter_overrider is not None:
             raise RuntimeError("Only one loop_iter overrider allowed")
         self._iter_overrider = hook
 
-    def add_after(self, hook):
+    def add_after(self, hook: Callable) -> None:
         self._after.append(hook)
 
     # Call combined hooks
-    def before_loop(self, lineno, iterable):
+    def before_loop(self, lineno: int, iterable: Any) -> None:
         for hook in self._before:
             hook(lineno, iterable)
 
-    def loop_iter(self, lineno, idx):
+    def loop_iter(self, lineno: int, idx: Any) -> Any:
         # override iteration index
         if self._iter_overrider is not None:
             new_idx = self._iter_overrider(lineno, idx)
@@ -241,24 +242,48 @@ class _CombinedLoopHooks:
 
         return idx
 
-    def after_loop(self, lineno):
+    def after_loop(self, lineno: int) -> None:
         for hook in self._after:
             hook(lineno)
 
-    def loop_iter_wrapper(self, iterable, lineno):
+    def loop_iter_wrapper(self, iterable: Any, lineno: int) -> "_LoopIter":
         return _LoopIter(iterable, lineno, self)
 
-    def clear(self):
+    def clear(self) -> None:
         self._before.clear()
         self._iter_listeners.clear()
         self._iter_overrider = None
         self._after.clear()
 
 
-__triton_viz_hooks = _CombinedLoopHooks()
-_orig_visit_for: Callable | None = None
-_orig_patch_lang: Callable | None = None
-_loops_patched: bool = False
+class _LoopPatcher:
+    """Manages loop patching state and hooks."""
+
+    def __init__(self):
+        self.hooks = _CombinedLoopHooks()
+        self._orig_visit_for: Callable | None = None
+        self._patched: bool = False
+
+    def patch(self) -> None:
+        """Apply loop patching."""
+        if not self._patched:
+            self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
+            _OrigASTTransformer.visit_For = _visit_For  # type: ignore[assignment]
+            self._patched = True
+
+    def unpatch(self) -> None:
+        """Remove loop patching."""
+        if not self._patched:
+            return
+
+        if self._orig_visit_for is not None:
+            _OrigASTTransformer.visit_For = self._orig_visit_for
+
+        self.hooks.clear()
+        self._patched = False
+
+
+_loop_patcher = _LoopPatcher()
 
 
 def _visit_For(self, node: ast.For):  # type: ignore[override]
@@ -266,16 +291,20 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     for i in R:
         ...
     ==>
-    for i in __triton_viz_hooks_loop(R, lineno):
+    for i in _triton_viz_loop_patcher.hooks.loop_iter_wrapper(R, lineno):
         ...
-    where __triton_viz_hooks_loop returns a _LoopIter object.
+    where _triton_viz_loop_patcher.hooks.loop_iter_wrapper returns a _LoopIter object.
     """
     self.generic_visit(node)
 
-    # __triton_viz_hooks.loop_iter(range(...), lineno)
+    # _triton_viz_loop_patcher.hooks.loop_iter(range(...), lineno)
     new_iter = ast.Call(
         func=ast.Attribute(
-            value=ast.Name(id="__triton_viz_hooks", ctx=ast.Load()),
+            value=ast.Attribute(
+                value=ast.Name(id="_triton_viz_loop_patcher", ctx=ast.Load()),
+                attr="hooks",
+                ctx=ast.Load(),
+            ),
             attr="loop_iter_wrapper",
             ctx=ast.Load(),
         ),
@@ -299,42 +328,29 @@ def patch_for_loop(
     loop_iter_listener: Callable | None,
     after_loop_callback: Callable | None,
 ):
-    global _orig_visit_for, _orig_patch_lang, _loops_patched
-    if not _loops_patched:
-        _orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
-        _OrigASTTransformer.visit_For = _visit_For  # type: ignore[assignment]
-        _loops_patched = True
+    _loop_patcher.patch()
 
     # Registering hooks
     if before_loop_callback is not None:
-        __triton_viz_hooks.add_before(before_loop_callback)
+        _loop_patcher.hooks.add_before(before_loop_callback)
     if loop_iter_overrider is not None:
-        __triton_viz_hooks.set_iter_overrider(loop_iter_overrider)
+        _loop_patcher.hooks.set_iter_overrider(loop_iter_overrider)
     if loop_iter_listener is not None:
-        __triton_viz_hooks.add_iter_listener(loop_iter_listener)
+        _loop_patcher.hooks.add_iter_listener(loop_iter_listener)
     if after_loop_callback is not None:
-        __triton_viz_hooks.add_after(after_loop_callback)
+        _loop_patcher.hooks.add_after(after_loop_callback)
 
 
 def unpatch_for_loop():
-    global _loops_patched
-    if not _loops_patched:
-        return
-
-    if _orig_visit_for is not None:
-        _OrigASTTransformer.visit_For = _orig_visit_for
-
-    __triton_viz_hooks.clear()
-
-    _loops_patched = False
+    _loop_patcher.unpatch()
 
 
-def _patch_lang(fn):
+def patch_lang(fn):
     triton_patch_lang(fn)
-    fn.__globals__["__triton_viz_hooks"] = __triton_viz_hooks
+    fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
 
 
-def _unpatch_lang():
+def unpatch_lang():
     import importlib
     import sys
 
@@ -367,12 +383,10 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                 ):
                     interpreter_builder.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
+                    if not client_manager.pre_run_callback(self.fn):
+                        return
                     self.fn(**call_args)
-                    # if symbolic execution, only do one iteration
-                    if (
-                        cfg.sanitizer_backend == "symexec"
-                        and not client_manager.get_client("sanitizer").need_full_grid
-                    ):
+                    if not client_manager.post_run_callback(self.fn):
                         return
 
     # Removes not used reserved keywords from kwargs
@@ -385,18 +399,17 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     }
     client_manager = kwargs.pop("client_manager")
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
-    # Remaps core language functions to interpreted ones
-    _patch_lang(self.fn)
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
     call_args = {}
     for name, arg in args.items():
         if name in self.constexprs:
             call_args[name] = arg
+            ret = arg
         else:
             ret = _implicit_cvt(arg)
-            client_manager.arg_callback(arg, ret)
-            call_args[name] = ret
+        client_manager.arg_callback(name, arg, ret)
+        call_args[name] = ret
     call_args.pop("self", None)
     # Iterate through grid
     grid = self.grid(call_args) if callable(self.grid) else self.grid
@@ -407,11 +420,10 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
-    _unpatch_lang()
 
 
 def _jit_function_call(self, *args, **kwargs):
-    triton_patch_lang(self.fn)
+    patch_lang(self.fn)
     return self.fn(*args, **kwargs)
 
 

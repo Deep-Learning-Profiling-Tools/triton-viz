@@ -2,6 +2,9 @@ import traceback
 from collections import namedtuple
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cached_property
+from typing import Any
+
 
 import numpy as np
 from torch import Tensor
@@ -225,6 +228,12 @@ class Sanitizer(Client):
 
         raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
 
+    def pre_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        return True
+
     def arg_callback(self, *args, **kwargs):  # type: ignore[override]
         raise NotImplementedError
 
@@ -244,6 +253,10 @@ class Sanitizer(Client):
         raise NotImplementedError
 
 
+def _get_last_grid(grid: tuple[int, ...]) -> tuple[int, int, int]:
+    return (grid[0] - 1, grid[1] - 1, grid[2] - 1)
+
+
 class SanitizerBruteForce(Sanitizer):
     def __init__(
         self,
@@ -254,6 +267,8 @@ class SanitizerBruteForce(Sanitizer):
         self.abort_on_error = abort_on_error
         self.tensors: list[Tensor] = []
         self.records: list = []
+        self.grid_idx: tuple[int, ...] | None = None
+        self.last_grid: tuple[int, int, int] | None = None
 
     def _report(self, op_type, record):
         traceback_info = _get_traceback_info()
@@ -269,17 +284,26 @@ class SanitizerBruteForce(Sanitizer):
         else:
             self.records.append(oob_record)
 
-    def arg_callback(self, arg, arg_cvt):
+    def pre_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        if self.grid_idx == self.last_grid:
+            self.tensors.clear()
+        return True
+
+    def arg_callback(self, name, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
             assert check_storage_contiguous(
                 arg
             ), "The address sanitizer only supports contiguouly stored tensors for now"
             self.tensors.append(arg)
 
-    def grid_idx_callback(self, grid_idx: tuple[int]):
-        pass
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
+        self.grid_idx = grid_idx
 
-    def grid_callback(self, grid: tuple[int]):
+    def grid_callback(self, grid: tuple[int, ...]) -> None:
+        self.last_grid = _get_last_grid(grid)
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
@@ -459,7 +483,7 @@ class SymbolicExpr:
 
     OP_SPEC = {
         # Core / primitive ops
-        "arange": Spec(req=("start", "end"), post=_arange_post),
+        "arange": Spec(req=("ret_ty", "start", "end"), post=_arange_post),
         "pid": Spec(req=("grid", "axis"), post=_pid_post),
         # Memory access ops
         "load": Spec(req=("ptr",), opt=("mask", "other"), post=_load_post),
@@ -512,7 +536,7 @@ class SymbolicExpr:
         ),
         "addptr": Spec(req=("ptr", "offset"), post=_addptr_post),
         # Broadcasting / shape manipulation
-        "splat": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        "splat": Spec(req=("shape", "arg"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
         "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         # Casting
@@ -547,10 +571,10 @@ class SymbolicExpr:
         else:
             self._init_from_spec(*args)
 
-        # affine loop optimization
+        # for-loop iterator association
         self._loop_ctx: LoopContext | None = None
 
-    def _init_from_spec(self, *args):
+    def _init_from_spec(self, *args: Any) -> None:
         if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
         spec = self.OP_SPEC[self.op]
@@ -991,10 +1015,14 @@ class SymbolicExpr:
         elif obj.op == "pid":
             result = obj.concrete_fn(obj.axis.to_py())
         elif obj.op == "arange":
-            result = obj.concrete_fn(obj.start.to_py(), obj.end.to_py() + 1)
+            # FIXME: The "+1" is a workaround for the exclusive end in arange
+            result = obj.concrete_fn(
+                obj.ret_ty.to_py(), obj.start.to_py(), obj.end.to_py() + 1
+            )
         elif obj.op == "splat":
             result = obj.concrete_fn(
-                obj.arg.concretize(), obj.children["shape"].to_py()
+                obj.children["shape"].to_py(),
+                obj.arg.concretize(),
             )
         elif obj.op in SymbolicExpr.BINARY_OPS:
             result = obj.concrete_fn(
@@ -1112,16 +1140,37 @@ class LoopContext:
     )
 
 
+@dataclass(frozen=True)
+class _FnSymbolicCache:
+    fn: Callable
+    grid: tuple[int, ...]
+    args: tuple
+
+    @cached_property
+    def _hash(self):
+        return hash((self.fn, self.grid, self.args))
+
+    def __hash__(self):
+        return self._hash
+
+
+_fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
+
+
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
         self.abort_on_error: bool = abort_on_error
         self.records: list[OutOfBoundsRecordZ3] = []
-        self.grid: tuple[int, ...] | None
+        self.grid: tuple[int, ...] | None = None
+        self.grid_idx: tuple[int, ...] | None = None
         self.tensors: list[Tensor] = []
         self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id: int = 0
         self.need_full_grid: bool = False
         self.loop_stack: list[LoopContext] = []
+        self.last_grid: tuple[int, int, int] | None = None
+        self.cache_args: list = []
+        self.cache_grid: tuple[int, ...] | None = None
         SymbolicExpr.set_loop_ctx_provider(
             lambda: self.loop_stack[-1] if self.loop_stack else None
         )
@@ -1162,10 +1211,36 @@ class SanitizerSymbolicExecution(Sanitizer):
         else:
             self.records.append(oob_record)
 
-    def arg_callback(self, arg, arg_cvt):
+    def _clear_cache(self):
+        self.cache_args.clear()
+        self.cache_grid = None
+
+    def pre_run_callback(self, fn: Callable) -> bool:
+        if self.cache_grid:
+            # First time we launch this program, compute the hash
+            fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
+            self._clear_cache()
+            if fn_cache not in _fn_symbolic_cache_set:
+                _fn_symbolic_cache_set.add(fn_cache)
+                # Must continue to run the program at least once
+                # We don't clear up tensors at this point
+                return True
+        # 2nd time we launch this program, depends on whether we need a full grid
+        return self.need_full_grid
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        if self.grid_idx == self.last_grid or not self.need_full_grid:
+            self._clear_cache()
+            self.tensors.clear()
+            self.tensor_addrs.clear()
+        return self.need_full_grid
+
+    def arg_callback(self, name, arg, arg_cvt):
         if not hasattr(arg, "data_ptr"):
+            if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
+                self.cache_args.append(arg)
             return
-        if arg.is_contiguous or check_storage_contiguous(arg):
+        if arg.is_contiguous() or check_storage_contiguous(arg):
             start = arg.data_ptr()
             end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
             tensor_physical_addresses = [(start, end)]
@@ -1175,19 +1250,22 @@ class SanitizerSymbolicExecution(Sanitizer):
             raise ValueError(
                 "The address sanitizer only supports contiguouly stored tensors for now!"
             )
-
+        # To uniquely identify the metadata of a tensor
+        self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
         self.tensors.append(arg)
         self.tensor_addrs.extend(tensor_physical_addresses)
 
-    def grid_callback(self, grid: tuple[int]) -> None:
+    def grid_callback(self, grid: tuple[int, ...]) -> None:
+        self.cache_grid = grid
+        self.last_grid = _get_last_grid(grid)
         self.grid = tuple(int(g) for g in grid)
         addr = Int("addr")
         self._addr_ok = Or(*[And(addr >= s, addr <= e) for s, e in self.tensor_addrs])
         self._solver = Solver()
         self._addr_sym = addr
 
-    def grid_idx_callback(self, grid_idx: tuple[int]):
-        pass
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
+        self.grid_idx = grid_idx
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def op_program_id_overrider(axis):
@@ -1223,9 +1301,9 @@ class SanitizerSymbolicExecution(Sanitizer):
 
             # check memory access using z3
             z3_addr, z3_constraints = ret.eval()
-            if self.loop_stack:  # affine loop optimization
+            if self.loop_stack:  # for-loop iterator association
                 ctx = self.loop_stack[-1]
-                # check if addr already appeared before in the loop
+                # check if addr already appeared before in the for-loop
                 signature = _make_signature(z3_addr, z3_constraints)
                 if signature in ctx.signature_cache:  # if appeared before
                     if cfg.verbose:
@@ -1234,7 +1312,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 else:  # new addr expr
                     if cfg.verbose:
                         print(
-                            "[Sanitizer]  ↪ new addr in loop, will check later",
+                            "[Sanitizer]  ↪ new addr in for-loop, will check later",
                             z3_addr,
                             z3_constraints,
                         )
@@ -1269,7 +1347,7 @@ class SanitizerSymbolicExecution(Sanitizer):
 
             # check memory access using z3
             z3_addr, z3_constraints = ret.eval()
-            if self.loop_stack:  # affine loop optimization
+            if self.loop_stack:  # for-loop iterator association
                 ctx = self.loop_stack[-1]
                 # check if addr already appeared before in the loop
                 signature = _make_signature(z3_addr, z3_constraints)
@@ -1363,9 +1441,10 @@ class SanitizerSymbolicExecution(Sanitizer):
             d_sym = SymbolicExpr.from_value(d)
             return SymbolicExpr("dot", a_sym, b_sym, d_sym)
 
-        def op_make_range_overrider(start, end):
+        def op_make_range_overrider(ret_ty, start, end):
             return SymbolicExpr(
                 "arange",
+                SymbolicExpr.from_value(ret_ty),
                 SymbolicExpr.from_value(start),
                 SymbolicExpr.from_value(end - 1),
             )
@@ -1377,11 +1456,10 @@ class SanitizerSymbolicExecution(Sanitizer):
             return SymbolicExpr("broadcast", SymbolicExpr.from_value(arg), shape)
 
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
-            ret = SymbolicExpr("sum", SymbolicExpr.from_value(input), axis, keep_dims)
-            return ret
+            return SymbolicExpr("sum", SymbolicExpr.from_value(input), axis, keep_dims)
 
-        def op_splat_overrider(arg, shape):
-            return SymbolicExpr("splat", SymbolicExpr.from_value(arg), shape)
+        def op_splat_overrider(shape, arg):
+            return SymbolicExpr("splat", shape, SymbolicExpr.from_value(arg))
 
         def op_make_block_ptr_overrider(
             base, shape, strides, offsets, tensor_shape, order
@@ -1467,7 +1545,8 @@ class SanitizerSymbolicExecution(Sanitizer):
     def register_for_loop_callback(self):
         def loop_hook_before(lineno, iterable):
             if not isinstance(iterable, range):
-                print("not a for-loop, skipping affine loop optimization.")
+                if cfg.verbose:
+                    print("not a for-loop, skipping for-loop iterator association.")
                 return
             length = len(iterable)
             idx_z3 = Int(f"loop_i_{lineno}")
@@ -1490,7 +1569,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ loop@{lineno} idx={idx}")
 
-        def loop_hook_after(lineno):
+        def loop_hook_after(lineno: int) -> None:
             ctx = self.loop_stack.pop()
             # add constraints for loop_i
             iterator_constraints: list[BoolRef] = []

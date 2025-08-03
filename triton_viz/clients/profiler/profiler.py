@@ -4,6 +4,7 @@ from ...core.data import Op, Load, Store
 from .data import LoadStoreBytes
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
+from typing import Callable
 
 
 class Profiler(Client):
@@ -14,13 +15,19 @@ class Profiler(Client):
         self.load_bytes = LoadStoreBytes("load", 0, 0)
         self.store_bytes = LoadStoreBytes("store", 0, 0)
 
-    def arg_callback(self, arg, arg_cvt):
+    def pre_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def arg_callback(self, name, arg, arg_cvt):
         pass
 
-    def grid_idx_callback(self, grid_idx: tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         pass
 
-    def grid_callback(self, grid: tuple[int]):
+    def grid_callback(self, grid: tuple[int, ...]):
         pass
 
     def _report_load_store_bytes(self, type, ptr: TensorHandle, mask: TensorHandle):

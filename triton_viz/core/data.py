@@ -201,5 +201,5 @@ class Grid:
 @dataclass
 class Launch:
     grid: tuple | None = None
-    tensors: list[Tensor] = field(default_factory=list)
+    tensors: set[Tensor] = field(default_factory=set)
     records: list = field(default_factory=list)
