@@ -45,7 +45,6 @@ from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
 from triton.runtime.interpreter import _tuple_create, _unwrap_tensor, _rewrap_tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
 from triton.runtime import JITFunction
-from typing import Any
 
 op_list = [
     ProgramId,
@@ -391,7 +390,6 @@ class FakeTensor:
 
 
 def _init_args_hst(args_dev, kwargs):
-
     def _to_cpu(arg):
         if isinstance(arg, tuple):
             return _tuple_create(arg, map(_to_cpu, arg))
@@ -424,6 +422,7 @@ def _init_args_hst(args_dev, kwargs):
     for key, value in kwargs.items():
         kwargs_hst[key] = _to_cpu(value)
     return args_hst, kwargs_hst
+
 
 def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
