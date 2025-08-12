@@ -801,22 +801,22 @@ class SymbolicExpr:
 
         return expr, self._constraints
 
-    def _to_z3(self, node: "SymbolicExpr") -> ArithRef:
+    def _to_z3(self) -> ArithRef:
         if self._z3 is not None:
             return self._z3
 
         # Recursively convert the current node to a Z3 expression
-        if node.op == "const":
-            if node._loop_ctx:  # if the node is a loop iterator
-                self._z3 = node._loop_ctx.idx_z3
-            elif isinstance(node.value, np.ndarray):
-                self._z3 = [IntVal(int(v)) for v in node.value.flat]
+        if self.op == "const":
+            if self._loop_ctx:  # if the self is a loop iterator
+                self._z3 = self._loop_ctx.idx_z3
+            elif isinstance(self.value, np.ndarray):
+                self._z3 = [IntVal(int(v)) for v in self.value.flat]
             else:
-                self._z3 = IntVal(node.value)
+                self._z3 = IntVal(self.value)
 
-        if node.op == "pid":
-            axis_val = node.axis.to_py()
-            grid_val = node.grid.to_py()
+        if self.op == "pid":
+            axis_val = self.axis.to_py()
+            grid_val = self.grid.to_py()
             name = f"pid_{axis_val}"
             if name not in self._vars:
                 v = Int(name)
@@ -826,90 +826,90 @@ class SymbolicExpr:
                 self._constraints.append(v < grid_val[axis_val])
             self._z3 = self._vars[name]
 
-        if node.op == "arange":
-            if id(node) in self._arange_dict:
-                self._z3 = self._arange_dict[id(node)]
+        if self.op == "arange":
+            if id(self) in self._arange_dict:
+                self._z3 = self._arange_dict[id(self)]
             else:
                 idx = self._arange_counter
                 self._arange_counter += 1
                 name = f"arange_{idx}"
                 v = Int(name)
                 self._vars[name] = v
-                start = node.start.value
-                end = node.end.value
+                start = self.start.value
+                end = self.end.value
                 self._constraints.append(v >= start)
                 self._constraints.append(v < end)
-                self._arange_dict[id(node)] = v
+                self._arange_dict[id(self)] = v
                 self._z3 = v
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
-        if node.op in self.UNARY_OPS:
-            val = self._to_z3(node.arg)
-            if node.op == "abs":
+        if self.op in self.UNARY_OPS:
+            val = self.arg._to_z3()
+            if self.op == "abs":
                 self._z3 = If(val >= 0, val, -val)
             else:
-                raise NotImplementedError(f"Unary op {node.op} is not implemented")
+                raise NotImplementedError(f"Unary op {self.op} is not implemented")
 
         # Binary arithmetic, comparison, etc.
-        if node.op in self.BINARY_OPS:
-            lhs = self._to_z3(node.lhs)
-            rhs = self._to_z3(node.rhs)
-            if node.op == "add":
+        if self.op in self.BINARY_OPS:
+            lhs = self.lhs._to_z3()
+            rhs = self.rhs._to_z3()
+            if self.op == "add":
                 self._z3 = lhs + rhs
-            if node.op == "sub":
+            if self.op == "sub":
                 self._z3 = lhs - rhs
-            if node.op == "mul":
+            if self.op == "mul":
                 self._z3 = lhs * rhs
-            if node.op in ("idiv"):
+            if self.op in ("idiv"):
                 self._z3 = lhs / rhs
-            if node.op == "mod":
+            if self.op == "mod":
                 self._z3 = lhs % rhs
-            if node.op == "less":
+            if self.op == "less":
                 self._z3 = lhs < rhs
-            if node.op == "less_equal":
+            if self.op == "less_equal":
                 self._z3 = lhs <= rhs
-            if node.op == "greater":
+            if self.op == "greater":
                 self._z3 = lhs > rhs
-            if node.op == "greater_equal":
+            if self.op == "greater_equal":
                 self._z3 = lhs >= rhs
-            if node.op == "equal":
+            if self.op == "equal":
                 self._z3 = lhs == rhs
-            if node.op == "not_equal":
+            if self.op == "not_equal":
                 self._z3 = lhs != rhs
-            if node.op == "maximum":
+            if self.op == "maximum":
                 self._z3 = If(lhs >= rhs, lhs, rhs)
-            if node.op == "bitwise_and":
+            if self.op == "bitwise_and":
                 self._z3 = And(lhs, rhs)
 
         # where(cond, lhs, rhs)
-        if node.op == "where":
-            cond = self._to_z3(node.cond)
-            lhs = self._to_z3(node.lhs)
-            rhs = self._to_z3(node.rhs)
+        if self.op == "where":
+            cond = self.cond._to_z3()
+            lhs = self.lhs._to_z3()
+            rhs = self.rhs._to_z3()
             self._z3 = If(cond, lhs, rhs)
 
         # sum(input, axis, keepdims)
-        if node.op == "sum":
-            arr = self._to_z3(node.input)
+        if self.op == "sum":
+            arr = self.input._to_z3()
             self._z3 = Sum(arr)
 
-        if node.op == "load" or node.op == "store":
+        if self.op == "load" or self.op == "store":
             # Load and store operations
-            ptr = self._to_z3(node.ptr)
-            if node.mask is not None:
-                mask = self._to_z3(node.mask)
+            ptr = self.ptr._to_z3()
+            if self.mask is not None:
+                mask = self.mask._to_z3()
                 self._constraints.append(mask)
             self._z3 = ptr
 
-        if node.op in ("splat", "expand_dims", "broadcast"):
-            self._z3 = self._to_z3(node.arg)
+        if self.op in ("splat", "expand_dims", "broadcast"):
+            self._z3 = self.arg._to_z3()
 
-        if node.op == "addptr":
+        if self.op == "addptr":
             # Add pointer operation
-            ptr_z3 = self._to_z3(node.ptr)
-            offset_z3 = self._to_z3(node.offset)
+            ptr_z3 = self.ptr._to_z3()
+            offset_z3 = self.offset._to_z3()
             element_bytewidth = max(
-                1, node.ptr.dtype_tt.element_ty.primitive_bitwidth // 8
+                1, self.ptr.dtype_tt.element_ty.primitive_bitwidth // 8
             )
             if isinstance(ptr_z3, list) and isinstance(
                 offset_z3, list
@@ -928,7 +928,7 @@ class SymbolicExpr:
         
         if self._z3 is None:
             # Other operations can be implemented as needed
-            raise NotImplementedError(f"Eval for op {node.op} is not implemented")
+            raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         
         return self._z3
 
