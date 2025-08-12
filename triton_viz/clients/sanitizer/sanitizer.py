@@ -543,6 +543,8 @@ class SymbolicExpr:
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
     }
 
+    _arange_counter = 0  # Used to name arange variables
+
     def __init__(self, op, *args):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
@@ -577,11 +579,6 @@ class SymbolicExpr:
         # z3
         self._z3 = None
 
-        self._arange_counter = 0  # Used to name arange variables
-        self._arange_dict: dict[
-            int, ArithRef
-        ] = {}  # make sure each arange only has one name
-        self._vars: dict[str, ArithRef] = {}
         self._constraints: list[BoolRef] = []
 
     def _init_from_spec(self, *args: Any) -> None:
@@ -819,29 +816,22 @@ class SymbolicExpr:
             axis_val = self.axis.to_py()
             grid_val = self.grid.to_py()
             name = f"pid_{axis_val}"
-            if name not in self._vars:
-                v = Int(name)
-                self._vars[name] = v
-                # Add constraint: 0 ≤ pid < grid[axis]
-                self._constraints.append(v >= 0)
-                self._constraints.append(v < grid_val[axis_val])
-            self._z3 = self._vars[name]
+            v = Int(name)
+            # Add constraint: 0 ≤ pid < grid[axis]
+            self._constraints.append(v >= 0)
+            self._constraints.append(v < grid_val[axis_val])
+            self._z3 = v
 
         if self.op == "arange":
-            if id(self) in self._arange_dict:
-                self._z3 = self._arange_dict[id(self)]
-            else:
-                idx = self._arange_counter
-                self._arange_counter += 1
-                name = f"arange_{idx}"
-                v = Int(name)
-                self._vars[name] = v
-                start = self.start.value
-                end = self.end.value
-                self._constraints.append(v >= start)
-                self._constraints.append(v < end)
-                self._arange_dict[id(self)] = v
-                self._z3 = v
+            idx = SymbolicExpr._arange_counter
+            SymbolicExpr._arange_counter += 1
+            name = f"arange_{idx}"
+            v = Int(name)
+            start = self.start.value
+            end = self.end.value
+            self._constraints.append(v >= start)
+            self._constraints.append(v < end)
+            self._z3 = v
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if self.op in self.UNARY_OPS:
