@@ -809,9 +809,10 @@ class SymbolicExpr:
         if node.op == "const":
             if node._loop_ctx:  # if the node is a loop iterator
                 self._z3 = node._loop_ctx.idx_z3
-            if isinstance(node.value, np.ndarray):
+            elif isinstance(node.value, np.ndarray):
                 self._z3 = [IntVal(int(v)) for v in node.value.flat]
-            self._z3 = IntVal(node.value)
+            else:
+                self._z3 = IntVal(node.value)
 
         if node.op == "pid":
             axis_val = node.axis.to_py()
