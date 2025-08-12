@@ -544,6 +544,9 @@ class SymbolicExpr:
     }
 
     _arange_counter = 0  # Used to name arange variables
+    _pid0 = Int("pid_0")
+    _pid1 = Int("pid_1")
+    _pid2 = Int("pid_2")
 
     def __init__(self, op, *args):
         """
@@ -815,11 +818,11 @@ class SymbolicExpr:
         if self.op == "pid":
             axis_val = self.axis.to_py()
             if axis_val == 0:
-                self._z3 = self._pid0
+                self._z3 = SymbolicExpr._pid0
             elif axis_val == 1:
-                self._z3 = self._pid1
+                self._z3 = SymbolicExpr._pid1
             else:
-                self._z3 = self._pid2
+                self._z3 = SymbolicExpr._pid2
 
         if self.op == "arange":
             idx = SymbolicExpr._arange_counter
@@ -1286,11 +1289,8 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.grid = tuple(int(g) for g in grid)
         addr = Int("addr")
         self._addr_ok = Or(*[And(addr >= s, addr <= e) for s, e in self.tensor_addrs])
-        self._pid0 = Int("pid_0")
-        self._pid1 = Int("pid_1")
-        self._pid2 = Int("pid_2")
-        self._pid_ok = And(self._pid0 < self.grid[0], self._pid1 < self.grid[1], self._pid2 < self.grid[2],
-                           self._pid0 >= 0, self._pid1 >= 0, self._pid2 >= 0)
+        self._pid_ok = And(SymbolicExpr._pid0 < self.grid[0], SymbolicExpr._pid1 < self.grid[1], SymbolicExpr._pid2 < self.grid[2],
+                           SymbolicExpr._pid0 >= 0, SymbolicExpr._pid1 >= 0, SymbolicExpr._pid2 >= 0)
         self._solver = Solver()
         self._addr_sym = addr
 
