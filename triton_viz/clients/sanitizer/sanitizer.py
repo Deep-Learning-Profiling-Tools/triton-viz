@@ -793,18 +793,18 @@ class SymbolicExpr:
         - expr: Z3 expression corresponding to the root node
         - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
         """
-        expr = self._to_z3()
+        expr, constraints = self._to_z3()
 
         if isinstance(expr, list):
             expr = [simplify(e).as_long() for e in expr]
         else:
             expr = simplify(expr)
 
-        return expr, self._constraints
+        return expr, constraints
 
-    def _to_z3(self) -> ArithRef:
+    def _to_z3(self) -> tuple[ArithRef, list]:
         if self._z3 is not None:
-            return self._z3
+            return self._z3, self._all_constraints
 
         # Recursively convert the current node to a Z3 expression
         if self.op == "const":
@@ -845,7 +845,7 @@ class SymbolicExpr:
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if self.op in self.UNARY_OPS:
-            val = self.arg._to_z3()
+            val, self._constraints = self.arg._to_z3()
             if self.op == "abs":
                 self._z3 = If(val >= 0, val, -val)
             else:
@@ -853,8 +853,10 @@ class SymbolicExpr:
 
         # Binary arithmetic, comparison, etc.
         if self.op in self.BINARY_OPS:
-            lhs = self.lhs._to_z3()
-            rhs = self.rhs._to_z3()
+            lhs, constraints_lhs = self.lhs._to_z3()
+            rhs, constraints_rhs = self.rhs._to_z3()
+            self._constraints.extend(constraints_lhs)
+            self._constraints.extend(constraints_rhs)
             if self.op == "add":
                 self._z3 = lhs + rhs
             if self.op == "sub":
@@ -884,31 +886,36 @@ class SymbolicExpr:
 
         # where(cond, lhs, rhs)
         if self.op == "where":
-            cond = self.cond._to_z3()
-            lhs = self.lhs._to_z3()
-            rhs = self.rhs._to_z3()
+            cond, constraints_cond = self.cond._to_z3()
+            lhs, constraints_lhs = self.lhs._to_z3()
+            rhs, constraints_rhs = self.rhs._to_z3()
             self._z3 = If(cond, lhs, rhs)
+            self._all_constraints.extend(
+                constraints_cond + constraints_lhs + constraints_rhs
+            )
 
         # sum(input, axis, keepdims)
         if self.op == "sum":
-            arr = self.input._to_z3()
+            arr, self._constraints = self.input._to_z3()
             self._z3 = Sum(arr)
 
         if self.op == "load" or self.op == "store":
             # Load and store operations
-            ptr = self.ptr._to_z3()
+            ptr, constraints_ptr = self.ptr._to_z3()
+            self._all_constraints.extend(constraints_ptr)
             if self.mask is not None:
-                mask = self.mask._to_z3()
-                self._constraints.append(mask)
+                mask, constraints_mask = self.mask._to_z3()
+                self._all_constraints.extend(constraints_mask)
             self._z3 = ptr
 
         if self.op in ("splat", "expand_dims", "broadcast"):
-            self._z3 = self.arg._to_z3()
+            self._z3, self._constraints = self.arg._to_z3()
 
         if self.op == "addptr":
             # Add pointer operation
-            ptr_z3 = self.ptr._to_z3()
-            offset_z3 = self.offset._to_z3()
+            ptr_z3, constraints_ptr = self.ptr._to_z3()
+            offset_z3, constraints_offset = self.offset._to_z3()
+            self._constraints = constraints_ptr + constraints_offset
             element_bytewidth = max(
                 1, self.ptr.dtype_tt.element_ty.primitive_bitwidth // 8
             )
@@ -931,7 +938,7 @@ class SymbolicExpr:
             # Other operations can be implemented as needed
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         
-        return self._z3
+        return self._z3, self._constraints
 
     def has_op(self, op_name: str) -> bool:
         if self.op == op_name:
