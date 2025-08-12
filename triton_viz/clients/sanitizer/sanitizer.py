@@ -577,6 +577,13 @@ class SymbolicExpr:
         # z3
         self._z3 = None
 
+        self._arange_counter = 0  # Used to name arange variables
+        self._arange_dict: dict[
+            int, ArithRef
+        ] = {}  # make sure each arange only has one name
+        self._vars: dict[str, ArithRef] = {}
+        self._constraints: list[BoolRef] = []
+
     def _init_from_spec(self, *args: Any) -> None:
         if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
@@ -786,12 +793,6 @@ class SymbolicExpr:
         - expr: Z3 expression corresponding to the root node
         - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
         """
-        self._arange_counter = 0  # Used to name arange variables
-        self._arange_dict: dict[
-            int, ArithRef
-        ] = {}  # make sure each arange only has one name
-        self._vars: dict[str, ArithRef] = {}
-        self._constraints: list[BoolRef] = []
         expr = self._to_z3()
 
         if isinstance(expr, list):
