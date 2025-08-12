@@ -905,7 +905,7 @@ class SymbolicExpr:
             self._constraints.extend(constraints_ptr)
             if self.mask is not None:
                 mask, _ = self.mask._to_z3()
-                self._constraints.extend(mask)
+                self._constraints.append(mask)
             self._z3 = ptr
 
         if self.op in ("splat", "expand_dims", "broadcast"):
