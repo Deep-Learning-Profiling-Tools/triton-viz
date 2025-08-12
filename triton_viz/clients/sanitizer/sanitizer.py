@@ -904,8 +904,8 @@ class SymbolicExpr:
             ptr, constraints_ptr = self.ptr._to_z3()
             self._constraints.extend(constraints_ptr)
             if self.mask is not None:
-                mask, constraints_mask = self.mask._to_z3()
-                self._constraints.extend(constraints_mask)
+                mask, _ = self.mask._to_z3()
+                self._constraints.extend(mask)
             self._z3 = ptr
 
         if self.op in ("splat", "expand_dims", "broadcast"):
@@ -1199,6 +1199,36 @@ class SanitizerSymbolicExecution(Sanitizer):
                 raise ValueError("Out-of-bounds access detected!")
         self._solver.pop()
 
+    def _handle_access_check(self, expr: SymbolicExpr):
+        """
+        Evaluate a memory access expression and either defer it (inside a loop)
+        or check it immediately (outside a loop).
+
+        Returns True if this access was identified as a duplicate within the
+        current loop and should be skipped by the caller (early-return case).
+        Otherwise returns False.
+        """
+        # check memory access using z3
+        z3_addr, z3_constraints = expr.eval()
+        if self.loop_stack:  # for-loop iterator association
+            ctx = self.loop_stack[-1]
+            # check if addr already appeared before in the for-loop
+            signature = _make_signature(z3_addr, z3_constraints)
+            if signature in ctx.signature_cache:  # if appeared before
+                if cfg.verbose:
+                    print("[Sanitizer]  ↪ skip duplicated addr in loop")
+            else:  # new addr expr
+                if cfg.verbose:
+                    print(
+                        "[Sanitizer]  ↪ new addr in for-loop, will check later",
+                        z3_addr,
+                        z3_constraints,
+                    )
+                ctx.signature_cache.add(signature)
+                ctx.pending_checks.append((z3_addr, z3_constraints))
+        else:  # non-loop case
+            self._check_range_satisfiable(z3_addr, z3_constraints)
+
     def _report(self, op_type, tensor, violation_address):
         traceback_info = _get_traceback_info()
         oob_record = OutOfBoundsRecordZ3(
@@ -1304,29 +1334,10 @@ class SanitizerSymbolicExecution(Sanitizer):
             else:
                 ret = SymbolicExpr("load", ptr_sym, mask, other)
 
-            # check memory access using z3
-            z3_addr, z3_constraints = ret.eval()
-            if self.loop_stack:  # for-loop iterator association
-                ctx = self.loop_stack[-1]
-                # check if addr already appeared before in the for-loop
-                signature = _make_signature(z3_addr, z3_constraints)
-                if signature in ctx.signature_cache:  # if appeared before
-                    if cfg.verbose:
-                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
-                    return ret
-                else:  # new addr expr
-                    if cfg.verbose:
-                        print(
-                            "[Sanitizer]  ↪ new addr in for-loop, will check later",
-                            z3_addr,
-                            z3_constraints,
-                        )
-                    ctx.signature_cache.add(signature)
-                    ctx.pending_checks.append((z3_addr, z3_constraints))
-            else:  # non-loop case
-                self._check_range_satisfiable(z3_addr, z3_constraints)
-
+            # check memory access using z3 (defer in loops or check immediately)
+            self._handle_access_check(ret)
             return ret
+
 
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
             return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
@@ -1350,29 +1361,10 @@ class SanitizerSymbolicExecution(Sanitizer):
             else:
                 ret = SymbolicExpr("store", ptr_sym, value, mask)
 
-            # check memory access using z3
-            z3_addr, z3_constraints = ret.eval()
-            if self.loop_stack:  # for-loop iterator association
-                ctx = self.loop_stack[-1]
-                # check if addr already appeared before in the loop
-                signature = _make_signature(z3_addr, z3_constraints)
-                if signature in ctx.signature_cache:  # if appeared before
-                    if cfg.verbose:
-                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
-                    return ret
-                else:  # new addr expr
-                    if cfg.verbose:
-                        print(
-                            "[Sanitizer]  ↪ new addr in loop, will check later",
-                            z3_addr,
-                            z3_constraints,
-                        )
-                    ctx.signature_cache.add(signature)
-                    ctx.pending_checks.append((z3_addr, z3_constraints))
-            else:  # non-loop case
-                self._check_range_satisfiable(z3_addr, z3_constraints)
-
+            # check memory access using z3 (defer in loops or check immediately)
+            self._handle_access_check(ret):
             return ret
+
 
         def op_unary_op_overrider(arg, op):
             _unary_map = {
