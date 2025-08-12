@@ -1289,9 +1289,9 @@ class SanitizerSymbolicExecution(Sanitizer):
         self._addr_ok = Or(*[And(addr >= s, addr <= e) for s, e in self.tensor_addrs])
         self._pid_ok = And(SymbolicExpr.PID0 < self.grid[0], SymbolicExpr.PID1 < self.grid[1], SymbolicExpr.PID2 < self.grid[2],
                            SymbolicExpr.PID0 >= 0, SymbolicExpr.PID1 >= 0, SymbolicExpr.PID2 >= 0)
+        self._solver = Solver()
         self._solver.add(Not(self._addr_ok))
         self._solver.add(self._pid_ok)
-        self._solver = Solver()
         self._addr_sym = addr
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
