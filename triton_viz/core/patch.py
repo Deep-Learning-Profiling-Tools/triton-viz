@@ -1,7 +1,7 @@
 import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Optional
 from tqdm import tqdm
 
 from . import config as cfg
@@ -323,10 +323,10 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
 
 
 def patch_for_loop(
-    before_loop_callback: Callable | None,
-    loop_iter_overrider: Callable | None,
-    loop_iter_listener: Callable | None,
-    after_loop_callback: Callable | None,
+    before_loop_callback: Optional[Callable],
+    loop_iter_overrider: Optional[Callable],
+    loop_iter_listener: Optional[Callable],
+    after_loop_callback: Optional[Callable],
 ):
     _loop_patcher.patch()
 

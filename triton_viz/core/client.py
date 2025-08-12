@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import ClassVar, Optional
 from collections.abc import Callable
 
 from .data import Op, Launch
@@ -53,7 +53,7 @@ class Client(ABC):
     @abstractmethod
     def register_for_loop_callback(
         self,
-    ) -> tuple[Callable | None, Callable | None, Callable | None, Callable | None]:
+    ) -> tuple[Optional[Callable], Optional[Callable], Optional[Callable], Optional[Callable]]:
         ...
 
     @abstractmethod
@@ -62,13 +62,13 @@ class Client(ABC):
 
 
 class ClientManager:
-    def __init__(self, clients: list[Client] | None = None):
+    def __init__(self, clients: Optional[list[Client]] = None):
         self.clients: dict[str, Client] = {}
         if clients:
             self.add_clients(clients)
         self.launch = Launch()
 
-    def get_client(self, name: str) -> Client | None:
+    def get_client(self, name: str) -> Optional[Client]:
         return self.clients.get(name)
 
     def add_clients(self, new_clients_list: list[Client]) -> None:

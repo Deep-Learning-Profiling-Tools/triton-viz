@@ -3,7 +3,7 @@ from collections import namedtuple
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Any
+from typing import Any, Optional, Union
 
 
 import numpy as np
@@ -199,6 +199,19 @@ def _get_tensor(tensor_list, data_ptr):
             break
         ret_idx = i
     return tensor_list[ret_idx]
+
+
+@dataclass
+class LoopContext:
+    lineno: int
+    length: int
+    idx_z3: ArithRef
+    values: list[int] = field(default_factory=list)
+    signature_cache: set[str] = field(default_factory=set)
+    pending_checks: list[tuple[Union[ArithRef, list[ArithRef]], list[BoolRef]]] = field(
+        default_factory=list
+    )
+
 
 
 class Sanitizer(Client):
@@ -577,7 +590,7 @@ class SymbolicExpr:
             self._init_from_spec(*args)
 
         # for-loop iterator association
-        self._loop_ctx: LoopContext | None = None
+        self._loop_ctx: Optional[LoopContext] = None
 
         # z3
         self._z3 = None
@@ -755,10 +768,10 @@ class SymbolicExpr:
             return tl.int32  # Default dtype for None
         raise ValueError(f"Unsupported type: {type(var)}")
 
-    _loop_ctx_provider: Callable[[], "LoopContext|None"] | None = None
+    _loop_ctx_provider: Optional[Callable[[], Optional[LoopContext]]] = None
 
     @classmethod
-    def set_loop_ctx_provider(cls, fn: Callable[[], "LoopContext|None"]):
+    def set_loop_ctx_provider(cls, fn: Callable[[], Optional[LoopContext]]):
         """Register a function that, on each call,
         returns the current active `LoopContext` (or `None` if none exists)."""
         cls._loop_ctx_provider = fn
@@ -787,7 +800,7 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> tuple[ArithRef | list[ArithRef], list[BoolRef]]:
+    def eval(self) -> tuple[Union[ArithRef, list[ArithRef]], list[BoolRef]]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression corresponding to the root node
@@ -1124,19 +1137,6 @@ def _make_signature(addr_expr, constraints) -> str:
     constr_repr = "|".join(sorted(simplify(c).sexpr() for c in constraints))
     return addr_repr + "##" + constr_repr
 
-
-@dataclass
-class LoopContext:
-    lineno: int
-    length: int
-    idx_z3: ArithRef
-    values: list[int] = field(default_factory=list)
-    signature_cache: set[str] = field(default_factory=set)
-    pending_checks: list[tuple[ArithRef | list[ArithRef], list[BoolRef]]] = field(
-        default_factory=list
-    )
-
-
 @dataclass(frozen=True)
 class _FnSymbolicCache:
     fn: Callable
@@ -1174,7 +1174,7 @@ class SanitizerSymbolicExecution(Sanitizer):
 
     def _check_range_satisfiable(
         self,
-        access_addr: int | list[int] | ArithRef | list[ArithRef],
+        access_addr: Union[int, list[int], ArithRef, list[ArithRef]],
         expr_constraints: list,
     ):
         if isinstance(access_addr, list):
