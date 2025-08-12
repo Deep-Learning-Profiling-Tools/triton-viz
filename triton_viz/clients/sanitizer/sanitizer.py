@@ -804,7 +804,7 @@ class SymbolicExpr:
 
     def _to_z3(self) -> tuple[ArithRef, list]:
         if self._z3 is not None:
-            return self._z3, self._all_constraints
+            return self._z3, self._constraints
 
         # Recursively convert the current node to a Z3 expression
         if self.op == "const":
@@ -890,7 +890,7 @@ class SymbolicExpr:
             lhs, constraints_lhs = self.lhs._to_z3()
             rhs, constraints_rhs = self.rhs._to_z3()
             self._z3 = If(cond, lhs, rhs)
-            self._all_constraints.extend(
+            self._constraints.extend(
                 constraints_cond + constraints_lhs + constraints_rhs
             )
 
@@ -902,10 +902,10 @@ class SymbolicExpr:
         if self.op == "load" or self.op == "store":
             # Load and store operations
             ptr, constraints_ptr = self.ptr._to_z3()
-            self._all_constraints.extend(constraints_ptr)
+            self._constraints.extend(constraints_ptr)
             if self.mask is not None:
                 mask, constraints_mask = self.mask._to_z3()
-                self._all_constraints.extend(constraints_mask)
+                self._constraints.extend(constraints_mask)
             self._z3 = ptr
 
         if self.op in ("splat", "expand_dims", "broadcast"):
