@@ -814,13 +814,12 @@ class SymbolicExpr:
 
         if self.op == "pid":
             axis_val = self.axis.to_py()
-            grid_val = self.grid.to_py()
-            name = f"pid_{axis_val}"
-            v = Int(name)
-            # Add constraint: 0 ≤ pid < grid[axis]
-            self._constraints.append(v >= 0)
-            self._constraints.append(v < grid_val[axis_val])
-            self._z3 = v
+            if axis_val == 0:
+                self._z3 = self._pid0
+            elif axis_val == 1:
+                self._z3 = self._pid1
+            else:
+                self._z3 = self._pid2
 
         if self.op == "arange":
             idx = SymbolicExpr._arange_counter
@@ -1182,6 +1181,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         self._solver.push()
         self._solver.add(self._addr_sym == access_addr)
         self._solver.add(Not(self._addr_ok))
+        self._solver.add(self._pid_ok)
         self._solver.add(And(*expr_constraints))
         if self._solver.check() == sat:
             print("out of bound access detected!")
@@ -1286,6 +1286,11 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.grid = tuple(int(g) for g in grid)
         addr = Int("addr")
         self._addr_ok = Or(*[And(addr >= s, addr <= e) for s, e in self.tensor_addrs])
+        self._pid0 = Int("pid_0")
+        self._pid1 = Int("pid_1")
+        self._pid2 = Int("pid_2")
+        self._pid_ok = And(self._pid0 < self.grid[0], self._pid1 < self.grid[1], self._pid2 < self.grid[2],
+                           self._pid0 >= 0, self._pid1 >= 0, self._pid2 >= 0)
         self._solver = Solver()
         self._addr_sym = addr
 
