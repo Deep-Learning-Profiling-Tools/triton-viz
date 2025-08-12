@@ -574,6 +574,9 @@ class SymbolicExpr:
         # for-loop iterator association
         self._loop_ctx: LoopContext | None = None
 
+        # z3
+        self._z3 = None
+
     def _init_from_spec(self, *args: Any) -> None:
         if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
@@ -799,13 +802,16 @@ class SymbolicExpr:
         return expr, self._constraints
 
     def _to_z3(self, node: "SymbolicExpr") -> ArithRef:
+        if self._z3:
+            return self._z3
+
         # Recursively convert the current node to a Z3 expression
         if node.op == "const":
             if node._loop_ctx:  # if the node is a loop iterator
-                return node._loop_ctx.idx_z3
+                self._z3 = node._loop_ctx.idx_z3
             if isinstance(node.value, np.ndarray):
-                return [IntVal(int(v)) for v in node.value.flat]
-            return IntVal(node.value)
+                self._z3 = [IntVal(int(v)) for v in node.value.flat]
+            self._z3 = IntVal(node.value)
 
         if node.op == "pid":
             axis_val = node.axis.to_py()
@@ -817,11 +823,11 @@ class SymbolicExpr:
                 # Add constraint: 0 ≤ pid < grid[axis]
                 self._constraints.append(v >= 0)
                 self._constraints.append(v < grid_val[axis_val])
-            return self._vars[name]
+            self._z3 = self._vars[name]
 
         if node.op == "arange":
             if id(node) in self._arange_dict:
-                return self._arange_dict[id(node)]
+                self._z3 = self._arange_dict[id(node)]
             idx = self._arange_counter
             self._arange_counter += 1
             name = f"arange_{idx}"
@@ -832,13 +838,13 @@ class SymbolicExpr:
             self._constraints.append(v >= start)
             self._constraints.append(v < end)
             self._arange_dict[id(node)] = v
-            return v
+            self._z3 = v
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if node.op in self.UNARY_OPS:
             val = self._to_z3(node.arg)
             if node.op == "abs":
-                return If(val >= 0, val, -val)
+                self._z3 = If(val >= 0, val, -val)
             raise NotImplementedError(f"Unary op {node.op} is not implemented")
 
         # Binary arithmetic, comparison, etc.
@@ -846,43 +852,43 @@ class SymbolicExpr:
             lhs = self._to_z3(node.lhs)
             rhs = self._to_z3(node.rhs)
             if node.op == "add":
-                return lhs + rhs
+                self._z3 = lhs + rhs
             if node.op == "sub":
-                return lhs - rhs
+                self._z3 = lhs - rhs
             if node.op == "mul":
-                return lhs * rhs
+                self._z3 = lhs * rhs
             if node.op in ("idiv"):
-                return lhs / rhs
+                self._z3 = lhs / rhs
             if node.op == "mod":
-                return lhs % rhs
+                self._z3 = lhs % rhs
             if node.op == "less":
-                return lhs < rhs
+                self._z3 = lhs < rhs
             if node.op == "less_equal":
-                return lhs <= rhs
+                self._z3 = lhs <= rhs
             if node.op == "greater":
-                return lhs > rhs
+                self._z3 = lhs > rhs
             if node.op == "greater_equal":
-                return lhs >= rhs
+                self._z3 = lhs >= rhs
             if node.op == "equal":
-                return lhs == rhs
+                self._z3 = lhs == rhs
             if node.op == "not_equal":
-                return lhs != rhs
+                self._z3 = lhs != rhs
             if node.op == "maximum":
-                return If(lhs >= rhs, lhs, rhs)
+                self._z3 = If(lhs >= rhs, lhs, rhs)
             if node.op == "bitwise_and":
-                return And(lhs, rhs)
+                self._z3 = And(lhs, rhs)
 
         # where(cond, lhs, rhs)
         if node.op == "where":
             cond = self._to_z3(node.cond)
             lhs = self._to_z3(node.lhs)
             rhs = self._to_z3(node.rhs)
-            return If(cond, lhs, rhs)
+            self._z3 = If(cond, lhs, rhs)
 
         # sum(input, axis, keepdims)
         if node.op == "sum":
             arr = self._to_z3(node.input)
-            return Sum(arr)
+            self._z3 = Sum(arr)
 
         if node.op == "load" or node.op == "store":
             # Load and store operations
@@ -890,10 +896,10 @@ class SymbolicExpr:
             if node.mask is not None:
                 mask = self._to_z3(node.mask)
                 self._constraints.append(mask)
-            return ptr
+            self._z3 = ptr
 
         if node.op in ("splat", "expand_dims", "broadcast"):
-            return self._to_z3(node.arg)
+            self._z3 = self._to_z3(node.arg)
 
         if node.op == "addptr":
             # Add pointer operation
@@ -909,16 +915,19 @@ class SymbolicExpr:
                     raise ValueError(
                         f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
                     )
-                return [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
+                self._z3 = [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
             if isinstance(ptr_z3, list):  # ptr is list, offset is scalar
-                return [p + offset_z3 * element_bytewidth for p in ptr_z3]
+                self._z3 = [p + offset_z3 * element_bytewidth for p in ptr_z3]
             if isinstance(offset_z3, list):  # offset is list, ptr is scalar
-                return [ptr_z3 + o * element_bytewidth for o in offset_z3]
+                self._z3 = [ptr_z3 + o * element_bytewidth for o in offset_z3]
             else:
-                return ptr_z3 + offset_z3 * element_bytewidth
-
-        # Other operations can be implemented as needed
-        raise NotImplementedError(f"Eval for op {node.op} is not implemented")
+                self._z3 = ptr_z3 + offset_z3 * element_bytewidth
+        
+        if not self._z3:
+            # Other operations can be implemented as needed
+            raise NotImplementedError(f"Eval for op {node.op} is not implemented")
+        
+        return self._z3
 
     def has_op(self, op_name: str) -> bool:
         if self.op == op_name:
