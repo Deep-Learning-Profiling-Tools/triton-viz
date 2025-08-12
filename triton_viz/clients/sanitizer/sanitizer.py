@@ -828,24 +828,26 @@ class SymbolicExpr:
         if node.op == "arange":
             if id(node) in self._arange_dict:
                 self._z3 = self._arange_dict[id(node)]
-            idx = self._arange_counter
-            self._arange_counter += 1
-            name = f"arange_{idx}"
-            v = Int(name)
-            self._vars[name] = v
-            start = node.start.value
-            end = node.end.value
-            self._constraints.append(v >= start)
-            self._constraints.append(v < end)
-            self._arange_dict[id(node)] = v
-            self._z3 = v
+            else:
+                idx = self._arange_counter
+                self._arange_counter += 1
+                name = f"arange_{idx}"
+                v = Int(name)
+                self._vars[name] = v
+                start = node.start.value
+                end = node.end.value
+                self._constraints.append(v >= start)
+                self._constraints.append(v < end)
+                self._arange_dict[id(node)] = v
+                self._z3 = v
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if node.op in self.UNARY_OPS:
             val = self._to_z3(node.arg)
             if node.op == "abs":
                 self._z3 = If(val >= 0, val, -val)
-            raise NotImplementedError(f"Unary op {node.op} is not implemented")
+            else:
+                raise NotImplementedError(f"Unary op {node.op} is not implemented")
 
         # Binary arithmetic, comparison, etc.
         if node.op in self.BINARY_OPS:
