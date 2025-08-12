@@ -792,7 +792,7 @@ class SymbolicExpr:
         ] = {}  # make sure each arange only has one name
         self._vars: dict[str, ArithRef] = {}
         self._constraints: list[BoolRef] = []
-        expr = self._to_z3(self)
+        expr = self._to_z3()
 
         if isinstance(expr, list):
             expr = [simplify(e).as_long() for e in expr]
