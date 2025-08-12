@@ -1362,7 +1362,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 ret = SymbolicExpr("store", ptr_sym, value, mask)
 
             # check memory access using z3 (defer in loops or check immediately)
-            self._handle_access_check(ret):
+            self._handle_access_check(ret)
             return ret
 
 
