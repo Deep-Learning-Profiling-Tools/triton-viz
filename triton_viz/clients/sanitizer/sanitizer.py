@@ -802,7 +802,7 @@ class SymbolicExpr:
         return expr, self._constraints
 
     def _to_z3(self, node: "SymbolicExpr") -> ArithRef:
-        if self._z3:
+        if self._z3 is not None:
             return self._z3
 
         # Recursively convert the current node to a Z3 expression
@@ -923,7 +923,7 @@ class SymbolicExpr:
             else:
                 self._z3 = ptr_z3 + offset_z3 * element_bytewidth
         
-        if not self._z3:
+        if self._z3 is None:
             # Other operations can be implemented as needed
             raise NotImplementedError(f"Eval for op {node.op} is not implemented")
         
