@@ -944,7 +944,9 @@ class SymbolicExpr:
                     raise ValueError(
                         f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
                     )
-                self._z3 = [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
+                self._z3 = [
+                    p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)
+                ]
             elif isinstance(ptr_z3, list):
                 self._z3 = [p + offset_z3 * element_bytewidth for p in ptr_z3]
             elif isinstance(offset_z3, list):
