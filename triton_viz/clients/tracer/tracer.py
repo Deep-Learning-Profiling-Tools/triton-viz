@@ -1,11 +1,11 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks
 from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
-from typing import Callable
+from typing import Callable, Optional, Union
 import numpy as np
 
 
-def _convert_grid_idx(grid_idx) -> tuple[int, int, int] | None:
+def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
     if grid_idx is None:
         return grid_idx
 
@@ -23,7 +23,7 @@ class Tracer(Client):
     def __init__(
         self,
         callpath: bool = True,
-        grid_idx: tuple[int] | int | None = None,
+        grid_idx: Optional[Union[tuple[int], int]] = None,
     ):
         self.callpath = callpath
         self.grid_idx = _convert_grid_idx(grid_idx)

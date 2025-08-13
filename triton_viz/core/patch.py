@@ -1,7 +1,7 @@
 import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Optional
 from tqdm import tqdm
 
 from . import config as cfg
@@ -209,7 +209,7 @@ class _CombinedLoopHooks:
     def __init__(self):
         self._before: list[Callable] = []
         self._iter_listeners: list[Callable] = []
-        self._iter_overrider: Callable | None = None
+        self._iter_overrider: Optional[Callable] = None
         self._after: list[Callable] = []
 
     # Register hooks
@@ -264,7 +264,7 @@ class _LoopPatcher:
 
     def __init__(self):
         self.hooks = _CombinedLoopHooks()
-        self._orig_visit_for: Callable | None = None
+        self._orig_visit_for: Optional[Callable] = None
         self._patched: bool = False
 
     def patch(self) -> None:
@@ -326,10 +326,10 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
 
 
 def patch_for_loop(
-    before_loop_callback: Callable | None,
-    loop_iter_overrider: Callable | None,
-    loop_iter_listener: Callable | None,
-    after_loop_callback: Callable | None,
+    before_loop_callback: Optional[Callable],
+    loop_iter_overrider: Optional[Callable],
+    loop_iter_listener: Optional[Callable],
+    after_loop_callback: Optional[Callable],
 ):
     _loop_patcher.patch()
 

@@ -6,6 +6,7 @@ from . import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
+from typing import Union
 
 
 launches: list[Launch] = []
@@ -18,7 +19,7 @@ def dummy_benchmarker(fn, quantiles):
 
 class Trace(KernelInterface):
     @staticmethod
-    def _normalize_client(client: str | Client) -> Client:
+    def _normalize_client(client: Union[str, Client]) -> Client:
         if isinstance(client, str):
             name = client.lower()
             if name == "sanitizer":
@@ -33,13 +34,13 @@ class Trace(KernelInterface):
         else:
             raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def add_client(self, new_client: str | Client) -> None:
+    def add_client(self, new_client: Union[str, Client]) -> None:
         self.client_manager.add_clients([self._normalize_client(new_client)])
 
     def __init__(
         self,
-        kernel: JITFunction | InterpretedFunction,
-        client: str | Client,
+        kernel: Union[JITFunction, InterpretedFunction],
+        client: Union[str, Client],
     ) -> None:
         self.fn = kernel
         if isinstance(kernel, Autotuner):
@@ -76,7 +77,7 @@ class Trace(KernelInterface):
         launches.append(self.client_manager.launch)
 
 
-def trace(clients: str | Client | None = None):
+def trace(clients: Union[str, Client, None] = None):
     """
     Create a trace object that can be used to run a kernel with instrumentation clients.
 

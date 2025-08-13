@@ -2,6 +2,7 @@ from ...core.data import Store, Load
 import numpy as np
 from numpy.typing import NDArray
 from dataclasses import dataclass
+from typing import Union
 import torch
 import z3
 
@@ -16,7 +17,7 @@ class TracebackInfo:
 
 @dataclass
 class OutOfBoundsRecord:
-    op_type: type[Store | Load]
+    op_type: type[Union[Store, Load]]
     tensor: torch.Tensor
     user_code_tracebacks: list[TracebackInfo]
 
