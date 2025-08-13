@@ -206,7 +206,7 @@ class _CombinedLoopHooks:
     def __init__(self):
         self._before: list[Callable] = []
         self._iter_listeners: list[Callable] = []
-        self._iter_overrider: Callable | None = None
+        self._iter_overrider: Optional[Callable] = None
         self._after: list[Callable] = []
 
     # Register hooks
@@ -261,7 +261,7 @@ class _LoopPatcher:
 
     def __init__(self):
         self.hooks = _CombinedLoopHooks()
-        self._orig_visit_for: Callable | None = None
+        self._orig_visit_for: Optional[Callable] = None
         self._patched: bool = False
 
     def patch(self) -> None:

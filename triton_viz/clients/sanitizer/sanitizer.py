@@ -208,7 +208,7 @@ class LoopContext:
     length: int
     idx_z3: ArithRef
     values: list[int] = field(default_factory=list)
-    signature_cache: set[int]
+    signature_cache: set[int] = field(default_factory=set)
     pending_checks: list[tuple[Union[ArithRef, list[ArithRef]], list[BoolRef]]] = field(
         default_factory=list
     )
