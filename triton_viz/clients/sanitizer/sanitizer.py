@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any, Optional, Union
+import re
 
 
 import numpy as np
@@ -211,6 +212,9 @@ class LoopContext:
     pending_checks: list[tuple[Union[ArithRef, list[ArithRef]], list[BoolRef]]] = field(
         default_factory=list
     )
+    # Clean up variable names by removing suffixes like _81, _144
+    # Cache compiled regex pattern for better performance
+    re_pattern = re.compile(r'(loop_i|arange)_\d+')
 
 
 
@@ -838,6 +842,8 @@ class SymbolicExpr:
                 self._z3 = SymbolicExpr.PID2
 
         if self.op == "arange":
+            # Get file name, line number, and column number
+
             idx = SymbolicExpr.ARANGE_COUNTER
             SymbolicExpr.ARANGE_COUNTER += 1
             name = f"arange_{idx}"
@@ -1042,7 +1048,7 @@ class SymbolicExpr:
         elif obj.op == "arange":
             # FIXME: The "+1" is a workaround for the exclusive end in arange
             result = obj.concrete_fn(
-                obj.ret_ty.to_py(), obj.start.to_py(), obj.end.to_py() + 1
+                obj.ret_ty.to_py(), obj.start.to_py(), obj.end.to_py()
             )
         elif obj.op == "splat":
             result = obj.concrete_fn(
@@ -1123,19 +1129,22 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     return expr
 
 
-def _make_signature(addr_expr, constraints) -> str:
+def _make_signature(addr_expr, constraints, re_pattern) -> str:
     """
     Convert (addr, constraints) into a stable string signature.
     • addr_expr can be a single z3 expr or list[expr]
     • constraints is list[expr]
     """
     if isinstance(addr_expr, list):
-        addr_repr = "|".join(sorted(simplify(e).sexpr() for e in addr_expr))
+        addr_repr = "|".join(sorted(e.sexpr() for e in addr_expr))
     else:
-        addr_repr = simplify(addr_expr).sexpr()
+        addr_repr = addr_expr.sexpr()
 
-    constr_repr = "|".join(sorted(simplify(c).sexpr() for c in constraints))
-    return addr_repr + "##" + constr_repr
+    constr_repr = "|".join(sorted(c.sexpr() for c in constraints))
+
+    addr_repr = re_pattern.sub(r'\1', addr_repr)
+    constr_repr = re_pattern.sub(r'\1', constr_repr)
+    return hash(addr_repr + "##" + constr_repr)
 
 @dataclass(frozen=True)
 class _FnSymbolicCache:
@@ -1204,7 +1213,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         if self.loop_stack:  # for-loop iterator association
             ctx = self.loop_stack[-1]
             # check if addr already appeared before in the for-loop
-            signature = _make_signature(z3_addr, z3_constraints)
+            signature = _make_signature(z3_addr, z3_constraints, ctx.re_pattern)
             if signature in ctx.signature_cache:  # if appeared before
                 if cfg.verbose:
                     print("[Sanitizer]  ↪ skip duplicated addr in loop")
@@ -1438,7 +1447,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 "arange",
                 SymbolicExpr.from_value(ret_ty),
                 SymbolicExpr.from_value(start),
-                SymbolicExpr.from_value(end - 1),
+                SymbolicExpr.from_value(end),
             )
 
         def op_expand_dims_overrider(arg, axis):
