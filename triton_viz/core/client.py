@@ -53,7 +53,9 @@ class Client(ABC):
     @abstractmethod
     def register_for_loop_callback(
         self,
-    ) -> tuple[Optional[Callable], Optional[Callable], Optional[Callable], Optional[Callable]]:
+    ) -> tuple[
+        Optional[Callable], Optional[Callable], Optional[Callable], Optional[Callable]
+    ]:
         ...
 
     @abstractmethod

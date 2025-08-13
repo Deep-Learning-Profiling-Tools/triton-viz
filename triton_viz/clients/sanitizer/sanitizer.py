@@ -214,8 +214,7 @@ class LoopContext:
     )
     # Clean up variable names by removing suffixes like _81, _144
     # Cache compiled regex pattern for better performance
-    re_pattern = re.compile(r'(loop_i|arange)_\d+')
-
+    re_pattern = re.compile(r"(loop_i|arange)_\d+")
 
 
 class Sanitizer(Client):
@@ -284,8 +283,8 @@ class SanitizerBruteForce(Sanitizer):
         self.abort_on_error = abort_on_error
         self.tensors: list[Tensor] = []
         self.records: list = []
-        self.grid_idx: tuple[int, ...] | None = None
-        self.last_grid: tuple[int, int, int] | None = None
+        self.grid_idx: Optional[tuple[int, ...]] = None
+        self.last_grid: Optional[tuple[int, int, int]] = None
 
     def _report(self, op_type, record):
         traceback_info = _get_traceback_info()
@@ -937,18 +936,20 @@ class SymbolicExpr:
                     raise ValueError(
                         f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
                     )
-                self._z3 = [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
+                self._z3 = [
+                    p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)
+                ]
             if isinstance(ptr_z3, list):  # ptr is list, offset is scalar
                 self._z3 = [p + offset_z3 * element_bytewidth for p in ptr_z3]
             if isinstance(offset_z3, list):  # offset is list, ptr is scalar
                 self._z3 = [ptr_z3 + o * element_bytewidth for o in offset_z3]
             else:
                 self._z3 = ptr_z3 + offset_z3 * element_bytewidth
-        
+
         if self._z3 is None:
             # Other operations can be implemented as needed
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
-        
+
         return self._z3, self._constraints
 
     def has_op(self, op_name: str) -> bool:
@@ -1129,7 +1130,7 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     return expr
 
 
-def _make_signature(addr_expr, constraints, re_pattern) -> str:
+def _make_signature(addr_expr, constraints, re_pattern) -> int:
     """
     Convert (addr, constraints) into a stable string signature.
     • addr_expr can be a single z3 expr or list[expr]
@@ -1142,9 +1143,10 @@ def _make_signature(addr_expr, constraints, re_pattern) -> str:
 
     constr_repr = "|".join(sorted(c.sexpr() for c in constraints))
 
-    addr_repr = re_pattern.sub(r'\1', addr_repr)
-    constr_repr = re_pattern.sub(r'\1', constr_repr)
+    addr_repr = re_pattern.sub(r"\1", addr_repr)
+    constr_repr = re_pattern.sub(r"\1", constr_repr)
     return hash(addr_repr + "##" + constr_repr)
+
 
 @dataclass(frozen=True)
 class _FnSymbolicCache:
@@ -1167,8 +1169,8 @@ class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
         self.abort_on_error: bool = abort_on_error
         self.records: list[OutOfBoundsRecordZ3] = []
-        self.grid: tuple[int, ...] | None = None
-        self.grid_idx: tuple[int, ...] | None = None
+        self.grid: Optional[tuple[int, ...]] = None
+        self.grid_idx: Optional[tuple[int, ...]] = None
         self.tensors: list[Tensor] = []
         self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id: int = 0
@@ -1296,8 +1298,14 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.grid = tuple(int(g) for g in grid)
         addr = Int("addr")
         self._addr_ok = Or(*[And(addr >= s, addr <= e) for s, e in self.tensor_addrs])
-        self._pid_ok = And(SymbolicExpr.PID0 < self.grid[0], SymbolicExpr.PID1 < self.grid[1], SymbolicExpr.PID2 < self.grid[2],
-                           SymbolicExpr.PID0 >= 0, SymbolicExpr.PID1 >= 0, SymbolicExpr.PID2 >= 0)
+        self._pid_ok = And(
+            SymbolicExpr.PID0 < self.grid[0],
+            SymbolicExpr.PID1 < self.grid[1],
+            SymbolicExpr.PID2 < self.grid[2],
+            SymbolicExpr.PID0 >= 0,
+            SymbolicExpr.PID1 >= 0,
+            SymbolicExpr.PID2 >= 0,
+        )
         self._solver = Solver()
         self._solver.add(Not(self._addr_ok))
         self._solver.add(self._pid_ok)
@@ -1342,7 +1350,6 @@ class SanitizerSymbolicExecution(Sanitizer):
             self._handle_access_check(ret)
             return ret
 
-
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
             return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
 
@@ -1368,7 +1375,6 @@ class SanitizerSymbolicExecution(Sanitizer):
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
             return ret
-
 
         def op_unary_op_overrider(arg, op):
             _unary_map = {
