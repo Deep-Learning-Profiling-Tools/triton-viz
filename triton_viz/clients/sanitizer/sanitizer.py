@@ -208,7 +208,7 @@ class LoopContext:
     length: int
     idx_z3: ArithRef
     values: list[int] = field(default_factory=list)
-    signature_cache: set[str] = field(default_factory=set)
+    signature_cache: set[int] = field(default_factory=int)
     pending_checks: list[tuple[Union[ArithRef, list[ArithRef]], list[BoolRef]]] = field(
         default_factory=list
     )
@@ -1176,9 +1176,9 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.unique_load_store_id: int = 0
         self.need_full_grid: bool = False
         self.loop_stack: list[LoopContext] = []
-        self.last_grid: tuple[int, int, int] | None = None
+        self.last_grid: Optional[tuple[int, int, int]] = None
         self.cache_args: list = []
-        self.cache_grid: tuple[int, ...] | None = None
+        self.cache_grid: Optional[tuple[int, ...]] = None
         SymbolicExpr.set_loop_ctx_provider(
             lambda: self.loop_stack[-1] if self.loop_stack else None
         )
