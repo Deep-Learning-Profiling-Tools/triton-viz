@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import ClassVar, Optional
 import traceback
 import numpy.typing as npt
 import numpy as np
@@ -200,6 +200,6 @@ class Grid:
 
 @dataclass
 class Launch:
-    grid: tuple | None = None
+    grid: Optional[tuple] = None
     tensors: set[Tensor] = field(default_factory=set)
     records: list = field(default_factory=list)

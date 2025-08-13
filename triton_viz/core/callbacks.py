@@ -1,9 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
 class OpCallbacks:
-    before_callback: Callable | None = None
-    after_callback: Callable | None = None
-    op_overrider: Callable | None = None
+    before_callback: Optional[Callable] = None
+    after_callback: Optional[Callable] = None
+    op_overrider: Optional[Callable] = None
