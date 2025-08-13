@@ -1047,7 +1047,6 @@ class SymbolicExpr:
         elif obj.op == "pid":
             result = obj.concrete_fn(obj.axis.to_py())
         elif obj.op == "arange":
-            # FIXME: The "+1" is a workaround for the exclusive end in arange
             result = obj.concrete_fn(
                 obj.ret_ty.to_py(), obj.start.to_py(), obj.end.to_py()
             )
@@ -1096,7 +1095,7 @@ class SymbolicExpr:
         return result
 
 
-def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
+def _replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     """
     Post-order traversal that replaces *all* minimal `load` sub-trees
     with constant nodes produced by `concretize`.
@@ -1109,7 +1108,9 @@ def replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
         if child is None:
             continue
         # replace subtree if load found
-        expr.children[name] = replace_load_subtree(child)
+        expr.children[name] = _replace_load_subtree(child)
+        expr.children[name]._z3 = None
+        expr.children[name]._constraints.clear()
 
     # check self
     if expr.op == "load" and all(
@@ -1330,7 +1331,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
                 self.need_full_grid = True
-                replace_load_subtree(ptr)
+                ptr = _replace_load_subtree(ptr)
 
             # make sure ptr dtype is valid
             if isinstance(ptr, TensorHandle) and not isinstance(
@@ -1357,7 +1358,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
                 self.need_full_grid = True
-                replace_load_subtree(ptr)
+                ptr = _replace_load_subtree(ptr)
 
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and not isinstance(
