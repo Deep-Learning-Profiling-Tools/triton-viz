@@ -174,13 +174,11 @@ def print_oob_record_pdb_style(
     magenta = "\033[95m"
 
     # ===================== Header =====================
-    print("\n" + "=" * 80)
-    print(f"{bold}{op_color}🚨 ILLEGAL MEMORY ACCESS DETECTED 🚨{reset_color}")
-    print("=" * 80)
+    print(f"\n{bold}{op_color}🚨 ILLEGAL MEMORY ACCESS DETECTED 🚨{reset_color}")
 
     # ===================== PDB-Style Code Context =====================
     if oob_record.user_code_tracebacks:
-        print(f"\n{bold}{cyan}━━━ Code Context ━━━{reset_color}")
+        print(f"{bold}{cyan}━━━ Code Context ━━━{reset_color}")
 
         for tb_info in oob_record.user_code_tracebacks:
             # Try to read the source file to show context
@@ -192,10 +190,9 @@ def print_oob_record_pdb_style(
                 start_line = max(0, tb_info.lineno - 4)
                 end_line = min(len(lines), tb_info.lineno + 3)
 
-                print(f"\n  {magenta}File:{reset_color} {tb_info.filename}")
+                print(f"  {magenta}File:{reset_color} {tb_info.filename}")
                 print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
                 print(f"  {magenta}Line {tb_info.lineno}:{reset_color}")
-                print()
 
                 for i in range(start_line, end_line):
                     line_num = i + 1
@@ -212,32 +209,44 @@ def print_oob_record_pdb_style(
             except (FileNotFoundError, IOError):
                 # Fallback if we can't read the file
                 print(
-                    f"\n  {magenta}File:{reset_color} {tb_info.filename}:{tb_info.lineno}"
+                    f"  {magenta}File:{reset_color} {tb_info.filename}:{tb_info.lineno}"
                 )
                 print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
                 print(f"  {magenta}Code:{reset_color} {tb_info.line_of_code}")
 
+            break  # Only show the first traceback for brevity
+
     # ===================== Tensor Information =====================
-    print(f"\n{bold}{cyan}━━━ Tensor Information ━━━{reset_color}")
+    print(f"{bold}{cyan}━━━ Tensor Information ━━━{reset_color}")
     tensor = oob_record.tensor
 
-    print(f"  {green}dtype:{reset_color}      {tensor.dtype}")
-    print(f"  {green}shape:{reset_color}      {tensor.shape}")
-    print(f"  {green}strides:{reset_color}    {tensor.stride()}")
-    print(f"  {green}device:{reset_color}     {tensor.device}")
-    print(f"  {green}contiguous:{reset_color} {tensor.is_contiguous()}")
-    print(f"  {green}base_ptr:{reset_color}   0x{tensor.data_ptr():016x}")
+    # Display two items per line to save vertical space
+    # Calculate column widths for alignment
+    col1_width = 12  # Width for first label
+    col2_width = 25  # Width for first value
+    col3_width = 12  # Width for second label
 
-    total_bytes = np.prod(tensor.shape) * tensor.element_size()
     print(
-        f"  {green}size:{reset_color}       {total_bytes} bytes ({np.prod(tensor.shape)} elements × {tensor.element_size()} bytes/element)"
+        f"  {green}{'dtype:':<{col1_width}}{reset_color} {str(tensor.dtype):<{col2_width}} {green}{'shape:':<{col3_width}}{reset_color} {tensor.shape}"
     )
     print(
-        f"  {green}valid_range:{reset_color} [0x{tensor.data_ptr():016x}, 0x{tensor.data_ptr() + total_bytes:016x})"
+        f"  {green}{'strides:':<{col1_width}}{reset_color} {str(tensor.stride()):<{col2_width}} {green}{'device:':<{col3_width}}{reset_color} {tensor.device}"
+    )
+    print(
+        f"  {green}{'contiguous:':<{col1_width}}{reset_color} {str(tensor.is_contiguous()):<{col2_width}} {green}{'base_ptr:':<{col3_width}}{reset_color} 0x{tensor.data_ptr():016x}"
+    )
+
+    total_bytes = np.prod(tensor.shape) * tensor.element_size()
+    size_str = f"{total_bytes} bytes"
+    range_str = (
+        f"[0x{tensor.data_ptr():016x}, 0x{tensor.data_ptr() + total_bytes:016x})"
+    )
+    print(
+        f"  {green}{'size:':<{col1_width}}{reset_color} {size_str:<{col2_width}} {green}{'valid_range:':<{col3_width}}{reset_color} {range_str}"
     )
 
     # ===================== Call Stack =====================
-    print(f"\n{bold}{cyan}━━━ Call Stack ━━━{reset_color}")
+    print(f"{bold}{cyan}━━━ Call Stack ━━━{reset_color}")
 
     if oob_record.user_code_tracebacks:
         for i, tb_info in enumerate(oob_record.user_code_tracebacks):
@@ -250,7 +259,7 @@ def print_oob_record_pdb_style(
         print("  (No traceback information available)")
 
     # ===================== Violation Details =====================
-    print(f"\n{bold}{cyan}━━━ Violation Details ━━━{reset_color}")
+    print(f"{bold}{cyan}━━━ Violation Details ━━━{reset_color}")
 
     if isinstance(oob_record, OutOfBoundsRecordBruteForce):
         offsets_arr = np.array(oob_record.offsets)
@@ -287,7 +296,7 @@ def print_oob_record_pdb_style(
 
     # ===================== Symbolic Expression Tree =====================
     if symbolic_expr is not None:
-        print(f"\n{bold}{cyan}━━━ Symbolic Expression Tree ━━━{reset_color}")
+        print(f"{bold}{cyan}━━━ Symbolic Expression Tree ━━━{reset_color}")
 
         if hasattr(symbolic_expr, "to_tree_str"):
             tree_str = symbolic_expr.to_tree_str()
@@ -298,19 +307,7 @@ def print_oob_record_pdb_style(
         else:
             print(f"  {symbolic_expr}")
 
-    # # ===================== Debugging Commands =====================
-    # print(f"\n{bold}{cyan}━━━ Debugging Commands ━━━{reset_color}")
-    # print(f"  {green}(Pdb){reset_color} print(error.tensor)")
-    # print(f"  {green}(Pdb){reset_color} print(error.tensor.shape)")
-    # print(f"  {green}(Pdb){reset_color} print(error.tensor.data_ptr())")
-    # print(f"  {green}(Pdb){reset_color} print(error.stack)")
-    # if symbolic_expr:
-    #     print(f"  {green}(Pdb){reset_color} print(error.symbolic_tree)")
-    #     print(f"  {green}(Pdb){reset_color} error.symbolic_tree.to_tree_str()")
-
-    print("\n" + "=" * 80)
-    print(f"{bold}End of IMA Diagnostic Report{reset_color}")
-    print("=" * 80 + "\n")
+    print(f"{bold}End of IMA Diagnostic Report{reset_color}\n")
 
 
 def _get_traceback_info():
