@@ -144,51 +144,263 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     print("============================================================")
 
 
+def print_oob_record_pdb_style(
+    oob_record: OutOfBoundsRecord, symbolic_expr: Optional["SymbolicExpr"] = None
+):
+    """
+    Print a comprehensive diagnostic report for OOB errors in PDB-style format.
+
+    Parameters
+    ----------
+    oob_record : OutOfBoundsRecord
+        The record containing information about out-of-bounds accesses.
+    symbolic_expr : Optional[SymbolicExpr]
+        The symbolic expression tree that led to the OOB access.
+    """
+    from pathlib import Path
+
+    # Determine operation type
+    if issubclass(oob_record.op_type, Store):
+        op_color = "\033[91m"  # Red for store
+    elif issubclass(oob_record.op_type, Load):
+        op_color = "\033[93m"  # Yellow for load
+    else:
+        op_color = "\033[0m"
+
+    reset_color = "\033[0m"
+    bold = "\033[1m"
+    cyan = "\033[96m"
+    green = "\033[92m"
+    magenta = "\033[95m"
+
+    # ===================== Header =====================
+    print(f"\n{bold}{op_color}🚨 ILLEGAL MEMORY ACCESS DETECTED 🚨{reset_color}")
+
+    # ===================== PDB-Style Code Context =====================
+    if oob_record.user_code_tracebacks:
+        print(f"{bold}{cyan}━━━ Code Context ━━━{reset_color}")
+
+        for tb_info in oob_record.user_code_tracebacks:
+            # Try to read the source file to show context
+            try:
+                with open(tb_info.filename, "r") as f:
+                    lines = f.readlines()
+
+                # Show 3 lines before and after for context
+                start_line = max(0, tb_info.lineno - 4)
+                end_line = min(len(lines), tb_info.lineno + 3)
+
+                print(f"  {magenta}File:{reset_color} {tb_info.filename}")
+                print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
+                print(f"  {magenta}Line {tb_info.lineno}:{reset_color}")
+
+                for i in range(start_line, end_line):
+                    line_num = i + 1
+                    line_content = lines[i].rstrip()
+
+                    if line_num == tb_info.lineno:
+                        # Highlight the problematic line
+                        print(
+                            f"{op_color}→ {line_num:4d} │ {line_content}{reset_color}"
+                        )
+                    else:
+                        print(f"  {line_num:4d} │ {line_content}")
+
+            except (FileNotFoundError, IOError):
+                # Fallback if we can't read the file
+                print(
+                    f"  {magenta}File:{reset_color} {tb_info.filename}:{tb_info.lineno}"
+                )
+                print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
+                print(f"  {magenta}Code:{reset_color} {tb_info.line_of_code}")
+
+            break  # Only show the first traceback for brevity
+
+    # ===================== Tensor Information =====================
+    print(f"{bold}{cyan}━━━ Tensor Information ━━━{reset_color}")
+    tensor = oob_record.tensor
+
+    # Display two items per line to save vertical space
+    # Calculate column widths for alignment
+    col1_width = 12  # Width for first label
+    col2_width = 25  # Width for first value
+    col3_width = 12  # Width for second label
+
+    print(
+        f"  {green}{'dtype:':<{col1_width}}{reset_color} {str(tensor.dtype):<{col2_width}} {green}{'shape:':<{col3_width}}{reset_color} {tensor.shape}"
+    )
+    print(
+        f"  {green}{'strides:':<{col1_width}}{reset_color} {str(tensor.stride()):<{col2_width}} {green}{'device:':<{col3_width}}{reset_color} {tensor.device}"
+    )
+    print(
+        f"  {green}{'contiguous:':<{col1_width}}{reset_color} {str(tensor.is_contiguous()):<{col2_width}} {green}{'base_ptr:':<{col3_width}}{reset_color} 0x{tensor.data_ptr():016x}"
+    )
+
+    total_bytes = np.prod(tensor.shape) * tensor.element_size()
+    size_str = f"{total_bytes} bytes"
+    range_str = (
+        f"[0x{tensor.data_ptr():016x}, 0x{tensor.data_ptr() + total_bytes:016x})"
+    )
+    print(
+        f"  {green}{'size:':<{col1_width}}{reset_color} {size_str:<{col2_width}} {green}{'valid_range:':<{col3_width}}{reset_color} {range_str}"
+    )
+
+    # ===================== Call Stack =====================
+    print(f"{bold}{cyan}━━━ Call Stack ━━━{reset_color}")
+
+    if oob_record.user_code_tracebacks:
+        for i, tb_info in enumerate(oob_record.user_code_tracebacks):
+            frame_num = len(oob_record.user_code_tracebacks) - i
+            file_name = Path(tb_info.filename).name
+            print(f"  #{frame_num} {tb_info.func_name} at {file_name}:{tb_info.lineno}")
+            if tb_info.line_of_code:
+                print(f"     └─ {tb_info.line_of_code.strip()}")
+    else:
+        print("  (No traceback information available)")
+
+    # ===================== Violation Details =====================
+    print(f"{bold}{cyan}━━━ Violation Details ━━━{reset_color}")
+
+    if isinstance(oob_record, OutOfBoundsRecordBruteForce):
+        offsets_arr = np.array(oob_record.offsets)
+        invalid_access_masks_arr = np.array(oob_record.invalid_access_masks)
+        invalid_indices = np.where(invalid_access_masks_arr.flatten())[0]
+
+        if len(invalid_indices) > 0:
+            print(f"  {green}Total violations:{reset_color} {len(invalid_indices)}")
+            invalid_offsets = offsets_arr.flatten()[invalid_indices]
+
+            # Show first few invalid offsets
+            display_count = min(10, len(invalid_offsets))
+            print(f"  {green}Invalid offsets (first {display_count}):{reset_color}")
+            for offset in invalid_offsets[:display_count]:
+                print(f"    • 0x{offset:016x} (offset: {offset})")
+
+            if len(invalid_offsets) > display_count:
+                print(f"    ... and {len(invalid_offsets) - display_count} more")
+
+    elif isinstance(oob_record, OutOfBoundsRecordZ3):
+        if hasattr(oob_record, "violation_address"):
+            print(
+                f"  {green}Violation address:{reset_color} 0x{oob_record.violation_address:016x}"
+            )
+
+        if hasattr(oob_record, "constraints") and oob_record.constraints:
+            print(
+                f"  {green}SMT constraints ({len(oob_record.constraints)}):{reset_color}"
+            )
+            for i, constraint in enumerate(oob_record.constraints[:5]):  # Show first 5
+                print(f"    [{i}] {constraint}")
+            if len(oob_record.constraints) > 5:
+                print(f"    ... and {len(oob_record.constraints) - 5} more constraints")
+
+    # ===================== Symbolic Expression Tree =====================
+    if symbolic_expr is not None:
+        print(f"{bold}{cyan}━━━ Symbolic Expression Tree ━━━{reset_color}")
+
+        if hasattr(symbolic_expr, "to_tree_str"):
+            tree_str = symbolic_expr.to_tree_str()
+            # Indent the tree for better display
+            for line in tree_str.split("\n"):
+                if line:
+                    print(f"  {line}")
+        else:
+            print(f"  {symbolic_expr}")
+
+    print(f"{bold}End of IMA Diagnostic Report{reset_color}\n")
+
+
 def _get_traceback_info():
     """
-    Why do both _grid_executor_call and _jit_function_call appear in the call stacks?
+    Extract user code frames from the call stack, focusing on actual user code
+    that contains the memory access operations.
 
+    Why do both _grid_executor_call and _jit_function_call appear in the call stacks?
     1) Main kernel dispatch (kernel[grid](...)) triggers _grid_executor_call.
     2) Inlined @triton.jit functions trigger _jit_function_call.
     3) Some code sees only _grid_executor_call if no separate JIT function is present or patched.
     4) Complex kernels (e.g., fused_attention) may show both: outer dispatch and inner JIT calls.
     """
-    oob_filename, oob_lineno, oob_func_name, oob_line_of_code = "", -1, "", ""
-
     stack_summary = traceback.extract_stack()
-
     user_code_tracebacks = []
-    # scan the call stack
+
+    # Filter out framework code to find user code frames
+    # We want to find frames that:
+    # 1. Are not in triton_viz internal files (except examples)
+    # 2. Are not in triton runtime/language files
+    # 3. Are user-defined functions
+
+    framework_paths = [
+        "triton_viz/core/",
+        "triton_viz/clients/",
+        "triton/runtime/",
+        "triton/language/",
+        "site-packages/triton/",
+    ]
+
+    # First pass: collect all potential user code frames
     for i, frame in enumerate(stack_summary):
-        user_code_index = None
-        if (
-            "_jit_function_call" in frame.name
-            and "triton_viz/core/patch.py" in frame.filename
-        ):
-            user_code_index = (
-                i + 2
-            )  # _grid_executor_call -> run_grid_loops -> user code
-        elif (
-            "_grid_executor_call" in frame.name
-            and "triton_viz/core/patch.py" in frame.filename
-        ):
-            user_code_index = i + 2  # the same as above
+        # Skip framework code
+        if any(path in frame.filename.replace("\\", "/") for path in framework_paths):
+            # Exception: include examples directory
+            if "examples/" not in frame.filename.replace("\\", "/"):
+                continue
 
-        if user_code_index is not None:
-            frame = stack_summary[user_code_index]
-            oob_filename = frame.filename
-            oob_lineno = frame.lineno
-            oob_func_name = frame.name
-            oob_line_of_code = frame.line
-            traceback_info = TracebackInfo(
-                filename=oob_filename,
-                lineno=oob_lineno,
-                func_name=oob_func_name,
-                line_of_code=oob_line_of_code,
-            )
-            user_code_tracebacks.append(traceback_info)
+        # Skip Python internals
+        if frame.filename.startswith("<"):
+            continue
 
-    return user_code_tracebacks
+        # Check if this frame is just after a patch.py call
+        # This usually indicates a transition from framework to user code
+        if i > 0:
+            prev_frame = stack_summary[i - 1]
+            if "triton_viz/core/patch.py" in prev_frame.filename:
+                # This is likely user code called by the framework
+                user_code_tracebacks.append(
+                    TracebackInfo(
+                        filename=frame.filename,
+                        lineno=frame.lineno,
+                        func_name=frame.name,
+                        line_of_code=frame.line,
+                    )
+                )
+
+    # If we didn't find any user code using the above method,
+    # fall back to the original approach but collect ALL relevant frames
+    if not user_code_tracebacks:
+        for i, frame in enumerate(stack_summary):
+            if (
+                "_jit_function_call" in frame.name
+                or "_grid_executor_call" in frame.name
+            ) and "triton_viz/core/patch.py" in frame.filename:
+                # Look at the next frame which should be user code
+                if i + 1 < len(stack_summary):
+                    next_frame = stack_summary[i + 1]
+                    # Only add if it's not already in our list and is user code
+                    if not any(path in next_frame.filename for path in framework_paths):
+                        user_code_tracebacks.append(
+                            TracebackInfo(
+                                filename=next_frame.filename,
+                                lineno=next_frame.lineno,
+                                func_name=next_frame.name,
+                                line_of_code=next_frame.line,
+                            )
+                        )
+
+    # Reverse the list so the most immediate error location comes first
+    # (closest to the actual tl.load/tl.store operation)
+    user_code_tracebacks.reverse()
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_tracebacks = []
+    for tb in user_code_tracebacks:
+        key = (tb.filename, tb.lineno)
+        if key not in seen:
+            seen.add(key)
+            unique_tracebacks.append(tb)
+
+    return unique_tracebacks
 
 
 def _get_tensor(tensor_list, data_ptr):
@@ -209,9 +421,9 @@ class LoopContext:
     idx_z3: ArithRef
     values: list[int] = field(default_factory=list)
     signature_cache: set[int] = field(default_factory=set)
-    pending_checks: list[tuple[Union[ArithRef, list[ArithRef]], list[BoolRef]]] = field(
-        default_factory=list
-    )
+    pending_checks: list[
+        tuple[Union[ArithRef, list[ArithRef]], list[BoolRef], Optional["SymbolicExpr"]]
+    ] = field(default_factory=list)
     # Clean up variable names by removing suffixes like _81, _144
     # Cache compiled regex pattern for better performance
     re_pattern = re.compile(r"(loop_i|arange)_\d+")
@@ -1214,6 +1426,43 @@ class SanitizerSymbolicExecution(Sanitizer):
                 raise ValueError("Out-of-bounds access detected!")
         self._solver.pop()
 
+    def _check_range_satisfiable_with_expr(
+        self,
+        access_addr: Union[int, list[int], ArithRef, list[ArithRef]],
+        expr_constraints: list,
+        symbolic_expr: Optional[SymbolicExpr] = None,
+    ):
+        """Check if access is satisfiable and report with symbolic expression if OOB."""
+        if isinstance(access_addr, list):
+            for addr in access_addr:
+                self._check_range_satisfiable_with_expr(
+                    addr, expr_constraints, symbolic_expr
+                )
+            return
+        self._solver.push()
+        self._solver.add(self._addr_sym == access_addr)
+        self._solver.add(And(*expr_constraints))
+        if self._solver.check() == sat:
+            # Get the model to find the violation address
+            model = self._solver.model()
+            violation_addr = model[self._addr_sym].as_long() if model else 0
+
+            # Find the tensor that this address belongs to
+            tensor = None
+            if self.tensors:
+                # Simple heuristic: use the first tensor for now
+                # In practice, you'd want to match the address to the correct tensor
+                tensor = self.tensors[0]
+
+            # Determine operation type from symbolic expression
+            op_type: type[Load] | type[Store] = Load  # Default
+            if symbolic_expr and symbolic_expr.op == "store":
+                op_type = Store
+
+            # Report with symbolic expression
+            self._report(op_type, tensor, violation_addr, symbolic_expr)
+        self._solver.pop()
+
     def _handle_access_check(self, expr: SymbolicExpr):
         """
         Evaluate a memory access expression and either defer it (inside a loop)
@@ -1240,11 +1489,12 @@ class SanitizerSymbolicExecution(Sanitizer):
                         z3_constraints,
                     )
                 ctx.signature_cache.add(signature)
-                ctx.pending_checks.append((z3_addr, z3_constraints))
+                # Store the expression along with the z3 data for later checking
+                ctx.pending_checks.append((z3_addr, z3_constraints, expr))
         else:  # non-loop case
-            self._check_range_satisfiable(z3_addr, z3_constraints)
+            self._check_range_satisfiable_with_expr(z3_addr, z3_constraints, expr)
 
-    def _report(self, op_type, tensor, violation_address):
+    def _report(self, op_type, tensor, violation_address, symbolic_expr=None):
         traceback_info = _get_traceback_info()
         oob_record = OutOfBoundsRecordZ3(
             op_type=op_type,
@@ -1252,9 +1502,14 @@ class SanitizerSymbolicExecution(Sanitizer):
             tensor=tensor,
             violation_address=violation_address,
             constraints=[],
+            symbolic_expr=symbolic_expr,
         )
         if self.abort_on_error:
-            print_oob_record(oob_record)
+            # Use the new PDB-style print function if available
+            if symbolic_expr is not None or cfg.verbose:
+                print_oob_record_pdb_style(oob_record, symbolic_expr)
+            else:
+                print_oob_record(oob_record)
             raise ValueError(
                 "Out-of-bounds access detected. See detailed report above."
             )
@@ -1599,7 +1854,14 @@ class SanitizerSymbolicExecution(Sanitizer):
                 )
 
             # execute pending checks
-            for addr_expr, expr_constraints in ctx.pending_checks:
+            for check_tuple in ctx.pending_checks:
+                # Handle both old format (2-tuple) and new format (3-tuple)
+                if len(check_tuple) == 2:
+                    addr_expr, expr_constraints = check_tuple
+                    symbolic_expr = None
+                else:
+                    addr_expr, expr_constraints, symbolic_expr = check_tuple
+
                 if cfg.verbose:
                     print(
                         "[Sanitizer] ▶ checking:",
@@ -1607,9 +1869,17 @@ class SanitizerSymbolicExecution(Sanitizer):
                         f" with iterator constraints: {iterator_constraints} ",
                         f" and expression-related constraints: {expr_constraints} ",
                     )
-                self._check_range_satisfiable(
-                    addr_expr, expr_constraints + iterator_constraints
-                )
+
+                if symbolic_expr is not None:
+                    self._check_range_satisfiable_with_expr(
+                        addr_expr,
+                        expr_constraints + iterator_constraints,
+                        symbolic_expr,
+                    )
+                else:
+                    self._check_range_satisfiable(
+                        addr_expr, expr_constraints + iterator_constraints
+                    )
 
             if cfg.verbose:
                 print(
