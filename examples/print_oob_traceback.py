@@ -28,10 +28,7 @@ def kernel_A(ptr, n):
 
 if __name__ == "__main__":
     x = torch.arange(4, dtype=torch.float32)
-    print("Input:", x)
 
     # We'll launch a grid bigger than x.numel() to force a out-of-bounds error
     grid = (x.numel() + 4,)
     kernel_A[grid](x, x.numel())
-
-    print("Output:", x)
