@@ -2,7 +2,7 @@ from ...core.data import Store, Load
 import numpy as np
 from numpy.typing import NDArray
 from dataclasses import dataclass
-from typing import Union
+from typing import Union, Any
 import torch
 import z3
 
@@ -51,7 +51,11 @@ class OutOfBoundsRecordZ3(OutOfBoundsRecord):
 
             In this scenario, 200 is an out-of-bounds address because it
             falls outside the valid ranges described by these constraints.
+
+        symbolic_expr (Optional[Any]):
+            The symbolic expression tree that led to the OOB access, if available.
     """
 
     constraints: list[z3.z3.BoolRef]
     violation_address: int
+    symbolic_expr: "Any" = None  # Optional symbolic expression tree
