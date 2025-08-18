@@ -45,9 +45,30 @@ def apply():
     if len(sys.argv) < 2:
         print("Usage: triton-sanitizer <script.py> [args...]")
         sys.exit(1)
+
     script = sys.argv[1]
-    sys.argv = sys.argv[1:]
-    runpy.run_path(script, run_name="__main__")
+
+    # Check if the first argument is a file that exists
+    import os
+    import subprocess
+    import shutil
+
+    if os.path.isfile(script):
+        # It's a Python script file, run it directly
+        sys.argv = sys.argv[1:]
+        runpy.run_path(script, run_name="__main__")
+    else:
+        # It might be a command like 'pytest', run it as a subprocess
+        cmd = sys.argv[1:]
+
+        # Check if it's an executable command
+        if shutil.which(cmd[0]):
+            # Run the command with the sanitizer environment already set up
+            result = subprocess.run(cmd, env=os.environ.copy())
+            sys.exit(result.returncode)
+        else:
+            print(f"Error: '{script}' is neither a valid file nor a command")
+            sys.exit(1)
 
 
 def enable_sanitizer():
