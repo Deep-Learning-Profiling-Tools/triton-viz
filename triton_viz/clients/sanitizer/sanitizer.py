@@ -375,6 +375,17 @@ class SymbolicExprDataWrapper:
     def size(self):
         return 2
 
+    @property
+    def dtype(self):
+        """Return the dtype from the underlying symbolic expression."""
+        if (
+            hasattr(self.symbolic_expr, "dtype_tt")
+            and self.symbolic_expr.dtype_tt is not None
+        ):
+            return self.symbolic_expr.dtype_tt
+        # Default to int64 if no dtype is available (common for integer operations)
+        return np.int64
+
     def __int__(self):
         int_val, _ = self.symbolic_expr.eval()
         if isinstance(int_val, IntNumRef):
