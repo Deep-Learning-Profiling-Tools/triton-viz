@@ -954,6 +954,10 @@ class SymbolicExpr:
             else:
                 self._z3 = ptr_z3 + offset_z3 * element_bytewidth
 
+        if self.op == "cast_impl":
+            # Cast operation - pass through the source value
+            self._z3, self._constraints = self.src._to_z3()
+
         if self._z3 is None:
             # Other operations can be implemented as needed
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
