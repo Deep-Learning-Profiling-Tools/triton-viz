@@ -1765,7 +1765,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         def op_tensor_pointer_store_overrider(
             ptr, value, boundary_check, cache_modifier, eviction_policy
         ):
-            raise NotImplementedError("TensorPointerStore is not supported yet.")
+            pass
 
         def op_idiv_overrider(lhs, rhs):
             return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
