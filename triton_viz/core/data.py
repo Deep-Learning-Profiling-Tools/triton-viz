@@ -194,6 +194,11 @@ class Fabs(Op):
 
 
 @dataclass
+class Ashr(Op):
+    name: ClassVar[str] = "ashr"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str

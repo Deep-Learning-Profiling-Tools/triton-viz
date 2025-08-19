@@ -34,6 +34,7 @@ from .data import (
     CastImpl,
     Reshape,
     Fabs,
+    Ashr,
 )
 import inspect
 import ast
@@ -74,6 +75,7 @@ op_list = [
     CastImpl,
     Reshape,
     Fabs,
+    Ashr,
 ]
 
 # Hardcoded operation attribute names to avoid issues with lambda functions
@@ -100,6 +102,7 @@ _OP_ATTR_NAMES = {
     CastImpl: "cast_impl",
     Reshape: "create_reshape",
     Fabs: "create_fabs",
+    Ashr: "create_ashr",
 }
 
 original_ops = {
@@ -125,6 +128,7 @@ original_ops = {
     CastImpl: interpreter_builder.cast_impl,
     Reshape: interpreter_builder.create_reshape,
     Fabs: interpreter_builder.create_fabs,
+    Ashr: interpreter_builder.create_ashr,
 }
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,

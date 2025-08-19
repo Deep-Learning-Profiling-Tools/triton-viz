@@ -56,6 +56,7 @@ from ...core.data import (
     CastImpl,
     Reshape,
     Fabs,
+    Ashr,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -708,6 +709,7 @@ class SymbolicExpr:
         "bitwise_and": "&",
         "right_shift": ">>",
         "left_shift": "<<",
+        "ashr": ">>>",
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
@@ -772,6 +774,7 @@ class SymbolicExpr:
                 "bitwise_and",
                 "right_shift",
                 "left_shift",
+                "ashr",
             )
         },
         # Ternary ops
@@ -1132,6 +1135,8 @@ class SymbolicExpr:
                 self._z3 = If(lhs >= rhs, lhs, rhs)
             if self.op == "bitwise_and":
                 self._z3 = And(lhs, rhs)
+            if self.op == "ashr":
+                raise NotImplementedError("Arithmetic shift right is not implemented in Z3")
 
         # where(cond, lhs, rhs)
         if self.op == "where":
@@ -1821,6 +1826,11 @@ class SanitizerSymbolicExecution(Sanitizer):
             arg_sym = SymbolicExpr.from_value(arg)
             return SymbolicExpr("fabs", arg_sym)
 
+        def op_ashr_overrider(lhs, rhs):
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            return SymbolicExpr("ashr", lhs_sym, rhs_sym)
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -1847,6 +1857,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             CastImpl: op_cast_impl_overrider,
             Reshape: op_reshape_overrider,
             Fabs: op_fabs_overrider,
+            Ashr: op_ashr_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
