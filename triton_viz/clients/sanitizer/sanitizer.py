@@ -53,6 +53,7 @@ from ...core.data import (
     Rsqrt,
     CastImpl,
     Reshape,
+    Fabs,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -679,6 +680,7 @@ class SymbolicExpr:
         "exp",
         "exp2",
         "abs",
+        "fabs",
         "floor",
         "ceil",
         "log",
@@ -738,6 +740,7 @@ class SymbolicExpr:
                 "exp",
                 "exp2",
                 "abs",
+                "fabs",
                 "floor",
                 "ceil",
                 "log",
@@ -1088,7 +1091,7 @@ class SymbolicExpr:
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if self.op in self.UNARY_OPS:
             val, self._constraints = self.arg._to_z3()
-            if self.op == "abs":
+            if self.op == "abs" or self.op == "fabs":
                 self._z3 = If(val >= 0, val, -val)
             else:
                 raise NotImplementedError(f"Unary op {self.op} is not implemented")
@@ -1798,6 +1801,10 @@ class SanitizerSymbolicExecution(Sanitizer):
             result.dtype_tt = arg_sym.dtype_tt if hasattr(arg_sym, "dtype_tt") else None
             return result
 
+        def op_fabs_overrider(arg):
+            arg_sym = SymbolicExpr.from_value(arg)
+            return SymbolicExpr("fabs", arg_sym)
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -1821,6 +1828,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Rsqrt: op_rsqrt_overrider,
             CastImpl: op_cast_impl_overrider,
             Reshape: op_reshape_overrider,
+            Fabs: op_fabs_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:

@@ -189,6 +189,11 @@ class Reshape(Op):
 
 
 @dataclass
+class Fabs(Op):
+    name: ClassVar[str] = "fabs"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str
