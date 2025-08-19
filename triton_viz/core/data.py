@@ -204,6 +204,11 @@ class Advance(Op):
 
 
 @dataclass
+class CumSum(Op):
+    name: ClassVar[str] = "cumsum"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str

@@ -36,6 +36,7 @@ from .data import (
     Fabs,
     Ashr,
     Advance,
+    CumSum,
 )
 import inspect
 import ast
@@ -78,6 +79,7 @@ op_list = [
     Fabs,
     Ashr,
     Advance,
+    CumSum,
 ]
 
 # Hardcoded operation attribute names to avoid issues with lambda functions
@@ -139,6 +141,9 @@ reduce_map: dict[type[Op], Callable] = {
     ReduceMin: tl.min,
     ReduceSum: tl.sum,
 }
+scan_map: dict[type[Op], Callable] = {
+    CumSum: tl.cumsum,
+}
 
 
 class PatchOp:
@@ -156,7 +161,7 @@ class PatchOp:
         if self.callbacks.before_callback:
             self.callbacks.before_callback(*args, **kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in reduce_map:
+            if self.op_type in reduce_map or self.op_type in scan_map:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -195,7 +200,7 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
             op_name,
             lambda *args, **kwargs: patched_op(*args, **kwargs),
         )
-    elif op_type in reduce_map:
+    elif op_type in reduce_map or op_type in scan_map:
         op_name = reduce_map[op_type].__name__
         original_op = getattr(tl, op_name)
         patched_op = PatchOp(original_op, op_type, callbacks)

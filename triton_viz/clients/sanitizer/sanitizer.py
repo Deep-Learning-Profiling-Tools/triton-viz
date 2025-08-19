@@ -58,6 +58,7 @@ from ...core.data import (
     Fabs,
     Ashr,
     Advance,
+    CumSum,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -715,6 +716,7 @@ class SymbolicExpr:
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum", "max", "min", "dot")
+    SCAN_OPS = ("cumsum",)
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
     CAST_OPS = ("cast_impl",)
@@ -728,6 +730,7 @@ class SymbolicExpr:
         + POINTER_OPS
         + BROADCAST_OPS
         + CAST_OPS
+        + SCAN_OPS
     )
 
     OP_SPEC = {
@@ -784,6 +787,8 @@ class SymbolicExpr:
         "sum": Spec(req=("input", "axis", "keepdims")),
         "max": Spec(req=("input", "axis", "keepdims")),
         "min": Spec(req=("input", "axis", "keepdims")),
+        # Scan Ops
+        "cumsum": Spec(req=("input", "axis", "reverse", "dtype")),
         "dot": Spec(req=("a", "b"), opt=("d",)),
         # Pointer utilities
         "make_block_ptr": Spec(
@@ -1844,6 +1849,11 @@ class SanitizerSymbolicExecution(Sanitizer):
             offsets_sym = SymbolicExpr.from_value(offsets)
             return SymbolicExpr("advance", ptr_sym, offsets_sym)
 
+        def op_cumsum_overrider(input, axis, reverse=False, dtype=None):
+            return SymbolicExpr(
+                "cumsum", SymbolicExpr.from_value(input), axis, reverse, dtype
+            )
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -1872,6 +1882,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Fabs: op_fabs_overrider,
             Ashr: op_ashr_overrider,
             Advance: op_advance_overrider,
+            CumSum: op_cumsum_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
