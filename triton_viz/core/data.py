@@ -184,6 +184,11 @@ class CastImpl(Op):
 
 
 @dataclass
+class Reshape(Op):
+    name: ClassVar[str] = "reshape"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str

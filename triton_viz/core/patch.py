@@ -32,6 +32,7 @@ from .data import (
     Idiv,
     Rsqrt,
     CastImpl,
+    Reshape,
 )
 import inspect
 import ast
@@ -70,7 +71,34 @@ op_list = [
     Idiv,
     Rsqrt,
     CastImpl,
+    Reshape,
 ]
+
+# Hardcoded operation attribute names to avoid issues with lambda functions
+_OP_ATTR_NAMES = {
+    ProgramId: "create_get_program_id",
+    RawStore: "create_store",
+    Store: "create_masked_store",
+    RawLoad: "create_load",
+    Load: "create_masked_load",
+    Dot: "create_dot",
+    UnaryOp: "unary_op",
+    BinaryOp: "binary_op",
+    TernaryOp: "ternary_op",
+    MakeRange: "create_make_range",
+    AddPtr: "create_addptr",
+    ExpandDims: "create_expand_dims",
+    Broadcast: "create_broadcast",
+    Splat: "create_splat",
+    MakeBlockPointer: "create_make_block_ptr",
+    TensorPointerLoad: "create_tensor_pointer_load",
+    TensorPointerStore: "create_tensor_pointer_store",
+    Idiv: "create_idiv",
+    Rsqrt: "create_rsqrt",
+    CastImpl: "cast_impl",
+    Reshape: "create_reshape",
+}
+
 original_ops = {
     ProgramId: interpreter_builder.create_get_program_id,
     RawStore: interpreter_builder.create_store,
@@ -92,6 +120,7 @@ original_ops = {
     Idiv: interpreter_builder.create_idiv,
     Rsqrt: interpreter_builder.create_rsqrt,
     CastImpl: interpreter_builder.cast_impl,
+    Reshape: interpreter_builder.create_reshape,
 }
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
@@ -146,9 +175,9 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
     """
     if op_type in original_ops:
         # create a new function that calls the before_callback, the original op and the after_callback
-        op_name = original_ops[op_type].__name__
-        current_op = getattr(interpreter_builder, op_name)
-        patched_op = PatchOp(current_op, op_type, callbacks)
+        op_name = _OP_ATTR_NAMES[op_type]
+        original_op = original_ops[op_type]
+        patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(
             interpreter_builder,
             op_name,
@@ -156,8 +185,8 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
         )
     elif op_type in reduce_map:
         op_name = reduce_map[op_type].__name__
-        current_op = getattr(tl, op_name)
-        patched_op = PatchOp(current_op, op_type, callbacks)
+        original_op = getattr(tl, op_name)
+        patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
@@ -167,11 +196,13 @@ def unpatch_op(op_type: type[Op]):
     """
     Unregister a callback for an operator.
 
-    :param op_name: The name of the operator to unregister the callback for.
+    :param op_type: The type of the operator to unregister the callback for.
     """
     if op_type in original_ops:
-        op_name = original_ops[op_type].__name__
-        setattr(interpreter_builder, op_name, original_ops[op_type])
+        original_op = original_ops[op_type]
+        # Use hardcoded name from _OP_ATTR_NAMES
+        op_name = _OP_ATTR_NAMES[op_type]
+        setattr(interpreter_builder, op_name, original_op)
 
 
 class _LoopIter:

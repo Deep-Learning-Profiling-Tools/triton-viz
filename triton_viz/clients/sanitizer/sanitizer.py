@@ -52,6 +52,7 @@ from ...core.data import (
     Idiv,
     Rsqrt,
     CastImpl,
+    Reshape,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -701,12 +702,14 @@ class SymbolicExpr:
         "equal": "==",
         "maximum": "max",
         "bitwise_and": "&",
+        "right_shift": ">>",
+        "left_shift": "<<",
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum", "dot")
     POINTER_OPS = ("make_block_ptr", "addptr")
-    BROADCAST_OPS = ("splat", "expand_dims", "broadcast")
+    BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
     CAST_OPS = ("cast_impl",)
     SUPPORTED_OPS = (
         BASIC_OPS
@@ -762,6 +765,8 @@ class SymbolicExpr:
                 "equal",
                 "maximum",
                 "bitwise_and",
+                "right_shift",
+                "left_shift",
             )
         },
         # Ternary ops
@@ -778,6 +783,7 @@ class SymbolicExpr:
         "splat": Spec(req=("shape", "arg"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
         "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        "reshape": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
     }
@@ -851,6 +857,9 @@ class SymbolicExpr:
     def __getattr__(self, name):
         if name in self.children:
             return self.children[name]
+        # Special handling for dtype to provide compatibility
+        if name == "dtype":
+            return self.dtype_tt
         raise AttributeError(name)
 
     def set_attr(self, name, values):
@@ -1692,6 +1701,8 @@ class SanitizerSymbolicExecution(Sanitizer):
                 np.fmod: lambda lhs, rhs: lhs % rhs,
                 np.maximum: lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
                 np.bitwise_and: lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
+                np.right_shift: lambda lhs, rhs: SymbolicExpr("right_shift", lhs, rhs),
+                np.left_shift: lambda lhs, rhs: SymbolicExpr("left_shift", lhs, rhs),
             }
             lhs_sym = SymbolicExpr.from_value(lhs)
             rhs_sym = SymbolicExpr.from_value(rhs)
@@ -1776,6 +1787,17 @@ class SanitizerSymbolicExecution(Sanitizer):
         def op_cast_impl_overrider(src, dst_type):
             return SymbolicExpr("cast_impl", src, dst_type)
 
+        def op_reshape_overrider(arg, shape, allow_reorder):
+            # For symbolic execution, we track the reshape operation
+            # arg is the input tensor, shape is the new shape, allow_reorder is a flag
+            arg_sym = SymbolicExpr.from_value(arg)
+            shape_sym = SymbolicExpr.from_value(shape)
+            # Create a reshape symbolic expression
+            result = SymbolicExpr("reshape", arg_sym, shape_sym)
+            # The dtype should be preserved from the input
+            result.dtype_tt = arg_sym.dtype_tt if hasattr(arg_sym, "dtype_tt") else None
+            return result
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -1798,6 +1820,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Idiv: op_idiv_overrider,
             Rsqrt: op_rsqrt_overrider,
             CastImpl: op_cast_impl_overrider,
+            Reshape: op_reshape_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
