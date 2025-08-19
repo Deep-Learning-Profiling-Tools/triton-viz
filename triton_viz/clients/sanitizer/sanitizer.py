@@ -57,6 +57,7 @@ from ...core.data import (
     Reshape,
     Fabs,
     Ashr,
+    Advance,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -714,7 +715,7 @@ class SymbolicExpr:
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
     REDUCE_OPS = ("sum", "max", "min", "dot")
-    POINTER_OPS = ("make_block_ptr", "addptr")
+    POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
     CAST_OPS = ("cast_impl",)
     SUPPORTED_OPS = (
@@ -789,6 +790,7 @@ class SymbolicExpr:
             req=("base", "shape", "strides", "offsets", "block_shape", "order")
         ),
         "addptr": Spec(req=("ptr", "offset"), post=_addptr_post),
+        "advance": Spec(req=("ptr", "offsets")),
         # Broadcasting / shape manipulation
         "splat": Spec(req=("shape", "arg"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
@@ -1136,7 +1138,9 @@ class SymbolicExpr:
             if self.op == "bitwise_and":
                 self._z3 = And(lhs, rhs)
             if self.op == "ashr":
-                raise NotImplementedError("Arithmetic shift right is not implemented in Z3")
+                raise NotImplementedError(
+                    "Arithmetic shift right is not implemented in Z3"
+                )
 
         # where(cond, lhs, rhs)
         if self.op == "where":
@@ -1207,6 +1211,9 @@ class SymbolicExpr:
         if self.op == "cast_impl":
             # Cast operation - pass through the source value
             self._z3, self._constraints = self.src._to_z3()
+
+        if self.op == "advance":
+            raise NotImplementedError("Advance operation is not implemented yet")
 
         if self._z3 is None:
             # Other operations can be implemented as needed
@@ -1831,6 +1838,12 @@ class SanitizerSymbolicExecution(Sanitizer):
             rhs_sym = SymbolicExpr.from_value(rhs)
             return SymbolicExpr("ashr", lhs_sym, rhs_sym)
 
+        def op_advance_overrider(ptr, offsets):
+            # Advance operation for block pointers
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            offsets_sym = SymbolicExpr.from_value(offsets)
+            return SymbolicExpr("advance", ptr_sym, offsets_sym)
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -1858,6 +1871,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Reshape: op_reshape_overrider,
             Fabs: op_fabs_overrider,
             Ashr: op_ashr_overrider,
+            Advance: op_advance_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:

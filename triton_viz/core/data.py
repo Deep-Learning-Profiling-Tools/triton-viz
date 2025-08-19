@@ -199,6 +199,11 @@ class Ashr(Op):
 
 
 @dataclass
+class Advance(Op):
+    name: ClassVar[str] = "advance"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str
