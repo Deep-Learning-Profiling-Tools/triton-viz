@@ -45,6 +45,8 @@ from ...core.data import (
     ExpandDims,
     Broadcast,
     ReduceSum,
+    ReduceMax,
+    ReduceMin,
     Splat,
     MakeBlockPointer,
     TensorPointerLoad,
@@ -709,7 +711,7 @@ class SymbolicExpr:
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
-    REDUCE_OPS = ("sum", "dot")
+    REDUCE_OPS = ("sum", "max", "min", "dot")
     POINTER_OPS = ("make_block_ptr", "addptr")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
     CAST_OPS = ("cast_impl",)
@@ -776,6 +778,8 @@ class SymbolicExpr:
         "where": Spec(req=("cond", "lhs", "rhs")),
         # Reduction ops
         "sum": Spec(req=("input", "axis", "keepdims")),
+        "max": Spec(req=("input", "axis", "keepdims")),
+        "min": Spec(req=("input", "axis", "keepdims")),
         "dot": Spec(req=("a", "b"), opt=("d",)),
         # Pointer utilities
         "make_block_ptr": Spec(
@@ -1143,6 +1147,12 @@ class SymbolicExpr:
         if self.op == "sum":
             arr, self._constraints = self.input._to_z3()
             self._z3 = Sum(arr)
+
+        if self.op == "max":
+            raise NotImplementedError("_to_z3 of max is not implemented yet")
+
+        if self.op == "min":
+            raise NotImplementedError("_to_z3 of min is not implemented yet")
 
         if self.op == "load" or self.op == "store":
             # Load and store operations
@@ -1758,6 +1768,12 @@ class SanitizerSymbolicExecution(Sanitizer):
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
             return SymbolicExpr("sum", SymbolicExpr.from_value(input), axis, keep_dims)
 
+        def op_reduce_max_overrider(input, axis=None, keep_dims=False, **kwargs):
+            return SymbolicExpr("max", SymbolicExpr.from_value(input), axis, keep_dims)
+
+        def op_reduce_min_overrider(input, axis=None, keep_dims=False, **kwargs):
+            return SymbolicExpr("min", SymbolicExpr.from_value(input), axis, keep_dims)
+
         def op_splat_overrider(shape, arg):
             return SymbolicExpr("splat", shape, SymbolicExpr.from_value(arg))
 
@@ -1820,6 +1836,8 @@ class SanitizerSymbolicExecution(Sanitizer):
             ExpandDims: op_expand_dims_overrider,
             Broadcast: op_broadcast_overrider,
             ReduceSum: op_reduce_sum_overrider,
+            ReduceMax: op_reduce_max_overrider,
+            ReduceMin: op_reduce_min_overrider,
             Splat: op_splat_overrider,
             MakeBlockPointer: op_make_block_ptr_overrider,
             TensorPointerLoad: op_tensor_pointer_load_overrider,
