@@ -1,5 +1,8 @@
+import os
+import shutil
 import runpy
 import sys
+import pytest
 import triton
 import triton_viz
 from triton_viz.clients import Sanitizer
@@ -65,10 +68,6 @@ def apply():
 
     script = sys.argv[1]
 
-    # Check if the first argument is a file that exists
-    import os
-    import shutil
-
     if os.path.isfile(script):
         # It's a Python script file, run it directly
         sys.argv = sys.argv[1:]
@@ -78,13 +77,18 @@ def apply():
         cmd = sys.argv[1:]
 
         # Check if it's an executable command
-        if shutil.which(cmd[0]) and cmd[0] == "pytest":
-            import pytest
-
-            sys.exit(pytest.main(cmd[1:]))
-        else:
-            print(f"Error: '{script}' is neither a valid file nor a command")
-            sys.exit(1)
+        if shutil.which(cmd[0]):
+            if cmd[0] == "pytest":
+                sys.exit(pytest.main(cmd[1:]))
+            elif cmd[0] == "python":
+                sys.argv = cmd[1:]
+                try:
+                    runpy.run_path(cmd[1], run_name="__main__")
+                except SystemExit as e:
+                    sys.exit(e.code)
+                sys.exit(0)
+        print(f"Error: '{script}' is neither a valid file nor a command")
+        sys.exit(1)
 
 
 def enable_sanitizer():
