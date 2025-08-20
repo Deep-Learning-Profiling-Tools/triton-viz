@@ -204,6 +204,21 @@ class Advance(Op):
 
 
 @dataclass
+class FpToFp(Op):
+    name: ClassVar[str] = "fp_to_fp"
+
+
+@dataclass
+class Umulhi(Op):
+    name: ClassVar[str] = "umulhi"
+
+
+@dataclass
+class Trans(Op):
+    name: ClassVar[str] = "trans"
+
+
+@dataclass
 class CumSum(Op):
     name: ClassVar[str] = "cumsum"
 

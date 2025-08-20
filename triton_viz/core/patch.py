@@ -36,6 +36,9 @@ from .data import (
     Fabs,
     Ashr,
     Advance,
+    FpToFp,
+    Umulhi,
+    Trans,
     CumSum,
 )
 import inspect
@@ -79,6 +82,9 @@ op_list = [
     Fabs,
     Ashr,
     Advance,
+    FpToFp,
+    Umulhi,
+    Trans,
     CumSum,
 ]
 
@@ -108,6 +114,9 @@ _OP_ATTR_NAMES = {
     Fabs: "create_fabs",
     Ashr: "create_ashr",
     Advance: "create_advance",
+    FpToFp: "create_fp_to_fp",
+    Umulhi: "create_umulhi",
+    Trans: "create_trans",
 }
 
 original_ops = {
@@ -135,6 +144,9 @@ original_ops = {
     Fabs: interpreter_builder.create_fabs,
     Ashr: interpreter_builder.create_ashr,
     Advance: interpreter_builder.create_advance,
+    FpToFp: interpreter_builder.create_fp_to_fp,
+    Umulhi: interpreter_builder.create_umulhi,
+    Trans: interpreter_builder.create_trans,
 }
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
@@ -143,6 +155,9 @@ reduce_map: dict[type[Op], Callable] = {
 }
 scan_map: dict[type[Op], Callable] = {
     CumSum: tl.cumsum,
+}
+math_map: dict[type[Op], Callable] = {
+    Umulhi: tl.math.umulhi,
 }
 
 
@@ -169,6 +184,8 @@ class PatchOp:
                     self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
                     args[0].dtype,
                 )
+            elif self.op_type in math_map:
+                raise NotImplementedError()
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 from ..clients.sanitizer.sanitizer import SymbolicExpr
@@ -201,10 +218,18 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
             lambda *args, **kwargs: patched_op(*args, **kwargs),
         )
     elif op_type in reduce_map or op_type in scan_map:
-        op_name = reduce_map[op_type].__name__
+        if op_type in reduce_map:
+            op_name = reduce_map[op_type].__name__
+        elif op_type in scan_map:
+            op_name = scan_map[op_type].__name__
         original_op = getattr(tl, op_name)
         patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
+    elif op_type in math_map:
+        op_name = math_map[op_type].__name__
+        original_op = getattr(tl.math, op_name)
+        patched_op = PatchOp(original_op, op_type, callbacks)
+        setattr(tl.math, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
 
@@ -421,8 +446,10 @@ class FakeTensor:
     def data_ptr(self) -> int:
         return self._data_ptr
 
-    def stride(self) -> tuple[int, ...]:
-        return self._stride
+    def stride(self, index=None) -> tuple[int, ...]:
+        if index is None:
+            return self._stride
+        return self._stride[index]
 
     def is_contiguous(self) -> bool:
         return self._is_contiguous

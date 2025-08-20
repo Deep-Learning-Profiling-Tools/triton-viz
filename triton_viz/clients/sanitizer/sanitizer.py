@@ -58,6 +58,9 @@ from ...core.data import (
     Fabs,
     Ashr,
     Advance,
+    FpToFp,
+    Umulhi,
+    Trans,
     CumSum,
 )
 from ..utils import (
@@ -708,6 +711,7 @@ class SymbolicExpr:
         "not_equal": "!=",
         "equal": "==",
         "maximum": "max",
+        "minimum": "min",
         "bitwise_and": "&",
         "right_shift": ">>",
         "left_shift": "<<",
@@ -775,6 +779,7 @@ class SymbolicExpr:
                 "not_equal",
                 "equal",
                 "maximum",
+                "minimum",
                 "bitwise_and",
                 "right_shift",
                 "left_shift",
@@ -795,7 +800,6 @@ class SymbolicExpr:
             req=("base", "shape", "strides", "offsets", "block_shape", "order")
         ),
         "addptr": Spec(req=("ptr", "offset"), post=_addptr_post),
-        "advance": Spec(req=("ptr", "offsets")),
         # Broadcasting / shape manipulation
         "splat": Spec(req=("shape", "arg"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
@@ -803,6 +807,9 @@ class SymbolicExpr:
         "reshape": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
+        # Misc
+        "advance": Spec(req=("ptr", "offsets")),
+        "umulhi": Spec(req=("lhs", "rhs")),
     }
 
     ARANGE_COUNTER = 0  # Used to name arange variables
@@ -1140,6 +1147,8 @@ class SymbolicExpr:
                 self._z3 = lhs != rhs
             if self.op == "maximum":
                 self._z3 = If(lhs >= rhs, lhs, rhs)
+            if self.op == "minimum":
+                self._z3 = If(lhs <= rhs, lhs, rhs)
             if self.op == "bitwise_and":
                 self._z3 = And(lhs, rhs)
             if self.op == "ashr":
@@ -1330,9 +1339,15 @@ class SymbolicExpr:
                 obj.arg.concretize(),
             )
         elif obj.op in SymbolicExpr.BINARY_OPS:
-            result = obj.concrete_fn(
-                obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
-            )
+            # Special handling for idiv which doesn't take a third parameter
+            if obj.op == "idiv":
+                result = obj.concrete_fn(
+                    obj.lhs.concretize(), obj.rhs.concretize()
+                )
+            else:
+                result = obj.concrete_fn(
+                    obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
+                )
         elif obj.op == "load":
             from ...core.patch import original_ops
 
@@ -1730,6 +1745,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 np.equal: lambda lhs, rhs: lhs == rhs,
                 np.fmod: lambda lhs, rhs: lhs % rhs,
                 np.maximum: lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
+                np.minimum: lambda lhs, rhs: SymbolicExpr("minimum", lhs, rhs),
                 np.bitwise_and: lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
                 np.right_shift: lambda lhs, rhs: SymbolicExpr("right_shift", lhs, rhs),
                 np.left_shift: lambda lhs, rhs: SymbolicExpr("left_shift", lhs, rhs),
@@ -1815,7 +1831,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             pass
 
         def op_idiv_overrider(lhs, rhs):
-            return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
+            result = SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
+            result.binary_numpy_op = np.floor_divide
+            return result
 
         def op_rsqrt_overrider(arg):
             return SymbolicExpr("rsqrt", SymbolicExpr.from_value(arg))
@@ -1848,6 +1866,17 @@ class SanitizerSymbolicExecution(Sanitizer):
             ptr_sym = SymbolicExpr.from_value(ptr)
             offsets_sym = SymbolicExpr.from_value(offsets)
             return SymbolicExpr("advance", ptr_sym, offsets_sym)
+
+        def op_fptofp_overrider(src, dst_type, rounding_mode):
+            return SymbolicExpr("fptofp", SymbolicExpr.from_value(src), dst_type, rounding_mode)
+
+        def op_umulhi_overrider(lhs, rhs):
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            return SymbolicExpr("umulhi", lhs_sym, rhs_sym)
+        
+        def op_trans_overrider(arg, perm):
+            return SymbolicExpr("trans", SymbolicExpr.from_value(arg), perm)
 
         def op_cumsum_overrider(input, axis, reverse=False, dtype=None):
             return SymbolicExpr(
@@ -1882,6 +1911,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             Fabs: op_fabs_overrider,
             Ashr: op_ashr_overrider,
             Advance: op_advance_overrider,
+            FpToFp: op_fptofp_overrider,
+            Umulhi: op_umulhi_overrider,
+            Trans: op_trans_overrider,
             CumSum: op_cumsum_overrider,
         }
 
