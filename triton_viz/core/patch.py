@@ -442,6 +442,7 @@ class FakeTensor:
     _stride: tuple[int, ...] = ()
     _is_contiguous: bool = True
     _element_size: int = 1
+    device = "fake_tensor"
 
     def data_ptr(self) -> int:
         return self._data_ptr
