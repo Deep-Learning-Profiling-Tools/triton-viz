@@ -50,14 +50,9 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 Upon successfully installing Triton, install Torch using the following command:
 
 ```sh
-pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
+pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 ```
 
-Upon successful installation of Torch make sure to uninstall `pytorch-triton` using the following command:
-
-```sh
-pip uninstall pytorch-triton
-```
 
 ### Installation of Triton-Viz
 
