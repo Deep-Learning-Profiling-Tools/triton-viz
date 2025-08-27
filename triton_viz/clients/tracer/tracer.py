@@ -111,7 +111,7 @@ class Tracer(Client):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
-        return None, None, None
+        return None, None, None ,None
 
     def finalize(self) -> list:
         self.tensors.clear()
