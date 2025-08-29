@@ -191,18 +191,37 @@ def get_load_value():
         return jsonify({"error": "Global tensor data not found"}), 200
 
 
-def run_flask_with_cloudflared():
-    cloudflared_port = 8000  # You can change this port if needed
-    tunnel_url = _run_cloudflared(cloudflared_port, 8001)  # not too important
+def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None):
+    """
+    Run the Flask app on a given port and expose it via Cloudflared.
+
+    :param port: Local Flask port to bind to. Defaults to 8000.
+    :param tunnel_port: Local tunnel control port for cloudflared. Defaults to port + 1.
+    """
+    cloudflared_port = port
+    if tunnel_port is None:
+        tunnel_port = cloudflared_port + 1
+    tunnel_url = _run_cloudflared(cloudflared_port, tunnel_port)
     print(f"Cloudflare tunnel URL: {tunnel_url}")
-    app.run(port=cloudflared_port)
+    app.run(host="0.0.0.0", port=cloudflared_port, debug=False, use_reloader=False)
 
 
-def launch(share=True):
+def launch(share: bool = True, port: int | None = None):
+    """
+    Launch the Triton-Viz Flask server.
+
+    :param share: If True, expose via cloudflared (public URL). If False, serve locally only.
+    :param port: Optional port override. Defaults to 8000 when share=True, else 5001.
+    """
     print("Launching Triton viz tool")
+    default_port = 8000 if share else 5001
+    actual_port = port or int(os.getenv("TRITON_VIZ_PORT", default_port))
+
     if share:
         print("--------")
-        flask_thread = threading.Thread(target=run_flask_with_cloudflared)
+        flask_thread = threading.Thread(
+            target=run_flask_with_cloudflared, args=(actual_port, None)
+        )
         flask_thread.start()
 
         # Wait for the server to start
@@ -210,9 +229,9 @@ def launch(share=True):
 
         # Try to get the tunnel URL by making a request to the local server
         try:
-            response = requests.get("http://localhost:8000")
+            response = requests.get(f"http://localhost:{actual_port}")
             public_url = response.url
-            print("Running on local URL:  http://localhost:8000")
+            print(f"Running on local URL:  http://localhost:{actual_port}")
             print(f"Running on public URL: {public_url}")
             print(
                 "\nThis share link expires in 72 hours. For free permanent hosting and GPU upgrades, check out Spaces: https://huggingface.co/spaces"
@@ -222,9 +241,9 @@ def launch(share=True):
             print("Setting up public URL... Please wait.")
     else:
         print("--------")
-        print("Running on local URL:  http://localhost:5001")
+        print(f"Running on local URL:  http://localhost:{actual_port}")
         print("--------")
-        app.run(port=5001)
+        app.run(host="0.0.0.0", port=actual_port, debug=False, use_reloader=False)
 
 
 # This function can be called to stop the Flask server if needed
