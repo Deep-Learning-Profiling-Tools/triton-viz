@@ -19,6 +19,8 @@ global_data = None
 raw_tensor_data = None
 precomputed_c_values = {}
 current_fullscreen_op = None
+last_public_url = None
+last_local_port = None
 
 
 def precompute_c_values(op_data):
@@ -201,7 +203,10 @@ def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None)
     cloudflared_port = port
     if tunnel_port is None:
         tunnel_port = cloudflared_port + 1
+    global last_public_url, last_local_port
     tunnel_url = _run_cloudflared(cloudflared_port, tunnel_port)
+    last_public_url = tunnel_url
+    last_local_port = cloudflared_port
     print(f"Cloudflare tunnel URL: {tunnel_url}")
     app.run(host="0.0.0.0", port=cloudflared_port, debug=False, use_reloader=False)
 
@@ -229,24 +234,60 @@ def launch(share: bool = True, port: int | None = None):
 
         # Try to get the tunnel URL by making a request to the local server
         try:
-            response = requests.get(f"http://localhost:{actual_port}")
-            public_url = response.url
-            print(f"Running on local URL:  http://localhost:{actual_port}")
-            print(f"Running on public URL: {public_url}")
+            local_url = f"http://localhost:{actual_port}"
+            # touch local server to ensure it's up
+            _ = requests.get(local_url)
+            public_url = last_public_url
+            print(f"Running on local URL:  {local_url}")
+            if public_url:
+                print(f"Running on public URL: {public_url}")
             print(
                 "\nThis share link expires in 72 hours. For free permanent hosting and GPU upgrades, check out Spaces: https://huggingface.co/spaces"
             )
             print("--------")
+            return local_url, public_url
         except requests.exceptions.RequestException:
             print("Setting up public URL... Please wait.")
     else:
         print("--------")
-        print(f"Running on local URL:  http://localhost:{actual_port}")
+        local_url = f"http://localhost:{actual_port}"
+        print(f"Running on local URL:  {local_url}")
         print("--------")
+        global last_local_port
+        last_local_port = actual_port
         app.run(host="0.0.0.0", port=actual_port, debug=False, use_reloader=False)
+        return local_url, None
 
 
-# This function can be called to stop the Flask server if needed
-def stop_server(flask_thread):
-    # Implement a way to stop the Flask server
-    pass
+def get_last_public_url():
+    """Return the last Cloudflare public URL created by launch(share=True)."""
+    return last_public_url
+
+
+@app.route("/shutdown", methods=["POST", "GET"])
+def _shutdown():
+    """Shutdown Flask development server (useful for notebooks)."""
+    from flask import request as _req
+
+    func = _req.environ.get("werkzeug.server.shutdown")
+    if func is None:
+        return jsonify(
+            {"status": "error", "message": "Not running with the Werkzeug Server"}
+        ), 400
+    func()
+    return jsonify({"status": "ok", "message": "Server shutting down..."})
+
+
+def stop_server(port: int | None = None):
+    """
+    Stop the running Flask server by calling the /shutdown endpoint.
+    If port is None, it will try the last used local port.
+    """
+    target_port = port or last_local_port
+    if target_port is None:
+        return False
+    try:
+        requests.post(f"http://127.0.0.1:{target_port}/shutdown", timeout=2)
+        return True
+    except Exception:
+        return False
