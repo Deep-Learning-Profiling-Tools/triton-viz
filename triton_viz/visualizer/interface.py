@@ -54,6 +54,14 @@ def update_global_data():
     # Pass the records to analyze_records
     analysis_data = analyze_records(all_records)
     viz_data = get_visualization_data()
+    try:
+        keys = list(viz_data.get("visualization_data", {}).keys())
+        print(f"[viz] grids: {keys}")
+        for k in keys:
+            ops = viz_data["visualization_data"].get(k, [])
+            print(f"[viz] grid {k} ops: {[op.get('type') for op in ops]}")
+    except Exception as e:
+        print("[viz] debug logging failed:", e)
     global_data = {
         "ops": {
             "visualization_data": viz_data["visualization_data"],
@@ -95,8 +103,8 @@ def debug_page():
 @app.route("/api/data")
 def get_data():
     global global_data
-    if global_data is None:
-        update_global_data()
+    # 每次请求前都尝试刷新一次，避免跨进程导致的不可见
+    update_global_data()
     return jsonify(global_data)
 
 
@@ -248,6 +256,10 @@ def launch(share: bool = True, port: int | None = None):
             return local_url, public_url
         except requests.exceptions.RequestException:
             print("Setting up public URL... Please wait.")
+            # Even if the readiness check fails, return the intended URLs so callers don't crash
+            local_url = f"http://localhost:{actual_port}"
+            public_url = last_public_url
+            return local_url, public_url
     else:
         print("--------")
         local_url = f"http://localhost:{actual_port}"
