@@ -184,6 +184,46 @@ class CastImpl(Op):
 
 
 @dataclass
+class Reshape(Op):
+    name: ClassVar[str] = "reshape"
+
+
+@dataclass
+class Fabs(Op):
+    name: ClassVar[str] = "fabs"
+
+
+@dataclass
+class Ashr(Op):
+    name: ClassVar[str] = "ashr"
+
+
+@dataclass
+class Advance(Op):
+    name: ClassVar[str] = "advance"
+
+
+@dataclass
+class FpToFp(Op):
+    name: ClassVar[str] = "fp_to_fp"
+
+
+@dataclass
+class Umulhi(Op):
+    name: ClassVar[str] = "umulhi"
+
+
+@dataclass
+class Trans(Op):
+    name: ClassVar[str] = "trans"
+
+
+@dataclass
+class CumSum(Op):
+    name: ClassVar[str] = "cumsum"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str
