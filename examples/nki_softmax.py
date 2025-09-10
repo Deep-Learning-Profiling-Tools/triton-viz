@@ -32,7 +32,7 @@ def softmax(in_tensor):
 
 if __name__ == "__main__":
     cfg.reset()
-    device = "xla"
+    device = "cpu"
     size = 16
     BLOCK_SIZE = 8
     torch.manual_seed(0)
