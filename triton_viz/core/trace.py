@@ -91,7 +91,8 @@ class NKITrace(KernelInterface, TraceInterface):
         return KernelInterface.__getitem__(self, tuple(*grid))
 
 
-def trace(clients: str | Client | None = None, backend: str = "triton"):
+#def trace(clients: str | Client | None = None, backend: str = "triton"):
+def trace(clients: str | Client | None = None, backend: str = "nki"):
     """
     Create a trace object that can be used to run a kernel with instrumentation clients.
 

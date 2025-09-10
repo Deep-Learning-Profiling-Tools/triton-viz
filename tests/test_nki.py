@@ -37,7 +37,8 @@ def test_slicing():
     nd_array = NDArray(value=data, name='test_array')
     
     # Test [:, :] (all elements)
-    slice_all = nd_array[:, :]
+    #slice_all = nd_array[:, :]
+    slice_all = nd_array[:2, :2]
     print(f"nd_array[:, :] = {slice_all}")
     print(f"Value:\n{slice_all.value}")
     print()
