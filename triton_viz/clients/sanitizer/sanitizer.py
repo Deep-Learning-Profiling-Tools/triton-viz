@@ -45,6 +45,8 @@ from ...core.data import (
     ExpandDims,
     Broadcast,
     ReduceSum,
+    ReduceMax,
+    ReduceMin,
     Splat,
     MakeBlockPointer,
     TensorPointerLoad,
@@ -52,6 +54,14 @@ from ...core.data import (
     Idiv,
     Rsqrt,
     CastImpl,
+    Reshape,
+    Fabs,
+    Ashr,
+    Advance,
+    FpToFp,
+    Umulhi,
+    Trans,
+    CumSum,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -667,6 +677,7 @@ class SymbolicExpr:
         "exp",
         "exp2",
         "abs",
+        "fabs",
         "floor",
         "ceil",
         "log",
@@ -689,13 +700,18 @@ class SymbolicExpr:
         "not_equal": "!=",
         "equal": "==",
         "maximum": "max",
+        "minimum": "min",
         "bitwise_and": "&",
+        "right_shift": ">>",
+        "left_shift": "<<",
+        "ashr": ">>>",
     }
     BINARY_OPS = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS = ("where",)
-    REDUCE_OPS = ("sum", "dot")
-    POINTER_OPS = ("make_block_ptr", "addptr")
-    BROADCAST_OPS = ("splat", "expand_dims", "broadcast")
+    REDUCE_OPS = ("sum", "max", "min", "dot")
+    SCAN_OPS = ("cumsum",)
+    POINTER_OPS = ("make_block_ptr", "addptr", "advance")
+    BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
     CAST_OPS = ("cast_impl",)
     SUPPORTED_OPS = (
         BASIC_OPS
@@ -707,6 +723,7 @@ class SymbolicExpr:
         + POINTER_OPS
         + BROADCAST_OPS
         + CAST_OPS
+        + SCAN_OPS
     )
 
     OP_SPEC = {
@@ -724,6 +741,7 @@ class SymbolicExpr:
                 "exp",
                 "exp2",
                 "abs",
+                "fabs",
                 "floor",
                 "ceil",
                 "log",
@@ -750,13 +768,21 @@ class SymbolicExpr:
                 "not_equal",
                 "equal",
                 "maximum",
+                "minimum",
                 "bitwise_and",
+                "right_shift",
+                "left_shift",
+                "ashr",
             )
         },
         # Ternary ops
         "where": Spec(req=("cond", "lhs", "rhs")),
         # Reduction ops
         "sum": Spec(req=("input", "axis", "keepdims")),
+        "max": Spec(req=("input", "axis", "keepdims")),
+        "min": Spec(req=("input", "axis", "keepdims")),
+        # Scan Ops
+        "cumsum": Spec(req=("input", "axis", "reverse", "dtype")),
         "dot": Spec(req=("a", "b"), opt=("d",)),
         # Pointer utilities
         "make_block_ptr": Spec(
@@ -767,8 +793,12 @@ class SymbolicExpr:
         "splat": Spec(req=("shape", "arg"), post=_broadcast_dtype),
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
         "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        "reshape": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
+        # Misc
+        "advance": Spec(req=("ptr", "offsets")),
+        "umulhi": Spec(req=("lhs", "rhs")),
     }
 
     ARANGE_COUNTER = 0  # Used to name arange variables
@@ -840,6 +870,9 @@ class SymbolicExpr:
     def __getattr__(self, name):
         if name in self.children:
             return self.children[name]
+        # Special handling for dtype to provide compatibility
+        if name == "dtype":
+            return self.dtype_tt
         raise AttributeError(name)
 
     def set_attr(self, name, values):
@@ -1068,7 +1101,7 @@ class SymbolicExpr:
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if self.op in self.UNARY_OPS:
             val, self._constraints = self.arg._to_z3()
-            if self.op == "abs":
+            if self.op == "abs" or self.op == "fabs":
                 self._z3 = If(val >= 0, val, -val)
             else:
                 raise NotImplementedError(f"Unary op {self.op} is not implemented")
@@ -1103,8 +1136,14 @@ class SymbolicExpr:
                 self._z3 = lhs != rhs
             if self.op == "maximum":
                 self._z3 = If(lhs >= rhs, lhs, rhs)
+            if self.op == "minimum":
+                self._z3 = If(lhs <= rhs, lhs, rhs)
             if self.op == "bitwise_and":
                 self._z3 = And(lhs, rhs)
+            if self.op == "ashr":
+                raise NotImplementedError(
+                    "Arithmetic shift right is not implemented in Z3"
+                )
 
         # where(cond, lhs, rhs)
         if self.op == "where":
@@ -1120,6 +1159,12 @@ class SymbolicExpr:
         if self.op == "sum":
             arr, self._constraints = self.input._to_z3()
             self._z3 = Sum(arr)
+
+        if self.op == "max":
+            raise NotImplementedError("_to_z3 of max is not implemented yet")
+
+        if self.op == "min":
+            raise NotImplementedError("_to_z3 of min is not implemented yet")
 
         if self.op == "load" or self.op == "store":
             # Load and store operations
@@ -1169,6 +1214,9 @@ class SymbolicExpr:
         if self.op == "cast_impl":
             # Cast operation - pass through the source value
             self._z3, self._constraints = self.src._to_z3()
+
+        if self.op == "advance":
+            raise NotImplementedError("Advance operation is not implemented yet")
 
         if self._z3 is None:
             # Other operations can be implemented as needed
@@ -1280,9 +1328,13 @@ class SymbolicExpr:
                 obj.arg.concretize(),
             )
         elif obj.op in SymbolicExpr.BINARY_OPS:
-            result = obj.concrete_fn(
-                obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
-            )
+            # Special handling for idiv which doesn't take a third parameter
+            if obj.op == "idiv":
+                result = obj.concrete_fn(obj.lhs.concretize(), obj.rhs.concretize())
+            else:
+                result = obj.concrete_fn(
+                    obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
+                )
         elif obj.op == "load":
             from ...core.patch import original_ops
 
@@ -1680,7 +1732,10 @@ class SanitizerSymbolicExecution(Sanitizer):
                 np.equal: lambda lhs, rhs: lhs == rhs,
                 np.fmod: lambda lhs, rhs: lhs % rhs,
                 np.maximum: lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
+                np.minimum: lambda lhs, rhs: SymbolicExpr("minimum", lhs, rhs),
                 np.bitwise_and: lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
+                np.right_shift: lambda lhs, rhs: SymbolicExpr("right_shift", lhs, rhs),
+                np.left_shift: lambda lhs, rhs: SymbolicExpr("left_shift", lhs, rhs),
             }
             lhs_sym = SymbolicExpr.from_value(lhs)
             rhs_sym = SymbolicExpr.from_value(rhs)
@@ -1733,6 +1788,12 @@ class SanitizerSymbolicExecution(Sanitizer):
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
             return SymbolicExpr("sum", SymbolicExpr.from_value(input), axis, keep_dims)
 
+        def op_reduce_max_overrider(input, axis=None, keep_dims=False, **kwargs):
+            return SymbolicExpr("max", SymbolicExpr.from_value(input), axis, keep_dims)
+
+        def op_reduce_min_overrider(input, axis=None, keep_dims=False, **kwargs):
+            return SymbolicExpr("min", SymbolicExpr.from_value(input), axis, keep_dims)
+
         def op_splat_overrider(shape, arg):
             return SymbolicExpr("splat", shape, SymbolicExpr.from_value(arg))
 
@@ -1780,13 +1841,59 @@ class SanitizerSymbolicExecution(Sanitizer):
             raise NotImplementedError("TensorPointerStore is not supported yet.")
 
         def op_idiv_overrider(lhs, rhs):
-            return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
+            result = SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
+            result.binary_numpy_op = np.floor_divide
+            return result
 
         def op_rsqrt_overrider(arg):
             return SymbolicExpr("rsqrt", SymbolicExpr.from_value(arg))
 
         def op_cast_impl_overrider(src, dst_type):
             return SymbolicExpr("cast_impl", src, dst_type)
+
+        def op_reshape_overrider(arg, shape, allow_reorder):
+            # For symbolic execution, we track the reshape operation
+            # arg is the input tensor, shape is the new shape, allow_reorder is a flag
+            arg_sym = SymbolicExpr.from_value(arg)
+            shape_sym = SymbolicExpr.from_value(shape)
+            # Create a reshape symbolic expression
+            result = SymbolicExpr("reshape", arg_sym, shape_sym)
+            # The dtype should be preserved from the input
+            result.dtype_tt = arg_sym.dtype_tt if hasattr(arg_sym, "dtype_tt") else None
+            return result
+
+        def op_fabs_overrider(arg):
+            arg_sym = SymbolicExpr.from_value(arg)
+            return SymbolicExpr("fabs", arg_sym)
+
+        def op_ashr_overrider(lhs, rhs):
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            return SymbolicExpr("ashr", lhs_sym, rhs_sym)
+
+        def op_advance_overrider(ptr, offsets):
+            # Advance operation for block pointers
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            offsets_sym = SymbolicExpr.from_value(offsets)
+            return SymbolicExpr("advance", ptr_sym, offsets_sym)
+
+        def op_fptofp_overrider(src, dst_type, rounding_mode):
+            return SymbolicExpr(
+                "fptofp", SymbolicExpr.from_value(src), dst_type, rounding_mode
+            )
+
+        def op_umulhi_overrider(lhs, rhs):
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            return SymbolicExpr("umulhi", lhs_sym, rhs_sym)
+
+        def op_trans_overrider(arg, perm):
+            return SymbolicExpr("trans", SymbolicExpr.from_value(arg), perm)
+
+        def op_cumsum_overrider(input, axis, reverse=False, dtype=None):
+            return SymbolicExpr(
+                "cumsum", SymbolicExpr.from_value(input), axis, reverse, dtype
+            )
 
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
@@ -1803,6 +1910,8 @@ class SanitizerSymbolicExecution(Sanitizer):
             ExpandDims: op_expand_dims_overrider,
             Broadcast: op_broadcast_overrider,
             ReduceSum: op_reduce_sum_overrider,
+            ReduceMax: op_reduce_max_overrider,
+            ReduceMin: op_reduce_min_overrider,
             Splat: op_splat_overrider,
             MakeBlockPointer: op_make_block_ptr_overrider,
             TensorPointerLoad: op_tensor_pointer_load_overrider,
@@ -1810,6 +1919,14 @@ class SanitizerSymbolicExecution(Sanitizer):
             Idiv: op_idiv_overrider,
             Rsqrt: op_rsqrt_overrider,
             CastImpl: op_cast_impl_overrider,
+            Reshape: op_reshape_overrider,
+            Fabs: op_fabs_overrider,
+            Ashr: op_ashr_overrider,
+            Advance: op_advance_overrider,
+            FpToFp: op_fptofp_overrider,
+            Umulhi: op_umulhi_overrider,
+            Trans: op_trans_overrider,
+            CumSum: op_cumsum_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
