@@ -1,5 +1,5 @@
 from ...core.client import Client
-from ...core.callbacks import OpCallbacks
+from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import Op, Load, Store
 from .data import LoadStoreBytes
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
@@ -61,7 +61,7 @@ class Profiler(Client):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
-        return None, None, None, None
+        return ForLoopCallbacks()
 
     def finalize(self) -> list:
         return [self.load_bytes, self.store_bytes]
