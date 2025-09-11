@@ -28,7 +28,7 @@ import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
 from ...core.client import Client
-from ...core.callbacks import OpCallbacks
+from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import (
     Op,
     RawLoad,
@@ -573,7 +573,7 @@ class SanitizerBruteForce(Sanitizer):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
-        return None, None, None, None
+        return ForLoopCallbacks()
 
     def finalize(self) -> list:
         return self.records
@@ -2004,11 +2004,11 @@ class SanitizerSymbolicExecution(Sanitizer):
                     f"(checked {len(ctx.pending_checks)} unique addr patterns)"
                 )
 
-        return (
-            loop_hook_before,
-            loop_hook_iter_overrider,
-            loop_hook_iter_listener,
-            loop_hook_after,
+        return ForLoopCallbacks(
+            before_loop_callback=loop_hook_before,
+            loop_iter_overrider=loop_hook_iter_overrider,
+            loop_iter_listener=loop_hook_iter_listener,
+            after_loop_callback=loop_hook_after,
         )
 
     def finalize(self) -> list:
