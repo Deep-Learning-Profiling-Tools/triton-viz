@@ -1118,7 +1118,7 @@ class SymbolicExpr:
                 self._z3 = lhs - rhs
             if self.op == "mul":
                 self._z3 = lhs * rhs
-            if self.op in ("idiv"):
+            if self.op == "idiv":
                 self._z3 = lhs / rhs
             if self.op == "mod":
                 self._z3 = lhs % rhs
@@ -1451,7 +1451,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.tensors: list[Tensor] = []
         self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id: int = 0
-        self.need_full_grid: bool = False
+        self.need_full_grid: Optional[bool] = None
         self.loop_stack: list[LoopContext] = []
         self.last_grid: Optional[tuple[int, int, int]] = None
         self.cache_args: list = []
@@ -1582,15 +1582,23 @@ class SanitizerSymbolicExecution(Sanitizer):
                 # Must continue to run the program at least once
                 # We don't clear up tensors at this point
                 return True
+            else:
+                return False
         # 2nd time we launch this program, depends on whether we need a full grid
+        if self.need_full_grid is None:
+            return True
         return self.need_full_grid
 
     def post_run_callback(self, fn: Callable) -> bool:
+        if self.need_full_grid is None:
+            self.need_full_grid = False
         if self.grid_idx == self.last_grid or not self.need_full_grid:
             self._clear_cache()
             self.tensors.clear()
             self.tensor_addrs.clear()
-        return self.need_full_grid
+        ret = self.need_full_grid
+        self.need_full_grid = None  # reset for the next run
+        return ret
 
     def arg_callback(self, name, arg, arg_cvt):
         if not hasattr(arg, "data_ptr"):
