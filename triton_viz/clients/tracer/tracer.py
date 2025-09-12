@@ -1,5 +1,6 @@
 from ...core.client import Client
-from ...core.callbacks import OpCallbacks
+
+from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore
 from typing import Callable, Optional, Union
 import numpy as np
@@ -134,7 +135,7 @@ class Tracer(Client):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
-        return None, None, None, None
+        return ForLoopCallbacks()
 
     def finalize(self) -> list:
         self.tensors.clear()
