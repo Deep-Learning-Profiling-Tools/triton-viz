@@ -1118,7 +1118,7 @@ class SymbolicExpr:
                 self._z3 = lhs - rhs
             if self.op == "mul":
                 self._z3 = lhs * rhs
-            if self.op in ("idiv"):
+            if self.op == "idiv":
                 self._z3 = lhs / rhs
             if self.op == "mod":
                 self._z3 = lhs % rhs
