@@ -1,7 +1,6 @@
 import pytest
 import torch
 import numpy as np
-from unittest.mock import patch
 
 import triton
 import triton.language as tl
@@ -21,9 +20,12 @@ from triton_viz.clients.sanitizer.sanitizer import (
 
 # ======== Init ===========
 def test_init_null_sanitizer():
-    with patch.object(cfg, "disable_sanitizer", True):
+    try:
+        cfg.disable_sanitizer = True
         s2 = Sanitizer(abort_on_error=True)
         assert isinstance(s2, NullSanitizer)
+    finally:
+        cfg.disable_sanitizer = False
 
 
 def test_init_symbolic_execution():
@@ -73,9 +75,12 @@ def null_sanitizer_kernel(idx_ptr):
 
 
 def test_null_sanitizer():
-    with patch.object(cfg, "disable_sanitizer", True):
+    try:
+        cfg.disable_sanitizer = True
         idx = torch.arange(128, dtype=torch.int32)
         null_sanitizer_kernel[(1,)](idx)
+    finally:
+        cfg.disable_sanitizer = False
 
 
 # ======== Indirect Load/Store =========
