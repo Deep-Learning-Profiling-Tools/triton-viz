@@ -13,29 +13,22 @@ from triton_viz.core.client import Client
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicExpr,
-    SanitizerBruteForce,
     NullSanitizer,
     SanitizerSymbolicExecution,
 )
 
-cfg.sanitizer_backend = "symexec"
-
 
 # ======== Init ===========
-def test_init_brute_force():
-    cfg.sanitizer_backend = "brute_force"
-    s1 = Sanitizer(abort_on_error=True)
-    assert isinstance(s1, SanitizerBruteForce) and s1.abort_on_error is True
-
-
 def test_init_null_sanitizer():
-    cfg.sanitizer_backend = "off"
-    s2 = Sanitizer(abort_on_error=True)
-    assert isinstance(s2, NullSanitizer)
+    try:
+        cfg.disable_sanitizer = True
+        s2 = Sanitizer(abort_on_error=True)
+        assert isinstance(s2, NullSanitizer)
+    finally:
+        cfg.disable_sanitizer = False
 
 
 def test_init_symbolic_execution():
-    cfg.sanitizer_backend = "symexec"
     s3 = Sanitizer(abort_on_error=True)
     assert isinstance(s3, SanitizerSymbolicExecution) and s3.abort_on_error is True
 
@@ -82,9 +75,12 @@ def null_sanitizer_kernel(idx_ptr):
 
 
 def test_null_sanitizer():
-    cfg.sanitizer_backend = "off"
-    idx = torch.arange(128, dtype=torch.int32)
-    null_sanitizer_kernel[(1,)](idx)
+    try:
+        cfg.disable_sanitizer = True
+        idx = torch.arange(128, dtype=torch.int32)
+        null_sanitizer_kernel[(1,)](idx)
+    finally:
+        cfg.disable_sanitizer = False
 
 
 # ======== Indirect Load/Store =========
@@ -191,7 +187,6 @@ def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
 
 
 def test_indirect_load():
-    cfg.sanitizer_backend = "symexec"
     idx = torch.arange(128, dtype=torch.int32)
     src = torch.rand(128)
     dst = torch.empty_like(src)
@@ -229,7 +224,6 @@ def triple_indirect_load_kernel(
 
 
 def test_triple_indirect_load(device):
-    cfg.sanitizer_backend = "symexec"
     N = 128
 
     src = torch.rand(N, device=device, dtype=torch.float32)
@@ -277,7 +271,6 @@ def dual_offset_load_kernel(
 
 
 def test_dual_offset_load(device):
-    cfg.sanitizer_backend = "symexec"
     N = 128
 
     src = torch.rand(N, device=device, dtype=torch.float32)
@@ -307,21 +300,21 @@ def test_dual_offset_load(device):
 # ======== Sanitizer Backend Tests =========
 def test_switch_backend():
     """Switch back and forth at runtime."""
-    original = cfg.sanitizer_backend
+    original = cfg.disable_sanitizer
 
-    cfg.sanitizer_backend = "symexec"
-    assert cfg.sanitizer_backend == "symexec"
+    cfg.disable_sanitizer = False  # Enable sanitizer
+    assert cfg.disable_sanitizer is False
 
-    cfg.sanitizer_backend = "off"
-    assert cfg.sanitizer_backend == "off"
+    cfg.disable_sanitizer = True  # Disable sanitizer
+    assert cfg.disable_sanitizer is True
 
-    cfg.sanitizer_backend = original
+    cfg.disable_sanitizer = original
 
 
 def test_invalid_backend_raises():
-    """Setting an unknown backend should raise ValueError."""
-    with pytest.raises(ValueError):
-        cfg.sanitizer_backend = "does_not_exist"
+    """Setting a non-boolean value should raise TypeError."""
+    with pytest.raises(TypeError):
+        cfg.disable_sanitizer = "not_a_bool"
 
 
 # ======== For-Loop Optimization Tests =========

@@ -442,7 +442,7 @@ class LoopContext:
 class Sanitizer(Client):
     """
     Factory class that returns the concrete sanitizer implementation
-    based on the value of ``cfg.sanitizer_backend``.
+    based on the value of ``cfg.disable_sanitizer``.
     """
 
     NAME = "sanitizer"
@@ -453,18 +453,11 @@ class Sanitizer(Client):
 
         cfg.sanitizer_activated = True
 
-        backend = cfg.sanitizer_backend
-
-        if backend == "brute_force":
-            return object.__new__(SanitizerBruteForce)
-
-        if backend == "symexec":
-            return object.__new__(SanitizerSymbolicExecution)
-
-        if backend == "off":
+        if cfg.disable_sanitizer:
             return object.__new__(NullSanitizer)
-
-        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
+        else:
+            # When sanitizer is enabled, use symexec backend by default
+            return object.__new__(SanitizerSymbolicExecution)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
