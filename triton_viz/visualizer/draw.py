@@ -18,7 +18,6 @@ def _is_type(obj, type_name: str) -> bool:
 
 
 def collect_grid():
-    # 动态获取当前的 launches，尽最大可能拿到"非空"的那份
     from ..core.trace import launches as current_launches
 
     try:

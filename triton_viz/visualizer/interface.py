@@ -103,7 +103,6 @@ def debug_page():
 @app.route("/api/data")
 def get_data():
     global global_data
-    # 每次请求前都尝试刷新一次，避免跨进程导致的不可见
     update_global_data()
     return jsonify(global_data)
 
