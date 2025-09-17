@@ -82,7 +82,7 @@ export function createLoadVisualization(containerElement, op) {
 
             if (intersects.length > 0) {
                 hoveredCube = intersects[0].object;
-                while (hoveredCube && !hoveredCube.tensorName) {
+                while (hoveredCube && !(hoveredCube.userData && hoveredCube.userData.tensorName)) {
                     hoveredCube = hoveredCube.parent;
                 }
 
@@ -92,11 +92,12 @@ export function createLoadVisualization(containerElement, op) {
                         hoverOutline.visible = true;
                     }
 
-                    updateSideMenu(hoveredCube.tensorName, hoveredCube.tensor0, hoveredCube.tensor1, hoveredCube.tensor2, undefined);
+                    const { tensorName, tensor0, tensor1, tensor2 } = hoveredCube.userData;
+                    updateSideMenu(tensorName, tensor0, tensor1, tensor2, undefined);
 
-                    const res = await getElementValue(hoveredCube.tensorName, hoveredCube.tensor0, hoveredCube.tensor1, hoveredCube.tensor2);
+                    const res = await getElementValue(tensorName, tensor0, tensor1, tensor2);
 
-                    updateSideMenu(hoveredCube.tensorName, hoveredCube.tensor0, hoveredCube.tensor1, hoveredCube.tensor2, res.value);
+                    updateSideMenu(tensorName, tensor0, tensor1, tensor2, res.value);
 
                     console.log(`Value: ${res.value}`);
                 }
@@ -134,10 +135,10 @@ export function createLoadVisualization(containerElement, op) {
             sliceTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
 
             const globalCube = globalTensor.children.find(c =>
-                c.tensor0 === globalCoord[0] && c.tensor1 === globalCoord[1] && c.tensor2 === globalCoord[2]
+                c.userData && c.userData.tensor0 === globalCoord[0] && c.userData.tensor1 === globalCoord[1] && c.userData.tensor2 === globalCoord[2]
             );
             const sliceCube = sliceTensor.children.find(c =>
-                c.tensor0 === sliceCoord[0] && c.tensor1 === sliceCoord[1] && c.tensor2 === sliceCoord[2]
+                c.userData && c.userData.tensor0 === sliceCoord[0] && c.userData.tensor1 === sliceCoord[1] && c.userData.tensor2 === sliceCoord[2]
             );
 
             if (globalCube) globalCube.material.emissive.setHex(0x444444);

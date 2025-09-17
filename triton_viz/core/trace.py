@@ -8,6 +8,10 @@ from .client import ClientManager, Client
 from .data import Launch
 from typing import Union
 
+from triton_viz.visualizer.interface import stop_server, launch
+
+stop_server()
+launch(share=False, port=5001)
 
 launches: list[Launch] = []
 
