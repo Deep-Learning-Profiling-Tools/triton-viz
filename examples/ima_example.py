@@ -4,10 +4,6 @@ import triton.language as tl
 
 import triton_viz
 from triton_viz.clients import Sanitizer
-from triton_viz import config as cfg
-
-
-cfg.sanitizer_backend = "symexec"
 
 
 @triton.jit
