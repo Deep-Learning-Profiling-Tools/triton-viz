@@ -1,5 +1,8 @@
+import os
+import shutil
 import runpy
 import sys
+import pytest
 import triton
 import triton_viz
 from triton_viz.clients import Sanitizer
@@ -7,6 +10,7 @@ from triton_viz.clients import Sanitizer
 
 # store the original triton.jit
 _original_jit = triton.jit
+_original_autotune = triton.autotune
 
 
 def sanitizer_wrapper(kernel):
@@ -28,6 +32,19 @@ def _patched_jit(fn=None, **jit_kw):
         return sanitizer_wrapper(k)
 
 
+def _patched_autotune(fn=None, **autotune_kw):
+    if fn is None:
+
+        def _decorator(f):
+            k = _original_autotune(**autotune_kw)(f)
+            return sanitizer_wrapper(k)
+
+        return _decorator
+    else:
+        k = _original_autotune(fn)
+        return sanitizer_wrapper(k)
+
+
 def apply():
     """
     Apply the sanitizer wrapper to triton.jit and run the user script.
@@ -39,6 +56,9 @@ def apply():
 
     _interp.jit = _patched_jit
 
+    # patching triton.autotune
+    triton.autotune = _patched_autotune
+
     # run user script
     # argv is like: ['triton-sanitizer', 'user_script.py', 'arg1', 'arg2', ...]
     if len(sys.argv) < 2:
@@ -46,11 +66,6 @@ def apply():
         sys.exit(1)
 
     script = sys.argv[1]
-
-    # Check if the first argument is a file that exists
-    import os
-    import subprocess
-    import shutil
 
     if os.path.isfile(script):
         # It's a Python script file, run it directly
@@ -62,12 +77,17 @@ def apply():
 
         # Check if it's an executable command
         if shutil.which(cmd[0]):
-            # Run the command with the sanitizer environment already set up
-            result = subprocess.run(cmd, env=os.environ.copy())
-            sys.exit(result.returncode)
-        else:
-            print(f"Error: '{script}' is neither a valid file nor a command")
-            sys.exit(1)
+            if cmd[0] == "pytest":
+                sys.exit(pytest.main(cmd[1:]))
+            elif cmd[0] == "python":
+                sys.argv = cmd[1:]
+                try:
+                    runpy.run_path(cmd[1], run_name="__main__")
+                except SystemExit as e:
+                    sys.exit(e.code)
+                sys.exit(0)
+        print(f"Error: '{script}' is neither a valid file nor a command")
+        sys.exit(1)
 
 
 def enable_sanitizer():
