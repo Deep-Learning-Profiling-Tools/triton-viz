@@ -13,7 +13,7 @@ from .patch import (
     op_list,
     patch_calls,
 )
-from .callbacks import OpCallbacks
+from .callbacks import OpCallbacks, ForLoopCallbacks
 from .patch import patch_lang, unpatch_lang
 
 
@@ -51,11 +51,7 @@ class Client(ABC):
         ...
 
     @abstractmethod
-    def register_for_loop_callback(
-        self,
-    ) -> tuple[
-        Optional[Callable], Optional[Callable], Optional[Callable], Optional[Callable]
-    ]:
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
         ...
 
     @abstractmethod
@@ -93,18 +89,8 @@ class ClientManager:
                     patch_op(op, callbacks)
 
                 # patch for loops
-                (
-                    before_loop_callback,
-                    loop_iter_overrider,
-                    loop_iter_listener,
-                    after_loop_callback,
-                ) = client.register_for_loop_callback()
-                patch_for_loop(
-                    before_loop_callback,
-                    loop_iter_overrider,
-                    loop_iter_listener,
-                    after_loop_callback,
-                )
+                loop_callbacks = client.register_for_loop_callback()
+                patch_for_loop(loop_callbacks)
                 # Remaps core language functions to interpreted ones
                 patch_lang(fn)
             try:

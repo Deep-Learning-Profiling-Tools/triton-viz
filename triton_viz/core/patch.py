@@ -5,7 +5,7 @@ from typing import Any, Optional
 from tqdm import tqdm
 
 from . import config as cfg
-from .callbacks import OpCallbacks
+from .callbacks import OpCallbacks, ForLoopCallbacks
 from .data import (
     Op,
     RawLoad,
@@ -31,6 +31,14 @@ from .data import (
     Idiv,
     Rsqrt,
     CastImpl,
+    Reshape,
+    Fabs,
+    Ashr,
+    Advance,
+    FpToFp,
+    Umulhi,
+    Trans,
+    CumSum,
 )
 import inspect
 import ast
@@ -67,7 +75,47 @@ op_list = [
     Idiv,
     Rsqrt,
     CastImpl,
+    Reshape,
+    Fabs,
+    Ashr,
+    Advance,
+    FpToFp,
+    Umulhi,
+    Trans,
+    CumSum,
 ]
+
+# Hardcoded operation attribute names to avoid issues with lambda functions
+_OP_ATTR_NAMES = {
+    ProgramId: "create_get_program_id",
+    RawStore: "create_store",
+    Store: "create_masked_store",
+    RawLoad: "create_load",
+    Load: "create_masked_load",
+    Dot: "create_dot",
+    UnaryOp: "unary_op",
+    BinaryOp: "binary_op",
+    TernaryOp: "ternary_op",
+    MakeRange: "create_make_range",
+    AddPtr: "create_addptr",
+    ExpandDims: "create_expand_dims",
+    Broadcast: "create_broadcast",
+    Splat: "create_splat",
+    MakeBlockPointer: "create_make_block_ptr",
+    TensorPointerLoad: "create_tensor_pointer_load",
+    TensorPointerStore: "create_tensor_pointer_store",
+    Idiv: "create_idiv",
+    Rsqrt: "create_rsqrt",
+    CastImpl: "cast_impl",
+    Reshape: "create_reshape",
+    Fabs: "create_fabs",
+    Ashr: "create_ashr",
+    Advance: "create_advance",
+    FpToFp: "create_fp_to_fp",
+    Umulhi: "create_umulhi",
+    Trans: "create_trans",
+}
+
 original_ops = {
     ProgramId: interpreter_builder.create_get_program_id,
     RawStore: interpreter_builder.create_store,
@@ -89,11 +137,24 @@ original_ops = {
     Idiv: interpreter_builder.create_idiv,
     Rsqrt: interpreter_builder.create_rsqrt,
     CastImpl: interpreter_builder.cast_impl,
+    Reshape: interpreter_builder.create_reshape,
+    Fabs: interpreter_builder.create_fabs,
+    Ashr: interpreter_builder.create_ashr,
+    Advance: interpreter_builder.create_advance,
+    FpToFp: interpreter_builder.create_fp_to_fp,
+    Umulhi: interpreter_builder.create_umulhi,
+    Trans: interpreter_builder.create_trans,
 }
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
     ReduceMin: tl.min,
     ReduceSum: tl.sum,
+}
+scan_map: dict[type[Op], Callable] = {
+    CumSum: tl.cumsum,
+}
+math_map: dict[type[Op], Callable] = {
+    Umulhi: tl.math.umulhi,
 }
 
 
@@ -112,7 +173,7 @@ class PatchOp:
         if self.callbacks.before_callback:
             self.callbacks.before_callback(*args, **kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in reduce_map:
+            if self.op_type in reduce_map or self.op_type in scan_map:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -120,6 +181,8 @@ class PatchOp:
                     self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
                     args[0].dtype,
                 )
+            elif self.op_type in math_map:
+                raise NotImplementedError()
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 from ..clients.sanitizer.sanitizer import SymbolicExpr
@@ -143,19 +206,27 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
     """
     if op_type in original_ops:
         # create a new function that calls the before_callback, the original op and the after_callback
-        op_name = original_ops[op_type].__name__
-        current_op = getattr(interpreter_builder, op_name)
-        patched_op = PatchOp(current_op, op_type, callbacks)
+        op_name = _OP_ATTR_NAMES[op_type]
+        original_op = original_ops[op_type]
+        patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(
             interpreter_builder,
             op_name,
             lambda *args, **kwargs: patched_op(*args, **kwargs),
         )
-    elif op_type in reduce_map:
-        op_name = reduce_map[op_type].__name__
-        current_op = getattr(tl, op_name)
-        patched_op = PatchOp(current_op, op_type, callbacks)
+    elif op_type in reduce_map or op_type in scan_map:
+        if op_type in reduce_map:
+            op_name = reduce_map[op_type].__name__
+        elif op_type in scan_map:
+            op_name = scan_map[op_type].__name__
+        original_op = getattr(tl, op_name)
+        patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
+    elif op_type in math_map:
+        op_name = math_map[op_type].__name__
+        original_op = getattr(tl.math, op_name)
+        patched_op = PatchOp(original_op, op_type, callbacks)
+        setattr(tl.math, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
 
@@ -164,11 +235,13 @@ def unpatch_op(op_type: type[Op]):
     """
     Unregister a callback for an operator.
 
-    :param op_name: The name of the operator to unregister the callback for.
+    :param op_type: The type of the operator to unregister the callback for.
     """
     if op_type in original_ops:
-        op_name = original_ops[op_type].__name__
-        setattr(interpreter_builder, op_name, original_ops[op_type])
+        original_op = original_ops[op_type]
+        # Use hardcoded name from _OP_ATTR_NAMES
+        op_name = _OP_ATTR_NAMES[op_type]
+        setattr(interpreter_builder, op_name, original_op)
 
 
 class _LoopIter:
@@ -322,23 +395,18 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     return ast.fix_missing_locations(new_for)
 
 
-def patch_for_loop(
-    before_loop_callback: Optional[Callable],
-    loop_iter_overrider: Optional[Callable],
-    loop_iter_listener: Optional[Callable],
-    after_loop_callback: Optional[Callable],
-):
+def patch_for_loop(loop_callbacks: ForLoopCallbacks):
     _loop_patcher.patch()
 
     # Registering hooks
-    if before_loop_callback is not None:
-        _loop_patcher.hooks.add_before(before_loop_callback)
-    if loop_iter_overrider is not None:
-        _loop_patcher.hooks.set_iter_overrider(loop_iter_overrider)
-    if loop_iter_listener is not None:
-        _loop_patcher.hooks.add_iter_listener(loop_iter_listener)
-    if after_loop_callback is not None:
-        _loop_patcher.hooks.add_after(after_loop_callback)
+    if loop_callbacks.before_loop_callback is not None:
+        _loop_patcher.hooks.add_before(loop_callbacks.before_loop_callback)
+    if loop_callbacks.loop_iter_overrider is not None:
+        _loop_patcher.hooks.set_iter_overrider(loop_callbacks.loop_iter_overrider)
+    if loop_callbacks.loop_iter_listener is not None:
+        _loop_patcher.hooks.add_iter_listener(loop_callbacks.loop_iter_listener)
+    if loop_callbacks.after_loop_callback is not None:
+        _loop_patcher.hooks.add_after(loop_callbacks.after_loop_callback)
 
 
 def unpatch_for_loop():

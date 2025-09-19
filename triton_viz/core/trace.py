@@ -69,6 +69,11 @@ class Trace(KernelInterface):
             self.finalize()
             return ret
 
+    def __call__(self, *args, **kwargs):
+        # When a traced JIT function is called from within another JIT function,
+        # we need to execute the underlying function directly
+        return self.base_fn(*args, **kwargs)
+
     def warmup(self, *args, **kwargs):
         raise NotImplementedError
 
@@ -91,8 +96,8 @@ def trace(clients: Union[str, Client, None] = None):
         raise TypeError(f"Expected str or Client, got {type(clients)}")
 
     def decorator(kernel) -> Trace:
-        # When sanitizer is off, skip tracing and return the original kernel unchanged
-        if cfg.sanitizer_backend == "off":
+        # When sanitizer is disabled, skip tracing and return the original kernel unchanged
+        if cfg.disable_sanitizer:
             return kernel
 
         # First-time wrapping
