@@ -58,6 +58,7 @@ def test_trace_decorator_add_clients():
 def trace_nested_inner_kernel(x):
     return x * 2
 
+
 def test_trace_nested_jit_calls():
     """
     Test that Trace class properly handles nested JIT function calls via __call__ method.
@@ -71,7 +72,9 @@ def test_trace_nested_jit_calls():
     @triton.jit
     def trace_nested_call_kernel(ptr, n: tl.constexpr):
         x = tl.load(ptr + tl.arange(0, n))
-        y = trace_nested_inner_kernel(x)  # This nested call requires __call__ method when wrapped by trace
+        y = trace_nested_inner_kernel(
+            x
+        )  # This nested call requires __call__ method when wrapped by trace
         tl.store(ptr + tl.arange(0, n), y)
 
     # Test execution
