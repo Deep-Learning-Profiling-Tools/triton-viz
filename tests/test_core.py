@@ -65,7 +65,7 @@ def test_trace_nested_jit_calls():
 
     When a traced JIT function is called from within another JIT function,
     the Trace wrapper needs to properly delegate to the underlying function.
-    This test ensures compatibility with nested Triton JIT function calls.
+    This test ensures compatibility with the command line triton-sanitizer wrapper.
     """
 
     @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
