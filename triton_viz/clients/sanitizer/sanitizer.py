@@ -28,7 +28,7 @@ import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
 from ...core.client import Client
-from ...core.callbacks import OpCallbacks
+from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import (
     Op,
     RawLoad,
@@ -442,7 +442,7 @@ class LoopContext:
 class Sanitizer(Client):
     """
     Factory class that returns the concrete sanitizer implementation
-    based on the value of ``cfg.sanitizer_backend``.
+    based on the value of ``cfg.disable_sanitizer``.
     """
 
     NAME = "sanitizer"
@@ -453,18 +453,11 @@ class Sanitizer(Client):
 
         cfg.sanitizer_activated = True
 
-        backend = cfg.sanitizer_backend
-
-        if backend == "brute_force":
-            return object.__new__(SanitizerBruteForce)
-
-        if backend == "symexec":
-            return object.__new__(SanitizerSymbolicExecution)
-
-        if backend == "off":
+        if cfg.disable_sanitizer:
             return object.__new__(NullSanitizer)
-
-        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
+        else:
+            # When sanitizer is enabled, use symexec backend by default
+            return object.__new__(SanitizerSymbolicExecution)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
@@ -573,7 +566,7 @@ class SanitizerBruteForce(Sanitizer):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
-        return None, None, None, None
+        return ForLoopCallbacks()
 
     def finalize(self) -> list:
         return self.records
@@ -1118,7 +1111,7 @@ class SymbolicExpr:
                 self._z3 = lhs - rhs
             if self.op == "mul":
                 self._z3 = lhs * rhs
-            if self.op in ("idiv"):
+            if self.op == "idiv":
                 self._z3 = lhs / rhs
             if self.op == "mod":
                 self._z3 = lhs % rhs
@@ -1451,7 +1444,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.tensors: list[Tensor] = []
         self.tensor_addrs: list[tuple[Int, Int]] = []
         self.unique_load_store_id: int = 0
-        self.need_full_grid: bool = False
+        self.need_full_grid: Optional[bool] = None
         self.loop_stack: list[LoopContext] = []
         self.last_grid: Optional[tuple[int, int, int]] = None
         self.cache_args: list = []
@@ -1582,15 +1575,23 @@ class SanitizerSymbolicExecution(Sanitizer):
                 # Must continue to run the program at least once
                 # We don't clear up tensors at this point
                 return True
+            else:
+                return False
         # 2nd time we launch this program, depends on whether we need a full grid
+        if self.need_full_grid is None:
+            return True
         return self.need_full_grid
 
     def post_run_callback(self, fn: Callable) -> bool:
+        if self.need_full_grid is None:
+            self.need_full_grid = False
         if self.grid_idx == self.last_grid or not self.need_full_grid:
             self._clear_cache()
             self.tensors.clear()
             self.tensor_addrs.clear()
-        return self.need_full_grid
+        ret = self.need_full_grid
+        self.need_full_grid = None  # reset for the next run
+        return ret
 
     def arg_callback(self, name, arg, arg_cvt):
         if not hasattr(arg, "data_ptr"):
@@ -2004,11 +2005,11 @@ class SanitizerSymbolicExecution(Sanitizer):
                     f"(checked {len(ctx.pending_checks)} unique addr patterns)"
                 )
 
-        return (
-            loop_hook_before,
-            loop_hook_iter_overrider,
-            loop_hook_iter_listener,
-            loop_hook_after,
+        return ForLoopCallbacks(
+            before_loop_callback=loop_hook_before,
+            loop_iter_overrider=loop_hook_iter_overrider,
+            loop_iter_listener=loop_hook_iter_listener,
+            after_loop_callback=loop_hook_after,
         )
 
     def finalize(self) -> list:

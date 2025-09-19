@@ -6,7 +6,6 @@ import pytest
 import triton
 import triton_viz
 from triton_viz.clients import Sanitizer
-from triton_viz import config as cfg
 
 
 # store the original triton.jit
@@ -92,8 +91,6 @@ def apply():
 
 
 def enable_sanitizer():
-    cfg.sanitizer_backend = "symexec"
-
     triton.jit = _patched_jit
     triton.language.jit = _patched_jit
     import triton.runtime.interpreter as _interp

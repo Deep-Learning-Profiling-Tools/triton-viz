@@ -5,7 +5,7 @@ from typing import Any, Optional
 from tqdm import tqdm
 
 from . import config as cfg
-from .callbacks import OpCallbacks
+from .callbacks import OpCallbacks, ForLoopCallbacks
 from .data import (
     Op,
     RawLoad,
@@ -395,23 +395,18 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     return ast.fix_missing_locations(new_for)
 
 
-def patch_for_loop(
-    before_loop_callback: Optional[Callable],
-    loop_iter_overrider: Optional[Callable],
-    loop_iter_listener: Optional[Callable],
-    after_loop_callback: Optional[Callable],
-):
+def patch_for_loop(loop_callbacks: ForLoopCallbacks):
     _loop_patcher.patch()
 
     # Registering hooks
-    if before_loop_callback is not None:
-        _loop_patcher.hooks.add_before(before_loop_callback)
-    if loop_iter_overrider is not None:
-        _loop_patcher.hooks.set_iter_overrider(loop_iter_overrider)
-    if loop_iter_listener is not None:
-        _loop_patcher.hooks.add_iter_listener(loop_iter_listener)
-    if after_loop_callback is not None:
-        _loop_patcher.hooks.add_after(after_loop_callback)
+    if loop_callbacks.before_loop_callback is not None:
+        _loop_patcher.hooks.add_before(loop_callbacks.before_loop_callback)
+    if loop_callbacks.loop_iter_overrider is not None:
+        _loop_patcher.hooks.set_iter_overrider(loop_callbacks.loop_iter_overrider)
+    if loop_callbacks.loop_iter_listener is not None:
+        _loop_patcher.hooks.add_iter_listener(loop_callbacks.loop_iter_listener)
+    if loop_callbacks.after_loop_callback is not None:
+        _loop_patcher.hooks.add_after(loop_callbacks.after_loop_callback)
 
 
 def unpatch_for_loop():
