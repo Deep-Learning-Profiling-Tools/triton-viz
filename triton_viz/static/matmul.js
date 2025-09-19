@@ -344,6 +344,15 @@ export function createMatMulVisualization(containerElement, op) {
     window.addEventListener('keydown', onKeyDown);
     containerElement.addEventListener('mousemove', onMouseMove);
 
+    // Mouse wheel zoom for matmul view
+    const WHEEL_ZOOM_SPEED = 0.5;
+    containerElement.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        const direction = event.deltaY > 0 ? 1 : -1;
+        camera.position.z += direction * WHEEL_ZOOM_SPEED;
+        camera.updateProjectionMatrix();
+    }, { passive: false });
+
     animate();
 
 
