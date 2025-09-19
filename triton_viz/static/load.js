@@ -29,6 +29,21 @@ export function createLoadVisualization(containerElement, op) {
         let isPaused = false;
 
         const sideMenu = createSideMenu(containerElement);
+        // Color map UI
+        const controlBar = document.createElement('div');
+        controlBar.style.position = 'absolute';
+        controlBar.style.top = '10px';
+        controlBar.style.left = '10px';
+        controlBar.style.display = 'flex';
+        controlBar.style.gap = '8px';
+        controlBar.style.zIndex = '1001';
+        const colorizeToggle = document.createElement('button');
+        colorizeToggle.textContent = 'Color by Value: OFF';
+        controlBar.appendChild(colorizeToggle);
+        containerElement.appendChild(controlBar);
+
+        let colorizeOn = false;
+        let tensorCache = null; // {min, max, shape, dims, values}
         let hoveredCube = null;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray
@@ -106,6 +121,32 @@ export function createLoadVisualization(containerElement, op) {
             }
         }
 
+        function applyColorMapIfNeeded() {
+            if (!colorizeOn || !tensorCache) return;
+            const { min, max, dims, values } = tensorCache;
+            const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+            const norm = (v) => (max === min ? 0.5 : (v - min) / (max - min));
+            // Simple blue->red gradient
+            const toColor = (t) => {
+                const x = clamp(norm(t), 0, 1);
+                const r = x;
+                const g = 0.2;
+                const b = 1.0 - x;
+                return new THREE.Color(r, g, b);
+            };
+            globalTensor.children.forEach((cube) => {
+                const u = cube.userData;
+                if (!u) return;
+                let v = 0.0;
+                try {
+                    if (dims === 3) v = values[u.tensor0][u.tensor1][u.tensor2];
+                    else if (dims === 2) v = values[u.tensor0][u.tensor1];
+                    else if (dims === 1) v = values[u.tensor0];
+                } catch (e) { /* ignore bad index */ }
+                cube.material.color.copy(toColor(v));
+            });
+        }
+
         function animate() {
             requestAnimationFrame(animate);
 
@@ -127,6 +168,7 @@ export function createLoadVisualization(containerElement, op) {
                 frame++;
             }
 
+            applyColorMapIfNeeded();
             renderer.render(scene, camera);
         }
 
@@ -156,6 +198,33 @@ export function createLoadVisualization(containerElement, op) {
             });
             return await response.json();
         }
+
+        async function fetchGlobalTensor() {
+            try {
+                const res = await fetch('/api/getLoadTensor', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uuid: op.uuid })
+                });
+                const data = await res.json();
+                if (!data || data.error) {
+                    console.warn('getLoadTensor error:', data && data.error);
+                    return null;
+                }
+                return data;
+            } catch (e) {
+                console.error('getLoadTensor failed', e);
+                return null;
+            }
+        }
+
+        colorizeToggle.addEventListener('click', async () => {
+            colorizeOn = !colorizeOn;
+            colorizeToggle.textContent = `Color by Value: ${colorizeOn ? 'ON' : 'OFF'}`;
+            if (colorizeOn && !tensorCache) {
+                tensorCache = await fetchGlobalTensor();
+            }
+        });
 
         function updateSideMenu(tensorName, x, y, z, value) {
             if (!tensorName) {

@@ -200,6 +200,50 @@ def get_load_value():
         return jsonify({"error": "Global tensor data not found"}), 200
 
 
+@app.route("/api/getLoadTensor", methods=["POST"])
+def get_load_tensor():
+    """Return entire global tensor for a given Load/Store op, with min/max.
+
+    Response schema:
+      {
+        "shape": [d0, d1, d2?],
+        "dims": 1|2|3,
+        "min": float,
+        "max": float,
+        "values": nested_list  # Python list converted from torch tensor
+      }
+    """
+    global raw_tensor_data
+    data = request.json
+    uuid = data.get("uuid")
+
+    if uuid is None or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+
+    op_data = raw_tensor_data[uuid]
+    if "global_tensor" not in op_data:
+        return jsonify({"error": "Global tensor data not found"}), 200
+
+    t = op_data["global_tensor"].cpu()
+    try:
+        t_min = float(t.min().item())
+        t_max = float(t.max().item())
+    except Exception:
+        # In case of empty tensor
+        t_min = 0.0
+        t_max = 0.0
+
+    return jsonify(
+        {
+            "shape": list(t.shape),
+            "dims": len(t.shape),
+            "min": t_min,
+            "max": t_max,
+            "values": t.numpy().tolist(),
+        }
+    )
+
+
 def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None):
     """
     Run the Flask app on a given port and expose it via Cloudflared.
@@ -222,8 +266,6 @@ def launch(share: bool = True, port: int | None = None):
     """
     Launch the Triton-Viz Flask server.
 
-    :param share: If True, expose via cloudflared (public URL). If False, serve locally only.
-    :param port: Optional port override. Defaults to 8000 when share=True, else 5001.
     """
     print("Launching Triton viz tool")
     default_port = 8000 if share else 5001
