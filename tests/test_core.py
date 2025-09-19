@@ -52,6 +52,36 @@ def test_trace_decorator_add_clients():
     assert sum(c == "tracer" for c in clients) == 1
 
 
+# ======== Nested JIT Call Tests =========
+@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+@triton.jit
+def trace_nested_inner_kernel(x):
+    return x * 2
+
+
+def test_trace_nested_jit_calls():
+    """
+    Test that Trace class properly handles nested JIT function calls via __call__ method.
+
+    When a traced JIT function is called from within another JIT function,
+    the Trace wrapper needs to properly delegate to the underlying function.
+    This test ensures compatibility with the command line triton-sanitizer wrapper.
+    """
+
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def trace_nested_call_kernel(ptr, n: tl.constexpr):
+        x = tl.load(ptr + tl.arange(0, n))
+        y = trace_nested_inner_kernel(
+            x
+        )  # This nested call requires __call__ method when wrapped by trace
+        tl.store(ptr + tl.arange(0, n), y)
+
+    # Test execution
+    data = torch.ones(8)
+    trace_nested_call_kernel[(1,)](data, 8)
+
+
 # ======== Wrapper Tests =========
 # Test that triton_viz.wrapper works correctly:
 # 1. It should patch triton.jit / triton.language.jit /
