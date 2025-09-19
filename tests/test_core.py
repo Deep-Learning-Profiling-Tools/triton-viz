@@ -12,10 +12,6 @@ import triton.language as tl
 
 import triton_viz
 from triton_viz.clients import Sanitizer
-from triton_viz import config as cfg
-
-
-cfg.sanitizer_backend = "symexec"
 
 
 # ======== Trace Decorator Tests =========
@@ -30,9 +26,6 @@ def test_trace_decorator_add_clients():
     The final Trace object should contain exactly one instance each of
     Sanitizer, Profiler, and Tracer (total = 3 clients).
     """
-
-    # Make sure sanitizer is on.
-    cfg.sanitizer_backend = "symexec"
 
     @triton_viz.trace("sanitizer")
     @triton_viz.trace("profiler")
@@ -135,7 +128,6 @@ def test_cli_invocation():
         # load sitecustomize.py
         env = os.environ.copy()
         env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
-        env["TRITON_SANITIZER_BACKEND"] = "symexec"
         env["TRITON_INTERPRET"] = "1"
 
         # run the dummy program using triton-sanitizer
@@ -188,7 +180,6 @@ if torch.cuda.is_available():  # Only test if CUDA is available
         This test uses n_elements = 128, matching the size of the input tensors.
         It should NOT cause any out-of-bound access.
         """
-        cfg.sanitizer_backend = "symexec"
         x = torch.randn(128)
         y = torch.randn(128)
         out = torch.empty_like(x)
@@ -202,7 +193,6 @@ if torch.cuda.is_available():  # Only test if CUDA is available
         This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
         It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
         """
-        cfg.sanitizer_backend = "symexec"
         x = torch.randn(128)
         y = torch.randn(128)
         out = torch.empty_like(x)

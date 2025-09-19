@@ -96,8 +96,8 @@ def trace(clients: Union[str, Client, None] = None):
         raise TypeError(f"Expected str or Client, got {type(clients)}")
 
     def decorator(kernel) -> Trace:
-        # When sanitizer is off, skip tracing and return the original kernel unchanged
-        if cfg.sanitizer_backend == "off":
+        # When sanitizer is disabled, skip tracing and return the original kernel unchanged
+        if cfg.disable_sanitizer:
             return kernel
 
         # First-time wrapping
