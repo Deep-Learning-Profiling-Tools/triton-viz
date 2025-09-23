@@ -224,11 +224,6 @@ class CumSum(Op):
 
 
 @dataclass
-class Bitcast(Op):
-    name: ClassVar[str] = "bitcast"
-
-
-@dataclass
 class Tensor:
     ptr: int
     dtype: str
