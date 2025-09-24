@@ -1362,9 +1362,14 @@ class SymbolicExpr:
             if obj.op in ("cast_impl", "bitcast"):
                 from ...core.patch import original_ops
                 from ...core.data import CastImpl, Bitcast
+
                 src_concrete = obj.src.concretize()
                 # dst_type is stored as a SymbolicExpr const node, need to extract the value
-                dst_type_value = obj.dst_type.value if hasattr(obj.dst_type, 'value') else obj.dst_type
+                dst_type_value = (
+                    obj.dst_type.value
+                    if hasattr(obj.dst_type, "value")
+                    else obj.dst_type
+                )
                 if obj.op == "cast_impl":
                     result = original_ops[CastImpl](src_concrete, dst_type_value)
                 else:  # bitcast
