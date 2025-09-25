@@ -62,6 +62,7 @@ from ...core.data import (
     Umulhi,
     Trans,
     CumSum,
+    Bitcast,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -442,7 +443,7 @@ class LoopContext:
 class Sanitizer(Client):
     """
     Factory class that returns the concrete sanitizer implementation
-    based on the value of ``cfg.sanitizer_backend``.
+    based on the value of ``cfg.disable_sanitizer``.
     """
 
     NAME = "sanitizer"
@@ -453,18 +454,11 @@ class Sanitizer(Client):
 
         cfg.sanitizer_activated = True
 
-        backend = cfg.sanitizer_backend
-
-        if backend == "brute_force":
-            return object.__new__(SanitizerBruteForce)
-
-        if backend == "symexec":
-            return object.__new__(SanitizerSymbolicExecution)
-
-        if backend == "off":
+        if cfg.disable_sanitizer:
             return object.__new__(NullSanitizer)
-
-        raise ValueError(f"Invalid TRITON_SANITIZER_BACKEND: {backend!r} ")
+        else:
+            # When sanitizer is enabled, use symexec backend by default
+            return object.__new__(SanitizerSymbolicExecution)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
@@ -712,7 +706,7 @@ class SymbolicExpr:
     SCAN_OPS = ("cumsum",)
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
-    CAST_OPS = ("cast_impl",)
+    CAST_OPS = ("cast_impl", "bitcast")
     SUPPORTED_OPS = (
         BASIC_OPS
         + INDIRECT_OPS
@@ -796,6 +790,7 @@ class SymbolicExpr:
         "reshape": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
+        "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         # Misc
         "advance": Spec(req=("ptr", "offsets")),
         "umulhi": Spec(req=("lhs", "rhs")),
@@ -1211,8 +1206,8 @@ class SymbolicExpr:
             else:
                 self._z3 = ptr_z3 + offset_z3 * element_bytewidth
 
-        if self.op == "cast_impl":
-            # Cast operation - pass through the source value
+        if self.op in ("cast_impl", "bitcast"):
+            # Cast/bitcast operation - pass through the source value
             self._z3, self._constraints = self.src._to_z3()
 
         if self.op == "advance":
@@ -1363,10 +1358,27 @@ class SymbolicExpr:
                 None,  # is_volatile
             )
         else:
-            concrete_args = [
-                SymbolicExpr.concretize(v) for k, v in obj.children.items()
-            ]
-            result = obj.concrete_fn(*concrete_args)
+            # Special handling for cast_impl and bitcast operations
+            if obj.op in ("cast_impl", "bitcast"):
+                from ...core.patch import original_ops
+                from ...core.data import CastImpl, Bitcast
+
+                src_concrete = obj.src.concretize()
+                # dst_type is stored as a SymbolicExpr const node, need to extract the value
+                dst_type_value = (
+                    obj.dst_type.value
+                    if hasattr(obj.dst_type, "value")
+                    else obj.dst_type
+                )
+                if obj.op == "cast_impl":
+                    result = original_ops[CastImpl](src_concrete, dst_type_value)
+                else:  # bitcast
+                    result = original_ops[Bitcast](src_concrete, dst_type_value)
+            else:
+                concrete_args = [
+                    SymbolicExpr.concretize(v) for k, v in obj.children.items()
+                ]
+                result = obj.concrete_fn(*concrete_args)
 
         return result
 
@@ -1903,6 +1915,12 @@ class SanitizerSymbolicExecution(Sanitizer):
                 "cumsum", SymbolicExpr.from_value(input), axis, reverse, dtype
             )
 
+        def op_bitcast_overrider(src, dst_type):
+            src_sym = SymbolicExpr.from_value(src)
+            result = SymbolicExpr("bitcast", src_sym, dst_type)
+            result.dtype_tt = dst_type
+            return result
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -1935,6 +1953,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Umulhi: op_umulhi_overrider,
             Trans: op_trans_overrider,
             CumSum: op_cumsum_overrider,
+            Bitcast: op_bitcast_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
