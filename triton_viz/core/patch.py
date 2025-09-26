@@ -40,6 +40,7 @@ from .data import (
     Trans,
     CumSum,
     Bitcast,
+    AtomicCas,
 )
 import inspect
 import ast
@@ -85,6 +86,7 @@ op_list = [
     Trans,
     CumSum,
     Bitcast,
+    AtomicCas,
 ]
 
 # Hardcoded operation attribute names to avoid issues with lambda functions
@@ -117,6 +119,7 @@ _OP_ATTR_NAMES = {
     Umulhi: "create_umulhi",
     Trans: "create_trans",
     Bitcast: "create_bitcast",
+    AtomicCas: "create_atomic_cas",
 }
 
 original_ops = {
@@ -148,6 +151,7 @@ original_ops = {
     Umulhi: interpreter_builder.create_umulhi,
     Trans: interpreter_builder.create_trans,
     Bitcast: interpreter_builder.create_bitcast,
+    AtomicCas: interpreter_builder.create_atomic_cas,
 }
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
