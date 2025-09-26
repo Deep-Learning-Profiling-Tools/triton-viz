@@ -122,7 +122,10 @@ export function interpolateColor(color1, color2, factor) {
 
 export function updateCubeColor(tensor, coord, startColor, endColor, factor) {
     const cube = tensor.children.find(c =>
-        c.tensor0 === coord[0] && c.tensor1 === coord[1] && c.tensor2 === coord[2]
+        c.userData &&
+        c.userData.tensor0 === coord[0] &&
+        c.userData.tensor1 === coord[1] &&
+        c.userData.tensor2 === coord[2]
     );
     if (cube) {
         cube.material.color.copy(interpolateColor(startColor, endColor, factor));
@@ -152,6 +155,15 @@ export function setupEventListeners(containerElement, camera, renderer, onMouseM
     });
     containerElement.addEventListener('mousemove', onMouseMove);
     window.addEventListener('keydown', onKeyDown);
+
+    // Mouse wheel zoom
+    const WHEEL_ZOOM_SPEED = 0.5;
+    containerElement.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        const direction = event.deltaY > 0 ? 1 : -1;
+        camera.position.z += direction * WHEEL_ZOOM_SPEED;
+        camera.updateProjectionMatrix();
+    }, { passive: false });
 }
 
 export function cameraControls(camera, cameraRotation) {
