@@ -39,20 +39,53 @@ def test_slicing():
     # Test [:, :] (all elements)
     #slice_all = nd_array[:, :]
     slice_all = nd_array[:2, :2]
+    assert np.allclose(slice_all._value, data[:2, :2])
     print(f"nd_array[:, :] = {slice_all}")
     print(f"Value:\n{slice_all.value}")
     print()
     
     # Test [:, 0] (first column)
     slice_col = nd_array[:, 0]
+    assert np.allclose(slice_col._value, data[:, 0])
     print(f"nd_array[:, 0] = {slice_col}")
     print(f"Value: {slice_col.value}")
     print()
     
     # Test [0, :] (first row)
     slice_row = nd_array[0, :]
+    assert np.allclose(slice_row._value, data[0, :])
     print(f"nd_array[0, :] = {slice_row}")
     print(f"Value: {slice_row.value}")
+    print()
+
+    # Test advanced indexing
+    rewritten_slice = (
+        np.arange(2)[:, None],
+        np.arange(3)[None, :],
+    )
+    slice_advanced = nd_array[rewritten_slice]
+    assert np.allclose(slice_advanced._value, data[rewritten_slice])
+    print(f"nd_array[nl.arange(2)[:, None], nl.arange(3)[None, :]] = {slice_advanced}")
+    print(f"Value:\n{slice_advanced.value}")
+    print()
+
+    # test nd_array[0, :3, :, 2:4, 2]
+    data = np.reshape(np.arange(3 * 4 * 5 * 6 * 7), (3, 4, 5, 6, 7))
+    nd_array = NDArray(value=data, name='test_array_5d')
+    rewritten_slice = (
+        0,
+        np.arange(3)[:, None, None],
+        np.arange(5)[None, :, None],
+        np.arange(2, 4)[None, None, :],
+        2
+    ) # this is what the above slice would be represented as after triton-viz tracing
+    slice_advanced = nd_array[rewritten_slice]
+    assert np.allclose(
+        slice_advanced._value,
+        data[rewritten_slice]
+    )
+    assert np.allclose(slice_advanced._value, data[0, :3, :, 2:4, 2])
+    print(f"Value:\n{slice_advanced.value}")
     print()
 
 def test_arithmetic():

@@ -132,26 +132,7 @@ class NDArray:
                     new_keys.append(slice(k.start, k.stop, k.step))
                 else:
                     new_keys.append(k)
-        # new_keys=[slice([0, None], [128, None], [1, None]), slice([None, 0], [None, 512], [None, 1])]
-        #if all(isinstance(k, slice) for k in new_keys):
-
-        #    def coalesce(*args):
-        #        for arg in args:
-        #            if arg is not None:
-        #                return arg
-        #        return None
-
-        #    # Combine slices per axis, preferring non-None values
-        #    new_keys = tuple(
-        #        slice(
-        #            coalesce(*(k.start[i] for k in new_keys)),
-        #            coalesce(*(k.stop[i] for k in new_keys)),
-        #            coalesce(*(k.step[i] for k in new_keys)),
-        #        )
-        #        for i in range(len(new_keys[0].start))
-        #    )
         sliced_value = self._value[tuple(new_keys)]
-
 
         # Create a new NDArray with the sliced data
         return NDArray(value=sliced_value, name=f"{self.name}_slice")
@@ -217,6 +198,7 @@ class NDArray:
 
 class Builder:
     def __init__(self, grid_dims=None):
+        # TODO: infinite grid dims for NKI
         self.grid_dims = grid_dims if grid_dims is not None else (1, 1, 1)
         self.grid_x = None
         self.grid_y = None
@@ -251,6 +233,12 @@ class Builder:
         else:
             ret = NDArray(buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs)
         return ret
+    
+    def zeros(self, shape, dtype, *, buffer=None, name="", **kwargs):
+        val = np.zeros(shape, dtype=dtype)
+        return self.ndarray(
+            shape, dtype, buffer=buffer, name=name, value=value, **kwargs
+        )
 
     def arange(self, *args):
         if len(args) == 1:
@@ -261,10 +249,7 @@ class Builder:
             stop = args[1]
         else:
             raise ValueError("arange expects 1 or 2 arguments")
-        return NLSlice(
-            start=start,
-            stop=stop,
-        ) 
+        return NDArray(value=np.arange(*args))
 
     def program_id(self, axis: int):
         if axis == 0:
@@ -284,9 +269,18 @@ class Builder:
             value = value.astype(dtype)
         return NDArray(value=value, name=src.name, **kwargs)
 
+    def load_transpose2d(self, src: NDArray, *, mask=None, dtype=None, **kwargs):
+        # THTODO
+        value = src._value
+        return self.load(NDArray(value=value.T, name=src.name), mask=mask, dtype=dtype, **kwargs)
+
     def store(self, dst: NDArray, value: NDArray, *, mask=None, **kwargs):
         if mask is not None:
             value = value[mask]
+        import tp 
+
+        tp.log(f'{dst=}')
+        tp.log(f'{value=}')
         dst._value[:] = value._value[:]
         return dst
 
@@ -300,6 +294,28 @@ def patch():
     nl.arange = lambda *args: nki_builder.arange(*args)
     nl.load = lambda src, **kwargs: nki_builder.load(src, **kwargs)
     nl.store = lambda dst, value, **kwargs: nki_builder.store(dst, value, **kwargs)
+    # see https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/api/nki.language.html
+
+    # TODO: implement
+    # matmul-specific
+    # nl.shared_hbm
+    # nl.psum
+    nl.affine_range
+    nl.par_dim
+    nl.zeros = lambda *args, **kwags: nki_builder.zeros(*args, **kwargs)
+    nl.mgrid
+    #nisa.nc_matmul
+    nl.copy
+
+    # attention-specific
+    nl.load_transpose2d = lambda src, **kwargs: nki_builder.load_transpose2d(src, **kwargs)
+    #nisa.affine_select
+    #nl.tensor_reduce
+    #nisa.activation
+    nl.broadcast_to
+    #nisa.nc_transpose
+
+
 
 
 def unpatch():
