@@ -63,6 +63,7 @@ from ...core.data import (
     Trans,
     CumSum,
     Bitcast,
+    AtomicCas,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -707,6 +708,7 @@ class SymbolicExpr:
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
     CAST_OPS = ("cast_impl", "bitcast")
+    ATOMIC_OPS = ("atomic_cas",)
     SUPPORTED_OPS = (
         BASIC_OPS
         + INDIRECT_OPS
@@ -718,6 +720,7 @@ class SymbolicExpr:
         + BROADCAST_OPS
         + CAST_OPS
         + SCAN_OPS
+        + ATOMIC_OPS
     )
 
     OP_SPEC = {
@@ -791,6 +794,8 @@ class SymbolicExpr:
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
+        # Atomic operations
+        "atomic_cas": Spec(req=("ptr", "cmp", "val")),
         # Misc
         "advance": Spec(req=("ptr", "offsets")),
         "umulhi": Spec(req=("lhs", "rhs")),
@@ -1231,6 +1236,9 @@ class SymbolicExpr:
         if self.op in ("cast_impl", "bitcast"):
             # Cast/bitcast operation - pass through the source value
             self._z3, self._constraints = self.src._to_z3()
+
+        if self.op == "atomic_cas":
+            raise NotImplementedError("atomic_cas operation is not implemented yet")
 
         if self.op == "advance":
             raise NotImplementedError("Advance operation is not implemented yet")
@@ -1943,6 +1951,15 @@ class SanitizerSymbolicExecution(Sanitizer):
             result.dtype_tt = dst_type
             return result
 
+        def op_atomic_cas_overrider(ptr, cmp, val, sem, scope):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            cmp_sym = SymbolicExpr.from_value(cmp)
+            val_sym = SymbolicExpr.from_value(val)
+            # sem is a MEM_SEMANTIC enum, not a regular value, so we pass it directly
+            result = SymbolicExpr("atomic_cas", ptr_sym, cmp_sym, val_sym)
+            result.sem = sem  # Store sem as an attribute
+            return result
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -1976,6 +1993,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Trans: op_trans_overrider,
             CumSum: op_cumsum_overrider,
             Bitcast: op_bitcast_overrider,
+            AtomicCas: op_atomic_cas_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:

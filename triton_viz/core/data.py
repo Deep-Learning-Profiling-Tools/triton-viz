@@ -229,6 +229,11 @@ class Bitcast(Op):
 
 
 @dataclass
+class AtomicCas(Op):
+    name: ClassVar[str] = "atomic_cas"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str
