@@ -89,6 +89,9 @@ class NKITrace(KernelInterface, TraceInterface):
 
     def __getitem__(self, *grid):
         return KernelInterface.__getitem__(self, tuple(*grid))
+    
+    def __call__(self, *args, **kwargs):
+        return self[(1, 1, 1)](*args, **kwargs)
 
 
 #def trace(clients: str | Client | None = None, backend: str = "triton"):
