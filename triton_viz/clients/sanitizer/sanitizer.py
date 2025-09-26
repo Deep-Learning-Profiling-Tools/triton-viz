@@ -1006,25 +1006,10 @@ class SymbolicExpr:
                     )
             return first_dtype
         if isinstance(var, TensorHandle):
-            # Handle TensorHandle with potentially multiple data elements
-            if len(var.data) > 1:
-                # For multi-element cases (e.g., from interleave operations),
-                # verify dtype consistency across all elements
-                first_dtype = None
-                for elem in var.data:
-                    if hasattr(elem, "dtype"):
-                        elem_dtype = elem.dtype
-                        if first_dtype is None:
-                            first_dtype = elem_dtype
-                        elif first_dtype != elem_dtype:
-                            raise ValueError(
-                                f"TensorHandle contains elements with inconsistent dtypes: "
-                                f"{first_dtype} vs {elem_dtype}"
-                            )
-                # If all elements have consistent dtype or no dtype attributes,
-                # trust and return the TensorHandle's overall dtype
-                return var.dtype
-            # Single element case - original logic
+            if len(var.data) != 1:
+                raise ValueError(
+                    f"Unsupported var.data: {var.data} with length more than one!"
+                )
             if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
                 return var.dtype
             if isinstance(var.dtype, tl.pointer_type):  # if a pointer
@@ -1053,14 +1038,7 @@ class SymbolicExpr:
         if isinstance(var, SymbolicExpr.tuple_types):  # if a tuple
             return cls("const", tuple(var), dtype_tt)
         if isinstance(var, TensorHandle):  # if a TensorHandle
-            # Handle both single and multi-element TensorHandle
-            if len(var.data) == 1:
-                # Single element: extract scalar for backward compatibility
-                return cls("const", var.data.item(), dtype_tt)
-            else:
-                # Multi-element: treat like a tuple, keep the entire array
-                # This occurs in operations like interleave
-                return cls("const", var.data, dtype_tt)
+            return cls("const", var.data.item(), dtype_tt)
         if isinstance(
             var, SymbolicExpr.builtin_scala_types
         ):  # if a python builtin type
