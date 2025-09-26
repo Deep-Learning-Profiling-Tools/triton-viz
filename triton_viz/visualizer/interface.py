@@ -19,6 +19,8 @@ global_data = None
 raw_tensor_data = None
 precomputed_c_values = {}
 current_fullscreen_op = None
+last_public_url = None
+last_local_port = None
 
 
 def precompute_c_values(op_data):
@@ -52,6 +54,14 @@ def update_global_data():
     # Pass the records to analyze_records
     analysis_data = analyze_records(all_records)
     viz_data = get_visualization_data()
+    try:
+        keys = list(viz_data.get("visualization_data", {}).keys())
+        print(f"[viz] grids: {keys}")
+        for k in keys:
+            ops = viz_data["visualization_data"].get(k, [])
+            print(f"[viz] grid {k} ops: {[op.get('type') for op in ops]}")
+    except Exception as e:
+        print("[viz] debug logging failed:", e)
     global_data = {
         "ops": {
             "visualization_data": viz_data["visualization_data"],
@@ -93,8 +103,7 @@ def debug_page():
 @app.route("/api/data")
 def get_data():
     global global_data
-    if global_data is None:
-        update_global_data()
+    update_global_data()
     return jsonify(global_data)
 
 
@@ -191,18 +200,82 @@ def get_load_value():
         return jsonify({"error": "Global tensor data not found"}), 200
 
 
-def run_flask_with_cloudflared():
-    cloudflared_port = 8000  # You can change this port if needed
-    tunnel_url = _run_cloudflared(cloudflared_port, 8001)  # not too important
+@app.route("/api/getLoadTensor", methods=["POST"])
+def get_load_tensor():
+    """Return entire global tensor for a given Load/Store op, with min/max.
+
+    Response schema:
+      {
+        "shape": [d0, d1, d2?],
+        "dims": 1|2|3,
+        "min": float,
+        "max": float,
+        "values": nested_list  # Python list converted from torch tensor
+      }
+    """
+    global raw_tensor_data
+    data = request.json
+    uuid = data.get("uuid")
+
+    if uuid is None or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+
+    op_data = raw_tensor_data[uuid]
+    if "global_tensor" not in op_data:
+        return jsonify({"error": "Global tensor data not found"}), 200
+
+    t = op_data["global_tensor"].cpu()
+    try:
+        t_min = float(t.min().item())
+        t_max = float(t.max().item())
+    except Exception:
+        # In case of empty tensor
+        t_min = 0.0
+        t_max = 0.0
+
+    return jsonify(
+        {
+            "shape": list(t.shape),
+            "dims": len(t.shape),
+            "min": t_min,
+            "max": t_max,
+            "values": t.numpy().tolist(),
+        }
+    )
+
+
+def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None):
+    """
+    Run the Flask app on a given port and expose it via Cloudflared.
+
+    :param port: Local Flask port to bind to. Defaults to 8000.
+    :param tunnel_port: Local tunnel control port for cloudflared. Defaults to port + 1.
+    """
+    cloudflared_port = port
+    if tunnel_port is None:
+        tunnel_port = cloudflared_port + 1
+    global last_public_url, last_local_port
+    tunnel_url = _run_cloudflared(cloudflared_port, tunnel_port)
+    last_public_url = tunnel_url
+    last_local_port = cloudflared_port
     print(f"Cloudflare tunnel URL: {tunnel_url}")
-    app.run(port=cloudflared_port)
+    app.run(host="0.0.0.0", port=cloudflared_port, debug=False, use_reloader=False)
 
 
-def launch(share=True):
+def launch(share: bool = True, port: int | None = None):
+    """
+    Launch the Triton-Viz Flask server.
+
+    """
     print("Launching Triton viz tool")
+    default_port = 8000 if share else 5001
+    actual_port = port or int(os.getenv("TRITON_VIZ_PORT", default_port))
+
     if share:
         print("--------")
-        flask_thread = threading.Thread(target=run_flask_with_cloudflared)
+        flask_thread = threading.Thread(
+            target=run_flask_with_cloudflared, args=(actual_port, None)
+        )
         flask_thread.start()
 
         # Wait for the server to start
@@ -210,24 +283,72 @@ def launch(share=True):
 
         # Try to get the tunnel URL by making a request to the local server
         try:
-            response = requests.get("http://localhost:8000")
-            public_url = response.url
-            print("Running on local URL:  http://localhost:8000")
-            print(f"Running on public URL: {public_url}")
+            local_url = f"http://localhost:{actual_port}"
+            # touch local server to ensure it's up
+            _ = requests.get(local_url)
+            public_url = last_public_url
+            print(f"Running on local URL:  {local_url}")
+            if public_url:
+                print(f"Running on public URL: {public_url}")
             print(
                 "\nThis share link expires in 72 hours. For free permanent hosting and GPU upgrades, check out Spaces: https://huggingface.co/spaces"
             )
             print("--------")
+            return local_url, public_url
         except requests.exceptions.RequestException:
             print("Setting up public URL... Please wait.")
+            # Even if the readiness check fails, return the intended URLs so callers don't crash
+            local_url = f"http://localhost:{actual_port}"
+            public_url = last_public_url
+            return local_url, public_url
     else:
         print("--------")
-        print("Running on local URL:  http://localhost:5001")
+        local_url = f"http://localhost:{actual_port}"
+        print(f"Running on local URL:  {local_url}")
         print("--------")
-        app.run(port=5001)
+        global last_local_port
+        last_local_port = actual_port
+
+        # Run Flask in a background thread so callers can continue (non-blocking)
+        def _run_local():
+            app.run(host="0.0.0.0", port=actual_port, debug=True, use_reloader=False)
+
+        flask_thread = threading.Thread(target=_run_local, daemon=True)
+        flask_thread.start()
+        # Give the server a moment to bind the port
+        time.sleep(0.5)
+        return local_url, None
 
 
-# This function can be called to stop the Flask server if needed
-def stop_server(flask_thread):
-    # Implement a way to stop the Flask server
-    pass
+def get_last_public_url():
+    """Return the last Cloudflare public URL created by launch(share=True)."""
+    return last_public_url
+
+
+@app.route("/shutdown", methods=["POST", "GET"])
+def _shutdown():
+    """Shutdown Flask development server (useful for notebooks)."""
+    from flask import request as _req
+
+    func = _req.environ.get("werkzeug.server.shutdown")
+    if func is None:
+        return jsonify(
+            {"status": "error", "message": "Not running with the Werkzeug Server"}
+        ), 400
+    func()
+    return jsonify({"status": "ok", "message": "Server shutting down..."})
+
+
+def stop_server(port: int | None = None):
+    """
+    Stop the running Flask server by calling the /shutdown endpoint.
+    If port is None, it will try the last used local port.
+    """
+    target_port = port or last_local_port
+    if target_port is None:
+        return False
+    try:
+        requests.post(f"http://127.0.0.1:{target_port}/shutdown", timeout=2)
+        return True
+    except Exception:
+        return False

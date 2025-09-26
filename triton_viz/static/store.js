@@ -1,4 +1,5 @@
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.module.js';
+import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
+import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import {
     setupScene,
     setupGeometries,
@@ -8,7 +9,7 @@ import {
     setupCamera,
     setupEventListeners,
     cameraControls
-} from './load_utils.js';
+} from './load_utils.js?v=3';
 
 export function createStoreVisualization(containerElement, op) {
 
@@ -29,6 +30,20 @@ export function createStoreVisualization(containerElement, op) {
         let isPaused = false;
 
         const sideMenu = createSideMenu(containerElement);
+        // Controls bar (drag toggle only for Store view)
+        const controlBar = document.createElement('div');
+        controlBar.style.position = 'fixed';
+        controlBar.style.top = '10px';
+        controlBar.style.left = '10px';
+        controlBar.style.display = 'flex';
+        controlBar.style.gap = '8px';
+        controlBar.style.zIndex = '2000';
+        controlBar.style.pointerEvents = 'auto';
+        const dragToggle = document.createElement('button');
+        dragToggle.textContent = 'Drag Cubes: OFF';
+        controlBar.appendChild(dragToggle);
+        containerElement.appendChild(controlBar);
+        let dragModeOn = false;
         let hoveredCube = null;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray
@@ -51,29 +66,72 @@ export function createStoreVisualization(containerElement, op) {
         scene.add(sliceTensor);
 
         addLabels(scene, globalTensor, sliceTensor);
-        setupCamera(scene, camera);
+        const { center } = setupCamera(scene, camera);
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.target.copy(center);
+        orbitControls.update();
 
         const totalFrames = op.global_coords.length * 2 + 30;
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
+        // Drag state (optional)
+        let isDragging = false;
+        let dragTarget = null;
+        const dragPlane = new THREE.Plane();
+        const planeIntersect = new THREE.Vector3();
+        const worldPosHelper = new THREE.Vector3();
+        const dragOffset = new THREE.Vector3();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
         setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown);
+        containerElement.addEventListener('mousedown', onMouseDown);
+        containerElement.addEventListener('mouseup', onMouseUp);
+        containerElement.addEventListener('mouseleave', onMouseUp);
+        dragToggle.addEventListener('click', () => {
+            dragModeOn = !dragModeOn;
+            dragToggle.textContent = `Drag Cubes: ${dragModeOn ? 'ON' : 'OFF'}`;
+            orbitControls.enabled = !dragModeOn;
+        });
         animate();
 
-        async function onMouseMove(event) {
+        function _updateMouseNDC(event) {
             mouse.x = (event.clientX / containerElement.clientWidth) * 2 - 1;
             mouse.y = -(event.clientY / containerElement.clientHeight) * 2 + 1;
+        }
 
+        function _raycastAll() {
             raycaster.setFromCamera(mouse, camera);
-
             const allTensorChildren = [
                 ...globalTensor.children,
                 ...sliceTensor.children
             ];
+            return raycaster.intersectObjects(allTensorChildren, true);
+        }
 
-            const intersects = raycaster.intersectObjects(allTensorChildren, true);
+        function _toTopLevelCube(obj) {
+            let node = obj;
+            while (node && !(node.userData && node.userData.tensorName)) {
+                node = node.parent;
+            }
+            return node;
+        }
+
+        async function onMouseMove(event) {
+            _updateMouseNDC(event);
+
+            raycaster.setFromCamera(mouse, camera);
+            if (isDragging && dragTarget) {
+                if (raycaster.ray.intersectPlane(dragPlane, planeIntersect)) {
+                    const newWorld = planeIntersect.add(dragOffset);
+                    dragTarget.parent.worldToLocal(newWorld);
+                    dragTarget.position.copy(newWorld);
+                }
+            }
+
+            const intersects = _raycastAll();
 
             if (hoveredCube) {
                 hoveredCube.getObjectByName('hoverOutline').visible = false;
@@ -81,10 +139,7 @@ export function createStoreVisualization(containerElement, op) {
             }
 
             if (intersects.length > 0) {
-                hoveredCube = intersects[0].object;
-                while (hoveredCube && !hoveredCube.tensorName) {
-                    hoveredCube = hoveredCube.parent;
-                }
+                hoveredCube = _toTopLevelCube(intersects[0].object);
 
                 if (hoveredCube) {
                     const hoverOutline = hoveredCube.getObjectByName('hoverOutline');
@@ -92,11 +147,12 @@ export function createStoreVisualization(containerElement, op) {
                         hoverOutline.visible = true;
                     }
 
-                    updateSideMenu(hoveredCube.tensorName, hoveredCube.tensor0, hoveredCube.tensor1, hoveredCube.tensor2, undefined);
+                    const { tensorName, tensor0, tensor1, tensor2 } = hoveredCube.userData;
+                    updateSideMenu(tensorName, tensor0, tensor1, tensor2, undefined);
 
-                    const res = await getElementValue(hoveredCube.tensorName, hoveredCube.tensor0, hoveredCube.tensor1, hoveredCube.tensor2);
+                    const res = await getElementValue(tensorName, tensor0, tensor1, tensor2);
 
-                    updateSideMenu(hoveredCube.tensorName, hoveredCube.tensor0, hoveredCube.tensor1, hoveredCube.tensor2, res.value);
+                    updateSideMenu(tensorName, tensor0, tensor1, tensor2, res.value);
 
                     console.log(`Value: ${res.value}`);
                 }
@@ -105,8 +161,35 @@ export function createStoreVisualization(containerElement, op) {
             }
         }
 
+        function onMouseDown(event) {
+            if (!dragModeOn) return;
+            _updateMouseNDC(event);
+            const hits = _raycastAll();
+            if (hits.length === 0) return;
+            const cube = _toTopLevelCube(hits[0].object);
+            if (!cube) return;
+            const normal = new THREE.Vector3();
+            camera.getWorldDirection(normal);
+            cube.getWorldPosition(worldPosHelper);
+            dragPlane.setFromNormalAndCoplanarPoint(normal, worldPosHelper);
+            raycaster.setFromCamera(mouse, camera);
+            if (!raycaster.ray.intersectPlane(dragPlane, planeIntersect)) return;
+            dragOffset.copy(worldPosHelper).sub(planeIntersect);
+            isDragging = true;
+            dragTarget = cube;
+            containerElement.style.cursor = 'grabbing';
+        }
+
+        function onMouseUp() {
+            if (!dragModeOn) return;
+            isDragging = false;
+            dragTarget = null;
+            containerElement.style.cursor = '';
+        }
+
         function animate() {
             requestAnimationFrame(animate);
+            orbitControls.update();
 
             if (!isPaused && frame < totalFrames) {
                 const index = Math.floor(frame / 2);
@@ -134,10 +217,10 @@ export function createStoreVisualization(containerElement, op) {
             sliceTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
 
             const globalCube = globalTensor.children.find(c =>
-                c.tensor0 === globalCoord[0] && c.tensor1 === globalCoord[1] && c.tensor2 === globalCoord[2]
+                c.userData && c.userData.tensor0 === globalCoord[0] && c.userData.tensor1 === globalCoord[1] && c.userData.tensor2 === globalCoord[2]
             );
             const sliceCube = sliceTensor.children.find(c =>
-                c.tensor0 === sliceCoord[0] && c.tensor1 === sliceCoord[1] && c.tensor2 === sliceCoord[2]
+                c.userData && c.userData.tensor0 === sliceCoord[0] && c.userData.tensor1 === sliceCoord[1] && c.userData.tensor2 === sliceCoord[2]
             );
 
             if (globalCube) globalCube.material.emissive.setHex(0x444444);
@@ -146,7 +229,7 @@ export function createStoreVisualization(containerElement, op) {
 
         async function getElementValue(tensorName, x, y, z) {
             let uuid = op.uuid;
-            const response = await fetch('/api/getStoreValue', {
+            const response = await fetch('/api/getLoadValue', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
