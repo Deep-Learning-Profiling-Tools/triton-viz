@@ -1186,7 +1186,9 @@ class SymbolicExpr:
             self._z3, self._constraints = self.arg._to_z3()
 
         if self.op == "join":
-            raise NotImplementedError("Join operation is not implemented in Z3 evaluation yet")
+            raise NotImplementedError(
+                "Join operation is not implemented in Z3 evaluation yet"
+            )
 
         if self.op == "addptr":
             # Add pointer operation
