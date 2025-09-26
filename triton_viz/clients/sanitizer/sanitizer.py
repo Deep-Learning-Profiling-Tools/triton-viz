@@ -55,6 +55,7 @@ from ...core.data import (
     Rsqrt,
     CastImpl,
     Reshape,
+    Join,
     Fabs,
     Ashr,
     Advance,
@@ -628,6 +629,11 @@ def _broadcast_dtype(self):
     self.dtype_tt = self.children["arg"].dtype_tt
 
 
+def _join_post(self):
+    # Join preserves the dtype of the left hand side
+    self.dtype_tt = self.children["lhs"].dtype_tt
+
+
 def _binary_dtype(expr):
     expr.dtype_tt = expr.lhs.dtype_tt
 
@@ -706,7 +712,7 @@ class SymbolicExpr:
     REDUCE_OPS = ("sum", "max", "min", "dot")
     SCAN_OPS = ("cumsum",)
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
-    BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
+    BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join")
     CAST_OPS = ("cast_impl", "bitcast")
     ATOMIC_OPS = ("atomic_cas",)
     SUPPORTED_OPS = (
@@ -791,6 +797,7 @@ class SymbolicExpr:
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
         "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         "reshape": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        "join": Spec(req=("lhs", "rhs"), post=_join_post),
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
@@ -1177,6 +1184,9 @@ class SymbolicExpr:
 
         if self.op in ("splat", "expand_dims", "broadcast"):
             self._z3, self._constraints = self.arg._to_z3()
+
+        if self.op == "join":
+            raise NotImplementedError("Join operation is not implemented in Z3 evaluation yet")
 
         if self.op == "addptr":
             # Add pointer operation
@@ -1890,6 +1900,16 @@ class SanitizerSymbolicExecution(Sanitizer):
             result.dtype_tt = arg_sym.dtype_tt if hasattr(arg_sym, "dtype_tt") else None
             return result
 
+        def op_join_overrider(lhs, rhs):
+            # Join operation combines two tensors along the last axis
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            # Create a join symbolic expression
+            result = SymbolicExpr("join", lhs_sym, rhs_sym)
+            # The dtype should be preserved from the inputs
+            result.dtype_tt = lhs_sym.dtype_tt if hasattr(lhs_sym, "dtype_tt") else None
+            return result
+
         def op_fabs_overrider(arg):
             arg_sym = SymbolicExpr.from_value(arg)
             return SymbolicExpr("fabs", arg_sym)
@@ -1963,6 +1983,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Rsqrt: op_rsqrt_overrider,
             CastImpl: op_cast_impl_overrider,
             Reshape: op_reshape_overrider,
+            Join: op_join_overrider,
             Fabs: op_fabs_overrider,
             Ashr: op_ashr_overrider,
             Advance: op_advance_overrider,
