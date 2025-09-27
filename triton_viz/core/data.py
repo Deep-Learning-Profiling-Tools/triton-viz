@@ -189,6 +189,11 @@ class Reshape(Op):
 
 
 @dataclass
+class Join(Op):
+    name: ClassVar[str] = "join"
+
+
+@dataclass
 class Fabs(Op):
     name: ClassVar[str] = "fabs"
 
