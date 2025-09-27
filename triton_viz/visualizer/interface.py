@@ -282,11 +282,12 @@ def launch(share: bool = True, port: int | None = None):
         time.sleep(5)
 
         # Try to get the tunnel URL by making a request to the local server
+        local_url = f"http://localhost:{actual_port}"
+        public_url = last_public_url
+
         try:
-            local_url = f"http://localhost:{actual_port}"
             # touch local server to ensure it's up
             _ = requests.get(local_url)
-            public_url = last_public_url
             print(f"Running on local URL:  {local_url}")
             if public_url:
                 print(f"Running on public URL: {public_url}")
@@ -294,13 +295,10 @@ def launch(share: bool = True, port: int | None = None):
                 "\nThis share link expires in 72 hours. For free permanent hosting and GPU upgrades, check out Spaces: https://huggingface.co/spaces"
             )
             print("--------")
-            return local_url, public_url
         except requests.exceptions.RequestException:
             print("Setting up public URL... Please wait.")
-            # Even if the readiness check fails, return the intended URLs so callers don't crash
-            local_url = f"http://localhost:{actual_port}"
-            public_url = last_public_url
-            return local_url, public_url
+
+        return local_url, public_url
     else:
         print("--------")
         local_url = f"http://localhost:{actual_port}"
