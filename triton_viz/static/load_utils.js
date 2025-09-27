@@ -1,4 +1,4 @@
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.module.js';
+import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 
 export const CUBE_SIZE = 0.2;
 export const GAP = 0.05;
@@ -44,10 +44,10 @@ export function createCube(color, tensorName, x, y, z, cubeGeometry, edgesGeomet
     hoverOutline.name = 'hoverOutline';
     cube.add(hoverOutline);
 
-    // Add custom properties to store tensor coordinates
-    cube.userData.tensor0 = z;
+    // Add custom properties to store tensor coordinates (x, y, z)
+    cube.userData.tensor0 = x;
     cube.userData.tensor1 = y;
-    cube.userData.tensor2 = x;
+    cube.userData.tensor2 = z;
     cube.userData.tensorName = tensorName;
 
     cube.name = `${tensorName}_cube_${x}_${y}_${z}`;
@@ -77,17 +77,64 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry, edg
                 }
             }
         }
+        // Build deterministic index from placement order to avoid mismatch
+        const indexOf = (x, y, z) => z * (width * height) + y * width + x;
 
-        console.log(`Highlighting ${coords.length} coordinates in global tensor`);
-        coords.forEach(([x, y, z]) => {
-            const cube = tensor.children.find(c =>
-                c.userData.tensor0 === x && c.userData.tensor1 === y && c.userData.tensor2 === z
-            );
-            if (cube) {
+        // Auto-detect coordinate axis order from incoming coords (try first N samples)
+        const samples = coords.slice(0, Math.min(256, coords.length));
+        const maxIncoming = [0, 0, 0];
+        for (const [a, b, c] of samples) {
+            if (a > maxIncoming[0]) maxIncoming[0] = a;
+            if (b > maxIncoming[1]) maxIncoming[1] = b;
+            if (c > maxIncoming[2]) maxIncoming[2] = c;
+        }
+        const target = [width - 1, height - 1, depth - 1];
+        const perms = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        function scorePerm(p) {
+            // sum of absolute diffs; heavy penalty if any exceeds target
+            let s = 0;
+            for (let i = 0; i < 3; i++) {
+                const diff = Math.abs(maxIncoming[i] - target[p[i]]);
+                s += diff;
+                if (maxIncoming[i] > target[p[i]]) s += 1000; // penalize out-of-range
+            }
+            return s;
+        }
+        let best = perms[0];
+        let bestScore = scorePerm(best);
+        for (let i = 1; i < perms.length; i++) {
+            const sc = scorePerm(perms[i]);
+            if (sc < bestScore) {
+                best = perms[i];
+                bestScore = sc;
+            }
+        }
+
+        const remap = ([a, b, c]) => {
+            const arr = [a, b, c];
+            return [arr[best.indexOf(0)], arr[best.indexOf(1)], arr[best.indexOf(2)]];
+        };
+
+        console.log(`Highlighting ${coords.length} coordinates in global tensor. perm used: ${best}`);
+        coords.forEach(([A, B, C]) => {
+            const [x, y, z] = remap([A, B, C]);
+            if (x < 0 || x >= width || y < 0 || y >= height || z < 0 || z >= depth) {
+                console.warn(`Could not find cube at (${A}, ${B}, ${C}) -> mapped to out-of-range (${x}, ${y}, ${z})`);
+                return;
+            }
+            const idx = indexOf(x, y, z);
+            const cube = tensor.children[idx];
+            if (cube && cube.userData && cube.userData.tensor0 === x && cube.userData.tensor1 === y && cube.userData.tensor2 === z) {
                 cube.material.color.set(COLOR_SLICE);
-                console.log(`Highlighted cube at (${x}, ${y}, ${z})`);
             } else {
-                console.warn(`Could not find cube at (${x}, ${y}, ${z})`);
+                console.warn(`Could not find cube at (${A}, ${B}, ${C}) -> mapped (${x}, ${y}, ${z})`);
             }
         });
     } else {
@@ -122,7 +169,10 @@ export function interpolateColor(color1, color2, factor) {
 
 export function updateCubeColor(tensor, coord, startColor, endColor, factor) {
     const cube = tensor.children.find(c =>
-        c.tensor0 === coord[0] && c.tensor1 === coord[1] && c.tensor2 === coord[2]
+        c.userData &&
+        c.userData.tensor0 === coord[0] &&
+        c.userData.tensor1 === coord[1] &&
+        c.userData.tensor2 === coord[2]
     );
     if (cube) {
         cube.material.color.copy(interpolateColor(startColor, endColor, factor));
@@ -152,6 +202,15 @@ export function setupEventListeners(containerElement, camera, renderer, onMouseM
     });
     containerElement.addEventListener('mousemove', onMouseMove);
     window.addEventListener('keydown', onKeyDown);
+
+    // Mouse wheel zoom
+    const WHEEL_ZOOM_SPEED = 0.5;
+    containerElement.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        const direction = event.deltaY > 0 ? 1 : -1;
+        camera.position.z += direction * WHEEL_ZOOM_SPEED;
+        camera.updateProjectionMatrix();
+    }, { passive: false });
 }
 
 export function cameraControls(camera, cameraRotation) {

@@ -1,19 +1,19 @@
 from triton_viz.core.data import (
     Tensor,
     Grid,
-    Store,
-    Load,
-    Dot,
     ExpandDims,
+    Dot,
+    Load,
+    Store,
 )
+from triton_viz.clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import numpy as np
-from ..core.trace import launches
-from ..clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import sys
 import torch
 import uuid
 
 sys.setrecursionlimit(100000)
+
 
 LAST_RECORD_ONLY = True
 
@@ -21,14 +21,29 @@ LAST_RECORD_ONLY = True
 
 
 def collect_grid():
+    from ..core.trace import launches as current_launches
+
+    try:
+        import sys as _sys
+
+        for name, mod in list(_sys.modules.items()):
+            if name.endswith("triton_viz.core.trace"):
+                cand = getattr(mod, "launches", None)
+                if isinstance(cand, list) and len(cand) > len(current_launches):
+                    current_launches = cand
+    except Exception:
+        pass
     records = []
     tensor_tables = []
     failures = []
-    for launch in launches:
+    for launch in current_launches:
         cur_records, cur_tensor_table, cur_failures = collect_launch(launch)
         records.append(cur_records)
         tensor_tables.append(cur_tensor_table)
         failures.append(cur_failures)
+    if len(records) == 0:
+        # Gracefully handle when there are no launches yet
+        return {}, {}, {}
     assert LAST_RECORD_ONLY, "Only last record is supported for now"
     return records[-1], tensor_tables[-1], failures[-1]
 
@@ -48,27 +63,30 @@ def collect_launch(launch):
             i,
         )
     failures = {}
-    all_grids = {}
-    last_grid = None
-    program_records = []
+    all_grids: dict[tuple, list] = {}
+    current_idx: tuple | None = None
     for r in launch.records:
         if isinstance(r, Grid):
-            if last_grid is not None:
-                all_grids[last_grid.idx] = program_records
-                program_records = []
-            last_grid = r
-        program_records.append(r)
-        if (
-            isinstance(r, (OutOfBoundsRecordBruteForce))
-            and (r.invalid_access_masks & r.op.masks).any()
-        ):
-            failures[last_grid.idx] = True
-    all_grids[last_grid.idx] = program_records
+            current_idx = getattr(r, "idx", None)
+            if current_idx is not None and current_idx not in all_grids:
+                all_grids[current_idx] = []
+            continue
+        if current_idx is None:
+            current_idx = (0, 0, 0)
+            all_grids.setdefault(current_idx, [])
+        # append non-Grid ops
+        all_grids[current_idx].append(r)
+        if isinstance(r, OutOfBoundsRecordBruteForce):
+            try:
+                if (r.invalid_access_masks & r.op.masks).any():
+                    failures[current_idx] = True
+            except Exception:
+                pass
     return all_grids, tensor_table, failures
 
 
 def extract_load_coords(
-    record: Load, global_tensor: Tensor
+    record, global_tensor: Tensor
 ) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
     # Extract coordinates for the global tensor
     global_shape = make_3d(global_tensor.shape)
@@ -214,6 +232,7 @@ def get_visualization_data():
     records, tensor_table, failures = collect_grid()
     visualization_data = {}
     raw_tensor_data = {}
+    kernel_src = ""
 
     for grid_idx, program_records in records.items():
         viz_data, raw_data, kernel_src = prepare_visualization_data(
@@ -222,12 +241,13 @@ def get_visualization_data():
         visualization_data[str(grid_idx)] = viz_data
         raw_tensor_data.update(raw_data)
 
-    # Get the kernel source code
+    # Ensure failures dict has JSON-serializable keys
+    safe_failures = {str(k): v for k, v in failures.items()}
 
     return {
         "visualization_data": visualization_data,
         "raw_tensor_data": raw_tensor_data,
-        "failures": failures,
+        "failures": safe_failures,
         "kernel_src": kernel_src,
     }
 

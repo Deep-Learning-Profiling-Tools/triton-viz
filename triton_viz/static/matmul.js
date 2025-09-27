@@ -1,4 +1,4 @@
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.module.js';
+import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 
 export function createMatMulVisualization(containerElement, op) {
     const { input_shape, other_shape, output_shape } = op;
@@ -343,6 +343,15 @@ export function createMatMulVisualization(containerElement, op) {
     window.addEventListener('resize', onResize);
     window.addEventListener('keydown', onKeyDown);
     containerElement.addEventListener('mousemove', onMouseMove);
+
+    // Mouse wheel zoom for matmul view
+    const WHEEL_ZOOM_SPEED = 0.5;
+    containerElement.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        const direction = event.deltaY > 0 ? 1 : -1;
+        camera.position.z += direction * WHEEL_ZOOM_SPEED;
+        camera.updateProjectionMatrix();
+    }, { passive: false });
 
     animate();
 
