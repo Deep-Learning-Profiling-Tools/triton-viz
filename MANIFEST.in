@@ -1,2 +1,0 @@
-recursive-include triton_viz/templates *.html
-recursive-include triton_viz/static *
