@@ -1,6 +1,6 @@
-import { createMatMulVisualization } from './matmul.js?v=3';
-import { createLoadVisualization } from './load.js?v=3';
-import { createStoreVisualization } from './store.js?v=3';
+import { createMatMulVisualization } from './matmul.js';
+import { createLoadVisualization } from './load.js';
+import { createStoreVisualization } from './store.js';
 
 export class GridBlock {
     constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction) {

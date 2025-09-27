@@ -9,7 +9,7 @@ import {
     setupCamera,
     setupEventListeners,
     cameraControls
-} from './load_utils.js?v=3';
+} from './load_utils.js';
 
 export function createStoreVisualization(containerElement, op) {
 

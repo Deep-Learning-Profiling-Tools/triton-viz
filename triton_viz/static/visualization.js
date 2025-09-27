@@ -1,5 +1,5 @@
-import { GridBlock } from './gridblock.js?v=3';
-import { createInfoPopup, showInfoPopup } from './infoPopup.js?v=3';
+import { GridBlock } from './gridblock.js';
+import { createInfoPopup, showInfoPopup } from './infoPopup.js';
 let globalData;
 let currentView = 'main';
 let canvas, ctx;
