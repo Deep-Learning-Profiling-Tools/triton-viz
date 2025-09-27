@@ -1,17 +1,18 @@
 from triton_viz.core.data import (
     Tensor,
+    Grid,
+    ExpandDims,
+    Dot,
+    Load,
+    Store,
 )
+from triton_viz.clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import numpy as np
 import sys
 import torch
 import uuid
 
 sys.setrecursionlimit(100000)
-
-
-# helper to tolerate multiple module instances (class identity mismatch)
-def _is_type(obj, type_name: str) -> bool:
-    return getattr(obj, "__class__", type("x", (), {})).__name__ == type_name
 
 
 LAST_RECORD_ONLY = True
@@ -65,7 +66,7 @@ def collect_launch(launch):
     all_grids: dict[tuple, list] = {}
     current_idx: tuple | None = None
     for r in launch.records:
-        if _is_type(r, "Grid"):
+        if isinstance(r, Grid):
             current_idx = getattr(r, "idx", None)
             if current_idx is not None and current_idx not in all_grids:
                 all_grids[current_idx] = []
@@ -75,7 +76,7 @@ def collect_launch(launch):
             all_grids.setdefault(current_idx, [])
         # append non-Grid ops
         all_grids[current_idx].append(r)
-        if _is_type(r, "OutOfBoundsRecordBruteForce"):
+        if isinstance(r, OutOfBoundsRecordBruteForce):
             try:
                 if (r.invalid_access_masks & r.op.masks).any():
                     failures[current_idx] = True
@@ -166,9 +167,9 @@ def prepare_visualization_data(program_records, tensor_table):
     for record in program_records:
         record_uuid = str(uuid.uuid4())[:8]
 
-        if _is_type(record, "ExpandDims"):
+        if isinstance(record, ExpandDims):
             print(record.input_shape, record.output_shape, record.index)
-        if _is_type(record, "Dot"):
+        if isinstance(record, Dot):
             visualization_data.append(
                 {
                     "type": "Dot",
@@ -185,7 +186,7 @@ def prepare_visualization_data(program_records, tensor_table):
                 "intermediate_results": record.intermediate_results,
             }
 
-        elif _is_type(record, "Load"):
+        elif isinstance(record, Load):
             global_tensor, slice_tensor = tensor_table[record.ptr]
             print(global_tensor)
             global_coords, slice_coords = extract_load_coords(record, global_tensor)
@@ -207,7 +208,7 @@ def prepare_visualization_data(program_records, tensor_table):
             }
             print(record.masks.shape)
 
-        elif _is_type(record, "Store"):
+        elif isinstance(record, Store):
             global_tensor, slice_tensor = tensor_table[record.ptr]
 
             global_coords, slice_coords = extract_load_coords(record, global_tensor)
