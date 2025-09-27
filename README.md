@@ -47,21 +47,13 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 - Python installed (preferably the latest available version).
 - [Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
 
-After installing Triton, choose ONE of the following to install PyTorch:
-
-- CPU-only (no GPU required):
-
-```sh
-pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-```
-
-- GPU (CUDA 12.1 nightly):
+Upon successfully installing Triton, install Torch using the following command:
 
 ```sh
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
 ```
 
-If you installed the GPU build, uninstall `pytorch-triton` to avoid conflicts:
+Upon successful installation of Torch make sure to uninstall `pytorch-triton` using the following command:
 
 ```sh
 pip uninstall pytorch-triton
