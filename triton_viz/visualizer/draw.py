@@ -21,18 +21,10 @@ LAST_RECORD_ONLY = True
 
 
 def collect_grid():
+    # If imported at module level, it may capture an empty launches list before trace.py completes initialization.
+    # By importing here, we ensure we get the current state of launches with all traced kernel executions.
     from ..core.trace import launches as current_launches
 
-    try:
-        import sys as _sys
-
-        for name, mod in list(_sys.modules.items()):
-            if name.endswith("triton_viz.core.trace"):
-                cand = getattr(mod, "launches", None)
-                if isinstance(cand, list) and len(cand) > len(current_launches):
-                    current_launches = cand
-    except Exception:
-        pass
     records = []
     tensor_tables = []
     failures = []
