@@ -365,8 +365,8 @@ export function createLoadVisualization(containerElement, op) {
             }
             orbitControls.update();
 
-            // When Color by Value is OFF, keep scene static (no highlight animation)
-            if (colorizeOn && !isPaused && frame < totalFrames) {
+            // Run highlight animation regardless of Color by Value state
+            if (!isPaused && frame < totalFrames) {
                 const index = Math.floor(frame / 2);
                 const factor = (frame % 2) / 1.0;
 
