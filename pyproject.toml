@@ -34,6 +34,12 @@ dependencies = [
   "tqdm",
 ]
 
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"triton_viz" = ["templates/*.html", "static/*.js", "static/**/*.js", "static/**"]
+
 [project.urls]
 homepage = "https://github.com/Deep-Learning-Profiling-Tools/triton-viz"
 
