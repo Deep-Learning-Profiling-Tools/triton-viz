@@ -19,6 +19,8 @@ global_data = None
 raw_tensor_data = None
 precomputed_c_values = {}
 current_fullscreen_op = None
+last_public_url = None
+last_local_port = None
 
 
 # Server state management
