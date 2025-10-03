@@ -25,6 +25,9 @@ export function createLoadVisualization(containerElement, op) {
         .then(data => console.log('Set current op:', data))
         .catch((error) => console.error('Error:', error));
 
+        // expose current op uuid globally for generic code panel in gridblock
+        try { window.current_op_uuid = op.uuid; } catch(e){}
+
         let currentStep = 0;
         let frame = 0;
         let isPaused = false;
@@ -63,6 +66,28 @@ export function createLoadVisualization(containerElement, op) {
         const dragToggle = document.createElement('button');
         dragToggle.textContent = 'Drag Cubes: OFF';
         controlBar.appendChild(dragToggle);
+        const codeToggle = document.createElement('button');
+        codeToggle.textContent = 'Show Code: OFF';
+        controlBar.appendChild(codeToggle);
+        // Mouse pick calibration (dx/dy in pixels)
+        const calibWrap = document.createElement('div');
+        calibWrap.style.display = 'flex';
+        calibWrap.style.alignItems = 'center';
+        calibWrap.style.gap = '4px';
+        const calibLabel = document.createElement('span');
+        calibLabel.textContent = 'Calib:';
+        calibLabel.style.opacity = '0.8';
+        const dxMinus = document.createElement('button'); dxMinus.textContent = '−X';
+        const dxPlus  = document.createElement('button'); dxPlus.textContent  = '+X';
+        const dyMinus = document.createElement('button'); dyMinus.textContent = '−Y';
+        const dyPlus  = document.createElement('button'); dyPlus.textContent  = '+Y';
+        const dxdyInfo = document.createElement('span'); dxdyInfo.style.minWidth = '70px'; dxdyInfo.style.textAlign = 'center';
+        const dxdyReset = document.createElement('button'); dxdyReset.textContent = 'Reset';
+        calibWrap.appendChild(calibLabel);
+        calibWrap.appendChild(dxMinus); calibWrap.appendChild(dxPlus);
+        calibWrap.appendChild(dyMinus); calibWrap.appendChild(dyPlus);
+        calibWrap.appendChild(dxdyInfo); calibWrap.appendChild(dxdyReset);
+        controlBar.appendChild(calibWrap);
         containerElement.appendChild(controlBar);
 
         // expose for debugging
@@ -79,6 +104,7 @@ export function createLoadVisualization(containerElement, op) {
         let legendEl = null;
         let scheme = 'mono';
         let monoBaseHex = '#3b82f6';
+        let codePanel = null;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray
         const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
@@ -116,6 +142,11 @@ export function createLoadVisualization(containerElement, op) {
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
+        // persistent calibration offsets
+        let mouseDx = Number(localStorage.getItem('viz_mouse_dx') || 0);
+        let mouseDy = Number(localStorage.getItem('viz_mouse_dy') || 0);
+        function updateDxDyLabel(){ dxdyInfo.textContent = `dx=${mouseDx}, dy=${mouseDy}`; }
+        updateDxDyLabel();
         // Drag state
         let dragModeOn = false;
         let isDragging = false;
@@ -135,8 +166,13 @@ export function createLoadVisualization(containerElement, op) {
         animate();
 
         function _updateMouseNDC(event) {
-            mouse.x = (event.clientX / containerElement.clientWidth) * 2 - 1;
-            mouse.y = -(event.clientY / containerElement.clientHeight) * 2 + 1;
+            const rect = renderer.domElement.getBoundingClientRect();
+            const dpr = (window.devicePixelRatio || 1);
+            const px = (event.clientX - rect.left + mouseDx) * dpr;
+            const py = (event.clientY - rect.top  + mouseDy) * dpr;
+            const w = rect.width * dpr, h = rect.height * dpr;
+            mouse.x = (px / w) * 2 - 1;
+            mouse.y = -(py / h) * 2 + 1;
         }
 
         function _raycastAll() {
@@ -157,8 +193,7 @@ export function createLoadVisualization(containerElement, op) {
         }
 
         async function onMouseMove(event) {
-            mouse.x = (event.clientX / containerElement.clientWidth) * 2 - 1;
-            mouse.y = -(event.clientY / containerElement.clientHeight) * 2 + 1;
+            _updateMouseNDC(event);
 
             raycaster.setFromCamera(mouse, camera);
 
@@ -286,6 +321,63 @@ export function createLoadVisualization(containerElement, op) {
 
             containerElement.appendChild(wrapper);
             legendEl = wrapper;
+        }
+
+        function destroyCodePanel() {
+            if (codePanel && codePanel.remove) codePanel.remove();
+            codePanel = null;
+        }
+
+        async function createCodePanel(frameIdx = 0, context = 8) {
+            destroyCodePanel();
+            const wrapper = document.createElement('div');
+            wrapper.style.position = 'fixed';
+            wrapper.style.right = '10px';
+            wrapper.style.top = '50px';
+            wrapper.style.width = '520px';
+            wrapper.style.maxHeight = '60vh';
+            wrapper.style.overflow = 'auto';
+            wrapper.style.padding = '8px 10px';
+            wrapper.style.background = 'rgba(0,0,0,0.65)';
+            wrapper.style.color = '#fff';
+            wrapper.style.font = '12px Menlo, Consolas, monospace';
+            wrapper.style.borderRadius = '6px';
+            wrapper.style.zIndex = '2000';
+
+            const header = document.createElement('div');
+            header.textContent = 'Operation Code & Context';
+            header.style.marginBottom = '6px';
+            header.style.opacity = '0.9';
+            wrapper.appendChild(header);
+
+            try {
+                const res = await fetch('/api/op_code', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uuid: op.uuid, frame_idx: frameIdx, context })
+                });
+                const data = await res.json();
+                const meta = document.createElement('div');
+                meta.style.marginBottom = '4px';
+                meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
+                wrapper.appendChild(meta);
+                const pre = document.createElement('pre');
+                pre.style.margin = '0';
+                pre.style.whiteSpace = 'pre';
+                const lines = (data.lines || []).map(l => {
+                    const mark = (data.highlight === l.no) ? '▶ ' : '  ';
+                    return `${mark}${String(l.no).padStart(6,' ')} | ${l.text||''}`;
+                }).join('\n');
+                pre.textContent = lines || '(no code available)';
+                wrapper.appendChild(pre);
+            } catch (e) {
+                const err = document.createElement('div');
+                err.textContent = 'Failed to load code context.';
+                wrapper.appendChild(err);
+            }
+
+            containerElement.appendChild(wrapper);
+            codePanel = wrapper;
         }
 
         function applyColorMapIfNeeded() {
@@ -479,6 +571,23 @@ export function createLoadVisualization(containerElement, op) {
             dragToggle.textContent = `Drag Cubes: ${dragModeOn ? 'ON' : 'OFF'}`;
             orbitControls.enabled = !dragModeOn;
         });
+
+        codeToggle.addEventListener('click', async () => {
+            const on = codeToggle.textContent.endsWith('OFF');
+            codeToggle.textContent = `Show Code: ${on ? 'ON' : 'OFF'}`;
+            if (on) {
+                await createCodePanel(0, 8);
+            } else {
+                destroyCodePanel();
+            }
+        });
+
+        // calibration handlers
+        dxMinus.addEventListener('click', ()=>{ mouseDx -= 1; localStorage.setItem('viz_mouse_dx', String(mouseDx)); updateDxDyLabel(); });
+        dxPlus.addEventListener('click',  ()=>{ mouseDx += 1; localStorage.setItem('viz_mouse_dx', String(mouseDx)); updateDxDyLabel(); });
+        dyMinus.addEventListener('click', ()=>{ mouseDy -= 1; localStorage.setItem('viz_mouse_dy', String(mouseDy)); updateDxDyLabel(); });
+        dyPlus.addEventListener('click',  ()=>{ mouseDy += 1; localStorage.setItem('viz_mouse_dy', String(mouseDy)); updateDxDyLabel(); });
+        dxdyReset.addEventListener('click', ()=>{ mouseDx = 0; mouseDy = 0; localStorage.setItem('viz_mouse_dx','0'); localStorage.setItem('viz_mouse_dy','0'); updateDxDyLabel(); });
 
         function updateSideMenu(tensorName, x, y, z, value) {
             if (!tensorName) {

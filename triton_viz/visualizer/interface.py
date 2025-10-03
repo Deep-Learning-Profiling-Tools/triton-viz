@@ -113,6 +113,35 @@ def update_global_data():
     global_data["analysis"] = df_dict
 
 
+def _safe_read_file_segment(filename: str, lineno: int, context: int = 8):
+    try:
+        # only allow files under current working dir for safety
+        cwd = os.path.realpath(os.getcwd())
+        path = os.path.realpath(filename)
+        if not path.startswith(cwd):
+            return None
+        start = max(1, lineno - context)
+        end = lineno + context
+        lines = []
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f, start=1):
+                if i < start:
+                    continue
+                if i > end:
+                    break
+                lines.append({"no": i, "text": line.rstrip("\n")})
+        return {
+            "filename": path,
+            "lineno": lineno,
+            "start": start,
+            "end": end,
+            "highlight": lineno,
+            "lines": lines,
+        }
+    except Exception:
+        return None
+
+
 @app.route("/")
 def index():
     update_global_data()
@@ -123,6 +152,12 @@ def index():
 def debug_page():
     update_global_data()
     return render_template("debug.html")
+
+
+@app.route("/calibrate")
+def calibrate_page():
+    # A minimal page to calibrate mouse picking dx/dy
+    return render_template("calibrate.html")
 
 
 @app.route("/api/data")
@@ -146,6 +181,110 @@ def set_current_op():
     return jsonify(
         {"status": "Current op set successfully", "uuid": current_fullscreen_op}
     )
+
+
+@app.route("/api/op_code", methods=["POST"])
+def get_op_code():
+    global raw_tensor_data, current_fullscreen_op
+    data = request.json or {}
+    # ensure data prepared
+    if raw_tensor_data is None:
+        update_global_data()
+    uuid = data.get("uuid") or current_fullscreen_op
+    frame_idx = int(data.get("frame_idx", 0))
+    context = int(data.get("context", 8))
+    if not uuid or raw_tensor_data is None or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    tb_list = raw_tensor_data[uuid].get("tracebacks") or []
+    if not tb_list:
+        return jsonify({"error": "Traceback not available"}), 200
+    # Heuristic: pick the BEST user frame under CWD (closest to op)
+    cwd = os.path.realpath(os.getcwd())
+
+    def _score(tb: dict) -> int:
+        fn = tb.get("filename") or ""
+        line = tb.get("line") or ""
+        name = tb.get("name") or ""
+        p = os.path.realpath(fn)
+        score = 0
+        if p.startswith(cwd):
+            score += 5
+        if any(
+            s in p
+            for s in ["site-packages", "triton_viz/", "triton/", "runpy.py", "IPython"]
+        ):
+            score -= 10
+        if name.endswith("_kernel") or "kernel" in name:
+            score += 3
+        if "tl." in line:
+            score += 2
+        if "examples" in p:
+            score += 1
+        return score
+
+    # Prefer frames from tail (closest to current) and highest score
+    best = None
+    best_score = -(10**9)
+    for tb in reversed(tb_list):
+        sc = _score(tb)
+        if sc > best_score:
+            best, best_score = tb, sc
+    chosen = best if best is not None else None
+    if chosen is None:
+        # fallback: use requested frame or last non-<string> frame
+        frame_idx = max(0, min(frame_idx, len(tb_list) - 1))
+        chosen = tb_list[frame_idx]
+        for tb in reversed(tb_list):
+            fn = tb.get("filename") or ""
+            if not fn.startswith("<"):
+                chosen = tb
+                break
+    tb = chosen
+    filename = tb.get("filename")
+    lineno = int(tb.get("lineno", 0))
+    line_of_code = tb.get("line")
+    seg = _safe_read_file_segment(filename, lineno, context)
+    if seg is None:
+        # fallback with single line
+        seg = {
+            "filename": filename,
+            "lineno": lineno,
+            "start": lineno,
+            "end": lineno,
+            "highlight": lineno,
+            "lines": [{"no": lineno, "text": line_of_code or ""}],
+        }
+    return jsonify(seg)
+
+
+@app.route("/api/getMatmulC", methods=["POST"])
+def get_matmul_c():
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    a = op.get("input_data")
+    b = op.get("other_data")
+    if a is None or b is None:
+        return jsonify({"error": "MatMul tensors not available"}), 200
+    try:
+        # Compute C on CPU
+        c = a @ b
+        c_cpu = c.cpu()
+        cmin = float(c_cpu.min().item())
+        cmax = float(c_cpu.max().item())
+        return jsonify(
+            {
+                "shape": list(c_cpu.shape),
+                "min": cmin,
+                "max": cmax,
+                "values": c_cpu.numpy().tolist(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"MatMul compute failed: {e}"}), 200
 
 
 @app.route("/api/getValue", methods=["POST"])

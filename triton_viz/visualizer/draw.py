@@ -169,6 +169,8 @@ def prepare_visualization_data(program_records, tensor_table):
                     "other_shape": record.other_shape,
                     "output_shape": record.output_shape,
                     "uuid": record_uuid,
+                    # provide C values for color-by-value
+                    "c_shape": record.output_shape,
                 }
             )
 
@@ -176,6 +178,16 @@ def prepare_visualization_data(program_records, tensor_table):
                 "input_data": torch.tensor(record.input_data),
                 "other_data": torch.tensor(record.other_data),
                 "intermediate_results": record.intermediate_results,
+                "tracebacks": [
+                    {
+                        "filename": f.filename,
+                        "lineno": f.lineno,
+                        "line": f.line,
+                        "name": f.name,
+                    }
+                    for f in getattr(record, "call_path", [])
+                ],
+                # prepare C values after kernel (if available from intermediate or recompute best-effort)
             }
 
         elif isinstance(record, Load):
@@ -197,6 +209,15 @@ def prepare_visualization_data(program_records, tensor_table):
             raw_tensor_data[record_uuid] = {
                 "global_tensor": global_tensor.data.cpu(),  # Ensure it's on CPU
                 "dims": len(global_tensor.data.cpu().shape),
+                "tracebacks": [
+                    {
+                        "filename": f.filename,
+                        "lineno": f.lineno,
+                        "line": f.line,
+                        "name": f.name,
+                    }
+                    for f in getattr(record, "call_path", [])
+                ],
             }
             print(record.masks.shape)
 
@@ -215,6 +236,18 @@ def prepare_visualization_data(program_records, tensor_table):
                     "uuid": record_uuid,
                 }
             )
+
+            raw_tensor_data[record_uuid] = {
+                "tracebacks": [
+                    {
+                        "filename": f.filename,
+                        "lineno": f.lineno,
+                        "line": f.line,
+                        "name": f.name,
+                    }
+                    for f in getattr(record, "call_path", [])
+                ],
+            }
 
     return visualization_data, raw_tensor_data, ""
 

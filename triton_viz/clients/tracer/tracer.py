@@ -3,6 +3,7 @@ from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore
 from typing import Callable, Optional, Union
 import numpy as np
+import traceback
 
 
 def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
@@ -64,6 +65,35 @@ class Tracer(Client):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        def _extract_user_frames() -> list[traceback.FrameSummary]:
+            stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
+            # drop current frames (this function and callers)
+            stack = stack[:-2]
+            cleaned: list[traceback.FrameSummary] = []
+            for f in stack:
+                fn = f.filename.replace("\\", "/")
+                if any(
+                    s in fn
+                    for s in [
+                        "triton_viz/core/",
+                        "triton_viz/clients/",
+                        "triton/runtime/",
+                        "triton/language/",
+                        "site-packages/triton/",
+                        "runpy.py",
+                        "IPython",
+                    ]
+                ):
+                    continue
+                cleaned.append(f)
+            if cleaned:
+                return cleaned
+            # fallback to last non "<...>" frame
+            for f in reversed(stack):
+                if not f.filename.startswith("<"):
+                    return [f]
+            return stack[-1:]
+
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -71,18 +101,18 @@ class Tracer(Client):
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
-            self.records.append(
-                Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            )
+            rec = Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
-            self.records.append(
-                Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            )
+            rec = Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
         def pre_raw_load_callback(ptr):
@@ -92,7 +122,9 @@ class Tracer(Client):
             tensor = self._get_tensor(first_ptr)
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Load(tensor.data_ptr(), offsets, true_mask))
+            rec = Load(tensor.data_ptr(), offsets, true_mask)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         def pre_raw_store_callback(ptr, value):
             if not self.sample:
@@ -101,7 +133,9 @@ class Tracer(Client):
             tensor = self._get_tensor(first_ptr)
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Store(tensor.data_ptr(), offsets, true_mask))
+            rec = Store(tensor.data_ptr(), offsets, true_mask)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
@@ -116,7 +150,10 @@ class Tracer(Client):
             input_shape = input.data.shape
             other_shape = other.data.shape
             ret_shape = ret.data.shape
-            self.records.append(Dot(input_shape, other_shape, ret_shape))
+            # Pass input/other raw arrays so draw.py can render MatMul
+            rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         if op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)

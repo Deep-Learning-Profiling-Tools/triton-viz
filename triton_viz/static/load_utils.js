@@ -12,6 +12,9 @@ export function setupScene(container, backgroundColor = 0x000000) {
     scene.background = new THREE.Color(backgroundColor);
     const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // Honour device pixel ratio to align raycaster with drawn pixels
+    const dpr = (window.devicePixelRatio || 1);
+    renderer.setPixelRatio(dpr);
     renderer.setSize(container.clientWidth, container.clientHeight);
     container.appendChild(renderer.domElement);
 

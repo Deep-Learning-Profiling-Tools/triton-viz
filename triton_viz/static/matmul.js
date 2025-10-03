@@ -1,4 +1,5 @@
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
+import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 
 export function createMatMulVisualization(containerElement, op) {
     const { input_shape, other_shape, output_shape } = op;
@@ -80,11 +81,23 @@ export function createMatMulVisualization(containerElement, op) {
 
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
+    // persistent calibration offsets shared with Load view for consistency
+    let mouseDx = Number(localStorage.getItem('viz_mouse_dx') || 0);
+    let mouseDy = Number(localStorage.getItem('viz_mouse_dy') || 0);
 
+
+    function _updateMouseNDC(event) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        const dpr = (window.devicePixelRatio || 1);
+        const px = (event.clientX - rect.left + mouseDx) * dpr;
+        const py = (event.clientY - rect.top  + mouseDy) * dpr;
+        const w = rect.width * dpr, h = rect.height * dpr;
+        mouse.x = (px / w) * 2 - 1;
+        mouse.y = -(py / h) * 2 + 1;
+    }
 
     async function onMouseMove(event) {
-        mouse.x = (event.clientX / containerElement.clientWidth) * 2 - 1;
-        mouse.y = -(event.clientY / containerElement.clientHeight) * 2 + 1;
+        _updateMouseNDC(event);
 
         raycaster.setFromCamera(mouse, camera);
 
@@ -150,6 +163,8 @@ export function createMatMulVisualization(containerElement, op) {
     const camera = new THREE.PerspectiveCamera(45, containerElement.clientWidth / containerElement.clientHeight, 0.1, 1000);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const dpr = (window.devicePixelRatio || 1);
+    renderer.setPixelRatio(dpr);
     renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
     containerElement.appendChild(renderer.domElement);
 
@@ -221,6 +236,11 @@ export function createMatMulVisualization(containerElement, op) {
 
     camera.position.set(center.x, center.y, center.z + cameraZ);
     camera.lookAt(center);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.target.copy(center);
+    controls.update();
 
     let isPaused = false;
 
@@ -241,10 +261,12 @@ export function createMatMulVisualization(containerElement, op) {
     function resetColors() {
         matrixA.children.forEach(cube => cube.material.color.copy(COLOR_A));
         matrixB.children.forEach(cube => cube.material.color.copy(COLOR_B));
+        matrixC.children.forEach(cube => cube.material.color.copy(COLOR_C));
     }
 
     function animate() {
         requestAnimationFrame(animate);
+        controls.update();
 
         if (!isPaused && frame < totalFrames) {
             resetColors();
@@ -296,6 +318,37 @@ export function createMatMulVisualization(containerElement, op) {
     controlPanel.appendChild(playPauseButton);
     controlPanel.appendChild(resetButton);
 
+    // Color by Value (for C matrix) toggle + legend (mono blue)
+    const colorToggle = document.createElement('button');
+    colorToggle.textContent = 'Color by Value: OFF';
+    controlPanel.appendChild(colorToggle);
+    let colorOn = false;
+    let legendEl = null;
+    function destroyLegend(){ if(legendEl && legendEl.remove) legendEl.remove(); legendEl=null; }
+    function createLegend(min,max){
+        destroyLegend();
+        const w = document.createElement('div');
+        Object.assign(w.style,{position:'absolute', left:'10px', bottom:'60px', background:'rgba(0,0,0,0.6)', color:'#fff', padding:'6px 8px', borderRadius:'6px'});
+        const c = document.createElement('canvas'); c.width=220; c.height=10; const ctx=c.getContext('2d');
+        for(let x=0;x<c.width;x++){ const t=x/(c.width-1); const r=t,g=0.2,b=1-t; ctx.fillStyle=`rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`; ctx.fillRect(x,0,1,c.height);}
+        const lab=document.createElement('div'); lab.style.display='flex'; lab.style.justifyContent='space-between'; lab.style.marginTop='2px'; lab.innerHTML=`<span>${min.toFixed(3)}</span><span>${max.toFixed(3)}</span>`;
+        const ttl=document.createElement('div'); ttl.textContent='Value (C)'; ttl.style.marginBottom='4px'; ttl.style.opacity='0.9';
+        w.appendChild(ttl); w.appendChild(c); w.appendChild(lab); containerElement.appendChild(w); legendEl=w;
+    }
+    async function fetchCValues(){
+        try{ const res=await fetch('/api/getMatmulC',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid: op.uuid})});
+            return await res.json(); }catch(e){ return {error:String(e)} }
+    }
+    function applyColorCWithData(data){ if(!colorOn||!data||data.error) return; try{
+            const M=(data.shape||[])[0]||0, N=(data.shape||[])[1]||0; const vals2d=data.values||[]; const vals=[]; const cells=[];
+            matrixC.children.forEach((cube,i)=>{ const row=Math.floor(i/N), col=i%N; cells.push({cube,row,col}); vals.push((row<M&&col<N)? vals2d[row][col]:0.0); });
+            const mn=Math.min(...vals), mx=Math.max(...vals);
+            cells.forEach((e,idx)=>{ const v=vals[idx]; const u=(mx===mn)?0.5:(v-mn)/(mx-mn); const r=u,g=0.2,b=1-u; e.cube.material.color.setRGB(r,g,b); });
+            createLegend(mn,mx);
+        }catch(e){}
+    }
+    colorToggle.addEventListener('click', async ()=>{ colorOn=!colorOn; colorToggle.textContent=`Color by Value: ${colorOn?'ON':'OFF'}`; if(!colorOn){ destroyLegend(); resetColors(); } else { const data=await fetchCValues(); applyColorCWithData(data); } });
+
     containerElement.appendChild(controlPanel);
 
     const PAN_SPEED = 0.1;
@@ -343,6 +396,7 @@ export function createMatMulVisualization(containerElement, op) {
     window.addEventListener('resize', onResize);
     window.addEventListener('keydown', onKeyDown);
     containerElement.addEventListener('mousemove', onMouseMove);
+    try { window.current_op_uuid = op.uuid; } catch (e) {}
 
     // Mouse wheel zoom for matmul view
     const WHEEL_ZOOM_SPEED = 0.5;

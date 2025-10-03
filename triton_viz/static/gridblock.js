@@ -90,6 +90,70 @@ export class GridBlock {
         if (this.blockData.length > 0) {
             this.displayOpVisualization(this.blockData[0]);
         }
+
+        // Add a global "Show Code" toggle once (applies to any op type)
+        const codeBtnId = 'global-code-toggle-btn';
+        if (!document.getElementById(codeBtnId)) {
+            const btn = document.createElement('button');
+            btn.id = codeBtnId;
+            btn.textContent = 'Show Code: OFF';
+            Object.assign(btn.style, {
+                position: 'fixed',
+                right: '10px',
+                top: '10px',
+                zIndex: '2001'
+            });
+            document.body.appendChild(btn);
+
+            let panel = null;
+            const destroyPanel = () => { if (panel && panel.remove) panel.remove(); panel = null; };
+            const createPanel = async (uuid, frameIdx = 0, context = 8) => {
+                destroyPanel();
+                const wrapper = document.createElement('div');
+                Object.assign(wrapper.style, {
+                    position: 'fixed', right: '10px', top: '50px', width: '520px', maxHeight: '60vh', overflow: 'auto',
+                    padding: '8px 10px', background: 'rgba(0,0,0,0.65)', color: '#fff', font: '12px Menlo, Consolas, monospace',
+                    borderRadius: '6px', zIndex: '2000'
+                });
+                const header = document.createElement('div');
+                header.textContent = 'Operation Code & Context';
+                header.style.marginBottom = '6px';
+                header.style.opacity = '0.9';
+                wrapper.appendChild(header);
+                try {
+                    const res = await fetch('/api/op_code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uuid, frame_idx: frameIdx, context }) });
+                    const data = await res.json();
+                    const meta = document.createElement('div');
+                    meta.style.marginBottom = '4px';
+                    meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
+                    wrapper.appendChild(meta);
+                    const pre = document.createElement('pre');
+                    pre.style.margin = '0';
+                    pre.style.whiteSpace = 'pre';
+                    const lines = (data.lines || []).map(l => {
+                        const mark = (data.highlight === l.no) ? '▶ ' : '  ';
+                        return `${mark}${String(l.no).padStart(6,' ')} | ${l.text||''}`;
+                    }).join('\n');
+                    pre.textContent = lines || '(no code available)';
+                    wrapper.appendChild(pre);
+                } catch (e) {
+                    const err = document.createElement('div');
+                    err.textContent = 'Failed to load code context.';
+                    wrapper.appendChild(err);
+                }
+                document.body.appendChild(wrapper);
+                panel = wrapper;
+            };
+
+            btn.addEventListener('click', async () => {
+                const turnOn = btn.textContent.endsWith('OFF');
+                btn.textContent = `Show Code: ${turnOn ? 'ON' : 'OFF'}`;
+                if (!this.blockData || this.blockData.length === 0) { if (!turnOn) destroyPanel(); return; }
+                // Prefer latest clicked/active uuid; fallback to first in current grid block
+                const activeUuid = window.current_op_uuid || (this.blockData[0] && this.blockData[0].uuid);
+                if (turnOn && activeUuid) await createPanel(activeUuid, 0, 8); else destroyPanel();
+            });
+        }
     }
 
     createVisualizationContainer() {
