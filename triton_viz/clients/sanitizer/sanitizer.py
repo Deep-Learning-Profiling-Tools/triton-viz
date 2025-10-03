@@ -983,6 +983,7 @@ class SymbolicExpr:
         return SymbolicExprDataWrapper(self.__str__(), self)
 
     triton_scala_dtypes = (
+        tl.int1,
         tl.int8,
         tl.int16,
         tl.int32,
