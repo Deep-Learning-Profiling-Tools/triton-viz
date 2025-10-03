@@ -1,5 +1,4 @@
 import math
-import tp
 import neuronxcc.nki.language as nl
 import neuronxcc.nki as nki
 import numpy as np
@@ -81,6 +80,17 @@ def tmp0_kernel(a):  # works
     # for store(dst, value, mask), dst.shape, value.shape, mask.shape need to be same, return shape
     return out
 
+def mgrid_kernel(a):  # test nl.mgrid functionality
+    B, D = a.shape
+    out = nl.ndarray(a.shape, dtype=a.dtype, buffer=nl.shared_hbm)
+
+    coords = nl.mgrid[:B, :D]
+    mask = (coords[0] < B) & (coords[1] < D)
+    a_tmp = nl.load(a[coords[0], coords[1]], mask=mask)
+    nl.store(out, value=2*a_tmp, mask=mask) # TODO: masked_store
+
+    return out
+
 def xyz_kernel(a):  # works
     B, T, C, H, W = a.shape
     out = nl.ndarray(a.shape, dtype=a.dtype, buffer=nl.shared_hbm)
@@ -127,7 +137,7 @@ y = torch.rand((B, D))
 blocks_x = math.ceil(B / 128)
 blocks_y = math.ceil(D / 512)
 
-kernel = tmp1_kernel
+kernel = mgrid_kernel
 if kernel == add_kernel:
     kernel_grid = (blocks_x, blocks_y)
     kernel_args = (x.numpy(), y.numpy())
@@ -172,39 +182,49 @@ if kernel == tmp1_kernel:
     kernel_grid = (blocks_x, blocks_y)
     kernel_args = (x.numpy(),)
     z1 = x
+if kernel == mgrid_kernel:
+    B, D = 1024, 1024
+    x = torch.rand((B, D))
 
-TRITON_VIZ = False
+    # Expected result: simple copy (nl.mgrid is just tested with device_print)
+    z1 = 2 * x  # Should be identical to input
+
+    kernel_grid = (1, 1, 1)
+    kernel_args = (x.numpy(),)
+
+TRITON_VIZ = True
 
 if TRITON_VIZ:
     kernel = triton_viz.trace(clients=Tracer(), backend="nki")(kernel)
     kk = kernel[kernel_grid]
     z2 = kk(*kernel_args)
-    z2 = torch.from_numpy(z2)
-    print((z1 - z2).abs().max())
+    #print((z1 - z2).abs().max())
 
-    print(f"Number of launches: {len(launches)}")
-    if launches:
-        launch = launches[-1]
-        print(f"Number of records: {len(launch.records)}")
-        for i, record in enumerate(launch.records):
-            print(f"Record {i}: {type(record).__name__}")
-            if hasattr(record, "ptr"):
-                print(f"  ptr: {record.ptr}")
-            if hasattr(record, "offsets"):
-                print(f"  offsets shape: {record.offsets.shape}")
-            if hasattr(record, "masks"):
-                print(f"  masks shape: {record.masks.shape}")
+    #print(f"Number of launches: {len(launches)}")
+    #if launches:
+    #    launch = launches[-1]
+    #    print(f"Number of records: {len(launch.records)}")
+    #    for i, record in enumerate(launch.records):
+    #        print(f"Record {i}: {type(record).__name__}")
+    #        if hasattr(record, "ptr"):
+    #            print(f"  ptr: {record.ptr}")
+    #        if hasattr(record, "offsets"):
+    #            print(f"  offsets shape: {record.offsets.shape}")
+    #        if hasattr(record, "masks"):
+    #            print(f"  masks shape: {record.masks.shape}")
 
-    # Try to launch visualization
-    try:
-        triton_viz.launch(share=False)
-    except Exception as e:
-        print(f"\nError during visualization: {e}")
-        import traceback
+    ## Try to launch visualization
+    #try:
+    #    triton_viz.launch(share=False)
+    #except Exception as e:
+    #    print(f"\nError during visualization: {e}")
+    #    import traceback
 
-        traceback.print_exc()
+    #    traceback.print_exc()
 else:
     kernel = nki.jit(kernel)
     z2 = nki.simulate_kernel(kernel[kernel_grid], *kernel_args)
-    z2 = torch.from_numpy(z2)
-    print((z1 - z2).abs().max())
+
+z2 = torch.from_numpy(z2)
+print((z1 - z2).abs().max())
+assert torch.allclose(z1, z2)

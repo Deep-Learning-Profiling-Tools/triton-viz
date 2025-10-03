@@ -129,23 +129,24 @@ class NDArray:
         """Implement slicing operations for NDArray"""
         if self._value is None:
             raise AttributeError("NDArray has no value to slice")
+        if not isinstance(keys, tuple):
+            keys = (keys,)
 
         # Apply the slicing to the underlying numpy array
         new_keys = []
-        if isinstance(keys, tuple):
-            arr_dim = 0
-            for k in keys:
-                if isinstance(k, NDArray):
-                    dim_len = self._value.shape[arr_dim]
-                    new_keys.append(k._value.clip(0, dim_len - 1))
-                elif isinstance(k, NLSlice):
-                    new_keys.append(slice(k.start, k.stop, k.step))
-                elif k is None:
-                    new_keys.append(k)
-                    arr_dim -= 1 # add new dim -> revisit arr_dim for next key
-                else:
-                    new_keys.append(k)
-                arr_dim += 1
+        arr_dim = 0
+        for k in keys:
+            if isinstance(k, NDArray):
+                dim_len = self._value.shape[arr_dim]
+                new_keys.append(k._value.clip(0, dim_len - 1))
+            elif isinstance(k, NLSlice):
+                new_keys.append(slice(k.start, k.stop, k.step))
+            elif k is None:
+                new_keys.append(k)
+                arr_dim -= 1 # add new dim -> revisit arr_dim for next key
+            else:
+                new_keys.append(k)
+            arr_dim += 1
         
         sliced_value = self._value[tuple(new_keys)]
 
@@ -382,7 +383,7 @@ def patch():
     nl.affine_range = nki_builder.range
     nl.par_dim
     nl.zeros = nki_builder.zeros
-    nl.mgrid
+    nl.mgrid = NDArray(value=np.mgrid, buffer=nl.sbuf, name='mgrid')
     nl.matmul = nki_builder.matmul
     nl.copy = nki_builder.copy
 
