@@ -89,14 +89,15 @@ class NDArray:
         self.buffer = buffer
         self.name = name
         self.kwargs = kwargs
+        value = None
         if "shape" in kwargs and "dtype" in kwargs:
             shape = kwargs.pop("shape")
             dtype = kwargs.pop("dtype")
-            self._value = np.ndarray(shape, dtype=dtype)
-        elif "value" in kwargs:
-            self._value = kwargs["value"]
-        else:
-            self._value = None
+            value = np.ndarray(shape, dtype=dtype)
+        if "value" in kwargs:
+            assert value is None or value.shape == kwargs["value"].shape
+            value = kwargs["value"]
+        self._value = value
 
     @property
     def shape(self):
@@ -109,10 +110,17 @@ class NDArray:
     @property
     def value(self):
         return self._value
+    
+    @property
+    def data(self):
+        return self._value
 
     @value.setter
     def value(self, new_value):
         self._value = new_value
+
+    def data_ptr(self):
+        return self.ctypes.data
 
     def __repr__(self):
         return f"NDArray(shape={self.shape}, dtype={self.dtype}, name={self.name})"
@@ -125,75 +133,82 @@ class NDArray:
         # Apply the slicing to the underlying numpy array
         new_keys = []
         if isinstance(keys, tuple):
+            arr_dim = 0
             for k in keys:
                 if isinstance(k, NDArray):
-                    new_keys.append(k._value)
+                    dim_len = self._value.shape[arr_dim]
+                    new_keys.append(k._value.clip(0, dim_len - 1))
                 elif isinstance(k, NLSlice):
                     new_keys.append(slice(k.start, k.stop, k.step))
+                elif k is None:
+                    new_keys.append(k)
+                    arr_dim -= 1 # add new dim -> revisit arr_dim for next key
                 else:
                     new_keys.append(k)
+                arr_dim += 1
+        
         sliced_value = self._value[tuple(new_keys)]
 
         # Create a new NDArray with the sliced data
         return NDArray(value=sliced_value, name=f"{self.name}_slice")
 
 
+    def _binary_op(self, other, op_func, op_name, op_symbol):
+        if isinstance(other, NDArray):
+            return NDArray(value=op_func(self._value, other._value), name=f"{self.name}_{op_name}_{other.name}")
+        elif np.isscalar(other):
+            return NDArray(value=op_func(self._value, other), name=f"{self.name}_{op_name}_scalar")
+        raise TypeError(f"Unsupported operand type(s) for {op_symbol}: 'NDArray' and '{type(other).__name__}'")
+
+    def _rbinary_op(self, other, op_func, op_name, op_symbol):
+        if isinstance(other, NDArray):
+            return NDArray(value=op_func(other._value, self._value), name=f"{other.name}_{op_name}_{self.name}")
+        elif np.isscalar(other):
+            return NDArray(value=op_func(other, self._value), name=f"scalar_{op_name}_{self.name}")
+        raise TypeError(f"Unsupported operand type(s) for {op_symbol}: '{type(other).__name__}' and 'NDArray'")
+
     # Define operator +/-/*//
     def __add__(self, other):
-        if isinstance(other, NDArray):
-            return NDArray(value=self._value + other._value, name=f"{self.name}_add_{other.name}")
-        elif np.isscalar(other):
-            return NDArray(value=self._value + other, name=f"{self.name}_add_scalar")
-        raise TypeError(f"Unsupported operand type(s) for +: 'NDArray' and '{type(other).__name__}'")
+        return self._binary_op(other, lambda a, b: a + b, "add", "+")
 
     def __radd__(self, other):
-        if isinstance(other, NDArray):
-            return NDArray(value=other._value + self._value, name=f"{other.name}_add_{self.name}")
-        elif np.isscalar(other):
-            return NDArray(value=other + self._value, name=f"scalar_add_{self.name}")
-        raise TypeError(f"Unsupported operand type(s) for +: '{type(other).__name__}' and 'NDArray'")
+        return self._rbinary_op(other, lambda a, b: a + b, "add", "+")
 
     def __sub__(self, other):
-        if isinstance(other, NDArray):
-            return NDArray(value=self._value - other._value, name=f"{self.name}_sub_{other.name}")
-        elif np.isscalar(other):
-            return NDArray(value=self._value - other, name=f"{self.name}_sub_scalar")
-        raise TypeError(f"Unsupported operand type(s) for -: 'NDArray' and '{type(other).__name__}'")
+        return self._binary_op(other, lambda a, b: a - b, "sub", "-")
 
     def __rsub__(self, other):
-        if isinstance(other, NDArray):
-            return NDArray(value=other._value - self._value, name=f"{other.name}_sub_{self.name}")
-        elif np.isscalar(other):
-            return NDArray(value=other - self._value, name=f"scalar_sub_{self.name}")
-        raise TypeError(f"Unsupported operand type(s) for -: '{type(other).__name__}' and 'NDArray'")
+        return self._rbinary_op(other, lambda a, b: a - b, "sub", "-")
 
     def __mul__(self, other):
-        if isinstance(other, NDArray):
-            return NDArray(value=self._value * other._value, name=f"{self.name}_mul_{other.name}")
-        elif np.isscalar(other):
-            return NDArray(value=self._value * other, name=f"{self.name}_mul_scalar")
-        raise TypeError(f"Unsupported operand type(s) for *: 'NDArray' and '{type(other).__name__}'")
+        return self._binary_op(other, lambda a, b: a * b, "mul", "*")
 
     def __rmul__(self, other):
-        if isinstance(other, NDArray):
-            return NDArray(value=other._value * self._value, name=f"{other.name}_mul_{self.name}")
-        elif np.isscalar(other):
-            return NDArray(value=other * self._value, name=f"scalar_mul_{self.name}")
-        raise TypeError(f"Unsupported operand type(s) for *: '{type(other).__name__}' and 'NDArray'")
+        return self._rbinary_op(other, lambda a, b: a * b, "mul", "*")
 
     def __truediv__(self, other):
-        if isinstance(other, NDArray):
-            return NDArray(value=self._value / other._value, name=f"{self.name}_div_{other.name}")
-        elif np.isscalar(other):
-            return NDArray(value=self._value / other, name=f"{self.name}_div_scalar")
-        raise TypeError(f"Unsupported operand type(s) for /: 'NDArray' and '{type(other).__name__}'")
+        return self._binary_op(other, lambda a, b: a / b, "div", "/")
 
     def __rtruediv__(self, other):
-        if isinstance(other, NDArray):
-            return NDArray(value=other._value / self._value, name=f"{other.name}_div_{self.name}")
-        elif np.isscalar(other):
-            return NDArray(value=other / self._value, name=f"scalar_div_{self.name}")
-        raise TypeError(f"Unsupported operand type(s) for /: '{type(other).__name__}' and 'NDArray'")
+        return self._rbinary_op(other, lambda a, b: a / b, "div", "/")
+
+    def __lt__(self, other):
+        return self._binary_op(other, lambda a, b: a < b, "lt", "<")
+
+    def __gt__(self, other):
+        return self._binary_op(other, lambda a, b: a > b, "gt", ">")
+
+    def __le__(self, other):
+        return self._binary_op(other, lambda a, b: a <= b, "le", "<=")
+
+    def __ge__(self, other):
+        return self._binary_op(other, lambda a, b: a >= b, "ge", ">=")
+
+    def __and__(self, other):
+        return self._binary_op(other, lambda a, b: a & b, "and", "&")
+
+    def __or__(self, other):
+        return self._binary_op(other, lambda a, b: a | b, "or", "|")
 
 
 class Builder:
@@ -206,7 +221,7 @@ class Builder:
         self.fn = None
         self.shared_hbm_arrays = {}
 
-    def set_grid_dims(self, grid_dims):
+    def set_grid_dim(self, grid_dims):
         self.grid_dims = grid_dims
 
     def set_grid_idx(self, x, y, z):
@@ -214,7 +229,7 @@ class Builder:
         self.grid_y = y
         self.grid_z = z
 
-    def ndarray(self, shape, dtype, *, buffer=None, name="", **kwargs):
+    def ndarray(self, shape, dtype, *, buffer=None, name=None, **kwargs):
         if buffer == nl.shared_hbm:
             if name is None:
                 # file name + function name + line number
@@ -234,8 +249,8 @@ class Builder:
             ret = NDArray(buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs)
         return ret
     
-    def zeros(self, shape, dtype, *, buffer=None, name="", **kwargs):
-        val = np.zeros(shape, dtype=dtype)
+    def zeros(self, shape, dtype, *, buffer=None, name=None, **kwargs):
+        value = np.zeros(shape, dtype=dtype)
         return self.ndarray(
             shape, dtype, buffer=buffer, name=name, value=value, **kwargs
         )
@@ -263,10 +278,21 @@ class Builder:
 
     def load(self, src: NDArray, *, mask=None, dtype=None, **kwargs):
         value = src._value
-        if mask is not None:
+        if isinstance(mask, NDArray):
+            value = value[mask._value]
+        elif mask is not None:
             value = value[mask]
         if dtype is not None:
             value = value.astype(dtype)
+
+        mask_value = getattr(mask, "_value", np.ones_like(src))
+        new_shape = []
+        for i, _v in enumerate(mask_value.shape):
+            assert np.unique(mask_value.sum(i)).size <= 2
+            new_dim = mask_value.sum(i).flatten()[0]
+            new_shape.append(new_dim)
+
+        value = value.reshape(new_shape)
         return NDArray(value=value, name=src.name, **kwargs)
 
     def load_transpose2d(self, src: NDArray, *, mask=None, dtype=None, **kwargs):
@@ -275,47 +301,111 @@ class Builder:
         return self.load(NDArray(value=value.T, name=src.name), mask=mask, dtype=dtype, **kwargs)
 
     def store(self, dst: NDArray, value: NDArray, *, mask=None, **kwargs):
-        if mask is not None:
-            value = value[mask]
-        import tp 
-
-        tp.log(f'{dst=}')
-        tp.log(f'{value=}')
-        dst._value[:] = value._value[:]
+        dst._value[mask._value] = value._value.ravel()
         return dst
 
+    def unary_op(self, x: NDArray, np_func, op_name, **kwargs):
+        return NDArray(value=np_func(x._value), name=f"{x.name}_{op_name}", **kwargs)
+
+    # Elementwise operator implementations
+    def exp(self, x: NDArray, **kwargs):
+        return self._unary_op(x, np.exp, "exp", **kwargs)
+
+    def relu(self, x: NDArray, **kwargs):
+        return self._unary_op(x, lambda v: np.maximum(v, 0), "relu", **kwargs)
+
+    def sigmoid(self, x: NDArray, **kwargs):
+        return self._unary_op(x, lambda v: 1 / (1 + np.exp(-v)), "sigmoid", **kwargs)
+
+    def tanh(self, x: NDArray, **kwargs):
+        return self._unary_op(x, np.tanh, "tanh", **kwargs)
+
+    def silu(self, x: NDArray, **kwargs):
+        # SiLU(x) = x * sigmoid(x)
+        sigmoid_x = 1 / (1 + np.exp(-x._value))
+        return NDArray(value=x._value * sigmoid_x, name=f"{x.name}_silu", **kwargs)
+
+    def gelu(self, x: NDArray, **kwargs):
+        # GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        sqrt_2_pi = np.sqrt(2 / np.pi)
+        inner = sqrt_2_pi * (x._value + 0.044715 * np.power(x._value, 3))
+        return NDArray(value=0.5 * x._value * (1 + np.tanh(inner)), name=f"{x.name}_gelu", **kwargs)
+
+    def sqrt(self, x: NDArray, **kwargs):
+        return self._unary_op(x, np.sqrt, "sqrt", **kwargs)
+
+    def abs(self, x: NDArray, **kwargs):
+        return self._unary_op(x, np.abs, "abs", **kwargs)
+
+    def log(self, x: NDArray, **kwargs):
+        return self._unary_op(x, np.log, "log", **kwargs)
+
+    def pow(self, x: NDArray, exponent, **kwargs):
+        if isinstance(exponent, NDArray):
+            return NDArray(value=np.power(x._value, exponent._value), name=f"{x.name}_pow_{exponent.name}", **kwargs)
+        elif np.isscalar(exponent):
+            return NDArray(value=np.power(x._value, exponent), name=f"{x.name}_pow_{exponent}", **kwargs)
+        else:
+            raise TypeError(f"Unsupported exponent type: {type(exponent)}")
+
+    def reciprocal(self, x: NDArray, **kwargs):
+        return self._unary_op(x, lambda v: 1 / v, "reciprocal", **kwargs)
+
+    def matmul(self, x: NDArray, y: NDArray, transpose_x=False, mask=None, **kwargs):
+        x_value = x._value 
+        if transpose_x:
+            x_value = x_value.T
+        y_value = y._value 
+        return NDArray(value=(x_value @ y_value), name=f"{x.name}_{y.name}_matmul", **kwargs)
+
+    def copy(self, x: NDArray, **kwargs):
+        return self.unary_op(x, np.copy, "copy", **kwargs)
+
+    def range(self, stop):
+        return range(stop)
 
 nki_builder = Builder()
 
 
 def patch():
-    nl.ndarray = lambda *args, **kwargs: nki_builder.ndarray(*args, **kwargs)
-    nl.program_id = lambda axis: nki_builder.program_id(axis)
-    nl.arange = lambda *args: nki_builder.arange(*args)
-    nl.load = lambda src, **kwargs: nki_builder.load(src, **kwargs)
-    nl.store = lambda dst, value, **kwargs: nki_builder.store(dst, value, **kwargs)
+    nl.ndarray = nki_builder.ndarray
+    nl.program_id = nki_builder.program_id
+    nl.arange = nki_builder.arange
+    nl.load = nki_builder.load
+    nl.store = nki_builder.store
     # see https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/api/nki.language.html
 
     # TODO: implement
     # matmul-specific
     # nl.shared_hbm
     # nl.psum
-    nl.affine_range
+    nl.affine_range = nki_builder.range
     nl.par_dim
-    nl.zeros = lambda *args, **kwags: nki_builder.zeros(*args, **kwargs)
+    nl.zeros = nki_builder.zeros
     nl.mgrid
-    #nisa.nc_matmul
-    nl.copy
+    nl.matmul = nki_builder.matmul
+    nl.copy = nki_builder.copy
 
     # attention-specific
-    nl.load_transpose2d = lambda src, **kwargs: nki_builder.load_transpose2d(src, **kwargs)
+    nl.load_transpose2d = nki_builder.load_transpose2d
     #nisa.affine_select
     #nl.tensor_reduce
     #nisa.activation
     nl.broadcast_to
     #nisa.nc_transpose
 
-
+    # Elementwise operators
+    nl.exp = nki_builder.exp
+    nl.relu = nki_builder.relu
+    nl.sigmoid = nki_builder.sigmoid
+    nl.tanh = nki_builder.tanh
+    nl.silu = nki_builder.silu
+    nl.gelu = nki_builder.gelu
+    nl.sqrt = nki_builder.sqrt
+    nl.abs = nki_builder.abs
+    nl.log = nki_builder.log
+    nl.pow = nki_builder.pow
+    nl.reciprocal = nki_builder.reciprocal
 
 
 def unpatch():
@@ -338,7 +428,7 @@ class NKIInterpretedFunction:
             grid_dims = (grid_dims[0], grid_dims[1], 1)
         elif len(grid_dims) != 3:
             raise ValueError(f"Grid must be 1, 2, or 3 dimensions, got {len(grid_dims)}")
-        nki_builder.set_grid_dims(grid_dims)
+        nki_builder.set_grid_dim(grid_dims)
         nki_builder.shared_hbm_arrays = {}
         nki_builder.fn = self.fn
 
