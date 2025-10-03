@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     verbose: bool
     sanitizer_activated: bool
+    virtual_memory: bool
     disable_sanitizer: bool
     report_grid_execution_progress: bool
 
@@ -33,6 +34,13 @@ class Config(types.ModuleType):
         self.report_grid_execution_progress = (
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
+
+        # --- Virtual memory flag ---
+        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
+
+    @property
+    def virtual_memory(self) -> bool:
+        return self._virtual_memory
 
     # ---------- disable_sanitizer ----------
     @property
