@@ -19,6 +19,7 @@ from z3 import (
     And,
     Or,
     Not,
+    Xor,
     sat,
     simplify,
 )
@@ -983,6 +984,7 @@ class SymbolicExpr:
         return SymbolicExprDataWrapper(self.__str__(), self)
 
     triton_scala_dtypes = (
+        tl.int1,
         tl.int8,
         tl.int16,
         tl.int32,
@@ -1075,6 +1077,9 @@ class SymbolicExpr:
         return expr, constraints
 
     def _to_z3(self) -> tuple[ArithRef, list]:
+        def _to_bool(x):
+            return x if isinstance(x, BoolRef) else (x != 0)
+
         if self._z3 is not None:
             return self._z3, self._constraints
 
@@ -1149,8 +1154,15 @@ class SymbolicExpr:
                 self._z3 = If(lhs >= rhs, lhs, rhs)
             if self.op == "minimum":
                 self._z3 = If(lhs <= rhs, lhs, rhs)
-            if self.op == "bitwise_and":
-                self._z3 = And(lhs, rhs)
+            if "bitwise" in self.op:
+                lhs = _to_bool(lhs)
+                rhs = _to_bool(rhs)
+                if self.op == "bitwise_and":
+                    self._z3 = And(lhs, rhs)
+                if self.op == "bitwise_or":
+                    self._z3 = Or(lhs, rhs)
+                if self.op == "bitwise_xor":
+                    self._z3 = Xor(lhs, rhs)
             if self.op == "ashr":
                 raise NotImplementedError(
                     "Arithmetic shift right is not implemented in Z3"
