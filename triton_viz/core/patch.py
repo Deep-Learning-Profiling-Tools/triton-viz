@@ -39,6 +39,7 @@ from triton.runtime.interpreter import (
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
+from triton_viz.core.nki import nki_builder
 
 op_list = [
     ProgramId,
@@ -64,6 +65,13 @@ op_list = [
     Idiv,
     Rsqrt,
     CastImpl,
+
+    #ProgramId,
+    #Store,
+    #Load,
+    #Dot,
+    #UnaryOp,
+    #MakeRange
 ]
 original_ops = {
     ProgramId: interpreter_builder.create_get_program_id,
@@ -86,6 +94,25 @@ original_ops = {
     Idiv: interpreter_builder.create_idiv,
     Rsqrt: interpreter_builder.create_rsqrt,
     CastImpl: interpreter_builder.cast_impl,
+
+    #ProgramId: nki_builder.program_id,
+    #Store: nki_builder.store,
+    #Load: nki_builder.load,
+    #Dot: nki_builder.matmul,
+    #UnaryOp: nki_builder.unary_op,
+    ##BinaryOp: nki_builder.binary_op,
+    ##TernaryOp: nki_builder.ternary_op,
+    #MakeRange: nki_builder.arange,
+    ##AddPtr: nki_builder.create_addptr,
+    ##ExpandDims: nki_builder.create_expand_dims,
+    ##Broadcast: nki_builder.create_broadcast,
+    ##Splat: nki_builder.create_splat,
+    ##MakeBlockPointer: nki_builder.create_make_block_ptr,
+    ##TensorPointerLoad: nki_builder.create_tensor_pointer_load,
+    ##TensorPointerStore: nki_builder.create_tensor_pointer_store,
+    ##Idiv: nki_builder.create_idiv,
+    ##Rsqrt: nki_builder.create_rsqrt,
+    ##CastImpl: nki_builder.cast_impl,
 }
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
@@ -143,16 +170,12 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
         op_name = original_ops[op_type].__name__
         current_op = getattr(interpreter_builder, op_name)
         patched_op = PatchOp(current_op, op_type, callbacks)
-        setattr(
-            interpreter_builder,
-            op_name,
-            lambda *args, **kwargs: patched_op(*args, **kwargs),
-        )
+        setattr(interpreter_builder, op_name, patched_op)
     elif op_type in reduce_map:
         op_name = reduce_map[op_type].__name__
         current_op = getattr(tl, op_name)
         patched_op = PatchOp(current_op, op_type, callbacks)
-        setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
+        setattr(tl, op_name, patched_op)
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
 

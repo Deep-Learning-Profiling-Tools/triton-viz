@@ -58,7 +58,7 @@ class Tracer(Client):
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def pre_load_callback(
-            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
+            ptr, mask, *ignore_args, **ignore_kwargs
         ):
             if not self.sample:
                 return
