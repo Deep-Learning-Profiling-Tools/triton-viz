@@ -47,9 +47,9 @@ def test_trace_decorator_add_clients():
         tl.store(out_ptr + offs, tl.load(x_ptr + offs) + tl.load(y_ptr + offs))
 
     # Should be wrapped as a Trace object.
-    from triton_viz.core.trace import Trace
+    from triton_viz.core.trace import TritonTrace
 
-    assert isinstance(my_kernel, Trace)
+    assert isinstance(my_kernel, TritonTrace)
 
     # Verify client de-duplication and addition logic
     clients = my_kernel.client_manager.clients
