@@ -5,8 +5,12 @@ import sys
 import pytest
 import triton
 import triton_viz
-from triton_viz.clients import Sanitizer
+from triton_viz.clients import Sanitizer, Profiler
 
+
+# Command names
+SANITIZER_COMMAND = "triton-sanitizer"
+PROFILER_COMMAND = "triton-profiler"
 
 # store the original triton.jit
 _original_jit = triton.jit
@@ -19,36 +23,51 @@ def sanitizer_wrapper(kernel):
     return tracer(kernel)
 
 
-def _patched_jit(fn=None, **jit_kw):
-    if fn is None:  # @triton.jit(**opts)
-
-        def _decorator(f):
-            k = _original_jit(**jit_kw)(f)
-            return sanitizer_wrapper(k)
-
-        return _decorator
-    else:  # @triton.jit
-        k = _original_jit(fn)
-        return sanitizer_wrapper(k)
+def profiler_wrapper(kernel):
+    tracer = triton_viz.trace(clients=Profiler())
+    return tracer(kernel)
 
 
-def _patched_autotune(fn=None, **autotune_kw):
-    if fn is None:
+def create_patched_jit(wrapper_func):
+    def _patched_jit(fn=None, **jit_kw):
+        if fn is None:  # @triton.jit(**opts)
 
-        def _decorator(f):
-            k = _original_autotune(**autotune_kw)(f)
-            return sanitizer_wrapper(k)
+            def _decorator(f):
+                k = _original_jit(**jit_kw)(f)
+                return wrapper_func(k)
 
-        return _decorator
-    else:
-        k = _original_autotune(fn)
-        return sanitizer_wrapper(k)
+            return _decorator
+        else:  # @triton.jit
+            k = _original_jit(fn)
+            return wrapper_func(k)
+
+    return _patched_jit
 
 
-def apply():
+def create_patched_autotune(wrapper_func):
+    def _patched_autotune(fn=None, **autotune_kw):
+        if fn is None:
+
+            def _decorator(f):
+                k = _original_autotune(**autotune_kw)(f)
+                return wrapper_func(k)
+
+            return _decorator
+        else:
+            k = _original_autotune(fn)
+            return wrapper_func(k)
+
+    return _patched_autotune
+
+
+def _apply_wrapper(wrapper_func, command_name, usage_msg):
     """
-    Apply the sanitizer wrapper to triton.jit and run the user script.
+    Generic function to apply a wrapper to triton.jit and run the user script.
     """
+    # Create patched functions with the specific wrapper
+    _patched_jit = create_patched_jit(wrapper_func)
+    _patched_autotune = create_patched_autotune(wrapper_func)
+
     # patching the original triton.jit
     triton.jit = _patched_jit
     triton.language.jit = _patched_jit
@@ -60,9 +79,8 @@ def apply():
     triton.autotune = _patched_autotune
 
     # run user script
-    # argv is like: ['triton-sanitizer', 'user_script.py', 'arg1', 'arg2', ...]
     if len(sys.argv) < 2:
-        print("Usage: triton-sanitizer <script.py> [args...]")
+        print(usage_msg)
         sys.exit(1)
 
     script = sys.argv[1]
@@ -90,7 +108,39 @@ def apply():
         sys.exit(1)
 
 
+def apply_sanitizer():
+    """
+    Apply the sanitizer wrapper to triton.jit and run the user script.
+    """
+    _apply_wrapper(
+        sanitizer_wrapper,
+        SANITIZER_COMMAND,
+        f"Usage: {SANITIZER_COMMAND} <script.py> [args...]",
+    )
+
+
+def apply_profiler():
+    """
+    Apply the profiler wrapper to triton.jit and run the user script.
+    """
+    _apply_wrapper(
+        profiler_wrapper,
+        PROFILER_COMMAND,
+        f"Usage: {PROFILER_COMMAND} <script.py> [args...]",
+    )
+
+
 def enable_sanitizer():
+    _patched_jit = create_patched_jit(sanitizer_wrapper)
+    triton.jit = _patched_jit
+    triton.language.jit = _patched_jit
+    import triton.runtime.interpreter as _interp
+
+    _interp.jit = _patched_jit
+
+
+def enable_profiler():
+    _patched_jit = create_patched_jit(profiler_wrapper)
     triton.jit = _patched_jit
     triton.language.jit = _patched_jit
     import triton.runtime.interpreter as _interp
