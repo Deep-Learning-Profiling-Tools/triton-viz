@@ -63,6 +63,38 @@ class Trace(KernelInterface):
         self.add_client(client)
 
     def run(self, *args, **kwargs):
+        # Check if any client needs ASM information
+        if self.client_manager.needs_asm():
+            # Run warmup to get ASM information from kernel compilation
+            # This doesn't actually execute the kernel, just compiles it
+            try:
+                # Get the original function for warmup
+                if hasattr(self.fn, "warmup"):
+                    # Remove client_manager and warmup from kwargs for warmup call
+                    warmup_kwargs = {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in ("client_manager", "warmup")
+                    }
+                    warmup_result = self.fn.warmup(*args, **warmup_kwargs)
+
+                    if warmup_result:
+                        if hasattr(warmup_result, "asm"):
+                            # Distribute ASM information to all clients that need it
+                            self.client_manager.distribute_asm_info(warmup_result.asm)
+                        elif hasattr(warmup_result, "__getitem__"):
+                            # Sometimes warmup returns a tuple (kernel, asm_info)
+                            # Try to extract ASM from the result
+                            for item in warmup_result:
+                                if hasattr(item, "asm"):
+                                    self.client_manager.distribute_asm_info(item.asm)
+                                    break
+            except Exception as e:
+                # If warmup fails, log warning but continue execution
+                import warnings
+
+                warnings.warn(f"Failed to collect ASM information: {e}")
+
         with self.client_manager.patch(self.base_fn):
             kwargs.update({"client_manager": self.client_manager})
             ret = self.interpreter_fn.run(*args, **kwargs)

@@ -497,6 +497,7 @@ class SanitizerBruteForce(Sanitizer):
         abort_on_error: bool = False,
         callpath: bool = True,
     ):
+        super().__init__()  # Initialize parent class
         self.callpath = callpath
         self.abort_on_error = abort_on_error
         self.tensors: list[Tensor] = []
@@ -1481,6 +1482,7 @@ _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
 
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
+        super().__init__()  # Initialize parent class
         self.abort_on_error: bool = abort_on_error
         self.records: list[OutOfBoundsRecordZ3] = []
         self.grid: Optional[tuple[int, ...]] = None
@@ -2097,7 +2099,7 @@ class NullSanitizer(Sanitizer):
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        super().__init__()  # Initialize parent class
 
     def _disabled(self, method: str):
         raise RuntimeError(

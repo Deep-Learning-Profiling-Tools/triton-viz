@@ -20,6 +20,12 @@ from .patch import patch_lang, unpatch_lang
 class Client(ABC):
     NAME: ClassVar[str]
 
+    def __init__(self):
+        # Whether this client needs ASM information from kernel warmup
+        self.collect_asm: bool = False
+        # Storage for ASM information if collected
+        self.asm_info: Optional[dict] = None
+
     @abstractmethod
     def pre_run_callback(self, fn: Callable) -> bool:
         """
@@ -57,6 +63,15 @@ class Client(ABC):
     @abstractmethod
     def finalize(self) -> list:
         ...
+
+    def set_asm_info(self, asm_info: dict):
+        """
+        Receive and store ASM information from kernel compilation.
+
+        :param asm_info: Dictionary containing ASM code for different architectures
+                        (e.g., {'amdgcn': '...', 'ptx': '...'})
+        """
+        self.asm_info = asm_info
 
 
 class ClientManager:
@@ -132,3 +147,21 @@ class ClientManager:
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         for client in self.clients.values():
             client.grid_idx_callback(grid_idx)
+
+    def needs_asm(self) -> bool:
+        """
+        Check if any registered client needs ASM information.
+
+        :return: True if at least one client has collect_asm=True
+        """
+        return any(client.collect_asm for client in self.clients.values())
+
+    def distribute_asm_info(self, asm_info: dict):
+        """
+        Distribute ASM information to clients that need it.
+
+        :param asm_info: Dictionary containing ASM code for different architectures
+        """
+        for client in self.clients.values():
+            if client.collect_asm and hasattr(client, "set_asm_info"):
+                client.set_asm_info(asm_info)

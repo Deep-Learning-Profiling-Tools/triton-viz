@@ -25,6 +25,7 @@ class Tracer(Client):
         callpath: bool = True,
         grid_idx: Optional[Union[tuple[int], int]] = None,
     ):
+        super().__init__()  # Initialize parent class
         self.callpath = callpath
         self.grid_idx = _convert_grid_idx(grid_idx)
         self.records: list = []
