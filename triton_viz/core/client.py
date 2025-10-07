@@ -163,5 +163,5 @@ class ClientManager:
         :param asm_info: Dictionary containing ASM code for different architectures
         """
         for client in self.clients.values():
-            if client.collect_asm and hasattr(client, "set_asm_info"):
+            if client.collect_asm:
                 client.set_asm_info(asm_info)
