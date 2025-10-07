@@ -90,10 +90,8 @@ class Trace(KernelInterface):
                                     self.client_manager.distribute_asm_info(item.asm)
                                     break
             except Exception as e:
-                # If warmup fails, log warning but continue execution
-                import warnings
-
-                warnings.warn(f"Failed to collect ASM information: {e}")
+                # If warmup fails, raise the error immediately
+                raise RuntimeError(f"Failed to collect ASM information: {e}") from e
 
         with self.client_manager.patch(self.base_fn):
             kwargs.update({"client_manager": self.client_manager})
