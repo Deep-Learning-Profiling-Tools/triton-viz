@@ -110,6 +110,7 @@ class ClientManager:
                     for client in self.clients.values()
                 ):
                     return None
+                kwargs.pop("warmup", None)
                 ret = fn(*args, **kwargs)
                 for client in self.clients.values():
                     client.post_warmup_callback(jit_fn, ret)

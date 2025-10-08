@@ -88,7 +88,9 @@ class Trace(KernelInterface):
         return self.base_fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
-        raise NotImplementedError
+        with self.client_manager.patch_warmup(self.jit_fn):
+            if self.warmup_runner:
+                self.warmup_runner.warmup(*args, **kwargs)
 
     def finalize(self):
         self.client_manager.finalize()
