@@ -39,19 +39,22 @@ class Trace(KernelInterface):
 
     def __init__(
         self,
-        kernel: Union[JITFunction, InterpretedFunction],
+        kernel: Union[JITFunction, InterpretedFunction, Autotuner],
         client: Union[str, Client],
     ) -> None:
         self.fn = kernel
         if isinstance(kernel, Autotuner):
+            self.jit_fn = kernel.fn
             self.base_fn = kernel.base_fn
             kernel._do_bench = dummy_benchmarker
             kernel.fn = InterpretedFunction(kernel.base_fn)
             self.interpreter_fn = kernel
         elif isinstance(kernel, InterpretedFunction):
+            self.jit_fn = None
             self.base_fn = kernel.fn
             self.interpreter_fn = kernel
         elif isinstance(kernel, JITFunction):
+            self.jit_fn = kernel
             self.base_fn = kernel.fn
             self.interpreter_fn = InterpretedFunction(kernel.fn)
         else:
@@ -68,9 +71,7 @@ class Trace(KernelInterface):
             # Run warmup to get ASM information from kernel compilation
             # This doesn't actually execute the kernel, just compiles it
             # Get the original function for warmup
-            fn = self.fn
-            if isinstance(self.fn, Autotuner):
-                fn = JITFunction(self.base_fn, self.interpreter_fn.fn.kwargs)
+            fn = self.jit_fn
 
             # Remove client_manager and warmup from kwargs for warmup call
             warmup_kwargs = {
