@@ -438,7 +438,7 @@ def unpatch_lang():
         importlib.reload(tl)
 
 
-def warmup(client_manager, jit_fn, *args, **kwargs):
+def warmup(client_manager, jit_fn, grid, *args, **kwargs):
     # Check if any client needs ASM information
     if not client_manager.needs_asm():
         return
@@ -450,7 +450,7 @@ def warmup(client_manager, jit_fn, *args, **kwargs):
     warmup_kwargs = {
         k: v for k, v in kwargs.items() if k not in ("client_manager", "warmup")
     }
-    warmup_result = jit_fn.warmup(*args, **warmup_kwargs)
+    warmup_result = jit_fn.warmup(*args, grid=grid, **warmup_kwargs)
 
     if warmup_result:
         if hasattr(warmup_result, "asm"):
@@ -525,7 +525,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
     # warmup if needed
-    warmup(client_manager, jit_fn, *args_dev, **kwargs)
+    warmup(client_manager, jit_fn, grid, *args_dev, **kwargs)
     run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
