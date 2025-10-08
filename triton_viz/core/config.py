@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     verbose: bool
     sanitizer_activated: bool
     disable_sanitizer: bool
+    disable_profiler: bool
     report_grid_execution_progress: bool
 
     def reset() -> None:
@@ -29,6 +30,9 @@ class Config(types.ModuleType):
         # --- Sanitizer disable flag ---
         self._disable_sanitizer = os.getenv("DISABLE_SANITIZER", "0") == "1"
 
+        # --- Profiler disable flag ---
+        self._disable_profiler = os.getenv("DISABLE_PROFILER", "0") == "1"
+
         # --- Grid execution progress flag ---
         self.report_grid_execution_progress = (
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
@@ -38,6 +42,10 @@ class Config(types.ModuleType):
     @property
     def disable_sanitizer(self) -> bool:
         return self._disable_sanitizer
+
+    @property
+    def disable_profiler(self) -> bool:
+        return self._disable_profiler
 
     @disable_sanitizer.setter
     def disable_sanitizer(self, value: bool) -> None:

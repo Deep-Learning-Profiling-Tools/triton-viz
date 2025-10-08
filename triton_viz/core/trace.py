@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
@@ -6,7 +8,7 @@ from . import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
-from typing import Union
+from typing import Callable, Optional, Union
 
 
 launches: list[Launch] = []
@@ -43,56 +45,35 @@ class Trace(KernelInterface):
         client: Union[str, Client],
     ) -> None:
         self.fn = kernel
+
+        def unpack_kernel(
+            source: Union["Trace", JITFunction, InterpretedFunction]
+        ) -> tuple[Optional[JITFunction], Callable, InterpretedFunction]:
+            if isinstance(source, Trace):
+                return source.jit_fn, source.base_fn, source.interpreter_fn
+            if isinstance(source, JITFunction):
+                base_fn = source.fn
+                return source, base_fn, InterpretedFunction(base_fn)
+            if isinstance(source, InterpretedFunction):
+                return None, source.fn, source
+            raise TypeError(f"Unsupported kernel type: {type(source)}")
+
         if isinstance(kernel, Autotuner):
-            self.jit_fn = kernel.fn
-            self.base_fn = kernel.base_fn
+            self.jit_fn, self.base_fn, self.interpreter_fn = unpack_kernel(kernel.fn)
+            # replace the benchmark with a dummy that just calls the function once
             kernel._do_bench = dummy_benchmarker
-            kernel.fn = InterpretedFunction(kernel.base_fn)
-            self.interpreter_fn = kernel
-        elif isinstance(kernel, InterpretedFunction):
-            self.jit_fn = None
-            self.base_fn = kernel.fn
-            self.interpreter_fn = kernel
-        elif isinstance(kernel, JITFunction):
-            self.jit_fn = kernel
-            self.base_fn = kernel.fn
-            self.interpreter_fn = InterpretedFunction(kernel.fn)
+            # replace the fn with an InterpretedFunction to avoid re-jitting
+            kernel.fn = self.interpreter_fn
         else:
-            raise TypeError(
-                f"Kernel must be JITFunction or InterpretedFunction, got {type(kernel)}"
-            )
+            self.jit_fn, self.base_fn, self.interpreter_fn = unpack_kernel(kernel)
         self.arg_names = kernel.arg_names
         self.client_manager = ClientManager()
         self.add_client(client)
 
     def run(self, *args, **kwargs):
-        # Check if any client needs ASM information
-        if self.client_manager.needs_asm():
-            # Run warmup to get ASM information from kernel compilation
-            # This doesn't actually execute the kernel, just compiles it
-            # Get the original function for warmup
-            fn = self.jit_fn
-
-            # Remove client_manager and warmup from kwargs for warmup call
-            warmup_kwargs = {
-                k: v for k, v in kwargs.items() if k not in ("client_manager", "warmup")
-            }
-            warmup_result = fn.warmup(*args, **warmup_kwargs)
-
-            if warmup_result:
-                if hasattr(warmup_result, "asm"):
-                    # Distribute ASM information to all clients that need it
-                    self.client_manager.distribute_asm_info(warmup_result.asm)
-                elif hasattr(warmup_result, "__getitem__"):
-                    # Sometimes warmup returns a tuple (kernel, asm_info)
-                    # Try to extract ASM from the result
-                    for item in warmup_result:
-                        if hasattr(item, "asm"):
-                            self.client_manager.distribute_asm_info(item.asm)
-                            break
-
         with self.client_manager.patch(self.base_fn):
             kwargs.update({"client_manager": self.client_manager})
+            kwargs.update({"jit_fn": self.jit_fn})
             ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()
             return ret
