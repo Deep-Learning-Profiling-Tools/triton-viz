@@ -25,6 +25,19 @@ class Profiler(Client):
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        # TODO: optionally proceed the warmup. For now, always proceed. 
+        return True
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        if not ret:
+            return
+
+        if hasattr(ret, "asm") and "amdgcn" in ret.asm:
+            self.has_buffer_load = "buffer_load_dwordx4" in ret.asm["amdgcn"]
+            if self.has_buffer_load:
+                print("✓ Detected buffer_load_dwordx4 instruction in kernel ASM")
+
     def arg_callback(self, name, arg, arg_cvt):
         pass
 
@@ -108,20 +121,6 @@ class Profiler(Client):
 
     def register_for_loop_callback(self):
         return ForLoopCallbacks()
-
-    def set_asm_info(self, asm_info: dict):
-        """
-        Override parent method to process ASM information for buffer_load detection.
-
-        :param asm_info: Dictionary containing ASM code for different architectures
-        """
-        super().set_asm_info(asm_info)
-
-        # Check for buffer_load instruction in AMD GPU ASM
-        if "amdgcn" in asm_info:
-            self.has_buffer_load = "buffer_load_dwordx4" in asm_info["amdgcn"]
-            if self.has_buffer_load:
-                print("✓ Detected buffer_load_dwordx4 instruction in kernel ASM")
 
     def finalize(self) -> list:
         return [self.load_bytes, self.store_bytes]

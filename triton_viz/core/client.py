@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 
 from abc import ABC, abstractmethod
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Any
 from collections.abc import Callable
 
 from .data import Op, Launch
@@ -13,6 +13,7 @@ from .patch import (
     op_list,
     patch_calls,
 )
+from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
 from .patch import patch_lang, unpatch_lang
 
@@ -64,14 +65,16 @@ class Client(ABC):
     def finalize(self) -> list:
         ...
 
-    def set_asm_info(self, asm_info: dict):
+    @abstractmethod
+    def pre_warmup_callback(self, jit_fn: Callable, *args, **kwargs) -> bool:
         """
-        Receive and store ASM information from kernel compilation.
+        Returns True if the warmup should proceed, False to skip warmup.
+        """
+        ...
 
-        :param asm_info: Dictionary containing ASM code for different architectures
-                        (e.g., {'amdgcn': '...', 'ptx': '...'})
-        """
-        self.asm_info = asm_info
+    @abstractmethod
+    def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
+        ...
 
 
 class ClientManager:
@@ -94,7 +97,34 @@ class ClientManager:
                 self.clients[new_client.NAME] = new_client
 
     @contextmanager
-    def patch(self, fn):
+    def patch_warmup(self, jit_fn):
+        if not hasattr(jit_fn, "warmup"):
+            yield
+            return
+
+        def patcher(fn):
+            @wraps(fn)
+            def wrapped(*args, **kwargs):
+                if all(
+                    not client.pre_warmup_callback(jit_fn, *args, **kwargs)
+                    for client in self.clients.values()
+                ):
+                    return None
+                ret = fn(*args, **kwargs)
+                for client in self.clients.values():
+                    client.post_warmup_callback(jit_fn, ret)
+                return ret
+
+            return wrapped
+
+        jit_fn.warmup = patcher(jit_fn.warmup)
+        try:
+            yield
+        finally:
+            jit_fn.warmup = jit_fn.warmup.__wrapped__
+
+    @contextmanager
+    def patch_run(self, fn):
         with patch_calls():
             for client in self.clients.values():
                 for op in op_list:
@@ -147,21 +177,3 @@ class ClientManager:
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         for client in self.clients.values():
             client.grid_idx_callback(grid_idx)
-
-    def needs_asm(self) -> bool:
-        """
-        Check if any registered client needs ASM information.
-
-        :return: True if at least one client has collect_asm=True
-        """
-        return any(client.collect_asm for client in self.clients.values())
-
-    def distribute_asm_info(self, asm_info: dict):
-        """
-        Distribute ASM information to clients that need it.
-
-        :param asm_info: Dictionary containing ASM code for different architectures
-        """
-        for client in self.clients.values():
-            if client.collect_asm:
-                client.set_asm_info(asm_info)

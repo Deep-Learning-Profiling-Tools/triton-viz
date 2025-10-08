@@ -50,7 +50,7 @@ class Trace(KernelInterface):
             source: Union["Trace", JITFunction, InterpretedFunction]
         ) -> tuple[Optional[JITFunction], Callable, InterpretedFunction]:
             if isinstance(source, Trace):
-                return source.jit_fn, source.base_fn, source.interpreter_fn
+                return source.jit_fn, source.base_fn, source.runner
             if isinstance(source, JITFunction):
                 base_fn = source.fn
                 return source, base_fn, InterpretedFunction(base_fn)
@@ -59,23 +59,27 @@ class Trace(KernelInterface):
             raise TypeError(f"Unsupported kernel type: {type(source)}")
 
         if isinstance(kernel, Autotuner):
-            self.jit_fn, self.base_fn, interpreter_fn = unpack_kernel(kernel.fn)
+            self.jit_fn, self.base_fn, runner = unpack_kernel(kernel.fn)
             # replace the benchmark with a dummy that just calls the function once
             kernel._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
-            kernel.fn = interpreter_fn
-            self.interpreter_fn = kernel
+            kernel.fn = runner
+            self.runner = kernel
         else:
-            self.jit_fn, self.base_fn, self.interpreter_fn = unpack_kernel(kernel)
+            self.jit_fn, self.base_fn, self.runner = unpack_kernel(kernel)
         self.arg_names = kernel.arg_names
         self.client_manager = ClientManager()
         self.add_client(client)
 
     def run(self, *args, **kwargs):
-        with self.client_manager.patch(self.base_fn):
+        with self.client_manager.patch_warmup(self.jit_fn):
+            if hasattr(self.runner, "warmup"):
+                self.runner.warmup(*args, **kwargs)
+
+        with self.client_manager.patch_run(self.base_fn):
             kwargs.update({"client_manager": self.client_manager})
             kwargs.update({"jit_fn": self.jit_fn})
-            ret = self.interpreter_fn.run(*args, **kwargs)
+            ret = self.runner.run(*args, **kwargs)
             self.finalize()
             return ret
 

@@ -438,32 +438,6 @@ def unpatch_lang():
         importlib.reload(tl)
 
 
-def warmup(client_manager, jit_fn, grid, *args, **kwargs):
-    # Check if any client needs ASM information
-    if not client_manager.needs_asm():
-        return
-
-    # Run warmup to get ASM information from kernel compilation
-    # This doesn't actually execute the kernel, just compiles it
-    # Get the original function for warmup
-    # Remove client_manager and warmup from kwargs for warmup call
-    warmup_kwargs = {
-        k: v for k, v in kwargs.items() if k not in ("client_manager", "warmup")
-    }
-    warmup_result = jit_fn.warmup(*args, grid=grid, **warmup_kwargs)
-
-    if warmup_result:
-        if hasattr(warmup_result, "asm"):
-            # Distribute ASM information to all clients that need it
-            client_manager.distribute_asm_info(warmup_result.asm)
-        elif hasattr(warmup_result, "__getitem__"):
-            # Sometimes warmup returns a tuple (kernel, asm_info)
-            # Try to extract ASM from the result
-            for item in warmup_result:
-                if hasattr(item, "asm"):
-                    client_manager.distribute_asm_info(item.asm)
-
-
 def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
@@ -524,8 +498,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
-    # warmup if needed
-    warmup(client_manager, jit_fn, grid, *args_dev, **kwargs)
     run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
@@ -534,7 +506,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
 def _jit_function_call(self, *args, **kwargs):
     patch_lang(self.fn)
     return self.fn(*args, **kwargs)
-
 
 @contextmanager
 def patch_calls():

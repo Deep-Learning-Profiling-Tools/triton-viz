@@ -468,6 +468,12 @@ class Sanitizer(Client):
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
+
     def arg_callback(self, *args, **kwargs):  # type: ignore[override]
         raise NotImplementedError
 
@@ -2090,7 +2096,6 @@ class SanitizerSymbolicExecution(Sanitizer):
 
     def finalize(self) -> list:
         return []
-
 
 class NullSanitizer(Sanitizer):
     """
