@@ -62,9 +62,11 @@ class Trace(KernelInterface):
             kernel._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
             kernel.fn = self.interpreted_fn
+            self.runner = kernel
             self.warmup_runner = kernel
         else:
-            self.jit_fn, self.base_fn, self.runner = unpack_kernel(kernel)
+            self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(kernel)
+            self.runner = self.interpreted_fn
             self.warmup_runner = self.jit_fn
         self.arg_names = kernel.arg_names
         self.client_manager = ClientManager()
