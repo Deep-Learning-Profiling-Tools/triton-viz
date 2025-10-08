@@ -13,11 +13,10 @@ class Profiler(Client):
     def __init__(self, callpath: bool = True):
         super().__init__()  # Initialize parent class
         # Enable ASM collection for the profiler
-        self.collect_asm = True
         self.callpath = callpath
         self.load_bytes = LoadStoreBytes("load", 0, 0)
         self.store_bytes = LoadStoreBytes("store", 0, 0)
-        self.has_buffer_load: Optional[bool] = None
+        self.has_buffer_load = False
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
