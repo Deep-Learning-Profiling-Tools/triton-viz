@@ -505,8 +505,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     }
     client_manager = kwargs.pop("client_manager")
     jit_fn = kwargs.pop("jit_fn")
-    # warmup
-    warmup(client_manager, jit_fn, *args_dev, **kwargs)
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
@@ -526,6 +524,8 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
+    # warmup if needed
+    warmup(client_manager, jit_fn, *args_dev, **kwargs)
     run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
