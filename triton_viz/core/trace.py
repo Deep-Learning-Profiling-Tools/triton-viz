@@ -1,3 +1,4 @@
+from copy import deepcopy
 from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
@@ -39,10 +40,10 @@ class Trace(KernelInterface):
 
     def __init__(
         self,
-        kernel: Union[JITFunction, InterpretedFunction, Autotuner],
+        runner: Union[JITFunction, InterpretedFunction, Autotuner],
         client: Union[str, Client],
     ) -> None:
-        self.fn = kernel
+        self.fn = runner
 
         def unpack_kernel(
             source: Union["Trace", JITFunction, InterpretedFunction],
@@ -54,21 +55,24 @@ class Trace(KernelInterface):
                 return source, base_fn, InterpretedFunction(base_fn)
             if isinstance(source, InterpretedFunction):
                 return None, source.fn, source
-            raise TypeError(f"Unsupported kernel type: {type(source)}")
+            raise TypeError(f"Unsupported runner type: {type(source)}")
 
-        if isinstance(kernel, Autotuner):
-            self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(kernel.fn)
+        if isinstance(runner, Autotuner):
+            self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
             # replace the benchmark with a dummy that just calls the function once
-            kernel._do_bench = dummy_benchmarker
+            runner._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
-            kernel.fn = self.interpreted_fn
-            self.runner = kernel
-            self.warmup_runner = kernel
+            runner.fn = self.interpreted_fn
+            # make a deepcopy of the runner for warmup
+            warmup_runner = deepcopy(runner)
+            warmup_runner.fn = self.jit_fn
+            self.runner = runner
+            self.warmup_runner = warmup_runner
         else:
-            self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(kernel)
+            self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner)
             self.runner = self.interpreted_fn
             self.warmup_runner = self.jit_fn
-        self.arg_names = kernel.arg_names
+        self.arg_names = runner.arg_names
         self.client_manager = ClientManager()
         self.add_client(client)
 
