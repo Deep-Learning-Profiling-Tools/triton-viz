@@ -46,9 +46,9 @@ class Trace(KernelInterface):
 
         def unpack_kernel(
             source: Union["Trace", JITFunction, InterpretedFunction],
-        ) -> tuple[Optional[JITFunction], Callable, InterpretedFunction]:
+        ) -> tuple[Optional[JITFunction], Optional[Callable], Optional[InterpretedFunction]]:
             if isinstance(source, Trace):
-                return source.jit_fn, source.base_fn, source.runner
+                return source.jit_fn, source.base_fn, source.interpreted_fn
             if isinstance(source, JITFunction):
                 base_fn = source.fn
                 return source, base_fn, InterpretedFunction(base_fn)
@@ -57,22 +57,23 @@ class Trace(KernelInterface):
             raise TypeError(f"Unsupported kernel type: {type(source)}")
 
         if isinstance(kernel, Autotuner):
-            self.jit_fn, self.base_fn, runner = unpack_kernel(kernel.fn)
+            self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(kernel.fn)
             # replace the benchmark with a dummy that just calls the function once
             kernel._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
-            kernel.fn = runner
-            self.runner = kernel
+            kernel.fn = self.interpreted_fn
+            self.warmup_runner = kernel
         else:
             self.jit_fn, self.base_fn, self.runner = unpack_kernel(kernel)
+            self.warmup_runner = self.jit_fn
         self.arg_names = kernel.arg_names
         self.client_manager = ClientManager()
         self.add_client(client)
 
     def run(self, *args, **kwargs):
         with self.client_manager.patch_warmup(self.jit_fn):
-            if hasattr(self.runner, "warmup"):
-                self.runner.warmup(*args, **kwargs)
+            if self.warmup_runner:
+                self.warmup_runner.warmup(*args, **kwargs)
 
         with self.client_manager.patch_run(self.base_fn):
             kwargs.update({"client_manager": self.client_manager})
