@@ -59,11 +59,12 @@ class Trace(KernelInterface):
             raise TypeError(f"Unsupported kernel type: {type(source)}")
 
         if isinstance(kernel, Autotuner):
-            self.jit_fn, self.base_fn, self.interpreter_fn = unpack_kernel(kernel.fn)
+            self.jit_fn, self.base_fn, interpreter_fn = unpack_kernel(kernel.fn)
             # replace the benchmark with a dummy that just calls the function once
             kernel._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
-            kernel.fn = self.interpreter_fn
+            kernel.fn = interpreter_fn
+            self.interpreter_fn = kernel
         else:
             self.jit_fn, self.base_fn, self.interpreter_fn = unpack_kernel(kernel)
         self.arg_names = kernel.arg_names
