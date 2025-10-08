@@ -1,5 +1,3 @@
-from copy import deepcopy
-
 from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
@@ -47,7 +45,7 @@ class Trace(KernelInterface):
         self.fn = kernel
 
         def unpack_kernel(
-            source: Union["Trace", JITFunction, InterpretedFunction]
+            source: Union["Trace", JITFunction, InterpretedFunction],
         ) -> tuple[Optional[JITFunction], Callable, InterpretedFunction]:
             if isinstance(source, Trace):
                 return source.jit_fn, source.base_fn, source.runner

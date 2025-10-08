@@ -2097,6 +2097,7 @@ class SanitizerSymbolicExecution(Sanitizer):
     def finalize(self) -> list:
         return []
 
+
 class NullSanitizer(Sanitizer):
     """
     A do-nothing object returned when the sanitizer backend is 'off'.

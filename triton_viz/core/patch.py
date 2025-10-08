@@ -507,6 +507,7 @@ def _jit_function_call(self, *args, **kwargs):
     patch_lang(self.fn)
     return self.fn(*args, **kwargs)
 
+
 @contextmanager
 def patch_calls():
     old_grid_executor_call = GridExecutor.__call__
