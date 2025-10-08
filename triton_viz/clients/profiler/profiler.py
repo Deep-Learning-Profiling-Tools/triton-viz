@@ -4,7 +4,7 @@ from ...core.data import Op, Load, Store, AddPtr
 from .data import LoadStoreBytes
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
-from typing import Callable, Optional
+from typing import Callable
 
 
 class Profiler(Client):

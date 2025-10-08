@@ -47,7 +47,9 @@ class Trace(KernelInterface):
 
         def unpack_kernel(
             source: Union["Trace", JITFunction, InterpretedFunction],
-        ) -> tuple[Optional[JITFunction], Optional[Callable], Optional[InterpretedFunction]]:
+        ) -> tuple[
+            Optional[JITFunction], Optional[Callable], Optional[InterpretedFunction]
+        ]:
             if isinstance(source, Trace):
                 return source.jit_fn, source.base_fn, source.interpreted_fn
             if isinstance(source, JITFunction):
