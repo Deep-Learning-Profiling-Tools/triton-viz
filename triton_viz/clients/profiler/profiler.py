@@ -33,9 +33,9 @@ class Profiler(Client):
             return
 
         if hasattr(ret, "asm") and "amdgcn" in ret.asm:
-            self.has_buffer_load = "buffer_load_dwordx4" in ret.asm["amdgcn"]
+            self.has_buffer_load = "buffer_load" in ret.asm["amdgcn"]
             if self.has_buffer_load:
-                print("✓ Detected buffer_load_dwordx4 instruction in kernel ASM")
+                print("Detected buffer_load instruction in kernel ASM!")
 
     def arg_callback(self, name, arg, arg_cvt):
         pass
