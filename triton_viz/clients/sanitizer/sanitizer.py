@@ -78,7 +78,7 @@ from .data import (
     OutOfBoundsRecordBruteForce,
     OutOfBoundsRecordZ3,
 )
-from ...core import config as cfg
+from ...core.config import config as cfg
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):

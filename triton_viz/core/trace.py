@@ -3,7 +3,7 @@ from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
-from . import config as cfg
+from .config import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch

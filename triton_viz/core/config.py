@@ -1,23 +1,8 @@
 import os
-import sys
-import types
-from typing import TYPE_CHECKING
 
 
-if TYPE_CHECKING:
-    verbose: bool
-    sanitizer_activated: bool
-    disable_sanitizer: bool
-    disable_profiler: bool
-    report_grid_execution_progress: bool
-
-    def reset() -> None:
-        ...
-
-
-class Config(types.ModuleType):
-    def __init__(self, name: str) -> None:
-        super().__init__(name)
+class Config:
+    def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
@@ -75,5 +60,4 @@ class Config(types.ModuleType):
             print("Grid-progress reporting is now ON.")
 
 
-# Replace the current module object with a live Config instance
-sys.modules[__name__] = Config(__name__)
+config = Config()

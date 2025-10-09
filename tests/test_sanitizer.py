@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
 import triton_viz
-from triton_viz import config as cfg
+from triton_viz.core.config import config as cfg
 from triton_viz.core.data import AddPtr, Load, RawLoad
 from triton_viz.core.client import Client
 from triton_viz.clients import Sanitizer
