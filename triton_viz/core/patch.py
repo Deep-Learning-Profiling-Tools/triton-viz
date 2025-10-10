@@ -478,7 +478,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
     }
     client_manager = kwargs.pop("client_manager")
-    jit_fn = kwargs.pop("jit_fn")
+    kwargs.pop("jit_fn")
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
