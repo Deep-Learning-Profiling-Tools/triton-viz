@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Any, Optional
 from tqdm import tqdm
 
-from . import config as cfg
+from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
 from .data import (
     Op,
