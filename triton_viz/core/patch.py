@@ -473,11 +473,12 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
     argspec = inspect.getfullargspec(self.fn)
-    triton_viz_args = ["client_manager"]
+    triton_viz_args = ["client_manager", "jit_fn"]
     kwargs = {
         k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
     }
     client_manager = kwargs.pop("client_manager")
+    kwargs.pop("jit_fn")
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)

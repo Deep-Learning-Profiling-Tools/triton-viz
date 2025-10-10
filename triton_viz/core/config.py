@@ -15,6 +15,9 @@ class Config:
         # --- Sanitizer disable flag ---
         self._disable_sanitizer = os.getenv("DISABLE_SANITIZER", "0") == "1"
 
+        # --- Profiler disable flag ---
+        self._disable_profiler = os.getenv("DISABLE_PROFILER", "0") == "1"
+
         # --- Grid execution progress flag ---
         self.report_grid_execution_progress = (
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
@@ -38,6 +41,25 @@ class Config:
             print("Triton Sanitizer disabled.")
         elif not value and previous:
             print("Triton Sanitizer enabled.")
+
+    # ---------- disable_profiler ----------
+    @property
+    def disable_profiler(self) -> bool:
+        return self._disable_profiler
+
+    @disable_profiler.setter
+    def disable_profiler(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("disable_profiler expects a bool.")
+
+        previous = getattr(self, "_disable_profiler", None)
+        self._disable_profiler = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Triton Profiler disabled.")
+        elif not value and previous:
+            print("Triton Profiler enabled.")
 
     # ---------- report_grid_execution_progress ----------
     @property

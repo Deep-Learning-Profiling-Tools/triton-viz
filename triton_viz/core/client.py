@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 
 from abc import ABC, abstractmethod
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Any
 from collections.abc import Callable
 
 from .data import Op, Launch
@@ -13,12 +13,19 @@ from .patch import (
     op_list,
     patch_calls,
 )
+from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
 from .patch import patch_lang, unpatch_lang
 
 
 class Client(ABC):
     NAME: ClassVar[str]
+
+    def __init__(self):
+        # Whether this client needs ASM information from kernel warmup
+        self.collect_asm: bool = False
+        # Storage for ASM information if collected
+        self.asm_info: Optional[dict] = None
 
     @abstractmethod
     def pre_run_callback(self, fn: Callable) -> bool:
@@ -58,6 +65,17 @@ class Client(ABC):
     def finalize(self) -> list:
         ...
 
+    @abstractmethod
+    def pre_warmup_callback(self, jit_fn: Callable, *args, **kwargs) -> bool:
+        """
+        Returns True if the warmup should proceed, False to skip warmup.
+        """
+        ...
+
+    @abstractmethod
+    def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
+        ...
+
 
 class ClientManager:
     def __init__(self, clients: Optional[list[Client]] = None):
@@ -79,7 +97,35 @@ class ClientManager:
                 self.clients[new_client.NAME] = new_client
 
     @contextmanager
-    def patch(self, fn):
+    def patch_warmup(self, jit_fn):
+        if not hasattr(jit_fn, "warmup"):
+            yield
+            return
+
+        def patcher(fn):
+            @wraps(fn)
+            def wrapped(*args, **kwargs):
+                if all(
+                    not client.pre_warmup_callback(jit_fn, *args, **kwargs)
+                    for client in self.clients.values()
+                ):
+                    return None
+                kwargs.pop("warmup", None)
+                ret = fn(*args, **kwargs)
+                for client in self.clients.values():
+                    client.post_warmup_callback(jit_fn, ret)
+                return ret
+
+            return wrapped
+
+        jit_fn.warmup = patcher(jit_fn.warmup)
+        try:
+            yield
+        finally:
+            jit_fn.warmup = jit_fn.warmup.__wrapped__
+
+    @contextmanager
+    def patch_run(self, fn):
         with patch_calls():
             for client in self.clients.values():
                 for op in op_list:
