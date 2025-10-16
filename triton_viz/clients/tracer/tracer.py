@@ -56,7 +56,7 @@ class Tracer(Client):
     def grid_callback(self, grid: tuple[int]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op], *ignore_args, **ignore_kwargs) -> OpCallbacks:
         def pre_load_callback(
             ptr, mask, *ignore_args, **ignore_kwargs
         ):
@@ -68,7 +68,7 @@ class Tracer(Client):
                 Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             )
 
-        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
+        def pre_store_callback(ptr, value, mask, *ignore_args, **ignore_kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
@@ -77,14 +77,14 @@ class Tracer(Client):
                 Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             )
 
-        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
+        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False, *ignore_args, **ignore_kwargs):
             if not self.sample:
                 return
             input_shape = input.handle.data.shape
             output_shape = ret.handle.data.shape
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
-        def post_dot_callback(ret, input, other, *args):
+        def post_dot_callback(ret, input, other, *ignore_args, **ignore_kwargs):
             if not self.sample:
                 return
             input_shape = input.data.shape

@@ -2,6 +2,9 @@ import numpy as np
 
 import neuronxcc.nki.language as nl
 import inspect
+import ast
+from .nki_extract_slice import StoreCallTransformer, transform_code
+from .nki_masked_load import masked_load, masked_store
 
 
 # Q1: slicing semantic is weird
@@ -120,7 +123,54 @@ class NDArray:
         self._value = new_value
 
     def data_ptr(self):
-        return self.ctypes.data
+        return self._value.ctypes.data
+
+    def stride(self):
+        return self._value.strides
+    
+    def element_size(self):
+        return self.dtype.itemsize
+
+    def cpu(self): # THTODO: rm?
+        return self
+
+    def get_offsets(self):
+        """
+        Generate offset arrays for each dimension based on shape and stride.
+
+        Args:
+            strides: Tuple of strides for each dimension (a, b, ..., z)
+
+        Returns:
+            Tuple of offset arrays: (arange(A)[:, None, ..., None]*a, arange(B)[None, :, ..., None]*b, ...)
+        """
+        strides = self._value.strides
+        if self._value is None:
+            raise AttributeError("NDArray has no value - cannot compute offsets")
+
+        shape = self.shape
+        if len(shape) != len(strides):
+            raise ValueError(f"Shape has {len(shape)} dimensions but strides has {len(strides)} dimensions")
+
+        #offsets = []
+        offsets = 0
+        ndim = len(shape)
+
+        for i, (dim_size, stride) in enumerate(zip(shape, strides)):
+            # Create arange for this dimension
+            arange_vals = np.arange(dim_size)
+
+            # Create broadcast shape - put arange in position i, others as 1
+            broadcast_shape = [1] * ndim
+            broadcast_shape[i] = dim_size
+
+            # Reshape and multiply by stride
+            offset_array = (arange_vals * stride).reshape(broadcast_shape)
+            #offsets.append(NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}"))
+            offsets += NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}")
+
+        #return tuple(offsets)
+        return offsets
 
     def __repr__(self):
         return f"NDArray(shape={self.shape}, dtype={self.dtype}, name={self.name})"
@@ -451,6 +501,8 @@ def patch():
     nl.pow = nki_builder.pow
     nl.reciprocal = nki_builder.reciprocal
 
+    nl.device_print = print
+
 
 def unpatch():
     # reload the original functions
@@ -477,9 +529,43 @@ class NKIInterpretedFunction:
         nki_builder.fn = self.fn
 
         kwargs.pop("warmup", None)  # Remove warmup from kwargs if it exists
-        kwargs.pop("client_manager", None)  # Remove client_manager from kwargs if it exists
+        client_manager = kwargs.pop("client_manager", None)  # Remove client_manager from kwargs if it exists
 
-        patch()
+        # Call grid_callback once before grid execution (similar to Triton)
+        if client_manager is not None:
+            client_manager.grid_callback(grid_dims)
+
+        patch() # NKI interpreter patching
+
+        #with client_manager.patch():
+        #v
+        #kwargs.update({"client_manager": client_manager})
+        #ret = self.interpreter_fn.run(*args, **kwargs)
+        #self.finalize()
+        #return ret
+
+        # Apply AST transformer to convert nl.load/nl.store calls to nl.masked_load/nl.masked_store
+        import types
+        if hasattr(self.fn, '__code__'):
+            # Get the source code of the function
+            source_code = inspect.getsource(self.fn)
+            # Transform the source code using the AST transformer
+            transformed_code = transform_code(source_code)
+            # Create a new function from the transformed code
+            #exec_globals = self.fn.__globals__.copy()
+            #exec(transformed_code, exec_globals)
+            ## Replace the original function with the transformed one
+            #self.fn = exec_globals[self.fn.__name__]
+            exec_globals = self.fn.__globals__.copy()
+            import random, string, os
+            rand_str = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+            os.makedirs('/tmp/triton-viz', exist_ok=True)
+            filename = f'/tmp/triton-viz/{rand_str}.py'
+            with open(filename, 'w') as f:
+                f.write(transformed_code)
+            code_obj = compile(transformed_code, filename=filename, mode="exec")
+            exec(code_obj, exec_globals)
+            self.fn = exec_globals[self.fn.__name__]
 
         # convert args to NDArray if they are not already
         args = [arg if isinstance(arg, NDArray) else NDArray(value=arg) for arg in args]
@@ -487,6 +573,13 @@ class NKIInterpretedFunction:
             for y in range(grid_dims[1]):
                 for z in range(grid_dims[2]):
                     nki_builder.set_grid_idx(x, y, z)
+
+                    # Call grid_idx_callback for each grid iteration (similar to Triton)
+                    if client_manager is not None:
+                        client_manager.grid_idx_callback((x, y, z))
+
                     result = self.fn(*args, **kwargs)
+        #^
+
         unpatch()
         return result.value

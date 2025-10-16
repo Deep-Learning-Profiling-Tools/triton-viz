@@ -41,79 +41,85 @@ from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime import JITFunction
 from triton_viz.core.nki import nki_builder
 
-op_list = [
-    ProgramId,
-    RawStore,
-    Store,
-    RawLoad,
-    Load,
-    UnaryOp,
-    BinaryOp,
-    TernaryOp,
-    Dot,
-    MakeRange,
-    AddPtr,
-    Splat,
-    ExpandDims,
-    Broadcast,
-    ReduceMax,
-    ReduceMin,
-    ReduceSum,
-    MakeBlockPointer,
-    TensorPointerLoad,
-    TensorPointerStore,
-    Idiv,
-    Rsqrt,
-    CastImpl,
+BUILDER = interpreter_builder
+if BUILDER == interpreter_builder:
+    op_list = [
+        ProgramId,
+        RawStore,
+        Store,
+        RawLoad,
+        Load,
+        UnaryOp,
+        BinaryOp,
+        TernaryOp,
+        Dot,
+        MakeRange,
+        AddPtr,
+        Splat,
+        ExpandDims,
+        Broadcast,
+        ReduceMax,
+        ReduceMin,
+        ReduceSum,
+        MakeBlockPointer,
+        TensorPointerLoad,
+        TensorPointerStore,
+        Idiv,
+        Rsqrt,
+        CastImpl,
+    ]
+    original_ops = {
+        ProgramId: interpreter_builder.create_get_program_id,
+        RawStore: interpreter_builder.create_store,
+        Store: interpreter_builder.create_masked_store,
+        RawLoad: interpreter_builder.create_load,
+        Load: interpreter_builder.create_masked_load,
+        Dot: interpreter_builder.create_dot,
+        UnaryOp: interpreter_builder.unary_op,
+        BinaryOp: interpreter_builder.binary_op,
+        TernaryOp: interpreter_builder.ternary_op,
+        MakeRange: interpreter_builder.create_make_range,
+        AddPtr: interpreter_builder.create_addptr,
+        ExpandDims: interpreter_builder.create_expand_dims,
+        Broadcast: interpreter_builder.create_broadcast,
+        Splat: interpreter_builder.create_splat,
+        MakeBlockPointer: interpreter_builder.create_make_block_ptr,
+        TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
+        TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
+        Idiv: interpreter_builder.create_idiv,
+        Rsqrt: interpreter_builder.create_rsqrt,
+        CastImpl: interpreter_builder.cast_impl,
+    }
+elif BUILDER == nki_builder:
+    op_list = [
+        ProgramId,
+        Store,
+        Load,
+        Dot,
+        UnaryOp,
+        MakeRange
+    ]
+    original_ops = {
+        ProgramId: nki_builder.program_id,
+        Store: nki_builder.store,
+        Load: nki_builder.load,
+        Dot: nki_builder.matmul,
+        UnaryOp: nki_builder.unary_op,
+        #BinaryOp: nki_builder.binary_op,
+        #TernaryOp: nki_builder.ternary_op,
+        MakeRange: nki_builder.arange,
+        #AddPtr: nki_builder.create_addptr,
+        #ExpandDims: nki_builder.create_expand_dims,
+        #Broadcast: nki_builder.create_broadcast,
+        #Splat: nki_builder.create_splat,
+        #MakeBlockPointer: nki_builder.create_make_block_ptr,
+        #TensorPointerLoad: nki_builder.create_tensor_pointer_load,
+        #TensorPointerStore: nki_builder.create_tensor_pointer_store,
+        #Idiv: nki_builder.create_idiv,
+        #Rsqrt: nki_builder.create_rsqrt,
+        #CastImpl: nki_builder.cast_impl,
+    }
 
-    #ProgramId,
-    #Store,
-    #Load,
-    #Dot,
-    #UnaryOp,
-    #MakeRange
-]
-original_ops = {
-    ProgramId: interpreter_builder.create_get_program_id,
-    RawStore: interpreter_builder.create_store,
-    Store: interpreter_builder.create_masked_store,
-    RawLoad: interpreter_builder.create_load,
-    Load: interpreter_builder.create_masked_load,
-    Dot: interpreter_builder.create_dot,
-    UnaryOp: interpreter_builder.unary_op,
-    BinaryOp: interpreter_builder.binary_op,
-    TernaryOp: interpreter_builder.ternary_op,
-    MakeRange: interpreter_builder.create_make_range,
-    AddPtr: interpreter_builder.create_addptr,
-    ExpandDims: interpreter_builder.create_expand_dims,
-    Broadcast: interpreter_builder.create_broadcast,
-    Splat: interpreter_builder.create_splat,
-    MakeBlockPointer: interpreter_builder.create_make_block_ptr,
-    TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
-    TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
-    Idiv: interpreter_builder.create_idiv,
-    Rsqrt: interpreter_builder.create_rsqrt,
-    CastImpl: interpreter_builder.cast_impl,
-
-    #ProgramId: nki_builder.program_id,
-    #Store: nki_builder.store,
-    #Load: nki_builder.load,
-    #Dot: nki_builder.matmul,
-    #UnaryOp: nki_builder.unary_op,
-    ##BinaryOp: nki_builder.binary_op,
-    ##TernaryOp: nki_builder.ternary_op,
-    #MakeRange: nki_builder.arange,
-    ##AddPtr: nki_builder.create_addptr,
-    ##ExpandDims: nki_builder.create_expand_dims,
-    ##Broadcast: nki_builder.create_broadcast,
-    ##Splat: nki_builder.create_splat,
-    ##MakeBlockPointer: nki_builder.create_make_block_ptr,
-    ##TensorPointerLoad: nki_builder.create_tensor_pointer_load,
-    ##TensorPointerStore: nki_builder.create_tensor_pointer_store,
-    ##Idiv: nki_builder.create_idiv,
-    ##Rsqrt: nki_builder.create_rsqrt,
-    ##CastImpl: nki_builder.cast_impl,
-}
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
     ReduceMin: tl.min,
@@ -168,9 +174,9 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
     if op_type in original_ops:
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = original_ops[op_type].__name__
-        current_op = getattr(interpreter_builder, op_name)
+        current_op = getattr(BUILDER, op_name)
         patched_op = PatchOp(current_op, op_type, callbacks)
-        setattr(interpreter_builder, op_name, patched_op)
+        setattr(BUILDER, op_name, patched_op)
     elif op_type in reduce_map:
         op_name = reduce_map[op_type].__name__
         current_op = getattr(tl, op_name)
@@ -188,7 +194,7 @@ def unpatch_op(op_type: type[Op]):
     """
     if op_type in original_ops:
         op_name = original_ops[op_type].__name__
-        setattr(interpreter_builder, op_name, original_ops[op_type])
+        setattr(BUILDER, op_name, original_ops[op_type])
 
 
 def _patch_lang(fn):
@@ -226,7 +232,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     leave=False,
                     disable=not (cfg.report_grid_execution_progress and grid[2] > 1),
                 ):
-                    interpreter_builder.set_grid_idx(x, y, z)
+                    BUILDER.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
                     self.fn(**call_args)
                     # if symbolic execution, only do one iteration
@@ -263,7 +269,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = self.grid(call_args) if callable(self.grid) else self.grid
     assert len(grid) <= 3
     grid = grid + (1,) * (3 - len(grid))
-    interpreter_builder.set_grid_dim(*grid)
+    BUILDER.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
     run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
