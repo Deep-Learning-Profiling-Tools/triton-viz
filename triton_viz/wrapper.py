@@ -24,7 +24,7 @@ def sanitizer_wrapper(kernel):
 
 
 def profiler_wrapper(kernel):
-    tracer = triton_viz.trace(clients=Profiler())
+    tracer = triton_viz.trace(clients=Profiler(CHECK_BUFFER_LOAD=True))
     return tracer(kernel)
 
 
