@@ -87,7 +87,7 @@ def mgrid_kernel(a):  # test nl.mgrid functionality
     coords = nl.mgrid[:B, :D]
     mask = (coords[0] < B) & (coords[1] < D)
     a_tmp = nl.load(a[coords[0], coords[1]], mask=mask)
-    nl.store(out, value=2*a_tmp, mask=mask) # TODO: masked_store
+    nl.store(out[coords[0], coords[1]], value=2*a_tmp, mask=mask)
 
     return out
 
@@ -126,7 +126,7 @@ def tmp1_kernel(a):
     a_tmp3 = nl.load(a[80:83, 80:85], mask=iy3)
     nl.device_print(f"a_tmp3:", a_tmp3)
 
-    nl.store(out[ix, iy], value=a_tmp, mask=mask)
+    #nl.store(out[ix, iy], value=a_tmp, mask=mask)
     return out
 
 
@@ -137,7 +137,7 @@ y = torch.rand((B, D))
 blocks_x = math.ceil(B / 128)
 blocks_y = math.ceil(D / 512)
 
-kernel = mgrid_kernel
+kernel = tmp1_kernel
 if kernel == add_kernel:
     kernel_grid = (blocks_x, blocks_y)
     kernel_args = (x.numpy(), y.numpy())

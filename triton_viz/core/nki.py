@@ -305,6 +305,45 @@ class Builder:
         dst._value[mask._value] = value._value.ravel()
         return dst
 
+    def _convert_keys_to_numpy(self, keys):
+        """Convert any NDArrays in keys to numpy arrays."""
+        if isinstance(keys, (tuple, list)):
+            return tuple(self._convert_keys_to_numpy(k) for k in keys)
+        elif isinstance(keys, NDArray):
+            return keys._value
+        else:
+            return keys
+
+    def masked_load(self, src: NDArray, keys, *, mask=None, **kwargs):
+        """Load array elements with masking for out-of-bounds errors."""
+        # Convert NDArray to numpy array
+        ndarray = src._value
+        mask_value = getattr(mask, "_value", mask) if mask is not None else None
+
+        # Convert any NDArrays in keys to numpy arrays
+        numpy_keys = self._convert_keys_to_numpy(keys)
+
+        # Call the actual masked_load function
+        result = masked_load(ndarray, numpy_keys, mask=mask_value)
+
+        # Convert result back to NDArray
+        return NDArray(value=result, name=f"{src.name}_masked_load", **kwargs)
+
+    def masked_store(self, dst: NDArray, keys, value: NDArray, *, mask=None, **kwargs):
+        """Store array elements with masking for out-of-bounds errors."""
+        # Convert NDArrays to numpy arrays
+        ndarray = dst._value
+        value_array = value._value
+        mask_value = getattr(mask, "_value", mask) if mask is not None else None
+
+        # Convert any NDArrays in keys to numpy arrays
+        numpy_keys = self._convert_keys_to_numpy(keys)
+
+        # Call the actual masked_store function
+        masked_store(ndarray, numpy_keys, value_array, mask=mask_value)
+
+        return dst
+
     def unary_op(self, x: NDArray, np_func, op_name, **kwargs):
         return NDArray(value=np_func(x._value), name=f"{x.name}_{op_name}", **kwargs)
 
@@ -374,6 +413,10 @@ def patch():
     nl.arange = nki_builder.arange
     nl.load = nki_builder.load
     nl.store = nki_builder.store
+
+    # Also expose masked_load and masked_store functions
+    nl.masked_load = nki_builder.masked_load
+    nl.masked_store = nki_builder.masked_store
     # see https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/api/nki.language.html
 
     # TODO: implement
