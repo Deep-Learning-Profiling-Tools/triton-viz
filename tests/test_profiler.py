@@ -1,8 +1,4 @@
-import pytest
 import torch
-import numpy as np
-from io import StringIO
-import sys
 
 import triton
 import triton.language as tl
@@ -83,11 +79,15 @@ def test_mask_percentage():
     expected_masked_stores = 2
 
     # Verify the statistics from profiler
-    assert profiler.total_loads == expected_total_loads, \
-        f"Expected {expected_total_loads} total loads, got {profiler.total_loads}"
-    assert profiler.masked_loads == expected_masked_loads, \
-        f"Expected {expected_masked_loads} masked loads, got {profiler.masked_loads}"
-    assert profiler.total_stores == expected_total_stores, \
-        f"Expected {expected_total_stores} total stores, got {profiler.total_stores}"
-    assert profiler.masked_stores == expected_masked_stores, \
-        f"Expected {expected_masked_stores} masked stores, got {profiler.masked_stores}"
+    assert (
+        profiler.total_loads == expected_total_loads
+    ), f"Expected {expected_total_loads} total loads, got {profiler.total_loads}"
+    assert (
+        profiler.masked_loads == expected_masked_loads
+    ), f"Expected {expected_masked_loads} masked loads, got {profiler.masked_loads}"
+    assert (
+        profiler.total_stores == expected_total_stores
+    ), f"Expected {expected_total_stores} total stores, got {profiler.total_stores}"
+    assert (
+        profiler.masked_stores == expected_masked_stores
+    ), f"Expected {expected_masked_stores} masked stores, got {profiler.masked_stores}"

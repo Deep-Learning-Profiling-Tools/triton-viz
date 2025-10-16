@@ -156,26 +156,26 @@ class Profiler(Client):
             # Load statistics
             if self.total_loads > 0:
                 masked_load_percentage = (self.masked_loads / self.total_loads) * 100
-                print(f"\nLoad Operations:")
+                print("\nLoad Operations:")
                 print(f"  Total loads:        {self.total_loads}")
                 print(f"  Masked loads:       {self.masked_loads}")
                 print(f"  Unmasked loads:     {self.total_loads - self.masked_loads}")
                 print(f"  Masked percentage:  {masked_load_percentage:.2f}%")
             else:
-                print(f"\nLoad Operations:")
-                print(f"  No load operations detected")
+                print("\nLoad Operations:")
+                print("  No load operations detected")
 
             # Store statistics
             if self.total_stores > 0:
                 masked_store_percentage = (self.masked_stores / self.total_stores) * 100
-                print(f"\nStore Operations:")
+                print("\nStore Operations:")
                 print(f"  Total stores:       {self.total_stores}")
                 print(f"  Masked stores:      {self.masked_stores}")
                 print(f"  Unmasked stores:    {self.total_stores - self.masked_stores}")
                 print(f"  Masked percentage:  {masked_store_percentage:.2f}%")
             else:
-                print(f"\nStore Operations:")
-                print(f"  No store operations detected")
+                print("\nStore Operations:")
+                print("  No store operations detected")
 
             print("=" * 60 + "\n")
 
