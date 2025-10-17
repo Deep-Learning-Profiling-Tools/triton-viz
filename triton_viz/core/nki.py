@@ -101,6 +101,7 @@ class NDArray:
             assert value is None or value.shape == kwargs["value"].shape
             value = kwargs["value"]
         self._value = value
+        self._data_ptr = None # needed if we want to save data pointers in .pkl files - records store the data pointer ran in a previous run but .data_ptr() gets the current mem location of the array (will be out of sync -> tensor lookup issues)
 
     @property
     def shape(self):
@@ -123,7 +124,9 @@ class NDArray:
         self._value = new_value
 
     def data_ptr(self):
-        return self._value.ctypes.data
+        if self._data_ptr is not None:
+            self._data_ptr = self._value.ctypes.data
+        return self._data_ptr
 
     def stride(self):
         return self._value.strides

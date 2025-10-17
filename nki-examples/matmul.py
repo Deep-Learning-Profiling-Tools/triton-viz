@@ -128,6 +128,11 @@ if TRITON_VIZ:
             if hasattr(record, "masks"):
                 print(f"  masks shape: {record.masks.shape}")
 
+    import pickle as pkl
+    with open('nki_mm_launches.pkl', 'wb') as f:
+        pkl.dump(launches, f)
+
+
     # Try to launch visualization
     try:
         triton_viz.launch(share=False)
