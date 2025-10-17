@@ -7,7 +7,7 @@ import triton_viz
 from triton_viz.clients import Profiler
 
 
-@triton_viz.trace(clients=(profiler := Profiler(CHECK_LOAD_MASK_PERCENTAGE=True)))
+@triton_viz.trace(clients=(profiler := Profiler()))
 @triton.jit
 def mask_percentage_test_kernel(
     in_ptr,
