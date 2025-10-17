@@ -113,14 +113,14 @@ class NDArray:
     @property
     def value(self):
         return self._value
-    
-    @property
-    def data(self):
-        return self._value
 
     @value.setter
     def value(self, new_value):
         self._value = new_value
+
+    @property
+    def data(self):
+        return self._value
 
     def data_ptr(self):
         return self._value.ctypes.data
@@ -399,16 +399,16 @@ class Builder:
 
     # Elementwise operator implementations
     def exp(self, x: NDArray, **kwargs):
-        return self._unary_op(x, np.exp, "exp", **kwargs)
+        return self.unary_op(x, np.exp, "exp", **kwargs)
 
     def relu(self, x: NDArray, **kwargs):
-        return self._unary_op(x, lambda v: np.maximum(v, 0), "relu", **kwargs)
+        return self.unary_op(x, lambda v: np.maximum(v, 0), "relu", **kwargs)
 
     def sigmoid(self, x: NDArray, **kwargs):
-        return self._unary_op(x, lambda v: 1 / (1 + np.exp(-v)), "sigmoid", **kwargs)
+        return self.unary_op(x, lambda v: 1 / (1 + np.exp(-v)), "sigmoid", **kwargs)
 
     def tanh(self, x: NDArray, **kwargs):
-        return self._unary_op(x, np.tanh, "tanh", **kwargs)
+        return self.unary_op(x, np.tanh, "tanh", **kwargs)
 
     def silu(self, x: NDArray, **kwargs):
         # SiLU(x) = x * sigmoid(x)
@@ -422,13 +422,13 @@ class Builder:
         return NDArray(value=0.5 * x._value * (1 + np.tanh(inner)), name=f"{x.name}_gelu", **kwargs)
 
     def sqrt(self, x: NDArray, **kwargs):
-        return self._unary_op(x, np.sqrt, "sqrt", **kwargs)
+        return self.unary_op(x, np.sqrt, "sqrt", **kwargs)
 
     def abs(self, x: NDArray, **kwargs):
-        return self._unary_op(x, np.abs, "abs", **kwargs)
+        return self.unary_op(x, np.abs, "abs", **kwargs)
 
     def log(self, x: NDArray, **kwargs):
-        return self._unary_op(x, np.log, "log", **kwargs)
+        return self.unary_op(x, np.log, "log", **kwargs)
 
     def pow(self, x: NDArray, exponent, **kwargs):
         if isinstance(exponent, NDArray):
@@ -439,7 +439,7 @@ class Builder:
             raise TypeError(f"Unsupported exponent type: {type(exponent)}")
 
     def reciprocal(self, x: NDArray, **kwargs):
-        return self._unary_op(x, lambda v: 1 / v, "reciprocal", **kwargs)
+        return self.unary_op(x, lambda v: 1 / v, "reciprocal", **kwargs)
 
     def matmul(self, x: NDArray, y: NDArray, transpose_x=False, mask=None, **kwargs):
         x_value = x._value 
