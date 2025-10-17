@@ -53,110 +53,141 @@ from triton.runtime.interpreter import (
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
 from triton.runtime import JITFunction
+from triton_viz.core.nki import nki_builder
 
-op_list = [
-    ProgramId,
-    RawStore,
-    Store,
-    RawLoad,
-    Load,
-    UnaryOp,
-    BinaryOp,
-    TernaryOp,
-    Dot,
-    MakeRange,
-    AddPtr,
-    Splat,
-    ExpandDims,
-    Broadcast,
-    ReduceMax,
-    ReduceMin,
-    ReduceSum,
-    MakeBlockPointer,
-    TensorPointerLoad,
-    TensorPointerStore,
-    Idiv,
-    Rsqrt,
-    CastImpl,
-    Reshape,
-    Join,
-    Fabs,
-    Ashr,
-    Advance,
-    FpToFp,
-    Umulhi,
-    Trans,
-    CumSum,
-    Bitcast,
-    AtomicCas,
-]
+BUILDER = interpreter_builder
+if BUILDER == interpreter_builder:
+    op_list = [
+        ProgramId,
+        RawStore,
+        Store,
+        RawLoad,
+        Load,
+        UnaryOp,
+        BinaryOp,
+        TernaryOp,
+        Dot,
+        MakeRange,
+        AddPtr,
+        Splat,
+        ExpandDims,
+        Broadcast,
+        ReduceMax,
+        ReduceMin,
+        ReduceSum,
+        MakeBlockPointer,
+        TensorPointerLoad,
+        TensorPointerStore,
+        Idiv,
+        Rsqrt,
+        CastImpl,
+        Reshape,
+        Join,
+        Fabs,
+        Ashr,
+        Advance,
+        FpToFp,
+        Umulhi,
+        Trans,
+        CumSum,
+        Bitcast,
+        AtomicCas,
+    ]
+    original_ops = {
+        ProgramId: interpreter_builder.create_get_program_id,
+        RawStore: interpreter_builder.create_store,
+        Store: interpreter_builder.create_masked_store,
+        RawLoad: interpreter_builder.create_load,
+        Load: interpreter_builder.create_masked_load,
+        Dot: interpreter_builder.create_dot,
+        UnaryOp: interpreter_builder.unary_op,
+        BinaryOp: interpreter_builder.binary_op,
+        TernaryOp: interpreter_builder.ternary_op,
+        MakeRange: interpreter_builder.create_make_range,
+        AddPtr: interpreter_builder.create_addptr,
+        ExpandDims: interpreter_builder.create_expand_dims,
+        Broadcast: interpreter_builder.create_broadcast,
+        Splat: interpreter_builder.create_splat,
+        MakeBlockPointer: interpreter_builder.create_make_block_ptr,
+        TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
+        TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
+        Idiv: interpreter_builder.create_idiv,
+        Rsqrt: interpreter_builder.create_rsqrt,
+        CastImpl: interpreter_builder.cast_impl,
+        Reshape: interpreter_builder.create_reshape,
+        Join: interpreter_builder.create_join,
+        Fabs: interpreter_builder.create_fabs,
+        Ashr: interpreter_builder.create_ashr,
+        Advance: interpreter_builder.create_advance,
+        FpToFp: interpreter_builder.create_fp_to_fp,
+        Umulhi: interpreter_builder.create_umulhi,
+        Trans: interpreter_builder.create_trans,
+        Bitcast: interpreter_builder.create_bitcast,
+        AtomicCas: interpreter_builder.create_atomic_cas,
+    }
+    # Hardcoded operation attribute names to avoid issues with lambda functions
+    _OP_ATTR_NAMES = {
+        ProgramId: "create_get_program_id",
+        RawStore: "create_store",
+        Store: "create_masked_store",
+        RawLoad: "create_load",
+        Load: "create_masked_load",
+        Dot: "create_dot",
+        UnaryOp: "unary_op",
+        BinaryOp: "binary_op",
+        TernaryOp: "ternary_op",
+        MakeRange: "create_make_range",
+        AddPtr: "create_addptr",
+        ExpandDims: "create_expand_dims",
+        Broadcast: "create_broadcast",
+        Splat: "create_splat",
+        MakeBlockPointer: "create_make_block_ptr",
+        TensorPointerLoad: "create_tensor_pointer_load",
+        TensorPointerStore: "create_tensor_pointer_store",
+        Idiv: "create_idiv",
+        Rsqrt: "create_rsqrt",
+        CastImpl: "cast_impl",
+        Reshape: "create_reshape",
+        Join: "create_join",
+        Fabs: "create_fabs",
+        Ashr: "create_ashr",
+        Advance: "create_advance",
+        FpToFp: "create_fp_to_fp",
+        Umulhi: "create_umulhi",
+        Trans: "create_trans",
+        Bitcast: "create_bitcast",
+        AtomicCas: "create_atomic_cas",
+    }
+elif BUILDER == nki_builder:
+    op_list = [
+        ProgramId,
+        Store,
+        Load,
+        Dot,
+        UnaryOp,
+        MakeRange
+    ]
+    original_ops = {
+        ProgramId: nki_builder.program_id,
+        Store: nki_builder.store,
+        Load: nki_builder.load,
+        Dot: nki_builder.matmul,
+        UnaryOp: nki_builder.unary_op,
+        #BinaryOp: nki_builder.binary_op,
+        #TernaryOp: nki_builder.ternary_op,
+        MakeRange: nki_builder.arange,
+        #AddPtr: nki_builder.create_addptr,
+        #ExpandDims: nki_builder.create_expand_dims,
+        #Broadcast: nki_builder.create_broadcast,
+        #Splat: nki_builder.create_splat,
+        #MakeBlockPointer: nki_builder.create_make_block_ptr,
+        #TensorPointerLoad: nki_builder.create_tensor_pointer_load,
+        #TensorPointerStore: nki_builder.create_tensor_pointer_store,
+        #Idiv: nki_builder.create_idiv,
+        #Rsqrt: nki_builder.create_rsqrt,
+        #CastImpl: nki_builder.cast_impl,
+    }
 
-# Hardcoded operation attribute names to avoid issues with lambda functions
-_OP_ATTR_NAMES = {
-    ProgramId: "create_get_program_id",
-    RawStore: "create_store",
-    Store: "create_masked_store",
-    RawLoad: "create_load",
-    Load: "create_masked_load",
-    Dot: "create_dot",
-    UnaryOp: "unary_op",
-    BinaryOp: "binary_op",
-    TernaryOp: "ternary_op",
-    MakeRange: "create_make_range",
-    AddPtr: "create_addptr",
-    ExpandDims: "create_expand_dims",
-    Broadcast: "create_broadcast",
-    Splat: "create_splat",
-    MakeBlockPointer: "create_make_block_ptr",
-    TensorPointerLoad: "create_tensor_pointer_load",
-    TensorPointerStore: "create_tensor_pointer_store",
-    Idiv: "create_idiv",
-    Rsqrt: "create_rsqrt",
-    CastImpl: "cast_impl",
-    Reshape: "create_reshape",
-    Join: "create_join",
-    Fabs: "create_fabs",
-    Ashr: "create_ashr",
-    Advance: "create_advance",
-    FpToFp: "create_fp_to_fp",
-    Umulhi: "create_umulhi",
-    Trans: "create_trans",
-    Bitcast: "create_bitcast",
-    AtomicCas: "create_atomic_cas",
-}
-
-original_ops = {
-    ProgramId: interpreter_builder.create_get_program_id,
-    RawStore: interpreter_builder.create_store,
-    Store: interpreter_builder.create_masked_store,
-    RawLoad: interpreter_builder.create_load,
-    Load: interpreter_builder.create_masked_load,
-    Dot: interpreter_builder.create_dot,
-    UnaryOp: interpreter_builder.unary_op,
-    BinaryOp: interpreter_builder.binary_op,
-    TernaryOp: interpreter_builder.ternary_op,
-    MakeRange: interpreter_builder.create_make_range,
-    AddPtr: interpreter_builder.create_addptr,
-    ExpandDims: interpreter_builder.create_expand_dims,
-    Broadcast: interpreter_builder.create_broadcast,
-    Splat: interpreter_builder.create_splat,
-    MakeBlockPointer: interpreter_builder.create_make_block_ptr,
-    TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
-    TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
-    Idiv: interpreter_builder.create_idiv,
-    Rsqrt: interpreter_builder.create_rsqrt,
-    CastImpl: interpreter_builder.cast_impl,
-    Reshape: interpreter_builder.create_reshape,
-    Join: interpreter_builder.create_join,
-    Fabs: interpreter_builder.create_fabs,
-    Ashr: interpreter_builder.create_ashr,
-    Advance: interpreter_builder.create_advance,
-    FpToFp: interpreter_builder.create_fp_to_fp,
-    Umulhi: interpreter_builder.create_umulhi,
-    Trans: interpreter_builder.create_trans,
-    Bitcast: interpreter_builder.create_bitcast,
-    AtomicCas: interpreter_builder.create_atomic_cas,
-}
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
     ReduceMin: tl.min,
@@ -222,7 +253,7 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
         original_op = original_ops[op_type]
         patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(
-            interpreter_builder,
+            BUILDER,
             op_name,
             lambda *args, **kwargs: patched_op(*args, **kwargs),
         )
@@ -253,7 +284,7 @@ def unpatch_op(op_type: type[Op]):
         original_op = original_ops[op_type]
         # Use hardcoded name from _OP_ATTR_NAMES
         op_name = _OP_ATTR_NAMES[op_type]
-        setattr(interpreter_builder, op_name, original_op)
+        setattr(BUILDER, op_name, original_op)
 
 
 class _LoopIter:
@@ -461,7 +492,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     leave=False,
                     disable=not (cfg.report_grid_execution_progress and grid[2] > 1),
                 ):
-                    interpreter_builder.set_grid_idx(x, y, z)
+                    BUILDER.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
                     if not client_manager.pre_run_callback(self.fn):
                         return
@@ -496,7 +527,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = self.grid(call_args) if callable(self.grid) else self.grid
     assert len(grid) <= 3
     grid = grid + (1,) * (3 - len(grid))
-    interpreter_builder.set_grid_dim(*grid)
+    BUILDER.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
     run_grid_loops(grid)
     # Copy arguments back to propagate side-effects
