@@ -75,6 +75,13 @@ export class GridBlock {
         const closeButton = this.createCloseButton();
         this.visualizationContainer.appendChild(closeButton);
 
+        // Ensure buttons panel sits above the canvas and accepts clicks
+        const buttonsPanel = this.visualizationContainer.querySelector('div');
+        if (buttonsPanel) {
+            buttonsPanel.style.pointerEvents = 'auto';
+            buttonsPanel.style.zIndex = '1002';
+        }
+
         this.isDetailedViewVisible = true;
         this.canvas.style.display = 'none';
         this.containerElement.style.display = 'block';
@@ -182,6 +189,15 @@ export class GridBlock {
         }
 
         this.contentArea.innerHTML = '';
+
+        // expose current op for debugging
+        try {
+            window.last_op = op;
+            window.last_op_global_shape = op.global_shape;
+            window.last_global_coords = op.global_coords;
+            window.last_slice_shape = op.slice_shape;
+            window.last_slice_coords = op.slice_coords;
+        } catch (e) {}
 
         switch (op.type) {
             case 'Dot':

@@ -12,10 +12,6 @@ import triton.language as tl
 
 import triton_viz
 from triton_viz.clients import Sanitizer
-from triton_viz import config as cfg
-
-
-cfg.sanitizer_backend = "symexec"
 
 
 # ======== Trace Decorator Tests =========
@@ -30,9 +26,6 @@ def test_trace_decorator_add_clients():
     The final Trace object should contain exactly one instance each of
     Sanitizer, Profiler, and Tracer (total = 3 clients).
     """
-
-    # Make sure sanitizer is on.
-    cfg.sanitizer_backend = "symexec"
 
     @triton_viz.trace("sanitizer")
     @triton_viz.trace("profiler")
@@ -57,6 +50,36 @@ def test_trace_decorator_add_clients():
     assert sum(c == "sanitizer" for c in clients) == 1
     assert sum(c == "profiler" for c in clients) == 1
     assert sum(c == "tracer" for c in clients) == 1
+
+
+# ======== Nested JIT Call Tests =========
+@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+@triton.jit
+def trace_nested_inner_kernel(x):
+    return x * 2
+
+
+def test_trace_nested_jit_calls():
+    """
+    Test that Trace class properly handles nested JIT function calls via __call__ method.
+
+    When a traced JIT function is called from within another JIT function,
+    the Trace wrapper needs to properly delegate to the underlying function.
+    This test ensures compatibility with the command line triton-sanitizer wrapper.
+    """
+
+    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def trace_nested_call_kernel(ptr, n: tl.constexpr):
+        x = tl.load(ptr + tl.arange(0, n))
+        y = trace_nested_inner_kernel(
+            x
+        )  # This nested call requires __call__ method when wrapped by trace
+        tl.store(ptr + tl.arange(0, n), y)
+
+    # Test execution
+    data = torch.ones(8)
+    trace_nested_call_kernel[(1,)](data, 8)
 
 
 # ======== Wrapper Tests =========
@@ -108,7 +131,6 @@ def test_cli_invocation():
         # load sitecustomize.py
         env = os.environ.copy()
         env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
-        env["TRITON_SANITIZER_BACKEND"] = "symexec"
         env["TRITON_INTERPRET"] = "1"
 
         # run the dummy program using triton-sanitizer
@@ -161,7 +183,6 @@ if torch.cuda.is_available():  # Only test if CUDA is available
         This test uses n_elements = 128, matching the size of the input tensors.
         It should NOT cause any out-of-bound access.
         """
-        cfg.sanitizer_backend = "symexec"
         x = torch.randn(128)
         y = torch.randn(128)
         out = torch.empty_like(x)
@@ -175,7 +196,6 @@ if torch.cuda.is_available():  # Only test if CUDA is available
         This test deliberately sets n_elements = 256, exceeding the actual buffer size (128).
         It will likely cause out-of-bound reads/writes, which may trigger errors or warnings.
         """
-        cfg.sanitizer_backend = "symexec"
         x = torch.randn(128)
         y = torch.randn(128)
         out = torch.empty_like(x)

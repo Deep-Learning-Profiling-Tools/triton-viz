@@ -1,10 +1,11 @@
 from ...core.client import Client
-from ...core.callbacks import OpCallbacks
-from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
+from ...core.callbacks import OpCallbacks, ForLoopCallbacks
+from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore
+from typing import Callable, Optional, Union
 import numpy as np
 
 
-def _convert_grid_idx(grid_idx) -> tuple[int, int, int] | None:
+def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
     if grid_idx is None:
         return grid_idx
 
@@ -22,8 +23,9 @@ class Tracer(Client):
     def __init__(
         self,
         callpath: bool = True,
-        grid_idx: tuple[int] | int | None = None,
+        grid_idx: Optional[Union[tuple[int], int]] = None,
     ):
+        super().__init__()  # Initialize parent class
         self.callpath = callpath
         self.grid_idx = _convert_grid_idx(grid_idx)
         self.records: list = []
@@ -40,11 +42,23 @@ class Tracer(Client):
             ret_idx = i
         return self.tensors[ret_idx]
 
-    def arg_callback(self, arg, arg_cvt):
+    def pre_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
+
+    def arg_callback(self, name, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
             self.tensors.append(arg)
 
-    def grid_idx_callback(self, grid_idx: tuple[int]):
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         if self.grid_idx is not None and grid_idx != self.grid_idx:
             self.sample = False
         else:
@@ -53,7 +67,7 @@ class Tracer(Client):
         # Create a Grid record for this grid index
         self.records.append(Grid(idx=grid_idx))
 
-    def grid_callback(self, grid: tuple[int]):
+    def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op], *ignore_args, **ignore_kwargs) -> OpCallbacks:
@@ -77,7 +91,26 @@ class Tracer(Client):
                 Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             )
 
-        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False, *ignore_args, **ignore_kwargs):
+        # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
+        def pre_raw_load_callback(ptr):
+            if not self.sample:
+                return
+            first_ptr = np.reshape(ptr.data, (-1))[0]
+            tensor = self._get_tensor(first_ptr)
+            offsets = ptr.data - tensor.data_ptr()
+            true_mask = np.ones_like(offsets, dtype=bool)
+            self.records.append(Load(tensor.data_ptr(), offsets, true_mask))
+
+        def pre_raw_store_callback(ptr, value):
+            if not self.sample:
+                return
+            first_ptr = np.reshape(ptr.data, (-1))[0]
+            tensor = self._get_tensor(first_ptr)
+            offsets = ptr.data - tensor.data_ptr()
+            true_mask = np.ones_like(offsets, dtype=bool)
+            self.records.append(Store(tensor.data_ptr(), offsets, true_mask))
+
+        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
                 return
             input_shape = input.handle.data.shape
@@ -96,6 +129,10 @@ class Tracer(Client):
             return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
             return OpCallbacks(before_callback=pre_store_callback)
+        elif op_type is RawLoad:
+            return OpCallbacks(before_callback=pre_raw_load_callback)
+        elif op_type is RawStore:
+            return OpCallbacks(before_callback=pre_raw_store_callback)
         elif op_type is ReduceSum:
             return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:
@@ -103,5 +140,9 @@ class Tracer(Client):
 
         return OpCallbacks()
 
+    def register_for_loop_callback(self):
+        return ForLoopCallbacks()
+
     def finalize(self) -> list:
+        self.tensors.clear()
         return self.records

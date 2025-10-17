@@ -1,67 +1,65 @@
 import os
-import sys
-import types
-from typing import TYPE_CHECKING, Literal
 
 
-if TYPE_CHECKING:
-    sanitizer_activated: bool
-    sanitizer_backend: Literal["off", "brute_force", "symexec"]
-    report_grid_execution_progress: bool
-    available_backends: tuple[str, ...]
-
-    def reset() -> None:
-        ...
-
-
-# Back-end options recognised by the sanitizer
-AVAILABLE_SANITIZER_BACKENDS = ("off", "brute_force", "symexec")
-
-
-class Config(types.ModuleType):
-    def __init__(self, name: str) -> None:
-        super().__init__(name)
+class Config:
+    def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
+        # --- Verbose mode flag ---
+        self.verbose = os.getenv("TRITON_VIZ_VERBOSE", "0") == "1"
+
         # --- Sanitizer activation flag ---
         self.sanitizer_activated = False
 
-        # --- Sanitizer backend ---
-        self._sanitizer_backend = os.getenv("TRITON_SANITIZER_BACKEND", "") or None
+        # --- Sanitizer disable flag ---
+        self._disable_sanitizer = os.getenv("DISABLE_SANITIZER", "0") == "1"
+
+        # --- Profiler disable flag ---
+        self._disable_profiler = os.getenv("DISABLE_PROFILER", "0") == "1"
 
         # --- Grid execution progress flag ---
-        env_flag = os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0")
-        self.report_grid_execution_progress = env_flag == "1"  # verify using setter
+        self.report_grid_execution_progress = (
+            os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
+        )  # verify using setter
 
-    # ---------- sanitizer_backend ----------
+    # ---------- disable_sanitizer ----------
     @property
-    def sanitizer_backend(self) -> str:
-        if not self.sanitizer_activated:
-            return "not_activated"
-        if self._sanitizer_backend is None:
-            raise RuntimeError(
-                f"TRITON_SANITIZER_BACKEND is not set!"
-                f"Available backends are: {AVAILABLE_SANITIZER_BACKENDS}"
-            )
-        return self._sanitizer_backend
+    def disable_sanitizer(self) -> bool:
+        return self._disable_sanitizer
 
-    @sanitizer_backend.setter
-    def sanitizer_backend(self, value: str) -> None:
-        if value not in AVAILABLE_SANITIZER_BACKENDS:
-            raise ValueError(
-                f"Invalid sanitizer_backend: {value!r}. "
-                f"Valid choices: {AVAILABLE_SANITIZER_BACKENDS}"
-            )
+    @disable_sanitizer.setter
+    def disable_sanitizer(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("disable_sanitizer expects a bool.")
 
-        previous = getattr(self, "_sanitizer_backend", None)
-        self._sanitizer_backend = value
+        previous = getattr(self, "_disable_sanitizer", None)
+        self._disable_sanitizer = value
 
         # User-friendly status messages
-        if value == "off" and previous != "off":
+        if value and not previous:
             print("Triton Sanitizer disabled.")
-        elif value != "off" and (previous == "off" or previous is None):
-            print(f"Triton Sanitizer enabled with backend: {value!r}")
+        elif not value and previous:
+            print("Triton Sanitizer enabled.")
+
+    # ---------- disable_profiler ----------
+    @property
+    def disable_profiler(self) -> bool:
+        return self._disable_profiler
+
+    @disable_profiler.setter
+    def disable_profiler(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("disable_profiler expects a bool.")
+
+        previous = getattr(self, "_disable_profiler", None)
+        self._disable_profiler = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Triton Profiler disabled.")
+        elif not value and previous:
+            print("Triton Profiler enabled.")
 
     # ---------- report_grid_execution_progress ----------
     @property
@@ -76,11 +74,5 @@ class Config(types.ModuleType):
         if flag:
             print("Grid-progress reporting is now ON.")
 
-    # ---------- read-only helpers ----------
-    @property
-    def available_backends(self):
-        return AVAILABLE_SANITIZER_BACKENDS
 
-
-# Replace the current module object with a live Config instance
-sys.modules[__name__] = Config(__name__)
+config = Config()

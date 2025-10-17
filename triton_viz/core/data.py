@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import ClassVar, Optional
 import traceback
 import numpy.typing as npt
 import numpy as np
@@ -184,6 +184,61 @@ class CastImpl(Op):
 
 
 @dataclass
+class Reshape(Op):
+    name: ClassVar[str] = "reshape"
+
+
+@dataclass
+class Join(Op):
+    name: ClassVar[str] = "join"
+
+
+@dataclass
+class Fabs(Op):
+    name: ClassVar[str] = "fabs"
+
+
+@dataclass
+class Ashr(Op):
+    name: ClassVar[str] = "ashr"
+
+
+@dataclass
+class Advance(Op):
+    name: ClassVar[str] = "advance"
+
+
+@dataclass
+class FpToFp(Op):
+    name: ClassVar[str] = "fp_to_fp"
+
+
+@dataclass
+class Umulhi(Op):
+    name: ClassVar[str] = "umulhi"
+
+
+@dataclass
+class Trans(Op):
+    name: ClassVar[str] = "trans"
+
+
+@dataclass
+class CumSum(Op):
+    name: ClassVar[str] = "cumsum"
+
+
+@dataclass
+class Bitcast(Op):
+    name: ClassVar[str] = "bitcast"
+
+
+@dataclass
+class AtomicCas(Op):
+    name: ClassVar[str] = "atomic_cas"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str
@@ -200,6 +255,6 @@ class Grid:
 
 @dataclass
 class Launch:
-    grid: tuple | None = None
-    tensors: list[Tensor] = field(default_factory=list)
+    grid: Optional[tuple] = None
+    tensors: set[Tensor] = field(default_factory=set)
     records: list = field(default_factory=list)
