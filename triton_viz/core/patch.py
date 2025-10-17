@@ -43,6 +43,7 @@ from .data import (
     Bitcast,
     AtomicCas,
 )
+from .data import Flip  # separate import to avoid reordering noise
 import inspect
 import ast
 from triton.runtime.interpreter import (
@@ -428,6 +429,95 @@ def unpatch_for_loop():
 def patch_lang(fn):
     triton_patch_lang(fn)
     fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
+    # Wrap tl.flip to emit a Flip record after computing result
+    try:
+        _orig_flip = getattr(tl, "flip", None)
+        if _orig_flip is not None and not getattr(
+            _orig_flip, "__triton_viz_wrapped__", False
+        ):
+
+            def _viz_flip(x, *args, **kwargs):
+                # Call original flip implementation
+                ret = _orig_flip(x, *args, **kwargs)
+                # Best-effort extract dim
+                dim = None
+                if args:
+                    dim = args[0]
+                if "dim" in kwargs:
+                    dim = kwargs.get("dim")
+                # Best-effort shapes
+                in_shape = None
+                out_shape = None
+                x_arr = None
+                r_arr = None
+                try:
+                    # interpreter tensors may expose .data or .handle.data
+                    x_data = getattr(x, "data", None)
+                    if x_data is None and hasattr(x, "handle"):
+                        x_data = getattr(x.handle, "data", None)
+                    if x_data is not None:
+                        in_shape = tuple(x_data.shape)
+                        x_arr = x_data
+                except Exception:
+                    pass
+                try:
+                    r_data = getattr(ret, "data", None)
+                    if r_data is None and hasattr(ret, "handle"):
+                        r_data = getattr(ret.handle, "data", None)
+                    if r_data is not None:
+                        out_shape = tuple(r_data.shape)
+                        r_arr = r_data
+                except Exception:
+                    pass
+
+                # Emit a Flip record to the active tracer, if available
+                try:
+                    global _current_client_manager
+                    cm = _current_client_manager
+                    if cm is not None and hasattr(cm, "clients"):
+                        tracer = cm.get_client("tracer")
+                        if tracer is not None:
+                            input_payload = None
+                            output_payload = None
+                            try:
+                                # Avoid huge payloads: cap to 64k elements
+                                def _maybe_list(arr):
+                                    import numpy as _np
+
+                                    if arr is None:
+                                        return None
+                                    try:
+                                        if arr.size <= 65536:
+                                            return _np.asarray(arr).tolist()
+                                    except Exception:
+                                        pass
+                                    return None
+
+                                input_payload = _maybe_list(x_arr)
+                                output_payload = _maybe_list(r_arr)
+                            except Exception:
+                                pass
+
+                            rec = Flip(
+                                input_shape=in_shape or tuple(),
+                                output_shape=out_shape or (in_shape or tuple()),
+                                dim=int(dim) if dim is not None else 0,
+                                input_data=input_payload,
+                                output_data=output_payload,
+                            )
+                            # attach call path already handled by Flip.__post_init__
+                            tracer.records.append(rec)
+                except Exception:
+                    # Never fail kernel execution due to viz
+                    pass
+                return ret
+
+            # mark wrapper to avoid double-wrapping on subsequent patch_lang calls
+            setattr(_viz_flip, "__triton_viz_wrapped__", True)
+            tl.flip = _viz_flip  # type: ignore[assignment]
+    except Exception:
+        # If wrapping fails, continue without Flip records
+        pass
 
 
 def unpatch_lang():
@@ -478,6 +568,9 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
     }
     client_manager = kwargs.pop("client_manager")
+    # Expose client_manager to tl.flip wrapper via a module-global
+    global _current_client_manager
+    _current_client_manager = client_manager
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)

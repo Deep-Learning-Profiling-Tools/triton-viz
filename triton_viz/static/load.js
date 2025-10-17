@@ -14,7 +14,8 @@ import {
 export function createLoadVisualization(containerElement, op) {
 
         console.log(op.uuid);
-        fetch('/api/setop', {
+        const API_BASE = window.__TRITON_VIZ_API__ || '';
+        fetch(`${API_BASE}/api/setop`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -351,7 +352,7 @@ export function createLoadVisualization(containerElement, op) {
             wrapper.appendChild(header);
 
             try {
-                const res = await fetch('/api/op_code', {
+                const res = await fetch(`${API_BASE}/api/op_code`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ uuid: op.uuid, frame_idx: frameIdx, context })
@@ -497,7 +498,7 @@ export function createLoadVisualization(containerElement, op) {
 
         async function getElementValue(tensorName, x, y, z) {
             let uuid = op.uuid;
-            const response = await fetch('/api/getLoadValue', {
+            const response = await fetch(`${API_BASE}/api/getLoadValue`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -509,7 +510,7 @@ export function createLoadVisualization(containerElement, op) {
 
         async function fetchGlobalTensor() {
             try {
-                const res = await fetch('/api/getLoadTensor', {
+                const res = await fetch(`${API_BASE}/api/getLoadTensor`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ uuid: op.uuid })

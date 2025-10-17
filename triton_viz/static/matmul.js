@@ -2,9 +2,10 @@ import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 
 export function createMatMulVisualization(containerElement, op) {
+    const API_BASE = window.__TRITON_VIZ_API__ || '';
     const { input_shape, other_shape, output_shape } = op;
     console.log(op.uuid)
-    fetch('/api/setop', {
+    fetch(`${API_BASE}/api/setop`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -14,9 +15,7 @@ export function createMatMulVisualization(containerElement, op) {
     .then(response => response.json())
     .then(data => console.log('Set current op:', data))
     .catch((error) => console.error('Error:', error));
-    let currentStep = 0;
-    const totalSteps = input_shape[1];
-    let frame = 0;
+    let currentStep = 0; // kept for compatibility with getValue; not used for animation
 
 
     const sideMenu = document.createElement('div');
@@ -30,6 +29,8 @@ export function createMatMulVisualization(containerElement, op) {
     sideMenu.style.fontFamily = 'Arial, sans-serif';
     sideMenu.style.fontSize = '14px';
     sideMenu.style.borderRadius = '5px';
+    sideMenu.style.zIndex = '2000';
+    sideMenu.style.pointerEvents = 'auto';
     containerElement.appendChild(sideMenu);
     let hoveredCube = null;
 
@@ -38,7 +39,7 @@ export function createMatMulVisualization(containerElement, op) {
 
     async function getElementValue( matrixName, row, col) {
         let uuid = op.uuid;
-        const response = await fetch('/api/getValue', {
+        const response = await fetch(`${API_BASE}/api/getValue`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -49,7 +50,7 @@ export function createMatMulVisualization(containerElement, op) {
     }
 
 
-    function updateSideMenu(matrix, x, y) {
+    function updateSideMenu(matrix, x, y, vectors) {
         if (!matrix) {
             sideMenu.innerHTML = '';
             return;
@@ -71,11 +72,25 @@ export function createMatMulVisualization(containerElement, op) {
             return;
         }
         console.log(matrixName, "x:", (x + 1), "y:", (y + 1));
+        let extra = '';
+        if (matrixName === 'C' && vectors && !vectors.error) {
+            const aRow = vectors.a_row || [];
+            const bCol = vectors.b_col || [];
+            const k = vectors.k || 0;
+            extra = `
+                <hr/>
+                <div><b>From A row</b>: [${aRow.slice(0,8).join(', ')}${aRow.length>8?' …':''}]</div>
+                <div><b>From B col</b>: [${bCol.slice(0,8).join(', ')}${bCol.length>8?' …':''}]</div>
+                <div><b>k</b>: ${k}</div>
+            `;
+        }
+
         sideMenu.innerHTML = `
             <h3 style="margin-top: 0;">Matrix ${matrixName}</h3>
             <p>Row: ${y + 1}</p>
             <p>Column: ${x + 1}</p>
             <p>Dimensions: ${dims[0]} x ${dims[1]}</p>
+            ${extra}
         `;
     }
 
@@ -135,10 +150,37 @@ export function createMatMulVisualization(containerElement, op) {
                     `Value: ${res.value}`
                 );
 
-                updateSideMenu(hoveredCube.matrixName, hoveredCube.matrixRow, hoveredCube.matrixCol);
+                // If hovering C, fetch vectors and update panel
+                let vectors = null;
+                if (hoveredCube.matrixName === 'C') {
+                    try {
+                        const resp = await fetch(`${API_BASE}/api/getMatmulVectors`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ uuid: op.uuid, row: hoveredCube.matrixRow, col: hoveredCube.matrixCol })
+                        });
+                        vectors = await resp.json();
+                    } catch (e) { vectors = { error: String(e) }; }
+
+                    // highlight A[row,:], B[:,col], C[row,col]
+                    resetColors();
+                    const row = hoveredCube.matrixRow;
+                    const col = hoveredCube.matrixCol;
+                    const highlightA = Array.from({ length: input_shape[1] }, (_, i) => [row, i]);
+                    const highlightB = Array.from({ length: other_shape[0] }, (_, i) => [i, col]);
+                    const highlightC = [[row, col]];
+                    highlightCubes(matrixA, highlightA, COLOR_HIGHLIGHT);
+                    highlightCubes(matrixB, highlightB, COLOR_HIGHLIGHT);
+                    highlightCubes(matrixC, highlightC, COLOR_FILLED);
+                } else {
+                    // hovering A/B or others -> just reset
+                    resetColors();
+                }
+                updateSideMenu(hoveredCube.matrixName, hoveredCube.matrixRow, hoveredCube.matrixCol, vectors);
             }
         } else {
             updateSideMenu(null);
+            resetColors();
         }
     }
 
@@ -242,9 +284,7 @@ export function createMatMulVisualization(containerElement, op) {
     controls.target.copy(center);
     controls.update();
 
-    let isPaused = false;
-
-    const totalFrames = input_shape[0] * other_shape[1];
+    // remove auto animation; highlight is driven by mouse hover only
 
     function highlightCubes(matrix, indices, highlightColor) {
         indices.forEach(([i, j]) => {
@@ -267,25 +307,6 @@ export function createMatMulVisualization(containerElement, op) {
     function animate() {
         requestAnimationFrame(animate);
         controls.update();
-
-        if (!isPaused && frame < totalFrames) {
-            resetColors();
-
-            const row = Math.floor(frame / other_shape[1]);
-            const col = frame % other_shape[1];
-            currentStep = frame % totalSteps + 1;
-
-            const highlightA = Array.from({ length: input_shape[1] }, (_, i) => [row, i]);
-            const highlightB = Array.from({ length: other_shape[0] }, (_, i) => [i, col]);
-            const highlightC = [[row, col]];
-
-            highlightCubes(matrixA, highlightA, COLOR_HIGHLIGHT);
-            highlightCubes(matrixB, highlightB, COLOR_HIGHLIGHT);
-            highlightCubes(matrixC, highlightC, COLOR_FILLED);
-
-            frame++;
-        }
-
         renderer.render(scene, camera);
     }
 
@@ -301,22 +322,10 @@ export function createMatMulVisualization(containerElement, op) {
     controlPanel.style.left = '10px';
     controlPanel.style.display = 'flex';
     controlPanel.style.gap = '10px';
+    controlPanel.style.zIndex = '2000';
+    controlPanel.style.pointerEvents = 'auto';
 
-    const playPauseButton = document.createElement('button');
-    playPauseButton.textContent = 'Play/Pause';
-    playPauseButton.addEventListener('click', () => {
-        isPaused = !isPaused;
-    });
-
-    const resetButton = document.createElement('button');
-    resetButton.textContent = 'Reset';
-    resetButton.addEventListener('click', () => {
-        frame = 0;
-        resetColors();
-    });
-
-    controlPanel.appendChild(playPauseButton);
-    controlPanel.appendChild(resetButton);
+    // Removed animation controls; keep panel for color-by-value toggle only
 
     // Color by Value (for C matrix) toggle + legend (mono blue)
     const colorToggle = document.createElement('button');
@@ -328,7 +337,7 @@ export function createMatMulVisualization(containerElement, op) {
     function createLegend(min,max){
         destroyLegend();
         const w = document.createElement('div');
-        Object.assign(w.style,{position:'absolute', left:'10px', bottom:'60px', background:'rgba(0,0,0,0.6)', color:'#fff', padding:'6px 8px', borderRadius:'6px'});
+        Object.assign(w.style,{position:'absolute', left:'10px', bottom:'60px', background:'rgba(0,0,0,0.6)', color:'#fff', padding:'6px 8px', borderRadius:'6px', zIndex:'2000', pointerEvents:'auto'});
         const c = document.createElement('canvas'); c.width=220; c.height=10; const ctx=c.getContext('2d');
         for(let x=0;x<c.width;x++){ const t=x/(c.width-1); const r=t,g=0.2,b=1-t; ctx.fillStyle=`rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`; ctx.fillRect(x,0,1,c.height);}
         const lab=document.createElement('div'); lab.style.display='flex'; lab.style.justifyContent='space-between'; lab.style.marginTop='2px'; lab.innerHTML=`<span>${min.toFixed(3)}</span><span>${max.toFixed(3)}</span>`;
@@ -336,7 +345,7 @@ export function createMatMulVisualization(containerElement, op) {
         w.appendChild(ttl); w.appendChild(c); w.appendChild(lab); containerElement.appendChild(w); legendEl=w;
     }
     async function fetchCValues(){
-        try{ const res=await fetch('/api/getMatmulC',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid: op.uuid})});
+        try{ const res=await fetch(`${API_BASE}/api/getMatmulC`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid: op.uuid})});
             return await res.json(); }catch(e){ return {error:String(e)} }
     }
     function applyColorCWithData(data){ if(!colorOn||!data||data.error) return; try{

@@ -105,6 +105,17 @@ class Dot(Op):
 
 
 @dataclass
+class Flip(Op):
+    name: ClassVar[str] = "flip"
+    input_shape: tuple
+    output_shape: tuple
+    dim: int
+    # Optional payloads to help frontend render actual values when available
+    input_data: list | None = None
+    output_data: list | None = None
+
+
+@dataclass
 class MakeRange(Op):
     name: ClassVar[str] = "make_range"
     start: int

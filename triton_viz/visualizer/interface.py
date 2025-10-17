@@ -203,10 +203,18 @@ def get_op_code():
 
     def _score(tb: dict) -> int:
         fn = tb.get("filename") or ""
-        line = tb.get("line") or ""
+        line = (tb.get("line") or "").strip()
         name = tb.get("name") or ""
         p = os.path.realpath(fn)
         score = 0
+
+        # 强优先：明确的 Triton 语言内核操作符
+        if "tl.load" in line or "tl.store" in line:
+            score += 100
+        elif "tl." in line:
+            score += 50
+
+        # 位置相关：项目代码优先，三方/框架降权
         if p.startswith(cwd):
             score += 5
         if any(
@@ -214,12 +222,15 @@ def get_op_code():
             for s in ["site-packages", "triton_viz/", "triton/", "runpy.py", "IPython"]
         ):
             score -= 10
+
+        # 语义相关：函数名看起来像 kernel 的加分
         if name.endswith("_kernel") or "kernel" in name:
             score += 3
-        if "tl." in line:
-            score += 2
+
+        # 体验相关：examples 目录小幅加分
         if "examples" in p:
             score += 1
+
         return score
 
     # Prefer frames from tail (closest to current) and highest score
@@ -285,6 +296,40 @@ def get_matmul_c():
         )
     except Exception as e:
         return jsonify({"error": f"MatMul compute failed: {e}"}), 200
+
+
+@app.route("/api/getMatmulVectors", methods=["POST"])
+def get_matmul_vectors():
+    """Return A[row, :] and B[:, col] for a given Dot op.
+
+    Request JSON: { uuid, row, col }
+    Response JSON: {
+        "row": int,
+        "col": int,
+        "a_row": [float, ...],
+        "b_col": [float, ...],
+        "k": int
+    }
+    """
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    row = int(data.get("row", 0))
+    col = int(data.get("col", 0))
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    a = op.get("input_data")
+    b = op.get("other_data")
+    if a is None or b is None:
+        return jsonify({"error": "MatMul tensors not available"}), 200
+    try:
+        a_row = a[row, :].cpu().numpy().tolist()
+        b_col = b[:, col].cpu().numpy().tolist()
+        k = len(a_row)
+        return jsonify({"row": row, "col": col, "a_row": a_row, "b_col": b_col, "k": k})
+    except Exception as e:
+        return jsonify({"error": f"MatMul vectors failed: {e}"}), 200
 
 
 @app.route("/api/getValue", methods=["POST"])
@@ -362,6 +407,43 @@ def get_load_value():
             return jsonify({"error": "Coordinates out of bounds"}), 200
     else:
         return jsonify({"error": "Global tensor data not found"}), 200
+
+
+@app.route("/api/getFlipValue", methods=["POST"])
+def get_flip_value():
+    """Return a value from input or output of a Flip op by linear index or 2D coords.
+
+    Request JSON: { uuid, which: "input"|"output", x, y }
+    - If tensor is 1D, use x only; if 2D, use x (col), y (row)
+    """
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    which = (data.get("which") or "input").lower()
+    x = data.get("x")
+    y = data.get("y")
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    t = op.get("input_data") if which == "input" else op.get("output_data")
+    shape = op.get("input_shape") if which == "input" else op.get("output_shape")
+    if t is None or shape is None:
+        return jsonify({"error": "Flip tensor data unavailable"}), 200
+    try:
+        if len(shape) <= 1:
+            idx = int(x or 0)
+            return jsonify({"value": t[idx].item()})
+        elif len(shape) == 2:
+            rr = int(y or 0)
+            cc = int(x or 0)
+            return jsonify({"value": t[rr, cc].item()})
+        else:
+            # higher dims not directly supported; fallback to flat index
+            idx = int(x or 0)
+            flat = t.view(-1)
+            return jsonify({"value": flat[idx].item()})
+    except Exception as e:
+        return jsonify({"error": f"Flip get value failed: {e}"}), 200
 
 
 @app.route("/api/getLoadTensor", methods=["POST"])

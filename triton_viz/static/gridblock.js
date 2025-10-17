@@ -1,4 +1,5 @@
 import { createMatMulVisualization } from './matmul.js';
+import { createFlipVisualization } from './flip.js';
 import { createLoadVisualization } from './load.js';
 import { createStoreVisualization } from './store.js';
 
@@ -74,6 +75,9 @@ export class GridBlock {
 
         const closeButton = this.createCloseButton();
         this.visualizationContainer.appendChild(closeButton);
+        // Add an explicit Back button (top-left) to return to main canvas view
+        const backButton = this.createBackButton();
+        this.visualizationContainer.appendChild(backButton);
 
         // Ensure buttons panel sits above the canvas and accepts clicks
         const buttonsPanel = this.visualizationContainer.querySelector('div');
@@ -121,7 +125,8 @@ export class GridBlock {
                 header.style.opacity = '0.9';
                 wrapper.appendChild(header);
                 try {
-                    const res = await fetch('/api/op_code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uuid, frame_idx: frameIdx, context }) });
+                    const API_BASE = window.__TRITON_VIZ_API__ || '';
+                    const res = await fetch(`${API_BASE}/api/op_code`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uuid, frame_idx: frameIdx, context }) });
                     const data = await res.json();
                     const meta = document.createElement('div');
                     meta.style.marginBottom = '4px';
@@ -273,6 +278,9 @@ export class GridBlock {
             case 'Store':
                 this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op);
                 break;
+            case 'Flip':
+                this.visualizationCleanupFunction = createFlipVisualization(this.contentArea, op);
+                break;
             default:
                 const unsupportedMsg = document.createElement('p');
                 unsupportedMsg.textContent = `Visualization not supported for ${op.type} operation`;
@@ -293,6 +301,26 @@ export class GridBlock {
         });
         closeButton.addEventListener('click', () => this.hideDetailedView());
         return closeButton;
+    }
+
+    createBackButton() {
+        const backButton = document.createElement('button');
+        backButton.textContent = 'Back';
+        Object.assign(backButton.style, {
+            position: 'fixed',
+            left: '10px',
+            bottom: '10px',
+            zIndex: '2002',
+            background: 'rgba(0,0,0,0.65)',
+            color: '#fff',
+            border: '1px solid #666',
+            padding: '6px 10px',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.5)'
+        });
+        backButton.addEventListener('click', () => this.hideDetailedView());
+        return backButton;
     }
 
     hideDetailedView() {

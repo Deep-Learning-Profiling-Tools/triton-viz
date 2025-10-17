@@ -1,6 +1,6 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
-from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore
+from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore, Flip
 from typing import Callable, Optional, Union
 import numpy as np
 import traceback
@@ -155,6 +155,27 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
+        def post_flip_callback(ret, x, *args, **kwargs):
+            if not self.sample:
+                return
+            # Try to capture dim argument
+            dim = None
+            if args:
+                dim = args[0]
+            if "dim" in kwargs:
+                dim = kwargs.get("dim")
+            try:
+                in_shape = tuple(x.data.shape)
+                out_shape = tuple(ret.data.shape)
+            except Exception:
+                in_shape = getattr(getattr(x, "handle", None), "data", None)
+                out_shape = getattr(getattr(ret, "handle", None), "data", None)
+                in_shape = tuple(getattr(in_shape, "shape", []) or [])
+                out_shape = tuple(getattr(out_shape, "shape", []) or [])
+            rec = Flip(in_shape, out_shape, int(dim) if dim is not None else 0)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
+
         if op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
@@ -167,6 +188,8 @@ class Tracer(Client):
             return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:
             return OpCallbacks(after_callback=post_dot_callback)
+        # Flip is wrapped at tl.flip; we don't have an interpreter op to hook here.
+        # The wrapper in patch_lang will append Flip records directly to tracer.
 
         return OpCallbacks()
 

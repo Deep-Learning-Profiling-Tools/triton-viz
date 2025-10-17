@@ -10,11 +10,14 @@ import {
     setupEventListeners,
     cameraControls
 } from './load_utils.js';
+import { createFlipDemo } from './flip_demo.js';
+import { createFlip3D } from './flip_3d.js';
 
 export function createStoreVisualization(containerElement, op) {
 
         console.log(op.uuid);
-        fetch('/api/setop', {
+        const API_BASE = window.__TRITON_VIZ_API__ || '';
+        fetch(`${API_BASE}/api/setop`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -45,6 +48,7 @@ export function createStoreVisualization(containerElement, op) {
         containerElement.appendChild(controlBar);
         let dragModeOn = false;
         let hoveredCube = null;
+        let flipCleanup = null;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray
         const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
@@ -95,6 +99,7 @@ export function createStoreVisualization(containerElement, op) {
             dragToggle.textContent = `Drag Cubes: ${dragModeOn ? 'ON' : 'OFF'}`;
             orbitControls.enabled = !dragModeOn;
         });
+        // Removed Flip demo button from Store view; Flip visualization is available under Flip op.
         animate();
 
         function _updateMouseNDC(event) {
@@ -229,7 +234,7 @@ export function createStoreVisualization(containerElement, op) {
 
         async function getElementValue(tensorName, x, y, z) {
             let uuid = op.uuid;
-            const response = await fetch('/api/getLoadValue', {
+            const response = await fetch(`${API_BASE}/api/getLoadValue`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
