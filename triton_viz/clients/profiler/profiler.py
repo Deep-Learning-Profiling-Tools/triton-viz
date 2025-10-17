@@ -13,8 +13,8 @@ class Profiler(Client):
     def __init__(
         self,
         callpath: bool = True,
-        CHECK_BUFFER_LOAD: bool = False,
-        CHECK_LOAD_MASK_PERCENTAGE: bool = False,
+        disable_buffer_load_check: bool = False,
+        disable_load_mask_percentage_check: bool = False,
     ):
         super().__init__()  # Initialize parent class
         # Enable ASM collection for the profiler
@@ -22,8 +22,8 @@ class Profiler(Client):
         self.load_bytes = LoadStoreBytes("load", 0, 0)
         self.store_bytes = LoadStoreBytes("store", 0, 0)
         self.has_buffer_load = False
-        self.CHECK_BUFFER_LOAD = CHECK_BUFFER_LOAD
-        self.CHECK_LOAD_MASK_PERCENTAGE = CHECK_LOAD_MASK_PERCENTAGE
+        self.disable_buffer_load_check = disable_buffer_load_check
+        self.disable_load_mask_percentage_check = disable_load_mask_percentage_check
 
         # Counters for mask statistics
         self.total_loads = 0  # Total number of load operations
@@ -45,7 +45,11 @@ class Profiler(Client):
         if not ret:
             return
 
-        if hasattr(ret, "asm") and "amdgcn" in ret.asm:
+        if (
+            not self.disable_buffer_load_check
+            and hasattr(ret, "asm")
+            and "amdgcn" in ret.asm
+        ):
             self.has_buffer_load = "buffer_load" in ret.asm["amdgcn"]
             if self.has_buffer_load:
                 print("Detected buffer_load instruction in kernel ASM!")
@@ -107,14 +111,14 @@ class Profiler(Client):
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
             self._report_load_store_bytes("load", ptr, mask)
-            if self.CHECK_LOAD_MASK_PERCENTAGE:
+            if not self.disable_load_mask_percentage_check:
                 if not _is_mask_all_true(mask):
                     self.masked_loads += 1
                 self.total_loads += 1
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             self._report_load_store_bytes("store", ptr, mask)
-            if self.CHECK_LOAD_MASK_PERCENTAGE:
+            if not self.disable_load_mask_percentage_check:
                 if not _is_mask_all_true(mask):
                     self.masked_stores += 1
                 self.total_stores += 1
@@ -131,7 +135,7 @@ class Profiler(Client):
             byte_offset = offset_data * element_bytewidth
 
             # Check if byte offsets are within 32-bit range
-            if self.CHECK_BUFFER_LOAD:
+            if not self.disable_buffer_load_check:
                 self._check_32bit_range(byte_offset, element_bytewidth, offset_data)
 
         if op_type is Load:
@@ -147,8 +151,8 @@ class Profiler(Client):
         return ForLoopCallbacks()
 
     def finalize(self) -> list:
-        # Calculate and print mask statistics only if CHECK_LOAD_MASK_PERCENTAGE is enabled
-        if self.CHECK_LOAD_MASK_PERCENTAGE:
+        # Calculate and print mask statistics only if load mask percentage check is enabled
+        if not self.disable_load_mask_percentage_check:
             print("\n" + "=" * 60)
             print("Profiler: Mask Usage Statistics")
             print("=" * 60)
