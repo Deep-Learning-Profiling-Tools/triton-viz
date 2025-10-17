@@ -26,6 +26,7 @@ class Tracer(Client):
         callpath: bool = True,
         grid_idx: Optional[Union[tuple[int], int]] = None,
     ):
+        super().__init__()  # Initialize parent class
         self.callpath = callpath
         self.grid_idx = _convert_grid_idx(grid_idx)
         self.records: list = []
@@ -48,6 +49,12 @@ class Tracer(Client):
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
+
     def arg_callback(self, name, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
             self.tensors.append(arg)
@@ -64,7 +71,9 @@ class Tracer(Client):
     def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+    def register_op_callback(
+        self, op_type: type[Op], *ignore_args, **ignore_kwargs
+    ) -> OpCallbacks:
         def _extract_user_frames() -> list[traceback.FrameSummary]:
             stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
             # drop current frames (this function and callers)
@@ -94,9 +103,7 @@ class Tracer(Client):
                     return [f]
             return stack[-1:]
 
-        def pre_load_callback(
-            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
-        ):
+        def pre_load_callback(ptr, mask, *ignore_args, **ignore_kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
@@ -105,7 +112,7 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
+        def pre_store_callback(ptr, value, mask, *ignore_args, **ignore_kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
@@ -137,14 +144,16 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
+        def post_reduce_sum_callback(
+            ret, input, axis=None, keep_dims=False, *ignore_args, **ignore_kwargs
+        ):
             if not self.sample:
                 return
             input_shape = input.handle.data.shape
             output_shape = ret.handle.data.shape
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
-        def post_dot_callback(ret, input, other, *args):
+        def post_dot_callback(ret, input, other, *ignore_args, **ignore_kwargs):
             if not self.sample:
                 return
             input_shape = input.data.shape

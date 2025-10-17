@@ -78,7 +78,7 @@ from .data import (
     OutOfBoundsRecordBruteForce,
     OutOfBoundsRecordZ3,
 )
-from ...core import config as cfg
+from ...core.config import config as cfg
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -468,6 +468,12 @@ class Sanitizer(Client):
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
+
     def arg_callback(self, *args, **kwargs):  # type: ignore[override]
         raise NotImplementedError
 
@@ -497,6 +503,7 @@ class SanitizerBruteForce(Sanitizer):
         abort_on_error: bool = False,
         callpath: bool = True,
     ):
+        super().__init__()  # Initialize parent class
         self.callpath = callpath
         self.abort_on_error = abort_on_error
         self.tensors: list[Tensor] = []
@@ -540,7 +547,7 @@ class SanitizerBruteForce(Sanitizer):
         self.last_grid = _get_last_grid(grid)
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -983,6 +990,7 @@ class SymbolicExpr:
         return SymbolicExprDataWrapper(self.__str__(), self)
 
     triton_scala_dtypes = (
+        tl.int1,
         tl.int8,
         tl.int16,
         tl.int32,
@@ -1480,6 +1488,7 @@ _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
 
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
+        super().__init__()  # Initialize parent class
         self.abort_on_error: bool = abort_on_error
         self.records: list[OutOfBoundsRecordZ3] = []
         self.grid: Optional[tuple[int, ...]] = None
@@ -1678,7 +1687,7 @@ class SanitizerSymbolicExecution(Sanitizer):
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         self.grid_idx = grid_idx
 
-    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
@@ -2096,7 +2105,7 @@ class NullSanitizer(Sanitizer):
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        super().__init__()  # Initialize parent class
 
     def _disabled(self, method: str):
         raise RuntimeError(
