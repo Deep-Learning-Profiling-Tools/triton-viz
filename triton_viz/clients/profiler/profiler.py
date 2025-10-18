@@ -10,7 +10,12 @@ from typing import Callable
 class Profiler(Client):
     NAME = "profiler"
 
-    def __init__(self, callpath: bool = True, disable_buffer_load_check: bool = False):
+    def __init__(
+        self,
+        callpath: bool = True,
+        disable_buffer_load_check: bool = False,
+        disable_for_loop_unroll_check: bool = False,
+    ):
         super().__init__()  # Initialize parent class
         # Enable ASM collection for the profiler
         self.callpath = callpath
@@ -18,6 +23,15 @@ class Profiler(Client):
         self.store_bytes = LoadStoreBytes("store", 0, 0)
         self.has_buffer_load = False
         self.disable_buffer_load_check = disable_buffer_load_check
+        self.disable_for_loop_unroll_check = disable_for_loop_unroll_check
+
+        # For-loop statistics
+        self.loop_info: list[
+            tuple[int, int]
+        ] = []  # List of (lineno, total_steps) tuples
+        self.loop_linenos_seen: set[
+            int
+        ] = set()  # Set to track already seen line numbers
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
@@ -125,7 +139,45 @@ class Profiler(Client):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
-        return ForLoopCallbacks()
+        def loop_hook_before(lineno, iterable):
+            if self.disable_for_loop_unroll_check:
+                return
+
+            if not isinstance(iterable, range):
+                return
+
+            # Only record each unique loop (by line number) once
+            # Different blocks will execute the same loop, so we deduplicate by lineno
+            if lineno in self.loop_linenos_seen:
+                return
+
+            # Record loop information: line number and total steps
+            length = len(iterable)
+            self.loop_info.append((lineno, length))
+            self.loop_linenos_seen.add(lineno)
+
+        def loop_hook_after(lineno: int) -> None:
+            # No action needed after loop for profiler
+            pass
+
+        return ForLoopCallbacks(
+            before_loop_callback=loop_hook_before,
+            after_loop_callback=loop_hook_after,
+        )
 
     def finalize(self) -> list:
+        # Print for-loop statistics if enabled
+        if not self.disable_for_loop_unroll_check and self.loop_info:
+            print("\n" + "=" * 60)
+            print("Profiler: For-Loop Statistics")
+            print("=" * 60)
+            print(f"\nTotal for-loops detected: {len(self.loop_info)}\n")
+
+            for idx, (lineno, total_steps) in enumerate(self.loop_info, 1):
+                print(f"Loop #{idx}:")
+                print(f"  Line number:    {lineno}")
+                print(f"  Total steps:    {total_steps}")
+
+            print("=" * 60 + "\n")
+
         return [self.load_bytes, self.store_bytes]
