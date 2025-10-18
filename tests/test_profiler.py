@@ -7,6 +7,7 @@ import triton_viz
 from triton_viz.clients import Profiler
 
 
+# ======== Case 3: Check masked element percentage for tuning BLOCK_SIZE ========
 @triton_viz.trace(clients=(profiler := Profiler(disable_buffer_load_check=True)))
 @triton.jit
 def mask_percentage_test_kernel(
