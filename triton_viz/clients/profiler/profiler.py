@@ -15,6 +15,7 @@ class Profiler(Client):
         callpath: bool = True,
         disable_buffer_load_check: bool = False,
         disable_for_loop_unroll_check: bool = False,
+        disable_load_mask_percentage_check: bool = False,
     ):
         super().__init__()  # Initialize parent class
         # Enable ASM collection for the profiler
@@ -32,6 +33,21 @@ class Profiler(Client):
         self.loop_linenos_seen: set[
             int
         ] = set()  # Set to track already seen line numbers
+        self.disable_load_mask_percentage_check = disable_load_mask_percentage_check
+
+        # Counters for mask statistics
+        self.load_mask_total_count = (
+            0  # Total number of mask elements in all load operations
+        )
+        self.load_mask_false_count = (
+            0  # Total number of False elements in all load masks
+        )
+        self.store_mask_total_count = (
+            0  # Total number of mask elements in all store operations
+        )
+        self.store_mask_false_count = (
+            0  # Total number of False elements in all store masks
+        )
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
@@ -106,13 +122,34 @@ class Profiler(Client):
                 assert False, "Buffer Load optimization should be used when offsets are within 32-bit range!"
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        def _get_mask_stats(mask: TensorHandle) -> tuple[int, int]:
+            """Get mask statistics: total count and false count.
+
+            Args:
+                mask: TensorHandle containing boolean mask data
+
+            Returns:
+                Tuple of (total_count, false_count)
+            """
+            total_count = mask.data.size
+            false_count = np.count_nonzero(np.logical_not(mask.data))
+            return total_count, false_count
+
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
             self._report_load_store_bytes("load", ptr, mask)
+            if not self.disable_load_mask_percentage_check:
+                total_count, false_count = _get_mask_stats(mask)
+                self.load_mask_total_count += total_count
+                self.load_mask_false_count += false_count
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             self._report_load_store_bytes("store", ptr, mask)
+            if not self.disable_load_mask_percentage_check:
+                total_count, false_count = _get_mask_stats(mask)
+                self.store_mask_total_count += total_count
+                self.store_mask_false_count += false_count
 
         def pre_addptr_callback(ptr, offset):
             dtype_tt = ptr.get_element_ty()
@@ -177,6 +214,38 @@ class Profiler(Client):
                 print(f"Loop #{idx}:")
                 print(f"  Line number:    {lineno}")
                 print(f"  Total steps:    {total_steps}")
+ 
+        # Calculate and print mask statistics only if load mask percentage check is enabled
+        if not self.disable_load_mask_percentage_check:
+            print("\n" + "=" * 60)
+            print("Profiler: Mask Usage Statistics")
+            print("=" * 60)
+
+            # Load statistics
+            if self.load_mask_total_count > 0:
+                load_masked_percentage = (
+                    self.load_mask_false_count / self.load_mask_total_count
+                ) * 100
+                print("\nLoad Operations:")
+                print(f"  Total mask elements:     {self.load_mask_total_count}")
+                print(f"  False elements:          {self.load_mask_false_count}")
+                print(f"  Masked percentage:       {load_masked_percentage:.2f}%")
+            else:
+                print("\nLoad Operations:")
+                print("  No load operations detected")
+
+            # Store statistics
+            if self.store_mask_total_count > 0:
+                store_masked_percentage = (
+                    self.store_mask_false_count / self.store_mask_total_count
+                ) * 100
+                print("\nStore Operations:")
+                print(f"  Total mask elements:     {self.store_mask_total_count}")
+                print(f"  False elements:          {self.store_mask_false_count}")
+                print(f"  Masked percentage:       {store_masked_percentage:.2f}%")
+            else:
+                print("\nStore Operations:")
+                print("  No store operations detected")
 
             print("=" * 60 + "\n")
 
