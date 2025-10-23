@@ -84,10 +84,17 @@ def test_for_loop_statistics():
         ), f"Loop #{idx+1}: lineno should be int, got {type(lineno)}"
         assert lineno > 0, f"Loop #{idx+1}: lineno should be positive, got {lineno}"
 
+
 # ======== Case 3: Check masked element percentage for tuning BLOCK_SIZE ========
 @triton_viz.trace(clients=(profiler := Profiler(disable_buffer_load_check=True)))
 @triton.jit
 def mask_percentage_test_kernel(
+    in_ptr,
+    out_ptr,
+    N: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
     Test kernel with a known mix of masked and unmasked load/store operations.
 
     Expected operations per block:

@@ -214,7 +214,7 @@ class Profiler(Client):
                 print(f"Loop #{idx}:")
                 print(f"  Line number:    {lineno}")
                 print(f"  Total steps:    {total_steps}")
- 
+
         # Calculate and print mask statistics only if load mask percentage check is enabled
         if not self.disable_load_mask_percentage_check:
             print("\n" + "=" * 60)
