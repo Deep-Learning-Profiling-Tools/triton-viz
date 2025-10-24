@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'triton_viz', 'core')
 import numpy as np
 
 # Import the nki module directly
-exec(open('triton_viz/core/nki.py').read())
+from triton_viz.core.nki import NDArray
 
 def test_ndarray_creation():
     print("Testing NDArray creation...")
