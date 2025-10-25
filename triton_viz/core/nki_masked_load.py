@@ -121,6 +121,9 @@ def masked_load(ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None) -> np
 def masked_store(ndarray: np.ndarray, keys: tuple, value: np.ndarray, mask: np.ndarray = None) -> None:
     """
     Store array elements with masking for out-of-bounds errors.
+    General idea of this procedure is to get all the indices that the slice + mask needs for a single advanced indexing assign.
+    - to handle OOB accesses we infer the min possible array size where array[keys] wouldn't have any OOBs
+    - we can get the indices for each dim by selecting from an mgrid
 
     Args:
         ndarray: Input numpy array to store values into
@@ -135,7 +138,6 @@ def masked_store(ndarray: np.ndarray, keys: tuple, value: np.ndarray, mask: np.n
     """
     # Handle mask=None case
     if mask is None:
-        import tp; tp.log(f'{ndarray.shape=}, {keys=}')
         ndarray[keys] = value
         return
 
@@ -145,23 +147,18 @@ def masked_store(ndarray: np.ndarray, keys: tuple, value: np.ndarray, mask: np.n
     if not isinstance(keys, tuple):
         keys = (keys,)
 
+    flat_mask = mask.ravel() # can only index with bool tensors if they're 1d
+
     # normalize (remove Nones in slices)
     keys, singleton_dims = normalize_slice(ndarray, keys)
     target_shape = _calculate_target_shape(keys, ndarray.shape)
-    offset_array = np.arange(np.prod(target_shape)).reshape(target_shape)
+    mgrid = np.mgrid[tuple(slice(0, dim, 1) for dim in target_shape)]
+    idxs = []
+    for mgrid_dim in mgrid:
+        # get the section that would be sliced if the array was big enough
+        sliced_section = mgrid_dim[keys]
 
-    offsets = np.expand_dims(offset_array[keys], singleton_dims)
-    assert offsets.shape == mask.shape
-
-    mask = np.squeeze(mask, singleton_dims)
-
-    # Check if there are any OOB indices where mask=True
-    in_bounds_mask = _get_valid_indices(keys, ndarray.shape, offsets.shape)
-    oob_with_true_mask = (~in_bounds_mask) & mask
-    oob_coords = np.where(oob_with_true_mask)
-    if len(oob_coords[0]) > 0:
-        # Get the first OOB coordinate
-        oob_idx = tuple(coord[0] for coord in oob_coords)
-        raise IndexError(f"index {oob_idx} is out of bounds for array of size {ndarray.shape}")
-
-    ndarray.ravel()[offsets[mask]] = value.ravel()[offsets[mask]]
+        # get just the section where mask=True
+        dim_idxs = sliced_section.ravel()[flat_mask]
+        idxs.append(dim_idxs)
+    ndarray[tuple(idxs)] = value.ravel()[flat_mask]

@@ -291,7 +291,7 @@ def test_masked_load():
         pass
 
 
-    print("Test 10: Make sure error if mask shape wrong")
+    print("Test 11: Make sure error if mask shape wrong")
     arr = np.array([
         [
             [1, 2, 3],
@@ -598,7 +598,7 @@ def test_masked_store():
         print("Success: Correctly raised AssertionError for values/mask shape mismatch\n")
 
     # Test 10: Values shape mismatch
-    print("Test 10: Values shape mismatch should raise AssertionError")
+    print("Test 10: incompatible shape implied by keys and mask")
     arr = np.array([1, 2, 3])
     values = np.array([10, 20, 30, 40])  # Wrong shape
     mask = np.array([True, False, True, False])
@@ -606,8 +606,8 @@ def test_masked_store():
     try:
         masked_store(arr_copy, (slice(0, 3),), values, mask=mask)
         raise RuntimeError("Should've raised an assertion error but did not")
-    except AssertionError:
-        print("Success: Correctly raised AssertionError for values shape mismatch\n")
+    except IndexError:
+        print("Success: Correctly raised IndexError for values shape mismatch\n")
 
     print("All masked_store tests completed!")
 
