@@ -2,8 +2,9 @@ import numpy as np
 
 get = lambda x, default: default if x is None else x
 
+
 def normalize_slice(ndarray: np.ndarray, keys: tuple) -> tuple[tuple, tuple]:
-    """ Separate singleton dims (None) and add bounds to slices like :2, 2:, or :"""
+    """Separate singleton dims (None) and add bounds to slices like :2, 2:, or :"""
     singleton_dims = []
     dim_idx = 0
     new_keys = []
@@ -28,7 +29,10 @@ def normalize_slice(ndarray: np.ndarray, keys: tuple) -> tuple[tuple, tuple]:
         dim_idx += 1
     return tuple(new_keys), tuple(singleton_dims)
 
-def _calculate_target_shape(keys: tuple, original_shape: tuple[int, ...]) -> tuple[int, ...]:
+
+def _calculate_target_shape(
+    keys: tuple, original_shape: tuple[int, ...]
+) -> tuple[int, ...]:
     """Calculate the shape needed for the padded array to handle indexing."""
     target_shape = list(original_shape)
     for i, (arr_dim, key) in enumerate(zip(original_shape, keys)):
@@ -40,7 +44,10 @@ def _calculate_target_shape(keys: tuple, original_shape: tuple[int, ...]) -> tup
             target_shape[i] = max(arr_dim, np.max(key) + 1)
     return tuple(target_shape)
 
-def _get_valid_indices(keys: tuple, original_shape: tuple[int, ...], result_shape: tuple[int, ...]) -> np.ndarray:
+
+def _get_valid_indices(
+    keys: tuple, original_shape: tuple[int, ...], result_shape: tuple[int, ...]
+) -> np.ndarray:
     """Get a boolean mask indicating which result indices are within original array bounds."""
     coords = np.mgrid[[slice(0, s) for s in result_shape]]
     valid_mask = np.ones(result_shape, dtype=bool)
@@ -55,11 +62,14 @@ def _get_valid_indices(keys: tuple, original_shape: tuple[int, ...], result_shap
             valid_indices = np.array(key)
             valid_mask &= (0 <= valid_indices) & (valid_indices < arr_dim)
         elif isinstance(key, (int, np.integer)):
-            valid_mask &= (0 <= int(key) < arr_dim)
+            valid_mask &= 0 <= int(key) < arr_dim
 
     return valid_mask
 
-def masked_load(ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None) -> np.ndarray:
+
+def masked_load(
+    ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None
+) -> np.ndarray:
     """
     Load array elements with masking for out-of-bounds errors.
 
@@ -73,13 +83,13 @@ def masked_load(ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None) -> np
     Returns:
         Indexed array with masked error handling
     """
-    try: # fast path case - if keys aren't OOB, just go with that
+    try:  # fast path case - if keys aren't OOB, just go with that
         out = ndarray[keys].copy()
         if mask is None:
             return out
         out[~mask] = np.iinfo(ndarray.dtype).max
         return out
-    except:
+    except Exception:
         pass
 
     # Convert keys to tuple if it's not already
@@ -111,14 +121,25 @@ def masked_load(ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None) -> np
     if len(oob_coords[0]) > 0:
         # Get the first OOB coordinate
         oob_idx = tuple(coord[0] for coord in oob_coords)
-        raise IndexError(f"index {oob_idx} is out of bounds for array of size {ndarray.shape}")
+        raise IndexError(
+            f"index {oob_idx} is out of bounds for array of size {ndarray.shape}"
+        )
 
     valid_mask = mask & in_bounds_mask
-    result[~valid_mask] = np.iinfo(ndarray.dtype).max
+    # Use appropriate max value based on dtype
+    if np.issubdtype(ndarray.dtype, np.integer):
+        result[~valid_mask] = np.iinfo(ndarray.dtype).max
+    elif np.issubdtype(ndarray.dtype, np.floating):
+        result[~valid_mask] = np.finfo(ndarray.dtype).max
+    else:
+        result[~valid_mask] = 0  # false
 
     return np.expand_dims(result, singleton_dims)
 
-def masked_store(ndarray: np.ndarray, keys: tuple, value: np.ndarray, mask: np.ndarray = None) -> None:
+
+def masked_store(
+    ndarray: np.ndarray, keys: tuple, value: np.ndarray, mask: np.ndarray = None
+) -> None:
     """
     Store array elements with masking for out-of-bounds errors.
     General idea of this procedure is to get all the indices that the slice + mask needs for a single advanced indexing assign.
@@ -147,7 +168,7 @@ def masked_store(ndarray: np.ndarray, keys: tuple, value: np.ndarray, mask: np.n
     if not isinstance(keys, tuple):
         keys = (keys,)
 
-    flat_mask = mask.ravel() # can only index with bool tensors if they're 1d
+    flat_mask = mask.ravel()  # can only index with bool tensors if they're 1d
 
     # normalize (remove Nones in slices)
     keys, singleton_dims = normalize_slice(ndarray, keys)
