@@ -73,9 +73,14 @@ def masked_load(ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None) -> np
     Returns:
         Indexed array with masked error handling
     """
-    # Handle mask=None case
-    if mask is None:
-        return ndarray[keys]
+    try: # fast path case - if keys aren't OOB, just go with that
+        out = ndarray[keys]
+        if mask is None:
+            return out
+        out[~mask] = np.iinfo(ndarray.dtype).max
+        return out
+    except:
+        pass
 
     # Convert keys to tuple if it's not already
     if not isinstance(keys, tuple):
@@ -109,7 +114,7 @@ def masked_load(ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None) -> np
         raise IndexError(f"index {oob_idx} is out of bounds for array of size {ndarray.shape}")
 
     valid_mask = mask & in_bounds_mask
-    result[~valid_mask] = 6
+    result[~valid_mask] = np.iinfo(ndarray.dtype).max
 
     return np.expand_dims(result, singleton_dims)
 
@@ -159,12 +164,4 @@ def masked_store(ndarray: np.ndarray, keys: tuple, value: np.ndarray, mask: np.n
         oob_idx = tuple(coord[0] for coord in oob_coords)
         raise IndexError(f"index {oob_idx} is out of bounds for array of size {ndarray.shape}")
 
-    print('!Ndarray')
-    print(ndarray)
-    print('!values')
-    print(value)
-    print('!Offsets')
-    print(offsets)
-    print('!mask')
-    print(mask)
     ndarray.ravel()[offsets[mask]] = value.ravel()[offsets[mask]]
