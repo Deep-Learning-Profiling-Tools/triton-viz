@@ -321,13 +321,10 @@ def test_masked_load_correct_mask_shape():
             [27, 28, 29],
         ],
     ])
-    print(arr)
     arr_slice = (slice(None, None, None),)
     mask = np.arange(27).reshape(3, 3, 3) % 2 == 0
     result = masked_load(arr, arr_slice, mask=mask)
 
-    print(arr)
-    raise
     print_op_details("Test 11: Correct mask shape", "load", arr, arr_slice, mask=mask, output=result)
 
     assert result.shape == mask.shape
