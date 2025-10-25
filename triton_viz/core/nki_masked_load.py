@@ -74,7 +74,7 @@ def masked_load(ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None) -> np
         Indexed array with masked error handling
     """
     try: # fast path case - if keys aren't OOB, just go with that
-        out = ndarray[keys]
+        out = ndarray[keys].clone()
         if mask is None:
             return out
         out[~mask] = np.iinfo(ndarray.dtype).max
