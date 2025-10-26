@@ -19,7 +19,8 @@ def dummy_benchmarker(fn, quantiles):
     fn()
     return (1.0, 1.0, 1.0)
 
-class TraceInterface():
+
+class TraceInterface:
     def __init__(self, client: Union[str, Client]) -> None:
         self.client_manager = ClientManager()
         self.add_client(client)
@@ -47,6 +48,7 @@ class TraceInterface():
         self.client_manager.finalize()
         launches.append(self.client_manager.launch)
 
+
 class TritonTrace(KernelInterface, TraceInterface):
     def __init__(
         self,
@@ -70,7 +72,7 @@ class TritonTrace(KernelInterface, TraceInterface):
             if isinstance(source, InterpretedFunction):
                 return None, source.fn, source
             raise TypeError(f"Unsupported runner type: {type(source)}")
-        
+
         if isinstance(runner, Autotuner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
             # replace the benchmark with a dummy that just calls the function once
@@ -86,7 +88,7 @@ class TritonTrace(KernelInterface, TraceInterface):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner)
             self.runner = self.interpreted_fn
             self.warmup_runner = self.jit_fn
-        
+
         self.arg_names = runner.arg_names
 
         self.fn = runner
@@ -97,7 +99,7 @@ class TritonTrace(KernelInterface, TraceInterface):
         with self.client_manager.patch_warmup(self.jit_fn):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
-    
+
     def run(self, *args, **kwargs):
         with self.client_manager.patch_warmup(self.jit_fn):
             if self.warmup_runner:
@@ -109,7 +111,7 @@ class TritonTrace(KernelInterface, TraceInterface):
             ret = self.runner.run(*args, **kwargs)
             self.finalize()
             return ret
-    
+
     def __call__(self, *args, **kwargs):
         # When a traced JIT function is called from within another JIT function,
         # we need to execute the underlying function directly
@@ -135,9 +137,18 @@ class NKITrace(KernelInterface, TraceInterface):
 
         TraceInterface.__init__(self, client)
 
-    def __getitem__(self, *grid):
-        return KernelInterface.__getitem__(self, tuple(*grid))
-    
+    def run(self, *args, **kwargs):
+        kwargs.update({"client_manager": self.client_manager})
+        ret = self.interpreter_fn.run(*args, **kwargs)
+        self.finalize()
+        return ret
+
+    def __getitem__(self, grid):
+        if isinstance(grid, tuple):
+            return KernelInterface.__getitem__(self, grid)
+        else:
+            return KernelInterface.__getitem__(self, (grid,))
+
     def __call__(self, *args, **kwargs):
         return self[(1, 1, 1)](*args, **kwargs)
 
@@ -161,11 +172,13 @@ def trace(clients: Union[str, Client, None] = None, backend: str = "triton"):
             return kernel
 
         # First-time wrapping
+        # Triton backend need JIT/Interpreter/Autotuner；
+        # NKI allow Python function（ NKIInterpretedFunction）
+        if backend == "nki":
+            return NKITrace(kernel, clients)
         if isinstance(kernel, (JITFunction, InterpretedFunction, Autotuner)):
             if backend == "triton":
                 return TritonTrace(kernel, clients)
-            elif backend == "nki":
-                return NKITrace(kernel, clients)
             else:
                 raise ValueError(f"Unknown backend: {backend}")
 
@@ -174,9 +187,10 @@ def trace(clients: Union[str, Client, None] = None, backend: str = "triton"):
             trace = kernel
             trace.add_client(clients)
             return trace
-        
 
-        raise TypeError(f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}")
+        raise TypeError(
+            f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}"
+        )
 
     return decorator
 

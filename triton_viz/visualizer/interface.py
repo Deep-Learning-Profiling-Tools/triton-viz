@@ -394,13 +394,30 @@ def get_load_value():
         x is not None and y is not None and z is not None
     ):
         try:
+            import numpy as _np
+
+            t = op_data["global_tensor"]
+            # Normalize to numpy array for robust indexing
+            if hasattr(t, "cpu"):
+                try:
+                    arr = t.cpu().numpy()
+                except Exception:
+                    arr = _np.asarray(t)
+            elif hasattr(t, "_value"):
+                arr = _np.asarray(getattr(t, "_value"))
+            elif hasattr(t, "data"):
+                arr = _np.asarray(getattr(t, "data"))
+            else:
+                arr = _np.asarray(t)
+
+            yy, xx, zz = int(y), int(x), int(z)
             value = 0.0
-            if op_data["dims"] == 3:
-                value = op_data["global_tensor"][x, y, z].item()
-            elif op_data["dims"] == 2:
-                value = op_data["global_tensor"][x, y].item()
-            elif op_data["dims"] == 1:
-                value = op_data["global_tensor"][x].item()
+            if arr.ndim >= 3:
+                value = float(arr[yy, xx, zz])
+            elif arr.ndim == 2:
+                value = float(arr[yy, xx])
+            elif arr.ndim == 1:
+                value = float(arr[xx])
 
             return jsonify({"value": value})
         except IndexError:
@@ -470,24 +487,34 @@ def get_load_tensor():
     if "global_tensor" not in op_data:
         return jsonify({"error": "Global tensor data not found"}), 200
 
-    t = op_data["global_tensor"].cpu()
-    try:
-        t_min = float(t.min().item())
-        t_max = float(t.max().item())
-    except Exception:
-        # In case of empty tensor
-        t_min = 0.0
-        t_max = 0.0
+    import numpy as _np
 
-    return jsonify(
-        {
-            "shape": list(t.shape),
-            "dims": len(t.shape),
-            "min": t_min,
-            "max": t_max,
-            "values": t.numpy().tolist(),
-        }
-    )
+    try:
+        t = op_data["global_tensor"]
+        if hasattr(t, "cpu"):
+            try:
+                arr = t.cpu().numpy()
+            except Exception:
+                arr = _np.asarray(t)
+        elif hasattr(t, "_value"):
+            arr = _np.asarray(getattr(t, "_value"))
+        elif hasattr(t, "data"):
+            arr = _np.asarray(getattr(t, "data"))
+        else:
+            arr = _np.asarray(t)
+        t_min = float(_np.min(arr)) if arr.size else 0.0
+        t_max = float(_np.max(arr)) if arr.size else 0.0
+        return jsonify(
+            {
+                "shape": list(arr.shape),
+                "dims": int(arr.ndim),
+                "min": t_min,
+                "max": t_max,
+                "values": arr.tolist(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"getLoadTensor failed: {e}"}), 200
 
 
 def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None):

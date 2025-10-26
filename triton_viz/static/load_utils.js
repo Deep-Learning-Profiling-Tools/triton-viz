@@ -61,9 +61,21 @@ export function createCube(color, tensorName, x, y, z, cubeGeometry, edgesGeomet
 export function createTensor(shape, coords, color, tensorName, cubeGeometry, edgesGeometry, lineMaterial) {
     console.log(`Creating ${tensorName} tensor:`, shape, coords);
     const tensor = new THREE.Group();
-    let [width, height, depth] = shape;
-    depth = depth || 1;
-    height = height || 1;
+    // Normalize shape to width (X), height (Y), depth (Z)
+    let width, height, depth;
+    if (shape.length === 1) {
+        width = shape[0];
+        height = 1;
+        depth = 1;
+    } else if (shape.length === 2) {
+        // Backend provides (H, W) for 2D tensors; interpret as width=W, height=H
+        height = shape[0];
+        width = shape[1];
+        depth = 1;
+    } else {
+        // Assume incoming order already matches [width, height, depth]
+        [width, height, depth] = shape;
+    }
 
     if (tensorName === 'Global') {
         console.log(`Creating global tensor with dimensions: ${width}x${height}x${depth}`);
@@ -158,7 +170,20 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry, edg
 }
 
 export function calculateTensorSize(shape) {
-    const [width, height, depth] = shape;
+    // Normalize shape for size calculation consistent with createTensor
+    let width, height, depth;
+    if (shape.length === 1) {
+        width = shape[0];
+        height = 1;
+        depth = 1;
+    } else if (shape.length === 2) {
+        // (H, W) -> width=W, height=H
+        height = shape[0];
+        width = shape[1];
+        depth = 1;
+    } else {
+        [width, height, depth] = shape;
+    }
     return new THREE.Vector3(
         width * (CUBE_SIZE + GAP),
         height * (CUBE_SIZE + GAP),

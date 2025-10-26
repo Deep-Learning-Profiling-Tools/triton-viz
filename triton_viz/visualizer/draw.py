@@ -90,9 +90,10 @@ def extract_load_coords(
         record.masks,
     )
 
+    # Report (x, y, z); delinearized returns (z, y, x)
     global_coords = [
         (float(xi), float(yi), float(zi))
-        for xi, yi, zi in zip(global_z, global_y, global_x)
+        for xi, yi, zi in zip(global_x, global_y, global_z)
         if xi != -1 and yi != -1 and zi != -1
     ]
 
@@ -172,6 +173,12 @@ def prepare_visualization_data(program_records, tensor_table):
                     "uuid": record_uuid,
                     # provide C values for color-by-value
                     "c_shape": record.output_shape,
+                    # NKI meta (accumulate to PSUM)
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "tile_shape": getattr(record, "tile_shape", None),
+                    "k": int(getattr(record, "k", 0)),
+                    "time_idx": int(getattr(record, "time_idx", -1)),
                 }
             )
 
@@ -238,12 +245,46 @@ def prepare_visualization_data(program_records, tensor_table):
                     "global_coords": global_coords,
                     "slice_coords": slice_coords,
                     "uuid": record_uuid,
+                    # NKI flow meta (optional)
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "bytes": int(getattr(record, "bytes", 0)),
+                    "time_idx": int(getattr(record, "time_idx", -1)),
                 }
             )
 
+            # Normalize to torch.Tensor for downstream APIs
+            try:
+                import numpy as _np
+                import torch as _torch
+
+                gt = global_tensor.data
+                # gt could be torch.Tensor, numpy.ndarray, or NDArray wrapper
+                if (
+                    hasattr(gt, "cpu")
+                    and callable(getattr(gt, "cpu"))
+                    and hasattr(gt, "shape")
+                ):
+                    t_cpu = gt.cpu()
+                else:
+                    # NDArray: prefer .data property -> numpy array
+                    if hasattr(gt, "data"):
+                        arr = gt.data
+                    else:
+                        arr = gt
+                    arr = _np.asarray(arr)
+                    t_cpu = _torch.from_numpy(
+                        arr.copy() if not arr.flags.c_contiguous else arr
+                    )
+            except Exception:
+                # Fallback to empty tensor if conversion fails
+                import torch as _torch
+
+                t_cpu = _torch.tensor([])
+
             raw_tensor_data[record_uuid] = {
-                "global_tensor": global_tensor.data.cpu(),  # Ensure it's on CPU
-                "dims": len(global_tensor.data.cpu().shape),
+                "global_tensor": t_cpu,
+                "dims": len(t_cpu.shape),
                 "tracebacks": [
                     {
                         "filename": f.filename,
@@ -269,6 +310,10 @@ def prepare_visualization_data(program_records, tensor_table):
                     "global_coords": global_coords,
                     "slice_coords": slice_coords,
                     "uuid": record_uuid,
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "bytes": int(getattr(record, "bytes", 0)),
+                    "time_idx": int(getattr(record, "time_idx", -1)),
                 }
             )
 

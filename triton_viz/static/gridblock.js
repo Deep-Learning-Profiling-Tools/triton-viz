@@ -2,6 +2,7 @@ import { createMatMulVisualization } from './matmul.js';
 import { createFlipVisualization } from './flip.js';
 import { createLoadVisualization } from './load.js';
 import { createStoreVisualization } from './store.js';
+import { createFlowDiagram } from './nki.js';
 
 export class GridBlock {
     constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction) {
@@ -197,12 +198,23 @@ export class GridBlock {
         });
 
         let currentSelectedTab = null;
+        // Tabs for each op
         this.blockData.forEach((op, index) => {
             const opTab = this.createOperationTab(op, index === 0);
             opTab.addEventListener('click', () => this.handleTabClick(opTab, op, currentSelectedTab));
             headerBar.appendChild(opTab);
             if (index === 0) currentSelectedTab = opTab;
         });
+        // Extra: NKI view tab (aggregates all ops)
+        const nkiTab = document.createElement('button');
+        nkiTab.textContent = 'Flow';
+        Object.assign(nkiTab.style, { flex:'0 0 auto', marginRight:'5px', background:'#333', color:'#fff', border:'none', padding:'10px', cursor:'pointer' });
+        nkiTab.addEventListener('click', () => {
+            if (currentSelectedTab) currentSelectedTab.style.backgroundColor = '#333';
+            nkiTab.style.backgroundColor = '#555';
+            this.displayFlowDiagram();
+        });
+        headerBar.appendChild(nkiTab);
 
         return headerBar;
     }
@@ -287,6 +299,14 @@ export class GridBlock {
                 unsupportedMsg.style.textAlign = 'center';
                 this.contentArea.appendChild(unsupportedMsg);
         }
+    }
+
+    displayFlowDiagram() {
+        if (!this.contentArea) return;
+        if (this.visualizationCleanupFunction) { this.visualizationCleanupFunction(); this.visualizationCleanupFunction = null; }
+        this.contentArea.innerHTML = '';
+        // Pass the entire block data (ops in this program) to Flow view
+        this.visualizationCleanupFunction = createFlowDiagram(this.contentArea, this.blockData || []);
     }
 
 

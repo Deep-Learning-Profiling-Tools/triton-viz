@@ -70,6 +70,27 @@ export function createStoreVisualization(containerElement, op) {
         scene.add(sliceTensor);
 
         addLabels(scene, globalTensor, sliceTensor);
+
+        // Overlay memory flow badges if available (NKI only)
+        try {
+            const badge = document.createElement('div');
+            badge.style.position = 'fixed';
+            badge.style.right = '10px';
+            badge.style.top = '60px';
+            badge.style.zIndex = '2500';
+            badge.style.background = 'rgba(0,0,0,0.65)';
+            badge.style.color = '#fff';
+            badge.style.padding = '6px 8px';
+            badge.style.borderRadius = '6px';
+            badge.style.font = '12px Arial';
+            const ms = (op.mem_src||'').toUpperCase();
+            const md = (op.mem_dst||'').toUpperCase();
+            const by = Number(op.bytes||0);
+            if (ms && md) {
+                badge.innerHTML = `<b>Memory Flow</b><br/>${ms} → ${md}${by?`<br/>${by} B`:''}`;
+                containerElement.appendChild(badge);
+            }
+        } catch(e){}
         const { center } = setupCamera(scene, camera);
         const orbitControls = new OrbitControls(camera, renderer.domElement);
         orbitControls.enableDamping = true;

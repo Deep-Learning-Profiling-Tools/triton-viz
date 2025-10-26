@@ -19,7 +19,8 @@ export function createMatMulVisualization(containerElement, op) {
 
 
     const sideMenu = document.createElement('div');
-    sideMenu.style.position = 'absolute';
+    // Use fixed position and high z-index to ensure it's above WebGL canvas
+    sideMenu.style.position = 'fixed';
     sideMenu.style.top = '10px';
     sideMenu.style.right = '10px';
     sideMenu.style.width = '200px';
@@ -29,9 +30,31 @@ export function createMatMulVisualization(containerElement, op) {
     sideMenu.style.fontFamily = 'Arial, sans-serif';
     sideMenu.style.fontSize = '14px';
     sideMenu.style.borderRadius = '5px';
-    sideMenu.style.zIndex = '2000';
+    sideMenu.style.zIndex = '3000';
     sideMenu.style.pointerEvents = 'auto';
     containerElement.appendChild(sideMenu);
+
+    // Memory flow badge for Dot (SBUF→PSUM)
+    try {
+        const badge = document.createElement('div');
+        badge.style.position = 'fixed';
+        badge.style.right = '10px';
+        badge.style.top = '60px';
+        badge.style.zIndex = '2500';
+        badge.style.background = 'rgba(0,0,0,0.65)';
+        badge.style.color = '#fff';
+        badge.style.padding = '6px 8px';
+        badge.style.borderRadius = '6px';
+        badge.style.font = '12px Arial';
+        const ms = (op.mem_src||'').toUpperCase();
+        const md = (op.mem_dst||'').toUpperCase();
+        if (ms && md) {
+            const tiles = Array.isArray(op.tile_shape)? `${op.tile_shape[0]}x${op.tile_shape[1]}` : '';
+            const k = Number(op.k||0);
+            badge.innerHTML = `<b>Memory Flow</b><br/>${ms} → ${md}${tiles?`<br/>Tile: ${tiles}`:''}${k?`<br/>K: ${k}`:''}`;
+            containerElement.appendChild(badge);
+        }
+    } catch(e){}
     let hoveredCube = null;
 
 
@@ -50,26 +73,26 @@ export function createMatMulVisualization(containerElement, op) {
     }
 
 
-    function updateSideMenu(matrix, x, y, vectors) {
-        if (!matrix) {
+    function updateSideMenu(matrixOrName, x, y, vectors, value) {
+        if (!matrixOrName) {
             sideMenu.innerHTML = '';
             return;
         }
 
         let matrixName;
         let dims;
-        if (matrix === matrixA) {
-            matrixName = 'A';
-            dims = input_shape;
-        } else if (matrix === matrixB) {
-            matrixName = 'B';
-            dims = other_shape;
-        } else if (matrix === matrixC) {
-            matrixName = 'C';
-            dims = output_shape;
+        // Accept both string name ('A'|'B'|'C') and matrix group object
+        if (typeof matrixOrName === 'string') {
+            const name = matrixOrName.toUpperCase();
+            if (name === 'A') { matrixName = 'A'; dims = input_shape; }
+            else if (name === 'B') { matrixName = 'B'; dims = other_shape; }
+            else if (name === 'C') { matrixName = 'C'; dims = output_shape; }
+            else { sideMenu.innerHTML = ''; return; }
         } else {
-            sideMenu.innerHTML = '';
-            return;
+            if (matrixOrName === matrixA) { matrixName = 'A'; dims = input_shape; }
+            else if (matrixOrName === matrixB) { matrixName = 'B'; dims = other_shape; }
+            else if (matrixOrName === matrixC) { matrixName = 'C'; dims = output_shape; }
+            else { sideMenu.innerHTML = ''; return; }
         }
         console.log(matrixName, "x:", (x + 1), "y:", (y + 1));
         let extra = '';
@@ -90,6 +113,7 @@ export function createMatMulVisualization(containerElement, op) {
             <p>Row: ${y + 1}</p>
             <p>Column: ${x + 1}</p>
             <p>Dimensions: ${dims[0]} x ${dims[1]}</p>
+            <p>Value: ${value !== undefined ? value : 'Loading...'}</p>
             ${extra}
         `;
     }
@@ -152,6 +176,7 @@ export function createMatMulVisualization(containerElement, op) {
 
                 // If hovering C, fetch vectors and update panel
                 let vectors = null;
+                let valueForPanel = res && res.value !== undefined ? res.value : undefined;
                 if (hoveredCube.matrixName === 'C') {
                     try {
                         const resp = await fetch(`${API_BASE}/api/getMatmulVectors`, {
@@ -160,6 +185,15 @@ export function createMatMulVisualization(containerElement, op) {
                             body: JSON.stringify({ uuid: op.uuid, row: hoveredCube.matrixRow, col: hoveredCube.matrixCol })
                         });
                         vectors = await resp.json();
+                        // Compute C[row,col] directly from vectors if available
+                        if (vectors && !vectors.error && Array.isArray(vectors.a_row) && Array.isArray(vectors.b_col)) {
+                            const aRow = vectors.a_row;
+                            const bCol = vectors.b_col;
+                            const len = Math.min(aRow.length, bCol.length);
+                            let sum = 0.0;
+                            for (let i = 0; i < len; i++) sum += aRow[i] * bCol[i];
+                            valueForPanel = sum;
+                        }
                     } catch (e) { vectors = { error: String(e) }; }
 
                     // highlight A[row,:], B[:,col], C[row,col]
@@ -176,7 +210,7 @@ export function createMatMulVisualization(containerElement, op) {
                     // hovering A/B or others -> just reset
                     resetColors();
                 }
-                updateSideMenu(hoveredCube.matrixName, hoveredCube.matrixRow, hoveredCube.matrixCol, vectors);
+                updateSideMenu(hoveredCube.matrixName, hoveredCube.matrixRow, hoveredCube.matrixCol, vectors, valueForPanel);
             }
         } else {
             updateSideMenu(null);
@@ -209,6 +243,10 @@ export function createMatMulVisualization(containerElement, op) {
     renderer.setPixelRatio(dpr);
     renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
     containerElement.appendChild(renderer.domElement);
+    // Ensure canvas is under overlays
+    renderer.domElement.style.position = 'relative';
+    renderer.domElement.style.zIndex = '1';
+    try { containerElement.style.pointerEvents = 'auto'; } catch(e){}
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(ambientLight);
@@ -317,12 +355,12 @@ export function createMatMulVisualization(containerElement, op) {
     }
 
     const controlPanel = document.createElement('div');
-    controlPanel.style.position = 'absolute';
+    controlPanel.style.position = 'fixed';
     controlPanel.style.bottom = '10px';
     controlPanel.style.left = '10px';
     controlPanel.style.display = 'flex';
     controlPanel.style.gap = '10px';
-    controlPanel.style.zIndex = '2000';
+    controlPanel.style.zIndex = '3000';
     controlPanel.style.pointerEvents = 'auto';
 
     // Removed animation controls; keep panel for color-by-value toggle only
