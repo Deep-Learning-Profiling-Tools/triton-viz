@@ -1029,6 +1029,8 @@ class SymbolicExpr:
                 return var.dtype
             if isinstance(var.dtype, tl.pointer_type):  # if a pointer
                 return var.dtype
+            # For any other dtype (e.g., block_type), return it as-is
+            return var.dtype
         if isinstance(var, SymbolicExpr.builtin_scala_types):
             return tl.int32 if isinstance(var, int) else tl.float32
         if var is None:
