@@ -35,6 +35,12 @@ class ProgramId(Op):
 
 
 @dataclass
+class Array(Op):
+    name: ClassVar[str] = "array"
+    ptr: int
+
+
+@dataclass
 class RawStore(Op):
     name: ClassVar[str] = "raw_store"
 

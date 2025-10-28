@@ -8,6 +8,7 @@ from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
 from .data import (
     Op,
+    Array,
     RawLoad,
     Load,
     RawStore,
@@ -159,33 +160,36 @@ if BUILDER == interpreter_builder:
         AtomicCas: "create_atomic_cas",
     }
 elif BUILDER == nki_builder:
-    op_list = [
-        ProgramId,
-        Store,
-        Load,
-        Dot,
-        UnaryOp,
-        MakeRange
-    ]
+    op_list = [Array, ProgramId, Store, Load, Dot, UnaryOp, MakeRange]
     original_ops = {
         ProgramId: nki_builder.program_id,
-        Store: nki_builder.store,
-        Load: nki_builder.load,
+        Array: nki_builder.ndarray,
+        Load: nki_builder.masked_load,
+        Store: nki_builder.masked_store,
         Dot: nki_builder.matmul,
-        UnaryOp: nki_builder.unary_op,
-        #BinaryOp: nki_builder.binary_op,
-        #TernaryOp: nki_builder.ternary_op,
+        UnaryOp: nki_builder._unary_op,
+        # BinaryOp: nki_builder.binary_op,
+        # TernaryOp: nki_builder.ternary_op,
         MakeRange: nki_builder.arange,
-        #AddPtr: nki_builder.create_addptr,
-        #ExpandDims: nki_builder.create_expand_dims,
-        #Broadcast: nki_builder.create_broadcast,
-        #Splat: nki_builder.create_splat,
-        #MakeBlockPointer: nki_builder.create_make_block_ptr,
-        #TensorPointerLoad: nki_builder.create_tensor_pointer_load,
-        #TensorPointerStore: nki_builder.create_tensor_pointer_store,
-        #Idiv: nki_builder.create_idiv,
-        #Rsqrt: nki_builder.create_rsqrt,
-        #CastImpl: nki_builder.cast_impl,
+        # AddPtr: nki_builder.create_addptr,
+        # ExpandDims: nki_builder.create_expand_dims,
+        # Broadcast: nki_builder.create_broadcast,
+        # Splat: nki_builder.create_splat,
+        # MakeBlockPointer: nki_builder.create_make_block_ptr,
+        # TensorPointerLoad: nki_builder.create_tensor_pointer_load,
+        # TensorPointerStore: nki_builder.create_tensor_pointer_store,
+        # Idiv: nki_builder.create_idiv,
+        # Rsqrt: nki_builder.create_rsqrt,
+        # CastImpl: nki_builder.cast_impl,
+    }
+    _OP_ATTR_NAMES = {
+        ProgramId: "program_id",
+        Array: "ndarray",
+        Load: "masked_load",
+        Store: "masked_store",
+        Dot: "matmul",
+        UnaryOp: "_unary_op",
+        MakeRange: "arange",
     }
 
 reduce_map: dict[type[Op], Callable] = {

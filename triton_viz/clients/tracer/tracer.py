@@ -1,6 +1,7 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
-from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore
+from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore, Array
+from triton_viz.core.nki_masked_load import masked_load
 from typing import Callable, Optional, Union
 import numpy as np
 
@@ -70,16 +71,42 @@ class Tracer(Client):
     def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: type[Op], *ignore_args, **ignore_kwargs) -> OpCallbacks:
-        def pre_load_callback(
-            ptr, mask, *ignore_args, **ignore_kwargs
-        ):
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        def pre_load_callback(ptr, mask, *ignore_args, **ignore_kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
             self.records.append(
                 Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            )
+
+        def _convert_keys_to_numpy(keys):
+            """Convert any NDArrays in keys to numpy arrays."""
+            if isinstance(keys, (tuple, list)):
+                return tuple(_convert_keys_to_numpy(k) for k in keys)
+            elif hasattr(keys, "data"):
+                return keys.data
+            else:
+                return keys
+
+        def post_array_callback(ret, *ignore_args, **ignore_kwargs):
+            assert hasattr(ret, "data")
+            self.tensors.append(ret)
+
+        def pre_masked_load_callback(
+            ptr, keys, mask=None, *ignore_args, **ignore_kwargs
+        ):
+            if not self.sample:
+                return
+            keys = _convert_keys_to_numpy(keys)
+
+            self.records.append(
+                Load(
+                    ptr.data_ptr(),
+                    masked_load(ptr.get_offsets().data, keys, mask=mask.data),
+                    mask.data,
+                )
             )
 
         def pre_store_callback(ptr, value, mask, *ignore_args, **ignore_kwargs):
@@ -90,6 +117,20 @@ class Tracer(Client):
             self.records.append(
                 Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             )
+
+        def pre_masked_store_callback(
+            ptr, keys, value, mask=None, *ignore_args, **ignore_kwargs
+        ):
+            if not self.sample:
+                return
+            keys = _convert_keys_to_numpy(keys)
+            offsets = masked_load(ptr.get_offsets().data, keys)
+            if mask is None:
+                mask_data = np.ones_like(offsets).astype(bool)
+            else:
+                mask_data = mask.data
+
+            self.records.append(Store(ptr.data_ptr(), offsets, mask_data))
 
         # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
         def pre_raw_load_callback(ptr):
@@ -110,7 +151,9 @@ class Tracer(Client):
             true_mask = np.ones_like(offsets, dtype=bool)
             self.records.append(Store(tensor.data_ptr(), offsets, true_mask))
 
-        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False, *ignore_args, **ignore_kwargs):
+        def post_reduce_sum_callback(
+            ret, input, axis=None, keep_dims=False, *ignore_args, **ignore_kwargs
+        ):
             if not self.sample:
                 return
             input_shape = input.handle.data.shape
@@ -123,12 +166,20 @@ class Tracer(Client):
             input_shape = input.data.shape
             other_shape = other.data.shape
             ret_shape = ret.data.shape
-            self.records.append(Dot(input_shape, other_shape, ret_shape))
+            self.records.append(
+                Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            )
 
+        if op_type is Array:  # THTODO: only for NKI
+            return OpCallbacks(after_callback=post_array_callback)
         if op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
             return OpCallbacks(before_callback=pre_store_callback)
+        # if op_type is Load: # THTODO: only for NKI
+        #    return OpCallbacks(before_callback=pre_masked_load_callback)
+        # elif op_type is Store: # THTODO: only for NKI
+        #    return OpCallbacks(before_callback=pre_masked_store_callback)
         elif op_type is RawLoad:
             return OpCallbacks(before_callback=pre_raw_load_callback)
         elif op_type is RawStore:
