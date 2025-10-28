@@ -43,9 +43,7 @@ def test_init_default_sanitizer():
 
 def test_addptr_expr_eval():
     base = SymbolicExpr.from_value(1000)  # Synthetic base address
-    base.dtype_tt = tl.pointer_type(
-        tl.int32
-    )  # Simulate a pointer type, int32 = 4 bytes
+    base.dtype_tt = tl.pointer_type(tl.int32)  # Simulate a pointer type, int32 = 4 bytes
     offset = SymbolicExpr.from_value(3)
     expr = SymbolicExpr("addptr", base, offset)
     assert expr.eval()[0] == 1000 + 3 * 4
@@ -94,10 +92,7 @@ def test_const_dtype_inference():
     assert z.dtype_tt == tl.int32
 
     expected_tree = (
-        "\n"
-        "add [dtype=int32]\n"
-        "├── lhs: const=(1, 2, 3) [dtype=int32]\n"
-        "└── rhs: const=(1, 2, 3) [dtype=int32]"
+        "\nadd [dtype=int32]\n├── lhs: const=(1, 2, 3) [dtype=int32]\n└── rhs: const=(1, 2, 3) [dtype=int32]"
     )
     assert z.to_tree_str() == expected_tree
 
@@ -120,9 +115,7 @@ def _sum_offsets_from_addptr(expr):
         cur = cur.ptr
 
     if non_const_offset:
-        raise ValueError(
-            f"Some non-constant offsets found ({non_const_offset}) in the addptr chain."
-        )
+        raise ValueError(f"Some non-constant offsets found ({non_const_offset}) in the addptr chain.")
     return np.sum(offsets, axis=0)
 
 
@@ -195,12 +188,8 @@ def test_indirect_load():
     indirect_load_kernel[grid](idx, src, dst, BLOCK_SIZE=32)
 
     expected_offsets = idx.cpu().numpy().tolist()  # Ground truth
-    observed_offsets = [
-        x for sublist in san1.observed_offsets for x in sublist
-    ]  # Flatten the list of lists
-    assert (
-        expected_offsets == observed_offsets
-    ), "Observed offsets do not match expected offsets."
+    observed_offsets = [x for sublist in san1.observed_offsets for x in sublist]  # Flatten the list of lists
+    assert expected_offsets == observed_offsets, "Observed offsets do not match expected offsets."
 
 
 @triton_viz.trace(clients=(san2 := LoadIndexChecker(abort_on_error=True)))
@@ -242,12 +231,8 @@ def test_triple_indirect_load(device):
     )
 
     expected_offsets = idx2[idx1].cpu().numpy().tolist()  # Ground Truth
-    observed_offsets = [
-        x for sublist in san2.observed_offsets for x in sublist
-    ]  # Flatten the list of lists
-    assert (
-        expected_offsets == observed_offsets
-    ), "Observed offsets do not match expected offsets."
+    observed_offsets = [x for sublist in san2.observed_offsets for x in sublist]  # Flatten the list of lists
+    assert expected_offsets == observed_offsets, "Observed offsets do not match expected offsets."
 
 
 @triton_viz.trace(clients=(san3 := LoadIndexChecker(abort_on_error=True)))
@@ -289,12 +274,8 @@ def test_dual_offset_load(device):
     )
 
     expected_offsets = (idx_a + idx_b).cpu().numpy().tolist()  # Ground Truth
-    observed_offsets = [
-        x for sublist in san3.observed_offsets for x in sublist
-    ]  # Flatten the list of lists
-    assert (
-        expected_offsets == observed_offsets
-    ), "Observed offsets do not match expected offsets."
+    observed_offsets = [x for sublist in san3.observed_offsets for x in sublist]  # Flatten the list of lists
+    assert expected_offsets == observed_offsets, "Observed offsets do not match expected offsets."
 
 
 # ======== Sanitizer Backend Tests =========
@@ -351,3 +332,77 @@ def test_copy_kernel():
         N,
         TILE_N=128,
     )
+
+
+def test_tensorhandle_dtype_inference():
+    """Test that _infer_literal_dtype handles all TensorHandle dtypes correctly."""
+    # Test all scalar dtypes
+    scalar_dtypes = [
+        tl.int1,
+        tl.int8,
+        tl.int16,
+        tl.int32,
+        tl.int64,
+        tl.uint8,
+        tl.uint16,
+        tl.uint32,
+        tl.uint64,
+        tl.float16,
+        tl.float32,
+        tl.float64,
+    ]
+
+    for dtype in scalar_dtypes:
+        data = np.array([42])
+        th = TensorHandle(data, dtype)
+
+        # Test _infer_literal_dtype
+        result_dtype = SymbolicExpr._infer_literal_dtype(th)
+        assert result_dtype == dtype, f"Expected {dtype}, got {result_dtype}"
+
+        # Test from_value
+        result_expr = SymbolicExpr.from_value(th)
+        assert result_expr.op == "const"
+        assert result_expr.value == 42
+        assert result_expr.dtype_tt == dtype
+
+
+@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+@triton.jit
+def masked_invert_kernel(mask_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    """
+    Kernel that uses the invert (~) operator on a mask.
+    This triggers create_splat with a TensorHandle during the inversion.
+    """
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load a boolean mask
+    p_mask = tl.load(mask_ptr + offsets, mask=mask, other=False)
+
+    # Invert the mask - this triggers create_splat internally
+    inverted = ~p_mask
+
+    # Store the result
+    result = tl.where(inverted, 1.0, 0.0)
+    tl.store(out_ptr + offsets, result, mask=mask)
+
+
+def test_splat_with_sanitizer(device):
+    """Test that create_splat works correctly with the sanitizer.
+
+    This test ensures that the ~ operator on a boolean tensor (which internally
+    uses create_splat) doesn't crash with "Unsupported type: TensorHandle" error.
+    """
+    N = 128
+    BLOCK_SIZE = 64
+
+    # Create test data
+    mask = torch.randint(0, 2, (N,), device=device, dtype=torch.bool)
+    out = torch.zeros(N, device=device, dtype=torch.float32)
+
+    # Run kernel with sanitizer enabled - should not crash
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
+    masked_invert_kernel[grid](mask, out, N, BLOCK_SIZE=BLOCK_SIZE)
