@@ -6,94 +6,6 @@ from .nki_extract_slice import transform_code
 from .nki_masked_load import masked_load, masked_store
 
 
-# Q1: slicing semantic is weird
-# Q2: why cannot we execute the .func function?
-
-
-# Multi-dimensional slice class
-class NLSlice:
-    def __init__(self, start=None, stop=None, step: int = 1):
-        self.start = [start] if isinstance(start, int) else start
-        self.stop = [stop] if isinstance(stop, int) else stop
-        self.step = [step] if isinstance(step, int) else step
-
-    def __repr__(self):
-        repr = ""
-        for start, stop, step in zip(self.start, self.stop, self.step):
-            if start is None:
-                start = "None"
-            if stop is None:
-                stop = "None"
-            if step is None:
-                step = "None"
-            repr += f"(start={start}, stop={stop}, step={step}) "
-        return repr
-
-    def __add__(self, other):
-        new_start = []
-        new_stop = []
-        new_step = []
-        if isinstance(other, NLSlice):
-            for start, stop, step in zip(self.start, self.stop, self.step):
-                new_start.append(start + other.start if start is not None else None)
-                new_stop.append(stop + other.stop if stop is not None else None)
-                new_step.append(step + other.step if step is not None else None)
-            return NLSlice(start=new_start, stop=new_stop, step=new_step)
-        elif isinstance(other, int):
-            for start, stop, step in zip(self.start, self.stop, self.step):
-                new_start.append(start + other if start is not None else None)
-                new_stop.append(stop + other if stop is not None else None)
-                new_step.append(step)
-            return NLSlice(start=new_start, stop=new_stop, step=new_step)
-        raise TypeError(
-            f"Unsupported operand type(s) for +: 'NLSlice' and '{type(other).__name__}'"
-        )
-
-    def __radd__(self, other):
-        new_start = []
-        new_stop = []
-        new_step = []
-        if isinstance(other, NLSlice):
-            for start, stop, step in zip(self.start, self.stop, self.step):
-                new_start.append(other.start + start if start is not None else None)
-                new_stop.append(other.stop + stop if stop is not None else None)
-                new_step.append(other.step + step if step is not None else None)
-            return NLSlice(start=new_start, stop=new_stop, step=new_step)
-        elif isinstance(other, int):
-            for start, stop, step in zip(self.start, self.stop, self.step):
-                new_start.append(other + start if start is not None else None)
-                new_stop.append(other + stop if stop is not None else None)
-                new_step.append(step)
-            return NLSlice(start=new_start, stop=new_stop, step=new_step)
-        raise TypeError(
-            f"Unsupported operand type(s) for +: '{type(other).__name__}' and 'NLSlice'"
-        )
-
-    def __getitem__(self, keys):
-        new_start = []
-        new_stop = []
-        new_step = []
-        idx = 0
-        for k in keys:
-            # check if k is None:
-            if k is None:
-                new_start.append(None)
-                new_stop.append(None)
-                new_step.append(None)
-            elif isinstance(k, slice):
-                assert (
-                    k.start is None and k.stop is None and k.step is None
-                ), "Slice must be complete"
-                new_start.append(self.start[idx])
-                new_stop.append(self.stop[idx])
-                new_step.append(self.step[idx])
-                idx += 1
-            else:
-                raise TypeError(f"Unsupported key type: {type(k)}")
-
-        return NLSlice(start=new_start, stop=new_stop, step=new_step)
-
-
 class NDArray:
     def __init__(self, buffer=None, name="", **kwargs):
         self.buffer = buffer
@@ -183,21 +95,7 @@ class NDArray:
             keys = (keys,)
 
         # Apply the slicing to the underlying numpy array
-        new_keys = []
-        arr_dim = 0
-        for k in keys:
-            if isinstance(k, NDArray):
-                dim_len = self.data.shape[arr_dim]
-                new_keys.append(k.data.clip(0, dim_len - 1))
-            elif isinstance(k, NLSlice):
-                new_keys.append(slice(k.start, k.stop, k.step))
-            elif k is None:
-                new_keys.append(k)
-                arr_dim -= 1  # add new dim -> revisit arr_dim for next key
-            else:
-                new_keys.append(k)
-            arr_dim += 1
-
+        new_keys = [k.data if isinstance(k, NDArray) else k for k in keys]
         sliced_value = self.data[tuple(new_keys)]
 
         # Create a new NDArray with the sliced data
