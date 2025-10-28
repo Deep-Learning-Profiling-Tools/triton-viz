@@ -189,10 +189,27 @@ class PatchOp:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
-                ret = tl.core.tensor(
-                    self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
-                    args[0].dtype,
-                )
+                overrider_ret = self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs)
+                from ..clients.sanitizer.sanitizer import SymbolicExpr
+
+                if isinstance(overrider_ret, SymbolicExpr):
+                    # For reduce operations, when the overrider returns a SymbolicExpr,
+                    # we need to concretize the input first if it's also a SymbolicExpr
+                    input_handle = args[0].handle
+                    if isinstance(input_handle, SymbolicExpr):
+                        # The input is a SymbolicExpr (e.g., from a load operation)
+                        # Concretize it to get the actual TensorHandle
+                        input_handle = input_handle.concretize()
+                    # Now call the original reduce operation with the concretized input
+                    # Create proper tensor with correct type (block_type with shape)
+                    input_shape = list(input_handle.data.shape)
+                    input_type = tl.block_type(input_handle.dtype, input_shape)
+                    input_tensor = tl.core.tensor(input_handle, input_type)
+                    tensor_handle = self.op(input_tensor, *args[1:], **kwargs).handle
+                    ret = tl.core.tensor(tensor_handle, tensor_handle.dtype)
+                else:
+                    # If not a SymbolicExpr, use it directly
+                    ret = tl.core.tensor(overrider_ret, args[0].dtype)
             elif self.op_type in math_map:
                 raise NotImplementedError()
             else:
