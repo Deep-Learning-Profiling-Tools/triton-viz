@@ -107,6 +107,7 @@ class NDArray:
         if "value" in kwargs:
             assert val is None or val.shape == kwargs["value"].shape
             val = kwargs["value"]
+        self._data_ptr = None
         self.data = val
 
     @property
@@ -118,7 +119,9 @@ class NDArray:
         return self.data.dtype if self.data is not None else None
 
     def data_ptr(self):
-        return self.data.ctypes.data
+        if self._data_ptr is None:
+            self._data_ptr = self.data.ctypes.data
+        return self._data_ptr
 
     def stride(self):
         return self.data.strides
@@ -562,9 +565,6 @@ class NKIInterpretedFunction:
 
         patch()  # NKI interpreter patching
 
-        # with client_manager.patch():
-        # v
-
         # Apply AST transformer to convert nl.load/nl.store calls to nl.masked_load/nl.masked_store
         if hasattr(self.fn, "__code__"):
             # Get the source code of the function
@@ -590,6 +590,14 @@ class NKIInterpretedFunction:
 
         # convert args to NDArray if they are not already
         args = [arg if isinstance(arg, NDArray) else NDArray(value=arg) for arg in args]
+
+        name_args = inspect.getcallargs(self.fn, *args)
+        call_args = {}
+        for name, arg in name_args.items():
+            call_args[name] = arg
+            ret = arg
+            client_manager.arg_callback(name, arg, ret)
+
         for x in range(grid_dims[0]):
             for y in range(grid_dims[1]):
                 for z in range(grid_dims[2]):
@@ -599,8 +607,11 @@ class NKIInterpretedFunction:
                     if client_manager is not None:
                         client_manager.grid_idx_callback((x, y, z))
 
-                    result = self.fn(*args, **kwargs)
-        # ^
+                    if not client_manager.pre_run_callback(self.fn):
+                        return
+                    self.fn(*args, **kwargs)
+                    if not client_manager.post_run_callback(self.fn):
+                        return
 
         unpatch()
-        return result.data
+        # return result.data

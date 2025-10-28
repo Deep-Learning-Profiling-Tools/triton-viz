@@ -145,10 +145,11 @@ class NKITrace(KernelInterface, TraceInterface):
         return self[(1, 1, 1)](*args, **kwargs)
 
     def run(self, *args, **kwargs):
-        kwargs.update({"client_manager": self.client_manager})
-        ret = self.interpreter_fn.run(*args, **kwargs)
-        self.finalize()
-        return ret
+        with self.client_manager.patch_run(self.interpreter_fn):
+            kwargs.update({"client_manager": self.client_manager})
+            ret = self.interpreter_fn.run(*args, **kwargs)
+            self.finalize()
+            return ret
 
 
 def trace(clients: Union[str, Client, None] = None, backend: str = "triton"):
