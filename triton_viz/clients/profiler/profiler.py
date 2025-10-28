@@ -10,13 +10,34 @@ from typing import Callable
 class Profiler(Client):
     NAME = "profiler"
 
-    def __init__(self, callpath: bool = True):
+    def __init__(
+        self,
+        callpath: bool = True,
+        disable_buffer_load_check: bool = False,
+        disable_load_mask_percentage_check: bool = False,
+    ):
         super().__init__()  # Initialize parent class
         # Enable ASM collection for the profiler
         self.callpath = callpath
         self.load_bytes = LoadStoreBytes("load", 0, 0)
         self.store_bytes = LoadStoreBytes("store", 0, 0)
         self.has_buffer_load = False
+        self.disable_buffer_load_check = disable_buffer_load_check
+        self.disable_load_mask_percentage_check = disable_load_mask_percentage_check
+
+        # Counters for mask statistics
+        self.load_mask_total_count = (
+            0  # Total number of mask elements in all load operations
+        )
+        self.load_mask_false_count = (
+            0  # Total number of False elements in all load masks
+        )
+        self.store_mask_total_count = (
+            0  # Total number of mask elements in all store operations
+        )
+        self.store_mask_false_count = (
+            0  # Total number of False elements in all store masks
+        )
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
@@ -32,7 +53,11 @@ class Profiler(Client):
         if not ret:
             return
 
-        if hasattr(ret, "asm") and "amdgcn" in ret.asm:
+        if (
+            not self.disable_buffer_load_check
+            and hasattr(ret, "asm")
+            and "amdgcn" in ret.asm
+        ):
             self.has_buffer_load = "buffer_load" in ret.asm["amdgcn"]
             if self.has_buffer_load:
                 print("Detected buffer_load instruction in kernel ASM!")
@@ -86,14 +111,35 @@ class Profiler(Client):
             if self.has_buffer_load is False:
                 assert False, "Buffer Load optimization should be used when offsets are within 32-bit range!"
 
-    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        def _get_mask_stats(mask: TensorHandle) -> tuple[int, int]:
+            """Get mask statistics: total count and false count.
+
+            Args:
+                mask: TensorHandle containing boolean mask data
+
+            Returns:
+                Tuple of (total_count, false_count)
+            """
+            total_count = mask.data.size
+            false_count = np.count_nonzero(np.logical_not(mask.data))
+            return total_count, false_count
+
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
             self._report_load_store_bytes("load", ptr, mask)
+            if not self.disable_load_mask_percentage_check:
+                total_count, false_count = _get_mask_stats(mask)
+                self.load_mask_total_count += total_count
+                self.load_mask_false_count += false_count
 
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             self._report_load_store_bytes("store", ptr, mask)
+            if not self.disable_load_mask_percentage_check:
+                total_count, false_count = _get_mask_stats(mask)
+                self.store_mask_total_count += total_count
+                self.store_mask_false_count += false_count
 
         def pre_addptr_callback(ptr, offset):
             dtype_tt = ptr.get_element_ty()
@@ -107,7 +153,8 @@ class Profiler(Client):
             byte_offset = offset_data * element_bytewidth
 
             # Check if byte offsets are within 32-bit range
-            self._check_32bit_range(byte_offset, element_bytewidth, offset_data)
+            if not self.disable_buffer_load_check:
+                self._check_32bit_range(byte_offset, element_bytewidth, offset_data)
 
         if op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)
@@ -122,4 +169,38 @@ class Profiler(Client):
         return ForLoopCallbacks()
 
     def finalize(self) -> list:
+        # Calculate and print mask statistics only if load mask percentage check is enabled
+        if not self.disable_load_mask_percentage_check:
+            print("\n" + "=" * 60)
+            print("Profiler: Mask Usage Statistics")
+            print("=" * 60)
+
+            # Load statistics
+            if self.load_mask_total_count > 0:
+                load_masked_percentage = (
+                    self.load_mask_false_count / self.load_mask_total_count
+                ) * 100
+                print("\nLoad Operations:")
+                print(f"  Total mask elements:     {self.load_mask_total_count}")
+                print(f"  False elements:          {self.load_mask_false_count}")
+                print(f"  Masked percentage:       {load_masked_percentage:.2f}%")
+            else:
+                print("\nLoad Operations:")
+                print("  No load operations detected")
+
+            # Store statistics
+            if self.store_mask_total_count > 0:
+                store_masked_percentage = (
+                    self.store_mask_false_count / self.store_mask_total_count
+                ) * 100
+                print("\nStore Operations:")
+                print(f"  Total mask elements:     {self.store_mask_total_count}")
+                print(f"  False elements:          {self.store_mask_false_count}")
+                print(f"  Masked percentage:       {store_masked_percentage:.2f}%")
+            else:
+                print("\nStore Operations:")
+                print("  No store operations detected")
+
+            print("=" * 60 + "\n")
+
         return [self.load_bytes, self.store_bytes]
