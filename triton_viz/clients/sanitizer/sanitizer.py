@@ -724,7 +724,7 @@ class SymbolicExpr:
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join")
     CAST_OPS = ("cast_impl", "bitcast")
-    ATOMIC_OPS = ("atomic_cas",)
+    ATOMIC_OPS = ("atomic_cas", "atomic_rmw")
     SUPPORTED_OPS = (
         BASIC_OPS
         + INDIRECT_OPS
@@ -815,6 +815,7 @@ class SymbolicExpr:
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         # Atomic operations
         "atomic_cas": Spec(req=("ptr", "cmp", "val")),
+        "atomic_rmw": Spec(req=("ptr", "val", "mask")),
         # Misc
         "advance": Spec(req=("ptr", "offsets")),
         "umulhi": Spec(req=("lhs", "rhs")),
@@ -1977,14 +1978,17 @@ class SanitizerSymbolicExecution(Sanitizer):
             return result
 
         def op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope):
-            ptr_sym = SymbolicExpr.from_value(ptr)
-            val_sym = SymbolicExpr.from_value(val)
-            mask_sym = SymbolicExpr.from_value(mask)
-            # rmwOp and sem are enums, not regular values, so we pass them directly
-            result = SymbolicExpr("atomic_rmw", ptr_sym, val_sym, mask_sym)
-            result.rmwOp = rmwOp  # Store rmwOp as an attribute
-            result.sem = sem  # Store sem as an attribute
-            return result
+            from ...core.patch import original_ops
+            from ...core.data import AtomicRMW
+            
+            # Execute the actual atomic operation immediately
+            # Atomic operations have side effects that must happen
+            # We pass through the original TensorHandle arguments directly
+            actual_result = original_ops[AtomicRMW](
+                rmwOp, ptr, val, mask, sem, scope
+            )
+            
+            return actual_result
 
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
