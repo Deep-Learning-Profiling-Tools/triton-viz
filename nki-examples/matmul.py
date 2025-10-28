@@ -1,9 +1,11 @@
 from neuronxcc import nki
 import neuronxcc.nki.language as nl
+
 import triton_viz
 from triton_viz.clients import Tracer
 from triton_viz.core.trace import launches
 import numpy as np
+import math
 
 
 def matmul_kernel(lhs, rhs, result):
@@ -29,12 +31,12 @@ def matmul_kernel(lhs, rhs, result):
     TILE_N = 4
 
     # Use affine_range to loop over tiles
-    for m in nl.affine_range(M // TILE_M):
-        for n in nl.affine_range(N // TILE_N):
+    for m in nl.affine_range(math.ceil(M / TILE_M)):
+        for n in nl.affine_range(math.ceil(N / TILE_N)):
             # Allocate a tensor in PSUM
             res_psum = nl.zeros((TILE_M, TILE_N), nl.int32, buffer=nl.psum)
 
-            for k in nl.affine_range(K // TILE_K):
+            for k in nl.affine_range(math.ceil(K / TILE_K)):
                 # Declare the tiles on SBUF
                 lhs_tile = nl.ndarray((TILE_K, TILE_M), dtype=lhs.dtype, buffer=nl.sbuf)
                 rhs_tile = nl.ndarray((TILE_K, TILE_N), dtype=rhs.dtype, buffer=nl.sbuf)
@@ -66,21 +68,21 @@ def matmul_kernel(lhs, rhs, result):
                 mask=out_mask,
             )
 
-    return result
-
 
 TRITON_VIZ = True
 kernel_grid = (1, 1, 1)
 lhs_small = np.arange(16).astype(np.float32).reshape(4, 4)
 rhs_small = np.arange(32).astype(np.float32).reshape(4, 8)
+# lhs_small = np.arange(9).astype(np.float32).reshape(3, 3)
+# rhs_small = np.arange(18).astype(np.float32).reshape(3, 6)
 result = np.empty((lhs_small.shape[0], rhs_small.shape[1]), dtype=lhs_small.dtype)
 kernel_args = (lhs_small, rhs_small, result)
 
 if TRITON_VIZ:
     print("Executing matmul_kernel with NKI interpreter...")
     traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(matmul_kernel)
-    kernel = traced_kernel[kernel_grid]
-    kernel(*kernel_args)
+    kernel_instance = traced_kernel[kernel_grid]
+    kernel_instance(*kernel_args)
 
     print(f"Number of launches: {len(launches)}")
     if launches:
@@ -97,7 +99,7 @@ if TRITON_VIZ:
 
     # Try to launch visualization
     try:
-        triton_viz.launch(share=True, port=8005)
+        triton_viz.launch(share=False)
     except Exception as e:
         print(f"\nError during visualization: {e}")
         import traceback

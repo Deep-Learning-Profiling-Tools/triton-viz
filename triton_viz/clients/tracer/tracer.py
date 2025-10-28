@@ -165,11 +165,12 @@ class Tracer(Client):
             if not self.sample:
                 return
             keys = _convert_keys_to_numpy(keys)
-            offsets = masked_load(ptr.get_offsets().data, keys)
             if mask is None:
+                offsets = masked_load(ptr.get_offsets().data, keys)
                 mask_data = np.ones_like(offsets).astype(bool)
             else:
                 mask_data = mask.data
+                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
 
             self.records.append(Store(ptr.data_ptr(), offsets, mask_data))
 
