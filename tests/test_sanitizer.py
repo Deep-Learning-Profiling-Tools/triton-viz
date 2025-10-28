@@ -372,3 +372,23 @@ def test_atomic_add():
     # Note: The sanitizer analyzes symbolically, so the actual value may not be updated
     # This test verifies that the operation doesn't crash
 
+
+@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+@triton.jit
+def atomic_cas_kernel(
+    output_ptr,
+    cmp_value: tl.constexpr,
+    new_value: tl.constexpr,
+):
+    # Simple atomic compare-and-swap operation
+    tl.atomic_cas(output_ptr, cmp_value, new_value)
+
+
+def test_atomic_cas():
+    """Test that atomic_cas operations work with the sanitizer."""
+    y = torch.zeros(1, dtype=torch.float32)
+    grid = (1,)
+    atomic_cas_kernel[grid](y, cmp_value=0.0, new_value=5.0)
+    # Note: The sanitizer analyzes symbolically, so the actual value may not be updated
+    # This test verifies that the operation doesn't crash
+
