@@ -1978,17 +1978,19 @@ class SanitizerSymbolicExecution(Sanitizer):
             return result
 
         def op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope):
+            # Import here to avoid circular dependency (patch imports from sanitizer)
             from ...core.patch import original_ops
             from ...core.data import AtomicRMW
             
-            # Execute the actual atomic operation immediately
-            # Atomic operations have side effects that must happen
-            # We pass through the original TensorHandle arguments directly
-            actual_result = original_ops[AtomicRMW](
+            # Atomic RMW operations must be executed immediately because:
+            # 1. They have side effects that modify memory
+            # 2. Their return value (old value) may be used in subsequent computations
+            # 3. The read-modify-write semantics are complex to model symbolically
+            # Unlike regular stores, we cannot defer execution, so we pass through
+            # to the original implementation which executes the atomic operation.
+            return original_ops[AtomicRMW](
                 rmwOp, ptr, val, mask, sem, scope
             )
-            
-            return actual_result
 
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
