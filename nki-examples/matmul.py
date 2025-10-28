@@ -6,11 +6,8 @@ from triton_viz.clients import Tracer
 from triton_viz.core.trace import launches
 import numpy as np
 
-tensors = set()  # THTODO: rm
-records = [triton_viz.core.data.Grid((0, 0, 0))]  # THTODO: rm
 
-
-def matmul_kernel(lhs, rhs):
+def matmul_kernel(lhs, rhs, result):
     """NKI matmul_kernel to compute a matrix multiplication operation in a tiled manner
 
     Args:
@@ -27,15 +24,11 @@ def matmul_kernel(lhs, rhs):
     M, K = lhs.shape
     K_, N = rhs.shape
     assert K == K_, "lhs and rhs must have the same contraction dimension"
-    result = nl.ndarray((M, N), dtype=lhs.dtype, buffer=nl.shared_hbm)
 
     TILE_M = 2
     TILE_K = 2
     TILE_N = 4
 
-    tensors.add(lhs)
-    tensors.add(rhs)
-    tensors.add(result)
     # Use affine_range to loop over tiles
     for m in nl.affine_range(M // TILE_M):
         for n in nl.affine_range(N // TILE_N):
@@ -52,35 +45,15 @@ def matmul_kernel(lhs, rhs):
                 lhs_f = nl.arange(TILE_K)[None, :] + k * TILE_K
                 lhs_mask = (lhs_p < M) & (lhs_f < K)
                 lhs_tile = nl.load(lhs[lhs_p, lhs_f], mask=lhs_mask)
-                records.append(
-                    triton_viz.core.data.Load(
-                        lhs.data_ptr(), (4 * (lhs_p * K + lhs_f)).data, lhs_mask.data
-                    )
-                )  # THTODO: rm
 
                 rhs_p = nl.arange(TILE_K)[:, None] + k * TILE_K
                 rhs_f = nl.arange(TILE_N)[None, :] + n * TILE_N
                 rhs_mask = (rhs_p < K) & (rhs_f < N)
                 rhs_tile = nl.load(rhs[rhs_p, rhs_f], mask=rhs_mask)
-                records.append(
-                    triton_viz.core.data.Load(
-                        rhs.data_ptr(), (4 * (rhs_p * N + rhs_f)).data, rhs_mask.data
-                    )
-                )  # THTODO: rm
 
                 # Accumulate partial-sums into PSUM
                 x = nl.matmul(lhs_tile[...], rhs_tile[...], transpose_x=False)
                 res_psum += x
-                records.append(
-                    triton_viz.core.data.Dot(
-                        lhs_tile.shape,
-                        rhs_tile.shape,
-                        res_psum.shape,
-                        lhs_tile.data,
-                        rhs_tile.data,
-                        x.data,
-                    )
-                )  # THTODO: rm
 
             # Copy the result from PSUM back to SBUF, and cast to expected output data-type
             res_sb = nl.copy(res_psum, dtype=result.dtype)
@@ -91,12 +64,8 @@ def matmul_kernel(lhs, rhs):
             nl.store(
                 result[m * TILE_M : (m + 1) * TILE_M, n * TILE_N : (n + 1) * TILE_N],
                 value=res_sb,
+                mask=out_mask,
             )
-            records.append(
-                triton_viz.core.data.Store(
-                    result.data_ptr(), (4 * (out_p * N + out_f)).data, out_mask.data
-                )
-            )  # THTODO: rm
 
     return result
 
@@ -105,19 +74,18 @@ TRITON_VIZ = True
 kernel_grid = (1, 1, 1)
 lhs_small = np.arange(16).astype(np.float32).reshape(4, 4)
 rhs_small = np.arange(32).astype(np.float32).reshape(4, 8)
-kernel_args = (lhs_small, rhs_small)
+result = np.empty((lhs_small.shape[0], rhs_small.shape[1]), dtype=lhs_small.dtype)
+kernel_args = (lhs_small, rhs_small, result)
 
 if TRITON_VIZ:
     print("Executing matmul_kernel with NKI interpreter...")
     traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(matmul_kernel)
-    kk = traced_kernel[kernel_grid]
-    z2 = kk(*kernel_args)
+    kernel = traced_kernel[kernel_grid]
+    kernel(*kernel_args)
 
     print(f"Number of launches: {len(launches)}")
     if launches:
         launch = launches[-1]
-        launch.records = records  # THTODO: rm
-        launch.tensors = tensors  # THTODO: rm
         print(f"Number of records: {len(launch.records)}")
         for i, record in enumerate(launch.records):
             print(f"Record {i}: {type(record).__name__}")
@@ -139,8 +107,9 @@ if TRITON_VIZ:
 else:
     print("Executing NKI JIT-ed matmul_kernel...")
     compiled_kernel = nki.jit(matmul_kernel)
-    z2 = nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
+    nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
 
+z2 = result
 z1 = lhs_small @ rhs_small
 print(np.max(np.abs(z1 - z2)))
 assert np.allclose(z1, z2)
