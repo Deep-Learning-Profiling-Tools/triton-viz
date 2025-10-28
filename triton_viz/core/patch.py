@@ -56,7 +56,7 @@ from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
 from triton.runtime import JITFunction
 from triton_viz.core.nki import nki_builder
 
-BUILDER = interpreter_builder
+BUILDER = nki_builder
 if BUILDER == interpreter_builder:
     op_list = [
         ProgramId,
@@ -171,16 +171,16 @@ elif BUILDER == nki_builder:
         # BinaryOp: nki_builder.binary_op,
         # TernaryOp: nki_builder.ternary_op,
         MakeRange: nki_builder.arange,
-        # AddPtr: nki_builder.create_addptr,
-        # ExpandDims: nki_builder.create_expand_dims,
-        # Broadcast: nki_builder.create_broadcast,
-        # Splat: nki_builder.create_splat,
-        # MakeBlockPointer: nki_builder.create_make_block_ptr,
-        # TensorPointerLoad: nki_builder.create_tensor_pointer_load,
-        # TensorPointerStore: nki_builder.create_tensor_pointer_store,
-        # Idiv: nki_builder.create_idiv,
         # Rsqrt: nki_builder.create_rsqrt,
         # CastImpl: nki_builder.cast_impl,
+    }
+    _OP_ATTR_NAMES = {
+        ProgramId: "program_id",
+        Array: "ndarray",
+        Load: "masked_load",
+        Store: "masked_store",
+        Dot: "matmul",
+        UnaryOp: "_unary_op",
     }
     _OP_ATTR_NAMES = {
         ProgramId: "program_id",

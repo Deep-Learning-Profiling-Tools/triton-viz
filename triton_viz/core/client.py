@@ -15,7 +15,7 @@ from .patch import (
 )
 from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
-from .patch import patch_lang, unpatch_lang
+# from .patch import patch_lang, unpatch_lang
 
 
 class Client(ABC):
@@ -138,14 +138,14 @@ class ClientManager:
                 loop_callbacks = client.register_for_loop_callback()
                 patch_for_loop(loop_callbacks)
                 # Remaps core language functions to interpreted ones
-                patch_lang(fn)
+                # patch_lang(fn)
             try:
                 yield
             finally:
                 for op in op_list:
                     unpatch_op(op)
                 unpatch_for_loop()
-                unpatch_lang()
+                # unpatch_lang()
 
     def pre_run_callback(self, fn: Callable) -> bool:
         rets = []
