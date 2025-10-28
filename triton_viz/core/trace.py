@@ -171,11 +171,13 @@ def trace(clients: Union[str, Client, None] = None, backend: str = "triton"):
             return kernel
 
         # First-time wrapping
+        # Triton backend need JIT/Interpreter/Autotuner；
+        # NKI allow Python function（ NKIInterpretedFunction）
+        if backend == "nki":
+            return NKITrace(kernel, clients)
         if isinstance(kernel, (JITFunction, InterpretedFunction, Autotuner)):
             if backend == "triton":
                 return TritonTrace(kernel, clients)
-            elif backend == "nki":
-                return NKITrace(kernel, clients)
             else:
                 raise ValueError(f"Unknown backend: {backend}")
 

@@ -86,7 +86,7 @@ class Profiler(Client):
             if self.has_buffer_load is False:
                 assert False, "Buffer Load optimization should be used when offsets are within 32-bit range!"
 
-    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):

@@ -1,6 +1,5 @@
 from neuronxcc import nki
 import neuronxcc.nki.language as nl
-
 import triton_viz
 from triton_viz.clients import Tracer
 from triton_viz.core.trace import launches
@@ -98,7 +97,7 @@ if TRITON_VIZ:
 
     # Try to launch visualization
     try:
-        triton_viz.launch(share=False)
+        triton_viz.launch(share=True, port=8005)
     except Exception as e:
         print(f"\nError during visualization: {e}")
         import traceback
@@ -107,7 +106,7 @@ if TRITON_VIZ:
 else:
     print("Executing NKI JIT-ed matmul_kernel...")
     compiled_kernel = nki.jit(matmul_kernel)
-    nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
+    z2 = nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
 
 z2 = result
 z1 = lhs_small @ rhs_small

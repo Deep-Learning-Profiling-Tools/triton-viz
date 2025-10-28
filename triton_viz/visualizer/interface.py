@@ -113,6 +113,35 @@ def update_global_data():
     global_data["analysis"] = df_dict
 
 
+def _safe_read_file_segment(filename: str, lineno: int, context: int = 8):
+    try:
+        # only allow files under current working dir for safety
+        cwd = os.path.realpath(os.getcwd())
+        path = os.path.realpath(filename)
+        if not path.startswith(cwd):
+            return None
+        start = max(1, lineno - context)
+        end = lineno + context
+        lines = []
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f, start=1):
+                if i < start:
+                    continue
+                if i > end:
+                    break
+                lines.append({"no": i, "text": line.rstrip("\n")})
+        return {
+            "filename": path,
+            "lineno": lineno,
+            "start": start,
+            "end": end,
+            "highlight": lineno,
+            "lines": lines,
+        }
+    except Exception:
+        return None
+
+
 @app.route("/")
 def index():
     update_global_data()
@@ -123,6 +152,12 @@ def index():
 def debug_page():
     update_global_data()
     return render_template("debug.html")
+
+
+@app.route("/calibrate")
+def calibrate_page():
+    # A minimal page to calibrate mouse picking dx/dy
+    return render_template("calibrate.html")
 
 
 @app.route("/api/data")
@@ -146,6 +181,155 @@ def set_current_op():
     return jsonify(
         {"status": "Current op set successfully", "uuid": current_fullscreen_op}
     )
+
+
+@app.route("/api/op_code", methods=["POST"])
+def get_op_code():
+    global raw_tensor_data, current_fullscreen_op
+    data = request.json or {}
+    # ensure data prepared
+    if raw_tensor_data is None:
+        update_global_data()
+    uuid = data.get("uuid") or current_fullscreen_op
+    frame_idx = int(data.get("frame_idx", 0))
+    context = int(data.get("context", 8))
+    if not uuid or raw_tensor_data is None or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    tb_list = raw_tensor_data[uuid].get("tracebacks") or []
+    if not tb_list:
+        return jsonify({"error": "Traceback not available"}), 200
+    # Heuristic: pick the BEST user frame under CWD (closest to op)
+    cwd = os.path.realpath(os.getcwd())
+
+    def _score(tb: dict) -> int:
+        fn = tb.get("filename") or ""
+        line = (tb.get("line") or "").strip()
+        name = tb.get("name") or ""
+        p = os.path.realpath(fn)
+        score = 0
+
+        # 强优先：明确的 Triton 语言内核操作符
+        if "tl.load" in line or "tl.store" in line:
+            score += 100
+        elif "tl." in line:
+            score += 50
+
+        # 位置相关：项目代码优先，三方/框架降权
+        if p.startswith(cwd):
+            score += 5
+        if any(
+            s in p
+            for s in ["site-packages", "triton_viz/", "triton/", "runpy.py", "IPython"]
+        ):
+            score -= 10
+
+        # 语义相关：函数名看起来像 kernel 的加分
+        if name.endswith("_kernel") or "kernel" in name:
+            score += 3
+
+        # 体验相关：examples 目录小幅加分
+        if "examples" in p:
+            score += 1
+
+        return score
+
+    # Prefer frames from tail (closest to current) and highest score
+    best = None
+    best_score = -(10**9)
+    for tb in reversed(tb_list):
+        sc = _score(tb)
+        if sc > best_score:
+            best, best_score = tb, sc
+    chosen = best if best is not None else None
+    if chosen is None:
+        # fallback: use requested frame or last non-<string> frame
+        frame_idx = max(0, min(frame_idx, len(tb_list) - 1))
+        chosen = tb_list[frame_idx]
+        for tb in reversed(tb_list):
+            fn = tb.get("filename") or ""
+            if not fn.startswith("<"):
+                chosen = tb
+                break
+    tb = chosen
+    filename = tb.get("filename")
+    lineno = int(tb.get("lineno", 0))
+    line_of_code = tb.get("line")
+    seg = _safe_read_file_segment(filename, lineno, context)
+    if seg is None:
+        # fallback with single line
+        seg = {
+            "filename": filename,
+            "lineno": lineno,
+            "start": lineno,
+            "end": lineno,
+            "highlight": lineno,
+            "lines": [{"no": lineno, "text": line_of_code or ""}],
+        }
+    return jsonify(seg)
+
+
+@app.route("/api/getMatmulC", methods=["POST"])
+def get_matmul_c():
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    a = op.get("input_data")
+    b = op.get("other_data")
+    if a is None or b is None:
+        return jsonify({"error": "MatMul tensors not available"}), 200
+    try:
+        # Compute C on CPU
+        c = a @ b
+        c_cpu = c.cpu()
+        cmin = float(c_cpu.min().item())
+        cmax = float(c_cpu.max().item())
+        return jsonify(
+            {
+                "shape": list(c_cpu.shape),
+                "min": cmin,
+                "max": cmax,
+                "values": c_cpu.numpy().tolist(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"MatMul compute failed: {e}"}), 200
+
+
+@app.route("/api/getMatmulVectors", methods=["POST"])
+def get_matmul_vectors():
+    """Return A[row, :] and B[:, col] for a given Dot op.
+
+    Request JSON: { uuid, row, col }
+    Response JSON: {
+        "row": int,
+        "col": int,
+        "a_row": [float, ...],
+        "b_col": [float, ...],
+        "k": int
+    }
+    """
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    row = int(data.get("row", 0))
+    col = int(data.get("col", 0))
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    a = op.get("input_data")
+    b = op.get("other_data")
+    if a is None or b is None:
+        return jsonify({"error": "MatMul tensors not available"}), 200
+    try:
+        a_row = a[row, :].cpu().numpy().tolist()
+        b_col = b[:, col].cpu().numpy().tolist()
+        k = len(a_row)
+        return jsonify({"row": row, "col": col, "a_row": a_row, "b_col": b_col, "k": k})
+    except Exception as e:
+        return jsonify({"error": f"MatMul vectors failed: {e}"}), 200
 
 
 @app.route("/api/getValue", methods=["POST"])
@@ -210,19 +394,73 @@ def get_load_value():
         x is not None and y is not None and z is not None
     ):
         try:
+            import numpy as _np
+
+            t = op_data["global_tensor"]
+            # Normalize to numpy array for robust indexing
+            if hasattr(t, "cpu"):
+                try:
+                    arr = t.cpu().numpy()
+                except Exception:
+                    arr = _np.asarray(t)
+            elif hasattr(t, "_value"):
+                arr = _np.asarray(getattr(t, "_value"))
+            elif hasattr(t, "data"):
+                arr = _np.asarray(getattr(t, "data"))
+            else:
+                arr = _np.asarray(t)
+
+            yy, xx, zz = int(y), int(x), int(z)
             value = 0.0
-            if op_data["dims"] == 3:
-                value = op_data["global_tensor"][x, y, z].item()
-            elif op_data["dims"] == 2:
-                value = op_data["global_tensor"][x, y].item()
-            elif op_data["dims"] == 1:
-                value = op_data["global_tensor"][x].item()
+            if arr.ndim >= 3:
+                value = float(arr[yy, xx, zz])
+            elif arr.ndim == 2:
+                value = float(arr[yy, xx])
+            elif arr.ndim == 1:
+                value = float(arr[xx])
 
             return jsonify({"value": value})
         except IndexError:
             return jsonify({"error": "Coordinates out of bounds"}), 200
     else:
         return jsonify({"error": "Global tensor data not found"}), 200
+
+
+@app.route("/api/getFlipValue", methods=["POST"])
+def get_flip_value():
+    """Return a value from input or output of a Flip op by linear index or 2D coords.
+
+    Request JSON: { uuid, which: "input"|"output", x, y }
+    - If tensor is 1D, use x only; if 2D, use x (col), y (row)
+    """
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    which = (data.get("which") or "input").lower()
+    x = data.get("x")
+    y = data.get("y")
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    t = op.get("input_data") if which == "input" else op.get("output_data")
+    shape = op.get("input_shape") if which == "input" else op.get("output_shape")
+    if t is None or shape is None:
+        return jsonify({"error": "Flip tensor data unavailable"}), 200
+    try:
+        if len(shape) <= 1:
+            idx = int(x or 0)
+            return jsonify({"value": t[idx].item()})
+        elif len(shape) == 2:
+            rr = int(y or 0)
+            cc = int(x or 0)
+            return jsonify({"value": t[rr, cc].item()})
+        else:
+            # higher dims not directly supported; fallback to flat index
+            idx = int(x or 0)
+            flat = t.view(-1)
+            return jsonify({"value": flat[idx].item()})
+    except Exception as e:
+        return jsonify({"error": f"Flip get value failed: {e}"}), 200
 
 
 @app.route("/api/getLoadTensor", methods=["POST"])
@@ -249,24 +487,34 @@ def get_load_tensor():
     if "global_tensor" not in op_data:
         return jsonify({"error": "Global tensor data not found"}), 200
 
-    t = op_data["global_tensor"].cpu()
-    try:
-        t_min = float(t.min().item())
-        t_max = float(t.max().item())
-    except Exception:
-        # In case of empty tensor
-        t_min = 0.0
-        t_max = 0.0
+    import numpy as _np
 
-    return jsonify(
-        {
-            "shape": list(t.shape),
-            "dims": len(t.shape),
-            "min": t_min,
-            "max": t_max,
-            "values": t.numpy().tolist(),
-        }
-    )
+    try:
+        t = op_data["global_tensor"]
+        if hasattr(t, "cpu"):
+            try:
+                arr = t.cpu().numpy()
+            except Exception:
+                arr = _np.asarray(t)
+        elif hasattr(t, "_value"):
+            arr = _np.asarray(getattr(t, "_value"))
+        elif hasattr(t, "data"):
+            arr = _np.asarray(getattr(t, "data"))
+        else:
+            arr = _np.asarray(t)
+        t_min = float(_np.min(arr)) if arr.size else 0.0
+        t_max = float(_np.max(arr)) if arr.size else 0.0
+        return jsonify(
+            {
+                "shape": list(arr.shape),
+                "dims": int(arr.ndim),
+                "min": t_min,
+                "max": t_max,
+                "values": arr.tolist(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"getLoadTensor failed: {e}"}), 200
 
 
 def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None):

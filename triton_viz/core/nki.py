@@ -614,4 +614,3 @@ class NKIInterpretedFunction:
                         return
 
         unpatch()
-        # return result.data

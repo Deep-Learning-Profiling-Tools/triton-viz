@@ -1,9 +1,21 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
-from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore, Array
+from ...core.data import (
+    Op,
+    Load,
+    Store,
+    ReduceSum,
+    Dot,
+    Grid,
+    RawLoad,
+    RawStore,
+    Array,
+    Flip,
+)
 from triton_viz.core.nki_masked_load import masked_load
 from typing import Callable, Optional, Union
 import numpy as np
+import traceback
 
 
 def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
@@ -71,15 +83,44 @@ class Tracer(Client):
     def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
+        def _extract_user_frames() -> list[traceback.FrameSummary]:
+            stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
+            # drop current frames (this function and callers)
+            stack = stack[:-2]
+            cleaned: list[traceback.FrameSummary] = []
+            for f in stack:
+                fn = f.filename.replace("\\", "/")
+                if any(
+                    s in fn
+                    for s in [
+                        "triton_viz/core/",
+                        "triton_viz/clients/",
+                        "triton/runtime/",
+                        "triton/language/",
+                        "site-packages/triton/",
+                        "runpy.py",
+                        "IPython",
+                    ]
+                ):
+                    continue
+                cleaned.append(f)
+            if cleaned:
+                return cleaned
+            # fallback to last non "<...>" frame
+            for f in reversed(stack):
+                if not f.filename.startswith("<"):
+                    return [f]
+            return stack[-1:]
+
         def pre_load_callback(ptr, mask, *ignore_args, **ignore_kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
-            self.records.append(
-                Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            )
+            rec = Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         def _convert_keys_to_numpy(keys):
             """Convert any NDArrays in keys to numpy arrays."""
@@ -114,9 +155,9 @@ class Tracer(Client):
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
-            self.records.append(
-                Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            )
+            rec = Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         def pre_masked_store_callback(
             ptr, keys, value, mask=None, *ignore_args, **ignore_kwargs
@@ -140,7 +181,9 @@ class Tracer(Client):
             tensor = self._get_tensor(first_ptr)
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Load(tensor.data_ptr(), offsets, true_mask))
+            rec = Load(tensor.data_ptr(), offsets, true_mask)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         def pre_raw_store_callback(ptr, value):
             if not self.sample:
@@ -149,7 +192,9 @@ class Tracer(Client):
             tensor = self._get_tensor(first_ptr)
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Store(tensor.data_ptr(), offsets, true_mask))
+            rec = Store(tensor.data_ptr(), offsets, true_mask)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         def post_reduce_sum_callback(
             ret, input, axis=None, keep_dims=False, *ignore_args, **ignore_kwargs
@@ -166,9 +211,31 @@ class Tracer(Client):
             input_shape = input.data.shape
             other_shape = other.data.shape
             ret_shape = ret.data.shape
-            self.records.append(
-                Dot(input_shape, other_shape, ret_shape, input.data, other.data)
-            )
+            # Pass input/other raw arrays so draw.py can render MatMul
+            rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
+
+        def post_flip_callback(ret, x, *args, **kwargs):
+            if not self.sample:
+                return
+            # Try to capture dim argument
+            dim = None
+            if args:
+                dim = args[0]
+            if "dim" in kwargs:
+                dim = kwargs.get("dim")
+            try:
+                in_shape = tuple(x.data.shape)
+                out_shape = tuple(ret.data.shape)
+            except Exception:
+                in_shape = getattr(getattr(x, "handle", None), "data", None)
+                out_shape = getattr(getattr(ret, "handle", None), "data", None)
+                in_shape = tuple(getattr(in_shape, "shape", []) or [])
+                out_shape = tuple(getattr(out_shape, "shape", []) or [])
+            rec = Flip(in_shape, out_shape, int(dim) if dim is not None else 0)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         if op_type is Array:  # THTODO: only for NKI
             return OpCallbacks(after_callback=post_array_callback)
@@ -188,6 +255,8 @@ class Tracer(Client):
             return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:
             return OpCallbacks(after_callback=post_dot_callback)
+        # Flip is wrapped at tl.flip; we don't have an interpreter op to hook here.
+        # The wrapper in patch_lang will append Flip records directly to tracer.
 
         return OpCallbacks()
 
