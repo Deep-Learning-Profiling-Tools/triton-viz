@@ -105,7 +105,7 @@ class TritonTrace(KernelInterface, TraceInterface):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
 
-        with self.client_manager.patch_run(self.base_fn):
+        with self.client_manager.patch_run(self.base_fn, backend="triton"):
             kwargs.update({"client_manager": self.client_manager})
             kwargs.update({"jit_fn": self.jit_fn})
             ret = self.runner.run(*args, **kwargs)
@@ -145,7 +145,7 @@ class NKITrace(KernelInterface, TraceInterface):
         return self[(1, 1, 1)](*args, **kwargs)
 
     def run(self, *args, **kwargs):
-        with self.client_manager.patch_run(self.interpreter_fn):
+        with self.client_manager.patch_run(self.func, backend="nki"):
             kwargs.update({"client_manager": self.client_manager})
             ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()

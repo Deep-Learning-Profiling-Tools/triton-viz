@@ -10,12 +10,11 @@ from .patch import (
     unpatch_op,
     patch_for_loop,
     unpatch_for_loop,
-    op_list,
     patch_calls,
 )
 from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
-# from .patch import patch_lang, unpatch_lang
+from .patch import patch_lang, unpatch_lang, OPERATION_REGISTRY
 
 
 class Client(ABC):
@@ -127,27 +126,31 @@ class ClientManager:
             jit_fn.warmup = jit_fn.warmup.__wrapped__
 
     @contextmanager
-    def patch_run(self, fn):
-        with patch_calls():
+    def patch_run(self, fn, backend: str):
+        with patch_calls(backend):
             for client in self.clients.values():
-                for op in op_list:
-                    # patch ops
+                # get operations for the specified backend
+                backend_ops = OPERATION_REGISTRY[backend]["op_list"]
 
-                    callbacks = client.register_op_callback(op)
-                    patch_op(op, callbacks)
+                for op in backend_ops:
+                    # patch ops
+                    callbacks = client.register_op_callback(op, backend=backend)
+                    patch_op(op, callbacks, backend=backend)
 
                 # patch for loops
                 loop_callbacks = client.register_for_loop_callback()
                 patch_for_loop(loop_callbacks)
                 # Remaps core language functions to interpreted ones
-                # patch_lang(fn)
+                patch_lang(fn, backend)
             try:
                 yield
             finally:
-                for op in op_list:
+                backend_ops = OPERATION_REGISTRY[backend]["op_list"]
+
+                for op in backend_ops:
                     unpatch_op(op)
                 unpatch_for_loop()
-                # unpatch_lang()
+                unpatch_lang(backend)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         rets = []

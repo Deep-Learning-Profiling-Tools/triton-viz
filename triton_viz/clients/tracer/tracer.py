@@ -7,6 +7,8 @@ from ...core.data import (
     ReduceSum,
     Dot,
     Grid,
+    MaskedLoad,
+    MaskedStore,
     RawLoad,
     RawStore,
     Array,
@@ -238,15 +240,15 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        if op_type is Array:  # THTODO: only for NKI
+        if op_type is Array:
             return OpCallbacks(after_callback=post_array_callback)
-        # if op_type is Load:
-        #     return OpCallbacks(before_callback=pre_load_callback)
-        # elif op_type is Store:
-        #     return OpCallbacks(before_callback=pre_store_callback)
-        if op_type is Load:  # THTODO: only for NKI
+        elif op_type is Load:
+            return OpCallbacks(before_callback=pre_load_callback)
+        elif op_type is MaskedLoad:
             return OpCallbacks(before_callback=pre_masked_load_callback)
-        elif op_type is Store:  # THTODO: only for NKI
+        elif op_type is Store:
+            return OpCallbacks(before_callback=pre_store_callback)
+        elif op_type is MaskedStore:
             return OpCallbacks(before_callback=pre_masked_store_callback)
         elif op_type is RawLoad:
             return OpCallbacks(before_callback=pre_raw_load_callback)

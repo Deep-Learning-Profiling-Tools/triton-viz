@@ -63,6 +63,11 @@ class Store(Op):
 
 
 @dataclass
+class MaskedStore(Op):
+    name: ClassVar[str] = "masked_store"
+
+
+@dataclass
 class RawLoad(Op):
     name: ClassVar[str] = "raw_load"
 
@@ -73,6 +78,11 @@ class Load(Op):
     ptr: int
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
+
+
+@dataclass
+class MaskedLoad(Op):
+    name: ClassVar[str] = "masked_load"
 
 
 @dataclass

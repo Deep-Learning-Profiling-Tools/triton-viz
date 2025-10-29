@@ -377,7 +377,7 @@ class Builder:
 nki_builder = Builder()
 
 
-def patch():
+def nki_patch_lang():
     nl.ndarray = nki_builder.ndarray
     nl.program_id = nki_builder.program_id
     nl.arange = nki_builder.arange
@@ -424,7 +424,7 @@ def patch():
     nl.device_print = print
 
 
-def unpatch():
+def nki_unpatch_lang():
     # reload the original functions
     import importlib
 
@@ -460,8 +460,6 @@ class NKIInterpretedFunction:
         # Call grid_callback once before grid execution (similar to Triton)
         if client_manager is not None:
             client_manager.grid_callback(grid_dims)
-
-        patch()  # NKI interpreter patching
 
         # Apply AST transformer to convert nl.load/nl.store calls to nl.masked_load/nl.masked_store
         if hasattr(self.fn, "__code__"):
@@ -510,5 +508,3 @@ class NKIInterpretedFunction:
                     self.fn(*args, **kwargs)
                     if not client_manager.post_run_callback(self.fn):
                         return
-
-        unpatch()
