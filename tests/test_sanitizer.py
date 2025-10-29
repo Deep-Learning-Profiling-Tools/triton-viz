@@ -198,9 +198,9 @@ def test_indirect_load():
     observed_offsets = [
         x for sublist in san1.observed_offsets for x in sublist
     ]  # Flatten the list of lists
-    assert (
-        expected_offsets == observed_offsets
-    ), "Observed offsets do not match expected offsets."
+    assert expected_offsets == observed_offsets, (
+        "Observed offsets do not match expected offsets."
+    )
 
 
 @triton_viz.trace(clients=(san2 := LoadIndexChecker(abort_on_error=True)))
@@ -245,9 +245,9 @@ def test_triple_indirect_load(device):
     observed_offsets = [
         x for sublist in san2.observed_offsets for x in sublist
     ]  # Flatten the list of lists
-    assert (
-        expected_offsets == observed_offsets
-    ), "Observed offsets do not match expected offsets."
+    assert expected_offsets == observed_offsets, (
+        "Observed offsets do not match expected offsets."
+    )
 
 
 @triton_viz.trace(clients=(san3 := LoadIndexChecker(abort_on_error=True)))
@@ -292,9 +292,9 @@ def test_dual_offset_load(device):
     observed_offsets = [
         x for sublist in san3.observed_offsets for x in sublist
     ]  # Flatten the list of lists
-    assert (
-        expected_offsets == observed_offsets
-    ), "Observed offsets do not match expected offsets."
+    assert expected_offsets == observed_offsets, (
+        "Observed offsets do not match expected offsets."
+    )
 
 
 # ======== Sanitizer Backend Tests =========
@@ -391,4 +391,3 @@ def test_atomic_cas():
     atomic_cas_kernel[grid](y, cmp_value=0.0, new_value=5.0)
     # Note: The sanitizer analyzes symbolically, so the actual value may not be updated
     # This test verifies that the operation doesn't crash
-
