@@ -44,8 +44,8 @@ class ProgramId(Op):
 
 
 @dataclass
-class Array(Op):
-    name: ClassVar[str] = "array"
+class Allocate(Op):
+    name: ClassVar[str] = "allocate"
     ptr: int
 
 
@@ -60,6 +60,11 @@ class Store(Op):
     ptr: int
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
+    mem_src: str = "SBUF"
+    mem_dst: str = "HBM"
+    backend: str = "nki"
+    bytes: int = 0
+    time_idx: int = 0
 
 
 @dataclass
@@ -78,6 +83,12 @@ class Load(Op):
     ptr: int
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
+    # buffer: str
+    mem_src: str = "HBM"
+    mem_dst: str = "SBUF"
+    backend: str = "nki"
+    bytes: int = 0
+    time_idx: int = 0
 
 
 @dataclass

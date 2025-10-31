@@ -11,7 +11,7 @@ from ...core.data import (
     MaskedStore,
     RawLoad,
     RawStore,
-    Array,
+    Allocate,
     Flip,
 )
 from triton_viz.core.nki_masked_load import masked_load
@@ -133,7 +133,7 @@ class Tracer(Client):
             else:
                 return keys
 
-        def post_array_callback(ret, *args, **kwargs):
+        def post_allocate_callback(ret, *args, **kwargs):
             assert hasattr(ret, "data")
             self.tensors.append(ret)
 
@@ -236,8 +236,8 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        if op_type is Array:
-            return OpCallbacks(after_callback=post_array_callback)
+        if op_type is Allocate:
+            return OpCallbacks(after_callback=post_allocate_callback)
         elif op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is MaskedLoad:

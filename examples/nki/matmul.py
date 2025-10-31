@@ -107,7 +107,7 @@ if TRITON_VIZ:
         traceback.print_exc()
 else:
     print("Executing NKI JIT-ed matmul_kernel...")
-    compiled_kernel = nki.jit(matmul_kernel)
+    compiled_kernel = nki.jit(matmul_kernel, kernel_return=False)
     z2 = nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
 
 z2 = result

@@ -9,7 +9,7 @@ from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
 from .data import (
     Op,
-    Array,
+    Allocate,
     RawLoad,
     Load,
     MaskedLoad,
@@ -165,10 +165,18 @@ OPERATION_REGISTRY = {
         },
     },
     "nki": {
-        "op_list": [Array, ProgramId, MaskedStore, MaskedLoad, Dot, UnaryOp, MakeRange],
+        "op_list": [
+            Allocate,
+            ProgramId,
+            MaskedStore,
+            MaskedLoad,
+            Dot,
+            UnaryOp,
+            MakeRange,
+        ],
         "original_ops": {
             ProgramId: nki_builder.program_id,
-            Array: nki_builder.ndarray,
+            Allocate: nki_builder.ndarray,
             MaskedLoad: nki_builder.masked_load,
             MaskedStore: nki_builder.masked_store,
             Dot: nki_builder.matmul,
@@ -177,7 +185,7 @@ OPERATION_REGISTRY = {
         },
         "op_attr_names": {
             ProgramId: "program_id",
-            Array: "ndarray",
+            Allocate: "ndarray",
             MaskedLoad: "masked_load",
             MaskedStore: "masked_store",
             Dot: "matmul",
