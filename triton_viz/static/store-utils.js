@@ -3,7 +3,8 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.m
 export function createMatMulVisualization(containerElement, op) {
     const { input_shape, other_shape, output_shape } = op;
     console.log(op.uuid)
-    fetch('/api/setop', {
+    const API_BASE = window.__TRITON_VIZ_API__ || '';
+    fetch(`${API_BASE}/api/setop`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -37,7 +38,7 @@ export function createMatMulVisualization(containerElement, op) {
 
     async function getElementValue( matrixName, row, col) {
         let uuid = op.uuid;
-        const response = await fetch('/api/getValue', {
+        const response = await fetch(`${API_BASE}/api/getValue`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
