@@ -115,7 +115,7 @@ class Tracer(Client):
                     return [f]
             return stack[-1:]
 
-        def pre_load_callback(ptr, mask, *ignore_args, **ignore_kwargs):
+        def pre_load_callback(ptr, mask, *args, **kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
@@ -133,13 +133,11 @@ class Tracer(Client):
             else:
                 return keys
 
-        def post_array_callback(ret, *ignore_args, **ignore_kwargs):
+        def post_array_callback(ret, *args, **kwargs):
             assert hasattr(ret, "data")
             self.tensors.append(ret)
 
-        def pre_masked_load_callback(
-            ptr, keys, mask=None, *ignore_args, **ignore_kwargs
-        ):
+        def pre_masked_load_callback(ptr, keys, mask=None, *args, **kwargs):
             if not self.sample:
                 return
             keys = _convert_keys_to_numpy(keys)
@@ -152,7 +150,7 @@ class Tracer(Client):
                 )
             )
 
-        def pre_store_callback(ptr, value, mask, *ignore_args, **ignore_kwargs):
+        def pre_store_callback(ptr, value, mask, *args, **kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
@@ -161,9 +159,7 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        def pre_masked_store_callback(
-            ptr, keys, value, mask=None, *ignore_args, **ignore_kwargs
-        ):
+        def pre_masked_store_callback(ptr, keys, value, mask=None, *args, **kwargs):
             if not self.sample:
                 return
             keys = _convert_keys_to_numpy(keys)
@@ -200,7 +196,7 @@ class Tracer(Client):
             self.records.append(rec)
 
         def post_reduce_sum_callback(
-            ret, input, axis=None, keep_dims=False, *ignore_args, **ignore_kwargs
+            ret, input, axis=None, keep_dims=False, *args, **kwargs
         ):
             if not self.sample:
                 return
@@ -208,7 +204,7 @@ class Tracer(Client):
             output_shape = ret.handle.data.shape
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
-        def post_dot_callback(ret, input, other, *ignore_args, **ignore_kwargs):
+        def post_dot_callback(ret, input, other, *args, **kwargs):
             if not self.sample:
                 return
             input_shape = input.data.shape
