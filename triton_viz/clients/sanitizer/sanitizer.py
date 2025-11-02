@@ -65,6 +65,7 @@ from ...core.data import (
     CumSum,
     Bitcast,
     AtomicCas,
+    AtomicRMW,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -723,7 +724,7 @@ class SymbolicExpr:
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join")
     CAST_OPS = ("cast_impl", "bitcast")
-    ATOMIC_OPS = ("atomic_cas",)
+    ATOMIC_OPS = ("atomic_cas", "atomic_rmw")
     SUPPORTED_OPS = (
         BASIC_OPS
         + INDIRECT_OPS
@@ -814,6 +815,7 @@ class SymbolicExpr:
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         # Atomic operations
         "atomic_cas": Spec(req=("ptr", "cmp", "val")),
+        "atomic_rmw": Spec(req=("ptr", "val", "mask")),
         # Misc
         "advance": Spec(req=("ptr", "offsets")),
         "umulhi": Spec(req=("lhs", "rhs")),
@@ -1975,6 +1977,16 @@ class SanitizerSymbolicExecution(Sanitizer):
             result.sem = sem  # Store sem as an attribute
             return result
 
+        def op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            val_sym = SymbolicExpr.from_value(val)
+            mask_sym = SymbolicExpr.from_value(mask)
+            # rmwOp and sem are enums, not regular values, so we pass them directly
+            result = SymbolicExpr("atomic_rmw", ptr_sym, val_sym, mask_sym)
+            result.rmwOp = rmwOp  # Store rmwOp as an attribute
+            result.sem = sem  # Store sem as an attribute
+            return result
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -2010,6 +2022,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             CumSum: op_cumsum_overrider,
             Bitcast: op_bitcast_overrider,
             AtomicCas: op_atomic_cas_overrider,
+            AtomicRMW: op_atomic_rmw_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
