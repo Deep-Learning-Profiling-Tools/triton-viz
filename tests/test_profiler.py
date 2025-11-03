@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 import triton
 import triton.language as tl
@@ -155,7 +156,19 @@ def block_sampling_test_kernel(
     tl.store(y_ptr + offsets, y, mask=mask)
 
 
-def test_block_sampling():
+@pytest.mark.parametrize(
+    "test_name,enable_sampling,k_value,expected_executions",
+    [
+        ("No block sampling", False, None, 8),
+        ("Block sampling k=1", True, 1, 1),
+        ("Block sampling k=3", True, 3, 3),
+        ("Block sampling k=5", True, 5, 5),
+        ("Block sampling k=8 (all blocks)", True, 8, 8),
+        ("Block sampling k=20 (exceeds total)", True, 20, 8),
+    ],
+    ids=lambda x: x if isinstance(x, str) else str(x),
+)
+def test_block_sampling(test_name, enable_sampling, k_value, expected_executions):
     """
     Test that the block sampling feature correctly samples k blocks from the grid.
 
@@ -169,40 +182,37 @@ def test_block_sampling():
     n_elements = 1024
     BLOCK_SIZE = 128
     grid = (n_elements // BLOCK_SIZE,)  # Creates 8 blocks
-    total_blocks = grid[0]
 
-    # Test cases: (test_name, enable_sampling, k_value, expected_executions)
-    test_cases = [
-        ("No block sampling", False, None, total_blocks),
-        ("Block sampling k=1", True, 1, 1),
-        ("Block sampling k=3", True, 3, 3),
-        ("Block sampling k=5", True, 5, 5),
-        ("Block sampling k=8 (all blocks)", True, 8, 8),
-        ("Block sampling k=20 (exceeds total)", True, 20, 8),
-    ]
+    # Create test data
+    x = torch.randn(n_elements, dtype=torch.float32)
+    y = torch.zeros_like(x)
+    counter = torch.zeros(1, dtype=torch.int32)
 
-    for test_name, enable_sampling, k_value, expected_executions in test_cases:
-        # Create test data
-        x = torch.randn(n_elements, dtype=torch.float32)
-        y = torch.zeros_like(x)
-        counter = torch.zeros(1, dtype=torch.int32)
+    # Create profiler with block sampling configuration
+    profiler = Profiler(
+        block_sampling=enable_sampling,
+        k=k_value,
+        disable_buffer_load_check=True,
+        disable_load_mask_percentage_check=True,
+    )
 
-        # Create profiler with block sampling configuration
-        profiler = Profiler(
-            block_sampling=enable_sampling,
-            k=k_value,
-            disable_buffer_load_check=True,
-            disable_load_mask_percentage_check=True,
-        )
+    # Apply trace decorator and run kernel
+    traced_kernel = triton_viz.trace(profiler)(block_sampling_test_kernel)
+    traced_kernel[grid](x, y, counter, n_elements, BLOCK_SIZE=BLOCK_SIZE)
 
-        # Apply trace decorator and run kernel
-        traced_kernel = triton_viz.trace(profiler)(block_sampling_test_kernel)
-        traced_kernel[grid](x, y, counter, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    # Get actual execution count
+    actual_executions = counter.item()
 
-        # Get actual execution count
-        actual_executions = counter.item()
+    # Verify the count matches expectation
+    assert (
+        actual_executions == expected_executions
+    ), f"{test_name}: Expected {expected_executions} executions, got {actual_executions}"
 
-        # Verify the count matches expectation
+    # Verify profiler settings
+    if enable_sampling:
         assert (
-            actual_executions == expected_executions
-        ), f"{test_name}: Expected {expected_executions} executions, got {actual_executions}"
+            profiler.block_sampling is True
+        ), f"{test_name}: block_sampling should be True"
+        assert (
+            profiler.k == k_value
+        ), f"{test_name}: k should be {k_value}, got {profiler.k}"
