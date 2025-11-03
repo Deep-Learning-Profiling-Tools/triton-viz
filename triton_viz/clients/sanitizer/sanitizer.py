@@ -1183,10 +1183,14 @@ class SymbolicExpr:
 
         if self.op == "max":
             arr, self._constraints = self.input._to_z3()
+            if not arr:
+                raise ValueError("Cannot compute max of empty array")
             self._z3 = reduce(lambda a, b: If(a >= b, a, b), arr)
 
         if self.op == "min":
             arr, self._constraints = self.input._to_z3()
+            if not arr:
+                raise ValueError("Cannot compute min of empty array")
             self._z3 = reduce(lambda a, b: If(a <= b, a, b), arr)
 
         if self.op == "load" or self.op == "store":
