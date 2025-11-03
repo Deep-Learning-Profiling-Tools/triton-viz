@@ -115,12 +115,25 @@ class Tracer(Client):
                     return [f]
             return stack[-1:]
 
+        def post_allocate_callback(ret, *args, **kwargs):
+            assert hasattr(ret, "data")
+            self.tensors.append(ret)
+
         def pre_load_callback(ptr, mask, *args, **kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
             rec = Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
+
+        def pre_store_callback(ptr, value, mask, *args, **kwargs):
+            if not self.sample:
+                return
+            first_ptr = np.reshape(ptr.data, (-1))[0]
+            tensor = self._get_tensor(first_ptr)
+            rec = Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
@@ -132,10 +145,6 @@ class Tracer(Client):
                 return keys.data
             else:
                 return keys
-
-        def post_allocate_callback(ret, *args, **kwargs):
-            assert hasattr(ret, "data")
-            self.tensors.append(ret)
 
         def pre_masked_load_callback(ptr, keys, mask=None, *args, **kwargs):
             if not self.sample:
@@ -149,15 +158,6 @@ class Tracer(Client):
                     mask.data,
                 )
             )
-
-        def pre_store_callback(ptr, value, mask, *args, **kwargs):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            rec = Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
 
         def pre_masked_store_callback(ptr, keys, value, mask=None, *args, **kwargs):
             if not self.sample:
