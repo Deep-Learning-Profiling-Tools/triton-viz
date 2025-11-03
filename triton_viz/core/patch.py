@@ -448,68 +448,41 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         return
 
     def run_grid_loops(grid):
-        # Check if block sampling is enabled in the profiler
+        # Generate all possible indices
+        all_indices = []
+        for x in range(grid[0]):
+            for y in range(grid[1]):
+                for z in range(grid[2]):
+                    all_indices.append((x, y, z))
+
+        # Determine which indices to execute
         profiler = client_manager.get_client("profiler")
         if profiler and hasattr(profiler, "block_sampling") and profiler.block_sampling:
-            # Calculate total number of blocks
-            block_size = grid[0] * grid[1] * grid[2]
-            # Ensure k is within valid range
+            # Block sampling enabled - randomly sample k indices
+            block_size = len(all_indices)
             k = min(profiler.k, block_size)
-
-            # Generate all possible indices
-            all_indices = []
-            for x in range(grid[0]):
-                for y in range(grid[1]):
-                    for z in range(grid[2]):
-                        all_indices.append((x, y, z))
-
-            # Randomly sample k indices using numpy.random.permutation
             perm = np.random.permutation(block_size)[:k]
-            sampled_indices = [all_indices[i] for i in perm]
-
-            # Execute only the sampled iterations
-            for x, y, z in tqdm(
-                sampled_indices,
-                desc=f"Sampled Blocks ({k}/{block_size})",
-                leave=False,
-                disable=not cfg.report_grid_execution_progress,
-            ):
-                interpreter_builder.set_grid_idx(x, y, z)
-                client_manager.grid_idx_callback((x, y, z))
-                if not client_manager.pre_run_callback(self.fn):
-                    return
-                self.fn(**call_args)
-                if not client_manager.post_run_callback(self.fn):
-                    return
+            indices_to_execute = [all_indices[i] for i in perm]
+            desc = f"Sampled Blocks ({k}/{block_size})"
         else:
-            # Original implementation - run all iterations
-            for x in tqdm(
-                range(grid[0]),
-                desc="Grid X",
-                leave=False,
-                disable=not cfg.report_grid_execution_progress,
-            ):
-                for y in tqdm(
-                    range(grid[1]),
-                    desc="Grid Y",
-                    leave=False,
-                    disable=not (cfg.report_grid_execution_progress and grid[1] > 1),
-                ):
-                    for z in tqdm(
-                        range(grid[2]),
-                        desc="Grid Z",
-                        leave=False,
-                        disable=not (
-                            cfg.report_grid_execution_progress and grid[2] > 1
-                        ),
-                    ):
-                        interpreter_builder.set_grid_idx(x, y, z)
-                        client_manager.grid_idx_callback((x, y, z))
-                        if not client_manager.pre_run_callback(self.fn):
-                            return
-                        self.fn(**call_args)
-                        if not client_manager.post_run_callback(self.fn):
-                            return
+            # No sampling - execute all indices
+            indices_to_execute = all_indices
+            desc = "Grid Blocks"
+
+        # Execute the selected indices
+        for x, y, z in tqdm(
+            indices_to_execute,
+            desc=desc,
+            leave=False,
+            disable=not cfg.report_grid_execution_progress,
+        ):
+            interpreter_builder.set_grid_idx(x, y, z)
+            client_manager.grid_idx_callback((x, y, z))
+            if not client_manager.pre_run_callback(self.fn):
+                return
+            self.fn(**call_args)
+            if not client_manager.post_run_callback(self.fn):
+                return
 
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
