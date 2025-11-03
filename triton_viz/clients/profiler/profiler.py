@@ -4,7 +4,7 @@ from ...core.data import Op, Load, Store, AddPtr
 from .data import LoadStoreBytes
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
-from typing import Callable
+from typing import Callable, Optional
 
 
 class Profiler(Client):
@@ -43,7 +43,14 @@ class Profiler(Client):
             0  # Total number of False elements in all store masks
         )
 
+        # Block sampling state
+        self.sampled_blocks: Optional[set[tuple[int, ...]]] = None
+        self.current_grid_idx: Optional[tuple[int, ...]] = None
+
     def pre_run_callback(self, fn: Callable) -> bool:
+        # If block sampling is enabled, check if current block is selected
+        if self.block_sampling and self.sampled_blocks is not None:
+            return self.current_grid_idx in self.sampled_blocks
         return True
 
     def post_run_callback(self, fn: Callable) -> bool:
@@ -70,10 +77,30 @@ class Profiler(Client):
         pass
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
-        pass
+        # Store the current grid index
+        self.current_grid_idx = grid_idx
 
     def grid_callback(self, grid: tuple[int, ...]):
-        pass
+        # If block sampling is enabled, determine which blocks to sample
+        if self.block_sampling:
+            # Generate all possible indices
+            all_indices = []
+            for x in range(grid[0] if len(grid) > 0 else 1):
+                for y in range(grid[1] if len(grid) > 1 else 1):
+                    for z in range(grid[2] if len(grid) > 2 else 1):
+                        all_indices.append((x, y, z))
+
+            # Sample k blocks randomly
+            total_blocks = len(all_indices)
+            k = min(self.k if self.k is not None else 1, total_blocks)
+
+            # Randomly select k indices
+            perm = np.random.permutation(total_blocks)[:k]
+            sampled_indices = [all_indices[i] for i in perm]
+            self.sampled_blocks = set(sampled_indices)
+        else:
+            # No sampling - all blocks will be executed
+            self.sampled_blocks = None
 
     def _report_load_store_bytes(self, type, ptr: TensorHandle, mask: TensorHandle):
         dtype_tt = ptr.get_element_ty()
