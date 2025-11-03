@@ -151,7 +151,7 @@ class ClientManager:
         rets = []
         for client in self.clients.values():
             rets.append(client.pre_run_callback(fn))
-        return any(rets)
+        return all(rets) if rets else True
 
     def post_run_callback(self, fn: Callable) -> bool:
         rets = []

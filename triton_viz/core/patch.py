@@ -468,7 +468,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     interpreter_builder.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
                     if not client_manager.pre_run_callback(self.fn):
-                        return
+                        continue  # Skip this block
                     self.fn(**call_args)
                     if not client_manager.post_run_callback(self.fn):
                         return
