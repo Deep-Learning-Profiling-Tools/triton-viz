@@ -176,8 +176,9 @@ class KernelGrid {
             for (let x = 0; x < this.gridSize[0]; x++) {
                 const blockX = this.rect.x + x * (this.blockWidth + 1);
                 const blockY = this.rect.y + y * (this.blockHeight + 1);
-                const gridKey = `(${x}, ${y}, ${this.currentZ})`;
-                const blockData = this.visualizationData[gridKey] || [];
+                const gridKey1 = `(${x}, ${y}, ${this.currentZ})`;
+                const gridKey2 = `(${x},${y},${this.currentZ})`;
+                const blockData = this.visualizationData[gridKey1] || this.visualizationData[gridKey2] || [];
                 const block = new GridBlock(
                     blockX, blockY, this.blockWidth, this.blockHeight,
                     x, y, this.currentZ, blockData,
@@ -253,8 +254,12 @@ function determineMaxValues(visualizationData) {
     maxY = 0;
     maxZ = 0;
     const keys = Object.keys(visualizationData);
+    console.log('grid keys:', keys);
     keys.forEach(key => {
-        const [x, y, z] = key.replace(/[()]/g, '').split(', ').map(Number);
+        const [x, y, z] = key
+            .replace(/[()]/g, '')
+            .split(',')
+            .map(s => Number(String(s).trim()));
         if (x > maxX) maxX = x;
         if (y > maxY) maxY = y;
         if (z > maxZ) maxZ = z;

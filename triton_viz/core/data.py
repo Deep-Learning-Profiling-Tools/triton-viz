@@ -189,6 +189,11 @@ class Reshape(Op):
 
 
 @dataclass
+class Join(Op):
+    name: ClassVar[str] = "join"
+
+
+@dataclass
 class Fabs(Op):
     name: ClassVar[str] = "fabs"
 
@@ -226,6 +231,16 @@ class CumSum(Op):
 @dataclass
 class Bitcast(Op):
     name: ClassVar[str] = "bitcast"
+
+
+@dataclass
+class AtomicCas(Op):
+    name: ClassVar[str] = "atomic_cas"
+
+
+@dataclass
+class AtomicRMW(Op):
+    name: ClassVar[str] = "atomic_rmw"
 
 
 @dataclass

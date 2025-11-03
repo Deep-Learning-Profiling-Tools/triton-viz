@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Any, Optional
 from tqdm import tqdm
 
-from . import config as cfg
+from .config import config as cfg
 from dataclasses import dataclass
 from .callbacks import OpCallbacks, ForLoopCallbacks
 
@@ -34,6 +34,7 @@ from .data import (
     Rsqrt,
     CastImpl,
     Reshape,
+    Join,
     Fabs,
     Ashr,
     Advance,
@@ -42,6 +43,8 @@ from .data import (
     Trans,
     CumSum,
     Bitcast,
+    AtomicCas,
+    AtomicRMW,
 )
 import inspect
 import ast
@@ -81,6 +84,7 @@ op_list = [
     Rsqrt,
     CastImpl,
     Reshape,
+    Join,
     Fabs,
     Ashr,
     Advance,
@@ -89,6 +93,8 @@ op_list = [
     Trans,
     CumSum,
     Bitcast,
+    AtomicCas,
+    AtomicRMW,
 ]
 
 # Hardcoded operation attribute names to avoid issues with lambda functions
@@ -114,6 +120,7 @@ _OP_ATTR_NAMES = {
     Rsqrt: "create_rsqrt",
     CastImpl: "cast_impl",
     Reshape: "create_reshape",
+    Join: "create_join",
     Fabs: "create_fabs",
     Ashr: "create_ashr",
     Advance: "create_advance",
@@ -121,6 +128,8 @@ _OP_ATTR_NAMES = {
     Umulhi: "create_umulhi",
     Trans: "create_trans",
     Bitcast: "create_bitcast",
+    AtomicCas: "create_atomic_cas",
+    AtomicRMW: "create_atomic_rmw",
 }
 
 original_ops = {
@@ -145,6 +154,7 @@ original_ops = {
     Rsqrt: interpreter_builder.create_rsqrt,
     CastImpl: interpreter_builder.cast_impl,
     Reshape: interpreter_builder.create_reshape,
+    Join: interpreter_builder.create_join,
     Fabs: interpreter_builder.create_fabs,
     Ashr: interpreter_builder.create_ashr,
     Advance: interpreter_builder.create_advance,
@@ -152,6 +162,8 @@ original_ops = {
     Umulhi: interpreter_builder.create_umulhi,
     Trans: interpreter_builder.create_trans,
     Bitcast: interpreter_builder.create_bitcast,
+    AtomicCas: interpreter_builder.create_atomic_cas,
+    AtomicRMW: interpreter_builder.create_atomic_rmw,
 }
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
@@ -523,7 +535,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     interpreter_builder.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
                     if not client_manager.pre_run_callback(self.fn):
-                        return
+                        continue  # Skip this block
                     self.fn(**call_args)
                     if not client_manager.post_run_callback(self.fn):
                         return
@@ -532,11 +544,12 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
     argspec = inspect.getfullargspec(self.fn)
-    triton_viz_args = ["client_manager"]
+    triton_viz_args = ["client_manager", "jit_fn"]
     kwargs = {
         k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
     }
     client_manager = kwargs.pop("client_manager")
+    kwargs.pop("jit_fn")
     if cfg.virtual_memory:
         args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs)
     else:
