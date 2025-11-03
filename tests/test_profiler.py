@@ -216,3 +216,53 @@ def test_block_sampling(test_name, enable_sampling, k_value, expected_executions
         assert (
             profiler.k == k_value
         ), f"{test_name}: k should be {k_value}, got {profiler.k}"
+
+
+# ======== Skipping Load and Store ========
+@triton.jit
+def simple_kernel(in_ptr, out_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < N
+
+    data = tl.load(in_ptr + offsets, mask=mask, other=0.0)
+    result = data * 2.0
+    tl.store(out_ptr + offsets, result, mask=mask)
+
+
+def test_load_store_skip():
+    """Test that load/store operations can be skipped when disable_load_store_skipping=False."""
+    N = 128
+    BLOCK_SIZE = 32
+
+    # Create input data
+    x = torch.ones(N, dtype=torch.float32) * 3.0  # All values are 3.0
+    y1 = torch.zeros(N, dtype=torch.float32)  # Output for normal execution
+    y2 = torch.zeros(N, dtype=torch.float32)  # Output for skipped execution
+
+    # Test 1: Normal execution (skipping disabled)
+    skip_load_store_profiler1 = Profiler(
+        disable_load_store_skipping=True,  # Disable skipping - normal execution
+        disable_buffer_load_check=True,
+    )
+    traced_kernel1 = triton_viz.trace(skip_load_store_profiler1)(simple_kernel)
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
+    traced_kernel1[grid](x, y1, N, BLOCK_SIZE)
+
+    # Verify normal execution: output should be input * 2 = 6.0
+    assert torch.allclose(
+        y1, torch.ones_like(y1) * 6.0
+    ), "Normal execution should produce 6.0"
+
+    # Test 2: Skipped execution (skipping enabled)
+    skip_load_store_profiler2 = Profiler(
+        disable_load_store_skipping=False,  # Enable skipping (default)
+        disable_buffer_load_check=True,
+    )
+    traced_kernel2 = triton_viz.trace(skip_load_store_profiler2)(simple_kernel)
+    traced_kernel2[grid](x, y2, N, BLOCK_SIZE)
+
+    # Verify skipped execution: output should remain 0.0 (unchanged)
+    assert torch.allclose(
+        y2, torch.zeros_like(y2)
+    ), "Skipped execution should leave output unchanged"
