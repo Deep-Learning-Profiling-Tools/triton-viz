@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from collections.abc import Callable
 from typing import Any, Optional
 from tqdm import tqdm
+import torch
 
 from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -443,31 +444,68 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         return
 
     def run_grid_loops(grid):
-        for x in tqdm(
-            range(grid[0]),
-            desc="Grid X",
-            leave=False,
-            disable=not cfg.report_grid_execution_progress,
-        ):
-            for y in tqdm(
-                range(grid[1]),
-                desc="Grid Y",
+        # Check if block sampling is enabled in the profiler
+        profiler = client_manager.get_client("profiler")
+        if profiler and hasattr(profiler, "block_sampling") and profiler.block_sampling:
+            # Calculate total number of blocks
+            block_size = grid[0] * grid[1] * grid[2]
+            # Ensure k is within valid range
+            k = min(profiler.k, block_size)
+
+            # Generate all possible indices
+            all_indices = []
+            for x in range(grid[0]):
+                for y in range(grid[1]):
+                    for z in range(grid[2]):
+                        all_indices.append((x, y, z))
+
+            # Randomly sample k indices using torch.randperm
+            perm = torch.randperm(block_size)[:k]
+            sampled_indices = [all_indices[i] for i in perm.tolist()]
+
+            # Execute only the sampled iterations
+            for x, y, z in tqdm(
+                sampled_indices,
+                desc=f"Sampled Blocks ({k}/{block_size})",
                 leave=False,
-                disable=not (cfg.report_grid_execution_progress and grid[1] > 1),
+                disable=not cfg.report_grid_execution_progress,
             ):
-                for z in tqdm(
-                    range(grid[2]),
-                    desc="Grid Z",
+                interpreter_builder.set_grid_idx(x, y, z)
+                client_manager.grid_idx_callback((x, y, z))
+                if not client_manager.pre_run_callback(self.fn):
+                    return
+                self.fn(**call_args)
+                if not client_manager.post_run_callback(self.fn):
+                    return
+        else:
+            # Original implementation - run all iterations
+            for x in tqdm(
+                range(grid[0]),
+                desc="Grid X",
+                leave=False,
+                disable=not cfg.report_grid_execution_progress,
+            ):
+                for y in tqdm(
+                    range(grid[1]),
+                    desc="Grid Y",
                     leave=False,
-                    disable=not (cfg.report_grid_execution_progress and grid[2] > 1),
+                    disable=not (cfg.report_grid_execution_progress and grid[1] > 1),
                 ):
-                    interpreter_builder.set_grid_idx(x, y, z)
-                    client_manager.grid_idx_callback((x, y, z))
-                    if not client_manager.pre_run_callback(self.fn):
-                        return
-                    self.fn(**call_args)
-                    if not client_manager.post_run_callback(self.fn):
-                        return
+                    for z in tqdm(
+                        range(grid[2]),
+                        desc="Grid Z",
+                        leave=False,
+                        disable=not (
+                            cfg.report_grid_execution_progress and grid[2] > 1
+                        ),
+                    ):
+                        interpreter_builder.set_grid_idx(x, y, z)
+                        client_manager.grid_idx_callback((x, y, z))
+                        if not client_manager.pre_run_callback(self.fn):
+                            return
+                        self.fn(**call_args)
+                        if not client_manager.post_run_callback(self.fn):
+                            return
 
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments

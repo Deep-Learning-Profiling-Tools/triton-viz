@@ -15,6 +15,8 @@ class Profiler(Client):
         callpath: bool = True,
         disable_buffer_load_check: bool = False,
         disable_load_mask_percentage_check: bool = False,
+        block_sampling: bool = False,
+        k: int | None = None,
     ):
         super().__init__()  # Initialize parent class
         # Enable ASM collection for the profiler
@@ -24,6 +26,8 @@ class Profiler(Client):
         self.has_buffer_load = False
         self.disable_buffer_load_check = disable_buffer_load_check
         self.disable_load_mask_percentage_check = disable_load_mask_percentage_check
+        self.block_sampling = block_sampling
+        self.k = k
 
         # Counters for mask statistics
         self.load_mask_total_count = (

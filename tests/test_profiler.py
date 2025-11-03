@@ -126,3 +126,83 @@ def test_mask_percentage():
     assert (
         abs(actual_store_masked_percentage - expected_store_masked_percentage) < 0.01
     ), f"Expected store masked percentage {expected_store_masked_percentage:.2f}%, got {actual_store_masked_percentage:.2f}%"
+
+
+# ======== Block Sampling ========
+@triton.jit
+def block_sampling_test_kernel(
+    x_ptr,
+    y_ptr,
+    counter_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Test kernel that increments a counter for each block executed.
+    This allows us to verify that block sampling is working correctly.
+    """
+    pid = tl.program_id(0)
+
+    # Atomically increment counter to count executions
+    tl.atomic_add(counter_ptr, 1)
+
+    # Normal kernel logic
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = x * 2
+    tl.store(y_ptr + offsets, y, mask=mask)
+
+
+def test_block_sampling():
+    """
+    Test that the block sampling feature correctly samples k blocks from the grid.
+
+    This test verifies:
+    - Block sampling can be enabled/disabled
+    - The k parameter correctly limits the number of blocks executed
+    - When k > total blocks, all blocks are executed
+    - The sampling works with different k values
+    """
+    # Test configuration
+    n_elements = 1024
+    BLOCK_SIZE = 128
+    grid = (n_elements // BLOCK_SIZE,)  # Creates 8 blocks
+    total_blocks = grid[0]
+
+    # Test cases: (test_name, enable_sampling, k_value, expected_executions)
+    test_cases = [
+        ("No block sampling", False, None, total_blocks),
+        ("Block sampling k=1", True, 1, 1),
+        ("Block sampling k=3", True, 3, 3),
+        ("Block sampling k=5", True, 5, 5),
+        ("Block sampling k=8 (all blocks)", True, 8, 8),
+        ("Block sampling k=20 (exceeds total)", True, 20, 8),
+    ]
+
+    for test_name, enable_sampling, k_value, expected_executions in test_cases:
+        # Create test data
+        x = torch.randn(n_elements, dtype=torch.float32)
+        y = torch.zeros_like(x)
+        counter = torch.zeros(1, dtype=torch.int32)
+
+        # Create profiler with block sampling configuration
+        profiler = Profiler(
+            block_sampling=enable_sampling,
+            k=k_value,
+            disable_buffer_load_check=True,
+            disable_load_mask_percentage_check=True,
+        )
+
+        # Apply trace decorator and run kernel
+        traced_kernel = triton_viz.trace(profiler)(block_sampling_test_kernel)
+        traced_kernel[grid](x, y, counter, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+
+        # Get actual execution count
+        actual_executions = counter.item()
+
+        # Verify the count matches expectation
+        assert (
+            actual_executions == expected_executions
+        ), f"{test_name}: Expected {expected_executions} executions, got {actual_executions}"
