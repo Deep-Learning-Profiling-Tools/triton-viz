@@ -432,8 +432,6 @@ def test_reduce_min_single_element():
 
 def test_reduce_max_empty_array():
     """Test that max reduce operation raises ValueError for empty array."""
-    import pytest
-
     input_arr = SymbolicExpr("const", np.array([]), tl.int32)
     max_expr = SymbolicExpr("max", input_arr, None, False)
     with pytest.raises(ValueError, match="Cannot compute max of empty array"):
@@ -442,8 +440,6 @@ def test_reduce_max_empty_array():
 
 def test_reduce_min_empty_array():
     """Test that min reduce operation raises ValueError for empty array."""
-    import pytest
-
     input_arr = SymbolicExpr("const", np.array([]), tl.int32)
     min_expr = SymbolicExpr("min", input_arr, None, False)
     with pytest.raises(ValueError, match="Cannot compute min of empty array"):
