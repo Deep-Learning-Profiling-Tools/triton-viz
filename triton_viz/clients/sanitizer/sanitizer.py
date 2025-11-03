@@ -2,7 +2,7 @@ import traceback
 from collections import namedtuple
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from functools import cached_property
+from functools import cached_property, reduce
 from typing import Any, Optional, Union
 import re
 
@@ -520,9 +520,9 @@ class SanitizerBruteForce(Sanitizer):
         if self.abort_on_error:
             if np.any(oob_record.invalid_access_masks):
                 print_oob_record(oob_record)
-                assert (
-                    False
-                ), "Out-of-bounds access detected. See detailed report above."
+                assert False, (
+                    "Out-of-bounds access detected. See detailed report above."
+                )
         else:
             self.records.append(oob_record)
 
@@ -536,9 +536,9 @@ class SanitizerBruteForce(Sanitizer):
 
     def arg_callback(self, name, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):
-            assert check_storage_contiguous(
-                arg
-            ), "The address sanitizer only supports contiguouly stored tensors for now"
+            assert check_storage_contiguous(arg), (
+                "The address sanitizer only supports contiguouly stored tensors for now"
+            )
             self.tensors.append(arg)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
@@ -1182,10 +1182,12 @@ class SymbolicExpr:
             self._z3 = Sum(arr)
 
         if self.op == "max":
-            raise NotImplementedError("_to_z3 of max is not implemented yet")
+            arr, self._constraints = self.input._to_z3()
+            self._z3 = reduce(lambda a, b: If(a >= b, a, b), arr)
 
         if self.op == "min":
-            raise NotImplementedError("_to_z3 of min is not implemented yet")
+            arr, self._constraints = self.input._to_z3()
+            self._z3 = reduce(lambda a, b: If(a <= b, a, b), arr)
 
         if self.op == "load" or self.op == "store":
             # Load and store operations
@@ -1864,7 +1866,9 @@ class SanitizerSymbolicExecution(Sanitizer):
                 == len(offsets)
                 == len(tensor_shape)
                 == len(order)
-            ), f"Length of shape ({len(shape)}), strides ({len(strides)}), offsets ({len(offsets)}), tensor_shape ({len(tensor_shape)}) and order ({len(order)}) must be the same!"
+            ), (
+                f"Length of shape ({len(shape)}), strides ({len(strides)}), offsets ({len(offsets)}), tensor_shape ({len(tensor_shape)}) and order ({len(order)}) must be the same!"
+            )
             shape = [SymbolicExpr.from_value(shape_i) for shape_i in shape]
             strides = [SymbolicExpr.from_value(strides_i) for strides_i in strides]
             offsets = [SymbolicExpr.from_value(offset_i) for offset_i in offsets]
