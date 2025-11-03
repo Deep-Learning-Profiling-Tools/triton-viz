@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from collections.abc import Callable
 from typing import Any, Optional
 from tqdm import tqdm
-import torch
+import numpy as np
 
 from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -463,9 +463,9 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     for z in range(grid[2]):
                         all_indices.append((x, y, z))
 
-            # Randomly sample k indices using torch.randperm
-            perm = torch.randperm(block_size)[:k]
-            sampled_indices = [all_indices[i] for i in perm.tolist()]
+            # Randomly sample k indices using numpy.random.permutation
+            perm = np.random.permutation(block_size)[:k]
+            sampled_indices = [all_indices[i] for i in perm]
 
             # Execute only the sampled iterations
             for x, y, z in tqdm(
