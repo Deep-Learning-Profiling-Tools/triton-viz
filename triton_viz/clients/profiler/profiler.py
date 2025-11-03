@@ -4,7 +4,14 @@ from ...core.data import Op, Load, Store, AddPtr
 from .data import LoadStoreBytes
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
+
+
+@dataclass(frozen=False)
+class LoopInfo:
+    length: Optional[int] = None
+    range_type: str = "unknown"
 
 
 class Profiler(Client):
@@ -29,12 +36,7 @@ class Profiler(Client):
         self.disable_for_loop_unroll_check = disable_for_loop_unroll_check
 
         # For-loop statistics
-        self.loop_info: list[
-            tuple[int, int]
-        ] = []  # List of (lineno, total_steps) tuples
-        self.loop_linenos_seen: set[
-            int
-        ] = set()  # Set to track already seen line numbers
+        self.loop_info: dict[int, LoopInfo] = {}
         self.disable_load_mask_percentage_check = disable_load_mask_percentage_check
         self.block_sampling = block_sampling
         self.k = k
@@ -207,6 +209,10 @@ class Profiler(Client):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
+        def loop_hook_range_type(lineno: int, range_type: str) -> None:
+            cur = self.loop_info.get(lineno, LoopInfo())
+            self.loop_info[lineno] = replace(cur, range_type=range_type)
+
         def loop_hook_before(lineno, iterable):
             if self.disable_for_loop_unroll_check:
                 return
@@ -216,19 +222,21 @@ class Profiler(Client):
 
             # Only record each unique loop (by line number) once
             # Different blocks will execute the same loop, so we deduplicate by lineno
-            if lineno in self.loop_linenos_seen:
+            if self.loop_info[lineno].length is not None:
                 return
 
             # Record loop information: line number and total steps
             length = len(iterable)
-            self.loop_info.append((lineno, length))
-            self.loop_linenos_seen.add(lineno)
+            # Update length in LoopInfo
+            cur = self.loop_info.get(lineno, LoopInfo())
+            self.loop_info[lineno] = replace(cur, length=length)
 
         def loop_hook_after(lineno: int) -> None:
             # No action needed after loop for profiler
             pass
 
         return ForLoopCallbacks(
+            range_type_callback=loop_hook_range_type,
             before_loop_callback=loop_hook_before,
             after_loop_callback=loop_hook_after,
         )
@@ -241,10 +249,13 @@ class Profiler(Client):
             print("=" * 60)
             print(f"\nTotal for-loops detected: {len(self.loop_info)}\n")
 
-            for idx, (lineno, total_steps) in enumerate(self.loop_info, 1):
+            for idx, (lineno, loop_info) in enumerate(self.loop_info.items(), 1):
                 print(f"Loop #{idx}:")
                 print(f"  Line number:    {lineno}")
-                print(f"  Total steps:    {total_steps}")
+                print(f"  Range type:     {loop_info.range_type}")
+                print(f"  Total steps:    {loop_info.length}")
+
+            print("=" * 60)
 
         # Calculate and print mask statistics only if load mask percentage check is enabled
         if not self.disable_load_mask_percentage_check:
