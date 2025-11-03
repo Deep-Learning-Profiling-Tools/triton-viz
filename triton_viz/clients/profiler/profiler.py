@@ -165,12 +165,24 @@ class Profiler(Client):
                 self.load_mask_total_count += total_count
                 self.load_mask_false_count += false_count
 
+        def load_overrider(
+            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
+        ):
+            # Skip actual load, return zeros
+            dtype_tt = ptr.get_element_ty()
+            dtype_np = _get_np_dtype(dtype_tt)
+            return TensorHandle(np.zeros_like(ptr.data, dtype=dtype_np), dtype_tt)
+
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             self._report_load_store_bytes("store", ptr, mask)
             if not self.disable_load_mask_percentage_check:
                 total_count, false_count = _get_mask_stats(mask)
                 self.store_mask_total_count += total_count
                 self.store_mask_false_count += false_count
+
+        def store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
+            # Skip actual store
+            pass
 
         def pre_addptr_callback(ptr, offset):
             dtype_tt = ptr.get_element_ty()
@@ -188,9 +200,13 @@ class Profiler(Client):
                 self._check_32bit_range(byte_offset, element_bytewidth, offset_data)
 
         if op_type is Load:
-            return OpCallbacks(before_callback=pre_load_callback)
+            return OpCallbacks(
+                before_callback=pre_load_callback, op_overrider=load_overrider
+            )
         elif op_type is Store:
-            return OpCallbacks(before_callback=pre_store_callback)
+            return OpCallbacks(
+                before_callback=pre_store_callback, op_overrider=store_overrider
+            )
         elif op_type is AddPtr:
             return OpCallbacks(before_callback=pre_addptr_callback)
 
