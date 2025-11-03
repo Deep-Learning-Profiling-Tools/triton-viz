@@ -9,7 +9,7 @@ from triton_viz.clients import Profiler
 
 
 # ======== Case 2: Check if for loop can be unrolled ========
-@triton_viz.trace(clients=(profiler := Profiler(disable_buffer_load_check=True)))
+@triton_viz.trace(clients=(loop_profiler := Profiler(disable_buffer_load_check=True)))
 @triton.jit
 def for_loop_test_kernel(
     in_ptr,
@@ -72,10 +72,10 @@ def test_for_loop_statistics():
 
     # Verify the loop statistics from profiler
     assert (
-        len(profiler.loop_info) == expected_num_loops
-    ), f"Expected {expected_num_loops} loops, got {len(profiler.loop_info)}"
+        len(loop_profiler.loop_info) == expected_num_loops
+    ), f"Expected {expected_num_loops} loops, got {len(loop_profiler.loop_info)}"
 
-    for idx, (lineno, total_steps) in enumerate(profiler.loop_info):
+    for idx, (lineno, total_steps) in enumerate(loop_profiler.loop_info):
         expected_steps = expected_loop_steps[idx]
         assert (
             total_steps == expected_steps
@@ -87,7 +87,7 @@ def test_for_loop_statistics():
 
 
 # ======== Case 3: Check masked element percentage for tuning BLOCK_SIZE ========
-@triton_viz.trace(clients=(profiler := Profiler(disable_buffer_load_check=True)))
+@triton_viz.trace(clients=(mask_profiler := Profiler(disable_buffer_load_check=True)))
 @triton.jit
 def mask_percentage_test_kernel(
     in_ptr,
@@ -176,27 +176,27 @@ def test_mask_percentage():
 
     # Verify the statistics from profiler
     assert (
-        profiler.load_mask_total_count == expected_load_mask_total
-    ), f"Expected {expected_load_mask_total} total load mask elements, got {profiler.load_mask_total_count}"
+        mask_profiler.load_mask_total_count == expected_load_mask_total
+    ), f"Expected {expected_load_mask_total} total load mask elements, got {mask_profiler.load_mask_total_count}"
     assert (
-        profiler.load_mask_false_count == expected_load_mask_false
-    ), f"Expected {expected_load_mask_false} false load mask elements, got {profiler.load_mask_false_count}"
+        mask_profiler.load_mask_false_count == expected_load_mask_false
+    ), f"Expected {expected_load_mask_false} false load mask elements, got {mask_profiler.load_mask_false_count}"
     assert (
-        profiler.store_mask_total_count == expected_store_mask_total
-    ), f"Expected {expected_store_mask_total} total store mask elements, got {profiler.store_mask_total_count}"
+        mask_profiler.store_mask_total_count == expected_store_mask_total
+    ), f"Expected {expected_store_mask_total} total store mask elements, got {mask_profiler.store_mask_total_count}"
     assert (
-        profiler.store_mask_false_count == expected_store_mask_false
-    ), f"Expected {expected_store_mask_false} false store mask elements, got {profiler.store_mask_false_count}"
+        mask_profiler.store_mask_false_count == expected_store_mask_false
+    ), f"Expected {expected_store_mask_false} false store mask elements, got {mask_profiler.store_mask_false_count}"
 
     # Verify the masked percentage calculation
     expected_load_masked_percentage = (56 / 384) * 100  # ~14.58%
     expected_store_masked_percentage = (56 / 384) * 100  # ~14.58%
 
     actual_load_masked_percentage = (
-        profiler.load_mask_false_count / profiler.load_mask_total_count
+        mask_profiler.load_mask_false_count / mask_profiler.load_mask_total_count
     ) * 100
     actual_store_masked_percentage = (
-        profiler.store_mask_false_count / profiler.store_mask_total_count
+        mask_profiler.store_mask_false_count / mask_profiler.store_mask_total_count
     ) * 100
 
     assert (
