@@ -172,6 +172,18 @@ class NDArray:
     def __or__(self, other):
         return self._binary_op(other, lambda a, b: a | b, "or", "|")
 
+    def reshape(self, *args, **kwargs):
+        return NDArray(
+            value=self.data.reshape(*args), name=f"{self.name}_reshape", **kwargs
+        )
+
+    def broadcast_to(self, *args, **kwargs):
+        return NDArray(
+            value=np.broadcast_to(self.data, *args),
+            name=f"{self.name}_broadcast_to",
+            **kwargs,
+        )
+
 
 class Builder:
     def __init__(self, grid_dims=None):
@@ -370,6 +382,35 @@ class Builder:
     def copy(self, x: NDArray, **kwargs):
         return self._unary_op(x, np.copy, "copy", **kwargs)
 
+    def sum(self, x: NDArray, *args, mask=None, **kwargs):
+        if mask is not None:
+            kwargs["where"] = mask.data
+        return NDArray(
+            value=x.data.sum(*args, **kwargs), name=f"{x.name}_sum", **kwargs
+        )
+
+    def square(self, x: NDArray, **kwargs):
+        return self._unary_op(x, np.square, "square", **kwargs)
+
+    def rsqrt(self, x: NDArray, **kwargs):
+        return self._unary_op(x, lambda v: 1 / np.sqrt(v), "rsqrt", **kwargs)
+
+    def multiply(self, x: NDArray, y: NDArray, **kwargs):
+        if isinstance(y, NDArray):
+            return NDArray(
+                value=np.multiply(x.data, y.data),
+                name=f"{x.name}_multiply_{y.name}",
+                **kwargs,
+            )
+        elif np.isscalar(y):
+            return NDArray(
+                value=np.multiply(x.data, y),
+                name=f"{x.name}_multiply_scalar",
+                **kwargs,
+            )
+        else:
+            raise TypeError(f"Unsupported type for multiply: {type(y)}")
+
     def range(self, stop):
         return range(stop)
 
@@ -399,6 +440,10 @@ def nki_patch_lang():
     nl.mgrid = NDArray(value=np.mgrid, buffer=nl.sbuf, name="mgrid")
     nl.matmul = nki_builder.matmul
     nl.copy = nki_builder.copy
+    nl.sum = nki_builder.sum
+    nl.square = nki_builder.square
+    nl.rsqrt = nki_builder.rsqrt
+    nl.multiply = nki_builder.multiply
 
     # attention-specific
     nl.load_transpose2d = nki_builder.load_transpose2d
