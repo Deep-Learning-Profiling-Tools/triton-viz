@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 import triton
 import triton.language as tl
@@ -7,8 +8,115 @@ import triton_viz
 from triton_viz.clients import Profiler
 
 
+# ======== Case 2: Check if for loop can be unrolled ========
+@triton_viz.trace(
+    clients=(
+        loop_profiler := Profiler(
+            disable_buffer_load_check=True, disable_load_mask_percentage_check=True
+        )
+    )
+)
+@triton.jit
+def for_loop_test_kernel(
+    in_ptr,
+    out_ptr,
+    N: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Test kernel with for-loops to verify loop statistics tracking.
+
+    This kernel contains 4 for-loops:
+    - First loop: Python range, iterates 10 times
+    - Second loop: Python range, iterates 5 times
+    - Third loop: tl.range, iterates 8 times
+    - Fourth loop: tl.static_range, iterates 6 times
+    """
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < N
+
+    # Load input
+    x = tl.load(in_ptr + offsets, mask=mask, other=0.0)
+
+    # First for-loop: Python range, 10 iterations
+    result = x
+    for i in range(10):
+        result = result + 1.0
+
+    # Second for-loop: Python range, 5 iterations
+    for j in range(5):
+        result = result * 2.0
+
+    # Third for-loop: tl.range, 8 iterations
+    for k in tl.range(2, 10):  # 2, 3, 4, 5, 6, 7, 8, 9
+        result = result + 0.5
+
+    # Fourth for-loop: tl.static_range, 6 iterations
+    for m in tl.static_range(0, 12, 2):  # 0, 2, 4, 6, 8, 10
+        result = result - 0.25
+
+    # Store result
+    tl.store(out_ptr + offsets, result, mask=mask)
+
+
+def test_for_loop_statistics():
+    """
+    Test that the profiler correctly tracks for-loop statistics.
+    """
+    N = 100
+    BLOCK_SIZE = 32
+    num_blocks = triton.cdiv(N, BLOCK_SIZE)
+
+    # Create input/output tensors
+    x = torch.randn(N, dtype=torch.float32)
+    y = torch.empty(N, dtype=torch.float32)
+
+    # Run the kernel
+    grid = (num_blocks,)
+    for_loop_test_kernel[grid](x, y, N, BLOCK_SIZE)
+
+    # Expected loop statistics:
+    # The kernel has 4 for-loops, but they are executed once per grid
+    # Each loop should be recorded only once (when first encountered)
+    # Loop 1: range(10) -> 10 steps, type: python_range
+    # Loop 2: range(5) -> 5 steps, type: python_range
+    # Loop 3: tl.range(2, 10) -> 8 steps, type: tl_range
+    # Loop 4: tl.static_range(0, 12, 2) -> 6 steps, type: tl_static_range
+
+    expected_num_loops = 4
+    expected_loop_steps = [10, 5, 8, 6]
+    expected_range_types = [
+        "python_range",
+        "python_range",
+        "tl_range",
+        "tl_static_range",
+    ]
+
+    # Verify the loop statistics from profiler
+    assert (
+        len(loop_profiler.loop_info) == expected_num_loops
+    ), f"Expected {expected_num_loops} loops, got {len(loop_profiler.loop_info)}"
+
+    for idx, (lineno, loop_info) in enumerate(loop_profiler.loop_info.items()):
+        expected_steps = expected_loop_steps[idx]
+        expected_type = expected_range_types[idx]
+
+        assert (
+            loop_info.length == expected_steps
+        ), f"Loop #{idx+1}: Expected {expected_steps} steps, got {loop_info.length}"
+        assert (
+            loop_info.range_type == expected_type
+        ), f"Loop #{idx+1}: Expected type {expected_type}, got {loop_info.range_type}"
+        assert isinstance(
+            lineno, int
+        ), f"Loop #{idx+1}: lineno should be int, got {type(lineno)}"
+        assert lineno > 0, f"Loop #{idx+1}: lineno should be positive, got {lineno}"
+
+
 # ======== Case 3: Check masked element percentage for tuning BLOCK_SIZE ========
-@triton_viz.trace(clients=(profiler := Profiler(disable_buffer_load_check=True)))
+@triton_viz.trace(clients=(mask_profiler := Profiler(disable_buffer_load_check=True)))
 @triton.jit
 def mask_percentage_test_kernel(
     in_ptr,
@@ -97,27 +205,27 @@ def test_mask_percentage():
 
     # Verify the statistics from profiler
     assert (
-        profiler.load_mask_total_count == expected_load_mask_total
-    ), f"Expected {expected_load_mask_total} total load mask elements, got {profiler.load_mask_total_count}"
+        mask_profiler.load_mask_total_count == expected_load_mask_total
+    ), f"Expected {expected_load_mask_total} total load mask elements, got {mask_profiler.load_mask_total_count}"
     assert (
-        profiler.load_mask_false_count == expected_load_mask_false
-    ), f"Expected {expected_load_mask_false} false load mask elements, got {profiler.load_mask_false_count}"
+        mask_profiler.load_mask_false_count == expected_load_mask_false
+    ), f"Expected {expected_load_mask_false} false load mask elements, got {mask_profiler.load_mask_false_count}"
     assert (
-        profiler.store_mask_total_count == expected_store_mask_total
-    ), f"Expected {expected_store_mask_total} total store mask elements, got {profiler.store_mask_total_count}"
+        mask_profiler.store_mask_total_count == expected_store_mask_total
+    ), f"Expected {expected_store_mask_total} total store mask elements, got {mask_profiler.store_mask_total_count}"
     assert (
-        profiler.store_mask_false_count == expected_store_mask_false
-    ), f"Expected {expected_store_mask_false} false store mask elements, got {profiler.store_mask_false_count}"
+        mask_profiler.store_mask_false_count == expected_store_mask_false
+    ), f"Expected {expected_store_mask_false} false store mask elements, got {mask_profiler.store_mask_false_count}"
 
     # Verify the masked percentage calculation
     expected_load_masked_percentage = (56 / 384) * 100  # ~14.58%
     expected_store_masked_percentage = (56 / 384) * 100  # ~14.58%
 
     actual_load_masked_percentage = (
-        profiler.load_mask_false_count / profiler.load_mask_total_count
+        mask_profiler.load_mask_false_count / mask_profiler.load_mask_total_count
     ) * 100
     actual_store_masked_percentage = (
-        profiler.store_mask_false_count / profiler.store_mask_total_count
+        mask_profiler.store_mask_false_count / mask_profiler.store_mask_total_count
     ) * 100
 
     assert (
@@ -126,3 +234,142 @@ def test_mask_percentage():
     assert (
         abs(actual_store_masked_percentage - expected_store_masked_percentage) < 0.01
     ), f"Expected store masked percentage {expected_store_masked_percentage:.2f}%, got {actual_store_masked_percentage:.2f}%"
+
+
+# ======== Block Sampling ========
+@triton.jit
+def block_sampling_test_kernel(
+    x_ptr,
+    y_ptr,
+    counter_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Test kernel that increments a counter for each block executed.
+    This allows us to verify that block sampling is working correctly.
+    """
+    pid = tl.program_id(0)
+
+    # Atomically increment counter to count executions
+    tl.atomic_add(counter_ptr, 1)
+
+    # Normal kernel logic
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = x * 2
+    tl.store(y_ptr + offsets, y, mask=mask)
+
+
+@pytest.mark.parametrize(
+    "test_name,enable_sampling,k_value,expected_executions",
+    [
+        ("No block sampling", False, None, 8),
+        ("Block sampling k=1", True, 1, 1),
+        ("Block sampling k=3", True, 3, 3),
+        ("Block sampling k=5", True, 5, 5),
+        ("Block sampling k=8 (all blocks)", True, 8, 8),
+        ("Block sampling k=20 (exceeds total)", True, 20, 8),
+    ],
+    ids=lambda x: x if isinstance(x, str) else str(x),
+)
+def test_block_sampling(test_name, enable_sampling, k_value, expected_executions):
+    """
+    Test that the block sampling feature correctly samples k blocks from the grid.
+
+    This test verifies:
+    - Block sampling can be enabled/disabled
+    - The k parameter correctly limits the number of blocks executed
+    - When k > total blocks, all blocks are executed
+    - The sampling works with different k values
+    """
+    # Test configuration
+    n_elements = 1024
+    BLOCK_SIZE = 128
+    grid = (n_elements // BLOCK_SIZE,)  # Creates 8 blocks
+
+    # Create test data
+    x = torch.randn(n_elements, dtype=torch.float32)
+    y = torch.zeros_like(x)
+    counter = torch.zeros(1, dtype=torch.int32)
+
+    # Create profiler with block sampling configuration
+    profiler = Profiler(
+        block_sampling=enable_sampling,
+        k=k_value,
+        disable_buffer_load_check=True,
+        disable_load_mask_percentage_check=True,
+    )
+
+    # Apply trace decorator and run kernel
+    traced_kernel = triton_viz.trace(profiler)(block_sampling_test_kernel)
+    traced_kernel[grid](x, y, counter, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+
+    # Get actual execution count
+    actual_executions = counter.item()
+
+    # Verify the count matches expectation
+    assert (
+        actual_executions == expected_executions
+    ), f"{test_name}: Expected {expected_executions} executions, got {actual_executions}"
+
+    # Verify profiler settings
+    if enable_sampling:
+        assert (
+            profiler.block_sampling is True
+        ), f"{test_name}: block_sampling should be True"
+        assert (
+            profiler.k == k_value
+        ), f"{test_name}: k should be {k_value}, got {profiler.k}"
+
+
+# ======== Skipping Load and Store ========
+@triton.jit
+def simple_kernel(in_ptr, out_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < N
+
+    data = tl.load(in_ptr + offsets, mask=mask, other=0.0)
+    result = data * 2.0
+    tl.store(out_ptr + offsets, result, mask=mask)
+
+
+def test_load_store_skip():
+    """Test that load/store operations can be skipped when disable_load_store_skipping=False."""
+    N = 128
+    BLOCK_SIZE = 32
+
+    # Create input data
+    x = torch.ones(N, dtype=torch.float32) * 3.0  # All values are 3.0
+    y1 = torch.zeros(N, dtype=torch.float32)  # Output for normal execution
+    y2 = torch.zeros(N, dtype=torch.float32)  # Output for skipped execution
+
+    # Test 1: Normal execution (skipping disabled)
+    skip_load_store_profiler1 = Profiler(
+        disable_load_store_skipping=True,  # Disable skipping - normal execution
+        disable_buffer_load_check=True,
+    )
+    traced_kernel1 = triton_viz.trace(skip_load_store_profiler1)(simple_kernel)
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
+    traced_kernel1[grid](x, y1, N, BLOCK_SIZE)
+
+    # Verify normal execution: output should be input * 2 = 6.0
+    assert torch.allclose(
+        y1, torch.ones_like(y1) * 6.0
+    ), "Normal execution should produce 6.0"
+
+    # Test 2: Skipped execution (skipping enabled)
+    skip_load_store_profiler2 = Profiler(
+        disable_load_store_skipping=False,  # Enable skipping (default)
+        disable_buffer_load_check=True,
+    )
+    traced_kernel2 = triton_viz.trace(skip_load_store_profiler2)(simple_kernel)
+    traced_kernel2[grid](x, y2, N, BLOCK_SIZE)
+
+    # Verify skipped execution: output should remain 0.0 (unchanged)
+    assert torch.allclose(
+        y2, torch.zeros_like(y2)
+    ), "Skipped execution should leave output unchanged"

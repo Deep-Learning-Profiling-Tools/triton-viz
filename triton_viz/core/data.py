@@ -286,6 +286,11 @@ class AtomicCas(Op):
 
 
 @dataclass
+class AtomicRMW(Op):
+    name: ClassVar[str] = "atomic_rmw"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str
