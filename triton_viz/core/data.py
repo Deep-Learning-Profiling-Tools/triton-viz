@@ -189,6 +189,11 @@ class Reshape(Op):
 
 
 @dataclass
+class Join(Op):
+    name: ClassVar[str] = "join"
+
+
+@dataclass
 class Fabs(Op):
     name: ClassVar[str] = "fabs"
 
@@ -231,6 +236,11 @@ class Bitcast(Op):
 @dataclass
 class AtomicCas(Op):
     name: ClassVar[str] = "atomic_cas"
+
+
+@dataclass
+class AtomicRMW(Op):
+    name: ClassVar[str] = "atomic_rmw"
 
 
 @dataclass

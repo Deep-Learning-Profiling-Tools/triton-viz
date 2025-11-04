@@ -55,6 +55,7 @@ from ...core.data import (
     Rsqrt,
     CastImpl,
     Reshape,
+    Join,
     Fabs,
     Ashr,
     Advance,
@@ -64,6 +65,7 @@ from ...core.data import (
     CumSum,
     Bitcast,
     AtomicCas,
+    AtomicRMW,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -77,7 +79,7 @@ from .data import (
     OutOfBoundsRecordBruteForce,
     OutOfBoundsRecordZ3,
 )
-from ...core import config as cfg
+from ...core.config import config as cfg
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -467,6 +469,12 @@ class Sanitizer(Client):
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
+
     def arg_callback(self, *args, **kwargs):  # type: ignore[override]
         raise NotImplementedError
 
@@ -496,6 +504,7 @@ class SanitizerBruteForce(Sanitizer):
         abort_on_error: bool = False,
         callpath: bool = True,
     ):
+        super().__init__()  # Initialize parent class
         self.callpath = callpath
         self.abort_on_error = abort_on_error
         self.tensors: list[Tensor] = []
@@ -639,6 +648,11 @@ def _broadcast_dtype(self):
     self.dtype_tt = self.children["arg"].dtype_tt
 
 
+def _join_post(self):
+    # Join preserves the dtype of the left hand side
+    self.dtype_tt = self.children["lhs"].dtype_tt
+
+
 def _binary_dtype(expr):
     expr.dtype_tt = expr.lhs.dtype_tt
 
@@ -708,6 +722,8 @@ class SymbolicExpr:
         "maximum": "max",
         "minimum": "min",
         "bitwise_and": "&",
+        "bitwise_or": "|",
+        "bitwise_xor": "^",
         "right_shift": ">>",
         "left_shift": "<<",
         "ashr": ">>>",
@@ -717,9 +733,9 @@ class SymbolicExpr:
     REDUCE_OPS = ("sum", "max", "min", "dot")
     SCAN_OPS = ("cumsum",)
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
-    BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape")
+    BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join")
     CAST_OPS = ("cast_impl", "bitcast")
-    ATOMIC_OPS = ("atomic_cas",)
+    ATOMIC_OPS = ("atomic_cas", "atomic_rmw")
     SUPPORTED_OPS = (
         BASIC_OPS
         + INDIRECT_OPS
@@ -778,6 +794,8 @@ class SymbolicExpr:
                 "maximum",
                 "minimum",
                 "bitwise_and",
+                "bitwise_or",
+                "bitwise_xor",
                 "right_shift",
                 "left_shift",
                 "ashr",
@@ -802,11 +820,13 @@ class SymbolicExpr:
         "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
         "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
         "reshape": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        "join": Spec(req=("lhs", "rhs"), post=_join_post),
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         # Atomic operations
         "atomic_cas": Spec(req=("ptr", "cmp", "val")),
+        "atomic_rmw": Spec(req=("ptr", "val", "mask")),
         # Misc
         "advance": Spec(req=("ptr", "offsets")),
         "umulhi": Spec(req=("lhs", "rhs")),
@@ -983,6 +1003,7 @@ class SymbolicExpr:
         return SymbolicExprDataWrapper(self.__str__(), self)
 
     triton_scala_dtypes = (
+        tl.int1,
         tl.int8,
         tl.int16,
         tl.int32,
@@ -1188,6 +1209,11 @@ class SymbolicExpr:
 
         if self.op in ("splat", "expand_dims", "broadcast"):
             self._z3, self._constraints = self.arg._to_z3()
+
+        if self.op == "join":
+            raise NotImplementedError(
+                "Join operation is not implemented in Z3 evaluation yet"
+            )
 
         if self.op == "addptr":
             # Add pointer operation
@@ -1475,6 +1501,7 @@ _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
 
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
+        super().__init__()  # Initialize parent class
         self.abort_on_error: bool = abort_on_error
         self.records: list[OutOfBoundsRecordZ3] = []
         self.grid: Optional[tuple[int, ...]] = None
@@ -1773,6 +1800,8 @@ class SanitizerSymbolicExecution(Sanitizer):
                 np.maximum: lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
                 np.minimum: lambda lhs, rhs: SymbolicExpr("minimum", lhs, rhs),
                 np.bitwise_and: lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
+                np.bitwise_or: lambda lhs, rhs: SymbolicExpr("bitwise_or", lhs, rhs),
+                np.bitwise_xor: lambda lhs, rhs: SymbolicExpr("bitwise_xor", lhs, rhs),
                 np.right_shift: lambda lhs, rhs: SymbolicExpr("right_shift", lhs, rhs),
                 np.left_shift: lambda lhs, rhs: SymbolicExpr("left_shift", lhs, rhs),
             }
@@ -1901,6 +1930,16 @@ class SanitizerSymbolicExecution(Sanitizer):
             result.dtype_tt = arg_sym.dtype_tt if hasattr(arg_sym, "dtype_tt") else None
             return result
 
+        def op_join_overrider(lhs, rhs):
+            # Join operation combines two tensors along the last axis
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            # Create a join symbolic expression
+            result = SymbolicExpr("join", lhs_sym, rhs_sym)
+            # The dtype should be preserved from the inputs
+            result.dtype_tt = lhs_sym.dtype_tt if hasattr(lhs_sym, "dtype_tt") else None
+            return result
+
         def op_fabs_overrider(arg):
             arg_sym = SymbolicExpr.from_value(arg)
             return SymbolicExpr("fabs", arg_sym)
@@ -1949,6 +1988,16 @@ class SanitizerSymbolicExecution(Sanitizer):
             result.sem = sem  # Store sem as an attribute
             return result
 
+        def op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            val_sym = SymbolicExpr.from_value(val)
+            mask_sym = SymbolicExpr.from_value(mask)
+            # rmwOp and sem are enums, not regular values, so we pass them directly
+            result = SymbolicExpr("atomic_rmw", ptr_sym, val_sym, mask_sym)
+            result.rmwOp = rmwOp  # Store rmwOp as an attribute
+            result.sem = sem  # Store sem as an attribute
+            return result
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -1974,6 +2023,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Rsqrt: op_rsqrt_overrider,
             CastImpl: op_cast_impl_overrider,
             Reshape: op_reshape_overrider,
+            Join: op_join_overrider,
             Fabs: op_fabs_overrider,
             Ashr: op_ashr_overrider,
             Advance: op_advance_overrider,
@@ -1983,6 +2033,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             CumSum: op_cumsum_overrider,
             Bitcast: op_bitcast_overrider,
             AtomicCas: op_atomic_cas_overrider,
+            AtomicRMW: op_atomic_rmw_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
@@ -2078,7 +2129,7 @@ class NullSanitizer(Sanitizer):
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        super().__init__()  # Initialize parent class
 
     def _disabled(self, method: str):
         raise RuntimeError(
