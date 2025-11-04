@@ -8,8 +8,115 @@ import triton_viz
 from triton_viz.clients import Profiler
 
 
+# ======== Case 2: Check if for loop can be unrolled ========
+@triton_viz.trace(
+    clients=(
+        loop_profiler := Profiler(
+            disable_buffer_load_check=True, disable_load_mask_percentage_check=True
+        )
+    )
+)
+@triton.jit
+def for_loop_test_kernel(
+    in_ptr,
+    out_ptr,
+    N: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Test kernel with for-loops to verify loop statistics tracking.
+
+    This kernel contains 4 for-loops:
+    - First loop: Python range, iterates 10 times
+    - Second loop: Python range, iterates 5 times
+    - Third loop: tl.range, iterates 8 times
+    - Fourth loop: tl.static_range, iterates 6 times
+    """
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < N
+
+    # Load input
+    x = tl.load(in_ptr + offsets, mask=mask, other=0.0)
+
+    # First for-loop: Python range, 10 iterations
+    result = x
+    for i in range(10):
+        result = result + 1.0
+
+    # Second for-loop: Python range, 5 iterations
+    for j in range(5):
+        result = result * 2.0
+
+    # Third for-loop: tl.range, 8 iterations
+    for k in tl.range(2, 10):  # 2, 3, 4, 5, 6, 7, 8, 9
+        result = result + 0.5
+
+    # Fourth for-loop: tl.static_range, 6 iterations
+    for m in tl.static_range(0, 12, 2):  # 0, 2, 4, 6, 8, 10
+        result = result - 0.25
+
+    # Store result
+    tl.store(out_ptr + offsets, result, mask=mask)
+
+
+def test_for_loop_statistics():
+    """
+    Test that the profiler correctly tracks for-loop statistics.
+    """
+    N = 100
+    BLOCK_SIZE = 32
+    num_blocks = triton.cdiv(N, BLOCK_SIZE)
+
+    # Create input/output tensors
+    x = torch.randn(N, dtype=torch.float32)
+    y = torch.empty(N, dtype=torch.float32)
+
+    # Run the kernel
+    grid = (num_blocks,)
+    for_loop_test_kernel[grid](x, y, N, BLOCK_SIZE)
+
+    # Expected loop statistics:
+    # The kernel has 4 for-loops, but they are executed once per grid
+    # Each loop should be recorded only once (when first encountered)
+    # Loop 1: range(10) -> 10 steps, type: python_range
+    # Loop 2: range(5) -> 5 steps, type: python_range
+    # Loop 3: tl.range(2, 10) -> 8 steps, type: tl_range
+    # Loop 4: tl.static_range(0, 12, 2) -> 6 steps, type: tl_static_range
+
+    expected_num_loops = 4
+    expected_loop_steps = [10, 5, 8, 6]
+    expected_range_types = [
+        "python_range",
+        "python_range",
+        "tl_range",
+        "tl_static_range",
+    ]
+
+    # Verify the loop statistics from profiler
+    assert (
+        len(loop_profiler.loop_info) == expected_num_loops
+    ), f"Expected {expected_num_loops} loops, got {len(loop_profiler.loop_info)}"
+
+    for idx, (lineno, loop_info) in enumerate(loop_profiler.loop_info.items()):
+        expected_steps = expected_loop_steps[idx]
+        expected_type = expected_range_types[idx]
+
+        assert (
+            loop_info.length == expected_steps
+        ), f"Loop #{idx+1}: Expected {expected_steps} steps, got {loop_info.length}"
+        assert (
+            loop_info.range_type == expected_type
+        ), f"Loop #{idx+1}: Expected type {expected_type}, got {loop_info.range_type}"
+        assert isinstance(
+            lineno, int
+        ), f"Loop #{idx+1}: lineno should be int, got {type(lineno)}"
+        assert lineno > 0, f"Loop #{idx+1}: lineno should be positive, got {lineno}"
+
+
 # ======== Case 3: Check masked element percentage for tuning BLOCK_SIZE ========
-@triton_viz.trace(clients=(profiler := Profiler(disable_buffer_load_check=True)))
+@triton_viz.trace(clients=(mask_profiler := Profiler(disable_buffer_load_check=True)))
 @triton.jit
 def mask_percentage_test_kernel(
     in_ptr,
@@ -98,27 +205,27 @@ def test_mask_percentage():
 
     # Verify the statistics from profiler
     assert (
-        profiler.load_mask_total_count == expected_load_mask_total
-    ), f"Expected {expected_load_mask_total} total load mask elements, got {profiler.load_mask_total_count}"
+        mask_profiler.load_mask_total_count == expected_load_mask_total
+    ), f"Expected {expected_load_mask_total} total load mask elements, got {mask_profiler.load_mask_total_count}"
     assert (
-        profiler.load_mask_false_count == expected_load_mask_false
-    ), f"Expected {expected_load_mask_false} false load mask elements, got {profiler.load_mask_false_count}"
+        mask_profiler.load_mask_false_count == expected_load_mask_false
+    ), f"Expected {expected_load_mask_false} false load mask elements, got {mask_profiler.load_mask_false_count}"
     assert (
-        profiler.store_mask_total_count == expected_store_mask_total
-    ), f"Expected {expected_store_mask_total} total store mask elements, got {profiler.store_mask_total_count}"
+        mask_profiler.store_mask_total_count == expected_store_mask_total
+    ), f"Expected {expected_store_mask_total} total store mask elements, got {mask_profiler.store_mask_total_count}"
     assert (
-        profiler.store_mask_false_count == expected_store_mask_false
-    ), f"Expected {expected_store_mask_false} false store mask elements, got {profiler.store_mask_false_count}"
+        mask_profiler.store_mask_false_count == expected_store_mask_false
+    ), f"Expected {expected_store_mask_false} false store mask elements, got {mask_profiler.store_mask_false_count}"
 
     # Verify the masked percentage calculation
     expected_load_masked_percentage = (56 / 384) * 100  # ~14.58%
     expected_store_masked_percentage = (56 / 384) * 100  # ~14.58%
 
     actual_load_masked_percentage = (
-        profiler.load_mask_false_count / profiler.load_mask_total_count
+        mask_profiler.load_mask_false_count / mask_profiler.load_mask_total_count
     ) * 100
     actual_store_masked_percentage = (
-        profiler.store_mask_false_count / profiler.store_mask_total_count
+        mask_profiler.store_mask_false_count / mask_profiler.store_mask_total_count
     ) * 100
 
     assert (

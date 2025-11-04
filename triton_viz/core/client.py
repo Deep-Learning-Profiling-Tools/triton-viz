@@ -54,7 +54,7 @@ class Client(ABC):
         ...
 
     @abstractmethod
-    def register_op_callback(self, op: type[Op]) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         ...
 
     @abstractmethod
