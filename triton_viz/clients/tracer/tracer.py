@@ -25,6 +25,7 @@ class Tracer(Client):
         callpath: bool = True,
         grid_idx: Optional[Union[tuple[int], int]] = None,
     ):
+        super().__init__()  # Initialize parent class
         self.callpath = callpath
         self.grid_idx = _convert_grid_idx(grid_idx)
         self.records: list = []
@@ -46,6 +47,12 @@ class Tracer(Client):
 
     def post_run_callback(self, fn: Callable) -> bool:
         return True
+
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
 
     def arg_callback(self, name, arg, arg_cvt):
         if hasattr(arg, "data_ptr"):

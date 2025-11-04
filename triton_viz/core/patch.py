@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Any, Optional
 from tqdm import tqdm
 
-from . import config as cfg
+from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
 from .data import (
     Op,
@@ -42,6 +42,7 @@ from .data import (
     CumSum,
     Bitcast,
     AtomicCas,
+    AtomicRMW,
 )
 import inspect
 import ast
@@ -89,6 +90,7 @@ op_list = [
     CumSum,
     Bitcast,
     AtomicCas,
+    AtomicRMW,
 ]
 
 # Hardcoded operation attribute names to avoid issues with lambda functions
@@ -123,6 +125,7 @@ _OP_ATTR_NAMES = {
     Trans: "create_trans",
     Bitcast: "create_bitcast",
     AtomicCas: "create_atomic_cas",
+    AtomicRMW: "create_atomic_rmw",
 }
 
 original_ops = {
@@ -156,6 +159,7 @@ original_ops = {
     Trans: interpreter_builder.create_trans,
     Bitcast: interpreter_builder.create_bitcast,
     AtomicCas: interpreter_builder.create_atomic_cas,
+    AtomicRMW: interpreter_builder.create_atomic_rmw,
 }
 reduce_map: dict[type[Op], Callable] = {
     ReduceMax: tl.max,
@@ -257,10 +261,12 @@ def unpatch_op(op_type: type[Op]):
 
 
 class _LoopIter:
-    def __init__(self, iterable, lineno, hooks):
+    def __init__(self, hooks, iterable, lineno, range_type):
         self._it = iter(iterable)
         self._lineno = lineno
         self._hooks = hooks
+        # triggering range_type
+        self._hooks.range_type(self._lineno, range_type)
         # triggering before_loop
         if self._hooks.before_loop:
             self._hooks.before_loop(self._lineno, iterable)
@@ -289,12 +295,16 @@ class _CombinedLoopHooks:
     """
 
     def __init__(self):
+        self._range_type: list[Callable] = []
         self._before: list[Callable] = []
         self._iter_listeners: list[Callable] = []
         self._iter_overrider: Optional[Callable] = None
         self._after: list[Callable] = []
 
     # Register hooks
+    def add_range_type_callback(self, hook: Callable) -> None:
+        self._range_type.append(hook)
+
     def add_before(self, hook: Callable) -> None:
         self._before.append(hook)
 
@@ -310,6 +320,10 @@ class _CombinedLoopHooks:
         self._after.append(hook)
 
     # Call combined hooks
+    def range_type(self, lineno: int, range_type: str) -> None:
+        for hook in self._range_type:
+            hook(lineno, range_type)
+
     def before_loop(self, lineno: int, iterable: Any) -> None:
         for hook in self._before:
             hook(lineno, iterable)
@@ -331,8 +345,10 @@ class _CombinedLoopHooks:
         for hook in self._after:
             hook(lineno)
 
-    def loop_iter_wrapper(self, iterable: Any, lineno: int) -> "_LoopIter":
-        return _LoopIter(iterable, lineno, self)
+    def loop_iter_wrapper(
+        self, iterable: Any, lineno: int, range_type: str
+    ) -> "_LoopIter":
+        return _LoopIter(self, iterable, lineno, range_type)
 
     def clear(self) -> None:
         self._before.clear()
@@ -376,13 +392,29 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     for i in R:
         ...
     ==>
-    for i in _triton_viz_loop_patcher.hooks.loop_iter_wrapper(R, lineno):
+    for i in _triton_viz_loop_patcher.hooks.loop_iter_wrapper(R, lineno, range_type):
         ...
     where _triton_viz_loop_patcher.hooks.loop_iter_wrapper returns a _LoopIter object.
     """
     self.generic_visit(node)
 
-    # _triton_viz_loop_patcher.hooks.loop_iter(range(...), lineno)
+    # Detect range type
+    range_type = "unknown"
+    if isinstance(node.iter, ast.Call):
+        func = node.iter.func
+        if isinstance(func, ast.Name) and func.id == "range":
+            range_type = "python_range"
+        elif (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "tl"
+        ):
+            if func.attr == "range":
+                range_type = "tl_range"
+            elif func.attr == "static_range":
+                range_type = "tl_static_range"
+
+    # _triton_viz_loop_patcher.hooks.loop_iter(range(...), lineno, range_type)
     new_iter = ast.Call(
         func=ast.Attribute(
             value=ast.Attribute(
@@ -393,7 +425,11 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
             attr="loop_iter_wrapper",
             ctx=ast.Load(),
         ),
-        args=[node.iter, ast.Constant(value=node.lineno)],
+        args=[
+            node.iter,
+            ast.Constant(value=node.lineno),
+            ast.Constant(value=range_type),
+        ],
         keywords=[],
     )
 
@@ -411,6 +447,8 @@ def patch_for_loop(loop_callbacks: ForLoopCallbacks):
     _loop_patcher.patch()
 
     # Registering hooks
+    if loop_callbacks.range_type_callback is not None:
+        _loop_patcher.hooks.add_range_type_callback(loop_callbacks.range_type_callback)
     if loop_callbacks.before_loop_callback is not None:
         _loop_patcher.hooks.add_before(loop_callbacks.before_loop_callback)
     if loop_callbacks.loop_iter_overrider is not None:
@@ -464,7 +502,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     interpreter_builder.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
                     if not client_manager.pre_run_callback(self.fn):
-                        return
+                        continue  # Skip this block
                     self.fn(**call_args)
                     if not client_manager.post_run_callback(self.fn):
                         return
@@ -473,11 +511,12 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
     argspec = inspect.getfullargspec(self.fn)
-    triton_viz_args = ["client_manager"]
+    triton_viz_args = ["client_manager", "jit_fn"]
     kwargs = {
         k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
     }
     client_manager = kwargs.pop("client_manager")
+    kwargs.pop("jit_fn")
     args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)

@@ -66,6 +66,7 @@ from ...core.data import (
     CumSum,
     Bitcast,
     AtomicCas,
+    AtomicRMW,
 )
 from ..utils import (
     check_out_of_bounds_access,
@@ -79,7 +80,7 @@ from .data import (
     OutOfBoundsRecordBruteForce,
     OutOfBoundsRecordZ3,
 )
-from ...core import config as cfg
+from ...core.config import config as cfg
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -469,6 +470,12 @@ class Sanitizer(Client):
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
+
     def arg_callback(self, *args, **kwargs):  # type: ignore[override]
         raise NotImplementedError
 
@@ -498,6 +505,7 @@ class SanitizerBruteForce(Sanitizer):
         abort_on_error: bool = False,
         callpath: bool = True,
     ):
+        super().__init__()  # Initialize parent class
         self.callpath = callpath
         self.abort_on_error = abort_on_error
         self.tensors: list[Tensor] = []
@@ -717,7 +725,7 @@ class SymbolicExpr:
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join")
     CAST_OPS = ("cast_impl", "bitcast")
-    ATOMIC_OPS = ("atomic_cas",)
+    ATOMIC_OPS = ("atomic_cas", "atomic_rmw")
     SUPPORTED_OPS = (
         BASIC_OPS
         + INDIRECT_OPS
@@ -808,6 +816,7 @@ class SymbolicExpr:
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         # Atomic operations
         "atomic_cas": Spec(req=("ptr", "cmp", "val")),
+        "atomic_rmw": Spec(req=("ptr", "val", "mask")),
         # Misc
         "advance": Spec(req=("ptr", "offsets")),
         "umulhi": Spec(req=("lhs", "rhs")),
@@ -1492,6 +1501,7 @@ _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
 
 class SanitizerSymbolicExecution(Sanitizer):
     def __init__(self, abort_on_error: bool = False):
+        super().__init__()  # Initialize parent class
         self.abort_on_error: bool = abort_on_error
         self.records: list[OutOfBoundsRecordZ3] = []
         self.grid: Optional[tuple[int, ...]] = None
@@ -1978,6 +1988,16 @@ class SanitizerSymbolicExecution(Sanitizer):
             result.sem = sem  # Store sem as an attribute
             return result
 
+        def op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            val_sym = SymbolicExpr.from_value(val)
+            mask_sym = SymbolicExpr.from_value(mask)
+            # rmwOp and sem are enums, not regular values, so we pass them directly
+            result = SymbolicExpr("atomic_rmw", ptr_sym, val_sym, mask_sym)
+            result.rmwOp = rmwOp  # Store rmwOp as an attribute
+            result.sem = sem  # Store sem as an attribute
+            return result
+
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
             RawLoad: op_raw_load_overrider,
@@ -2013,6 +2033,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             CumSum: op_cumsum_overrider,
             Bitcast: op_bitcast_overrider,
             AtomicCas: op_atomic_cas_overrider,
+            AtomicRMW: op_atomic_rmw_overrider,
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
@@ -2108,7 +2129,7 @@ class NullSanitizer(Sanitizer):
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        super().__init__()  # Initialize parent class
 
     def _disabled(self, method: str):
         raise RuntimeError(
