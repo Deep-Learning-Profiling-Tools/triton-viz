@@ -54,7 +54,7 @@ class Client(ABC):
         ...
 
     @abstractmethod
-    def register_op_callback(self, op: type[Op]) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         ...
 
     @abstractmethod
@@ -151,7 +151,7 @@ class ClientManager:
         rets = []
         for client in self.clients.values():
             rets.append(client.pre_run_callback(fn))
-        return any(rets)
+        return all(rets) if rets else True
 
     def post_run_callback(self, fn: Callable) -> bool:
         rets = []
