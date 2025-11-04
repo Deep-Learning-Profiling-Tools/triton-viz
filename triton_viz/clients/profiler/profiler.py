@@ -340,7 +340,7 @@ class Profiler(Client):
             )
             print("=" * 60)
             if self.potential_buffer_load_issue_found:
-                print("\nWarning: Potential Buffer Load Issue Detected!")
+                print("\n>>>>>> Warning: Potential Buffer Load Issue Detected! <<<<<<")
                 print(
                     "\nSome memory access offsets are within 32-bit range, "
                     "\nbut Buffer Load optimization was NOT used in the kernel."
