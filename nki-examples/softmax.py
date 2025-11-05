@@ -3,8 +3,6 @@ import neuronxcc.nki.language as nl
 
 import torch
 import triton_viz
-import torch_xla.core.xla_model as xm
-from triton_viz.clients import Tracer
 from triton_viz.core import config as cfg
 from triton_viz.core.trace import launches
 import numpy as np
@@ -17,7 +15,7 @@ def softmax(in_tensor):
     B, D = in_tensor.shape
     out_tensor = nl.ndarray((B, D), dtype=in_tensor.dtype, buffer=nl.shared_hbm)
 
-    #assert nl.tile_size.pmax == 128
+    # assert nl.tile_size.pmax == 128
     num_tiles = math.ceil(B / 128)
     for tile_idx in nl.affine_range(num_tiles):
         i_p = tile_idx * 128 + nl.arange(128)[:, None]
@@ -42,7 +40,7 @@ if __name__ == "__main__":
 
     if TRITON_VIZ:
         softmax = triton_viz.trace()(softmax)
-        softmax[(1,1,1)](x)
+        softmax[(1, 1, 1)](x)
 
         # Print records to see what's being captured
         print(f"Number of launches: {len(launches)}")

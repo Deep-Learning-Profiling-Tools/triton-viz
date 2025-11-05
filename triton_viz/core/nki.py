@@ -2,13 +2,13 @@ import numpy as np
 
 import neuronxcc.nki.language as nl
 import inspect
-import ast
-from .nki_extract_slice import StoreCallTransformer, transform_code
+from .nki_extract_slice import transform_code
 from .nki_masked_load import masked_load, masked_store
 
 
 # Q1: slicing semantic is weird
 # Q2: why cannot we execute the .func function?
+
 
 # Multi-dimensional slice class
 class NLSlice:
@@ -26,7 +26,7 @@ class NLSlice:
                 stop = "None"
             if step is None:
                 step = "None"
-            repr += f"(start={start}, stop={stop}, step={step}) " 
+            repr += f"(start={start}, stop={stop}, step={step}) "
         return repr
 
     def __add__(self, other):
@@ -45,7 +45,9 @@ class NLSlice:
                 new_stop.append(stop + other if stop is not None else None)
                 new_step.append(step)
             return NLSlice(start=new_start, stop=new_stop, step=new_step)
-        raise TypeError(f"Unsupported operand type(s) for +: 'NLSlice' and '{type(other).__name__}'")
+        raise TypeError(
+            f"Unsupported operand type(s) for +: 'NLSlice' and '{type(other).__name__}'"
+        )
 
     def __radd__(self, other):
         new_start = []
@@ -63,7 +65,9 @@ class NLSlice:
                 new_stop.append(other + stop if stop is not None else None)
                 new_step.append(step)
             return NLSlice(start=new_start, stop=new_stop, step=new_step)
-        raise TypeError(f"Unsupported operand type(s) for +: '{type(other).__name__}' and 'NLSlice'")
+        raise TypeError(
+            f"Unsupported operand type(s) for +: '{type(other).__name__}' and 'NLSlice'"
+        )
 
     def __getitem__(self, keys):
         new_start = []
@@ -77,7 +81,9 @@ class NLSlice:
                 new_stop.append(None)
                 new_step.append(None)
             elif isinstance(k, slice):
-                assert k.start is None and k.stop is None and k.step is None, "Slice must be complete"
+                assert (
+                    k.start is None and k.stop is None and k.step is None
+                ), "Slice must be complete"
                 new_start.append(self.start[idx])
                 new_stop.append(self.stop[idx])
                 new_step.append(self.step[idx])
@@ -86,6 +92,7 @@ class NLSlice:
                 raise TypeError(f"Unsupported key type: {type(k)}")
 
         return NLSlice(start=new_start, stop=new_stop, step=new_step)
+
 
 class NDArray:
     def __init__(self, buffer=None, name="", **kwargs):
@@ -127,11 +134,11 @@ class NDArray:
 
     def stride(self):
         return self._value.strides
-    
+
     def element_size(self):
         return self.dtype.itemsize
 
-    def cpu(self): # THTODO: rm?
+    def cpu(self):  # THTODO: rm?
         return self
 
     def get_offsets(self):
@@ -150,9 +157,11 @@ class NDArray:
 
         shape = self.shape
         if len(shape) != len(strides):
-            raise ValueError(f"Shape has {len(shape)} dimensions but strides has {len(strides)} dimensions")
+            raise ValueError(
+                f"Shape has {len(shape)} dimensions but strides has {len(strides)} dimensions"
+            )
 
-        #offsets = []
+        # offsets = []
         offsets = 0
         ndim = len(shape)
 
@@ -166,10 +175,10 @@ class NDArray:
 
             # Reshape and multiply by stride
             offset_array = (arange_vals * stride).reshape(broadcast_shape)
-            #offsets.append(NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}"))
+            # offsets.append(NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}"))
             offsets += NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}")
 
-        #return tuple(offsets)
+        # return tuple(offsets)
         return offsets
 
     def __repr__(self):
@@ -193,30 +202,43 @@ class NDArray:
                 new_keys.append(slice(k.start, k.stop, k.step))
             elif k is None:
                 new_keys.append(k)
-                arr_dim -= 1 # add new dim -> revisit arr_dim for next key
+                arr_dim -= 1  # add new dim -> revisit arr_dim for next key
             else:
                 new_keys.append(k)
             arr_dim += 1
-        
+
         sliced_value = self._value[tuple(new_keys)]
 
         # Create a new NDArray with the sliced data
         return NDArray(value=sliced_value, name=f"{self.name}_slice")
 
-
     def _binary_op(self, other, op_func, op_name, op_symbol):
         if isinstance(other, NDArray):
-            return NDArray(value=op_func(self._value, other._value), name=f"{self.name}_{op_name}_{other.name}")
+            return NDArray(
+                value=op_func(self._value, other._value),
+                name=f"{self.name}_{op_name}_{other.name}",
+            )
         elif np.isscalar(other):
-            return NDArray(value=op_func(self._value, other), name=f"{self.name}_{op_name}_scalar")
-        raise TypeError(f"Unsupported operand type(s) for {op_symbol}: 'NDArray' and '{type(other).__name__}'")
+            return NDArray(
+                value=op_func(self._value, other), name=f"{self.name}_{op_name}_scalar"
+            )
+        raise TypeError(
+            f"Unsupported operand type(s) for {op_symbol}: 'NDArray' and '{type(other).__name__}'"
+        )
 
     def _rbinary_op(self, other, op_func, op_name, op_symbol):
         if isinstance(other, NDArray):
-            return NDArray(value=op_func(other._value, self._value), name=f"{other.name}_{op_name}_{self.name}")
+            return NDArray(
+                value=op_func(other._value, self._value),
+                name=f"{other.name}_{op_name}_{self.name}",
+            )
         elif np.isscalar(other):
-            return NDArray(value=op_func(other, self._value), name=f"scalar_{op_name}_{self.name}")
-        raise TypeError(f"Unsupported operand type(s) for {op_symbol}: '{type(other).__name__}' and 'NDArray'")
+            return NDArray(
+                value=op_func(other, self._value), name=f"scalar_{op_name}_{self.name}"
+            )
+        raise TypeError(
+            f"Unsupported operand type(s) for {op_symbol}: '{type(other).__name__}' and 'NDArray'"
+        )
 
     # Define operator +/-/*//
     def __add__(self, other):
@@ -294,12 +316,14 @@ class Builder:
                 ret = self.shared_hbm_arrays[name]
             else:
                 # Create a new shared HBM array and store it
-                ret = NDArray(buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs)
+                ret = NDArray(
+                    buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs
+                )
                 self.shared_hbm_arrays[name] = ret
         else:
             ret = NDArray(buffer=buffer, name=name, shape=shape, dtype=dtype, **kwargs)
         return ret
-    
+
     def zeros(self, shape, dtype, *, buffer=None, name=None, **kwargs):
         value = np.zeros(shape, dtype=dtype)
         return self.ndarray(
@@ -349,7 +373,9 @@ class Builder:
     def load_transpose2d(self, src: NDArray, *, mask=None, dtype=None, **kwargs):
         # THTODO
         value = src._value
-        return self.load(NDArray(value=value.T, name=src.name), mask=mask, dtype=dtype, **kwargs)
+        return self.load(
+            NDArray(value=value.T, name=src.name), mask=mask, dtype=dtype, **kwargs
+        )
 
     def store(self, dst: NDArray, value: NDArray, *, mask=None, **kwargs):
         dst._value[mask._value] = value._value.ravel()
@@ -419,7 +445,9 @@ class Builder:
         # GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
         sqrt_2_pi = np.sqrt(2 / np.pi)
         inner = sqrt_2_pi * (x._value + 0.044715 * np.power(x._value, 3))
-        return NDArray(value=0.5 * x._value * (1 + np.tanh(inner)), name=f"{x.name}_gelu", **kwargs)
+        return NDArray(
+            value=0.5 * x._value * (1 + np.tanh(inner)), name=f"{x.name}_gelu", **kwargs
+        )
 
     def sqrt(self, x: NDArray, **kwargs):
         return self.unary_op(x, np.sqrt, "sqrt", **kwargs)
@@ -432,9 +460,17 @@ class Builder:
 
     def pow(self, x: NDArray, exponent, **kwargs):
         if isinstance(exponent, NDArray):
-            return NDArray(value=np.power(x._value, exponent._value), name=f"{x.name}_pow_{exponent.name}", **kwargs)
+            return NDArray(
+                value=np.power(x._value, exponent._value),
+                name=f"{x.name}_pow_{exponent.name}",
+                **kwargs,
+            )
         elif np.isscalar(exponent):
-            return NDArray(value=np.power(x._value, exponent), name=f"{x.name}_pow_{exponent}", **kwargs)
+            return NDArray(
+                value=np.power(x._value, exponent),
+                name=f"{x.name}_pow_{exponent}",
+                **kwargs,
+            )
         else:
             raise TypeError(f"Unsupported exponent type: {type(exponent)}")
 
@@ -442,17 +478,20 @@ class Builder:
         return self.unary_op(x, lambda v: 1 / v, "reciprocal", **kwargs)
 
     def matmul(self, x: NDArray, y: NDArray, transpose_x=False, mask=None, **kwargs):
-        x_value = x._value 
+        x_value = x._value
         if transpose_x:
             x_value = x_value.T
-        y_value = y._value 
-        return NDArray(value=(x_value @ y_value), name=f"{x.name}_{y.name}_matmul", **kwargs)
+        y_value = y._value
+        return NDArray(
+            value=(x_value @ y_value), name=f"{x.name}_{y.name}_matmul", **kwargs
+        )
 
     def copy(self, x: NDArray, **kwargs):
         return self.unary_op(x, np.copy, "copy", **kwargs)
 
     def range(self, stop):
         return range(stop)
+
 
 nki_builder = Builder()
 
@@ -476,17 +515,17 @@ def patch():
     nl.affine_range = nki_builder.range
     nl.par_dim
     nl.zeros = nki_builder.zeros
-    nl.mgrid = NDArray(value=np.mgrid, buffer=nl.sbuf, name='mgrid')
+    nl.mgrid = NDArray(value=np.mgrid, buffer=nl.sbuf, name="mgrid")
     nl.matmul = nki_builder.matmul
     nl.copy = nki_builder.copy
 
     # attention-specific
     nl.load_transpose2d = nki_builder.load_transpose2d
-    #nisa.affine_select
-    #nl.tensor_reduce
-    #nisa.activation
+    # nisa.affine_select
+    # nl.tensor_reduce
+    # nisa.activation
     nl.broadcast_to
-    #nisa.nc_transpose
+    # nisa.nc_transpose
 
     # Elementwise operators
     nl.exp = nki_builder.exp
@@ -516,52 +555,60 @@ class NKIInterpretedFunction:
         self.fn = fn
 
     def run(self, *args, **kwargs):
-        grid_dims = kwargs.pop("grid", (1, 1, 1))  # Remove grid from kwargs to avoid passing it to the function
+        grid_dims = kwargs.pop(
+            "grid", (1, 1, 1)
+        )  # Remove grid from kwargs to avoid passing it to the function
         # make it 3d if not
         if len(grid_dims) == 1:
             grid_dims = (grid_dims[0], 1, 1)
         elif len(grid_dims) == 2:
             grid_dims = (grid_dims[0], grid_dims[1], 1)
         elif len(grid_dims) != 3:
-            raise ValueError(f"Grid must be 1, 2, or 3 dimensions, got {len(grid_dims)}")
+            raise ValueError(
+                f"Grid must be 1, 2, or 3 dimensions, got {len(grid_dims)}"
+            )
         nki_builder.set_grid_dim(grid_dims)
         nki_builder.shared_hbm_arrays = {}
         nki_builder.fn = self.fn
 
         kwargs.pop("warmup", None)  # Remove warmup from kwargs if it exists
-        client_manager = kwargs.pop("client_manager", None)  # Remove client_manager from kwargs if it exists
+        client_manager = kwargs.pop(
+            "client_manager", None
+        )  # Remove client_manager from kwargs if it exists
 
         # Call grid_callback once before grid execution (similar to Triton)
         if client_manager is not None:
             client_manager.grid_callback(grid_dims)
 
-        patch() # NKI interpreter patching
+        patch()  # NKI interpreter patching
 
-        #with client_manager.patch():
-        #v
-        #kwargs.update({"client_manager": client_manager})
-        #ret = self.interpreter_fn.run(*args, **kwargs)
-        #self.finalize()
-        #return ret
+        # with client_manager.patch():
+        # v
+        # kwargs.update({"client_manager": client_manager})
+        # ret = self.interpreter_fn.run(*args, **kwargs)
+        # self.finalize()
+        # return ret
 
         # Apply AST transformer to convert nl.load/nl.store calls to nl.masked_load/nl.masked_store
-        import types
-        if hasattr(self.fn, '__code__'):
+        if hasattr(self.fn, "__code__"):
             # Get the source code of the function
             source_code = inspect.getsource(self.fn)
             # Transform the source code using the AST transformer
             transformed_code = transform_code(source_code)
             # Create a new function from the transformed code
-            #exec_globals = self.fn.__globals__.copy()
-            #exec(transformed_code, exec_globals)
+            # exec_globals = self.fn.__globals__.copy()
+            # exec(transformed_code, exec_globals)
             ## Replace the original function with the transformed one
-            #self.fn = exec_globals[self.fn.__name__]
+            # self.fn = exec_globals[self.fn.__name__]
             exec_globals = self.fn.__globals__.copy()
             import random, string, os
-            rand_str = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-            os.makedirs('/tmp/triton-viz', exist_ok=True)
-            filename = f'/tmp/triton-viz/{rand_str}.py'
-            with open(filename, 'w') as f:
+
+            rand_str = "".join(
+                random.choices(string.ascii_letters + string.digits, k=16)
+            )
+            os.makedirs("/tmp/triton-viz", exist_ok=True)
+            filename = f"/tmp/triton-viz/{rand_str}.py"
+            with open(filename, "w") as f:
                 f.write(transformed_code)
             code_obj = compile(transformed_code, filename=filename, mode="exec")
             exec(code_obj, exec_globals)
@@ -579,7 +626,7 @@ class NKIInterpretedFunction:
                         client_manager.grid_idx_callback((x, y, z))
 
                     result = self.fn(*args, **kwargs)
-        #^
+        # ^
 
         unpatch()
         return result.value
