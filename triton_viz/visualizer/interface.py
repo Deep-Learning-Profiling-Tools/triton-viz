@@ -281,17 +281,19 @@ def get_matmul_c():
     if a is None or b is None:
         return jsonify({"error": "MatMul tensors not available"}), 200
     try:
-        # Compute C on CPU
-        c = a @ b
-        c_cpu = c.cpu()
-        cmin = float(c_cpu.min().item())
-        cmax = float(c_cpu.max().item())
+        import numpy as _np
+
+        a_np = _np.asarray(a)
+        b_np = _np.asarray(b)
+        c_np = a_np @ b_np
+        cmin = float(_np.min(c_np)) if c_np.size else 0.0
+        cmax = float(_np.max(c_np)) if c_np.size else 0.0
         return jsonify(
             {
-                "shape": list(c_cpu.shape),
+                "shape": list(c_np.shape),
                 "min": cmin,
                 "max": cmax,
-                "values": c_cpu.numpy().tolist(),
+                "values": c_np.tolist(),
             }
         )
     except Exception as e:
@@ -324,8 +326,12 @@ def get_matmul_vectors():
     if a is None or b is None:
         return jsonify({"error": "MatMul tensors not available"}), 200
     try:
-        a_row = a[row, :].cpu().numpy().tolist()
-        b_col = b[:, col].cpu().numpy().tolist()
+        import numpy as _np
+
+        a_np = _np.asarray(a)
+        b_np = _np.asarray(b)
+        a_row = a_np[row, :].tolist()
+        b_col = b_np[:, col].tolist()
         k = len(a_row)
         return jsonify({"row": row, "col": col, "a_row": a_row, "b_col": b_col, "k": k})
     except Exception as e:
@@ -396,29 +402,16 @@ def get_load_value():
         try:
             import numpy as _np
 
-            t = op_data["global_tensor"]
-            # Normalize to numpy array for robust indexing
-            if hasattr(t, "cpu"):
-                try:
-                    arr = t.cpu().numpy()
-                except Exception:
-                    arr = _np.asarray(t)
-            elif hasattr(t, "_value"):
-                arr = _np.asarray(getattr(t, "_value"))
-            elif hasattr(t, "data"):
-                arr = _np.asarray(getattr(t, "data"))
-            else:
-                arr = _np.asarray(t)
-
+            arr = _np.asarray(op_data["global_tensor"])  # already NumPy in draw.py
             yy, xx, zz = int(y), int(x), int(z)
-            value = 0.0
             if arr.ndim >= 3:
                 value = float(arr[yy, xx, zz])
             elif arr.ndim == 2:
                 value = float(arr[yy, xx])
             elif arr.ndim == 1:
                 value = float(arr[xx])
-
+            else:
+                value = 0.0
             return jsonify({"value": value})
         except IndexError:
             return jsonify({"error": "Coordinates out of bounds"}), 200
@@ -490,26 +483,21 @@ def get_load_tensor():
     import numpy as _np
 
     try:
-        t = op_data["global_tensor"]
-        if hasattr(t, "cpu"):
-            try:
-                arr = t.cpu().numpy()
-            except Exception:
-                arr = _np.asarray(t)
-        elif hasattr(t, "_value"):
-            arr = _np.asarray(getattr(t, "_value"))
-        elif hasattr(t, "data"):
-            arr = _np.asarray(getattr(t, "data"))
-        else:
-            arr = _np.asarray(t)
-        t_min = float(_np.min(arr)) if arr.size else 0.0
-        t_max = float(_np.max(arr)) if arr.size else 0.0
+        arr = _np.asarray(op_data["global_tensor"])  # already NumPy in draw.py
+        t_shape = op_data.get("shape") or list(arr.shape)
+        t_dims = op_data.get("dims") or int(arr.ndim)
+        t_min = op_data.get("min")
+        t_max = op_data.get("max")
+        if t_min is None:
+            t_min = float(_np.min(arr)) if arr.size else 0.0
+        if t_max is None:
+            t_max = float(_np.max(arr)) if arr.size else 0.0
         return jsonify(
             {
-                "shape": list(arr.shape),
-                "dims": int(arr.ndim),
-                "min": t_min,
-                "max": t_max,
+                "shape": t_shape,
+                "dims": int(t_dims),
+                "min": float(t_min),
+                "max": float(t_max),
                 "values": arr.tolist(),
             }
         )
