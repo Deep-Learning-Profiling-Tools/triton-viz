@@ -7,8 +7,8 @@ from ...core.data import (
     ReduceSum,
     Dot,
     Grid,
-    MaskedLoad,
-    MaskedStore,
+    # MaskedLoad,
+    # MaskedStore,
     RawLoad,
     RawStore,
     Allocate,
@@ -146,31 +146,47 @@ class Tracer(Client):
             else:
                 return keys
 
-        def pre_masked_load_callback(ptr, keys, mask=None, *args, **kwargs):
+        def pre_masked_load_callback(ptr, *args, **kwargs):
             if not self.sample:
                 return
-            keys = _convert_keys_to_numpy(keys)
 
-            self.records.append(
-                Load(
-                    ptr.data_ptr(),
-                    masked_load(ptr.get_offsets().data, keys, mask=mask.data),
-                    mask.data,
-                )
-            )
+            mask = kwargs["mask"]
+            if "keys" in kwargs:
+                keys = _convert_keys_to_numpy(kwargs["keys"])
+                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
+                tensor = ptr
+            else:  # i.e. for triton, ptr = pointer + offsets
+                first_ptr = np.reshape(ptr.data, (-1))[0]
+                tensor = self._get_tensor(first_ptr)
+                offsets = ptr.data - tensor.data_ptr()
 
-        def pre_masked_store_callback(ptr, keys, value, mask=None, *args, **kwargs):
+            rec = Load(tensor.data_ptr(), offsets, mask.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
+
+        def pre_masked_store_callback(ptr, *args, **kwargs):
             if not self.sample:
                 return
-            keys = _convert_keys_to_numpy(keys)
-            if mask is None:
-                offsets = masked_load(ptr.get_offsets().data, keys)
-                mask_data = np.ones_like(offsets).astype(bool)
-            else:
+
+            mask = kwargs.get("mask", None)
+            if "keys" in kwargs:
+                keys = _convert_keys_to_numpy(kwargs["keys"])
+                if mask is None:
+                    offsets = masked_load(ptr.get_offsets().data, keys)
+                    mask_data = np.ones_like(offsets).astype(bool)
+                else:
+                    mask_data = mask.data
+                    offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
+                tensor = ptr
+            else:  # i.e. for triton, ptr = pointer + offsets, so keys=None
+                first_ptr = np.reshape(ptr.data, (-1))[0]
+                tensor = self._get_tensor(first_ptr)
+                offsets = ptr.data - tensor.data_ptr()
                 mask_data = mask.data
-                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
 
-            self.records.append(Store(ptr.data_ptr(), offsets, mask_data))
+            rec = Store(tensor.data_ptr(), offsets, mask_data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
         def pre_raw_load_callback(ptr):
@@ -238,13 +254,13 @@ class Tracer(Client):
 
         if op_type is Allocate:
             return OpCallbacks(after_callback=post_allocate_callback)
+        # elif op_type is Load:
+        #    return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Load:
-            return OpCallbacks(before_callback=pre_load_callback)
-        elif op_type is MaskedLoad:
             return OpCallbacks(before_callback=pre_masked_load_callback)
+        # elif op_type is Store:
+        #    return OpCallbacks(before_callback=pre_store_callback)
         elif op_type is Store:
-            return OpCallbacks(before_callback=pre_store_callback)
-        elif op_type is MaskedStore:
             return OpCallbacks(before_callback=pre_masked_store_callback)
         elif op_type is RawLoad:
             return OpCallbacks(before_callback=pre_raw_load_callback)

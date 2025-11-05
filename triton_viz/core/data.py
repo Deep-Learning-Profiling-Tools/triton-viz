@@ -67,9 +67,12 @@ class Store(Op):
     time_idx: int = 0
 
 
-@dataclass
-class MaskedStore(Op):
-    name: ClassVar[str] = "masked_store"
+class TritonStore(Store):
+    ...
+
+
+class NKIStore(Store):
+    ...
 
 
 @dataclass
@@ -91,9 +94,12 @@ class Load(Op):
     time_idx: int = 0
 
 
-@dataclass
-class MaskedLoad(Op):
-    name: ClassVar[str] = "masked_load"
+class TritonLoad(Load):
+    ...
+
+
+class NKILoad(Load):
+    ...
 
 
 @dataclass

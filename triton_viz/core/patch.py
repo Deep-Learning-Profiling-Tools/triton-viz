@@ -12,10 +12,8 @@ from .data import (
     Allocate,
     RawLoad,
     Load,
-    MaskedLoad,
-    RawStore,
     Store,
-    MaskedStore,
+    RawStore,
     UnaryOp,
     BinaryOp,
     TernaryOp,
@@ -60,12 +58,18 @@ from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
 from triton.runtime import JITFunction
 from triton_viz.core.nki import nki_builder
 
+
 # shared operation registry for both backends
+def identity(*args, **kwargs):
+    return args, kwargs
+
+
 OPERATION_REGISTRY = {
     "triton": {
         "op_list": [
             ProgramId,
             RawStore,
+            # TritonStore,
             Store,
             RawLoad,
             Load,
@@ -102,10 +106,29 @@ OPERATION_REGISTRY = {
         "original_ops": {
             ProgramId: interpreter_builder.create_get_program_id,
             RawStore: interpreter_builder.create_store,
+            # TritonStore: interpreter_builder.create_masked_store,
             Store: interpreter_builder.create_masked_store,
             RawLoad: interpreter_builder.create_load,
             Load: interpreter_builder.create_masked_load,
             Dot: interpreter_builder.create_dot,
+            # ProgramId: (
+            #    interpreter_builder.create_get_program_id,
+            #    lambda axis: axis
+            # ),
+            # RawStore: (interpreter_builder.create_store, identity),
+            # TritonStore: (
+            #    interpreter_builder.create_masked_store,
+            #    lambda ptr, value, mask, *args, **kwargs: ptr, value, mask
+            # ),
+            # RawLoad: interpreter_builder.create_load,
+            # TritonLoad: (
+            #    interpreter_builder.create_masked_load,
+            #    lambda ptr, mask, *args, **kwargs: ptr, mask
+            # ),
+            # Dot: (
+            #    interpreter_builder.create_dot,
+            #    lambda a, b, *args, **kwargs: a, b
+            # ),
             UnaryOp: interpreter_builder.unary_op,
             BinaryOp: interpreter_builder.binary_op,
             TernaryOp: interpreter_builder.ternary_op,
@@ -168,8 +191,10 @@ OPERATION_REGISTRY = {
         "op_list": [
             Allocate,
             ProgramId,
-            MaskedStore,
-            MaskedLoad,
+            Load,
+            Store,
+            # NKILoad,
+            # NKIStore,
             Dot,
             UnaryOp,
             MakeRange,
@@ -177,8 +202,10 @@ OPERATION_REGISTRY = {
         "original_ops": {
             ProgramId: nki_builder.program_id,
             Allocate: nki_builder.ndarray,
-            MaskedLoad: nki_builder.masked_load,
-            MaskedStore: nki_builder.masked_store,
+            # NKILoad: nki_builder.masked_load,
+            # NKIStore: nki_builder.masked_store,
+            Load: nki_builder.masked_load,
+            Store: nki_builder.masked_store,
             Dot: nki_builder.matmul,
             UnaryOp: nki_builder._unary_op,
             MakeRange: nki_builder.arange,
@@ -186,8 +213,10 @@ OPERATION_REGISTRY = {
         "op_attr_names": {
             ProgramId: "program_id",
             Allocate: "ndarray",
-            MaskedLoad: "masked_load",
-            MaskedStore: "masked_store",
+            # NKILoad: "masked_load",
+            # NKIStore: "masked_store",
+            Load: "masked_load",
+            Store: "masked_store",
             Dot: "matmul",
             UnaryOp: "_unary_op",
             MakeRange: "arange",
