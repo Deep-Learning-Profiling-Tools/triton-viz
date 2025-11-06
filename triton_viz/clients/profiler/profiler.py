@@ -28,22 +28,16 @@ class Profiler(Client):
         k: int | None = None,
     ):
         super().__init__()  # Initialize parent class
-        # Enable ASM collection for the profiler
         self.callpath = callpath
         self.load_bytes = LoadStoreBytes("load", 0, 0)
         self.store_bytes = LoadStoreBytes("store", 0, 0)
-        self.has_buffer_load = False
-        self.disable_buffer_load_check = disable_buffer_load_check
+
+        # Case 2: For-loop Unrolling Statistics
         self.disable_for_loop_unroll_check = disable_for_loop_unroll_check
-
-        # For-loop statistics
         self.loop_info: dict[int, LoopInfo] = {}
-        self.disable_load_mask_percentage_check = disable_load_mask_percentage_check
-        self.disable_load_store_skipping = disable_load_store_skipping
-        self.block_sampling = block_sampling
-        self.k = k
 
-        # Counters for mask statistics
+        # Case 3: Mask Ratio Statistics
+        self.disable_load_mask_percentage_check = disable_load_mask_percentage_check
         self.load_mask_total_count = (
             0  # Total number of mask elements in all load operations
         )
@@ -57,9 +51,19 @@ class Profiler(Client):
             0  # Total number of False elements in all store masks
         )
 
-        # Block sampling state
+        # Case 4: Buffer Load Check
+        self.has_buffer_load = False
+        self.disable_buffer_load_check = disable_buffer_load_check
+        self.potential_buffer_load_issue_found = False
+
+        # Block sampling
+        self.block_sampling = block_sampling
+        self.k = k
         self.sampled_blocks: Optional[set[tuple[int, ...]]] = None
         self.current_grid_idx: Optional[tuple[int, ...]] = None
+
+        # Load & Store Skipping
+        self.disable_load_store_skipping = disable_load_store_skipping
 
     def pre_run_callback(self, fn: Callable) -> bool:
         # If block sampling is enabled, check if current block is selected
@@ -154,7 +158,8 @@ class Profiler(Client):
             # All offsets are within 32-bit range
             # If we're on AMD GPU and buffer_load is NOT found, this is an error
             if self.has_buffer_load is False:
-                assert False, "Buffer Load optimization should be used when offsets are within 32-bit range!"
+                # Buffer Load optimization should be used when offsets are within 32-bit range.
+                self.potential_buffer_load_issue_found = True
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def _get_mask_stats(mask: TensorHandle) -> tuple[int, int]:
@@ -264,25 +269,34 @@ class Profiler(Client):
         )
 
     def finalize(self) -> list:
-        # Print for-loop statistics if enabled
-        if not self.disable_for_loop_unroll_check and self.loop_info:
+        print("=" * 60, "Profiler Issues Summary", "=" * 60)
+        if not self.disable_for_loop_unroll_check:
             print("\n" + "=" * 60)
-            print("Profiler: For-Loop Statistics")
+            print(
+                "-" * 10
+                + " "
+                + "Profiler: For-Loop Unrolling Statistics"
+                + " "
+                + "-" * 9
+            )
             print("=" * 60)
-            print(f"\nTotal for-loops detected: {len(self.loop_info)}\n")
+            if self.loop_info:
+                print(f"\nTotal for-loops detected: {len(self.loop_info)}\n")
 
-            for idx, (lineno, loop_info) in enumerate(self.loop_info.items(), 1):
-                print(f"Loop #{idx}:")
-                print(f"  Line number:    {lineno}")
-                print(f"  Range type:     {loop_info.range_type}")
-                print(f"  Total steps:    {loop_info.length}")
+                for idx, (lineno, loop_info) in enumerate(self.loop_info.items(), 1):
+                    print(f"Loop #{idx}:")
+                    print(f"  Line number:    {lineno}")
+                    print(f"  Range type:     {loop_info.range_type}")
+                    print(f"  Total steps:    {loop_info.length}")
 
-            print("=" * 60)
+                print("=" * 60)
+            else:
+                print("\nNo for-loops detected.\n")
+                print("=" * 60)
 
-        # Calculate and print mask statistics only if load mask percentage check is enabled
         if not self.disable_load_mask_percentage_check:
             print("\n" + "=" * 60)
-            print("Profiler: Mask Usage Statistics")
+            print("-" * 10 + " " + "Profiler: Mask Ratio Statistics" + " " + "-" * 17)
             print("=" * 60)
 
             # Load statistics
@@ -312,5 +326,36 @@ class Profiler(Client):
                 print("  No store operations detected")
 
             print("=" * 60 + "\n")
+
+        if not self.disable_buffer_load_check:
+            print("\n" + "=" * 60)
+            print(
+                "-" * 10
+                + " "
+                + "Profiler: Buffer Load Issue Detection"
+                + " "
+                + "-" * 11
+            )
+            print("=" * 60)
+            if self.potential_buffer_load_issue_found:
+                print("\n>>>>>> Warning: Potential Buffer Load Issue Detected! <<<<<<")
+                print(
+                    "\nSome memory access offsets are within 32-bit range, "
+                    "\nbut Buffer Load optimization was NOT used in the kernel."
+                )
+                print(
+                    "\nThis may lead to suboptimal performance on AMD GPUs. "
+                    "\nConsider enabling Buffer Load optimization."
+                )
+            else:
+                print("No Buffer Load Issues Detected.")
+                print(
+                    "All memory access offsets are within 32-bit range, "
+                    "and Buffer Load optimization was used appropriately."
+                )
+            print("=" * 60 + "\n")
+
+        print("=" * 60, "Profiler Issues Summary Ends", "=" * 55)
+        print("\n\n\n")
 
         return [self.load_bytes, self.store_bytes]
