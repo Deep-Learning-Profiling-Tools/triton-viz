@@ -67,14 +67,6 @@ class Store(Op):
     time_idx: int = 0
 
 
-class TritonStore(Store):
-    ...
-
-
-class NKIStore(Store):
-    ...
-
-
 @dataclass
 class RawLoad(Op):
     name: ClassVar[str] = "raw_load"
@@ -92,14 +84,6 @@ class Load(Op):
     backend: str = "nki"
     bytes: int = 0
     time_idx: int = 0
-
-
-class TritonLoad(Load):
-    ...
-
-
-class NKILoad(Load):
-    ...
 
 
 @dataclass
