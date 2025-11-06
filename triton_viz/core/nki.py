@@ -41,8 +41,14 @@ class NDArray:
     def element_size(self):
         return self.dtype.itemsize
 
-    def cpu(self):  # THTODO: rm?
+    def cpu(self):
         return self
+
+    def detach(self):
+        return self
+
+    def numpy(self):
+        return self.data
 
     def get_offsets(self):
         """

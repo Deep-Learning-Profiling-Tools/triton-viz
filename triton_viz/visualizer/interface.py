@@ -3,7 +3,6 @@ from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data
 import os
-import torch
 from flask_cloudflared import _run_cloudflared
 import requests
 import time
@@ -59,9 +58,7 @@ def precompute_c_values(op_data):
         for j in range(cols):
             precomputed[(i, j)] = [0] * (inner_dim + 1)
             for k in range(1, inner_dim + 1):
-                precomputed[(i, j)][k] = torch.dot(
-                    input_data[i, :k], other_data[:k, j]
-                ).item()
+                precomputed[(i, j)][k] = input_data[i, :k] @ other_data[:k, j]
 
     return precomputed
 
