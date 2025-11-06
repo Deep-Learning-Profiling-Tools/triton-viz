@@ -148,7 +148,7 @@ class ClientManager:
                 backend_ops = OPERATION_REGISTRY[backend]["op_list"]
 
                 for op in backend_ops:
-                    unpatch_op(op)
+                    unpatch_op(op, backend)
                 unpatch_for_loop()
                 unpatch_lang(backend)
 

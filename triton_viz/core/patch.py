@@ -310,46 +310,20 @@ for op_type in NKI_OP_LIST:
 
 OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
     "triton": {
+        "builder": interpreter_builder,
         "op_list": TRITON_OP_LIST,
         "original_ops": TRITON_ORIGINAL_OPS,
         "op_attr_names": TRITON_OP_ATTR_NAMES,
         "adapters": TRITON_ADAPTERS,
     },
     "nki": {
+        "builder": nki_builder,
         "op_list": NKI_OP_LIST,
         "original_ops": NKI_ORIGINAL_OPS,
         "op_attr_names": NKI_OP_ATTR_NAMES,
         "adapters": NKI_ADAPTERS,
     },
 }
-
-BUILDER = interpreter_builder
-current_backend = "triton"
-op_list: list[Op] = OPERATION_REGISTRY[current_backend]["op_list"]
-original_ops: dict[Op, Callable] = OPERATION_REGISTRY[current_backend]["original_ops"]
-_OP_ATTR_NAMES: dict[Op, str] = OPERATION_REGISTRY[current_backend]["op_attr_names"]
-
-
-def get_builder_for_backend(backend: str):
-    """Get the appropriate builder for a given backend."""
-    return nki_builder if backend == "nki" else interpreter_builder
-
-
-def detect_current_backend():
-    """Detect the current backend based on which operations have been patched."""
-    # Check if Triton operations have been patched first (since this example uses Triton)
-    if hasattr(interpreter_builder, "create_get_program_id") and hasattr(
-        interpreter_builder.create_get_program_id, "__wrapped__"
-    ):
-        return "triton"
-    # Check if NKI operations have been patched
-    elif hasattr(nki_builder, "program_id") and hasattr(
-        nki_builder.program_id, "__wrapped__"
-    ):
-        return "nki"
-    # Default to checking BUILDER global
-    else:
-        return "nki" if BUILDER == nki_builder else "triton"
 
 
 reduce_map: dict[type[Op], Callable] = {
@@ -408,7 +382,7 @@ class PatchOp:
         return ret
 
 
-def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: Optional[str] = None):
+def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: str):
     """
     Register a callback to be called before and after an operator is executed.
 
@@ -416,27 +390,20 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: Optional[str] =
     :param callbacks: The OpCallbacks object containing before_callback, after_callback, and op_overrider.
     :param backend: The backend to use ('triton', 'nki', or None for current backend).
     """
-    if backend is None:
-        backend = current_backend
-
     if backend not in OPERATION_REGISTRY:
         raise ValueError(f"Unknown backend: {backend}")
 
     backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
     backend_attr_names = OPERATION_REGISTRY[backend]["op_attr_names"]
     backend_adapters = OPERATION_REGISTRY[backend]["adapters"]
-    backend_builder = nki_builder if backend == "nki" else interpreter_builder
+    backend_builder = OPERATION_REGISTRY[backend]["builder"]
 
     if op_type in backend_ops:
         op_name = backend_attr_names[op_type]
         original_op = backend_ops[op_type]
         adapter = backend_adapters[op_type]
         patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(
-            backend_builder,
-            op_name,
-            lambda *args, **kwargs: patched_op(*args, **kwargs),
-        )
+        setattr(backend_builder, op_name, patched_op)
     elif backend == "triton" and (op_type in reduce_map or op_type in scan_map):
         if op_type in reduce_map:
             op_name = reduce_map[op_type].__name__
@@ -445,28 +412,32 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: Optional[str] =
         original_op = getattr(tl, op_name)
         adapter = backend_adapters[op_type]
         patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
+        setattr(tl, op_name, patched_op)
     elif backend == "triton" and op_type in math_map:
         op_name = math_map[op_type].__name__
         original_op = getattr(tl.math, op_name)
         adapter = backend_adapters[op_type]
         patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(tl.math, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
+        setattr(tl.math, op_name, patched_op)
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
 
 
-def unpatch_op(op_type: type[Op]):
+def unpatch_op(op_type: type[Op], backend: str):
     """
     Unregister a callback for an operator.
 
     :param op_type: The type of the operator to unregister the callback for.
     """
-    if op_type in original_ops:
-        original_op = original_ops[op_type]  # type: ignore
+    backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
+    backend_attr_names = OPERATION_REGISTRY[backend]["op_attr_names"]
+    backend_builder = OPERATION_REGISTRY[backend]["builder"]
+
+    if op_type in backend_ops:
+        original_op = backend_ops[op_type]  # type: ignore
         # Use hardcoded name from _OP_ATTR_NAMES
-        op_name = _OP_ATTR_NAMES[op_type]  # type: ignore
-        setattr(BUILDER, op_name, original_op)
+        op_name = backend_attr_names[op_type]  # type: ignore
+        setattr(backend_builder, op_name, original_op)
 
 
 class _LoopIter:
@@ -794,6 +765,8 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     if kwargs.pop("warmup", False):
         return
 
+    builder = OPERATION_REGISTRY[backend]["builder"]
+
     def run_grid_loops(grid):
         for x in tqdm(
             range(grid[0]),
@@ -852,9 +825,6 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     grid = self.grid(call_args) if callable(self.grid) else self.grid
     assert len(grid) <= 3
     grid = grid + (1,) * (3 - len(grid))
-
-    # Use the correct builder based on current backend
-    builder = get_builder_for_backend(backend)
 
     if backend == "nki":
         builder.set_grid_dim(grid)
