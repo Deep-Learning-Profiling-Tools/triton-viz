@@ -47,42 +47,13 @@ class NDArray:
     def get_offsets(self):
         """
         Generate offset arrays for each dimension based on shape and stride.
-
-        Args:
-            strides: Tuple of strides for each dimension (a, b, ..., z)
-
-        Returns:
-            Tuple of offset arrays: (arange(A)[:, None, ..., None]*a, arange(B)[None, :, ..., None]*b, ...)
+        Given array with shape (A, ..., Z) and strides (a, ..., z), return offsets:
+        a * arange(A)[:, None, ..., None] + ... + z * arange(Z)[None, None, ..., :]
         """
-        strides = self.data.strides
-        if self.data is None:
-            raise AttributeError("NDArray has no value - cannot compute offsets")
-
-        shape = self.shape
-        if len(shape) != len(strides):
-            raise ValueError(
-                f"Shape has {len(shape)} dimensions but strides has {len(strides)} dimensions"
-            )
-
-        # offsets = []
         offsets = 0
-        ndim = len(shape)
-
-        for i, (dim_size, stride) in enumerate(zip(shape, strides)):
-            # Create arange for this dimension
-            arange_vals = np.arange(dim_size)
-
-            # Create broadcast shape - put arange in position i, others as 1
-            broadcast_shape = [1] * ndim
-            broadcast_shape[i] = dim_size
-
-            # Reshape and multiply by stride
-            offset_array = (arange_vals * stride).reshape(broadcast_shape)
-            # offsets.append(NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}"))
-            offsets += NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}")
-
-        # return tuple(offsets)
-        return offsets
+        for dim_size, stride in zip(self.shape, self.stride()):
+            offsets = np.expand_dims(offsets, -1) + np.arange(dim_size) * stride
+        return NDArray(value=offsets, name=self.name)
 
     def __repr__(self):
         return f"NDArray(shape={self.shape}, dtype={self.dtype}, name={self.name})"
