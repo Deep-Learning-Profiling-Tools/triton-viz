@@ -130,11 +130,11 @@ class ClientManager:
         with patch_calls(backend):
             for client in self.clients.values():
                 # get operations for the specified backend
-                backend_ops = OPERATION_REGISTRY[backend]["op_list"]
+                backend_ops: list = OPERATION_REGISTRY[backend]["op_list"]
 
                 for op in backend_ops:
                     # patch ops
-                    callbacks = client.register_op_callback(op, backend=backend)
+                    callbacks = client.register_op_callback(op)
                     patch_op(op, callbacks, backend=backend)
 
                 # patch for loops

@@ -1,6 +1,7 @@
 import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Optional
 from functools import partialmethod
 from tqdm import tqdm
@@ -59,176 +60,266 @@ from triton.runtime import JITFunction
 from triton_viz.core.nki import nki_builder
 
 
-# shared operation registry for both backends
-def identity(*args, **kwargs):
-    return args, kwargs
+@dataclass
+class AdapterResult:
+    """
+    For each backend, ops may have slightly different function signatures
+    which we run through (backend, function)-specific adapters to return
+    standardized args/kwargs for client callbacks.
+    """
+
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.args = args
+        self.kwargs = kwargs
 
 
-OPERATION_REGISTRY = {
+def passthrough_adapter(*args: Any, **kwargs: Any) -> AdapterResult:
+    """Return arguments unchanged for clients that expect the original signature."""
+    return AdapterResult(args, kwargs)
+
+
+def _program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(axis)
+
+
+def _triton_raw_store_adapter(
+    ptr: Any, value: Any, *_args: Any, **_kwargs: Any
+) -> AdapterResult:
+    return AdapterResult(ptr, value)
+
+
+def _triton_store_adapter(
+    ptr: Any, _value: Any, mask: Any, *_args: Any, **kwargs: Any
+) -> AdapterResult:
+    keys = kwargs.get("keys")
+    return AdapterResult(ptr, mask, keys)
+
+
+def _triton_raw_load_adapter(ptr: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(ptr)
+
+
+def _triton_load_adapter(
+    ptr: Any, mask: Any, _other: Any, *_args: Any, **kwargs: Any
+) -> AdapterResult:
+    keys = kwargs.get("keys")
+    return AdapterResult(ptr, mask, keys)
+
+
+def _triton_dot_adapter(a: Any, b: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(a, b)
+
+
+def _triton_reduce_sum_adapter(
+    input_tensor, axis=None, keep_dims=False, *_args, **_kwargs
+) -> AdapterResult:
+    return AdapterResult(input_tensor, axis, keep_dims)
+
+
+def _triton_addptr_adapter(
+    ptr: Any, offset: Any, *_args: Any, **_kwargs: Any
+) -> AdapterResult:
+    return AdapterResult(ptr, offset)
+
+
+def _nki_load_adapter(
+    src: Any, keys: Any, *, mask: Optional[Any] = None, **_kwargs: Any
+) -> AdapterResult:
+    return AdapterResult(src, mask, keys)
+
+
+def _nki_store_adapter(
+    dst: Any, keys: Any, value: Any, *, mask: Optional[Any] = None, **_kwargs: Any
+) -> AdapterResult:
+    return AdapterResult(dst, mask, keys)
+
+
+def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(x, y)
+
+
+TRITON_OP_LIST = [
+    ProgramId,
+    RawStore,
+    Store,
+    RawLoad,
+    Load,
+    UnaryOp,
+    BinaryOp,
+    TernaryOp,
+    Dot,
+    MakeRange,
+    AddPtr,
+    Splat,
+    ExpandDims,
+    Broadcast,
+    ReduceMax,
+    ReduceMin,
+    ReduceSum,
+    MakeBlockPointer,
+    TensorPointerLoad,
+    TensorPointerStore,
+    Idiv,
+    Rsqrt,
+    CastImpl,
+    Reshape,
+    Join,
+    Fabs,
+    Ashr,
+    Advance,
+    FpToFp,
+    Umulhi,
+    Trans,
+    CumSum,
+    Bitcast,
+    AtomicCas,
+]
+
+TRITON_ORIGINAL_OPS = {
+    ProgramId: interpreter_builder.create_get_program_id,
+    RawStore: interpreter_builder.create_store,
+    Store: interpreter_builder.create_masked_store,
+    RawLoad: interpreter_builder.create_load,
+    Load: interpreter_builder.create_masked_load,
+    Dot: interpreter_builder.create_dot,
+    UnaryOp: interpreter_builder.unary_op,
+    BinaryOp: interpreter_builder.binary_op,
+    TernaryOp: interpreter_builder.ternary_op,
+    MakeRange: interpreter_builder.create_make_range,
+    AddPtr: interpreter_builder.create_addptr,
+    ExpandDims: interpreter_builder.create_expand_dims,
+    Broadcast: interpreter_builder.create_broadcast,
+    Splat: interpreter_builder.create_splat,
+    MakeBlockPointer: interpreter_builder.create_make_block_ptr,
+    TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
+    TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
+    Idiv: interpreter_builder.create_idiv,
+    Rsqrt: interpreter_builder.create_rsqrt,
+    CastImpl: interpreter_builder.cast_impl,
+    Reshape: interpreter_builder.create_reshape,
+    Join: interpreter_builder.create_join,
+    Fabs: interpreter_builder.create_fabs,
+    Ashr: interpreter_builder.create_ashr,
+    Advance: interpreter_builder.create_advance,
+    FpToFp: interpreter_builder.create_fp_to_fp,
+    Umulhi: interpreter_builder.create_umulhi,
+    Trans: interpreter_builder.create_trans,
+    Bitcast: interpreter_builder.create_bitcast,
+    AtomicCas: interpreter_builder.create_atomic_cas,
+}
+
+TRITON_OP_ATTR_NAMES = {
+    ProgramId: "create_get_program_id",
+    RawStore: "create_store",
+    Store: "create_masked_store",
+    RawLoad: "create_load",
+    Load: "create_masked_load",
+    Dot: "create_dot",
+    UnaryOp: "unary_op",
+    BinaryOp: "binary_op",
+    TernaryOp: "ternary_op",
+    MakeRange: "create_make_range",
+    AddPtr: "create_addptr",
+    ExpandDims: "create_expand_dims",
+    Broadcast: "create_broadcast",
+    Splat: "create_splat",
+    MakeBlockPointer: "create_make_block_ptr",
+    TensorPointerLoad: "create_tensor_pointer_load",
+    TensorPointerStore: "create_tensor_pointer_store",
+    Idiv: "create_idiv",
+    Rsqrt: "create_rsqrt",
+    CastImpl: "cast_impl",
+    Reshape: "create_reshape",
+    Join: "create_join",
+    Fabs: "create_fabs",
+    Ashr: "create_ashr",
+    Advance: "create_advance",
+    FpToFp: "create_fp_to_fp",
+    Umulhi: "create_umulhi",
+    Trans: "create_trans",
+    Bitcast: "create_bitcast",
+    AtomicCas: "create_atomic_cas",
+}
+
+TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
+    ProgramId: _program_id_adapter,
+    RawStore: _triton_raw_store_adapter,
+    Store: _triton_store_adapter,
+    RawLoad: _triton_raw_load_adapter,
+    Load: _triton_load_adapter,
+    Dot: _triton_dot_adapter,
+    ReduceSum: _triton_reduce_sum_adapter,
+    AddPtr: _triton_addptr_adapter,
+}
+
+for op_type in TRITON_OP_LIST:
+    TRITON_ADAPTERS.setdefault(op_type, passthrough_adapter)
+
+
+NKI_OP_LIST = [
+    Allocate,
+    ProgramId,
+    Load,
+    Store,
+    Dot,
+    UnaryOp,
+    MakeRange,
+]
+
+NKI_ORIGINAL_OPS = {
+    ProgramId: nki_builder.program_id,
+    Allocate: nki_builder.ndarray,
+    Load: nki_builder.masked_load,
+    Store: nki_builder.masked_store,
+    Dot: nki_builder.matmul,
+    UnaryOp: nki_builder._unary_op,
+    MakeRange: nki_builder.arange,
+}
+
+NKI_OP_ATTR_NAMES = {
+    ProgramId: "program_id",
+    Allocate: "ndarray",
+    Load: "masked_load",
+    Store: "masked_store",
+    Dot: "matmul",
+    UnaryOp: "_unary_op",
+    MakeRange: "arange",
+}
+
+NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
+    ProgramId: _program_id_adapter,
+    Load: _nki_load_adapter,
+    Store: _nki_store_adapter,
+    Dot: _nki_dot_adapter,
+}
+
+for op_type in NKI_OP_LIST:
+    NKI_ADAPTERS.setdefault(op_type, passthrough_adapter)
+
+
+OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
     "triton": {
-        "op_list": [
-            ProgramId,
-            RawStore,
-            # TritonStore,
-            Store,
-            RawLoad,
-            Load,
-            UnaryOp,
-            BinaryOp,
-            TernaryOp,
-            Dot,
-            MakeRange,
-            AddPtr,
-            Splat,
-            ExpandDims,
-            Broadcast,
-            ReduceMax,
-            ReduceMin,
-            ReduceSum,
-            MakeBlockPointer,
-            TensorPointerLoad,
-            TensorPointerStore,
-            Idiv,
-            Rsqrt,
-            CastImpl,
-            Reshape,
-            Join,
-            Fabs,
-            Ashr,
-            Advance,
-            FpToFp,
-            Umulhi,
-            Trans,
-            CumSum,
-            Bitcast,
-            AtomicCas,
-        ],
-        "original_ops": {
-            ProgramId: interpreter_builder.create_get_program_id,
-            RawStore: interpreter_builder.create_store,
-            # TritonStore: interpreter_builder.create_masked_store,
-            Store: interpreter_builder.create_masked_store,
-            RawLoad: interpreter_builder.create_load,
-            Load: interpreter_builder.create_masked_load,
-            Dot: interpreter_builder.create_dot,
-            # ProgramId: (
-            #    interpreter_builder.create_get_program_id,
-            #    lambda axis: axis
-            # ),
-            # RawStore: (interpreter_builder.create_store, identity),
-            # TritonStore: (
-            #    interpreter_builder.create_masked_store,
-            #    lambda ptr, value, mask, *args, **kwargs: ptr, value, mask
-            # ),
-            # RawLoad: interpreter_builder.create_load,
-            # TritonLoad: (
-            #    interpreter_builder.create_masked_load,
-            #    lambda ptr, mask, *args, **kwargs: ptr, mask
-            # ),
-            # Dot: (
-            #    interpreter_builder.create_dot,
-            #    lambda a, b, *args, **kwargs: a, b
-            # ),
-            UnaryOp: interpreter_builder.unary_op,
-            BinaryOp: interpreter_builder.binary_op,
-            TernaryOp: interpreter_builder.ternary_op,
-            MakeRange: interpreter_builder.create_make_range,
-            AddPtr: interpreter_builder.create_addptr,
-            ExpandDims: interpreter_builder.create_expand_dims,
-            Broadcast: interpreter_builder.create_broadcast,
-            Splat: interpreter_builder.create_splat,
-            MakeBlockPointer: interpreter_builder.create_make_block_ptr,
-            TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
-            TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
-            Idiv: interpreter_builder.create_idiv,
-            Rsqrt: interpreter_builder.create_rsqrt,
-            CastImpl: interpreter_builder.cast_impl,
-            Reshape: interpreter_builder.create_reshape,
-            Join: interpreter_builder.create_join,
-            Fabs: interpreter_builder.create_fabs,
-            Ashr: interpreter_builder.create_ashr,
-            Advance: interpreter_builder.create_advance,
-            FpToFp: interpreter_builder.create_fp_to_fp,
-            Umulhi: interpreter_builder.create_umulhi,
-            Trans: interpreter_builder.create_trans,
-            Bitcast: interpreter_builder.create_bitcast,
-            AtomicCas: interpreter_builder.create_atomic_cas,
-        },
-        "op_attr_names": {
-            ProgramId: "create_get_program_id",
-            RawStore: "create_store",
-            Store: "create_masked_store",
-            RawLoad: "create_load",
-            Load: "create_masked_load",
-            Dot: "create_dot",
-            UnaryOp: "unary_op",
-            BinaryOp: "binary_op",
-            TernaryOp: "ternary_op",
-            MakeRange: "create_make_range",
-            AddPtr: "create_addptr",
-            ExpandDims: "create_expand_dims",
-            Broadcast: "create_broadcast",
-            Splat: "create_splat",
-            MakeBlockPointer: "create_make_block_ptr",
-            TensorPointerLoad: "create_tensor_pointer_load",
-            TensorPointerStore: "create_tensor_pointer_store",
-            Idiv: "create_idiv",
-            Rsqrt: "create_rsqrt",
-            CastImpl: "cast_impl",
-            Reshape: "create_reshape",
-            Join: "create_join",
-            Fabs: "create_fabs",
-            Ashr: "create_ashr",
-            Advance: "create_advance",
-            FpToFp: "create_fp_to_fp",
-            Umulhi: "create_umulhi",
-            Trans: "create_trans",
-            Bitcast: "create_bitcast",
-            AtomicCas: "create_atomic_cas",
-        },
+        "op_list": TRITON_OP_LIST,
+        "original_ops": TRITON_ORIGINAL_OPS,
+        "op_attr_names": TRITON_OP_ATTR_NAMES,
+        "adapters": TRITON_ADAPTERS,
     },
     "nki": {
-        "op_list": [
-            Allocate,
-            ProgramId,
-            Load,
-            Store,
-            # NKILoad,
-            # NKIStore,
-            Dot,
-            UnaryOp,
-            MakeRange,
-        ],
-        "original_ops": {
-            ProgramId: nki_builder.program_id,
-            Allocate: nki_builder.ndarray,
-            # NKILoad: nki_builder.masked_load,
-            # NKIStore: nki_builder.masked_store,
-            Load: nki_builder.masked_load,
-            Store: nki_builder.masked_store,
-            Dot: nki_builder.matmul,
-            UnaryOp: nki_builder._unary_op,
-            MakeRange: nki_builder.arange,
-        },
-        "op_attr_names": {
-            ProgramId: "program_id",
-            Allocate: "ndarray",
-            # NKILoad: "masked_load",
-            # NKIStore: "masked_store",
-            Load: "masked_load",
-            Store: "masked_store",
-            Dot: "matmul",
-            UnaryOp: "_unary_op",
-            MakeRange: "arange",
-        },
+        "op_list": NKI_OP_LIST,
+        "original_ops": NKI_ORIGINAL_OPS,
+        "op_attr_names": NKI_OP_ATTR_NAMES,
+        "adapters": NKI_ADAPTERS,
     },
 }
 
 BUILDER = interpreter_builder
 current_backend = "triton"
-op_list = OPERATION_REGISTRY[current_backend]["op_list"]
-original_ops = OPERATION_REGISTRY[current_backend]["original_ops"]  # type: ignore
-_OP_ATTR_NAMES = OPERATION_REGISTRY[current_backend]["op_attr_names"]  # type: ignore
+op_list: list = OPERATION_REGISTRY[current_backend]["op_list"]
+original_ops: dict = OPERATION_REGISTRY[current_backend]["original_ops"]
+_OP_ATTR_NAMES: dict = OPERATION_REGISTRY[current_backend]["op_attr_names"]
 
 
 def get_builder_for_backend(backend: str):
@@ -272,14 +363,17 @@ class PatchOp:
         op: Callable,
         op_type: type[Op],
         callbacks: OpCallbacks,
+        adapter: Callable[..., AdapterResult],
     ):
         self.op = op
         self.op_type = op_type
         self.callbacks = callbacks
+        self.adapter = adapter
 
     def __call__(self, *args, **kwargs):
         if self.callbacks.before_callback:
-            self.callbacks.before_callback(*args, **kwargs)
+            before_args = self.adapter(*args, **kwargs)
+            self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
         if self.callbacks.op_overrider:
             if self.op_type in reduce_map or self.op_type in scan_map:
                 # see triton.runtime.interpreter:ReduceOps.sum
@@ -301,7 +395,8 @@ class PatchOp:
             ret = self.op(*args, **kwargs)
         if self.callbacks.after_callback:
             # Pass ret so that we don't have to derive output shape from args
-            self.callbacks.after_callback(ret, *args, **kwargs)
+            after_args = self.adapter(*args, **kwargs)
+            self.callbacks.after_callback(ret, *after_args.args, **after_args.kwargs)
         return ret
 
 
@@ -319,14 +414,16 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: Optional[str] =
     if backend not in OPERATION_REGISTRY:
         raise ValueError(f"Unknown backend: {backend}")
 
-    backend_ops = OPERATION_REGISTRY[backend]["original_ops"]  # type: ignore
-    backend_attr_names = OPERATION_REGISTRY[backend]["op_attr_names"]  # type: ignore
+    backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
+    backend_attr_names = OPERATION_REGISTRY[backend]["op_attr_names"]
+    backend_adapters = OPERATION_REGISTRY[backend]["adapters"]
     backend_builder = nki_builder if backend == "nki" else interpreter_builder
 
     if op_type in backend_ops:
-        op_name = backend_attr_names[op_type]  # type: ignore
-        original_op = backend_ops[op_type]  # type: ignore
-        patched_op = PatchOp(original_op, op_type, callbacks)
+        op_name = backend_attr_names[op_type]
+        original_op = backend_ops[op_type]
+        adapter = backend_adapters[op_type]
+        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
         setattr(
             backend_builder,
             op_name,
@@ -338,12 +435,14 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: Optional[str] =
         elif op_type in scan_map:
             op_name = scan_map[op_type].__name__
         original_op = getattr(tl, op_name)
-        patched_op = PatchOp(original_op, op_type, callbacks)
+        adapter = backend_adapters[op_type]
+        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     elif backend == "triton" and op_type in math_map:
         op_name = math_map[op_type].__name__
         original_op = getattr(tl.math, op_name)
-        patched_op = PatchOp(original_op, op_type, callbacks)
+        adapter = backend_adapters[op_type]
+        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
         setattr(tl.math, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
     else:
         raise ValueError(f"Patching operator {op_type} not supported")

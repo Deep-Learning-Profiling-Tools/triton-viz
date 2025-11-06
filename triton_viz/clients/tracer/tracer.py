@@ -7,8 +7,6 @@ from ...core.data import (
     ReduceSum,
     Dot,
     Grid,
-    # MaskedLoad,
-    # MaskedStore,
     RawLoad,
     RawStore,
     Allocate,
@@ -115,27 +113,9 @@ class Tracer(Client):
                     return [f]
             return stack[-1:]
 
-        def post_allocate_callback(ret, *args, **kwargs):
+        def post_allocate_callback(ret):
             assert hasattr(ret, "data")
             self.tensors.append(ret)
-
-        def pre_load_callback(ptr, mask, *args, **kwargs):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            rec = Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
-
-        def pre_store_callback(ptr, value, mask, *args, **kwargs):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            rec = Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
 
         def _convert_keys_to_numpy(keys):
             """Convert any NDArrays in keys to numpy arrays."""
@@ -146,31 +126,34 @@ class Tracer(Client):
             else:
                 return keys
 
-        def pre_masked_load_callback(ptr, *args, **kwargs):
+        def pre_masked_load_callback(ptr, mask, keys):
             if not self.sample:
                 return
 
-            mask = kwargs["mask"]
-            if "keys" in kwargs:
-                keys = _convert_keys_to_numpy(kwargs["keys"])
-                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
-                tensor = ptr
-            else:  # i.e. for triton, ptr = pointer + offsets
+            if keys is None:  # i.e. for triton, ptr = pointer + offsets
                 first_ptr = np.reshape(ptr.data, (-1))[0]
                 tensor = self._get_tensor(first_ptr)
                 offsets = ptr.data - tensor.data_ptr()
+            else:
+                keys = _convert_keys_to_numpy(keys)
+                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
+                tensor = ptr
 
             rec = Load(tensor.data_ptr(), offsets, mask.data)
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        def pre_masked_store_callback(ptr, *args, **kwargs):
+        def pre_masked_store_callback(ptr, mask, keys):
             if not self.sample:
                 return
 
-            mask = kwargs.get("mask", None)
-            if "keys" in kwargs:
-                keys = _convert_keys_to_numpy(kwargs["keys"])
+            if keys is None:  # i.e. for triton, ptr = pointer + offsets, so keys=None
+                first_ptr = np.reshape(ptr.data, (-1))[0]
+                tensor = self._get_tensor(first_ptr)
+                offsets = ptr.data - tensor.data_ptr()
+                mask_data = mask.data
+            else:
+                keys = _convert_keys_to_numpy(keys)
                 if mask is None:
                     offsets = masked_load(ptr.get_offsets().data, keys)
                     mask_data = np.ones_like(offsets).astype(bool)
@@ -178,11 +161,6 @@ class Tracer(Client):
                     mask_data = mask.data
                     offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
                 tensor = ptr
-            else:  # i.e. for triton, ptr = pointer + offsets, so keys=None
-                first_ptr = np.reshape(ptr.data, (-1))[0]
-                tensor = self._get_tensor(first_ptr)
-                offsets = ptr.data - tensor.data_ptr()
-                mask_data = mask.data
 
             rec = Store(tensor.data_ptr(), offsets, mask_data)
             rec.call_path = _extract_user_frames()
@@ -211,16 +189,14 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        def post_reduce_sum_callback(
-            ret, input, axis=None, keep_dims=False, *args, **kwargs
-        ):
+        def post_reduce_sum_callback(ret, input, axis, keep_dims):
             if not self.sample:
                 return
             input_shape = input.handle.data.shape
             output_shape = ret.handle.data.shape
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
-        def post_dot_callback(ret, input, other, *args, **kwargs):
+        def post_dot_callback(ret, input, other):
             if not self.sample:
                 return
             input_shape = input.data.shape
@@ -254,12 +230,8 @@ class Tracer(Client):
 
         if op_type is Allocate:
             return OpCallbacks(after_callback=post_allocate_callback)
-        # elif op_type is Load:
-        #    return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Load:
             return OpCallbacks(before_callback=pre_masked_load_callback)
-        # elif op_type is Store:
-        #    return OpCallbacks(before_callback=pre_store_callback)
         elif op_type is Store:
             return OpCallbacks(before_callback=pre_masked_store_callback)
         elif op_type is RawLoad:

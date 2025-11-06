@@ -548,9 +548,7 @@ class SanitizerBruteForce(Sanitizer):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
-        def pre_load_callback(
-            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
-        ):
+        def pre_load_callback(ptr, mask, _keys):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
             tensor = _get_tensor(self.tensors, first_ptr)
@@ -558,14 +556,12 @@ class SanitizerBruteForce(Sanitizer):
             self._report(op_type, oob)
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
-        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
+        def pre_store_callback(ptr, mask, _keys):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
             tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
-            self._report(
-                op_type, check_out_of_bounds_access(ptr.data, mask.data, tensor)
-            )
+            self._report(op_type, oob)
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
         if op_type is Load:
