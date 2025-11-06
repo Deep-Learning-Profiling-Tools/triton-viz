@@ -351,3 +351,43 @@ def test_copy_kernel():
         N,
         TILE_N=128,
     )
+
+
+# ======== Atomic Operations Tests =========
+@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+@triton.jit
+def atomic_add_kernel(
+    output_ptr,
+    value: tl.constexpr,
+):
+    # Simple atomic add operation
+    tl.atomic_add(output_ptr, value)
+
+
+def test_atomic_add():
+    """Test that atomic_add operations work with the sanitizer."""
+    y = torch.zeros(1, dtype=torch.float32)
+    grid = (1,)
+    atomic_add_kernel[grid](y, value=5.0)
+    # Note: The sanitizer analyzes symbolically, so the actual value may not be updated
+    # This test verifies that the operation doesn't crash
+
+
+@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+@triton.jit
+def atomic_cas_kernel(
+    output_ptr,
+    cmp_value: tl.constexpr,
+    new_value: tl.constexpr,
+):
+    # Simple atomic compare-and-swap operation
+    tl.atomic_cas(output_ptr, cmp_value, new_value)
+
+
+def test_atomic_cas():
+    """Test that atomic_cas operations work with the sanitizer."""
+    y = torch.zeros(1, dtype=torch.float32)
+    grid = (1,)
+    atomic_cas_kernel[grid](y, cmp_value=0.0, new_value=5.0)
+    # Note: The sanitizer analyzes symbolically, so the actual value may not be updated
+    # This test verifies that the operation doesn't crash

@@ -182,9 +182,35 @@ def prepare_visualization_data(program_records, tensor_table):
                 }
             )
 
+            # Normalize Dot operands to NumPy arrays for downstream endpoints
+            try:
+                import numpy as _np
+
+                def _to_numpy_cpu(x):
+                    if isinstance(x, _np.ndarray):
+                        return x
+                    if hasattr(x, "cpu"):
+                        try:
+                            return x.detach().cpu().numpy()
+                        except Exception:
+                            return _np.asarray(x)
+                    if hasattr(x, "data"):
+                        return _np.asarray(getattr(x, "data"))
+                    if hasattr(x, "_value"):
+                        return _np.asarray(getattr(x, "_value"))
+                    return _np.asarray(x)
+
+                a_np = _to_numpy_cpu(record.input_data)
+                b_np = _to_numpy_cpu(record.other_data)
+            except Exception:
+                import numpy as _np
+
+                a_np = _np.asarray(record.input_data)
+                b_np = _np.asarray(record.other_data)
+
             raw_tensor_data[record_uuid] = {
-                "input_data": torch.tensor(record.input_data),
-                "other_data": torch.tensor(record.other_data),
+                "input_data": a_np,
+                "other_data": b_np,
                 "intermediate_results": record.intermediate_results,
                 "tracebacks": [
                     {
@@ -253,38 +279,36 @@ def prepare_visualization_data(program_records, tensor_table):
                 }
             )
 
-            # Normalize to torch.Tensor for downstream APIs
+            # Normalize to NumPy array for downstream APIs, and cache basic stats
             try:
                 import numpy as _np
-                import torch as _torch
 
                 gt = global_tensor.data
-                # gt could be torch.Tensor, numpy.ndarray, or NDArray wrapper
-                if (
-                    hasattr(gt, "cpu")
-                    and callable(getattr(gt, "cpu"))
-                    and hasattr(gt, "shape")
-                ):
-                    t_cpu = gt.cpu()
+                if hasattr(gt, "cpu") and callable(getattr(gt, "cpu", None)):
+                    try:
+                        arr = gt.detach().cpu().numpy()
+                    except Exception:
+                        arr = _np.asarray(gt)
+                elif hasattr(gt, "data"):
+                    arr = _np.asarray(getattr(gt, "data"))
+                elif hasattr(gt, "_value"):
+                    arr = _np.asarray(getattr(gt, "_value"))
                 else:
-                    # NDArray: prefer .data property -> numpy array
-                    if hasattr(gt, "data"):
-                        arr = gt.data
-                    else:
-                        arr = gt
-                    arr = _np.asarray(arr)
-                    t_cpu = _torch.from_numpy(
-                        arr.copy() if not arr.flags.c_contiguous else arr
-                    )
+                    arr = _np.asarray(gt)
             except Exception:
-                # Fallback to empty tensor if conversion fails
-                import torch as _torch
+                import numpy as _np
 
-                t_cpu = _torch.tensor([])
+                arr = _np.asarray([])
+
+            t_min = float(np.min(arr)) if arr.size else 0.0
+            t_max = float(np.max(arr)) if arr.size else 0.0
 
             raw_tensor_data[record_uuid] = {
-                "global_tensor": t_cpu,
-                "dims": len(t_cpu.shape),
+                "global_tensor": arr,
+                "dims": int(arr.ndim),
+                "shape": list(arr.shape),
+                "min": t_min,
+                "max": t_max,
                 "tracebacks": [
                     {
                         "filename": f.filename,
