@@ -78,7 +78,7 @@ class AdapterResult:
 
 def passthrough_adapter(*args: Any, **kwargs: Any) -> AdapterResult:
     """Return arguments unchanged for clients that expect the original signature."""
-    return AdapterResult(args, kwargs)
+    return AdapterResult(*args, **kwargs)
 
 
 def _program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
@@ -105,8 +105,7 @@ def _triton_raw_load_adapter(ptr: Any, *_args: Any, **_kwargs: Any) -> AdapterRe
 def _triton_load_adapter(
     ptr: Any, mask: Any, _other: Any, *_args: Any, **kwargs: Any
 ) -> AdapterResult:
-    keys = kwargs.get("keys")
-    return AdapterResult(ptr, mask, keys)
+    return AdapterResult(ptr, mask, kwargs.get("keys"))
 
 
 def _triton_dot_adapter(a: Any, b: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
