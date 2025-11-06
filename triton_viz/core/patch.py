@@ -125,6 +125,10 @@ def _triton_addptr_adapter(
     return AdapterResult(ptr, offset)
 
 
+def _nki_allocate_adapter(*_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult()
+
+
 def _nki_load_adapter(
     src: Any, keys: Any, *, mask: Optional[Any] = None, **_kwargs: Any
 ) -> AdapterResult:
@@ -291,6 +295,7 @@ NKI_OP_ATTR_NAMES = {
 
 NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
     ProgramId: _program_id_adapter,
+    Allocate: _nki_allocate_adapter,
     Load: _nki_load_adapter,
     Store: _nki_store_adapter,
     Dot: _nki_dot_adapter,
@@ -317,9 +322,9 @@ OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
 
 BUILDER = interpreter_builder
 current_backend = "triton"
-op_list: list = OPERATION_REGISTRY[current_backend]["op_list"]
-original_ops: dict = OPERATION_REGISTRY[current_backend]["original_ops"]
-_OP_ATTR_NAMES: dict = OPERATION_REGISTRY[current_backend]["op_attr_names"]
+op_list: list[Op] = OPERATION_REGISTRY[current_backend]["op_list"]
+original_ops: dict[Op, Callable] = OPERATION_REGISTRY[current_backend]["original_ops"]
+_OP_ATTR_NAMES: dict[Op, str] = OPERATION_REGISTRY[current_backend]["op_attr_names"]
 
 
 def get_builder_for_backend(backend: str):
