@@ -13,8 +13,8 @@ from .data import (
     Allocate,
     RawLoad,
     Load,
-    Store,
     RawStore,
+    Store,
     UnaryOp,
     BinaryOp,
     TernaryOp,
@@ -45,6 +45,7 @@ from .data import (
     CumSum,
     Bitcast,
     AtomicCas,
+    AtomicRMW,
 )
 from .data import Flip  # separate import to avoid reordering noise
 import inspect
@@ -179,6 +180,7 @@ TRITON_OP_LIST = [
     CumSum,
     Bitcast,
     AtomicCas,
+    AtomicRMW,
 ]
 
 TRITON_ORIGINAL_OPS = {
@@ -212,6 +214,7 @@ TRITON_ORIGINAL_OPS = {
     Trans: interpreter_builder.create_trans,
     Bitcast: interpreter_builder.create_bitcast,
     AtomicCas: interpreter_builder.create_atomic_cas,
+    AtomicRMW: interpreter_builder.create_atomic_rmw,
 }
 
 TRITON_OP_ATTR_NAMES = {
@@ -245,6 +248,7 @@ TRITON_OP_ATTR_NAMES = {
     Trans: "create_trans",
     Bitcast: "create_bitcast",
     AtomicCas: "create_atomic_cas",
+    AtomicRMW: "create_atomic_rmw",
 }
 
 TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {

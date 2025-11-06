@@ -83,7 +83,7 @@ class Tracer(Client):
     def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def _extract_user_frames() -> list[traceback.FrameSummary]:
             stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
             # drop current frames (this function and callers)
@@ -126,7 +126,7 @@ class Tracer(Client):
             else:
                 return keys
 
-        def pre_masked_load_callback(ptr, mask, keys):
+        def pre_load_callback(ptr, mask, keys):
             if not self.sample:
                 return
 
@@ -143,7 +143,7 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        def pre_masked_store_callback(ptr, mask, keys):
+        def pre_store_callback(ptr, mask, keys):
             if not self.sample:
                 return
 
@@ -189,7 +189,7 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        def post_reduce_sum_callback(ret, input, axis, keep_dims):
+        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
                 return
             input_shape = input.handle.data.shape
@@ -231,9 +231,9 @@ class Tracer(Client):
         if op_type is Allocate:
             return OpCallbacks(after_callback=post_allocate_callback)
         elif op_type is Load:
-            return OpCallbacks(before_callback=pre_masked_load_callback)
+            return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
-            return OpCallbacks(before_callback=pre_masked_store_callback)
+            return OpCallbacks(before_callback=pre_store_callback)
         elif op_type is RawLoad:
             return OpCallbacks(before_callback=pre_raw_load_callback)
         elif op_type is RawStore:
