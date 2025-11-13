@@ -14,7 +14,7 @@ authors = [
 ]
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -49,5 +49,6 @@ triton-profiler = "triton_viz.wrapper:apply_profiler"
 
 [project.optional-dependencies]
 nki = [
-  "neuronx-cc==2.*",
+  "neuronx-cc @ https://pip.repos.neuron.amazonaws.com/neuronx-cc/neuronx_cc-2.21.33363.0%2B82129205-cp310-cp310-linux_x86_64.whl ; python_version == '3.10'",
+  "neuronx-cc @ https://pip.repos.neuron.amazonaws.com/neuronx-cc/neuronx_cc-2.21.33363.0%2B82129205-cp311-cp311-linux_x86_64.whl ; python_version == '3.11'"
 ]
