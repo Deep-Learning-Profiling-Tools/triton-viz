@@ -150,15 +150,28 @@ class Trace(KernelInterface):
     def __getattr__(self, name):
         # Forward any missing attributes to the underlying runner
         # This allows Trace to transparently proxy attributes like 'src', 'hash', etc.
-        # First check if runner has it
-        if hasattr(self.fn, name):
-            return getattr(self.fn, name)
-        # Then check jit_fn
-        if hasattr(self.jit_fn, name):
-            return getattr(self.jit_fn, name)
-        # Finally check base_fn
-        if hasattr(self.base_fn, name):
-            return getattr(self.base_fn, name)
+        # Use object.__getattribute__ to avoid infinite recursion
+        try:
+            fn = object.__getattribute__(self, "fn")
+            if hasattr(fn, name):
+                return getattr(fn, name)
+        except AttributeError:
+            pass
+
+        try:
+            jit_fn = object.__getattribute__(self, "jit_fn")
+            if hasattr(jit_fn, name):
+                return getattr(jit_fn, name)
+        except AttributeError:
+            pass
+
+        try:
+            base_fn = object.__getattribute__(self, "base_fn")
+            if hasattr(base_fn, name):
+                return getattr(base_fn, name)
+        except AttributeError:
+            pass
+
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}'"
         )
