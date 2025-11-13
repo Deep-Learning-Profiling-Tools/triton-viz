@@ -3,7 +3,7 @@ import numpy as np
 import neuronxcc.nki.language as nl
 import inspect
 from .nki_extract_slice import transform_code
-from .nki_masked_load import masked_load, masked_store
+from .masked_load import masked_load, masked_store
 
 
 class NDArray:

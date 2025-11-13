@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from triton_viz.core.nki_masked_load import masked_load, masked_store
+from triton_viz.core.masked_load import masked_load, masked_store
 
 
 def print_op_details(
