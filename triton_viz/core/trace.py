@@ -80,32 +80,32 @@ class Trace(KernelInterface):
 
         # Preserve common function attributes for compatibility
         # with code that expects to access these attributes on the kernel
-        if hasattr(runner, '__name__'):
+        if hasattr(runner, "__name__"):
             self.__name__ = runner.__name__
-        elif self.base_fn and hasattr(self.base_fn, '__name__'):
+        elif self.base_fn and hasattr(self.base_fn, "__name__"):
             self.__name__ = self.base_fn.__name__
         else:
-            self.__name__ = '<unknown>'
+            self.__name__ = "<unknown>"
 
-        if hasattr(runner, '__module__'):
+        if hasattr(runner, "__module__"):
             self.__module__ = runner.__module__
-        elif self.base_fn and hasattr(self.base_fn, '__module__'):
+        elif self.base_fn and hasattr(self.base_fn, "__module__"):
             self.__module__ = self.base_fn.__module__
 
-        if hasattr(runner, '__doc__'):
+        if hasattr(runner, "__doc__"):
             self.__doc__ = runner.__doc__
-        elif self.base_fn and hasattr(self.base_fn, '__doc__'):
+        elif self.base_fn and hasattr(self.base_fn, "__doc__"):
             self.__doc__ = self.base_fn.__doc__
 
-        if hasattr(runner, '__qualname__'):
+        if hasattr(runner, "__qualname__"):
             self.__qualname__ = runner.__qualname__
-        elif self.base_fn and hasattr(self.base_fn, '__qualname__'):
+        elif self.base_fn and hasattr(self.base_fn, "__qualname__"):
             self.__qualname__ = self.base_fn.__qualname__
 
         # Preserve Triton-specific attributes (like src for JITFunction)
-        if hasattr(runner, 'src'):
+        if hasattr(runner, "src"):
             self.src = runner.src
-        elif self.jit_fn and hasattr(self.jit_fn, 'src'):
+        elif self.jit_fn and hasattr(self.jit_fn, "src"):
             self.src = self.jit_fn.src
 
     def run(self, *args, **kwargs):
@@ -146,7 +146,9 @@ class Trace(KernelInterface):
         # Finally check base_fn
         if hasattr(self.base_fn, name):
             return getattr(self.base_fn, name)
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
 
 
 def trace(clients: Union[str, Client, None] = None):
