@@ -137,7 +137,9 @@ def trace(clients: Union[str, Client, None] = None):
             return kernel
 
         # First-time wrapping
-        if isinstance(kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)):
+        if isinstance(
+            kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
+        ):
             return Trace(kernel, clients)
 
         # If the object is already a Trace, just append the new client(s)
