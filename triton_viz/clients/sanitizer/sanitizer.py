@@ -1361,8 +1361,9 @@ class SymbolicExpr:
                     obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
                 )
         elif obj.op == "load":
-            from ...core.patch import original_ops
+            from ...core.patch import OPERATION_REGISTRY
 
+            original_ops = OPERATION_REGISTRY["triton"]["original_ops"]
             ptr_concrete = obj.ptr.concretize()
             # concretize mask
             # create an all-True mask if mask is None
@@ -1390,9 +1391,10 @@ class SymbolicExpr:
         else:
             # Special handling for cast_impl and bitcast operations
             if obj.op in ("cast_impl", "bitcast"):
-                from ...core.patch import original_ops
+                from ...core.patch import OPERATION_REGISTRY
                 from ...core.data import CastImpl, Bitcast
 
+                original_ops = OPERATION_REGISTRY["triton"]["original_ops"]
                 src_concrete = obj.src.concretize()
                 # dst_type is stored as a SymbolicExpr const node, need to extract the value
                 dst_type_value = (
