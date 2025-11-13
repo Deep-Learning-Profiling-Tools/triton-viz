@@ -139,21 +139,21 @@ class Trace(KernelInterface):
         # This allows Trace to transparently proxy attributes like 'src', 'hash', etc.
         # Use object.__getattribute__ to avoid infinite recursion
         try:
-            fn = object.__getattribute__(self, 'fn')
+            fn = object.__getattribute__(self, "fn")
             if hasattr(fn, name):
                 return getattr(fn, name)
         except AttributeError:
             pass
 
         try:
-            jit_fn = object.__getattribute__(self, 'jit_fn')
+            jit_fn = object.__getattribute__(self, "jit_fn")
             if hasattr(jit_fn, name):
                 return getattr(jit_fn, name)
         except AttributeError:
             pass
 
         try:
-            base_fn = object.__getattribute__(self, 'base_fn')
+            base_fn = object.__getattribute__(self, "base_fn")
             if hasattr(base_fn, name):
                 return getattr(base_fn, name)
         except AttributeError:
