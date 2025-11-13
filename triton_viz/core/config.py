@@ -18,6 +18,9 @@ class Config:
         # --- Profiler disable flag ---
         self._disable_profiler = os.getenv("DISABLE_PROFILER", "0") == "1"
 
+        # --- Timing enable flag ---
+        self._enable_timing = os.getenv("ENABLE_TIMING", "0") == "1"
+
         # --- Grid execution progress flag ---
         self.report_grid_execution_progress = (
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
@@ -60,6 +63,26 @@ class Config:
             print("Triton Profiler disabled.")
         elif not value and previous:
             print("Triton Profiler enabled.")
+
+    # ---------- enable_timing ----------
+    @property
+    def enable_timing(self) -> bool:
+        return self._enable_timing
+
+    @enable_timing.setter
+    def enable_timing(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("enable_timing expects a bool.")
+        self._enable_timing = value
+
+        previous = getattr(self, "_enable_timing", None)
+        self._enable_timing = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Triton timing enabled.")
+        elif not value and previous:
+            print("Triton timing disabled.")
 
     # ---------- report_grid_execution_progress ----------
     @property
