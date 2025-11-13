@@ -50,6 +50,4 @@ triton-profiler = "triton_viz.wrapper:apply_profiler"
 [project.optional-dependencies]
 nki = [
   "neuronx-cc==2.*",
-  "libneuronxla==2.*",
-  "torch-neuronx==2.*",
 ]
