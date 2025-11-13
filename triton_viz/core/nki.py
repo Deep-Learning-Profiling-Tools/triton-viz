@@ -1,6 +1,13 @@
 import numpy as np
 
-import neuronxcc.nki.language as nl
+try:
+    import neuronxcc.nki.language as nl
+except (
+    ModuleNotFoundError
+) as exc:  # pragma: no cover - only hit when optional deps missing
+    raise ModuleNotFoundError(
+        "NeuronX dependencies are missing. Install triton-viz[nki] to enable the NKI interpreter."
+    ) from exc
 import inspect
 from .nki_extract_slice import transform_code
 from .masked_load import masked_load, masked_store

@@ -71,6 +71,23 @@ pip install -e .
 
 You're all set!
 
+### Optional: Enable NKI Support
+
+If you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the NKI-specific tests:
+
+1. Follow the [AWS Neuron Torch-NeuronX Ubuntu 22.04 setup guide](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/setup/neuron-setup/pytorch/neuronx/ubuntu/torch-neuronx-ubuntu22.html#setup-torch-neuronx-ubuntu22) to add the Neuron APT repository and install the required system packages (for example `aws-neuronx-tools`, `aws-neuronx-runtime-lib`, `aws-neuronx-collectives`, and their dependencies).
+2. Install Triton-Viz with the optional NKI extras so the Neuron Python packages (`neuronx-cc`, `libneuronxla`, `torch-neuronx`) are available:
+
+   ```sh
+   pip install -e .[nki]
+   # or pip install triton-viz[nki]
+   ```
+
+### Testing
+* To run core Triton-viz tests, run `pytest tests/`.
+* (if NKI installed) To run NKI-specific tests, run `pytest -m nki tests/`.
+* To run all tests (Triton + NKI), run `pytest -m "" tests/`.
+
 ## Working with Examples
 
 ```sh

@@ -58,7 +58,15 @@ from triton.runtime.interpreter import (
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
 from triton.runtime import JITFunction
-from triton_viz.core.nki import nki_builder
+
+HAS_NKI = False
+nki_builder = None
+try:
+    from triton_viz.core.nki import nki_builder  # type: ignore
+
+    HAS_NKI = True
+except ModuleNotFoundError:
+    pass
 
 
 @dataclass
@@ -265,47 +273,53 @@ TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
 for op_type in TRITON_OP_LIST:
     TRITON_ADAPTERS.setdefault(op_type, passthrough_adapter)
 
+NKI_OP_LIST: list[type[Op]] = []
+NKI_ORIGINAL_OPS: dict[type[Op], Callable] = {}
+NKI_OP_ATTR_NAMES: dict[type[Op], str] = {}
+NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
+if HAS_NKI:
+    assert nki_builder is not None
 
-NKI_OP_LIST = [
-    Allocate,
-    ProgramId,
-    Load,
-    Store,
-    Dot,
-    UnaryOp,
-    MakeRange,
-]
+    NKI_OP_LIST = [
+        Allocate,
+        ProgramId,
+        Load,
+        Store,
+        Dot,
+        UnaryOp,
+        MakeRange,
+    ]
 
-NKI_ORIGINAL_OPS = {
-    ProgramId: nki_builder.program_id,
-    Allocate: nki_builder.ndarray,
-    Load: nki_builder.masked_load,
-    Store: nki_builder.masked_store,
-    Dot: nki_builder.matmul,
-    UnaryOp: nki_builder._unary_op,
-    MakeRange: nki_builder.arange,
-}
+    NKI_ORIGINAL_OPS = {
+        ProgramId: nki_builder.program_id,
+        Allocate: nki_builder.ndarray,
+        Load: nki_builder.masked_load,
+        Store: nki_builder.masked_store,
+        Dot: nki_builder.matmul,
+        UnaryOp: nki_builder._unary_op,
+        MakeRange: nki_builder.arange,
+    }
 
-NKI_OP_ATTR_NAMES = {
-    ProgramId: "program_id",
-    Allocate: "ndarray",
-    Load: "masked_load",
-    Store: "masked_store",
-    Dot: "matmul",
-    UnaryOp: "_unary_op",
-    MakeRange: "arange",
-}
+    NKI_OP_ATTR_NAMES = {
+        ProgramId: "program_id",
+        Allocate: "ndarray",
+        Load: "masked_load",
+        Store: "masked_store",
+        Dot: "matmul",
+        UnaryOp: "_unary_op",
+        MakeRange: "arange",
+    }
 
-NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
-    ProgramId: _program_id_adapter,
-    Allocate: _nki_allocate_adapter,
-    Load: _nki_load_adapter,
-    Store: _nki_store_adapter,
-    Dot: _nki_dot_adapter,
-}
+    NKI_ADAPTERS = {
+        ProgramId: _program_id_adapter,
+        Allocate: _nki_allocate_adapter,
+        Load: _nki_load_adapter,
+        Store: _nki_store_adapter,
+        Dot: _nki_dot_adapter,
+    }
 
-for op_type in NKI_OP_LIST:
-    NKI_ADAPTERS.setdefault(op_type, passthrough_adapter)
+    for op_type in NKI_OP_LIST:
+        NKI_ADAPTERS.setdefault(op_type, passthrough_adapter)
 
 
 OPERATION_REGISTRY: dict[str, dict[str, Any]] = {

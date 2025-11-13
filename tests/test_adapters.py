@@ -1,3 +1,5 @@
+import pytest
+
 from triton_viz.core.callbacks import OpCallbacks
 from triton_viz.core.data import (
     AddPtr,
@@ -8,6 +10,7 @@ from triton_viz.core.data import (
 )
 from triton_viz.core.patch import (
     AdapterResult,
+    HAS_NKI,
     NKI_ADAPTERS,
     PatchOp,
     TRITON_ADAPTERS,
@@ -120,6 +123,7 @@ def test_program_id_adapter_returns_axis_only():
     assert result.kwargs == {}
 
 
+@pytest.mark.skipif(not HAS_NKI, reason="NKI extras not installed")
 def test_nki_load_store_adapters_align_with_clients():
     """NKI adapters normalize masked load/store to (tensor, mask, keys)."""
     src = object()
