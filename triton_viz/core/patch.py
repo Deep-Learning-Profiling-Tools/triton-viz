@@ -840,10 +840,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     assert len(grid) <= 3
     grid = grid + (1,) * (3 - len(grid))
 
-    if backend == "nki":
-        builder.set_grid_dim(grid)
-    else:  # triton
-        builder.set_grid_dim(*grid)
+    builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
     run_grid_loops(grid)
     # Copy arguments back to propagate side-effects

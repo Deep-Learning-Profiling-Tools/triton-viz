@@ -179,7 +179,7 @@ class Builder:
         self.fn = None
         self.shared_hbm_arrays = {}
 
-    def set_grid_dim(self, grid_dims):
+    def set_grid_dim(self, *grid_dims):
         self.grid_dims = grid_dims
 
     def set_grid_idx(self, x, y, z):
@@ -477,7 +477,7 @@ class NKIInterpretedFunction:
             raise ValueError(
                 f"Grid must be 1, 2, or 3 dimensions, got {len(grid_dims)}"
             )
-        nki_builder.set_grid_dim(grid_dims)
+        nki_builder.set_grid_dim(*grid_dims)
         nki_builder.shared_hbm_arrays = {}
         nki_builder.fn = self.fn
 
