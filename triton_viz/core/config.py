@@ -23,12 +23,26 @@ class Config:
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
 
+        # --- Ablation Study ---
+        # Cache 1: SymExpr Node Cache - caches Z3 expressions in SymExpr._z3
+        self.enable_symbol_cache = os.getenv("SANITIZER_ENABLE_SYMBOL_CACHE", "1") == "1"
+
+        # Cache 2: Loop Iterator Cache - deduplicates memory patterns in loops
+        self.enable_loop_cache = os.getenv("SANITIZER_ENABLE_LOOP_CACHE", "1") == "1"
+
+        # Cache 3: Grid Cache - shared solver per kernel launch (incremental SMT)
+        self.enable_grid_cache = os.getenv("SANITIZER_ENABLE_GRID_CACHE", "1") == "1"
+
+        # Cache 4: Kernel Cache - skip re-analysis of identical kernel launches
+        self.enable_kernel_cache = os.getenv("SANITIZER_ENABLE_KERNEL_CACHE", "1") == "1"
+
         # --- Virtual memory flag ---
-        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
+        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "1") == "1"
 
     @property
     def virtual_memory(self) -> bool:
         return self._virtual_memory
+        
 
     # ---------- disable_sanitizer ----------
     @property

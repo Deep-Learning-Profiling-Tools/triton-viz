@@ -1085,7 +1085,8 @@ class SymbolicExpr:
         return expr, constraints
 
     def _to_z3(self) -> tuple[ArithRef, list]:
-        if self._z3 is not None:
+        # Symbol Cache: Check if caching is enabled
+        if cfg.enable_symbol_cache and self._z3 is not None:
             return self._z3, self._constraints
 
         # Recursively convert the current node to a Z3 expression
@@ -1250,6 +1251,14 @@ class SymbolicExpr:
         if self._z3 is None:
             # Other operations can be implemented as needed
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+
+        # Only cache result if symbol cache is enabled
+        if not cfg.enable_symbol_cache:
+            z3_result = self._z3
+            constraints_result = self._constraints.copy()
+            self._z3 = None
+            self._constraints = []
+            return z3_result, constraints_result
 
         return self._z3, self._constraints
 
@@ -1503,6 +1512,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.last_grid: Optional[tuple[int, int, int]] = None
         self.cache_args: list = []
         self.cache_grid: Optional[tuple[int, ...]] = None
+        self._persistent_solver: Optional[Solver] = None  # For Grid Cache
         SymbolicExpr.set_loop_ctx_provider(
             lambda: self.loop_stack[-1] if self.loop_stack else None
         )
@@ -1516,14 +1526,28 @@ class SanitizerSymbolicExecution(Sanitizer):
             for addr in access_addr:
                 self._check_range_satisfiable(addr, expr_constraints)
             return
-        self._solver.push()
-        self._solver.add(self._addr_sym == access_addr)
-        self._solver.add(And(*expr_constraints))
-        if self._solver.check() == sat:
-            print("out of bound access detected!")
-            if self.abort_on_error:
-                raise ValueError("Out-of-bounds access detected!")
-        self._solver.pop()
+
+        if cfg.enable_grid_cache:
+            # Grid Cache enabled: Use push/pop on persistent solver
+            self._solver.push()
+            self._solver.add(self._addr_sym == access_addr)
+            self._solver.add(And(*expr_constraints))
+            if self._solver.check() == sat:
+                print("out of bound access detected!")
+                if self.abort_on_error:
+                    raise ValueError("Out-of-bounds access detected!")
+            self._solver.pop()
+        else:
+            # Grid Cache disabled: Create new solver for each check
+            solver = Solver()
+            solver.add(Not(self._addr_ok))
+            solver.add(self._pid_ok)
+            solver.add(self._addr_sym == access_addr)
+            solver.add(And(*expr_constraints))
+            if solver.check() == sat:
+                print("out of bound access detected!")
+                if self.abort_on_error:
+                    raise ValueError("Out-of-bounds access detected!")
 
     def _check_range_satisfiable_with_expr(
         self,
@@ -1538,29 +1562,56 @@ class SanitizerSymbolicExecution(Sanitizer):
                     addr, expr_constraints, symbolic_expr
                 )
             return
-        self._solver.push()
-        self._solver.add(self._addr_sym == access_addr)
-        self._solver.add(And(*expr_constraints))
-        if self._solver.check() == sat:
-            # Get the model to find the violation address
-            model = self._solver.model()
-            violation_addr = model[self._addr_sym].as_long() if model else 0
 
-            # Find the tensor that this address belongs to
-            tensor = None
-            if self.tensors:
-                # Simple heuristic: use the first tensor for now
-                # In practice, you'd want to match the address to the correct tensor
-                tensor = self.tensors[0]
+        if cfg.enable_grid_cache:
+            # Grid Cache enabled: Use push/pop on persistent solver
+            self._solver.push()
+            self._solver.add(self._addr_sym == access_addr)
+            self._solver.add(And(*expr_constraints))
+            if self._solver.check() == sat:
+                # Get the model to find the violation address
+                model = self._solver.model()
+                violation_addr = model[self._addr_sym].as_long() if model else 0
 
-            # Determine operation type from symbolic expression
-            op_type: type[Load] | type[Store] = Load  # Default
-            if symbolic_expr and symbolic_expr.op == "store":
-                op_type = Store
+                # Find the tensor that this address belongs to
+                tensor = None
+                if self.tensors:
+                    # Simple heuristic: use the first tensor for now
+                    # In practice, you'd want to match the address to the correct tensor
+                    tensor = self.tensors[0]
 
-            # Report with symbolic expression
-            self._report(op_type, tensor, violation_addr, symbolic_expr)
-        self._solver.pop()
+                # Determine operation type from symbolic expression
+                op_type: type[Load] | type[Store] = Load  # Default
+                if symbolic_expr and symbolic_expr.op == "store":
+                    op_type = Store
+
+                # Report with symbolic expression
+                self._report(op_type, tensor, violation_addr, symbolic_expr)
+            self._solver.pop()
+        else:
+            # Grid Cache disabled: Create new solver for each check
+            solver = Solver()
+            solver.add(Not(self._addr_ok))
+            solver.add(self._pid_ok)
+            solver.add(self._addr_sym == access_addr)
+            solver.add(And(*expr_constraints))
+            if solver.check() == sat:
+                # Get the model to find the violation address
+                model = solver.model()
+                violation_addr = model[self._addr_sym].as_long() if model else 0
+
+                # Find the tensor that this address belongs to
+                tensor = None
+                if self.tensors:
+                    tensor = self.tensors[0]
+
+                # Determine operation type from symbolic expression
+                op_type: type[Load] | type[Store] = Load  # Default
+                if symbolic_expr and symbolic_expr.op == "store":
+                    op_type = Store
+
+                # Report with symbolic expression
+                self._report(op_type, tensor, violation_addr, symbolic_expr)
 
     def _handle_access_check(self, expr: SymbolicExpr):
         """
@@ -1575,21 +1626,34 @@ class SanitizerSymbolicExecution(Sanitizer):
         z3_addr, z3_constraints = expr.eval()
         if self.loop_stack:  # for-loop iterator association
             ctx = self.loop_stack[-1]
-            # check if addr already appeared before in the for-loop
-            signature = _make_signature(z3_addr, z3_constraints, ctx.re_pattern)
-            if signature in ctx.signature_cache:  # if appeared before
-                if cfg.verbose:
-                    print("[Sanitizer]  ↪ skip duplicated addr in loop")
-            else:  # new addr expr
+
+            # Loop Cache: Only use signature cache if enabled
+            if cfg.enable_loop_cache:
+                # check if addr already appeared before in the for-loop
+                signature = _make_signature(z3_addr, z3_constraints, ctx.re_pattern)
+                if signature in ctx.signature_cache:  # if appeared before
+                    if cfg.verbose:
+                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
+                    return  # Skip duplicate check
+                else:  # new addr expr
+                    if cfg.verbose:
+                        print(
+                            "[Sanitizer]  ↪ new addr in for-loop, will check later",
+                            z3_addr,
+                            z3_constraints,
+                        )
+                    ctx.signature_cache.add(signature)
+            else:
+                # Without loop cache, always add to pending checks
                 if cfg.verbose:
                     print(
-                        "[Sanitizer]  ↪ new addr in for-loop, will check later",
+                        "[Sanitizer]  ↪ addr in for-loop (no dedup), will check later",
                         z3_addr,
                         z3_constraints,
                     )
-                ctx.signature_cache.add(signature)
-                # Store the expression along with the z3 data for later checking
-                ctx.pending_checks.append((z3_addr, z3_constraints, expr))
+
+            # Store the expression along with the z3 data for later checking
+            ctx.pending_checks.append((z3_addr, z3_constraints, expr))
         else:  # non-loop case
             self._check_range_satisfiable_with_expr(z3_addr, z3_constraints, expr)
 
@@ -1620,7 +1684,8 @@ class SanitizerSymbolicExecution(Sanitizer):
         self.cache_grid = None
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        if self.cache_grid:
+        # Kernel Cache: Only use cache if enabled
+        if cfg.enable_kernel_cache and self.cache_grid:
             # First time we launch this program, compute the hash
             fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
             self._clear_cache()
@@ -1630,7 +1695,12 @@ class SanitizerSymbolicExecution(Sanitizer):
                 # We don't clear up tensors at this point
                 return True
             else:
+                # Skip re-analysis for identical kernel launch
                 return False
+        elif self.cache_grid:
+            # Kernel cache disabled, always clear cache and run
+            self._clear_cache()
+
         # 2nd time we launch this program, depends on whether we need a full grid
         if self.need_full_grid is None:
             return True
