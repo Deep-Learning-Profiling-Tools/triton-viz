@@ -862,6 +862,9 @@ class SymbolicExpr:
 
         self._constraints: list[BoolRef] = []
 
+        # arange-specific: store the assigned variable index to avoid side effects
+        self._arange_id: Optional[int] = None
+
     def _init_from_spec(self, *args: Any) -> None:
         if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
@@ -1085,9 +1088,20 @@ class SymbolicExpr:
         return expr, constraints
 
     def _to_z3(self) -> tuple[ArithRef, list]:
-        # Symbol Cache: Check if caching is enabled
+        # For arange nodes: assign a unique ID once (before cache check to avoid side effects)
+        if self.op == "arange" and self._arange_id is None:
+            self._arange_id = SymbolicExpr.ARANGE_COUNTER
+            SymbolicExpr.ARANGE_COUNTER += 1
+
+        # Symbol Cache: Check if caching is enabled and result is already computed
         if cfg.enable_symbol_cache and self._z3 is not None:
             return self._z3, self._constraints
+
+        # If cache is disabled and this node was already computed, clear it to recompute
+        # This ensures fresh computation without stale state accumulation
+        if not cfg.enable_symbol_cache and self._z3 is not None:
+            self._z3 = None
+            self._constraints = []
 
         # Recursively convert the current node to a Z3 expression
         if self.op == "const":
@@ -1108,11 +1122,8 @@ class SymbolicExpr:
                 self._z3 = SymbolicExpr.PID2
 
         if self.op == "arange":
-            # Get file name, line number, and column number
-
-            idx = SymbolicExpr.ARANGE_COUNTER
-            SymbolicExpr.ARANGE_COUNTER += 1
-            name = f"arange_{idx}"
+            # Use the pre-assigned ID (guaranteed to be set at this point)
+            name = f"arange_{self._arange_id}"
             v = Int(name)
             start = self.start.value
             end = self.end.value
@@ -1252,14 +1263,9 @@ class SymbolicExpr:
             # Other operations can be implemented as needed
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
-        # Only cache result if symbol cache is enabled
-        if not cfg.enable_symbol_cache:
-            z3_result = self._z3
-            constraints_result = self._constraints.copy()
-            self._z3 = None
-            self._constraints = []
-            return z3_result, constraints_result
-
+        # Return the computed result
+        # Note: We always keep _z3 and _constraints in the node for consistency
+        # The cache check at the beginning of this method determines if we recompute
         return self._z3, self._constraints
 
     def has_op(self, op_name: str) -> bool:
