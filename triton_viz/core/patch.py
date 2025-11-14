@@ -215,18 +215,43 @@ class PatchOp:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
-                ret = tl.core.tensor(
-                    self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
-                    args[0].dtype,
+                from ..clients.sanitizer.sanitizer import (
+                    SymbolicExpr,
+                    SYMBOLIC_EXPR_TENSOR_ATTR,
                 )
+
+                sym_ret = self.callbacks.op_overrider(
+                    args[0].handle, *args[1:], **kwargs
+                )
+                if isinstance(sym_ret, SymbolicExpr):
+                    sym_ret.concrete_fn = original_ops.get(self.op_type, self.op)
+                    handle = sym_ret.concretize()
+                    ret = tl.core.tensor(handle, args[0].dtype)
+                    setattr(ret, SYMBOLIC_EXPR_TENSOR_ATTR, sym_ret)
+                else:
+                    ret = tl.core.tensor(sym_ret, args[0].dtype)
             elif self.op_type in math_map:
                 raise NotImplementedError()
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
-                from ..clients.sanitizer.sanitizer import SymbolicExpr
+                from ..clients.sanitizer.sanitizer import (
+                    SymbolicExpr,
+                    SYMBOLIC_EXPR_TENSOR_ATTR,
+                    SYMBOLIC_EXPR_HANDLE_ATTR,
+                )
 
                 if isinstance(ret, SymbolicExpr):
-                    ret.concrete_fn = self.op
+                    ret.concrete_fn = original_ops.get(self.op_type, self.op)
+                    handle = ret.concretize()
+                    if self.callbacks.direct_triton_patch:
+                        dtype_tt = ret.dtype_tt or getattr(handle, "dtype", tl.int32)
+                        tensor = tl.core.tensor(handle, dtype_tt)
+                        setattr(tensor, SYMBOLIC_EXPR_TENSOR_ATTR, ret)
+                        ret = tensor
+                    else:
+                        if hasattr(handle, "attr"):
+                            handle.attr[SYMBOLIC_EXPR_HANDLE_ATTR] = ret
+                        ret = handle
         else:
             ret = self.op(*args, **kwargs)
         if self.callbacks.after_callback:

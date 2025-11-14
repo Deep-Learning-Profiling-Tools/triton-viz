@@ -25,7 +25,7 @@ from z3 import (
 from z3.z3 import BoolRef, ArithRef, IntNumRef
 
 import triton.language as tl
-from triton.runtime.interpreter import TensorHandle
+from triton.runtime.interpreter import TensorHandle, interpreter_builder, _get_np_dtype
 
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
@@ -100,6 +100,22 @@ DIRECT_TRITON_PATCHABLE_OPS = {
     Trans,
     AtomicCas,
 }
+
+SYMBOLIC_EXPR_TENSOR_ATTR = "_triton_viz_symbolic_expr"
+SYMBOLIC_EXPR_HANDLE_ATTR = "_triton_viz_symbolic_expr_handle"
+
+_ORIG_TENSOR_INIT = tl.core.tensor.__init__
+
+
+def _tensor_init_with_symbolic_metadata(self, handle, type):
+    _ORIG_TENSOR_INIT(self, handle, type)
+    if isinstance(handle, TensorHandle):
+        symbolic_attr = handle.attr.get(SYMBOLIC_EXPR_HANDLE_ATTR)
+        if symbolic_attr is not None:
+            setattr(self, SYMBOLIC_EXPR_TENSOR_ATTR, symbolic_attr)
+
+
+tl.core.tensor.__init__ = _tensor_init_with_symbolic_metadata
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -638,6 +654,17 @@ class SymbolicExprDataWrapper:
         return self.value
 
 
+class SymbolicExprTensorTypeProxy:
+    def __init__(self, dtype):
+        resolved = dtype or tl.int32
+        self.scalar = resolved
+        self.dtype = resolved
+        self.element_ty = resolved
+
+    def __getattr__(self, name):
+        return getattr(self.scalar, name)
+
+
 Spec = namedtuple(
     "Spec",
     [
@@ -861,6 +888,7 @@ class SymbolicExpr:
 
         # Functions and arguments for concretization
         self._binary_numpy_op = None
+        self._unary_numpy_op = None
         self._concrete_fn = None
         self._concrete_args = ()
         self._concrete_kwargs = {}
@@ -913,50 +941,106 @@ class SymbolicExpr:
         # Special handling for dtype to provide compatibility
         if name == "dtype":
             return self.dtype_tt
+        if name == "type":
+            return SymbolicExprTensorTypeProxy(self.dtype_tt)
         raise AttributeError(name)
+
+    @staticmethod
+    def _coerce(other: Any) -> "SymbolicExpr":
+        if isinstance(other, SymbolicExpr):
+            return other
+        return SymbolicExpr.from_value(other)
 
     def set_attr(self, name, values):
         self.attrs[name] = values
 
+    @staticmethod
+    def _finalize_binary(expr, numpy_op=None, concrete_fn=None):
+        if numpy_op is not None:
+            expr.binary_numpy_op = numpy_op
+        expr.concrete_fn = (
+            concrete_fn if concrete_fn is not None else interpreter_builder.binary_op
+        )
+        return expr
+
     def __add__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("add", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(SymbolicExpr("add", self, other), np.add)
 
     def __sub__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("sub", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(SymbolicExpr("sub", self, other), np.subtract)
 
     def __mul__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("mul", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(SymbolicExpr("mul", self, other), np.multiply)
 
     def __truediv__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("div", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(SymbolicExpr("div", self, other), np.divide)
 
     def __floordiv__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("idiv", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(
+            SymbolicExpr("idiv", self, other),
+            concrete_fn=interpreter_builder.create_idiv,
+        )
 
     def __mod__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("mod", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(SymbolicExpr("mod", self, other), np.fmod)
 
     def __lt__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("less", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(SymbolicExpr("less", self, other), np.less)
 
     def __le__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("less_equal", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(SymbolicExpr("less_equal", self, other), np.less_equal)
 
     def __ne__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("not_equal", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(
+            SymbolicExpr("not_equal", self, other), np.not_equal
+        )
 
     def __eq__(self, other):
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
-        return SymbolicExpr("equal", self, other)
+        other = self._coerce(other)
+        return self._finalize_binary(SymbolicExpr("equal", self, other), np.equal)
+
+    def _as_python_scalar(self):
+        concrete = self.concretize()
+        if isinstance(concrete, TensorHandle):
+            data = concrete.data
+            if data.size != 1:
+                raise TypeError(
+                    "SymbolicExpr with TensorHandle data >1 cannot be converted to scalar"
+                )
+            concrete = data.item()
+        if isinstance(concrete, np.ndarray):
+            if concrete.size != 1:
+                raise TypeError(
+                    "SymbolicExpr with ndarray data >1 cannot be converted to scalar"
+                )
+            concrete = concrete.reshape(-1)[0]
+        if isinstance(concrete, np.generic):
+            concrete = concrete.item()
+        return concrete
+
+    def __index__(self):
+        value = self._as_python_scalar()
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("SymbolicExpr cannot be interpreted as an integer") from exc
+
+    def __int__(self):
+        value = self._as_python_scalar()
+        return int(value)
+
+    def __float__(self):
+        value = self._as_python_scalar()
+        return float(value)
 
     def to_anytree(self):
         """Convert this SymbolicExpr into an anytree Node."""
@@ -1043,14 +1127,11 @@ class SymbolicExpr:
                     )
             return first_dtype
         if isinstance(var, TensorHandle):
-            if len(var.data) != 1:
-                raise ValueError(
-                    f"Unsupported var.data: {var.data} with length more than one!"
-                )
-            if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
+            if var.dtype in SymbolicExpr.triton_scala_dtypes:
                 return var.dtype
-            if isinstance(var.dtype, tl.pointer_type):  # if a pointer
+            if isinstance(var.dtype, (tl.pointer_type, tl.block_type)):
                 return var.dtype
+            return var.dtype
         if isinstance(var, SymbolicExpr.builtin_scala_types):
             return tl.int32 if isinstance(var, int) else tl.float32
         if var is None:
@@ -1072,10 +1153,59 @@ class SymbolicExpr:
 
         dtype_tt = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
+        if isinstance(var, tl.core.tensor):
+            symbolic_attr = getattr(var, SYMBOLIC_EXPR_TENSOR_ATTR, None)
+            if symbolic_attr is None:
+                handle = getattr(var, "handle", None)
+                if isinstance(handle, TensorHandle):
+                    symbolic_attr = handle.attr.get(SYMBOLIC_EXPR_HANDLE_ATTR)
+            if symbolic_attr is not None:
+                if dtype_tt is not None:
+                    symbolic_attr.dtype_tt = dtype_tt
+                return symbolic_attr
+            handle = getattr(var, "handle", None)
+            if isinstance(handle, SymbolicExprDataWrapper):
+                sym = handle.symbolic_expr
+                if dtype_tt is not None:
+                    sym.dtype_tt = dtype_tt
+                return sym
+            if isinstance(handle, cls):
+                sym = handle
+                if dtype_tt is not None:
+                    sym.dtype_tt = dtype_tt
+                return sym
+            if isinstance(handle, TensorHandle):
+                sym = cls.from_value(handle)
+                if dtype_tt is not None:
+                    sym.dtype_tt = dtype_tt
+                return sym
+            if isinstance(handle, np.generic):
+                return cls("const", handle.item(), dtype_tt)
+            if isinstance(handle, SymbolicExpr.builtin_scala_types):
+                return cls("const", handle, dtype_tt)
+            if isinstance(handle, SymbolicExpr.tuple_types):
+                return cls("const", tuple(handle), dtype_tt)
+            if handle is None:
+                return cls("const", None, dtype_tt)
+            raise ValueError(
+                "Unsupported tensor handle type:",
+                type(handle),
+            )
+
         if isinstance(var, SymbolicExpr.tuple_types):  # if a tuple
             return cls("const", tuple(var), dtype_tt)
         if isinstance(var, TensorHandle):  # if a TensorHandle
-            return cls("const", var.data.item(), dtype_tt)
+            symbolic_attr = var.attr.get(SYMBOLIC_EXPR_HANDLE_ATTR)
+            if symbolic_attr is not None:
+                if dtype_tt is not None:
+                    symbolic_attr.dtype_tt = dtype_tt
+                return symbolic_attr
+            data = var.data
+            if data.size == 1:
+                value = data.item()
+            else:
+                value = np.array(data, copy=True)
+            return cls("const", value, dtype_tt or var.dtype)
         if isinstance(
             var, SymbolicExpr.builtin_scala_types
         ):  # if a python builtin type
@@ -1113,7 +1243,11 @@ class SymbolicExpr:
             if self._loop_ctx:  # if the self is a loop iterator
                 self._z3 = self._loop_ctx.idx_z3
             elif isinstance(self.value, np.ndarray):
-                self._z3 = [IntVal(int(v)) for v in self.value.flat]
+                try:
+                    self._z3 = [IntVal(int(v)) for v in self.value.flat]
+                except Exception as exc:
+                    print("[SymbolicExpr] Failed to convert ndarray to IntVal:", self.value, exc)
+                    raise
             else:
                 self._z3 = IntVal(self.value)
 
@@ -1153,6 +1287,10 @@ class SymbolicExpr:
             rhs, constraints_rhs = self.rhs._to_z3()
             self._constraints.extend(constraints_lhs)
             self._constraints.extend(constraints_rhs)
+            if isinstance(lhs, list):
+                lhs = lhs[0]
+            if isinstance(rhs, list):
+                rhs = rhs[0]
             if self.op == "add":
                 self._z3 = lhs + rhs
             if self.op == "sub":
@@ -1305,6 +1443,7 @@ class SymbolicExpr:
 
     _concrete_fn_cache: dict[str, Callable] = {}
     _binary_numpy_op_cache: dict[str, Callable] = {}
+    _unary_numpy_op_cache: dict[str, Callable] = {}
 
     @property
     def concrete_fn(self):
@@ -1335,6 +1474,20 @@ class SymbolicExpr:
         self._binary_numpy_op = op
         SymbolicExpr._binary_numpy_op_cache[self.op] = op
 
+    @property
+    def unary_numpy_op(self):
+        if (
+            self._unary_numpy_op is None
+            and self.op in SymbolicExpr._unary_numpy_op_cache
+        ):
+            self._unary_numpy_op = SymbolicExpr._unary_numpy_op_cache[self.op]
+        return self._unary_numpy_op
+
+    @unary_numpy_op.setter
+    def unary_numpy_op(self, op):
+        self._unary_numpy_op = op
+        SymbolicExpr._unary_numpy_op_cache[self.op] = op
+
     def concretize(self_or_cls, obj=None):
         """
         Usage:
@@ -1357,12 +1510,28 @@ class SymbolicExpr:
         # concretize logic
         if obj.concrete_fn is None:
             if obj.op == "const":
+                dtype_tt = obj.dtype_tt
+                if dtype_tt is None:
+                    val = obj.value
+                    if isinstance(val, (int, np.integer)):
+                        dtype_tt = tl.int32
+                    elif isinstance(val, (float, np.floating)):
+                        dtype_tt = tl.float32
+                    elif isinstance(val, np.ndarray) and np.issubdtype(val.dtype, np.floating):
+                        dtype_tt = tl.float32
+                    elif isinstance(val, np.ndarray) and np.issubdtype(val.dtype, np.integer):
+                        dtype_tt = tl.int32
+                    else:
+                        dtype_tt = tl.int32
                 if obj.dtype_tt == tl.pointer_type:
                     result = TensorHandle(
                         np.array([obj.value], dtype=np.uint64), obj.dtype_tt
                     )
                 else:
-                    result = TensorHandle(obj.value, obj.dtype_tt)
+                    data = obj.value
+                    if not isinstance(data, np.ndarray):
+                        data = np.array([data], dtype=_get_np_dtype(dtype_tt))
+                    result = TensorHandle(data, dtype_tt)
             else:
                 raise RuntimeError(f"{obj.op}'s concrete function is not set!")
         elif obj.op == "pid":
@@ -1376,6 +1545,48 @@ class SymbolicExpr:
                 obj.children["shape"].to_py(),
                 obj.arg.concretize(),
             )
+        elif obj.op in SymbolicExpr.REDUCE_OPS:
+            input_concrete = obj.input.concretize()
+            axis = (
+                obj.axis.to_py()
+                if hasattr(obj.axis, "to_py")
+                else obj.axis
+            )
+            keepdims = (
+                obj.keepdims.to_py()
+                if hasattr(obj.keepdims, "to_py")
+                else obj.keepdims
+            )
+            np_reduce = None
+            if obj.op == "max":
+                np_reduce = np.max
+            elif obj.op == "min":
+                np_reduce = np.min
+            elif obj.op == "sum":
+                np_reduce = np.sum
+            if np_reduce is not None and isinstance(input_concrete, TensorHandle):
+                data = np_reduce(
+                    input_concrete.data,
+                    axis=None if axis is None else int(axis),
+                    keepdims=bool(keepdims),
+                )
+                result = TensorHandle(np.array(data), input_concrete.dtype)
+            else:
+                if isinstance(input_concrete, TensorHandle):
+                    input_dtype = obj.input.dtype_tt or input_concrete.dtype
+                    input_tensor = tl.core.tensor(input_concrete, input_dtype)
+                else:
+                    input_tensor = input_concrete
+                result_tensor = obj.concrete_fn(input_tensor, axis, keepdims)
+                if hasattr(result_tensor, "handle"):
+                    result = result_tensor.handle
+                else:
+                    result = result_tensor
+        elif obj.op in SymbolicExpr.UNARY_OPS:
+            arg_concrete = obj.arg.concretize()
+            if obj.unary_numpy_op is None:
+                raise RuntimeError(f"{obj.op}'s numpy op is not set!")
+            result = obj.concrete_fn(arg_concrete, obj.unary_numpy_op)
         elif obj.op in SymbolicExpr.BINARY_OPS:
             # Special handling for idiv which doesn't take a third parameter
             if obj.op == "idiv":
@@ -1396,12 +1607,26 @@ class SymbolicExpr:
                 )
             else:
                 mask_concrete = obj.mask.concretize()
+                if mask_concrete.data.size == 1 and ptr_concrete.data.size != 1:
+                    mask_value = bool(mask_concrete.data.item())
+                    mask_data = np.full(
+                        ptr_concrete.data.shape, mask_value, dtype=bool
+                    )
+                    mask_concrete = TensorHandle(mask_data, tl.int1)
 
             # concretize the 'other' argument if it exists
             if obj.other is None:
                 other_concrete = None
             else:
                 other_concrete = obj.other.concretize()
+                if other_concrete.data.size == 1 and ptr_concrete.data.size != 1:
+                    other_value = other_concrete.data.item()
+                    other_data = np.full(
+                        ptr_concrete.data.shape,
+                        other_value,
+                        dtype=other_concrete.data.dtype,
+                    )
+                    other_concrete = TensorHandle(other_data, other_concrete.dtype)
 
             result = original_ops[Load](
                 ptr_concrete,
@@ -1410,6 +1635,31 @@ class SymbolicExpr:
                 None,  # cache_modifier
                 None,  # eviction_policy
                 None,  # is_volatile
+            )
+        elif obj.op == "store":
+            from ...core.patch import original_ops
+
+            ptr_concrete = obj.ptr.concretize()
+            value_concrete = obj.value.concretize()
+            if obj.mask is None:
+                mask_concrete = TensorHandle(
+                    np.ones_like(ptr_concrete.data, dtype=bool), tl.int1
+                )
+            else:
+                mask_concrete = obj.mask.concretize()
+                if mask_concrete.data.size == 1 and ptr_concrete.data.size != 1:
+                    mask_value = bool(mask_concrete.data.item())
+                    mask_data = np.full(
+                        ptr_concrete.data.shape, mask_value, dtype=bool
+                    )
+                    mask_concrete = TensorHandle(mask_data, tl.int1)
+            metadata = obj.attrs.get("store_metadata", {})
+            result = original_ops[Store](
+                ptr_concrete,
+                value_concrete,
+                mask_concrete,
+                metadata.get("cache_modifier"),
+                metadata.get("eviction_policy"),
             )
         else:
             # Special handling for cast_impl and bitcast operations
@@ -1861,7 +2111,9 @@ class SanitizerSymbolicExecution(Sanitizer):
                 raise NotImplementedError(
                     f"Unsupported unary operation: {op} on {arg_sym}"
                 )
-            return SymbolicExpr(name, arg_sym)
+            result = SymbolicExpr(name, arg_sym)
+            result.unary_numpy_op = op
+            return result
 
         def op_binary_op_overrider(lhs, rhs, op):
             _binary_map = {
@@ -2216,7 +2468,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             sym = SymbolicExpr("const", idx, tl.int32)
             sym._loop_ctx = self.loop_stack[-1]
 
-            return tl.core.tensor(sym, tl.int32)
+            tensor = tl.core.tensor(sym.concretize(), tl.int32)
+            setattr(tensor, SYMBOLIC_EXPR_TENSOR_ATTR, sym)
+            return tensor
 
         def loop_hook_iter_listener(lineno, idx):
             if cfg.verbose:
