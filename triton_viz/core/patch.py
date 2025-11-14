@@ -242,13 +242,14 @@ class PatchOp:
 
                 if isinstance(ret, SymbolicExpr):
                     ret.concrete_fn = original_ops.get(self.op_type, self.op)
-                    handle = ret.concretize()
                     if self.callbacks.direct_triton_patch:
+                        handle = ret.concretize()
                         dtype_tt = ret.dtype_tt or getattr(handle, "dtype", tl.int32)
                         tensor = tl.core.tensor(handle, dtype_tt)
                         setattr(tensor, SYMBOLIC_EXPR_TENSOR_ATTR, ret)
                         ret = tensor
                     else:
+                        handle = self.op(*args, **kwargs)
                         if hasattr(handle, "attr"):
                             handle.attr[SYMBOLIC_EXPR_HANDLE_ATTR] = ret
                         ret = handle
