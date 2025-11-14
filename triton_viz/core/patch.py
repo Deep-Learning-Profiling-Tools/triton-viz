@@ -173,6 +173,35 @@ math_map: dict[type[Op], Callable] = {
     Umulhi: tl.math.umulhi,
 }
 
+_DIRECT_TRITON_OP_TARGETS: dict[type[Op], list[tuple[Any, str]]] = {
+    ProgramId: [(tl, "program_id")],
+    Load: [(tl, "load")],
+    Store: [(tl, "store")],
+    Dot: [(tl, "dot")],
+    MakeRange: [(tl, "arange")],
+    ExpandDims: [(tl, "expand_dims")],
+    Broadcast: [(tl, "broadcast_to"), (tl, "broadcast")],
+    MakeBlockPointer: [(tl, "make_block_ptr")],
+    Idiv: [(tl, "cdiv")],
+    Rsqrt: [(tl.math, "rsqrt")],
+    CastImpl: [(tl, "cast")],
+    Reshape: [(tl, "reshape")],
+    Join: [(tl, "join")],
+    Fabs: [(tl.math, "fabs")],
+    Advance: [(tl, "advance")],
+    Trans: [(tl, "trans")],
+    AtomicCas: [(tl, "atomic_cas")],
+}
+
+direct_original_ops: dict[type[Op], list[tuple[Any, str, Callable]]] = {}
+
+
+def _wrap_patched_op(patched_op: PatchOp) -> Callable:
+    def wrapper(*args, **kwargs):
+        return patched_op(*args, **kwargs)
+
+    return wrapper
+
 
 class PatchOp:
     def __init__(
@@ -220,6 +249,25 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
     :param op_type: The type of the operator to register the callback for.
     :param callbacks: The OpCallbacks object containing before_callback, after_callback, and op_overrider.
     """
+    if callbacks.direct_triton_patch:
+        targets = _DIRECT_TRITON_OP_TARGETS.get(op_type, [])
+        patched_targets: list[tuple[Any, str, Callable]] = []
+        for module, attr_name in targets:
+            original_op = getattr(module, attr_name, None)
+            if original_op is None:
+                continue
+            patched_op = PatchOp(original_op, op_type, callbacks)
+            setattr(module, attr_name, _wrap_patched_op(patched_op))
+            patched_targets.append((module, attr_name, original_op))
+        if patched_targets:
+            direct_original_ops[op_type] = patched_targets
+            return
+        elif cfg.verbose and targets:
+            missing_targets = ", ".join(attr for _, attr in targets)
+            print(
+                f"[patch] Unable to patch tl.{missing_targets} for {op_type.__name__}, fallback to builder."
+            )
+
     if op_type in original_ops:
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = _OP_ATTR_NAMES[op_type]
@@ -253,6 +301,11 @@ def unpatch_op(op_type: type[Op]):
 
     :param op_type: The type of the operator to unregister the callback for.
     """
+    if op_type in direct_original_ops:
+        for module, attr_name, original in direct_original_ops.pop(op_type):
+            setattr(module, attr_name, original)
+        return
+
     if op_type in original_ops:
         original_op = original_ops[op_type]
         # Use hardcoded name from _OP_ATTR_NAMES

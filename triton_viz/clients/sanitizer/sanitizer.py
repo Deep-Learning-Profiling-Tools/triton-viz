@@ -81,6 +81,26 @@ from .data import (
 )
 from ...core.config import config as cfg
 
+DIRECT_TRITON_PATCHABLE_OPS = {
+    ProgramId,
+    Load,
+    Store,
+    Dot,
+    MakeRange,
+    ExpandDims,
+    Broadcast,
+    MakeBlockPointer,
+    Idiv,
+    Rsqrt,
+    CastImpl,
+    Reshape,
+    Join,
+    Fabs,
+    Advance,
+    Trans,
+    AtomicCas,
+}
+
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
     """
@@ -1694,14 +1714,42 @@ class SanitizerSymbolicExecution(Sanitizer):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
 
-        def op_raw_load_overrider(ptr, cache_modifier, eviction_policy, is_volatile):
+        def _clean_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+            cleaned = dict(kwargs)
+            cleaned.pop("_semantic", None)
+            return cleaned
+
+        def op_raw_load_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            ptr, cache_modifier, eviction_policy, is_volatile = args
             return op_load_overrider(
-                ptr, None, None, cache_modifier, eviction_policy, is_volatile
+                ptr, None, None, cache_modifier, eviction_policy, is_volatile, **kwargs
             )
 
-        def op_load_overrider(
-            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
-        ):
+        def op_load_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            boundary_check: tuple[int, ...] = ()
+            padding_option = ""
+            if not kwargs and len(args) == 6:
+                ptr, mask, other, cache_modifier, eviction_policy, is_volatile = args
+            else:
+                ptr = args[0]
+                remaining = list(args[1:])
+                mask = kwargs.pop("mask", None)
+                if mask is None and remaining:
+                    mask = remaining.pop(0)
+                other = kwargs.pop("other", None)
+                if other is None and remaining:
+                    other = remaining.pop(0)
+                boundary_check = kwargs.pop("boundary_check", ())
+                padding_option = kwargs.pop("padding_option", "")
+                cache_modifier = kwargs.pop("cache_modifier", "")
+                eviction_policy = kwargs.pop("eviction_policy", "")
+                is_volatile = kwargs.pop("volatile", kwargs.pop("is_volatile", False))
+                if not cache_modifier and remaining:
+                    cache_modifier = remaining.pop(0)
+                if not eviction_policy and remaining:
+                    eviction_policy = remaining.pop(0)
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
                 self.need_full_grid = True
@@ -1714,21 +1762,54 @@ class SanitizerSymbolicExecution(Sanitizer):
                 raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
             ptr_sym = SymbolicExpr.from_value(ptr)
 
-            if mask is None:
-                ret = SymbolicExpr("load", ptr_sym)
-            elif other is None:
-                ret = SymbolicExpr("load", ptr_sym, mask)
-            else:
-                ret = SymbolicExpr("load", ptr_sym, mask, other)
+            load_args = [ptr_sym]
+            if mask is not None:
+                load_args.append(mask)
+            if other is not None:
+                load_args.append(other)
+
+            ret = SymbolicExpr("load", *load_args)
+            ret.set_attr(
+                "load_metadata",
+                {
+                    "boundary_check": boundary_check,
+                    "padding_option": padding_option,
+                    "cache_modifier": cache_modifier,
+                    "eviction_policy": eviction_policy,
+                    "volatile": is_volatile,
+                },
+            )
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
             return ret
 
-        def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
-            return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
+        def op_raw_store_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            ptr, value, cache_modifier, eviction_policy = args
+            return op_store_overrider(
+                ptr, value, None, cache_modifier, eviction_policy, **kwargs
+            )
 
-        def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
+        def op_store_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            boundary_check: tuple[int, ...] = ()
+            if not kwargs and len(args) == 5:
+                ptr, value, mask, cache_modifier, eviction_policy = args
+            else:
+                ptr = args[0]
+                value = args[1] if len(args) > 1 else kwargs.pop("value")
+                remaining = list(args[2:])
+                mask = kwargs.pop("mask", None)
+                if mask is None and remaining:
+                    mask = remaining.pop(0)
+                boundary_check = kwargs.pop("boundary_check", ())
+                cache_modifier = kwargs.pop("cache_modifier", "")
+                eviction_policy = kwargs.pop("eviction_policy", "")
+                if not cache_modifier and remaining:
+                    cache_modifier = remaining.pop(0)
+                if not eviction_policy and remaining:
+                    eviction_policy = remaining.pop(0)
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
                 self.need_full_grid = True
@@ -1742,10 +1823,19 @@ class SanitizerSymbolicExecution(Sanitizer):
             ptr_sym = SymbolicExpr.from_value(ptr)
 
             value = SymbolicExpr.from_value(value)
-            if mask is None:
-                ret = SymbolicExpr("store", ptr_sym, value)
-            else:
-                ret = SymbolicExpr("store", ptr_sym, value, mask)
+            store_args = [ptr_sym, value]
+            if mask is not None:
+                store_args.append(mask)
+
+            ret = SymbolicExpr("store", *store_args)
+            ret.set_attr(
+                "store_metadata",
+                {
+                    "boundary_check": boundary_check,
+                    "cache_modifier": cache_modifier,
+                    "eviction_policy": eviction_policy,
+                },
+            )
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
@@ -1822,13 +1912,40 @@ class SanitizerSymbolicExecution(Sanitizer):
             offset_sym = SymbolicExpr.from_value(offset)
             return SymbolicExpr("addptr", ptr_sym, offset_sym)
 
-        def op_dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
+        def op_dot_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            if not kwargs and len(args) == 5:
+                a, b, d, _input_precision, _max_num_imprecise_acc = args
+            else:
+                a = args[0]
+                b = args[1]
+                remaining = list(args[2:])
+                d = kwargs.pop("acc", None)
+                if d is None and remaining:
+                    d = remaining.pop(0)
+                # consume optional keyword arguments to avoid unexpected errors
+                kwargs.pop("input_precision", None)
+                kwargs.pop("allow_tf32", None)
+                kwargs.pop("max_num_imprecise_acc", None)
+                kwargs.pop("out_dtype", None)
             a_sym = SymbolicExpr.from_value(a)
             b_sym = SymbolicExpr.from_value(b)
+            if d is None:
+                return SymbolicExpr("dot", a_sym, b_sym)
             d_sym = SymbolicExpr.from_value(d)
             return SymbolicExpr("dot", a_sym, b_sym, d_sym)
 
-        def op_make_range_overrider(ret_ty, start, end):
+        def op_make_range_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            if len(args) == 3 and not kwargs:
+                ret_ty, start, end = args
+            else:
+                ret_ty = kwargs.pop("ret_ty", None)
+                if len(args) >= 2:
+                    start, end = args[:2]
+                else:
+                    start = kwargs.pop("start")
+                    end = kwargs.pop("end")
             return SymbolicExpr(
                 "arange",
                 SymbolicExpr.from_value(ret_ty),
@@ -1836,11 +1953,30 @@ class SanitizerSymbolicExecution(Sanitizer):
                 SymbolicExpr.from_value(end),
             )
 
-        def op_expand_dims_overrider(arg, axis):
+        def op_expand_dims_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            if len(args) >= 2:
+                arg, axis = args[:2]
+            else:
+                arg = kwargs.pop("arg")
+                axis = kwargs.pop("axis")
             return SymbolicExpr("expand_dims", SymbolicExpr.from_value(arg), axis)
 
-        def op_broadcast_overrider(arg, shape):
-            return SymbolicExpr("broadcast", SymbolicExpr.from_value(arg), shape)
+        def op_broadcast_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            arg = args[0]
+            shape: Any
+            if len(args) > 2:
+                shape = args[1:]
+            elif len(args) == 2:
+                shape = args[1]
+            else:
+                shape = kwargs.pop("shape")
+            if isinstance(shape, tl.core.constexpr):
+                shape = shape.value
+            if not isinstance(shape, (list, tuple)):
+                shape = [shape]
+            return SymbolicExpr("broadcast", SymbolicExpr.from_value(arg), list(shape))
 
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
             return SymbolicExpr("sum", SymbolicExpr.from_value(input), axis, keep_dims)
@@ -1854,23 +1990,23 @@ class SanitizerSymbolicExecution(Sanitizer):
         def op_splat_overrider(shape, arg):
             return SymbolicExpr("splat", shape, SymbolicExpr.from_value(arg))
 
-        def op_make_block_ptr_overrider(
-            base, shape, strides, offsets, tensor_shape, order
-        ):
+        def op_make_block_ptr_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            base, shape, strides, offsets, shape_like, order = args[:6]
+            block_shape = kwargs.pop("block_shape", shape_like)
             base = SymbolicExpr.from_value(base)
             assert (
                 len(shape)
                 == len(strides)
                 == len(offsets)
-                == len(tensor_shape)
+                == len(block_shape)
                 == len(order)
-            ), f"Length of shape ({len(shape)}), strides ({len(strides)}), offsets ({len(offsets)}), tensor_shape ({len(tensor_shape)}) and order ({len(order)}) must be the same!"
+            ), f"Length of shape ({len(shape)}), strides ({len(strides)}), offsets ({len(offsets)}), block_shape ({len(block_shape)}) and order ({len(order)}) must be the same!"
             shape = [SymbolicExpr.from_value(shape_i) for shape_i in shape]
             strides = [SymbolicExpr.from_value(strides_i) for strides_i in strides]
             offsets = [SymbolicExpr.from_value(offset_i) for offset_i in offsets]
             tensor_shape = [
-                SymbolicExpr.from_value(tensor_shape_i)
-                for tensor_shape_i in tensor_shape
+                SymbolicExpr.from_value(block_shape_i) for block_shape_i in block_shape
             ]
             order = [SymbolicExpr.from_value(order_i) for order_i in order]
 
@@ -1897,39 +2033,52 @@ class SanitizerSymbolicExecution(Sanitizer):
         ):
             raise NotImplementedError("TensorPointerStore is not supported yet.")
 
-        def op_idiv_overrider(lhs, rhs):
+        def op_idiv_overrider(lhs, rhs, *_, **kwargs):
+            _clean_kwargs(kwargs)
             result = SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
             result.binary_numpy_op = np.floor_divide
             return result
 
-        def op_rsqrt_overrider(arg):
+        def op_rsqrt_overrider(arg, *_, **kwargs):
+            _clean_kwargs(kwargs)
             return SymbolicExpr("rsqrt", SymbolicExpr.from_value(arg))
 
-        def op_cast_impl_overrider(src, dst_type):
-            return SymbolicExpr("cast_impl", src, dst_type)
+        def op_cast_impl_overrider(src, dst_type, *_, **kwargs):
+            _clean_kwargs(kwargs)
+            return SymbolicExpr("cast_impl", SymbolicExpr.from_value(src), dst_type)
 
-        def op_reshape_overrider(arg, shape, allow_reorder):
-            # For symbolic execution, we track the reshape operation
-            # arg is the input tensor, shape is the new shape, allow_reorder is a flag
+        def op_reshape_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            if len(args) == 3 and not kwargs:
+                arg, shape, allow_reorder = args
+            else:
+                arg = args[0]
+                allow_reorder = kwargs.pop("allow_reorder", kwargs.pop("can_reorder", False))
+                remaining = list(args[1:])
+                if remaining:
+                    if len(remaining) == 1 and isinstance(remaining[0], (tuple, list)):
+                        shape = remaining[0]
+                    else:
+                        shape = remaining
+                else:
+                    shape = kwargs.pop("shape")
             arg_sym = SymbolicExpr.from_value(arg)
             shape_sym = SymbolicExpr.from_value(shape)
-            # Create a reshape symbolic expression
             result = SymbolicExpr("reshape", arg_sym, shape_sym)
-            # The dtype should be preserved from the input
             result.dtype_tt = arg_sym.dtype_tt if hasattr(arg_sym, "dtype_tt") else None
+            result.set_attr("allow_reorder", allow_reorder)
             return result
 
-        def op_join_overrider(lhs, rhs):
-            # Join operation combines two tensors along the last axis
+        def op_join_overrider(lhs, rhs, *_, **kwargs):
+            _clean_kwargs(kwargs)
             lhs_sym = SymbolicExpr.from_value(lhs)
             rhs_sym = SymbolicExpr.from_value(rhs)
-            # Create a join symbolic expression
             result = SymbolicExpr("join", lhs_sym, rhs_sym)
-            # The dtype should be preserved from the inputs
             result.dtype_tt = lhs_sym.dtype_tt if hasattr(lhs_sym, "dtype_tt") else None
             return result
 
-        def op_fabs_overrider(arg):
+        def op_fabs_overrider(arg, *_, **kwargs):
+            _clean_kwargs(kwargs)
             arg_sym = SymbolicExpr.from_value(arg)
             return SymbolicExpr("fabs", arg_sym)
 
@@ -1938,8 +2087,8 @@ class SanitizerSymbolicExecution(Sanitizer):
             rhs_sym = SymbolicExpr.from_value(rhs)
             return SymbolicExpr("ashr", lhs_sym, rhs_sym)
 
-        def op_advance_overrider(ptr, offsets):
-            # Advance operation for block pointers
+        def op_advance_overrider(ptr, offsets, *_, **kwargs):
+            _clean_kwargs(kwargs)
             ptr_sym = SymbolicExpr.from_value(ptr)
             offsets_sym = SymbolicExpr.from_value(offsets)
             return SymbolicExpr("advance", ptr_sym, offsets_sym)
@@ -1954,7 +2103,15 @@ class SanitizerSymbolicExecution(Sanitizer):
             rhs_sym = SymbolicExpr.from_value(rhs)
             return SymbolicExpr("umulhi", lhs_sym, rhs_sym)
 
-        def op_trans_overrider(arg, perm):
+        def op_trans_overrider(*args, **kwargs):
+            kwargs = _clean_kwargs(kwargs)
+            arg = args[0]
+            if len(args) == 2:
+                perm = args[1]
+            elif len(args) > 2:
+                perm = args[1:]
+            else:
+                perm = kwargs.pop("perm")
             return SymbolicExpr("trans", SymbolicExpr.from_value(arg), perm)
 
         def op_cumsum_overrider(input, axis, reverse=False, dtype=None):
@@ -1968,13 +2125,14 @@ class SanitizerSymbolicExecution(Sanitizer):
             result.dtype_tt = dst_type
             return result
 
-        def op_atomic_cas_overrider(ptr, cmp, val, sem, scope):
+        def op_atomic_cas_overrider(ptr, cmp, val, sem=None, scope=None, **kwargs):
+            _clean_kwargs(kwargs)
             ptr_sym = SymbolicExpr.from_value(ptr)
             cmp_sym = SymbolicExpr.from_value(cmp)
             val_sym = SymbolicExpr.from_value(val)
-            # sem is a MEM_SEMANTIC enum, not a regular value, so we pass it directly
             result = SymbolicExpr("atomic_cas", ptr_sym, cmp_sym, val_sym)
-            result.sem = sem  # Store sem as an attribute
+            result.sem = sem
+            result.scope = scope
             return result
 
         def op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope):
@@ -2026,7 +2184,14 @@ class SanitizerSymbolicExecution(Sanitizer):
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
-            return OpCallbacks(op_overrider=OP_TYPE_TO_OVERRIDER[op_type])
+            direct_patch = (
+                cfg.sanitizer_direct_triton_ops
+                and op_type in DIRECT_TRITON_PATCHABLE_OPS
+            )
+            return OpCallbacks(
+                op_overrider=OP_TYPE_TO_OVERRIDER[op_type],
+                direct_triton_patch=direct_patch,
+            )
         else:
             return OpCallbacks()
 

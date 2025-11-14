@@ -8,6 +8,7 @@ class OpCallbacks:
     before_callback: Optional[Callable] = None
     after_callback: Optional[Callable] = None
     op_overrider: Optional[Callable] = None
+    direct_triton_patch: bool = False
 
 
 @dataclass

@@ -15,6 +15,11 @@ class Config:
         # --- Sanitizer disable flag ---
         self._disable_sanitizer = os.getenv("DISABLE_SANITIZER", "0") == "1"
 
+        # --- Sanitizer direct Triton patch flag ---
+        self._sanitizer_direct_triton_ops = (
+            os.getenv("SANITIZER_DIRECT_TRITON_OPS", "0") == "1"
+        )
+
         # --- Profiler disable flag ---
         self._disable_profiler = os.getenv("DISABLE_PROFILER", "0") == "1"
 
@@ -96,6 +101,22 @@ class Config:
         self._report_grid_execution_progress = flag
         if flag:
             print("Grid-progress reporting is now ON.")
+
+    # ---------- sanitizer_direct_triton_ops ----------
+    @property
+    def sanitizer_direct_triton_ops(self) -> bool:
+        return self._sanitizer_direct_triton_ops
+
+    @sanitizer_direct_triton_ops.setter
+    def sanitizer_direct_triton_ops(self, flag: bool) -> None:
+        if not isinstance(flag, bool):
+            raise TypeError("sanitizer_direct_triton_ops expects a bool.")
+        previous = getattr(self, "_sanitizer_direct_triton_ops", None)
+        self._sanitizer_direct_triton_ops = flag
+        if flag and not previous:
+            print("Sanitizer will patch tl.* ops directly (semantic checks skipped).")
+        elif not flag and previous:
+            print("Sanitizer reverted to interpreter builder patching.")
 
 
 config = Config()
