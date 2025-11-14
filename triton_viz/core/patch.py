@@ -196,13 +196,6 @@ _DIRECT_TRITON_OP_TARGETS: dict[type[Op], list[tuple[Any, str]]] = {
 direct_original_ops: dict[type[Op], list[tuple[Any, str, Callable]]] = {}
 
 
-def _wrap_patched_op(patched_op: PatchOp) -> Callable:
-    def wrapper(*args, **kwargs):
-        return patched_op(*args, **kwargs)
-
-    return wrapper
-
-
 class PatchOp:
     def __init__(
         self,
@@ -240,6 +233,13 @@ class PatchOp:
             # Pass ret so that we don't have to derive output shape from args
             self.callbacks.after_callback(ret, *args, **kwargs)
         return ret
+
+
+def _wrap_patched_op(patched_op: PatchOp) -> Callable:
+    def wrapper(*args, **kwargs):
+        return patched_op(*args, **kwargs)
+
+    return wrapper
 
 
 def patch_op(op_type: type[Op], callbacks: OpCallbacks):
