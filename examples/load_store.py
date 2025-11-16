@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
     # Try to launch visualization
     try:
-        triton_viz.launch()
+        triton_viz.launch(share=False)
     except Exception as e:
         print(f"\nError during visualization: {e}")
         import traceback
