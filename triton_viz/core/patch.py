@@ -842,7 +842,16 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
     builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
+    if cfg.enable_timing:
+        import time
+
+        start_time = time.time()
     run_grid_loops(grid)
+    if cfg.enable_timing:
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        name = self.fn.__name__
+        print(f"Triton-Viz: execution time for {name}: {elapsed_time * 1000:.3f} ms")
     # Copy arguments back to propagate side-effects
     self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
 
