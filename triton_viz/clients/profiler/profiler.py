@@ -2,16 +2,38 @@ from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import Op, Load, Store, AddPtr
 from .data import LoadStoreBytes
+from ..utils import get_source_location_from_stack
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
 from dataclasses import dataclass, replace
-from typing import Callable, Optional
+from typing import Callable, Optional, List
 
 
 @dataclass(frozen=False)
 class LoopInfo:
     length: Optional[int] = None
     range_type: str = "unknown"
+
+
+@dataclass
+class MaskOpStats:
+    """Statistics for a single mask operation."""
+
+    op_type: str  # "load" or "store"
+    lineno: int
+    filename: str
+    code_line: str
+    total_elements: int
+    false_elements: int
+
+
+@dataclass
+class AggregatedMaskOpStats:
+    total: int = 0
+    false: int = 0
+    filename: str = ""
+    code_line: str = ""
+    op_type: str = ""
 
 
 class Profiler(Client):
@@ -50,6 +72,8 @@ class Profiler(Client):
         self.store_mask_false_count = (
             0  # Total number of False elements in all store masks
         )
+        # Per-operation statistics for detailed analysis
+        self.mask_op_stats: List[MaskOpStats] = []
 
         # Case 4: Buffer Load Check
         self.has_buffer_load = False
@@ -184,6 +208,20 @@ class Profiler(Client):
                 self.load_mask_total_count += total_count
                 self.load_mask_false_count += false_count
 
+                # Record per-operation statistics
+                lineno, filename, code_line = get_source_location_from_stack()
+                if lineno > 0:  # Only record if we got valid line info
+                    self.mask_op_stats.append(
+                        MaskOpStats(
+                            op_type="load",
+                            lineno=lineno,
+                            filename=filename,
+                            code_line=code_line.strip() if code_line else "",
+                            total_elements=total_count,
+                            false_elements=false_count,
+                        )
+                    )
+
         def load_overrider(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -198,6 +236,20 @@ class Profiler(Client):
                 total_count, false_count = _get_mask_stats(mask)
                 self.store_mask_total_count += total_count
                 self.store_mask_false_count += false_count
+
+                # Record per-operation statistics
+                lineno, filename, code_line = get_source_location_from_stack()
+                if lineno > 0:  # Only record if we got valid line info
+                    self.mask_op_stats.append(
+                        MaskOpStats(
+                            op_type="store",
+                            lineno=lineno,
+                            filename=filename,
+                            code_line=code_line.strip() if code_line else "",
+                            total_elements=total_count,
+                            false_elements=false_count,
+                        )
+                    )
 
         def store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             # Skip actual store
@@ -301,12 +353,13 @@ class Profiler(Client):
             print("-" * 10 + " " + "Profiler: Mask Ratio Statistics" + " " + "-" * 17)
             print("=" * 60)
 
-            # Load statistics
+            # Overall statistics
             if self.load_mask_total_count > 0:
                 load_masked_percentage = (
                     self.load_mask_false_count / self.load_mask_total_count
                 ) * 100
-                print("\nLoad Operations:")
+                print("\n" + "─" * 40)
+                print("Overall Load Operations:")
                 print(f"  Total mask elements:     {self.load_mask_total_count}")
                 print(f"  False elements:          {self.load_mask_false_count}")
                 print(f"  Masked percentage:       {load_masked_percentage:.2f}%")
@@ -319,7 +372,7 @@ class Profiler(Client):
                 store_masked_percentage = (
                     self.store_mask_false_count / self.store_mask_total_count
                 ) * 100
-                print("\nStore Operations:")
+                print("\nOverall Store Operations:")
                 print(f"  Total mask elements:     {self.store_mask_total_count}")
                 print(f"  False elements:          {self.store_mask_false_count}")
                 print(f"  Masked percentage:       {store_masked_percentage:.2f}%")
@@ -327,7 +380,86 @@ class Profiler(Client):
                 print("\nStore Operations:")
                 print("  No store operations detected")
 
-            print("=" * 60 + "\n")
+            # Detailed per-operation breakdown
+            if self.mask_op_stats:
+                print("\n" + "─" * 40)
+                print("Per-Operation Breakdown:")
+
+                # Aggregate stats by line number
+                from collections import defaultdict
+
+                aggregated_stats: defaultdict[
+                    tuple[int, str], AggregatedMaskOpStats
+                ] = defaultdict(lambda: AggregatedMaskOpStats())
+
+                for stat in self.mask_op_stats:
+                    key = (stat.lineno, stat.op_type)
+                    aggregated_stats[key].total += stat.total_elements
+                    aggregated_stats[key].false += stat.false_elements
+                    aggregated_stats[key].filename = stat.filename
+                    aggregated_stats[key].code_line = stat.code_line
+                    aggregated_stats[key].op_type = stat.op_type
+
+                # Sort by false elements (descending)
+                sorted_stats = sorted(
+                    [(k, v) for k, v in aggregated_stats.items()],
+                    key=lambda x: x[1].false,
+                    reverse=True,
+                )
+
+                # Display top contributors
+                print("\nTop 5 Operations by False Elements:")
+                print("─" * 40)
+
+                import os
+
+                for i, ((lineno, op_type), stats) in enumerate(sorted_stats[:5], 1):
+                    percentage = (
+                        (stats.false / stats.total * 100) if stats.total > 0 else 0
+                    )
+                    filename_short = os.path.basename(stats.filename)
+
+                    print(f"\n#{i}. {op_type.upper()} at {filename_short}:{lineno}")
+                    print(f"    Total elements: {stats.total:,}")
+                    print(f"    False elements: {stats.false:,} ({percentage:.1f}%)")
+                    if stats.code_line:
+                        # Handle multi-line code
+                        code_lines = stats.code_line.split("\n")
+                        if len(code_lines) == 1:
+                            print(f"    Code: {code_lines[0]}")
+                        else:
+                            print("    Code:")
+                            for code_line in code_lines:
+                                print(f"        {code_line}")
+
+                # Summary table of all operations
+                if len(sorted_stats) > 5:
+                    print("\n" + "─" * 40)
+                    print("All Operations Summary (sorted by false elements):")
+                    print(
+                        "\n{:<10} {:<40} {:>15} {:>15} {:>8}".format(
+                            "Type", "Location", "Total Elems", "False Elems", "False%"
+                        )
+                    )
+                    print("─" * 100)
+
+                    for (lineno, op_type), stats in sorted_stats:
+                        percentage = (
+                            (stats.false / stats.total * 100) if stats.total > 0 else 0
+                        )
+                        filename_short = os.path.basename(stats.filename)
+                        location = f"{filename_short}:{lineno}"
+                        print(
+                            "{:<10} {:<40} {:>15,} {:>15,} {:>7.1f}%".format(
+                                op_type,
+                                location[:40],
+                                stats.total,
+                                stats.false,
+                                percentage,
+                            )
+                        )
+
+            print("\n" + "=" * 60 + "\n")
 
         if not self.disable_buffer_load_check:
             print("\n" + "=" * 60)
