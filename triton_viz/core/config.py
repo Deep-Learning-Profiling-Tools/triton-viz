@@ -26,6 +26,16 @@ class Config:
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
 
+        # --- Profiler enable load/store/dot skipping flag ---
+        self._profiler_enable_load_store_skipping = (
+            os.getenv("PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1") == "1"
+        )
+
+        # --- Profiler enable block sampling flag ---
+        self._profiler_enable_block_sampling = (
+            os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
+        )
+
     # ---------- disable_sanitizer ----------
     @property
     def disable_sanitizer(self) -> bool:
@@ -96,6 +106,44 @@ class Config:
         self._report_grid_execution_progress = flag
         if flag:
             print("Grid-progress reporting is now ON.")
+
+    # ---------- profiler_enable_load_store_skipping ----------
+    @property
+    def profiler_enable_load_store_skipping(self) -> bool:
+        return self._profiler_enable_load_store_skipping
+
+    @profiler_enable_load_store_skipping.setter
+    def profiler_enable_load_store_skipping(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_enable_load_store_skipping expects a bool.")
+
+        previous = getattr(self, "_profiler_enable_load_store_skipping", None)
+        self._profiler_enable_load_store_skipping = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler load/store/dot skipping enabled.")
+        elif not value and previous:
+            print("Profiler load/store/dot skipping disabled.")
+
+    # ---------- profiler_enable_block_sampling ----------
+    @property
+    def profiler_enable_block_sampling(self) -> bool:
+        return self._profiler_enable_block_sampling
+
+    @profiler_enable_block_sampling.setter
+    def profiler_enable_block_sampling(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_enable_block_sampling expects a bool.")
+
+        previous = getattr(self, "_profiler_enable_block_sampling", None)
+        self._profiler_enable_block_sampling = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler block sampling enabled.")
+        elif not value and previous:
+            print("Profiler block sampling disabled.")
 
 
 config = Config()
