@@ -26,6 +26,13 @@ class Config:
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
 
+        # --- Virtual memory flag ---
+        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
+
+    @property
+    def virtual_memory(self) -> bool:
+        return self._virtual_memory
+
     # ---------- disable_sanitizer ----------
     @property
     def disable_sanitizer(self) -> bool:
