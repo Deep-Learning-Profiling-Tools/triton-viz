@@ -1,6 +1,8 @@
 import { createMatMulVisualization } from './matmul.js';
+import { createFlipVisualization } from './flip.js';
 import { createLoadVisualization } from './load.js';
 import { createStoreVisualization } from './store.js';
+import { createFlowDiagram } from './nki.js';
 
 export class GridBlock {
     constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction) {
@@ -74,6 +76,9 @@ export class GridBlock {
 
         const closeButton = this.createCloseButton();
         this.visualizationContainer.appendChild(closeButton);
+        // Add an explicit Back button (top-left) to return to main canvas view
+        const backButton = this.createBackButton();
+        this.visualizationContainer.appendChild(backButton);
 
         // Ensure buttons panel sits above the canvas and accepts clicks
         const buttonsPanel = this.visualizationContainer.querySelector('div');
@@ -89,6 +94,71 @@ export class GridBlock {
         // Display the first operation visualization after the content area is added to the DOM
         if (this.blockData.length > 0) {
             this.displayOpVisualization(this.blockData[0]);
+        }
+
+        // Add a global "Show Code" toggle once (applies to any op type)
+        const codeBtnId = 'global-code-toggle-btn';
+        if (!document.getElementById(codeBtnId)) {
+            const btn = document.createElement('button');
+            btn.id = codeBtnId;
+            btn.textContent = 'Show Code: OFF';
+            Object.assign(btn.style, {
+                position: 'fixed',
+                right: '10px',
+                top: '10px',
+                zIndex: '2001'
+            });
+            document.body.appendChild(btn);
+
+            let panel = null;
+            const destroyPanel = () => { if (panel && panel.remove) panel.remove(); panel = null; };
+            const createPanel = async (uuid, frameIdx = 0, context = 8) => {
+                destroyPanel();
+                const wrapper = document.createElement('div');
+                Object.assign(wrapper.style, {
+                    position: 'fixed', right: '10px', top: '50px', width: '520px', maxHeight: '60vh', overflow: 'auto',
+                    padding: '8px 10px', background: 'rgba(0,0,0,0.65)', color: '#fff', font: '12px Menlo, Consolas, monospace',
+                    borderRadius: '6px', zIndex: '2000'
+                });
+                const header = document.createElement('div');
+                header.textContent = 'Operation Code & Context';
+                header.style.marginBottom = '6px';
+                header.style.opacity = '0.9';
+                wrapper.appendChild(header);
+                try {
+                    const API_BASE = window.__TRITON_VIZ_API__ || '';
+                    const res = await fetch(`${API_BASE}/api/op_code`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uuid, frame_idx: frameIdx, context }) });
+                    const data = await res.json();
+                    const meta = document.createElement('div');
+                    meta.style.marginBottom = '4px';
+                    meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
+                    wrapper.appendChild(meta);
+                    const pre = document.createElement('pre');
+                    pre.style.margin = '0';
+                    pre.style.whiteSpace = 'pre';
+                    const lines = (data.lines || []).map(l => {
+                        const mark = (data.highlight === l.no) ? '▶ ' : '  ';
+                        return `${mark}${String(l.no).padStart(6,' ')} | ${l.text||''}`;
+                    }).join('\n');
+                    pre.textContent = lines || '(no code available)';
+                    wrapper.appendChild(pre);
+                } catch (e) {
+                    const err = document.createElement('div');
+                    err.textContent = 'Failed to load code context.';
+                    wrapper.appendChild(err);
+                }
+                document.body.appendChild(wrapper);
+                panel = wrapper;
+            };
+
+            btn.addEventListener('click', async () => {
+                const turnOn = btn.textContent.endsWith('OFF');
+                btn.textContent = `Show Code: ${turnOn ? 'ON' : 'OFF'}`;
+                if (!this.blockData || this.blockData.length === 0) { if (!turnOn) destroyPanel(); return; }
+                // Prefer latest clicked/active uuid; fallback to first in current grid block
+                const activeUuid = window.current_op_uuid || (this.blockData[0] && this.blockData[0].uuid);
+                if (turnOn && activeUuid) await createPanel(activeUuid, 0, 8); else destroyPanel();
+            });
         }
     }
 
@@ -128,12 +198,23 @@ export class GridBlock {
         });
 
         let currentSelectedTab = null;
+        // Tabs for each op
         this.blockData.forEach((op, index) => {
             const opTab = this.createOperationTab(op, index === 0);
             opTab.addEventListener('click', () => this.handleTabClick(opTab, op, currentSelectedTab));
             headerBar.appendChild(opTab);
             if (index === 0) currentSelectedTab = opTab;
         });
+        // Extra: NKI view tab (aggregates all ops)
+        const nkiTab = document.createElement('button');
+        nkiTab.textContent = 'Flow';
+        Object.assign(nkiTab.style, { flex:'0 0 auto', marginRight:'5px', background:'#333', color:'#fff', border:'none', padding:'10px', cursor:'pointer' });
+        nkiTab.addEventListener('click', () => {
+            if (currentSelectedTab) currentSelectedTab.style.backgroundColor = '#333';
+            nkiTab.style.backgroundColor = '#555';
+            this.displayFlowDiagram();
+        });
+        headerBar.appendChild(nkiTab);
 
         return headerBar;
     }
@@ -209,12 +290,23 @@ export class GridBlock {
             case 'Store':
                 this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op);
                 break;
+            case 'Flip':
+                this.visualizationCleanupFunction = createFlipVisualization(this.contentArea, op);
+                break;
             default:
                 const unsupportedMsg = document.createElement('p');
                 unsupportedMsg.textContent = `Visualization not supported for ${op.type} operation`;
                 unsupportedMsg.style.textAlign = 'center';
                 this.contentArea.appendChild(unsupportedMsg);
         }
+    }
+
+    displayFlowDiagram() {
+        if (!this.contentArea) return;
+        if (this.visualizationCleanupFunction) { this.visualizationCleanupFunction(); this.visualizationCleanupFunction = null; }
+        this.contentArea.innerHTML = '';
+        // Pass the entire block data (ops in this program) to Flow view
+        this.visualizationCleanupFunction = createFlowDiagram(this.contentArea, this.blockData || []);
     }
 
 
@@ -229,6 +321,26 @@ export class GridBlock {
         });
         closeButton.addEventListener('click', () => this.hideDetailedView());
         return closeButton;
+    }
+
+    createBackButton() {
+        const backButton = document.createElement('button');
+        backButton.textContent = 'Back';
+        Object.assign(backButton.style, {
+            position: 'fixed',
+            left: '10px',
+            bottom: '10px',
+            zIndex: '2002',
+            background: 'rgba(0,0,0,0.65)',
+            color: '#fff',
+            border: '1px solid #666',
+            padding: '6px 10px',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.5)'
+        });
+        backButton.addEventListener('click', () => this.hideDetailedView());
+        return backButton;
     }
 
     hideDetailedView() {
