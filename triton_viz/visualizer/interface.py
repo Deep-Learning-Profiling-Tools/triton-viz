@@ -330,14 +330,10 @@ def launch(share: bool = True, port: int | None = None):
         print("--------")
         _server_state.set_local_port(actual_port)
 
-        # Run Flask in a background thread so callers can continue (non-blocking)
-        def _run_local():
-            app.run(host="0.0.0.0", port=actual_port, debug=True, use_reloader=False)
+        # For share=False, we want to block and keep the server running
+        # This is the traditional behavior for local web servers
+        app.run(host="0.0.0.0", port=actual_port, debug=True, use_reloader=False)
 
-        flask_thread = threading.Thread(target=_run_local, daemon=True)
-        flask_thread.start()
-        # Give the server a moment to bind the port
-        time.sleep(0.5)
         return local_url, None
 
 
