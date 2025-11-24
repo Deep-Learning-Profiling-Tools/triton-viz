@@ -147,7 +147,7 @@ class Config:
             print("Profiler block sampling enabled.")
         elif not value and previous:
             print("Profiler block sampling disabled.")
-    
+
     # ---------- virtual memory ----------
     @property
     def virtual_memory(self) -> bool:
