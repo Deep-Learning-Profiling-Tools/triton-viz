@@ -1,6 +1,7 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
-from ...core.data import Op, Load, Store, AddPtr
+from ...core.data import Op, Load, Store, AddPtr, Dot
+from ...core.config import config as cfg
 from .data import LoadStoreBytes
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
@@ -23,8 +24,6 @@ class Profiler(Client):
         disable_buffer_load_check: bool = False,
         disable_for_loop_unroll_check: bool = False,
         disable_load_mask_percentage_check: bool = False,
-        disable_load_store_skipping: bool = False,
-        block_sampling: bool = False,
         k: int | None = None,
     ):
         super().__init__()  # Initialize parent class
@@ -57,13 +56,14 @@ class Profiler(Client):
         self.potential_buffer_load_issue_found = False
 
         # Block sampling
-        self.block_sampling = block_sampling
+        self.block_sampling = cfg.profiler_enable_block_sampling
         self.k = k
         self.sampled_blocks: Optional[set[tuple[int, ...]]] = None
         self.current_grid_idx: Optional[tuple[int, ...]] = None
 
         # Load & Store Skipping
-        self.disable_load_store_skipping = disable_load_store_skipping
+        # Config has enable_load_store_skipping, but profiler uses disable_load_store_skipping
+        self.disable_load_store_skipping = not cfg.profiler_enable_load_store_skipping
 
     def pre_run_callback(self, fn: Callable) -> bool:
         # If block sampling is enabled, check if current block is selected
@@ -203,6 +203,11 @@ class Profiler(Client):
             # Skip actual store
             pass
 
+        def dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
+            # Skip actual dot operation, return zeros with same shape as d
+            # This replaces np.matmul(a_data, b_data, dtype=d.data.dtype) + d.data
+            return TensorHandle(np.zeros_like(d.data), d.dtype.scalar)
+
         def pre_addptr_callback(ptr, offset):
             dtype_tt = ptr.get_element_ty()
             element_bitwidth = dtype_tt.primitive_bitwidth
@@ -232,6 +237,11 @@ class Profiler(Client):
                 return OpCallbacks(
                     before_callback=pre_store_callback, op_overrider=store_overrider
                 )
+        elif op_type is Dot:
+            if self.disable_load_store_skipping:
+                return OpCallbacks()
+            else:
+                return OpCallbacks(op_overrider=dot_overrider)
         elif op_type is AddPtr:
             return OpCallbacks(before_callback=pre_addptr_callback)
 
