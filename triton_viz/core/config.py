@@ -26,7 +26,7 @@ class Config:
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
 
-        # --- Ablation Study ---
+        # --- Sanitizer Cache Ablation Study ---
         # Cache 1: SymExpr Node Cache - caches Z3 expressions in SymExpr._z3
         self.enable_symbol_cache = (
             os.getenv("SANITIZER_ENABLE_SYMBOL_CACHE", "1") == "1"
@@ -44,11 +44,18 @@ class Config:
         )
 
         # --- Virtual memory flag ---
-        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "1") == "1"
+        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
 
-    @property
-    def virtual_memory(self) -> bool:
-        return self._virtual_memory
+        # --- Profiler Optimization Ablation Study ---
+        # Optimization 1: enable load/store/dot skipping
+        self._profiler_enable_load_store_skipping = (
+            os.getenv("PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1") == "1"
+        )
+
+        # Optimization 2: Profiler enable block sampling
+        self._profiler_enable_block_sampling = (
+            os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
+        )
 
     # ---------- disable_sanitizer ----------
     @property
@@ -120,6 +127,49 @@ class Config:
         self._report_grid_execution_progress = flag
         if flag:
             print("Grid-progress reporting is now ON.")
+
+    # ---------- profiler_enable_load_store_skipping ----------
+    @property
+    def profiler_enable_load_store_skipping(self) -> bool:
+        return self._profiler_enable_load_store_skipping
+
+    @profiler_enable_load_store_skipping.setter
+    def profiler_enable_load_store_skipping(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_enable_load_store_skipping expects a bool.")
+
+        previous = getattr(self, "_profiler_enable_load_store_skipping", None)
+        self._profiler_enable_load_store_skipping = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler load/store/dot skipping enabled.")
+        elif not value and previous:
+            print("Profiler load/store/dot skipping disabled.")
+
+    # ---------- profiler_enable_block_sampling ----------
+    @property
+    def profiler_enable_block_sampling(self) -> bool:
+        return self._profiler_enable_block_sampling
+
+    @profiler_enable_block_sampling.setter
+    def profiler_enable_block_sampling(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_enable_block_sampling expects a bool.")
+
+        previous = getattr(self, "_profiler_enable_block_sampling", None)
+        self._profiler_enable_block_sampling = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler block sampling enabled.")
+        elif not value and previous:
+            print("Profiler block sampling disabled.")
+
+    # ---------- virtual memory ----------
+    @property
+    def virtual_memory(self) -> bool:
+        return self._virtual_memory
 
 
 config = Config()

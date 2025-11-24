@@ -6,16 +6,10 @@ import triton.language as tl
 
 import triton_viz
 from triton_viz.clients import Profiler
+from triton_viz.core.config import config as cfg
 
 
 # ======== Case 2: Check if for loop can be unrolled ========
-@triton_viz.trace(
-    clients=(
-        loop_profiler := Profiler(
-            disable_buffer_load_check=True, disable_load_mask_percentage_check=True
-        )
-    )
-)
 @triton.jit
 def for_loop_test_kernel(
     in_ptr,
@@ -73,9 +67,17 @@ def test_for_loop_statistics():
     x = torch.randn(N, dtype=torch.float32)
     y = torch.empty(N, dtype=torch.float32)
 
+    # Create profiler in the test function
+    # Disable block sampling to ensure all blocks are executed
+    cfg._profiler_enable_block_sampling = False
+    loop_profiler = Profiler(
+        disable_buffer_load_check=True, disable_load_mask_percentage_check=True
+    )
+    traced_kernel = triton_viz.trace(loop_profiler)(for_loop_test_kernel)
+
     # Run the kernel
     grid = (num_blocks,)
-    for_loop_test_kernel[grid](x, y, N, BLOCK_SIZE)
+    traced_kernel[grid](x, y, N, BLOCK_SIZE)
 
     # Expected loop statistics:
     # The kernel has 4 for-loops, but they are executed once per grid
@@ -116,7 +118,6 @@ def test_for_loop_statistics():
 
 
 # ======== Case 3: Check masked element percentage for tuning BLOCK_SIZE ========
-@triton_viz.trace(clients=(mask_profiler := Profiler(disable_buffer_load_check=True)))
 @triton.jit
 def mask_percentage_test_kernel(
     in_ptr,
@@ -175,9 +176,15 @@ def test_mask_percentage():
     x = torch.randn(N, dtype=torch.float32)
     y = torch.empty(N * 2, dtype=torch.float32)
 
+    # Create profiler in the test function
+    # Disable block sampling to ensure all blocks are executed
+    cfg._profiler_enable_block_sampling = False
+    mask_profiler = Profiler(disable_buffer_load_check=True)
+    traced_kernel = triton_viz.trace(mask_profiler)(mask_percentage_test_kernel)
+
     # Run the kernel
     grid = (num_blocks,)
-    mask_percentage_test_kernel[grid](x, y, N, BLOCK_SIZE)
+    traced_kernel[grid](x, y, N, BLOCK_SIZE)
 
     # Expected mask statistics:
     # Note: In the triton interpreter, load/store operations without an explicit mask
@@ -295,9 +302,12 @@ def test_block_sampling(test_name, enable_sampling, k_value, expected_executions
     y = torch.zeros_like(x)
     counter = torch.zeros(1, dtype=torch.int32)
 
-    # Create profiler with block sampling configuration
+    # Configure block sampling via config - must be done BEFORE creating Profiler
+    # Set the private attribute directly to ensure it takes effect
+    cfg._profiler_enable_block_sampling = enable_sampling
+
+    # Create profiler with k value
     profiler = Profiler(
-        block_sampling=enable_sampling,
         k=k_value,
         disable_buffer_load_check=True,
         disable_load_mask_percentage_check=True,
@@ -318,8 +328,8 @@ def test_block_sampling(test_name, enable_sampling, k_value, expected_executions
     # Verify profiler settings
     if enable_sampling:
         assert (
-            profiler.block_sampling is True
-        ), f"{test_name}: block_sampling should be True"
+            profiler.block_sampling == enable_sampling
+        ), f"{test_name}: block_sampling should be {enable_sampling}, got {profiler.block_sampling}"
         assert (
             profiler.k == k_value
         ), f"{test_name}: k should be {k_value}, got {profiler.k}"
@@ -337,39 +347,57 @@ def simple_kernel(in_ptr, out_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     tl.store(out_ptr + offsets, result, mask=mask)
 
 
-def test_load_store_skip():
-    """Test that load/store operations can be skipped when disable_load_store_skipping=False."""
+def test_load_store_skip_disabled():
+    """Test that load/store operations work normally when skipping is disabled."""
     N = 128
     BLOCK_SIZE = 32
 
     # Create input data
     x = torch.ones(N, dtype=torch.float32) * 3.0  # All values are 3.0
-    y1 = torch.zeros(N, dtype=torch.float32)  # Output for normal execution
-    y2 = torch.zeros(N, dtype=torch.float32)  # Output for skipped execution
+    y = torch.zeros(N, dtype=torch.float32)  # Output
 
-    # Test 1: Normal execution (skipping disabled)
-    skip_load_store_profiler1 = Profiler(
-        disable_load_store_skipping=True,  # Disable skipping - normal execution
-        disable_buffer_load_check=True,
-    )
-    traced_kernel1 = triton_viz.trace(skip_load_store_profiler1)(simple_kernel)
+    # Set configuration - disable skipping for normal execution
+    cfg._profiler_enable_load_store_skipping = False
+    # Also disable block sampling to ensure all blocks are executed
+    cfg._profiler_enable_block_sampling = False
+
+    # Create profiler and traced kernel
+    profiler = Profiler(disable_buffer_load_check=True)
+    traced_kernel = triton_viz.trace(profiler)(simple_kernel)
+
+    # Run kernel
     grid = (triton.cdiv(N, BLOCK_SIZE),)
-    traced_kernel1[grid](x, y1, N, BLOCK_SIZE)
+    traced_kernel[grid](x, y, N, BLOCK_SIZE)
 
     # Verify normal execution: output should be input * 2 = 6.0
     assert torch.allclose(
-        y1, torch.ones_like(y1) * 6.0
-    ), "Normal execution should produce 6.0"
+        y, torch.ones_like(y) * 6.0
+    ), f"Normal execution should produce 6.0, got {y[:10]}"
 
-    # Test 2: Skipped execution (skipping enabled)
-    skip_load_store_profiler2 = Profiler(
-        disable_load_store_skipping=False,  # Enable skipping (default)
-        disable_buffer_load_check=True,
-    )
-    traced_kernel2 = triton_viz.trace(skip_load_store_profiler2)(simple_kernel)
-    traced_kernel2[grid](x, y2, N, BLOCK_SIZE)
+
+def test_load_store_skip_enabled():
+    """Test that load/store operations are skipped when skipping is enabled."""
+    N = 128
+    BLOCK_SIZE = 32
+
+    # Create input data
+    x = torch.ones(N, dtype=torch.float32) * 3.0  # All values are 3.0
+    y = torch.zeros(N, dtype=torch.float32)  # Output
+
+    # Set configuration - enable skipping
+    cfg._profiler_enable_load_store_skipping = True
+    # Also disable block sampling to ensure all blocks are executed
+    cfg._profiler_enable_block_sampling = False
+
+    # Create profiler and traced kernel
+    profiler = Profiler(disable_buffer_load_check=True)
+    traced_kernel = triton_viz.trace(profiler)(simple_kernel)
+
+    # Run kernel
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
+    traced_kernel[grid](x, y, N, BLOCK_SIZE)
 
     # Verify skipped execution: output should remain 0.0 (unchanged)
     assert torch.allclose(
-        y2, torch.zeros_like(y2)
-    ), "Skipped execution should leave output unchanged"
+        y, torch.zeros_like(y)
+    ), f"Skipped execution should leave output unchanged, got {y[:10]}"
