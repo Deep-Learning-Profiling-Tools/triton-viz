@@ -26,6 +26,9 @@ class Config:
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
 
+        # --- Virtual memory flag ---
+        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
+
         # --- Profiler enable load/store/dot skipping flag ---
         self._profiler_enable_load_store_skipping = (
             os.getenv("PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1") == "1"
@@ -144,6 +147,11 @@ class Config:
             print("Profiler block sampling enabled.")
         elif not value and previous:
             print("Profiler block sampling disabled.")
+
+    # ---------- virtual memory ----------
+    @property
+    def virtual_memory(self) -> bool:
+        return self._virtual_memory
 
 
 config = Config()
