@@ -85,6 +85,15 @@ class Trace(KernelInterface):
             warmup_runner.fn = self.jit_fn
             self.runner = runner
             self.warmup_runner = warmup_runner
+        elif isinstance(runner, Heuristics):
+            self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
+            # replace the fn with an InterpretedFunction to avoid re-jitting
+            runner.fn = self.interpreted_fn
+            # make a deepcopy of the runner for warmup
+            warmup_runner = deepcopy(runner)
+            warmup_runner.fn = self.jit_fn
+            self.runner = runner
+            self.warmup_runner = warmup_runner
         else:
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner)
             self.runner = self.interpreted_fn
