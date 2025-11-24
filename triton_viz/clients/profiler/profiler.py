@@ -1,6 +1,6 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
-from ...core.data import Op, Load, Store, AddPtr
+from ...core.data import Op, Load, Store, AddPtr, Dot
 from .data import LoadStoreBytes
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
@@ -201,6 +201,11 @@ class Profiler(Client):
             # Skip actual store
             pass
 
+        def dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
+            # Skip actual dot operation, return zeros with same shape as d
+            # This replaces np.matmul(a_data, b_data, dtype=d.data.dtype) + d.data
+            return TensorHandle(np.zeros_like(d.data), d.dtype.scalar)
+
         def pre_addptr_callback(ptr, offset):
             dtype_tt = ptr.get_element_ty()
             element_bitwidth = dtype_tt.primitive_bitwidth
@@ -230,6 +235,11 @@ class Profiler(Client):
                 return OpCallbacks(
                     before_callback=pre_store_callback, op_overrider=store_overrider
                 )
+        elif op_type is Dot:
+            if self.disable_load_store_skipping:
+                return OpCallbacks()
+            else:
+                return OpCallbacks(op_overrider=dot_overrider)
         elif op_type is AddPtr:
             return OpCallbacks(before_callback=pre_addptr_callback)
 
