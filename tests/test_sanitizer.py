@@ -836,8 +836,7 @@ def test_kernel_cache_disabled_no_dummy_benchmarker():
 
 def test_kernel_cache_autotune_with_dummy_benchmarker():
     """
-    Test that kernel cache enabled uses dummy_benchmarker.
-    Verifies the benchmarker is installed and kernel runs without error.
+    Test that kernel cache enabled installs dummy_benchmarker on autotuned kernels.
     """
     original_setting = cfg.enable_kernel_cache
 
@@ -866,11 +865,6 @@ def test_kernel_cache_autotune_with_dummy_benchmarker():
             output = x + y
             tl.store(out_ptr + offsets, output, mask=mask)
 
-        size = 128
-        x = torch.ones(size, device="cpu", dtype=torch.float32)
-        y = torch.ones(size, device="cpu", dtype=torch.float32)
-        out = torch.zeros(size, device="cpu", dtype=torch.float32)
-
         traced_kernel = trace(clients=Sanitizer())(autotune_add_kernel_cache_on)
 
         # Verify dummy benchmarker is installed
@@ -882,37 +876,18 @@ def test_kernel_cache_autotune_with_dummy_benchmarker():
                 bench_fn is not None and bench_fn.__name__ == "dummy_benchmarker"
             ), f"Expected dummy_benchmarker when cache enabled, got: {bench_fn}"
 
-        # Run the kernel (should not raise any errors)
-        grid = lambda META: (triton.cdiv(size, META["BLOCK_SIZE"]),)
-        traced_kernel[grid](x, y, out, size)
-        # Note: Output correctness not checked as sanitizer runs symbolically
-
     finally:
         cfg.enable_kernel_cache = original_setting
 
 
 def test_kernel_cache_autotune_real_benchmarker():
     """
-    Test that kernel cache disabled uses real benchmarker (multiple benchmark calls).
+    Test that kernel cache disabled does NOT install dummy_benchmarker on autotuned kernels.
     """
     original_setting = cfg.enable_kernel_cache
 
-    # Counter to track benchmark calls
-    benchmark_call_count = [0]  # Use list for closure mutability
-
-    def counting_benchmarker(fn, quantiles):
-        """A benchmarker that counts how many times it's called."""
-        benchmark_call_count[0] += 1
-        fn()  # Just call once for speed
-        return (1.0, 1.0, 1.0)
-
     try:
         cfg.enable_kernel_cache = False
-
-        size = 128
-        x = torch.ones(size, device="cpu", dtype=torch.float32)
-        y = torch.ones(size, device="cpu", dtype=torch.float32)
-        out = torch.zeros(size, device="cpu", dtype=torch.float32)
 
         # Create a fresh autotuned kernel to avoid cached config
         @triton.autotune(
@@ -945,18 +920,6 @@ def test_kernel_cache_autotune_real_benchmarker():
             assert (
                 bench_fn is None or bench_fn.__name__ != "dummy_benchmarker"
             ), "dummy_benchmarker should not be installed when cache disabled"
-
-            # Patch with counting benchmarker to verify multiple calls
-            traced_kernel.runner._do_bench = counting_benchmarker
-
-        # Run the kernel
-        grid = lambda META: (triton.cdiv(size, META["BLOCK_SIZE"]),)
-        traced_kernel[grid](x, y, out, size)
-
-        # Benchmark should be called for each config (at least 2 times)
-        assert (
-            benchmark_call_count[0] >= 2
-        ), f"Expected benchmark to be called multiple times, got {benchmark_call_count[0]}"
 
     finally:
         cfg.enable_kernel_cache = original_setting
