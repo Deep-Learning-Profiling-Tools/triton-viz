@@ -834,27 +834,6 @@ def test_kernel_cache_disabled_no_dummy_benchmarker():
         cfg.enable_kernel_cache = original_setting
 
 
-# Autotuned kernel with multiple configs for autotune tests
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
-        triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
-        triton.Config({"BLOCK_SIZE": 128}, num_warps=4),
-    ],
-    key=["n_elements"],
-)
-@triton.jit
-def _autotune_add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    x = tl.load(x_ptr + offsets, mask=mask)
-    y = tl.load(y_ptr + offsets, mask=mask)
-    output = x + y
-    tl.store(out_ptr + offsets, output, mask=mask)
-
-
 def test_kernel_cache_autotune_with_dummy_benchmarker():
     """
     Test that kernel cache enabled uses dummy_benchmarker.
@@ -865,12 +844,34 @@ def test_kernel_cache_autotune_with_dummy_benchmarker():
     try:
         cfg.enable_kernel_cache = True
 
+        # Create a fresh autotuned kernel inside the test to avoid state corruption
+        @triton.autotune(
+            configs=[
+                triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+                triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
+                triton.Config({"BLOCK_SIZE": 128}, num_warps=4),
+            ],
+            key=["n_elements"],
+        )
+        @triton.jit
+        def autotune_add_kernel_cache_on(
+            x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr
+        ):
+            pid = tl.program_id(axis=0)
+            block_start = pid * BLOCK_SIZE
+            offsets = block_start + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < n_elements
+            x = tl.load(x_ptr + offsets, mask=mask)
+            y = tl.load(y_ptr + offsets, mask=mask)
+            output = x + y
+            tl.store(out_ptr + offsets, output, mask=mask)
+
         size = 128
         x = torch.ones(size, device="cpu", dtype=torch.float32)
         y = torch.ones(size, device="cpu", dtype=torch.float32)
         out = torch.zeros(size, device="cpu", dtype=torch.float32)
 
-        traced_kernel = trace(clients=Sanitizer())(_autotune_add_kernel)
+        traced_kernel = trace(clients=Sanitizer())(autotune_add_kernel_cache_on)
 
         # Verify dummy benchmarker is installed
         if hasattr(traced_kernel, "runner") and hasattr(
