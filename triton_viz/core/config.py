@@ -18,10 +18,44 @@ class Config:
         # --- Profiler disable flag ---
         self._disable_profiler = os.getenv("DISABLE_PROFILER", "0") == "1"
 
+        # --- Timing enable flag ---
+        self._enable_timing = os.getenv("ENABLE_TIMING", "0") == "1"
+
         # --- Grid execution progress flag ---
         self.report_grid_execution_progress = (
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
+
+        # --- Sanitizer Cache Ablation Study ---
+        # Cache 1: SymExpr Node Cache - caches Z3 expressions in SymExpr._z3
+        self.enable_symbol_cache = (
+            os.getenv("SANITIZER_ENABLE_SYMBOL_CACHE", "1") == "1"
+        )
+
+        # Cache 2: Loop Iterator Cache - deduplicates memory patterns in loops
+        self.enable_loop_cache = os.getenv("SANITIZER_ENABLE_LOOP_CACHE", "1") == "1"
+
+        # Cache 3: Grid Cache - shared solver per kernel launch (incremental SMT)
+        self.enable_grid_cache = os.getenv("SANITIZER_ENABLE_GRID_CACHE", "1") == "1"
+
+        # Cache 4: Kernel Cache - skip re-analysis of identical kernel launches
+        self.enable_kernel_cache = (
+            os.getenv("SANITIZER_ENABLE_KERNEL_CACHE", "1") == "1"
+        )
+
+        # --- Virtual memory flag ---
+        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
+
+        # --- Profiler Optimization Ablation Study ---
+        # Optimization 1: enable load/store/dot skipping
+        self._profiler_enable_load_store_skipping = (
+            os.getenv("PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1") == "1"
+        )
+
+        # Optimization 2: Profiler enable block sampling
+        self._profiler_enable_block_sampling = (
+            os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
+        )
 
     # ---------- disable_sanitizer ----------
     @property
@@ -61,6 +95,26 @@ class Config:
         elif not value and previous:
             print("Triton Profiler enabled.")
 
+    # ---------- enable_timing ----------
+    @property
+    def enable_timing(self) -> bool:
+        return self._enable_timing
+
+    @enable_timing.setter
+    def enable_timing(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("enable_timing expects a bool.")
+        self._enable_timing = value
+
+        previous = getattr(self, "_enable_timing", None)
+        self._enable_timing = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Triton timing enabled.")
+        elif not value and previous:
+            print("Triton timing disabled.")
+
     # ---------- report_grid_execution_progress ----------
     @property
     def report_grid_execution_progress(self) -> bool:
@@ -73,6 +127,49 @@ class Config:
         self._report_grid_execution_progress = flag
         if flag:
             print("Grid-progress reporting is now ON.")
+
+    # ---------- profiler_enable_load_store_skipping ----------
+    @property
+    def profiler_enable_load_store_skipping(self) -> bool:
+        return self._profiler_enable_load_store_skipping
+
+    @profiler_enable_load_store_skipping.setter
+    def profiler_enable_load_store_skipping(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_enable_load_store_skipping expects a bool.")
+
+        previous = getattr(self, "_profiler_enable_load_store_skipping", None)
+        self._profiler_enable_load_store_skipping = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler load/store/dot skipping enabled.")
+        elif not value and previous:
+            print("Profiler load/store/dot skipping disabled.")
+
+    # ---------- profiler_enable_block_sampling ----------
+    @property
+    def profiler_enable_block_sampling(self) -> bool:
+        return self._profiler_enable_block_sampling
+
+    @profiler_enable_block_sampling.setter
+    def profiler_enable_block_sampling(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_enable_block_sampling expects a bool.")
+
+        previous = getattr(self, "_profiler_enable_block_sampling", None)
+        self._profiler_enable_block_sampling = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler block sampling enabled.")
+        elif not value and previous:
+            print("Profiler block sampling disabled.")
+
+    # ---------- virtual memory ----------
+    @property
+    def virtual_memory(self) -> bool:
+        return self._virtual_memory
 
 
 config = Config()
