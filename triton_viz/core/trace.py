@@ -65,8 +65,10 @@ class Trace(KernelInterface):
 
         if isinstance(runner, Autotuner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
-            # replace the benchmark with a dummy that just calls the function once
-            runner._do_bench = dummy_benchmarker
+            # Kernel Cache: replace the benchmark with a dummy to skip performance testing
+            # When kernel cache is disabled, allow normal autotuning to proceed
+            if cfg.enable_kernel_cache:
+                runner._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
             runner.fn = self.interpreted_fn
             # make a deepcopy of the runner for warmup

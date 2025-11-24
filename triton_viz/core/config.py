@@ -26,15 +26,33 @@ class Config:
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
 
+        # --- Sanitizer Cache Ablation Study ---
+        # Cache 1: SymExpr Node Cache - caches Z3 expressions in SymExpr._z3
+        self.enable_symbol_cache = (
+            os.getenv("SANITIZER_ENABLE_SYMBOL_CACHE", "1") == "1"
+        )
+
+        # Cache 2: Loop Iterator Cache - deduplicates memory patterns in loops
+        self.enable_loop_cache = os.getenv("SANITIZER_ENABLE_LOOP_CACHE", "1") == "1"
+
+        # Cache 3: Grid Cache - shared solver per kernel launch (incremental SMT)
+        self.enable_grid_cache = os.getenv("SANITIZER_ENABLE_GRID_CACHE", "1") == "1"
+
+        # Cache 4: Kernel Cache - skip re-analysis of identical kernel launches
+        self.enable_kernel_cache = (
+            os.getenv("SANITIZER_ENABLE_KERNEL_CACHE", "1") == "1"
+        )
+
         # --- Virtual memory flag ---
         self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
 
-        # --- Profiler enable load/store/dot skipping flag ---
+        # --- Profiler Optimization Ablation Study ---
+        # Optimization 1: enable load/store/dot skipping
         self._profiler_enable_load_store_skipping = (
             os.getenv("PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1") == "1"
         )
 
-        # --- Profiler enable block sampling flag ---
+        # Optimization 2: Profiler enable block sampling
         self._profiler_enable_block_sampling = (
             os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
         )
