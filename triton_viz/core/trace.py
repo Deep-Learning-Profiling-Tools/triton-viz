@@ -1,5 +1,6 @@
 from copy import deepcopy
 from triton.runtime import KernelInterface, Autotuner
+from triton.runtime.autotuner import Heuristics
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
@@ -40,13 +41,13 @@ class Trace(KernelInterface):
 
     def __init__(
         self,
-        runner: Union[JITFunction, InterpretedFunction, Autotuner],
+        runner: Union[JITFunction, InterpretedFunction, Autotuner, Heuristics],
         client: Union[str, Client],
     ) -> None:
         self.fn = runner
 
         def unpack_kernel(
-            source: Union["Trace", JITFunction, InterpretedFunction],
+            source: Union["Trace", JITFunction, InterpretedFunction, Heuristics],
         ) -> tuple[
             Optional[JITFunction], Optional[Callable], Optional[InterpretedFunction]
         ]:
@@ -57,12 +58,24 @@ class Trace(KernelInterface):
                 return source, base_fn, InterpretedFunction(base_fn)
             if isinstance(source, InterpretedFunction):
                 return None, source.fn, source
+            if isinstance(source, Heuristics):
+                # Heuristics wraps another kernel, recursively unpack it
+                return unpack_kernel(source.fn)
             raise TypeError(f"Unsupported runner type: {type(source)}")
 
         if isinstance(runner, Autotuner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
             # replace the benchmark with a dummy that just calls the function once
             runner._do_bench = dummy_benchmarker
+            # replace the fn with an InterpretedFunction to avoid re-jitting
+            runner.fn = self.interpreted_fn
+            # make a deepcopy of the runner for warmup
+            warmup_runner = deepcopy(runner)
+            warmup_runner.fn = self.jit_fn
+            self.runner = runner
+            self.warmup_runner = warmup_runner
+        elif isinstance(runner, Heuristics):
+            self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
             # replace the fn with an InterpretedFunction to avoid re-jitting
             runner.fn = self.interpreted_fn
             # make a deepcopy of the runner for warmup
@@ -183,7 +196,9 @@ def trace(clients: Union[str, Client, None] = None):
             return kernel
 
         # First-time wrapping
-        if isinstance(kernel, (JITFunction, InterpretedFunction, Autotuner)):
+        if isinstance(
+            kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
+        ):
             return Trace(kernel, clients)
 
         # If the object is already a Trace, just append the new client(s)

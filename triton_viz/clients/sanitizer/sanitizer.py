@@ -1857,30 +1857,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         def op_make_block_ptr_overrider(
             base, shape, strides, offsets, tensor_shape, order
         ):
-            base = SymbolicExpr.from_value(base)
-            assert (
-                len(shape)
-                == len(strides)
-                == len(offsets)
-                == len(tensor_shape)
-                == len(order)
-            ), f"Length of shape ({len(shape)}), strides ({len(strides)}), offsets ({len(offsets)}), tensor_shape ({len(tensor_shape)}) and order ({len(order)}) must be the same!"
-            shape = [SymbolicExpr.from_value(shape_i) for shape_i in shape]
-            strides = [SymbolicExpr.from_value(strides_i) for strides_i in strides]
-            offsets = [SymbolicExpr.from_value(offset_i) for offset_i in offsets]
-            tensor_shape = [
-                SymbolicExpr.from_value(tensor_shape_i)
-                for tensor_shape_i in tensor_shape
-            ]
-            order = [SymbolicExpr.from_value(order_i) for order_i in order]
-
-            ret = SymbolicExpr(
-                "make_block_ptr", base, shape, strides, offsets, tensor_shape, order
-            )
-
-            ret.dtype_tt = base.get_element_ty()
-
-            return ret
+            raise NotImplementedError("MakeBlockPtr is not supported yet.")
 
         def op_tensor_pointer_load_overrider(
             ptr,
