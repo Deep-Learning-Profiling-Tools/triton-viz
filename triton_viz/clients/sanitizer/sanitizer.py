@@ -1081,7 +1081,7 @@ class SymbolicExpr:
         expr, constraints = self._to_z3()
 
         if isinstance(expr, list):
-            expr = [simplify(e).as_long() for e in expr]
+            expr = [simplify(e) for e in expr]
         else:
             expr = simplify(expr)
 
@@ -1109,8 +1109,17 @@ class SymbolicExpr:
                 self._z3 = self._loop_ctx.idx_z3
             elif isinstance(self.value, np.ndarray):
                 self._z3 = [IntVal(int(v)) for v in self.value.flat]
+            elif isinstance(self.value, tuple):
+                self._z3 = [IntVal(int(v)) for v in self.value]
+            elif isinstance(self.value, (int, float)):
+                # Convert to int for Z3 - Z3's IntVal cannot parse float strings
+                self._z3 = IntVal(int(self.value))
+            elif self.value is None:
+                # For None values, use 0 as a placeholder (e.g., for optional mask/other)
+                self._z3 = IntVal(0)
             else:
-                self._z3 = IntVal(self.value)
+                # For other types (e.g., tl.core.dtype), try converting to int
+                self._z3 = IntVal(int(self.value))
 
         if self.op == "pid":
             axis_val = self.axis.to_py()
@@ -1145,34 +1154,52 @@ class SymbolicExpr:
             rhs, constraints_rhs = self.rhs._to_z3()
             self._constraints.extend(constraints_lhs)
             self._constraints.extend(constraints_rhs)
+
+            # Helper function to apply binary operation element-wise when operands are lists
+            def _apply_binop(op_func, left, right):
+                lhs_is_list = isinstance(left, list)
+                rhs_is_list = isinstance(right, list)
+                if lhs_is_list and rhs_is_list:
+                    if len(left) != len(right):
+                        raise ValueError(
+                            f"List operands must have same length: {len(left)} vs {len(right)}"
+                        )
+                    return [op_func(li, ri) for li, ri in zip(left, right)]
+                elif lhs_is_list:
+                    return [op_func(li, right) for li in left]
+                elif rhs_is_list:
+                    return [op_func(left, ri) for ri in right]
+                else:
+                    return op_func(left, right)
+
             if self.op == "add":
-                self._z3 = lhs + rhs
+                self._z3 = _apply_binop(lambda a, b: a + b, lhs, rhs)
             if self.op == "sub":
-                self._z3 = lhs - rhs
+                self._z3 = _apply_binop(lambda a, b: a - b, lhs, rhs)
             if self.op == "mul":
-                self._z3 = lhs * rhs
+                self._z3 = _apply_binop(lambda a, b: a * b, lhs, rhs)
             if self.op == "idiv":
-                self._z3 = lhs / rhs
+                self._z3 = _apply_binop(lambda a, b: a / b, lhs, rhs)
             if self.op == "mod":
-                self._z3 = lhs % rhs
+                self._z3 = _apply_binop(lambda a, b: a % b, lhs, rhs)
             if self.op == "less":
-                self._z3 = lhs < rhs
+                self._z3 = _apply_binop(lambda a, b: a < b, lhs, rhs)
             if self.op == "less_equal":
-                self._z3 = lhs <= rhs
+                self._z3 = _apply_binop(lambda a, b: a <= b, lhs, rhs)
             if self.op == "greater":
-                self._z3 = lhs > rhs
+                self._z3 = _apply_binop(lambda a, b: a > b, lhs, rhs)
             if self.op == "greater_equal":
-                self._z3 = lhs >= rhs
+                self._z3 = _apply_binop(lambda a, b: a >= b, lhs, rhs)
             if self.op == "equal":
-                self._z3 = lhs == rhs
+                self._z3 = _apply_binop(lambda a, b: a == b, lhs, rhs)
             if self.op == "not_equal":
-                self._z3 = lhs != rhs
+                self._z3 = _apply_binop(lambda a, b: a != b, lhs, rhs)
             if self.op == "maximum":
-                self._z3 = If(lhs >= rhs, lhs, rhs)
+                self._z3 = _apply_binop(lambda a, b: If(a >= b, a, b), lhs, rhs)
             if self.op == "minimum":
-                self._z3 = If(lhs <= rhs, lhs, rhs)
+                self._z3 = _apply_binop(lambda a, b: If(a <= b, a, b), lhs, rhs)
             if self.op == "bitwise_and":
-                self._z3 = And(lhs, rhs)
+                self._z3 = _apply_binop(lambda a, b: And(a, b), lhs, rhs)
             if self.op == "ashr":
                 raise NotImplementedError(
                     "Arithmetic shift right is not implemented in Z3"
@@ -1533,46 +1560,12 @@ class SanitizerSymbolicExecution(Sanitizer):
         self,
         access_addr: Union[int, list[int], ArithRef, list[ArithRef]],
         expr_constraints: list,
-    ):
-        if isinstance(access_addr, list):
-            for addr in access_addr:
-                self._check_range_satisfiable(addr, expr_constraints)
-            return
-
-        if cfg.enable_grid_cache:
-            # Grid Cache enabled: Use push/pop on persistent solver
-            self._solver.push()
-            self._solver.add(self._addr_sym == access_addr)
-            self._solver.add(And(*expr_constraints))
-            if self._solver.check() == sat:
-                print("out of bound access detected!")
-                if self.abort_on_error:
-                    raise ValueError("Out-of-bounds access detected!")
-            self._solver.pop()
-        else:
-            # Grid Cache disabled: Create new solver for each check
-            solver = Solver()
-            solver.add(Not(self._addr_ok))
-            solver.add(self._pid_ok)
-            solver.add(self._addr_sym == access_addr)
-            solver.add(And(*expr_constraints))
-            if solver.check() == sat:
-                print("out of bound access detected!")
-                if self.abort_on_error:
-                    raise ValueError("Out-of-bounds access detected!")
-
-    def _check_range_satisfiable_with_expr(
-        self,
-        access_addr: Union[int, list[int], ArithRef, list[ArithRef]],
-        expr_constraints: list,
         symbolic_expr: Optional[SymbolicExpr] = None,
     ):
-        """Check if access is satisfiable and report with symbolic expression if OOB."""
+        """Check if access is satisfiable and report if OOB."""
         if isinstance(access_addr, list):
             for addr in access_addr:
-                self._check_range_satisfiable_with_expr(
-                    addr, expr_constraints, symbolic_expr
-                )
+                self._check_range_satisfiable(addr, expr_constraints, symbolic_expr)
             return
 
         if cfg.enable_grid_cache:
@@ -1581,7 +1574,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             self._solver.add(self._addr_sym == access_addr)
             self._solver.add(And(*expr_constraints))
             if self._solver.check() == sat:
-                raise ValueError("Out-of-bounds access detected!")
+                print("out of bound access detected!")
+                if self.abort_on_error:
+                    raise ValueError("Out-of-bounds access detected!")
             self._solver.pop()
         else:
             # Grid Cache disabled: Create new solver for each check
@@ -1591,7 +1586,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             solver.add(self._addr_sym == access_addr)
             solver.add(And(*expr_constraints))
             if solver.check() == sat:
-                raise ValueError("Out-of-bounds access detected!")
+                print("out of bound access detected!")
+                if self.abort_on_error:
+                    raise ValueError("Out-of-bounds access detected!")
 
     def _handle_access_check(self, expr: SymbolicExpr):
         """
@@ -1635,7 +1632,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             # Store the expression along with the z3 data for later checking
             ctx.pending_checks.append((z3_addr, z3_constraints, expr))
         else:  # non-loop case
-            self._check_range_satisfiable_with_expr(z3_addr, z3_constraints, expr)
+            self._check_range_satisfiable(z3_addr, z3_constraints, expr)
 
     def _report(self, op_type, tensor, violation_address, symbolic_expr=None):
         traceback_info = _get_traceback_info()
@@ -2135,16 +2132,11 @@ class SanitizerSymbolicExecution(Sanitizer):
                         f" and expression-related constraints: {expr_constraints} ",
                     )
 
-                if symbolic_expr is not None:
-                    self._check_range_satisfiable_with_expr(
-                        addr_expr,
-                        expr_constraints + iterator_constraints,
-                        symbolic_expr,
-                    )
-                else:
-                    self._check_range_satisfiable(
-                        addr_expr, expr_constraints + iterator_constraints
-                    )
+                self._check_range_satisfiable(
+                    addr_expr,
+                    expr_constraints + iterator_constraints,
+                    symbolic_expr,
+                )
 
             if cfg.verbose:
                 print(
