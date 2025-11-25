@@ -2,7 +2,7 @@ import traceback
 from collections import namedtuple
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from functools import cached_property
+from functools import cached_property, reduce
 from typing import Any, Optional, Union
 import re
 
@@ -1205,10 +1205,16 @@ class SymbolicExpr:
             self._z3 = Sum(arr)
 
         if self.op == "max":
-            raise NotImplementedError("_to_z3 of max is not implemented yet")
+            arr, self._constraints = self.input._to_z3()
+            if not arr:
+                raise ValueError("Cannot compute max of empty array")
+            self._z3 = reduce(lambda a, b: If(a >= b, a, b), arr)
 
         if self.op == "min":
-            raise NotImplementedError("_to_z3 of min is not implemented yet")
+            arr, self._constraints = self.input._to_z3()
+            if not arr:
+                raise ValueError("Cannot compute min of empty array")
+            self._z3 = reduce(lambda a, b: If(a <= b, a, b), arr)
 
         if self.op == "load" or self.op == "store":
             # Load and store operations
