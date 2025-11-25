@@ -1586,7 +1586,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                     tensor = self.tensors[0]
 
                 # Determine operation type from symbolic expression
-                op_type: type[Load] | type[Store] = Load  # Default
+                op_type = Load  # Default
                 if symbolic_expr and symbolic_expr.op == "store":
                     op_type = Store
 
