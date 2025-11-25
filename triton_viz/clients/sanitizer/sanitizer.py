@@ -1156,19 +1156,21 @@ class SymbolicExpr:
             self._constraints.extend(constraints_rhs)
 
             # Helper function to apply binary operation element-wise when operands are lists
-            def _apply_binop(op_func, l, r):
-                lhs_is_list = isinstance(l, list)
-                rhs_is_list = isinstance(r, list)
+            def _apply_binop(op_func, left, right):
+                lhs_is_list = isinstance(left, list)
+                rhs_is_list = isinstance(right, list)
                 if lhs_is_list and rhs_is_list:
-                    if len(l) != len(r):
-                        raise ValueError(f"List operands must have same length: {len(l)} vs {len(r)}")
-                    return [op_func(li, ri) for li, ri in zip(l, r)]
+                    if len(left) != len(right):
+                        raise ValueError(
+                            f"List operands must have same length: {len(left)} vs {len(right)}"
+                        )
+                    return [op_func(li, ri) for li, ri in zip(left, right)]
                 elif lhs_is_list:
-                    return [op_func(li, r) for li in l]
+                    return [op_func(li, right) for li in left]
                 elif rhs_is_list:
-                    return [op_func(l, ri) for ri in r]
+                    return [op_func(left, ri) for ri in right]
                 else:
-                    return op_func(l, r)
+                    return op_func(left, right)
 
             if self.op == "add":
                 self._z3 = _apply_binop(lambda a, b: a + b, lhs, rhs)
