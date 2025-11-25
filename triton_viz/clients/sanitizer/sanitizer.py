@@ -1547,9 +1547,24 @@ class SanitizerSymbolicExecution(Sanitizer):
             self._solver.add(self._addr_sym == access_addr)
             self._solver.add(And(*expr_constraints))
             if self._solver.check() == sat:
-                print("out of bound access detected!")
-                if self.abort_on_error:
-                    raise ValueError("Out-of-bounds access detected!")
+                # Get the model to find the violation address
+                model = self._solver.model()
+                violation_addr = model[self._addr_sym].as_long() if model else 0
+
+                # Find the tensor that this address belongs to
+                tensor = None
+                if self.tensors:
+                    # Simple heuristic: use the first tensor for now
+                    # In practice, you'd want to match the address to the correct tensor
+                    tensor = self.tensors[0]
+
+                # Determine operation type from symbolic expression
+                op_type: type[Load] | type[Store] = Load  # Default
+                if symbolic_expr and symbolic_expr.op == "store":
+                    op_type = Store
+
+                # Report with symbolic expression
+                self._report(op_type, tensor, violation_addr, symbolic_expr)
             self._solver.pop()
         else:
             # Grid Cache disabled: Create new solver for each check
@@ -1559,9 +1574,24 @@ class SanitizerSymbolicExecution(Sanitizer):
             solver.add(self._addr_sym == access_addr)
             solver.add(And(*expr_constraints))
             if solver.check() == sat:
-                print("out of bound access detected!")
-                if self.abort_on_error:
-                    raise ValueError("Out-of-bounds access detected!")
+                # Get the model to find the violation address
+                model = solver.model()
+                violation_addr = model[self._addr_sym].as_long() if model else 0
+
+                # Find the tensor that this address belongs to
+                tensor = None
+                if self.tensors:
+                    # Simple heuristic: use the first tensor for now
+                    # In practice, you'd want to match the address to the correct tensor
+                    tensor = self.tensors[0]
+
+                # Determine operation type from symbolic expression
+                op_type: type[Load] | type[Store] = Load  # Default
+                if symbolic_expr and symbolic_expr.op == "store":
+                    op_type = Store
+
+                # Report with symbolic expression
+                self._report(op_type, tensor, violation_addr, symbolic_expr)
 
     def _handle_access_check(self, expr: SymbolicExpr):
         """
