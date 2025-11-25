@@ -1533,46 +1533,12 @@ class SanitizerSymbolicExecution(Sanitizer):
         self,
         access_addr: Union[int, list[int], ArithRef, list[ArithRef]],
         expr_constraints: list,
-    ):
-        if isinstance(access_addr, list):
-            for addr in access_addr:
-                self._check_range_satisfiable(addr, expr_constraints)
-            return
-
-        if cfg.enable_grid_cache:
-            # Grid Cache enabled: Use push/pop on persistent solver
-            self._solver.push()
-            self._solver.add(self._addr_sym == access_addr)
-            self._solver.add(And(*expr_constraints))
-            if self._solver.check() == sat:
-                print("out of bound access detected!")
-                if self.abort_on_error:
-                    raise ValueError("Out-of-bounds access detected!")
-            self._solver.pop()
-        else:
-            # Grid Cache disabled: Create new solver for each check
-            solver = Solver()
-            solver.add(Not(self._addr_ok))
-            solver.add(self._pid_ok)
-            solver.add(self._addr_sym == access_addr)
-            solver.add(And(*expr_constraints))
-            if solver.check() == sat:
-                print("out of bound access detected!")
-                if self.abort_on_error:
-                    raise ValueError("Out-of-bounds access detected!")
-
-    def _check_range_satisfiable_with_expr(
-        self,
-        access_addr: Union[int, list[int], ArithRef, list[ArithRef]],
-        expr_constraints: list,
         symbolic_expr: Optional[SymbolicExpr] = None,
     ):
-        """Check if access is satisfiable and report with symbolic expression if OOB."""
+        """Check if access is satisfiable and report if OOB."""
         if isinstance(access_addr, list):
             for addr in access_addr:
-                self._check_range_satisfiable_with_expr(
-                    addr, expr_constraints, symbolic_expr
-                )
+                self._check_range_satisfiable(addr, expr_constraints, symbolic_expr)
             return
 
         if cfg.enable_grid_cache:
@@ -1581,7 +1547,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             self._solver.add(self._addr_sym == access_addr)
             self._solver.add(And(*expr_constraints))
             if self._solver.check() == sat:
-                raise ValueError("Out-of-bounds access detected!")
+                print("out of bound access detected!")
+                if self.abort_on_error:
+                    raise ValueError("Out-of-bounds access detected!")
             self._solver.pop()
         else:
             # Grid Cache disabled: Create new solver for each check
@@ -1591,7 +1559,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             solver.add(self._addr_sym == access_addr)
             solver.add(And(*expr_constraints))
             if solver.check() == sat:
-                raise ValueError("Out-of-bounds access detected!")
+                print("out of bound access detected!")
+                if self.abort_on_error:
+                    raise ValueError("Out-of-bounds access detected!")
 
     def _handle_access_check(self, expr: SymbolicExpr):
         """
@@ -1635,7 +1605,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             # Store the expression along with the z3 data for later checking
             ctx.pending_checks.append((z3_addr, z3_constraints, expr))
         else:  # non-loop case
-            self._check_range_satisfiable_with_expr(z3_addr, z3_constraints, expr)
+            self._check_range_satisfiable(z3_addr, z3_constraints, expr)
 
     def _report(self, op_type, tensor, violation_address, symbolic_expr=None):
         traceback_info = _get_traceback_info()
@@ -2110,16 +2080,11 @@ class SanitizerSymbolicExecution(Sanitizer):
                         f" and expression-related constraints: {expr_constraints} ",
                     )
 
-                if symbolic_expr is not None:
-                    self._check_range_satisfiable_with_expr(
-                        addr_expr,
-                        expr_constraints + iterator_constraints,
-                        symbolic_expr,
-                    )
-                else:
-                    self._check_range_satisfiable(
-                        addr_expr, expr_constraints + iterator_constraints
-                    )
+                self._check_range_satisfiable(
+                    addr_expr,
+                    expr_constraints + iterator_constraints,
+                    symbolic_expr,
+                )
 
             if cfg.verbose:
                 print(
