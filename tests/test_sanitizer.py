@@ -445,6 +445,8 @@ def test_reduce_min_empty_array():
     min_expr = SymbolicExpr("min", input_arr, None, False)
     with pytest.raises(ValueError, match="Cannot compute min of empty array"):
         min_expr.eval()
+
+
 # ======== Cache Ablation Tests =========
 
 # ---- Symbol Cache Tests ----
