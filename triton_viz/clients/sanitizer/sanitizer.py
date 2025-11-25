@@ -1081,7 +1081,7 @@ class SymbolicExpr:
         expr, constraints = self._to_z3()
 
         if isinstance(expr, list):
-            expr = [simplify(e).as_long() for e in expr]
+            expr = [simplify(e) for e in expr]
         else:
             expr = simplify(expr)
 
@@ -1109,8 +1109,17 @@ class SymbolicExpr:
                 self._z3 = self._loop_ctx.idx_z3
             elif isinstance(self.value, np.ndarray):
                 self._z3 = [IntVal(int(v)) for v in self.value.flat]
+            elif isinstance(self.value, tuple):
+                self._z3 = [IntVal(int(v)) for v in self.value]
+            elif isinstance(self.value, (int, float)):
+                # Convert to int for Z3 - Z3's IntVal cannot parse float strings
+                self._z3 = IntVal(int(self.value))
+            elif self.value is None:
+                # For None values, use 0 as a placeholder (e.g., for optional mask/other)
+                self._z3 = IntVal(0)
             else:
-                self._z3 = IntVal(self.value)
+                # For other types (e.g., tl.core.dtype), try converting to int
+                self._z3 = IntVal(int(self.value))
 
         if self.op == "pid":
             axis_val = self.axis.to_py()
@@ -1145,34 +1154,50 @@ class SymbolicExpr:
             rhs, constraints_rhs = self.rhs._to_z3()
             self._constraints.extend(constraints_lhs)
             self._constraints.extend(constraints_rhs)
+
+            # Helper function to apply binary operation element-wise when operands are lists
+            def _apply_binop(op_func, l, r):
+                lhs_is_list = isinstance(l, list)
+                rhs_is_list = isinstance(r, list)
+                if lhs_is_list and rhs_is_list:
+                    if len(l) != len(r):
+                        raise ValueError(f"List operands must have same length: {len(l)} vs {len(r)}")
+                    return [op_func(li, ri) for li, ri in zip(l, r)]
+                elif lhs_is_list:
+                    return [op_func(li, r) for li in l]
+                elif rhs_is_list:
+                    return [op_func(l, ri) for ri in r]
+                else:
+                    return op_func(l, r)
+
             if self.op == "add":
-                self._z3 = lhs + rhs
+                self._z3 = _apply_binop(lambda a, b: a + b, lhs, rhs)
             if self.op == "sub":
-                self._z3 = lhs - rhs
+                self._z3 = _apply_binop(lambda a, b: a - b, lhs, rhs)
             if self.op == "mul":
-                self._z3 = lhs * rhs
+                self._z3 = _apply_binop(lambda a, b: a * b, lhs, rhs)
             if self.op == "idiv":
-                self._z3 = lhs / rhs
+                self._z3 = _apply_binop(lambda a, b: a / b, lhs, rhs)
             if self.op == "mod":
-                self._z3 = lhs % rhs
+                self._z3 = _apply_binop(lambda a, b: a % b, lhs, rhs)
             if self.op == "less":
-                self._z3 = lhs < rhs
+                self._z3 = _apply_binop(lambda a, b: a < b, lhs, rhs)
             if self.op == "less_equal":
-                self._z3 = lhs <= rhs
+                self._z3 = _apply_binop(lambda a, b: a <= b, lhs, rhs)
             if self.op == "greater":
-                self._z3 = lhs > rhs
+                self._z3 = _apply_binop(lambda a, b: a > b, lhs, rhs)
             if self.op == "greater_equal":
-                self._z3 = lhs >= rhs
+                self._z3 = _apply_binop(lambda a, b: a >= b, lhs, rhs)
             if self.op == "equal":
-                self._z3 = lhs == rhs
+                self._z3 = _apply_binop(lambda a, b: a == b, lhs, rhs)
             if self.op == "not_equal":
-                self._z3 = lhs != rhs
+                self._z3 = _apply_binop(lambda a, b: a != b, lhs, rhs)
             if self.op == "maximum":
-                self._z3 = If(lhs >= rhs, lhs, rhs)
+                self._z3 = _apply_binop(lambda a, b: If(a >= b, a, b), lhs, rhs)
             if self.op == "minimum":
-                self._z3 = If(lhs <= rhs, lhs, rhs)
+                self._z3 = _apply_binop(lambda a, b: If(a <= b, a, b), lhs, rhs)
             if self.op == "bitwise_and":
-                self._z3 = And(lhs, rhs)
+                self._z3 = _apply_binop(lambda a, b: And(a, b), lhs, rhs)
             if self.op == "ashr":
                 raise NotImplementedError(
                     "Arithmetic shift right is not implemented in Z3"
