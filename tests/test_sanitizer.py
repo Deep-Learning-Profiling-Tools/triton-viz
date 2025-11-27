@@ -394,6 +394,59 @@ def test_atomic_cas():
     # This test verifies that the operation doesn't crash
 
 
+# ======== Reduce Operations (max, min) =========
+def test_reduce_max_expr_eval():
+    """Test that max reduce operation evaluates correctly."""
+    # Test with array of values - create const SymbolicExpr with numpy array
+    input_arr = SymbolicExpr("const", np.array([1, 5, 3, 2]), tl.int32)
+    max_expr = SymbolicExpr("max", input_arr, None, False)
+    result, _ = max_expr.eval()
+    assert result == 5
+
+
+def test_reduce_min_expr_eval():
+    """Test that min reduce operation evaluates correctly."""
+    # Test with array of values - create const SymbolicExpr with numpy array
+    input_arr = SymbolicExpr("const", np.array([1, 5, 3, 2]), tl.int32)
+    min_expr = SymbolicExpr("min", input_arr, None, False)
+    result, _ = min_expr.eval()
+    assert result == 1
+
+
+def test_reduce_max_single_element():
+    """Test that max reduce operation works with single element."""
+    # Test with single element - create const SymbolicExpr with numpy array
+    input_arr = SymbolicExpr("const", np.array([42]), tl.int32)
+    max_expr = SymbolicExpr("max", input_arr, None, False)
+    result, _ = max_expr.eval()
+    assert result == 42
+
+
+def test_reduce_min_single_element():
+    """Test that min reduce operation works with single element."""
+    # Test with single element - create const SymbolicExpr with numpy array
+    input_arr = SymbolicExpr("const", np.array([42]), tl.int32)
+    min_expr = SymbolicExpr("min", input_arr, None, False)
+    result, _ = min_expr.eval()
+    assert result == 42
+
+
+def test_reduce_max_empty_array():
+    """Test that max reduce operation raises ValueError for empty array."""
+    input_arr = SymbolicExpr("const", np.array([]), tl.int32)
+    max_expr = SymbolicExpr("max", input_arr, None, False)
+    with pytest.raises(ValueError, match="Cannot compute max of empty array"):
+        max_expr.eval()
+
+
+def test_reduce_min_empty_array():
+    """Test that min reduce operation raises ValueError for empty array."""
+    input_arr = SymbolicExpr("const", np.array([]), tl.int32)
+    min_expr = SymbolicExpr("min", input_arr, None, False)
+    with pytest.raises(ValueError, match="Cannot compute min of empty array"):
+        min_expr.eval()
+
+
 # ======== Cache Ablation Tests =========
 
 # ---- Symbol Cache Tests ----
