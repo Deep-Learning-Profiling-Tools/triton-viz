@@ -92,7 +92,7 @@ class Tracer(Client):
             )
 
         # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
-        def pre_raw_load_callback(ptr):
+        def pre_raw_load_callback(ptr, *args, **kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
@@ -101,7 +101,7 @@ class Tracer(Client):
             true_mask = np.ones_like(offsets, dtype=bool)
             self.records.append(Load(tensor.data_ptr(), offsets, true_mask))
 
-        def pre_raw_store_callback(ptr, value):
+        def pre_raw_store_callback(ptr, value, *args, **kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]

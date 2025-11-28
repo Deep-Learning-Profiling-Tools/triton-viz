@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from abc import ABC, abstractmethod
 from typing import ClassVar, Optional, Any
 from collections.abc import Callable
+import threading
 
 from .data import Op, Launch
 from .patch import (
@@ -83,6 +84,7 @@ class ClientManager:
         if clients:
             self.add_clients(clients)
         self.launch = Launch()
+        self._lock = threading.Lock()
 
     def get_client(self, name: str) -> Optional[Client]:
         return self.clients.get(name)
@@ -148,33 +150,39 @@ class ClientManager:
                 unpatch_lang()
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        rets = []
-        for client in self.clients.values():
-            rets.append(client.pre_run_callback(fn))
-        return all(rets) if rets else True
+        with self._lock:
+            rets = []
+            for client in self.clients.values():
+                rets.append(client.pre_run_callback(fn))
+            return all(rets) if rets else True
 
     def post_run_callback(self, fn: Callable) -> bool:
-        rets = []
-        for client in self.clients.values():
-            rets.append(client.post_run_callback(fn))
-        return any(rets)
+        with self._lock:
+            rets = []
+            for client in self.clients.values():
+                rets.append(client.post_run_callback(fn))
+            return any(rets)
 
     def finalize(self) -> None:
-        self.launch.records = []
-        for client in self.clients.values():
-            self.launch.records += client.finalize()
+        with self._lock:
+            self.launch.records = []
+            for client in self.clients.values():
+                self.launch.records += client.finalize()
 
     def arg_callback(self, name, arg, arg_cvt):
-        if hasattr(arg, "data_ptr"):
-            self.launch.tensors.add(arg)
-        for client in self.clients.values():
-            client.arg_callback(name, arg, arg_cvt)
+        with self._lock:
+            if hasattr(arg, "data_ptr"):
+                self.launch.tensors.add(arg)
+            for client in self.clients.values():
+                client.arg_callback(name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int]):
-        self.launch.grid = grid
-        for client in self.clients.values():
-            client.grid_callback(grid)
+        with self._lock:
+            self.launch.grid = grid
+            for client in self.clients.values():
+                client.grid_callback(grid)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
-        for client in self.clients.values():
-            client.grid_idx_callback(grid_idx)
+        with self._lock:
+            for client in self.clients.values():
+                client.grid_idx_callback(grid_idx)

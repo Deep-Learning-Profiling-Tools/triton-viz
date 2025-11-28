@@ -3,6 +3,9 @@ from contextlib import contextmanager
 from collections.abc import Callable
 from typing import Any, Optional
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
+from queue import SimpleQueue, Empty
+import threading
 
 from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -173,6 +176,20 @@ math_map: dict[type[Op], Callable] = {
     Umulhi: tl.math.umulhi,
 }
 
+_thread_local_state = threading.local()
+_program_id_lock = threading.Lock()
+
+
+def _set_thread_grid_state(
+    grid_dim: tuple[int, int, int], grid_idx: tuple[int, int, int]
+) -> None:
+    _thread_local_state.grid_dim = grid_dim
+    _thread_local_state.grid_idx = grid_idx
+
+
+def _get_thread_grid_idx() -> Optional[tuple[int, int, int]]:
+    return getattr(_thread_local_state, "grid_idx", None)
+
 
 class PatchOp:
     def __init__(
@@ -224,7 +241,27 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = _OP_ATTR_NAMES[op_type]
         original_op = original_ops[op_type]
-        patched_op = PatchOp(original_op, op_type, callbacks)
+        if op_type is ProgramId:
+            # Program ID depends on per-block state; serialize the builder update and
+            # feed in the thread-local grid index to avoid cross-thread interference.
+            def _program_id_with_thread_state(*args, **kwargs):
+                thread_grid_idx = _get_thread_grid_idx()
+                if thread_grid_idx is not None:
+                    with _program_id_lock:
+                        prev_program_id = getattr(
+                            interpreter_builder, "_program_id", None
+                        )
+                        interpreter_builder.set_grid_idx(*thread_grid_idx)
+                        try:
+                            return original_op(*args, **kwargs)
+                        finally:
+                            if prev_program_id is not None:
+                                interpreter_builder._program_id = prev_program_id
+                return original_op(*args, **kwargs)
+
+            patched_op = PatchOp(_program_id_with_thread_state, op_type, callbacks)
+        else:
+            patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(
             interpreter_builder,
             op_name,
@@ -499,8 +536,10 @@ def _grid_executor_call(self, *args_dev, **kwargs):
                     leave=False,
                     disable=not (cfg.report_grid_execution_progress and grid[2] > 1),
                 ):
-                    interpreter_builder.set_grid_idx(x, y, z)
-                    client_manager.grid_idx_callback((x, y, z))
+                    grid_idx = (x, y, z)
+                    _set_thread_grid_state(grid, grid_idx)
+                    interpreter_builder.set_grid_idx(*grid_idx)
+                    client_manager.grid_idx_callback(grid_idx)
                     if not client_manager.pre_run_callback(self.fn):
                         continue  # Skip this block
                     self.fn(**call_args)
@@ -536,11 +575,48 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
     interpreter_builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
+    total_blocks = grid[0] * grid[1] * grid[2]
+    max_workers = min(cfg.num_sms, total_blocks)
+
+    def _dispatch_with_threads():
+        tasks: SimpleQueue = SimpleQueue()
+        for x in range(grid[0]):
+            for y in range(grid[1]):
+                for z in range(grid[2]):
+                    tasks.put((x, y, z))
+
+        stop_event = threading.Event()
+
+        def _worker():
+            while not stop_event.is_set():
+                try:
+                    grid_idx = tasks.get_nowait()
+                except Empty:
+                    return
+                _set_thread_grid_state(grid, grid_idx)
+                interpreter_builder.set_grid_idx(*grid_idx)
+                client_manager.grid_idx_callback(grid_idx)
+                if not client_manager.pre_run_callback(self.fn):
+                    continue
+                self.fn(**call_args)
+                if not client_manager.post_run_callback(self.fn):
+                    stop_event.set()
+                    return
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_worker) for _ in range(max_workers)]
+            for fut in futures:
+                fut.result()
+
     if cfg.enable_timing:
         import time
 
         start_time = time.time()
-    run_grid_loops(grid)
+    if max_workers <= 1:
+        run_grid_loops(grid)
+    else:
+        _dispatch_with_threads()
+
     if cfg.enable_timing:
         end_time = time.time()
         elapsed_time = end_time - start_time
