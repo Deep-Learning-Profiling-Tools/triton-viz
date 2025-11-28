@@ -19,9 +19,10 @@ def nki_rmsnorm_kernel(a_tensor, g_tensor, result):
     assert D == g_tensor.shape[0]
 
     # Generate tensor indices to index input tensor
-    ix = nl.arange(2)[:, None]
+    B_TILE = 8
+    ix = nl.arange(B_TILE)[:, None]
     iw = nl.arange(1)[:, None]
-    iy = nl.arange(8)[None, :]
+    iy = nl.arange(D)[None, :]
 
     # Load RMSNorm weight once, reused by rows/tiles of a_tensor
     g_tile = nl.load(g_tensor.reshape((1, D))[iw, iy], mask=iy < D)
@@ -29,10 +30,10 @@ def nki_rmsnorm_kernel(a_tensor, g_tensor, result):
     # Process 2 rows at a time due to 2-partition tile size limitation
     # Since we're not reducing across the first dimension
     # Tiles can be processed independently
-    for i in nl.affine_range(math.ceil(B / 2)):
+    for i in nl.affine_range(math.ceil(B / B_TILE)):
         # Load input data from external memory to on-chip memory
-        mask = (i * 2 + ix < B) & (iy < D)
-        a_tile = nl.load(a_tensor[i * 2 + ix, iy], mask=mask)
+        mask = (i * B_TILE + ix < B) & (iy < D)
+        a_tile = nl.load(a_tensor[i * B_TILE + ix, iy], mask=mask)
 
         # Compute element-wise square of a_tensor
         in_square = nl.square(a_tile)
@@ -53,13 +54,13 @@ def nki_rmsnorm_kernel(a_tensor, g_tensor, result):
 
         # Broadcast weight along first axis to match tensor shape
         # B_active = min(B - i * 2, 2)
-        g_bcast = g_tile.broadcast_to((2, 8))
+        g_bcast = g_tile.broadcast_to((B_TILE, D))
 
         # Multiply with the RMSNorm weight
-        out_tile = nl.multiply(out_tile, g_bcast, mask=(i * 2 + ix < B))
+        out_tile = nl.multiply(out_tile, g_bcast, mask=(i * B_TILE + ix < B))
 
         # store the addition results back to external memory (out_tensor)
-        nl.store(result[i * 2 + ix, iy], value=out_tile, mask=mask)
+        nl.store(result[i * B_TILE + ix, iy], value=out_tile, mask=mask)
 
 
 # ref
@@ -77,8 +78,9 @@ def torch_rmsnorm_kernel(a_tensor, g_tensor):
 
 TRITON_VIZ = True
 kernel_grid = (1, 1, 1)
-a_tensor = torch.arange(15).float().view(3, 5)
-g_tensor = torch.arange(5).float()
+B, D = 32, 32
+a_tensor = torch.arange(B * D).float().view(B, D)
+g_tensor = torch.arange(D).float()
 result = torch.empty_like(a_tensor).numpy()
 kernel_args = (a_tensor.numpy(), g_tensor.numpy(), result)
 

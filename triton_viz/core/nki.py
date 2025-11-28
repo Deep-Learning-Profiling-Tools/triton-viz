@@ -85,6 +85,16 @@ class NDArray:
         # Create a new NDArray with the sliced data
         return NDArray(value=sliced_value, name=f"{self.name}_slice")
 
+    def __setitem__(self, keys, value):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+
+        # Apply the slicing to the underlying numpy array
+        new_keys = [k.data if isinstance(k, NDArray) else k for k in keys]
+        self.data[tuple(new_keys)] = value.data
+
+        return self
+
     def _binary_op(self, other, op_func, op_name, op_symbol):
         if isinstance(other, NDArray):
             return NDArray(
