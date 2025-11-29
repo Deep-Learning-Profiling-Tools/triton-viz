@@ -2,10 +2,10 @@ import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
 from typing import Any, Optional
-from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
+import time
 
 from .config import config as cfg
 from dataclasses import dataclass
@@ -180,19 +180,18 @@ math_map: dict[type[Op], Callable] = {
     Umulhi: tl.math.umulhi,
 }
 
-_thread_local_state = threading.local()
-_program_id_lock = threading.Lock()
+_thread_local_interpreter_state = threading.local()
+_thread_local_interpreter_state.grid_idx = None  # just set a default
 
 
-def _set_thread_grid_state(
-    grid_dim: tuple[int, int, int], grid_idx: tuple[int, int, int]
-) -> None:
-    _thread_local_state.grid_dim = grid_dim
-    _thread_local_state.grid_idx = grid_idx
+def _set_thread_grid_idx(self, x: int, y: int, z: int) -> None:
+    _thread_local_interpreter_state.grid_idx = (x, y, z)
 
 
-def _get_thread_grid_idx() -> Optional[tuple[int, int, int]]:
-    return getattr(_thread_local_state, "grid_idx", None)
+# Bind to the builder class so attribute access uses thread-local storage.
+_interp_cls = interpreter_builder.__class__
+_interp_cls.set_grid_idx = _set_thread_grid_idx  # type: ignore[attr-defined]
+_interp_cls.grid_idx = property(lambda self: _thread_local_interpreter_state.grid_idx)  # type: ignore[attr-defined]
 
 
 class PatchOp:
@@ -207,6 +206,15 @@ class PatchOp:
         self.callbacks = callbacks
 
     def __call__(self, *args, **kwargs):
+        # periodically sleep briefly so other worker threads can run
+        _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
+        _YIELD_SLEEP_SEC = 0.0005  # Small positive sleep to encourage OS-level yield
+        now = time.perf_counter()
+        last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
+        if now - last >= _YIELD_INTERVAL_SEC:
+            _thread_local_interpreter_state.last_yield_ts = now
+            time.sleep(_YIELD_SLEEP_SEC)
+
         if self.callbacks.before_callback:
             self.callbacks.before_callback(*args, **kwargs)
         if self.callbacks.op_overrider:
@@ -245,27 +253,7 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
         # create a new function that calls the before_callback, the original op and the after_callback
         op_name = _OP_ATTR_NAMES[op_type]
         original_op = original_ops[op_type]
-        if op_type is ProgramId:
-            # Program ID depends on per-block state; serialize the builder update and
-            # feed in the thread-local grid index to avoid cross-thread interference.
-            def _program_id_with_thread_state(*args, **kwargs):
-                thread_grid_idx = _get_thread_grid_idx()
-                if thread_grid_idx is not None:
-                    with _program_id_lock:
-                        prev_program_id = getattr(
-                            interpreter_builder, "_program_id", None
-                        )
-                        interpreter_builder.set_grid_idx(*thread_grid_idx)
-                        try:
-                            return original_op(*args, **kwargs)
-                        finally:
-                            if prev_program_id is not None:
-                                interpreter_builder._program_id = prev_program_id
-                return original_op(*args, **kwargs)
-
-            patched_op = PatchOp(_program_id_with_thread_state, op_type, callbacks)
-        else:
-            patched_op = PatchOp(original_op, op_type, callbacks)
+        patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(
             interpreter_builder,
             op_name,
@@ -584,35 +572,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     if kwargs.pop("warmup", False):
         return
 
-    def run_grid_loops(grid):
-        for x in tqdm(
-            range(grid[0]),
-            desc="Grid X",
-            leave=False,
-            disable=not cfg.report_grid_execution_progress,
-        ):
-            for y in tqdm(
-                range(grid[1]),
-                desc="Grid Y",
-                leave=False,
-                disable=not (cfg.report_grid_execution_progress and grid[1] > 1),
-            ):
-                for z in tqdm(
-                    range(grid[2]),
-                    desc="Grid Z",
-                    leave=False,
-                    disable=not (cfg.report_grid_execution_progress and grid[2] > 1),
-                ):
-                    grid_idx = (x, y, z)
-                    _set_thread_grid_state(grid, grid_idx)
-                    interpreter_builder.set_grid_idx(*grid_idx)
-                    client_manager.grid_idx_callback(grid_idx)
-                    if not client_manager.pre_run_callback(self.fn):
-                        continue  # Skip this block
-                    self.fn(**call_args)
-                    if not client_manager.post_run_callback(self.fn):
-                        return
-
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
@@ -648,7 +607,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
     total_blocks = grid[0] * grid[1] * grid[2]
     max_workers = min(cfg.num_sms, total_blocks)
 
-    def _dispatch_with_threads():
+    def run_grid_loops(grid):
         tasks: SimpleQueue = SimpleQueue()
         for x in range(grid[0]):
             for y in range(grid[1]):
@@ -660,12 +619,11 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         def _worker():
             while not stop_event.is_set():
                 try:
-                    grid_idx = tasks.get_nowait()
+                    x, y, z = tasks.get_nowait()
                 except Empty:
                     return
-                _set_thread_grid_state(grid, grid_idx)
-                interpreter_builder.set_grid_idx(*grid_idx)
-                client_manager.grid_idx_callback(grid_idx)
+                interpreter_builder.set_grid_idx(x, y, z)
+                client_manager.grid_idx_callback((x, y, z))
                 if not client_manager.pre_run_callback(self.fn):
                     continue
                 self.fn(**call_args)
@@ -682,10 +640,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
         import time
 
         start_time = time.time()
-    if max_workers <= 1:
-        run_grid_loops(grid)
-    else:
-        _dispatch_with_threads()
+    run_grid_loops(grid)
 
     if cfg.enable_timing:
         end_time = time.time()
