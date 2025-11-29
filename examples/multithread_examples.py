@@ -1,5 +1,5 @@
 import argparse
-
+import time
 import triton
 import triton.language as tl
 import torch
@@ -18,19 +18,18 @@ def make_kernels(trace_decorator=None):
         if pid == 0:
             counter = 0
             # Wait until PID 1 finishes, then write a marker.
-            max_spin = 50_000
+            max_spin = 10_000
             while tl.atomic_cas(out, 0.0, 0.0) == 0.0 and counter < max_spin:
                 counter += 1
             if counter >= max_spin:
                 # Prevent infinite hangs when concurrency is missing.
-                tl.store(out, -1.0)
+                tl.store(out, -2.0)
                 return
             tl.store(out, counter)
         elif pid == 1:
             arange = tl.arange(0, 128)
             s = 0.0
             for i in range(N // 128):
-                print(i)
                 s += tl.sum(tl.load(x + i * 128 + arange))
             tl.atomic_add(out, s + 1)
 
@@ -95,14 +94,14 @@ def main():
     slow_iters = 16384 if device.type == "cuda" else 256
     rt_N = slow_iters * 32
 
-    # warmup
     x = torch.zeros((pc_N,), device=device)
     out = torch.zeros((), device=device)
-    producer_consumer[(2, 1, 1)](x, out, pc_N)
-
-    x = torch.zeros((pc_N,), device=device)
-    out = torch.zeros((), device=device)
-    producer_consumer[(2, 1, 1)](x, out, pc_N)
+    pc_grid = producer_consumer[(2, 1, 1)]
+    print("x.shape:", x.shape)
+    tic = time.perf_counter()
+    pc_grid(x, out, pc_N)
+    toc = time.perf_counter()
+    print("duration:", toc - tic)
     print("producer_consumer output:", out.item())
 
     x = torch.zeros((rt_N,), device=device)
