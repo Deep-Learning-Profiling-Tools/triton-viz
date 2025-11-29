@@ -98,6 +98,14 @@ class Profiler(Client):
         # Store the current grid index
         self.current_grid_idx = grid_idx
 
+    @property
+    def current_grid_idx(self) -> Optional[tuple[int, ...]]:
+        return self._get_thread_local("current_grid_idx", None)
+
+    @current_grid_idx.setter
+    def current_grid_idx(self, grid_idx: Optional[tuple[int, ...]]) -> None:
+        self._set_thread_local("current_grid_idx", grid_idx)
+
     def grid_callback(self, grid: tuple[int, ...]):
         # If block sampling is enabled, determine which blocks to sample
         if self.block_sampling:

@@ -3,6 +3,7 @@ from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore
 from typing import Callable, Optional, Union
 import numpy as np
+import threading
 
 
 def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
@@ -31,6 +32,7 @@ class Tracer(Client):
         self.records: list = []
         self.tensors: list = []
         self.sample = True
+        self._records_lock = threading.Lock()
 
     def _get_tensor(self, data_ptr):
         # From a give ptr, get where the original tensor is stored
@@ -58,6 +60,11 @@ class Tracer(Client):
         if hasattr(arg, "data_ptr"):
             self.tensors.append(arg)
 
+    def _append_record(self, record) -> None:
+        # Serialize writes to shared records list across threads
+        with self._records_lock:
+            self.records.append(record)
+
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
         if self.grid_idx is not None and grid_idx != self.grid_idx:
             self.sample = False
@@ -65,7 +72,7 @@ class Tracer(Client):
             self.sample = True
 
         # Create a Grid record for this grid index
-        self.records.append(Grid(idx=grid_idx))
+        self._append_record(Grid(idx=grid_idx))
 
     def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
@@ -78,7 +85,7 @@ class Tracer(Client):
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
-            self.records.append(
+            self._append_record(
                 Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             )
 
@@ -87,7 +94,7 @@ class Tracer(Client):
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
-            self.records.append(
+            self._append_record(
                 Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             )
 
@@ -99,7 +106,7 @@ class Tracer(Client):
             tensor = self._get_tensor(first_ptr)
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Load(tensor.data_ptr(), offsets, true_mask))
+            self._append_record(Load(tensor.data_ptr(), offsets, true_mask))
 
         def pre_raw_store_callback(ptr, value, *args, **kwargs):
             if not self.sample:
@@ -108,14 +115,14 @@ class Tracer(Client):
             tensor = self._get_tensor(first_ptr)
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Store(tensor.data_ptr(), offsets, true_mask))
+            self._append_record(Store(tensor.data_ptr(), offsets, true_mask))
 
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
                 return
             input_shape = input.handle.data.shape
             output_shape = ret.handle.data.shape
-            self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
+            self._append_record(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
         def post_dot_callback(ret, input, other, *args):
             if not self.sample:
@@ -123,7 +130,7 @@ class Tracer(Client):
             input_shape = input.data.shape
             other_shape = other.data.shape
             ret_shape = ret.data.shape
-            self.records.append(Dot(input_shape, other_shape, ret_shape))
+            self._append_record(Dot(input_shape, other_shape, ret_shape))
 
         if op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)
@@ -142,6 +149,14 @@ class Tracer(Client):
 
     def register_for_loop_callback(self):
         return ForLoopCallbacks()
+
+    @property
+    def sample(self) -> bool:
+        return self._get_thread_local("sample", True)
+
+    @sample.setter
+    def sample(self, value: bool) -> None:
+        self._set_thread_local("sample", value)
 
     def finalize(self) -> list:
         self.tensors.clear()
