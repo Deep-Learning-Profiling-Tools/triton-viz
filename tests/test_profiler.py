@@ -70,9 +70,8 @@ def test_for_loop_statistics():
     # Create profiler in the test function
     # Disable block sampling to ensure all blocks are executed
     cfg._profiler_enable_block_sampling = False
-    loop_profiler = Profiler(
-        disable_buffer_load_check=True, disable_load_mask_percentage_check=True
-    )
+    cfg._profiler_disable_buffer_load_check = True
+    loop_profiler = Profiler(disable_load_mask_percentage_check=True)
     traced_kernel = triton_viz.trace(loop_profiler)(for_loop_test_kernel)
 
     # Run the kernel
@@ -179,7 +178,8 @@ def test_mask_percentage():
     # Create profiler in the test function
     # Disable block sampling to ensure all blocks are executed
     cfg._profiler_enable_block_sampling = False
-    mask_profiler = Profiler(disable_buffer_load_check=True)
+    cfg._profiler_disable_buffer_load_check = True
+    mask_profiler = Profiler()
     traced_kernel = triton_viz.trace(mask_profiler)(mask_percentage_test_kernel)
 
     # Run the kernel
@@ -305,11 +305,11 @@ def test_block_sampling(test_name, enable_sampling, k_value, expected_executions
     # Configure block sampling via config - must be done BEFORE creating Profiler
     # Set the private attribute directly to ensure it takes effect
     cfg._profiler_enable_block_sampling = enable_sampling
+    cfg._profiler_disable_buffer_load_check = True
 
     # Create profiler with k value
     profiler = Profiler(
         k=k_value,
-        disable_buffer_load_check=True,
         disable_load_mask_percentage_check=True,
     )
 
@@ -360,9 +360,10 @@ def test_load_store_skip_disabled():
     cfg._profiler_enable_load_store_skipping = False
     # Also disable block sampling to ensure all blocks are executed
     cfg._profiler_enable_block_sampling = False
+    cfg._profiler_disable_buffer_load_check = True
 
     # Create profiler and traced kernel
-    profiler = Profiler(disable_buffer_load_check=True)
+    profiler = Profiler()
     traced_kernel = triton_viz.trace(profiler)(simple_kernel)
 
     # Run kernel
@@ -388,9 +389,10 @@ def test_load_store_skip_enabled():
     cfg._profiler_enable_load_store_skipping = True
     # Also disable block sampling to ensure all blocks are executed
     cfg._profiler_enable_block_sampling = False
+    cfg._profiler_disable_buffer_load_check = True
 
     # Create profiler and traced kernel
-    profiler = Profiler(disable_buffer_load_check=True)
+    profiler = Profiler()
     traced_kernel = triton_viz.trace(profiler)(simple_kernel)
 
     # Run kernel

@@ -57,6 +57,12 @@ class Config:
             os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
         )
 
+        # --- Profiler Performance Issues Detection ---
+        # AMD Buffer Load Check: detects buffer_load instruction usage in kernel ASM
+        self._profiler_disable_buffer_load_check = (
+            os.getenv("PROFILER_DISABLE_BUFFER_LOAD_CHECK", "0") == "1"
+        )
+
     # ---------- disable_sanitizer ----------
     @property
     def disable_sanitizer(self) -> bool:
@@ -170,6 +176,25 @@ class Config:
     @property
     def virtual_memory(self) -> bool:
         return self._virtual_memory
+
+    # ---------- profiler_disable_buffer_load_check ----------
+    @property
+    def profiler_disable_buffer_load_check(self) -> bool:
+        return self._profiler_disable_buffer_load_check
+
+    @profiler_disable_buffer_load_check.setter
+    def profiler_disable_buffer_load_check(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_disable_buffer_load_check expects a bool.")
+
+        previous = getattr(self, "_profiler_disable_buffer_load_check", None)
+        self._profiler_disable_buffer_load_check = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler buffer load check disabled.")
+        elif not value and previous:
+            print("Profiler buffer load check enabled.")
 
 
 config = Config()
