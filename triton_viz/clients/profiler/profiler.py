@@ -99,8 +99,8 @@ class Profiler(Client):
         return True
 
     def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
-        # TODO: optionally proceed the warmup. For now, always proceed.
-        return True
+        # Skip warmup if buffer load check is disabled
+        return not self.disable_buffer_load_check
 
     def post_warmup_callback(self, jit_fn, ret) -> None:
         if not ret:
