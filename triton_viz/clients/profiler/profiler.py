@@ -43,7 +43,6 @@ class Profiler(Client):
     def __init__(
         self,
         callpath: bool = True,
-        disable_buffer_load_check: bool = False,
         disable_for_loop_unroll_check: bool = False,
         disable_load_mask_percentage_check: bool = False,
         k: int | None = None,
@@ -76,7 +75,7 @@ class Profiler(Client):
 
         # Case 4: Buffer Load Check
         self.has_buffer_load = False
-        self.disable_buffer_load_check = disable_buffer_load_check
+        self.disable_buffer_load_check = cfg.profiler_disable_buffer_load_check
         self.potential_buffer_load_issue_found = False
 
         # Block sampling
