@@ -2103,6 +2103,8 @@ class SanitizerSymbolicExecution(Sanitizer):
                 val, constraints = expr.eval()
             elif isinstance(expr, ArithRef):
                 val, constraints = expr, []
+            elif isinstance(expr, TensorHandle):
+                return int(expr.data.item())
             else:
                 return int(expr)
 
@@ -2165,33 +2167,38 @@ class SanitizerSymbolicExecution(Sanitizer):
                     return val.handle.concretize()
                 return val
 
-            args = [_resolve_bound(v) for v in iter_args]
+            args = tuple(_resolve_bound(v) for v in iter_args)
             # Prefer explicit args; fall back to kwargs when args are empty.
             if not args and iter_kwargs:
                 start_expr = _resolve_bound(iter_kwargs.get("start", 0))
                 stop_expr = _resolve_bound(iter_kwargs.get("stop", iter_kwargs.get("end")))
                 step_expr = _resolve_bound(iter_kwargs.get("step", 1))
                 if stop_expr is not None:
-                    args = [start_expr, stop_expr, step_expr]
+                    args = (start_expr, stop_expr, step_expr)
 
-            if args:
-                start_expr, stop_expr, step_expr = 0, None, 1
-                if len(args) == 1:
-                    stop_expr = args[0]
-                elif len(args) == 2:
-                    start_expr, stop_expr = args[0], args[1]
-                else:
-                    start_expr, stop_expr, step_expr = args[0], args[1], args[2]
-            elif isinstance(iterable, range) or (
-                hasattr(iterable, "start")
-                and hasattr(iterable, "stop")
-                and hasattr(iterable, "step")
+            if not args and (
+                isinstance(iterable, range)
+                or (
+                    hasattr(iterable, "start")
+                    and hasattr(iterable, "stop")
+                    and hasattr(iterable, "step")
+                )
             ):
-                start_expr = getattr(iterable, "start", 0)
-                stop_expr = getattr(iterable, "stop", 0)
-                step_expr = getattr(iterable, "step", 1)
-            else:
+                args = tuple(
+                    _resolve_bound(getattr(iterable, attr, default))
+                    for attr, default in (("start", 0), ("stop", 0), ("step", 1))
+                )
+
+            if not args:
                 return None
+
+            start_expr, stop_expr, step_expr = 0, None, 1
+            if len(args) == 1:
+                stop_expr = args[0]
+            elif len(args) == 2:
+                start_expr, stop_expr = args[0], args[1]
+            else:
+                start_expr, stop_expr, step_expr = args[0], args[1], args[2]
 
             step = _get_constant_step(step_expr)
             step_sign = -1 if step < 0 else 1
