@@ -9,7 +9,7 @@ from triton.runtime.interpreter import TensorHandle
 import triton_viz
 from triton_viz import trace
 from triton_viz.core.config import config as cfg
-from triton_viz.core.data import AddPtr, Load, RawLoad
+from triton_viz.core.data import AddPtr, Load, RawLoad, Trans
 from triton_viz.core.client import Client
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.sanitizer import (
@@ -56,13 +56,45 @@ def test_addptr_overrider():
     # Run through sanitizer's overrider
     ptr_dtype = tl.pointer_type(tl.int32)
     ptr_th = TensorHandle(np.array([1000]), ptr_dtype)
-    offset_th = TensorHandle(np.array([3]), tl.int32)
+    offset_th = TensorHandle(np.array([3]).astype(np.int32), tl.int32)
     sanitizer = SanitizerSymbolicExecution(abort_on_error=False)
     op_callbacks = sanitizer.register_op_callback(AddPtr)
     assert op_callbacks.op_overrider is not None
     expr = op_callbacks.op_overrider(ptr_th, offset_th)  # offset = 3
     assert expr.op == "addptr"
     assert expr.eval()[0] == 1000 + 3 * 4  # element_bytewidth = 4
+
+
+# ======== Trans =========
+
+
+def test_trans_overrider_passthrough_and_dtype():
+    base = SymbolicExpr.from_value((1, 2, 3))
+    base.dtype_tt = tl.float32  # ensure dtype is preserved through trans
+
+    sanitizer = SanitizerSymbolicExecution(abort_on_error=False)
+    op_callbacks = sanitizer.register_op_callback(Trans)
+    assert op_callbacks.op_overrider is not None
+
+    perm = (1, 0)
+    trans_expr = op_callbacks.op_overrider(base, perm)
+
+    assert isinstance(trans_expr, SymbolicExpr)
+    assert trans_expr.op == "trans"
+    assert trans_expr.arg is base
+    assert trans_expr.permutation.op == "const"
+    assert trans_expr.permutation.to_py() == perm
+    assert trans_expr.dtype_tt == base.dtype_tt
+
+    def _z3_to_int_list(values):
+        vals = values if isinstance(values, list) else [values]
+        return [v.as_long() if hasattr(v, "as_long") else int(str(v)) for v in vals]
+
+    trans_vals, trans_constraints = trans_expr.eval()
+    base_vals, base_constraints = base.eval()
+
+    assert _z3_to_int_list(trans_vals) == _z3_to_int_list(base_vals)
+    assert trans_constraints == base_constraints
 
 
 # ======== Null Sanitizer =========
@@ -117,7 +149,7 @@ def _sum_offsets_from_addptr(expr):
         if off.op != "const":  # If any offset is not constant, we cannot sum it.
             non_const_offset = off
             break
-        offsets.append(np.asarray(off.to_py(), dtype=np.int64))
+        offsets.append(off.to_py().tolist())
         cur = cur.ptr
 
     if non_const_offset:
@@ -152,7 +184,6 @@ class LoadIndexChecker(SanitizerSymbolicExecution):
             load_expr = orig_overrider(ptr, *a, **k)
 
             # Important: We only record pointers accessing fp32!
-            # This is because fp32 is usually the outermost dtype of a "load of a load" chain.
             # This is the case in all unittests.
             p = load_expr.ptr
             if (
