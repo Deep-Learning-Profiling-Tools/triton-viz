@@ -62,7 +62,6 @@ from ...core.data import (
     Advance,
     FpToFp,
     Umulhi,
-    Trans,
     CumSum,
     Bitcast,
     AtomicCas,
