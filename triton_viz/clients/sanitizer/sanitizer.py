@@ -2159,12 +2159,18 @@ class SanitizerSymbolicExecution(Sanitizer):
             if isinstance(iterable, RangeWrapper):
                 return iterable
 
-            args = list(iter_args)
+            def _resolve_bound(val):
+                if isinstance(val, tl.core.tensor):
+                    self.need_full_grid = True
+                    return val.handle.concretize(val)
+                return val
+
+            args = [_resolve_bound(v) for v in iter_args]
             # Prefer explicit args; fall back to kwargs when args are empty.
             if not args and iter_kwargs:
-                start_expr = iter_kwargs.get("start", 0)
-                stop_expr = iter_kwargs.get("stop", iter_kwargs.get("end"))
-                step_expr = iter_kwargs.get("step", 1)
+                start_expr = _resolve_bound(iter_kwargs.get("start", 0))
+                stop_expr = _resolve_bound(iter_kwargs.get("stop", iter_kwargs.get("end")))
+                step_expr = _resolve_bound(iter_kwargs.get("step", 1))
                 if stop_expr is not None:
                     args = [start_expr, stop_expr, step_expr]
 
