@@ -833,6 +833,7 @@ class SymbolicExpr:
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
+        "fp_to_fp": Spec(req=("src", "dst_type", "rounding_mode"), post=_cast_impl_post),
         # Atomic operations
         "atomic_cas": Spec(req=("ptr", "cmp", "val")),
         "atomic_rmw": Spec(req=("ptr", "val", "mask")),
