@@ -151,12 +151,21 @@ def test_loop_hook_before_materializes_symbolic_bounds():
     sanitizer = SanitizerSymbolicExecution()
     loop_callbacks = sanitizer.register_for_loop_callback()
     assert loop_callbacks.before_loop_callback is not None
+    assert loop_callbacks.range_wrapper_factory is not None
 
     # Positive step: min(start), max(stop)
     start_expr = SymbolicExpr("add", SymbolicExpr.from_value(2), SymbolicExpr.from_value(3))
     stop_expr = SymbolicExpr.from_value(8)
     step_expr = SymbolicExpr.from_value(1)
-    loop_callbacks.before_loop_callback(200, _FakeRange(start_expr, stop_expr, step_expr, length=5))
+    wrapped = loop_callbacks.range_wrapper_factory(
+        None,
+        200,
+        "python_range",
+        (start_expr, stop_expr, step_expr),
+        {},
+        range,
+    )
+    loop_callbacks.before_loop_callback(200, wrapped)
     ctx = sanitizer.loop_stack.pop()
     assert ctx.start == 5  # min(start) == 5
     assert ctx.stop == 8   # max(stop) == 8
@@ -166,7 +175,15 @@ def test_loop_hook_before_materializes_symbolic_bounds():
     start_expr = SymbolicExpr.from_value(10)
     stop_expr = SymbolicExpr.from_value(-2)
     step_expr = SymbolicExpr.from_value(-3)
-    loop_callbacks.before_loop_callback(201, _FakeRange(start_expr, stop_expr, step_expr, length=4))
+    wrapped = loop_callbacks.range_wrapper_factory(
+        None,
+        201,
+        "python_range",
+        (start_expr, stop_expr, step_expr),
+        {},
+        range,
+    )
+    loop_callbacks.before_loop_callback(201, wrapped)
     ctx = sanitizer.loop_stack.pop()
     assert ctx.start == 10  # max(start)
     assert ctx.stop == -2   # min(stop)

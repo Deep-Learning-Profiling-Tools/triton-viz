@@ -447,6 +447,21 @@ class LoopContext:
     re_pattern = re.compile(r"(loop_i|arange)_\d+")
 
 
+@dataclass
+class RangeWrapper:
+    iterable: Any
+    length: int
+    start: int
+    stop: int
+    step: int
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def __len__(self):
+        return self.length
+
+
 class Sanitizer(Client):
     """
     Factory class that returns the concrete sanitizer implementation
@@ -2125,54 +2140,101 @@ class SanitizerSymbolicExecution(Sanitizer):
                 raise ValueError("Loop step cannot be zero.")
             return step
 
-        def loop_hook_before(lineno, iterable):
-            if not isinstance(iterable, range) and not (
+        def _wrap_range(
+            iterable,
+            _lineno,
+            _range_type,
+            iter_args=None,
+            iter_kwargs=None,
+            _iter_callable=None,
+        ):
+            """
+            Wrap range-like iterables so we can evaluate bounds once.
+            The caller can pass the original range call arguments to avoid
+            evaluating Python's built-in range on symbolic values.
+            """
+            iter_args = tuple(iter_args or ())
+            iter_kwargs = iter_kwargs or {}
+
+            if isinstance(iterable, RangeWrapper):
+                return iterable
+
+            args = list(iter_args)
+            # Prefer explicit args; fall back to kwargs when args are empty.
+            if not args and iter_kwargs:
+                start_expr = iter_kwargs.get("start", 0)
+                stop_expr = iter_kwargs.get("stop", iter_kwargs.get("end"))
+                step_expr = iter_kwargs.get("step", 1)
+                if stop_expr is not None:
+                    args = [start_expr, stop_expr, step_expr]
+
+            if args:
+                start_expr, stop_expr, step_expr = 0, None, 1
+                if len(args) == 1:
+                    stop_expr = args[0]
+                elif len(args) == 2:
+                    start_expr, stop_expr = args[0], args[1]
+                else:
+                    start_expr, stop_expr, step_expr = args[0], args[1], args[2]
+            elif isinstance(iterable, range) or (
                 hasattr(iterable, "start")
                 and hasattr(iterable, "stop")
                 and hasattr(iterable, "step")
             ):
-                if cfg.verbose:
-                    print("not a for-loop, skipping for-loop iterator association.")
-                return
+                start_expr = getattr(iterable, "start", 0)
+                stop_expr = getattr(iterable, "stop", 0)
+                step_expr = getattr(iterable, "step", 1)
+            else:
+                return None
 
-            length = len(iterable)
-            start_expr = getattr(iterable, "start", 0)
-            stop_expr = getattr(iterable, "stop", length)
-            step_expr = getattr(iterable, "step", 1)
-
-            # Triton requires step to be a constant; convert directly.
             step = _get_constant_step(step_expr)
             step_sign = -1 if step < 0 else 1
 
-            # Materialize start/stop respecting step direction:
-            #   step < 0  -> max(start), min(stop)
-            #   step >= 0 -> min(start), max(stop)
             start = _materialize_loop_value(start_expr, maximize=step_sign < 0)
             stop = _materialize_loop_value(stop_expr, maximize=step_sign >= 0)
 
+            concrete_range = range(start, stop, step)
+            length = len(concrete_range)
+
+            return RangeWrapper(
+                concrete_range, length=length, start=start, stop=stop, step=step
+            )
+
+        def loop_hook_before(lineno, iterable):
+            if not isinstance(iterable, RangeWrapper):
+                if cfg.verbose:
+                    print("not a range wrapper, skipping for-loop iterator association.")
+                return
+
             idx_z3 = Int(f"loop_i_{lineno}")
             self.loop_stack.append(
-                LoopContext(lineno, length, idx_z3, start=start, stop=stop, step=step)
+                LoopContext(
+                    lineno,
+                    iterable.length,
+                    idx_z3,
+                    start=iterable.start,
+                    stop=iterable.stop,
+                    step=iterable.step,
+                )
             )
             if cfg.verbose:
-                print(f"[Sanitizer] ▶ enter loop@{lineno}, len={length}")
+                print(f"[Sanitizer] ▶ enter loop@{lineno}, len={iterable.length}")
 
         def loop_hook_iter_overrider(lineno, idx):
-            # collect iterator values
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
                 self.loop_stack[-1].values.append(idx)
-
-            # Make a tagged SymbolicExpr
-            sym = SymbolicExpr("const", idx, tl.int32)
-            sym._loop_ctx = self.loop_stack[-1]
-
-            return tl.core.tensor(sym, tl.int32)
+                sym = SymbolicExpr("const", idx, tl.int32)
+                sym._loop_ctx = self.loop_stack[-1]
+                return tl.core.tensor(sym, tl.int32)
+            return idx
 
         def loop_hook_iter_listener(lineno, idx):
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ loop@{lineno} idx={idx}")
 
         def loop_hook_after(lineno: int) -> None:
+            if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
+                return
             ctx = self.loop_stack.pop()
             # add constraints for loop_i
             iterator_constraints: list[BoolRef] = []
@@ -2208,9 +2270,10 @@ class SanitizerSymbolicExecution(Sanitizer):
                 print(
                     f"[Sanitizer] ▶ leave loop@{lineno} end. "
                     f"(checked {len(ctx.pending_checks)} unique addr patterns)"
-                )
+            )
 
         return ForLoopCallbacks(
+            range_wrapper_factory=_wrap_range,
             before_loop_callback=loop_hook_before,
             loop_iter_overrider=loop_hook_iter_overrider,
             loop_iter_listener=loop_hook_iter_listener,
