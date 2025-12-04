@@ -2093,7 +2093,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Fabs: op_fabs_overrider,
             Ashr: op_ashr_overrider,
             Advance: op_advance_overrider,
-            FpToFp: op_fptofp_overrider,
+            FpToFp: op_fp_to_fp_overrider,
             Umulhi: op_umulhi_overrider,
             CumSum: op_cumsum_overrider,
             Bitcast: op_bitcast_overrider,
