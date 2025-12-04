@@ -19,6 +19,7 @@ from z3 import (
     And,
     Or,
     Not,
+    Optimize,
     sat,
     simplify,
 )
@@ -433,6 +434,9 @@ class LoopContext:
     lineno: int
     length: int
     idx_z3: ArithRef
+    start: int = 0
+    stop: int = 0
+    step: int = 1
     values: list[int] = field(default_factory=list)
     signature_cache: set[int] = field(default_factory=set)
     pending_checks: list[
@@ -603,6 +607,7 @@ class SymbolicExprDataWrapper:
 
     def __int__(self):
         int_val, _ = self.symbolic_expr.eval()
+        print(self.symbolic_expr, int_val)
         if isinstance(int_val, IntNumRef):
             return int_val.as_long()
         if isinstance(int_val, int):
@@ -2072,14 +2077,83 @@ class SanitizerSymbolicExecution(Sanitizer):
             return OpCallbacks()
 
     def register_for_loop_callback(self):
+        def _materialize_loop_value(expr, maximize: bool) -> int:
+            """
+            Materialize a possibly symbolic loop bound using Z3 optimization.
+
+            If `maximize` is True, take the maximum feasible value; otherwise take
+            the minimum feasible value.
+            """
+            if isinstance(expr, SymbolicExpr):
+                val, constraints = expr.eval()
+            elif isinstance(expr, ArithRef):
+                val, constraints = expr, []
+            else:
+                return int(expr)
+
+            opt = Optimize()
+            if constraints:
+                opt.add(*constraints)
+
+            (opt.maximize(val) if maximize else opt.minimize(val))
+
+            if opt.check() != sat:
+                raise ValueError("Unable to materialize loop bound for expression.")
+
+            model = opt.model()
+            bound_val = model.evaluate(val, model_completion=True)
+            if hasattr(bound_val, "as_long"):
+                return bound_val.as_long()
+
+            raise ValueError(
+                f"Failed to materialize loop bound for expression: {expr}"
+            )
+
+        def _get_constant_step(step_expr) -> int:
+            """
+            Triton requires a constant step. Convert it to int without solving.
+            """
+            if isinstance(step_expr, SymbolicExpr):
+                # Only allow constant SymbolicExpr
+                if step_expr.op != "const":
+                    raise ValueError("Loop step must be a constant.")
+                step_expr = step_expr.to_py()
+            if isinstance(step_expr, ArithRef):
+                raise ValueError("Loop step must be a concrete constant, not symbolic.")
+            step = int(step_expr)
+            if step == 0:
+                raise ValueError("Loop step cannot be zero.")
+            return step
+
         def loop_hook_before(lineno, iterable):
-            if not isinstance(iterable, range):
+            if not isinstance(iterable, range) and not (
+                hasattr(iterable, "start")
+                and hasattr(iterable, "stop")
+                and hasattr(iterable, "step")
+            ):
                 if cfg.verbose:
                     print("not a for-loop, skipping for-loop iterator association.")
                 return
+
             length = len(iterable)
+            start_expr = getattr(iterable, "start", 0)
+            stop_expr = getattr(iterable, "stop", length)
+            step_expr = getattr(iterable, "step", 1)
+
+            # Triton requires step to be a constant; convert directly.
+            step = _get_constant_step(step_expr)
+            step_sign = -1 if step < 0 else 1
+
+            # Materialize start/stop respecting step direction:
+            #   step < 0  -> max(start), min(stop)
+            #   step >= 0 -> min(start), max(stop)
+            start = _materialize_loop_value(start_expr, maximize=step_sign < 0)
+            stop = _materialize_loop_value(stop_expr, maximize=step_sign >= 0)
+
             idx_z3 = Int(f"loop_i_{lineno}")
-            self.loop_stack.append(LoopContext(lineno, length, idx_z3))
+            self.loop_stack.append(
+                LoopContext(lineno, length, idx_z3, start=start, stop=stop, step=step)
+            )
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ enter loop@{lineno}, len={length}")
 
