@@ -2188,9 +2188,10 @@ class SanitizerSymbolicExecution(Sanitizer):
                 return iterable
 
             def _resolve_bound(val):
-                if isinstance(val, tl.core.tensor):
+                val = SymbolicExpr.from_value(val)
+                if val.has_op("load"):
                     self.need_full_grid = True
-                    val = _replace_load_subtree(val.handle)
+                    val = _replace_load_subtree(val)
                 return val
 
             args = tuple(_resolve_bound(v) for v in iter_args)
