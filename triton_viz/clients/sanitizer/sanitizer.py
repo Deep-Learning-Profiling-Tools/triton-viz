@@ -1824,9 +1824,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             if mask is None:
                 ret = SymbolicExpr("load", ptr_sym)
             elif other is None:
-                ret = SymbolicExpr("load", ptr_sym, mask)
+                ret = SymbolicExpr("load", ptr_sym, SymbolicExpr.from_value(mask))
             else:
-                ret = SymbolicExpr("load", ptr_sym, mask, other)
+                ret = SymbolicExpr("load", ptr_sym, SymbolicExpr.from_value(mask), SymbolicExpr.from_value(other))
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
@@ -1858,9 +1858,9 @@ class SanitizerSymbolicExecution(Sanitizer):
 
             value = SymbolicExpr.from_value(value)
             if mask is None:
-                ret = SymbolicExpr("store", ptr_sym, value)
+                ret = SymbolicExpr("store", ptr_sym, SymbolicExpr.from_value(value))
             else:
-                ret = SymbolicExpr("store", ptr_sym, value, mask)
+                ret = SymbolicExpr("store", ptr_sym, SymbolicExpr.from_value(value), SymbolicExpr.from_value(mask))
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
