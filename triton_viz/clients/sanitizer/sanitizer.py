@@ -2180,7 +2180,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             def _resolve_bound(val):
                 if isinstance(val, tl.core.tensor):
                     self.need_full_grid = True
-                    return val.handle.concretize()
+                    val = _replace_load_subtree(val.handle)
                 return val
 
             args = tuple(_resolve_bound(v) for v in iter_args)
