@@ -1388,12 +1388,12 @@ class SymbolicExpr:
         if obj.concrete_fn is None:
             if obj.op == "const":
                 if isinstance(obj.value, SymbolicExpr.builtin_scala_types):
-                
                     result = TensorHandle(
-                        np.array([obj.value], dtype=_get_np_dtype(obj.dtype_tt)), obj.dtype_tt)
+                        np.array([obj.value], dtype=_get_np_dtype(obj.dtype_tt)),
+                        obj.dtype_tt,
+                    )
                 else:
-                    result = TensorHandle(
-                        obj.value, obj.dtype_tt)
+                    result = TensorHandle(obj.value, obj.dtype_tt)
             else:
                 raise RuntimeError(f"{obj.op}'s concrete function is not set!")
         elif obj.op == "pid":
