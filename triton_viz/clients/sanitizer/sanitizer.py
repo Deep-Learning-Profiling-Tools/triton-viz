@@ -742,7 +742,7 @@ class SymbolicExpr:
     SCAN_OPS = ("cumsum",)
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join", "trans")
-    CAST_OPS = ("cast_impl", "bitcast")
+    CAST_OPS = ("cast_impl", "bitcast", "fp_to_fp")
     ATOMIC_OPS = ("atomic_cas", "atomic_rmw")
     SUPPORTED_OPS = (
         BASIC_OPS
