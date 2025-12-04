@@ -603,10 +603,14 @@ class SymbolicExprDataWrapper:
 
     def __int__(self):
         int_val, _ = self.symbolic_expr.eval()
+        if isinstance(int_val, BoolRef):
+            return 1 if int_val else 0
         if isinstance(int_val, IntNumRef):
             return int_val.as_long()
         if isinstance(int_val, int):
             return int_val
+        if isinstance(int_val, ArithRef):
+            return self.symbolic_expr.concretize()
         raise ValueError(
             f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int"
         )
