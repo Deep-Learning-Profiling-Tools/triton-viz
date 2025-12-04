@@ -55,7 +55,6 @@ from triton.runtime.interpreter import (
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
-from triton.runtime.interpreter import InterpretedFunction
 from triton.runtime.interpreter import _tuple_create, _unwrap_tensor, _rewrap_tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
 from triton.runtime import JITFunction
@@ -676,8 +675,7 @@ def _grid_executor_call(self, *args_dev, **kwargs):
 
 def _jit_function_call(self, *args, **kwargs):
     patch_lang(self.fn)
-    fn = InterpretedFunction(self.fn)
-    return fn(*args, **kwargs)
+    return self.fn(*args, **kwargs)
 
 
 @contextmanager
