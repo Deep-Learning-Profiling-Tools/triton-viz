@@ -55,7 +55,7 @@ from triton.runtime.interpreter import (
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
-from triton.runtime.Interpreter import InterpretedFunction
+from triton.runtime.interpreter import InterpretedFunction
 from triton.runtime.interpreter import _tuple_create, _unwrap_tensor, _rewrap_tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
 from triton.runtime import JITFunction
@@ -416,7 +416,6 @@ class _LoopPatcher:
 
 
 _loop_patcher = _LoopPatcher()
-
 
 
 def _visit_For(self, node: ast.For):  # type: ignore[override]
