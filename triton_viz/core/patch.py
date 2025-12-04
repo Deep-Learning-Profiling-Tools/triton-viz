@@ -675,7 +675,8 @@ def _grid_executor_call(self, *args_dev, **kwargs):
 
 def _jit_function_call(self, *args, **kwargs):
     patch_lang(self.fn)
-    return self.fn(*args, **kwargs)
+    fn = self.rewrite()
+    return fn(*args, **kwargs)
 
 
 @contextmanager
