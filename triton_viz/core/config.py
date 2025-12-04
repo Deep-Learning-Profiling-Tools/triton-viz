@@ -43,8 +43,8 @@ class Config:
             os.getenv("SANITIZER_ENABLE_KERNEL_CACHE", "1") == "1"
         )
 
-        # --- Virtual memory flag ---
-        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
+        # --- Fake tensor flag ---
+        self._virtual_memory = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "0") == "1"
 
         # --- Profiler Optimization Ablation Study ---
         # Optimization 1: enable load/store/dot skipping
