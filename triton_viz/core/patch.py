@@ -304,6 +304,8 @@ class _CombinedLoopHooks:
         self._iter_listeners: list[Callable] = []
         self._iter_overrider: Optional[Callable] = None
         self._after: list[Callable] = []
+        self._range_wrapper: Optional[Callable] = None
+        self._condition_wrapper: Optional[Callable] = None
 
     # Register hooks
     def add_range_type_callback(self, hook: Callable) -> None:
@@ -322,6 +324,16 @@ class _CombinedLoopHooks:
 
     def add_after(self, hook: Callable) -> None:
         self._after.append(hook)
+
+    def set_range_wrapper(self, hook: Callable) -> None:
+        if self._range_wrapper is not None:
+            raise RuntimeError("Only one loop_range wrapper allowed")
+        self._range_wrapper = hook
+
+    def set_condition_wrapper(self, hook: Callable) -> None:
+        if self._condition_wrapper is not None:
+            raise RuntimeError("Only one condition wrapper allowed")
+        self._condition_wrapper = hook
 
     # Call combined hooks
     def range_type(self, lineno: int, range_type: str) -> None:
@@ -354,11 +366,25 @@ class _CombinedLoopHooks:
     ) -> "_LoopIter":
         return _LoopIter(self, iterable, lineno, range_type)
 
+    def loop_range_wrapper(
+        self, range_args: tuple[Any, ...], lineno: int, range_type: str
+    ):
+        if self._range_wrapper is not None:
+            return self._range_wrapper(range_args, lineno, range_type)
+        return range(*range_args)
+
+    def wrap_condition(self, test_expr: Any):
+        if self._condition_wrapper is not None:
+            return self._condition_wrapper(test_expr)
+        return test_expr
+
     def clear(self) -> None:
         self._before.clear()
         self._iter_listeners.clear()
         self._iter_overrider = None
         self._after.clear()
+        self._range_wrapper = None
+        self._condition_wrapper = None
 
 
 class _LoopPatcher:
@@ -367,13 +393,16 @@ class _LoopPatcher:
     def __init__(self):
         self.hooks = _CombinedLoopHooks()
         self._orig_visit_for: Optional[Callable] = None
+        self._orig_visit_if: Optional[Callable] = None
         self._patched: bool = False
 
     def patch(self) -> None:
         """Apply loop patching."""
         if not self._patched:
             self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
+            self._orig_visit_if = getattr(_OrigASTTransformer, "visit_If", None)
             _OrigASTTransformer.visit_For = _visit_For  # type: ignore[assignment]
+            _OrigASTTransformer.visit_If = _visit_If  # type: ignore[assignment]
             self._patched = True
 
     def unpatch(self) -> None:
@@ -383,6 +412,8 @@ class _LoopPatcher:
 
         if self._orig_visit_for is not None:
             _OrigASTTransformer.visit_For = self._orig_visit_for
+        if self._orig_visit_if is not None:
+            _OrigASTTransformer.visit_If = self._orig_visit_if
 
         self.hooks.clear()
         self._patched = False
@@ -418,6 +449,26 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
             elif func.attr == "static_range":
                 range_type = "tl_static_range"
 
+    base_iter = node.iter
+    if range_type != "unknown":
+        base_iter = ast.Call(
+            func=ast.Attribute(
+                value=ast.Attribute(
+                    value=ast.Name(id="_triton_viz_loop_patcher", ctx=ast.Load()),
+                    attr="hooks",
+                    ctx=ast.Load(),
+                ),
+                attr="loop_range_wrapper",
+                ctx=ast.Load(),
+            ),
+            args=[
+                ast.Tuple(elts=node.iter.args, ctx=ast.Load()),
+                ast.Constant(value=node.lineno),
+                ast.Constant(value=range_type),
+            ],
+            keywords=[],
+        )
+
     # _triton_viz_loop_patcher.hooks.loop_iter(range(...), lineno, range_type)
     new_iter = ast.Call(
         func=ast.Attribute(
@@ -430,7 +481,7 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
             ctx=ast.Load(),
         ),
         args=[
-            node.iter,
+            base_iter,
             ast.Constant(value=node.lineno),
             ast.Constant(value=range_type),
         ],
@@ -447,12 +498,38 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     return ast.fix_missing_locations(new_for)
 
 
+def _visit_If(self, node: ast.If):  # type: ignore[override]
+    self.generic_visit(node)
+
+    # _triton_viz_loop_patcher.hooks.wrap_condition(TEST)
+    new_test = ast.Call(
+        func=ast.Attribute(
+            value=ast.Attribute(
+                value=ast.Name(id="_triton_viz_loop_patcher", ctx=ast.Load()),
+                attr="hooks",
+                ctx=ast.Load(),
+            ),
+            attr="wrap_condition",
+            ctx=ast.Load(),
+        ),
+        args=[node.test],
+        keywords=[],
+    )
+
+    node.test = ast.copy_location(new_test, node.test)
+    return node
+
+
 def patch_for_loop(loop_callbacks: ForLoopCallbacks):
     _loop_patcher.patch()
 
     # Registering hooks
     if loop_callbacks.range_type_callback is not None:
         _loop_patcher.hooks.add_range_type_callback(loop_callbacks.range_type_callback)
+    if loop_callbacks.range_wrapper is not None:
+        _loop_patcher.hooks.set_range_wrapper(loop_callbacks.range_wrapper)
+    if loop_callbacks.condition_wrapper is not None:
+        _loop_patcher.hooks.set_condition_wrapper(loop_callbacks.condition_wrapper)
     if loop_callbacks.before_loop_callback is not None:
         _loop_patcher.hooks.add_before(loop_callbacks.before_loop_callback)
     if loop_callbacks.loop_iter_overrider is not None:

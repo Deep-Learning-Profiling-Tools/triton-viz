@@ -441,6 +441,73 @@ class LoopContext:
     # Clean up variable names by removing suffixes like _81, _144
     # Cache compiled regex pattern for better performance
     re_pattern = re.compile(r"(loop_i|arange)_\d+")
+    range_args: Optional[tuple[Any, ...]] = None
+
+
+class _RangeWrapper:
+    """Wraps a concrete iterable while retaining the original symbolic range args."""
+
+    def __init__(self, iterable, symbolic_args):
+        self._iterable = iterable
+        self.symbolic_args = symbolic_args
+
+    def __iter__(self):
+        return iter(self._iterable)
+
+    def __len__(self):
+        return len(self._iterable)
+
+
+def _normalize_range_args(args: tuple[Any, ...]) -> tuple[Any, Any, Any]:
+    if len(args) == 1:
+        return (0, args[0], 1)
+    if len(args) == 2:
+        return (args[0], args[1], 1)
+    if len(args) == 3:
+        return tuple(args)
+    raise TypeError(f"range expected 1 to 3 arguments, got {len(args)}")
+
+
+def _materialize_range_arg(arg: Any) -> int:
+    """Best-effort conversion of symbolic objects to a concrete int for range."""
+
+    if hasattr(arg, "as_long"):
+        try:
+            return int(arg.as_long())
+        except Exception:
+            pass
+
+    if hasattr(arg, "concretize"):
+        try:
+            conc = arg.concretize()
+            if hasattr(conc, "data"):
+                return int(conc.data.item())
+        except Exception:
+            pass
+
+    if hasattr(arg, "to_py"):
+        try:
+            return int(arg.to_py())
+        except Exception:
+            pass
+
+    try:
+        return int(arg)
+    except Exception:
+        raise TypeError(
+            f"Cannot convert range argument of type {type(arg)} to int: {arg}"
+        )
+
+
+def _z3_from_value(val: Any) -> tuple[ArithRef, list[BoolRef]]:
+    if isinstance(val, SymbolicExpr):
+        return val.eval()
+    if isinstance(val, ArithRef):
+        return val, []
+    try:
+        return IntVal(int(val)), []
+    except Exception as exc:
+        raise TypeError(f"Cannot convert range value {val} (type {type(val)}) to z3") from exc
 
 
 class Sanitizer(Client):
@@ -599,18 +666,18 @@ class SymbolicExprDataWrapper:
 
     @property
     def size(self):
-        return 2
+        return 1
 
     def __int__(self):
         int_val, _ = self.symbolic_expr.eval()
         if isinstance(int_val, BoolRef):
-            return 1 if int_val else 0
+            self.value = 1 if int_val else 0
         if isinstance(int_val, IntNumRef):
-            return int_val.as_long()
+            self.value = int_val.as_long()
         if isinstance(int_val, int):
-            return int_val
+            self.value = int_val
         if isinstance(int_val, ArithRef):
-            return self.symbolic_expr.concretize()
+            self.value = self.symbolic_expr.concretize().data.item()
         raise ValueError(
             f"SymbolicExprDataWrapper is type: {type(int_val)}, value: {int_val} and cannot be converted to int"
         )
@@ -997,7 +1064,7 @@ class SymbolicExpr:
 
     @property
     def data(self):
-        return SymbolicExprDataWrapper(self.__str__(), self)
+        return SymbolicExprDataWrapper(self.__str__(), self).value
 
     triton_scala_dtypes = (
         tl.int1,
@@ -2078,15 +2145,53 @@ class SanitizerSymbolicExecution(Sanitizer):
 
     def register_for_loop_callback(self):
         def loop_hook_before(lineno, iterable):
-            if not isinstance(iterable, range):
+            if not isinstance(iterable, range) and not hasattr(
+                iterable, "symbolic_args"
+            ):
                 if cfg.verbose:
                     print("not a for-loop, skipping for-loop iterator association.")
                 return
             length = len(iterable)
             idx_z3 = Int(f"loop_i_{lineno}")
-            self.loop_stack.append(LoopContext(lineno, length, idx_z3))
+            ctx = LoopContext(lineno, length, idx_z3)
+            if hasattr(iterable, "symbolic_args"):
+                ctx.range_args = iterable.symbolic_args
+            self.loop_stack.append(ctx)
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ enter loop@{lineno}, len={length}")
+
+        def loop_range_wrapper(range_args: tuple[Any, ...], lineno: int, range_type: str):
+            normalized_args = _normalize_range_args(range_args)
+            concrete_args = [_materialize_range_arg(arg) for arg in normalized_args]
+            iterable = range(*concrete_args)
+            return _RangeWrapper(iterable, normalized_args)
+
+        def condition_wrapper(test_expr):
+            sym = SymbolicExpr.from_value(test_expr)
+
+            class _CondWrapper:
+                def __init__(self, symbolic_expr):
+                    self.symbolic_expr = symbolic_expr
+                    self._concrete = None
+
+                @property
+                def data(self):
+                    return self.symbolic_expr
+
+                def __bool__(self):
+                    if self._concrete is None:
+                        conc = self.symbolic_expr.concretize()
+                        if hasattr(conc, "data"):
+                            data = conc.data
+                            if data.size == 1:
+                                self._concrete = data.item()
+                            else:
+                                self._concrete = bool(data.any())
+                        else:
+                            self._concrete = conc
+                    return bool(self._concrete)
+
+            return _CondWrapper(sym)
 
         def loop_hook_iter_overrider(lineno, idx):
             # collect iterator values
@@ -2107,7 +2212,17 @@ class SanitizerSymbolicExecution(Sanitizer):
             ctx = self.loop_stack.pop()
             # add constraints for loop_i
             iterator_constraints: list[BoolRef] = []
-            if ctx.values:
+            if ctx.range_args:
+                start, stop, step = ctx.range_args
+                start_z3, start_cons = _z3_from_value(start)
+                stop_z3, stop_cons = _z3_from_value(stop)
+                step_z3, step_cons = _z3_from_value(step)
+                iterator_constraints.extend(start_cons + stop_cons + step_cons)
+                iterator_constraints.append(ctx.idx_z3 >= start_z3)
+                iterator_constraints.append(ctx.idx_z3 < stop_z3)
+                iterator_constraints.append(step_z3 != 0)
+                iterator_constraints.append((ctx.idx_z3 - start_z3) % step_z3 == 0)
+            elif ctx.values:
                 iterator_constraints.append(
                     Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
                 )
@@ -2142,6 +2257,8 @@ class SanitizerSymbolicExecution(Sanitizer):
                 )
 
         return ForLoopCallbacks(
+            range_wrapper=loop_range_wrapper,
+            condition_wrapper=condition_wrapper,
             before_loop_callback=loop_hook_before,
             loop_iter_overrider=loop_hook_iter_overrider,
             loop_iter_listener=loop_hook_iter_listener,

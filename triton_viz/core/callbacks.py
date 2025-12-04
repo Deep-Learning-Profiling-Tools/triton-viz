@@ -13,6 +13,8 @@ class OpCallbacks:
 @dataclass
 class ForLoopCallbacks:
     range_type_callback: Optional[Callable] = None
+    range_wrapper: Optional[Callable] = None
+    condition_wrapper: Optional[Callable] = None
     before_loop_callback: Optional[Callable] = None
     loop_iter_overrider: Optional[Callable] = None
     loop_iter_listener: Optional[Callable] = None

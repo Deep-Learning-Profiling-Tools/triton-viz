@@ -307,7 +307,9 @@ class Profiler(Client):
             if self.disable_for_loop_unroll_check:
                 return
 
-            if not isinstance(iterable, range):
+            if not isinstance(iterable, range) and not hasattr(
+                iterable, "symbolic_args"
+            ):
                 return
 
             # Only record each unique loop (by line number) once
