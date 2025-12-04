@@ -1070,11 +1070,11 @@ class SymbolicExpr:
 
     @classmethod
     def from_value(cls, var):
-        if isinstance(var, cls):  # if already SymbolicExpr
-            return var
-
         if isinstance(var, tl.core.tensor):  # if a triton tensor
             var = var.handle  # get its handle
+
+        if isinstance(var, cls):  # if already SymbolicExpr
+            return var
 
         dtype_tt = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
