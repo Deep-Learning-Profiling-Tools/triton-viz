@@ -1806,6 +1806,14 @@ class SanitizerSymbolicExecution(Sanitizer):
                 self.need_full_grid = True
                 ptr = _replace_load_subtree(ptr)
 
+            if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
+                self.need_full_grid = True
+                mask = _replace_load_subtree(mask)
+            
+            if isinstance(other, SymbolicExpr) and other.has_op("load"):
+                self.need_full_grid = True
+                other = _replace_load_subtree(other)
+
             # make sure ptr dtype is valid
             if isinstance(ptr, TensorHandle) and not isinstance(
                 ptr.dtype, tl.pointer_type
@@ -1832,6 +1840,14 @@ class SanitizerSymbolicExecution(Sanitizer):
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
                 self.need_full_grid = True
                 ptr = _replace_load_subtree(ptr)
+
+            if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
+                self.need_full_grid = True
+                mask = _replace_load_subtree(mask)
+            
+            if isinstance(value, SymbolicExpr) and value.has_op("load"):
+                self.need_full_grid = True
+                value = _replace_load_subtree(value)
 
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and not isinstance(
