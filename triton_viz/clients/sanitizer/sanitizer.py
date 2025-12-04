@@ -2060,7 +2060,6 @@ class SanitizerSymbolicExecution(Sanitizer):
             Advance: op_advance_overrider,
             FpToFp: op_fptofp_overrider,
             Umulhi: op_umulhi_overrider,
-            Trans: op_trans_overrider,
             CumSum: op_cumsum_overrider,
             Bitcast: op_bitcast_overrider,
             AtomicCas: op_atomic_cas_overrider,
