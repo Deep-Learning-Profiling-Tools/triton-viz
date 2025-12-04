@@ -2029,11 +2029,6 @@ class SanitizerSymbolicExecution(Sanitizer):
             offsets_sym = SymbolicExpr.from_value(offsets)
             return SymbolicExpr("advance", ptr_sym, offsets_sym)
 
-        def op_fptofp_overrider(src, dst_type, rounding_mode):
-            return SymbolicExpr(
-                "fptofp", SymbolicExpr.from_value(src), dst_type, rounding_mode
-            )
-
         def op_umulhi_overrider(lhs, rhs):
             lhs_sym = SymbolicExpr.from_value(lhs)
             rhs_sym = SymbolicExpr.from_value(rhs)

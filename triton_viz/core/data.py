@@ -233,10 +233,6 @@ class Bitcast(Op):
     name: ClassVar[str] = "bitcast"
 
 @dataclass
-class FpToFp(Op):
-    name: ClassVar[str] = "fp_to_fp"
-
-@dataclass
 class AtomicCas(Op):
     name: ClassVar[str] = "atomic_cas"
 
