@@ -2047,6 +2047,11 @@ class SanitizerSymbolicExecution(Sanitizer):
                 "cumsum", SymbolicExpr.from_value(input), axis, reverse, dtype
             )
 
+        def op_fp_to_fp_overrider(src, dst_type, rounding_mode):
+            return SymbolicExpr(
+                "fp_to_fp", SymbolicExpr.from_value(src), dst_type, rounding_mode
+            )
+
         def op_bitcast_overrider(src, dst_type):
             src_sym = SymbolicExpr.from_value(src)
             return SymbolicExpr("bitcast", src_sym, dst_type)
