@@ -622,7 +622,6 @@ class SymbolicExprDataWrapper:
 
     def __int__(self):
         int_val, _ = self.symbolic_expr.eval()
-        print(self.symbolic_expr, int_val)
         if isinstance(int_val, IntNumRef):
             return int_val.as_long()
         if isinstance(int_val, int):
@@ -1093,7 +1092,7 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> tuple[Union[ArithRef, list[ArithRef]], list[BoolRef]]:
+    def eval(self) -> tuple[ArithRef, list]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression corresponding to the root node
@@ -1519,6 +1518,7 @@ def _replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
         expr.dtype_tt = concrete.dtype
         expr.children.clear()
         expr.concrete_fn = None
+        expr._z3 = None
 
     return expr
 
@@ -2117,10 +2117,14 @@ class SanitizerSymbolicExecution(Sanitizer):
             """
             if isinstance(expr, SymbolicExpr):
                 val, constraints = expr.eval()
+                if isinstance(val, list):
+                    val = val[0]
+                if isinstance(val, IntNumRef):
+                    return val.as_long()
+                if isinstance(val, int):
+                    return val
             elif isinstance(expr, ArithRef):
                 val, constraints = expr, []
-            elif isinstance(expr, TensorHandle):
-                return int(expr.data.item())
             else:
                 return int(expr)
 
