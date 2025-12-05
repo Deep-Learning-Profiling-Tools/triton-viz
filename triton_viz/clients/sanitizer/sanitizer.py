@@ -1214,7 +1214,7 @@ class SymbolicExpr:
                     v = If(v, IntVal(1), IntVal(0))
                 if isinstance(v, BitVecRef):
                     return v
-                return Int2BV(bitwidth, v)
+                return Int2BV(v, bitwidth)
 
             def _from_bv(v):
                 if isinstance(v, list):
