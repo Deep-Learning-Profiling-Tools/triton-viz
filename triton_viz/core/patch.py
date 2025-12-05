@@ -242,6 +242,8 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
             op_name = reduce_map[op_type].__name__
         elif op_type in scan_map:
             op_name = scan_map[op_type].__name__
+        elif op_type in reshape_map:
+            op_name = reshape_map[op_type].__name__
         original_op = getattr(tl, op_name)
         patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
