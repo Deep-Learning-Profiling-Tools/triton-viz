@@ -653,17 +653,6 @@ def _load_post(self):
     self.dtype_tt = self.ptr.dtype_tt.element_ty
 
 
-def _reduce_post(self):
-    input = self.children["input"]
-    keepdims = self.children["keepdims"]
-    if keepdims.value:
-        self.shape = input.shape
-    else:
-        self.shape = tuple(
-            dim for i, dim in enumerate(input.shape) if i not in self.children["axis"].value
-        )
-
-
 def _reshape_dtype(self):
     self.dtype_tt = self.children["arg"].dtype_tt
 
@@ -824,9 +813,9 @@ class SymbolicExpr:
         # Ternary ops
         "where": Spec(req=("cond", "lhs", "rhs")),
         # Reduction ops
-        "sum": Spec(req=("input", "axis", "keepdims"), post=_reduce_post),
-        "max": Spec(req=("input", "axis", "keepdims"), post=_reduce_post),
-        "min": Spec(req=("input", "axis", "keepdims"), post=_reduce_post),
+        "sum": Spec(req=("input", "axis", "keepdims")),
+        "max": Spec(req=("input", "axis", "keepdims")),
+        "min": Spec(req=("input", "axis", "keepdims")),
         # Scan Ops
         "cumsum": Spec(req=("input", "axis", "reverse", "dtype")),
         "dot": Spec(req=("a", "b"), opt=("d",)),

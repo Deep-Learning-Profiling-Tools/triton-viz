@@ -176,6 +176,9 @@ scan_map: dict[type[Op], Callable] = {
 math_map: dict[type[Op], Callable] = {
     Umulhi: tl.math.umulhi,
 }
+reshape_map: dict[type[Op], Callable] = {
+	Trans: tl.trans,
+}
 
 
 class PatchOp:
@@ -193,7 +196,7 @@ class PatchOp:
         if self.callbacks.before_callback:
             self.callbacks.before_callback(*args, **kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in reduce_map or self.op_type in scan_map:
+            if self.op_type in reduce_map or self.op_type in scan_map or self.op_type in reshape_map:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
