@@ -68,6 +68,6 @@ else:
     compiled_kernel = nki.jit(softmax_kernel, kernel_return=False)
     nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
 
-y_expected = np.exp(x_small) / np.exp(x_small).sum(-1, keepdim=True)
+y_expected = np.exp(x_small) / np.exp(x_small).sum(-1, keepdims=True)
 print(np.max(np.abs(y_expected - y_small)))
 assert np.allclose(y_expected, y_small)
