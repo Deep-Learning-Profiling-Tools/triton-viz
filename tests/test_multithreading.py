@@ -8,6 +8,8 @@ import triton
 import triton.language as tl
 
 import triton_viz
+from triton_viz.clients.profiler.profiler import Profiler
+from triton_viz.core.config import config as cfg
 
 trace_state = importlib.import_module("triton_viz.core.trace")
 
@@ -129,6 +131,23 @@ def _write_pid(out):
     tl.store(out + pid, pid)
 
 
+@triton.jit
+def _profiler_load_store(x, out):
+    pid = tl.program_id(0)
+    arange = tl.arange(0, 8)
+    offset = pid * 8 + arange
+    vals = tl.load(x + offset)
+    tl.store(out + offset, vals)
+
+
+@triton_viz.trace("sanitizer")
+@triton.jit
+def _sanitizer_two_blocks(x, out):
+    pid = tl.program_id(0)
+    x_slice = tl.load(x) + tl.cast(pid, tl.float32)
+    tl.store(out + pid, x_slice)
+
+
 def test_tracer_records_all_blocks(two_sms):
     """Tracer should record a Grid entry for every launched block when multiple blocks run."""
     out = torch.zeros((4,), dtype=torch.float32)
@@ -137,3 +156,67 @@ def test_tracer_records_all_blocks(two_sms):
     grid_records = [r for r in trace_state.launches[-1].records if hasattr(r, "idx")]
     seen = {tuple(record.idx) for record in grid_records}
     assert seen == {(i, 0, 0) for i in range(4)}
+
+
+def test_tracer_records_are_thread_safe(two_sms):
+    """Run many blocks concurrently and ensure every block is recorded once."""
+    out = torch.zeros((32,), dtype=torch.float32)
+    _write_pid[(32,)](out)
+    assert trace_state.launches, "trace launch should be recorded"
+    grid_records = [r for r in trace_state.launches[-1].records if hasattr(r, "idx")]
+    seen = {tuple(record.idx) for record in grid_records}
+    assert seen == {(i, 0, 0) for i in range(32)}
+
+
+def test_sanitizer_handles_concurrent_blocks(two_sms):
+    """Sanitizer should complete and report no OOB even when blocks run concurrently."""
+    x = torch.tensor(3.0)
+    out = torch.zeros((2,), dtype=torch.float32)
+    thread = threading.Thread(target=lambda: _sanitizer_two_blocks[(2,)](x, out))
+    thread.start()
+    thread.join(timeout=3)
+    assert not thread.is_alive(), "sanitizer execution should complete under timeout"
+    # Symbolic sanitizer may not perform concrete stores; just ensure no OOB records
+    assert not trace_state.launches[-1].records, "sanitizer should not report OOB"
+
+
+def test_sanitizer_handles_serial_blocks(one_sm):
+    """Sanitizer should complete and report no OOB even when blocks run sequentially."""
+    x = torch.tensor(3.0)
+    out = torch.zeros((2,), dtype=torch.float32)
+    thread = threading.Thread(target=lambda: _sanitizer_two_blocks[(2,)](x, out))
+    thread.start()
+    thread.join(timeout=3)
+    assert not thread.is_alive(), "sanitizer execution should complete under timeout"
+    assert not trace_state.launches[-1].records, "sanitizer should not report OOB"
+
+
+def _run_profiler_load_store():
+    prev_block_sampling = cfg.profiler_enable_block_sampling
+    prev_skip = cfg.profiler_enable_load_store_skipping
+    cfg.profiler_enable_block_sampling = False
+    cfg.profiler_enable_load_store_skipping = False
+    try:
+        profiler = Profiler(disable_buffer_load_check=True)
+        traced = triton_viz.trace(profiler)(_profiler_load_store)
+        x = torch.ones((16,), dtype=torch.float32)
+        out = torch.zeros_like(x)
+        traced[(2,)](x, out)
+        return profiler.load_mask_total_count, profiler.store_mask_total_count
+    finally:
+        cfg.profiler_enable_block_sampling = prev_block_sampling
+        cfg.profiler_enable_load_store_skipping = prev_skip
+
+
+def test_profiler_counts_serial(one_sm):
+    """Profiler load/store mask counts should be stable when blocks run sequentially."""
+    load_total, store_total = _run_profiler_load_store()
+    assert load_total == 16
+    assert store_total == 16
+
+
+def test_profiler_counts_concurrent(two_sms):
+    """Profiler load/store mask counts should match concurrent execution."""
+    load_total, store_total = _run_profiler_load_store()
+    assert load_total == 16
+    assert store_total == 16
