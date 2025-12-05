@@ -197,7 +197,7 @@ def _run_profiler_load_store():
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_enable_load_store_skipping = False
     try:
-        profiler = Profiler(disable_buffer_load_check=True)
+        profiler = Profiler()
         traced = triton_viz.trace(profiler)(_profiler_load_store)
         x = torch.ones((16,), dtype=torch.float32)
         out = torch.zeros_like(x)

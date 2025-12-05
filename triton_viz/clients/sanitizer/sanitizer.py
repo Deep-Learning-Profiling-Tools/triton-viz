@@ -24,7 +24,7 @@ from z3 import (
 from z3.z3 import BoolRef, ArithRef, IntNumRef
 
 import triton.language as tl
-from triton.runtime.interpreter import TensorHandle
+from triton.runtime.interpreter import TensorHandle, _get_np_dtype
 
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
@@ -54,13 +54,13 @@ from ...core.data import (
     Rsqrt,
     CastImpl,
     Reshape,
+    Trans,
     Join,
     Fabs,
     Ashr,
     Advance,
     FpToFp,
     Umulhi,
-    Trans,
     CumSum,
     Bitcast,
     AtomicCas,
@@ -643,7 +643,7 @@ def _load_post(self):
     self.dtype_tt = self.ptr.dtype_tt.element_ty
 
 
-def _broadcast_dtype(self):
+def _reshape_dtype(self):
     self.dtype_tt = self.children["arg"].dtype_tt
 
 
@@ -732,7 +732,7 @@ class SymbolicExpr:
     REDUCE_OPS = ("sum", "max", "min", "dot")
     SCAN_OPS = ("cumsum",)
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
-    BROADCAST_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join")
+    RESHAPE_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join", "trans")
     CAST_OPS = ("cast_impl", "bitcast")
     ATOMIC_OPS = ("atomic_cas", "atomic_rmw")
     SUPPORTED_OPS = (
@@ -743,7 +743,7 @@ class SymbolicExpr:
         + TERNARY_OPS
         + REDUCE_OPS
         + POINTER_OPS
-        + BROADCAST_OPS
+        + RESHAPE_OPS
         + CAST_OPS
         + SCAN_OPS
         + ATOMIC_OPS
@@ -815,10 +815,11 @@ class SymbolicExpr:
         ),
         "addptr": Spec(req=("ptr", "offset"), post=_addptr_post),
         # Broadcasting / shape manipulation
-        "splat": Spec(req=("shape", "arg"), post=_broadcast_dtype),
-        "expand_dims": Spec(req=("arg", "axis"), post=_broadcast_dtype),
-        "broadcast": Spec(req=("arg", "shape"), post=_broadcast_dtype),
-        "reshape": Spec(req=("arg", "shape"), post=_broadcast_dtype),
+        "splat": Spec(req=("shape", "arg"), post=_reshape_dtype),
+        "expand_dims": Spec(req=("arg", "axis"), post=_reshape_dtype),
+        "broadcast": Spec(req=("arg", "shape"), post=_reshape_dtype),
+        "reshape": Spec(req=("arg", "shape"), post=_reshape_dtype),
+        "trans": Spec(req=("arg", "permutation"), post=_reshape_dtype),
         "join": Spec(req=("lhs", "rhs"), post=_join_post),
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
@@ -1251,7 +1252,7 @@ class SymbolicExpr:
                 self._constraints.append(mask)
             self._z3 = ptr
 
-        if self.op in ("splat", "expand_dims", "broadcast"):
+        if self.op in ("splat", "expand_dims", "broadcast", "reshape", "trans"):
             self._z3, self._constraints = self.arg._to_z3()
 
         if self.op == "join":
@@ -1395,9 +1396,10 @@ class SymbolicExpr:
         # concretize logic
         if obj.concrete_fn is None:
             if obj.op == "const":
-                if obj.dtype_tt == tl.pointer_type:
+                if isinstance(obj.value, SymbolicExpr.builtin_scala_types):
                     result = TensorHandle(
-                        np.array([obj.value], dtype=np.uint64), obj.dtype_tt
+                        np.array([obj.value], dtype=_get_np_dtype(obj.dtype_tt)),
+                        obj.dtype_tt,
                     )
                 else:
                     result = TensorHandle(obj.value, obj.dtype_tt)
@@ -1978,20 +1980,14 @@ class SanitizerSymbolicExecution(Sanitizer):
             arg_sym = SymbolicExpr.from_value(arg)
             shape_sym = SymbolicExpr.from_value(shape)
             # Create a reshape symbolic expression
-            result = SymbolicExpr("reshape", arg_sym, shape_sym)
-            # The dtype should be preserved from the input
-            result.dtype_tt = arg_sym.dtype_tt if hasattr(arg_sym, "dtype_tt") else None
-            return result
+            return SymbolicExpr("reshape", arg_sym, shape_sym)
 
         def op_join_overrider(lhs, rhs):
             # Join operation combines two tensors along the last axis
             lhs_sym = SymbolicExpr.from_value(lhs)
             rhs_sym = SymbolicExpr.from_value(rhs)
             # Create a join symbolic expression
-            result = SymbolicExpr("join", lhs_sym, rhs_sym)
-            # The dtype should be preserved from the inputs
-            result.dtype_tt = lhs_sym.dtype_tt if hasattr(lhs_sym, "dtype_tt") else None
-            return result
+            return SymbolicExpr("join", lhs_sym, rhs_sym)
 
         def op_fabs_overrider(arg):
             arg_sym = SymbolicExpr.from_value(arg)
@@ -2028,28 +2024,19 @@ class SanitizerSymbolicExecution(Sanitizer):
 
         def op_bitcast_overrider(src, dst_type):
             src_sym = SymbolicExpr.from_value(src)
-            result = SymbolicExpr("bitcast", src_sym, dst_type)
-            result.dtype_tt = dst_type
-            return result
+            return SymbolicExpr("bitcast", src_sym, dst_type)
 
         def op_atomic_cas_overrider(ptr, cmp, val, sem, scope):
             ptr_sym = SymbolicExpr.from_value(ptr)
             cmp_sym = SymbolicExpr.from_value(cmp)
             val_sym = SymbolicExpr.from_value(val)
-            # sem is a MEM_SEMANTIC enum, not a regular value, so we pass it directly
-            result = SymbolicExpr("atomic_cas", ptr_sym, cmp_sym, val_sym)
-            result.sem = sem  # Store sem as an attribute
-            return result
+            return SymbolicExpr("atomic_cas", ptr_sym, cmp_sym, val_sym)
 
         def op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope):
             ptr_sym = SymbolicExpr.from_value(ptr)
             val_sym = SymbolicExpr.from_value(val)
             mask_sym = SymbolicExpr.from_value(mask)
-            # rmwOp and sem are enums, not regular values, so we pass them directly
-            result = SymbolicExpr("atomic_rmw", ptr_sym, val_sym, mask_sym)
-            result.rmwOp = rmwOp  # Store rmwOp as an attribute
-            result.sem = sem  # Store sem as an attribute
-            return result
+            return SymbolicExpr("atomic_rmw", ptr_sym, val_sym, mask_sym)
 
         OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
             ProgramId: op_program_id_overrider,
@@ -2076,13 +2063,13 @@ class SanitizerSymbolicExecution(Sanitizer):
             Rsqrt: op_rsqrt_overrider,
             CastImpl: op_cast_impl_overrider,
             Reshape: op_reshape_overrider,
+            Trans: op_trans_overrider,
             Join: op_join_overrider,
             Fabs: op_fabs_overrider,
             Ashr: op_ashr_overrider,
             Advance: op_advance_overrider,
             FpToFp: op_fptofp_overrider,
             Umulhi: op_umulhi_overrider,
-            Trans: op_trans_overrider,
             CumSum: op_cumsum_overrider,
             Bitcast: op_bitcast_overrider,
             AtomicCas: op_atomic_cas_overrider,

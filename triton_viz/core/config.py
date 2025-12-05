@@ -50,8 +50,8 @@ class Config:
             os.getenv("SANITIZER_ENABLE_KERNEL_CACHE", "1") == "1"
         )
 
-        # --- Virtual memory flag ---
-        self._virtual_memory = os.getenv("TRITON_VIZ_VIRTUAL_MEMORY", "0") == "1"
+        # --- Fake tensor flag ---
+        self._virtual_memory = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "0") == "1"
 
         # --- Profiler Optimization Ablation Study ---
         # Optimization 1: enable load/store/dot skipping
@@ -62,6 +62,12 @@ class Config:
         # Optimization 2: Profiler enable block sampling
         self._profiler_enable_block_sampling = (
             os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
+        )
+
+        # --- Profiler Performance Issues Detection ---
+        # AMD Buffer Load Check: detects buffer_load instruction usage in kernel ASM
+        self._profiler_disable_buffer_load_check = (
+            os.getenv("PROFILER_DISABLE_BUFFER_LOAD_CHECK", "0") == "1"
         )
 
     # ---------- disable_sanitizer ----------
@@ -190,6 +196,25 @@ class Config:
     @property
     def virtual_memory(self) -> bool:
         return self._virtual_memory
+
+    # ---------- profiler_disable_buffer_load_check ----------
+    @property
+    def profiler_disable_buffer_load_check(self) -> bool:
+        return self._profiler_disable_buffer_load_check
+
+    @profiler_disable_buffer_load_check.setter
+    def profiler_disable_buffer_load_check(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_disable_buffer_load_check expects a bool.")
+
+        previous = getattr(self, "_profiler_disable_buffer_load_check", None)
+        self._profiler_disable_buffer_load_check = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler buffer load check disabled.")
+        elif not value and previous:
+            print("Profiler buffer load check enabled.")
 
 
 config = Config()
