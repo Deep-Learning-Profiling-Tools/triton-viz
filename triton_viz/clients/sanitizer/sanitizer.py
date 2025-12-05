@@ -837,7 +837,9 @@ class SymbolicExpr:
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
-        "fp_to_fp": Spec(req=("src", "dst_type", "rounding_mode"), post=_cast_impl_post),
+        "fp_to_fp": Spec(
+            req=("src", "dst_type", "rounding_mode"), post=_cast_impl_post
+        ),
         # Atomic operations
         "atomic_cas": Spec(req=("ptr", "cmp", "val")),
         "atomic_rmw": Spec(req=("ptr", "val", "mask")),
@@ -1290,6 +1292,7 @@ class SymbolicExpr:
 
         # where(cond, lhs, rhs)
         if self.op == "where":
+
             def _normalize(expr):
                 if not isinstance(expr, list):
                     return [expr]
@@ -1302,9 +1305,11 @@ class SymbolicExpr:
                     if len(lst) == 1:
                         broadcasted.append(lst * max_len)
                     else:
-                        assert len(lst) == max_len, "Incompatible lengths for broadcasting"
+                        assert (
+                            len(lst) == max_len
+                        ), "Incompatible lengths for broadcasting"
                         broadcasted.append(lst)
-                return tuple(broadcasted) 
+                return tuple(broadcasted)
 
             cond, constraints_cond = self.cond._to_z3()
             lhs, constraints_lhs = self.lhs._to_z3()
@@ -1920,7 +1925,6 @@ class SanitizerSymbolicExecution(Sanitizer):
                 self.need_full_grid = True
                 mask = _replace_load_subtree(mask)
 
-
             # make sure ptr dtype is valid
             if isinstance(ptr, TensorHandle) and not isinstance(
                 ptr.dtype, tl.pointer_type
@@ -1933,7 +1937,12 @@ class SanitizerSymbolicExecution(Sanitizer):
             elif other is None:
                 ret = SymbolicExpr("load", ptr_sym, SymbolicExpr.from_value(mask))
             else:
-                ret = SymbolicExpr("load", ptr_sym, SymbolicExpr.from_value(mask), SymbolicExpr.from_value(other))
+                ret = SymbolicExpr(
+                    "load",
+                    ptr_sym,
+                    SymbolicExpr.from_value(mask),
+                    SymbolicExpr.from_value(other),
+                )
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
@@ -1963,7 +1972,12 @@ class SanitizerSymbolicExecution(Sanitizer):
             if mask is None:
                 ret = SymbolicExpr("store", ptr_sym, SymbolicExpr.from_value(value))
             else:
-                ret = SymbolicExpr("store", ptr_sym, SymbolicExpr.from_value(value), SymbolicExpr.from_value(mask))
+                ret = SymbolicExpr(
+                    "store",
+                    ptr_sym,
+                    SymbolicExpr.from_value(value),
+                    SymbolicExpr.from_value(mask),
+                )
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
@@ -2245,9 +2259,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             if hasattr(bound_val, "as_long"):
                 return bound_val.as_long()
 
-            raise ValueError(
-                f"Failed to materialize loop bound for expression: {expr}"
-            )
+            raise ValueError(f"Failed to materialize loop bound for expression: {expr}")
 
         def _get_constant_step(step_expr) -> int:
             """
@@ -2295,7 +2307,9 @@ class SanitizerSymbolicExecution(Sanitizer):
             # Prefer explicit args; fall back to kwargs when args are empty.
             if not args and iter_kwargs:
                 start_expr = _resolve_bound(iter_kwargs.get("start", 0))
-                stop_expr = _resolve_bound(iter_kwargs.get("stop", iter_kwargs.get("end")))
+                stop_expr = _resolve_bound(
+                    iter_kwargs.get("stop", iter_kwargs.get("end"))
+                )
                 step_expr = _resolve_bound(iter_kwargs.get("step", 1))
                 if stop_expr is not None:
                     args = (start_expr, stop_expr, step_expr)
@@ -2340,7 +2354,9 @@ class SanitizerSymbolicExecution(Sanitizer):
         def loop_hook_before(lineno, iterable):
             if not isinstance(iterable, RangeWrapper):
                 if cfg.verbose:
-                    print("not a range wrapper, skipping for-loop iterator association.")
+                    print(
+                        "not a range wrapper, skipping for-loop iterator association."
+                    )
                 return
 
             idx_z3 = Int(f"loop_i_{lineno}")
@@ -2434,7 +2450,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 print(
                     f"[Sanitizer] ▶ leave loop@{lineno} end. "
                     f"(checked {len(ctx.pending_checks)} unique addr patterns)"
-            )
+                )
 
         return ForLoopCallbacks(
             range_wrapper_factory=_wrap_range,

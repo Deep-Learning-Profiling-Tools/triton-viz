@@ -232,6 +232,7 @@ class CumSum(Op):
 class Bitcast(Op):
     name: ClassVar[str] = "bitcast"
 
+
 @dataclass
 class AtomicCas(Op):
     name: ClassVar[str] = "atomic_cas"
