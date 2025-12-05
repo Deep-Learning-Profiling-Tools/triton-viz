@@ -2045,7 +2045,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             rhs_sym = SymbolicExpr.from_value(rhs)
             return SymbolicExpr("umulhi", lhs_sym, rhs_sym)
 
-        def op_trans_overrider(arg, perm):
+        def op_trans_overrider(arg, perm=[1, 0]):
             return SymbolicExpr("trans", SymbolicExpr.from_value(arg), perm)
 
         def op_cumsum_overrider(input, axis, reverse=False, dtype=None):
