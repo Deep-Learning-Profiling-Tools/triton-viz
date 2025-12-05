@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from functools import cached_property, reduce
 from typing import Any, Optional, Union
 import re
-import threading
 
 import numpy as np
 from torch import Tensor
@@ -465,47 +464,6 @@ class Sanitizer(Client):
 
     def __init__(self, *args, **kwargs):
         super().__init__()
-        self._lock = threading.RLock()
-
-    def _lock_op_callbacks(self, callbacks: OpCallbacks) -> OpCallbacks:
-        """Wrap OpCallbacks so each hook runs under the sanitizer lock."""
-
-        def _wrap(fn):
-            if fn is None:
-                return None
-
-            def wrapped(*args, **kwargs):
-                with self._lock:
-                    return fn(*args, **kwargs)
-
-            return wrapped
-
-        return OpCallbacks(
-            before_callback=_wrap(callbacks.before_callback),
-            after_callback=_wrap(callbacks.after_callback),
-            op_overrider=_wrap(callbacks.op_overrider),
-        )
-
-    def _lock_for_loop_callbacks(self, callbacks: ForLoopCallbacks) -> ForLoopCallbacks:
-        """Wrap ForLoopCallbacks so each hook runs under the sanitizer lock."""
-
-        def _wrap(fn):
-            if fn is None:
-                return None
-
-            def wrapped(*args, **kwargs):
-                with self._lock:
-                    return fn(*args, **kwargs)
-
-            return wrapped
-
-        return ForLoopCallbacks(
-            range_type_callback=_wrap(callbacks.range_type_callback),
-            before_loop_callback=_wrap(callbacks.before_loop_callback),
-            loop_iter_overrider=_wrap(callbacks.loop_iter_overrider),
-            loop_iter_listener=_wrap(callbacks.loop_iter_listener),
-            after_loop_callback=_wrap(callbacks.after_loop_callback),
-        )
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
@@ -556,44 +514,49 @@ class SanitizerBruteForce(Sanitizer):
         self.grid_idx: Optional[tuple[int, ...]] = None
         self.last_grid: Optional[tuple[int, int, int]] = None
 
-    def _report(self, op_type, record):
-        with self._lock:
-            traceback_info = _get_traceback_info()
-            oob_record = OutOfBoundsRecordBruteForce(
-                op_type=op_type, user_code_tracebacks=traceback_info, **record
-            )
-            if self.abort_on_error:
-                if np.any(oob_record.invalid_access_masks):
-                    print_oob_record(oob_record)
-                    assert (
-                        False
-                    ), "Out-of-bounds access detected. See detailed report above."
-            else:
-                self.records.append(oob_record)
+    def _report(
+        self, op_type, record
+    ):  # internal methods assumed to be called under the lock; TODO: should I just use an RLock?
+        traceback_info = _get_traceback_info()
+        oob_record = OutOfBoundsRecordBruteForce(
+            op_type=op_type, user_code_tracebacks=traceback_info, **record
+        )
+        if self.abort_on_error:
+            if np.any(oob_record.invalid_access_masks):
+                print_oob_record(oob_record)
+                assert (
+                    False
+                ), "Out-of-bounds access detected. See detailed report above."
+        else:
+            self.records.append(oob_record)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
 
     def post_run_callback(self, fn: Callable) -> bool:
-        if self.grid_idx == self.last_grid:
-            self.tensors.clear()
+        with self._lock:
+            if self.grid_idx == self.last_grid:
+                self.tensors.clear()
         return True
 
     def arg_callback(self, name, arg, arg_cvt):
-        if hasattr(arg, "data_ptr"):
-            assert check_storage_contiguous(
-                arg
-            ), "The address sanitizer only supports contiguouly stored tensors for now"
-            self.tensors.append(arg)
+        with self._lock:
+            if hasattr(arg, "data_ptr"):
+                assert check_storage_contiguous(
+                    arg
+                ), "The address sanitizer only supports contiguouly stored tensors for now"
+                self.tensors.append(arg)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
-        self.grid_idx = grid_idx
+        self.grid_idx = grid_idx  # grid_idx is thread-local so no need to lock
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
-        self.last_grid = _get_last_grid(grid)
-        self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
+        with self._lock:
+            self.last_grid = _get_last_grid(grid)
+            self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        @self.lock_fn
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -604,6 +567,7 @@ class SanitizerBruteForce(Sanitizer):
             self._report(op_type, oob)
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
+        @self.lock_fn
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
@@ -615,21 +579,18 @@ class SanitizerBruteForce(Sanitizer):
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
         if op_type is Load:
-            return self._lock_op_callbacks(
-                OpCallbacks(before_callback=pre_load_callback)
-            )
+            return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
-            return self._lock_op_callbacks(
-                OpCallbacks(before_callback=pre_store_callback)
-            )
+            return OpCallbacks(before_callback=pre_store_callback)
 
-        return self._lock_op_callbacks(OpCallbacks())
+        return OpCallbacks()
 
     def register_for_loop_callback(self):
-        return self._lock_for_loop_callbacks(ForLoopCallbacks())
+        return ForLoopCallbacks()
 
     def finalize(self) -> list:
-        return self.records
+        with self._lock:
+            return self.records
 
 
 class SymbolicExprDataWrapper:
@@ -2130,13 +2091,12 @@ class SanitizerSymbolicExecution(Sanitizer):
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
-            return self._lock_op_callbacks(
-                OpCallbacks(op_overrider=OP_TYPE_TO_OVERRIDER[op_type])
-            )
+            return OpCallbacks(op_overrider=self.lock_fn(OP_TYPE_TO_OVERRIDER[op_type]))
         else:
-            return self._lock_op_callbacks(OpCallbacks())
+            return OpCallbacks()
 
     def register_for_loop_callback(self):
+        @self.lock_fn
         def loop_hook_before(lineno, iterable):
             if not isinstance(iterable, range):
                 if cfg.verbose:
@@ -2148,6 +2108,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ enter loop@{lineno}, len={length}")
 
+        @self.lock_fn
         def loop_hook_iter_overrider(lineno, idx):
             # collect iterator values
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
@@ -2159,10 +2120,12 @@ class SanitizerSymbolicExecution(Sanitizer):
 
             return tl.core.tensor(sym, tl.int32)
 
+        @self.lock_fn
         def loop_hook_iter_listener(lineno, idx):
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ loop@{lineno} idx={idx}")
 
+        @self.lock_fn
         def loop_hook_after(lineno: int) -> None:
             ctx = self.loop_stack.pop()
             # add constraints for loop_i
@@ -2201,13 +2164,11 @@ class SanitizerSymbolicExecution(Sanitizer):
                     f"(checked {len(ctx.pending_checks)} unique addr patterns)"
                 )
 
-        return self._lock_for_loop_callbacks(
-            ForLoopCallbacks(
-                before_loop_callback=loop_hook_before,
-                loop_iter_overrider=loop_hook_iter_overrider,
-                loop_iter_listener=loop_hook_iter_listener,
-                after_loop_callback=loop_hook_after,
-            )
+        return ForLoopCallbacks(
+            before_loop_callback=loop_hook_before,
+            loop_iter_overrider=loop_hook_iter_overrider,
+            loop_iter_listener=loop_hook_iter_listener,
+            after_loop_callback=loop_hook_after,
         )
 
     def finalize(self) -> list:

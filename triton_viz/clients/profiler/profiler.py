@@ -7,7 +7,6 @@ from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
-import threading
 
 
 @dataclass(frozen=False)
@@ -61,7 +60,6 @@ class Profiler(Client):
         self.k = k
         self.sampled_blocks: Optional[set[tuple[int, ...]]] = None
         self.current_grid_idx: Optional[tuple[int, ...]] = None
-        self._lock = threading.Lock()
 
         # Load & Store Skipping
         # Config has enable_load_store_skipping, but profiler uses disable_load_store_skipping
@@ -130,20 +128,21 @@ class Profiler(Client):
             # No sampling - all blocks will be executed
             self.sampled_blocks = None
 
-    def _report_load_store_bytes(self, type, ptr: TensorHandle, mask: TensorHandle):
+    def _report_load_store_bytes(
+        self, type, ptr: TensorHandle, mask: TensorHandle
+    ):  # internal methods assumed to be called under the lock
         dtype_tt = ptr.get_element_ty()
         dtype_np: np.dtype = _get_np_dtype(dtype_tt)
         mask_true = np.count_nonzero(mask.data)
         mask_false = np.count_nonzero(np.logical_not(mask.data))
         total_bytes_true = mask_true * dtype_np.itemsize
         total_bytes_attempted = (mask_true + mask_false) * dtype_np.itemsize
-        with self._lock:
-            if type == "load":
-                self.load_bytes.total_bytes_attempted += total_bytes_attempted
-                self.load_bytes.total_bytes_true += total_bytes_true
-            elif type == "store":
-                self.store_bytes.total_bytes_attempted += total_bytes_attempted
-                self.store_bytes.total_bytes_true += total_bytes_true
+        if type == "load":
+            self.load_bytes.total_bytes_attempted += total_bytes_attempted
+            self.load_bytes.total_bytes_true += total_bytes_true
+        elif type == "store":
+            self.store_bytes.total_bytes_attempted += total_bytes_attempted
+            self.store_bytes.total_bytes_true += total_bytes_true
 
     def _check_32bit_range(
         self, byte_offset: np.ndarray, element_bytewidth: int, offset_data: np.ndarray
@@ -186,16 +185,17 @@ class Profiler(Client):
             false_count = np.count_nonzero(np.logical_not(mask.data))
             return total_count, false_count
 
+        @self.lock_fn
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
             self._report_load_store_bytes("load", ptr, mask)
             if not self.disable_load_mask_percentage_check:
                 total_count, false_count = _get_mask_stats(mask)
-                with self._lock:
-                    self.load_mask_total_count += total_count
-                    self.load_mask_false_count += false_count
+                self.load_mask_total_count += total_count
+                self.load_mask_false_count += false_count
 
+        @self.lock_fn
         def load_overrider(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -204,23 +204,26 @@ class Profiler(Client):
             dtype_np = _get_np_dtype(dtype_tt)
             return TensorHandle(np.zeros_like(ptr.data, dtype=dtype_np), dtype_tt)
 
+        @self.lock_fn
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             self._report_load_store_bytes("store", ptr, mask)
             if not self.disable_load_mask_percentage_check:
                 total_count, false_count = _get_mask_stats(mask)
-                with self._lock:
-                    self.store_mask_total_count += total_count
-                    self.store_mask_false_count += false_count
+                self.store_mask_total_count += total_count
+                self.store_mask_false_count += false_count
 
+        @self.lock_fn
         def store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             # Skip actual store
             pass
 
+        @self.lock_fn
         def dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
             # Skip actual dot operation, return zeros with same shape as d
             # This replaces np.matmul(a_data, b_data, dtype=d.data.dtype) + d.data
             return TensorHandle(np.zeros_like(d.data), d.dtype.scalar)
 
+        @self.lock_fn
         def pre_addptr_callback(ptr, offset):
             dtype_tt = ptr.get_element_ty()
             element_bitwidth = dtype_tt.primitive_bitwidth
@@ -261,10 +264,12 @@ class Profiler(Client):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
+        @self.lock_fn
         def loop_hook_range_type(lineno: int, range_type: str) -> None:
             cur = self.loop_info.get(lineno, LoopInfo())
             self.loop_info[lineno] = replace(cur, range_type=range_type)
 
+        @self.lock_fn
         def loop_hook_before(lineno, iterable):
             if self.disable_for_loop_unroll_check:
                 return
@@ -283,6 +288,7 @@ class Profiler(Client):
             cur = self.loop_info.get(lineno, LoopInfo())
             self.loop_info[lineno] = replace(cur, length=length)
 
+        @self.lock_fn
         def loop_hook_after(lineno: int) -> None:
             # No action needed after loop for profiler
             pass

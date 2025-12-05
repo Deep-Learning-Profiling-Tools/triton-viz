@@ -32,6 +32,16 @@ class Client(ABC):
         # Lock for serializing shared state where needed
         self._lock = threading.Lock()
 
+    def lock_fn(self, fn: Callable) -> Callable:
+        """Forces serial execution of the given function."""
+
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            with self._lock:
+                return fn(*args, **kwargs)
+
+        return wrapped
+
     @abstractmethod
     def pre_run_callback(self, fn: Callable) -> bool:
         """
