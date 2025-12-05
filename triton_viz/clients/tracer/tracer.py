@@ -65,12 +65,14 @@ class Tracer(Client):
             self.sample = True
 
         # Create a Grid record for this grid index
-        self.records.append(Grid(idx=grid_idx))
+        with self._lock:
+            self.records.append(Grid(idx=grid_idx))
 
     def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        @self.lock_fn
         def pre_load_callback(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -82,6 +84,7 @@ class Tracer(Client):
                 Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             )
 
+        @self.lock_fn
         def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
             if not self.sample:
                 return
@@ -92,7 +95,8 @@ class Tracer(Client):
             )
 
         # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
-        def pre_raw_load_callback(ptr):
+        @self.lock_fn
+        def pre_raw_load_callback(ptr, *args, **kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
@@ -101,7 +105,8 @@ class Tracer(Client):
             true_mask = np.ones_like(offsets, dtype=bool)
             self.records.append(Load(tensor.data_ptr(), offsets, true_mask))
 
-        def pre_raw_store_callback(ptr, value):
+        @self.lock_fn
+        def pre_raw_store_callback(ptr, value, *args, **kwargs):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
@@ -110,6 +115,7 @@ class Tracer(Client):
             true_mask = np.ones_like(offsets, dtype=bool)
             self.records.append(Store(tensor.data_ptr(), offsets, true_mask))
 
+        @self.lock_fn
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
                 return
@@ -117,6 +123,7 @@ class Tracer(Client):
             output_shape = ret.handle.data.shape
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
+        @self.lock_fn
         def post_dot_callback(ret, input, other, *args):
             if not self.sample:
                 return
@@ -143,6 +150,15 @@ class Tracer(Client):
     def register_for_loop_callback(self):
         return ForLoopCallbacks()
 
+    @property
+    def sample(self) -> bool:
+        return self._get_thread_local("sample", True)
+
+    @sample.setter
+    def sample(self, value: bool) -> None:
+        self._set_thread_local("sample", value)
+
     def finalize(self) -> list:
-        self.tensors.clear()
-        return self.records
+        with self._lock:
+            self.tensors.clear()
+            return self.records

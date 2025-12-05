@@ -78,6 +78,16 @@ cd examples
 python <file_name>.py
 ```
 
+### CPU interpreter concurrency
+
+When running with the Triton CPU interpreter (`TRITON_INTERPRET=1`), you can emulate concurrent SMs by setting how many blocks execute in parallel:
+
+```sh
+export TRITON_VIZ_NUM_SMS=4  # or set triton_viz.config.num_sms in Python
+```
+
+This is useful for kernels that rely on cross-block synchronization (e.g., producer/consumer patterns) when testing without a GPU.
+
 ## More Puzzles
 
 If you're interested in fun puzzles to work with in Triton, do check out: [Triton Puzzles](https://github.com/srush/Triton-Puzzles)
