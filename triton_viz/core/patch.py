@@ -235,7 +235,7 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
             op_name,
             lambda *args, **kwargs: patched_op(*args, **kwargs),
         )
-    elif op_type in reduce_map or op_type in scan_map:
+    elif op_type in reduce_map or op_type in scan_map or op_type in reshape_map:
         if op_type in reduce_map:
             op_name = reduce_map[op_type].__name__
         elif op_type in scan_map:
