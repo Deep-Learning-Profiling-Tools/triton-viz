@@ -24,6 +24,7 @@ from z3 import (
     simplify,
 )
 from z3.z3 import BoolRef, ArithRef, IntNumRef
+from z3.z3util import get_vars
 
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle, _get_np_dtype
@@ -2272,6 +2273,17 @@ class SanitizerSymbolicExecution(Sanitizer):
                     Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
                 )
 
+            def _filter_constraints(addr_expr, constraints):
+                addr_eq = self._addr_sym == addr_expr
+                relevant_vars = set(get_vars(addr_eq))
+                filtered = []
+                for constraint in constraints:
+                    constraint_vars = set(get_vars(constraint))
+                    if constraint_vars and not constraint_vars.issubset(relevant_vars):
+                        continue
+                    filtered.append(constraint)
+                return filtered
+
             # execute pending checks
             for check_tuple in ctx.pending_checks:
                 # Handle both old format (2-tuple) and new format (3-tuple)
@@ -2281,6 +2293,8 @@ class SanitizerSymbolicExecution(Sanitizer):
                 else:
                     addr_expr, expr_constraints, symbolic_expr = check_tuple
 
+                combined_constraints = expr_constraints + iterator_constraints
+
                 if cfg.verbose:
                     print(
                         "[Sanitizer] ▶ checking:",
@@ -2289,11 +2303,25 @@ class SanitizerSymbolicExecution(Sanitizer):
                         f" and expression-related constraints: {expr_constraints} ",
                     )
 
-                self._check_range_satisfiable(
-                    addr_expr,
-                    expr_constraints + iterator_constraints,
-                    symbolic_expr,
-                )
+                if isinstance(addr_expr, list):
+                    for single_addr_expr in addr_expr:
+                        filtered_constraints = _filter_constraints(
+                            single_addr_expr, combined_constraints
+                        )
+                        self._check_range_satisfiable(
+                            single_addr_expr,
+                            filtered_constraints,
+                            symbolic_expr,
+                        )
+                else:
+                    filtered_constraints = _filter_constraints(
+                        addr_expr, combined_constraints
+                    )
+                    self._check_range_satisfiable(
+                        addr_expr,
+                        filtered_constraints,
+                        symbolic_expr,
+                    )
 
             if cfg.verbose:
                 print(
