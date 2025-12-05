@@ -1121,11 +1121,6 @@ class SymbolicExpr:
             self._z3 = None
             self._constraints = []
 
-        def _normalize(expr):
-            if not isinstance(expr, list):
-                return [expr]
-            return expr
-
         # Recursively convert the current node to a Z3 expression
         if self.op == "const":
             if self._loop_ctx:  # if the self is a loop iterator
@@ -1232,12 +1227,31 @@ class SymbolicExpr:
 
         # where(cond, lhs, rhs)
         if self.op == "where":
+            def _normalize(expr):
+                if not isinstance(expr, list):
+                    return [expr]
+                return expr
+
+            def _broadcast(*lists):
+                max_len = max(len(lst) for lst in lists)
+                broadcasted = []
+                for lst in lists:
+                    if len(lst) == 1:
+                        broadcasted.append(lst * max_len)
+                    else:
+                        assert len(lst) == max_len, "Incompatible lengths for broadcasting"
+                        broadcasted.append(lst)
+                return tuple(broadcasted) 
+
             cond, constraints_cond = self.cond._to_z3()
             lhs, constraints_lhs = self.lhs._to_z3()
             rhs, constraints_rhs = self.rhs._to_z3()
+
             cond = _normalize(cond)
             lhs = _normalize(lhs)
             rhs = _normalize(rhs)
+            cond, lhs, rhs = _broadcast(cond, lhs, rhs)
+
             if not (len(cond) == len(lhs) == len(rhs)):
                 raise ValueError(
                     f"where op requires cond, lhs, rhs to have the same length, got {len(cond)}, {len(lhs)}, {len(rhs)}"
