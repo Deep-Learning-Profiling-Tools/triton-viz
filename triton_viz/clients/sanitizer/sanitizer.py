@@ -1675,27 +1675,26 @@ class SanitizerSymbolicExecution(Sanitizer):
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)
 
     def _report(self, op_type, tensor, violation_address, symbolic_expr=None):
-        with self._lock:
-            traceback_info = _get_traceback_info()
-            oob_record = OutOfBoundsRecordZ3(
-                op_type=op_type,
-                user_code_tracebacks=traceback_info,
-                tensor=tensor,
-                violation_address=violation_address,
-                constraints=[],
-                symbolic_expr=symbolic_expr,
-            )
-            if self.abort_on_error:
-                # Use the new PDB-style print function if available
-                if symbolic_expr is not None or cfg.verbose:
-                    print_oob_record_pdb_style(oob_record, symbolic_expr)
-                else:
-                    print_oob_record(oob_record)
-                raise ValueError(
-                    "Out-of-bounds access detected. See detailed report above."
-                )
+        traceback_info = _get_traceback_info()
+        oob_record = OutOfBoundsRecordZ3(
+            op_type=op_type,
+            user_code_tracebacks=traceback_info,
+            tensor=tensor,
+            violation_address=violation_address,
+            constraints=[],
+            symbolic_expr=symbolic_expr,
+        )
+        if self.abort_on_error:
+            # Use the new PDB-style print function if available
+            if symbolic_expr is not None or cfg.verbose:
+                print_oob_record_pdb_style(oob_record, symbolic_expr)
             else:
-                self.records.append(oob_record)
+                print_oob_record(oob_record)
+            raise ValueError(
+                "Out-of-bounds access detected. See detailed report above."
+            )
+        else:
+            self.records.append(oob_record)
 
     def _clear_cache(self):
         self.cache_args.clear()
