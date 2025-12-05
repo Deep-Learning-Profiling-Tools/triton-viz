@@ -1688,7 +1688,15 @@ class SanitizerSymbolicExecution(Sanitizer):
             # Grid Cache enabled: Use push/pop on persistent solver
             self._solver.push()
             self._solver.add(self._addr_sym == access_addr)
-            self._solver.add(And(*expr_constraints))
+            bool_constraints = []
+            for c in expr_constraints:
+                if isinstance(c, BoolRef):
+                    bool_constraints.append(c)
+                elif isinstance(c, (int, float, IntNumRef)):
+                    bool_constraints.append(IntVal(int(c)) != 0)
+                else:
+                    bool_constraints.append(c != 0)
+            self._solver.add(And(*bool_constraints))
             if self._solver.check() == sat:
                 # Get the model to find the violation address
                 model = self._solver.model()
@@ -1715,7 +1723,15 @@ class SanitizerSymbolicExecution(Sanitizer):
             solver.add(Not(self._addr_ok))
             solver.add(self._pid_ok)
             solver.add(self._addr_sym == access_addr)
-            solver.add(And(*expr_constraints))
+            bool_constraints = []
+            for c in expr_constraints:
+                if isinstance(c, BoolRef):
+                    bool_constraints.append(c)
+                elif isinstance(c, (int, float, IntNumRef)):
+                    bool_constraints.append(IntVal(int(c)) != 0)
+                else:
+                    bool_constraints.append(c != 0)
+            solver.add(And(*bool_constraints))
             if solver.check() == sat:
                 # Get the model to find the violation address
                 model = solver.model()
