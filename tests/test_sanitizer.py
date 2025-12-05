@@ -135,6 +135,61 @@ def test_const_dtype_inference():
     assert z.to_tree_str() == expected_tree
 
 
+def test_loop_hook_before_materializes_symbolic_bounds():
+    class _FakeRange:
+        def __init__(self, start, stop, step, length):
+            self.start = start
+            self.stop = stop
+            self.step = step
+            self._len = length
+
+        def __len__(self):
+            return self._len
+
+    sanitizer = SanitizerSymbolicExecution()
+    loop_callbacks = sanitizer.register_for_loop_callback()
+    assert loop_callbacks.before_loop_callback is not None
+    assert loop_callbacks.range_wrapper_factory is not None
+
+    # Positive step: min(start), max(stop)
+    start_expr = SymbolicExpr(
+        "add", SymbolicExpr.from_value(2), SymbolicExpr.from_value(3)
+    )
+    stop_expr = SymbolicExpr.from_value(8)
+    step_expr = SymbolicExpr.from_value(1)
+    wrapped = loop_callbacks.range_wrapper_factory(
+        None,
+        200,
+        "python_range",
+        (start_expr, stop_expr, step_expr),
+        {},
+        range,
+    )
+    loop_callbacks.before_loop_callback(200, wrapped)
+    ctx = sanitizer.loop_stack.pop()
+    assert ctx.start == 5  # min(start) == 5
+    assert ctx.stop == 8  # max(stop) == 8
+    assert ctx.step == 1
+
+    # Negative step: max(start), min(stop)
+    start_expr = SymbolicExpr.from_value(10)
+    stop_expr = SymbolicExpr.from_value(-2)
+    step_expr = SymbolicExpr.from_value(-3)
+    wrapped = loop_callbacks.range_wrapper_factory(
+        None,
+        201,
+        "python_range",
+        (start_expr, stop_expr, step_expr),
+        {},
+        range,
+    )
+    loop_callbacks.before_loop_callback(201, wrapped)
+    ctx = sanitizer.loop_stack.pop()
+    assert ctx.start == 10  # max(start)
+    assert ctx.stop == -2  # min(stop)
+    assert ctx.step == -3
+
+
 def _sum_offsets_from_addptr(expr):
     """
     Traverse an addptr SymbolicExpr and sum all constant offsets.

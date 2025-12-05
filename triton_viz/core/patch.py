@@ -126,7 +126,6 @@ _OP_ATTR_NAMES = {
     Advance: "create_advance",
     FpToFp: "create_fp_to_fp",
     Umulhi: "create_umulhi",
-    Trans: "create_trans",
     Bitcast: "create_bitcast",
     AtomicCas: "create_atomic_cas",
     AtomicRMW: "create_atomic_rmw",
@@ -160,7 +159,6 @@ original_ops = {
     Advance: interpreter_builder.create_advance,
     FpToFp: interpreter_builder.create_fp_to_fp,
     Umulhi: interpreter_builder.create_umulhi,
-    Trans: interpreter_builder.create_trans,
     Bitcast: interpreter_builder.create_bitcast,
     AtomicCas: interpreter_builder.create_atomic_cas,
     AtomicRMW: interpreter_builder.create_atomic_rmw,
@@ -175,6 +173,9 @@ scan_map: dict[type[Op], Callable] = {
 }
 math_map: dict[type[Op], Callable] = {
     Umulhi: tl.math.umulhi,
+}
+reshape_map: dict[type[Op], Callable] = {
+    Trans: tl.trans,
 }
 
 
@@ -193,7 +194,11 @@ class PatchOp:
         if self.callbacks.before_callback:
             self.callbacks.before_callback(*args, **kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in reduce_map or self.op_type in scan_map:
+            if (
+                self.op_type in reduce_map
+                or self.op_type in scan_map
+                or self.op_type in reshape_map
+            ):
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -234,11 +239,13 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks):
             op_name,
             lambda *args, **kwargs: patched_op(*args, **kwargs),
         )
-    elif op_type in reduce_map or op_type in scan_map:
+    elif op_type in reduce_map or op_type in scan_map or op_type in reshape_map:
         if op_type in reduce_map:
             op_name = reduce_map[op_type].__name__
         elif op_type in scan_map:
             op_name = scan_map[op_type].__name__
+        elif op_type in reshape_map:
+            op_name = reshape_map[op_type].__name__
         original_op = getattr(tl, op_name)
         patched_op = PatchOp(original_op, op_type, callbacks)
         setattr(tl, op_name, lambda *args, **kwargs: patched_op(*args, **kwargs))
@@ -303,6 +310,7 @@ class _CombinedLoopHooks:
         self._before: list[Callable] = []
         self._iter_listeners: list[Callable] = []
         self._iter_overrider: Optional[Callable] = None
+        self._range_wrapper_factory: Optional[Callable] = None
         self._after: list[Callable] = []
 
     # Register hooks
@@ -319,6 +327,11 @@ class _CombinedLoopHooks:
         if self._iter_overrider is not None:
             raise RuntimeError("Only one loop_iter overrider allowed")
         self._iter_overrider = hook
+
+    def set_range_wrapper_factory(self, hook: Callable) -> None:
+        if self._range_wrapper_factory is not None:
+            raise RuntimeError("Only one range_wrapper_factory allowed")
+        self._range_wrapper_factory = hook
 
     def add_after(self, hook: Callable) -> None:
         self._after.append(hook)
@@ -350,14 +363,34 @@ class _CombinedLoopHooks:
             hook(lineno)
 
     def loop_iter_wrapper(
-        self, iterable: Any, lineno: int, range_type: str
+        self,
+        iterable_callable: Callable,
+        iter_args,
+        iter_kwargs,
+        lineno: int,
+        range_type: str,
     ) -> "_LoopIter":
+        args = tuple(iter_args) if iter_args is not None else ()
+        kwargs = dict(iter_kwargs) if iter_kwargs is not None else {}
+
+        if self._range_wrapper_factory is not None:
+            wrapped = self._range_wrapper_factory(
+                None, lineno, range_type, args, kwargs, iterable_callable
+            )
+            if wrapped is not None:
+                iterable = wrapped
+            else:
+                iterable = iterable_callable(*args, **kwargs)
+        else:
+            iterable = iterable_callable(*args, **kwargs)
         return _LoopIter(self, iterable, lineno, range_type)
 
     def clear(self) -> None:
+        self._range_type.clear()
         self._before.clear()
         self._iter_listeners.clear()
         self._iter_overrider = None
+        self._range_wrapper_factory = None
         self._after.clear()
 
 
@@ -396,7 +429,7 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     for i in R:
         ...
     ==>
-    for i in _triton_viz_loop_patcher.hooks.loop_iter_wrapper(R, lineno, range_type):
+    for i in _triton_viz_loop_patcher.hooks.loop_iter_wrapper(iter_callable, args, kwargs, lineno, range_type):
         ...
     where _triton_viz_loop_patcher.hooks.loop_iter_wrapper returns a _LoopIter object.
     """
@@ -418,7 +451,27 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
             elif func.attr == "static_range":
                 range_type = "tl_static_range"
 
-    # _triton_viz_loop_patcher.hooks.loop_iter(range(...), lineno, range_type)
+    if isinstance(node.iter, ast.Call):
+        iter_callable = node.iter.func
+        iter_args = ast.Tuple(elts=node.iter.args, ctx=ast.Load())
+        kw_keys = []
+        kw_vals = []
+        for kw in node.iter.keywords:
+            if kw.arg is None:  # skip **kwargs for simplicity
+                continue
+            kw_keys.append(ast.Constant(value=kw.arg))
+            kw_vals.append(kw.value)
+        iter_kwargs = ast.Dict(keys=kw_keys, values=kw_vals)
+    else:
+        iter_callable = ast.Lambda(
+            args=ast.arguments(
+                posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]
+            ),
+            body=node.iter,
+        )
+        iter_args = ast.Tuple(elts=[], ctx=ast.Load())
+        iter_kwargs = ast.Dict(keys=[], values=[])
+
     new_iter = ast.Call(
         func=ast.Attribute(
             value=ast.Attribute(
@@ -430,7 +483,9 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
             ctx=ast.Load(),
         ),
         args=[
-            node.iter,
+            iter_callable,
+            iter_args,
+            iter_kwargs,
             ast.Constant(value=node.lineno),
             ast.Constant(value=range_type),
         ],
@@ -453,6 +508,10 @@ def patch_for_loop(loop_callbacks: ForLoopCallbacks):
     # Registering hooks
     if loop_callbacks.range_type_callback is not None:
         _loop_patcher.hooks.add_range_type_callback(loop_callbacks.range_type_callback)
+    if loop_callbacks.range_wrapper_factory is not None:
+        _loop_patcher.hooks.set_range_wrapper_factory(
+            loop_callbacks.range_wrapper_factory
+        )
     if loop_callbacks.before_loop_callback is not None:
         _loop_patcher.hooks.add_before(loop_callbacks.before_loop_callback)
     if loop_callbacks.loop_iter_overrider is not None:
