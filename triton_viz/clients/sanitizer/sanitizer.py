@@ -1121,6 +1121,11 @@ class SymbolicExpr:
             self._z3 = None
             self._constraints = []
 
+        def _normalize(expr):
+            if not isinstance(expr, list):
+                return [expr]
+            return expr
+
         # Recursively convert the current node to a Z3 expression
         if self.op == "const":
             if self._loop_ctx:  # if the self is a loop iterator
@@ -1230,7 +1235,16 @@ class SymbolicExpr:
             cond, constraints_cond = self.cond._to_z3()
             lhs, constraints_lhs = self.lhs._to_z3()
             rhs, constraints_rhs = self.rhs._to_z3()
-            self._z3 = If(cond, lhs, rhs)
+            cond = _normalize(cond)
+            lhs = _normalize(lhs)
+            rhs = _normalize(rhs)
+            if not (len(cond) == len(lhs) == len(rhs)):
+                raise ValueError(
+                    f"where op requires cond, lhs, rhs to have the same length, got {len(cond)}, {len(lhs)}, {len(rhs)}"
+                )
+            self._z3 = []
+            for i in range(len(cond)):
+                self._z3.append(If(cond[i], lhs[i], rhs[i]))
             self._constraints.extend(
                 constraints_cond + constraints_lhs + constraints_rhs
             )
@@ -1322,13 +1336,6 @@ class SymbolicExpr:
         # Return the computed result
         # Note: We always keep _z3 and _constraints in the node for consistency
         # The cache check at the beginning of this method determines if we recompute
-
-        def _normalize(expr):
-            if isinstance(expr, list):
-                assert len(expr) == 1, "Only single-element lists are supported"
-                return expr[0]
-            return expr
-
         return self._z3, self._constraints
 
     def has_op(self, op_name: str) -> bool:
