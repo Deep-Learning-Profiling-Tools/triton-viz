@@ -68,13 +68,8 @@ def main():
         default=2,
         help="Concurrent blocks to emulate in the Triton interpreter (when --viz is enabled).",
     )
-    parser.add_argument(
-        "--device",
-        choices=["cuda", "cpu"],
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device to run on. Use CPU with TRITON_INTERPRET=1 to emulate the GPU.",
-    )
     args = parser.parse_args()
+    print(args)
 
     trace_decorator = None
     if args.viz:
@@ -85,13 +80,13 @@ def main():
 
     producer_consumer, racing_threads = make_kernels(trace_decorator)
 
-    device = torch.device(
-        args.device if args.device == "cuda" and torch.cuda.is_available() else "cpu"
-    )
+    device = (
+        "cpu" if args.viz else "cuda"
+    )  # triton-viz only supports CPU, triton only supports CUDA (TRITON_INTERPRET=1 runs on CPU but hangs)
 
     # Use smaller workloads on CPU to keep interpreter runs snappy.
-    pc_N = 16384 * 16 if device.type == "cuda" else 2048
-    slow_iters = 16384 if device.type == "cuda" else 256
+    pc_N = 16384 * 16 if device == "cuda" else 2048
+    slow_iters = 16384 if device == "cuda" else 256
     rt_N = slow_iters * 32
 
     x = torch.zeros((pc_N,), device=device)
@@ -102,12 +97,14 @@ def main():
     pc_grid(x, out, pc_N)
     toc = time.perf_counter()
     print("duration:", toc - tic)
-    print("producer_consumer output:", out.item())
+    print("producer_consumer output:", out.item())  # should not be -1
 
     x = torch.zeros((rt_N,), device=device)
     out = torch.zeros((), device=device)
     racing_threads[(2, 1, 1)](x, out, rt_N, slow_iters)
-    print("racing_threads output:", out.item())
+    print(
+        "racing_threads output:", out.item()
+    )  # should be 1 as this is returned in the branch that finishes first
 
 
 if __name__ == "__main__":
