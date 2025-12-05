@@ -1154,7 +1154,8 @@ class SymbolicExpr:
             if name in SymbolicExpr.ARANGE_DICT:
                 self._z3, self._constraints = SymbolicExpr.ARANGE_DICT[name]
             else:
-                self._z3 = Int(name)
+                v = Int(name)
+                self._z3 = v
                 self._constraints.append(v >= start)
                 self._constraints.append(v < end)
 
