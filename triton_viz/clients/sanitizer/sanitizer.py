@@ -22,6 +22,9 @@ from z3 import (
     Optimize,
     sat,
     simplify,
+    Int2BV,
+    BV2Int,
+    BitVecRef,
 )
 from z3.z3 import BoolRef, ArithRef, IntNumRef
 from z3.z3util import get_vars
@@ -1192,6 +1195,32 @@ class SymbolicExpr:
                 else:
                     return op_func(left, right)
 
+            def _infer_bitwidth(expr):
+                dtype = getattr(expr, "dtype_tt", None)
+                if dtype is None:
+                    return None
+                if hasattr(dtype, "primitive_bitwidth"):
+                    return dtype.primitive_bitwidth
+                if hasattr(dtype, "element_ty") and hasattr(
+                    dtype.element_ty, "primitive_bitwidth"
+                ):
+                    return dtype.element_ty.primitive_bitwidth
+                return None
+
+            def _to_bv(v, bitwidth):
+                if isinstance(v, list):
+                    return [_to_bv(x, bitwidth) for x in v]
+                if isinstance(v, BoolRef):
+                    v = If(v, IntVal(1), IntVal(0))
+                if isinstance(v, BitVecRef):
+                    return v
+                return Int2BV(bitwidth, v)
+
+            def _from_bv(v):
+                if isinstance(v, list):
+                    return [_from_bv(x) for x in v]
+                return BV2Int(v, is_signed=False)
+
             if self.op == "add":
                 self._z3 = _apply_binop(lambda a, b: a + b, lhs, rhs)
             if self.op == "sub":
@@ -1219,7 +1248,41 @@ class SymbolicExpr:
             if self.op == "minimum":
                 self._z3 = _apply_binop(lambda a, b: If(a <= b, a, b), lhs, rhs)
             if self.op == "bitwise_and":
-                self._z3 = _apply_binop(lambda a, b: And(a, b), lhs, rhs)
+                bitwidth = (
+                    _infer_bitwidth(self)
+                    or _infer_bitwidth(self.lhs)
+                    or _infer_bitwidth(self.rhs)
+                    or 64
+                )
+
+                def _bit_and(a, b):
+                    return _from_bv(_to_bv(a, bitwidth) & _to_bv(b, bitwidth))
+
+                self._z3 = _apply_binop(_bit_and, lhs, rhs)
+            if self.op == "bitwise_or":
+                bitwidth = (
+                    _infer_bitwidth(self)
+                    or _infer_bitwidth(self.lhs)
+                    or _infer_bitwidth(self.rhs)
+                    or 64
+                )
+
+                def _bit_or(a, b):
+                    return _from_bv(_to_bv(a, bitwidth) | _to_bv(b, bitwidth))
+
+                self._z3 = _apply_binop(_bit_or, lhs, rhs)
+            if self.op == "bitwise_xor":
+                bitwidth = (
+                    _infer_bitwidth(self)
+                    or _infer_bitwidth(self.lhs)
+                    or _infer_bitwidth(self.rhs)
+                    or 64
+                )
+
+                def _bit_xor(a, b):
+                    return _from_bv(_to_bv(a, bitwidth) ^ _to_bv(b, bitwidth))
+
+                self._z3 = _apply_binop(_bit_xor, lhs, rhs)
             if self.op == "ashr":
                 raise NotImplementedError(
                     "Arithmetic shift right is not implemented in Z3"
