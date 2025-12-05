@@ -1322,6 +1322,13 @@ class SymbolicExpr:
         # Return the computed result
         # Note: We always keep _z3 and _constraints in the node for consistency
         # The cache check at the beginning of this method determines if we recompute
+
+        def _normalize(expr):
+            if isinstance(expr, list):
+                assert len(expr) == 1, "Only single-element lists are supported"
+                return expr[0]
+            return expr
+
         return self._z3, self._constraints
 
     def has_op(self, op_name: str) -> bool:
