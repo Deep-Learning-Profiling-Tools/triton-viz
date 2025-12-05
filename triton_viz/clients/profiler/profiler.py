@@ -7,6 +7,7 @@ from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
+import threading
 
 
 @dataclass(frozen=False)
@@ -60,6 +61,7 @@ class Profiler(Client):
         self.k = k
         self.sampled_blocks: Optional[set[tuple[int, ...]]] = None
         self.current_grid_idx: Optional[tuple[int, ...]] = None
+        self._lock = threading.Lock()
 
         # Load & Store Skipping
         # Config has enable_load_store_skipping, but profiler uses disable_load_store_skipping
@@ -135,12 +137,13 @@ class Profiler(Client):
         mask_false = np.count_nonzero(np.logical_not(mask.data))
         total_bytes_true = mask_true * dtype_np.itemsize
         total_bytes_attempted = (mask_true + mask_false) * dtype_np.itemsize
-        if type == "load":
-            self.load_bytes.total_bytes_attempted += total_bytes_attempted
-            self.load_bytes.total_bytes_true += total_bytes_true
-        elif type == "store":
-            self.store_bytes.total_bytes_attempted += total_bytes_attempted
-            self.store_bytes.total_bytes_true += total_bytes_true
+        with self._lock:
+            if type == "load":
+                self.load_bytes.total_bytes_attempted += total_bytes_attempted
+                self.load_bytes.total_bytes_true += total_bytes_true
+            elif type == "store":
+                self.store_bytes.total_bytes_attempted += total_bytes_attempted
+                self.store_bytes.total_bytes_true += total_bytes_true
 
     def _check_32bit_range(
         self, byte_offset: np.ndarray, element_bytewidth: int, offset_data: np.ndarray
@@ -189,8 +192,9 @@ class Profiler(Client):
             self._report_load_store_bytes("load", ptr, mask)
             if not self.disable_load_mask_percentage_check:
                 total_count, false_count = _get_mask_stats(mask)
-                self.load_mask_total_count += total_count
-                self.load_mask_false_count += false_count
+                with self._lock:
+                    self.load_mask_total_count += total_count
+                    self.load_mask_false_count += false_count
 
         def load_overrider(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
@@ -204,8 +208,9 @@ class Profiler(Client):
             self._report_load_store_bytes("store", ptr, mask)
             if not self.disable_load_mask_percentage_check:
                 total_count, false_count = _get_mask_stats(mask)
-                self.store_mask_total_count += total_count
-                self.store_mask_false_count += false_count
+                with self._lock:
+                    self.store_mask_total_count += total_count
+                    self.store_mask_false_count += false_count
 
         def store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             # Skip actual store

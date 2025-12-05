@@ -29,6 +29,8 @@ class Client(ABC):
         self.asm_info: Optional[dict] = None
         # Thread-local scratch space for per-thread callback state
         self._thread_local = threading.local()
+        # Lock for serializing shared state where needed
+        self._lock = threading.Lock()
 
     @abstractmethod
     def pre_run_callback(self, fn: Callable) -> bool:
@@ -180,21 +182,25 @@ class ClientManager:
             return any(rets)
 
     def finalize(self) -> None:
-        self.launch.records = []
-        for client in self.clients.values():
-            self.launch.records += client.finalize()
+        with self._lock:
+            self.launch.records = []
+            for client in self.clients.values():
+                self.launch.records += client.finalize()
 
     def arg_callback(self, name, arg, arg_cvt):
-        if hasattr(arg, "data_ptr"):
-            self.launch.tensors.add(arg)
-        for client in self.clients.values():
-            client.arg_callback(name, arg, arg_cvt)
+        with self._lock:
+            if hasattr(arg, "data_ptr"):
+                self.launch.tensors.add(arg)
+            for client in self.clients.values():
+                client.arg_callback(name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int]):
-        self.launch.grid = grid
-        for client in self.clients.values():
-            client.grid_callback(grid)
+        with self._lock:
+            self.launch.grid = grid
+            for client in self.clients.values():
+                client.grid_callback(grid)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
-        for client in self.clients.values():
-            client.grid_idx_callback(grid_idx)
+        with self._lock:
+            for client in self.clients.values():
+                client.grid_idx_callback(grid_idx)

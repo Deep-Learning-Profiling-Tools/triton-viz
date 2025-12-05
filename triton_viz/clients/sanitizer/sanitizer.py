@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from functools import cached_property, reduce
 from typing import Any, Optional, Union
 import re
-
+import threading
 
 import numpy as np
 from torch import Tensor
@@ -463,6 +463,50 @@ class Sanitizer(Client):
             # When sanitizer is enabled, use symexec backend by default
             return object.__new__(SanitizerSymbolicExecution)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self._lock = threading.RLock()
+
+    def _lock_op_callbacks(self, callbacks: OpCallbacks) -> OpCallbacks:
+        """Wrap OpCallbacks so each hook runs under the sanitizer lock."""
+
+        def _wrap(fn):
+            if fn is None:
+                return None
+
+            def wrapped(*args, **kwargs):
+                with self._lock:
+                    return fn(*args, **kwargs)
+
+            return wrapped
+
+        return OpCallbacks(
+            before_callback=_wrap(callbacks.before_callback),
+            after_callback=_wrap(callbacks.after_callback),
+            op_overrider=_wrap(callbacks.op_overrider),
+        )
+
+    def _lock_for_loop_callbacks(self, callbacks: ForLoopCallbacks) -> ForLoopCallbacks:
+        """Wrap ForLoopCallbacks so each hook runs under the sanitizer lock."""
+
+        def _wrap(fn):
+            if fn is None:
+                return None
+
+            def wrapped(*args, **kwargs):
+                with self._lock:
+                    return fn(*args, **kwargs)
+
+            return wrapped
+
+        return ForLoopCallbacks(
+            range_type_callback=_wrap(callbacks.range_type_callback),
+            before_loop_callback=_wrap(callbacks.before_loop_callback),
+            loop_iter_overrider=_wrap(callbacks.loop_iter_overrider),
+            loop_iter_listener=_wrap(callbacks.loop_iter_listener),
+            after_loop_callback=_wrap(callbacks.after_loop_callback),
+        )
+
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
 
@@ -513,18 +557,19 @@ class SanitizerBruteForce(Sanitizer):
         self.last_grid: Optional[tuple[int, int, int]] = None
 
     def _report(self, op_type, record):
-        traceback_info = _get_traceback_info()
-        oob_record = OutOfBoundsRecordBruteForce(
-            op_type=op_type, user_code_tracebacks=traceback_info, **record
-        )
-        if self.abort_on_error:
-            if np.any(oob_record.invalid_access_masks):
-                print_oob_record(oob_record)
-                assert (
-                    False
-                ), "Out-of-bounds access detected. See detailed report above."
-        else:
-            self.records.append(oob_record)
+        with self._lock:
+            traceback_info = _get_traceback_info()
+            oob_record = OutOfBoundsRecordBruteForce(
+                op_type=op_type, user_code_tracebacks=traceback_info, **record
+            )
+            if self.abort_on_error:
+                if np.any(oob_record.invalid_access_masks):
+                    print_oob_record(oob_record)
+                    assert (
+                        False
+                    ), "Out-of-bounds access detected. See detailed report above."
+            else:
+                self.records.append(oob_record)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
@@ -570,14 +615,18 @@ class SanitizerBruteForce(Sanitizer):
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
         if op_type is Load:
-            return OpCallbacks(before_callback=pre_load_callback)
+            return self._lock_op_callbacks(
+                OpCallbacks(before_callback=pre_load_callback)
+            )
         elif op_type is Store:
-            return OpCallbacks(before_callback=pre_store_callback)
+            return self._lock_op_callbacks(
+                OpCallbacks(before_callback=pre_store_callback)
+            )
 
-        return OpCallbacks()
+        return self._lock_op_callbacks(OpCallbacks())
 
     def register_for_loop_callback(self):
-        return ForLoopCallbacks()
+        return self._lock_for_loop_callbacks(ForLoopCallbacks())
 
     def finalize(self) -> list:
         return self.records
@@ -1665,26 +1714,27 @@ class SanitizerSymbolicExecution(Sanitizer):
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)
 
     def _report(self, op_type, tensor, violation_address, symbolic_expr=None):
-        traceback_info = _get_traceback_info()
-        oob_record = OutOfBoundsRecordZ3(
-            op_type=op_type,
-            user_code_tracebacks=traceback_info,
-            tensor=tensor,
-            violation_address=violation_address,
-            constraints=[],
-            symbolic_expr=symbolic_expr,
-        )
-        if self.abort_on_error:
-            # Use the new PDB-style print function if available
-            if symbolic_expr is not None or cfg.verbose:
-                print_oob_record_pdb_style(oob_record, symbolic_expr)
-            else:
-                print_oob_record(oob_record)
-            raise ValueError(
-                "Out-of-bounds access detected. See detailed report above."
+        with self._lock:
+            traceback_info = _get_traceback_info()
+            oob_record = OutOfBoundsRecordZ3(
+                op_type=op_type,
+                user_code_tracebacks=traceback_info,
+                tensor=tensor,
+                violation_address=violation_address,
+                constraints=[],
+                symbolic_expr=symbolic_expr,
             )
-        else:
-            self.records.append(oob_record)
+            if self.abort_on_error:
+                # Use the new PDB-style print function if available
+                if symbolic_expr is not None or cfg.verbose:
+                    print_oob_record_pdb_style(oob_record, symbolic_expr)
+                else:
+                    print_oob_record(oob_record)
+                raise ValueError(
+                    "Out-of-bounds access detected. See detailed report above."
+                )
+            else:
+                self.records.append(oob_record)
 
     def _clear_cache(self):
         self.cache_args.clear()
@@ -2080,9 +2130,11 @@ class SanitizerSymbolicExecution(Sanitizer):
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
-            return OpCallbacks(op_overrider=OP_TYPE_TO_OVERRIDER[op_type])
+            return self._lock_op_callbacks(
+                OpCallbacks(op_overrider=OP_TYPE_TO_OVERRIDER[op_type])
+            )
         else:
-            return OpCallbacks()
+            return self._lock_op_callbacks(OpCallbacks())
 
     def register_for_loop_callback(self):
         def loop_hook_before(lineno, iterable):
@@ -2149,11 +2201,13 @@ class SanitizerSymbolicExecution(Sanitizer):
                     f"(checked {len(ctx.pending_checks)} unique addr patterns)"
                 )
 
-        return ForLoopCallbacks(
-            before_loop_callback=loop_hook_before,
-            loop_iter_overrider=loop_hook_iter_overrider,
-            loop_iter_listener=loop_hook_iter_listener,
-            after_loop_callback=loop_hook_after,
+        return self._lock_for_loop_callbacks(
+            ForLoopCallbacks(
+                before_loop_callback=loop_hook_before,
+                loop_iter_overrider=loop_hook_iter_overrider,
+                loop_iter_listener=loop_hook_iter_listener,
+                after_loop_callback=loop_hook_after,
+            )
         )
 
     def finalize(self) -> list:
