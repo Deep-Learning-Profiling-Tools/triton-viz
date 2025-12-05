@@ -1593,7 +1593,7 @@ def _replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     with constant nodes produced by `concretize`.
     """
     if not isinstance(expr, SymbolicExpr):
-        raise TypeError("replace_min_load_subtree expects a SymbolicExpr instance!")
+        raise TypeError("replace_load_subtree expects a SymbolicExpr instance!")
 
     # check subtrees
     for name, child in list(expr.children.items()):
@@ -1601,8 +1601,6 @@ def _replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
             continue
         # replace subtree if load found
         expr.children[name] = _replace_load_subtree(child)
-        expr.children[name]._z3 = None
-        expr.children[name]._constraints.clear()
 
     # check self
     if expr.op == "load" and all(
@@ -1620,6 +1618,7 @@ def _replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
         expr.children.clear()
         expr.concrete_fn = None
         expr._z3 = None
+        expr._constraints.clear()
 
     return expr
 
