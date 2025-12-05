@@ -842,10 +842,11 @@ class SymbolicExpr:
         "umulhi": Spec(req=("lhs", "rhs")),
     }
 
-    ARANGE_COUNTER = 0  # Used to name arange variables
     PID0 = Int("pid_0")
     PID1 = Int("pid_1")
     PID2 = Int("pid_2")
+
+    ARANGE_DICT: dict[tuple[int, int], tuple[ArithRef, list]] = {}
 
     def __init__(self, op, *args):
         """
@@ -882,9 +883,6 @@ class SymbolicExpr:
         self._z3 = None
 
         self._constraints: list[BoolRef] = []
-
-        # arange-specific: store the assigned variable index to avoid side effects
-        self._arange_id: Optional[int] = None
 
     def _init_from_spec(self, *args: Any) -> None:
         if self.op not in self.OP_SPEC:
@@ -1112,11 +1110,6 @@ class SymbolicExpr:
         return expr, constraints
 
     def _to_z3(self) -> tuple[ArithRef, list]:
-        # For arange nodes: assign a unique ID once (before cache check to avoid side effects)
-        if self.op == "arange" and self._arange_id is None:
-            self._arange_id = SymbolicExpr.ARANGE_COUNTER
-            SymbolicExpr.ARANGE_COUNTER += 1
-
         # Symbol Cache: Check if caching is enabled and result is already computed
         if cfg.enable_symbol_cache and self._z3 is not None:
             return self._z3, self._constraints
@@ -1155,14 +1148,15 @@ class SymbolicExpr:
                 self._z3 = SymbolicExpr.PID2
 
         if self.op == "arange":
-            # Use the pre-assigned ID (guaranteed to be set at this point)
-            name = f"arange_{self._arange_id}"
-            v = Int(name)
             start = self.start.value
             end = self.end.value
-            self._constraints.append(v >= start)
-            self._constraints.append(v < end)
-            self._z3 = v
+            name = f"arange_{start}_{end}"
+            if name in SymbolicExpr.ARANGE_DICT:
+                self._z3, self._constraints = SymbolicExpr.ARANGE_DICT[name]
+            else:
+                self._z3 = Int(name)
+                self._constraints.append(v >= start)
+                self._constraints.append(v < end)
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if self.op in self.UNARY_OPS:
