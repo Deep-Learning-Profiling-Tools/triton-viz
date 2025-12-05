@@ -1157,13 +1157,15 @@ class SymbolicExpr:
             start = self.start.value
             end = self.end.value
             name = f"arange_{start}_{end}"
-            if name in SymbolicExpr.ARANGE_DICT:
-                self._z3, self._constraints = SymbolicExpr.ARANGE_DICT[name]
+            key = (start, end)
+            if key in SymbolicExpr.ARANGE_DICT:
+                self._z3, self._constraints = SymbolicExpr.ARANGE_DICT[key]
             else:
                 v = Int(name)
                 self._z3 = v
                 self._constraints.append(v >= start)
                 self._constraints.append(v < end)
+                SymbolicExpr.ARANGE_DICT[key] = (self._z3, self._constraints)
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if self.op in self.UNARY_OPS:
