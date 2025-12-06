@@ -1,10 +1,49 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
-from ...core.data import Op, Load, Store, AddPtr, Dot
+from ...core.data import (
+    Op,
+    Load,
+    Store,
+    AddPtr,
+    Dot,
+    RawLoad,
+    RawStore,
+    UnaryOp,
+    BinaryOp,
+    TernaryOp,
+    ProgramId,
+    MakeRange,
+    ExpandDims,
+    Broadcast,
+    ReduceSum,
+    ReduceMax,
+    ReduceMin,
+    Splat,
+    MakeBlockPointer,
+    TensorPointerLoad,
+    TensorPointerStore,
+    Idiv,
+    Rsqrt,
+    CastImpl,
+    Reshape,
+    Trans,
+    Join,
+    Fabs,
+    Ashr,
+    Advance,
+    FpToFp,
+    Umulhi,
+    CumSum,
+    Bitcast,
+    AtomicCas,
+    AtomicRMW,
+)
 from ...core.config import config as cfg
 from .data import LoadStoreBytes
 from ..utils import get_source_location_from_stack
+from ..sanitizer.sanitizer import SymbolicExpr, SymbolicExprDataWrapper
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
+import triton.language as tl
 import numpy as np
 from dataclasses import dataclass, replace
 from typing import Callable, Optional, List
@@ -38,7 +77,60 @@ class AggregatedMaskOpStats:
 
 
 class Profiler(Client):
+    """
+    Factory class that returns the concrete profiler implementation
+    based on the value of ``cfg.profiler_use_symbolic``.
+    """
+
     NAME = "profiler"
+
+    def __new__(cls, *args, **kwargs):
+        if cls is not Profiler:
+            return super().__new__(cls)
+
+        if cfg.profiler_use_symbolic:
+            return object.__new__(SymbolicProfiler)
+        else:
+            return object.__new__(ConcreteProfiler)
+
+    def pre_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
+
+    def arg_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def finalize(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def grid_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def grid_idx_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def register_op_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    def register_for_loop_callback(self, *args, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+
+class ConcreteProfiler(Profiler):
+    """
+    Concrete profiler that executes operations and collects runtime statistics.
+    Uses actual tensor values for profiling.
+    """
+
+    NAME = "profiler_concrete"
 
     def __init__(
         self,
@@ -502,3 +594,325 @@ class Profiler(Client):
         print("\n\n\n")
 
         return [self.load_bytes, self.store_bytes]
+
+
+class SymbolicProfiler(Profiler):
+    """
+    A symbolic profiler that tracks all operations as SymbolicExpr trees.
+    Unlike the sanitizer, this profiler does NOT compute Z3 constraints.
+    It simply builds symbolic expression trees for analysis purposes.
+    """
+
+    NAME = "profiler_symbolic"
+
+    def __init__(self):
+        super().__init__()
+        self.grid: Optional[tuple[int, ...]] = None
+        self.grid_idx: Optional[tuple[int, ...]] = None
+
+    def pre_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        return True
+
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
+
+    def arg_callback(self, name, arg, arg_cvt):
+        pass
+
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
+        self.grid_idx = grid_idx
+
+    def grid_callback(self, grid: tuple[int, ...]) -> None:
+        self.grid = tuple(int(g) for g in grid)
+
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        def op_program_id_overrider(axis):
+            assert self.grid, "Grid not initialized!"
+            return SymbolicExpr("pid", self.grid, axis)
+
+        def op_raw_load_overrider(ptr, cache_modifier, eviction_policy, is_volatile):
+            return op_load_overrider(
+                ptr, None, None, cache_modifier, eviction_policy, is_volatile
+            )
+
+        def op_load_overrider(
+            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
+        ):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            if mask is None:
+                ret = SymbolicExpr("load", ptr_sym)
+            elif other is None:
+                ret = SymbolicExpr("load", ptr_sym, mask)
+            else:
+                ret = SymbolicExpr("load", ptr_sym, mask, other)
+            return ret
+
+        def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
+            return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
+
+        def op_store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            value = SymbolicExpr.from_value(value)
+            if mask is None:
+                ret = SymbolicExpr("store", ptr_sym, value)
+            else:
+                ret = SymbolicExpr("store", ptr_sym, value, mask)
+            return ret
+
+        def op_unary_op_overrider(arg, op):
+            _unary_map = {
+                np.cos: "cos",
+                np.exp: "exp",
+                np.exp2: "exp2",
+                np.abs: "abs",
+                np.floor: "floor",
+                np.ceil: "ceil",
+                np.log: "log",
+                np.log2: "log2",
+                np.sqrt: "sqrt",
+                np.sin: "sin",
+            }
+            arg_sym = SymbolicExpr.from_value(arg)
+            try:
+                name = _unary_map[op]
+            except KeyError:
+                raise NotImplementedError(
+                    f"Unsupported unary operation: {op} on {arg_sym}"
+                )
+            return SymbolicExpr(name, arg_sym)
+
+        def op_binary_op_overrider(lhs, rhs, op):
+            _binary_map = {
+                np.add: lambda lhs, rhs: lhs + rhs,
+                np.subtract: lambda lhs, rhs: lhs - rhs,
+                np.multiply: lambda lhs, rhs: lhs * rhs,
+                np.divide: lambda lhs, rhs: lhs / rhs,
+                np.less: lambda lhs, rhs: lhs < rhs,
+                np.less_equal: lambda lhs, rhs: lhs <= rhs,
+                np.greater: lambda lhs, rhs: lhs > rhs,
+                np.greater_equal: lambda lhs, rhs: lhs >= rhs,
+                np.not_equal: lambda lhs, rhs: lhs != rhs,
+                np.equal: lambda lhs, rhs: lhs == rhs,
+                np.fmod: lambda lhs, rhs: lhs % rhs,
+                np.maximum: lambda lhs, rhs: SymbolicExpr("maximum", lhs, rhs),
+                np.minimum: lambda lhs, rhs: SymbolicExpr("minimum", lhs, rhs),
+                np.bitwise_and: lambda lhs, rhs: SymbolicExpr("bitwise_and", lhs, rhs),
+                np.bitwise_or: lambda lhs, rhs: SymbolicExpr("bitwise_or", lhs, rhs),
+                np.bitwise_xor: lambda lhs, rhs: SymbolicExpr("bitwise_xor", lhs, rhs),
+                np.right_shift: lambda lhs, rhs: SymbolicExpr("right_shift", lhs, rhs),
+                np.left_shift: lambda lhs, rhs: SymbolicExpr("left_shift", lhs, rhs),
+            }
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            try:
+                func = _binary_map[op]
+            except KeyError:
+                raise NotImplementedError(
+                    f"Unsupported binary operation: {op} between {lhs_sym} and {rhs_sym}"
+                )
+            result = func(lhs_sym, rhs_sym)
+            result.binary_numpy_op = op
+            return result
+
+        def op_ternary_op_overrider(lhs, rhs, other, op):
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            other = SymbolicExpr.from_value(other)
+            if op is np.where:
+                return SymbolicExpr("where", lhs_sym, rhs_sym, other)
+            else:
+                raise NotImplementedError(
+                    f"Unsupported ternary operation: {op} between {lhs_sym}, {rhs_sym} and {other}"
+                )
+
+        def op_addptr_overrider(ptr, offset):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            offset_sym = SymbolicExpr.from_value(offset)
+            return SymbolicExpr("addptr", ptr_sym, offset_sym)
+
+        def op_dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
+            a_sym = SymbolicExpr.from_value(a)
+            b_sym = SymbolicExpr.from_value(b)
+            d_sym = SymbolicExpr.from_value(d)
+            return SymbolicExpr("dot", a_sym, b_sym, d_sym)
+
+        def op_make_range_overrider(ret_ty, start, end):
+            return SymbolicExpr(
+                "arange",
+                SymbolicExpr.from_value(ret_ty),
+                SymbolicExpr.from_value(start),
+                SymbolicExpr.from_value(end),
+            )
+
+        def op_expand_dims_overrider(arg, axis):
+            return SymbolicExpr("expand_dims", SymbolicExpr.from_value(arg), axis)
+
+        def op_broadcast_overrider(arg, shape):
+            return SymbolicExpr("broadcast", SymbolicExpr.from_value(arg), shape)
+
+        def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
+            return SymbolicExpr("sum", SymbolicExpr.from_value(input), axis, keep_dims)
+
+        def op_reduce_max_overrider(input, axis=None, keep_dims=False, **kwargs):
+            return SymbolicExpr("max", SymbolicExpr.from_value(input), axis, keep_dims)
+
+        def op_reduce_min_overrider(input, axis=None, keep_dims=False, **kwargs):
+            return SymbolicExpr("min", SymbolicExpr.from_value(input), axis, keep_dims)
+
+        def op_splat_overrider(shape, arg):
+            return SymbolicExpr("splat", shape, SymbolicExpr.from_value(arg))
+
+        def op_make_block_ptr_overrider(
+            base, shape, strides, offsets, tensor_shape, order
+        ):
+            return SymbolicExpr(
+                "make_block_ptr",
+                SymbolicExpr.from_value(base),
+                shape,
+                strides,
+                offsets,
+                tensor_shape,
+                order,
+            )
+
+        def op_tensor_pointer_load_overrider(
+            ptr,
+            boundary_check,
+            padding_option,
+            cache_modifier,
+            eviction_policy,
+            is_volatile,
+        ):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            return SymbolicExpr("load", ptr_sym)
+
+        def op_tensor_pointer_store_overrider(
+            ptr, value, boundary_check, cache_modifier, eviction_policy
+        ):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            value_sym = SymbolicExpr.from_value(value)
+            return SymbolicExpr("store", ptr_sym, value_sym)
+
+        def op_idiv_overrider(lhs, rhs):
+            result = SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
+            result.binary_numpy_op = np.floor_divide
+            return result
+
+        def op_rsqrt_overrider(arg):
+            return SymbolicExpr("rsqrt", SymbolicExpr.from_value(arg))
+
+        def op_cast_impl_overrider(src, dst_type):
+            return SymbolicExpr("cast_impl", src, dst_type)
+
+        def op_reshape_overrider(arg, shape, allow_reorder):
+            arg_sym = SymbolicExpr.from_value(arg)
+            shape_sym = SymbolicExpr.from_value(shape)
+            return SymbolicExpr("reshape", arg_sym, shape_sym)
+
+        def op_join_overrider(lhs, rhs):
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            return SymbolicExpr("join", lhs_sym, rhs_sym)
+
+        def op_fabs_overrider(arg):
+            arg_sym = SymbolicExpr.from_value(arg)
+            return SymbolicExpr("fabs", arg_sym)
+
+        def op_ashr_overrider(lhs, rhs):
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            return SymbolicExpr("ashr", lhs_sym, rhs_sym)
+
+        def op_advance_overrider(ptr, offsets):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            offsets_sym = SymbolicExpr.from_value(offsets)
+            return SymbolicExpr("advance", ptr_sym, offsets_sym)
+
+        def op_fptofp_overrider(src, dst_type, rounding_mode):
+            return SymbolicExpr(
+                "fptofp", SymbolicExpr.from_value(src), dst_type, rounding_mode
+            )
+
+        def op_umulhi_overrider(lhs, rhs):
+            lhs_sym = SymbolicExpr.from_value(lhs)
+            rhs_sym = SymbolicExpr.from_value(rhs)
+            return SymbolicExpr("umulhi", lhs_sym, rhs_sym)
+
+        def op_trans_overrider(arg, perm):
+            return SymbolicExpr("trans", SymbolicExpr.from_value(arg), perm)
+
+        def op_cumsum_overrider(input, axis, reverse=False, dtype=None):
+            return SymbolicExpr(
+                "cumsum", SymbolicExpr.from_value(input), axis, reverse, dtype
+            )
+
+        def op_bitcast_overrider(src, dst_type):
+            src_sym = SymbolicExpr.from_value(src)
+            return SymbolicExpr("bitcast", src_sym, dst_type)
+
+        def op_atomic_cas_overrider(ptr, cmp, val, sem, scope):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            cmp_sym = SymbolicExpr.from_value(cmp)
+            val_sym = SymbolicExpr.from_value(val)
+            return SymbolicExpr("atomic_cas", ptr_sym, cmp_sym, val_sym)
+
+        def op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope):
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            val_sym = SymbolicExpr.from_value(val)
+            mask_sym = SymbolicExpr.from_value(mask)
+            return SymbolicExpr("atomic_rmw", ptr_sym, val_sym, mask_sym)
+
+        OP_TYPE_TO_OVERRIDER: dict[type[Op], Callable] = {
+            ProgramId: op_program_id_overrider,
+            RawLoad: op_raw_load_overrider,
+            Load: op_load_overrider,
+            RawStore: op_raw_store_overrider,
+            Store: op_store_overrider,
+            UnaryOp: op_unary_op_overrider,
+            BinaryOp: op_binary_op_overrider,
+            TernaryOp: op_ternary_op_overrider,
+            Dot: op_dot_overrider,
+            MakeRange: op_make_range_overrider,
+            AddPtr: op_addptr_overrider,
+            ExpandDims: op_expand_dims_overrider,
+            Broadcast: op_broadcast_overrider,
+            ReduceSum: op_reduce_sum_overrider,
+            ReduceMax: op_reduce_max_overrider,
+            ReduceMin: op_reduce_min_overrider,
+            Splat: op_splat_overrider,
+            MakeBlockPointer: op_make_block_ptr_overrider,
+            TensorPointerLoad: op_tensor_pointer_load_overrider,
+            TensorPointerStore: op_tensor_pointer_store_overrider,
+            Idiv: op_idiv_overrider,
+            Rsqrt: op_rsqrt_overrider,
+            CastImpl: op_cast_impl_overrider,
+            Reshape: op_reshape_overrider,
+            Trans: op_trans_overrider,
+            Join: op_join_overrider,
+            Fabs: op_fabs_overrider,
+            Ashr: op_ashr_overrider,
+            Advance: op_advance_overrider,
+            FpToFp: op_fptofp_overrider,
+            Umulhi: op_umulhi_overrider,
+            CumSum: op_cumsum_overrider,
+            Bitcast: op_bitcast_overrider,
+            AtomicCas: op_atomic_cas_overrider,
+            AtomicRMW: op_atomic_rmw_overrider,
+        }
+
+        if op_type in OP_TYPE_TO_OVERRIDER:
+            return OpCallbacks(op_overrider=OP_TYPE_TO_OVERRIDER[op_type])
+        else:
+            return OpCallbacks()
+
+    def register_for_loop_callback(self):
+        return ForLoopCallbacks()
+
+    def finalize(self) -> list:
+        return []

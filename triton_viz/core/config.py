@@ -63,6 +63,12 @@ class Config:
             os.getenv("PROFILER_DISABLE_BUFFER_LOAD_CHECK", "0") == "1"
         )
 
+        # --- Profiler Backend Selection ---
+        # Use symbolic profiler (SymbolicProfiler) instead of concrete profiler (ProfilerConcrete)
+        self._profiler_use_symbolic = (
+            os.getenv("PROFILER_USE_SYMBOLIC", "0") == "1"
+        )
+
     # ---------- disable_sanitizer ----------
     @property
     def disable_sanitizer(self) -> bool:
@@ -195,6 +201,25 @@ class Config:
             print("Profiler buffer load check disabled.")
         elif not value and previous:
             print("Profiler buffer load check enabled.")
+
+    # ---------- profiler_use_symbolic ----------
+    @property
+    def profiler_use_symbolic(self) -> bool:
+        return self._profiler_use_symbolic
+
+    @profiler_use_symbolic.setter
+    def profiler_use_symbolic(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_use_symbolic expects a bool.")
+
+        previous = getattr(self, "_profiler_use_symbolic", None)
+        self._profiler_use_symbolic = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler using symbolic backend (SymbolicProfiler).")
+        elif not value and previous:
+            print("Profiler using concrete backend (ConcreteProfiler).")
 
 
 config = Config()
