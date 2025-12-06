@@ -65,9 +65,7 @@ class Config:
 
         # --- Profiler Backend Selection ---
         # Use symbolic profiler (SymbolicProfiler) instead of concrete profiler (ProfilerConcrete)
-        self._profiler_use_symbolic = (
-            os.getenv("PROFILER_USE_SYMBOLIC", "0") == "1"
-        )
+        self._profiler_use_symbolic = os.getenv("PROFILER_USE_SYMBOLIC", "0") == "1"
 
     # ---------- disable_sanitizer ----------
     @property

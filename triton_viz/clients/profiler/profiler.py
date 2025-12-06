@@ -41,9 +41,8 @@ from ...core.data import (
 from ...core.config import config as cfg
 from .data import LoadStoreBytes
 from ..utils import get_source_location_from_stack
-from ..sanitizer.sanitizer import SymbolicExpr, SymbolicExprDataWrapper
+from ..sanitizer.sanitizer import SymbolicExpr
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
-import triton.language as tl
 import numpy as np
 from dataclasses import dataclass, replace
 from typing import Callable, Optional, List
