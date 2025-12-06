@@ -79,8 +79,10 @@ class TritonTrace(KernelInterface, TraceInterface):
 
         if isinstance(runner, Autotuner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
-            # replace the benchmark with a dummy that just calls the function once
-            runner._do_bench = dummy_benchmarker
+            # Kernel Cache: replace the benchmark with a dummy to skip performance testing
+            # When kernel cache is disabled, allow normal autotuning to proceed
+            if cfg.enable_kernel_cache:
+                runner._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
             runner.fn = self.interpreted_fn
             # make a deepcopy of the runner for warmup
@@ -107,11 +109,6 @@ class TritonTrace(KernelInterface, TraceInterface):
         self.fn = runner
 
         TraceInterface.__init__(self, client)
-
-    def warmup(self, *args, **kwargs):
-        with self.client_manager.patch_warmup(self.jit_fn):
-            if self.warmup_runner:
-                self.warmup_runner.warmup(*args, **kwargs)
 
         # Preserve common function attributes for compatibility
         # with code that expects to access these attributes on the kernel
@@ -162,6 +159,11 @@ class TritonTrace(KernelInterface, TraceInterface):
             raise RuntimeError("No base function to call!")
         return self.base_fn(*args, **kwargs)
 
+    def warmup(self, *args, **kwargs):
+        with self.client_manager.patch_warmup(self.jit_fn):
+            if self.warmup_runner:
+                self.warmup_runner.warmup(*args, **kwargs)
+
 
 class NKITrace(KernelInterface, TraceInterface):
     def __init__(self, kernel, client: str | Client) -> None:
@@ -209,7 +211,6 @@ class NKITrace(KernelInterface, TraceInterface):
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}'"
         )
-
 
     def __getitem__(self, *grid):
         return KernelInterface.__getitem__(self, tuple(*grid))

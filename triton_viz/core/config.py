@@ -26,6 +26,43 @@ class Config:
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
 
+        # --- Sanitizer Cache Ablation Study ---
+        # Cache 1: SymExpr Node Cache - caches Z3 expressions in SymExpr._z3
+        self.enable_symbol_cache = (
+            os.getenv("SANITIZER_ENABLE_SYMBOL_CACHE", "1") == "1"
+        )
+
+        # Cache 2: Loop Iterator Cache - deduplicates memory patterns in loops
+        self.enable_loop_cache = os.getenv("SANITIZER_ENABLE_LOOP_CACHE", "1") == "1"
+
+        # Cache 3: Grid Cache - shared solver per kernel launch (incremental SMT)
+        self.enable_grid_cache = os.getenv("SANITIZER_ENABLE_GRID_CACHE", "1") == "1"
+
+        # Cache 4: Kernel Cache - skip re-analysis of identical kernel launches
+        self.enable_kernel_cache = (
+            os.getenv("SANITIZER_ENABLE_KERNEL_CACHE", "1") == "1"
+        )
+
+        # --- Fake tensor flag ---
+        self._virtual_memory = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "0") == "1"
+
+        # --- Profiler Optimization Ablation Study ---
+        # Optimization 1: enable load/store/dot skipping
+        self._profiler_enable_load_store_skipping = (
+            os.getenv("PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1") == "1"
+        )
+
+        # Optimization 2: Profiler enable block sampling
+        self._profiler_enable_block_sampling = (
+            os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
+        )
+
+        # --- Profiler Performance Issues Detection ---
+        # AMD Buffer Load Check: detects buffer_load instruction usage in kernel ASM
+        self._profiler_disable_buffer_load_check = (
+            os.getenv("PROFILER_DISABLE_BUFFER_LOAD_CHECK", "0") == "1"
+        )
+
     # ---------- disable_sanitizer ----------
     @property
     def disable_sanitizer(self) -> bool:
@@ -96,6 +133,68 @@ class Config:
         self._report_grid_execution_progress = flag
         if flag:
             print("Grid-progress reporting is now ON.")
+
+    # ---------- profiler_enable_load_store_skipping ----------
+    @property
+    def profiler_enable_load_store_skipping(self) -> bool:
+        return self._profiler_enable_load_store_skipping
+
+    @profiler_enable_load_store_skipping.setter
+    def profiler_enable_load_store_skipping(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_enable_load_store_skipping expects a bool.")
+
+        previous = getattr(self, "_profiler_enable_load_store_skipping", None)
+        self._profiler_enable_load_store_skipping = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler load/store/dot skipping enabled.")
+        elif not value and previous:
+            print("Profiler load/store/dot skipping disabled.")
+
+    # ---------- profiler_enable_block_sampling ----------
+    @property
+    def profiler_enable_block_sampling(self) -> bool:
+        return self._profiler_enable_block_sampling
+
+    @profiler_enable_block_sampling.setter
+    def profiler_enable_block_sampling(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_enable_block_sampling expects a bool.")
+
+        previous = getattr(self, "_profiler_enable_block_sampling", None)
+        self._profiler_enable_block_sampling = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler block sampling enabled.")
+        elif not value and previous:
+            print("Profiler block sampling disabled.")
+
+    # ---------- virtual memory ----------
+    @property
+    def virtual_memory(self) -> bool:
+        return self._virtual_memory
+
+    # ---------- profiler_disable_buffer_load_check ----------
+    @property
+    def profiler_disable_buffer_load_check(self) -> bool:
+        return self._profiler_disable_buffer_load_check
+
+    @profiler_disable_buffer_load_check.setter
+    def profiler_disable_buffer_load_check(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("profiler_disable_buffer_load_check expects a bool.")
+
+        previous = getattr(self, "_profiler_disable_buffer_load_check", None)
+        self._profiler_disable_buffer_load_check = value
+
+        # User-friendly status messages
+        if value and not previous:
+            print("Profiler buffer load check disabled.")
+        elif not value and previous:
+            print("Profiler buffer load check enabled.")
 
 
 config = Config()
