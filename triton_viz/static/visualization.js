@@ -379,7 +379,8 @@ function draw() {
 
 async function fetchData() {
     try {
-        const response = await fetch('/api/data');
+        const API_BASE = window.__TRITON_VIZ_API__ || '';
+        const response = await fetch(`${API_BASE}/api/data`);
         globalData = await response.json();
         console.log(globalData);
 
