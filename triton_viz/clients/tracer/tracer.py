@@ -86,6 +86,10 @@ class Tracer(Client):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
+        active_backend = (kwargs or {}).get("backend", "triton")
+        # simple per-launch logical clock for NKI flow ordering
+        if not hasattr(self, "_nki_time"):  # initialize once
+            self._nki_time = 0
         def _extract_user_frames() -> list[traceback.FrameSummary]:
             stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
             # drop current frames (this function and callers)
@@ -121,6 +125,31 @@ class Tracer(Client):
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
             rec = Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            # Backend-specific annotations
+            try:
+                if active_backend == "triton":
+                    rec.backend = "triton"
+                    rec.mem_src = None
+                    rec.mem_dst = None
+                    rec.bytes = 0
+                    rec.time_idx = -1
+                else:  # nki
+                    rec.backend = "nki"
+                    # defaults in data.py already reflect HBM->SBUF for Load
+                    # estimate bytes from mask popcount if possible
+                    try:
+                        elem_sz = getattr(tensor, "element_size", lambda: 1)()
+                    except Exception:
+                        elem_sz = 1
+                    try:
+                        n_elems = int(np.count_nonzero(mask.data))
+                    except Exception:
+                        n_elems = 0
+                    rec.bytes = int(n_elems * elem_sz)
+                    rec.time_idx = int(self._nki_time)
+                    self._nki_time += 1
+            except Exception:
+                pass
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
@@ -141,14 +170,34 @@ class Tracer(Client):
             if not self.sample:
                 return
             keys = _convert_keys_to_numpy(keys)
-
-            self.records.append(
-                Load(
-                    ptr.data_ptr(),
-                    masked_load(ptr.get_offsets().data, keys, mask=mask.data),
-                    mask.data,
-                )
+            rec = Load(
+                ptr.data_ptr(),
+                masked_load(ptr.get_offsets().data, keys, mask=mask.data),
+                mask.data,
             )
+            try:
+                if active_backend == "triton":
+                    rec.backend = "triton"
+                    rec.mem_src = None
+                    rec.mem_dst = None
+                    rec.bytes = 0
+                    rec.time_idx = -1
+                else:
+                    rec.backend = "nki"
+                    try:
+                        elem_sz = getattr(ptr, "element_size", lambda: getattr(ptr.dtype, "itemsize", 1))()
+                    except Exception:
+                        elem_sz = getattr(ptr.dtype, "itemsize", 1)
+                    try:
+                        n_elems = int(np.count_nonzero(getattr(mask, "data", mask)))
+                    except Exception:
+                        n_elems = 0
+                    rec.bytes = int(n_elems * elem_sz)
+                    rec.time_idx = int(self._nki_time)
+                    self._nki_time += 1
+            except Exception:
+                pass
+            self.records.append(rec)
 
         def pre_store_callback(ptr, value, mask, *args, **kwargs):
             if not self.sample:
@@ -156,6 +205,29 @@ class Tracer(Client):
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
             rec = Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
+            try:
+                if active_backend == "triton":
+                    rec.backend = "triton"
+                    rec.mem_src = None
+                    rec.mem_dst = None
+                    rec.bytes = 0
+                    rec.time_idx = -1
+                else:
+                    rec.backend = "nki"
+                    # defaults in data.py already reflect SBUF->HBM for Store
+                    try:
+                        elem_sz = getattr(value, "element_size", lambda: getattr(value.dtype, "itemsize", 1))()
+                    except Exception:
+                        elem_sz = getattr(value.dtype, "itemsize", 1)
+                    try:
+                        n_elems = int(np.count_nonzero(mask.data))
+                    except Exception:
+                        n_elems = 0
+                    rec.bytes = int(n_elems * elem_sz)
+                    rec.time_idx = int(self._nki_time)
+                    self._nki_time += 1
+            except Exception:
+                pass
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
@@ -169,8 +241,30 @@ class Tracer(Client):
             else:
                 mask_data = mask.data
                 offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
-
-            self.records.append(Store(ptr.data_ptr(), offsets, mask_data))
+            rec = Store(ptr.data_ptr(), offsets, mask_data)
+            try:
+                if active_backend == "triton":
+                    rec.backend = "triton"
+                    rec.mem_src = None
+                    rec.mem_dst = None
+                    rec.bytes = 0
+                    rec.time_idx = -1
+                else:
+                    rec.backend = "nki"
+                    try:
+                        elem_sz = getattr(value, "element_size", lambda: getattr(value.dtype, "itemsize", 1))()
+                    except Exception:
+                        elem_sz = getattr(value.dtype, "itemsize", 1)
+                    try:
+                        n_elems = int(np.count_nonzero(mask_data))
+                    except Exception:
+                        n_elems = 0
+                    rec.bytes = int(n_elems * elem_sz)
+                    rec.time_idx = int(self._nki_time)
+                    self._nki_time += 1
+            except Exception:
+                pass
+            self.records.append(rec)
 
         # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
         def pre_raw_load_callback(ptr):
@@ -181,6 +275,20 @@ class Tracer(Client):
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
             rec = Load(tensor.data_ptr(), offsets, true_mask)
+            try:
+                if active_backend == "triton":
+                    rec.backend = "triton"
+                    rec.mem_src = None
+                    rec.mem_dst = None
+                    rec.bytes = 0
+                    rec.time_idx = -1
+                else:
+                    rec.backend = "nki"
+                    rec.bytes = int(offsets.size)  # best-effort
+                    rec.time_idx = int(self._nki_time)
+                    self._nki_time += 1
+            except Exception:
+                pass
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
@@ -192,6 +300,20 @@ class Tracer(Client):
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
             rec = Store(tensor.data_ptr(), offsets, true_mask)
+            try:
+                if active_backend == "triton":
+                    rec.backend = "triton"
+                    rec.mem_src = None
+                    rec.mem_dst = None
+                    rec.bytes = 0
+                    rec.time_idx = -1
+                else:
+                    rec.backend = "nki"
+                    rec.bytes = int(offsets.size)
+                    rec.time_idx = int(self._nki_time)
+                    self._nki_time += 1
+            except Exception:
+                pass
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
@@ -212,6 +334,16 @@ class Tracer(Client):
             ret_shape = ret.data.shape
             # Pass input/other raw arrays so draw.py can render MatMul
             rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            try:
+                if active_backend == "nki":
+                    # Annotate flow for Dot as SBUF -> PSUM
+                    rec.mem_src = "SBUF"
+                    rec.mem_dst = "PSUM"
+                    rec.backend = "nki"
+                    rec.time_idx = int(self._nki_time)
+                    self._nki_time += 1
+            except Exception:
+                pass
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 

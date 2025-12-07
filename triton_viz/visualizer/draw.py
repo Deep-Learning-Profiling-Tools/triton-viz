@@ -300,8 +300,41 @@ def prepare_visualization_data(program_records, tensor_table):
 
                 arr = _np.asarray([])
 
-            t_min = float(np.min(arr)) if arr.size else 0.0
-            t_max = float(np.max(arr)) if arr.size else 0.0
+            # Normalize any NDArray/object payload to plain numpy numeric array
+            try:
+                import numpy as _np
+
+                def _unwrap(v):
+                    # Recursively unwrap objects exposing .data (e.g., NDArray)
+                    vv = getattr(v, "data", v)
+                    return _unwrap(vv) if hasattr(vv, "data") else vv
+
+                # First unwrap the outer container
+                arr = _unwrap(arr)
+                arr = _np.asarray(arr)
+                if arr.dtype == object:
+                    flat = [_unwrap(x) for x in arr.ravel()]
+                    # Try direct float cast
+                    try:
+                        arr = _np.asarray(flat, dtype=float).reshape(arr.shape)
+                    except Exception:
+                        # Fallback: for nested arrays, take mean as scalar proxy
+                        try:
+                            scalars = []
+                            for x in flat:
+                                xx = _np.asarray(_unwrap(x))
+                                if xx.size == 0:
+                                    scalars.append(0.0)
+                                else:
+                                    scalars.append(float(xx.astype(float).ravel()[0]))
+                            arr = _np.asarray(scalars, dtype=float).reshape(arr.shape)
+                        except Exception:
+                            arr = _np.zeros(arr.shape, dtype=float)
+            except Exception:
+                pass
+
+            t_min = float(np.min(arr)) if getattr(arr, "size", 0) else 0.0
+            t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
 
             raw_tensor_data[record_uuid] = {
                 "global_tensor": arr,
@@ -341,7 +374,64 @@ def prepare_visualization_data(program_records, tensor_table):
                 }
             )
 
+            # Reuse the same normalization path as Load so histogram/sampling works
+            try:
+                import numpy as _np
+
+                gt = global_tensor.data
+                if hasattr(gt, "cpu") and callable(getattr(gt, "cpu", None)):
+                    try:
+                        arr = gt.detach().cpu().numpy()
+                    except Exception:
+                        arr = _np.asarray(gt)
+                elif hasattr(gt, "data"):
+                    arr = _np.asarray(getattr(gt, "data"))
+                elif hasattr(gt, "_value"):
+                    arr = _np.asarray(getattr(gt, "_value"))
+                else:
+                    arr = _np.asarray(gt)
+            except Exception:
+                import numpy as _np
+
+                arr = _np.asarray([])
+
+            try:
+                import numpy as _np
+
+                def _unwrap(v):
+                    vv = getattr(v, "data", v)
+                    return _unwrap(vv) if hasattr(vv, "data") else vv
+
+                arr = _unwrap(arr)
+                arr = _np.asarray(arr)
+                if arr.dtype == object:
+                    flat = [_unwrap(x) for x in arr.ravel()]
+                    try:
+                        arr = _np.asarray(flat, dtype=float).reshape(arr.shape)
+                    except Exception:
+                        try:
+                            scalars = []
+                            for x in flat:
+                                xx = _np.asarray(_unwrap(x))
+                                if xx.size == 0:
+                                    scalars.append(0.0)
+                                else:
+                                    scalars.append(float(xx.astype(float).ravel()[0]))
+                            arr = _np.asarray(scalars, dtype=float).reshape(arr.shape)
+                        except Exception:
+                            arr = _np.zeros(arr.shape, dtype=float)
+            except Exception:
+                pass
+
+            t_min = float(np.min(arr)) if getattr(arr, "size", 0) else 0.0
+            t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
+
             raw_tensor_data[record_uuid] = {
+                "global_tensor": arr,
+                "dims": int(arr.ndim),
+                "shape": list(arr.shape),
+                "min": t_min,
+                "max": t_max,
                 "tracebacks": [
                     {
                         "filename": f.filename,

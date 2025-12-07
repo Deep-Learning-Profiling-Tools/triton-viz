@@ -1,9 +1,11 @@
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
+import { createHistogramOverlay } from './histogram.js';
 
 export function createMatMulVisualization(containerElement, op) {
     const API_BASE = window.__TRITON_VIZ_API__ || '';
-    const { input_shape, other_shape, output_shape } = op;
+    const { input_shape, other_shape, output_shape, b_swizzle } = op;
+    const swizzleB = !!b_swizzle;
     console.log(op.uuid)
     fetch(`${API_BASE}/api/setop`, {
         method: 'POST',
@@ -201,7 +203,9 @@ export function createMatMulVisualization(containerElement, op) {
                     const row = hoveredCube.matrixRow;
                     const col = hoveredCube.matrixCol;
                     const highlightA = Array.from({ length: input_shape[1] }, (_, i) => [row, i]);
-                    const highlightB = Array.from({ length: other_shape[0] }, (_, i) => [i, col]);
+                    const highlightB = swizzleB
+                        ? Array.from({ length: other_shape[1] }, (_, j) => [col, j]) // TEMP: until tracer auto-detects
+                        : Array.from({ length: other_shape[0] }, (_, i) => [i, col]);
                     const highlightC = [[row, col]];
                     highlightCubes(matrixA, highlightA, COLOR_HIGHLIGHT);
                     highlightCubes(matrixB, highlightB, COLOR_HIGHLIGHT);
@@ -369,6 +373,22 @@ export function createMatMulVisualization(containerElement, op) {
     const colorToggle = document.createElement('button');
     colorToggle.textContent = 'Color by Value: OFF';
     controlPanel.appendChild(colorToggle);
+
+        const histogramUI = createHistogramOverlay(containerElement, {
+            title: 'Dot Value Distribution',
+            apiBase: API_BASE,
+            sources: [
+                { value: 'A', label: 'Matrix A' },
+                { value: 'B', label: 'Matrix B' },
+                { value: 'C', label: 'Matrix C (output)' },
+            ],
+            buildRequestBody: (source, bins) => ({
+                uuid: op.uuid,
+                source,
+                bins,
+            }),
+        });
+        controlPanel.appendChild(histogramUI.button);
     let colorOn = false;
     let legendEl = null;
     function destroyLegend(){ if(legendEl && legendEl.remove) legendEl.remove(); legendEl=null; }

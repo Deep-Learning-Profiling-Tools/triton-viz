@@ -1,18 +1,40 @@
 import { GridBlock } from './gridblock.js';
 import { createInfoPopup, showInfoPopup } from './infoPopup.js';
+import { createLoadOverallVisualization } from './load.js';
+import { createStoreOverallVisualization } from './store.js';
 let globalData;
 let currentView = 'main';
 let canvas, ctx;
 let maxX = 0, maxY = 0, maxZ = 0;
 let sliders = [], zSlider, precomputeButton, kernelGrid;
+let overallButton;
 let backButton;
 let currentBlockData = null;
 let isInitialized = false;
 let containerElement;
 let infoPopup;
 let infoButton;
+let overallCleanup = null;
+const overallCache = {};
+function setGlobalCodeButtonVisible(visible) {
+    const btn = document.getElementById('global-code-toggle-btn');
+    if (btn) {
+        btn.style.display = visible ? 'block' : 'none';
+    }
+}
+try {
+    window.setGlobalCodeButtonVisible = setGlobalCodeButtonVisible;
+} catch (e) {}
+function closeOverallOverlay() {
+    if (overallCleanup) {
+        overallCleanup();
+        overallCleanup = null;
+    }
+}
 function switchToMainView() {
     currentView = 'main';
+    closeOverallOverlay();
+    setGlobalCodeButtonVisible(false);
     if (currentBlockData) {
         currentBlockData.hideDetailedView();
         currentBlockData = null;
@@ -218,6 +240,11 @@ class KernelGrid {
         });
     }
 
+    // overall view no longer depends on selection; this stub kept for compatibility
+    getSelectedOps() {
+        return null;
+    }
+
     handleClick(x, y) {
         const clickedBlock = this.blocks.find(block =>
             block.isPointInside(x, y) && this.shouldDrawBlock(block)
@@ -277,6 +304,7 @@ function initializeUIElements() {
     zSlider.enabled = maxZ > 0;
 
     precomputeButton = new Button(1300, 260, 250, 40, "Precompute");
+    overallButton = new Button(1300, 330, 250, 40, "Overall");
     kernelGrid = new KernelGrid(50, 50, 1200, 800, [maxX + 1, maxY + 1, maxZ + 1], globalData.ops.visualization_data);
     backButton = new Button(50, 50, 100, 40, "Back");
     const buttonSize = 40;
@@ -335,6 +363,12 @@ function handleMouseEvent(event) {
         if (precomputeButton) {
             precomputeButton.handleEvent(event);
         }
+        if (overallButton) {
+            overallButton.handleEvent(event);
+            if (event.type === 'mouseup' && overallButton.isHovered) {
+                showOverallOverlay();
+            }
+        }
         if (kernelGrid) {
             kernelGrid.handleMouseMove(offsetX, offsetY);
             if (event.type === 'mousedown') {
@@ -371,10 +405,197 @@ function draw() {
             zSlider.draw(ctx);
         }
         if (precomputeButton) precomputeButton.draw(ctx);
+        if (overallButton) overallButton.draw(ctx);
         if (infoButton) {
             infoButton.draw(ctx);
         }
     }
+}
+
+function collectOpsByType(kind = 'any') {
+    if (!globalData || !globalData.ops || !globalData.ops.visualization_data) return [];
+    const vizData = globalData.ops.visualization_data;
+    const keys = Object.keys(vizData).sort((a, b) => {
+        const parse = (key) =>
+            key
+                .replace(/[()]/g, '')
+                .split(',')
+                .map((s) => Number(String(s).trim()));
+        const [ax, ay, az] = parse(a);
+        const [bx, by, bz] = parse(b);
+        if (ax !== bx) return ax - bx;
+        if (ay !== by) return ay - by;
+        return az - bz;
+    });
+    const ops = [];
+    keys.forEach((key) => {
+        const list = vizData[key] || [];
+        list.forEach((op) => {
+            if (op && op.overall_key && (kind === 'any' || op.type === kind)) {
+                ops.push(op);
+            }
+        });
+    });
+    return ops;
+}
+
+async function fetchOverallData(keys, kind) {
+    const unique = Array.from(new Set((keys || []).filter(Boolean)));
+    if (!unique.length) {
+        throw new Error('No overall data available');
+    }
+    const API_BASE = window.__TRITON_VIZ_API__ || '';
+    const endpoint = kind === 'store' ? 'store_overall' : 'load_overall';
+    const results = await Promise.all(
+        unique.map(async (key) => {
+            const resp = await fetch(`${API_BASE}/api/${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key }),
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.error) {
+                throw new Error(data && data.error ? data.error : 'Request failed');
+            }
+            return data;
+        })
+    );
+    const merged = {
+        shape: results[0]?.shape || [],
+        slice_shape: results[0]?.slice_shape || [],
+        tiles: [],
+    };
+    results.forEach((entry) => {
+        (entry.tiles || []).forEach((tile) => merged.tiles.push(tile));
+    });
+    return merged;
+}
+
+async function showOverallOverlay() {
+    const ops = collectOpsByType('any');
+    if (!ops.length) {
+        alert('当前没有可视化的 Load/Store 操作。');
+        return;
+    }
+    currentView = 'overall';
+    setGlobalCodeButtonVisible(false);
+    containerElement.style.pointerEvents = 'auto';
+    containerElement.style.display = 'block';
+    containerElement.innerHTML = '';
+    if (canvas) {
+        canvas.style.display = 'none';
+    }
+
+    const title = document.createElement('h2');
+    title.textContent = 'Overall View';
+    title.style.textAlign = 'center';
+    title.style.margin = '10px 0';
+    title.style.color = '#fff';
+    containerElement.appendChild(title);
+
+    const headerBar = document.createElement('div');
+    Object.assign(headerBar.style, {
+        display: 'flex',
+        flexDirection: 'row',
+        backgroundColor: '#333',
+        padding: '5px',
+        overflowX: 'auto',
+        gap: '6px',
+    });
+    containerElement.appendChild(headerBar);
+
+    const contentArea = document.createElement('div');
+    Object.assign(contentArea.style, {
+        flex: '1',
+        padding: '10px',
+        height: 'calc(100% - 120px)',
+    });
+    containerElement.appendChild(contentArea);
+
+    const backBtn = document.createElement('button');
+    backBtn.textContent = 'Back';
+    Object.assign(backBtn.style, {
+        position: 'fixed',
+        right: '20px',
+        top: '20px',
+        zIndex: '1200',
+    });
+    backBtn.addEventListener('click', () => {
+        if (overallCleanup) {
+            overallCleanup();
+            overallCleanup = null;
+        }
+        switchToMainView();
+        if (kernelGrid && typeof kernelGrid.onOverallClosed === 'function') {
+            kernelGrid.onOverallClosed();
+        }
+    });
+    containerElement.appendChild(backBtn);
+
+    let currentTab = null;
+    const showOp = async (op, tabEl) => {
+        if (currentTab) currentTab.style.backgroundColor = '#333';
+        currentTab = tabEl;
+        if (currentTab) currentTab.style.backgroundColor = '#555';
+        if (overallCleanup) {
+            overallCleanup();
+            overallCleanup = null;
+        }
+        contentArea.innerHTML = '<p style="color:#ccc;padding:20px;">Loading...</p>';
+        try {
+            const payload = await getOverallPayload(op);
+            contentArea.innerHTML = '';
+            const vizFn = op.type === 'Store' ? createStoreOverallVisualization : createLoadOverallVisualization;
+            overallCleanup = vizFn(contentArea, payload);
+        } catch (err) {
+            contentArea.innerHTML = `<p style="color:#ff8080;padding:20px;">${err}</p>`;
+        }
+    };
+
+    ops.forEach((op, idx) => {
+        const btn = document.createElement('button');
+        btn.textContent = `${idx + 1}. ${op.type} (${(op.global_shape || []).join('×')})`;
+        Object.assign(btn.style, {
+            flex: '0 0 auto',
+            backgroundColor: '#333',
+            color: '#fff',
+            border: 'none',
+            padding: '10px',
+            cursor: 'pointer',
+        });
+        btn.addEventListener('click', () => showOp(op, btn));
+        headerBar.appendChild(btn);
+        if (idx === 0) showOp(op, btn);
+    });
+}
+
+async function getOverallPayload(op) {
+    if (!op.overall_key) {
+        throw new Error('Overall data unavailable for this operation.');
+    }
+    const cacheKey = `${op.type}:${op.overall_key}`;
+    if (!overallCache[cacheKey]) {
+        const endpoint = op.type === 'Store' ? 'store_overall' : 'load_overall';
+        const API_BASE = window.__TRITON_VIZ_API__ || '';
+        const resp = await fetch(`${API_BASE}/api/${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: op.overall_key }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            throw new Error(data && data.error ? data.error : 'Request failed');
+        }
+        overallCache[cacheKey] = data;
+    }
+    const data = overallCache[cacheKey];
+    return {
+        ...op,
+        overall_mode: true,
+        overall_tiles: data.tiles || [],
+        overall_shape: data.shape || op.global_shape,
+        overall_slice_shape: data.slice_shape || op.slice_shape,
+    };
 }
 
 async function fetchData() {

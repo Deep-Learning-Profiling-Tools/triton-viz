@@ -1,33 +1,25 @@
+import { renderSbufPanel } from './sbuf_panel.js';
+
 export function createFlowDiagram(containerElement, opsByProgram) {
 // Minimal NKI flow view: three lanes (HBM, SBUF, PSUM) and arrows per op time_idx
 // opsByProgram: array of op objects for a grid block (Load/Store/Dot/Copy) with mem_* fields
   const laneNames = ["HBM", "SBUF", "PSUM"];
   const laneY = { HBM: 60, SBUF: 160, PSUM: 260 };
-  const width = containerElement.clientWidth || 1200;
+  const containerWidth = containerElement.clientWidth || 1200;
   const height = 360;
 
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  canvas.style.width = '100%';
-  canvas.style.height = '360px';
-  canvas.style.background = '#111';
-  canvas.style.border = '1px solid #333';
-  containerElement.appendChild(canvas);
-  const ctx = canvas.getContext('2d');
+  const wrapper = document.createElement('div');
+  wrapper.style.width = '100%';
+  wrapper.style.overflowX = 'auto';
+  wrapper.style.border = '1px solid #333';
+  wrapper.style.background = '#111';
+  containerElement.appendChild(wrapper);
 
-  // Draw lanes
-  ctx.font = '14px Arial';
-  ctx.fillStyle = '#ddd';
-  ctx.strokeStyle = '#444';
-  laneNames.forEach(name => {
-    const y = laneY[name];
-    ctx.beginPath();
-    ctx.moveTo(80, y);
-    ctx.lineTo(width - 20, y);
-    ctx.stroke();
-    ctx.fillText(name, 20, y + 5);
-  });
+  const canvas = document.createElement('canvas');
+  canvas.height = height;
+  canvas.style.height = `${height}px`;
+  wrapper.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
 
   // Normalize time to X range
   const events = opsByProgram
@@ -48,7 +40,32 @@ export function createFlowDiagram(containerElement, opsByProgram) {
   events.sort((a,b)=>a.t-b.t);
   const tMin = events[0].t;
   const tMax = events[events.length-1].t || (tMin+1);
-  const toX = t => 80 + (width-120) * (t - tMin) / Math.max(1, (tMax - tMin));
+  // classify copy operations (PSUM -> SBUF)
+  events.forEach(e => {
+    if ((e.type || '').toLowerCase() === 'store' && e.src === 'PSUM' && e.dst === 'SBUF') {
+      e.type = 'Copy';
+    }
+  });
+
+  const baseSpacing = 100;
+  const dynamicWidth = Math.max(containerWidth, 120 + baseSpacing * events.length);
+  canvas.width = dynamicWidth;
+  canvas.style.width = `${dynamicWidth}px`;
+
+  // Draw lanes
+  ctx.font = '14px Arial';
+  ctx.fillStyle = '#ddd';
+  ctx.strokeStyle = '#444';
+  laneNames.forEach(name => {
+    const y = laneY[name];
+    ctx.beginPath();
+    ctx.moveTo(80, y);
+    ctx.lineTo(dynamicWidth - 20, y);
+    ctx.stroke();
+    ctx.fillText(name, 20, y + 5);
+  });
+
+  const toX = t => 80 + (dynamicWidth-120) * (t - tMin) / Math.max(1, (tMax - tMin));
 
   // Color mapping per type
   const colorFor = (type) => {
@@ -56,12 +73,13 @@ export function createFlowDiagram(containerElement, opsByProgram) {
       case 'load': return '#00bcd4';
       case 'store': return '#ff9800';
       case 'dot': return '#8bc34a';
+      case 'copy': return '#b0bec5';
       default: return '#9e9e9e';
     }
   };
 
   // Draw arrows for each event
-  events.forEach(e => {
+  events.forEach((e, idx) => {
     const y1 = laneY[e.src] ?? laneY.SBUF;
     const y2 = laneY[e.dst] ?? laneY.SBUF;
     const x = toX(e.t);
@@ -88,7 +106,8 @@ export function createFlowDiagram(containerElement, opsByProgram) {
     ctx.fillStyle = '#ccc';
     ctx.font = '11px Arial';
     const label = `${e.type}  ${e.bytes||0}B`;
-    ctx.fillText(label, x + 6, (y1+y2)/2 - 6);
+    const labelOffset = idx % 2 === 0 ? -6 : -18;
+    ctx.fillText(label, x + 6, (y1+y2)/2 + labelOffset);
   });
 
   // Legend
@@ -97,9 +116,16 @@ export function createFlowDiagram(containerElement, opsByProgram) {
   legend.style.marginTop = '6px';
   legend.style.color = '#ddd';
   legend.style.font = '12px Arial';
-  legend.innerHTML = `<b>Flow Diagram</b> &nbsp; <span style="color:#00bcd4">■ Load</span>&nbsp;&nbsp;<span style="color:#8bc34a">■ Dot(PSUM)</span>&nbsp;&nbsp;<span style="color:#ff9800">■ Store</span>`;
+  legend.innerHTML = `<b>Flow Diagram</b> &nbsp; <span style="color:#00bcd4">■ Load</span>&nbsp;&nbsp;<span style="color:#8bc34a">■ Dot(PSUM)</span>&nbsp;&nbsp;<span style="color:#b0bec5">■ Copy (PSUM→SBUF)</span>&nbsp;&nbsp;<span style="color:#ff9800">■ Store</span>`;
   containerElement.appendChild(legend);
 
+  const sbufButton = renderSbufPanel();
+  if (sbufButton) {
+    sbufButton.style.position = 'absolute';
+    sbufButton.style.top = '10px';
+    sbufButton.style.right = '10px';
+    containerElement.appendChild(sbufButton);
+  }
   return () => { containerElement.innerHTML = ''; };
 }
 
