@@ -57,6 +57,11 @@ class Config:
             os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
         )
 
+        # Optimization 3: Profiler block sampling k value (number of blocks to sample)
+        self._profiler_block_sampling_k = int(
+            os.getenv("PROFILER_BLOCK_SAMPLING_K", "1")
+        )
+
         # --- Profiler Performance Issues Detection ---
         # AMD Buffer Load Check: detects buffer_load instruction usage in kernel ASM
         self._profiler_disable_buffer_load_check = (
@@ -171,6 +176,25 @@ class Config:
             print("Profiler block sampling enabled.")
         elif not value and previous:
             print("Profiler block sampling disabled.")
+
+    # ---------- profiler_block_sampling_k ----------
+    @property
+    def profiler_block_sampling_k(self) -> int:
+        return self._profiler_block_sampling_k
+
+    @profiler_block_sampling_k.setter
+    def profiler_block_sampling_k(self, value: int) -> None:
+        if not isinstance(value, int):
+            raise TypeError("profiler_block_sampling_k expects an int.")
+        if value < 1:
+            raise ValueError("profiler_block_sampling_k must be at least 1.")
+
+        previous = getattr(self, "_profiler_block_sampling_k", None)
+        self._profiler_block_sampling_k = value
+
+        # User-friendly status messages
+        if previous is not None and value != previous:
+            print(f"Profiler block sampling k changed from {previous} to {value}.")
 
     # ---------- virtual memory ----------
     @property

@@ -80,7 +80,7 @@ class Profiler(Client):
 
         # Block sampling
         self.block_sampling = cfg.profiler_enable_block_sampling
-        self.k = k
+        self.k = k if k is not None else cfg.profiler_block_sampling_k
         self.sampled_blocks: Optional[set[tuple[int, ...]]] = None
         self.current_grid_idx: Optional[tuple[int, ...]] = None
 
