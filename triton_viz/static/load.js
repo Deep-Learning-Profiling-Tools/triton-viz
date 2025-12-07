@@ -10,6 +10,7 @@ import {
     setupEventListeners,
     cameraControls
 } from './load_utils.js';
+import { createHistogramOverlay } from './histogram.js';
 
 export function createLoadVisualization(containerElement, op) {
 
@@ -70,6 +71,23 @@ export function createLoadVisualization(containerElement, op) {
         const codeToggle = document.createElement('button');
         codeToggle.textContent = 'Show Code: OFF';
         controlBar.appendChild(codeToggle);
+        const histogramUI = createHistogramOverlay(containerElement, {
+            title: 'Load Value Distribution',
+            apiBase: API_BASE,
+            sources: [
+                { value: 'GLOBAL', label: 'Global Tensor' }
+            ],
+            buildRequestBody: (source, bins) => ({
+                uuid: op.uuid,
+                source,
+                bins
+            }),
+        });
+        controlBar.appendChild(histogramUI.button);
+        // Flow arrow toggle
+        const flowToggle = document.createElement('button');
+        flowToggle.textContent = 'Flow Arrow: ON';
+        controlBar.appendChild(flowToggle);
         // Mouse pick calibration (dx/dy in pixels)
         const calibWrap = document.createElement('div');
         calibWrap.style.display = 'flex';
@@ -100,7 +118,7 @@ export function createLoadVisualization(containerElement, op) {
         } catch (e) {}
 
         let colorizeOn = false;
-        let tensorCache = null; // {min, max, shape, dims, values}
+        let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
         let hoveredCube = null;
         let legendEl = null;
         let scheme = 'mono';
@@ -125,6 +143,50 @@ export function createLoadVisualization(containerElement, op) {
 
         scene.add(globalTensor);
         scene.add(sliceTensor);
+
+        // Arrow helper (+ label) showing flow Global -> Slice
+        const ARROW_COLOR = 0xffcc00; // gold
+        const arrow = new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(0,0,0), 1.0, ARROW_COLOR, 0.25, 0.12);
+        arrow.visible = true;
+        scene.add(arrow);
+
+        function createTextSprite(text) {
+            const c = document.createElement('canvas');
+            const ctx2 = c.getContext('2d');
+            const P = 4; // padding
+            ctx2.font = 'bold 18px Arial';
+            const metrics = ctx2.measureText(text);
+            const w = Math.ceil(metrics.width) + P*2;
+            const h = 28 + P*2;
+            c.width = w; c.height = h;
+            // redraw with proper size
+            const ctx3 = c.getContext('2d');
+            ctx3.fillStyle = 'rgba(0,0,0,0.65)';
+            ctx3.fillRect(0, 0, w, h);
+            ctx3.fillStyle = '#ffffff';
+            ctx3.font = 'bold 18px Arial';
+            ctx3.textBaseline = 'middle';
+            ctx3.fillText(text, P, h/2);
+            const tex = new THREE.CanvasTexture(c);
+            tex.needsUpdate = true;
+            const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+            const spr = new THREE.Sprite(mat);
+            // scale proportional to text size
+            const scaleX = Math.max(1, w / 64);
+            const scaleY = Math.max(0.5, h / 64);
+            spr.scale.set(scaleX, scaleY, 1);
+            return spr;
+        }
+
+        const labelText = (()=>{
+            const ms = (op.mem_src||'').toUpperCase();
+            const md = (op.mem_dst||'').toUpperCase();
+            if (ms && md) return `Load ${ms} → ${md}`;
+            return 'Load Global → Slice';
+        })();
+        const arrowLabel = createTextSprite(labelText);
+        arrowLabel.visible = true;
+        scene.add(arrowLabel);
 
         // Precompute highlighted coords in Global tensor for quick reset
         const highlightedGlobalSet = new Set(
@@ -185,6 +247,13 @@ export function createLoadVisualization(containerElement, op) {
         containerElement.addEventListener('mousedown', onMouseDown);
         containerElement.addEventListener('mouseup', onMouseUp);
         containerElement.addEventListener('mouseleave', onMouseUp);
+        let flowArrowOn = true;
+        flowToggle.addEventListener('click', () => {
+            flowArrowOn = !flowArrowOn;
+            flowToggle.textContent = `Flow Arrow: ${flowArrowOn ? 'ON' : 'OFF'}`;
+            arrow.visible = flowArrowOn;
+            arrowLabel.visible = flowArrowOn;
+        });
         animate();
 
         function _updateMouseNDC(event) {
@@ -402,26 +471,42 @@ export function createLoadVisualization(containerElement, op) {
             codePanel = wrapper;
         }
 
-        function applyColorMapIfNeeded() {
-            if (!colorizeOn || !tensorCache) return;
-            const { min, max, dims, values } = tensorCache;
-            const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-            const norm = (v) => (max === min ? 0.5 : (v - min) / (max - min));
-            const toColor = (t) => {
-                const u = clamp(norm(t), 0, 1);
-                return scheme === 'mono' ? monoColor(u, monoBaseHex) : viridisColor(u);
-            };
-            globalTensor.children.forEach((cube) => {
+        function sampleValue(cache, userData, fallback) {
+            if (!cache) return fallback;
+            const { dims, values } = cache;
+            try {
+                if (dims >= 3) {
+                    return values[userData.tensor0][userData.tensor1][userData.tensor2];
+                } else if (dims === 2) {
+                    return values[userData.tensor0][userData.tensor1];
+                } else if (dims === 1) {
+                    return values[userData.tensor0];
+                }
+            } catch (e) {
+                /* ignore */
+            }
+            return fallback;
+        }
+
+        function applyColorToTensor(targetTensor, cache) {
+            if (!cache || !tensorCache) return;
+            const min = tensorCache.scaleMin;
+            const max = tensorCache.scaleMax;
+            const denom = max - min || 1;
+            targetTensor.children.forEach((cube) => {
                 const u = cube.userData;
                 if (!u) return;
-                let v = 0.0;
-                try {
-                    if (dims === 3) v = values[u.tensor0][u.tensor1][u.tensor2];
-                    else if (dims === 2) v = values[u.tensor0][u.tensor1];
-                    else if (dims === 1) v = values[u.tensor0];
-                } catch (e) { /* ignore bad index */ }
-                cube.material.color.copy(toColor(v));
+                const val = sampleValue(cache, u, min);
+                const t = Math.max(0, Math.min(1, (val - min) / denom));
+                const color = scheme === 'mono' ? monoColor(t, monoBaseHex) : viridisColor(t);
+                cube.material.color.copy(color);
             });
+        }
+
+        function applyColorMapIfNeeded() {
+            if (!colorizeOn || !tensorCache) return;
+            applyColorToTensor(globalTensor, tensorCache.global);
+            applyColorToTensor(sliceTensor, tensorCache.slice);
         }
 
         function resetGlobalColors() {
@@ -493,6 +578,37 @@ export function createLoadVisualization(containerElement, op) {
 
                     highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord);
                     updateInfoPanel(globalCoord, sliceCoord, index);
+
+                    // Update arrow position/direction and label at midpoint
+                    if (flowArrowOn) {
+                        const gCube = globalTensor.children.find(c => c.userData && c.userData.tensor0 === globalCoord[0] && c.userData.tensor1 === globalCoord[1] && c.userData.tensor2 === globalCoord[2]);
+                        const sCube = sliceTensor.children.find(c => c.userData && c.userData.tensor0 === sliceCoord[0] && c.userData.tensor1 === sliceCoord[1] && c.userData.tensor2 === sliceCoord[2]);
+                        if (gCube && sCube) {
+                            const src = new THREE.Vector3();
+                            const dst = new THREE.Vector3();
+                            gCube.getWorldPosition(src);
+                            sCube.getWorldPosition(dst);
+                            const dir = new THREE.Vector3().subVectors(dst, src);
+                            const len = dir.length();
+                            if (len > 1e-6) {
+                                arrow.visible = true;
+                                arrow.setDirection(dir.normalize());
+                                // arrow length a bit shorter than full to avoid piercing cubes
+                                const safeLen = Math.max(0.1, len - 0.3);
+                                arrow.setLength(safeLen, 0.25, 0.12);
+                                arrow.position.copy(src);
+                                const mid = new THREE.Vector3().addVectors(src, dst).multiplyScalar(0.5);
+                                arrowLabel.position.copy(mid);
+                                arrowLabel.visible = true;
+                            } else {
+                                arrow.visible = false;
+                                arrowLabel.visible = false;
+                            }
+                        } else {
+                            arrow.visible = false;
+                            arrowLabel.visible = false;
+                        }
+                    }
                 }
 
                 frame++;
@@ -501,6 +617,7 @@ export function createLoadVisualization(containerElement, op) {
             applyColorMapIfNeeded();
             renderer.render(scene, camera);
         }
+
 
         function highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord) {
             globalTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
@@ -529,7 +646,7 @@ export function createLoadVisualization(containerElement, op) {
             return await response.json();
         }
 
-        async function fetchGlobalTensor() {
+        async function fetchTensorPayload() {
             try {
                 const res = await fetch(`${API_BASE}/api/getLoadTensor`, {
                     method: 'POST',
@@ -541,7 +658,32 @@ export function createLoadVisualization(containerElement, op) {
                     console.warn('getLoadTensor error:', data && data.error);
                     return null;
                 }
-                return data;
+                const sliceMin = data.slice?.min;
+                const sliceMax = data.slice?.max;
+                const scaleMin = Math.min(
+                    data.min ?? 0,
+                    sliceMin !== undefined ? sliceMin : data.min ?? 0
+                );
+                const scaleMax = Math.max(
+                    data.max ?? 0,
+                    sliceMax !== undefined ? sliceMax : data.max ?? 0
+                );
+                return {
+                    scaleMin,
+                    scaleMax,
+                    global: {
+                        dims: data.dims,
+                        values: data.values,
+                        shape: data.shape,
+                    },
+                    slice: data.slice
+                        ? {
+                            dims: data.slice.dims,
+                            values: data.slice.values,
+                            shape: data.slice.shape,
+                        }
+                        : null,
+                };
             } catch (e) {
                 console.error('getLoadTensor failed', e);
                 return null;
@@ -551,27 +693,29 @@ export function createLoadVisualization(containerElement, op) {
         colorizeToggle.addEventListener('click', async () => {
             colorizeOn = !colorizeOn;
             colorizeToggle.textContent = `Color by Value: ${colorizeOn ? 'ON' : 'OFF'}`;
-            if (colorizeOn && !tensorCache) {
-                tensorCache = await fetchGlobalTensor();
-            }
             if (!colorizeOn) {
-                // When turning OFF, immediately restore original colors
                 resetGlobalColors();
-                // Also reset slice side to its base color to avoid mixing styles
-                sliceTensor.children.forEach((cube) => {
-                    cube.material.color.copy(COLOR_LEFT_SLICE);
-                });
+                resetSliceColors();
                 destroyLegend();
-            } else if (tensorCache) {
-                createLegend(tensorCache.min, tensorCache.max);
+                return;
             }
+            if (!tensorCache) {
+                tensorCache = await fetchTensorPayload();
+            }
+            if (!tensorCache) {
+                colorizeOn = false;
+                colorizeToggle.textContent = 'Color by Value: OFF';
+                return;
+            }
+            createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
+            applyColorMapIfNeeded();
         });
 
         schemeSelect.addEventListener('change', () => {
             scheme = schemeSelect.value;
             if (colorizeOn && tensorCache) {
                 applyColorMapIfNeeded();
-                createLegend(tensorCache.min, tensorCache.max);
+                createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
             }
             // color picker visible only for mono
             colorPicker.style.display = scheme === 'mono' ? 'block' : 'none';
@@ -581,7 +725,7 @@ export function createLoadVisualization(containerElement, op) {
             monoBaseHex = e.target.value || '#3b82f6';
             if (scheme === 'mono' && colorizeOn && tensorCache) {
                 applyColorMapIfNeeded();
-                createLegend(tensorCache.min, tensorCache.max);
+                createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
             }
         });
 
@@ -673,4 +817,122 @@ export function createLoadVisualization(containerElement, op) {
             scene.add(sprite);
         }
 
+}
+
+export function createLoadOverallVisualization(containerElement, op) {
+        const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);
+        const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0);
+        const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);
+        const tiles = op.overall_tiles || [];
+        const globalShape = op.overall_shape || op.global_shape || [];
+        const sliceShape = op.overall_slice_shape || op.slice_shape || [];
+
+        containerElement.innerHTML = '';
+        const sceneRoot = document.createElement('div');
+        sceneRoot.style.position = 'relative';
+        sceneRoot.style.width = '100%';
+        sceneRoot.style.height = '100%';
+        containerElement.appendChild(sceneRoot);
+
+        const legend = document.createElement('div');
+        Object.assign(legend.style, {
+            position: 'absolute',
+            top: '10px',
+            right: '10px',
+            background: 'rgba(0,0,0,0.65)',
+            color: '#fff',
+            padding: '8px 10px',
+            borderRadius: '6px',
+            maxHeight: '200px',
+            overflow: 'auto',
+            fontSize: '12px',
+            zIndex: 10,
+        });
+        legend.innerHTML = '<strong>Overall Tiles</strong><br/>';
+        sceneRoot.appendChild(legend);
+
+        const { scene, camera, renderer } = setupScene(sceneRoot, COLOR_BACKGROUND);
+        const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
+
+        const globalTensor = createTensor(globalShape, [], COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
+        const sliceTensor = createTensor(sliceShape, [], COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
+        const globalSize = calculateTensorSize(globalShape);
+        sliceTensor.position.set(globalSize.x + 5, 0, 0);
+        scene.add(globalTensor);
+        scene.add(sliceTensor);
+
+        const globalMap = buildCubeMap(globalTensor);
+        const sliceMap = buildCubeMap(sliceTensor);
+
+        tiles.forEach((tile, idx) => {
+            const color = new THREE.Color().setHSL((idx * 0.17) % 1, 0.65, 0.55);
+            legend.appendChild(createLegendRow(idx, color));
+            paintCoords(globalMap, tile.global_coords, color);
+            paintCoords(sliceMap, tile.slice_coords, color);
+        });
+
+        const { center } = setupCamera(scene, camera);
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.target.copy(center);
+        orbitControls.update();
+
+        sceneRoot.appendChild(renderer.domElement);
+
+        let rafId = null;
+        const animate = () => {
+            orbitControls.update();
+            renderer.render(scene, camera);
+            rafId = requestAnimationFrame(animate);
+        };
+        animate();
+
+        return () => {
+            if (rafId) cancelAnimationFrame(rafId);
+            renderer.dispose();
+            if (renderer.domElement && renderer.domElement.parentElement) {
+                renderer.domElement.parentElement.removeChild(renderer.domElement);
+            }
+            if (legend && legend.parentElement) legend.parentElement.removeChild(legend);
+            containerElement.innerHTML = '';
+        };
+
+        function buildCubeMap(tensor) {
+            const map = new Map();
+            tensor.children.forEach((cube) => {
+                if (cube.userData && typeof cube.userData.tensor0 === 'number') {
+                    const key = `${cube.userData.tensor0},${cube.userData.tensor1},${cube.userData.tensor2}`;
+                    map.set(key, cube);
+                }
+            });
+            return map;
+        }
+
+        function paintCoords(map, coords = [], color) {
+            coords.forEach(([x, y, z = 0]) => {
+                const key = `${Math.round(x)},${Math.round(y)},${Math.round(z)}`;
+                const cube = map.get(key);
+                if (cube) cube.material.color.copy(color);
+            });
+        }
+
+        function createLegendRow(idx, color) {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.gap = '6px';
+            const swatch = document.createElement('span');
+            Object.assign(swatch.style, {
+                display: 'inline-block',
+                width: '14px',
+                height: '14px',
+                background: `#${color.getHexString()}`,
+            });
+            row.appendChild(swatch);
+            const label = document.createElement('span');
+            label.textContent = `Tile ${idx + 1}`;
+            row.appendChild(label);
+            return row;
+        }
 }

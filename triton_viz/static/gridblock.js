@@ -1,7 +1,7 @@
 import { createMatMulVisualization } from './matmul.js';
 import { createFlipVisualization } from './flip.js';
-import { createLoadVisualization } from './load.js';
-import { createStoreVisualization } from './store.js';
+import { createLoadVisualization, createLoadOverallVisualization } from './load.js';
+import { createStoreVisualization, createStoreOverallVisualization } from './store.js';
 import { createFlowDiagram } from './nki.js';
 
 export class GridBlock {
@@ -160,6 +160,9 @@ export class GridBlock {
                 if (turnOn && activeUuid) await createPanel(activeUuid, 0, 8); else destroyPanel();
             });
         }
+        if (window.setGlobalCodeButtonVisible) {
+            window.setGlobalCodeButtonVisible(true);
+        }
     }
 
     createVisualizationContainer() {
@@ -216,20 +219,56 @@ export class GridBlock {
         });
         headerBar.appendChild(nkiTab);
 
+        const loadOps = this.blockData.filter(op => op.type === 'Load' && op.overall_key);
+        if (loadOps.length) {
+            const loadOverallTab = document.createElement('button');
+            loadOverallTab.textContent = 'Load Overall';
+            Object.assign(loadOverallTab.style, { flex:'0 0 auto', marginRight:'5px', background:'#333', color:'#fff', border:'none', padding:'10px', cursor:'pointer' });
+            loadOverallTab.addEventListener('click', async () => {
+                if (currentSelectedTab) currentSelectedTab.style.backgroundColor = '#333';
+                currentSelectedTab = loadOverallTab;
+                loadOverallTab.style.backgroundColor = '#555';
+                await this.displayLoadOverallView(loadOps);
+            });
+            headerBar.appendChild(loadOverallTab);
+        }
+
+        const storeOps = this.blockData.filter(op => op.type === 'Store' && op.overall_key);
+        if (storeOps.length) {
+            const storeOverallTab = document.createElement('button');
+            storeOverallTab.textContent = 'Store Overall';
+            Object.assign(storeOverallTab.style, { flex:'0 0 auto', marginRight:'5px', background:'#333', color:'#fff', border:'none', padding:'10px', cursor:'pointer' });
+            storeOverallTab.addEventListener('click', async () => {
+                if (currentSelectedTab) currentSelectedTab.style.backgroundColor = '#333';
+                currentSelectedTab = storeOverallTab;
+                storeOverallTab.style.backgroundColor = '#555';
+                await this.displayStoreOverallView(storeOps);
+            });
+            headerBar.appendChild(storeOverallTab);
+        }
+
         return headerBar;
     }
 
     createOperationTab(op, isFirst) {
+        const label = [
+            op.type,
+            (op.global_shape || []).join('×'),
+            typeof op.overall_key === 'string' ? op.overall_key : ''
+        ]
+            .filter(Boolean)
+            .join(' | ');
         const opTab = document.createElement('button');
-        opTab.textContent = op.type;
+        opTab.textContent = label;
         Object.assign(opTab.style, {
             flex: '0 0 auto',
             marginRight: '5px',
             backgroundColor: isFirst ? '#555' : '#333',
             color: '#fff',
             border: 'none',
-            padding: '10px',
-            cursor: 'pointer'
+            padding: '8px 12px',
+            cursor: 'pointer',
+            fontSize: '12px',
         });
         return opTab;
     }
@@ -309,6 +348,76 @@ export class GridBlock {
         this.visualizationCleanupFunction = createFlowDiagram(this.contentArea, this.blockData || []);
     }
 
+    async displayLoadOverallView(loadOps) {
+        if (!this.contentArea) return;
+        this.contentArea.innerHTML = '<p style="padding:20px;color:#ccc;">Loading overall Load view...</p>';
+        try {
+            const data = await this.fetchOverallData(loadOps.map(op => op.overall_key), 'load');
+            if (this.visualizationCleanupFunction) { this.visualizationCleanupFunction(); this.visualizationCleanupFunction = null; }
+            const base = loadOps[0] || {};
+            const opPayload = {
+                ...base,
+                overall_mode: true,
+                overall_tiles: data.tiles || [],
+                overall_shape: data.shape || base.global_shape,
+                overall_slice_shape: data.slice_shape || base.slice_shape,
+            };
+            this.visualizationCleanupFunction = createLoadOverallVisualization(this.contentArea, opPayload);
+        } catch (err) {
+            this.contentArea.innerHTML = `<p style="padding:20px;color:#ff8080;">Failed to load overall view: ${err}</p>`;
+        }
+    }
+
+    async displayStoreOverallView(storeOps) {
+        if (!this.contentArea) return;
+        this.contentArea.innerHTML = '<p style="padding:20px;color:#ccc;">Loading overall Store view...</p>';
+        try {
+            const data = await this.fetchOverallData(storeOps.map(op => op.overall_key), 'store');
+            if (this.visualizationCleanupFunction) { this.visualizationCleanupFunction(); this.visualizationCleanupFunction = null; }
+            const base = storeOps[0] || {};
+            const opPayload = {
+                ...base,
+                overall_mode: true,
+                overall_tiles: data.tiles || [],
+                overall_shape: data.shape || base.global_shape,
+                overall_slice_shape: data.slice_shape || base.slice_shape,
+            };
+            this.visualizationCleanupFunction = createStoreOverallVisualization(this.contentArea, opPayload);
+        } catch (err) {
+            this.contentArea.innerHTML = `<p style="padding:20px;color:#ff8080;">Failed to load overall view: ${err}</p>`;
+        }
+    }
+
+    async fetchOverallData(keys, kind) {
+        const uniqueKeys = Array.from(new Set((keys || []).filter(Boolean)));
+        if (!uniqueKeys.length) {
+            throw new Error('No overall data available');
+        }
+        const API_BASE = window.__TRITON_VIZ_API__ || '';
+        const endpoint = kind === 'store' ? 'store_overall' : 'load_overall';
+        const results = await Promise.all(uniqueKeys.map(async (key) => {
+            const resp = await fetch(`${API_BASE}/api/${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key })
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.error) {
+                throw new Error(data && data.error ? data.error : 'Request failed');
+            }
+            return data;
+        }));
+        const merged = {
+            shape: results[0]?.shape || [],
+            slice_shape: results[0]?.slice_shape || [],
+            tiles: [],
+        };
+        results.forEach((entry) => {
+            (entry.tiles || []).forEach(tile => merged.tiles.push(tile));
+        });
+        return merged;
+    }
+
 
     createCloseButton() {
         const closeButton = document.createElement('button');
@@ -365,5 +474,8 @@ export class GridBlock {
         this.canvas.style.display = 'block';
         this.containerElement.style.display = 'none';
         this.drawFunction();
+        if (window.setGlobalCodeButtonVisible) {
+            window.setGlobalCodeButtonVisible(false);
+        }
     }
 }
