@@ -138,7 +138,7 @@ class Trace(KernelInterface):
     def __call__(self, *args, **kwargs):
         # When a traced JIT function is called from within another JIT function,
         # we need to execute the underlying function directly
-        return self.base_fn(*args, **kwargs)
+        return self.interpreted_fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
         with self.client_manager.patch_warmup(self.jit_fn):
