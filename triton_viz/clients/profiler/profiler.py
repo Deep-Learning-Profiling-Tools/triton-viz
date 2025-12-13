@@ -122,17 +122,25 @@ class Profiler(Client):
         self.current_grid_idx = grid_idx
 
     def grid_callback(self, grid: tuple[int, ...]):
+        # Calculate total blocks: grid[0] * grid[1] * grid[2] (with defaults of 1)
+        grid_x = grid[0] if len(grid) > 0 else 1
+        grid_y = grid[1] if len(grid) > 1 else 1
+        grid_z = grid[2] if len(grid) > 2 else 1
+        total_blocks = grid_x * grid_y * grid_z
+        print(
+            f"Triton-Viz: total_blocks = {total_blocks} (grid: {grid_x} x {grid_y} x {grid_z})"
+        )
+
         # If block sampling is enabled, determine which blocks to sample
         if self.block_sampling:
             # Generate all possible indices
             all_indices = []
-            for x in range(grid[0] if len(grid) > 0 else 1):
-                for y in range(grid[1] if len(grid) > 1 else 1):
-                    for z in range(grid[2] if len(grid) > 2 else 1):
+            for x in range(grid_x):
+                for y in range(grid_y):
+                    for z in range(grid_z):
                         all_indices.append((x, y, z))
 
             # Sample k blocks randomly
-            total_blocks = len(all_indices)
             k = min(self.k if self.k is not None else 1, total_blocks)
 
             # Randomly select k indices
