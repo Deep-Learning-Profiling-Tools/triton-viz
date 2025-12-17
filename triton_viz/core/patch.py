@@ -712,10 +712,6 @@ def _grid_executor_call(self, *args_dev, **kwargs):
 
         start_time = time.time()
 
-    # without thread pool - not significantly faster than with thread pool IMO
-    # run_grid_loops_1thread(grid)
-
-    # with thread pool
     if max_workers == 1:
         run_grid_loops_1thread(grid)
     else:
