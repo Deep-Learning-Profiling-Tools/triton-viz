@@ -695,11 +695,31 @@ def _grid_executor_call(self, *args_dev, **kwargs):
             for fut in futures:
                 fut.result()
 
+    def run_grid_loops_1thread(grid):
+        for x in range(grid[0]):
+            for y in range(grid[1]):
+                for z in range(grid[2]):
+                    interpreter_builder.set_grid_idx(x, y, z)
+                    client_manager.grid_idx_callback((x, y, z))
+                    if not client_manager.pre_run_callback(self.fn):
+                        continue
+                    self.fn(**call_args)
+                    if not client_manager.post_run_callback(self.fn):
+                        return
+
     if cfg.enable_timing:
         import time
 
         start_time = time.time()
-    run_grid_loops(grid)
+
+    # without thread pool - not significantly faster than with thread pool IMO
+    # run_grid_loops_1thread(grid)
+
+    # with thread pool
+    if max_workers == 1:
+        run_grid_loops_1thread(grid)
+    else:
+        run_grid_loops(grid)
 
     if cfg.enable_timing:
         end_time = time.time()
