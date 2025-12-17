@@ -128,21 +128,3 @@ def apply_profiler():
         PROFILER_COMMAND,
         f"Usage: {PROFILER_COMMAND} <script.py> [args...]",
     )
-
-
-def enable_sanitizer():
-    _patched_jit = create_patched_jit(sanitizer_wrapper)
-    triton.jit = _patched_jit
-    triton.language.jit = _patched_jit
-    import triton.runtime.interpreter as _interp
-
-    _interp.jit = _patched_jit
-
-
-def enable_profiler():
-    _patched_jit = create_patched_jit(profiler_wrapper)
-    triton.jit = _patched_jit
-    triton.language.jit = _patched_jit
-    import triton.runtime.interpreter as _interp
-
-    _interp.jit = _patched_jit

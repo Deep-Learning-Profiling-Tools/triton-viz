@@ -155,9 +155,7 @@ class TritonTrace(KernelInterface, TraceInterface):
     def __call__(self, *args, **kwargs):
         # When a traced JIT function is called from within another JIT function,
         # we need to execute the underlying function directly
-        if self.base_fn is None:
-            raise RuntimeError("No base function to call!")
-        return self.base_fn(*args, **kwargs)
+        return self.interpreted_fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
         with self.client_manager.patch_warmup(self.jit_fn):

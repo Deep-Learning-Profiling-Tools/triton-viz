@@ -19,10 +19,15 @@ from z3 import (
     And,
     Or,
     Not,
+    Optimize,
     sat,
     simplify,
+    Int2BV,
+    BV2Int,
+    BitVecRef,
 )
 from z3.z3 import BoolRef, ArithRef, IntNumRef
+from z3.z3util import get_vars
 
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle, _get_np_dtype
@@ -433,6 +438,9 @@ class LoopContext:
     lineno: int
     length: int
     idx_z3: ArithRef
+    start: int = 0
+    stop: int = 0
+    step: int = 1
     values: list[int] = field(default_factory=list)
     signature_cache: set[int] = field(default_factory=set)
     pending_checks: list[
@@ -441,6 +449,21 @@ class LoopContext:
     # Clean up variable names by removing suffixes like _81, _144
     # Cache compiled regex pattern for better performance
     re_pattern = re.compile(r"(loop_i|arange)_\d+")
+
+
+@dataclass
+class RangeWrapper:
+    iterable: Any
+    length: int
+    start: int
+    stop: int
+    step: int
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def __len__(self):
+        return self.length
 
 
 class Sanitizer(Client):
@@ -719,7 +742,7 @@ class SymbolicExpr:
     SCAN_OPS = ("cumsum",)
     POINTER_OPS = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS = ("splat", "expand_dims", "broadcast", "reshape", "join", "trans")
-    CAST_OPS = ("cast_impl", "bitcast")
+    CAST_OPS = ("cast_impl", "bitcast", "fp_to_fp")
     ATOMIC_OPS = ("atomic_cas", "atomic_rmw")
     SUPPORTED_OPS = (
         BASIC_OPS
@@ -810,6 +833,9 @@ class SymbolicExpr:
         # Casting
         "cast_impl": Spec(req=("src", "dst_type"), post=_cast_impl_post),
         "bitcast": Spec(req=("src", "dst_type"), post=_cast_impl_post),
+        "fp_to_fp": Spec(
+            req=("src", "dst_type", "rounding_mode"), post=_cast_impl_post
+        ),
         # Atomic operations
         "atomic_cas": Spec(req=("ptr", "cmp", "val")),
         "atomic_rmw": Spec(req=("ptr", "val", "mask")),
@@ -818,10 +844,11 @@ class SymbolicExpr:
         "umulhi": Spec(req=("lhs", "rhs")),
     }
 
-    ARANGE_COUNTER = 0  # Used to name arange variables
     PID0 = Int("pid_0")
     PID1 = Int("pid_1")
     PID2 = Int("pid_2")
+
+    ARANGE_DICT: dict[tuple[int, int], tuple[ArithRef, list]] = {}
 
     def __init__(self, op, *args):
         """
@@ -858,9 +885,6 @@ class SymbolicExpr:
         self._z3 = None
 
         self._constraints: list[BoolRef] = []
-
-        # arange-specific: store the assigned variable index to avoid side effects
-        self._arange_id: Optional[int] = None
 
     def _init_from_spec(self, *args: Any) -> None:
         if self.op not in self.OP_SPEC:
@@ -1047,6 +1071,9 @@ class SymbolicExpr:
 
     @classmethod
     def from_value(cls, var):
+        if isinstance(var, tl.core.tensor):  # if a triton tensor
+            var = var.handle  # get its handle
+
         if isinstance(var, cls):  # if already SymbolicExpr
             return var
 
@@ -1069,7 +1096,7 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> tuple[Union[ArithRef, list[ArithRef]], list[BoolRef]]:
+    def eval(self) -> tuple[ArithRef, list]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression corresponding to the root node
@@ -1085,11 +1112,6 @@ class SymbolicExpr:
         return expr, constraints
 
     def _to_z3(self) -> tuple[ArithRef, list]:
-        # For arange nodes: assign a unique ID once (before cache check to avoid side effects)
-        if self.op == "arange" and self._arange_id is None:
-            self._arange_id = SymbolicExpr.ARANGE_COUNTER
-            SymbolicExpr.ARANGE_COUNTER += 1
-
         # Symbol Cache: Check if caching is enabled and result is already computed
         if cfg.enable_symbol_cache and self._z3 is not None:
             return self._z3, self._constraints
@@ -1128,14 +1150,18 @@ class SymbolicExpr:
                 self._z3 = SymbolicExpr.PID2
 
         if self.op == "arange":
-            # Use the pre-assigned ID (guaranteed to be set at this point)
-            name = f"arange_{self._arange_id}"
-            v = Int(name)
             start = self.start.value
             end = self.end.value
-            self._constraints.append(v >= start)
-            self._constraints.append(v < end)
-            self._z3 = v
+            name = f"arange_{start}_{end}"
+            key = (start, end)
+            if key in SymbolicExpr.ARANGE_DICT:
+                self._z3, self._constraints = SymbolicExpr.ARANGE_DICT[key]
+            else:
+                v = Int(name)
+                self._z3 = v
+                self._constraints.append(v >= start)
+                self._constraints.append(v < end)
+                SymbolicExpr.ARANGE_DICT[key] = (self._z3, self._constraints)
 
         # Unary operations (only abs is demonstrated here; others can be added using z3.Function as needed)
         if self.op in self.UNARY_OPS:
@@ -1169,6 +1195,32 @@ class SymbolicExpr:
                 else:
                     return op_func(left, right)
 
+            def _infer_bitwidth(expr):
+                dtype = getattr(expr, "dtype_tt", None)
+                if dtype is None:
+                    return None
+                if hasattr(dtype, "primitive_bitwidth"):
+                    return dtype.primitive_bitwidth
+                if hasattr(dtype, "element_ty") and hasattr(
+                    dtype.element_ty, "primitive_bitwidth"
+                ):
+                    return dtype.element_ty.primitive_bitwidth
+                return None
+
+            def _to_bv(v, bitwidth):
+                if isinstance(v, list):
+                    return [_to_bv(x, bitwidth) for x in v]
+                if isinstance(v, BoolRef):
+                    v = If(v, IntVal(1), IntVal(0))
+                if isinstance(v, BitVecRef):
+                    return v
+                return Int2BV(v, bitwidth)
+
+            def _from_bv(v):
+                if isinstance(v, list):
+                    return [_from_bv(x) for x in v]
+                return BV2Int(v, is_signed=False)
+
             if self.op == "add":
                 self._z3 = _apply_binop(lambda a, b: a + b, lhs, rhs)
             if self.op == "sub":
@@ -1196,7 +1248,41 @@ class SymbolicExpr:
             if self.op == "minimum":
                 self._z3 = _apply_binop(lambda a, b: If(a <= b, a, b), lhs, rhs)
             if self.op == "bitwise_and":
-                self._z3 = _apply_binop(lambda a, b: And(a, b), lhs, rhs)
+                bitwidth = (
+                    _infer_bitwidth(self)
+                    or _infer_bitwidth(self.lhs)
+                    or _infer_bitwidth(self.rhs)
+                    or 64
+                )
+
+                def _bit_and(a, b):
+                    return _from_bv(_to_bv(a, bitwidth) & _to_bv(b, bitwidth))
+
+                self._z3 = _apply_binop(_bit_and, lhs, rhs)
+            if self.op == "bitwise_or":
+                bitwidth = (
+                    _infer_bitwidth(self)
+                    or _infer_bitwidth(self.lhs)
+                    or _infer_bitwidth(self.rhs)
+                    or 64
+                )
+
+                def _bit_or(a, b):
+                    return _from_bv(_to_bv(a, bitwidth) | _to_bv(b, bitwidth))
+
+                self._z3 = _apply_binop(_bit_or, lhs, rhs)
+            if self.op == "bitwise_xor":
+                bitwidth = (
+                    _infer_bitwidth(self)
+                    or _infer_bitwidth(self.lhs)
+                    or _infer_bitwidth(self.rhs)
+                    or 64
+                )
+
+                def _bit_xor(a, b):
+                    return _from_bv(_to_bv(a, bitwidth) ^ _to_bv(b, bitwidth))
+
+                self._z3 = _apply_binop(_bit_xor, lhs, rhs)
             if self.op == "ashr":
                 raise NotImplementedError(
                     "Arithmetic shift right is not implemented in Z3"
@@ -1204,10 +1290,41 @@ class SymbolicExpr:
 
         # where(cond, lhs, rhs)
         if self.op == "where":
+
+            def _normalize(expr):
+                if not isinstance(expr, list):
+                    return [expr]
+                return expr
+
+            def _broadcast(*lists):
+                max_len = max(len(lst) for lst in lists)
+                broadcasted = []
+                for lst in lists:
+                    if len(lst) == 1:
+                        broadcasted.append(lst * max_len)
+                    else:
+                        assert (
+                            len(lst) == max_len
+                        ), "Incompatible lengths for broadcasting"
+                        broadcasted.append(lst)
+                return tuple(broadcasted)
+
             cond, constraints_cond = self.cond._to_z3()
             lhs, constraints_lhs = self.lhs._to_z3()
             rhs, constraints_rhs = self.rhs._to_z3()
-            self._z3 = If(cond, lhs, rhs)
+
+            cond = _normalize(cond)
+            lhs = _normalize(lhs)
+            rhs = _normalize(rhs)
+            cond, lhs, rhs = _broadcast(cond, lhs, rhs)
+
+            if not (len(cond) == len(lhs) == len(rhs)):
+                raise ValueError(
+                    f"where op requires cond, lhs, rhs to have the same length, got {len(cond)}, {len(lhs)}, {len(rhs)}"
+                )
+            self._z3 = []
+            for i in range(len(cond)):
+                self._z3.append(If(cond[i], lhs[i], rhs[i]))
             self._constraints.extend(
                 constraints_cond + constraints_lhs + constraints_rhs
             )
@@ -1235,7 +1352,10 @@ class SymbolicExpr:
             self._constraints.extend(constraints_ptr)
             if self.mask is not None:
                 mask, _ = self.mask._to_z3()
-                self._constraints.append(mask)
+                if isinstance(mask, list):
+                    self._constraints.extend(mask)
+                else:
+                    self._constraints.append(mask)
             self._z3 = ptr
 
         if self.op in ("splat", "expand_dims", "broadcast", "reshape", "trans"):
@@ -1471,7 +1591,7 @@ def _replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
     with constant nodes produced by `concretize`.
     """
     if not isinstance(expr, SymbolicExpr):
-        raise TypeError("replace_min_load_subtree expects a SymbolicExpr instance!")
+        raise TypeError("replace_load_subtree expects a SymbolicExpr instance!")
 
     # check subtrees
     for name, child in list(expr.children.items()):
@@ -1479,8 +1599,6 @@ def _replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
             continue
         # replace subtree if load found
         expr.children[name] = _replace_load_subtree(child)
-        expr.children[name]._z3 = None
-        expr.children[name]._constraints.clear()
 
     # check self
     if expr.op == "load" and all(
@@ -1497,6 +1615,8 @@ def _replace_load_subtree(expr: SymbolicExpr) -> SymbolicExpr:
         expr.dtype_tt = concrete.dtype
         expr.children.clear()
         expr.concrete_fn = None
+        expr._z3 = None
+        expr._constraints.clear()
 
     return expr
 
@@ -1572,7 +1692,15 @@ class SanitizerSymbolicExecution(Sanitizer):
             # Grid Cache enabled: Use push/pop on persistent solver
             self._solver.push()
             self._solver.add(self._addr_sym == access_addr)
-            self._solver.add(And(*expr_constraints))
+            bool_constraints = []
+            for c in expr_constraints:
+                if isinstance(c, BoolRef):
+                    bool_constraints.append(c)
+                elif isinstance(c, (int, float, IntNumRef)):
+                    bool_constraints.append(IntVal(int(c)) != 0)
+                else:
+                    bool_constraints.append(c != 0)
+            self._solver.add(And(*bool_constraints))
             if self._solver.check() == sat:
                 # Get the model to find the violation address
                 model = self._solver.model()
@@ -1599,7 +1727,15 @@ class SanitizerSymbolicExecution(Sanitizer):
             solver.add(Not(self._addr_ok))
             solver.add(self._pid_ok)
             solver.add(self._addr_sym == access_addr)
-            solver.add(And(*expr_constraints))
+            bool_constraints = []
+            for c in expr_constraints:
+                if isinstance(c, BoolRef):
+                    bool_constraints.append(c)
+                elif isinstance(c, (int, float, IntNumRef)):
+                    bool_constraints.append(IntVal(int(c)) != 0)
+                else:
+                    bool_constraints.append(c != 0)
+            solver.add(And(*bool_constraints))
             if solver.check() == sat:
                 # Get the model to find the violation address
                 model = solver.model()
@@ -1784,6 +1920,10 @@ class SanitizerSymbolicExecution(Sanitizer):
                 self.need_full_grid = True
                 ptr = _replace_load_subtree(ptr)
 
+            if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
+                self.need_full_grid = True
+                mask = _replace_load_subtree(mask)
+
             # make sure ptr dtype is valid
             if isinstance(ptr, TensorHandle) and not isinstance(
                 ptr.dtype, tl.pointer_type
@@ -1794,9 +1934,14 @@ class SanitizerSymbolicExecution(Sanitizer):
             if mask is None:
                 ret = SymbolicExpr("load", ptr_sym)
             elif other is None:
-                ret = SymbolicExpr("load", ptr_sym, mask)
+                ret = SymbolicExpr("load", ptr_sym, SymbolicExpr.from_value(mask))
             else:
-                ret = SymbolicExpr("load", ptr_sym, mask, other)
+                ret = SymbolicExpr(
+                    "load",
+                    ptr_sym,
+                    SymbolicExpr.from_value(mask),
+                    SymbolicExpr.from_value(other),
+                )
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
@@ -1811,6 +1956,10 @@ class SanitizerSymbolicExecution(Sanitizer):
                 self.need_full_grid = True
                 ptr = _replace_load_subtree(ptr)
 
+            if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
+                self.need_full_grid = True
+                mask = _replace_load_subtree(mask)
+
             # make sure ptr is a SymbolicExpr
             if isinstance(ptr, TensorHandle) and not isinstance(
                 ptr.dtype, tl.pointer_type
@@ -1820,9 +1969,14 @@ class SanitizerSymbolicExecution(Sanitizer):
 
             value = SymbolicExpr.from_value(value)
             if mask is None:
-                ret = SymbolicExpr("store", ptr_sym, value)
+                ret = SymbolicExpr("store", ptr_sym, SymbolicExpr.from_value(value))
             else:
-                ret = SymbolicExpr("store", ptr_sym, value, mask)
+                ret = SymbolicExpr(
+                    "store",
+                    ptr_sym,
+                    SymbolicExpr.from_value(value),
+                    SymbolicExpr.from_value(mask),
+                )
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
@@ -1992,22 +2146,22 @@ class SanitizerSymbolicExecution(Sanitizer):
             offsets_sym = SymbolicExpr.from_value(offsets)
             return SymbolicExpr("advance", ptr_sym, offsets_sym)
 
-        def op_fptofp_overrider(src, dst_type, rounding_mode):
-            return SymbolicExpr(
-                "fptofp", SymbolicExpr.from_value(src), dst_type, rounding_mode
-            )
-
         def op_umulhi_overrider(lhs, rhs):
             lhs_sym = SymbolicExpr.from_value(lhs)
             rhs_sym = SymbolicExpr.from_value(rhs)
             return SymbolicExpr("umulhi", lhs_sym, rhs_sym)
 
-        def op_trans_overrider(arg, perm):
+        def op_trans_overrider(arg, perm=[1, 0]):
             return SymbolicExpr("trans", SymbolicExpr.from_value(arg), perm)
 
         def op_cumsum_overrider(input, axis, reverse=False, dtype=None):
             return SymbolicExpr(
                 "cumsum", SymbolicExpr.from_value(input), axis, reverse, dtype
+            )
+
+        def op_fp_to_fp_overrider(src, dst_type, rounding_mode):
+            return SymbolicExpr(
+                "fp_to_fp", SymbolicExpr.from_value(src), dst_type, rounding_mode
             )
 
         def op_bitcast_overrider(src, dst_type):
@@ -2056,7 +2210,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             Fabs: op_fabs_overrider,
             Ashr: op_ashr_overrider,
             Advance: op_advance_overrider,
-            FpToFp: op_fptofp_overrider,
+            FpToFp: op_fp_to_fp_overrider,
             Umulhi: op_umulhi_overrider,
             CumSum: op_cumsum_overrider,
             Bitcast: op_bitcast_overrider,
@@ -2070,33 +2224,169 @@ class SanitizerSymbolicExecution(Sanitizer):
             return OpCallbacks()
 
     def register_for_loop_callback(self):
+        def _materialize_loop_value(expr, maximize: bool) -> int:
+            """
+            Materialize a possibly symbolic loop bound using Z3 optimization.
+
+            If `maximize` is True, take the maximum feasible value; otherwise take
+            the minimum feasible value.
+            """
+            if isinstance(expr, SymbolicExpr):
+                val, constraints = expr.eval()
+                if isinstance(val, list):
+                    val = val[0]
+                if isinstance(val, IntNumRef):
+                    return val.as_long()
+                if isinstance(val, int):
+                    return val
+            elif isinstance(expr, ArithRef):
+                val, constraints = expr, []
+            else:
+                return int(expr)
+
+            opt = Optimize()
+            if constraints:
+                opt.add(*constraints)
+
+            (opt.maximize(val) if maximize else opt.minimize(val))
+
+            if opt.check() != sat:
+                raise ValueError("Unable to materialize loop bound for expression.")
+
+            model = opt.model()
+            bound_val = model.evaluate(val, model_completion=True)
+            if hasattr(bound_val, "as_long"):
+                return bound_val.as_long()
+
+            raise ValueError(f"Failed to materialize loop bound for expression: {expr}")
+
+        def _get_constant_step(step_expr) -> int:
+            """
+            Triton requires a constant step. Convert it to int without solving.
+            """
+            if isinstance(step_expr, SymbolicExpr):
+                # Only allow constant SymbolicExpr
+                if step_expr.op != "const":
+                    raise ValueError("Loop step must be a constant.")
+                step_expr = step_expr.to_py()
+            if isinstance(step_expr, ArithRef):
+                raise ValueError("Loop step must be a concrete constant, not symbolic.")
+            step = int(step_expr)
+            if step == 0:
+                raise ValueError("Loop step cannot be zero.")
+            return step
+
+        def _wrap_range(
+            iterable,
+            _lineno,
+            _range_type,
+            iter_args=None,
+            iter_kwargs=None,
+            _iter_callable=None,
+        ):
+            """
+            Wrap range-like iterables so we can evaluate bounds once.
+            The caller can pass the original range call arguments to avoid
+            evaluating Python's built-in range on symbolic values.
+            """
+            iter_args = tuple(iter_args or ())
+            iter_kwargs = iter_kwargs or {}
+
+            if isinstance(iterable, RangeWrapper):
+                return iterable
+
+            def _resolve_bound(val):
+                val = SymbolicExpr.from_value(val)
+                if val.has_op("load"):
+                    self.need_full_grid = True
+                    val = _replace_load_subtree(val)
+                return val
+
+            args = tuple(_resolve_bound(v) for v in iter_args)
+            # Prefer explicit args; fall back to kwargs when args are empty.
+            if not args and iter_kwargs:
+                start_expr = _resolve_bound(iter_kwargs.get("start", 0))
+                stop_expr = _resolve_bound(
+                    iter_kwargs.get("stop", iter_kwargs.get("end"))
+                )
+                step_expr = _resolve_bound(iter_kwargs.get("step", 1))
+                if stop_expr is not None:
+                    args = (start_expr, stop_expr, step_expr)
+
+            if not args and (
+                isinstance(iterable, range)
+                or (
+                    hasattr(iterable, "start")
+                    and hasattr(iterable, "stop")
+                    and hasattr(iterable, "step")
+                )
+            ):
+                args = tuple(
+                    _resolve_bound(getattr(iterable, attr, default))
+                    for attr, default in (("start", 0), ("stop", 0), ("step", 1))
+                )
+
+            if not args:
+                return None
+
+            start_expr, stop_expr, step_expr = 0, None, 1
+            if len(args) == 1:
+                stop_expr = args[0]
+            elif len(args) == 2:
+                start_expr, stop_expr = args[0], args[1]
+            else:
+                start_expr, stop_expr, step_expr = args[0], args[1], args[2]
+
+            step = _get_constant_step(step_expr)
+            step_sign = -1 if step < 0 else 1
+
+            start = _materialize_loop_value(start_expr, maximize=step_sign < 0)
+            stop = _materialize_loop_value(stop_expr, maximize=step_sign >= 0)
+
+            concrete_range = range(start, stop, step)
+            length = len(concrete_range)
+
+            return RangeWrapper(
+                concrete_range, length=length, start=start, stop=stop, step=step
+            )
+
         def loop_hook_before(lineno, iterable):
-            if not isinstance(iterable, range):
+            if not isinstance(iterable, RangeWrapper):
                 if cfg.verbose:
-                    print("not a for-loop, skipping for-loop iterator association.")
+                    print(
+                        "not a range wrapper, skipping for-loop iterator association."
+                    )
                 return
-            length = len(iterable)
+
             idx_z3 = Int(f"loop_i_{lineno}")
-            self.loop_stack.append(LoopContext(lineno, length, idx_z3))
+            self.loop_stack.append(
+                LoopContext(
+                    lineno,
+                    iterable.length,
+                    idx_z3,
+                    start=iterable.start,
+                    stop=iterable.stop,
+                    step=iterable.step,
+                )
+            )
             if cfg.verbose:
-                print(f"[Sanitizer] ▶ enter loop@{lineno}, len={length}")
+                print(f"[Sanitizer] ▶ enter loop@{lineno}, len={iterable.length}")
 
         def loop_hook_iter_overrider(lineno, idx):
-            # collect iterator values
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
                 self.loop_stack[-1].values.append(idx)
-
-            # Make a tagged SymbolicExpr
-            sym = SymbolicExpr("const", idx, tl.int32)
-            sym._loop_ctx = self.loop_stack[-1]
-
-            return tl.core.tensor(sym, tl.int32)
+                sym = SymbolicExpr("const", idx, tl.int32)
+                sym._loop_ctx = self.loop_stack[-1]
+                return tl.core.tensor(sym, tl.int32)
+            return idx
 
         def loop_hook_iter_listener(lineno, idx):
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ loop@{lineno} idx={idx}")
 
         def loop_hook_after(lineno: int) -> None:
+            if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
+                return
             ctx = self.loop_stack.pop()
             # add constraints for loop_i
             iterator_constraints: list[BoolRef] = []
@@ -2104,6 +2394,17 @@ class SanitizerSymbolicExecution(Sanitizer):
                 iterator_constraints.append(
                     Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
                 )
+
+            def _filter_constraints(addr_expr, constraints):
+                addr_eq = self._addr_sym == addr_expr
+                relevant_vars = set(get_vars(addr_eq))
+                filtered = []
+                for constraint in constraints:
+                    constraint_vars = set(get_vars(constraint))
+                    if constraint_vars and not constraint_vars.issubset(relevant_vars):
+                        continue
+                    filtered.append(constraint)
+                return filtered
 
             # execute pending checks
             for check_tuple in ctx.pending_checks:
@@ -2114,6 +2415,8 @@ class SanitizerSymbolicExecution(Sanitizer):
                 else:
                     addr_expr, expr_constraints, symbolic_expr = check_tuple
 
+                combined_constraints = expr_constraints + iterator_constraints
+
                 if cfg.verbose:
                     print(
                         "[Sanitizer] ▶ checking:",
@@ -2122,11 +2425,25 @@ class SanitizerSymbolicExecution(Sanitizer):
                         f" and expression-related constraints: {expr_constraints} ",
                     )
 
-                self._check_range_satisfiable(
-                    addr_expr,
-                    expr_constraints + iterator_constraints,
-                    symbolic_expr,
-                )
+                if isinstance(addr_expr, list):
+                    for single_addr_expr in addr_expr:
+                        filtered_constraints = _filter_constraints(
+                            single_addr_expr, combined_constraints
+                        )
+                        self._check_range_satisfiable(
+                            single_addr_expr,
+                            filtered_constraints,
+                            symbolic_expr,
+                        )
+                else:
+                    filtered_constraints = _filter_constraints(
+                        addr_expr, combined_constraints
+                    )
+                    self._check_range_satisfiable(
+                        addr_expr,
+                        filtered_constraints,
+                        symbolic_expr,
+                    )
 
             if cfg.verbose:
                 print(
@@ -2135,6 +2452,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 )
 
         return ForLoopCallbacks(
+            range_wrapper_factory=_wrap_range,
             before_loop_callback=loop_hook_before,
             loop_iter_overrider=loop_hook_iter_overrider,
             loop_iter_listener=loop_hook_iter_listener,
