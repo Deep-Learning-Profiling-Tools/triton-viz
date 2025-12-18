@@ -1835,81 +1835,78 @@ class SanitizerSymbolicExecution(Sanitizer):
             self.records.append(oob_record)
 
     def _clear_cache(self):
-        self.cache_args.clear()
-        self.cache_grid = None
+        with self._lock:
+            self.cache_args.clear()
+            self.cache_grid = None
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        # Kernel Cache: Only use cache if enabled
-        if cfg.enable_kernel_cache and self.cache_grid:
-            # First time we launch this program, compute the hash
-            fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
-            self._clear_cache()
-            if fn_cache not in _fn_symbolic_cache_set:
-                _fn_symbolic_cache_set.add(fn_cache)
-                # Must continue to run the program at least once
-                # We don't clear up tensors at this point
-                return True
-            else:
-                # Skip re-analysis for identical kernel launch
+        with self._lock:
+            if cfg.enable_kernel_cache and self.cache_grid:
+                fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
+                self._clear_cache()
+                if fn_cache not in _fn_symbolic_cache_set:
+                    _fn_symbolic_cache_set.add(fn_cache)
+                    return True
                 return False
-        elif self.cache_grid:
-            # Kernel cache disabled, always clear cache and run
-            self._clear_cache()
-
-        # 2nd time we launch this program, depends on whether we need a full grid
-        if self.need_full_grid is None:
-            return True
-        return self.need_full_grid
+            if self.cache_grid:
+                self._clear_cache()
+            if self.need_full_grid is None:
+                return True
+            return self.need_full_grid
 
     def post_run_callback(self, fn: Callable) -> bool:
-        if self.need_full_grid is None:
-            self.need_full_grid = False
-        if self.grid_idx == self.last_grid or not self.need_full_grid:
-            self._clear_cache()
-            self.tensors.clear()
-            self.tensor_addrs.clear()
-        ret = self.need_full_grid
-        self.need_full_grid = None  # reset for the next run
-        return ret
+        with self._lock:
+            if self.need_full_grid is None:
+                self.need_full_grid = False
+            if self.grid_idx == self.last_grid or not self.need_full_grid:
+                self._clear_cache()
+                self.tensors.clear()
+                self.tensor_addrs.clear()
+            ret = self.need_full_grid
+            self.need_full_grid = None
+            return ret
 
     def arg_callback(self, name, arg, arg_cvt):
-        if not hasattr(arg, "data_ptr"):
-            if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
-                self.cache_args.append(arg)
-            return
-        if arg.is_contiguous() or check_storage_contiguous(arg):
-            start = arg.data_ptr()
-            end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
-            tensor_physical_addresses = [(start, end)]
-        elif check_inner_stride_equal_to_one(arg):
-            tensor_physical_addresses = get_physical_addr_from_tensor_slice(arg)
-        else:
-            raise ValueError(
-                "The address sanitizer only supports contiguouly stored tensors for now!"
-            )
-        # To uniquely identify the metadata of a tensor
-        self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
-        self.tensors.append(arg)
-        self.tensor_addrs.extend(tensor_physical_addresses)
+        with self._lock:
+            if not hasattr(arg, "data_ptr"):
+                if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
+                    self.cache_args.append(arg)
+                return
+            if arg.is_contiguous() or check_storage_contiguous(arg):
+                start = arg.data_ptr()
+                end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
+                tensor_physical_addresses = [(start, end)]
+            elif check_inner_stride_equal_to_one(arg):
+                tensor_physical_addresses = get_physical_addr_from_tensor_slice(arg)
+            else:
+                raise ValueError(
+                    "The address sanitizer only supports contiguouly stored tensors for now!"
+                )
+            self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
+            self.tensors.append(arg)
+            self.tensor_addrs.extend(tensor_physical_addresses)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
-        self.cache_grid = grid
-        self.last_grid = _get_last_grid(grid)
-        self.grid = tuple(int(g) for g in grid)
-        addr = Int("addr")
-        self._addr_ok = Or(*[And(addr >= s, addr <= e) for s, e in self.tensor_addrs])
-        self._pid_ok = And(
-            SymbolicExpr.PID0 < self.grid[0],
-            SymbolicExpr.PID1 < self.grid[1],
-            SymbolicExpr.PID2 < self.grid[2],
-            SymbolicExpr.PID0 >= 0,
-            SymbolicExpr.PID1 >= 0,
-            SymbolicExpr.PID2 >= 0,
-        )
-        self._solver = Solver()
-        self._solver.add(Not(self._addr_ok))
-        self._solver.add(self._pid_ok)
-        self._addr_sym = addr
+        with self._lock:
+            self.cache_grid = grid
+            self.last_grid = _get_last_grid(grid)
+            self.grid = tuple(int(g) for g in grid)
+            addr = Int("addr")
+            self._addr_ok = Or(
+                *[And(addr >= s, addr <= e) for s, e in self.tensor_addrs]
+            )
+            self._pid_ok = And(
+                SymbolicExpr.PID0 < self.grid[0],
+                SymbolicExpr.PID1 < self.grid[1],
+                SymbolicExpr.PID2 < self.grid[2],
+                SymbolicExpr.PID0 >= 0,
+                SymbolicExpr.PID1 >= 0,
+                SymbolicExpr.PID2 >= 0,
+            )
+            self._solver = Solver()
+            self._solver.add(Not(self._addr_ok))
+            self._solver.add(self._pid_ok)
+            self._addr_sym = addr
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         self.grid_idx = grid_idx

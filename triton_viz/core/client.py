@@ -30,7 +30,7 @@ class Client(ABC):
         # Thread-local scratch space for per-thread callback state
         self._thread_local = threading.local()
         # Lock for serializing shared state where needed
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def lock_fn(self, fn: Callable) -> Callable:
         """Forces serial execution of the given function."""
