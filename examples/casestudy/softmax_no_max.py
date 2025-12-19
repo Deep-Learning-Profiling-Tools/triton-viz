@@ -40,7 +40,8 @@ def softmax_kernel(
     denom = tl.sum(num, axis=0)
     denom = tl.where(denom == 0, 1.0, denom)
     out = num / denom
-    out = tl.where(tl.math.isfinite(out), out, 0.0)
+    finite_mask = (out == out) & (out != float("inf")) & (out != -float("inf"))
+    out = tl.where(finite_mask, out, 0.0)
 
     tl.store(y_ptr + row_start + offs * stride_l, out, mask=mask)
 
@@ -53,7 +54,9 @@ def run_demo():
     # 制造极大范围的数值，禁用 (x - max(x)) 会直接导致 exp 上溢
     base = torch.linspace(-1000.0, 1000.0, steps=l_max, device=device)
     x = torch.stack([base + i * 50 for i in range(batch)], dim=0)
-    lengths_inclusive = torch.full((batch,), l_max - 1, dtype=torch.int32, device=device)
+    lengths_inclusive = torch.full(
+        (batch,), l_max - 1, dtype=torch.int32, device=device
+    )
     valid_counts = lengths_inclusive + 1
     y = torch.empty_like(x)
 
@@ -83,4 +86,3 @@ def run_demo():
 
 if __name__ == "__main__":
     run_demo()
-

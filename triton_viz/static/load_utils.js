@@ -18,6 +18,19 @@ export function setupScene(container, backgroundColor = 0x000000) {
     renderer.setSize(container.clientWidth, container.clientHeight);
     container.appendChild(renderer.domElement);
 
+    // 确保输出在 sRGB 空间里渲染，避免颜色被 gamma 压暗
+    try {
+        if ('outputEncoding' in renderer) {
+            renderer.outputEncoding = THREE.sRGBEncoding;
+        }
+        if ('outputColorSpace' in renderer) {
+            renderer.outputColorSpace = THREE.SRGBColorSpace;
+        }
+        renderer.toneMapping = THREE.NoToneMapping;
+    } catch (e) {
+        // 忽略旧版 three 的不兼容字段
+    }
+
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(ambientLight);
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
@@ -30,7 +43,13 @@ export function setupScene(container, backgroundColor = 0x000000) {
 export function setupGeometries() {
     const cubeGeometry = new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE);
     const edgesGeometry = new THREE.EdgesGeometry(cubeGeometry);
-    const lineMaterial = new THREE.LineBasicMaterial({ color: COLOR_EDGE });
+    // 细且半透明的边线材质；WebGL 会 clamp 线宽，但通过降低不透明度来让线“看起来更细”
+    const lineMaterial = new THREE.LineBasicMaterial({
+        color: COLOR_EDGE,
+        linewidth: 0.1,
+        transparent: true,
+        opacity: 0.3, // baseline 稍微更实一点，具体不透明度在主题里再微调
+    });
     return { cubeGeometry, edgesGeometry, lineMaterial };
 }
 
@@ -39,6 +58,7 @@ export function createCube(color, tensorName, x, y, z, cubeGeometry, edgesGeomet
     const cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
     const edges = new THREE.LineSegments(edgesGeometry, lineMaterial);
     cube.add(edges);
+    cube.userData.edges = edges;
 
     const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
     const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
@@ -285,3 +305,67 @@ export function cameraControls(camera, cameraRotation) {
         camera.updateProjectionMatrix();
     };
 }
+
+export function addLabels(scene, globalTensor, sliceTensor, colorOrBg = '#ffffff') {
+    const sprites = [];
+    sprites.push(addLabel(scene, "Global Tensor", globalTensor.position, colorOrBg));
+    sprites.push(addLabel(scene, "Slice Tensor", sliceTensor.position, colorOrBg));
+    return sprites;
+}
+
+function computeLabelPalette(colorOrBg) {
+    // 保留原有简洁标签样式，仅根据背景亮度调整文字/描边颜色
+    // three.js Color 无 getLuminance，这里手算
+    let luminance = 0;
+    try {
+        const c = (colorOrBg instanceof THREE.Color) ? colorOrBg : new THREE.Color(colorOrBg || 0x000000);
+        luminance = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    } catch (e) {
+        luminance = 0;
+    }
+    const isLightBg = luminance > 0.55;
+    return isLightBg
+        ? { fill: '#111111', stroke: '#f8fafc' }   // 白底用深文字+浅描边
+        : { fill: '#ffffff', stroke: '#0f172a' };  // 暗底用亮文字+深描边
+}
+
+function addLabel(scene, text, position, colorOrBg) {
+    // 轻量文本标签：无背景，仅描边+填充，避免“熊猫眼”效果
+    const paddingX = 6;
+    const paddingY = 6;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.font = 'Bold 24px Arial';
+    const metrics = ctx.measureText(text);
+    const textWidth = metrics.width;
+    const textHeight = 28;
+    canvas.width = Math.ceil(textWidth + paddingX * 2);
+    canvas.height = Math.ceil(textHeight + paddingY * 2);
+
+    const { fill, stroke } = computeLabelPalette(colorOrBg);
+    ctx.font = 'Bold 24px Arial';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = stroke;
+    ctx.fillStyle = fill;
+    const y = canvas.height / 2;
+    ctx.strokeText(text, paddingX, y);
+    ctx.fillText(text, paddingX, y);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.position.set(position.x, position.y + 2, position.z);
+    const scaleX = Math.max(1, canvas.width / 64);
+    const scaleY = Math.max(0.6, canvas.height / 48);
+    sprite.scale.set(scaleX, scaleY, 1);
+    scene.add(sprite);
+    return sprite;
+}
+

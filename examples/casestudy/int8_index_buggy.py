@@ -31,7 +31,9 @@ def run_demo():
     x = torch.arange(100, 116, dtype=torch.int8)
     y_bug = torch.empty(N, dtype=torch.float32)
 
-    buggy_dequant_kernel[(1,)](x, y_bug, N, BLOCK_SIZE=BLOCK_SIZE, WRAP_START=WRAP_START)
+    buggy_dequant_kernel[(1,)](
+        x, y_bug, N, BLOCK_SIZE=BLOCK_SIZE, WRAP_START=WRAP_START
+    )
 
     print("buggy output:", y_bug.cpu().tolist())
 
@@ -40,4 +42,3 @@ def run_demo():
 
 if __name__ == "__main__":
     run_demo()
-

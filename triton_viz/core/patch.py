@@ -46,7 +46,6 @@ from .data import (
     CumSum,
     Bitcast,
     AtomicCas,
-    AtomicRMW,
 )
 from .data import Flip  # separate import to avoid reordering noise
 import inspect

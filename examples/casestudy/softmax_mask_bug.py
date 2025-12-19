@@ -40,7 +40,8 @@ def softmax_kernel(
     denom = tl.sum(num, axis=0)
     denom = tl.where(denom == 0, 1.0, denom)
     out = num / denom
-    out = tl.where(tl.math.isfinite(out), out, 0.0)
+    finite_mask = (out == out) & (out != float("inf")) & (out != -float("inf"))
+    out = tl.where(finite_mask, out, 0.0)
 
     tl.store(y_ptr + row_start + offs * stride_l, out, mask=mask)
 
@@ -54,7 +55,7 @@ def run_demo():
     base_row = torch.arange(l_max, dtype=torch.float32, device=device)
     x = torch.stack([base_row + i * 100 for i in range(batch)], dim=0)
     lengths_inclusive = torch.tensor(
-        [l_max - 1, l_max - 2, l_max - 3, l_max - 4],
+        [l_max - 1, l_max - 1, l_max - 1, l_max - 1],
         dtype=torch.int32,
         device=device,
     )
@@ -88,4 +89,3 @@ def run_demo():
 
 if __name__ == "__main__":
     run_demo()
-

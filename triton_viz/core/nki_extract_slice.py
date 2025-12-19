@@ -1,5 +1,6 @@
 import ast
 
+
 class StoreCallTransformer(ast.NodeTransformer):
     """
     A targeted AST transformer to rewrite `nl.store(x[...], ...)` calls
@@ -24,8 +25,8 @@ class StoreCallTransformer(ast.NodeTransformer):
         if not (
             isinstance(call_node.func, ast.Attribute)
             and isinstance(call_node.func.value, ast.Name)
-            and call_node.func.value.id == 'nl'
-            and call_node.func.attr in ('store', 'load')
+            and call_node.func.value.id == "nl"
+            and call_node.func.attr in ("store", "load")
         ):
             return self.generic_visit(node)
 
@@ -41,20 +42,18 @@ class StoreCallTransformer(ast.NodeTransformer):
 
         # 4. REBUILD
         # Convert to nl.masked_load or nl.masked_store
-        func_name = 'masked_' + call_node.func.attr
+        func_name = "masked_" + call_node.func.attr
 
         new_call = ast.Call(
             func=ast.Attribute(
-                value=ast.Name(id='nl', ctx=ast.Load()),
-                attr=func_name,
-                ctx=ast.Load()
+                value=ast.Name(id="nl", ctx=ast.Load()), attr=func_name, ctx=ast.Load()
             ),
             args=[
                 sliced_object,
                 self._create_slice_value_node(slice_content),
-                *remaining_args
+                *remaining_args,
             ],
-            keywords=call_node.keywords
+            keywords=call_node.keywords,
         )
 
         # 5. REPLACE
@@ -74,8 +73,8 @@ class StoreCallTransformer(ast.NodeTransformer):
         if not (
             isinstance(call_node.func, ast.Attribute)
             and isinstance(call_node.func.value, ast.Name)
-            and call_node.func.value.id == 'nl'
-            and call_node.func.attr in ('store', 'load')
+            and call_node.func.value.id == "nl"
+            and call_node.func.attr in ("store", "load")
         ):
             return self.generic_visit(node)
 
@@ -91,27 +90,25 @@ class StoreCallTransformer(ast.NodeTransformer):
 
         # 4. REBUILD
         # Convert to nl.masked_load or nl.masked_store
-        func_name = 'masked_' + call_node.func.attr
+        func_name = "masked_" + call_node.func.attr
 
         new_call = ast.Call(
             func=ast.Attribute(
-                value=ast.Name(id='nl', ctx=ast.Load()),
-                attr=func_name,
-                ctx=ast.Load()
+                value=ast.Name(id="nl", ctx=ast.Load()), attr=func_name, ctx=ast.Load()
             ),
             args=[
                 sliced_object,
                 self._create_slice_value_node(slice_content),
-                *remaining_args
+                *remaining_args,
             ],
-            keywords=call_node.keywords
+            keywords=call_node.keywords,
         )
 
         # 5. REPLACE: Create a new assignment with the transformed call
         return ast.Assign(
             targets=node.targets,
             value=new_call,
-            type_comment=getattr(node, 'type_comment', None)
+            type_comment=getattr(node, "type_comment", None),
         )
 
     def _create_slice_value_node(self, node: ast.AST) -> ast.AST:
@@ -122,21 +119,22 @@ class StoreCallTransformer(ast.NodeTransformer):
         match node:
             case ast.Slice(lower, upper, step):
                 return ast.Call(
-                    func=ast.Name(id='slice', ctx=ast.Load()),
+                    func=ast.Name(id="slice", ctx=ast.Load()),
                     args=[
                         lower or ast.Constant(value=None),
                         upper or ast.Constant(value=None),
-                        step or ast.Constant(value=None)
+                        step or ast.Constant(value=None),
                     ],
-                    keywords=[]
+                    keywords=[],
                 )
             case ast.Tuple(elts):
                 return ast.Tuple(
                     elts=[self._create_slice_value_node(e) for e in elts],
-                    ctx=ast.Load()
+                    ctx=ast.Load(),
                 )
             case _:
                 return node
+
 
 def transform_code(source_code: str) -> str:
     """
@@ -147,6 +145,7 @@ def transform_code(source_code: str) -> str:
     new_tree = transformer.visit(tree)
     ast.fix_missing_locations(new_tree)
     return ast.unparse(new_tree)
+
 
 # --- Input Code ---
 source_code = """
@@ -166,7 +165,7 @@ other_lib.store(y[10:])
 nl.some_other_func(z[:5])
 """
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # --- Transformation ---
     transformed_code = transform_code(source_code)
 

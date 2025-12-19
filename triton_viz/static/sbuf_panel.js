@@ -22,6 +22,7 @@ function formatBytes(bytes) {
     return `${bytes.toFixed(1)} ${units[u]}`;
 }
 
+
 export function renderSbufPanel() {
     const API_BASE = window.__TRITON_VIZ_API__ || '';
     const button = document.createElement('button');
@@ -177,4 +178,3 @@ export function renderSbufPanel() {
     document.body.appendChild(overlay);
     return button;
 }
-

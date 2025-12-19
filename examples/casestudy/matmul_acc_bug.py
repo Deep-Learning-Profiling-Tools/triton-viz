@@ -46,8 +46,12 @@ def matmul_acc_kernel(
         acc = tl.load(c_ptrs, mask=c_mask, other=0.0)
 
     for k in range(0, K, BLOCK_K):
-        a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & (k + offs_k[None, :] < K), other=0.0)
-        b = tl.load(b_ptrs, mask=(k + offs_k[:, None] < K) & (offs_n[None, :] < N), other=0.0)
+        a = tl.load(
+            a_ptrs, mask=(offs_m[:, None] < M) & (k + offs_k[None, :] < K), other=0.0
+        )
+        b = tl.load(
+            b_ptrs, mask=(k + offs_k[:, None] < K) & (offs_n[None, :] < N), other=0.0
+        )
         acc += tl.dot(a, b)
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
@@ -122,4 +126,3 @@ def run_demo():
 
 if __name__ == "__main__":
     run_demo()
-

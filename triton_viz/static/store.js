@@ -8,11 +8,13 @@ import {
     updateCubeColor,
     setupCamera,
     setupEventListeners,
-    cameraControls
+    cameraControls,
+    addLabels
 } from './load_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { createFlipDemo } from './flip_demo.js';
 import { createFlip3D } from './flip_3d.js';
+import { enableDrag } from './ui_helpers.js';
 
 function createHeatmapOverlay(apiBase, uuid, onDataLoaded) {
         const button = document.createElement('button');
@@ -154,22 +156,34 @@ export function createStoreVisualization(containerElement, op) {
         let frame = 0;
         let isPaused = false;
 
+        containerElement.innerHTML = '';
+        containerElement.style.position = 'relative';
+        const stage = document.createElement('div');
+        stage.className = 'viz-stage';
+        containerElement.appendChild(stage);
+
         const sideMenu = createSideMenu(containerElement);
-        // Controls bar (drag toggle only for Store view)
         const controlBar = document.createElement('div');
-        controlBar.style.position = 'fixed';
-        controlBar.style.top = '10px';
-        controlBar.style.left = '10px';
-        controlBar.style.display = 'flex';
-        controlBar.style.gap = '8px';
-        controlBar.style.zIndex = '2000';
-        controlBar.style.pointerEvents = 'auto';
-        const dragToggle = document.createElement('button');
-        dragToggle.textContent = 'Drag Cubes: OFF';
+        controlBar.className = 'viz-floating-bar';
+        controlBar.style.flexWrap = 'wrap';
+
+        const dragHandle = document.createElement('button');
+        dragHandle.type = 'button';
+        dragHandle.className = 'viz-drag-handle drag-handle';
+        dragHandle.setAttribute('aria-label', 'Drag controls');
+        dragHandle.innerHTML = '<span aria-hidden="true">⠿</span> Drag';
+        controlBar.appendChild(dragHandle);
+
+        const makeGhostButton = (label) => {
+            const btn = document.createElement('button');
+            btn.className = 'viz-button ghost';
+            btn.textContent = label;
+            return btn;
+        };
+
+        const dragToggle = makeGhostButton('Drag Cubes: OFF');
         controlBar.appendChild(dragToggle);
-        // Flow arrow toggle
-        const flowToggle = document.createElement('button');
-        flowToggle.textContent = 'Flow Arrow: ON';
+        const flowToggle = makeGhostButton('Flow Arrow: ON');
         controlBar.appendChild(flowToggle);
         const histogramUI = createHistogramOverlay(containerElement, {
             title: 'Store Value Distribution',
@@ -183,6 +197,7 @@ export function createStoreVisualization(containerElement, op) {
                 bins,
             }),
         });
+        histogramUI.button.className = 'viz-button ghost';
         controlBar.appendChild(histogramUI.button);
         const heatmapUI = createHeatmapOverlay(API_BASE, op.uuid, (data) => {
             if (data) {
@@ -192,18 +207,78 @@ export function createStoreVisualization(containerElement, op) {
                 }
             }
         });
+        heatmapUI.button.className = 'viz-button ghost';
         controlBar.appendChild(heatmapUI.button);
-        const colorToggle = document.createElement('button');
-        colorToggle.textContent = 'Color by Value: OFF';
+        const colorToggle = makeGhostButton('Color by Value: OFF');
         controlBar.appendChild(colorToggle);
+        // Per-op summary (bytes) toggle for Store
+        const summaryBtn = makeGhostButton('Summary: OFF');
+        controlBar.appendChild(summaryBtn);
         containerElement.appendChild(controlBar);
+        enableDrag(controlBar, { handle: dragHandle, bounds: window, initialLeft: 32, initialTop: 32 });
         let dragModeOn = false;
         let hoveredCube = null;
         let flipCleanup = null;
         let colorizeOn = false;
         let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
 
-        const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray
+        // Store view summary panel (per-op bytes)
+        let summaryPanel = null;
+        const destroySummaryPanel = () => {
+            if (summaryPanel && summaryPanel.remove) summaryPanel.remove();
+            summaryPanel = null;
+        };
+
+        function openSummaryPanel() {
+            destroySummaryPanel();
+            const panel = document.createElement('div');
+            panel.className = 'info-card';
+            panel.style.position = 'fixed';
+            panel.style.left = '32px';
+            panel.style.maxWidth = '260px';
+            panel.style.zIndex = '2200';
+
+            const header = document.createElement('div');
+            header.className = 'panel-header drag-handle';
+            header.style.marginBottom = '6px';
+            header.innerHTML = '<span>Store Summary</span><span class="drag-grip" aria-hidden="true">⠿</span>';
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'viz-button ghost';
+            closeBtn.textContent = 'Close';
+            closeBtn.style.marginLeft = 'auto';
+            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+            closeBtn.addEventListener('click', () => {
+                destroySummaryPanel();
+                summaryBtn.textContent = 'Summary: OFF';
+            });
+            header.appendChild(closeBtn);
+            panel.appendChild(header);
+
+            const body = document.createElement('div');
+            body.style.fontSize = '11px';
+            body.innerHTML = `
+                <div style="font-weight:600;margin-bottom:4px;">Current op</div>
+                <div>Type: Store</div>
+                <div>Bytes: ${Number(op.bytes || 0)}</div>
+            `;
+
+            panel.appendChild(body);
+            document.body.appendChild(panel);
+            enableDrag(panel, { handle: header, bounds: window, initialLeft: 32, initialTop: window.innerHeight - 220 });
+            summaryPanel = panel;
+        }
+
+        summaryBtn.addEventListener('click', () => {
+            const turnOn = summaryBtn.textContent.endsWith('OFF');
+            summaryBtn.textContent = `Summary: ${turnOn ? 'ON' : 'OFF'}`;
+            if (turnOn) {
+                openSummaryPanel();
+            } else {
+                destroySummaryPanel();
+            }
+        });
+
+        const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
         const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
         const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0); // Magenta (starting color for left slice)
         const COLOR_LOADED = new THREE.Color(1.0, 0.8, 0.0);    // Gold (final color for both slices)
@@ -215,7 +290,30 @@ export function createStoreVisualization(containerElement, op) {
         const TEMP_COLOR = new THREE.Color();
         const highlightedGlobalSet = new Set((op.global_coords || []).map(([x, y, z]) => `${x},${y},${z}`));
 
-        const { scene, camera, renderer } = setupScene(containerElement, COLOR_BACKGROUND);
+        const baseGlobalDark = COLOR_GLOBAL.clone();
+        const baseSliceDark = COLOR_LEFT_SLICE.clone();
+        // 浅色主题下的更清爽 pastel 底色，减少“灰雾感”
+        const baseGlobalLight = new THREE.Color('#fefce8'); // very light warm yellow
+        const baseSliceLight = new THREE.Color('#dbeafe');  // light blue
+        let currentBaseGlobal = baseGlobalDark.clone();
+        let currentBaseSlice = baseSliceDark.clone();
+
+        let currentBackground = COLOR_BACKGROUND;
+        const backgroundSelect = document.createElement('select');
+        backgroundSelect.className = 'viz-select';
+        backgroundSelect.title = 'Canvas background';
+        backgroundSelect.innerHTML = `
+            <option value="#000000">Night</option>
+            <option value="#0b1120">Midnight</option>
+            <option value="#111827">Deep Blue</option>
+            <option value="#ffffff">Paper</option>
+            <option value="#f7f0e3">Beige</option>
+            <option value="#f5f7fb">Soft Gray</option>
+        `;
+        // insert before histogram button to stay away from Color toggle group
+        controlBar.insertBefore(backgroundSelect, histogramUI.button);
+
+        const { scene, camera, renderer } = setupScene(stage, currentBackground);
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
 
         const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
@@ -268,28 +366,35 @@ export function createStoreVisualization(containerElement, op) {
         })();
         const arrowLabel = createTextSprite(labelText);
         arrowLabel.visible = true;
+        const midX = (globalTensor.position.x + sliceTensor.position.x) / 2;
+        arrowLabel.position.set(midX, 1.4, 0);
+        arrowLabel.material.color = new THREE.Color(getTextColor(currentBackground));
         scene.add(arrowLabel);
 
-        addLabels(scene, globalTensor, sliceTensor);
+        labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
+
+        const refreshTextOverlays = () => {
+            if (arrowLabel) scene.remove(arrowLabel);
+            const newLabel = createTextSprite(labelText);
+            newLabel.visible = true;
+            const midX2 = (globalTensor.position.x + sliceTensor.position.x) / 2;
+            newLabel.position.set(midX2, 1.4, 0);
+            newLabel.material.color = new THREE.Color(getTextColor(currentBackground));
+            scene.add(newLabel);
+            labelSprites.forEach(s => scene.remove(s));
+            labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
+        };
 
         // Overlay memory flow badges if available (NKI only)
         try {
             const badge = document.createElement('div');
-            badge.style.position = 'fixed';
-            badge.style.right = '10px';
-            badge.style.top = '60px';
-            badge.style.zIndex = '2500';
-            badge.style.background = 'rgba(0,0,0,0.65)';
-            badge.style.color = '#fff';
-            badge.style.padding = '6px 8px';
-            badge.style.borderRadius = '6px';
-            badge.style.font = '12px Arial';
+            badge.className = 'viz-floating-badge';
             const ms = (op.mem_src||'').toUpperCase();
             const md = (op.mem_dst||'').toUpperCase();
             const by = Number(op.bytes||0);
             if (ms && md) {
-                badge.innerHTML = `<b>Memory Flow</b><br/>${ms} → ${md}${by?`<br/>${by} B`:''}`;
-                containerElement.appendChild(badge);
+                badge.innerHTML = `<strong>Memory Flow</strong><br/>${ms} → ${md}${by?`<br/>${by} B`:''}`;
+                stage.appendChild(badge);
             }
         } catch(e){}
         const { center } = setupCamera(scene, camera);
@@ -312,10 +417,10 @@ export function createStoreVisualization(containerElement, op) {
         const dragOffset = new THREE.Vector3();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown);
-        containerElement.addEventListener('mousedown', onMouseDown);
-        containerElement.addEventListener('mouseup', onMouseUp);
-        containerElement.addEventListener('mouseleave', onMouseUp);
+        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown);
+        stage.addEventListener('mousedown', onMouseDown);
+        stage.addEventListener('mouseup', onMouseUp);
+        stage.addEventListener('mouseleave', onMouseUp);
         colorToggle.addEventListener('click', async () => {
             colorizeOn = !colorizeOn;
             colorToggle.textContent = `Color by Value: ${colorizeOn ? 'ON' : 'OFF'}`;
@@ -345,12 +450,51 @@ export function createStoreVisualization(containerElement, op) {
             arrow.visible = flowArrowOn;
             arrowLabel.visible = flowArrowOn;
         });
+        function isLightBackgroundHex(hex) {
+            const h = (hex || '').toLowerCase();
+            return h === '#ffffff' || h === '#f7f0e3' || h === '#f5f7fb';
+        }
+
+        function applyBackgroundTheme(hex) {
+            const isLight = isLightBackgroundHex(hex);
+
+            currentBaseGlobal.copy(isLight ? baseGlobalLight : baseGlobalDark);
+            currentBaseSlice.copy(isLight ? baseSliceLight : baseSliceDark);
+            resetColorByValue();
+
+            globalTensor.children.forEach((cube) => {
+                if (cube?.userData?.edges) {
+                    cube.userData.edges.visible = !isLight;
+                }
+            });
+            sliceTensor.children.forEach((cube) => {
+                if (cube?.userData?.edges) {
+                    cube.userData.edges.visible = !isLight;
+                }
+            });
+            if (!isLight) {
+                if (lineMaterial) {
+                    lineMaterial.color.set('#ffffff');
+                    lineMaterial.opacity = 0.28;
+                }
+            }
+        }
+
+        backgroundSelect.addEventListener('change', (event) => {
+            const value = event.target.value;
+            currentBackground = new THREE.Color(value);
+            if (scene && scene.background) scene.background = currentBackground;
+            applyBackgroundTheme(value);
+            refreshTextOverlays();
+        });
+
+        applyBackgroundTheme(backgroundSelect.value || '#000000');
         // Removed Flip demo button from Store view; Flip visualization is available under Flip op.
         animate();
 
         function _updateMouseNDC(event) {
-            mouse.x = (event.clientX / containerElement.clientWidth) * 2 - 1;
-            mouse.y = -(event.clientY / containerElement.clientHeight) * 2 + 1;
+            mouse.x = (event.clientX / stage.clientWidth) * 2 - 1;
+            mouse.y = -(event.clientY / stage.clientHeight) * 2 + 1;
         }
 
         function _raycastAll() {
@@ -428,14 +572,14 @@ export function createStoreVisualization(containerElement, op) {
             dragOffset.copy(worldPosHelper).sub(planeIntersect);
             isDragging = true;
             dragTarget = cube;
-            containerElement.style.cursor = 'grabbing';
+            stage.style.cursor = 'grabbing';
         }
 
         function onMouseUp() {
             if (!dragModeOn) return;
             isDragging = false;
             dragTarget = null;
-            containerElement.style.cursor = '';
+            stage.style.cursor = '';
         }
 
         function animate() {
@@ -580,11 +724,11 @@ export function createStoreVisualization(containerElement, op) {
                 const u = cube.userData;
                 if (!u) return;
                 const key = `${u.tensor0},${u.tensor1},${u.tensor2}`;
-                const base = highlightedGlobalSet.has(key) ? COLOR_SLICE : COLOR_GLOBAL;
+                const base = highlightedGlobalSet.has(key) ? COLOR_SLICE : currentBaseGlobal;
                 cube.material.color.copy(base);
             });
             sliceTensor.children.forEach((cube) => {
-                cube.material.color.copy(COLOR_LEFT_SLICE);
+                cube.material.color.copy(currentBaseSlice);
             });
         }
 
@@ -653,38 +797,10 @@ export function createStoreVisualization(containerElement, op) {
 
         function createSideMenu(container) {
             const menu = document.createElement('div');
-            menu.style.position = 'absolute';
-            menu.style.top = '10px';
-            menu.style.right = '10px';
-            menu.style.width = '200px';
-            menu.style.padding = '10px';
-            menu.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
-            menu.style.color = 'white';
-            menu.style.fontFamily = 'Arial, sans-serif';
-            menu.style.fontSize = '14px';
-            menu.style.borderRadius = '5px';
+            menu.className = 'viz-side-panel';
+            menu.style.width = '240px';
             container.appendChild(menu);
             return menu;
-        }
-
-        function addLabels(scene, globalTensor, sliceTensor) {
-            addLabel(scene, "Global Tensor", globalTensor.position);
-            addLabel(scene, "Slice Tensor", sliceTensor.position);
-        }
-
-        function addLabel(scene, text, position) {
-            const canvas = document.createElement('canvas');
-            const context = canvas.getContext('2d');
-            context.font = 'Bold 24px Arial';
-            context.fillStyle = 'white';
-            context.fillText(text, 0, 24);
-
-            const texture = new THREE.CanvasTexture(canvas);
-            const material = new THREE.SpriteMaterial({ map: texture });
-            const sprite = new THREE.Sprite(material);
-            sprite.position.set(position.x, position.y + 2, position.z);
-            sprite.scale.set(4, 2, 1);
-            scene.add(sprite);
         }
 
 }
@@ -699,9 +815,7 @@ export function createStoreOverallVisualization(containerElement, op) {
 
         containerElement.innerHTML = '';
         const sceneRoot = document.createElement('div');
-        sceneRoot.style.position = 'relative';
-        sceneRoot.style.width = '100%';
-        sceneRoot.style.height = '100%';
+        sceneRoot.className = 'viz-stage';
         containerElement.appendChild(sceneRoot);
 
         const legend = document.createElement('div');
@@ -718,10 +832,40 @@ export function createStoreOverallVisualization(containerElement, op) {
             fontSize: '12px',
             zIndex: 10,
         });
-        legend.innerHTML = '<strong>Overall Tiles</strong><br/>';
+        legend.innerHTML = '<strong>Program Blocks</strong><br/>';
         sceneRoot.appendChild(legend);
+        // 背景选择
+        let currentBackground = COLOR_BACKGROUND;
+        const controlBar = document.createElement('div');
+        Object.assign(controlBar.style, {
+            position: 'absolute',
+            top: '10px',
+            left: '10px',
+            zIndex: 12,
+            display: 'flex',
+            gap: '8px',
+            alignItems: 'center',
+            background: 'rgba(0,0,0,0.55)',
+            color: '#fff',
+            padding: '6px 8px',
+            borderRadius: '6px',
+            fontSize: '12px',
+        });
+        const bgLabel = document.createElement('span');
+        bgLabel.textContent = 'Background';
+        controlBar.appendChild(bgLabel);
+        const backgroundSelect = document.createElement('select');
+        [['Dark', '#000000'], ['Paper', '#ffffff'], ['Beige', '#f7f0e3'], ['Slate', '#0f172a']].forEach(([label, value]) => {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = label;
+            backgroundSelect.appendChild(opt);
+        });
+        backgroundSelect.value = '#000000';
+        controlBar.appendChild(backgroundSelect);
+        sceneRoot.appendChild(controlBar);
 
-        const { scene, camera, renderer } = setupScene(sceneRoot, COLOR_BACKGROUND);
+        const { scene, camera, renderer } = setupScene(sceneRoot, currentBackground);
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
 
         const globalTensor = createTensor(globalShape, [], COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
@@ -731,15 +875,119 @@ export function createStoreOverallVisualization(containerElement, op) {
         scene.add(globalTensor);
         scene.add(sliceTensor);
 
+        // Overall 视图使用 MeshBasic 平涂材质，让颜色与图例更一致
+        const applyFlatMaterial = (group) => {
+            group.traverse((obj) => {
+                if (obj && obj.isMesh && obj.material && obj.material.color) {
+                    const color = obj.material.color.clone();
+                    obj.material = new THREE.MeshBasicMaterial({
+                        color,
+                        toneMapped: false,
+                    });
+                }
+            });
+        };
+        applyFlatMaterial(globalTensor);
+        applyFlatMaterial(sliceTensor);
+
         const globalMap = buildCubeMap(globalTensor);
         const sliceMap = buildCubeMap(sliceTensor);
 
-        tiles.forEach((tile, idx) => {
-            const color = new THREE.Color().setHSL((idx * 0.17) % 1, 0.65, 0.55);
-            legend.appendChild(createLegendRow(idx, color));
-            paintCoords(globalMap, tile.global_coords, color);
-            paintCoords(sliceMap, tile.slice_coords, color);
-        });
+        const PAPER_BG_HEX = '#ffffff';
+        const BEIGE_BG_HEX = '#f7f0e3';
+
+        function isLightBackgroundHex(hex) {
+            const h = (hex || '').toLowerCase();
+            return h === PAPER_BG_HEX || h === BEIGE_BG_HEX;
+        }
+
+        function getTileColorForBackground(bgHex, idx) {
+            const hex = (bgHex || '').toLowerCase();
+            if (isLightBackgroundHex(hex)) {
+                // Paper/Beige：与 Load overall 一致的 8 色高亮调色板
+                const paperPalette = [
+                    '#ff8a3c', // orange
+                    '#ffd54a', // yellow
+                    '#a3e635', // lime
+                    '#34d399', // green
+                    '#5fd4ff', // cyan
+                    '#4f8bff', // blue
+                    '#6366f1', // indigo
+                    '#f9739b', // rose
+                ];
+                const chosen = paperPalette[idx % paperPalette.length];
+                return new THREE.Color(chosen);
+            }
+            // 暗色背景沿用原来的 HSL 分布
+            return new THREE.Color().setHSL((idx * 0.17) % 1, 0.65, 0.55);
+        }
+
+        function recolorBackgroundCubes(bgHex) {
+            const hex = (bgHex || '').toLowerCase();
+            const isLight = isLightBackgroundHex(hex);
+
+            const baseGlobal = isLight ? new THREE.Color('#fefce8') : COLOR_GLOBAL;
+            const baseSlice  = isLight ? new THREE.Color('#dbeafe') : COLOR_SLICE;
+
+            globalTensor.children.forEach((cube) => {
+                if (cube && cube.material && cube.material.color) {
+                    cube.material.color.copy(baseGlobal);
+                }
+            });
+            sliceTensor.children.forEach((cube) => {
+                if (cube && cube.material && cube.material.color) {
+                    cube.material.color.copy(baseSlice);
+                }
+            });
+
+            // 根据背景切换 MeshPhong <-> MeshBasic，让深色背景保持原始 3D 效果
+            const switchMaterialForGroup = (group) => {
+                group.traverse((obj) => {
+                    if (!obj || !obj.isMesh) return;
+                    if (!obj.material || !obj.material.color) return;
+                    if (isLight) {
+                        // 深色材质 -> 记住原来的，再换成 MeshBasic 平涂
+                        if (!obj.userData.phongMaterial) {
+                            obj.userData.phongMaterial = obj.material;
+                        }
+                        if (!(obj.material instanceof THREE.MeshBasicMaterial)) {
+                            const color = obj.material.color.clone();
+                            obj.material = new THREE.MeshBasicMaterial({
+                                color,
+                                toneMapped: false,
+                            });
+                        }
+                    } else if (obj.userData.phongMaterial) {
+                        obj.material = obj.userData.phongMaterial;
+                    }
+                });
+            };
+            switchMaterialForGroup(globalTensor);
+            switchMaterialForGroup(sliceTensor);
+
+            if (lineMaterial) {
+                lineMaterial.visible = true;
+                if (isLight) {
+                    lineMaterial.color.set('#111827');
+                    lineMaterial.opacity = 0.16;
+                } else {
+                    lineMaterial.color.set('#ffffff');
+                    lineMaterial.opacity = 0.28;
+                }
+            }
+        }
+
+        function renderTilesForBackground(bgHex) {
+            recolorBackgroundCubes(bgHex);
+
+            legend.innerHTML = '<strong>Program Blocks</strong><br/>';
+            tiles.forEach((tile, idx) => {
+                const color = getTileColorForBackground(bgHex, idx);
+                legend.appendChild(createLegendRow(idx, color));
+                paintCoords(globalMap, tile.global_coords, color);
+                paintCoords(sliceMap, tile.slice_coords, color);
+            });
+        }
 
         const { center } = setupCamera(scene, camera);
         const orbitControls = new OrbitControls(camera, renderer.domElement);
@@ -749,6 +997,17 @@ export function createStoreOverallVisualization(containerElement, op) {
         orbitControls.update();
 
         sceneRoot.appendChild(renderer.domElement);
+
+        // 初始化一次
+        renderTilesForBackground(backgroundSelect.value || '#000000');
+
+        backgroundSelect.addEventListener('change', (event) => {
+            const value = event.target.value;
+            currentBackground = new THREE.Color(value);
+            scene.background = currentBackground;
+            renderer.setClearColor(currentBackground, 1);
+            renderTilesForBackground(value);
+        });
 
         let rafId = null;
         const animate = () => {
@@ -801,7 +1060,7 @@ export function createStoreOverallVisualization(containerElement, op) {
             });
             row.appendChild(swatch);
             const label = document.createElement('span');
-            label.textContent = `Tile ${idx + 1}`;
+            label.textContent = `Program Block ${idx + 1}`;
             row.appendChild(label);
             return row;
         }

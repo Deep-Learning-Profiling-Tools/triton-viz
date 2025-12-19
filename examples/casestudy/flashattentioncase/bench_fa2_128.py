@@ -5,14 +5,16 @@ import time
 import torch
 
 
-def benchmark_flash_attn(variant: str = "slow",
-                         B: int = 4,
-                         H: int = 16,
-                         S: int = 1024,
-                         D: int = 128,
-                         warmup: int = 20,
-                         iters: int = 50,
-                         device: str = "cuda"):
+def benchmark_flash_attn(
+    variant: str = "slow",
+    B: int = 4,
+    H: int = 16,
+    S: int = 1024,
+    D: int = 128,
+    warmup: int = 20,
+    iters: int = 50,
+    device: str = "cuda",
+):
     assert variant in ("slow", "fixed")
     mod_name = f"flash_attn_triton_{variant}"
     fa = importlib.import_module(mod_name)
@@ -41,8 +43,18 @@ def benchmark_flash_attn(variant: str = "slow",
     # warmup
     for _ in range(warmup):
         fa._flash_attn_backward(
-            do, q, k, v, o, lse, dq, dk, dv,
-            bias=None, causal=False, softmax_scale=softmax_scale
+            do,
+            q,
+            k,
+            v,
+            o,
+            lse,
+            dq,
+            dk,
+            dv,
+            bias=None,
+            causal=False,
+            softmax_scale=softmax_scale,
         )
     torch.cuda.synchronize()
 
@@ -50,8 +62,18 @@ def benchmark_flash_attn(variant: str = "slow",
     for _ in range(iters):
         start = time.perf_counter()
         fa._flash_attn_backward(
-            do, q, k, v, o, lse, dq, dk, dv,
-            bias=None, causal=False, softmax_scale=softmax_scale
+            do,
+            q,
+            k,
+            v,
+            o,
+            lse,
+            dq,
+            dk,
+            dv,
+            bias=None,
+            causal=False,
+            softmax_scale=softmax_scale,
         )
         torch.cuda.synchronize()
         end = time.perf_counter()

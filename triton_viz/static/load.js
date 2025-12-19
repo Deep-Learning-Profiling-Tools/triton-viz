@@ -8,9 +8,12 @@ import {
     updateCubeColor,
     setupCamera,
     setupEventListeners,
-    cameraControls
+    cameraControls,
+    addLabels,
+    COLOR_EDGE,
 } from './load_utils.js';
 import { createHistogramOverlay } from './histogram.js';
+import { enableDrag } from './ui_helpers.js';
 
 export function createLoadVisualization(containerElement, op) {
 
@@ -30,46 +33,43 @@ export function createLoadVisualization(containerElement, op) {
         // expose current op uuid globally for generic code panel in gridblock
         try { window.current_op_uuid = op.uuid; } catch(e){}
 
+        containerElement.innerHTML = '';
+        containerElement.style.position = 'relative';
+        const stage = document.createElement('div');
+        stage.className = 'viz-stage';
+        containerElement.appendChild(stage);
+
         let currentStep = 0;
         let frame = 0;
         let isPaused = false;
 
         const sideMenu = createSideMenu(containerElement);
-        // Color map UI
+
         const controlBar = document.createElement('div');
-        controlBar.style.position = 'fixed';
-        controlBar.style.top = '10px';
-        controlBar.style.left = '10px';
-        controlBar.style.display = 'flex';
-        controlBar.style.gap = '8px';
-        controlBar.style.zIndex = '2000';
-        controlBar.style.pointerEvents = 'auto';
-        const colorizeToggle = document.createElement('button');
-        colorizeToggle.textContent = 'Color by Value: OFF';
+        controlBar.className = 'viz-floating-bar';
+        controlBar.style.flexWrap = 'wrap';
+
+        const dragHandle = document.createElement('button');
+        dragHandle.type = 'button';
+        dragHandle.className = 'viz-drag-handle drag-handle';
+        dragHandle.setAttribute('aria-label', 'Drag controls');
+        dragHandle.innerHTML = '<span aria-hidden="true">⠿</span> Drag';
+        controlBar.appendChild(dragHandle);
+
+        const makeGhostButton = (label) => {
+            const btn = document.createElement('button');
+            btn.className = 'viz-button ghost';
+            btn.textContent = label;
+            return btn;
+        };
+
+        const colorizeToggle = makeGhostButton('Color by Value: OFF');
         controlBar.appendChild(colorizeToggle);
-        // Color scheme selector + color picker
-        const schemeSelect = document.createElement('select');
-        schemeSelect.style.padding = '4px 6px';
-        schemeSelect.style.borderRadius = '4px';
-        schemeSelect.style.border = '1px solid #555';
-        schemeSelect.style.background = '#2a2a2a';
-        schemeSelect.style.color = '#fff';
-        schemeSelect.innerHTML = '<option value="mono">Mono</option><option value="viridis">Viridis</option>';
-        controlBar.appendChild(schemeSelect);
-        const colorPicker = document.createElement('input');
-        colorPicker.type = 'color';
-        colorPicker.value = '#3b82f6'; // default blue
-        colorPicker.style.width = '36px';
-        colorPicker.style.height = '28px';
-        colorPicker.style.border = 'none';
-        colorPicker.style.outline = 'none';
-        colorPicker.title = 'Choose base color for Mono';
-        controlBar.appendChild(colorPicker);
-        const dragToggle = document.createElement('button');
-        dragToggle.textContent = 'Drag Cubes: OFF';
+
+        const dragToggle = makeGhostButton('Drag Cubes: OFF');
         controlBar.appendChild(dragToggle);
-        const codeToggle = document.createElement('button');
-        codeToggle.textContent = 'Show Code: OFF';
+
+        const codeToggle = makeGhostButton('Show Code: OFF');
         controlBar.appendChild(codeToggle);
         const histogramUI = createHistogramOverlay(containerElement, {
             title: 'Load Value Distribution',
@@ -83,31 +83,113 @@ export function createLoadVisualization(containerElement, op) {
                 bins
             }),
         });
+        histogramUI.button.className = 'viz-button ghost';
         controlBar.appendChild(histogramUI.button);
+        // Per-op summary (bytes) toggle
+        const summaryBtn = makeGhostButton('Summary: OFF');
+        controlBar.appendChild(summaryBtn);
         // Flow arrow toggle
-        const flowToggle = document.createElement('button');
-        flowToggle.textContent = 'Flow Arrow: ON';
+        const flowToggle = makeGhostButton('Flow Arrow: ON');
         controlBar.appendChild(flowToggle);
+        // Background selector + color scheme controls
+        const backgroundSelect = document.createElement('select');
+        backgroundSelect.className = 'viz-select';
+        backgroundSelect.title = 'Canvas background';
+        backgroundSelect.innerHTML = `
+            <option value="#000000">Night</option>
+            <option value="#0b1120">Midnight</option>
+            <option value="#111827">Deep Blue</option>
+            <option value="#ffffff">Paper</option>
+            <option value="#f7f0e3">Beige</option>
+            <option value="#f5f7fb">Soft Gray</option>
+        `;
+        controlBar.appendChild(backgroundSelect);
+
+        const schemeSelect = document.createElement('select');
+        schemeSelect.className = 'viz-select';
+        schemeSelect.innerHTML = '<option value="mono">Mono</option><option value="viridis">Viridis</option>';
+        controlBar.appendChild(schemeSelect);
+
+        const colorPicker = document.createElement('input');
+        colorPicker.type = 'color';
+        colorPicker.value = '#3b82f6';
+        colorPicker.title = 'Choose base color for Mono';
+        controlBar.appendChild(colorPicker);
         // Mouse pick calibration (dx/dy in pixels)
         const calibWrap = document.createElement('div');
-        calibWrap.style.display = 'flex';
-        calibWrap.style.alignItems = 'center';
-        calibWrap.style.gap = '4px';
+        calibWrap.className = 'viz-inline-controls';
         const calibLabel = document.createElement('span');
-        calibLabel.textContent = 'Calib:';
-        calibLabel.style.opacity = '0.8';
-        const dxMinus = document.createElement('button'); dxMinus.textContent = '−X';
-        const dxPlus  = document.createElement('button'); dxPlus.textContent  = '+X';
-        const dyMinus = document.createElement('button'); dyMinus.textContent = '−Y';
-        const dyPlus  = document.createElement('button'); dyPlus.textContent  = '+Y';
-        const dxdyInfo = document.createElement('span'); dxdyInfo.style.minWidth = '70px'; dxdyInfo.style.textAlign = 'center';
-        const dxdyReset = document.createElement('button'); dxdyReset.textContent = 'Reset';
+        calibLabel.textContent = 'Calib';
+        const dxMinus = makeGhostButton('−X');
+        const dxPlus  = makeGhostButton('+X');
+        const dyMinus = makeGhostButton('−Y');
+        const dyPlus  = makeGhostButton('+Y');
+        const dxdyInfo = document.createElement('span');
+        dxdyInfo.className = 'value-pill';
+        const dxdyReset = makeGhostButton('Reset');
         calibWrap.appendChild(calibLabel);
         calibWrap.appendChild(dxMinus); calibWrap.appendChild(dxPlus);
         calibWrap.appendChild(dyMinus); calibWrap.appendChild(dyPlus);
         calibWrap.appendChild(dxdyInfo); calibWrap.appendChild(dxdyReset);
         controlBar.appendChild(calibWrap);
         containerElement.appendChild(controlBar);
+        enableDrag(controlBar, { handle: dragHandle, bounds: window, initialLeft: 32, initialTop: 32 });
+
+        // Load view summary panel (per-op bytes)
+        let summaryPanel = null;
+        const destroySummaryPanel = () => {
+            if (summaryPanel && summaryPanel.remove) summaryPanel.remove();
+            summaryPanel = null;
+        };
+
+        function openSummaryPanel() {
+            destroySummaryPanel();
+            const panel = document.createElement('div');
+            panel.className = 'info-card';
+            panel.style.position = 'fixed';
+            panel.style.left = '32px';
+            panel.style.maxWidth = '260px';
+            panel.style.zIndex = '2200';
+
+            const header = document.createElement('div');
+            header.className = 'panel-header drag-handle';
+            header.style.marginBottom = '6px';
+            header.innerHTML = '<span>Load Summary</span><span class="drag-grip" aria-hidden="true">⠿</span>';
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'viz-button ghost';
+            closeBtn.textContent = 'Close';
+            closeBtn.style.marginLeft = 'auto';
+            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+            closeBtn.addEventListener('click', () => {
+                destroySummaryPanel();
+                summaryBtn.textContent = 'Summary: OFF';
+            });
+            header.appendChild(closeBtn);
+            panel.appendChild(header);
+
+            const body = document.createElement('div');
+            body.style.fontSize = '11px';
+            body.innerHTML = `
+                <div style="font-weight:600;margin-bottom:4px;">Current op</div>
+                <div>Type: Load</div>
+                <div>Bytes: ${Number(op.bytes || 0)}</div>
+            `;
+
+            panel.appendChild(body);
+            document.body.appendChild(panel);
+            enableDrag(panel, { handle: header, bounds: window, initialLeft: 32, initialTop: window.innerHeight - 220 });
+            summaryPanel = panel;
+        }
+
+        summaryBtn.addEventListener('click', () => {
+            const turnOn = summaryBtn.textContent.endsWith('OFF');
+            summaryBtn.textContent = `Summary: ${turnOn ? 'ON' : 'OFF'}`;
+            if (turnOn) {
+                openSummaryPanel();
+            } else {
+                destroySummaryPanel();
+            }
+        });
 
         // expose for debugging
         try {
@@ -124,14 +206,29 @@ export function createLoadVisualization(containerElement, op) {
         let scheme = 'mono';
         let monoBaseHex = '#3b82f6';
         let codePanel = null;
+let labelSprites = [];
+const TEXT_LIGHT = '#ffffff';
+const TEXT_DARK = '#111111';
 
-        const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray
-        const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
-        const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0); // Magenta (starting color for left slice)
+function getTextColor(bgColor) {
+    try {
+        const c = (bgColor instanceof THREE.Color) ? bgColor : new THREE.Color(bgColor);
+        const lum = c.getLuminance();
+        return lum > 0.6 ? TEXT_DARK : TEXT_LIGHT;
+    } catch (e) {
+        return TEXT_LIGHT;
+    }
+}
+
+        const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
+        const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (highlighted global coords)
+        const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0); // Magenta (slice base in dark themes)
         const COLOR_LOADED = new THREE.Color(1.0, 0.8, 0.0);    // Gold (final color for both slices)
         const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);  // Black
 
-        const { scene, camera, renderer } = setupScene(containerElement, COLOR_BACKGROUND);
+        let currentBackground = COLOR_BACKGROUND;
+        let sceneBundle = setupScene(stage, currentBackground);
+        let { scene, camera, renderer } = sceneBundle;
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
 
         const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
@@ -150,7 +247,7 @@ export function createLoadVisualization(containerElement, op) {
         arrow.visible = true;
         scene.add(arrow);
 
-        function createTextSprite(text) {
+        function createTextSprite(text, backgroundColor) {
             const c = document.createElement('canvas');
             const ctx2 = c.getContext('2d');
             const P = 4; // padding
@@ -161,9 +258,12 @@ export function createLoadVisualization(containerElement, op) {
             c.width = w; c.height = h;
             // redraw with proper size
             const ctx3 = c.getContext('2d');
-            ctx3.fillStyle = 'rgba(0,0,0,0.65)';
+            const luminance = (backgroundColor && backgroundColor.getLuminance) ? backgroundColor.getLuminance() : 0;
+            const textColor = luminance > 0.6 ? '#111111' : '#ffffff';
+            const bgColor = luminance > 0.6 ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.65)';
+            ctx3.fillStyle = bgColor;
             ctx3.fillRect(0, 0, w, h);
-            ctx3.fillStyle = '#ffffff';
+            ctx3.fillStyle = textColor;
             ctx3.font = 'bold 18px Arial';
             ctx3.textBaseline = 'middle';
             ctx3.fillText(text, P, h/2);
@@ -184,8 +284,13 @@ export function createLoadVisualization(containerElement, op) {
             if (ms && md) return `Load ${ms} → ${md}`;
             return 'Load Global → Slice';
         })();
-        const arrowLabel = createTextSprite(labelText);
+        let arrowLabel = createTextSprite(labelText, currentBackground);
         arrowLabel.visible = true;
+        // place label above the midpoint between tensors
+        const midX = (globalTensor.position.x + sliceTensor.position.x) / 2;
+        const textColor = getTextColor(currentBackground);
+        arrowLabel.position.set(midX, 1.4, 0);
+        arrowLabel.material.color = new THREE.Color(textColor);
         scene.add(arrowLabel);
 
         // Precompute highlighted coords in Global tensor for quick reset
@@ -193,26 +298,40 @@ export function createLoadVisualization(containerElement, op) {
             op.global_coords.map(([x, y, z]) => `${x},${y},${z}`)
         );
 
-        addLabels(scene, globalTensor, sliceTensor);
+        // Theme-aware base colors for Global / Slice;会随着背景切换而更新
+        const baseGlobalDark = COLOR_GLOBAL.clone();
+        const baseSliceDark = COLOR_LEFT_SLICE.clone();
+        // 浅色主题下用更明亮、带一点色温的 pastel 色，避免灰蒙蒙
+        const baseGlobalLight = new THREE.Color('#fefce8'); // very light warm yellow
+        const baseSliceLight = new THREE.Color('#dbeafe');  // light blue
+        let currentBaseGlobal = baseGlobalDark.clone();
+        let currentBaseSlice = baseSliceDark.clone();
+
+        labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
+
+        const refreshTextOverlays = () => {
+            if (arrowLabel) scene.remove(arrowLabel);
+            arrowLabel = createTextSprite(labelText, currentBackground);
+            arrowLabel.visible = true;
+            const midX = (globalTensor.position.x + sliceTensor.position.x) / 2;
+            arrowLabel.position.set(midX, 1.4, 0);
+            arrowLabel.material.color = new THREE.Color(getTextColor(currentBackground));
+            scene.add(arrowLabel);
+            const list = Array.isArray(labelSprites) ? labelSprites : [];
+            list.forEach((s) => scene.remove(s));
+            labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground) || [];
+        };
 
         // Overlay memory flow badges if available (NKI only)
         try {
             const badge = document.createElement('div');
-            badge.style.position = 'fixed';
-            badge.style.right = '10px';
-            badge.style.top = '60px';
-            badge.style.zIndex = '2500';
-            badge.style.background = 'rgba(0,0,0,0.65)';
-            badge.style.color = '#fff';
-            badge.style.padding = '6px 8px';
-            badge.style.borderRadius = '6px';
-            badge.style.font = '12px Arial';
+            badge.className = 'viz-floating-badge';
             const ms = (op.mem_src||'').toUpperCase();
             const md = (op.mem_dst||'').toUpperCase();
             const by = Number(op.bytes||0);
             if (ms && md) {
-                badge.innerHTML = `<b>Memory Flow</b><br/>${ms} → ${md}${by?`<br/>${by} B`:''}`;
-                containerElement.appendChild(badge);
+                badge.innerHTML = `<strong>Memory Flow</strong><br/>${ms} → ${md}${by?`<br/>${by} B`:''}`;
+                stage.appendChild(badge);
             }
         } catch(e){}
         const { center } = setupCamera(scene, camera);
@@ -240,13 +359,59 @@ export function createLoadVisualization(containerElement, op) {
         const worldPosHelper = new THREE.Vector3();
         const dragOffset = new THREE.Vector3();
 
+        function isLightBackgroundHex(hex) {
+            const h = (hex || '').toLowerCase();
+            return h === '#ffffff' || h === '#f7f0e3' || h === '#f5f7fb';
+        }
+
+        function applyBackgroundTheme(hex) {
+            const isLight = isLightBackgroundHex(hex);
+
+            // 1) Global/Slice 底色：暗色下用原色，浅色下用更柔和的浅色
+            currentBaseGlobal.copy(isLight ? baseGlobalLight : baseGlobalDark);
+            currentBaseSlice.copy(isLight ? baseSliceLight : baseSliceDark);
+            resetGlobalColors();
+            resetSliceColors();
+
+            // 2) 边线：Dark / Slate 显示白线，浅色背景则隐藏
+            globalTensor.children.forEach((cube) => {
+                if (cube?.userData?.edges) {
+                    cube.userData.edges.visible = !isLight;
+                }
+            });
+            sliceTensor.children.forEach((cube) => {
+                if (cube?.userData?.edges) {
+                    cube.userData.edges.visible = !isLight;
+                }
+            });
+            if (!isLight) {
+                if (lineMaterial) {
+                    lineMaterial.color.set('#ffffff');
+                    lineMaterial.opacity = 0.28;
+                }
+            }
+        }
+
+        backgroundSelect.addEventListener('change', (event) => {
+            const value = event.target.value;
+            currentBackground = new THREE.Color(value);
+            if (scene && scene.background) {
+                scene.background = currentBackground;
+            }
+            applyBackgroundTheme(value);
+            refreshTextOverlays();
+        });
+
+        // 初始化一次，和默认背景同步
+        applyBackgroundTheme(backgroundSelect.value || '#000000');
+
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown);
+        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown);
 
         // Additional pointer events for dragging
-        containerElement.addEventListener('mousedown', onMouseDown);
-        containerElement.addEventListener('mouseup', onMouseUp);
-        containerElement.addEventListener('mouseleave', onMouseUp);
+        stage.addEventListener('mousedown', onMouseDown);
+        stage.addEventListener('mouseup', onMouseUp);
+        stage.addEventListener('mouseleave', onMouseUp);
         let flowArrowOn = true;
         flowToggle.addEventListener('click', () => {
             flowArrowOn = !flowArrowOn;
@@ -376,24 +541,34 @@ export function createLoadVisualization(containerElement, op) {
         function createLegend(min, max) {
             destroyLegend();
             const wrapper = document.createElement('div');
-            wrapper.style.position = 'fixed';
-            wrapper.style.left = '10px';
-            wrapper.style.top = '50px';
-            wrapper.style.padding = '6px 8px';
-            wrapper.style.background = 'rgba(0,0,0,0.6)';
-            wrapper.style.color = '#fff';
-            wrapper.style.font = '12px Arial, sans-serif';
-            wrapper.style.borderRadius = '6px';
-            wrapper.style.zIndex = '2000';
+            wrapper.className = 'viz-floating-badge';
+            wrapper.style.left = '24px';
+            wrapper.style.top = '120px';
+            wrapper.style.right = 'auto';
+            wrapper.style.width = '260px';
 
-            const title = document.createElement('div');
+            const header = document.createElement('div');
+            header.style.display = 'flex';
+            header.style.alignItems = 'center';
+            header.style.justifyContent = 'space-between';
+            header.style.marginBottom = '8px';
+
+            const title = document.createElement('span');
             title.textContent = scheme === 'mono' ? 'Value (Mono)' : 'Value (Viridis)';
-            title.style.marginBottom = '4px';
-            title.style.opacity = '0.9';
-            wrapper.appendChild(title);
+            title.style.fontWeight = '600';
+            header.appendChild(title);
+
+            const legendHandle = document.createElement('button');
+            legendHandle.type = 'button';
+            legendHandle.className = 'viz-drag-handle drag-handle';
+            legendHandle.innerHTML = '<span aria-hidden="true">⠿</span>';
+            legendHandle.style.marginLeft = '12px';
+            header.appendChild(legendHandle);
+
+            wrapper.appendChild(header);
 
             const canvas = document.createElement('canvas');
-            canvas.width = 220; canvas.height = 10;
+            canvas.width = 220; canvas.height = 12;
             const ctx2 = canvas.getContext('2d');
             for (let x = 0; x < canvas.width; x++) {
                 const t = x / (canvas.width - 1);
@@ -406,12 +581,13 @@ export function createLoadVisualization(containerElement, op) {
             const labels = document.createElement('div');
             labels.style.display = 'flex';
             labels.style.justifyContent = 'space-between';
-            labels.style.marginTop = '2px';
+            labels.style.marginTop = '4px';
             labels.innerHTML = `<span>${min.toFixed(3)}</span><span>${max.toFixed(3)}</span>`;
             wrapper.appendChild(labels);
 
-            containerElement.appendChild(wrapper);
+            stage.appendChild(wrapper);
             legendEl = wrapper;
+            enableDrag(wrapper, { handle: legendHandle, bounds: stage, initialLeft: 32, initialTop: 140 });
         }
 
         function destroyCodePanel() {
@@ -422,23 +598,23 @@ export function createLoadVisualization(containerElement, op) {
         async function createCodePanel(frameIdx = 0, context = 8) {
             destroyCodePanel();
             const wrapper = document.createElement('div');
-            wrapper.style.position = 'fixed';
-            wrapper.style.right = '10px';
-            wrapper.style.top = '50px';
-            wrapper.style.width = '520px';
-            wrapper.style.maxHeight = '60vh';
-            wrapper.style.overflow = 'auto';
-            wrapper.style.padding = '8px 10px';
-            wrapper.style.background = 'rgba(0,0,0,0.65)';
-            wrapper.style.color = '#fff';
-            wrapper.style.font = '12px Menlo, Consolas, monospace';
-            wrapper.style.borderRadius = '6px';
-            wrapper.style.zIndex = '2000';
-
+            wrapper.className = 'show-code-panel';
+            wrapper.style.top = '140px';
+            wrapper.style.right = '32px';
             const header = document.createElement('div');
-            header.textContent = 'Operation Code & Context';
-            header.style.marginBottom = '6px';
-            header.style.opacity = '0.9';
+            header.className = 'panel-header drag-handle';
+            header.style.marginBottom = '8px';
+            header.innerHTML = '<span>Operation Code & Context</span><span class="drag-grip" aria-hidden="true">⠿</span>';
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'viz-button ghost';
+            closeBtn.textContent = 'Close';
+            closeBtn.style.marginLeft = 'auto';
+            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+            closeBtn.addEventListener('click', () => {
+                destroyCodePanel();
+                codeToggle.textContent = 'Show Code: OFF';
+            });
+            header.appendChild(closeBtn);
             wrapper.appendChild(header);
 
             try {
@@ -449,12 +625,12 @@ export function createLoadVisualization(containerElement, op) {
                 });
                 const data = await res.json();
                 const meta = document.createElement('div');
-                meta.style.marginBottom = '4px';
+                meta.style.marginBottom = '6px';
+                meta.style.fontSize = '12px';
                 meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
                 wrapper.appendChild(meta);
                 const pre = document.createElement('pre');
                 pre.style.margin = '0';
-                pre.style.whiteSpace = 'pre';
                 const lines = (data.lines || []).map(l => {
                     const mark = (data.highlight === l.no) ? '▶ ' : '  ';
                     return `${mark}${String(l.no).padStart(6,' ')} | ${l.text||''}`;
@@ -468,6 +644,7 @@ export function createLoadVisualization(containerElement, op) {
             }
 
             containerElement.appendChild(wrapper);
+            enableDrag(wrapper, { handle: header, bounds: window });
             codePanel = wrapper;
         }
 
@@ -510,20 +687,21 @@ export function createLoadVisualization(containerElement, op) {
         }
 
         function resetGlobalColors() {
-            // Restore original colors: Global cubes default to COLOR_GLOBAL,
-            // highlighted coords (in op.global_coords) are COLOR_SLICE
+            // Restore base colors according to current theme:
+            // - Global cubes use currentBaseGlobal
+            // - highlighted coords (in op.global_coords) use COLOR_SLICE
             globalTensor.children.forEach((cube) => {
                 const u = cube.userData;
                 if (!u) return;
                 const key = `${u.tensor0},${u.tensor1},${u.tensor2}`;
-                const baseColor = highlightedGlobalSet.has(key) ? COLOR_SLICE : COLOR_GLOBAL;
+                const baseColor = highlightedGlobalSet.has(key) ? COLOR_SLICE : currentBaseGlobal;
                 cube.material.color.copy(baseColor);
             });
         }
 
         function resetSliceColors() {
             sliceTensor.children.forEach((cube) => {
-                cube.material.color.copy(COLOR_LEFT_SLICE);
+                cube.material.color.copy(currentBaseSlice);
             });
         }
 
@@ -545,14 +723,14 @@ export function createLoadVisualization(containerElement, op) {
             dragOffset.copy(worldPosHelper).sub(planeIntersect);
             isDragging = true;
             dragTarget = cube;
-            containerElement.style.cursor = 'grabbing';
+            stage.style.cursor = 'grabbing';
         }
 
         function onMouseUp() {
             if (!dragModeOn) return;
             isDragging = false;
             dragTarget = null;
-            containerElement.style.cursor = '';
+            stage.style.cursor = '';
         }
 
         function animate() {
@@ -783,38 +961,10 @@ export function createLoadVisualization(containerElement, op) {
 
         function createSideMenu(container) {
             const menu = document.createElement('div');
-            menu.style.position = 'absolute';
-            menu.style.top = '10px';
-            menu.style.right = '10px';
-            menu.style.width = '200px';
-            menu.style.padding = '10px';
-            menu.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
-            menu.style.color = 'white';
-            menu.style.fontFamily = 'Arial, sans-serif';
-            menu.style.fontSize = '14px';
-            menu.style.borderRadius = '5px';
+            menu.className = 'viz-side-panel';
+            menu.style.width = '240px';
             container.appendChild(menu);
             return menu;
-        }
-
-        function addLabels(scene, globalTensor, sliceTensor) {
-            addLabel(scene, "Global Tensor", globalTensor.position);
-            addLabel(scene, "Slice Tensor", sliceTensor.position);
-        }
-
-        function addLabel(scene, text, position) {
-            const canvas = document.createElement('canvas');
-            const context = canvas.getContext('2d');
-            context.font = 'Bold 24px Arial';
-            context.fillStyle = 'white';
-            context.fillText(text, 0, 24);
-
-            const texture = new THREE.CanvasTexture(canvas);
-            const material = new THREE.SpriteMaterial({ map: texture });
-            const sprite = new THREE.Sprite(material);
-            sprite.position.set(position.x, position.y + 2, position.z);
-            sprite.scale.set(4, 2, 1);
-            scene.add(sprite);
         }
 
 }
@@ -829,9 +979,7 @@ export function createLoadOverallVisualization(containerElement, op) {
 
         containerElement.innerHTML = '';
         const sceneRoot = document.createElement('div');
-        sceneRoot.style.position = 'relative';
-        sceneRoot.style.width = '100%';
-        sceneRoot.style.height = '100%';
+        sceneRoot.className = 'viz-stage';
         containerElement.appendChild(sceneRoot);
 
         const legend = document.createElement('div');
@@ -848,10 +996,41 @@ export function createLoadOverallVisualization(containerElement, op) {
             fontSize: '12px',
             zIndex: 10,
         });
-        legend.innerHTML = '<strong>Overall Tiles</strong><br/>';
+        legend.innerHTML = '<strong>Program Blocks</strong><br/>';
         sceneRoot.appendChild(legend);
 
-        const { scene, camera, renderer } = setupScene(sceneRoot, COLOR_BACKGROUND);
+        // 背景选择
+        let currentBackground = COLOR_BACKGROUND;
+        const controlBar = document.createElement('div');
+        Object.assign(controlBar.style, {
+            position: 'absolute',
+            top: '10px',
+            left: '10px',
+            zIndex: 12,
+            display: 'flex',
+            gap: '8px',
+            alignItems: 'center',
+            background: 'rgba(0,0,0,0.55)',
+            color: '#fff',
+            padding: '6px 8px',
+            borderRadius: '6px',
+            fontSize: '12px',
+        });
+        const bgLabel = document.createElement('span');
+        bgLabel.textContent = 'Background';
+        controlBar.appendChild(bgLabel);
+        const backgroundSelect = document.createElement('select');
+        [['Dark', '#000000'], ['Paper', '#ffffff'], ['Beige', '#f7f0e3'], ['Slate', '#0f172a']].forEach(([label, value]) => {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = label;
+            backgroundSelect.appendChild(opt);
+        });
+        backgroundSelect.value = '#000000';
+        controlBar.appendChild(backgroundSelect);
+        sceneRoot.appendChild(controlBar);
+
+        const { scene, camera, renderer } = setupScene(sceneRoot, currentBackground);
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
 
         const globalTensor = createTensor(globalShape, [], COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
@@ -864,12 +1043,108 @@ export function createLoadOverallVisualization(containerElement, op) {
         const globalMap = buildCubeMap(globalTensor);
         const sliceMap = buildCubeMap(sliceTensor);
 
-        tiles.forEach((tile, idx) => {
-            const color = new THREE.Color().setHSL((idx * 0.17) % 1, 0.65, 0.55);
-            legend.appendChild(createLegendRow(idx, color));
-            paintCoords(globalMap, tile.global_coords, color);
-            paintCoords(sliceMap, tile.slice_coords, color);
-        });
+        const PAPER_BG_HEX = '#ffffff';
+        const BEIGE_BG_HEX = '#f7f0e3';
+
+        function isLightBackgroundHex(hex) {
+            const h = (hex || '').toLowerCase();
+            return h === PAPER_BG_HEX || h === BEIGE_BG_HEX;
+        }
+
+        function getTileColorForBackground(bgHex, idx) {
+            const hex = (bgHex || '').toLowerCase();
+            if (isLightBackgroundHex(hex)) {
+                // Paper/Beige：更多 block 时也能区分开的亮色调色板（8 种色相）
+                const paperPalette = [
+                    '#ff8a3c', // orange
+                    '#ffd54a', // yellow
+                    '#a3e635', // lime
+                    '#34d399', // green
+                    '#5fd4ff', // cyan
+                    '#4f8bff', // blue
+                    '#6366f1', // indigo
+                    '#f9739b', // rose
+                ];
+                const chosen = paperPalette[idx % paperPalette.length];
+                return new THREE.Color(chosen);
+            }
+            // 暗色背景下沿用原来的 HSL 方案（保持 Dark 外观不变）
+            return new THREE.Color().setHSL((idx * 0.17) % 1, 0.65, 0.55);
+        }
+
+        function recolorBackgroundCubes(bgHex) {
+            const hex = (bgHex || '').toLowerCase();
+            const isLight = isLightBackgroundHex(hex);
+
+            // Paper/Beige：用更明亮的 pastel 底色；Dark/Slate：使用原始配色
+            const baseGlobal = isLight ? new THREE.Color('#fefce8') : COLOR_GLOBAL;
+            const baseSlice  = isLight ? new THREE.Color('#dbeafe') : COLOR_LEFT_SLICE;
+
+            // 先把所有 cube 恢复为“底色”，避免旧 tile 颜色残留
+            globalTensor.children.forEach((cube) => {
+                if (cube && cube.material && cube.material.color) {
+                    cube.material.color.copy(baseGlobal);
+                }
+            });
+            sliceTensor.children.forEach((cube) => {
+                if (cube && cube.material && cube.material.color) {
+                    cube.material.color.copy(baseSlice);
+                }
+            });
+
+            // 根据背景切换 MeshPhong <-> MeshBasic：深色保持 3D，高光；浅色用平涂颜色
+            const switchMaterialForGroup = (group) => {
+                group.traverse((obj) => {
+                    if (!obj || !obj.isMesh) return;
+                    if (!obj.material || !obj.material.color) return;
+                    if (isLight) {
+                        if (!obj.userData.phongMaterial) {
+                            obj.userData.phongMaterial = obj.material;
+                        }
+                        if (!(obj.material instanceof THREE.MeshBasicMaterial)) {
+                            const color = obj.material.color.clone();
+                            obj.material = new THREE.MeshBasicMaterial({
+                                color,
+                                toneMapped: false,
+                            });
+                        }
+                    } else if (obj.userData.phongMaterial) {
+                        obj.material = obj.userData.phongMaterial;
+                    }
+                });
+            };
+            switchMaterialForGroup(globalTensor);
+            switchMaterialForGroup(sliceTensor);
+
+            // 所有背景都加一层细衬线：暗底用半透明白线，浅底用半透明深灰线
+            if (lineMaterial) {
+                lineMaterial.visible = true;
+                if (isLight) {
+                    lineMaterial.color.set('#111827'); // 深灰
+                    lineMaterial.opacity = 0.16;
+                } else {
+                    lineMaterial.color.set('#ffffff');
+                    lineMaterial.opacity = 0.28;
+                }
+            }
+        }
+
+        function renderTilesForBackground(bgHex) {
+            recolorBackgroundCubes(bgHex);
+
+            // 重置图例，并按当前背景重新上色所有块
+            legend.innerHTML = '<strong>Program Blocks</strong><br/>';
+
+            tiles.forEach((tile, idx) => {
+                const color = getTileColorForBackground(bgHex, idx);
+                legend.appendChild(createLegendRow(idx, color));
+                paintCoords(globalMap, tile.global_coords, color);
+                paintCoords(sliceMap, tile.slice_coords, color);
+            });
+        }
+
+        // 初始渲染（根据当前背景选择器的值）
+        renderTilesForBackground(backgroundSelect.value || '#000000');
 
         const { center } = setupCamera(scene, camera);
         const orbitControls = new OrbitControls(camera, renderer.domElement);
@@ -878,7 +1153,16 @@ export function createLoadOverallVisualization(containerElement, op) {
         orbitControls.target.copy(center);
         orbitControls.update();
 
+        renderer.setClearColor(currentBackground, 1);
         sceneRoot.appendChild(renderer.domElement);
+
+        backgroundSelect.addEventListener('change', (event) => {
+            const value = event.target.value;
+            currentBackground = new THREE.Color(value);
+            scene.background = currentBackground;
+            renderer.setClearColor(currentBackground, 1);
+            renderTilesForBackground(value);
+        });
 
         let rafId = null;
         const animate = () => {
@@ -931,8 +1215,9 @@ export function createLoadOverallVisualization(containerElement, op) {
             });
             row.appendChild(swatch);
             const label = document.createElement('span');
-            label.textContent = `Tile ${idx + 1}`;
+            label.textContent = `Program Block ${idx + 1}`;
             row.appendChild(label);
             return row;
         }
 }
+
