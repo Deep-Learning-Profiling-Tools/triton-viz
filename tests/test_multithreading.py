@@ -10,15 +10,11 @@ import triton.language as tl
 import triton_viz
 from triton_viz.clients.profiler.profiler import Profiler
 from triton_viz.core.config import config as cfg
-
-trace_state = importlib.import_module("triton_viz.core.trace")
-
+import os
 
 # TODO: remove this fixture once we unpatch triton-viz properly
-@pytest.fixture(autouse=True)
-def _force_interpreter(monkeypatch):
-    monkeypatch.setenv("TRITON_INTERPRET", "1")
-    yield
+os.environ["TRITON_INTERPRET"] = "1"
+trace_state = importlib.import_module("triton_viz.core.trace")
 
 
 @pytest.fixture
