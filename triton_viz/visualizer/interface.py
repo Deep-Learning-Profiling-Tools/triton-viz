@@ -22,6 +22,37 @@ precomputed_c_values = {}
 current_fullscreen_op = None
 last_public_url = None
 last_local_port = None
+sbuf_events = []
+load_overall_maps = {}
+store_overall_maps = {}
+DEVICE_LIMITS = {
+    "TRN1_NC_V2": 24 * 1024 * 1024,
+    "TRN1_CHIP": 48 * 1024 * 1024,
+    "TRN1_2XL": 48 * 1024 * 1024,
+    "TRN1_32XL": 768 * 1024 * 1024,
+    "TRN2_NC_V3": 28 * 1024 * 1024,
+    "TRN2_CHIP": 224 * 1024 * 1024,
+    "TRN2_48XL": 3584 * 1024 * 1024,
+}
+
+
+def _compute_sbuf_timeline(events: list[dict]) -> tuple[list[dict], int]:
+    if not events:
+        return [], 0
+    usage = 0
+    timeline = []
+    for ev in sorted(events, key=lambda e: e.get("time_idx", 0)):
+        usage += int(ev.get("delta", 0))
+        timeline.append(
+            {
+                "time_idx": int(ev.get("time_idx", 0)),
+                "usage": usage,
+                "label": ev.get("label"),
+                "uuid": ev.get("uuid"),
+            }
+        )
+    max_usage = max((pt["usage"] for pt in timeline), default=0)
+    return timeline, max_usage
 
 
 # Server state management
@@ -93,13 +124,21 @@ def precompute_c_values(op_data):
 
 
 def update_global_data():
-    global global_data, raw_tensor_data, precomputed_c_values
+    global global_data
+    global raw_tensor_data
+    global precomputed_c_values
+    global sbuf_events
+    global load_overall_maps
+    global store_overall_maps
 
     # Collect all records from launches
     from ..core.trace import launches
 
-    all_records = []
+    all_records: list = []
     for launch in launches:
+        # Include the Launch object itself so analysis can attach per-kernel
+        # metadata (e.g., grid size) before consuming client records.
+        all_records.append(launch)
         all_records.extend(launch.records)
 
     # Pass the records to analyze_records
@@ -121,6 +160,9 @@ def update_global_data():
         }
     }
     raw_tensor_data = viz_data["raw_tensor_data"]
+    sbuf_events = raw_tensor_data.pop("__sbuf_events__", [])
+    load_overall_maps = viz_data.get("load_overall", {})
+    store_overall_maps = viz_data.get("store_overall", {})
 
     # Precompute C values for each Dot operation
     precomputed_c_values = {}
@@ -191,6 +233,25 @@ def get_data():
     global global_data
     update_global_data()
     return jsonify(global_data)
+
+
+@app.route("/api/sbuf")
+def get_sbuf_usage():
+    global sbuf_events
+    device = (request.args.get("device") or "A100").upper()
+    limit = DEVICE_LIMITS.get(device)
+    if limit is None:
+        limit = int(request.args.get("limit_bytes", 256 * 1024))
+    timeline, max_usage = _compute_sbuf_timeline(sbuf_events)
+    overflow = [pt for pt in timeline if pt["usage"] > limit]
+    return jsonify(
+        {
+            "timeline": timeline,
+            "limit_bytes": limit,
+            "max_usage": max_usage,
+            "overflow_points": overflow,
+        }
+    )
 
 
 @app.route("/api/update_data")
@@ -356,10 +417,25 @@ def get_matmul_vectors():
 
         a_np = _np.asarray(a)
         b_np = _np.asarray(b)
+        swizzle = bool(op.get("b_swizzle"))
         a_row = a_np[row, :].tolist()
-        b_col = b_np[:, col].tolist()
+        if swizzle:
+            # TEMP: until tracer auto-detects, demo may flag B swizzle by row access
+            b_vec = b_np[col, :]
+        else:
+            b_vec = b_np[:, col]
+        b_col = _np.asarray(b_vec).ravel().tolist()
         k = len(a_row)
-        return jsonify({"row": row, "col": col, "a_row": a_row, "b_col": b_col, "k": k})
+        return jsonify(
+            {
+                "row": row,
+                "col": col,
+                "a_row": a_row,
+                "b_col": b_col,
+                "k": k,
+                "swizzle": swizzle,
+            }
+        )
     except Exception as e:
         return jsonify({"error": f"MatMul vectors failed: {e}"}), 200
 
@@ -591,17 +667,60 @@ def get_load_tensor():
             t_min = float(_np.min(arr)) if arr.size else 0.0
         if t_max is None:
             t_max = float(_np.max(arr)) if arr.size else 0.0
-        return jsonify(
-            {
-                "shape": t_shape,
-                "dims": int(t_dims),
-                "min": float(t_min),
-                "max": float(t_max),
-                "values": arr.tolist(),
+        payload = {
+            "shape": t_shape,
+            "dims": int(t_dims),
+            "min": float(t_min),
+            "max": float(t_max),
+            "values": arr.tolist(),
+        }
+
+        slice_arr = op_data.get("slice_tensor")
+        if slice_arr is not None:
+            slice_np = _np.asarray(slice_arr)
+            slice_shape = op_data.get("slice_shape") or list(slice_np.shape)
+            slice_dims = op_data.get("slice_dims") or int(slice_np.ndim)
+            slice_min = op_data.get("slice_min")
+            slice_max = op_data.get("slice_max")
+            if slice_min is None:
+                slice_min = float(_np.min(slice_np)) if slice_np.size else 0.0
+            if slice_max is None:
+                slice_max = float(_np.max(slice_np)) if slice_np.size else 0.0
+            payload["slice"] = {
+                "shape": slice_shape,
+                "dims": int(slice_dims),
+                "min": float(slice_min),
+                "max": float(slice_max),
+                "values": slice_np.tolist(),
             }
-        )
+
+        return jsonify(payload)
     except Exception as e:
         return jsonify({"error": f"getLoadTensor failed: {e}"}), 200
+
+
+@app.route("/api/load_overall", methods=["POST"])
+def get_load_overall():
+    data = request.json or {}
+    key = data.get("key")
+    if not key:
+        return jsonify({"error": "Missing key"}), 400
+    entry = load_overall_maps.get(key)
+    if not entry:
+        return jsonify({"error": "Overall data not found"}), 404
+    return jsonify(entry)
+
+
+@app.route("/api/store_overall", methods=["POST"])
+def get_store_overall():
+    data = request.json or {}
+    key = data.get("key")
+    if not key:
+        return jsonify({"error": "Missing key"}), 400
+    entry = store_overall_maps.get(key)
+    if not entry:
+        return jsonify({"error": "Overall data not found"}), 404
+    return jsonify(entry)
 
 
 def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None):

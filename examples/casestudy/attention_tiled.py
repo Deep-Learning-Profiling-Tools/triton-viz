@@ -61,7 +61,13 @@ def emit_tiled_records(M=64, N=1024, D=64, TILE_N=64, max_tiles=4):
         time_idx += 1
         records.append(load_k)
 
-        dot = Dot((M, D), (tile_size, D), (M, tile_size), q.numpy(), k[tile_start : tile_start + tile_size].numpy())
+        dot = Dot(
+            (M, D),
+            (tile_size, D),
+            (M, tile_size),
+            q.numpy(),
+            k[tile_start : tile_start + tile_size].numpy(),
+        )
         dot.mem_src = "SBUF"
         dot.mem_dst = "PSUM"
         dot.bytes = 3 * 1024 * 1024
@@ -101,4 +107,3 @@ if __name__ == "__main__":
     records, tensors = emit_tiled_records()
     make_launch(records, tensors)
     triton_viz.launch(share=True)
-

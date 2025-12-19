@@ -10,8 +10,14 @@ def analyze_records(records):
         if isinstance(record, Launch):
             if record_data is not None:
                 data.append(record_data)
-            grid_size = record.grid_size
-            record_data = [["Grid Size", tuple(grid_size)]]
+            # New-style Launch objects in triton_viz.core.data expose ``grid``,
+            # while older synthetic case-study Launches may not. Be defensive.
+            grid = getattr(record, "grid_size", None)
+            if grid is None:
+                grid = getattr(record, "grid", None)
+            if grid is None:
+                grid = ()
+            record_data = [["Grid Size", tuple(grid)]]
         elif isinstance(record, OpTypeCounts):
             op_type_counts = record.type_counts
             record_data += [

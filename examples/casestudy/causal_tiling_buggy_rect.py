@@ -27,8 +27,8 @@ def causal_access_buggy_rect(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
-    row_mask = (offs_m < N_CTX)
-    col_mask = (offs_n < N_CTX)
+    row_mask = offs_m < N_CTX
+    col_mask = offs_n < N_CTX
     causal_mask = offs_n[None, :] <= offs_m[:, None]
     mask = row_mask[:, None] & col_mask[None, :] & causal_mask
 
@@ -61,4 +61,3 @@ def run_demo():
 
 if __name__ == "__main__":
     run_demo()
-

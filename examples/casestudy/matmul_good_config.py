@@ -34,7 +34,6 @@ def matmul_kernel(
     GROUP_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    num_pid_m = tl.cdiv(M, BLOCK_M)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     group_size = GROUP_M * num_pid_n
 
@@ -107,4 +106,3 @@ def run_demo():
 
 if __name__ == "__main__":
     run_demo()
-

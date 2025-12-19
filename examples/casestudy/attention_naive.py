@@ -95,4 +95,3 @@ if __name__ == "__main__":
     records, tensors = emit_attention_records()
     make_launch(records, tensors)
     triton_viz.launch(share=True)
-

@@ -99,8 +99,9 @@ def extract_load_coords(
 
     # Extract coordinates for the slice tensor
     # Infer shape from masks array
-    slice_shape = make_3d(record.masks.shape)
-    slice_z, slice_y, slice_x = record.masks.reshape(*slice_shape).nonzero()
+    slice_mask = np.asarray(record.masks, dtype=bool, order="C")
+    slice_shape = make_3d(slice_mask.shape)
+    slice_z, slice_y, slice_x = slice_mask.reshape(*slice_shape).nonzero()
 
     slice_coords = [
         (float(xi), float(yi), float(zi))
@@ -116,6 +117,42 @@ def make_3d(shape: tuple[int, ...]):
     if len(shape) == 2:
         return (1, shape[0], shape[1])
     return shape
+
+
+def build_slice_tensor(record, tensor: Tensor, global_arr: np.ndarray):
+    """Reconstruct slice-tensor values by sampling the global tensor via recorded offsets."""
+    try:
+        mask = np.asarray(record.masks, dtype=bool)
+        offsets = np.asarray(record.offsets, dtype=np.int64)
+        if offsets.shape != mask.shape:
+            offsets = np.broadcast_to(offsets, mask.shape)
+        elem_size = getattr(tensor, "element_size", None)
+        if not elem_size:
+            try:
+                elem_size = tensor.data.element_size()
+            except Exception:
+                elem_size = 1
+        elem_size = max(int(elem_size), 1)
+
+        flat_mask = mask.reshape(-1)
+        flat_offsets = offsets.reshape(-1)
+        slice_flat = np.zeros_like(flat_offsets, dtype=float)
+
+        if flat_mask.any() and global_arr.size:
+            elem_indices = (flat_offsets[flat_mask] // elem_size).astype(np.int64)
+            elem_indices = np.clip(elem_indices, 0, global_arr.size - 1)
+            global_flat = global_arr.reshape(-1)
+            values = global_flat[elem_indices]
+            slice_flat[flat_mask] = values
+            slice_min = float(values.min())
+            slice_max = float(values.max())
+        else:
+            slice_min = slice_max = 0.0
+
+        return slice_flat.reshape(mask.shape), slice_min, slice_max
+    except Exception:
+        shape = np.asarray(record.masks).shape
+        return np.zeros(shape, dtype=float), 0.0, 0.0
 
 
 def delinearized(
@@ -147,6 +184,7 @@ def delinearized(
         element_size = dtype.element_ty.primitive_bitwidth // 8
 
     x = x.copy() // element_size
+    mask = np.asarray(mask, dtype=np.int64, order="C")
     z = ((x // (shape[1] * shape[2])) * mask - (1 - mask)).ravel()
     y = (((x // shape[2]) % shape[1]) * mask - (1 - mask)).ravel()
     x = ((x % shape[2]) * mask - (1 - mask)).ravel()
@@ -158,6 +196,9 @@ def prepare_visualization_data(program_records, tensor_table):
     # global idx
     visualization_data = []
     raw_tensor_data = {}
+    sbuf_events = []
+    load_overall = {}
+    store_overall = {}
     for record in program_records:
         record_uuid = str(uuid.uuid4())[:8]
 
@@ -178,6 +219,9 @@ def prepare_visualization_data(program_records, tensor_table):
                     "mem_dst": getattr(record, "mem_dst", None),
                     "tile_shape": getattr(record, "tile_shape", None),
                     "k": int(getattr(record, "k", 0)),
+                    # TEMP: the b_swizzle flag is injected only for demo until tracer can infer automatically
+                    "b_swizzle": bool(getattr(record, "b_swizzle", False)),
+                    "bytes": int(getattr(record, "bytes", 0)),
                     "time_idx": int(getattr(record, "time_idx", -1)),
                 }
             )
@@ -211,6 +255,8 @@ def prepare_visualization_data(program_records, tensor_table):
             raw_tensor_data[record_uuid] = {
                 "input_data": a_np,
                 "other_data": b_np,
+                # TEMP: same as above, remember whether demo flagged swizzle
+                "b_swizzle": bool(getattr(record, "b_swizzle", False)),
                 "intermediate_results": record.intermediate_results,
                 "tracebacks": [
                     {
@@ -263,6 +309,8 @@ def prepare_visualization_data(program_records, tensor_table):
             print(global_tensor)
             global_coords, slice_coords = extract_load_coords(record, global_tensor)
 
+            ptr_key = f"LOAD:{int(getattr(record, 'ptr', id(global_tensor)))}"
+
             visualization_data.append(
                 {
                     "type": "Load",
@@ -271,11 +319,30 @@ def prepare_visualization_data(program_records, tensor_table):
                     "global_coords": global_coords,
                     "slice_coords": slice_coords,
                     "uuid": record_uuid,
+                    "overall_key": ptr_key,
                     # NKI flow meta (optional)
                     "mem_src": getattr(record, "mem_src", None),
                     "mem_dst": getattr(record, "mem_dst", None),
                     "bytes": int(getattr(record, "bytes", 0)),
                     "time_idx": int(getattr(record, "time_idx", -1)),
+                }
+            )
+
+            entry = load_overall.setdefault(
+                ptr_key,
+                {
+                    "shape": list(global_tensor.shape),
+                    "dims": len(global_tensor.shape),
+                    "slice_shape": list(record.masks.shape),
+                    "tiles": [],
+                },
+            )
+            entry["tiles"].append(
+                {
+                    "uuid": record_uuid,
+                    "global_coords": global_coords,
+                    "slice_coords": slice_coords,
+                    "ptr_key": ptr_key,
                 }
             )
 
@@ -335,6 +402,9 @@ def prepare_visualization_data(program_records, tensor_table):
 
             t_min = float(np.min(arr)) if getattr(arr, "size", 0) else 0.0
             t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
+            slice_arr, slice_min, slice_max = build_slice_tensor(
+                record, global_tensor, arr
+            )
 
             raw_tensor_data[record_uuid] = {
                 "global_tensor": arr,
@@ -342,6 +412,11 @@ def prepare_visualization_data(program_records, tensor_table):
                 "shape": list(arr.shape),
                 "min": t_min,
                 "max": t_max,
+                "slice_tensor": slice_arr,
+                "slice_dims": int(slice_arr.ndim),
+                "slice_shape": list(slice_arr.shape),
+                "slice_min": slice_min,
+                "slice_max": slice_max,
                 "tracebacks": [
                     {
                         "filename": f.filename,
@@ -352,12 +427,21 @@ def prepare_visualization_data(program_records, tensor_table):
                     for f in getattr(record, "call_path", [])
                 ],
             }
-            print(record.masks.shape)
+            sbuf_events.append(
+                {
+                    "time_idx": int(getattr(record, "time_idx", len(sbuf_events))),
+                    "delta": int(getattr(record, "bytes", arr.nbytes)),
+                    "label": "load",
+                    "uuid": record_uuid,
+                }
+            )
 
         elif isinstance(record, Store):
             global_tensor, slice_tensor = tensor_table[record.ptr]
 
             global_coords, slice_coords = extract_load_coords(record, global_tensor)
+
+            ptr_key = f"STORE:{int(getattr(record, 'ptr', id(global_tensor)))}"
 
             visualization_data.append(
                 {
@@ -367,10 +451,29 @@ def prepare_visualization_data(program_records, tensor_table):
                     "global_coords": global_coords,
                     "slice_coords": slice_coords,
                     "uuid": record_uuid,
+                    "overall_key": ptr_key,
                     "mem_src": getattr(record, "mem_src", None),
                     "mem_dst": getattr(record, "mem_dst", None),
                     "bytes": int(getattr(record, "bytes", 0)),
                     "time_idx": int(getattr(record, "time_idx", -1)),
+                }
+            )
+
+            entry = store_overall.setdefault(
+                ptr_key,
+                {
+                    "shape": list(global_tensor.shape),
+                    "dims": len(global_tensor.shape),
+                    "slice_shape": list(record.masks.shape),
+                    "tiles": [],
+                },
+            )
+            entry["tiles"].append(
+                {
+                    "uuid": record_uuid,
+                    "global_coords": global_coords,
+                    "slice_coords": slice_coords,
+                    "ptr_key": ptr_key,
                 }
             )
 
@@ -425,6 +528,9 @@ def prepare_visualization_data(program_records, tensor_table):
 
             t_min = float(np.min(arr)) if getattr(arr, "size", 0) else 0.0
             t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
+            slice_arr, slice_min, slice_max = build_slice_tensor(
+                record, global_tensor, arr
+            )
 
             raw_tensor_data[record_uuid] = {
                 "global_tensor": arr,
@@ -432,6 +538,11 @@ def prepare_visualization_data(program_records, tensor_table):
                 "shape": list(arr.shape),
                 "min": t_min,
                 "max": t_max,
+                "slice_tensor": slice_arr,
+                "slice_dims": int(slice_arr.ndim),
+                "slice_shape": list(slice_arr.shape),
+                "slice_min": slice_min,
+                "slice_max": slice_max,
                 "tracebacks": [
                     {
                         "filename": f.filename,
@@ -442,8 +553,17 @@ def prepare_visualization_data(program_records, tensor_table):
                     for f in getattr(record, "call_path", [])
                 ],
             }
+            sbuf_events.append(
+                {
+                    "time_idx": int(getattr(record, "time_idx", len(sbuf_events))),
+                    "delta": -int(getattr(record, "bytes", arr.nbytes)),
+                    "label": "store",
+                    "uuid": record_uuid,
+                }
+            )
 
-    return visualization_data, raw_tensor_data, ""
+    raw_tensor_data["__sbuf_events__"] = sbuf_events
+    return visualization_data, raw_tensor_data, "", load_overall, store_overall
 
 
 def get_visualization_data():
@@ -452,13 +572,29 @@ def get_visualization_data():
     visualization_data = {}
     raw_tensor_data = {}
     kernel_src = ""
+    load_overall_maps = {}
+    store_overall_maps = {}
 
     for grid_idx, program_records in records.items():
-        viz_data, raw_data, kernel_src = prepare_visualization_data(
-            program_records, tensor_table
-        )
+        (
+            viz_data,
+            raw_data,
+            kernel_src,
+            load_overall,
+            store_overall,
+        ) = prepare_visualization_data(program_records, tensor_table)
         visualization_data[str(grid_idx)] = viz_data
         raw_tensor_data.update(raw_data)
+        for key, val in load_overall.items():
+            if key in load_overall_maps:
+                load_overall_maps[key]["tiles"].extend(val.get("tiles", []))
+            else:
+                load_overall_maps[key] = val
+        for key, val in store_overall.items():
+            if key in store_overall_maps:
+                store_overall_maps[key]["tiles"].extend(val.get("tiles", []))
+            else:
+                store_overall_maps[key] = val
 
     # Ensure failures dict has JSON-serializable keys
     safe_failures = {str(k): v for k, v in failures.items()}
@@ -468,6 +604,8 @@ def get_visualization_data():
         "raw_tensor_data": raw_tensor_data,
         "failures": safe_failures,
         "kernel_src": kernel_src,
+        "load_overall": load_overall_maps,
+        "store_overall": store_overall_maps,
     }
 
 

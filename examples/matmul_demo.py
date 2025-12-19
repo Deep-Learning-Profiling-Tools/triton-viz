@@ -91,3 +91,25 @@ def run_demo():
 
 if __name__ == "__main__":
     run_demo()
+
+
+
+import triton
+import triton.language as tl
+
+@triton.jit  # <-- Annotation A
+def add_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    # Parallel index of the current block
+    pid = tl.program_id(axis=0)  # <-- Annotation B
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)  # <-- Annotation C
+    mask = offsets < N
+
+    # Load, compute, store (block-wise)
+    x = tl.load(x_ptr + offsets, mask=mask)  # <-- Annotation D
+    y = tl.load(y_ptr + offsets, mask=mask)
+    output = x + y
+    tl.store(out_ptr + offsets, output, mask=mask)
+
+
+    
