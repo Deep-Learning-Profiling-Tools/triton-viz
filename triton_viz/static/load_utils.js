@@ -43,7 +43,7 @@ export function setupScene(container, backgroundColor = 0x000000) {
 export function setupGeometries() {
     const cubeGeometry = new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE);
     const edgesGeometry = new THREE.EdgesGeometry(cubeGeometry);
-    // 细且半透明的边线材质；WebGL 会 clamp 线宽，但通过降低不透明度来让线“看起来更细”
+    // 细且半透明的边线材质；WebGL 会 clamp 线宽，但通过降低不透明度来让线"看起来更细"
     const lineMaterial = new THREE.LineBasicMaterial({
         color: COLOR_EDGE,
         linewidth: 0.1,
@@ -330,7 +330,7 @@ function computeLabelPalette(colorOrBg) {
 }
 
 function addLabel(scene, text, position, colorOrBg) {
-    // 轻量文本标签：无背景，仅描边+填充，避免“熊猫眼”效果
+    // 轻量文本标签：无背景，仅描边+填充，避免"熊猫眼"效果
     const paddingX = 6;
     const paddingY = 6;
     const canvas = document.createElement('canvas');
@@ -368,4 +368,3 @@ function addLabel(scene, text, position, colorOrBg) {
     scene.add(sprite);
     return sprite;
 }
-

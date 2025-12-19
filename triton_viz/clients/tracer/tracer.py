@@ -123,7 +123,9 @@ class Tracer(Client):
         def _safe_elem_size(obj, default: int = 1) -> int:
             try:
                 # Tensor-like object with element_size()
-                if hasattr(obj, "element_size") and callable(getattr(obj, "element_size", None)):
+                if hasattr(obj, "element_size") and callable(
+                    getattr(obj, "element_size", None)
+                ):
                     return int(obj.element_size())
             except Exception:
                 pass
@@ -205,7 +207,9 @@ class Tracer(Client):
                     rec.time_idx = -1
                 else:
                     rec.backend = "nki"
-                    elem_sz = _safe_elem_size(ptr, _safe_elem_size(getattr(ptr, "dtype", None), 1))
+                    elem_sz = _safe_elem_size(
+                        ptr, _safe_elem_size(getattr(ptr, "dtype", None), 1)
+                    )
                     n_elems = _count_true(getattr(mask, "data", mask))
                     rec.bytes = int(n_elems * elem_sz)
                     rec.time_idx = int(self._nki_time)
