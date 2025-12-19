@@ -93,9 +93,9 @@ if __name__ == "__main__":
     run_demo()
 
 
-
 import triton
 import triton.language as tl
+
 
 @triton.jit  # <-- Annotation A
 def add_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
@@ -110,6 +110,3 @@ def add_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
     y = tl.load(y_ptr + offsets, mask=mask)
     output = x + y
     tl.store(out_ptr + offsets, output, mask=mask)
-
-
-    

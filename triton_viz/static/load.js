@@ -1080,7 +1080,7 @@ export function createLoadOverallVisualization(containerElement, op) {
             const baseGlobal = isLight ? new THREE.Color('#fefce8') : COLOR_GLOBAL;
             const baseSlice  = isLight ? new THREE.Color('#dbeafe') : COLOR_LEFT_SLICE;
 
-            // 先把所有 cube 恢复为“底色”，避免旧 tile 颜色残留
+            // 先把所有 cube 恢复为"底色"，避免旧 tile 颜色残留
             globalTensor.children.forEach((cube) => {
                 if (cube && cube.material && cube.material.color) {
                     cube.material.color.copy(baseGlobal);
@@ -1220,4 +1220,3 @@ export function createLoadOverallVisualization(containerElement, op) {
             return row;
         }
 }
-

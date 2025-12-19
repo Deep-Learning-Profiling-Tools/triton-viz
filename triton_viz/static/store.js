@@ -292,7 +292,7 @@ export function createStoreVisualization(containerElement, op) {
 
         const baseGlobalDark = COLOR_GLOBAL.clone();
         const baseSliceDark = COLOR_LEFT_SLICE.clone();
-        // 浅色主题下的更清爽 pastel 底色，减少“灰雾感”
+        // 浅色主题下的更清爽 pastel 底色，减少"灰雾感"
         const baseGlobalLight = new THREE.Color('#fefce8'); // very light warm yellow
         const baseSliceLight = new THREE.Color('#dbeafe');  // light blue
         let currentBaseGlobal = baseGlobalDark.clone();
