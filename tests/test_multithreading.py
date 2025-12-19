@@ -14,6 +14,7 @@ from triton_viz.core.config import config as cfg
 trace_state = importlib.import_module("triton_viz.core.trace")
 
 
+# TODO: remove this fixture once we unpatch triton-viz properly
 @pytest.fixture(autouse=True)
 def _force_interpreter(monkeypatch):
     monkeypatch.setenv("TRITON_INTERPRET", "1")
@@ -70,9 +71,14 @@ def test_producer_consumer_hang(one_sm):
 
     thread = threading.Thread(target=lambda: _producer_consumer[(2,)](x, out))
     thread.start()
-    thread.join(timeout=2)
+
+    # note: don't use timeout=2 for this, it'll cause the next
+    # test to run before this thread unpatches triton-viz ->
+    # this thread will unpatch while the next test
+    # needs patched ops, causing weird failures
+    thread.join()
     assert (
-        thread.is_alive() or out.item() >= 10_000
+        out.item() >= 10_000
     ), "producer_consumer should hang or PID 0 spin to max limit (10K) when blocks run sequentially"
 
 
@@ -83,9 +89,9 @@ def test_producer_consumer_converges(two_sms):
 
     thread = threading.Thread(target=lambda: _producer_consumer[(2,)](x, out))
     thread.start()
-    thread.join(timeout=2)
+    thread.join()
     assert (
-        not thread.is_alive() and 0 < out.item() < 10_000
+        0 < out.item() < 10_000
     ), "producer_consumer should complete and PID 0 shouldn't spin to max limit (10K) when blocks run concurrently"
 
 
