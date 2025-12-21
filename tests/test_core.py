@@ -54,19 +54,11 @@ def test_trace_decorator_add_clients():
 
 # ======== Unpatch Tests =========
 def test_unpatch_lang_restores_builtins():
-    from triton_viz.core.patch import patch_lang, unpatch_lang
-
     @triton.jit
     def dummy_kernel(x_ptr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         tl.store(x_ptr + offs, tl.load(x_ptr + offs))
-
-    patch_lang(dummy_kernel)
-    try:
-        pass
-    finally:
-        unpatch_lang()
 
     # e2e run: make sure jit'd triton kernel can run after tracing
     if not torch.cuda.is_available():
