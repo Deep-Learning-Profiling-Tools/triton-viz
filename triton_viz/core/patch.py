@@ -535,8 +535,22 @@ def unpatch_lang():
     import importlib
     import sys
 
+    for name in ("core", "math", "extra"):
+        mod = getattr(tl, name, None)
+        if mod is not None and mod.__name__ in sys.modules:
+            importlib.reload(mod)
+
     if tl.__name__ in sys.modules:
         importlib.reload(tl)
+
+    from triton.language import semantic as tl_semantic
+    from triton.compiler import code_generator as codegen
+
+    tl_semantic.TritonSemantic.tensor = tl.tensor
+    tl_semantic.TritonSemantic.lang = tl
+    codegen.tensor = tl.tensor
+    codegen.language = tl
+    codegen.constexpr = tl.constexpr
 
 
 @dataclass(frozen=True)
