@@ -1,6 +1,6 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
-from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid, RawLoad, RawStore
+from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
 from typing import Callable, Optional, Union
 import numpy as np
 
@@ -91,25 +91,6 @@ class Tracer(Client):
                 Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
             )
 
-        # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
-        def pre_raw_load_callback(ptr):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            offsets = ptr.data - tensor.data_ptr()
-            true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Load(tensor.data_ptr(), offsets, true_mask))
-
-        def pre_raw_store_callback(ptr, value):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            offsets = ptr.data - tensor.data_ptr()
-            true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Store(tensor.data_ptr(), offsets, true_mask))
-
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
                 return
@@ -123,16 +104,14 @@ class Tracer(Client):
             input_shape = input.data.shape
             other_shape = other.data.shape
             ret_shape = ret.data.shape
-            self.records.append(Dot(input_shape, other_shape, ret_shape))
+            self.records.append(
+                Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            )
 
         if op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
             return OpCallbacks(before_callback=pre_store_callback)
-        elif op_type is RawLoad:
-            return OpCallbacks(before_callback=pre_raw_load_callback)
-        elif op_type is RawStore:
-            return OpCallbacks(before_callback=pre_raw_store_callback)
         elif op_type is ReduceSum:
             return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:
