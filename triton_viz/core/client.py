@@ -167,8 +167,8 @@ class ClientManager:
                 # patch for loops
                 loop_callbacks = client.register_for_loop_callback()
                 patch_for_loop(loop_callbacks)
-                # Remaps core language functions to interpreted ones
-                patch_lang(fn)
+            # Remaps core language functions to interpreted ones
+            patch_lang(fn)
             try:
                 yield
             finally:
