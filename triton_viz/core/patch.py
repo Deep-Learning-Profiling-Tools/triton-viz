@@ -8,7 +8,6 @@ from queue import SimpleQueue, Empty
 import threading
 import time
 from functools import partialmethod
-from tqdm import tqdm
 
 from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
