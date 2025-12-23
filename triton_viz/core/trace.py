@@ -8,10 +8,12 @@ from .config import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Union, TypeVar
 
 
 launches: list[Launch] = []
+
+T = TypeVar("T")
 
 
 def dummy_benchmarker(fn, quantiles):
@@ -19,7 +21,11 @@ def dummy_benchmarker(fn, quantiles):
     return (1.0, 1.0, 1.0)
 
 
-class Trace(KernelInterface):
+class TraceInterface:
+    def __init__(self, client: Union[str, Client]) -> None:
+        self.client_manager = ClientManager()
+        self.add_client(client)
+
     @staticmethod
     def _normalize_client(client: Union[str, Client]) -> Client:
         if isinstance(client, str):
@@ -39,19 +45,27 @@ class Trace(KernelInterface):
     def add_client(self, new_client: Union[str, Client]) -> None:
         self.client_manager.add_clients([self._normalize_client(new_client)])
 
+    def finalize(self):
+        self.client_manager.finalize()
+        launches.append(self.client_manager.launch)
+
+
+class TritonTrace(KernelInterface, TraceInterface):
     def __init__(
         self,
         runner: Union[JITFunction, InterpretedFunction, Autotuner, Heuristics],
         client: Union[str, Client],
     ) -> None:
-        self.fn = runner
+        self.jit_fn: Optional[JITFunction] = None
+        self.base_fn: Optional[Callable] = None
+        self.interpreted_fn: Optional[InterpretedFunction] = None
 
         def unpack_kernel(
-            source: Union["Trace", JITFunction, InterpretedFunction, Heuristics],
+            source: Union["TritonTrace", JITFunction, InterpretedFunction, Heuristics],
         ) -> tuple[
             Optional[JITFunction], Optional[Callable], Optional[InterpretedFunction]
         ]:
-            if isinstance(source, Trace):
+            if isinstance(source, TritonTrace):
                 return source.jit_fn, source.base_fn, source.interpreted_fn
             if isinstance(source, JITFunction):
                 base_fn = source.fn
@@ -89,9 +103,12 @@ class Trace(KernelInterface):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner)
             self.runner = self.interpreted_fn
             self.warmup_runner = self.jit_fn
+
         self.arg_names = runner.arg_names
-        self.client_manager = ClientManager()
-        self.add_client(client)
+
+        self.fn = runner
+
+        TraceInterface.__init__(self, client)
 
         # Preserve common function attributes for compatibility
         # with code that expects to access these attributes on the kernel
@@ -128,7 +145,7 @@ class Trace(KernelInterface):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
 
-        with self.client_manager.patch_run(self.base_fn):
+        with self.client_manager.patch_run(self.base_fn, backend="triton"):
             kwargs.update({"client_manager": self.client_manager})
             kwargs.update({"jit_fn": self.jit_fn})
             ret = self.runner.run(*args, **kwargs)
@@ -145,9 +162,24 @@ class Trace(KernelInterface):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
 
-    def finalize(self):
-        self.client_manager.finalize()
-        launches.append(self.client_manager.launch)
+
+class NKITrace(KernelInterface, TraceInterface):
+    def __init__(self, kernel, client: str | Client) -> None:
+        from neuronxcc.nki.compile import GenericKernel
+        from .nki import NKIInterpretedFunction
+
+        if isinstance(kernel, GenericKernel):
+            # This is wrong
+            self.interpreter_fn = NKIInterpretedFunction(kernel.func)
+            self.func = kernel.func
+        elif isinstance(kernel, NKIInterpretedFunction):
+            self.interpreter_fn = kernel
+            self.func = kernel.fn
+        else:
+            self.interpreter_fn = NKIInterpretedFunction(kernel)
+            self.func = kernel
+
+        TraceInterface.__init__(self, client)
 
     def __getattr__(self, name):
         # Forward any missing attributes to the underlying runner
@@ -178,8 +210,21 @@ class Trace(KernelInterface):
             f"'{type(self).__name__}' object has no attribute '{name}'"
         )
 
+    def __getitem__(self, *grid):
+        return KernelInterface.__getitem__(self, tuple(*grid))
 
-def trace(clients: Union[str, Client, None] = None):
+    def __call__(self, *args, **kwargs):
+        return self[(1, 1, 1)](*args, **kwargs)
+
+    def run(self, *args, **kwargs):
+        with self.client_manager.patch_run(self.func, backend="nki"):
+            kwargs.update({"client_manager": self.client_manager})
+            ret = self.interpreter_fn.run(*args, **kwargs)
+            self.finalize()
+            return ret
+
+
+def trace(clients: Union[str, Client, None] = None, backend: str = "triton"):
     """
     Create a trace object that can be used to run a kernel with instrumentation clients.
 
@@ -192,19 +237,37 @@ def trace(clients: Union[str, Client, None] = None):
     if not isinstance(clients, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(clients)}")
 
-    def decorator(kernel) -> Trace:
+    def decorator(kernel) -> TraceInterface:
         # When sanitizer is disabled, skip tracing and return the original kernel unchanged
         if cfg.disable_sanitizer:
             return kernel
 
         # First-time wrapping
+        # Triton backend need JIT/Interpreter/Autotuner；
+        # NKI allow Python function（ NKIInterpretedFunction）
+        if backend == "nki":
+            return NKITrace(kernel, clients)
         if isinstance(
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
         ):
-            return Trace(kernel, clients)
+            if backend == "triton":
+                return TritonTrace(kernel, clients)
+            else:
+                raise ValueError(f"Unknown backend: {backend}")
 
-        # If the object is already a Trace, just append the new client(s)
-        if isinstance(kernel, Trace):
+        # Handle NKI functions specifically
+        if backend == "nki":
+            from .nki import NKIInterpretedFunction
+
+            if isinstance(kernel, NKIInterpretedFunction):
+                return NKITrace(kernel, clients)
+            else:
+                # Wrap plain functions as NKIInterpretedFunction
+                interpreted_fn = NKIInterpretedFunction(kernel)
+                return NKITrace(interpreted_fn, clients)
+
+        # If the object is already initialized as a TraceInterface, just append the new client(s)
+        if isinstance(kernel, TraceInterface):
             trace = kernel
             trace.add_client(clients)
             return trace
@@ -221,4 +284,4 @@ def clear() -> None:
     Clear all traces.
     """
     global launches
-    launches = []
+    launches.clear()

@@ -16,22 +16,37 @@ TRITON_FRAMES = [
 @dataclass
 class Op:
     name: ClassVar[str] = "op"
-    call_path: list[traceback.StackSummary] = field(init=False, default_factory=list)
+    call_path: list[traceback.FrameSummary] = field(init=False, default_factory=list)
 
     def __post_init__(self):
-        self.call_path = traceback.extract_stack()[:-2]
+        full_stack = traceback.extract_stack()[:-2]
+        # keep original for fallback
+        self.call_path = full_stack
         clean_call_path = []
-        for frame in self.call_path:
+        for frame in full_stack:
             if not any(
                 triton_frame in frame.filename for triton_frame in TRITON_FRAMES
             ):
                 clean_call_path.append(frame)
-        self.call_path = clean_call_path
+        # if filtering removed all frames, fallback to last meaningful frame(s)
+        if clean_call_path:
+            self.call_path = clean_call_path
+        else:
+            for frame in reversed(full_stack):
+                if not str(frame.filename).startswith("<"):
+                    self.call_path = [frame]
+                    break
 
 
 @dataclass
 class ProgramId(Op):
     name: ClassVar[str] = "program_id"
+
+
+@dataclass
+class Allocate(Op):
+    name: ClassVar[str] = "allocate"
+    ptr: int
 
 
 @dataclass
@@ -45,6 +60,11 @@ class Store(Op):
     ptr: int
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
+    mem_src: str = "SBUF"
+    mem_dst: str = "HBM"
+    backend: str = "nki"
+    bytes: int = 0
+    time_idx: int = 0
 
 
 @dataclass
@@ -58,6 +78,12 @@ class Load(Op):
     ptr: int
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
+    # buffer: str
+    mem_src: str = "HBM"
+    mem_dst: str = "SBUF"
+    backend: str = "nki"
+    bytes: int = 0
+    time_idx: int = 0
 
 
 @dataclass
@@ -93,6 +119,17 @@ class Dot(Op):
     def update_intermediate(self, row: int, col: int, result: float):
         # Store only the result as a float
         self.intermediate_results[(row, col)] = result
+
+
+@dataclass
+class Flip(Op):
+    name: ClassVar[str] = "flip"
+    input_shape: tuple
+    output_shape: tuple
+    dim: int
+    # Optional payloads to help frontend render actual values when available
+    input_data: list | None = None
+    output_data: list | None = None
 
 
 @dataclass

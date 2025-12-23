@@ -40,9 +40,9 @@ def test_trace_decorator_add_clients():
         tl.store(out_ptr + offs, tl.load(x_ptr + offs) + tl.load(y_ptr + offs))
 
     # Should be wrapped as a Trace object.
-    from triton_viz.core.trace import Trace
+    from triton_viz.core.trace import TritonTrace
 
-    assert isinstance(my_kernel, Trace)
+    assert isinstance(my_kernel, TritonTrace)
 
     # Verify client de-duplication and addition logic
     clients = my_kernel.client_manager.clients
@@ -50,6 +50,27 @@ def test_trace_decorator_add_clients():
     assert sum(c == "sanitizer" for c in clients) == 1
     assert sum(c == "profiler" for c in clients) == 1
     assert sum(c == "tracer" for c in clients) == 1
+
+
+# ======== Unpatch Tests =========
+def test_unpatch_lang_restores_builtins():
+    @triton.jit
+    def dummy_kernel(x_ptr, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        tl.store(x_ptr + offs, tl.load(x_ptr + offs))
+
+    # e2e run: make sure jit'd triton kernel can run after tracing
+    if not torch.cuda.is_available():
+        pytest.skip("cuda required for triton kernel execution")
+    size = 16
+    block_size = 8
+    x = torch.arange(size, device="cuda")
+    grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
+    for client in ["tracer", "sanitizer", "profiler"]:
+        traced = triton_viz.trace(client)(dummy_kernel)
+        traced[grid](x, BLOCK_SIZE=block_size)
+        dummy_kernel[grid](x, BLOCK_SIZE=block_size)
 
 
 # ======== Nested JIT Call Tests =========
