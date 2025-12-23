@@ -1,8 +1,19 @@
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
-from ...core.data import Op, Load, Store, ReduceSum, Dot, Grid
+from ...core.data import (
+    Op,
+    Load,
+    Store,
+    ReduceSum,
+    Dot,
+    Grid,
+    Allocate,
+    Flip,
+)
+from triton_viz.core.masked_load import masked_load
 from typing import Callable, Optional, Union
 import numpy as np
+import traceback
 
 
 def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
@@ -72,48 +83,114 @@ class Tracer(Client):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        @self.lock_fn
-        def pre_load_callback(
-            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
-        ):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            self.records.append(
-                Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            )
+        def _extract_user_frames() -> list[traceback.FrameSummary]:
+            stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
+            # drop current frames (this function and callers)
+            stack = stack[:-2]
+            cleaned: list[traceback.FrameSummary] = []
+            for f in stack:
+                fn = f.filename.replace("\\", "/")
+                if any(
+                    s in fn
+                    for s in [
+                        "triton_viz/core/",
+                        "triton_viz/clients/",
+                        "triton/runtime/",
+                        "triton/language/",
+                        "site-packages/triton/",
+                        "runpy.py",
+                        "IPython",
+                    ]
+                ):
+                    continue
+                cleaned.append(f)
+            if cleaned:
+                return cleaned
+            # fallback to last non "<...>" frame
+            for f in reversed(stack):
+                if not f.filename.startswith("<"):
+                    return [f]
+            return stack[-1:]
+
+        def post_allocate_callback(ret):
+            assert hasattr(ret, "data")
+            self.tensors.append(ret)
+
+        def _convert_keys_to_numpy(keys):
+            """Convert any NDArrays in keys to numpy arrays."""
+            if isinstance(keys, (tuple, list)):
+                return tuple(_convert_keys_to_numpy(k) for k in keys)
+            elif hasattr(keys, "data"):
+                return keys.data
+            else:
+                return keys
 
         @self.lock_fn
-        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
+        def pre_load_callback(ptr, mask, keys):
             if not self.sample:
                 return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            self.records.append(
-                Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            )
+
+            if keys is None:  # i.e. for triton, ptr = pointer + offsets
+                first_ptr = np.reshape(ptr.data, (-1))[0]
+                tensor = self._get_tensor(first_ptr)
+                offsets = ptr.data - tensor.data_ptr()
+            else:
+                keys = _convert_keys_to_numpy(keys)
+                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
+                tensor = ptr
+
+            rec = Load(tensor.data_ptr(), offsets, mask.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
+
+        @self.lock_fn
+        def pre_store_callback(ptr, mask, keys):
+            if not self.sample:
+                return
+
+            if keys is None:  # i.e. for triton, ptr = pointer + offsets, so keys=None
+                first_ptr = np.reshape(ptr.data, (-1))[0]
+                tensor = self._get_tensor(first_ptr)
+                offsets = ptr.data - tensor.data_ptr()
+                mask_data = mask.data
+            else:
+                keys = _convert_keys_to_numpy(keys)
+                if mask is None:
+                    offsets = masked_load(ptr.get_offsets().data, keys)
+                    mask_data = np.ones_like(offsets).astype(bool)
+                else:
+                    mask_data = mask.data
+                    offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
+                tensor = ptr
+
+            rec = Store(tensor.data_ptr(), offsets, mask_data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
         @self.lock_fn
-        def pre_raw_load_callback(ptr, *args, **kwargs):
+        def pre_raw_load_callback(ptr):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Load(tensor.data_ptr(), offsets, true_mask))
+            rec = Load(tensor.data_ptr(), offsets, true_mask)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         @self.lock_fn
-        def pre_raw_store_callback(ptr, value, *args, **kwargs):
+        def pre_raw_store_callback(ptr, value):
             if not self.sample:
                 return
             first_ptr = np.reshape(ptr.data, (-1))[0]
             tensor = self._get_tensor(first_ptr)
             offsets = ptr.data - tensor.data_ptr()
             true_mask = np.ones_like(offsets, dtype=bool)
-            self.records.append(Store(tensor.data_ptr(), offsets, true_mask))
+            rec = Store(tensor.data_ptr(), offsets, true_mask)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
         @self.lock_fn
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
@@ -124,17 +201,41 @@ class Tracer(Client):
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
         @self.lock_fn
-        def post_dot_callback(ret, input, other, *args):
+        def post_dot_callback(ret, input, other):
             if not self.sample:
                 return
             input_shape = input.data.shape
             other_shape = other.data.shape
             ret_shape = ret.data.shape
-            self.records.append(
-                Dot(input_shape, other_shape, ret_shape, input.data, other.data)
-            )
+            # Pass input/other raw arrays so draw.py can render MatMul
+            rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
 
-        if op_type is Load:
+        def post_flip_callback(ret, x, *args, **kwargs):
+            if not self.sample:
+                return
+            # Try to capture dim argument
+            dim = None
+            if args:
+                dim = args[0]
+            if "dim" in kwargs:
+                dim = kwargs.get("dim")
+            try:
+                in_shape = tuple(x.data.shape)
+                out_shape = tuple(ret.data.shape)
+            except Exception:
+                in_shape = getattr(getattr(x, "handle", None), "data", None)
+                out_shape = getattr(getattr(ret, "handle", None), "data", None)
+                in_shape = tuple(getattr(in_shape, "shape", []) or [])
+                out_shape = tuple(getattr(out_shape, "shape", []) or [])
+            rec = Flip(in_shape, out_shape, int(dim) if dim is not None else 0)
+            rec.call_path = _extract_user_frames()
+            self.records.append(rec)
+
+        if op_type is Allocate:
+            return OpCallbacks(after_callback=post_allocate_callback)
+        elif op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
             return OpCallbacks(before_callback=pre_store_callback)
@@ -142,6 +243,8 @@ class Tracer(Client):
             return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:
             return OpCallbacks(after_callback=post_dot_callback)
+        # Flip is wrapped at tl.flip; we don't have an interpreter op to hook here.
+        # The wrapper in patch_lang will append Flip records directly to tracer.
 
         return OpCallbacks()
 

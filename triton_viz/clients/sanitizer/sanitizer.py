@@ -580,9 +580,7 @@ class SanitizerBruteForce(Sanitizer):
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         @self.lock_fn
-        def pre_load_callback(
-            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
-        ):
+        def pre_load_callback(ptr, mask, _keys):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
             tensor = _get_tensor(self.tensors, first_ptr)
@@ -591,14 +589,12 @@ class SanitizerBruteForce(Sanitizer):
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
         @self.lock_fn
-        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
+        def pre_store_callback(ptr, mask, _keys):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
             tensor = _get_tensor(self.tensors, first_ptr)
             oob = check_out_of_bounds_access(ptr.data, mask.data, tensor)
-            self._report(
-                op_type, check_out_of_bounds_access(ptr.data, mask.data, tensor)
-            )
+            self._report(op_type, oob)
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
         if op_type is Load:
@@ -1545,8 +1541,9 @@ class SymbolicExpr:
                     obj.lhs.concretize(), obj.rhs.concretize(), obj.binary_numpy_op
                 )
         elif obj.op == "load":
-            from ...core.patch import original_ops
+            from ...core.patch import OPERATION_REGISTRY
 
+            original_ops = OPERATION_REGISTRY["triton"]["original_ops"]
             ptr_concrete = obj.ptr.concretize()
             # concretize mask
             # create an all-True mask if mask is None
@@ -1574,9 +1571,10 @@ class SymbolicExpr:
         else:
             # Special handling for cast_impl and bitcast operations
             if obj.op in ("cast_impl", "bitcast"):
-                from ...core.patch import original_ops
+                from ...core.patch import OPERATION_REGISTRY
                 from ...core.data import CastImpl, Bitcast
 
+                original_ops = OPERATION_REGISTRY["triton"]["original_ops"]
                 src_concrete = obj.src.concretize()
                 # dst_type is stored as a SymbolicExpr const node, need to extract the value
                 dst_type_value = (
