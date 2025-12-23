@@ -7,8 +7,6 @@ from ...core.data import (
     ReduceSum,
     Dot,
     Grid,
-    RawLoad,
-    RawStore,
     Allocate,
     Flip,
 )
@@ -234,10 +232,6 @@ class Tracer(Client):
             return OpCallbacks(before_callback=pre_load_callback)
         elif op_type is Store:
             return OpCallbacks(before_callback=pre_store_callback)
-        elif op_type is RawLoad:
-            return OpCallbacks(before_callback=pre_raw_load_callback)
-        elif op_type is RawStore:
-            return OpCallbacks(before_callback=pre_raw_store_callback)
         elif op_type is ReduceSum:
             return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:

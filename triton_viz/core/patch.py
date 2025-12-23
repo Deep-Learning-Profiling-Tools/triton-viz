@@ -820,16 +820,35 @@ def patch_lang(fn, backend):
 
 
 def unpatch_lang(backend):
+    # TODO: once this (https://github.com/triton-lang/triton/pull/8735)
+    # gets into a stable release, we can simplify this unpatching logic by upgrading Triton.
+    # This PR is ugly to implement in triton-viz directly because it piggybacks off
+    # patching code. So until then, we just brute-force re-import all triton subpackages to unpatch
+
     import importlib
     import sys
 
     if backend == "triton":
+        for name in ("core", "math", "extra"):
+            mod = getattr(tl, name, None)
+            if mod is not None and mod.__name__ in sys.modules:
+                importlib.reload(mod)
+
         if tl.__name__ in sys.modules:
             importlib.reload(tl)
     elif backend == "nki":
         from triton_viz.core.nki import nki_unpatch_lang
 
         nki_unpatch_lang()
+
+    from triton.language import semantic as tl_semantic
+    from triton.compiler import code_generator as codegen
+
+    tl_semantic.TritonSemantic.tensor = tl.tensor
+    tl_semantic.TritonSemantic.lang = tl
+    codegen.tensor = tl.tensor
+    codegen.language = tl
+    codegen.constexpr = tl.constexpr
 
 
 @dataclass(frozen=True)
