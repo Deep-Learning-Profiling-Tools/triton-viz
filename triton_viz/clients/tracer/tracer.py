@@ -76,7 +76,8 @@ class Tracer(Client):
             self.sample = True
 
         # Create a Grid record for this grid index
-        self.records.append(Grid(idx=grid_idx))
+        with self._lock:
+            self.records.append(Grid(idx=grid_idx))
 
     def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
@@ -124,6 +125,7 @@ class Tracer(Client):
             else:
                 return keys
 
+        @self.lock_fn
         def pre_load_callback(ptr, mask, keys):
             if not self.sample:
                 return
@@ -141,6 +143,7 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
+        @self.lock_fn
         def pre_store_callback(ptr, mask, keys):
             if not self.sample:
                 return
@@ -165,6 +168,7 @@ class Tracer(Client):
             self.records.append(rec)
 
         # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
+        @self.lock_fn
         def pre_raw_load_callback(ptr):
             if not self.sample:
                 return
@@ -176,6 +180,7 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
+        @self.lock_fn
         def pre_raw_store_callback(ptr, value):
             if not self.sample:
                 return
@@ -187,6 +192,7 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
+        @self.lock_fn
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
                 return
@@ -194,6 +200,7 @@ class Tracer(Client):
             output_shape = ret.handle.data.shape
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
+        @self.lock_fn
         def post_dot_callback(ret, input, other):
             if not self.sample:
                 return
@@ -244,6 +251,15 @@ class Tracer(Client):
     def register_for_loop_callback(self):
         return ForLoopCallbacks()
 
+    @property
+    def sample(self) -> bool:
+        return self._get_thread_local("sample", True)
+
+    @sample.setter
+    def sample(self, value: bool) -> None:
+        self._set_thread_local("sample", value)
+
     def finalize(self) -> list:
-        self.tensors.clear()
-        return self.records
+        with self._lock:
+            self.tensors.clear()
+            return self.records

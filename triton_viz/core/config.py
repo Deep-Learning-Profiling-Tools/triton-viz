@@ -12,6 +12,13 @@ class Config:
         # --- Sanitizer activation flag ---
         self.sanitizer_activated = False
 
+        # --- Interpreter concurrency (CPU) ---
+        num_sms_env = os.getenv("TRITON_VIZ_NUM_SMS", "1")
+        try:
+            self._num_sms = max(1, int(num_sms_env))
+        except ValueError:
+            self._num_sms = 1
+
         # --- Sanitizer disable flag ---
         self._disable_sanitizer = os.getenv("DISABLE_SANITIZER", "0") == "1"
 
@@ -133,6 +140,19 @@ class Config:
         self._report_grid_execution_progress = flag
         if flag:
             print("Grid-progress reporting is now ON.")
+
+    # ---------- num_sms ----------
+    @property
+    def num_sms(self) -> int:
+        return self._num_sms
+
+    @num_sms.setter
+    def num_sms(self, value: int) -> None:
+        if not isinstance(value, int):
+            raise TypeError("num_sms expects an int.")
+        if value < 1:
+            raise ValueError("num_sms must be >= 1.")
+        self._num_sms = value
 
     # ---------- profiler_enable_load_store_skipping ----------
     @property

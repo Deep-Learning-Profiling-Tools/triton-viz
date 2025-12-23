@@ -3,8 +3,11 @@ from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Optional
+from concurrent.futures import ThreadPoolExecutor
+from queue import SimpleQueue, Empty
+import threading
+import time
 from functools import partialmethod
-from tqdm import tqdm
 
 from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -356,6 +359,19 @@ reshape_map: dict[type[Op], Callable] = {
     Trans: tl.trans,
 }
 
+_thread_local_interpreter_state = threading.local()
+_thread_local_interpreter_state.grid_idx = None  # just set a default
+
+
+def _set_thread_grid_idx(self, x: int, y: int, z: int) -> None:
+    _thread_local_interpreter_state.grid_idx = (x, y, z)
+
+
+# Bind to the builder class so attribute access uses thread-local storage.
+_interp_cls = interpreter_builder.__class__
+_interp_cls.set_grid_idx = _set_thread_grid_idx  # type: ignore[attr-defined]
+_interp_cls.grid_idx = property(lambda self: _thread_local_interpreter_state.grid_idx)  # type: ignore[attr-defined]
+
 
 class PatchOp:
     def __init__(
@@ -371,6 +387,15 @@ class PatchOp:
         self.adapter = adapter
 
     def __call__(self, *args, **kwargs):
+        # periodically sleep briefly so other worker threads can run
+        _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
+        _YIELD_SLEEP_SEC = 0.0005  # Small positive sleep to encourage OS-level yield
+        now = time.perf_counter()
+        last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
+        if now - last >= _YIELD_INTERVAL_SEC:
+            _thread_local_interpreter_state.last_yield_ts = now
+            time.sleep(_YIELD_SLEEP_SEC)
+
         if self.callbacks.before_callback:
             before_args = self.adapter(*args, **kwargs)
             self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
@@ -921,33 +946,6 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
     builder = OPERATION_REGISTRY[backend]["builder"]
 
-    def run_grid_loops(grid):
-        for x in tqdm(
-            range(grid[0]),
-            desc="Grid X",
-            leave=False,
-            disable=not cfg.report_grid_execution_progress,
-        ):
-            for y in tqdm(
-                range(grid[1]),
-                desc="Grid Y",
-                leave=False,
-                disable=not (cfg.report_grid_execution_progress and grid[1] > 1),
-            ):
-                for z in tqdm(
-                    range(grid[2]),
-                    desc="Grid Z",
-                    leave=False,
-                    disable=not (cfg.report_grid_execution_progress and grid[2] > 1),
-                ):
-                    builder.set_grid_idx(x, y, z)
-                    client_manager.grid_idx_callback((x, y, z))
-                    if not client_manager.pre_run_callback(self.fn):
-                        continue  # Skip this block
-                    self.fn(**call_args)
-                    if not client_manager.post_run_callback(self.fn):
-                        return
-
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
@@ -986,11 +984,60 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
     builder.set_grid_dim(*grid)
     client_manager.grid_callback(grid)
+    total_blocks = grid[0] * grid[1] * grid[2]
+    max_workers = min(cfg.num_sms, total_blocks)
+
+    def run_grid_loops(grid):
+        tasks: SimpleQueue = SimpleQueue()
+        for x in range(grid[0]):
+            for y in range(grid[1]):
+                for z in range(grid[2]):
+                    tasks.put((x, y, z))
+
+        stop_event = threading.Event()
+
+        def _worker():
+            while not stop_event.is_set():
+                try:
+                    x, y, z = tasks.get_nowait()
+                except Empty:
+                    return
+                interpreter_builder.set_grid_idx(x, y, z)
+                client_manager.grid_idx_callback((x, y, z))
+                if not client_manager.pre_run_callback(self.fn):
+                    continue
+                self.fn(**call_args)
+                if not client_manager.post_run_callback(self.fn):
+                    stop_event.set()
+                    return
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_worker) for _ in range(max_workers)]
+            for fut in futures:
+                fut.result()
+
+    def run_grid_loops_1thread(grid):
+        for x in range(grid[0]):
+            for y in range(grid[1]):
+                for z in range(grid[2]):
+                    interpreter_builder.set_grid_idx(x, y, z)
+                    client_manager.grid_idx_callback((x, y, z))
+                    if not client_manager.pre_run_callback(self.fn):
+                        continue
+                    self.fn(**call_args)
+                    if not client_manager.post_run_callback(self.fn):
+                        return
+
     if cfg.enable_timing:
         import time
 
         start_time = time.time()
-    run_grid_loops(grid)
+
+    if max_workers == 1:
+        run_grid_loops_1thread(grid)
+    else:
+        run_grid_loops(grid)
+
     if cfg.enable_timing:
         end_time = time.time()
         elapsed_time = end_time - start_time

@@ -6,7 +6,6 @@ from functools import cached_property, reduce
 from typing import Any, Optional, Union
 import re
 
-
 import numpy as np
 from torch import Tensor
 from anytree import Node, RenderTree
@@ -486,6 +485,9 @@ class Sanitizer(Client):
             # When sanitizer is enabled, use symexec backend by default
             return object.__new__(SanitizerSymbolicExecution)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
 
@@ -535,7 +537,9 @@ class SanitizerBruteForce(Sanitizer):
         self.grid_idx: Optional[tuple[int, ...]] = None
         self.last_grid: Optional[tuple[int, int, int]] = None
 
-    def _report(self, op_type, record):
+    def _report(
+        self, op_type, record
+    ):  # internal methods assumed to be called under the lock; TODO: should I just use an RLock?
         traceback_info = _get_traceback_info()
         oob_record = OutOfBoundsRecordBruteForce(
             op_type=op_type, user_code_tracebacks=traceback_info, **record
@@ -553,25 +557,29 @@ class SanitizerBruteForce(Sanitizer):
         return True
 
     def post_run_callback(self, fn: Callable) -> bool:
-        if self.grid_idx == self.last_grid:
-            self.tensors.clear()
+        with self._lock:
+            if self.grid_idx == self.last_grid:
+                self.tensors.clear()
         return True
 
     def arg_callback(self, name, arg, arg_cvt):
-        if hasattr(arg, "data_ptr"):
-            assert check_storage_contiguous(
-                arg
-            ), "The address sanitizer only supports contiguouly stored tensors for now"
-            self.tensors.append(arg)
+        with self._lock:
+            if hasattr(arg, "data_ptr"):
+                assert check_storage_contiguous(
+                    arg
+                ), "The address sanitizer only supports contiguouly stored tensors for now"
+                self.tensors.append(arg)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
-        self.grid_idx = grid_idx
+        self.grid_idx = grid_idx  # grid_idx is thread-local so no need to lock
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
-        self.last_grid = _get_last_grid(grid)
-        self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
+        with self._lock:
+            self.last_grid = _get_last_grid(grid)
+            self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        @self.lock_fn
         def pre_load_callback(ptr, mask, _keys):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
@@ -580,6 +588,7 @@ class SanitizerBruteForce(Sanitizer):
             self._report(op_type, oob)
             ptr.data = tensor.data_ptr() + oob["corrected_offsets"]
 
+        @self.lock_fn
         def pre_store_callback(ptr, mask, _keys):
             first_loc = np.unravel_index(np.argmax(mask, axis=None), mask.data.shape)
             first_ptr = ptr.data[first_loc]
@@ -599,7 +608,8 @@ class SanitizerBruteForce(Sanitizer):
         return ForLoopCallbacks()
 
     def finalize(self) -> list:
-        return self.records
+        with self._lock:
+            return self.records
 
 
 class SymbolicExprDataWrapper:
@@ -1823,81 +1833,78 @@ class SanitizerSymbolicExecution(Sanitizer):
             self.records.append(oob_record)
 
     def _clear_cache(self):
-        self.cache_args.clear()
-        self.cache_grid = None
+        with self._lock:
+            self.cache_args.clear()
+            self.cache_grid = None
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        # Kernel Cache: Only use cache if enabled
-        if cfg.enable_kernel_cache and self.cache_grid:
-            # First time we launch this program, compute the hash
-            fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
-            self._clear_cache()
-            if fn_cache not in _fn_symbolic_cache_set:
-                _fn_symbolic_cache_set.add(fn_cache)
-                # Must continue to run the program at least once
-                # We don't clear up tensors at this point
-                return True
-            else:
-                # Skip re-analysis for identical kernel launch
+        with self._lock:
+            if cfg.enable_kernel_cache and self.cache_grid:
+                fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
+                self._clear_cache()
+                if fn_cache not in _fn_symbolic_cache_set:
+                    _fn_symbolic_cache_set.add(fn_cache)
+                    return True
                 return False
-        elif self.cache_grid:
-            # Kernel cache disabled, always clear cache and run
-            self._clear_cache()
-
-        # 2nd time we launch this program, depends on whether we need a full grid
-        if self.need_full_grid is None:
-            return True
-        return self.need_full_grid
+            if self.cache_grid:
+                self._clear_cache()
+            if self.need_full_grid is None:
+                return True
+            return self.need_full_grid
 
     def post_run_callback(self, fn: Callable) -> bool:
-        if self.need_full_grid is None:
-            self.need_full_grid = False
-        if self.grid_idx == self.last_grid or not self.need_full_grid:
-            self._clear_cache()
-            self.tensors.clear()
-            self.tensor_addrs.clear()
-        ret = self.need_full_grid
-        self.need_full_grid = None  # reset for the next run
-        return ret
+        with self._lock:
+            if self.need_full_grid is None:
+                self.need_full_grid = False
+            if self.grid_idx == self.last_grid or not self.need_full_grid:
+                self._clear_cache()
+                self.tensors.clear()
+                self.tensor_addrs.clear()
+            ret = self.need_full_grid
+            self.need_full_grid = None
+            return ret
 
     def arg_callback(self, name, arg, arg_cvt):
-        if not hasattr(arg, "data_ptr"):
-            if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
-                self.cache_args.append(arg)
-            return
-        if arg.is_contiguous() or check_storage_contiguous(arg):
-            start = arg.data_ptr()
-            end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
-            tensor_physical_addresses = [(start, end)]
-        elif check_inner_stride_equal_to_one(arg):
-            tensor_physical_addresses = get_physical_addr_from_tensor_slice(arg)
-        else:
-            raise ValueError(
-                "The address sanitizer only supports contiguouly stored tensors for now!"
-            )
-        # To uniquely identify the metadata of a tensor
-        self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
-        self.tensors.append(arg)
-        self.tensor_addrs.extend(tensor_physical_addresses)
+        with self._lock:
+            if not hasattr(arg, "data_ptr"):
+                if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
+                    self.cache_args.append(arg)
+                return
+            if arg.is_contiguous() or check_storage_contiguous(arg):
+                start = arg.data_ptr()
+                end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
+                tensor_physical_addresses = [(start, end)]
+            elif check_inner_stride_equal_to_one(arg):
+                tensor_physical_addresses = get_physical_addr_from_tensor_slice(arg)
+            else:
+                raise ValueError(
+                    "The address sanitizer only supports contiguouly stored tensors for now!"
+                )
+            self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
+            self.tensors.append(arg)
+            self.tensor_addrs.extend(tensor_physical_addresses)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
-        self.cache_grid = grid
-        self.last_grid = _get_last_grid(grid)
-        self.grid = tuple(int(g) for g in grid)
-        addr = Int("addr")
-        self._addr_ok = Or(*[And(addr >= s, addr <= e) for s, e in self.tensor_addrs])
-        self._pid_ok = And(
-            SymbolicExpr.PID0 < self.grid[0],
-            SymbolicExpr.PID1 < self.grid[1],
-            SymbolicExpr.PID2 < self.grid[2],
-            SymbolicExpr.PID0 >= 0,
-            SymbolicExpr.PID1 >= 0,
-            SymbolicExpr.PID2 >= 0,
-        )
-        self._solver = Solver()
-        self._solver.add(Not(self._addr_ok))
-        self._solver.add(self._pid_ok)
-        self._addr_sym = addr
+        with self._lock:
+            self.cache_grid = grid
+            self.last_grid = _get_last_grid(grid)
+            self.grid = tuple(int(g) for g in grid)
+            addr = Int("addr")
+            self._addr_ok = Or(
+                *[And(addr >= s, addr <= e) for s, e in self.tensor_addrs]
+            )
+            self._pid_ok = And(
+                SymbolicExpr.PID0 < self.grid[0],
+                SymbolicExpr.PID1 < self.grid[1],
+                SymbolicExpr.PID2 < self.grid[2],
+                SymbolicExpr.PID0 >= 0,
+                SymbolicExpr.PID1 >= 0,
+                SymbolicExpr.PID2 >= 0,
+            )
+            self._solver = Solver()
+            self._solver.add(Not(self._addr_ok))
+            self._solver.add(self._pid_ok)
+            self._addr_sym = addr
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         self.grid_idx = grid_idx
@@ -2219,7 +2226,7 @@ class SanitizerSymbolicExecution(Sanitizer):
         }
 
         if op_type in OP_TYPE_TO_OVERRIDER:
-            return OpCallbacks(op_overrider=OP_TYPE_TO_OVERRIDER[op_type])
+            return OpCallbacks(op_overrider=self.lock_fn(OP_TYPE_TO_OVERRIDER[op_type]))
         else:
             return OpCallbacks()
 
@@ -2276,6 +2283,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 raise ValueError("Loop step cannot be zero.")
             return step
 
+        @self.lock_fn
         def _wrap_range(
             iterable,
             _lineno,
@@ -2350,6 +2358,7 @@ class SanitizerSymbolicExecution(Sanitizer):
                 concrete_range, length=length, start=start, stop=stop, step=step
             )
 
+        @self.lock_fn
         def loop_hook_before(lineno, iterable):
             if not isinstance(iterable, RangeWrapper):
                 if cfg.verbose:
@@ -2372,6 +2381,7 @@ class SanitizerSymbolicExecution(Sanitizer):
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ enter loop@{lineno}, len={iterable.length}")
 
+        @self.lock_fn
         def loop_hook_iter_overrider(lineno, idx):
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
                 self.loop_stack[-1].values.append(idx)
@@ -2380,10 +2390,12 @@ class SanitizerSymbolicExecution(Sanitizer):
                 return tl.core.tensor(sym, tl.int32)
             return idx
 
+        @self.lock_fn
         def loop_hook_iter_listener(lineno, idx):
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ loop@{lineno} idx={idx}")
 
+        @self.lock_fn
         def loop_hook_after(lineno: int) -> None:
             if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
                 return

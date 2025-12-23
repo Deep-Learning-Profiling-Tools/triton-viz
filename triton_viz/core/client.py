@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from abc import ABC, abstractmethod
 from typing import ClassVar, Optional, Any
 from collections.abc import Callable
+import threading
 
 from .data import Op, Launch
 from .patch import (
@@ -25,6 +26,20 @@ class Client(ABC):
         self.collect_asm: bool = False
         # Storage for ASM information if collected
         self.asm_info: Optional[dict] = None
+        # Thread-local scratch space for per-thread callback state
+        self._thread_local = threading.local()
+        # Lock for serializing shared state where needed
+        self._lock = threading.RLock()
+
+    def lock_fn(self, fn: Callable) -> Callable:
+        """Forces serial execution of the given function."""
+
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            with self._lock:
+                return fn(*args, **kwargs)
+
+        return wrapped
 
     @abstractmethod
     def pre_run_callback(self, fn: Callable) -> bool:
@@ -77,6 +92,20 @@ class Client(ABC):
     def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
         ...
 
+    def _set_thread_local(self, key: str, value: Any) -> None:
+        setattr(self._thread_local, key, value)
+
+    def _get_thread_local(self, key: str, default: Any = None) -> Any:
+        return getattr(self._thread_local, key, default)
+
+    @property
+    def grid_idx(self) -> Optional[tuple[int, ...]]:
+        return self._get_thread_local("grid_idx", None)
+
+    @grid_idx.setter
+    def grid_idx(self, value: Optional[tuple[int, ...]]) -> None:
+        self._set_thread_local("grid_idx", value)
+
 
 class ClientManager:
     def __init__(self, clients: Optional[list[Client]] = None):
@@ -84,6 +113,7 @@ class ClientManager:
         if clients:
             self.add_clients(clients)
         self.launch = Launch()
+        self._lock = threading.Lock()
 
     def get_client(self, name: str) -> Optional[Client]:
         return self.clients.get(name)
@@ -153,33 +183,39 @@ class ClientManager:
                 unpatch_lang(backend)
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        rets = []
-        for client in self.clients.values():
-            rets.append(client.pre_run_callback(fn))
-        return all(rets) if rets else True
+        with self._lock:
+            rets = []
+            for client in self.clients.values():
+                rets.append(client.pre_run_callback(fn))
+            return all(rets) if rets else True
 
     def post_run_callback(self, fn: Callable) -> bool:
-        rets = []
-        for client in self.clients.values():
-            rets.append(client.post_run_callback(fn))
-        return any(rets)
+        with self._lock:
+            rets = []
+            for client in self.clients.values():
+                rets.append(client.post_run_callback(fn))
+            return any(rets)
 
     def finalize(self) -> None:
-        self.launch.records = []
-        for client in self.clients.values():
-            self.launch.records += client.finalize()
+        with self._lock:
+            self.launch.records = []
+            for client in self.clients.values():
+                self.launch.records += client.finalize()
 
     def arg_callback(self, name, arg, arg_cvt):
-        if hasattr(arg, "data_ptr"):
-            self.launch.tensors.add(arg)
-        for client in self.clients.values():
-            client.arg_callback(name, arg, arg_cvt)
+        with self._lock:
+            if hasattr(arg, "data_ptr"):
+                self.launch.tensors.add(arg)
+            for client in self.clients.values():
+                client.arg_callback(name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int]):
-        self.launch.grid = grid
-        for client in self.clients.values():
-            client.grid_callback(grid)
+        with self._lock:
+            self.launch.grid = grid
+            for client in self.clients.values():
+                client.grid_callback(grid)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
-        for client in self.clients.values():
-            client.grid_idx_callback(grid_idx)
+        with self._lock:
+            for client in self.clients.values():
+                client.grid_idx_callback(grid_idx)

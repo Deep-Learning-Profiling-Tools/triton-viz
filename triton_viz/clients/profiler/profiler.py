@@ -121,6 +121,14 @@ class Profiler(Client):
         # Store the current grid index
         self.current_grid_idx = grid_idx
 
+    @property
+    def current_grid_idx(self) -> Optional[tuple[int, ...]]:
+        return self._get_thread_local("current_grid_idx", None)
+
+    @current_grid_idx.setter
+    def current_grid_idx(self, grid_idx: Optional[tuple[int, ...]]) -> None:
+        self._set_thread_local("current_grid_idx", grid_idx)
+
     def grid_callback(self, grid: tuple[int, ...]):
         # If block sampling is enabled, determine which blocks to sample
         if self.block_sampling:
@@ -143,7 +151,9 @@ class Profiler(Client):
             # No sampling - all blocks will be executed
             self.sampled_blocks = None
 
-    def _report_load_store_bytes(self, type, ptr: TensorHandle, mask: TensorHandle):
+    def _report_load_store_bytes(
+        self, type, ptr: TensorHandle, mask: TensorHandle
+    ):  # internal methods assumed to be called under the lock
         dtype_tt = ptr.get_element_ty()
         dtype_np: np.dtype = _get_np_dtype(dtype_tt)
         mask_true = np.count_nonzero(mask.data)
@@ -198,6 +208,7 @@ class Profiler(Client):
             false_count = np.count_nonzero(np.logical_not(mask.data))
             return total_count, false_count
 
+        @self.lock_fn
         def pre_load_callback(ptr, mask, keys):
             self._report_load_store_bytes("load", ptr, mask)
             if not self.disable_load_mask_percentage_check:
@@ -219,6 +230,7 @@ class Profiler(Client):
                         )
                     )
 
+        @self.lock_fn
         def load_overrider(
             ptr, mask, other, cache_modifier, eviction_policy, is_volatile
         ):
@@ -227,6 +239,7 @@ class Profiler(Client):
             dtype_np = _get_np_dtype(dtype_tt)
             return TensorHandle(np.zeros_like(ptr.data, dtype=dtype_np), dtype_tt)
 
+        @self.lock_fn
         def pre_store_callback(ptr, mask, keys):
             self._report_load_store_bytes("store", ptr, mask)
             if not self.disable_load_mask_percentage_check:
@@ -248,15 +261,18 @@ class Profiler(Client):
                         )
                     )
 
+        @self.lock_fn
         def store_overrider(ptr, value, mask, cache_modifier, eviction_policy):
             # Skip actual store
             pass
 
+        @self.lock_fn
         def dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
             # Skip actual dot operation, return zeros with same shape as d
             # This replaces np.matmul(a_data, b_data, dtype=d.data.dtype) + d.data
             return TensorHandle(np.zeros_like(d.data), d.dtype.scalar)
 
+        @self.lock_fn
         def pre_addptr_callback(ptr, offset):
             dtype_tt = ptr.get_element_ty()
             element_bitwidth = dtype_tt.primitive_bitwidth
@@ -297,10 +313,12 @@ class Profiler(Client):
         return OpCallbacks()
 
     def register_for_loop_callback(self):
+        @self.lock_fn
         def loop_hook_range_type(lineno: int, range_type: str) -> None:
             cur = self.loop_info.get(lineno, LoopInfo())
             self.loop_info[lineno] = replace(cur, range_type=range_type)
 
+        @self.lock_fn
         def loop_hook_before(lineno, iterable):
             if self.disable_for_loop_unroll_check:
                 return
@@ -319,6 +337,7 @@ class Profiler(Client):
             cur = self.loop_info.get(lineno, LoopInfo())
             self.loop_info[lineno] = replace(cur, length=length)
 
+        @self.lock_fn
         def loop_hook_after(lineno: int) -> None:
             # No action needed after loop for profiler
             pass
