@@ -60,3 +60,13 @@ jobs:
       run: |
         cd triton_viz
         python -m pytest tests
+
+    - name: Install Triton-Viz with NKI extras
+      run: |
+        cd triton_viz
+        pip install -e .[nki]
+
+    - name: Run full (Triton + NKI) pytest suite
+      run: |
+        cd triton_viz
+        python -m pytest tests -m ""

@@ -198,9 +198,7 @@ class Profiler(Client):
             false_count = np.count_nonzero(np.logical_not(mask.data))
             return total_count, false_count
 
-        def pre_load_callback(
-            ptr, mask, other, cache_modifier, eviction_policy, is_volatile
-        ):
+        def pre_load_callback(ptr, mask, keys):
             self._report_load_store_bytes("load", ptr, mask)
             if not self.disable_load_mask_percentage_check:
                 total_count, false_count = _get_mask_stats(mask)
@@ -229,7 +227,7 @@ class Profiler(Client):
             dtype_np = _get_np_dtype(dtype_tt)
             return TensorHandle(np.zeros_like(ptr.data, dtype=dtype_np), dtype_tt)
 
-        def pre_store_callback(ptr, value, mask, cache_modifier, eviction_policy):
+        def pre_store_callback(ptr, mask, keys):
             self._report_load_store_bytes("store", ptr, mask)
             if not self.disable_load_mask_percentage_check:
                 total_count, false_count = _get_mask_stats(mask)

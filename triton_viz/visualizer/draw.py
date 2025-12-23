@@ -5,6 +5,7 @@ from triton_viz.core.data import (
     Dot,
     Load,
     Store,
+    Flip,
 )
 from triton_viz.clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import numpy as np
@@ -89,9 +90,10 @@ def extract_load_coords(
         record.masks,
     )
 
+    # Report (x, y, z); delinearized returns (z, y, x)
     global_coords = [
         (float(xi), float(yi), float(zi))
-        for xi, yi, zi in zip(global_z, global_y, global_x)
+        for xi, yi, zi in zip(global_x, global_y, global_z)
         if xi != -1 and yi != -1 and zi != -1
     ]
 
@@ -169,13 +171,91 @@ def prepare_visualization_data(program_records, tensor_table):
                     "other_shape": record.other_shape,
                     "output_shape": record.output_shape,
                     "uuid": record_uuid,
+                    # provide C values for color-by-value
+                    "c_shape": record.output_shape,
+                    # NKI meta (accumulate to PSUM)
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "tile_shape": getattr(record, "tile_shape", None),
+                    "k": int(getattr(record, "k", 0)),
+                    "time_idx": int(getattr(record, "time_idx", -1)),
+                }
+            )
+
+            # Normalize Dot operands to NumPy arrays for downstream endpoints
+            try:
+                import numpy as _np
+
+                def _to_numpy_cpu(x):
+                    if isinstance(x, _np.ndarray):
+                        return x
+                    if hasattr(x, "cpu"):
+                        try:
+                            return x.detach().cpu().numpy()
+                        except Exception:
+                            return _np.asarray(x)
+                    if hasattr(x, "data"):
+                        return _np.asarray(getattr(x, "data"))
+                    if hasattr(x, "_value"):
+                        return _np.asarray(getattr(x, "_value"))
+                    return _np.asarray(x)
+
+                a_np = _to_numpy_cpu(record.input_data)
+                b_np = _to_numpy_cpu(record.other_data)
+            except Exception:
+                import numpy as _np
+
+                a_np = _np.asarray(record.input_data)
+                b_np = _np.asarray(record.other_data)
+
+            raw_tensor_data[record_uuid] = {
+                "input_data": a_np,
+                "other_data": b_np,
+                "intermediate_results": record.intermediate_results,
+                "tracebacks": [
+                    {
+                        "filename": f.filename,
+                        "lineno": f.lineno,
+                        "line": f.line,
+                        "name": f.name,
+                    }
+                    for f in getattr(record, "call_path", [])
+                ],
+                # prepare C values after kernel (if available from intermediate or recompute best-effort)
+            }
+
+        elif isinstance(record, Flip):
+            visualization_data.append(
+                {
+                    "type": "Flip",
+                    "input_shape": record.input_shape,
+                    "output_shape": record.output_shape,
+                    "dim": int(getattr(record, "dim", 0)),
+                    "uuid": record_uuid,
                 }
             )
 
             raw_tensor_data[record_uuid] = {
-                "input_data": torch.tensor(record.input_data),
-                "other_data": torch.tensor(record.other_data),
-                "intermediate_results": record.intermediate_results,
+                "tracebacks": [
+                    {
+                        "filename": f.filename,
+                        "lineno": f.lineno,
+                        "line": f.line,
+                        "name": f.name,
+                    }
+                    for f in getattr(record, "call_path", [])
+                ],
+                # best-effort payload for potential future value viz
+                "input_shape": list(record.input_shape),
+                "output_shape": list(record.output_shape),
+                "dim": int(getattr(record, "dim", 0)),
+                # optionally include data for hover value queries
+                "input_data": None
+                if getattr(record, "input_data", None) is None
+                else torch.tensor(record.input_data),
+                "output_data": None
+                if getattr(record, "output_data", None) is None
+                else torch.tensor(record.output_data),
             }
 
         elif isinstance(record, Load):
@@ -191,12 +271,53 @@ def prepare_visualization_data(program_records, tensor_table):
                     "global_coords": global_coords,
                     "slice_coords": slice_coords,
                     "uuid": record_uuid,
+                    # NKI flow meta (optional)
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "bytes": int(getattr(record, "bytes", 0)),
+                    "time_idx": int(getattr(record, "time_idx", -1)),
                 }
             )
 
+            # Normalize to NumPy array for downstream APIs, and cache basic stats
+            try:
+                import numpy as _np
+
+                gt = global_tensor.data
+                if hasattr(gt, "cpu") and callable(getattr(gt, "cpu", None)):
+                    try:
+                        arr = gt.detach().cpu().numpy()
+                    except Exception:
+                        arr = _np.asarray(gt)
+                elif hasattr(gt, "data"):
+                    arr = _np.asarray(getattr(gt, "data"))
+                elif hasattr(gt, "_value"):
+                    arr = _np.asarray(getattr(gt, "_value"))
+                else:
+                    arr = _np.asarray(gt)
+            except Exception:
+                import numpy as _np
+
+                arr = _np.asarray([])
+
+            t_min = float(np.min(arr)) if arr.size else 0.0
+            t_max = float(np.max(arr)) if arr.size else 0.0
+
             raw_tensor_data[record_uuid] = {
-                "global_tensor": global_tensor.data.cpu(),  # Ensure it's on CPU
-                "dims": len(global_tensor.data.cpu().shape),
+                "global_tensor": arr,
+                "dims": int(arr.ndim),
+                "shape": list(arr.shape),
+                "min": t_min,
+                "max": t_max,
+                "tracebacks": [
+                    {
+                        "filename": f.filename,
+                        "lineno": f.lineno,
+                        "line": f.line,
+                        "name": f.name,
+                    }
+                    for f in getattr(record, "call_path", [])
+                ],
             }
             print(record.masks.shape)
 
@@ -213,8 +334,24 @@ def prepare_visualization_data(program_records, tensor_table):
                     "global_coords": global_coords,
                     "slice_coords": slice_coords,
                     "uuid": record_uuid,
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "bytes": int(getattr(record, "bytes", 0)),
+                    "time_idx": int(getattr(record, "time_idx", -1)),
                 }
             )
+
+            raw_tensor_data[record_uuid] = {
+                "tracebacks": [
+                    {
+                        "filename": f.filename,
+                        "lineno": f.lineno,
+                        "line": f.line,
+                        "name": f.name,
+                    }
+                    for f in getattr(record, "call_path", [])
+                ],
+            }
 
     return visualization_data, raw_tensor_data, ""
 
