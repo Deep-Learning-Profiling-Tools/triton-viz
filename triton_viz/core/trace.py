@@ -221,4 +221,4 @@ def clear() -> None:
     Clear all traces.
     """
     global launches
-    launches = []
+    launches.clear()
