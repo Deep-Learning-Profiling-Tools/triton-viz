@@ -76,7 +76,7 @@ class Tracer(Client):
             self.sample = True
 
         # Create a Grid record for this grid index
-        with self._lock:
+        with self._lock_context():
             self.records.append(Grid(idx=grid_idx))
 
     def grid_callback(self, grid: tuple[int, ...]):
@@ -260,6 +260,6 @@ class Tracer(Client):
         self._set_thread_local("sample", value)
 
     def finalize(self) -> list:
-        with self._lock:
+        with self._lock_context():
             self.tensors.clear()
             return self.records

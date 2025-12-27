@@ -2,7 +2,7 @@ import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
@@ -387,20 +387,23 @@ class PatchOp:
         self.adapter = adapter
 
     def __call__(self, *args, **kwargs):
-        # periodically sleep briefly so other worker threads can run
-        _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
-        _YIELD_SLEEP_SEC = 0.0005  # Small positive sleep to encourage OS-level yield
-        now = time.perf_counter()
-        last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
-        if now - last >= _YIELD_INTERVAL_SEC:
-            _thread_local_interpreter_state.last_yield_ts = now
-            time.sleep(_YIELD_SLEEP_SEC)
+        if cfg.num_sms > 1:
+            # periodically sleep briefly so other worker threads can run
+            _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
+            _YIELD_SLEEP_SEC = 0.0005  # Small positive sleep to encourage OS-level yield
+            now = time.perf_counter()
+            last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
+            if now - last >= _YIELD_INTERVAL_SEC:
+                _thread_local_interpreter_state.last_yield_ts = now
+                time.sleep(_YIELD_SLEEP_SEC)
 
         if self.callbacks.before_callback:
             before_args = self.adapter(*args, **kwargs)
             self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in {**reduce_map, **scan_map, **reshape_map}:
+            if self.op_type in math_map:
+                raise NotImplementedError("Patching math ops not yet supported")
+            elif self.op_type in {**reduce_map, **scan_map, **reshape_map}:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -408,14 +411,12 @@ class PatchOp:
                     self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
                     args[0].dtype,
                 )
-            elif self.op_type in math_map:
-                raise NotImplementedError()
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
-                from ..clients.sanitizer.sanitizer import SymbolicExpr
-
-                if isinstance(ret, SymbolicExpr):
-                    ret.concrete_fn = self.op
+            if hasattr(ret, "handle") and hasattr(ret.handle, "concrete_fn"):
+                cast(Any, ret.handle).concrete_fn = self.op
+            elif hasattr(ret, "concrete_fn"):
+                cast(Any, ret).concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
         if self.callbacks.after_callback:
@@ -448,12 +449,8 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: str):
         patched_op = PatchOp(original_op, op_type, callbacks, adapter)
         setattr(backend_builder, op_name, patched_op)
     elif backend == "triton" and op_type in {**reduce_map, **scan_map, **reshape_map}:
-        if op_type in reduce_map:
-            op_name = reduce_map[op_type].__name__
-        elif op_type in scan_map:
-            op_name = scan_map[op_type].__name__
-        elif op_type in reshape_map:
-            op_name = reshape_map[op_type].__name__
+        special_ops = {**reduce_map, **scan_map, **reshape_map}
+        op_name = special_ops[op_type].__name__
         original_op = getattr(tl, op_name)
         adapter = backend_adapters[op_type]
         patched_op = PatchOp(original_op, op_type, callbacks, adapter)

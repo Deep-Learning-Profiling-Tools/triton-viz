@@ -7,7 +7,7 @@ from triton_viz.core.config import config as cfg
 from triton_viz.core.trace import launches
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def simple_kernel(
     x_ptr,

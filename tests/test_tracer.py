@@ -11,7 +11,7 @@ from triton_viz.core.trace import launches
 def test_tracer_records_masked_load_store():
     triton_viz.clear()
 
-    @triton_viz.trace(clients=Tracer())
+    @triton_viz.trace(client=Tracer())
     @triton.jit
     def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
@@ -57,7 +57,7 @@ def copy_kernel(x_ptr, out_ptr, BLOCK_SIZE: tl.constexpr):
 def test_tracer_grid_idx_sampling():
     triton_viz.clear()
 
-    traced = triton_viz.trace(clients=Tracer(grid_idx=1))(copy_kernel)
+    traced = triton_viz.trace(client=Tracer(grid_idx=1))(copy_kernel)
 
     block_size = 4
     n_elements = 12
@@ -81,7 +81,7 @@ def test_tracer_grid_idx_sampling():
 def test_tracer_records_reduce_sum():
     triton_viz.clear()
 
-    @triton_viz.trace(clients=Tracer())
+    @triton_viz.trace(client=Tracer())
     @triton.jit
     def reduce_sum_kernel(
         x_ptr,
@@ -128,7 +128,7 @@ def test_tracer_records_reduce_sum():
 def test_tracer_records_dot():
     triton_viz.clear()
 
-    @triton_viz.trace(clients=Tracer())
+    @triton_viz.trace(client=Tracer())
     @triton.jit
     def dot_kernel(
         a_ptr,
@@ -186,3 +186,39 @@ def test_tracer_records_dot():
     assert record.input_shape == (block_m, block_k)
     assert record.other_shape == (block_k, block_n)
     assert record.output_shape == (block_m, block_n)
+
+
+def test_kernel_cache_autotune_with_dummy_benchmarker():
+    """
+    Test that autotuned kernels install dummy_benchmarker.
+    """
+    # Create a fresh autotuned kernel inside the test to avoid state corruption
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+            triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
+            triton.Config({"BLOCK_SIZE": 128}, num_warps=4),
+        ],
+        key=["n_elements"],
+    )
+    @triton.jit
+    def autotune_add_kernel_cache_on(
+        x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr
+    ):
+        pid = tl.program_id(axis=0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask)
+        y = tl.load(y_ptr + offsets, mask=mask)
+        output = x + y
+        tl.store(out_ptr + offsets, output, mask=mask)
+
+    traced_kernel = trace(client=Sanitizer())(autotune_add_kernel_cache_on)
+
+    # Verify dummy benchmarker is installed
+    if hasattr(traced_kernel, "runner") and hasattr(traced_kernel.runner, "_do_bench"):
+        bench_fn = traced_kernel.runner._do_bench
+        assert (
+            bench_fn is not None and bench_fn.__name__ == "dummy_benchmarker"
+        ), f"Expected dummy_benchmarker, got: {bench_fn}"

@@ -9,9 +9,6 @@ class Config:
         # --- Verbose mode flag ---
         self.verbose = os.getenv("TRITON_VIZ_VERBOSE", "0") == "1"
 
-        # --- Sanitizer activation flag ---
-        self.sanitizer_activated = False
-
         # --- Interpreter concurrency (CPU) ---
         num_sms_env = os.getenv("TRITON_VIZ_NUM_SMS", "1")
         try:
@@ -19,11 +16,21 @@ class Config:
         except ValueError:
             self._num_sms = 1
 
-        # --- Sanitizer disable flag ---
-        self._disable_sanitizer = os.getenv("DISABLE_SANITIZER", "0") == "1"
+        # --- Sanitizer enable flag ---
+        enable_sanitizer_env = os.getenv("ENABLE_SANITIZER")
+        if enable_sanitizer_env is None:
+            self._enable_sanitizer = not (
+                os.getenv("DISABLE_SANITIZER", "0") == "1"
+            )
+        else:
+            self._enable_sanitizer = enable_sanitizer_env == "1"
 
-        # --- Profiler disable flag ---
-        self._disable_profiler = os.getenv("DISABLE_PROFILER", "0") == "1"
+        # --- Profiler enable flag ---
+        enable_profiler_env = os.getenv("ENABLE_PROFILER")
+        if enable_profiler_env is None:
+            self._enable_profiler = not (os.getenv("DISABLE_PROFILER", "0") == "1")
+        else:
+            self._enable_profiler = enable_profiler_env == "1"
 
         # --- Timing enable flag ---
         self._enable_timing = os.getenv("ENABLE_TIMING", "0") == "1"
@@ -32,23 +39,6 @@ class Config:
         self.report_grid_execution_progress = (
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
-
-        # --- Sanitizer Cache Ablation Study ---
-        # Cache 1: SymExpr Node Cache - caches Z3 expressions in SymExpr._z3
-        self.enable_symbol_cache = (
-            os.getenv("SANITIZER_ENABLE_SYMBOL_CACHE", "1") == "1"
-        )
-
-        # Cache 2: Loop Iterator Cache - deduplicates memory patterns in loops
-        self.enable_loop_cache = os.getenv("SANITIZER_ENABLE_LOOP_CACHE", "1") == "1"
-
-        # Cache 3: Grid Cache - shared solver per kernel launch (incremental SMT)
-        self.enable_grid_cache = os.getenv("SANITIZER_ENABLE_GRID_CACHE", "1") == "1"
-
-        # Cache 4: Kernel Cache - skip re-analysis of identical kernel launches
-        self.enable_kernel_cache = (
-            os.getenv("SANITIZER_ENABLE_KERNEL_CACHE", "1") == "1"
-        )
 
         # --- Fake tensor flag ---
         self._virtual_memory = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "0") == "1"
@@ -70,43 +60,43 @@ class Config:
             os.getenv("PROFILER_DISABLE_BUFFER_LOAD_CHECK", "0") == "1"
         )
 
-    # ---------- disable_sanitizer ----------
+    # ---------- enable_sanitizer ----------
     @property
-    def disable_sanitizer(self) -> bool:
-        return self._disable_sanitizer
+    def enable_sanitizer(self) -> bool:
+        return self._enable_sanitizer
 
-    @disable_sanitizer.setter
-    def disable_sanitizer(self, value: bool) -> None:
+    @enable_sanitizer.setter
+    def enable_sanitizer(self, value: bool) -> None:
         if not isinstance(value, bool):
-            raise TypeError("disable_sanitizer expects a bool.")
+            raise TypeError("enable_sanitizer expects a bool.")
 
-        previous = getattr(self, "_disable_sanitizer", None)
-        self._disable_sanitizer = value
+        previous = getattr(self, "_enable_sanitizer", None)
+        self._enable_sanitizer = value
 
         # User-friendly status messages
         if value and not previous:
-            print("Triton Sanitizer disabled.")
-        elif not value and previous:
             print("Triton Sanitizer enabled.")
+        elif not value and previous:
+            print("Triton Sanitizer disabled.")
 
-    # ---------- disable_profiler ----------
+    # ---------- enable_profiler ----------
     @property
-    def disable_profiler(self) -> bool:
-        return self._disable_profiler
+    def enable_profiler(self) -> bool:
+        return self._enable_profiler
 
-    @disable_profiler.setter
-    def disable_profiler(self, value: bool) -> None:
+    @enable_profiler.setter
+    def enable_profiler(self, value: bool) -> None:
         if not isinstance(value, bool):
-            raise TypeError("disable_profiler expects a bool.")
+            raise TypeError("enable_profiler expects a bool.")
 
-        previous = getattr(self, "_disable_profiler", None)
-        self._disable_profiler = value
+        previous = getattr(self, "_enable_profiler", None)
+        self._enable_profiler = value
 
         # User-friendly status messages
         if value and not previous:
-            print("Triton Profiler disabled.")
-        elif not value and previous:
             print("Triton Profiler enabled.")
+        elif not value and previous:
+            print("Triton Profiler disabled.")
 
     # ---------- enable_timing ----------
     @property

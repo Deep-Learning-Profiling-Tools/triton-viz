@@ -2,7 +2,7 @@ from ...core.data import Store, Load
 import numpy as np
 from numpy.typing import NDArray
 from dataclasses import dataclass
-from typing import Union, Any
+from typing import Union, Any, Optional
 import torch
 import z3
 
@@ -59,3 +59,4 @@ class OutOfBoundsRecordZ3(OutOfBoundsRecord):
     constraints: list[z3.z3.BoolRef]
     violation_address: int
     symbolic_expr: "Any" = None  # Optional symbolic expression tree
+    tensor_name: Optional[str] = None

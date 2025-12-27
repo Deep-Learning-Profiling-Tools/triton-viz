@@ -13,14 +13,6 @@ from typing import Callable, Optional, Union, TypeVar
 
 launches: list[Launch] = []
 
-T = TypeVar("T")
-
-
-def dummy_benchmarker(fn, quantiles):
-    fn()
-    return (1.0, 1.0, 1.0)
-
-
 class TraceInterface:
     def __init__(self, client: Union[str, Client]) -> None:
         self.client_manager = ClientManager()
@@ -79,10 +71,11 @@ class TritonTrace(KernelInterface, TraceInterface):
 
         if isinstance(runner, Autotuner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
-            # Kernel Cache: replace the benchmark with a dummy to skip performance testing
-            # When kernel cache is disabled, allow normal autotuning to proceed
-            if cfg.enable_kernel_cache:
-                runner._do_bench = dummy_benchmarker
+            # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
+            def dummy_benchmarker(fn, quantiles):
+                fn()
+                return (1.0, 1.0, 1.0)
+            runner._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
             runner.fn = self.interpreted_fn
             # make a deepcopy of the runner for warmup
@@ -224,34 +217,34 @@ class NKITrace(KernelInterface, TraceInterface):
             return ret
 
 
-def trace(clients: Union[str, Client, None] = None, backend: str = "triton"):
+def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
     """
-    Create a trace object that can be used to run a kernel with instrumentation clients.
+    Create a trace object that can be used to run a kernel with instrumentation client(s).
 
     :param kernel: The kernel to run.
     :param client: A client to run with the kernel. Defaults to Tracer() if not specified.
     """
-    if clients is None:
-        clients = Tracer()
+    if client is None:
+        client = Tracer()
 
-    if not isinstance(clients, (str, Client)):
-        raise TypeError(f"Expected str or Client, got {type(clients)}")
+    if not isinstance(client, (str, Client)):
+        raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def decorator(kernel) -> TraceInterface:
+    def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface | TraceInterface:
         # When sanitizer is disabled, skip tracing and return the original kernel unchanged
-        if cfg.disable_sanitizer:
+        if not cfg.enable_sanitizer:
             return kernel
 
         # First-time wrapping
         # Triton backend need JIT/Interpreter/Autotuner；
         # NKI allow Python function（ NKIInterpretedFunction）
         if backend == "nki":
-            return NKITrace(kernel, clients)
+            return NKITrace(kernel, client)
         if isinstance(
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
         ):
             if backend == "triton":
-                return TritonTrace(kernel, clients)
+                return TritonTrace(kernel, client)
             else:
                 raise ValueError(f"Unknown backend: {backend}")
 
@@ -260,16 +253,16 @@ def trace(clients: Union[str, Client, None] = None, backend: str = "triton"):
             from .nki import NKIInterpretedFunction
 
             if isinstance(kernel, NKIInterpretedFunction):
-                return NKITrace(kernel, clients)
+                return NKITrace(kernel, client)
             else:
                 # Wrap plain functions as NKIInterpretedFunction
                 interpreted_fn = NKIInterpretedFunction(kernel)
-                return NKITrace(interpreted_fn, clients)
+                return NKITrace(interpreted_fn, client)
 
         # If the object is already initialized as a TraceInterface, just append the new client(s)
         if isinstance(kernel, TraceInterface):
             trace = kernel
-            trace.add_client(clients)
+            trace.add_client(client)
             return trace
 
         raise TypeError(
