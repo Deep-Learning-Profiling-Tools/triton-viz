@@ -36,7 +36,7 @@ class Config:
         self._enable_timing = os.getenv("ENABLE_TIMING", "0") == "1"
 
         # --- Grid execution progress flag ---
-        self.report_grid_execution_progress = (
+        self._report_grid_execution_progress = (
             os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
         )  # verify using setter
 

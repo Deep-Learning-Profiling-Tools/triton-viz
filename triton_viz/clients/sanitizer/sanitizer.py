@@ -126,15 +126,18 @@ class Sanitizer(Client):
 
     NAME = "sanitizer"
 
-    def __new__(cls, *args, **kwargs):
-        if not cfg.enable_sanitizer:
-            return object.__new__(NullSanitizer)
-        else:
-            # When sanitizer is enabled, use symexec backend by default
-            return object.__new__(SymbolicSanitizer)
+    def __new__(cls, *args, **kwargs) -> "Sanitizer":
+        if cls is Sanitizer:
+            target_cls: type["Sanitizer"] = (
+                SymbolicSanitizer if cfg.enable_sanitizer else NullSanitizer
+            )
+            obj = object.__new__(target_cls)
+            cast(Any, target_cls).__init__(obj, *args, **kwargs)
+            return obj
+        return super().__new__(cls)
 
     def __init__(self, abort_on_error: bool = True, *args, **kwargs):
-        super().__init__()
+        super().__init__(*args, **kwargs)
         self.abort_on_error: bool = abort_on_error
 
     def pre_run_callback(self, fn: Callable) -> bool:
@@ -184,7 +187,10 @@ class SymbolicExprDataWrapper:
 
     @property
     def size(self) -> int:
-        return 2
+        shape = self.symbolic_expr.shape
+        if len(shape) == 0:
+            return 1
+        return reduce(lambda x, y: x * y, shape)
 
     @staticmethod
     def coerce_int(val: Any) -> int:
@@ -332,8 +338,7 @@ class SymbolicExpr:
         assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
         self.op = op
         self.attrs: dict[str, Any] = {}
-        self.dtype_tt: Optional[tl.core.dtype | tl.pointer_type] = None
-        self.shape: list[int] = []
+        self.dtype: Optional[tl.core.dtype] = None
 
         # Functions and arguments for concretization
         self.concrete_fn: Optional[Callable[..., Any]] = None
@@ -350,28 +355,29 @@ class SymbolicExpr:
 
         self.constraints: list[BoolRef] = []
 
+    @property
+    def shape(self) -> tuple[int, ...]:
+        if not self.dtype:
+            return ()
+        if self.dtype is tl.block_type:
+            return self.dtype.shape
+        elif self.dtype is tl.pointer_type:
+            return self.dtype.element_ty.shape
+        return ()
+
     def _init_from_spec(self, *args: Any) -> None:
         if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
         spec = self.OP_SPEC[self.op]
 
-        # check if args number match the spec
-        min_n = len(spec.req)
-        max_n = min_n + len(spec.opt)
-        if not (min_n <= len(args) <= max_n):
-            raise ValueError(
-                f"{self.op} expects {min_n} - {max_n} args, got {len(args)}"
-            )
-
         if self.op == "const":  # leaf node
             self.value = args[0]
-            if len(args) >= 2:
-                self.dtype_tt = args[1]
+            self.dtype = args[1]
         else:
             # store in self.children
             names = list(spec.req) + list(spec.opt)
             for name, val in zip(names, args):
-                val = SymbolicExpr.from_value(val)
+                val = SymbolicExpr.from_value(val) if val is not None else None
                 self.children[name] = val
             for name in names[len(args) :]:
                 self.children[name] = None
@@ -384,9 +390,6 @@ class SymbolicExpr:
     def __getattr__(self, name: str) -> Any:
         if name in self.children:
             return self.children[name]
-        # Special handling for dtype to provide compatibility
-        if name == "dtype":
-            return self.dtype_tt
         raise AttributeError(name)
 
     def set_attr(self, name: str, values: Any) -> None:
@@ -437,7 +440,6 @@ class SymbolicExpr:
         # Generate the node label
         label = self._node_label()
         root = Node(label)
-
         # Recursively add child nodes
         for child_key, child_symbolic_expr in self.children.items():
             if child_symbolic_expr is None:
@@ -452,7 +454,7 @@ class SymbolicExpr:
     def _node_label(self) -> str:
         """Generate a short label for this node."""
         label = self._node_label_core()
-        label = f"{label} [dtype={self.dtype_tt}]"
+        label = f"{label} [dtype={self.dtype}]"
 
         return label
 
@@ -510,7 +512,7 @@ class SymbolicExpr:
             for v in seq[1:]:  # assume only one consistent dtype in the tuple
                 if SymbolicExpr._infer_literal_dtype(v) != first_dtype:
                     raise ValueError(
-                        f"All elements in the tuple must have the same dtype, but found {first_dtype} and {SymbolicExpr.from_value(v).dtype_tt}"
+                        f"All elements in the tuple must have the same dtype, but found {first_dtype} and {SymbolicExpr.from_value(v).dtype}"
                     )
             return first_dtype
         if isinstance(var, TensorHandle):
@@ -544,19 +546,19 @@ class SymbolicExpr:
         if isinstance(var, cls):  # if already SymbolicExpr
             return var
 
-        dtype_tt = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
+        dtype = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
         if isinstance(var, SymbolicExpr.tuple_types):  # if a tuple
-            return cls.create("const", tuple(var), dtype_tt)
+            return cls.create("const", tuple(var), dtype)
         if isinstance(var, TensorHandle):  # if a TensorHandle
-            return cls.create("const", var.data.item(), dtype_tt)
+            return cls.create("const", var.data.item(), dtype)
         if isinstance(
             var, SymbolicExpr.builtin_scala_types
         ):  # if a python builtin type
-            return cls.create("const", var, dtype_tt)
+            return cls.create("const", var, dtype)
         if isinstance(var, tl.core.dtype):
             # If it's a triton dtype, we can create a const node with it
-            return cls.create("const", var, dtype_tt)
+            return cls.create("const", var, dtype)
 
         raise ValueError("Unknown type:", type(var))
 
@@ -623,13 +625,9 @@ class SymbolicExpr:
         return self._concretize_impl()
 
     def _concretize_impl(self) -> Any:
-        if self.concrete_fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
-        return self.concrete_fn(
-            *[v.concretize() if v is not None else None for v in self.children.values()]
-        )
+        raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
 
-    def replace_subtree(self) -> "SymbolicExpr":
+    def replace_subtree(self, anchor_op: Optional[str] = None) -> "SymbolicExpr":
         """
         Post-order traversal that replaces *all* sub-trees with constant nodes
         produced by `concretize`.
@@ -637,45 +635,46 @@ class SymbolicExpr:
         for name, child in list(self.children.items()):
             if child is None:
                 continue
-            self.children[name] = child.replace_subtree()
-
-        concrete = self.concretize()
-        if not isinstance(concrete, TensorHandle):
-            raise TypeError(f"Unexpected dtype: {type(concrete)}!")
+            self.children[name] = child.replace_subtree(anchor_op)
 
         # inplace replace to "const" node
-        self.op = "const"
-        self.value = concrete.data
-        self.dtype_tt = concrete.dtype
-        self.children.clear()
-        self.concrete_fn = None
-        self.z3 = None
-        self.constraints.clear()
+        if anchor_op is None or (
+            self.op == anchor_op
+            and all(
+            (child is None) or (not child.has_op(anchor_op))
+            for child in self.children.values()
+            )
+        ):
+            concrete = self.concretize()
+            if not isinstance(concrete, TensorHandle):
+                raise TypeError(f"Unexpected dtype: {type(concrete)}!")
+
+            self = SymbolicExpr.create("const", concrete, concrete.dtype)
 
         return self
 
 class BasicSymbolicExpr(SymbolicExpr):
     OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "const": Spec(req=("value",), opt=("dtype",)),
-        "pid": Spec(req=("grid", "axis")),
+        "const": Spec(req=("value", "dtype")),
+        "pid": Spec(req=("axis",)),
         "arange": Spec(req=("ret_ty", "start", "end")),
     }
 
     def _post_init(self) -> None:
-        if self.op in ("pid", "arange"):
-            self.dtype_tt = tl.int32  # Program ID / arange are always int32
+        if self.op == "pid":
+            self.dtype = tl.int32 
+        elif self.op == "arange": # Program ID / arange are always int32
+            self.dtype = tl.block_type(tl.int32, [self.end.value - self.start.value])
 
     def _node_label_core(self) -> str:
         if self.op == "const":
             return f"const={self.value}"
         if self.op == "pid":
             axis_node = self.children.get("axis")
-            grid_node = self.children.get("grid")
-            if axis_node is None or grid_node is None:
-                raise ValueError("pid node is missing required children: axis/grid")
+            if axis_node is None:
+                raise ValueError("pid node is missing required children: axis")
             axis_val = axis_node.to_py()
-            grid_val = grid_node.to_py()
-            return f"pid_{axis_val}={grid_val[axis_val]}"
+            return f"pid_{axis_val}"
         return super()._node_label_core()
 
     def _to_z3_impl(self) -> None:
@@ -742,19 +741,23 @@ class BasicSymbolicExpr(SymbolicExpr):
         return handler(self)
 
     def _concretize_const(self) -> Any:
-        dtype_tt = self.dtype_tt
-        if dtype_tt is None:
+        dtype = self.dtype
+        if dtype is None:
             raise RuntimeError("const node is missing dtype information")
 
         if isinstance(self.value, (SymbolicExpr.builtin_scala_types, tl.pointer_type)):
             return TensorHandle(
-                np.array([self.value], dtype=_get_np_dtype(dtype_tt)),
-                dtype_tt,
+                np.array([self.value], dtype=_get_np_dtype(dtype)),
+                dtype,
             )
         elif isinstance(self.value, SymbolicExpr.tuple_types):
             seq = cast(Sequence[Any], self.value)
-            np_array = np.array(seq, dtype=_get_np_dtype(dtype_tt))
-            return TensorHandle(np_array, dtype_tt)
+            np_array = np.array(seq, dtype=_get_np_dtype(dtype))
+            return TensorHandle(np_array, dtype)
+        elif isinstance(self.value, TensorHandle):
+            if self.value.data.size != 1:
+                raise RuntimeError("Only scalar TensorHandle is supported in const!")
+            return self.value
 
         raise RuntimeError(f"Unsupported const value type: {type(self.value)}")
 
@@ -786,7 +789,7 @@ class IndirectSymbolicExpr(SymbolicExpr):
     def _post_init(self) -> None:
         if self.op == "load":
             assert self.ptr is not None
-            self.dtype_tt = self.ptr.dtype_tt.element_ty
+            self.dtype = self.ptr.dtype.element_ty
 
     def _to_z3_impl(self) -> None:
         ptr, constraints_ptr = self.ptr._to_z3()
@@ -801,12 +804,6 @@ class IndirectSymbolicExpr(SymbolicExpr):
         self.constraints = constraints
 
     def _concretize_impl(self) -> Any:
-        if self.op != "load":
-            return super()._concretize_impl()
-
-        from ...core.patch import OPERATION_REGISTRY
-
-        original_ops = OPERATION_REGISTRY["triton"]["original_ops"]
         ptr_concrete = self.ptr.concretize()
         if self.mask is None:
             mask_concrete = TensorHandle(
@@ -820,7 +817,12 @@ class IndirectSymbolicExpr(SymbolicExpr):
         else:
             other_concrete = self.other.concretize()
 
-        return original_ops[Load](
+        fn = self.concrete_fn
+        if fn is None:
+            raise RuntimeError(f"{self.op}'s concrete function is not set!")
+
+        # load
+        return fn(
             ptr_concrete,
             mask_concrete,
             other_concrete,
@@ -861,18 +863,7 @@ class BinarySymbolicExpr(SymbolicExpr):
     def _post_init(self) -> None:
         lhs = self.children.get("lhs")
         rhs = self.children.get("rhs")
-        if lhs is None or rhs is None:
-            return
-        if not lhs.shape:
-            self.shape = rhs.shape
-        elif not rhs.shape:
-            self.shape = lhs.shape
-        else:
-            assert lhs.shape == rhs.shape, (
-                f"lhs shape {lhs.shape} != rhs shape {rhs.shape}"
-            )
-            self.shape = lhs.shape
-        self.dtype_tt = lhs.dtype_tt
+        self.dtype = lhs.dtype
 
     def _to_z3_impl(self) -> None:
         lhs, constraints_lhs = self.lhs._to_z3()
@@ -884,6 +875,16 @@ class BinarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         self.z3 = handler(self, lhs, rhs)
 
+    def _concretize_impl(self) -> Any:
+        fn = self.concrete_fn
+        if fn is None:
+            raise RuntimeError(f"{self.op}'s concrete function is not set!")
+        lhs_concrete = self.lhs.concretize()
+        rhs_concrete = self.rhs.concretize()
+        np_op = self._NUMPY_OPS.get(self.op, None)
+        if np_op is None:
+            raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
+        return fn(lhs_concrete, rhs_concrete, np_op)
 
     @staticmethod
     def _apply_binop(op_func, left, right):
@@ -903,7 +904,7 @@ class BinarySymbolicExpr(SymbolicExpr):
 
     @staticmethod
     def _infer_bitwidth(expr):
-        dtype = getattr(expr, "dtype_tt", None)
+        dtype = getattr(expr, "dtype", None)
         if dtype is None:
             return None
         if hasattr(dtype, "primitive_bitwidth"):
@@ -1011,6 +1012,27 @@ class BinarySymbolicExpr(SymbolicExpr):
     def _op_ashr(self, lhs, rhs):
         raise NotImplementedError("Arithmetic shift right is not implemented in Z3")
 
+    _NUMPY_OPS: ClassVar[dict[str, Callable[[Any, Any], Any]]] = {
+        "add": np.add,
+        "sub": np.subtract,
+        "mul": np.multiply,
+        "div": np.divide,
+        "mod": np.fmod,
+        "less": np.less,
+        "less_equal": np.less_equal,
+        "greater": np.greater,
+        "greater_equal": np.greater_equal,
+        "equal": np.equal,
+        "not_equal": np.not_equal,
+        "maximum": np.maximum,
+        "minimum": np.minimum,
+        "bitwise_and": np.bitwise_and,
+        "bitwise_or": np.bitwise_or,
+        "bitwise_xor": np.bitwise_xor,
+        "right_shift": np.right_shift,
+        "left_shift": np.left_shift,
+    }
+
     _Z3_BUILDERS: ClassVar[
         dict[str, Callable[["BinarySymbolicExpr", Z3Expr, Z3Expr], Z3Expr]]
     ] = {
@@ -1038,6 +1060,9 @@ class TernarySymbolicExpr(SymbolicExpr):
     OP_SPEC: ClassVar[dict[str, Spec]] = {
         "where": Spec(req=("cond", "lhs", "rhs")),
     }
+
+    def _post_init(self) -> None:
+        self.dtype = self.lhs.dtype
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1103,14 +1128,10 @@ class ReduceSymbolicExpr(SymbolicExpr):
 
     def _reduce_max(self) -> None:
         arr, self.constraints = self.input._to_z3()
-        if not arr:
-            raise ValueError("Cannot compute max of empty array")
         self.z3 = reduce(lambda a, b: If(a >= b, a, b), arr)
 
     def _reduce_min(self) -> None:
         arr, self.constraints = self.input._to_z3()
-        if not arr:
-            raise ValueError("Cannot compute min of empty array")
         self.z3 = reduce(lambda a, b: If(a <= b, a, b), arr)
 
     _Z3_BUILDERS: ClassVar[dict[str, Callable[["ReduceSymbolicExpr"], None]]] = {
@@ -1137,11 +1158,12 @@ class PointerSymbolicExpr(SymbolicExpr):
         "addptr": Spec(req=("ptr", "offset")),
         "advance": Spec(req=("ptr", "offsets")),
     }
+    _INT_DTYPES: ClassVar[tuple[type, ...]] = (int, np.integer, bool)
 
     def _post_init(self) -> None:
         if self.op == "addptr":
             assert self.ptr is not None
-            self.dtype_tt = self.ptr.dtype_tt
+            self.dtype = self.ptr.dtype.element_ty
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1149,11 +1171,19 @@ class PointerSymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         handler(self)
 
+    def _concretize_impl(self) -> Any:
+        fn = self.concrete_fn
+        if fn is None:
+            raise RuntimeError(f"{self.op}'s concrete function is not set!")
+        if self.op == "addptr":
+            return fn(self.ptr.concretize(), self.offset.concretize())
+        raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
+
     def _addptr(self) -> None:
         ptr_z3, constraints_ptr = self.ptr._to_z3()
         offset_z3, constraints_offset = self.offset._to_z3()
         self.constraints = constraints_ptr + constraints_offset
-        element_bytewidth = max(1, self.ptr.dtype_tt.element_ty.primitive_bitwidth // 8)
+        element_bytewidth = max(1, self.ptr.dtype.scalar.element_ty.primitive_bitwidth // 8)
         if isinstance(ptr_z3, list) and isinstance(offset_z3, list):
             if len(ptr_z3) != len(offset_z3):
                 raise ValueError(
@@ -1188,11 +1218,14 @@ class ReshapeSymbolicExpr(SymbolicExpr):
 
     def _post_init(self) -> None:
         if self.op == "join":
-            assert self.lhs is not None
-            self.dtype_tt = self.lhs.dtype_tt
-        elif self.op in ("splat", "expand_dims", "broadcast", "reshape", "trans"):
-            assert self.arg is not None
-            self.dtype_tt = self.arg.dtype_tt
+            self.dtype = self.lhs.dtype
+        elif self.op == "splat":
+            shape = self.children["shape"].dtype.shape
+            self.dtype = tl.block_type(
+                self.arg.dtype, shape
+            )
+        elif self.op in ("expand_dims", "broadcast", "reshape", "trans"):
+            self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1237,7 +1270,7 @@ class CastSymbolicExpr(SymbolicExpr):
         if self.op in ("cast_impl", "bitcast", "fp_to_fp"):
             assert self.dst_type is not None
             if self.dst_type.op == "const":
-                self.dtype_tt = self.dst_type.value
+                self.dtype = self.dst_type.value
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1247,17 +1280,14 @@ class CastSymbolicExpr(SymbolicExpr):
 
     def _concretize_impl(self) -> Any:
         if self.op in ("cast_impl", "bitcast"):
-            from ...core.patch import OPERATION_REGISTRY
-            from ...core.data import CastImpl, Bitcast
-
-            original_ops = OPERATION_REGISTRY["triton"]["original_ops"]
+            fn = self.concrete_fn
+            if fn is None:
+                raise RuntimeError(f"{self.op}'s concrete function is not set!")
             src_concrete = self.src.concretize()
             dst_type_value = (
                 self.dst_type.value if hasattr(self.dst_type, "value") else self.dst_type
             )
-            if self.op == "cast_impl":
-                return original_ops[CastImpl](src_concrete, dst_type_value)
-            return original_ops[Bitcast](src_concrete, dst_type_value)
+            return fn(src_concrete, dst_type_value)
         return super()._concretize_impl()
 
     def _cast_passthrough(self) -> None:
@@ -1373,7 +1403,7 @@ class SymbolicSanitizer(Sanitizer):
         seen: set[int] = set()
 
         def walk(node: SymbolicExpr) -> None:
-            if node.op == "const" and isinstance(node.dtype_tt, tl.pointer_type):
+            if node.op == "const" and isinstance(node.dtype, tl.pointer_type):
                 try:
                     val = node.to_py()
                 except Exception:
@@ -1633,44 +1663,32 @@ class SymbolicSanitizer(Sanitizer):
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def op_program_id_overrider(axis):
-            assert self.grid, "Grid not initialized!"
-            return SymbolicExpr.create("pid", self.grid, axis)
+            return SymbolicExpr.create("pid", axis)
 
         def op_raw_load_overrider(ptr, cache_modifier, eviction_policy, is_volatile):
             return op_load_overrider(
                 ptr, None, None, cache_modifier, eviction_policy, is_volatile
             )
-
         def op_load_overrider(ptr, mask, other, *args):
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
                 self.need_full_grid = True
-                ptr = ptr.replace_subtree()
+                ptr = ptr.replace_subtree("load")
 
             if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
                 self.need_full_grid = True
-                mask = mask.replace_subtree()
+                mask = mask.replace_subtree("load")
 
-            # make sure ptr dtype is valid
-            if isinstance(ptr, TensorHandle) and not isinstance(
-                ptr.dtype, tl.pointer_type
-            ):
-                raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
             ptr_sym = SymbolicExpr.from_value(ptr)
             mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
             other_sym = SymbolicExpr.from_value(other) if other is not None else None
 
-            if mask_sym is None:
-                ret = SymbolicExpr.create("load", ptr_sym)
-            elif other_sym is None:
-                ret = SymbolicExpr.create("load", ptr_sym, mask_sym)
-            else:
-                ret = SymbolicExpr.create(
-                    "load",
-                    ptr_sym,
-                    mask_sym,
-                    other_sym,
-                )
+            ret = SymbolicExpr.create(
+                "load",
+                ptr_sym,
+                mask_sym,
+                other_sym,
+            )
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
@@ -1678,35 +1696,24 @@ class SymbolicSanitizer(Sanitizer):
 
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
             return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
-
         def op_store_overrider(ptr, value, mask, *args):
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
                 self.need_full_grid = True
-                ptr = ptr.replace_subtree()
+                ptr = ptr.replace_subtree("load")
 
             if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
                 self.need_full_grid = True
-                mask = mask.replace_subtree()
-
-            # make sure ptr is a SymbolicExpr
-            if isinstance(ptr, TensorHandle) and not isinstance(
-                ptr.dtype, tl.pointer_type
-            ):
-                raise ValueError(f"Unsupported ptr dtype: {ptr.dtype}")
+                mask = mask.replace_subtree("load")
             ptr_sym = SymbolicExpr.from_value(ptr)
-
             value_sym = SymbolicExpr.from_value(value)
             mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
-            if mask_sym is None:
-                ret = SymbolicExpr.create("store", ptr_sym, value_sym)
-            else:
-                ret = SymbolicExpr.create(
-                    "store",
-                    ptr_sym,
-                    value_sym,
-                    mask_sym,
-                )
+            ret = SymbolicExpr.create(
+                "store",
+                ptr_sym,
+                value_sym,
+                mask_sym,
+            )
 
             # check memory access using z3 (defer in loops or check immediately)
             self._handle_access_check(ret)
@@ -1785,7 +1792,7 @@ class SymbolicSanitizer(Sanitizer):
         def op_dot_overrider(a, b, d, input_precision, max_num_imprecise_acc):
             a_sym = SymbolicExpr.from_value(a)
             b_sym = SymbolicExpr.from_value(b)
-            d_sym = SymbolicExpr.from_value(d)
+            d_sym = SymbolicExpr.from_value(d) if d is not None else None
             return SymbolicExpr.create("dot", a_sym, b_sym, d_sym)
 
         def op_make_range_overrider(ret_ty, start, end):
@@ -1959,8 +1966,9 @@ class SymbolicSanitizer(Sanitizer):
                 )
 
             if isinstance(expr, SymbolicExpr):
-                if expr.op == "const" and expr.dtype_tt is None:
+                if expr.op == "const":
                     return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+                self.need_full_grid = True
                 expr = expr.replace_subtree()
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
 
@@ -1992,21 +2000,14 @@ class SymbolicSanitizer(Sanitizer):
             if isinstance(iterable, RangeWrapper):
                 return iterable
 
-            def _resolve_bound(val):
-                val = SymbolicExpr.from_value(val)
-                if val.has_op("load"):
-                    self.need_full_grid = True
-                    val = val.replace_subtree()
-                return val
-
-            args = tuple(_resolve_bound(v) for v in iter_args)
+            args = tuple(SymbolicExpr.from_value(v) for v in iter_args)
             # Prefer explicit args; fall back to kwargs when args are empty.
             if not args and iter_kwargs:
-                start_expr = _resolve_bound(iter_kwargs.get("start", 0))
-                stop_expr = _resolve_bound(
+                start_expr = SymbolicExpr.from_value(iter_kwargs.get("start", 0))
+                stop_expr = SymbolicExpr.from_value(
                     iter_kwargs.get("stop", iter_kwargs.get("end"))
                 )
-                step_expr = _resolve_bound(iter_kwargs.get("step", 1))
+                step_expr = SymbolicExpr.from_value(iter_kwargs.get("step", 1))
                 if stop_expr is not None:
                     args = (start_expr, stop_expr, step_expr)
 
@@ -2019,7 +2020,7 @@ class SymbolicSanitizer(Sanitizer):
                 )
             ):
                 args = tuple(
-                    _resolve_bound(getattr(iterable, attr, default))
+                    SymbolicExpr.from_value(getattr(iterable, attr, default))
                     for attr, default in (("start", 0), ("stop", 0), ("step", 1))
                 )
 

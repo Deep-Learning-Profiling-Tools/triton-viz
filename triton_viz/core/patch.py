@@ -411,12 +411,16 @@ class PatchOp:
                     self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
                     args[0].dtype,
                 )
+                cast(Any, ret.handle).concrete_fn = self.op
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
-            if hasattr(ret, "handle") and hasattr(ret.handle, "concrete_fn"):
-                cast(Any, ret.handle).concrete_fn = self.op
-            elif hasattr(ret, "concrete_fn"):
-                cast(Any, ret).concrete_fn = self.op
+                if self.op_type == RawLoad:
+                    cast(Any, ret).concrete_fn = TRITON_ORIGINAL_OPS[Load]
+                elif self.op_type == RawStore:
+                    cast(Any, ret).concrete_fn = TRITON_ORIGINAL_OPS[Store]
+                else: 
+
+                    cast(Any, ret).concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
         if self.callbacks.after_callback:

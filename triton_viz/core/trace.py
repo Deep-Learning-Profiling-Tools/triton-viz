@@ -230,7 +230,7 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
     if not isinstance(client, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface | TraceInterface:
+    def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
         # When sanitizer is disabled, skip tracing and return the original kernel unchanged
         if not cfg.enable_sanitizer:
             return kernel
