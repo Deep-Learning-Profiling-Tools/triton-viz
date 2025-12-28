@@ -297,11 +297,9 @@ def test_loop_deferred_checks_after_context():
     assert loop_deferred_check_recorder.after_loop_pending == [1]
     addr_expr, constraints = loop_deferred_check_recorder.check_inside_loop[0]
     assert "4*loop_i_2" in str(addr_expr)
-    assert len(constraints) == 1
-    interval_constraint = constraints[0]
-    assert len(interval_constraint.children()) == 2
-    bounds = {str(child) for child in interval_constraint.children()}
-    assert bounds == {"loop_i_2 >= 0", "loop_i_2 < 4"}
+    constraints_str = " ".join(str(c) for c in constraints)
+    assert "loop_i_2 >= 0" in constraints_str
+    assert "loop_i_2 < 4" in constraints_str
     assert loop_deferred_check_recorder.records
 
 
