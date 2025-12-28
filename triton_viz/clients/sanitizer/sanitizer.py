@@ -128,8 +128,9 @@ class Sanitizer(Client):
 
     def __new__(cls, *args, **kwargs) -> "Sanitizer":
         if cls is Sanitizer:
-            target_cls: type["Sanitizer"] = (
-                SymbolicSanitizer if cfg.enable_sanitizer else NullSanitizer
+            target_cls = cast(
+                type["Sanitizer"],
+                SymbolicSanitizer if cfg.enable_sanitizer else NullSanitizer,
             )
             obj = object.__new__(target_cls)
             cast(Any, target_cls).__init__(obj, *args, **kwargs)
@@ -546,7 +547,8 @@ class SymbolicExpr:
         dtype = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
         if isinstance(var, SymbolicExpr.tuple_types):  # if a tuple
-            return cls.create("const", tuple(var), dtype)
+            seq = cast(Sequence[Any], var)
+            return cls.create("const", tuple(seq), dtype)
         if isinstance(var, TensorHandle):  # if a TensorHandle
             return cls.create("const", var.data.item(), dtype)
         if isinstance(
@@ -861,6 +863,8 @@ class BinarySymbolicExpr(SymbolicExpr):
     def _post_init(self) -> None:
         lhs = self.children.get("lhs")
         rhs = self.children.get("rhs")
+        if lhs is None or rhs is None:
+            raise ValueError("Binary op requires both lhs and rhs operands")
         self.dtype = lhs.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1218,12 +1222,22 @@ class ReshapeSymbolicExpr(SymbolicExpr):
 
     def _post_init(self) -> None:
         if self.op == "join":
-            self.dtype = self.lhs.dtype
+            lhs = self.children.get("lhs")
+            if lhs is None:
+                raise ValueError("Join op requires lhs")
+            self.dtype = lhs.dtype
         elif self.op == "splat":
-            shape = self.children["shape"].dtype.shape
-            self.dtype = tl.block_type(self.arg.dtype, shape)
+            shape_expr = self.children.get("shape")
+            arg_expr = self.children.get("arg")
+            if shape_expr is None or arg_expr is None or shape_expr.dtype is None:
+                raise ValueError("Splat op requires shape and arg")
+            shape = shape_expr.dtype.shape
+            self.dtype = tl.block_type(arg_expr.dtype, shape)
         elif self.op in ("expand_dims", "broadcast", "reshape", "trans"):
-            self.dtype = self.arg.dtype
+            arg_expr = self.children.get("arg")
+            if arg_expr is None:
+                raise ValueError(f"{self.op} op requires arg")
+            self.dtype = arg_expr.dtype
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1236,7 +1250,11 @@ class ReshapeSymbolicExpr(SymbolicExpr):
             fn = self.concrete_fn
             if fn is None:
                 raise RuntimeError(f"{self.op}'s concrete function is not set!")
-            return fn(self.children["shape"].to_py(), self.arg.concretize())
+            shape_expr = self.children.get("shape")
+            arg_expr = self.children.get("arg")
+            if shape_expr is None or arg_expr is None:
+                raise ValueError("Splat op requires shape and arg")
+            return fn(shape_expr.to_py(), arg_expr.concretize())
         return super()._concretize_impl()
 
     def _reshape_passthrough(self) -> None:
@@ -1336,6 +1354,15 @@ SymbolicExpr.register_op_class(CastSymbolicExpr, SymbolicExpr.CAST_OPS)
 SymbolicExpr.register_op_class(AtomicSymbolicExpr, SymbolicExpr.ATOMIC_OPS)
 
 
+def _sexpr_or_str(expr: Any) -> str:
+    if isinstance(expr, (int, np.integer)):
+        return str(int(expr))
+    sexpr = getattr(expr, "sexpr", None)
+    if callable(sexpr):
+        return sexpr()
+    return str(expr)
+
+
 def _make_signature(
     addr_expr: Z3Expr, constraints: list[BoolRef], re_pattern: re.Pattern[str]
 ) -> int:
@@ -1345,9 +1372,9 @@ def _make_signature(
     • constraints is list[expr]
     """
     if isinstance(addr_expr, list):
-        addr_repr = "|".join(sorted(e.sexpr() for e in addr_expr))
+        addr_repr = "|".join(sorted(_sexpr_or_str(e) for e in addr_expr))
     else:
-        addr_repr = addr_expr.sexpr()
+        addr_repr = _sexpr_or_str(addr_expr)
 
     constr_repr = "|".join(sorted(c.sexpr() for c in constraints))
 
@@ -1508,7 +1535,10 @@ class SymbolicSanitizer(Sanitizer):
             tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
 
             # Determine operation type from symbolic expression
-            op_type = Load if symbolic_expr.op == "store" else Store
+            if symbolic_expr.op == "store":
+                op_type: type[Load] | type[Store] = Store
+            else:
+                op_type = Load
 
             # Report with symbolic expression
             self._report(op_type, tensor, violation_addr, symbolic_expr)

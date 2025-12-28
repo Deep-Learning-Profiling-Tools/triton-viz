@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import Tracer
+from triton_viz.clients import Tracer, Sanitizer
 from triton_viz.core.data import Grid, Load, Store, ReduceSum, Dot
 from triton_viz.core.trace import launches
 
@@ -215,7 +215,7 @@ def test_kernel_cache_autotune_with_dummy_benchmarker():
         output = x + y
         tl.store(out_ptr + offsets, output, mask=mask)
 
-    traced_kernel = trace(client=Sanitizer())(autotune_add_kernel_cache_on)
+    traced_kernel = triton_viz.trace(client=Sanitizer())(autotune_add_kernel_cache_on)
 
     # Verify dummy benchmarker is installed
     if hasattr(traced_kernel, "runner") and hasattr(traced_kernel.runner, "_do_bench"):

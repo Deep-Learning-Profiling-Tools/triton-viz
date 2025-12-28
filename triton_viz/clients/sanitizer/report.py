@@ -1,5 +1,5 @@
 import traceback
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
@@ -10,6 +10,9 @@ from .data import (
     OutOfBoundsRecordBruteForce,
     OutOfBoundsRecordZ3,
 )
+
+if TYPE_CHECKING:
+    from .sanitizer import SymbolicExpr
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
