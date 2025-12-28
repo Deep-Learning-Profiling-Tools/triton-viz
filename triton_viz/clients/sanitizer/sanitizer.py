@@ -2,7 +2,7 @@ from collections import namedtuple
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property, reduce
-from typing import Any, ClassVar, NoReturn, Optional, Union, TypeAlias, cast
+from typing import Any, ClassVar, NoReturn, Optional, Union, TypeAlias, TypeVar, cast
 import sys
 import re
 
@@ -83,6 +83,7 @@ from ...core.config import config as cfg
 
 Z3Expr: TypeAlias = Union[ExprRef, int, list[ExprRef], list[int], Tactic, Probe]
 ConstraintExpr: TypeAlias = Union[ExprRef, int, float, bool]
+SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
 
 
 @dataclass
@@ -125,7 +126,7 @@ class Sanitizer(Client):
 
     NAME = "sanitizer"
 
-    def __new__(cls, *args, **kwargs) -> "Sanitizer":
+    def __new__(cls: type[SanitizerT], *args: Any, **kwargs: Any) -> SanitizerT:
         if cls is Sanitizer:
             target_cls = cast(
                 type["Sanitizer"],
@@ -133,7 +134,7 @@ class Sanitizer(Client):
             )
             obj = object.__new__(target_cls)
             cast(Any, target_cls).__init__(obj, *args, **kwargs)
-            return obj
+            return cast(SanitizerT, obj)
         return super().__new__(cls)
 
     def __init__(self, abort_on_error: bool = True, *args, **kwargs):
@@ -1460,7 +1461,7 @@ class SymbolicSanitizer(Sanitizer):
 
     def _find_tensor_for_expr(
         self, symbolic_expr: Optional[SymbolicExpr], violation_addr: int
-    ) -> Optional[Tensor]:
+    ) -> Tensor:
         # Prefer mapping from pointer base addresses present in the expression.
         base_candidates = self._collect_pointer_bases(symbolic_expr)
         if base_candidates:
@@ -1490,7 +1491,7 @@ class SymbolicSanitizer(Sanitizer):
         if self.tensors:
             return self.tensors[0]
 
-        return None
+        raise RuntimeError("No tensor registered in SymbolicSanitizer!")
 
     def _record_tensor_name(self, tensor: Tensor, name: str) -> None:
         if not name:
@@ -2157,22 +2158,6 @@ class SymbolicSanitizer(Sanitizer):
                     Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
                 )
 
-            def _filter_constraints(
-                addr_expr: Z3Expr, constraints: Sequence[ConstraintExpr]
-            ) -> list[ConstraintExpr]:
-                addr_eq = self.addr_sym == addr_expr
-                relevant_vars = set(get_vars(addr_eq))
-                filtered: list[ConstraintExpr] = []
-                for constraint in constraints:
-                    if not isinstance(constraint, ExprRef):
-                        filtered.append(constraint)
-                        continue
-                    constraint_vars = set(get_vars(constraint))
-                    if constraint_vars and not constraint_vars.issubset(relevant_vars):
-                        continue
-                    filtered.append(constraint)
-                return filtered
-
             # execute pending checks
             for check_tuple in ctx.pending_checks:
                 addr_expr, expr_constraints, symbolic_expr = check_tuple
@@ -2189,21 +2174,15 @@ class SymbolicSanitizer(Sanitizer):
 
                 if isinstance(addr_expr, list):
                     for single_addr_expr in addr_expr:
-                        filtered_constraints = _filter_constraints(
-                            single_addr_expr, combined_constraints
-                        )
                         self._check_range_satisfiable(
                             single_addr_expr,
-                            filtered_constraints,
+                            combined_constraints,
                             symbolic_expr,
                         )
                 else:
-                    filtered_constraints = _filter_constraints(
-                        addr_expr, combined_constraints
-                    )
                     self._check_range_satisfiable(
                         addr_expr,
-                        filtered_constraints,
+                        combined_constraints,
                         symbolic_expr,
                     )
 

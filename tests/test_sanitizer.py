@@ -1,7 +1,7 @@
 import pytest
 import torch
 import numpy as np
-from typing import Any, cast
+from typing import Any, cast, Sequence
 
 import triton
 import triton.language as tl
@@ -13,6 +13,7 @@ from triton_viz.core.client import Client
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicExpr,
+    ConstraintExpr,
     Z3Expr,
     NullSanitizer,
     SymbolicSanitizer,
@@ -80,7 +81,7 @@ class LoadIndexChecker(SymbolicSanitizer):
         )
 
 
-load_index_checker: LoadIndexChecker = LoadIndexChecker(abort_on_error=True)
+load_index_checker: LoadIndexChecker = LoadIndexChecker(abort_on_error=False)
 
 
 class LoopBoundsChecker(SymbolicSanitizer):
@@ -125,12 +126,12 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self.after_loop_pending: list[int] = []
-        self.check_inside_loop: list[tuple[Z3Expr, list[BoolRef]]] = []
+        self.check_inside_loop: list[tuple[Z3Expr, Sequence[ConstraintExpr]]] = []
 
     def _check_range_satisfiable(
         self,
         access_addr: Z3Expr,
-        expr_constraints: list[BoolRef],
+        expr_constraints: Sequence[ConstraintExpr],
         symbolic_expr: SymbolicExpr,
     ) -> None:
         self.check_inside_loop.append((access_addr, expr_constraints))
@@ -204,6 +205,8 @@ def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
 
 
 def test_indirect_load():
+    load_index_checker.observed_offsets.clear()
+
     idx = torch.arange(128, dtype=torch.int32)
     src = torch.rand(128)
     dst = torch.empty_like(src)
@@ -252,6 +255,16 @@ def loop_deferred_check_kernel(out_ptr):
         tl.store(out_ptr + idx, idx)
 
 
+@triton_viz.trace(client=load_index_checker)
+@triton.jit
+def loop_deferred_check_simplify_kernel(out_ptr):
+    pid = tl.program_id(0)
+    num_blocks = tl.num_programs(0) + 1
+    for i in range(0, num_blocks):
+        idx = pid + 1
+        tl.store(out_ptr + idx, idx)
+
+
 def test_loop_bounds_from_load():
     loop_bounds_checker.observed_bounds.clear()
     start = torch.tensor([2], dtype=torch.int32)
@@ -288,6 +301,16 @@ def test_loop_deferred_checks_after_context():
     values = {cast(IntNumRef,c.arg(1)).as_long() for c in constraints[0].children()}
     assert values == {0, 1, 2, 3}
     assert loop_deferred_check_recorder.records
+
+
+def test_loop_deferred_checks_simplify():
+    load_index_checker.observed_offsets.clear()
+
+    out = torch.empty((3,), dtype=torch.int32)
+
+    loop_deferred_check_simplify_kernel[(2,)](out)
+
+    assert load_index_checker.observed_offsets == []
 
 
 # ======== Reduce Operations =========
