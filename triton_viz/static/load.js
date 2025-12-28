@@ -4,11 +4,11 @@ import {
     setupScene,
     setupGeometries,
     createTensor,
-    calculateTensorSize,
-    updateCubeColor,
     setupCamera,
     setupEventListeners,
-    cameraControls
+    cameraControls,
+    CUBE_SIZE,
+    COLOR_HOVER
 } from './load_utils.js';
 
 export function createLoadVisualization(containerElement, op) {
@@ -29,10 +29,6 @@ export function createLoadVisualization(containerElement, op) {
         // expose current op uuid globally for generic code panel in gridblock
         try { window.current_op_uuid = op.uuid; } catch(e){}
 
-        let currentStep = 0;
-        let frame = 0;
-        let isPaused = false;
-
         const sideMenu = createSideMenu(containerElement);
         // Color map UI
         const controlBar = document.createElement('div');
@@ -46,92 +42,51 @@ export function createLoadVisualization(containerElement, op) {
         const colorizeToggle = document.createElement('button');
         colorizeToggle.textContent = 'Color by Value: OFF';
         controlBar.appendChild(colorizeToggle);
-        // Color scheme selector + color picker
-        const schemeSelect = document.createElement('select');
-        schemeSelect.style.padding = '4px 6px';
-        schemeSelect.style.borderRadius = '4px';
-        schemeSelect.style.border = '1px solid #555';
-        schemeSelect.style.background = '#2a2a2a';
-        schemeSelect.style.color = '#fff';
-        schemeSelect.innerHTML = '<option value="mono">Mono</option><option value="viridis">Viridis</option>';
-        controlBar.appendChild(schemeSelect);
-        const colorPicker = document.createElement('input');
-        colorPicker.type = 'color';
-        colorPicker.value = '#3b82f6'; // default blue
-        colorPicker.style.width = '36px';
-        colorPicker.style.height = '28px';
-        colorPicker.style.border = 'none';
-        colorPicker.style.outline = 'none';
-        colorPicker.title = 'Choose base color for Mono';
-        controlBar.appendChild(colorPicker);
-        const dragToggle = document.createElement('button');
-        dragToggle.textContent = 'Drag Cubes: OFF';
-        controlBar.appendChild(dragToggle);
         const codeToggle = document.createElement('button');
         codeToggle.textContent = 'Show Code: OFF';
         controlBar.appendChild(codeToggle);
-        // Mouse pick calibration (dx/dy in pixels)
-        const calibWrap = document.createElement('div');
-        calibWrap.style.display = 'flex';
-        calibWrap.style.alignItems = 'center';
-        calibWrap.style.gap = '4px';
-        const calibLabel = document.createElement('span');
-        calibLabel.textContent = 'Calib:';
-        calibLabel.style.opacity = '0.8';
-        const dxMinus = document.createElement('button'); dxMinus.textContent = '−X';
-        const dxPlus  = document.createElement('button'); dxPlus.textContent  = '+X';
-        const dyMinus = document.createElement('button'); dyMinus.textContent = '−Y';
-        const dyPlus  = document.createElement('button'); dyPlus.textContent  = '+Y';
-        const dxdyInfo = document.createElement('span'); dxdyInfo.style.minWidth = '70px'; dxdyInfo.style.textAlign = 'center';
-        const dxdyReset = document.createElement('button'); dxdyReset.textContent = 'Reset';
-        calibWrap.appendChild(calibLabel);
-        calibWrap.appendChild(dxMinus); calibWrap.appendChild(dxPlus);
-        calibWrap.appendChild(dyMinus); calibWrap.appendChild(dyPlus);
-        calibWrap.appendChild(dxdyInfo); calibWrap.appendChild(dxdyReset);
-        controlBar.appendChild(calibWrap);
         containerElement.appendChild(controlBar);
 
         // expose for debugging
         try {
             window.last_op_global_shape = op.global_shape;
             window.last_global_coords = op.global_coords;
-            window.last_slice_shape = op.slice_shape;
-            window.last_slice_coords = op.slice_coords;
         } catch (e) {}
 
         let colorizeOn = false;
         let tensorCache = null; // {min, max, shape, dims, values}
-        let hoveredCube = null;
+        let hoveredHit = null;
+        let lastHoverKey = null;
+        let hoverToken = 0;
+        let hoverRaf = null;
+        let lastMouseEvent = null;
         let legendEl = null;
-        let scheme = 'mono';
-        let monoBaseHex = '#3b82f6';
         let codePanel = null;
+        let rafId = null;
+        let renderPending = false;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray
         const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
-        const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0); // Magenta (starting color for left slice)
-        const COLOR_LOADED = new THREE.Color(1.0, 0.8, 0.0);    // Gold (final color for both slices)
         const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);  // Black
 
         const { scene, camera, renderer } = setupScene(containerElement, COLOR_BACKGROUND);
-        const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
+        const { cubeGeometry } = setupGeometries();
 
-        const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
-        const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
-
-        // Position slice tensor
-        const globalSize = calculateTensorSize(op.global_shape);
-        sliceTensor.position.set(globalSize.x + 5, 0, 0); // Adjusted tensor spacing
-
+        const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry);
+        const globalMesh = globalTensor.userData.mesh;
         scene.add(globalTensor);
-        scene.add(sliceTensor);
 
         // Precompute highlighted coords in Global tensor for quick reset
-        const highlightedGlobalSet = new Set(
-            op.global_coords.map(([x, y, z]) => `${x},${y},${z}`)
-        );
+        const highlightedGlobalIndices = globalTensor.userData.highlightedIndices;
 
-        addLabels(scene, globalTensor, sliceTensor);
+        addLabels(scene, globalTensor);
+        const allTensorChildren = [globalMesh];
+        const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
+        const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
+        const hoverMaterial = new THREE.LineBasicMaterial({ color: COLOR_HOVER });
+        const globalHoverOutline = new THREE.LineSegments(hoverEdgesGeometry, hoverMaterial);
+        globalHoverOutline.visible = false;
+        globalTensor.add(globalHoverOutline);
 
         // Overlay memory flow badges if available (NKI only)
         try {
@@ -159,37 +114,19 @@ export function createLoadVisualization(containerElement, op) {
         orbitControls.dampingFactor = 0.05;
         orbitControls.target.copy(center);
         orbitControls.update();
-
-        const totalFrames = op.global_coords.length * 2 + 30;
+        orbitControls.addEventListener('change', requestRender);
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
-        // persistent calibration offsets
-        let mouseDx = Number(localStorage.getItem('viz_mouse_dx') || 0);
-        let mouseDy = Number(localStorage.getItem('viz_mouse_dy') || 0);
-        function updateDxDyLabel(){ dxdyInfo.textContent = `dx=${mouseDx}, dy=${mouseDy}`; }
-        updateDxDyLabel();
-        // Drag state
-        let dragModeOn = false;
-        let isDragging = false;
-        let dragTarget = null; // THREE.Mesh (cube)
-        const dragPlane = new THREE.Plane();
-        const planeIntersect = new THREE.Vector3();
-        const worldPosHelper = new THREE.Vector3();
-        const dragOffset = new THREE.Vector3();
-
+        const mouseDx = 0;
+        const mouseDy = 0;
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown);
-
-        // Additional pointer events for dragging
-        containerElement.addEventListener('mousedown', onMouseDown);
-        containerElement.addEventListener('mouseup', onMouseUp);
-        containerElement.addEventListener('mouseleave', onMouseUp);
-        animate();
+        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, requestRender);
+        requestRender();
 
         function _updateMouseNDC(event) {
             const rect = renderer.domElement.getBoundingClientRect();
-            const dpr = (window.devicePixelRatio || 1);
+            const dpr = renderer.getPixelRatio();
             const px = (event.clientX - rect.left + mouseDx) * dpr;
             const py = (event.clientY - rect.top  + mouseDy) * dpr;
             const w = rect.width * dpr, h = rect.height * dpr;
@@ -197,66 +134,94 @@ export function createLoadVisualization(containerElement, op) {
             mouse.y = -(py / h) * 2 + 1;
         }
 
+        const tmpMatrix = new THREE.Matrix4();
+        const tmpPosition = new THREE.Vector3();
+        const tmpQuat = new THREE.Quaternion();
+        const tmpScale = new THREE.Vector3();
+
         function _raycastAll() {
             raycaster.setFromCamera(mouse, camera);
-            const allTensorChildren = [
-                ...globalTensor.children,
-                ...sliceTensor.children
-            ];
             return raycaster.intersectObjects(allTensorChildren, true);
         }
 
-        function _toTopLevelCube(obj) {
-            let node = obj;
-            while (node && !(node.userData && node.userData.tensorName)) {
-                node = node.parent;
-            }
-            return node;
+        function instanceCoord(mesh, instanceId) {
+            if (mesh.userData.coords) return mesh.userData.coords[instanceId];
+            const { width, height } = mesh.userData.shape;
+            const z = Math.floor(instanceId / (width * height));
+            const rem = instanceId - z * width * height;
+            const y = Math.floor(rem / width);
+            const x = rem - y * width;
+            return [x, y, z];
         }
 
-        async function onMouseMove(event) {
-            _updateMouseNDC(event);
+        function instanceLocalPosition(mesh, instanceId, target) {
+            mesh.getMatrixAt(instanceId, tmpMatrix);
+            tmpMatrix.decompose(target, tmpQuat, tmpScale);
+            return target;
+        }
 
+        function setOutlinePosition(outline, mesh, instanceId) {
+            instanceLocalPosition(mesh, instanceId, tmpPosition);
+            outline.position.copy(tmpPosition);
+            outline.visible = true;
+        }
+
+        function baseGlobalColorByIndex(idx) {
+            return highlightedGlobalIndices.has(idx) ? COLOR_SLICE : COLOR_GLOBAL;
+        }
+
+        function onMouseMove(event) {
+            lastMouseEvent = event;
+            if (hoverRaf) return;
+            hoverRaf = requestAnimationFrame(() => {
+                hoverRaf = null;
+                handleMouseMove(lastMouseEvent);
+            });
+        }
+
+        function handleMouseMove(event) {
+            _updateMouseNDC(event);
             raycaster.setFromCamera(mouse, camera);
 
-            // Dragging: update target position on plane
-            if (isDragging && dragTarget) {
-                if (raycaster.ray.intersectPlane(dragPlane, planeIntersect)) {
-                    const newWorld = planeIntersect.add(dragOffset);
-                    // Convert world -> parent local
-                    dragTarget.parent.worldToLocal(newWorld);
-                    dragTarget.position.copy(newWorld);
-                }
-            }
+            let needsRender = false;
 
             const intersects = _raycastAll();
-
-            if (hoveredCube) {
-                hoveredCube.getObjectByName('hoverOutline').visible = false;
-                hoveredCube = null;
+            const hit = intersects.length > 0 ? intersects[0] : null;
+            const nextHover = hit && hit.instanceId !== undefined ? { mesh: hit.object, instanceId: hit.instanceId } : null;
+            const prevOutline = hoveredHit ? globalHoverOutline : null;
+            const nextOutline = nextHover ? globalHoverOutline : null;
+            if (prevOutline && (!nextHover || hoveredHit.mesh !== nextHover.mesh || hoveredHit.instanceId !== nextHover.instanceId)) {
+                if (prevOutline.visible) {
+                    prevOutline.visible = false;
+                    needsRender = true;
+                }
             }
+            hoveredHit = nextHover;
 
-            if (intersects.length > 0) {
-                    hoveredCube = _toTopLevelCube(intersects[0].object);
+            if (hoveredHit) {
+                if (nextOutline && !nextOutline.visible) {
+                    setOutlinePosition(nextOutline, hoveredHit.mesh, hoveredHit.instanceId);
+                    needsRender = true;
+                }
 
-                if (hoveredCube) {
-                    const hoverOutline = hoveredCube.getObjectByName('hoverOutline');
-                    if (hoverOutline) {
-                        hoverOutline.visible = true;
-                    }
-
-                    const { tensorName, tensor0, tensor1, tensor2 } = hoveredCube.userData;
+                const tensorName = hoveredHit.mesh.userData.tensorName;
+                const [tensor0, tensor1, tensor2] = instanceCoord(hoveredHit.mesh, hoveredHit.instanceId);
+                const hoverKey = `${tensorName}:${tensor0},${tensor1},${tensor2}`;
+                if (hoverKey !== lastHoverKey) {
+                    lastHoverKey = hoverKey;
                     updateSideMenu(tensorName, tensor0, tensor1, tensor2, undefined);
-
-                    const res = await getElementValue(tensorName, tensor0, tensor1, tensor2);
-
-                    updateSideMenu(tensorName, tensor0, tensor1, tensor2, res.value);
-
-                    console.log(`Value: ${res.value}`);
+                    const token = ++hoverToken;
+                    getElementValue(tensorName, tensor0, tensor1, tensor2).then((res) => {
+                        if (token !== hoverToken) return;
+                        updateSideMenu(tensorName, tensor0, tensor1, tensor2, res.value);
+                    });
                 }
             } else {
-                updateSideMenu(null);
+                if (lastHoverKey !== null) updateSideMenu(null);
+                lastHoverKey = null;
             }
+
+            if (needsRender) requestRender();
         }
 
         // --------- Colormap (Viridis-like) and Legend ---------
@@ -289,16 +254,6 @@ export function createLoadVisualization(containerElement, op) {
             return new THREE.Color(1,1,1);
         }
 
-        function monoColor(t, hex) {
-            // map to HSL with same hue/sat, varying lightness from 0.9 -> 0.25
-            const base = new THREE.Color(hex);
-            const hsl = {h:0,s:0,l:0};
-            base.getHSL(hsl);
-            const l = lerp(0.9, 0.25, t);
-            const s = Math.min(1.0, Math.max(0.4, hsl.s)); // ensure enough saturation
-            return new THREE.Color().setHSL(hsl.h, s, l);
-        }
-
         function destroyLegend() {
             if (legendEl && legendEl.remove) legendEl.remove();
             legendEl = null;
@@ -318,7 +273,7 @@ export function createLoadVisualization(containerElement, op) {
             wrapper.style.zIndex = '2000';
 
             const title = document.createElement('div');
-            title.textContent = scheme === 'mono' ? 'Value (Mono)' : 'Value (Viridis)';
+            title.textContent = 'Value (Viridis)';
             title.style.marginBottom = '4px';
             title.style.opacity = '0.9';
             wrapper.appendChild(title);
@@ -328,7 +283,7 @@ export function createLoadVisualization(containerElement, op) {
             const ctx2 = canvas.getContext('2d');
             for (let x = 0; x < canvas.width; x++) {
                 const t = x / (canvas.width - 1);
-                const c = (scheme === 'mono') ? monoColor(t, monoBaseHex) : viridisColor(t);
+                const c = viridisColor(t);
                 ctx2.fillStyle = `rgb(${Math.round(c.r*255)},${Math.round(c.g*255)},${Math.round(c.b*255)})`;
                 ctx2.fillRect(x, 0, 1, canvas.height);
             }
@@ -402,119 +357,51 @@ export function createLoadVisualization(containerElement, op) {
             codePanel = wrapper;
         }
 
-        function applyColorMapIfNeeded() {
+        function applyColorMap() {
             if (!colorizeOn || !tensorCache) return;
             const { min, max, dims, values } = tensorCache;
             const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
             const norm = (v) => (max === min ? 0.5 : (v - min) / (max - min));
-            const toColor = (t) => {
-                const u = clamp(norm(t), 0, 1);
-                return scheme === 'mono' ? monoColor(u, monoBaseHex) : viridisColor(u);
-            };
-            globalTensor.children.forEach((cube) => {
-                const u = cube.userData;
-                if (!u) return;
+            const toColor = (t) => viridisColor(clamp(norm(t), 0, 1));
+            for (let idx = 0; idx < globalMesh.count; idx++) {
+                const [x, y, z] = instanceCoord(globalMesh, idx);
                 let v = 0.0;
                 try {
-                    if (dims === 3) v = values[u.tensor0][u.tensor1][u.tensor2];
-                    else if (dims === 2) v = values[u.tensor0][u.tensor1];
-                    else if (dims === 1) v = values[u.tensor0];
+                    if (dims === 3) v = values[x][y][z];
+                    else if (dims === 2) v = values[x][y];
+                    else if (dims === 1) v = values[x];
                 } catch (e) { /* ignore bad index */ }
-                cube.material.color.copy(toColor(v));
-            });
+                globalMesh.setColorAt(idx, toColor(v));
+            }
+            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
         }
 
         function resetGlobalColors() {
-            // Restore original colors: Global cubes default to COLOR_GLOBAL,
+            // restore original colors: global cubes default to COLOR_GLOBAL,
             // highlighted coords (in op.global_coords) are COLOR_SLICE
-            globalTensor.children.forEach((cube) => {
-                const u = cube.userData;
-                if (!u) return;
-                const key = `${u.tensor0},${u.tensor1},${u.tensor2}`;
-                const baseColor = highlightedGlobalSet.has(key) ? COLOR_SLICE : COLOR_GLOBAL;
-                cube.material.color.copy(baseColor);
-            });
-        }
-
-        function resetSliceColors() {
-            sliceTensor.children.forEach((cube) => {
-                cube.material.color.copy(COLOR_LEFT_SLICE);
-            });
-        }
-
-        function onMouseDown(event) {
-            if (!dragModeOn) return;
-            _updateMouseNDC(event);
-            const hits = _raycastAll();
-            if (hits.length === 0) return;
-            const cube = _toTopLevelCube(hits[0].object);
-            if (!cube) return;
-            // Prepare drag plane using camera forward as normal, passing through cube
-            const normal = new THREE.Vector3();
-            camera.getWorldDirection(normal);
-            cube.getWorldPosition(worldPosHelper);
-            dragPlane.setFromNormalAndCoplanarPoint(normal, worldPosHelper);
-            // Compute offset between intersection and cube world position
-            raycaster.setFromCamera(mouse, camera);
-            if (!raycaster.ray.intersectPlane(dragPlane, planeIntersect)) return;
-            dragOffset.copy(worldPosHelper).sub(planeIntersect);
-            isDragging = true;
-            dragTarget = cube;
-            containerElement.style.cursor = 'grabbing';
-        }
-
-        function onMouseUp() {
-            if (!dragModeOn) return;
-            isDragging = false;
-            dragTarget = null;
-            containerElement.style.cursor = '';
-        }
-
-        function animate() {
-            requestAnimationFrame(animate);
-            // If colormap is OFF, ensure colors are reset every frame before animations
-            if (!colorizeOn) {
-                resetGlobalColors();
-                resetSliceColors();
+            for (let idx = 0; idx < globalMesh.count; idx++) {
+                globalMesh.setColorAt(idx, baseGlobalColorByIndex(idx));
             }
-            orbitControls.update();
+            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
+        }
 
-            // Run highlight animation regardless of Color by Value state
-            if (!isPaused && frame < totalFrames) {
-                const index = Math.floor(frame / 2);
-                const factor = (frame % 2) / 1.0;
-
-                if (index < op.global_coords.length) {
-                    const globalCoord = op.global_coords[index];
-                    const sliceCoord = op.slice_coords[index];
-
-                    updateCubeColor(globalTensor, globalCoord, COLOR_GLOBAL, COLOR_SLICE, factor);
-                    updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
-
-                    highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord);
-                    updateInfoPanel(globalCoord, sliceCoord, index);
-                }
-
-                frame++;
+        function requestRender() {
+            if (rafId !== null) {
+                renderPending = true;
+                return;
             }
+            rafId = requestAnimationFrame(renderFrame);
+        }
 
-            applyColorMapIfNeeded();
+        function renderFrame() {
+            const needsMore = orbitControls.update();
             renderer.render(scene, camera);
-        }
-
-        function highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord) {
-            globalTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
-            sliceTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
-
-            const globalCube = globalTensor.children.find(c =>
-                c.userData && c.userData.tensor0 === globalCoord[0] && c.userData.tensor1 === globalCoord[1] && c.userData.tensor2 === globalCoord[2]
-            );
-            const sliceCube = sliceTensor.children.find(c =>
-                c.userData && c.userData.tensor0 === sliceCoord[0] && c.userData.tensor1 === sliceCoord[1] && c.userData.tensor2 === sliceCoord[2]
-            );
-
-            if (globalCube) globalCube.material.emissive.setHex(0x444444);
-            if (sliceCube) sliceCube.material.emissive.setHex(0x444444);
+            if (needsMore || renderPending) {
+                renderPending = false;
+                rafId = requestAnimationFrame(renderFrame);
+                return;
+            }
+            rafId = null;
         }
 
         async function getElementValue(tensorName, x, y, z) {
@@ -551,47 +438,20 @@ export function createLoadVisualization(containerElement, op) {
         colorizeToggle.addEventListener('click', async () => {
             colorizeOn = !colorizeOn;
             colorizeToggle.textContent = `Color by Value: ${colorizeOn ? 'ON' : 'OFF'}`;
-            if (colorizeOn && !tensorCache) {
-                tensorCache = await fetchGlobalTensor();
+            if (colorizeOn) {
+                if (!tensorCache) {
+                    tensorCache = await fetchGlobalTensor();
+                }
+                if (tensorCache) {
+                    applyColorMap();
+                    createLegend(tensorCache.min, tensorCache.max);
+                }
+                requestRender();
+                return;
             }
-            if (!colorizeOn) {
-                // When turning OFF, immediately restore original colors
-                resetGlobalColors();
-                // Also reset slice side to its base color to avoid mixing styles
-                sliceTensor.children.forEach((cube) => {
-                    cube.material.color.copy(COLOR_LEFT_SLICE);
-                });
-                destroyLegend();
-            } else if (tensorCache) {
-                createLegend(tensorCache.min, tensorCache.max);
-            }
-        });
-
-        schemeSelect.addEventListener('change', () => {
-            scheme = schemeSelect.value;
-            if (colorizeOn && tensorCache) {
-                applyColorMapIfNeeded();
-                createLegend(tensorCache.min, tensorCache.max);
-            }
-            // color picker visible only for mono
-            colorPicker.style.display = scheme === 'mono' ? 'block' : 'none';
-        });
-
-        colorPicker.addEventListener('input', (e) => {
-            monoBaseHex = e.target.value || '#3b82f6';
-            if (scheme === 'mono' && colorizeOn && tensorCache) {
-                applyColorMapIfNeeded();
-                createLegend(tensorCache.min, tensorCache.max);
-            }
-        });
-
-        // initialize picker visibility
-        colorPicker.style.display = 'block';
-
-        dragToggle.addEventListener('click', () => {
-            dragModeOn = !dragModeOn;
-            dragToggle.textContent = `Drag Cubes: ${dragModeOn ? 'ON' : 'OFF'}`;
-            orbitControls.enabled = !dragModeOn;
+            resetGlobalColors();
+            destroyLegend();
+            requestRender();
         });
 
         codeToggle.addEventListener('click', async () => {
@@ -604,20 +464,13 @@ export function createLoadVisualization(containerElement, op) {
             }
         });
 
-        // calibration handlers
-        dxMinus.addEventListener('click', ()=>{ mouseDx -= 1; localStorage.setItem('viz_mouse_dx', String(mouseDx)); updateDxDyLabel(); });
-        dxPlus.addEventListener('click',  ()=>{ mouseDx += 1; localStorage.setItem('viz_mouse_dx', String(mouseDx)); updateDxDyLabel(); });
-        dyMinus.addEventListener('click', ()=>{ mouseDy -= 1; localStorage.setItem('viz_mouse_dy', String(mouseDy)); updateDxDyLabel(); });
-        dyPlus.addEventListener('click',  ()=>{ mouseDy += 1; localStorage.setItem('viz_mouse_dy', String(mouseDy)); updateDxDyLabel(); });
-        dxdyReset.addEventListener('click', ()=>{ mouseDx = 0; mouseDy = 0; localStorage.setItem('viz_mouse_dx','0'); localStorage.setItem('viz_mouse_dy','0'); updateDxDyLabel(); });
-
         function updateSideMenu(tensorName, x, y, z, value) {
             if (!tensorName) {
                 sideMenu.innerHTML = '';
                 return;
             }
 
-            let dims = tensorName === 'Global' ? op.global_shape : op.slice_shape;
+            let dims = op.global_shape;
             sideMenu.innerHTML = `
                 <h3 style="margin-top: 0;">${tensorName} Tensor</h3>
                 <p>X: ${x + 1}</p>
@@ -625,15 +478,6 @@ export function createLoadVisualization(containerElement, op) {
                 <p>Z: ${z + 1}</p>
                 <p>Dimensions: ${dims.join(' x ')}</p>
                 <p>Value: ${value !== undefined ? value : 'Loading...'}</p>
-            `;
-        }
-
-        function updateInfoPanel(globalCoord, sliceCoord, index) {
-            sideMenu.innerHTML = `
-                <h3>Current Operation</h3>
-                <p>Global Coords: (${globalCoord.join(', ')})</p>
-                <p>Slice Coords: (${sliceCoord.join(', ')})</p>
-                <p>Progress: ${index + 1}/${op.global_coords.length}</p>
             `;
         }
 
@@ -653,9 +497,8 @@ export function createLoadVisualization(containerElement, op) {
             return menu;
         }
 
-        function addLabels(scene, globalTensor, sliceTensor) {
+        function addLabels(scene, globalTensor) {
             addLabel(scene, "Global Tensor", globalTensor.position);
-            addLabel(scene, "Slice Tensor", sliceTensor.position);
         }
 
         function addLabel(scene, text, position) {

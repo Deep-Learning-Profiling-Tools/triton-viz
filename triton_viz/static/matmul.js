@@ -55,7 +55,16 @@ export function createMatMulVisualization(containerElement, op) {
             containerElement.appendChild(badge);
         }
     } catch(e){}
-    let hoveredCube = null;
+    let hoveredHit = null;
+    let lastHoverKey = null;
+    let hoverToken = 0;
+    let hoverRaf = null;
+    let lastMouseEvent = null;
+    let highlightA = [];
+    let highlightB = [];
+    let highlightC = [];
+    let rafId = null;
+    let renderPending = false;
 
 
 
@@ -120,14 +129,13 @@ export function createMatMulVisualization(containerElement, op) {
 
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
-    // persistent calibration offsets shared with Load view for consistency
-    let mouseDx = Number(localStorage.getItem('viz_mouse_dx') || 0);
-    let mouseDy = Number(localStorage.getItem('viz_mouse_dy') || 0);
+    const mouseDx = 0;
+    const mouseDy = 0;
 
 
     function _updateMouseNDC(event) {
         const rect = renderer.domElement.getBoundingClientRect();
-        const dpr = (window.devicePixelRatio || 1);
+        const dpr = renderer.getPixelRatio();
         const px = (event.clientX - rect.left + mouseDx) * dpr;
         const py = (event.clientY - rect.top  + mouseDy) * dpr;
         const w = rect.width * dpr, h = rect.height * dpr;
@@ -135,57 +143,124 @@ export function createMatMulVisualization(containerElement, op) {
         mouse.y = -(py / h) * 2 + 1;
     }
 
-    async function onMouseMove(event) {
-        _updateMouseNDC(event);
+    function instanceCoord(mesh, instanceId) {
+        const cols = mesh.userData.cols;
+        const row = Math.floor(instanceId / cols);
+        const col = instanceId - row * cols;
+        return [row, col];
+    }
 
-        raycaster.setFromCamera(mouse, camera);
+    const tmpMatrix = new THREE.Matrix4();
+    const tmpPosition = new THREE.Vector3();
+    const tmpQuat = new THREE.Quaternion();
+    const tmpScale = new THREE.Vector3();
 
-        const allMatrixChildren = [
-            ...(matrixA ? matrixA.children : []),
-            ...(matrixB ? matrixB.children : []),
-            ...(matrixC ? matrixC.children : [])
-        ];
+    function instanceLocalPosition(mesh, instanceId, target) {
+        mesh.getMatrixAt(instanceId, tmpMatrix);
+        tmpMatrix.decompose(target, tmpQuat, tmpScale);
+        return target;
+    }
 
-        const intersects = raycaster.intersectObjects(allMatrixChildren, true);
+    function setOutlinePosition(mesh, instanceId) {
+        instanceLocalPosition(mesh, instanceId, tmpPosition);
+        mesh.localToWorld(tmpPosition);
+        hoverOutline.position.copy(tmpPosition);
+        hoverOutline.visible = true;
+    }
 
-        if (hoveredCube) {
-            hoveredCube.getObjectByName('hoverOutline').visible = false;
-            hoveredCube = null;
+    function clearHighlight(list, mesh, baseColor) {
+        if (list.length === 0) return;
+        list.forEach((idx) => mesh.setColorAt(idx, baseColor));
+        list.length = 0;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+
+    function applyHighlights(row, col) {
+        clearHighlight(highlightA, matrixA, COLOR_A);
+        clearHighlight(highlightB, matrixB, COLOR_B);
+        if (!colorOn) clearHighlight(highlightC, matrixC, COLOR_C);
+
+        const aCols = matrixA.userData.cols;
+        const bCols = matrixB.userData.cols;
+        const cCols = matrixC.userData.cols;
+
+        for (let j = 0; j < aCols; j++) {
+            const idx = row * aCols + j;
+            highlightA.push(idx);
+            matrixA.setColorAt(idx, COLOR_HIGHLIGHT);
+        }
+        for (let i = 0; i < matrixB.userData.rows; i++) {
+            const idx = i * bCols + col;
+            highlightB.push(idx);
+            matrixB.setColorAt(idx, COLOR_HIGHLIGHT);
+        }
+        if (!colorOn) {
+            const cIdx = row * cCols + col;
+            highlightC.push(cIdx);
+            matrixC.setColorAt(cIdx, COLOR_FILLED);
         }
 
-        if (intersects.length > 0) {
-            // Find the actual cube (parent of the intersected object)
-            hoveredCube = intersects[0].object;
-            while (hoveredCube && !hoveredCube.matrixName) {
-                hoveredCube = hoveredCube.parent;
+        if (matrixA.instanceColor) matrixA.instanceColor.needsUpdate = true;
+        if (matrixB.instanceColor) matrixB.instanceColor.needsUpdate = true;
+        if (matrixC.instanceColor) matrixC.instanceColor.needsUpdate = true;
+    }
+
+    function clearHighlights(includeC) {
+        clearHighlight(highlightA, matrixA, COLOR_A);
+        clearHighlight(highlightB, matrixB, COLOR_B);
+        if (includeC) clearHighlight(highlightC, matrixC, COLOR_C);
+    }
+
+    function onMouseMove(event) {
+        lastMouseEvent = event;
+        if (hoverRaf) return;
+        hoverRaf = requestAnimationFrame(() => {
+            hoverRaf = null;
+            handleMouseMove(lastMouseEvent);
+        });
+    }
+
+    async function handleMouseMove(event) {
+        _updateMouseNDC(event);
+        raycaster.setFromCamera(mouse, camera);
+
+        let needsRender = false;
+        const intersects = raycaster.intersectObjects([matrixA, matrixB, matrixC], true);
+        const hit = intersects.length > 0 ? intersects[0] : null;
+        const nextHover = hit && hit.instanceId !== undefined ? { mesh: hit.object, instanceId: hit.instanceId } : null;
+
+        if (hoveredHit && (!nextHover || hoveredHit.mesh !== nextHover.mesh || hoveredHit.instanceId !== nextHover.instanceId)) {
+            if (hoverOutline.visible) {
+                hoverOutline.visible = false;
+                needsRender = true;
             }
+        }
+        hoveredHit = nextHover;
 
-            if (hoveredCube) {
-                const hoverOutline = hoveredCube.getObjectByName('hoverOutline');
-                if (hoverOutline) {
-                    hoverOutline.visible = true;
-                }
-                const res = await getElementValue(hoveredCube.matrixName, hoveredCube.matrixRow, hoveredCube.matrixCol);
-                // Log the matrix name, row, and column of the hovered cube
-                console.log(
-                    // `Matrix: ${hoveredCube.matrixName}, ` +
-                    // `Row: ${hoveredCube.matrixRow + 1}, ` +
-                    // `Column: ${hoveredCube.matrixCol + 1}`+
-                    `Value: ${res.value}`
-                );
+        if (hoveredHit) {
+            setOutlinePosition(hoveredHit.mesh, hoveredHit.instanceId);
+            needsRender = true;
 
-                // If hovering C, fetch vectors and update panel
+            const matrixName = hoveredHit.mesh.userData.matrixName;
+            const [row, col] = instanceCoord(hoveredHit.mesh, hoveredHit.instanceId);
+            const hoverKey = `${matrixName}:${row},${col}`;
+            if (hoverKey !== lastHoverKey) {
+                lastHoverKey = hoverKey;
+                updateSideMenu(matrixName, col, row, null, undefined);
+                const token = ++hoverToken;
+                const res = await getElementValue(matrixName, row, col);
+                if (token !== hoverToken) return;
+
                 let vectors = null;
                 let valueForPanel = res && res.value !== undefined ? res.value : undefined;
-                if (hoveredCube.matrixName === 'C') {
+                if (matrixName === 'C') {
                     try {
                         const resp = await fetch(`${API_BASE}/api/getMatmulVectors`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ uuid: op.uuid, row: hoveredCube.matrixRow, col: hoveredCube.matrixCol })
+                            body: JSON.stringify({ uuid: op.uuid, row, col })
                         });
                         vectors = await resp.json();
-                        // Compute C[row,col] directly from vectors if available
                         if (vectors && !vectors.error && Array.isArray(vectors.a_row) && Array.isArray(vectors.b_col)) {
                             const aRow = vectors.a_row;
                             const bCol = vectors.b_col;
@@ -196,26 +271,22 @@ export function createMatMulVisualization(containerElement, op) {
                         }
                     } catch (e) { vectors = { error: String(e) }; }
 
-                    // highlight A[row,:], B[:,col], C[row,col]
-                    resetColors();
-                    const row = hoveredCube.matrixRow;
-                    const col = hoveredCube.matrixCol;
-                    const highlightA = Array.from({ length: input_shape[1] }, (_, i) => [row, i]);
-                    const highlightB = Array.from({ length: other_shape[0] }, (_, i) => [i, col]);
-                    const highlightC = [[row, col]];
-                    highlightCubes(matrixA, highlightA, COLOR_HIGHLIGHT);
-                    highlightCubes(matrixB, highlightB, COLOR_HIGHLIGHT);
-                    highlightCubes(matrixC, highlightC, COLOR_FILLED);
+                    applyHighlights(row, col);
+                    needsRender = true;
                 } else {
-                    // hovering A/B or others -> just reset
-                    resetColors();
+                    clearHighlights(!colorOn);
+                    needsRender = true;
                 }
-                updateSideMenu(hoveredCube.matrixName, hoveredCube.matrixRow, hoveredCube.matrixCol, vectors, valueForPanel);
+                updateSideMenu(matrixName, col, row, vectors, valueForPanel);
             }
         } else {
+            lastHoverKey = null;
             updateSideMenu(null);
-            resetColors();
+            clearHighlights(!colorOn);
+            needsRender = true;
         }
+
+        if (needsRender) requestRender();
     }
 
 
@@ -231,7 +302,6 @@ export function createMatMulVisualization(containerElement, op) {
     const COLOR_HIGHLIGHT = new THREE.Color(0.0, 0.0, 1.0);
     const COLOR_FILLED = new THREE.Color(0.0, 0.0, 1.0);
     const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);
-    const COLOR_EDGE = new THREE.Color(0.3, 0.3, 0.3);
     const COLOR_HOVER = new THREE.Color(1.0, 1.0, 0.0);
 
     const scene = new THREE.Scene();
@@ -239,7 +309,7 @@ export function createMatMulVisualization(containerElement, op) {
     const camera = new THREE.PerspectiveCamera(45, containerElement.clientWidth / containerElement.clientHeight, 0.1, 1000);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    const dpr = (window.devicePixelRatio || 1);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     renderer.setPixelRatio(dpr);
     renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
     containerElement.appendChild(renderer.domElement);
@@ -255,54 +325,78 @@ export function createMatMulVisualization(containerElement, op) {
     scene.add(directionalLight);
 
     const cubeGeometry = new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE);
-    const edgesGeometry = new THREE.EdgesGeometry(cubeGeometry);
-    const lineMaterial = new THREE.LineBasicMaterial({ color: COLOR_EDGE });
+    const normals = cubeGeometry.attributes.normal;
+    const colorArray = new Float32Array(cubeGeometry.attributes.position.count * 3);
+    const lightDir = new THREE.Vector3(0.35, 0.6, 0.7).normalize();
+    for (let i = 0; i < normals.count; i++) {
+        const nx = normals.getX(i);
+        const ny = normals.getY(i);
+        const nz = normals.getZ(i);
+        const ndotl = Math.max(0, nx * lightDir.x + ny * lightDir.y + nz * lightDir.z);
+        const shade = 0.6 + 0.4 * ndotl;
+        const base = i * 3;
+        colorArray[base] = shade;
+        colorArray[base + 1] = shade;
+        colorArray[base + 2] = shade;
+    }
+    cubeGeometry.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+    const spacing = CUBE_SIZE + GAP;
 
-    function createCube(color, matrixName, i, j) {
-        const cubeMaterial = new THREE.MeshPhongMaterial({ color: color });
-        const cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
-        const edges = new THREE.LineSegments(edgesGeometry, lineMaterial);
-        cube.add(edges);
-
-        const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
-        const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
-        const hoverOutline = new THREE.LineSegments(hoverEdgesGeometry, new THREE.LineBasicMaterial({ color: COLOR_HOVER }));
-        hoverOutline.visible = false;
-        hoverOutline.name = 'hoverOutline';
-        cube.add(hoverOutline);
-
-        cube.name = `${matrixName}_cube_${i}_${j}`;
-        cube.matrixName = matrixName;
-        cube.matrixRow = i;
-        cube.matrixCol = j;
-
-        return cube;
+    function matrixSize(dimensions) {
+        return {
+            rows: dimensions[0],
+            cols: dimensions[1],
+            width: dimensions[1] * spacing,
+            height: dimensions[0] * spacing
+        };
     }
 
-    function createMatrix(dimensions, position, color, matrixName) {
-        const matrix = new THREE.Group();
-        matrix.userData.dimensions = dimensions;
-        for (let i = 0; i < dimensions[0]; i++) {
-            for (let j = 0; j < dimensions[1]; j++) {
-                const cube = createCube(color, matrixName, i, j);
-                cube.position.set(
-                    position.x + j * (CUBE_SIZE + GAP),
-                    position.y - i * (CUBE_SIZE + GAP),
-                    position.z
-                );
-                matrix.add(cube);
+    function createMatrixMesh(dimensions, position, color, matrixName) {
+        const { rows, cols } = matrixSize(dimensions);
+        const count = rows * cols;
+        const material = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
+        const mesh = new THREE.InstancedMesh(cubeGeometry, material, count);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+        const matrix = new THREE.Matrix4();
+        for (let i = 0; i < rows; i++) {
+            for (let j = 0; j < cols; j++) {
+                const idx = i * cols + j;
+                matrix.setPosition(position.x + j * spacing, position.y - i * spacing, position.z);
+                mesh.setMatrixAt(idx, matrix);
+                mesh.setColorAt(idx, color);
             }
         }
-        return matrix;
+        mesh.userData.matrixName = matrixName;
+        mesh.userData.rows = rows;
+        mesh.userData.cols = cols;
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        mesh.computeBoundingBox();
+        mesh.computeBoundingSphere();
+        return mesh;
     }
 
-    const matrixA = createMatrix(input_shape, new THREE.Vector3(-10, 10, 0), COLOR_A, 'A');
-    const matrixB = createMatrix(other_shape, new THREE.Vector3(0, 10, 0), COLOR_B, 'B');
-    const matrixC = createMatrix(output_shape, new THREE.Vector3(-5, -4, 0), COLOR_C, 'C');
+    const gap = spacing;
+    const sizeA = matrixSize(input_shape);
+    const sizeB = matrixSize(other_shape);
+    const sizeC = matrixSize(output_shape);
+    const posC = new THREE.Vector3(0, 0, 0);
+    const posA = new THREE.Vector3(-(sizeA.width + gap), 0, 0);
+    const posB = new THREE.Vector3(0, sizeB.height + gap, 0);
+
+    const matrixA = createMatrixMesh(input_shape, posA, COLOR_A, 'A');
+    const matrixB = createMatrixMesh(other_shape, posB, COLOR_B, 'B');
+    const matrixC = createMatrixMesh(output_shape, posC, COLOR_C, 'C');
 
     scene.add(matrixA);
     scene.add(matrixB);
     scene.add(matrixC);
+    const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
+    const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
+    const hoverOutline = new THREE.LineSegments(hoverEdgesGeometry, new THREE.LineBasicMaterial({ color: COLOR_HOVER }));
+    hoverOutline.visible = false;
+    scene.add(hoverOutline);
 
     const center = new THREE.Vector3();
     const size = new THREE.Vector3();
@@ -321,37 +415,48 @@ export function createMatMulVisualization(containerElement, op) {
     controls.dampingFactor = 0.05;
     controls.target.copy(center);
     controls.update();
-
-    // remove auto animation; highlight is driven by mouse hover only
-
-    function highlightCubes(matrix, indices, highlightColor) {
-        indices.forEach(([i, j]) => {
-            if (i >= 0 && i < matrix.userData.dimensions[0] && j >= 0 && j < matrix.userData.dimensions[1]) {
-                const index = i * matrix.userData.dimensions[1] + j;
-                if (index < matrix.children.length) {
-                    matrix.children[index].material.color.copy(highlightColor);
-
-                }
-            }
-        });
-    }
+    controls.addEventListener('change', requestRender);
 
     function resetColors() {
-        matrixA.children.forEach(cube => cube.material.color.copy(COLOR_A));
-        matrixB.children.forEach(cube => cube.material.color.copy(COLOR_B));
-        matrixC.children.forEach(cube => cube.material.color.copy(COLOR_C));
+        clearHighlights(true);
+        for (let idx = 0; idx < matrixA.count; idx++) {
+            matrixA.setColorAt(idx, COLOR_A);
+        }
+        for (let idx = 0; idx < matrixB.count; idx++) {
+            matrixB.setColorAt(idx, COLOR_B);
+        }
+        for (let idx = 0; idx < matrixC.count; idx++) {
+            matrixC.setColorAt(idx, COLOR_C);
+        }
+        if (matrixA.instanceColor) matrixA.instanceColor.needsUpdate = true;
+        if (matrixB.instanceColor) matrixB.instanceColor.needsUpdate = true;
+        if (matrixC.instanceColor) matrixC.instanceColor.needsUpdate = true;
     }
 
-    function animate() {
-        requestAnimationFrame(animate);
-        controls.update();
+    function requestRender() {
+        if (rafId !== null) {
+            renderPending = true;
+            return;
+        }
+        rafId = requestAnimationFrame(renderFrame);
+    }
+
+    function renderFrame() {
+        const needsMore = controls.update();
         renderer.render(scene, camera);
+        if (needsMore || renderPending) {
+            renderPending = false;
+            rafId = requestAnimationFrame(renderFrame);
+            return;
+        }
+        rafId = null;
     }
 
     function onResize() {
         camera.aspect = containerElement.clientWidth / containerElement.clientHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
+        requestRender();
     }
 
     const controlPanel = document.createElement('div');
@@ -387,14 +492,19 @@ export function createMatMulVisualization(containerElement, op) {
             return await res.json(); }catch(e){ return {error:String(e)} }
     }
     function applyColorCWithData(data){ if(!colorOn||!data||data.error) return; try{
-            const M=(data.shape||[])[0]||0, N=(data.shape||[])[1]||0; const vals2d=data.values||[]; const vals=[]; const cells=[];
-            matrixC.children.forEach((cube,i)=>{ const row=Math.floor(i/N), col=i%N; cells.push({cube,row,col}); vals.push((row<M&&col<N)? vals2d[row][col]:0.0); });
+            const M=(data.shape||[])[0]||0, N=(data.shape||[])[1]||0; const vals2d=data.values||[];
+            const vals=[]; const rows=matrixC.userData.rows; const cols=matrixC.userData.cols;
+            for(let r=0;r<rows;r++){ for(let c=0;c<cols;c++){ vals.push((r<M&&c<N)? vals2d[r][c]:0.0); } }
             const mn=Math.min(...vals), mx=Math.max(...vals);
-            cells.forEach((e,idx)=>{ const v=vals[idx]; const u=(mx===mn)?0.5:(v-mn)/(mx-mn); const r=u,g=0.2,b=1-u; e.cube.material.color.setRGB(r,g,b); });
+            for(let idx=0;idx<vals.length;idx++){
+                const v=vals[idx]; const u=(mx===mn)?0.5:(v-mn)/(mx-mn); const r=u,g=0.2,b=1-u;
+                matrixC.setColorAt(idx, new THREE.Color(r,g,b));
+            }
+            if (matrixC.instanceColor) matrixC.instanceColor.needsUpdate = true;
             createLegend(mn,mx);
         }catch(e){}
     }
-    colorToggle.addEventListener('click', async ()=>{ colorOn=!colorOn; colorToggle.textContent=`Color by Value: ${colorOn?'ON':'OFF'}`; if(!colorOn){ destroyLegend(); resetColors(); } else { const data=await fetchCValues(); applyColorCWithData(data); } });
+    colorToggle.addEventListener('click', async ()=>{ colorOn=!colorOn; colorToggle.textContent=`Color by Value: ${colorOn?'ON':'OFF'}`; if(!colorOn){ destroyLegend(); resetColors(); } else { clearHighlights(true); const data=await fetchCValues(); applyColorCWithData(data); } requestRender(); });
 
     containerElement.appendChild(controlPanel);
 
@@ -438,6 +548,7 @@ export function createMatMulVisualization(containerElement, op) {
         }
         camera.setRotationFromEuler(cameraRotation);
         camera.updateProjectionMatrix();
+        requestRender();
     }
 
     window.addEventListener('resize', onResize);
@@ -452,9 +563,9 @@ export function createMatMulVisualization(containerElement, op) {
         const direction = event.deltaY > 0 ? 1 : -1;
         camera.position.z += direction * WHEEL_ZOOM_SPEED;
         camera.updateProjectionMatrix();
+        requestRender();
     }, { passive: false });
-
-    animate();
+    requestRender();
 
 
     function cleanup() {

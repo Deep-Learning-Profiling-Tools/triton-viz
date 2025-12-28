@@ -18,6 +18,7 @@ export class GridBlock {
         this.drawFunction = drawFunction;
         this.isDetailedViewVisible = false;
         this.contentArea = null;
+        this.currentSelectedTab = null;
     }
 
 
@@ -197,21 +198,20 @@ export class GridBlock {
             overflowX: 'auto'
         });
 
-        let currentSelectedTab = null;
-        // Tabs for each op
+        this.currentSelectedTab = null;
+        // tabs for each op
         this.blockData.forEach((op, index) => {
             const opTab = this.createOperationTab(op, index === 0);
-            opTab.addEventListener('click', () => this.handleTabClick(opTab, op, currentSelectedTab));
+            opTab.addEventListener('click', () => this.handleTabClick(opTab, op));
             headerBar.appendChild(opTab);
-            if (index === 0) currentSelectedTab = opTab;
+            if (index === 0) this.currentSelectedTab = opTab;
         });
         // Extra: NKI view tab (aggregates all ops)
         const nkiTab = document.createElement('button');
         nkiTab.textContent = 'Flow';
         Object.assign(nkiTab.style, { flex:'0 0 auto', marginRight:'5px', background:'#333', color:'#fff', border:'none', padding:'10px', cursor:'pointer' });
         nkiTab.addEventListener('click', () => {
-            if (currentSelectedTab) currentSelectedTab.style.backgroundColor = '#333';
-            nkiTab.style.backgroundColor = '#555';
+            this.setActiveTab(nkiTab);
             this.displayFlowDiagram();
         });
         headerBar.appendChild(nkiTab);
@@ -234,9 +234,14 @@ export class GridBlock {
         return opTab;
     }
 
-    handleTabClick(clickedTab, op, currentSelectedTab) {
-        if (currentSelectedTab) currentSelectedTab.style.backgroundColor = '#333';
-        clickedTab.style.backgroundColor = '#555';
+    setActiveTab(tab) {
+        if (this.currentSelectedTab) this.currentSelectedTab.style.backgroundColor = '#333';
+        this.currentSelectedTab = tab;
+        if (tab) tab.style.backgroundColor = '#555';
+    }
+
+    handleTabClick(clickedTab, op) {
+        this.setActiveTab(clickedTab);
         this.displayOpVisualization(op);
     }
 

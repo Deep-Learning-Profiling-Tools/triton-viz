@@ -4,14 +4,12 @@ import {
     setupScene,
     setupGeometries,
     createTensor,
-    calculateTensorSize,
-    updateCubeColor,
     setupCamera,
     setupEventListeners,
-    cameraControls
+    cameraControls,
+    CUBE_SIZE,
+    COLOR_HOVER
 } from './load_utils.js';
-import { createFlipDemo } from './flip_demo.js';
-import { createFlip3D } from './flip_3d.js';
 
 export function createStoreVisualization(containerElement, op) {
 
@@ -28,12 +26,8 @@ export function createStoreVisualization(containerElement, op) {
         .then(data => console.log('Set current op:', data))
         .catch((error) => console.error('Error:', error));
 
-        let currentStep = 0;
-        let frame = 0;
-        let isPaused = false;
-
         const sideMenu = createSideMenu(containerElement);
-        // Controls bar (drag toggle only for Store view)
+        // Controls bar
         const controlBar = document.createElement('div');
         controlBar.style.position = 'fixed';
         controlBar.style.top = '10px';
@@ -42,34 +36,41 @@ export function createStoreVisualization(containerElement, op) {
         controlBar.style.gap = '8px';
         controlBar.style.zIndex = '2000';
         controlBar.style.pointerEvents = 'auto';
-        const dragToggle = document.createElement('button');
-        dragToggle.textContent = 'Drag Cubes: OFF';
-        controlBar.appendChild(dragToggle);
+        const colorizeToggle = document.createElement('button');
+        colorizeToggle.textContent = 'Color by Value: OFF';
+        controlBar.appendChild(colorizeToggle);
         containerElement.appendChild(controlBar);
-        let dragModeOn = false;
-        let hoveredCube = null;
-        let flipCleanup = null;
+        let hoveredHit = null;
+        let lastHoverKey = null;
+        let hoverToken = 0;
+        let hoverRaf = null;
+        let lastMouseEvent = null;
+        let colorizeOn = false;
+        let tensorCache = null;
+        let legendEl = null;
+        let rafId = null;
+        let renderPending = false;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray
         const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
-        const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0); // Magenta (starting color for left slice)
-        const COLOR_LOADED = new THREE.Color(1.0, 0.8, 0.0);    // Gold (final color for both slices)
         const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);  // Black
-
         const { scene, camera, renderer } = setupScene(containerElement, COLOR_BACKGROUND);
-        const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
+        const { cubeGeometry } = setupGeometries();
 
-        const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
-        const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
-
-        // Position slice tensor
-        const globalSize = calculateTensorSize(op.global_shape);
-        sliceTensor.position.set(globalSize.x + 5, 0, 0); // Adjusted tensor spacing
+        const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry);
+        const globalMesh = globalTensor.userData.mesh;
+        const highlightedGlobalIndices = globalTensor.userData.highlightedIndices;
 
         scene.add(globalTensor);
-        scene.add(sliceTensor);
 
-        addLabels(scene, globalTensor, sliceTensor);
+        addLabels(scene, globalTensor);
+        const allTensorChildren = [globalMesh];
+        const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
+        const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
+        const hoverMaterial = new THREE.LineBasicMaterial({ color: COLOR_HOVER });
+        const globalHoverOutline = new THREE.LineSegments(hoverEdgesGeometry, hoverMaterial);
+        globalHoverOutline.visible = false;
+        globalTensor.add(globalHoverOutline);
 
         // Overlay memory flow badges if available (NKI only)
         try {
@@ -97,160 +98,253 @@ export function createStoreVisualization(containerElement, op) {
         orbitControls.dampingFactor = 0.05;
         orbitControls.target.copy(center);
         orbitControls.update();
-
-        const totalFrames = op.global_coords.length * 2 + 30;
+        orbitControls.addEventListener('change', requestRender);
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
-        // Drag state (optional)
-        let isDragging = false;
-        let dragTarget = null;
-        const dragPlane = new THREE.Plane();
-        const planeIntersect = new THREE.Vector3();
-        const worldPosHelper = new THREE.Vector3();
-        const dragOffset = new THREE.Vector3();
+        const mouseDx = 0;
+        const mouseDy = 0;
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown);
-        containerElement.addEventListener('mousedown', onMouseDown);
-        containerElement.addEventListener('mouseup', onMouseUp);
-        containerElement.addEventListener('mouseleave', onMouseUp);
-        dragToggle.addEventListener('click', () => {
-            dragModeOn = !dragModeOn;
-            dragToggle.textContent = `Drag Cubes: ${dragModeOn ? 'ON' : 'OFF'}`;
-            orbitControls.enabled = !dragModeOn;
+        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, requestRender);
+        colorizeToggle.addEventListener('click', async () => {
+            colorizeOn = !colorizeOn;
+            colorizeToggle.textContent = `Color by Value: ${colorizeOn ? 'ON' : 'OFF'}`;
+            if (colorizeOn) {
+                if (!tensorCache) {
+                    tensorCache = await fetchGlobalTensor();
+                }
+                if (tensorCache) {
+                    applyColorMap();
+                    createLegend(tensorCache.min, tensorCache.max);
+                }
+                requestRender();
+                return;
+            }
+            resetGlobalColors();
+            destroyLegend();
+            requestRender();
         });
         // Removed Flip demo button from Store view; Flip visualization is available under Flip op.
-        animate();
+        requestRender();
 
         function _updateMouseNDC(event) {
-            mouse.x = (event.clientX / containerElement.clientWidth) * 2 - 1;
-            mouse.y = -(event.clientY / containerElement.clientHeight) * 2 + 1;
+            const rect = renderer.domElement.getBoundingClientRect();
+            const dpr = renderer.getPixelRatio();
+            const px = (event.clientX - rect.left + mouseDx) * dpr;
+            const py = (event.clientY - rect.top + mouseDy) * dpr;
+            const w = rect.width * dpr, h = rect.height * dpr;
+            mouse.x = (px / w) * 2 - 1;
+            mouse.y = -(py / h) * 2 + 1;
         }
 
         function _raycastAll() {
             raycaster.setFromCamera(mouse, camera);
-            const allTensorChildren = [
-                ...globalTensor.children,
-                ...sliceTensor.children
-            ];
             return raycaster.intersectObjects(allTensorChildren, true);
         }
 
-        function _toTopLevelCube(obj) {
-            let node = obj;
-            while (node && !(node.userData && node.userData.tensorName)) {
-                node = node.parent;
-            }
-            return node;
+        const tmpMatrix = new THREE.Matrix4();
+        const tmpPosition = new THREE.Vector3();
+        const tmpQuat = new THREE.Quaternion();
+        const tmpScale = new THREE.Vector3();
+
+        function instanceCoord(mesh, instanceId) {
+            if (mesh.userData.coords) return mesh.userData.coords[instanceId];
+            const { width, height } = mesh.userData.shape;
+            const z = Math.floor(instanceId / (width * height));
+            const rem = instanceId - z * width * height;
+            const y = Math.floor(rem / width);
+            const x = rem - y * width;
+            return [x, y, z];
         }
 
-        async function onMouseMove(event) {
-            _updateMouseNDC(event);
+        function instanceLocalPosition(mesh, instanceId, target) {
+            mesh.getMatrixAt(instanceId, tmpMatrix);
+            tmpMatrix.decompose(target, tmpQuat, tmpScale);
+            return target;
+        }
 
-            raycaster.setFromCamera(mouse, camera);
-            if (isDragging && dragTarget) {
-                if (raycaster.ray.intersectPlane(dragPlane, planeIntersect)) {
-                    const newWorld = planeIntersect.add(dragOffset);
-                    dragTarget.parent.worldToLocal(newWorld);
-                    dragTarget.position.copy(newWorld);
+        function setOutlinePosition(outline, mesh, instanceId) {
+            instanceLocalPosition(mesh, instanceId, tmpPosition);
+            outline.position.copy(tmpPosition);
+            outline.visible = true;
+        }
+
+        function baseGlobalColorByIndex(idx) {
+            return highlightedGlobalIndices.has(idx) ? COLOR_SLICE : COLOR_GLOBAL;
+        }
+
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function lerpColor(c1, c2, t) {
+            const r = Math.round(lerp(c1[0], c2[0], t)) / 255;
+            const g = Math.round(lerp(c1[1], c2[1], t)) / 255;
+            const b = Math.round(lerp(c1[2], c2[2], t)) / 255;
+            return new THREE.Color(r, g, b);
+        }
+        const VIRIDIS = [
+            [0.00, [68, 1, 84]],
+            [0.25, [59, 82, 139]],
+            [0.50, [33, 145, 140]],
+            [0.75, [94, 201, 98]],
+            [1.00, [253, 231, 37]]
+        ];
+        function viridisColor(t) {
+            if (t <= 0) return new THREE.Color().setRGB(...VIRIDIS[0][1].map(v=>v/255));
+            if (t >= 1) return new THREE.Color().setRGB(...VIRIDIS[VIRIDIS.length-1][1].map(v=>v/255));
+            for (let i = 0; i < VIRIDIS.length - 1; i++) {
+                const [p, c] = VIRIDIS[i];
+                const [pn, cn] = VIRIDIS[i+1];
+                if (t >= p && t <= pn) {
+                    const tt = (t - p) / (pn - p);
+                    return lerpColor(c, cn, tt);
                 }
             }
+            return new THREE.Color(1,1,1);
+        }
+
+        function applyColorMap() {
+            if (!colorizeOn || !tensorCache) return;
+            const { min, max, dims, values } = tensorCache;
+            const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+            const norm = (v) => (max === min ? 0.5 : (v - min) / (max - min));
+            for (let idx = 0; idx < globalMesh.count; idx++) {
+                const [x, y, z] = instanceCoord(globalMesh, idx);
+                let v = 0.0;
+                try {
+                    if (dims === 3) v = values[x][y][z];
+                    else if (dims === 2) v = values[x][y];
+                    else if (dims === 1) v = values[x];
+                } catch (e) { /* ignore bad index */ }
+                const u = clamp(norm(v), 0, 1);
+                globalMesh.setColorAt(idx, viridisColor(u));
+            }
+            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
+        }
+
+        function resetGlobalColors() {
+            for (let idx = 0; idx < globalMesh.count; idx++) {
+                globalMesh.setColorAt(idx, baseGlobalColorByIndex(idx));
+            }
+            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
+        }
+
+        function destroyLegend() {
+            if (legendEl && legendEl.remove) legendEl.remove();
+            legendEl = null;
+        }
+
+        function createLegend(min, max) {
+            destroyLegend();
+            const wrapper = document.createElement('div');
+            wrapper.style.position = 'fixed';
+            wrapper.style.left = '10px';
+            wrapper.style.top = '50px';
+            wrapper.style.padding = '6px 8px';
+            wrapper.style.background = 'rgba(0,0,0,0.6)';
+            wrapper.style.color = '#fff';
+            wrapper.style.font = '12px Arial, sans-serif';
+            wrapper.style.borderRadius = '6px';
+            wrapper.style.zIndex = '2000';
+
+            const title = document.createElement('div');
+            title.textContent = 'Value (Viridis)';
+            title.style.marginBottom = '4px';
+            title.style.opacity = '0.9';
+            wrapper.appendChild(title);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 220; canvas.height = 10;
+            const ctx2 = canvas.getContext('2d');
+            for (let x = 0; x < canvas.width; x++) {
+                const t = x / (canvas.width - 1);
+                const c = viridisColor(t);
+                ctx2.fillStyle = `rgb(${Math.round(c.r*255)},${Math.round(c.g*255)},${Math.round(c.b*255)})`;
+                ctx2.fillRect(x, 0, 1, canvas.height);
+            }
+            wrapper.appendChild(canvas);
+
+            const labels = document.createElement('div');
+            labels.style.display = 'flex';
+            labels.style.justifyContent = 'space-between';
+            labels.style.marginTop = '2px';
+            labels.innerHTML = `<span>${min.toFixed(3)}</span><span>${max.toFixed(3)}</span>`;
+            wrapper.appendChild(labels);
+
+            containerElement.appendChild(wrapper);
+            legendEl = wrapper;
+        }
+
+        function onMouseMove(event) {
+            lastMouseEvent = event;
+            if (hoverRaf) return;
+            hoverRaf = requestAnimationFrame(() => {
+                hoverRaf = null;
+                handleMouseMove(lastMouseEvent);
+            });
+        }
+
+        function handleMouseMove(event) {
+            _updateMouseNDC(event);
+            raycaster.setFromCamera(mouse, camera);
+
+            let needsRender = false;
 
             const intersects = _raycastAll();
-
-            if (hoveredCube) {
-                hoveredCube.getObjectByName('hoverOutline').visible = false;
-                hoveredCube = null;
+            const hit = intersects.length > 0 ? intersects[0] : null;
+            const nextHover = hit && hit.instanceId !== undefined ? { mesh: hit.object, instanceId: hit.instanceId } : null;
+            const prevOutline = hoveredHit ? globalHoverOutline : null;
+            const nextOutline = nextHover ? globalHoverOutline : null;
+            if (prevOutline && (!nextHover || hoveredHit.mesh !== nextHover.mesh || hoveredHit.instanceId !== nextHover.instanceId)) {
+                if (prevOutline.visible) {
+                    prevOutline.visible = false;
+                    needsRender = true;
+                }
             }
+            hoveredHit = nextHover;
 
-            if (intersects.length > 0) {
-                hoveredCube = _toTopLevelCube(intersects[0].object);
+            if (hoveredHit) {
+                if (nextOutline && !nextOutline.visible) {
+                    setOutlinePosition(nextOutline, hoveredHit.mesh, hoveredHit.instanceId);
+                    needsRender = true;
+                }
 
-                if (hoveredCube) {
-                    const hoverOutline = hoveredCube.getObjectByName('hoverOutline');
-                    if (hoverOutline) {
-                        hoverOutline.visible = true;
-                    }
-
-                    const { tensorName, tensor0, tensor1, tensor2 } = hoveredCube.userData;
+                const tensorName = hoveredHit.mesh.userData.tensorName;
+                const [tensor0, tensor1, tensor2] = instanceCoord(hoveredHit.mesh, hoveredHit.instanceId);
+                const hoverKey = `${tensorName}:${tensor0},${tensor1},${tensor2}`;
+                if (hoverKey !== lastHoverKey) {
+                    lastHoverKey = hoverKey;
                     updateSideMenu(tensorName, tensor0, tensor1, tensor2, undefined);
-
-                    const res = await getElementValue(tensorName, tensor0, tensor1, tensor2);
-
-                    updateSideMenu(tensorName, tensor0, tensor1, tensor2, res.value);
-
-                    console.log(`Value: ${res.value}`);
+                    const token = ++hoverToken;
+                    getElementValue(tensorName, tensor0, tensor1, tensor2).then((res) => {
+                        if (token !== hoverToken) return;
+                        updateSideMenu(tensorName, tensor0, tensor1, tensor2, res.value);
+                    });
                 }
             } else {
-                updateSideMenu(null);
-            }
-        }
-
-        function onMouseDown(event) {
-            if (!dragModeOn) return;
-            _updateMouseNDC(event);
-            const hits = _raycastAll();
-            if (hits.length === 0) return;
-            const cube = _toTopLevelCube(hits[0].object);
-            if (!cube) return;
-            const normal = new THREE.Vector3();
-            camera.getWorldDirection(normal);
-            cube.getWorldPosition(worldPosHelper);
-            dragPlane.setFromNormalAndCoplanarPoint(normal, worldPosHelper);
-            raycaster.setFromCamera(mouse, camera);
-            if (!raycaster.ray.intersectPlane(dragPlane, planeIntersect)) return;
-            dragOffset.copy(worldPosHelper).sub(planeIntersect);
-            isDragging = true;
-            dragTarget = cube;
-            containerElement.style.cursor = 'grabbing';
-        }
-
-        function onMouseUp() {
-            if (!dragModeOn) return;
-            isDragging = false;
-            dragTarget = null;
-            containerElement.style.cursor = '';
-        }
-
-        function animate() {
-            requestAnimationFrame(animate);
-            orbitControls.update();
-
-            if (!isPaused && frame < totalFrames) {
-                const index = Math.floor(frame / 2);
-                const factor = (frame % 2) / 1.0;
-
-                if (index < op.global_coords.length) {
-                    const globalCoord = op.global_coords[index];
-                    const sliceCoord = op.slice_coords[index];
-
-                    updateCubeColor(globalTensor, globalCoord, COLOR_GLOBAL, COLOR_SLICE, factor);
-                    updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
-
-                    highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord);
-                    updateInfoPanel(globalCoord, sliceCoord, index);
-                }
-
-                frame++;
+                if (lastHoverKey !== null) updateSideMenu(null);
+                lastHoverKey = null;
             }
 
+            if (needsRender) requestRender();
+        }
+
+        function requestRender() {
+            if (rafId !== null) {
+                renderPending = true;
+                return;
+            }
+            rafId = requestAnimationFrame(renderFrame);
+        }
+
+        function renderFrame() {
+            const needsMore = orbitControls.update();
             renderer.render(scene, camera);
-        }
-
-        function highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord) {
-            globalTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
-            sliceTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
-
-            const globalCube = globalTensor.children.find(c =>
-                c.userData && c.userData.tensor0 === globalCoord[0] && c.userData.tensor1 === globalCoord[1] && c.userData.tensor2 === globalCoord[2]
-            );
-            const sliceCube = sliceTensor.children.find(c =>
-                c.userData && c.userData.tensor0 === sliceCoord[0] && c.userData.tensor1 === sliceCoord[1] && c.userData.tensor2 === sliceCoord[2]
-            );
-
-            if (globalCube) globalCube.material.emissive.setHex(0x444444);
-            if (sliceCube) sliceCube.material.emissive.setHex(0x444444);
+            if (needsMore || renderPending) {
+                renderPending = false;
+                rafId = requestAnimationFrame(renderFrame);
+                return;
+            }
+            rafId = null;
         }
 
         async function getElementValue(tensorName, x, y, z) {
@@ -265,13 +359,32 @@ export function createStoreVisualization(containerElement, op) {
             return await response.json();
         }
 
+        async function fetchGlobalTensor() {
+            try {
+                const res = await fetch(`${API_BASE}/api/getLoadTensor`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uuid: op.uuid })
+                });
+                const data = await res.json();
+                if (!data || data.error) {
+                    console.warn('getLoadTensor error:', data && data.error);
+                    return null;
+                }
+                return data;
+            } catch (e) {
+                console.error('getLoadTensor failed', e);
+                return null;
+            }
+        }
+
         function updateSideMenu(tensorName, x, y, z, value) {
             if (!tensorName) {
                 sideMenu.innerHTML = '';
                 return;
             }
 
-            let dims = tensorName === 'Global' ? op.global_shape : op.slice_shape;
+            let dims = op.global_shape;
             sideMenu.innerHTML = `
                 <h3 style="margin-top: 0;">${tensorName} Tensor</h3>
                 <p>X: ${x + 1}</p>
@@ -279,15 +392,6 @@ export function createStoreVisualization(containerElement, op) {
                 <p>Z: ${z + 1}</p>
                 <p>Dimensions: ${dims.join(' x ')}</p>
                 <p>Value: ${value !== undefined ? value : 'Storeing...'}</p>
-            `;
-        }
-
-        function updateInfoPanel(globalCoord, sliceCoord, index) {
-            sideMenu.innerHTML = `
-                <h3>Current Operation</h3>
-                <p>Global Coords: (${globalCoord.join(', ')})</p>
-                <p>Slice Coords: (${sliceCoord.join(', ')})</p>
-                <p>Progress: ${index + 1}/${op.global_coords.length}</p>
             `;
         }
 
@@ -307,9 +411,8 @@ export function createStoreVisualization(containerElement, op) {
             return menu;
         }
 
-        function addLabels(scene, globalTensor, sliceTensor) {
+        function addLabels(scene, globalTensor) {
             addLabel(scene, "Global Tensor", globalTensor.position);
-            addLabel(scene, "Slice Tensor", sliceTensor.position);
         }
 
         function addLabel(scene, text, position) {
