@@ -2,7 +2,7 @@ from collections import namedtuple
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property, reduce
-from typing import Any, ClassVar, Optional, Union, TypeAlias, cast
+from typing import Any, ClassVar, NoReturn, Optional, Union, TypeAlias, cast
 import sys
 import re
 
@@ -82,7 +82,7 @@ from ...core.config import config as cfg
 
 
 Z3Expr: TypeAlias = Union[ExprRef, int, list[ExprRef], list[int], Tactic, Probe]
-ConstraintExpr: TypeAlias = Union[ExprRef, int, float]
+ConstraintExpr: TypeAlias = Union[ExprRef, int, float, bool]
 
 
 @dataclass
@@ -95,12 +95,11 @@ class LoopContext:
     step: int = 1
     values: list[int] = field(default_factory=list)
     signature_cache: set[int] = field(default_factory=set)
-    pending_checks: list[tuple[Z3Expr, list[BoolRef], "SymbolicExpr"]] = field(
+    pending_checks: list[tuple[Z3Expr, list[ConstraintExpr], "SymbolicExpr"]] = field(
         default_factory=list
     )
-    # Clean up variable names by removing suffixes like _81, _144
-    # Cache compiled regex pattern for better performance
-    re_pattern = re.compile(r"(loop_i|arange)_\d+")
+    # Normalize loop/arange suffixes in signature strings (e.g., loop_i_81 -> loop_i).
+    re_pattern: ClassVar[re.Pattern[str]] = re.compile(r"(loop_i|arange)_\d+")
 
 
 @dataclass
@@ -147,28 +146,32 @@ class Sanitizer(Client):
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 
-    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+    def pre_warmup_callback(
+        self, jit_fn: Callable, *args: Any, **kwargs: Any
+    ) -> bool:
         return False
 
-    def post_warmup_callback(self, jit_fn, ret) -> None:
+    def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
         pass
 
-    def arg_callback(self, *args, **kwargs):  # type: ignore[override]
+    def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
         raise NotImplementedError
 
-    def finalize(self, *args, **kwargs):  # type: ignore[override]
+    def finalize(self) -> list:
         raise NotImplementedError
 
-    def grid_callback(self, *args, **kwargs):  # type: ignore[override]
+    def grid_callback(self, grid: tuple[int, ...]) -> None:
         raise NotImplementedError
 
-    def grid_idx_callback(self, *args, **kwargs):  # type: ignore[override]
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         raise NotImplementedError
 
-    def register_op_callback(self, *args, **kwargs):  # type: ignore[override]
+    def register_op_callback(
+        self, op_type: type[Op], *args: Any, **kwargs: Any
+    ) -> OpCallbacks:
         raise NotImplementedError
 
-    def register_for_loop_callback(self, *args, **kwargs):  # type: ignore[override]
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
         raise NotImplementedError
 
 
@@ -313,7 +316,9 @@ class SymbolicExpr:
     PID1: ClassVar[ArithRef] = Int("pid_1")
     PID2: ClassVar[ArithRef] = Int("pid_2")
 
-    ARANGE_DICT: ClassVar[dict[tuple[int, int], tuple[ArithRef, list[BoolRef]]]] = {}
+    ARANGE_DICT: ClassVar[
+        dict[tuple[int, int], tuple[ArithRef, list[ConstraintExpr]]]
+    ] = {}
     _OP_CLASS_MAP: ClassVar[dict[str, type["SymbolicExpr"]]] = {}
 
     @classmethod
@@ -351,7 +356,7 @@ class SymbolicExpr:
         # z3
         self.z3: Optional[Z3Expr] = None
 
-        self.constraints: list[BoolRef] = []
+        self.constraints: list[ConstraintExpr] = []
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -561,11 +566,12 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> tuple[Z3Expr, list[BoolRef]]:
+    def eval(self) -> tuple[Z3Expr, list[ConstraintExpr]]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression (or list of expressions) corresponding to the root node
-        - constraints: list of Z3 BoolExpr objects, recording all range constraints created by program_id and arange
+        - constraints: list of constraint expressions (Z3 Bool/Arith or scalars),
+          recording all range constraints created by program_id and arange
         """
         expr, constraints = self._to_z3()
 
@@ -576,7 +582,7 @@ class SymbolicExpr:
 
         return expr, constraints
 
-    def _to_z3(self) -> tuple[Z3Expr, list[BoolRef]]:
+    def _to_z3(self) -> tuple[Z3Expr, list[ConstraintExpr]]:
         if self.z3 is not None:
             return self.z3, self.constraints
 
@@ -1357,6 +1363,8 @@ SymbolicExpr.register_op_class(AtomicSymbolicExpr, SymbolicExpr.ATOMIC_OPS)
 
 
 def _sexpr_or_str(expr: Any) -> str:
+    if isinstance(expr, bool):
+        return "true" if expr else "false"
     if isinstance(expr, (int, np.integer)):
         return str(int(expr))
     sexpr = getattr(expr, "sexpr", None)
@@ -1366,7 +1374,9 @@ def _sexpr_or_str(expr: Any) -> str:
 
 
 def _make_signature(
-    addr_expr: Z3Expr, constraints: list[BoolRef], re_pattern: re.Pattern[str]
+    addr_expr: Z3Expr,
+    constraints: Sequence[ConstraintExpr],
+    re_pattern: re.Pattern[str],
 ) -> int:
     """
     Convert (addr, constraints) into a stable string signature.
@@ -1378,7 +1388,7 @@ def _make_signature(
     else:
         addr_repr = _sexpr_or_str(addr_expr)
 
-    constr_repr = "|".join(sorted(c.sexpr() for c in constraints))
+    constr_repr = "|".join(sorted(_sexpr_or_str(c) for c in constraints))
 
     addr_repr = re_pattern.sub(r"\1", addr_repr)
     constr_repr = re_pattern.sub(r"\1", constr_repr)
@@ -1392,10 +1402,10 @@ class _FnSymbolicCache:
     args: tuple
 
     @cached_property
-    def hash_value(self):
+    def hash_value(self) -> int:
         return hash((self.fn, self.grid, self.args))
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return self.hash_value
 
 
@@ -1498,19 +1508,9 @@ class SymbolicSanitizer(Sanitizer):
     def _check_range_satisfiable(
         self,
         access_addr: Z3Expr,
-        expr_constraints: list[BoolRef],
+        expr_constraints: Sequence[ConstraintExpr],
         symbolic_expr: SymbolicExpr,
     ) -> None:
-        if isinstance(access_addr, list):
-            for addr in access_addr:
-                self._check_range_satisfiable(addr, expr_constraints, symbolic_expr)
-            return
-
-        # Use push/pop on persistent solver
-        assert self.solver is not None
-        assert self.addr_sym is not None
-        self.solver.push()
-        self.solver.add(self.addr_sym == access_addr)
         bool_constraints: list[BoolRef] = []
         for c in expr_constraints:
             if isinstance(c, BoolRef):
@@ -1523,28 +1523,48 @@ class SymbolicSanitizer(Sanitizer):
                 bool_constraints.append(BoolVal(int(c) != 0))
             else:
                 bool_constraints.append(cast(BoolRef, c != 0))
-        self.solver.add(And(*bool_constraints))
-        if self.solver.check() == sat:
-            # Get the model to find the violation address
-            model = self.solver.model()
-            violation_val = model.evaluate(self.addr_sym, model_completion=True)
-            if isinstance(violation_val, IntNumRef):
-                violation_addr = violation_val.as_long()
-            else:
-                raise RuntimeError("Unexpected violation address type from Z3 model!")
 
-            # Find the tensor that this address belongs to
-            tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+        # Use push/pop on persistent solver
+        solver = self.solver
+        addr_sym = self.addr_sym
+        assert solver is not None
+        assert addr_sym is not None
 
-            # Determine operation type from symbolic expression
-            if symbolic_expr.op == "store":
-                op_type: type[Load] | type[Store] = Store
-            else:
-                op_type = Load
+        def _check_single_addr(addr_expr: Z3Expr) -> None:
+            solver.push()
+            solver.add(addr_sym == addr_expr)
+            if bool_constraints:
+                solver.add(And(*bool_constraints))
+            if solver.check() == sat:
+                # Get the model to find the violation address
+                model = solver.model()
+                violation_val = model.evaluate(addr_sym, model_completion=True)
+                if isinstance(violation_val, IntNumRef):
+                    violation_addr = violation_val.as_long()
+                else:
+                    raise RuntimeError(
+                        "Unexpected violation address type from Z3 model!"
+                    )
 
-            # Report with symbolic expression
-            self._report(op_type, tensor, violation_addr, symbolic_expr)
-        self.solver.pop()
+                # Find the tensor that this address belongs to
+                tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+
+                # Determine operation type from symbolic expression
+                if symbolic_expr.op == "store":
+                    op_type: type[Load] | type[Store] = Store
+                else:
+                    op_type = Load
+
+                # Report with symbolic expression
+                self._report(op_type, tensor, violation_addr, symbolic_expr)
+            solver.pop()
+
+        if isinstance(access_addr, list):
+            for addr in access_addr:
+                _check_single_addr(addr)
+            return
+
+        _check_single_addr(access_addr)
 
     def _handle_access_check(self, expr: SymbolicExpr) -> None:
         """
@@ -1678,9 +1698,6 @@ class SymbolicSanitizer(Sanitizer):
             SymbolicExpr.PID2 >= 0,
         )
         self.pid_ok = cast(BoolRef, pid_ok_expr)
-
-        assert self.addr_ok is not None
-        assert self.pid_ok is not None
 
         self.solver = Solver()
         self.solver.add(Not(self.addr_ok))
@@ -2138,17 +2155,22 @@ class SymbolicSanitizer(Sanitizer):
                 return
             ctx = self.loop_stack.pop()
             # add constraints for loop_i
-            iterator_constraints: list[Z3Expr] = []
+            iterator_constraints: list[ConstraintExpr] = []
             if ctx.values:
                 iterator_constraints.append(
                     Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
                 )
 
-            def _filter_constraints(addr_expr, constraints):
+            def _filter_constraints(
+                addr_expr: Z3Expr, constraints: Sequence[ConstraintExpr]
+            ) -> list[ConstraintExpr]:
                 addr_eq = self.addr_sym == addr_expr
                 relevant_vars = set(get_vars(addr_eq))
-                filtered = []
+                filtered: list[ConstraintExpr] = []
                 for constraint in constraints:
+                    if not isinstance(constraint, ExprRef):
+                        filtered.append(constraint)
+                        continue
                     constraint_vars = set(get_vars(constraint))
                     if constraint_vars and not constraint_vars.issubset(relevant_vars):
                         continue
@@ -2157,10 +2179,9 @@ class SymbolicSanitizer(Sanitizer):
 
             # execute pending checks
             for check_tuple in ctx.pending_checks:
-                # Handle both old format (2-tuple) and new format (3-tuple)
                 addr_expr, expr_constraints, symbolic_expr = check_tuple
 
-                combined_constraints = expr_constraints + iterator_constraints
+                combined_constraints = list(expr_constraints) + iterator_constraints
 
                 if cfg.verbose:
                     print(
@@ -2214,32 +2235,34 @@ class NullSanitizer(Sanitizer):
     Any attribute access raises an explicit error so misuse is obvious.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)  # Initialize parent class
+    def __init__(self, abort_on_error: bool = True, *args: Any, **kwargs: Any):
+        super().__init__(abort_on_error=abort_on_error, *args, **kwargs)  # Initialize parent class
 
-    def _disabled(self, method: str):
+    def _disabled(self, method: str) -> NoReturn:
         raise RuntimeError(
             f"[NullSanitizer] '{method}' was called, "
             "but sanitizer backend is off; no functionality is available."
         )
 
-    def arg_callback(self, *args, **kwargs):
+    def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
         self._disabled("arg_callback")
 
-    def finalize(self, *args, **kwargs):
+    def finalize(self) -> list:
         self._disabled("finalize")
 
-    def grid_callback(self, *args, **kwargs):
+    def grid_callback(self, grid: tuple[int, ...]) -> None:
         self._disabled("grid_callback")
 
-    def grid_idx_callback(self, *args, **kwargs):
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         self._disabled("grid_idx_callback")
 
-    def register_op_callback(self, *args, **kwargs):
+    def register_op_callback(
+        self, op_type: type[Op], *args: Any, **kwargs: Any
+    ) -> OpCallbacks:
         self._disabled("register_op_callback")
 
-    def register_for_loop_callback(self, *args, **kwargs):
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
         self._disabled("register_for_loop_callback")
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         self._disabled(name)
