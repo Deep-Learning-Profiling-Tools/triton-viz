@@ -1,4 +1,3 @@
-from unittest import result
 import pytest
 import torch
 import numpy as np
@@ -6,12 +5,10 @@ from typing import Any, cast
 
 import triton
 import triton.language as tl
-from triton.runtime.interpreter import TensorHandle
 
 import triton_viz
-from triton_viz import trace
 from triton_viz.core.config import config as cfg
-from triton_viz.core.data import AddPtr, Load, RawLoad, Trans
+from triton_viz.core.data import Load, RawLoad
 from triton_viz.core.client import Client
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.sanitizer import (
@@ -21,14 +18,16 @@ from triton_viz.clients.sanitizer.sanitizer import (
     RangeWrapper,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
-from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
+from z3.z3 import ArithRef, IntNumRef
 
 # ======== Helpers ===========
+
 
 class LoadIndexChecker(SymbolicSanitizer):
     """
     Record all offsets, then union into a set.
     """
+
     def __new__(cls, *a: Any, **k: Any) -> "LoadIndexChecker":
         # Ensure we construct the subclass directly (some sanitizer bases use a
         # factory-style __new__/typing that returns "Sanitizer").
@@ -55,10 +54,12 @@ class LoadIndexChecker(SymbolicSanitizer):
             cur = expr
             while cur.op == "addptr":
                 off = cur.offset
-                if off.op == "const":  # If any offset is not constant, we cannot sum it.
+                if (
+                    off.op == "const"
+                ):  # If any offset is not constant, we cannot sum it.
                     offsets.append(off.to_py().tolist())
                 cur = cur.ptr
-            
+
             if len(offsets) == 0:
                 return None
             return np.sum(offsets, axis=0)
@@ -84,10 +85,12 @@ class LoadIndexChecker(SymbolicSanitizer):
 
 load_index_checker: LoadIndexChecker = LoadIndexChecker(abort_on_error=True)
 
+
 class LoopBoundsChecker(SymbolicSanitizer):
     """
     Record concretized loop bounds.
     """
+
     def __new__(cls, *a: Any, **k: Any) -> "LoopBoundsChecker":
         # Ensure we construct the subclass directly (some sanitizer bases use a
         # factory-style __new__/typing that returns "Sanitizer").
@@ -123,6 +126,7 @@ class LoopBoundsChecker(SymbolicSanitizer):
 
 loop_bounds_checker: LoopBoundsChecker = LoopBoundsChecker(abort_on_error=True)
 
+
 # ======== Init ===========
 def test_init_null_sanitizer():
     cfg.enable_sanitizer = False
@@ -146,6 +150,7 @@ def test_init_default_sanitizer():
         assert isinstance(s, Client)
     finally:
         cfg.enable_sanitizer = False
+
 
 # ======== Indirect Load/Store ===========
 
@@ -178,7 +183,9 @@ def test_indirect_load():
         expected_offsets == observed_offsets
     ), "Observed offsets do not match expected offsets."
 
+
 # ======== Loop Tests ===========
+
 
 @triton_viz.trace(client=loop_bounds_checker)
 @triton.jit
@@ -188,6 +195,7 @@ def loop_bounds_kernel(start_ptr, stop_ptr, out_ptr):
     for _ in range(start, stop):
         pass
     tl.store(out_ptr, start)
+
 
 @triton_viz.trace(client=loop_bounds_checker)
 @triton.jit
@@ -210,6 +218,7 @@ def test_loop_bounds_from_load():
 
     assert loop_bounds_checker.observed_bounds == [(2, 6, 1)]
 
+
 def test_loop_bounds_from_pid():
     loop_bounds_checker.observed_bounds.clear()
     out = torch.empty((2,), dtype=torch.int32)
@@ -221,16 +230,20 @@ def test_loop_bounds_from_pid():
 
 # ======== Reduce Operations =========
 
+
 @pytest.mark.parametrize("op", ["max", "min", "sum"])
 @pytest.mark.parametrize("data", [[1, 5, 3, 2], [42]])
 def test_reduce_expr_eval(op: str, data):
     input_arr = SymbolicExpr.create("const", np.array(data), tl.int32)
     max_expr = SymbolicExpr.create(op, input_arr, None, False)
     import builtins
+
     result, _ = max_expr.eval()
     assert cast(IntNumRef, result).as_long() == getattr(builtins, op)(data)
 
+
 # ======== Basic Symbolic Expr Operations =========
+
 
 @pytest.mark.parametrize("value", [(1, 2, 3), 4])
 def test_basic_expr_const_eval(value):
@@ -243,7 +256,14 @@ def test_basic_expr_const_eval(value):
     assert constraints == []
 
 
-@pytest.mark.parametrize("axis,expected_pid", [(0, SymbolicExpr.PID0), (1, SymbolicExpr.PID1), (2, SymbolicExpr.PID2),])
+@pytest.mark.parametrize(
+    "axis,expected_pid",
+    [
+        (0, SymbolicExpr.PID0),
+        (1, SymbolicExpr.PID1),
+        (2, SymbolicExpr.PID2),
+    ],
+)
 def test_basic_expr_pid_eval(axis, expected_pid):
     grid = (4, 5, 6)
     pid_expr = SymbolicExpr.create("pid", grid, axis)
@@ -262,9 +282,17 @@ def test_basic_expr_arange_eval(start, end):
     assert str(constraints[0]) == f"{result} >= {start}"
     assert str(constraints[1]) == f"{result} < {end}"
 
+
 # ======== Unary Symbolic Expr Operations =========
 
-@pytest.mark.parametrize( "op,value,expected", [ ("abs", -3, 3), ("fabs", -7, 7), ],)
+
+@pytest.mark.parametrize(
+    "op,value,expected",
+    [
+        ("abs", -3, 3),
+        ("fabs", -7, 7),
+    ],
+)
 def test_unary_expr_eval(op: str, value: int, expected: int):
     arg = SymbolicExpr.create("const", value, tl.int32)
     expr = SymbolicExpr.create(op, arg)
@@ -272,7 +300,9 @@ def test_unary_expr_eval(op: str, value: int, expected: int):
     assert cast(IntNumRef, result).as_long() == expected
     assert constraints == []
 
+
 # ======== Binary Symbolic Expr Operations =========
+
 
 @pytest.mark.parametrize(
     "op,lhs,rhs,expected",
@@ -306,7 +336,9 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
         assert cast(IntNumRef, result).as_long() == expected
     assert constraints == []
 
+
 # ======== Pointer Symbolic Expr Operations =========
+
 
 def test_pointer_expr_addptr_eval():
     base = SymbolicExpr.create("const", 100, tl.pointer_type(tl.int32))
@@ -316,7 +348,9 @@ def test_pointer_expr_addptr_eval():
     assert cast(IntNumRef, result).as_long() == 112
     assert constraints == []
 
+
 # ======== Reshape Symbolic Expr Operations =========
+
 
 @pytest.mark.parametrize(
     "op,extra",

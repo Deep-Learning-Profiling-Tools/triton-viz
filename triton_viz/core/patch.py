@@ -390,7 +390,9 @@ class PatchOp:
         if cfg.num_sms > 1:
             # periodically sleep briefly so other worker threads can run
             _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
-            _YIELD_SLEEP_SEC = 0.0005  # Small positive sleep to encourage OS-level yield
+            _YIELD_SLEEP_SEC = (
+                0.0005  # Small positive sleep to encourage OS-level yield
+            )
             now = time.perf_counter()
             last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
             if now - last >= _YIELD_INTERVAL_SEC:
@@ -418,8 +420,7 @@ class PatchOp:
                     cast(Any, ret).concrete_fn = TRITON_ORIGINAL_OPS[Load]
                 elif self.op_type == RawStore:
                     cast(Any, ret).concrete_fn = TRITON_ORIGINAL_OPS[Store]
-                else: 
-
+                else:
                     cast(Any, ret).concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)

@@ -19,9 +19,7 @@ class Config:
         # --- Sanitizer enable flag ---
         enable_sanitizer_env = os.getenv("ENABLE_SANITIZER")
         if enable_sanitizer_env is None:
-            self._enable_sanitizer = not (
-                os.getenv("DISABLE_SANITIZER", "0") == "1"
-            )
+            self._enable_sanitizer = not (os.getenv("DISABLE_SANITIZER", "0") == "1")
         else:
             self._enable_sanitizer = enable_sanitizer_env == "1"
 

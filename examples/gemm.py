@@ -1,7 +1,6 @@
 import torch
 from tqdm import tqdm
 import time
-import numpy as np
 
 import triton
 import triton.language as tl

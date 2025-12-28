@@ -95,9 +95,9 @@ class LoopContext:
     step: int = 1
     values: list[int] = field(default_factory=list)
     signature_cache: set[int] = field(default_factory=set)
-    pending_checks: list[
-        tuple[Z3Expr, list[BoolRef], "SymbolicExpr"]
-    ] = field(default_factory=list)
+    pending_checks: list[tuple[Z3Expr, list[BoolRef], "SymbolicExpr"]] = field(
+        default_factory=list
+    )
     # Clean up variable names by removing suffixes like _81, _144
     # Cache compiled regex pattern for better performance
     re_pattern = re.compile(r"(loop_i|arange)_\d+")
@@ -203,15 +203,12 @@ class SymbolicExprDataWrapper:
         if isinstance(val, TensorHandle):
             if val.data.size != 1:
                 raise ValueError(
-                    "Expected scalar TensorHandle, got size "
-                    f"{val.data.size}"
+                    "Expected scalar TensorHandle, got size " f"{val.data.size}"
                 )
             return int(val.data.item())
         if isinstance(val, np.ndarray):
             if val.size != 1:
-                raise ValueError(
-                    f"Expected scalar ndarray, got size {val.size}"
-                )
+                raise ValueError(f"Expected scalar ndarray, got size {val.size}")
             return int(val.item())
         raise ValueError(
             f"SymbolicExprDataWrapper cannot coerce type {type(val)} to int"
@@ -641,8 +638,8 @@ class SymbolicExpr:
         if anchor_op is None or (
             self.op == anchor_op
             and all(
-            (child is None) or (not child.has_op(anchor_op))
-            for child in self.children.values()
+                (child is None) or (not child.has_op(anchor_op))
+                for child in self.children.values()
             )
         ):
             concrete = self.concretize()
@@ -653,6 +650,7 @@ class SymbolicExpr:
 
         return self
 
+
 class BasicSymbolicExpr(SymbolicExpr):
     OP_SPEC: ClassVar[dict[str, Spec]] = {
         "const": Spec(req=("value", "dtype")),
@@ -662,8 +660,8 @@ class BasicSymbolicExpr(SymbolicExpr):
 
     def _post_init(self) -> None:
         if self.op == "pid":
-            self.dtype = tl.int32 
-        elif self.op == "arange": # Program ID / arange are always int32
+            self.dtype = tl.int32
+        elif self.op == "arange":  # Program ID / arange are always int32
             self.dtype = tl.block_type(tl.int32, [self.end.value - self.start.value])
 
     def _node_label_core(self) -> str:
@@ -1183,7 +1181,9 @@ class PointerSymbolicExpr(SymbolicExpr):
         ptr_z3, constraints_ptr = self.ptr._to_z3()
         offset_z3, constraints_offset = self.offset._to_z3()
         self.constraints = constraints_ptr + constraints_offset
-        element_bytewidth = max(1, self.ptr.dtype.scalar.element_ty.primitive_bitwidth // 8)
+        element_bytewidth = max(
+            1, self.ptr.dtype.scalar.element_ty.primitive_bitwidth // 8
+        )
         if isinstance(ptr_z3, list) and isinstance(offset_z3, list):
             if len(ptr_z3) != len(offset_z3):
                 raise ValueError(
@@ -1221,9 +1221,7 @@ class ReshapeSymbolicExpr(SymbolicExpr):
             self.dtype = self.lhs.dtype
         elif self.op == "splat":
             shape = self.children["shape"].dtype.shape
-            self.dtype = tl.block_type(
-                self.arg.dtype, shape
-            )
+            self.dtype = tl.block_type(self.arg.dtype, shape)
         elif self.op in ("expand_dims", "broadcast", "reshape", "trans"):
             self.dtype = self.arg.dtype
 
@@ -1285,7 +1283,9 @@ class CastSymbolicExpr(SymbolicExpr):
                 raise RuntimeError(f"{self.op}'s concrete function is not set!")
             src_concrete = self.src.concretize()
             dst_type_value = (
-                self.dst_type.value if hasattr(self.dst_type, "value") else self.dst_type
+                self.dst_type.value
+                if hasattr(self.dst_type, "value")
+                else self.dst_type
             )
             return fn(src_concrete, dst_type_value)
         return super()._concretize_impl()
@@ -1437,6 +1437,7 @@ class SymbolicSanitizer(Sanitizer):
 
         # Fall back to the closest registered segment.
         if self.tensor_addrs:
+
             def _distance(seg: tuple[int, int, Tensor]) -> int:
                 start, end, _tensor = seg
                 if violation_addr < start:
@@ -1497,15 +1498,11 @@ class SymbolicSanitizer(Sanitizer):
         if self.solver.check() == sat:
             # Get the model to find the violation address
             model = self.solver.model()
-            violation_val = model.evaluate(
-                self.addr_sym, model_completion=True
-            )
+            violation_val = model.evaluate(self.addr_sym, model_completion=True)
             if isinstance(violation_val, IntNumRef):
                 violation_addr = violation_val.as_long()
             else:
-                raise RuntimeError(
-                    "Unexpected violation address type from Z3 model!"
-                )
+                raise RuntimeError("Unexpected violation address type from Z3 model!")
 
             # Find the tensor that this address belongs to
             tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
@@ -1669,6 +1666,7 @@ class SymbolicSanitizer(Sanitizer):
             return op_load_overrider(
                 ptr, None, None, cache_modifier, eviction_policy, is_volatile
             )
+
         def op_load_overrider(ptr, mask, other, *args):
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
@@ -1696,6 +1694,7 @@ class SymbolicSanitizer(Sanitizer):
 
         def op_raw_store_overrider(ptr, value, cache_modifier, eviction_policy):
             return op_store_overrider(ptr, value, None, cache_modifier, eviction_policy)
+
         def op_store_overrider(ptr, value, mask, *args):
             # deal with indirect loads
             if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
@@ -1756,11 +1755,21 @@ class SymbolicSanitizer(Sanitizer):
                 np.fmod: lambda lhs, rhs: lhs % rhs,
                 np.maximum: lambda lhs, rhs: SymbolicExpr.create("maximum", lhs, rhs),
                 np.minimum: lambda lhs, rhs: SymbolicExpr.create("minimum", lhs, rhs),
-                np.bitwise_and: lambda lhs, rhs: SymbolicExpr.create("bitwise_and", lhs, rhs),
-                np.bitwise_or: lambda lhs, rhs: SymbolicExpr.create("bitwise_or", lhs, rhs),
-                np.bitwise_xor: lambda lhs, rhs: SymbolicExpr.create("bitwise_xor", lhs, rhs),
-                np.right_shift: lambda lhs, rhs: SymbolicExpr.create("right_shift", lhs, rhs),
-                np.left_shift: lambda lhs, rhs: SymbolicExpr.create("left_shift", lhs, rhs),
+                np.bitwise_and: lambda lhs, rhs: SymbolicExpr.create(
+                    "bitwise_and", lhs, rhs
+                ),
+                np.bitwise_or: lambda lhs, rhs: SymbolicExpr.create(
+                    "bitwise_or", lhs, rhs
+                ),
+                np.bitwise_xor: lambda lhs, rhs: SymbolicExpr.create(
+                    "bitwise_xor", lhs, rhs
+                ),
+                np.right_shift: lambda lhs, rhs: SymbolicExpr.create(
+                    "right_shift", lhs, rhs
+                ),
+                np.left_shift: lambda lhs, rhs: SymbolicExpr.create(
+                    "left_shift", lhs, rhs
+                ),
             }
             lhs_sym = SymbolicExpr.from_value(lhs)
             rhs_sym = SymbolicExpr.from_value(rhs)
@@ -1804,19 +1813,27 @@ class SymbolicSanitizer(Sanitizer):
             )
 
         def op_expand_dims_overrider(arg, axis):
-            return SymbolicExpr.create("expand_dims", SymbolicExpr.from_value(arg), axis)
+            return SymbolicExpr.create(
+                "expand_dims", SymbolicExpr.from_value(arg), axis
+            )
 
         def op_broadcast_overrider(arg, shape):
             return SymbolicExpr.create("broadcast", SymbolicExpr.from_value(arg), shape)
 
         def op_reduce_sum_overrider(input, axis=None, keep_dims=False, **kwargs):
-            return SymbolicExpr.create("sum", SymbolicExpr.from_value(input), axis, keep_dims)
+            return SymbolicExpr.create(
+                "sum", SymbolicExpr.from_value(input), axis, keep_dims
+            )
 
         def op_reduce_max_overrider(input, axis=None, keep_dims=False, **kwargs):
-            return SymbolicExpr.create("max", SymbolicExpr.from_value(input), axis, keep_dims)
+            return SymbolicExpr.create(
+                "max", SymbolicExpr.from_value(input), axis, keep_dims
+            )
 
         def op_reduce_min_overrider(input, axis=None, keep_dims=False, **kwargs):
-            return SymbolicExpr.create("min", SymbolicExpr.from_value(input), axis, keep_dims)
+            return SymbolicExpr.create(
+                "min", SymbolicExpr.from_value(input), axis, keep_dims
+            )
 
         def op_splat_overrider(shape, arg):
             return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))

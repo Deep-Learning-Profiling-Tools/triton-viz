@@ -8,10 +8,11 @@ from .config import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
-from typing import Callable, Optional, Union, TypeVar
+from typing import Callable, Optional, Union
 
 
 launches: list[Launch] = []
+
 
 class TraceInterface:
     def __init__(self, client: Union[str, Client]) -> None:
@@ -71,10 +72,12 @@ class TritonTrace(KernelInterface, TraceInterface):
 
         if isinstance(runner, Autotuner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
+
             # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
             def dummy_benchmarker(fn, quantiles):
                 fn()
                 return (1.0, 1.0, 1.0)
+
             runner._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
             runner.fn = self.interpreted_fn

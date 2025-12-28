@@ -192,6 +192,7 @@ def test_kernel_cache_autotune_with_dummy_benchmarker():
     """
     Test that autotuned kernels install dummy_benchmarker.
     """
+
     # Create a fresh autotuned kernel inside the test to avoid state corruption
     @triton.autotune(
         configs=[
