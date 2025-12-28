@@ -130,7 +130,7 @@ export function createFlipVisualization(containerElement, op) {
     const _hoverTimer = setInterval(syncHoverHighlight, 60);
     function _updateMouseNDC(event) {
         const rect = renderer.domElement.getBoundingClientRect();
-        const dpr = (window.devicePixelRatio || 1);
+        const dpr = renderer.getPixelRatio();
         const px = (event.clientX - rect.left) * dpr;
         const py = (event.clientY - rect.top ) * dpr;
         const w = rect.width * dpr, h = rect.height * dpr;

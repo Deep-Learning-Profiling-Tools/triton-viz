@@ -11,9 +11,9 @@ export function setupScene(container, backgroundColor = 0x000000) {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(backgroundColor);
     const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    // Honour device pixel ratio to align raycaster with drawn pixels
-    const dpr = (window.devicePixelRatio || 1);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    // cap device pixel ratio to reduce fillrate
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     renderer.setPixelRatio(dpr);
     renderer.setSize(container.clientWidth, container.clientHeight);
     container.appendChild(renderer.domElement);
@@ -42,6 +42,21 @@ export function setupScene(container, backgroundColor = 0x000000) {
 
 export function setupGeometries() {
     const cubeGeometry = new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE);
+    const normals = cubeGeometry.attributes.normal;
+    const colorArray = new Float32Array(cubeGeometry.attributes.position.count * 3);
+    const lightDir = new THREE.Vector3(0.35, 0.6, 0.7).normalize();
+    for (let i = 0; i < normals.count; i++) {
+        const nx = normals.getX(i);
+        const ny = normals.getY(i);
+        const nz = normals.getZ(i);
+        const ndotl = Math.max(0, nx * lightDir.x + ny * lightDir.y + nz * lightDir.z);
+        const shade = 0.6 + 0.4 * ndotl;
+        const base = i * 3;
+        colorArray[base] = shade;
+        colorArray[base + 1] = shade;
+        colorArray[base + 2] = shade;
+    }
+    cubeGeometry.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
     const edgesGeometry = new THREE.EdgesGeometry(cubeGeometry);
     // 细且半透明的边线材质；WebGL 会 clamp 线宽，但通过降低不透明度来让线"看起来更细"
     const lineMaterial = new THREE.LineBasicMaterial({
@@ -54,9 +69,10 @@ export function setupGeometries() {
 }
 
 export function createCube(color, tensorName, x, y, z, cubeGeometry, edgesGeometry, lineMaterial) {
-    const cubeMaterial = new THREE.MeshPhongMaterial({ color: color });
+    const cubeMaterial = new THREE.MeshPhongMaterial({ color: color, vertexColors: false });
     const cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
     const edges = new THREE.LineSegments(edgesGeometry, lineMaterial);
+    edges.name = 'edgeOutline';
     cube.add(edges);
     cube.userData.edges = edges;
 
@@ -67,7 +83,6 @@ export function createCube(color, tensorName, x, y, z, cubeGeometry, edgesGeomet
     hoverOutline.name = 'hoverOutline';
     cube.add(hoverOutline);
 
-    // Add custom properties to store tensor coordinates (x, y, z)
     cube.userData.tensor0 = x;
     cube.userData.tensor1 = y;
     cube.userData.tensor2 = z;
@@ -78,7 +93,7 @@ export function createCube(color, tensorName, x, y, z, cubeGeometry, edgesGeomet
     return cube;
 }
 
-export function createTensor(shape, coords, color, tensorName, cubeGeometry, edgesGeometry, lineMaterial) {
+export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
     console.log(`Creating ${tensorName} tensor:`, shape, coords);
     const tensor = new THREE.Group();
     // Normalize shape to width (X), height (Y), depth (Z)
@@ -97,25 +112,20 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry, edg
         [width, height, depth] = shape;
     }
 
-    if (tensorName === 'Global') {
-        console.log(`Creating global tensor with dimensions: ${width}x${height}x${depth}`);
-        for (let z = 0; z < depth; z++) {
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    const cube = createCube(color, tensorName, x, y, z, cubeGeometry, edgesGeometry, lineMaterial);
-                    cube.position.set(
-                        x * (CUBE_SIZE + GAP),
-                        -y * (CUBE_SIZE + GAP),
-                        -z * (CUBE_SIZE + GAP)
-                    );
-                    tensor.add(cube);
-                }
-            }
-        }
-        // Build deterministic index from placement order to avoid mismatch
-        const indexOf = (x, y, z) => z * (width * height) + y * width + x;
+    const spacing = CUBE_SIZE + GAP;
+    const isGlobal = tensorName === 'Global';
+    const instanceCount = isGlobal ? width * height * depth : coords.length;
+    const cubeMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
+    const mesh = new THREE.InstancedMesh(cubeGeometry, cubeMaterial, instanceCount);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(instanceCount * 3), 3);
+    const matrix = new THREE.Matrix4();
+    const baseColor = color instanceof THREE.Color ? color.clone() : new THREE.Color(color);
+    const highlightedIndices = new Set();
 
-        // Auto-detect coordinate axis order from incoming coords (try first N samples)
+    if (isGlobal) {
+        console.log(`Creating global tensor with dimensions: ${width}x${height}x${depth}`);
+        // auto-detect coordinate axis order from incoming coords (try first N samples)
         const samples = coords.slice(0, Math.min(256, coords.length));
         const maxIncoming = [0, 0, 0];
         for (const [a, b, c] of samples) {
@@ -164,28 +174,43 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry, edg
                 console.warn(`Could not find cube at (${A}, ${B}, ${C}) -> mapped to out-of-range (${x}, ${y}, ${z})`);
                 return;
             }
-            const idx = indexOf(x, y, z);
-            const cube = tensor.children[idx];
-            if (cube && cube.userData && cube.userData.tensor0 === x && cube.userData.tensor1 === y && cube.userData.tensor2 === z) {
-                cube.material.color.set(COLOR_SLICE);
-            } else {
-                console.warn(`Could not find cube at (${A}, ${B}, ${C}) -> mapped (${x}, ${y}, ${z})`);
-            }
+            const idx = z * (width * height) + y * width + x;
+            highlightedIndices.add(idx);
         });
+
+        let idx = 0;
+        for (let z = 0; z < depth; z++) {
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    matrix.setPosition(x * spacing, -y * spacing, -z * spacing);
+                    mesh.setMatrixAt(idx, matrix);
+                    mesh.setColorAt(idx, highlightedIndices.has(idx) ? COLOR_SLICE : baseColor);
+                    idx++;
+                }
+            }
+        }
     } else {
         console.log(`Creating slice tensor with ${coords.length} coordinates`);
-        coords.forEach(([x, y, z]) => {
-            const cube = createCube(color, tensorName, x, y, z, cubeGeometry, edgesGeometry, lineMaterial);
-            cube.position.set(
-                x * (CUBE_SIZE + GAP),
-                -y * (CUBE_SIZE + GAP),
-                -z * (CUBE_SIZE + GAP)
-            );
-            tensor.add(cube);
+        coords.forEach(([x, y, z], idx) => {
+            matrix.setPosition(x * spacing, -y * spacing, -z * spacing);
+            mesh.setMatrixAt(idx, matrix);
+            mesh.setColorAt(idx, baseColor);
         });
+        mesh.userData.coords = coords;
     }
 
-    console.log(`Created ${tensorName} tensor with ${tensor.children.length} cubes`);
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.userData.tensorName = tensorName;
+    mesh.userData.shape = { width, height, depth };
+    mesh.computeBoundingBox();
+    mesh.computeBoundingSphere();
+
+    tensor.add(mesh);
+    tensor.userData.mesh = mesh;
+    tensor.userData.highlightedIndices = highlightedIndices;
+
+    console.log(`Created ${tensorName} tensor with ${instanceCount} cubes`);
     return tensor;
 }
 
@@ -242,22 +267,27 @@ export function setupCamera(scene, camera) {
     return { center, cameraZ };
 }
 
-export function setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown) {
+export function setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, onRender) {
     window.addEventListener('resize', () => {
         camera.aspect = containerElement.clientWidth / containerElement.clientHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
+        if (onRender) onRender();
     });
     containerElement.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', (event) => {
+        onKeyDown(event);
+        if (onRender) onRender();
+    });
 
-    // Mouse wheel zoom
+    // mouse wheel zoom
     const WHEEL_ZOOM_SPEED = 0.5;
     containerElement.addEventListener('wheel', (event) => {
         event.preventDefault();
         const direction = event.deltaY > 0 ? 1 : -1;
         camera.position.z += direction * WHEEL_ZOOM_SPEED;
         camera.updateProjectionMatrix();
+        if (onRender) onRender();
     }, { passive: false });
 }
 
