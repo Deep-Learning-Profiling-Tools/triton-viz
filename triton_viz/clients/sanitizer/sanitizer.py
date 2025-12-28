@@ -615,9 +615,7 @@ class SymbolicExpr:
             if len(v.data) == 1:
                 return v.data.item()  # scalar case
             else:
-                raise NotImplementedError(
-                    "SymbolicExpr.to_py() for multi-element tensors is not implemented yet!"
-                )
+                return v.data.tolist()  # multi-element case
         return v
 
     def concretize(self) -> Any:
@@ -684,21 +682,25 @@ class BasicSymbolicExpr(SymbolicExpr):
         builder(self)
 
     def _build_const(self) -> None:
+        value = self.value
+        if isinstance(value, TensorHandle):
+            value = self.value.data
+
         if self.loop_ctx:  # if the self is a loop iterator
             self.z3 = self.loop_ctx.idx_z3
-        elif isinstance(self.value, np.ndarray):
-            self.z3 = [IntVal(int(v)) for v in self.value.flat]
-        elif isinstance(self.value, tuple):
-            self.z3 = [IntVal(int(v)) for v in self.value]
-        elif isinstance(self.value, (int, float)):
+        elif isinstance(value, np.ndarray):
+            self.z3 = [IntVal(int(v)) for v in value.flat]
+        elif isinstance(value, tuple):
+            self.z3 = [IntVal(int(v)) for v in value]
+        elif isinstance(value, (int, float)):
             # Convert to int for Z3 - Z3's IntVal cannot parse float strings
-            self.z3 = IntVal(int(self.value))
-        elif self.value is None:
+            self.z3 = IntVal(int(value))
+        elif value is None:
             # For None values, use 0 as a placeholder (e.g., for optional mask/other)
             self.z3 = IntVal(0)
         else:
             # For other types (e.g., tl.core.dtype), try converting to int
-            self.z3 = IntVal(int(self.value))
+            self.z3 = IntVal(int(value))
         self.constraints = []
 
     def _build_pid(self) -> None:

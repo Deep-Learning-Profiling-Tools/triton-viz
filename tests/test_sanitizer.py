@@ -13,12 +13,15 @@ from triton_viz.core.client import Client
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicExpr,
+    Z3Expr,
     NullSanitizer,
     SymbolicSanitizer,
     RangeWrapper,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
-from z3.z3 import ArithRef, IntNumRef
+from z3 import simplify, is_int_value
+from z3.z3 import ArithRef, BoolRef, IntNumRef
+from z3.z3util import get_vars
 
 # ======== Helpers ===========
 
@@ -27,12 +30,6 @@ class LoadIndexChecker(SymbolicSanitizer):
     """
     Record all offsets, then union into a set.
     """
-
-    def __new__(cls, *a: Any, **k: Any) -> "LoadIndexChecker":
-        # Ensure we construct the subclass directly (some sanitizer bases use a
-        # factory-style __new__/typing that returns "Sanitizer").
-        return object.__new__(cls)
-
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self._offset_lists: list[list[int]] = list()
@@ -57,7 +54,7 @@ class LoadIndexChecker(SymbolicSanitizer):
                 if (
                     off.op == "const"
                 ):  # If any offset is not constant, we cannot sum it.
-                    offsets.append(off.to_py().tolist())
+                    offsets.append(off.to_py())
                 cur = cur.ptr
 
             if len(offsets) == 0:
@@ -90,12 +87,6 @@ class LoopBoundsChecker(SymbolicSanitizer):
     """
     Record concretized loop bounds.
     """
-
-    def __new__(cls, *a: Any, **k: Any) -> "LoopBoundsChecker":
-        # Ensure we construct the subclass directly (some sanitizer bases use a
-        # factory-style __new__/typing that returns "Sanitizer").
-        return object.__new__(cls)
-
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self._bounds: list[tuple[int, int, int]] = list()
@@ -125,6 +116,51 @@ class LoopBoundsChecker(SymbolicSanitizer):
 
 
 loop_bounds_checker: LoopBoundsChecker = LoopBoundsChecker(abort_on_error=True)
+
+
+class LoopDeferredCheckRecorder(SymbolicSanitizer):
+    """
+    Record when deferred checks are executed after loop exit.
+    """
+    def __init__(self, *a, **k) -> None:
+        super().__init__(*a, **k)
+        self.after_loop_pending: list[int] = []
+        self.check_inside_loop: list[tuple[Z3Expr, list[BoolRef]]] = []
+
+    def _check_range_satisfiable(
+        self,
+        access_addr: Z3Expr,
+        expr_constraints: list[BoolRef],
+        symbolic_expr: SymbolicExpr,
+    ) -> None:
+        self.check_inside_loop.append((access_addr, expr_constraints))
+        super()._check_range_satisfiable(access_addr, expr_constraints, symbolic_expr)
+
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        callbacks = super().register_for_loop_callback()
+        orig_after = callbacks.after_loop_callback
+
+        def _after_loop(lineno: int) -> None:
+            pending = 0
+            if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+                pending = len(self.loop_stack[-1].pending_checks)
+            if orig_after is not None:
+                orig_after(lineno)
+            self.after_loop_pending.append(pending)
+
+        return ForLoopCallbacks(
+            range_wrapper_factory=callbacks.range_wrapper_factory,
+            range_type_callback=callbacks.range_type_callback,
+            before_loop_callback=callbacks.before_loop_callback,
+            loop_iter_overrider=callbacks.loop_iter_overrider,
+            loop_iter_listener=callbacks.loop_iter_listener,
+            after_loop_callback=_after_loop,
+        )
+
+
+loop_deferred_check_recorder: LoopDeferredCheckRecorder = LoopDeferredCheckRecorder(
+    abort_on_error=False
+)
 
 
 # ======== Init ===========
@@ -208,6 +244,14 @@ def loop_bounds_pid_kernel(out_ptr):
     tl.store(out_ptr + pid, start)
 
 
+@triton_viz.trace(client=loop_deferred_check_recorder)
+@triton.jit
+def loop_deferred_check_kernel(out_ptr):
+    for i in range(0, 4):
+        idx = i + 1
+        tl.store(out_ptr + idx, idx)
+
+
 def test_loop_bounds_from_load():
     loop_bounds_checker.observed_bounds.clear()
     start = torch.tensor([2], dtype=torch.int32)
@@ -226,6 +270,24 @@ def test_loop_bounds_from_pid():
     loop_bounds_pid_kernel[(2,)](out)
 
     assert loop_bounds_checker.observed_bounds == [(0, 2, 1), (1, 3, 1)]
+
+
+def test_loop_deferred_checks_after_context():
+    loop_deferred_check_recorder.after_loop_pending.clear()
+    loop_deferred_check_recorder.check_inside_loop.clear()
+    loop_deferred_check_recorder.records.clear()
+
+    out = torch.empty((2,), dtype=torch.int32)
+
+    loop_deferred_check_kernel[(1,)](out)
+
+    assert loop_deferred_check_recorder.after_loop_pending == [1]
+    addr_expr, constraints = loop_deferred_check_recorder.check_inside_loop[0]
+    assert "4*loop_i_2" in str(addr_expr)
+    assert len(constraints) == 1
+    values = {cast(IntNumRef,c.arg(1)).as_long() for c in constraints[0].children()}
+    assert values == {0, 1, 2, 3}
+    assert loop_deferred_check_recorder.records
 
 
 # ======== Reduce Operations =========
@@ -266,7 +328,7 @@ def test_basic_expr_const_eval(value):
 )
 def test_basic_expr_pid_eval(axis, expected_pid):
     grid = (4, 5, 6)
-    pid_expr = SymbolicExpr.create("pid", grid, axis)
+    pid_expr = SymbolicExpr.create("pid", axis)
     result, constraints = pid_expr.eval()
     assert result == expected_pid
     assert constraints == []
