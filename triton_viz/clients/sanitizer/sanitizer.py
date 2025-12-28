@@ -1172,8 +1172,7 @@ class PointerSymbolicExpr(SymbolicExpr):
 
     def _post_init(self) -> None:
         if self.op == "addptr":
-            assert self.ptr is not None
-            self.dtype = self.ptr.dtype.element_ty
+            self.dtype = self.ptr.dtype
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
