@@ -2028,9 +2028,17 @@ class SymbolicSanitizer(Sanitizer):
             if isinstance(expr, SymbolicExpr):
                 if expr.op == "const":
                     return SymbolicExprDataWrapper.coerce_int(expr.to_py())
-                self.need_full_grid = True
-                expr = expr.replace_subtree()
-                return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+                elif expr.has_op("load"):
+                    self.need_full_grid = True
+                    expr = expr.replace_subtree("load")
+                    return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+                else:
+                    z3_expr, _ = expr.eval()
+                    if isinstance(z3_expr, IntNumRef):
+                        return z3_expr.as_long()
+                    self.need_full_grid = True
+                    expr = expr.replace_subtree()
+                    return SymbolicExprDataWrapper.coerce_int(expr.to_py())
 
             return int(expr)
 
