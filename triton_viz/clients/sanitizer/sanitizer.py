@@ -2199,11 +2199,12 @@ class SymbolicSanitizer(Sanitizer):
                     And(ctx.idx_z3 >= start, ctx.idx_z3 < stop)
                     for start, stop in ctx.values
                 ]
-                iterator_constraints.append(
+                iterator_constraint = (
                     interval_constraints[0]
                     if len(interval_constraints) == 1
                     else Or(*interval_constraints)
                 )
+                iterator_constraints.append(cast(ExprRef, iterator_constraint))
 
             # execute pending checks
             for check_tuple in ctx.pending_checks:
@@ -2219,19 +2220,11 @@ class SymbolicSanitizer(Sanitizer):
                         f" and expression-related constraints: {expr_constraints} ",
                     )
 
-                if isinstance(addr_expr, list):
-                    for single_addr_expr in addr_expr:
-                        self._check_range_satisfiable(
-                            single_addr_expr,
-                            combined_constraints,
-                            symbolic_expr,
-                        )
-                else:
-                    self._check_range_satisfiable(
-                        addr_expr,
-                        combined_constraints,
-                        symbolic_expr,
-                    )
+                self._check_range_satisfiable(
+                    addr_expr,
+                    combined_constraints,
+                    symbolic_expr,
+                )
 
             if cfg.verbose:
                 print(
