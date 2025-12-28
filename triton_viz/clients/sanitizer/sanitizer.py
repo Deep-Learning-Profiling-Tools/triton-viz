@@ -2025,11 +2025,6 @@ class SymbolicSanitizer(Sanitizer):
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         def _materialize_loop_value(expr: Any) -> int:
-            if isinstance(expr, ArithRef):
-                expr = SymbolicExpr.create(
-                    "const", SymbolicExprDataWrapper.coerce_int(expr), tl.int32
-                )
-
             if isinstance(expr, SymbolicExpr):
                 if expr.op == "const":
                     return SymbolicExprDataWrapper.coerce_int(expr.to_py())
@@ -2038,12 +2033,6 @@ class SymbolicSanitizer(Sanitizer):
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
 
             return int(expr)
-
-        def _get_constant_step(step_expr: Any) -> int:
-            step = _materialize_loop_value(step_expr)
-            if step == 0:
-                raise ValueError("Loop step cannot be zero.")
-            return step
 
         @self.lock_fn
         def _wrap_range(
@@ -2100,7 +2089,7 @@ class SymbolicSanitizer(Sanitizer):
             else:
                 start_expr, stop_expr, step_expr = args[0], args[1], args[2]
 
-            step = _get_constant_step(step_expr)
+            step = _materialize_loop_value(step_expr)
             start = _materialize_loop_value(start_expr)
             stop = _materialize_loop_value(stop_expr)
 
