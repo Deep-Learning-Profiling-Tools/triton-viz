@@ -141,16 +141,24 @@ def _intervals_to_constraint(
 
 @dataclass
 class PendingCheck:
+    symbolic_expr: "SymbolicExpr"
     addr_expr: Z3Expr
     constraints: list[ConstraintExpr]
-    symbolic_expr: "SymbolicExpr"
+    # The symbolic expression corresponding to immediate value extraction.
     imm_var: Optional[ArithRef] = None
-    imm_values: list[tuple[int, int]] = field(default_factory=list)
+    # List of immediate values observed.
+    imm_values: set[int] = field(default_factory=set)
+    # The common base expression (addr_expr - imm_var) if imm_var is not None.
+    base_expr: ExprRef = field(default_factory=lambda: IntVal(0))
 
-    def add_immediate(self, value: int) -> None:
+    def add_immediate(self, ctx: "LoopContext", value: int) -> None:
         if self.imm_var is None:
-            return
-        _add_interval_value(self.imm_values, value)
+            self.imm_var = Int(f"imm_{ctx.lineno}_{ctx.imm_counter}")
+            ctx.imm_counter += 1
+            # Generalize addr_expr to base_expr + imm_var so we can constrain imm_var later.
+            self.addr_expr = simplify(self.base_expr + self.imm_var)
+
+        self.imm_values.add(value)
 
 
 @dataclass
@@ -165,8 +173,6 @@ class LoopContext:
     signature_cache: dict[int, int] = field(default_factory=dict)
     pending_checks: list[PendingCheck] = field(default_factory=list)
     imm_counter: int = 0
-    # Normalize loop/arange suffixes in signature strings (e.g., loop_i_81 -> loop_i).
-    re_pattern: ClassVar[re.Pattern[str]] = re.compile(r"(loop_i|arange)_\d+")
 
     def add_value(self, idx: int) -> None:
         _add_interval_value(self.values, idx)
@@ -1469,8 +1475,7 @@ def _split_additive_immediate(expr: Z3Expr) -> Optional[tuple[ExprRef, int]]:
 
 def _make_signature(
     addr_expr: Z3Expr,
-    constraints: Sequence[ConstraintExpr],
-    re_pattern: re.Pattern[str],
+    constraints: Sequence[ConstraintExpr]
 ) -> int:
     """
     Convert (addr, constraints) into a stable string signature.
@@ -1478,14 +1483,19 @@ def _make_signature(
     • constraints is list[expr]
     """
     if isinstance(addr_expr, list):
-        addr_repr = "|".join(sorted(_sexpr_or_str(e) for e in addr_expr))
+        if len(addr_expr) == 1:
+            addr_repr = _sexpr_or_str(addr_expr[0])
+        else:
+            addr_repr = "|".join(sorted(_sexpr_or_str(e) for e in addr_expr))
     else:
         addr_repr = _sexpr_or_str(addr_expr)
 
-    constr_repr = "|".join(sorted(_sexpr_or_str(c) for c in constraints))
-
-    addr_repr = re_pattern.sub(r"\1", addr_repr)
-    constr_repr = re_pattern.sub(r"\1", constr_repr)
+    if not constraints:
+        constr_repr = ""
+    elif len(constraints) == 1:
+        constr_repr = _sexpr_or_str(constraints[0])
+    else:
+        constr_repr = "|".join(sorted(_sexpr_or_str(c) for c in constraints))
 
     return hash(addr_repr + "##" + constr_repr)
 
@@ -1661,48 +1671,6 @@ class SymbolicSanitizer(Sanitizer):
 
         _check_single_addr(access_addr)
 
-    def _enqueue_pending_check(
-        self,
-        ctx: LoopContext,
-        signature: int,
-        addr_expr: Z3Expr,
-        constraints: Sequence[ConstraintExpr],
-        symbolic_expr: SymbolicExpr,
-    ) -> None:
-        if cfg.verbose:
-            print(
-                "[Sanitizer]  ↪ new addr in for-loop, will check later",
-                addr_expr,
-                constraints,
-            )
-        ctx.signature_cache[signature] = len(ctx.pending_checks)
-        ctx.pending_checks.append(PendingCheck(addr_expr, list(constraints), symbolic_expr))
-
-    def _merge_pending_immediate(
-        self,
-        ctx: LoopContext,
-        pending: PendingCheck,
-        imm_value: int,
-    ) -> bool:
-        if pending.imm_var is None:
-            existing_split = _split_additive_immediate(pending.addr_expr)
-            if existing_split is None:
-                return False
-            existing_base, existing_imm = existing_split
-            if existing_imm == imm_value:
-                return False
-            imm_var = Int(f"imm_{ctx.lineno}_{ctx.imm_counter}")
-            ctx.imm_counter += 1
-            pending.imm_var = imm_var
-            pending.addr_expr = simplify(existing_base + imm_var)
-            pending.imm_values = []
-            pending.add_immediate(existing_imm)
-
-        pending.add_immediate(imm_value)
-        if cfg.verbose:
-            print("[Sanitizer]  ↪ merge immediate offsets in loop")
-        return True
-
     def _handle_access_check(self, expr: SymbolicExpr) -> None:
         """
         Evaluate a memory access expression and either defer it (inside a loop)
@@ -1721,27 +1689,31 @@ class SymbolicSanitizer(Sanitizer):
         for addr in addrs:
             split = _split_additive_immediate(addr)
             if split is None:
-                signature_expr = addr
+                base_expr = cast(ExprRef, addr)
                 imm_value = None
             else:
-                signature_expr, imm_value = split
+                base_expr, imm_value = split
 
-            signature = _make_signature(signature_expr, z3_constraints, ctx.re_pattern)
+            signature = _make_signature(base_expr, z3_constraints)
             pending_idx = ctx.signature_cache.get(signature)
             if pending_idx is None:
-                self._enqueue_pending_check(
-                    ctx, signature, addr, z3_constraints, expr
+                ctx.signature_cache[signature] = len(ctx.pending_checks)
+                pending_check = PendingCheck(
+                    symbolic_expr=expr,
+                    addr_expr=addr,
+                    constraints=list(z3_constraints),
+                    base_expr=base_expr,
                 )
-                continue
-
-            pending = ctx.pending_checks[pending_idx]
-            if imm_value is not None and self._merge_pending_immediate(
-                ctx, pending, imm_value
-            ):
-                continue
-
-            if cfg.verbose:
-                print("[Sanitizer]  ↪ skip duplicated addr in loop")
+                if imm_value is not None:
+                    pending_check.add_immediate(ctx, imm_value)
+                ctx.pending_checks.append(pending_check)
+            else:
+                pending_check = ctx.pending_checks[pending_idx]
+                if imm_value is not None and imm_value not in pending_check.imm_values:
+                    pending_check.add_immediate(ctx, imm_value)
+                else:
+                    if cfg.verbose:
+                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
 
     def _report(
         self,
@@ -2305,15 +2277,18 @@ class SymbolicSanitizer(Sanitizer):
                 iterator_constraints.append(iterator_constraint)
 
             # execute pending checks
-            for pending in ctx.pending_checks:
-                addr_expr = pending.addr_expr
-                expr_constraints = pending.constraints
-                symbolic_expr = pending.symbolic_expr
+            for pending_check in ctx.pending_checks:
+                addr_expr = pending_check.addr_expr
+                expr_constraints = pending_check.constraints
+                symbolic_expr = pending_check.symbolic_expr
 
                 imm_constraints: list[ConstraintExpr] = []
-                if pending.imm_var is not None and pending.imm_values:
+                if pending_check.imm_var is not None and pending_check.imm_values:
+                    imm_intervals: list[tuple[int, int]] = []
+                    for v in pending_check.imm_values:
+                        imm_intervals.append((int(v), int(v + 1)))
                     imm_constraint = _intervals_to_constraint(
-                        pending.imm_var, pending.imm_values
+                        pending_check.imm_var, imm_intervals
                     )
                     if imm_constraint is not None:
                         imm_constraints.append(imm_constraint)
