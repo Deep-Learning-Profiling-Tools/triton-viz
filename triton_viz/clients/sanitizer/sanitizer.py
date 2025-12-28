@@ -1,3 +1,4 @@
+from bisect import bisect_left
 from collections import namedtuple
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -94,13 +95,53 @@ class LoopContext:
     start: int = 0
     stop: int = 0
     step: int = 1
-    values: list[int] = field(default_factory=list)
+    values: list[tuple[int, int]] = field(default_factory=list)
     signature_cache: set[int] = field(default_factory=set)
     pending_checks: list[tuple[Z3Expr, list[ConstraintExpr], "SymbolicExpr"]] = field(
         default_factory=list
     )
     # Normalize loop/arange suffixes in signature strings (e.g., loop_i_81 -> loop_i).
     re_pattern: ClassVar[re.Pattern[str]] = re.compile(r"(loop_i|arange)_\d+")
+
+    def add_value(self, idx: int) -> None:
+        intervals = self.values
+        if not intervals:
+            intervals.append((idx, idx + 1))
+            return
+
+        insert_at = bisect_left(intervals, (idx, idx + 1))
+
+        if insert_at > 0:
+            left_start, left_end = intervals[insert_at - 1]
+            if left_start <= idx < left_end:
+                return
+
+        if insert_at < len(intervals):
+            right_start, right_end = intervals[insert_at]
+            if right_start <= idx < right_end:
+                return
+
+        merge_left = insert_at > 0 and intervals[insert_at - 1][1] == idx
+        merge_right = insert_at < len(intervals) and intervals[insert_at][0] == idx + 1
+
+        if merge_left and merge_right:
+            left_start, _ = intervals[insert_at - 1]
+            _, right_end = intervals[insert_at]
+            intervals[insert_at - 1] = (left_start, right_end)
+            intervals.pop(insert_at)
+            return
+
+        if merge_left:
+            left_start, _ = intervals[insert_at - 1]
+            intervals[insert_at - 1] = (left_start, idx + 1)
+            return
+
+        if merge_right:
+            _, right_end = intervals[insert_at]
+            intervals[insert_at] = (idx, right_end)
+            return
+
+        intervals.insert(insert_at, (idx, idx + 1))
 
 
 @dataclass
@@ -2135,7 +2176,7 @@ class SymbolicSanitizer(Sanitizer):
         @self.lock_fn
         def loop_hook_iter_overrider(lineno, idx):
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
-                self.loop_stack[-1].values.append(idx)
+                self.loop_stack[-1].add_value(idx)
                 sym = SymbolicExpr.create("const", idx, tl.int32)
                 sym.loop_ctx = self.loop_stack[-1]
                 return tl.core.tensor(sym, tl.int32)
@@ -2154,8 +2195,14 @@ class SymbolicSanitizer(Sanitizer):
             # add constraints for loop_i
             iterator_constraints: list[ConstraintExpr] = []
             if ctx.values:
+                interval_constraints = [
+                    And(ctx.idx_z3 >= start, ctx.idx_z3 < stop)
+                    for start, stop in ctx.values
+                ]
                 iterator_constraints.append(
-                    Or(*[ctx.idx_z3 == v for v in set(ctx.values)])
+                    interval_constraints[0]
+                    if len(interval_constraints) == 1
+                    else Or(*interval_constraints)
                 )
 
             # execute pending checks
@@ -2211,7 +2258,7 @@ class NullSanitizer(Sanitizer):
     """
 
     def __init__(self, abort_on_error: bool = True, *args: Any, **kwargs: Any):
-        super().__init__(abort_on_error=abort_on_error, *args, **kwargs)  # Initialize parent class
+        super().__init__(abort_on_error=abort_on_error)
 
     def _disabled(self, method: str) -> NoReturn:
         raise RuntimeError(
