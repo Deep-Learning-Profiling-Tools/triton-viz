@@ -85,7 +85,6 @@ from ..utils import (
     check_storage_contiguous,
     get_physical_addr_from_tensor_slice,
     check_inner_stride_equal_to_one,
-    frame_timer,
 )
 from .data import OutOfBoundsRecordZ3
 from .report import _get_traceback_info, print_oob_record, print_oob_record_pdb_style
@@ -700,7 +699,6 @@ class SymbolicExpr:
         """Return a wrapper suitable for external consumers."""
         return SymbolicExprDataWrapper(self.__str__(), self)
 
-    @frame_timer
     def _to_z3(self) -> tuple[Z3Expr, ConstraintConjunction]:
         if self.z3 is not None:
             return self.z3, self.constraints
