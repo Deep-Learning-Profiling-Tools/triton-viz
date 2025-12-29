@@ -494,8 +494,8 @@ class SymbolicExpr:
         """
         assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
         self.op = op
-        # Tensor handle attributes, including `attrs`, `dtype`, and `data`
-        self.attrs: dict[str, Any] = {}
+        # Tensor handle attributes, including `attr`, `dtype`, and `data`
+        self.attr: dict[str, Any] = {}
         self.dtype: Optional[tl.core.dtype] = None
 
         # Functions and arguments for concretization
@@ -766,6 +766,11 @@ class SymbolicExpr:
         for prefix, _, node in RenderTree(root):
             lines.append(f"{prefix}{node.name}")
         return "\n" + "\n".join(lines)
+
+    # Tensor handle methods, not used in sanitizer
+    # TODO: inherits a tensor handle protocol?
+    def set_attr(self, key, value):
+        self.attr[key] = value
 
     def __str__(self) -> str:
         return self.to_tree_str()
@@ -2338,10 +2343,11 @@ class SymbolicSanitizer(Sanitizer):
             addr_sym = self.addr_sym
             assert solver is not None
             assert addr_sym is not None
-            solver.push()
             # add constraints for loop_i
-            iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
-            solver.add(iterator_constraint)
+            if ctx.values:
+                solver.push()
+                iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
+                solver.add(iterator_constraint)
 
             for pending_check in ctx.pending_checks:
                 addr_expr = pending_check.addr_expr
@@ -2361,7 +2367,8 @@ class SymbolicSanitizer(Sanitizer):
                     expr_constraints,
                     symbolic_expr,
                 )
-            solver.pop()
+            if ctx.values:
+                solver.pop()
 
             if cfg.verbose:
                 print(
