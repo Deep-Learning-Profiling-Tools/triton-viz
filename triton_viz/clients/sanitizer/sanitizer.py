@@ -768,6 +768,7 @@ class SymbolicExpr:
         """Return a wrapper suitable for external consumers."""
         return SymbolicExprDataWrapper(self.__str__(), self)
 
+    @_timer
     def _to_z3(self) -> tuple[Z3Expr, ConstraintConjunction]:
         if self.z3 is not None:
             return self.z3, self.constraints
