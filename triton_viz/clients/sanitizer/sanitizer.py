@@ -438,12 +438,6 @@ class SymbolicExpr:
         self.children[name] = child
         return child
 
-    def set_child_attribute(
-        self, name: str, child: Optional["SymbolicExpr"]
-    ) -> None:
-        if name != "dtype" and not hasattr(SymbolicExpr, name):
-            setattr(self, name, child)
-
     def __add__(self, other: "SymbolicExpr") -> "SymbolicExpr":
         return SymbolicExpr.create("add", self, other)
 
@@ -680,7 +674,7 @@ class SymbolicExpr:
                 continue
             new_child = child.replace_subtree(anchor_op)
             self.children[name] = new_child
-            self.set_child_attribute(name, new_child)
+            setattr(self, name, new_child)
 
         # inplace replace to "const" node
         if anchor_op is None or (
@@ -701,8 +695,6 @@ class SymbolicExpr:
 
 class ConstSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
-        if op != "const":
-            raise NotImplementedError(f"Unsupported op for const: {op}")
         super().__init__(op)
         self.value = value
         self.dtype = dtype
@@ -753,8 +745,6 @@ class ConstSymbolicExpr(SymbolicExpr):
 
 class PidSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, axis: Any):
-        if op != "pid":
-            raise NotImplementedError(f"Unsupported op for pid: {op}")
         super().__init__(op)
         self.axis = self._add_child("axis", axis)
         self.dtype = tl.int32
@@ -782,8 +772,6 @@ class PidSymbolicExpr(SymbolicExpr):
 
 class ArangeSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, ret_ty: Any, start: Any, end: Any):
-        if op != "arange":
-            raise NotImplementedError(f"Unsupported op for arange: {op}")
         super().__init__(op)
         self.ret_ty = self._add_child("ret_ty", ret_ty)
         self.start = self._add_child("start", start)
@@ -857,8 +845,6 @@ class IndirectSymbolicExprBase(SymbolicExpr):
 
 class LoadSymbolicExpr(IndirectSymbolicExprBase):
     def __init__(self, op: str, ptr: Any, mask: Any = None, other: Any = None):
-        if op != "load":
-            raise NotImplementedError(f"Unsupported op for load: {op}")
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
         self.mask = self._add_child("mask", mask) if mask is not None else None
@@ -875,8 +861,6 @@ class StoreSymbolicExpr(IndirectSymbolicExprBase):
         mask: Any = None,
         other: Any = None,
     ):
-        if op != "store":
-            raise NotImplementedError(f"Unsupported op for store: {op}")
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
         self.value = self._add_child("value", value)
@@ -1120,8 +1104,6 @@ class BinarySymbolicExpr(SymbolicExpr):
 
 class WhereSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, cond: Any, lhs: Any, rhs: Any):
-        if op != "where":
-            raise NotImplementedError(f"Unsupported op for where: {op}")
         super().__init__(op)
         self.cond = self._add_child("cond", cond)
         self.lhs = self._add_child("lhs", lhs)
@@ -1216,8 +1198,6 @@ class ReduceSymbolicExpr(SymbolicExpr):
 
 class DotSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, a: Any, b: Any, d: Any = None):
-        if op != "dot":
-            raise NotImplementedError(f"Unsupported op for dot: {op}")
         super().__init__(op)
         self.a = self._add_child("a", a)
         self.b = self._add_child("b", b)
@@ -1229,8 +1209,6 @@ class DotSymbolicExpr(SymbolicExpr):
 
 class CumsumSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, input: Any, axis: Any, reverse: Any, dtype: Any):
-        if op != "cumsum":
-            raise NotImplementedError(f"Unsupported op for cumsum: {op}")
         super().__init__(op)
         self.input = self._add_child("input", input)
         self.axis = self._add_child("axis", axis)
@@ -1252,8 +1230,6 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
         block_shape: Any,
         order: Any,
     ):
-        if op != "make_block_ptr":
-            raise NotImplementedError(f"Unsupported op for make_block_ptr: {op}")
         super().__init__(op)
         self.base = self._add_child("base", base)
         self._add_child("shape", shape)
@@ -1270,8 +1246,6 @@ class AddPtrSymbolicExpr(SymbolicExpr):
     _INT_DTYPES: ClassVar[tuple[type, ...]] = (int, np.integer, bool)
 
     def __init__(self, op: str, ptr: Any, offset: Any):
-        if op != "addptr":
-            raise NotImplementedError(f"Unsupported op for addptr: {op}")
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
         self.offset = self._add_child("offset", offset)
@@ -1308,8 +1282,6 @@ class AddPtrSymbolicExpr(SymbolicExpr):
 
 class AdvanceSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, ptr: Any, offsets: Any):
-        if op != "advance":
-            raise NotImplementedError(f"Unsupported op for advance: {op}")
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
         self.offsets = self._add_child("offsets", offsets)
@@ -1320,8 +1292,6 @@ class AdvanceSymbolicExpr(SymbolicExpr):
 
 class SplatSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, block_type: Any, arg: Any):
-        if op != "splat":
-            raise NotImplementedError(f"Unsupported op for splat: {op}")
         super().__init__(op)
         self.block_type = self._add_child("block_type", block_type)
         self.arg = self._add_child("arg", arg)
@@ -1340,8 +1310,6 @@ class SplatSymbolicExpr(SymbolicExpr):
 
 class ExpandDimsSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, axis: Any):
-        if op != "expand_dims":
-            raise NotImplementedError(f"Unsupported op for expand_dims: {op}")
         super().__init__(op)
         self.arg = self._add_child("arg", arg)
         self.axis = self._add_child("axis", axis)
@@ -1354,8 +1322,6 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
 
 class BroadcastSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, shape: Any):
-        if op != "broadcast":
-            raise NotImplementedError(f"Unsupported op for broadcast: {op}")
         super().__init__(op)
         self.arg = self._add_child("arg", arg)
         self._add_child("shape", shape)
@@ -1368,8 +1334,6 @@ class BroadcastSymbolicExpr(SymbolicExpr):
 
 class ReshapeSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, shape: Any):
-        if op != "reshape":
-            raise NotImplementedError(f"Unsupported op for reshape: {op}")
         super().__init__(op)
         self.arg = self._add_child("arg", arg)
         self._add_child("shape", shape)
@@ -1382,8 +1346,6 @@ class ReshapeSymbolicExpr(SymbolicExpr):
 
 class TransSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, permutation: Any):
-        if op != "trans":
-            raise NotImplementedError(f"Unsupported op for trans: {op}")
         super().__init__(op)
         self.arg = self._add_child("arg", arg)
         self.permutation = self._add_child("permutation", permutation)
@@ -1396,8 +1358,6 @@ class TransSymbolicExpr(SymbolicExpr):
 
 class JoinSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, lhs: Any, rhs: Any):
-        if op != "join":
-            raise NotImplementedError(f"Unsupported op for join: {op}")
         super().__init__(op)
         self.lhs = self._add_child("lhs", lhs)
         self.rhs = self._add_child("rhs", rhs)
@@ -1439,8 +1399,6 @@ class CastSymbolicExpr(SymbolicExpr):
 
 class FpToFpSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, src: Any, dst_type: Any, rounding_mode: Any):
-        if op != "fp_to_fp":
-            raise NotImplementedError(f"Unsupported op for fp_to_fp: {op}")
         super().__init__(op)
         self.src = self._add_child("src", src)
         self.dst_type = self._add_child("dst_type", dst_type)
@@ -1454,8 +1412,6 @@ class FpToFpSymbolicExpr(SymbolicExpr):
 
 class AtomicCasSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, ptr: Any, cmp: Any, val: Any):
-        if op != "atomic_cas":
-            raise NotImplementedError(f"Unsupported op for atomic_cas: {op}")
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
         self.cmp = self._add_child("cmp", cmp)
@@ -1467,8 +1423,6 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
 
 class AtomicRmwSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, ptr: Any, val: Any, mask: Any = None):
-        if op != "atomic_rmw":
-            raise NotImplementedError(f"Unsupported op for atomic_rmw: {op}")
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
         self.val = self._add_child("val", val)
