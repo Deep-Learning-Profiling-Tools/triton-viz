@@ -2220,13 +2220,16 @@ class SymbolicSanitizer(Sanitizer):
                 iterator_constraints.append(iterator_constraint)
 
             # execute pending checks
+            solver = self.solver
+            addr_sym = self.addr_sym
+            assert solver is not None
+            assert addr_sym is not None
+            solver.push()
+            solver.add(iterator_constraints)
             for pending_check in ctx.pending_checks:
                 addr_expr = pending_check.addr_expr
                 expr_constraints = pending_check.constraints
                 symbolic_expr = pending_check.symbolic_expr
-                combined_constraints = (
-                    list(expr_constraints) + iterator_constraints
-                )
 
                 if cfg.verbose:
                     print(
@@ -2238,9 +2241,10 @@ class SymbolicSanitizer(Sanitizer):
 
                 self._check_range_satisfiable(
                     addr_expr,
-                    combined_constraints,
+                    expr_constraints,
                     symbolic_expr,
                 )
+            solver.pop()
 
             if cfg.verbose:
                 print(
