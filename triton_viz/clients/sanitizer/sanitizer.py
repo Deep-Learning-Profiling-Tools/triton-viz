@@ -417,6 +417,7 @@ class SymbolicExpr:
         """
         assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
         self.op = op
+        # Tensor handle attributes, including `attrs`, `dtype`, and `data`
         self.attrs: dict[str, Any] = {}
         self.dtype: Optional[tl.core.dtype] = None
 
@@ -449,8 +450,8 @@ class SymbolicExpr:
         if self.op not in self.OP_SPEC:
             raise NotImplementedError(f"Unsupported op: {self.op}")
         spec = self.OP_SPEC[self.op]
-
-        if self.op == "const":  # leaf node
+        if self.op == "const":
+            # leaf node, we can stop calling from_val otherwise will cause recursion
             self.value = args[0]
             self.dtype = args[1]
         else:
@@ -462,7 +463,7 @@ class SymbolicExpr:
             for name in names[len(args) :]:
                 self.children[name] = None
 
-            self._post_init()
+        self._post_init()
 
     def _post_init(self) -> None:
         return
@@ -471,9 +472,6 @@ class SymbolicExpr:
         if name in self.children:
             return self.children[name]
         raise AttributeError(name)
-
-    def set_attr(self, name: str, values: Any) -> None:
-        self.attrs[name] = values
 
     def __add__(self, other: "SymbolicExpr") -> "SymbolicExpr":
         assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
@@ -632,6 +630,10 @@ class SymbolicExpr:
             seq = cast(Sequence[Any], var)
             return cls.create("const", tuple(seq), dtype)
         if isinstance(var, TensorHandle):  # if a TensorHandle
+            if len(var.data) != 1:
+                raise ValueError(
+                    "SymbolicExpr.from_value only supports scalar TensorHandle!"
+                )
             return cls.create("const", var.data.item(), dtype)
         if isinstance(
             var, SymbolicExpr.builtin_scala_types
@@ -771,19 +773,16 @@ class BasicSymbolicExpr(SymbolicExpr):
 
         if self.loop_ctx:  # if the self is a loop iterator
             self.z3 = self.loop_ctx.idx_z3
-        elif isinstance(value, np.ndarray):
+        elif isinstance(value, np.ndarray): # only const nodes can be created with ndarray
             self.z3 = [IntVal(int(v)) for v in value.flat]
         elif isinstance(value, tuple):
             self.z3 = [IntVal(int(v)) for v in value]
         elif isinstance(value, (int, float)):
             # Convert to int for Z3 - Z3's IntVal cannot parse float strings
             self.z3 = IntVal(int(value))
-        elif value is None:
-            # For None values, use 0 as a placeholder (e.g., for optional mask/other)
-            self.z3 = IntVal(0)
         else:
-            # For other types (e.g., tl.core.dtype), try converting to int
-            self.z3 = IntVal(int(value))
+            # For other values, use 0 as a placeholder (e.g., for optional mask/other)
+            self.z3 = IntVal(0)
         self.constraints = []
 
     def _build_pid(self) -> None:
