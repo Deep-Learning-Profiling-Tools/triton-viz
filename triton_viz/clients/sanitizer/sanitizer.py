@@ -1613,32 +1613,6 @@ class SymbolicSanitizer(Sanitizer):
 
         return walk(expr)
 
-    def _addr_ok_for_expr(self, symbolic_expr: SymbolicExpr) -> Z3Expr:
-        addr_sym = self.addr_sym
-        assert addr_sym is not None
-        if not self.tensor_addrs:
-            return BoolVal(False)
-
-        base_candidate = self._collect_tensor_base(symbolic_expr)
-        addr_ranges: list[tuple[int, int]] = []
-        if base_candidate is not None:
-            base = base_candidate
-            tensor_match: Optional[Tensor] = None
-            for start, end, tensor in self.tensor_addrs:
-                if start <= base <= end:
-                    tensor_match = tensor
-                    break
-            if tensor_match is not None:
-                addr_ranges = [
-                    (start, end)
-                    for start, end, tensor in self.tensor_addrs
-                    if tensor is tensor_match
-                ]
-
-        if not addr_ranges:
-            addr_ranges = [(start, end) for start, end, _ in self.tensor_addrs]
-
-        return Or(*[And(addr_sym >= start, addr_sym <= end) for start, end in addr_ranges])
 
     def _find_tensor_for_expr(
         self, symbolic_expr: SymbolicExpr, violation_addr: int
@@ -1696,12 +1670,10 @@ class SymbolicSanitizer(Sanitizer):
         addr_sym = self.addr_sym
         assert solver is not None
         assert addr_sym is not None
-        addr_ok_expr = self._addr_ok_for_expr(symbolic_expr)
 
         def _check_single_addr(addr_expr: Z3Expr) -> None:
             solver.push()
             solver.add(addr_sym == addr_expr)
-            solver.add(Not(addr_ok_expr))
             if expr_constraints is not None:
                 solver.add(expr_constraints)
             if solver.check() == sat:
@@ -1849,6 +1821,13 @@ class SymbolicSanitizer(Sanitizer):
         self.grid = tuple(int(g) for g in grid)
         addr = Int("addr")
 
+        addr_ok_expr = (
+            Or(*[And(addr >= s, addr <= e) for s, e, _ in self.tensor_addrs])
+            if self.tensor_addrs
+            else BoolVal(False)
+        )
+        self.addr_ok = cast(BoolRef, addr_ok_expr)
+
         pid_ok_expr = And(
             SymbolicExpr.PID0 < self.grid[0],
             SymbolicExpr.PID1 < self.grid[1],
@@ -1860,6 +1839,7 @@ class SymbolicSanitizer(Sanitizer):
         self.pid_ok = cast(BoolRef, pid_ok_expr)
 
         self.solver = Solver()
+        self.solver.add(Not(self.addr_ok))
         self.solver.add(self.pid_ok)
         self.addr_sym = addr
 
