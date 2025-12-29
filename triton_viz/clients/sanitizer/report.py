@@ -80,9 +80,9 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
 
         # Print OOB details
         print(f"Invalid access detected at address: {violation_address}")
-        print("Constraints:")
-        for constraint in constraints:
-            print(constraint)
+        if constraints is not None:
+            print("Constraints:")
+            print(constraints)
 
     else:
         raise NotImplementedError(
@@ -238,14 +238,10 @@ def print_oob_record_pdb_style(
                 f"  {green}Violation address:{reset_color} 0x{oob_record.violation_address:016x}"
             )
 
-        if hasattr(oob_record, "constraints") and oob_record.constraints:
-            print(
-                f"  {green}SMT constraints ({len(oob_record.constraints)}):{reset_color}"
-            )
-            for i, constraint in enumerate(oob_record.constraints[:5]):  # Show first 5
-                print(f"    [{i}] {constraint}")
-            if len(oob_record.constraints) > 5:
-                print(f"    ... and {len(oob_record.constraints) - 5} more constraints")
+        constraints = getattr(oob_record, "constraints", None)
+        if constraints is not None:
+            print(f"  {green}SMT constraints:{reset_color}")
+            print(f"    {constraints}")
 
     # ===================== Symbolic Expression Tree =====================
     if symbolic_expr is not None:

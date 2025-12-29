@@ -1,7 +1,7 @@
 import pytest
 import torch
 import numpy as np
-from typing import Any, cast, Sequence
+from typing import Any, Optional, cast
 
 import triton
 import triton.language as tl
@@ -13,7 +13,6 @@ from triton_viz.core.client import Client
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicExpr,
-    ConstraintExpr,
     Z3Expr,
     NullSanitizer,
     SymbolicSanitizer,
@@ -125,13 +124,13 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self.after_loop_pending: list[int] = []
-        self.check_inside_loop: list[tuple[Z3Expr, Sequence[ConstraintExpr]]] = []
-        self.iterator_constraints: list[ConstraintExpr] = []
+        self.check_inside_loop: list[tuple[Z3Expr, Optional[BoolRef]]] = []
+        self.iterator_constraints: list[BoolRef] = []
 
     def _check_range_satisfiable(
         self,
         access_addr: Z3Expr,
-        expr_constraints: Sequence[ConstraintExpr],
+        expr_constraints: Optional[BoolRef],
         symbolic_expr: SymbolicExpr,
     ) -> None:
         self.check_inside_loop.append((access_addr, expr_constraints))
@@ -345,7 +344,7 @@ def test_basic_expr_const_eval(value):
         assert [cast(IntNumRef, v).as_long() for v in cast(list, result)] == list(value)
     else:
         assert cast(IntNumRef, result).as_long() == value
-    assert constraints == []
+    assert constraints is None
 
 
 @pytest.mark.parametrize(
@@ -361,7 +360,7 @@ def test_basic_expr_pid_eval(axis, expected_pid):
     pid_expr = SymbolicExpr.create("pid", axis)
     result, constraints = pid_expr.eval()
     assert result == expected_pid
-    assert constraints == []
+    assert constraints is None
 
 
 @pytest.mark.parametrize("start,end", [(4, 8), (0, 4)])
@@ -370,9 +369,10 @@ def test_basic_expr_arange_eval(start, end):
     result, constraints = arange_expr.eval()
     result = cast(ArithRef, result)
     assert result.decl().name() == f"arange_{start}_{end}"
-    assert len(constraints) == 2
-    assert str(constraints[0]) == f"{result} >= {start}"
-    assert str(constraints[1]) == f"{result} < {end}"
+    assert constraints is not None
+    constraints_str = str(constraints)
+    assert f"{result} >= {start}" in constraints_str
+    assert f"{result} < {end}" in constraints_str
 
 
 # ======== Unary Symbolic Expr Operations =========
@@ -390,7 +390,7 @@ def test_unary_expr_eval(op: str, value: int, expected: int):
     expr = SymbolicExpr.create(op, arg)
     result, constraints = expr.eval()
     assert cast(IntNumRef, result).as_long() == expected
-    assert constraints == []
+    assert constraints is None
 
 
 # ======== Binary Symbolic Expr Operations =========
@@ -426,7 +426,7 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
         assert str(result) == str(expected)
     else:
         assert cast(IntNumRef, result).as_long() == expected
-    assert constraints == []
+    assert constraints is None
 
 
 # ======== Pointer Symbolic Expr Operations =========
@@ -438,7 +438,7 @@ def test_pointer_expr_addptr_eval():
     expr = SymbolicExpr.create("addptr", base, offset)
     result, constraints = expr.eval()
     assert cast(IntNumRef, result).as_long() == 112
-    assert constraints == []
+    assert constraints is None
 
 
 # ======== Reshape Symbolic Expr Operations =========
@@ -462,4 +462,4 @@ def test_reshape_expr_eval(op: str, extra):
         expr = SymbolicExpr.create(op, arg, extra)
     result, constraints = expr.eval()
     assert cast(IntNumRef, result).as_long() == 5
-    assert constraints == []
+    assert constraints is None

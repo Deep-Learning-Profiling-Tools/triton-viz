@@ -83,7 +83,8 @@ from ...core.config import config as cfg
 
 
 Z3Expr: TypeAlias = Union[ExprRef, list[ExprRef], Tactic, Probe]
-ConstraintExpr: TypeAlias = ExprRef
+ConstraintExpr: TypeAlias = Union[ExprRef, bool, int, float]
+ConstraintConjunction: TypeAlias = Optional[BoolRef]
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
 
 
@@ -138,28 +139,52 @@ def _intervals_to_constraint(
     return Or(*constraints)
 
 
-def _convert_constraints_to_bool(
+def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
+    if isinstance(expr, BoolRef):
+        return expr
+    if isinstance(expr, bool):
+        return BoolVal(expr)
+    if isinstance(expr, IntNumRef):
+        return BoolVal(expr.as_long() != 0)
+    if isinstance(expr, (int, float)):
+        return BoolVal(int(expr) != 0)
+    return cast(BoolRef, expr != 0)
+
+
+def _iter_constraints_to_bool(
     expr_constraints: Sequence[ConstraintExpr],
-) -> list[BoolRef]:
-    bool_constraints: list[BoolRef] = []
-    for c in expr_constraints:
-        if isinstance(c, BoolRef):
-            bool_constraints.append(c)
-        elif isinstance(c, bool):
-            bool_constraints.append(BoolVal(c))
-        elif isinstance(c, IntNumRef):
-            bool_constraints.append(BoolVal(c.as_long() != 0))
-        elif isinstance(c, (int, float)):
-            bool_constraints.append(BoolVal(int(c) != 0))
+) -> Iterator[BoolRef]:
+    for constraint in expr_constraints:
+        yield _constraint_to_bool(constraint)
+
+
+def _and_constraints(
+    *constraints: Optional[ConstraintExpr | Sequence[ConstraintExpr]]
+) -> ConstraintConjunction:
+    result: Optional[BoolRef] = None
+    for constraint in constraints:
+        if constraint is None:
+            continue
+        if isinstance(constraint, (list, tuple)):
+            for bool_constraint in _iter_constraints_to_bool(constraint):
+                if result is None:
+                    result = bool_constraint
+                else:
+                    result = And(result, bool_constraint)
+            continue
+        bool_constraint = _constraint_to_bool(constraint)
+        if result is None:
+            result = bool_constraint
         else:
-            bool_constraints.append(cast(BoolRef, c != 0))
-    return bool_constraints
+            result = And(result, bool_constraint)
+    return result
+
 
 @dataclass
 class PendingCheck:
     symbolic_expr: "SymbolicExpr"
     addr_expr: Z3Expr
-    constraints: list[ConstraintExpr]
+    constraints: ConstraintConjunction
 
 
 @dataclass
@@ -381,7 +406,7 @@ class SymbolicExpr:
     PID2: ClassVar[ArithRef] = Int("pid_2")
 
     ARANGE_DICT: ClassVar[
-        dict[tuple[int, int], tuple[ArithRef, list[ConstraintExpr]]]
+        dict[tuple[int, int], tuple[ArithRef, ConstraintConjunction]]
     ] = {}
     _OP_CLASS_MAP: ClassVar[dict[str, type["SymbolicExpr"]]] = {}
 
@@ -421,7 +446,7 @@ class SymbolicExpr:
         # z3
         self.z3: Optional[Z3Expr] = None
 
-        self.constraints: list[ConstraintExpr] = []
+        self.constraints: ConstraintConjunction = None
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -533,10 +558,19 @@ class SymbolicExpr:
 
     @staticmethod
     def _infer_literal_dtype(var: Any) -> tl.core.dtype | tl.pointer_type:
-        if isinstance(var, tl.core.dtype):
-            return var
         if isinstance(var, tl.core.tensor):
             var = var.handle
+        if isinstance(var, TensorHandle):
+            if len(var.data) != 1:
+                raise ValueError(
+                    f"Unsupported var.data: {var.data} with length more than one!"
+                )
+            if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
+                return var.dtype
+            if isinstance(var.dtype, tl.pointer_type):  # if a pointer
+                return var.dtype
+        if isinstance(var, tl.core.dtype):
+            return var
         if isinstance(var, SymbolicExpr.tuple_types):
             seq = cast(Sequence[Any], var)
             if len(seq) == 0:
@@ -548,15 +582,6 @@ class SymbolicExpr:
                         f"All elements in the tuple must have the same dtype, but found {first_dtype} and {SymbolicExpr.from_value(v).dtype}"
                     )
             return first_dtype
-        if isinstance(var, TensorHandle):
-            if len(var.data) != 1:
-                raise ValueError(
-                    f"Unsupported var.data: {var.data} with length more than one!"
-                )
-            if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
-                return var.dtype
-            if isinstance(var.dtype, tl.pointer_type):  # if a pointer
-                return var.dtype
         if isinstance(var, SymbolicExpr.builtin_scala_types):
             return tl.int32 if isinstance(var, int) else tl.float32
         raise ValueError(f"Unsupported type: {type(var)}")
@@ -600,11 +625,12 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> tuple[Z3Expr, list[ConstraintExpr]]:
+    def eval(self) -> tuple[Z3Expr, ConstraintConjunction]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression (or list of expressions) corresponding to the root node
-        - constraints: list of constraint expressions (Z3 Bool/Arith or scalars),
+        - constraints: conjunction of constraint expressions (Z3 Bool or scalars),
+          or None when there are no constraints,
           recording all range constraints created by program_id and arange
         """
         expr, constraints = self._to_z3()
@@ -616,7 +642,7 @@ class SymbolicExpr:
 
         return expr, constraints
 
-    def _to_z3(self) -> tuple[Z3Expr, list[ConstraintExpr]]:
+    def _to_z3(self) -> tuple[Z3Expr, ConstraintConjunction]:
         if self.z3 is not None:
             return self.z3, self.constraints
 
@@ -719,7 +745,7 @@ class ConstSymbolicExpr(SymbolicExpr):
         else:
             # For other values, use 0 as a placeholder (e.g., for optional mask/other)
             self.z3 = IntVal(0)
-        self.constraints = []
+        self.constraints = None
 
     def _concretize_impl(self) -> Any:
         dtype = self.dtype
@@ -761,13 +787,10 @@ class PidSymbolicExpr(SymbolicExpr):
             self.z3 = SymbolicExpr.PID1
         else:
             self.z3 = SymbolicExpr.PID2
-        self.constraints = []
+        self.constraints = None
 
     def _concretize_impl(self) -> Any:
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
-        return fn(self.axis.to_py())
+        return self.concrete_fn(self.axis.to_py())
 
 
 class ArangeSymbolicExpr(SymbolicExpr):
@@ -789,30 +812,24 @@ class ArangeSymbolicExpr(SymbolicExpr):
         name = f"arange_{start}_{end}"
         v = Int(name)
         self.z3 = v
-        self.constraints = [v >= start, v < end]
+        self.constraints = _and_constraints(v >= start, v < end)
         SymbolicExpr.ARANGE_DICT[key] = (self.z3, self.constraints)
 
     def _concretize_impl(self) -> Any:
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
-        return fn(self.ret_ty.to_py(), self.start.to_py(), self.end.to_py())
+        return self.concrete_fn(self.ret_ty.to_py(), self.start.to_py(), self.end.to_py())
 
 
 class IndirectSymbolicExprBase(SymbolicExpr):
     def _to_z3_impl(self) -> None:
         ptr_expr = self.ptr
         ptr, constraints_ptr = ptr_expr._to_z3()
-        constraints = list(constraints_ptr)
         mask_expr = self.mask
+        mask_constraint: Optional[ConstraintExpr | Sequence[ConstraintExpr]] = None
         if mask_expr is not None:
             mask, _ = mask_expr._to_z3()
-            if isinstance(mask, list):
-                constraints.extend(mask)
-            else:
-                constraints.append(mask)
+            mask_constraint = mask
         self.z3 = ptr
-        self.constraints = constraints
+        self.constraints = _and_constraints(constraints_ptr, mask_constraint)
 
     def _concretize_impl(self) -> Any:
         ptr_concrete = self.ptr.concretize()
@@ -828,12 +845,7 @@ class IndirectSymbolicExprBase(SymbolicExpr):
         else:
             other_concrete = self.other.concretize()
 
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
-
-        # load
-        return fn(
+        return self.concrete_fn(
             ptr_concrete,
             mask_concrete,
             other_concrete,
@@ -908,7 +920,7 @@ class BinarySymbolicExpr(SymbolicExpr):
         rhs_expr = self.rhs
         lhs, constraints_lhs = lhs_expr._to_z3()
         rhs, constraints_rhs = rhs_expr._to_z3()
-        self.constraints = constraints_lhs + constraints_rhs
+        self.constraints = _and_constraints(constraints_lhs, constraints_rhs)
 
         handler = self._Z3_BUILDERS.get(self.op)
         if handler is None:
@@ -916,15 +928,12 @@ class BinarySymbolicExpr(SymbolicExpr):
         self.z3 = handler(self, lhs, rhs)
 
     def _concretize_impl(self) -> Any:
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
         np_op = self._NUMPY_OPS.get(self.op, None)
         if np_op is None:
             raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
-        return fn(lhs_concrete, rhs_concrete, np_op)
+        return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)
 
     @staticmethod
     def _apply_binop(op_func, left, right):
@@ -1150,7 +1159,9 @@ class WhereSymbolicExpr(SymbolicExpr):
                 f"where op requires cond, lhs, rhs to have the same length, got {len(cond)}, {len(lhs)}, {len(rhs)}"
             )
         self.z3 = [If(cond[i], lhs[i], rhs[i]) for i in range(len(cond))]
-        self.constraints = constraints_cond + constraints_lhs + constraints_rhs
+        self.constraints = _and_constraints(
+            constraints_cond, constraints_lhs, constraints_rhs
+        )
 
     _Z3_BUILDERS: ClassVar[dict[str, Callable[["WhereSymbolicExpr"], None]]] = {
         "where": _where,
@@ -1256,7 +1267,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         offset_expr = self.offset
         ptr_z3, constraints_ptr = ptr_expr._to_z3()
         offset_z3, constraints_offset = offset_expr._to_z3()
-        self.constraints = constraints_ptr + constraints_offset
+        self.constraints = _and_constraints(constraints_ptr, constraints_offset)
         element_bytewidth = max(
             1, ptr_expr.dtype.scalar.element_ty.primitive_bitwidth // 8
         )
@@ -1274,10 +1285,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
             self.z3 = [ptr_z3 + o * element_bytewidth for o in offset_z3]
 
     def _concretize_impl(self) -> Any:
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
-        return fn(self.ptr.concretize(), self.offset.concretize())
+        return self.concrete_fn(self.ptr.concretize(), self.offset.concretize())
 
 
 class AdvanceSymbolicExpr(SymbolicExpr):
@@ -1302,10 +1310,7 @@ class SplatSymbolicExpr(SymbolicExpr):
         self.z3, self.constraints = arg_expr._to_z3()
 
     def _concretize_impl(self) -> Any:
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
-        return fn(self.block_type.to_py(), self.arg.concretize())
+        return self.concrete_fn(self.block_type.to_py(), self.arg.concretize())
 
 
 class ExpandDimsSymbolicExpr(SymbolicExpr):
@@ -1385,16 +1390,9 @@ class CastSymbolicExpr(SymbolicExpr):
         self.z3, self.constraints = self.src._to_z3()
 
     def _concretize_impl(self) -> Any:
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
         src_concrete = self.src.concretize()
-        dst_type_value = (
-            self.dst_type.value
-            if hasattr(self.dst_type, "value")
-            else self.dst_type
-        )
-        return fn(src_concrete, dst_type_value)
+        dst_type_value = self.dst_type.value
+        return self.concrete_fn(src_concrete, dst_type_value)
 
 
 class FpToFpSymbolicExpr(SymbolicExpr):
@@ -1471,12 +1469,12 @@ def _sexpr_or_str(expr: Any) -> str:
 
 def _make_signature(
     addr_expr: Z3Expr,
-    constraints: Sequence[ConstraintExpr]
+    constraints: ConstraintConjunction,
 ) -> int:
     """
     Convert (addr, constraints) into a stable string signature.
     • addr_expr can be a single z3 expr or list[expr]
-    • constraints is list[expr]
+    • constraints is a conjunction of expr
     """
     if isinstance(addr_expr, list):
         if len(addr_expr) == 1:
@@ -1486,12 +1484,10 @@ def _make_signature(
     else:
         addr_repr = _sexpr_or_str(addr_expr)
 
-    if not constraints:
+    if constraints is None:
         constr_repr = ""
-    elif len(constraints) == 1:
-        constr_repr = _sexpr_or_str(constraints[0])
     else:
-        constr_repr = "|".join(sorted(_sexpr_or_str(c) for c in constraints))
+        constr_repr = _sexpr_or_str(constraints)
 
     return hash(addr_repr + "##" + constr_repr)
 
@@ -1609,11 +1605,9 @@ class SymbolicSanitizer(Sanitizer):
     def _check_range_satisfiable(
         self,
         access_addr: Z3Expr,
-        expr_constraints: Sequence[ConstraintExpr],
+        expr_constraints: ConstraintConjunction,
         symbolic_expr: SymbolicExpr,
     ) -> None:
-        bool_constraints: list[BoolRef] = _convert_constraints_to_bool(expr_constraints)
-
         # Use push/pop on persistent solver
         solver = self.solver
         addr_sym = self.addr_sym
@@ -1623,8 +1617,8 @@ class SymbolicSanitizer(Sanitizer):
         def _check_single_addr(addr_expr: Z3Expr) -> None:
             solver.push()
             solver.add(addr_sym == addr_expr)
-            if bool_constraints:
-                solver.add(And(*bool_constraints))
+            if expr_constraints is not None:
+                solver.add(expr_constraints)
             if solver.check() == sat:
                 # Get the model to find the violation address
                 model = solver.model()
@@ -1698,7 +1692,7 @@ class SymbolicSanitizer(Sanitizer):
             user_code_tracebacks=traceback_info,
             tensor=tensor,
             violation_address=violation_address,
-            constraints=[],
+            constraints=None,
             symbolic_expr=symbolic_expr,
             tensor_name=tensor_name,
         )
