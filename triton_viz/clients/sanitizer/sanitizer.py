@@ -83,8 +83,8 @@ from .report import _get_traceback_info, print_oob_record, print_oob_record_pdb_
 from ...core.config import config as cfg
 
 
-Z3Expr: TypeAlias = Union[ExprRef, int, list[ExprRef], list[int], Tactic, Probe]
-ConstraintExpr: TypeAlias = Union[ExprRef, int, float, bool]
+Z3Expr: TypeAlias = Union[ExprRef, list[ExprRef], Tactic, Probe]
+ConstraintExpr: TypeAlias = ExprRef
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
 
 
@@ -1448,29 +1448,36 @@ def _sexpr_or_str(expr: Any) -> str:
     return str(expr)
 
 
-def _split_additive_immediate(expr: Z3Expr) -> Optional[tuple[ExprRef, int]]:
+def _split_additive_immediate(expr: ExprRef) -> Optional[tuple[ExprRef, int]]:
     if isinstance(expr, IntNumRef):
         return IntVal(0), expr.as_long()
-    if isinstance(expr, int):
-        return IntVal(0), expr
-    if not isinstance(expr, ExprRef):
-        return None
-    if not is_add(expr):
-        return expr, 0
 
     const_sum = 0
+    saw_const = False
+    terms: list[ExprRef] = []
     stack = [expr]
     while stack:
         term = stack.pop()
         if is_add(term):
-            stack.extend(term.children())
-            continue
-        if isinstance(term, IntNumRef):
+            # Preserve left-to-right order when popping from the stack.
+            stack.extend(reversed(term.children()))
+        elif isinstance(term, IntNumRef):
             const_sum += term.as_long()
+            saw_const = True
+        else:
+            terms.append(cast(ExprRef, term))
 
-    if const_sum == 0:
+    if not saw_const:
         return expr, 0
-    return simplify(expr - IntVal(const_sum)), const_sum
+
+    if not terms:
+        base_expr = IntVal(0)
+    elif len(terms) == 1:
+        base_expr = terms[0]
+    else:
+        base_expr = Sum(terms)
+
+    return base_expr, const_sum
 
 
 def _make_signature(
@@ -1687,7 +1694,7 @@ class SymbolicSanitizer(Sanitizer):
         ctx = self.loop_stack[-1]
         addrs = z3_addr if isinstance(z3_addr, list) else [z3_addr]
         for addr in addrs:
-            split = _split_additive_immediate(addr)
+            split = _split_additive_immediate(cast(ExprRef, addr))
             if split is None:
                 base_expr = cast(ExprRef, addr)
                 imm_value = None
