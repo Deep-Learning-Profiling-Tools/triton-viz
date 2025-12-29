@@ -474,43 +474,33 @@ class SymbolicExpr:
         raise AttributeError(name)
 
     def __add__(self, other: "SymbolicExpr") -> "SymbolicExpr":
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("add", self, other)
 
     def __sub__(self, other: "SymbolicExpr") -> "SymbolicExpr":
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("sub", self, other)
 
     def __mul__(self, other: "SymbolicExpr") -> "SymbolicExpr":
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("mul", self, other)
 
     def __truediv__(self, other: "SymbolicExpr") -> "SymbolicExpr":
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("div", self, other)
 
     def __floordiv__(self, other: "SymbolicExpr") -> "SymbolicExpr":
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("idiv", self, other)
 
     def __mod__(self, other: "SymbolicExpr") -> "SymbolicExpr":
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("mod", self, other)
 
     def __lt__(self, other: object) -> Any:
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("less", self, other)
 
     def __le__(self, other: object) -> Any:
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("less_equal", self, other)
 
     def __ne__(self, other: object) -> Any:
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("not_equal", self, other)
 
     def __eq__(self, other: object) -> Any:
-        assert isinstance(other, SymbolicExpr), "Operand must be a SymbolicExpr!"
         return SymbolicExpr.create("equal", self, other)
 
     def _to_anytree(self) -> Node:
@@ -1340,7 +1330,6 @@ class CastSymbolicExpr(SymbolicExpr):
 
     def _post_init(self) -> None:
         if self.op in ("cast_impl", "bitcast", "fp_to_fp"):
-            assert self.dst_type is not None
             if self.dst_type.op == "const":
                 self.dtype = self.dst_type.value
 
