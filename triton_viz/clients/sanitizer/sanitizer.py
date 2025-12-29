@@ -436,14 +436,9 @@ class SymbolicExpr:
     def _add_child(self, name: str, value: Any) -> Optional["SymbolicExpr"]:
         child = SymbolicExpr.from_value(value) if value is not None else None
         self.children[name] = child
-        self._set_child_attribute(name, child)
         return child
 
-    def _add_children(self, **children: Any) -> None:
-        for name, value in children.items():
-            self._add_child(name, value)
-
-    def _set_child_attribute(
+    def set_child_attribute(
         self, name: str, child: Optional["SymbolicExpr"]
     ) -> None:
         if name != "dtype" and not hasattr(SymbolicExpr, name):
@@ -685,7 +680,7 @@ class SymbolicExpr:
                 continue
             new_child = child.replace_subtree(anchor_op)
             self.children[name] = new_child
-            self._set_child_attribute(name, new_child)
+            self.set_child_attribute(name, new_child)
 
         # inplace replace to "const" node
         if anchor_op is None or (
@@ -769,8 +764,7 @@ class PidSymbolicExpr(SymbolicExpr):
         return f"pid_{axis_val}"
 
     def _to_z3_impl(self) -> None:
-        axis_expr = self.children["axis"]
-        axis_val = axis_expr.to_py()
+        axis_val = self.axis.to_py()
         if axis_val == 0:
             self.z3 = SymbolicExpr.PID0
         elif axis_val == 1:
@@ -798,15 +792,13 @@ class ArangeSymbolicExpr(SymbolicExpr):
         self.dtype = tl.block_type(tl.int32, [self.end.value - self.start.value])
 
     def _to_z3_impl(self) -> None:
-        start_expr = self.children["start"]
-        end_expr = self.children["end"]
-        start = start_expr.value
-        end = end_expr.value
-        name = f"arange_{start}_{end}"
+        start = self.start.to_py()
+        end = self.end.to_py()
         key = (start, end)
         if key in SymbolicExpr.ARANGE_DICT:
             self.z3, self.constraints = SymbolicExpr.ARANGE_DICT[key]
             return
+        name = f"arange_{start}_{end}"
         v = Int(name)
         self.z3 = v
         self.constraints = [v >= start, v < end]
@@ -821,10 +813,10 @@ class ArangeSymbolicExpr(SymbolicExpr):
 
 class IndirectSymbolicExprBase(SymbolicExpr):
     def _to_z3_impl(self) -> None:
-        ptr_expr = self.children["ptr"]
+        ptr_expr = self.ptr
         ptr, constraints_ptr = ptr_expr._to_z3()
         constraints = list(constraints_ptr)
-        mask_expr = self.children.get("mask")
+        mask_expr = self.mask
         if mask_expr is not None:
             mask, _ = mask_expr._to_z3()
             if isinstance(mask, list):
@@ -869,8 +861,8 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
             raise NotImplementedError(f"Unsupported op for load: {op}")
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
-        self.mask = self._add_child("mask", mask)
-        self.other = self._add_child("other", other)
+        self.mask = self._add_child("mask", mask) if mask is not None else None
+        self.other = self._add_child("other", other) if other is not None else None
         self.dtype = self.ptr.dtype.element_ty
 
 
@@ -888,8 +880,8 @@ class StoreSymbolicExpr(IndirectSymbolicExprBase):
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
         self.value = self._add_child("value", value)
-        self.mask = self._add_child("mask", mask)
-        self.other = self._add_child("other", other)
+        self.mask = self._add_child("mask", mask) if mask is not None else None
+        self.other = self._add_child("other", other) if other is not None else None
 
 
 class UnarySymbolicExpr(SymbolicExpr):
@@ -900,7 +892,7 @@ class UnarySymbolicExpr(SymbolicExpr):
         self.arg = self._add_child("arg", arg)
 
     def _to_z3_impl(self) -> None:
-        arg_expr = self.children["arg"]
+        arg_expr = self.arg
         val, constraints = arg_expr._to_z3()
         handler = self._Z3_BUILDERS.get(self.op)
         if handler is None:
@@ -928,8 +920,8 @@ class BinarySymbolicExpr(SymbolicExpr):
         self.dtype = self.lhs.dtype
 
     def _to_z3_impl(self) -> None:
-        lhs_expr = self.children["lhs"]
-        rhs_expr = self.children["rhs"]
+        lhs_expr = self.lhs
+        rhs_expr = self.rhs
         lhs, constraints_lhs = lhs_expr._to_z3()
         rhs, constraints_rhs = rhs_expr._to_z3()
         self.constraints = constraints_lhs + constraints_rhs
@@ -1035,8 +1027,8 @@ class BinarySymbolicExpr(SymbolicExpr):
         return self._apply_binop(lambda a, b: If(a <= b, a, b), lhs, rhs)
 
     def _op_bitwise_and(self, lhs, rhs):
-        lhs_expr = self.children["lhs"]
-        rhs_expr = self.children["rhs"]
+        lhs_expr = self.lhs
+        rhs_expr = self.rhs
         bitwidth = (
             self._infer_bitwidth(self)
             or self._infer_bitwidth(lhs_expr)
@@ -1050,8 +1042,8 @@ class BinarySymbolicExpr(SymbolicExpr):
         return self._apply_binop(_bit_and, lhs, rhs)
 
     def _op_bitwise_or(self, lhs, rhs):
-        lhs_expr = self.children["lhs"]
-        rhs_expr = self.children["rhs"]
+        lhs_expr = self.lhs
+        rhs_expr = self.rhs
         bitwidth = (
             self._infer_bitwidth(self)
             or self._infer_bitwidth(lhs_expr)
@@ -1065,8 +1057,8 @@ class BinarySymbolicExpr(SymbolicExpr):
         return self._apply_binop(_bit_or, lhs, rhs)
 
     def _op_bitwise_xor(self, lhs, rhs):
-        lhs_expr = self.children["lhs"]
-        rhs_expr = self.children["rhs"]
+        lhs_expr = self.lhs
+        rhs_expr = self.rhs
         bitwidth = (
             self._infer_bitwidth(self)
             or self._infer_bitwidth(lhs_expr)
@@ -1159,9 +1151,9 @@ class WhereSymbolicExpr(SymbolicExpr):
                     broadcasted.append(lst)
             return tuple(broadcasted)
 
-        cond_expr = self.children["cond"]
-        lhs_expr = self.children["lhs"]
-        rhs_expr = self.children["rhs"]
+        cond_expr = self.cond
+        lhs_expr = self.lhs
+        rhs_expr = self.rhs
         cond, constraints_cond = cond_expr._to_z3()
         lhs, constraints_lhs = lhs_expr._to_z3()
         rhs, constraints_rhs = rhs_expr._to_z3()
@@ -1186,13 +1178,13 @@ class WhereSymbolicExpr(SymbolicExpr):
 class ReduceSymbolicExpr(SymbolicExpr):
     _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min")
 
-    def __init__(self, op: str, input: Any, axis: Any, keepdims: Any):
+    def __init__(self, op: str, input: Any, axis: Any = None, keepdims: bool = False):
         if op not in self._SUPPORTED_OPS:
             raise NotImplementedError(f"Unsupported reduce op: {op}")
         super().__init__(op)
         self.input = self._add_child("input", input)
-        self.axis = self._add_child("axis", axis)
         self.keepdims = self._add_child("keepdims", keepdims)
+        self.axis = self._add_child("axis", axis) if axis is not None else None
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1201,17 +1193,17 @@ class ReduceSymbolicExpr(SymbolicExpr):
         handler(self)
 
     def _reduce_sum(self) -> None:
-        input_expr = self.children["input"]
+        input_expr = self.input
         arr, self.constraints = input_expr._to_z3()
         self.z3 = Sum(arr)
 
     def _reduce_max(self) -> None:
-        input_expr = self.children["input"]
+        input_expr = self.input
         arr, self.constraints = input_expr._to_z3()
         self.z3 = reduce(lambda a, b: If(a >= b, a, b), arr)
 
     def _reduce_min(self) -> None:
-        input_expr = self.children["input"]
+        input_expr = self.input
         arr, self.constraints = input_expr._to_z3()
         self.z3 = reduce(lambda a, b: If(a <= b, a, b), arr)
 
@@ -1286,8 +1278,8 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         self.dtype = self.ptr.dtype
 
     def _to_z3_impl(self) -> None:
-        ptr_expr = self.children["ptr"]
-        offset_expr = self.children["offset"]
+        ptr_expr = self.ptr
+        offset_expr = self.offset
         ptr_z3, constraints_ptr = ptr_expr._to_z3()
         offset_z3, constraints_offset = offset_expr._to_z3()
         self.constraints = constraints_ptr + constraints_offset
@@ -1336,7 +1328,7 @@ class SplatSymbolicExpr(SymbolicExpr):
         self.dtype = self.block_type.dtype
 
     def _to_z3_impl(self) -> None:
-        arg_expr = self.children["arg"]
+        arg_expr = self.arg
         self.z3, self.constraints = arg_expr._to_z3()
 
     def _concretize_impl(self) -> Any:
@@ -1356,7 +1348,7 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
         self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
-        arg_expr = self.children["arg"]
+        arg_expr = self.arg
         self.z3, self.constraints = arg_expr._to_z3()
 
 
@@ -1370,7 +1362,7 @@ class BroadcastSymbolicExpr(SymbolicExpr):
         self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
-        arg_expr = self.children["arg"]
+        arg_expr = self.arg
         self.z3, self.constraints = arg_expr._to_z3()
 
 
@@ -1384,7 +1376,7 @@ class ReshapeSymbolicExpr(SymbolicExpr):
         self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
-        arg_expr = self.children["arg"]
+        arg_expr = self.arg
         self.z3, self.constraints = arg_expr._to_z3()
 
 
@@ -1398,7 +1390,7 @@ class TransSymbolicExpr(SymbolicExpr):
         self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
-        arg_expr = self.children["arg"]
+        arg_expr = self.arg
         self.z3, self.constraints = arg_expr._to_z3()
 
 
@@ -1430,8 +1422,7 @@ class CastSymbolicExpr(SymbolicExpr):
             self.dtype = self.dst_type.value
 
     def _to_z3_impl(self) -> None:
-        src_expr = self.children["src"]
-        self.z3, self.constraints = src_expr._to_z3()
+        self.z3, self.constraints = self.src._to_z3()
 
     def _concretize_impl(self) -> Any:
         fn = self.concrete_fn
@@ -1475,13 +1466,13 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
 
 
 class AtomicRmwSymbolicExpr(SymbolicExpr):
-    def __init__(self, op: str, ptr: Any, val: Any, mask: Any):
+    def __init__(self, op: str, ptr: Any, val: Any, mask: Any = None):
         if op != "atomic_rmw":
             raise NotImplementedError(f"Unsupported op for atomic_rmw: {op}")
         super().__init__(op)
         self.ptr = self._add_child("ptr", ptr)
         self.val = self._add_child("val", val)
-        self.mask = self._add_child("mask", mask)
+        self.mask = self._add_child("mask", mask) if mask is not None else None
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")

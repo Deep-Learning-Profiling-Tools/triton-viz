@@ -53,9 +53,7 @@ class LoadIndexChecker(SymbolicSanitizer):
             cur = expr
             while cur.op == "addptr":
                 off = cur.offset
-                if (
-                    off.op == "const"
-                ):  # If any offset is not constant, we cannot sum it.
+                if off.op == "const":  # If any offset is not constant, we cannot sum it.
                     offsets.append(off.to_py())
                 cur = cur.ptr
 
