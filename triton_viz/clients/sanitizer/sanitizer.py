@@ -2219,19 +2219,16 @@ class SymbolicSanitizer(Sanitizer):
             if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
                 return
             ctx = self.loop_stack.pop()
-            # add constraints for loop_i
-            iterator_constraints: list[ConstraintExpr] = []
-            iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
-            if iterator_constraint is not None:
-                iterator_constraints.append(iterator_constraint)
-
             # execute pending checks
             solver = self.solver
             addr_sym = self.addr_sym
             assert solver is not None
             assert addr_sym is not None
             solver.push()
-            solver.add(And(*_convert_constraints_to_bool(iterator_constraints)))
+            # add constraints for loop_i
+            iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
+            solver.add(iterator_constraint)
+
             for pending_check in ctx.pending_checks:
                 addr_expr = pending_check.addr_expr
                 expr_constraints = pending_check.constraints
@@ -2241,7 +2238,7 @@ class SymbolicSanitizer(Sanitizer):
                     print(
                         "[Sanitizer] ▶ checking:",
                         addr_expr,
-                        f" with iterator constraints: {iterator_constraints} ",
+                        f" with iterator constraints: {iterator_constraint} ",
                         f" and expression-related constraints: {expr_constraints} ",
                     )
 

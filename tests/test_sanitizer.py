@@ -18,6 +18,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
     SymbolicSanitizer,
     RangeWrapper,
+    _intervals_to_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
 from z3 import simplify, is_int_value
@@ -127,6 +128,7 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
         super().__init__(*a, **k)
         self.after_loop_pending: list[int] = []
         self.check_inside_loop: list[tuple[Z3Expr, Sequence[ConstraintExpr]]] = []
+        self.iterator_constraints: list[ConstraintExpr] = []
 
     def _check_range_satisfiable(
         self,
@@ -144,7 +146,11 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
         def _after_loop(lineno: int) -> None:
             pending = 0
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
-                pending = len(self.loop_stack[-1].pending_checks)
+                ctx = self.loop_stack[-1]
+                pending = len(ctx.pending_checks)
+                iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
+                if iterator_constraint is not None:
+                    self.iterator_constraints.append(iterator_constraint)
             if orig_after is not None:
                 orig_after(lineno)
             self.after_loop_pending.append(pending)
@@ -288,6 +294,7 @@ def test_loop_bounds_from_pid():
 def test_loop_deferred_checks_after_context():
     loop_deferred_check_recorder.after_loop_pending.clear()
     loop_deferred_check_recorder.check_inside_loop.clear()
+    loop_deferred_check_recorder.iterator_constraints.clear()
     loop_deferred_check_recorder.records.clear()
 
     out = torch.empty((2,), dtype=torch.int32)
@@ -295,11 +302,13 @@ def test_loop_deferred_checks_after_context():
     loop_deferred_check_kernel[(1,)](out)
 
     assert loop_deferred_check_recorder.after_loop_pending == [1]
-    addr_expr, constraints = loop_deferred_check_recorder.check_inside_loop[0]
+    addr_expr, _ = loop_deferred_check_recorder.check_inside_loop[0]
     assert "4*loop_i_2" in str(addr_expr)
-    constraints_str = " ".join(str(c) for c in constraints)
-    assert "loop_i_2 >= 0" in constraints_str
-    assert "loop_i_2 < 4" in constraints_str
+    iterator_constraints_str = " ".join(
+        str(c) for c in loop_deferred_check_recorder.iterator_constraints
+    )
+    assert "loop_i_2 >= 0" in iterator_constraints_str
+    assert "loop_i_2 < 4" in iterator_constraints_str
     assert loop_deferred_check_recorder.records
 
 
