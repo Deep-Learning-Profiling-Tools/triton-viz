@@ -332,7 +332,7 @@ def test_reduce_expr_eval(op: str, data):
     max_expr = SymbolicExpr.create(op, input_arr, None, False)
     import builtins
 
-    result, _ = max_expr.eval()
+    result, _ = max_expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == getattr(builtins, op)(data)
 
 
@@ -342,7 +342,7 @@ def test_reduce_expr_eval(op: str, data):
 @pytest.mark.parametrize("value", [(1, 2, 3), 4])
 def test_basic_expr_const_eval(value):
     const_expr = SymbolicExpr.create("const", value, tl.int32)
-    result, constraints = const_expr.eval()
+    result, constraints = const_expr.eval(simplify_constraints=False)
     if isinstance(value, (list, tuple)):
         assert [cast(IntNumRef, v).as_long() for v in cast(list, result)] == list(value)
     else:
@@ -361,7 +361,7 @@ def test_basic_expr_const_eval(value):
 def test_basic_expr_pid_eval(axis, expected_pid):
     grid = (4, 5, 6)
     pid_expr = SymbolicExpr.create("pid", axis)
-    result, constraints = pid_expr.eval()
+    result, constraints = pid_expr.eval(simplify_constraints=False)
     assert result == expected_pid
     assert constraints is None
 
@@ -369,7 +369,7 @@ def test_basic_expr_pid_eval(axis, expected_pid):
 @pytest.mark.parametrize("start,end", [(4, 8), (0, 4)])
 def test_basic_expr_arange_eval(start, end):
     arange_expr = SymbolicExpr.create("arange", tl.int32, start, end)
-    result, constraints = arange_expr.eval()
+    result, constraints = arange_expr.eval(simplify_constraints=False)
     result = cast(ArithRef, result)
     assert result.decl().name() == f"arange_{start}_{end}"
     assert constraints is not None
@@ -391,7 +391,7 @@ def test_basic_expr_arange_eval(start, end):
 def test_unary_expr_eval(op: str, value: int, expected: int):
     arg = SymbolicExpr.create("const", value, tl.int32)
     expr = SymbolicExpr.create(op, arg)
-    result, constraints = expr.eval()
+    result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == expected
     assert constraints is None
 
@@ -424,7 +424,7 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
     lhs_expr = SymbolicExpr.create("const", lhs, tl.int32)
     rhs_expr = SymbolicExpr.create("const", rhs, tl.int32)
     expr = SymbolicExpr.create(op, lhs_expr, rhs_expr)
-    result, constraints = expr.eval()
+    result, constraints = expr.eval(simplify_constraints=False)
     if isinstance(expected, bool):
         assert str(result) == str(expected)
     else:
@@ -439,7 +439,7 @@ def test_pointer_expr_addptr_eval():
     base = SymbolicExpr.create("const", 100, tl.pointer_type(tl.int32))
     offset = SymbolicExpr.create("const", 3, tl.int32)
     expr = SymbolicExpr.create("addptr", base, offset)
-    result, constraints = expr.eval()
+    result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == 112
     assert constraints is None
 
@@ -463,6 +463,6 @@ def test_reshape_expr_eval(op: str, extra):
         expr = SymbolicExpr.create(op, extra, arg)
     else:
         expr = SymbolicExpr.create(op, arg, extra)
-    result, constraints = expr.eval()
+    result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == 5
     assert constraints is None

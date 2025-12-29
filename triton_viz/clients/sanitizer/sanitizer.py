@@ -610,7 +610,9 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> tuple[Z3Expr, ConstraintConjunction]:
+    def eval(
+        self, simplify_constraints: bool = True
+    ) -> tuple[Z3Expr, ConstraintConjunction]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression (or list of expressions) corresponding to the root node
@@ -624,6 +626,10 @@ class SymbolicExpr:
             expr = [simplify(e) for e in expr]
         else:
             expr = simplify(expr)
+
+        if constraints is not None and simplify_constraints:
+            # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
+            constraints = cast(BoolRef, simplify(constraints))
 
         return expr, constraints
 
