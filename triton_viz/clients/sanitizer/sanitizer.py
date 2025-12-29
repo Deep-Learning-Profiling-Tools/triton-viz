@@ -2,6 +2,7 @@ from bisect import bisect_left
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property, reduce
+import math
 from typing import (
     Any,
     ClassVar,
@@ -99,6 +100,17 @@ def _add_interval_value(intervals: list[tuple[int, int]], idx: int) -> None:
         intervals.append((idx, idx + 1))
         return
 
+    # Fast path for monotonic append (common for `range(...)` iteration).
+    last_start, last_end = intervals[-1]
+    if last_start <= idx < last_end:
+        return
+    if idx == last_end:
+        intervals[-1] = (last_start, idx + 1)
+        return
+    if idx > last_end:
+        intervals.append((idx, idx + 1))
+        return
+
     insert_at = bisect_left(intervals, (idx, idx + 1))
 
     if insert_at > 0:
@@ -167,23 +179,20 @@ def _iter_constraints_to_bool(
 def _and_constraints(
     *constraints: Optional[ConstraintExpr | Sequence[ConstraintExpr]],
 ) -> ConstraintConjunction:
-    result: Optional[BoolRef] = None
+    parts: list[BoolRef] = []
     for constraint in constraints:
         if constraint is None:
             continue
         if isinstance(constraint, (list, tuple)):
-            for bool_constraint in _iter_constraints_to_bool(constraint):
-                if result is None:
-                    result = bool_constraint
-                else:
-                    result = And(result, bool_constraint)
+            parts.extend(_iter_constraints_to_bool(constraint))
             continue
-        bool_constraint = _constraint_to_bool(constraint)
-        if result is None:
-            result = bool_constraint
-        else:
-            result = And(result, bool_constraint)
-    return result
+        parts.append(_constraint_to_bool(constraint))
+
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return And(*parts)
 
 
 @dataclass
@@ -280,6 +289,41 @@ class Sanitizer(Client):
         raise NotImplementedError
 
 
+_UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
+    np.cos: "cos",
+    np.exp: "exp",
+    np.exp2: "exp2",
+    np.abs: "abs",
+    np.floor: "floor",
+    np.ceil: "ceil",
+    np.log: "log",
+    np.log2: "log2",
+    np.sqrt: "sqrt",
+    np.sin: "sin",
+}
+
+_BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
+    np.add: "add",
+    np.subtract: "sub",
+    np.multiply: "mul",
+    np.divide: "div",
+    np.less: "less",
+    np.less_equal: "less_equal",
+    np.greater: "greater",
+    np.greater_equal: "greater_equal",
+    np.not_equal: "not_equal",
+    np.equal: "equal",
+    np.fmod: "mod",
+    np.maximum: "maximum",
+    np.minimum: "minimum",
+    np.bitwise_and: "bitwise_and",
+    np.bitwise_or: "bitwise_or",
+    np.bitwise_xor: "bitwise_xor",
+    np.right_shift: "right_shift",
+    np.left_shift: "left_shift",
+}
+
+
 class SymbolicExprDataWrapper:
     """
     This wrapper is used as a workaround of triton interpreter legacy code.
@@ -290,16 +334,32 @@ class SymbolicExprDataWrapper:
     we need to wrap SymbolicExpr with a class that has size attribute, and data.size != 1.
     """
 
-    def __init__(self, value: str, symbolic_expr: "SymbolicExpr"):
-        self.value = value
+    def __init__(self, symbolic_expr: "SymbolicExpr", value: Optional[str] = None):
+        self._value = value
         self.symbolic_expr = symbolic_expr
+
+    def invalidate(self) -> None:
+        self._value = None
+
+    def _ensure_value(self) -> str:
+        if self._value is None:
+            self._value = str(self.symbolic_expr)
+        return self._value
+
+    @property
+    def value(self) -> str:
+        return self._ensure_value()
+
+    @value.setter
+    def value(self, v: str) -> None:
+        self._value = v
 
     @property
     def size(self) -> int:
         shape = self.symbolic_expr.shape
         if len(shape) == 0:
             return 1
-        return reduce(lambda x, y: x * y, shape)
+        return math.prod(shape)
 
     @staticmethod
     def coerce_int(val: Any) -> int:
@@ -451,6 +511,10 @@ class SymbolicExpr:
         self.z3: Optional[Z3Expr] = None
 
         self.constraints: ConstraintConjunction = None
+        self._simplified_z3: Optional[Z3Expr] = None
+        self._simplified_constraints: Optional[ConstraintConjunction] = None
+        self._has_op_cache: dict[str, bool] = {}
+        self._data_wrapper: Optional[SymbolicExprDataWrapper] = None
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -466,6 +530,11 @@ class SymbolicExpr:
         child = SymbolicExpr.from_value(value) if value is not None else None
         self.children[name] = child
         setattr(self, name, child)
+        self._has_op_cache.clear()
+        self._simplified_z3 = None
+        self._simplified_constraints = None
+        if self._data_wrapper is not None:
+            self._data_wrapper.invalidate()
 
     def __add__(self, other: "SymbolicExpr") -> "SymbolicExpr":
         return SymbolicExpr.create("add", self, other)
@@ -622,16 +691,19 @@ class SymbolicExpr:
         """
         expr, constraints = self._to_z3()
 
-        if isinstance(expr, list):
-            expr = [simplify(e) for e in expr]
-        else:
-            expr = simplify(expr)
+        if self._simplified_z3 is None:
+            if isinstance(expr, list):
+                self._simplified_z3 = [simplify(e) for e in expr]
+            else:
+                self._simplified_z3 = simplify(expr)
 
         if constraints is not None and simplify_constraints:
-            # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
-            constraints = cast(BoolRef, simplify(constraints))
+            if self._simplified_constraints is None:
+                # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
+                self._simplified_constraints = cast(BoolRef, simplify(constraints))
+            return self._simplified_z3, self._simplified_constraints
 
-        return expr, constraints
+        return self._simplified_z3, constraints
 
     def to_py(self) -> Any:
         """Return a Python value for this expression."""
@@ -670,13 +742,19 @@ class SymbolicExpr:
 
     def has_op(self, op_name: str) -> bool:
         """Return True when the subtree contains an op with the given name."""
+        cached = self._has_op_cache.get(op_name)
+        if cached is not None:
+            return cached
         if self.op == op_name:
+            self._has_op_cache[op_name] = True
             return True
         for _, child_symbolic_expr in self.children.items():
             if child_symbolic_expr is None:
                 continue
             if child_symbolic_expr.has_op(op_name):
+                self._has_op_cache[op_name] = True
                 return True
+        self._has_op_cache[op_name] = False
         return False
 
     def to_tree_str(self) -> str:
@@ -698,7 +776,9 @@ class SymbolicExpr:
     @property
     def data(self) -> SymbolicExprDataWrapper:
         """Return a wrapper suitable for external consumers."""
-        return SymbolicExprDataWrapper(self.__str__(), self)
+        if self._data_wrapper is None:
+            self._data_wrapper = SymbolicExprDataWrapper(self)
+        return self._data_wrapper
 
     def _to_z3(self) -> tuple[Z3Expr, ConstraintConjunction]:
         if self.z3 is not None:
@@ -1558,8 +1638,8 @@ def _make_signature(
         if len(addr_expr) == 1:
             addr_hash = hash(addr_expr[0])
         else:
-            addr_hashes = sorted(hash(e) for e in addr_expr)
-            addr_hash = hash(tuple(addr_hashes))
+            # Order-stable hashing avoids O(n log n) sorting in hot paths.
+            addr_hash = hash(tuple(hash(e) for e in addr_expr))
     else:
         addr_hash = hash(addr_expr)
 
@@ -1913,21 +1993,9 @@ class SymbolicSanitizer(Sanitizer):
             return ret
 
         def op_unary_op_overrider(arg, op):
-            _unary_map = {
-                np.cos: "cos",
-                np.exp: "exp",
-                np.exp2: "exp2",
-                np.abs: "abs",
-                np.floor: "floor",
-                np.ceil: "ceil",
-                np.log: "log",
-                np.log2: "log2",
-                np.sqrt: "sqrt",
-                np.sin: "sin",
-            }
             arg_sym = SymbolicExpr.from_value(arg)
             try:
-                name = _unary_map[op]
+                name = _UNARY_NUMPY_TO_SYM_OP[op]
             except KeyError:
                 raise NotImplementedError(
                     f"Unsupported unary operation: {op} on {arg_sym}"
@@ -1935,46 +2003,15 @@ class SymbolicSanitizer(Sanitizer):
             return SymbolicExpr.create(name, arg_sym)
 
         def op_binary_op_overrider(lhs, rhs, op):
-            _binary_map = {
-                np.add: lambda lhs, rhs: lhs + rhs,
-                np.subtract: lambda lhs, rhs: lhs - rhs,
-                np.multiply: lambda lhs, rhs: lhs * rhs,
-                np.divide: lambda lhs, rhs: lhs / rhs,
-                np.less: lambda lhs, rhs: lhs < rhs,
-                np.less_equal: lambda lhs, rhs: lhs <= rhs,
-                np.greater: lambda lhs, rhs: lhs > rhs,
-                np.greater_equal: lambda lhs, rhs: lhs >= rhs,
-                np.not_equal: lambda lhs, rhs: lhs != rhs,
-                np.equal: lambda lhs, rhs: lhs == rhs,
-                np.fmod: lambda lhs, rhs: lhs % rhs,
-                np.maximum: lambda lhs, rhs: SymbolicExpr.create("maximum", lhs, rhs),
-                np.minimum: lambda lhs, rhs: SymbolicExpr.create("minimum", lhs, rhs),
-                np.bitwise_and: lambda lhs, rhs: SymbolicExpr.create(
-                    "bitwise_and", lhs, rhs
-                ),
-                np.bitwise_or: lambda lhs, rhs: SymbolicExpr.create(
-                    "bitwise_or", lhs, rhs
-                ),
-                np.bitwise_xor: lambda lhs, rhs: SymbolicExpr.create(
-                    "bitwise_xor", lhs, rhs
-                ),
-                np.right_shift: lambda lhs, rhs: SymbolicExpr.create(
-                    "right_shift", lhs, rhs
-                ),
-                np.left_shift: lambda lhs, rhs: SymbolicExpr.create(
-                    "left_shift", lhs, rhs
-                ),
-            }
             lhs_sym = SymbolicExpr.from_value(lhs)
             rhs_sym = SymbolicExpr.from_value(rhs)
             try:
-                func = _binary_map[op]
+                op_name = _BINARY_NUMPY_TO_SYM_OP[op]
             except KeyError:
                 raise NotImplementedError(
                     f"Unsupported binary operation: {op} between {lhs_sym} and {rhs_sym}"
                 )
-            result = func(lhs_sym, rhs_sym)
-            return result
+            return SymbolicExpr.create(op_name, lhs_sym, rhs_sym)
 
         def op_ternary_op_overrider(lhs, rhs, other, op):
             lhs_sym = SymbolicExpr.from_value(lhs)
