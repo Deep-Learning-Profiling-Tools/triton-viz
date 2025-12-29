@@ -1,7 +1,7 @@
 from bisect import bisect_left
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from functools import cached_property, reduce, wraps
+from functools import cached_property, reduce
 from typing import (
     Any,
     ClassVar,
@@ -10,14 +10,10 @@ from typing import (
     Union,
     TypeAlias,
     TypeVar,
-    ParamSpec,
     cast,
-    overload,
 )
 import sys
 import re
-import threading
-import time
 
 import numpy as np
 from torch import Tensor
@@ -89,6 +85,7 @@ from ..utils import (
     check_storage_contiguous,
     get_physical_addr_from_tensor_slice,
     check_inner_stride_equal_to_one,
+    frame_timer,
 )
 from .data import OutOfBoundsRecordZ3
 from .report import _get_traceback_info, print_oob_record, print_oob_record_pdb_style
@@ -99,71 +96,6 @@ Z3Expr: TypeAlias = Union[ExprRef, list[ExprRef], Tactic, Probe]
 ConstraintExpr: TypeAlias = Union[ExprRef, bool, int, float]
 ConstraintConjunction: TypeAlias = Optional[BoolRef]
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-_TIMER_STATE = threading.local()
-
-
-def _get_timer_stack() -> list[dict[str, float]]:
-    stack = getattr(_TIMER_STATE, "stack", None)
-    if stack is None:
-        stack = []
-        _TIMER_STATE.stack = stack
-    return stack
-
-
-@overload
-def _timer(
-    fn: Callable[P, R], *, label: str = ""
-) -> Callable[P, R]:
-    ...
-
-
-@overload
-def _timer(*, label: str = "") -> Callable[[Callable[P, R]], Callable[P, R]]:
-    ...
-
-
-def _timer(
-    fn: Callable[P, R] | None = None, *, label: str = ""
-) -> Callable[[Callable[P, R]], Callable[P, R]] | Callable[P, R]:
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
-        @wraps(func)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            stack = _get_timer_stack()
-            frame = {"child_time": 0.0}
-            stack.append(frame)
-            start = time.perf_counter()
-            try:
-                return func(*args, **kwargs)
-            finally:
-                elapsed = time.perf_counter() - start
-                stack.pop()
-                if stack:
-                    stack[-1]["child_time"] += elapsed
-                exclusive_ms = (elapsed - frame["child_time"]) * 1000.0
-                if label == "z3":
-                    self = args[0] if args else None
-                    op_name = getattr(self, "op", type(self).__name__)
-                    class_name = type(self).__name__
-                    name = f"{label} {class_name}({op_name})"
-                elif label:
-                    name = f"{label} {func.__name__}"
-                else:
-                    name = func.__name__
-                print(
-                    f"{name} {exclusive_ms:.3f}ms",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-        return wrapper
-
-    if fn is None:
-        return decorator
-    return decorator(fn)
 
 
 def _add_interval_value(intervals: list[tuple[int, int]], idx: int) -> None:
@@ -768,7 +700,7 @@ class SymbolicExpr:
         """Return a wrapper suitable for external consumers."""
         return SymbolicExprDataWrapper(self.__str__(), self)
 
-    @_timer
+    @frame_timer
     def _to_z3(self) -> tuple[Z3Expr, ConstraintConjunction]:
         if self.z3 is not None:
             return self.z3, self.constraints
