@@ -1540,18 +1540,16 @@ def _make_signature(
     """
     if isinstance(addr_expr, list):
         if len(addr_expr) == 1:
-            addr_repr = _sexpr_or_str(addr_expr[0])
+            addr_hash = hash(addr_expr[0])
         else:
-            addr_repr = "|".join(sorted(_sexpr_or_str(e) for e in addr_expr))
+            addr_hashes = sorted(hash(e) for e in addr_expr)
+            addr_hash = hash(tuple(addr_hashes))
     else:
-        addr_repr = _sexpr_or_str(addr_expr)
+        addr_hash = hash(addr_expr)
 
-    if constraints is None:
-        constr_repr = ""
-    else:
-        constr_repr = _sexpr_or_str(constraints)
+    constr_hash = 0 if constraints is None else hash(constraints)
 
-    return hash(addr_repr + "##" + constr_repr)
+    return hash((addr_hash, constr_hash))
 
 
 @dataclass(frozen=True)
