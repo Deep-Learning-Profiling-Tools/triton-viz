@@ -103,14 +103,14 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-_Z3_TIMER_STATE = threading.local()
+_TIMER_STATE = threading.local()
 
 
-def _get_z3_timer_stack() -> list[dict[str, float]]:
-    stack = getattr(_Z3_TIMER_STATE, "stack", None)
+def _get_timer_stack() -> list[dict[str, float]]:
+    stack = getattr(_TIMER_STATE, "stack", None)
     if stack is None:
         stack = []
-        _Z3_TIMER_STATE.stack = stack
+        _TIMER_STATE.stack = stack
     return stack
 
 
@@ -132,7 +132,7 @@ def _timer(
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            stack = _get_z3_timer_stack()
+            stack = _get_timer_stack()
             frame = {"child_time": 0.0}
             stack.append(frame)
             start = time.perf_counter()
@@ -778,7 +778,6 @@ class SymbolicExpr:
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         return self.z3, self.constraints
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
@@ -811,7 +810,6 @@ class ConstSymbolicExpr(SymbolicExpr):
                 return v.data.tolist()  # multi-element case
         return v
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         value = self.value
         if isinstance(value, TensorHandle):
@@ -865,7 +863,6 @@ class PidSymbolicExpr(SymbolicExpr):
         axis_val = self.axis.to_py()
         return f"pid_{axis_val}"
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         axis_val = self.axis.to_py()
         if axis_val == 0:
@@ -893,7 +890,6 @@ class ArangeSymbolicExpr(SymbolicExpr):
         end_const = cast(ConstSymbolicExpr, self.end)
         self.dtype = tl.block_type(tl.int32, [end_const.value - start_const.value])
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         start = self.start.to_py()
         end = self.end.to_py()
@@ -915,7 +911,6 @@ class IndirectSymbolicExprBase(SymbolicExpr):
     mask: Optional["SymbolicExpr"]
     other: Optional["SymbolicExpr"]
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         ptr_expr = self.ptr
         ptr, constraints_ptr = ptr_expr._to_z3()
@@ -986,7 +981,6 @@ class UnarySymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         val, constraints = self.arg._to_z3()
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1016,7 +1010,6 @@ class BinarySymbolicExpr(SymbolicExpr):
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         lhs, constraints_lhs = self.lhs._to_z3()
         rhs, constraints_rhs = self.rhs._to_z3()
@@ -1223,7 +1216,6 @@ class WhereSymbolicExpr(SymbolicExpr):
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         handler = self._Z3_BUILDERS.get(self.op)
         if handler is None:
@@ -1286,7 +1278,6 @@ class ReduceSymbolicExpr(SymbolicExpr):
         self.add_child("keepdims", keepdims)
         self.add_child("axis", axis)
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         handler = self._Z3_BUILDERS.get(self.op)
         if handler is None:
@@ -1325,7 +1316,6 @@ class DotSymbolicExpr(SymbolicExpr):
         self.add_child("b", b)
         self.add_child("d", d)
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
@@ -1342,7 +1332,6 @@ class CumsumSymbolicExpr(SymbolicExpr):
         self.add_child("reverse", reverse)
         self.dtype = dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
@@ -1373,7 +1362,6 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
         self.add_child("order", order)
         self.dtype = base.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
@@ -1389,7 +1377,6 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         self.add_child("offset", offset)
         self.dtype = self.ptr.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         ptr_expr = self.ptr
         offset_expr = self.offset
@@ -1426,7 +1413,6 @@ class AdvanceSymbolicExpr(SymbolicExpr):
         self.add_child("ptr", ptr)
         self.add_child("offsets", offsets)
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError("Advance operation is not implemented yet")
 
@@ -1441,7 +1427,6 @@ class SplatSymbolicExpr(SymbolicExpr):
         self.add_child("arg", arg)
         self.dtype = self.block_type.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
 
@@ -1459,7 +1444,6 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
         self.add_child("axis", axis)
         self.dtype = self.arg.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
 
@@ -1472,7 +1456,6 @@ class BroadcastSymbolicExpr(SymbolicExpr):
         self.add_child("arg", arg)
         self.dtype = self.arg.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
 
@@ -1485,7 +1468,6 @@ class ReshapeSymbolicExpr(SymbolicExpr):
         self.add_child("arg", arg)
         self.dtype = self.arg.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
 
@@ -1500,7 +1482,6 @@ class TransSymbolicExpr(SymbolicExpr):
         self.add_child("permutation", permutation)
         self.dtype = self.arg.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
 
@@ -1515,7 +1496,6 @@ class JoinSymbolicExpr(SymbolicExpr):
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(
             "Join operation is not implemented in Z3 evaluation yet"
@@ -1535,7 +1515,6 @@ class CastSymbolicExpr(SymbolicExpr):
         self.add_child("dst_type", dst_type)
         self.dtype = self.dst_type.to_py()
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.src._to_z3()
 
@@ -1556,7 +1535,6 @@ class FpToFpSymbolicExpr(SymbolicExpr):
         self.add_child("rounding_mode", rounding_mode)
         self.dtype = self.dst_type.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
@@ -1573,7 +1551,6 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
         self.add_child("val", val)
         self.dtype = self.val.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError("atomic_cas operation is not implemented yet")
 
@@ -1590,7 +1567,6 @@ class AtomicRmwSymbolicExpr(SymbolicExpr):
         self.add_child("mask", mask)
         self.dtype = self.val.dtype
 
-    @_timer(label="z3")
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
