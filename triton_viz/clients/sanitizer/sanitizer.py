@@ -1,5 +1,4 @@
 from bisect import bisect_left
-from collections import namedtuple
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property, reduce
@@ -308,16 +307,6 @@ class SymbolicExprDataWrapper:
         return self.value
 
 
-Spec = namedtuple(
-    "Spec",
-    [
-        "req",  # Required Arguments (tuple)
-        "opt",  # Optional Arguments (tuple)
-    ],
-    defaults=((), ()),
-)
-
-
 class SymbolicExpr:
     BASIC_OPS: ClassVar[tuple[str, ...]] = ("const", "pid", "arange")
     INDIRECT_OPS: ClassVar[tuple[str, ...]] = ("load", "store")
@@ -387,8 +376,6 @@ class SymbolicExpr:
         + ATOMIC_OPS
     )
 
-    OP_SPEC: ClassVar[dict[str, Spec]] = {}
-
     PID0: ClassVar[ArithRef] = Int("pid_0")
     PID1: ClassVar[ArithRef] = Int("pid_1")
     PID2: ClassVar[ArithRef] = Int("pid_2")
@@ -407,13 +394,14 @@ class SymbolicExpr:
 
     @classmethod
     def create(cls, op: str, *args: Any) -> "SymbolicExpr":
-        op_cls = cls._OP_CLASS_MAP.get(op, cls)
+        op_cls = cls._OP_CLASS_MAP.get(op)
+        if op_cls is None:
+            raise NotImplementedError(f"No operator class registered for {op}")
         return op_cls(op, *args)
 
-    def __init__(self, op: str, *args: Any):
+    def __init__(self, op: str):
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
-        :param args: Sub-expressions (for compound operations)
         """
         assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
         self.op = op
@@ -426,7 +414,6 @@ class SymbolicExpr:
 
         # deal with args
         self.children: dict[str, Optional["SymbolicExpr"]] = {}
-        self._init_from_spec(*args)
 
         # for-loop iterator association
         self.loop_ctx: Optional[LoopContext] = None
@@ -446,32 +433,21 @@ class SymbolicExpr:
             return self.dtype.element_ty.shape
         return ()
 
-    def _init_from_spec(self, *args: Any) -> None:
-        if self.op not in self.OP_SPEC:
-            raise NotImplementedError(f"Unsupported op: {self.op}")
-        spec = self.OP_SPEC[self.op]
-        if self.op == "const":
-            # leaf node, we can stop calling from_val otherwise will cause recursion
-            self.value = args[0]
-            self.dtype = args[1]
-        else:
-            # store in self.children
-            names = list(spec.req) + list(spec.opt)
-            for name, val in zip(names, args):
-                val = SymbolicExpr.from_value(val) if val is not None else None
-                self.children[name] = val
-            for name in names[len(args) :]:
-                self.children[name] = None
+    def _add_child(self, name: str, value: Any) -> Optional["SymbolicExpr"]:
+        child = SymbolicExpr.from_value(value) if value is not None else None
+        self.children[name] = child
+        self._set_child_attribute(name, child)
+        return child
 
-        self._post_init()
+    def _add_children(self, **children: Any) -> None:
+        for name, value in children.items():
+            self._add_child(name, value)
 
-    def _post_init(self) -> None:
-        return
-
-    def __getattr__(self, name: str) -> Any:
-        if name in self.children:
-            return self.children[name]
-        raise AttributeError(name)
+    def _set_child_attribute(
+        self, name: str, child: Optional["SymbolicExpr"]
+    ) -> None:
+        if name != "dtype" and not hasattr(SymbolicExpr, name):
+            setattr(self, name, child)
 
     def __add__(self, other: "SymbolicExpr") -> "SymbolicExpr":
         return SymbolicExpr.create("add", self, other)
@@ -707,7 +683,9 @@ class SymbolicExpr:
         for name, child in list(self.children.items()):
             if child is None:
                 continue
-            self.children[name] = child.replace_subtree(anchor_op)
+            new_child = child.replace_subtree(anchor_op)
+            self.children[name] = new_child
+            self._set_child_attribute(name, new_child)
 
         # inplace replace to "const" node
         if anchor_op is None or (
@@ -726,41 +704,25 @@ class SymbolicExpr:
         return self
 
 
-class BasicSymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "const": Spec(req=("value", "dtype")),
-        "pid": Spec(req=("axis",)),
-        "arange": Spec(req=("ret_ty", "start", "end")),
-    }
-
-    def _post_init(self) -> None:
-        if self.op == "pid":
-            self.dtype = tl.int32
-        elif self.op == "arange":  # Program ID / arange are always int32
-            self.dtype = tl.block_type(tl.int32, [self.end.value - self.start.value])
+class ConstSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
+        if op != "const":
+            raise NotImplementedError(f"Unsupported op for const: {op}")
+        super().__init__(op)
+        self.value = value
+        self.dtype = dtype
 
     def _node_label_core(self) -> str:
-        if self.op == "const":
-            return f"const={self.value}"
-        if self.op == "pid":
-            axis_val = self.axis.to_py()
-            return f"pid_{axis_val}"
-        return super()._node_label_core()
+        return f"const={self.value}"
 
     def _to_z3_impl(self) -> None:
-        builder = self._Z3_BUILDERS.get(self.op)
-        if builder is None:
-            raise NotImplementedError(f"Eval for op {self.op} is not implemented")
-        builder(self)
-
-    def _build_const(self) -> None:
         value = self.value
         if isinstance(value, TensorHandle):
             value = self.value.data
 
         if self.loop_ctx:  # if the self is a loop iterator
             self.z3 = self.loop_ctx.idx_z3
-        elif isinstance(value, np.ndarray): # only const nodes can be created with ndarray
+        elif isinstance(value, np.ndarray):  # only const nodes can be created with ndarray
             self.z3 = [IntVal(int(v)) for v in value.flat]
         elif isinstance(value, tuple):
             self.z3 = [IntVal(int(v)) for v in value]
@@ -772,7 +734,41 @@ class BasicSymbolicExpr(SymbolicExpr):
             self.z3 = IntVal(0)
         self.constraints = []
 
-    def _build_pid(self) -> None:
+    def _concretize_impl(self) -> Any:
+        dtype = self.dtype
+        if dtype is None:
+            raise RuntimeError("const node is missing dtype information")
+
+        if isinstance(self.value, (SymbolicExpr.builtin_scala_types, tl.pointer_type)):
+            return TensorHandle(
+                np.array([self.value], dtype=_get_np_dtype(dtype)),
+                dtype,
+            )
+        if isinstance(self.value, SymbolicExpr.tuple_types):
+            seq = cast(Sequence[Any], self.value)
+            np_array = np.array(seq, dtype=_get_np_dtype(dtype))
+            return TensorHandle(np_array, dtype)
+        if isinstance(self.value, TensorHandle):
+            if self.value.data.size != 1:
+                raise RuntimeError("Only scalar TensorHandle is supported in const!")
+            return self.value
+
+        raise RuntimeError(f"Unsupported const value type: {type(self.value)}")
+
+
+class PidSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, axis: Any):
+        if op != "pid":
+            raise NotImplementedError(f"Unsupported op for pid: {op}")
+        super().__init__(op)
+        self.axis = self._add_child("axis", axis)
+        self.dtype = tl.int32
+
+    def _node_label_core(self) -> str:
+        axis_val = self.axis.to_py()
+        return f"pid_{axis_val}"
+
+    def _to_z3_impl(self) -> None:
         axis_expr = self.children["axis"]
         axis_val = axis_expr.to_py()
         if axis_val == 0:
@@ -783,7 +779,25 @@ class BasicSymbolicExpr(SymbolicExpr):
             self.z3 = SymbolicExpr.PID2
         self.constraints = []
 
-    def _build_arange(self) -> None:
+    def _concretize_impl(self) -> Any:
+        fn = self.concrete_fn
+        if fn is None:
+            raise RuntimeError(f"{self.op}'s concrete function is not set!")
+        return fn(self.axis.to_py())
+
+
+class ArangeSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, ret_ty: Any, start: Any, end: Any):
+        if op != "arange":
+            raise NotImplementedError(f"Unsupported op for arange: {op}")
+        super().__init__(op)
+        self.ret_ty = self._add_child("ret_ty", ret_ty)
+        self.start = self._add_child("start", start)
+        self.end = self._add_child("end", end)
+        # Program ID / arange are always int32
+        self.dtype = tl.block_type(tl.int32, [self.end.value - self.start.value])
+
+    def _to_z3_impl(self) -> None:
         start_expr = self.children["start"]
         end_expr = self.children["end"]
         start = start_expr.value
@@ -798,68 +812,14 @@ class BasicSymbolicExpr(SymbolicExpr):
         self.constraints = [v >= start, v < end]
         SymbolicExpr.ARANGE_DICT[key] = (self.z3, self.constraints)
 
-    _Z3_BUILDERS: ClassVar[dict[str, Callable[["BasicSymbolicExpr"], None]]] = {
-        "const": _build_const,
-        "pid": _build_pid,
-        "arange": _build_arange,
-    }
-
     def _concretize_impl(self) -> Any:
-        handler = self._CONCRETIZE_BUILDERS.get(self.op)
-        if handler is None:
-            raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
-        return handler(self)
-
-    def _concretize_const(self) -> Any:
-        dtype = self.dtype
-        if dtype is None:
-            raise RuntimeError("const node is missing dtype information")
-
-        if isinstance(self.value, (SymbolicExpr.builtin_scala_types, tl.pointer_type)):
-            return TensorHandle(
-                np.array([self.value], dtype=_get_np_dtype(dtype)),
-                dtype,
-            )
-        elif isinstance(self.value, SymbolicExpr.tuple_types):
-            seq = cast(Sequence[Any], self.value)
-            np_array = np.array(seq, dtype=_get_np_dtype(dtype))
-            return TensorHandle(np_array, dtype)
-        elif isinstance(self.value, TensorHandle):
-            if self.value.data.size != 1:
-                raise RuntimeError("Only scalar TensorHandle is supported in const!")
-            return self.value
-
-        raise RuntimeError(f"Unsupported const value type: {type(self.value)}")
-
-    def _concretize_pid(self) -> Any:
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
-        return fn(self.axis.to_py())
-
-    def _concretize_arange(self) -> Any:
         fn = self.concrete_fn
         if fn is None:
             raise RuntimeError(f"{self.op}'s concrete function is not set!")
         return fn(self.ret_ty.to_py(), self.start.to_py(), self.end.to_py())
 
-    _CONCRETIZE_BUILDERS: ClassVar[dict[str, Callable[["BasicSymbolicExpr"], Any]]] = {
-        "const": _concretize_const,
-        "pid": _concretize_pid,
-        "arange": _concretize_arange,
-    }
 
-
-class IndirectSymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "load": Spec(req=("ptr",), opt=("mask", "other")),
-        "store": Spec(req=("ptr", "value"), opt=("mask", "other")),
-    }
-
-    def _post_init(self) -> None:
-        if self.op == "load":
-            self.dtype = self.ptr.dtype.element_ty
-
+class IndirectSymbolicExprBase(SymbolicExpr):
     def _to_z3_impl(self) -> None:
         ptr_expr = self.children["ptr"]
         ptr, constraints_ptr = ptr_expr._to_z3()
@@ -903,10 +863,41 @@ class IndirectSymbolicExpr(SymbolicExpr):
         )
 
 
+class LoadSymbolicExpr(IndirectSymbolicExprBase):
+    def __init__(self, op: str, ptr: Any, mask: Any = None, other: Any = None):
+        if op != "load":
+            raise NotImplementedError(f"Unsupported op for load: {op}")
+        super().__init__(op)
+        self.ptr = self._add_child("ptr", ptr)
+        self.mask = self._add_child("mask", mask)
+        self.other = self._add_child("other", other)
+        self.dtype = self.ptr.dtype.element_ty
+
+
+class StoreSymbolicExpr(IndirectSymbolicExprBase):
+    def __init__(
+        self,
+        op: str,
+        ptr: Any,
+        value: Any,
+        mask: Any = None,
+        other: Any = None,
+    ):
+        if op != "store":
+            raise NotImplementedError(f"Unsupported op for store: {op}")
+        super().__init__(op)
+        self.ptr = self._add_child("ptr", ptr)
+        self.value = self._add_child("value", value)
+        self.mask = self._add_child("mask", mask)
+        self.other = self._add_child("other", other)
+
+
 class UnarySymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        op: Spec(req=("arg",)) for op in SymbolicExpr.UNARY_OPS
-    }
+    def __init__(self, op: str, arg: Any):
+        if op not in SymbolicExpr.UNARY_OPS:
+            raise NotImplementedError(f"Unsupported unary op: {op}")
+        super().__init__(op)
+        self.arg = self._add_child("arg", arg)
 
     def _to_z3_impl(self) -> None:
         arg_expr = self.children["arg"]
@@ -928,11 +919,12 @@ class UnarySymbolicExpr(SymbolicExpr):
 
 
 class BinarySymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        op: Spec(req=("lhs", "rhs")) for op in SymbolicExpr.BINARY_OPS
-    }
-
-    def _post_init(self) -> None:
+    def __init__(self, op: str, lhs: Any, rhs: Any):
+        if op not in SymbolicExpr.BINARY_OPS:
+            raise NotImplementedError(f"Unsupported binary op: {op}")
+        super().__init__(op)
+        self.lhs = self._add_child("lhs", lhs)
+        self.rhs = self._add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1134,12 +1126,14 @@ class BinarySymbolicExpr(SymbolicExpr):
     }
 
 
-class TernarySymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "where": Spec(req=("cond", "lhs", "rhs")),
-    }
-
-    def _post_init(self) -> None:
+class WhereSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, cond: Any, lhs: Any, rhs: Any):
+        if op != "where":
+            raise NotImplementedError(f"Unsupported op for where: {op}")
+        super().__init__(op)
+        self.cond = self._add_child("cond", cond)
+        self.lhs = self._add_child("lhs", lhs)
+        self.rhs = self._add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1184,18 +1178,21 @@ class TernarySymbolicExpr(SymbolicExpr):
         self.z3 = [If(cond[i], lhs[i], rhs[i]) for i in range(len(cond))]
         self.constraints = constraints_cond + constraints_lhs + constraints_rhs
 
-    _Z3_BUILDERS: ClassVar[dict[str, Callable[["TernarySymbolicExpr"], None]]] = {
+    _Z3_BUILDERS: ClassVar[dict[str, Callable[["WhereSymbolicExpr"], None]]] = {
         "where": _where,
     }
 
 
 class ReduceSymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "sum": Spec(req=("input", "axis", "keepdims")),
-        "max": Spec(req=("input", "axis", "keepdims")),
-        "min": Spec(req=("input", "axis", "keepdims")),
-        "dot": Spec(req=("a", "b"), opt=("d",)),
-    }
+    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min")
+
+    def __init__(self, op: str, input: Any, axis: Any, keepdims: Any):
+        if op not in self._SUPPORTED_OPS:
+            raise NotImplementedError(f"Unsupported reduce op: {op}")
+        super().__init__(op)
+        self.input = self._add_child("input", input)
+        self.axis = self._add_child("axis", axis)
+        self.keepdims = self._add_child("keepdims", keepdims)
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1225,44 +1222,70 @@ class ReduceSymbolicExpr(SymbolicExpr):
     }
 
 
-class ScanSymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "cumsum": Spec(req=("input", "axis", "reverse", "dtype")),
-    }
+class DotSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, a: Any, b: Any, d: Any = None):
+        if op != "dot":
+            raise NotImplementedError(f"Unsupported op for dot: {op}")
+        super().__init__(op)
+        self.a = self._add_child("a", a)
+        self.b = self._add_child("b", b)
+        self.d = self._add_child("d", d)
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
 
-class PointerSymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "make_block_ptr": Spec(
-            req=("base", "shape", "strides", "offsets", "block_shape", "order")
-        ),
-        "addptr": Spec(req=("ptr", "offset")),
-        "advance": Spec(req=("ptr", "offsets")),
-    }
-    _INT_DTYPES: ClassVar[tuple[type, ...]] = (int, np.integer, bool)
-
-    def _post_init(self) -> None:
-        if self.op == "addptr":
-            self.dtype = self.ptr.dtype
+class CumsumSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, input: Any, axis: Any, reverse: Any, dtype: Any):
+        if op != "cumsum":
+            raise NotImplementedError(f"Unsupported op for cumsum: {op}")
+        super().__init__(op)
+        self.input = self._add_child("input", input)
+        self.axis = self._add_child("axis", axis)
+        self.reverse = self._add_child("reverse", reverse)
+        self._add_child("dtype", dtype)
 
     def _to_z3_impl(self) -> None:
-        handler = self._Z3_BUILDERS.get(self.op)
-        if handler is None:
-            raise NotImplementedError(f"Eval for op {self.op} is not implemented")
-        handler(self)
+        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
-    def _concretize_impl(self) -> Any:
-        fn = self.concrete_fn
-        if fn is None:
-            raise RuntimeError(f"{self.op}'s concrete function is not set!")
-        if self.op == "addptr":
-            return fn(self.ptr.concretize(), self.offset.concretize())
-        raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
 
-    def _addptr(self) -> None:
+class MakeBlockPtrSymbolicExpr(SymbolicExpr):
+    def __init__(
+        self,
+        op: str,
+        base: Any,
+        shape: Any,
+        strides: Any,
+        offsets: Any,
+        block_shape: Any,
+        order: Any,
+    ):
+        if op != "make_block_ptr":
+            raise NotImplementedError(f"Unsupported op for make_block_ptr: {op}")
+        super().__init__(op)
+        self.base = self._add_child("base", base)
+        self._add_child("shape", shape)
+        self.strides = self._add_child("strides", strides)
+        self.offsets = self._add_child("offsets", offsets)
+        self.block_shape = self._add_child("block_shape", block_shape)
+        self.order = self._add_child("order", order)
+
+    def _to_z3_impl(self) -> None:
+        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+
+
+class AddPtrSymbolicExpr(SymbolicExpr):
+    _INT_DTYPES: ClassVar[tuple[type, ...]] = (int, np.integer, bool)
+
+    def __init__(self, op: str, ptr: Any, offset: Any):
+        if op != "addptr":
+            raise NotImplementedError(f"Unsupported op for addptr: {op}")
+        super().__init__(op)
+        self.ptr = self._add_child("ptr", ptr)
+        self.offset = self._add_child("offset", offset)
+        self.dtype = self.ptr.dtype
+
+    def _to_z3_impl(self) -> None:
         ptr_expr = self.children["ptr"]
         offset_expr = self.children["offset"]
         ptr_z3, constraints_ptr = ptr_expr._to_z3()
@@ -1271,7 +1294,7 @@ class PointerSymbolicExpr(SymbolicExpr):
         element_bytewidth = max(
             1, ptr_expr.dtype.scalar.element_ty.primitive_bitwidth // 8
         )
-        if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list): # hot path
+        if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
             self.z3 = ptr_z3 + offset_z3 * element_bytewidth
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
             if len(ptr_z3) != len(offset_z3):
@@ -1281,146 +1304,213 @@ class PointerSymbolicExpr(SymbolicExpr):
             self.z3 = [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
         elif isinstance(ptr_z3, list):
             self.z3 = [p + offset_z3 * element_bytewidth for p in ptr_z3]
-        else: # isinstance(offset_z3, list):
+        else:  # isinstance(offset_z3, list):
             self.z3 = [ptr_z3 + o * element_bytewidth for o in offset_z3]
 
-    def _advance(self) -> None:
-        raise NotImplementedError("Advance operation is not implemented yet")
-
-    _Z3_BUILDERS: ClassVar[dict[str, Callable[["PointerSymbolicExpr"], None]]] = {
-        "addptr": _addptr,
-        "advance": _advance,
-    }
+    def _concretize_impl(self) -> Any:
+        fn = self.concrete_fn
+        if fn is None:
+            raise RuntimeError(f"{self.op}'s concrete function is not set!")
+        return fn(self.ptr.concretize(), self.offset.concretize())
 
 
-class ReshapeSymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "splat": Spec(req=("block_type", "arg")),
-        "expand_dims": Spec(req=("arg", "axis")),
-        "broadcast": Spec(req=("arg", "shape")),
-        "reshape": Spec(req=("arg", "shape")),
-        "trans": Spec(req=("arg", "permutation")),
-        "join": Spec(req=("lhs", "rhs")),
-    }
-
-    def _post_init(self) -> None:
-        if self.op == "join":
-            self.dtype = self.lhs.dtype
-        elif self.op == "splat":
-            self.dtype = self.block_type.dtype
-        elif self.op in ("expand_dims", "broadcast", "reshape", "trans"):
-            self.dtype = self.arg.dtype
+class AdvanceSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, ptr: Any, offsets: Any):
+        if op != "advance":
+            raise NotImplementedError(f"Unsupported op for advance: {op}")
+        super().__init__(op)
+        self.ptr = self._add_child("ptr", ptr)
+        self.offsets = self._add_child("offsets", offsets)
 
     def _to_z3_impl(self) -> None:
-        handler = self._Z3_BUILDERS.get(self.op)
-        if handler is None:
-            raise NotImplementedError(f"Eval for op {self.op} is not implemented")
-        handler(self)
+        raise NotImplementedError("Advance operation is not implemented yet")
 
-    def _concretize_impl(self) -> Any:
-        if self.op == "splat":
-            fn = self.concrete_fn
-            if fn is None:
-                raise RuntimeError(f"{self.op}'s concrete function is not set!")
-            return fn(self.block_type.to_py(), self.arg.concretize())
-        return super()._concretize_impl()
 
-    def _reshape_passthrough(self) -> None:
+class SplatSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, block_type: Any, arg: Any):
+        if op != "splat":
+            raise NotImplementedError(f"Unsupported op for splat: {op}")
+        super().__init__(op)
+        self.block_type = self._add_child("block_type", block_type)
+        self.arg = self._add_child("arg", arg)
+        self.dtype = self.block_type.dtype
+
+    def _to_z3_impl(self) -> None:
         arg_expr = self.children["arg"]
         self.z3, self.constraints = arg_expr._to_z3()
 
-    def _join(self) -> None:
+    def _concretize_impl(self) -> Any:
+        fn = self.concrete_fn
+        if fn is None:
+            raise RuntimeError(f"{self.op}'s concrete function is not set!")
+        return fn(self.block_type.to_py(), self.arg.concretize())
+
+
+class ExpandDimsSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, arg: Any, axis: Any):
+        if op != "expand_dims":
+            raise NotImplementedError(f"Unsupported op for expand_dims: {op}")
+        super().__init__(op)
+        self.arg = self._add_child("arg", arg)
+        self.axis = self._add_child("axis", axis)
+        self.dtype = self.arg.dtype
+
+    def _to_z3_impl(self) -> None:
+        arg_expr = self.children["arg"]
+        self.z3, self.constraints = arg_expr._to_z3()
+
+
+class BroadcastSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, arg: Any, shape: Any):
+        if op != "broadcast":
+            raise NotImplementedError(f"Unsupported op for broadcast: {op}")
+        super().__init__(op)
+        self.arg = self._add_child("arg", arg)
+        self._add_child("shape", shape)
+        self.dtype = self.arg.dtype
+
+    def _to_z3_impl(self) -> None:
+        arg_expr = self.children["arg"]
+        self.z3, self.constraints = arg_expr._to_z3()
+
+
+class ReshapeSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, arg: Any, shape: Any):
+        if op != "reshape":
+            raise NotImplementedError(f"Unsupported op for reshape: {op}")
+        super().__init__(op)
+        self.arg = self._add_child("arg", arg)
+        self._add_child("shape", shape)
+        self.dtype = self.arg.dtype
+
+    def _to_z3_impl(self) -> None:
+        arg_expr = self.children["arg"]
+        self.z3, self.constraints = arg_expr._to_z3()
+
+
+class TransSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, arg: Any, permutation: Any):
+        if op != "trans":
+            raise NotImplementedError(f"Unsupported op for trans: {op}")
+        super().__init__(op)
+        self.arg = self._add_child("arg", arg)
+        self.permutation = self._add_child("permutation", permutation)
+        self.dtype = self.arg.dtype
+
+    def _to_z3_impl(self) -> None:
+        arg_expr = self.children["arg"]
+        self.z3, self.constraints = arg_expr._to_z3()
+
+
+class JoinSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, lhs: Any, rhs: Any):
+        if op != "join":
+            raise NotImplementedError(f"Unsupported op for join: {op}")
+        super().__init__(op)
+        self.lhs = self._add_child("lhs", lhs)
+        self.rhs = self._add_child("rhs", rhs)
+        self.dtype = self.lhs.dtype
+
+    def _to_z3_impl(self) -> None:
         raise NotImplementedError(
             "Join operation is not implemented in Z3 evaluation yet"
         )
 
-    _Z3_BUILDERS: ClassVar[dict[str, Callable[["ReshapeSymbolicExpr"], None]]] = {
-        "splat": _reshape_passthrough,
-        "expand_dims": _reshape_passthrough,
-        "broadcast": _reshape_passthrough,
-        "reshape": _reshape_passthrough,
-        "trans": _reshape_passthrough,
-        "join": _join,
-    }
-
 
 class CastSymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "cast_impl": Spec(req=("src", "dst_type")),
-        "bitcast": Spec(req=("src", "dst_type")),
-        "fp_to_fp": Spec(req=("src", "dst_type", "rounding_mode")),
-    }
+    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("cast_impl", "bitcast")
 
-    def _post_init(self) -> None:
-        if self.op in ("cast_impl", "bitcast", "fp_to_fp"):
-            if self.dst_type.op == "const":
-                self.dtype = self.dst_type.value
+    def __init__(self, op: str, src: Any, dst_type: Any):
+        if op not in self._SUPPORTED_OPS:
+            raise NotImplementedError(f"Unsupported cast op: {op}")
+        super().__init__(op)
+        self.src = self._add_child("src", src)
+        self.dst_type = self._add_child("dst_type", dst_type)
+        if self.dst_type.op == "const":
+            self.dtype = self.dst_type.value
 
     def _to_z3_impl(self) -> None:
-        handler = self._Z3_BUILDERS.get(self.op)
-        if handler is None:
-            raise NotImplementedError(f"Eval for op {self.op} is not implemented")
-        handler(self)
-
-    def _concretize_impl(self) -> Any:
-        if self.op in ("cast_impl", "bitcast"):
-            fn = self.concrete_fn
-            if fn is None:
-                raise RuntimeError(f"{self.op}'s concrete function is not set!")
-            src_concrete = self.src.concretize()
-            dst_type_value = (
-                self.dst_type.value
-                if hasattr(self.dst_type, "value")
-                else self.dst_type
-            )
-            return fn(src_concrete, dst_type_value)
-        return super()._concretize_impl()
-
-    def _cast_passthrough(self) -> None:
         src_expr = self.children["src"]
         self.z3, self.constraints = src_expr._to_z3()
 
-    _Z3_BUILDERS: ClassVar[dict[str, Callable[["CastSymbolicExpr"], None]]] = {
-        "cast_impl": _cast_passthrough,
-        "bitcast": _cast_passthrough,
-    }
+    def _concretize_impl(self) -> Any:
+        fn = self.concrete_fn
+        if fn is None:
+            raise RuntimeError(f"{self.op}'s concrete function is not set!")
+        src_concrete = self.src.concretize()
+        dst_type_value = (
+            self.dst_type.value
+            if hasattr(self.dst_type, "value")
+            else self.dst_type
+        )
+        return fn(src_concrete, dst_type_value)
 
 
-class AtomicSymbolicExpr(SymbolicExpr):
-    OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "atomic_cas": Spec(req=("ptr", "cmp", "val")),
-        "atomic_rmw": Spec(req=("ptr", "val", "mask")),
-    }
+class FpToFpSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, src: Any, dst_type: Any, rounding_mode: Any):
+        if op != "fp_to_fp":
+            raise NotImplementedError(f"Unsupported op for fp_to_fp: {op}")
+        super().__init__(op)
+        self.src = self._add_child("src", src)
+        self.dst_type = self._add_child("dst_type", dst_type)
+        self.rounding_mode = self._add_child("rounding_mode", rounding_mode)
+        if self.dst_type.op == "const":
+            self.dtype = self.dst_type.value
 
     def _to_z3_impl(self) -> None:
-        handler = self._Z3_BUILDERS.get(self.op)
-        if handler is None:
-            raise NotImplementedError(f"Eval for op {self.op} is not implemented")
-        handler(self)
-
-    def _atomic_cas(self) -> None:
-        raise NotImplementedError("atomic_cas operation is not implemented yet")
-
-    def _atomic_rmw(self) -> None:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
-    _Z3_BUILDERS: ClassVar[dict[str, Callable[["AtomicSymbolicExpr"], None]]] = {
-        "atomic_cas": _atomic_cas,
-        "atomic_rmw": _atomic_rmw,
-    }
+
+class AtomicCasSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, ptr: Any, cmp: Any, val: Any):
+        if op != "atomic_cas":
+            raise NotImplementedError(f"Unsupported op for atomic_cas: {op}")
+        super().__init__(op)
+        self.ptr = self._add_child("ptr", ptr)
+        self.cmp = self._add_child("cmp", cmp)
+        self.val = self._add_child("val", val)
+
+    def _to_z3_impl(self) -> None:
+        raise NotImplementedError("atomic_cas operation is not implemented yet")
 
 
-SymbolicExpr.register_op_class(BasicSymbolicExpr, SymbolicExpr.BASIC_OPS)
-SymbolicExpr.register_op_class(IndirectSymbolicExpr, SymbolicExpr.INDIRECT_OPS)
+class AtomicRmwSymbolicExpr(SymbolicExpr):
+    def __init__(self, op: str, ptr: Any, val: Any, mask: Any):
+        if op != "atomic_rmw":
+            raise NotImplementedError(f"Unsupported op for atomic_rmw: {op}")
+        super().__init__(op)
+        self.ptr = self._add_child("ptr", ptr)
+        self.val = self._add_child("val", val)
+        self.mask = self._add_child("mask", mask)
+
+    def _to_z3_impl(self) -> None:
+        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+
+
+SymbolicExpr.register_op_class(ConstSymbolicExpr, ("const",))
+SymbolicExpr.register_op_class(PidSymbolicExpr, ("pid",))
+SymbolicExpr.register_op_class(ArangeSymbolicExpr, ("arange",))
+SymbolicExpr.register_op_class(LoadSymbolicExpr, ("load",))
+SymbolicExpr.register_op_class(StoreSymbolicExpr, ("store",))
 SymbolicExpr.register_op_class(UnarySymbolicExpr, SymbolicExpr.UNARY_OPS)
 SymbolicExpr.register_op_class(BinarySymbolicExpr, SymbolicExpr.BINARY_OPS)
-SymbolicExpr.register_op_class(TernarySymbolicExpr, SymbolicExpr.TERNARY_OPS)
-SymbolicExpr.register_op_class(ReduceSymbolicExpr, SymbolicExpr.REDUCE_OPS)
-SymbolicExpr.register_op_class(ScanSymbolicExpr, SymbolicExpr.SCAN_OPS)
-SymbolicExpr.register_op_class(PointerSymbolicExpr, SymbolicExpr.POINTER_OPS)
-SymbolicExpr.register_op_class(ReshapeSymbolicExpr, SymbolicExpr.RESHAPE_OPS)
-SymbolicExpr.register_op_class(CastSymbolicExpr, SymbolicExpr.CAST_OPS)
-SymbolicExpr.register_op_class(AtomicSymbolicExpr, SymbolicExpr.ATOMIC_OPS)
+SymbolicExpr.register_op_class(WhereSymbolicExpr, ("where",))
+SymbolicExpr.register_op_class(ReduceSymbolicExpr, ("sum", "max", "min"))
+SymbolicExpr.register_op_class(DotSymbolicExpr, ("dot",))
+SymbolicExpr.register_op_class(CumsumSymbolicExpr, ("cumsum",))
+SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
+SymbolicExpr.register_op_class(AddPtrSymbolicExpr, ("addptr",))
+SymbolicExpr.register_op_class(AdvanceSymbolicExpr, ("advance",))
+SymbolicExpr.register_op_class(SplatSymbolicExpr, ("splat",))
+SymbolicExpr.register_op_class(ExpandDimsSymbolicExpr, ("expand_dims",))
+SymbolicExpr.register_op_class(BroadcastSymbolicExpr, ("broadcast",))
+SymbolicExpr.register_op_class(ReshapeSymbolicExpr, ("reshape",))
+SymbolicExpr.register_op_class(TransSymbolicExpr, ("trans",))
+SymbolicExpr.register_op_class(JoinSymbolicExpr, ("join",))
+SymbolicExpr.register_op_class(CastSymbolicExpr, ("cast_impl", "bitcast"))
+SymbolicExpr.register_op_class(FpToFpSymbolicExpr, ("fp_to_fp",))
+SymbolicExpr.register_op_class(AtomicCasSymbolicExpr, ("atomic_cas",))
+SymbolicExpr.register_op_class(AtomicRmwSymbolicExpr, ("atomic_rmw",))
 
 
 def _sexpr_or_str(expr: Any) -> str:
