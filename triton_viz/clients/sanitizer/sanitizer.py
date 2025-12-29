@@ -458,9 +458,10 @@ class SymbolicExpr:
             return self.dtype.element_ty.shape
         return ()
 
-    def _add_child(self, name: str, value: Any) -> Optional["SymbolicExpr"]:
+    def add_child(self, name: str, value: Any) -> Optional["SymbolicExpr"]:
         child = SymbolicExpr.from_value(value) if value is not None else None
         self.children[name] = child
+        setattr(self, name, child)
         return child
 
     def __add__(self, other: "SymbolicExpr") -> "SymbolicExpr":
@@ -699,8 +700,7 @@ class SymbolicExpr:
             if child is None:
                 continue
             new_child = child.replace_subtree(anchor_op)
-            self.children[name] = new_child
-            setattr(self, name, new_child)
+            self.add_child(name, new_child)
 
         # inplace replace to "const" node
         if anchor_op is None or (
@@ -772,7 +772,7 @@ class ConstSymbolicExpr(SymbolicExpr):
 class PidSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, axis: Any):
         super().__init__(op)
-        self.axis = self._add_child("axis", axis)
+        self.add_child("axis", axis)
         self.dtype = tl.int32
 
     def _node_label_core(self) -> str:
@@ -796,9 +796,9 @@ class PidSymbolicExpr(SymbolicExpr):
 class ArangeSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, ret_ty: Any, start: Any, end: Any):
         super().__init__(op)
-        self.ret_ty = self._add_child("ret_ty", ret_ty)
-        self.start = self._add_child("start", start)
-        self.end = self._add_child("end", end)
+        self.add_child("ret_ty", ret_ty)
+        self.add_child("start", start)
+        self.add_child("end", end)
         # Program ID / arange are always int32
         self.dtype = tl.block_type(tl.int32, [self.end.value - self.start.value])
 
@@ -858,9 +858,9 @@ class IndirectSymbolicExprBase(SymbolicExpr):
 class LoadSymbolicExpr(IndirectSymbolicExprBase):
     def __init__(self, op: str, ptr: Any, mask: Any = None, other: Any = None):
         super().__init__(op)
-        self.ptr = self._add_child("ptr", ptr)
-        self.mask = self._add_child("mask", mask) if mask is not None else None
-        self.other = self._add_child("other", other) if other is not None else None
+        self.add_child("ptr", ptr)
+        self.add_child("mask", mask)
+        self.add_child("other", other)
         self.dtype = self.ptr.dtype.element_ty
 
 
@@ -874,10 +874,10 @@ class StoreSymbolicExpr(IndirectSymbolicExprBase):
         other: Any = None,
     ):
         super().__init__(op)
-        self.ptr = self._add_child("ptr", ptr)
-        self.value = self._add_child("value", value)
-        self.mask = self._add_child("mask", mask) if mask is not None else None
-        self.other = self._add_child("other", other) if other is not None else None
+        self.add_child("ptr", ptr)
+        self.add_child("value", value)
+        self.add_child("mask", mask)
+        self.add_child("other", other)
 
 
 class UnarySymbolicExpr(SymbolicExpr):
@@ -885,7 +885,7 @@ class UnarySymbolicExpr(SymbolicExpr):
         if op not in SymbolicExpr.UNARY_OPS:
             raise NotImplementedError(f"Unsupported unary op: {op}")
         super().__init__(op)
-        self.arg = self._add_child("arg", arg)
+        self.add_child("arg", arg)
 
     def _to_z3_impl(self) -> None:
         arg_expr = self.arg
@@ -911,8 +911,8 @@ class BinarySymbolicExpr(SymbolicExpr):
         if op not in SymbolicExpr.BINARY_OPS:
             raise NotImplementedError(f"Unsupported binary op: {op}")
         super().__init__(op)
-        self.lhs = self._add_child("lhs", lhs)
-        self.rhs = self._add_child("rhs", rhs)
+        self.add_child("lhs", lhs)
+        self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1114,9 +1114,9 @@ class BinarySymbolicExpr(SymbolicExpr):
 class WhereSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, cond: Any, lhs: Any, rhs: Any):
         super().__init__(op)
-        self.cond = self._add_child("cond", cond)
-        self.lhs = self._add_child("lhs", lhs)
-        self.rhs = self._add_child("rhs", rhs)
+        self.add_child("cond", cond)
+        self.add_child("lhs", lhs)
+        self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1175,9 +1175,9 @@ class ReduceSymbolicExpr(SymbolicExpr):
         if op not in self._SUPPORTED_OPS:
             raise NotImplementedError(f"Unsupported reduce op: {op}")
         super().__init__(op)
-        self.input = self._add_child("input", input)
-        self.keepdims = self._add_child("keepdims", keepdims)
-        self.axis = self._add_child("axis", axis) if axis is not None else None
+        self.add_child("input", input)
+        self.add_child("keepdims", keepdims)
+        self.add_child("axis", axis)
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1210,9 +1210,9 @@ class ReduceSymbolicExpr(SymbolicExpr):
 class DotSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, a: Any, b: Any, d: Any = None):
         super().__init__(op)
-        self.a = self._add_child("a", a)
-        self.b = self._add_child("b", b)
-        self.d = self._add_child("d", d)
+        self.add_child("a", a)
+        self.add_child("b", b)
+        self.add_child("d", d)
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1221,10 +1221,10 @@ class DotSymbolicExpr(SymbolicExpr):
 class CumsumSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, input: Any, axis: Any, reverse: Any, dtype: Any):
         super().__init__(op)
-        self.input = self._add_child("input", input)
-        self.axis = self._add_child("axis", axis)
-        self.reverse = self._add_child("reverse", reverse)
-        self._add_child("dtype", dtype)
+        self.add_child("input", input)
+        self.add_child("axis", axis)
+        self.add_child("reverse", reverse)
+        self.dtype = dtype
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1242,12 +1242,12 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
         order: Any,
     ):
         super().__init__(op)
-        self.base = self._add_child("base", base)
-        self._add_child("shape", shape)
-        self.strides = self._add_child("strides", strides)
-        self.offsets = self._add_child("offsets", offsets)
-        self.block_shape = self._add_child("block_shape", block_shape)
-        self.order = self._add_child("order", order)
+        self.add_child("base", base)
+        self.add_child("shape", shape)
+        self.add_child("strides", strides)
+        self.add_child("offsets", offsets)
+        self.add_child("block_shape", block_shape)
+        self.add_child("order", order)
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1258,8 +1258,8 @@ class AddPtrSymbolicExpr(SymbolicExpr):
 
     def __init__(self, op: str, ptr: Any, offset: Any):
         super().__init__(op)
-        self.ptr = self._add_child("ptr", ptr)
-        self.offset = self._add_child("offset", offset)
+        self.add_child("ptr", ptr)
+        self.add_child("offset", offset)
         self.dtype = self.ptr.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1291,8 +1291,8 @@ class AddPtrSymbolicExpr(SymbolicExpr):
 class AdvanceSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, ptr: Any, offsets: Any):
         super().__init__(op)
-        self.ptr = self._add_child("ptr", ptr)
-        self.offsets = self._add_child("offsets", offsets)
+        self.add_child("ptr", ptr)
+        self.add_child("offsets", offsets)
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError("Advance operation is not implemented yet")
@@ -1301,8 +1301,8 @@ class AdvanceSymbolicExpr(SymbolicExpr):
 class SplatSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, block_type: Any, arg: Any):
         super().__init__(op)
-        self.block_type = self._add_child("block_type", block_type)
-        self.arg = self._add_child("arg", arg)
+        self.add_child("block_type", block_type)
+        self.add_child("arg", arg)
         self.dtype = self.block_type.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1316,8 +1316,8 @@ class SplatSymbolicExpr(SymbolicExpr):
 class ExpandDimsSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, axis: Any):
         super().__init__(op)
-        self.arg = self._add_child("arg", arg)
-        self.axis = self._add_child("axis", axis)
+        self.add_child("arg", arg)
+        self.add_child("axis", axis)
         self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1328,8 +1328,7 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
 class BroadcastSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, shape: Any):
         super().__init__(op)
-        self.arg = self._add_child("arg", arg)
-        self._add_child("shape", shape)
+        self.add_child("arg", arg)
         self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1340,8 +1339,7 @@ class BroadcastSymbolicExpr(SymbolicExpr):
 class ReshapeSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, shape: Any):
         super().__init__(op)
-        self.arg = self._add_child("arg", arg)
-        self._add_child("shape", shape)
+        self.add_child("arg", arg)
         self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1352,8 +1350,8 @@ class ReshapeSymbolicExpr(SymbolicExpr):
 class TransSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, permutation: Any):
         super().__init__(op)
-        self.arg = self._add_child("arg", arg)
-        self.permutation = self._add_child("permutation", permutation)
+        self.add_child("arg", arg)
+        self.add_child("permutation", permutation)
         self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1364,8 +1362,8 @@ class TransSymbolicExpr(SymbolicExpr):
 class JoinSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, lhs: Any, rhs: Any):
         super().__init__(op)
-        self.lhs = self._add_child("lhs", lhs)
-        self.rhs = self._add_child("rhs", rhs)
+        self.add_child("lhs", lhs)
+        self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
 
     def _to_z3_impl(self) -> None:
@@ -1381,8 +1379,8 @@ class CastSymbolicExpr(SymbolicExpr):
         if op not in self._SUPPORTED_OPS:
             raise NotImplementedError(f"Unsupported cast op: {op}")
         super().__init__(op)
-        self.src = self._add_child("src", src)
-        self.dst_type = self._add_child("dst_type", dst_type)
+        self.add_child("src", src)
+        self.add_child("dst_type", dst_type)
         if self.dst_type.op == "const":
             self.dtype = self.dst_type.value
 
@@ -1398,9 +1396,9 @@ class CastSymbolicExpr(SymbolicExpr):
 class FpToFpSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, src: Any, dst_type: Any, rounding_mode: Any):
         super().__init__(op)
-        self.src = self._add_child("src", src)
-        self.dst_type = self._add_child("dst_type", dst_type)
-        self.rounding_mode = self._add_child("rounding_mode", rounding_mode)
+        self.add_child("src", src)
+        self.add_child("dst_type", dst_type)
+        self.add_child("rounding_mode", rounding_mode)
         if self.dst_type.op == "const":
             self.dtype = self.dst_type.value
 
@@ -1411,9 +1409,9 @@ class FpToFpSymbolicExpr(SymbolicExpr):
 class AtomicCasSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, ptr: Any, cmp: Any, val: Any):
         super().__init__(op)
-        self.ptr = self._add_child("ptr", ptr)
-        self.cmp = self._add_child("cmp", cmp)
-        self.val = self._add_child("val", val)
+        self.add_child("ptr", ptr)
+        self.add_child("cmp", cmp)
+        self.add_child("val", val)
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError("atomic_cas operation is not implemented yet")
@@ -1422,9 +1420,9 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
 class AtomicRmwSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, ptr: Any, val: Any, mask: Any = None):
         super().__init__(op)
-        self.ptr = self._add_child("ptr", ptr)
-        self.val = self._add_child("val", val)
-        self.mask = self._add_child("mask", mask) if mask is not None else None
+        self.add_child("ptr", ptr)
+        self.add_child("val", val)
+        self.add_child("mask", mask)
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
