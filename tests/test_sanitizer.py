@@ -359,7 +359,6 @@ def test_basic_expr_const_eval(value):
     ],
 )
 def test_basic_expr_pid_eval(axis, expected_pid):
-    grid = (4, 5, 6)
     pid_expr = SymbolicExpr.create("pid", axis)
     result, constraints = pid_expr.eval(simplify_constraints=False)
     assert result == expected_pid
