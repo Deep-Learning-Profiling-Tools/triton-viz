@@ -458,11 +458,10 @@ class SymbolicExpr:
             return self.dtype.element_ty.shape
         return ()
 
-    def add_child(self, name: str, value: Any) -> Optional["SymbolicExpr"]:
+    def add_child(self, name: str, value: Any) -> None:
         child = SymbolicExpr.from_value(value) if value is not None else None
         self.children[name] = child
         setattr(self, name, child)
-        return child
 
     def __add__(self, other: "SymbolicExpr") -> "SymbolicExpr":
         return SymbolicExpr.create("add", self, other)
@@ -519,26 +518,6 @@ class SymbolicExpr:
 
     def _node_label_core(self) -> str:
         return self.op
-
-    def to_tree_str(self) -> str:
-        """
-        Render the AST as an ASCII tree using anytree.RenderTree.
-        """
-        root = self._to_anytree()
-        lines = []
-        for prefix, _, node in RenderTree(root):
-            lines.append(f"{prefix}{node.name}")
-        return "\n" + "\n".join(lines)
-
-    def __str__(self) -> str:
-        return self.to_tree_str()
-
-    def __repr__(self) -> str:
-        return self.__str__()
-
-    @property
-    def data(self) -> SymbolicExprDataWrapper:
-        return SymbolicExprDataWrapper(self.__str__(), self)
 
     triton_scala_dtypes: ClassVar[tuple[tl.core.dtype, ...]] = (
         tl.int1,
@@ -643,52 +622,12 @@ class SymbolicExpr:
 
         return expr, constraints
 
-    def _to_z3(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        if self.z3 is not None:
-            return self.z3, self.constraints
-
-        self._to_z3_impl()
-        if self.z3 is None:
-            raise NotImplementedError(f"Eval for op {self.op} is not implemented")
-        return self.z3, self.constraints
-
-    def _to_z3_impl(self) -> None:
-        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
-
-    def has_op(self, op_name: str) -> bool:
-        if self.op == op_name:
-            return True
-        for _, child_symbolic_expr in self.children.items():
-            if child_symbolic_expr is None:
-                continue
-            if child_symbolic_expr.has_op(op_name):
-                return True
-        return False
-
     def to_py(self) -> Any:
-        """
-        Valid only for nodes with op == 'const':
-        - If `value` is a TensorHandle:
-            • Scalar  -> return int/float
-            • Multi-element -> return a Python list
-        - Otherwise, return the original Python object
-          (e.g., int, float, tuple, list, etc.).
-        """
-        if self.op != "const":
-            raise TypeError("SymbolicExpr.to_py() can be used only on 'const' nodes")
-
-        v = self.value
-        if isinstance(v, TensorHandle):
-            if len(v.data) == 1:
-                return v.data.item()  # scalar case
-            else:
-                return v.data.tolist()  # multi-element case
-        return v
+        """Return a Python value for this expression."""
+        raise NotImplementedError("to_py must be implemented by subclasses")
 
     def concretize(self) -> Any:
-        return self._concretize_impl()
-
-    def _concretize_impl(self) -> Any:
+        """Return a concrete TensorHandle for this expression."""
         raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
 
     def replace_subtree(self, anchor_op: Optional[str] = None) -> "SymbolicExpr":
@@ -718,6 +657,50 @@ class SymbolicExpr:
 
         return self
 
+    def has_op(self, op_name: str) -> bool:
+        """Return True when the subtree contains an op with the given name."""
+        if self.op == op_name:
+            return True
+        for _, child_symbolic_expr in self.children.items():
+            if child_symbolic_expr is None:
+                continue
+            if child_symbolic_expr.has_op(op_name):
+                return True
+        return False
+
+    def to_tree_str(self) -> str:
+        """
+        Render the AST as an ASCII tree using anytree.RenderTree.
+        """
+        root = self._to_anytree()
+        lines = []
+        for prefix, _, node in RenderTree(root):
+            lines.append(f"{prefix}{node.name}")
+        return "\n" + "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.to_tree_str()
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+    @property
+    def data(self) -> SymbolicExprDataWrapper:
+        """Return a wrapper suitable for external consumers."""
+        return SymbolicExprDataWrapper(self.__str__(), self)
+
+    def _to_z3(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        if self.z3 is not None:
+            return self.z3, self.constraints
+
+        self._to_z3_impl()
+        if self.z3 is None:
+            raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+        return self.z3, self.constraints
+
+    def _to_z3_impl(self) -> None:
+        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+
 
 class ConstSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
@@ -727,6 +710,23 @@ class ConstSymbolicExpr(SymbolicExpr):
 
     def _node_label_core(self) -> str:
         return f"const={self.value}"
+
+    def to_py(self) -> Any:
+        """
+        Valid only for nodes with op == 'const':
+        - If `value` is a TensorHandle:
+            • Scalar  -> return int/float
+            • Multi-element -> return a Python list
+        - Otherwise, return the original Python object
+          (e.g., int, float, tuple, list, etc.).
+        """
+        v = self.value
+        if isinstance(v, TensorHandle):
+            if len(v.data) == 1:
+                return v.data.item()  # scalar case
+            else:
+                return v.data.tolist()  # multi-element case
+        return v
 
     def _to_z3_impl(self) -> None:
         value = self.value
@@ -747,7 +747,7 @@ class ConstSymbolicExpr(SymbolicExpr):
             self.z3 = IntVal(0)
         self.constraints = None
 
-    def _concretize_impl(self) -> Any:
+    def concretize(self) -> Any:
         dtype = self.dtype
         if dtype is None:
             raise RuntimeError("const node is missing dtype information")
@@ -789,7 +789,7 @@ class PidSymbolicExpr(SymbolicExpr):
             self.z3 = SymbolicExpr.PID2
         self.constraints = None
 
-    def _concretize_impl(self) -> Any:
+    def concretize(self) -> Any:
         return self.concrete_fn(self.axis.to_py())
 
 
@@ -815,7 +815,7 @@ class ArangeSymbolicExpr(SymbolicExpr):
         self.constraints = _and_constraints(v >= start, v < end)
         SymbolicExpr.ARANGE_DICT[key] = (self.z3, self.constraints)
 
-    def _concretize_impl(self) -> Any:
+    def concretize(self) -> Any:
         return self.concrete_fn(self.ret_ty.to_py(), self.start.to_py(), self.end.to_py())
 
 
@@ -831,7 +831,7 @@ class IndirectSymbolicExprBase(SymbolicExpr):
         self.z3 = ptr
         self.constraints = _and_constraints(constraints_ptr, mask_constraint)
 
-    def _concretize_impl(self) -> Any:
+    def concretize(self) -> Any:
         ptr_concrete = self.ptr.concretize()
         if self.mask is None:
             mask_concrete = TensorHandle(
@@ -927,7 +927,7 @@ class BinarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         self.z3 = handler(self, lhs, rhs)
 
-    def _concretize_impl(self) -> Any:
+    def concretize(self) -> Any:
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
         np_op = self._NUMPY_OPS.get(self.op, None)
@@ -1284,7 +1284,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         else:  # isinstance(offset_z3, list):
             self.z3 = [ptr_z3 + o * element_bytewidth for o in offset_z3]
 
-    def _concretize_impl(self) -> Any:
+    def concretize(self) -> Any:
         return self.concrete_fn(self.ptr.concretize(), self.offset.concretize())
 
 
@@ -1309,7 +1309,7 @@ class SplatSymbolicExpr(SymbolicExpr):
         arg_expr = self.arg
         self.z3, self.constraints = arg_expr._to_z3()
 
-    def _concretize_impl(self) -> Any:
+    def concretize(self) -> Any:
         return self.concrete_fn(self.block_type.to_py(), self.arg.concretize())
 
 
@@ -1387,7 +1387,7 @@ class CastSymbolicExpr(SymbolicExpr):
     def _to_z3_impl(self) -> None:
         self.z3, self.constraints = self.src._to_z3()
 
-    def _concretize_impl(self) -> Any:
+    def concretize(self) -> Any:
         src_concrete = self.src.concretize()
         dst_type_value = self.dst_type.value
         return self.concrete_fn(src_concrete, dst_type_value)
