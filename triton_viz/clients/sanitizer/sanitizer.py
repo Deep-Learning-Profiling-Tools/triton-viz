@@ -5,6 +5,7 @@ from functools import cached_property, reduce, wraps
 from typing import Any, ClassVar, NoReturn, Optional, Union, TypeAlias, TypeVar, cast
 import sys
 import re
+import threading
 import time
 
 import numpy as np
@@ -89,6 +90,17 @@ ConstraintConjunction: TypeAlias = Optional[BoolRef]
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
 
 
+_Z3_TIMER_STATE = threading.local()
+
+
+def _get_z3_timer_stack() -> list[dict[str, float]]:
+    stack = getattr(_Z3_TIMER_STATE, "stack", None)
+    if stack is None:
+        stack = []
+        _Z3_TIMER_STATE.stack = stack
+    return stack
+
+
 def _timed_to_z3_impl(
     fn: Callable[..., tuple[Z3Expr, ConstraintConjunction]],
 ) -> Callable[..., tuple[Z3Expr, ConstraintConjunction]]:
@@ -96,15 +108,22 @@ def _timed_to_z3_impl(
     def wrapper(
         self: "SymbolicExpr", *args: Any, **kwargs: Any
     ) -> tuple[Z3Expr, ConstraintConjunction]:
+        stack = _get_z3_timer_stack()
+        frame = {"child_time": 0.0}
+        stack.append(frame)
         start = time.perf_counter()
         try:
             return fn(self, *args, **kwargs)
         finally:
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            elapsed = time.perf_counter() - start
+            stack.pop()
+            if stack:
+                stack[-1]["child_time"] += elapsed
+            exclusive_ms = (elapsed - frame["child_time"]) * 1000.0
             op_name = getattr(self, "op", type(self).__name__)
             class_name = type(self).__name__
             print(
-                f"[z3-timer] {class_name}({op_name}) {elapsed_ms:.3f}ms",
+                f"[z3-timer] {class_name}({op_name}) {exclusive_ms:.3f}ms",
                 file=sys.stderr,
                 flush=True,
             )
