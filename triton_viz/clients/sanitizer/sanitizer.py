@@ -317,6 +317,24 @@ Spec = namedtuple(
     defaults=((), ()),
 )
 
+_MISSING: object = object()
+
+
+class _ChildMap(dict):
+    __slots__ = ("_owner",)
+
+    def __init__(self, owner: "SymbolicExpr") -> None:
+        super().__init__()
+        self._owner = owner
+
+    def __setitem__(self, key: str, value: Optional["SymbolicExpr"]) -> None:
+        super().__setitem__(key, value)
+        self._owner._bind_child_attr(key, value)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
 
 class SymbolicExpr:
     BASIC_OPS: ClassVar[tuple[str, ...]] = ("const", "pid", "arange")
@@ -389,6 +407,20 @@ class SymbolicExpr:
 
     OP_SPEC: ClassVar[dict[str, Spec]] = {}
 
+    _RESERVED_CHILD_ATTRS: ClassVar[set[str]] = {
+        "op",
+        "attrs",
+        "dtype",
+        "concrete_fn",
+        "children",
+        "loop_ctx",
+        "z3",
+        "constraints",
+        "value",
+        "shape",
+        "data",
+    }
+
     PID0: ClassVar[ArithRef] = Int("pid_0")
     PID1: ClassVar[ArithRef] = Int("pid_1")
     PID2: ClassVar[ArithRef] = Int("pid_2")
@@ -425,7 +457,7 @@ class SymbolicExpr:
         self.concrete_fn: Optional[Callable[..., Any]] = None
 
         # deal with args
-        self.children: dict[str, Optional["SymbolicExpr"]] = {}
+        self.children: dict[str, Optional["SymbolicExpr"]] = _ChildMap(self)
         self._init_from_spec(*args)
 
         # for-loop iterator association
@@ -435,6 +467,18 @@ class SymbolicExpr:
         self.z3: Optional[Z3Expr] = None
 
         self.constraints: list[ConstraintExpr] = []
+
+    def _can_bind_child_attr(self, name: str) -> bool:
+        if name in self._RESERVED_CHILD_ATTRS:
+            return False
+        # Avoid clobbering methods/properties on the class hierarchy.
+        if hasattr(type(self), name):
+            return False
+        return True
+
+    def _bind_child_attr(self, name: str, value: Optional["SymbolicExpr"]) -> None:
+        if self._can_bind_child_attr(name):
+            object.__setattr__(self, name, value)
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -469,8 +513,9 @@ class SymbolicExpr:
         return
 
     def __getattr__(self, name: str) -> Any:
-        if name in self.children:
-            return self.children[name]
+        child = self.children.get(name, _MISSING)
+        if child is not _MISSING:
+            return child
         raise AttributeError(name)
 
     def __add__(self, other: "SymbolicExpr") -> "SymbolicExpr":
@@ -655,13 +700,32 @@ class SymbolicExpr:
         if self.z3 is not None:
             return self.z3, self.constraints
 
-        self._to_z3_impl()
+        stack: list[tuple["SymbolicExpr", bool]] = [(self, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if node.z3 is not None:
+                continue
+            if expanded:
+                node._to_z3_impl()
+                if node.z3 is None:
+                    raise NotImplementedError(
+                        f"Eval for op {node.op} is not implemented"
+                    )
+                continue
+            stack.append((node, True))
+            for child in node._z3_children():
+                if child is not None and child.z3 is None:
+                    stack.append((child, False))
+
         if self.z3 is None:
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         return self.z3, self.constraints
 
     def _to_z3_impl(self) -> None:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        return ()
 
     def has_op(self, op_name: str) -> bool:
         if self.op == op_name:
@@ -857,6 +921,11 @@ class IndirectSymbolicExpr(SymbolicExpr):
         if self.op == "load":
             self.dtype = self.ptr.dtype.element_ty
 
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        if self.mask is None:
+            return (self.ptr,)
+        return (self.ptr, self.mask)
+
     def _to_z3_impl(self) -> None:
         ptr, constraints_ptr = self.ptr._to_z3()
         constraints = list(constraints_ptr)
@@ -903,6 +972,9 @@ class UnarySymbolicExpr(SymbolicExpr):
         op: Spec(req=("arg",)) for op in SymbolicExpr.UNARY_OPS
     }
 
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        return (self.arg,)
+
     def _to_z3_impl(self) -> None:
         val, constraints = self.arg._to_z3()
         handler = self._Z3_BUILDERS.get(self.op)
@@ -928,6 +1000,9 @@ class BinarySymbolicExpr(SymbolicExpr):
 
     def _post_init(self) -> None:
         self.dtype = self.lhs.dtype
+
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        return (self.lhs, self.rhs)
 
     def _to_z3_impl(self) -> None:
         lhs, constraints_lhs = self.lhs._to_z3()
@@ -1128,6 +1203,9 @@ class TernarySymbolicExpr(SymbolicExpr):
     def _post_init(self) -> None:
         self.dtype = self.lhs.dtype
 
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        return (self.cond, self.lhs, self.rhs)
+
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
         if handler is None:
@@ -1180,6 +1258,11 @@ class ReduceSymbolicExpr(SymbolicExpr):
         "dot": Spec(req=("a", "b"), opt=("d",)),
     }
 
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        if self.op in self._Z3_BUILDERS:
+            return (self.input,)
+        return ()
+
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
         if handler is None:
@@ -1227,6 +1310,11 @@ class PointerSymbolicExpr(SymbolicExpr):
     def _post_init(self) -> None:
         if self.op == "addptr":
             self.dtype = self.ptr.dtype
+
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        if self.op == "addptr":
+            return (self.ptr, self.offset)
+        return ()
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1289,6 +1377,11 @@ class ReshapeSymbolicExpr(SymbolicExpr):
         elif self.op in ("expand_dims", "broadcast", "reshape", "trans"):
             self.dtype = self.arg.dtype
 
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        if self.op == "join":
+            return ()
+        return (self.arg,)
+
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
         if handler is None:
@@ -1332,6 +1425,11 @@ class CastSymbolicExpr(SymbolicExpr):
         if self.op in ("cast_impl", "bitcast", "fp_to_fp"):
             if self.dst_type.op == "const":
                 self.dtype = self.dst_type.value
+
+    def _z3_children(self) -> Sequence[Optional["SymbolicExpr"]]:
+        if self.op in self._Z3_BUILDERS:
+            return (self.src,)
+        return ()
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
