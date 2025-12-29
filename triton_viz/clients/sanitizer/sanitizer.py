@@ -296,7 +296,7 @@ class SymbolicExprDataWrapper:
         )
 
     def __int__(self) -> int:
-        int_val, _ = self.symbolic_expr.eval()
+        int_val, _ = self.symbolic_expr.eval(apply_simplify=True)
         if isinstance(int_val, list):
             int_val = int_val[0]
         return self.coerce_int(int_val)
@@ -635,7 +635,7 @@ class SymbolicExpr:
 
         raise ValueError("Unknown type:", type(var))
 
-    def eval(self) -> tuple[Z3Expr, list[ConstraintExpr]]:
+    def eval(self, apply_simplify: bool = False) -> tuple[Z3Expr, list[ConstraintExpr]]:
         """
         Returns a tuple (expr, constraints):
         - expr: Z3 expression (or list of expressions) corresponding to the root node
@@ -644,10 +644,11 @@ class SymbolicExpr:
         """
         expr, constraints = self._to_z3()
 
-        if isinstance(expr, list):
-            expr = [simplify(e) for e in expr]
-        else:
-            expr = simplify(expr)
+        if apply_simplify:
+            if isinstance(expr, list):
+                expr = [simplify(e) for e in expr]
+            else:
+                expr = simplify(expr)
 
         return expr, constraints
 
@@ -2063,7 +2064,7 @@ class SymbolicSanitizer(Sanitizer):
                     expr = expr.replace_subtree("load")
                     return SymbolicExprDataWrapper.coerce_int(expr.to_py())
                 else:
-                    z3_expr, _ = expr.eval()
+                    z3_expr, _ = expr.eval(apply_simplify=True)
                     if isinstance(z3_expr, IntNumRef):
                         return z3_expr.as_long()
                     self.need_full_grid = True
