@@ -966,7 +966,7 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("ptr", ptr)
         self.add_child("mask", mask)
         self.add_child("other", other)
-        self.dtype = self.ptr.dtype.element_ty
+        self.dtype = self.ptr.dtype.element_ty # type: ignore
 
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
