@@ -1592,45 +1592,59 @@ class SymbolicSanitizer(Sanitizer):
             lambda *_args, **_kwargs: self.loop_stack[-1] if self.loop_stack else None
         )
 
-    def _collect_pointer_bases(self, expr: Optional[SymbolicExpr]) -> list[int]:
-        if expr is None:
-            return []
-
-        bases: list[int] = []
-        seen: set[int] = set()
-
-        def walk(node: SymbolicExpr) -> None:
+    def _collect_tensor_base(self, expr: SymbolicExpr) -> Optional[int]:
+        def walk(node: SymbolicExpr) -> Optional[int]:
             if node.op == "const" and isinstance(node.dtype, tl.pointer_type):
-                try:
-                    val = node.to_py()
-                except Exception:
-                    val = None
-                if isinstance(val, (int, np.integer)):
-                    base = int(val)
-                    if base not in seen:
-                        seen.add(base)
-                        bases.append(base)
+                return node.to_py()
             for child in node.children.values():
                 if child is not None:
-                    walk(child)
+                    base = walk(child)
+                    if base is not None:
+                        return base
+            return None
 
-        walk(expr)
-        return bases
+        return walk(expr)
+
+    def _addr_ok_for_expr(self, symbolic_expr: SymbolicExpr) -> Z3Expr:
+        addr_sym = self.addr_sym
+        assert addr_sym is not None
+        if not self.tensor_addrs:
+            return BoolVal(False)
+
+        base_candidate = self._collect_tensor_base(symbolic_expr)
+        addr_ranges: list[tuple[int, int]] = []
+        if base_candidate is not None:
+            base = base_candidate
+            tensor_match: Optional[Tensor] = None
+            for start, end, tensor in self.tensor_addrs:
+                if start <= base <= end:
+                    tensor_match = tensor
+                    break
+            if tensor_match is not None:
+                addr_ranges = [
+                    (start, end)
+                    for start, end, tensor in self.tensor_addrs
+                    if tensor is tensor_match
+                ]
+
+        if not addr_ranges:
+            addr_ranges = [(start, end) for start, end, _ in self.tensor_addrs]
+
+        return Or(*[And(addr_sym >= start, addr_sym <= end) for start, end in addr_ranges])
 
     def _find_tensor_for_expr(
-        self, symbolic_expr: Optional[SymbolicExpr], violation_addr: int
+        self, symbolic_expr: SymbolicExpr, violation_addr: int
     ) -> Tensor:
         # Prefer mapping from pointer base addresses present in the expression.
-        base_candidates = self._collect_pointer_bases(symbolic_expr)
-        if base_candidates:
-            for base in base_candidates:
-                for tensor in self.tensors:
-                    if tensor.data_ptr() == base:
-                        return tensor
-            for base in base_candidates:
-                for start, end, tensor in self.tensor_addrs:
-                    if start <= base <= end:
-                        return tensor
+        base_candidate = self._collect_tensor_base(symbolic_expr)
+        if base_candidate is not None:
+            base = base_candidate
+            for tensor in self.tensors:
+                if tensor.data_ptr() == base:
+                    return tensor
+            for start, end, tensor in self.tensor_addrs:
+                if start <= base <= end:
+                    return tensor
 
         # Fall back to the closest registered segment.
         if self.tensor_addrs:
@@ -1674,10 +1688,12 @@ class SymbolicSanitizer(Sanitizer):
         addr_sym = self.addr_sym
         assert solver is not None
         assert addr_sym is not None
+        addr_ok_expr = self._addr_ok_for_expr(symbolic_expr)
 
         def _check_single_addr(addr_expr: Z3Expr) -> None:
             solver.push()
             solver.add(addr_sym == addr_expr)
+            solver.add(Not(addr_ok_expr))
             if expr_constraints is not None:
                 solver.add(expr_constraints)
             if solver.check() == sat:
@@ -1825,13 +1841,6 @@ class SymbolicSanitizer(Sanitizer):
         self.grid = tuple(int(g) for g in grid)
         addr = Int("addr")
 
-        addr_ok_expr = (
-            Or(*[And(addr >= s, addr <= e) for s, e, _ in self.tensor_addrs])
-            if self.tensor_addrs
-            else BoolVal(False)
-        )
-        self.addr_ok = cast(BoolRef, addr_ok_expr)
-
         pid_ok_expr = And(
             SymbolicExpr.PID0 < self.grid[0],
             SymbolicExpr.PID1 < self.grid[1],
@@ -1843,7 +1852,6 @@ class SymbolicSanitizer(Sanitizer):
         self.pid_ok = cast(BoolRef, pid_ok_expr)
 
         self.solver = Solver()
-        self.solver.add(Not(self.addr_ok))
         self.solver.add(self.pid_ok)
         self.addr_sym = addr
 
