@@ -144,21 +144,6 @@ class PendingCheck:
     symbolic_expr: "SymbolicExpr"
     addr_expr: Z3Expr
     constraints: list[ConstraintExpr]
-    # The symbolic expression corresponding to immediate value extraction.
-    imm_var: Optional[ArithRef] = None
-    # List of immediate values observed.
-    imm_values: set[int] = field(default_factory=set)
-    # The common base expression (addr_expr - imm_var) if imm_var is not None.
-    base_expr: ExprRef = field(default_factory=lambda: IntVal(0))
-
-    def add_immediate(self, ctx: "LoopContext", value: int) -> None:
-        if self.imm_var is None:
-            self.imm_var = Int(f"imm_{ctx.lineno}_{ctx.imm_counter}")
-            ctx.imm_counter += 1
-            # Generalize addr_expr to base_expr + imm_var so we can constrain imm_var later.
-            self.addr_expr = simplify(self.base_expr + self.imm_var)
-
-        self.imm_values.add(value)
 
 
 @dataclass
@@ -172,7 +157,6 @@ class LoopContext:
     values: list[tuple[int, int]] = field(default_factory=list)
     signature_cache: dict[int, int] = field(default_factory=dict)
     pending_checks: list[PendingCheck] = field(default_factory=list)
-    imm_counter: int = 0
 
     def add_value(self, idx: int) -> None:
         _add_interval_value(self.values, idx)
@@ -1448,38 +1432,6 @@ def _sexpr_or_str(expr: Any) -> str:
     return str(expr)
 
 
-def _split_additive_immediate(expr: ExprRef) -> Optional[tuple[ExprRef, int]]:
-    if isinstance(expr, IntNumRef):
-        return IntVal(0), expr.as_long()
-
-    const_sum = 0
-    saw_const = False
-    terms: list[ExprRef] = []
-    stack = [expr]
-    while stack:
-        term = stack.pop()
-        if is_add(term):
-            # Preserve left-to-right order when popping from the stack.
-            stack.extend(reversed(term.children()))
-        elif isinstance(term, IntNumRef):
-            const_sum += term.as_long()
-            saw_const = True
-        else:
-            terms.append(cast(ExprRef, term))
-
-    if not saw_const:
-        return expr, 0
-
-    if not terms:
-        base_expr = IntVal(0)
-    elif len(terms) == 1:
-        base_expr = terms[0]
-    else:
-        base_expr = Sum(terms)
-
-    return base_expr, const_sum
-
-
 def _make_signature(
     addr_expr: Z3Expr,
     constraints: Sequence[ConstraintExpr]
@@ -1692,35 +1644,19 @@ class SymbolicSanitizer(Sanitizer):
             return
 
         ctx = self.loop_stack[-1]
-        addrs = z3_addr if isinstance(z3_addr, list) else [z3_addr]
-        for addr in addrs:
-            split = _split_additive_immediate(cast(ExprRef, addr))
-            if split is None:
-                base_expr = cast(ExprRef, addr)
-                imm_value = None
-            else:
-                base_expr, imm_value = split
-
-            signature = _make_signature(base_expr, z3_constraints)
-            pending_idx = ctx.signature_cache.get(signature)
-            if pending_idx is None:
-                ctx.signature_cache[signature] = len(ctx.pending_checks)
-                pending_check = PendingCheck(
-                    symbolic_expr=expr,
-                    addr_expr=addr,
-                    constraints=list(z3_constraints),
-                    base_expr=base_expr,
-                )
-                if imm_value is not None:
-                    pending_check.add_immediate(ctx, imm_value)
-                ctx.pending_checks.append(pending_check)
-            else:
-                pending_check = ctx.pending_checks[pending_idx]
-                if imm_value is not None and imm_value not in pending_check.imm_values:
-                    pending_check.add_immediate(ctx, imm_value)
-                else:
-                    if cfg.verbose:
-                        print("[Sanitizer]  ↪ skip duplicated addr in loop")
+        signature = _make_signature(z3_addr, z3_constraints)
+        pending_idx = ctx.signature_cache.get(signature)
+        if pending_idx is None:
+            ctx.signature_cache[signature] = len(ctx.pending_checks)
+            pending_check = PendingCheck(
+                symbolic_expr=expr,
+                addr_expr=z3_addr,
+                constraints=z3_constraints,
+            )
+            ctx.pending_checks.append(pending_check)
+        else:
+            if cfg.verbose:
+                print("[Sanitizer]  ↪ skip duplicated addr in loop")
 
     def _report(
         self,
@@ -2288,20 +2224,8 @@ class SymbolicSanitizer(Sanitizer):
                 addr_expr = pending_check.addr_expr
                 expr_constraints = pending_check.constraints
                 symbolic_expr = pending_check.symbolic_expr
-
-                imm_constraints: list[ConstraintExpr] = []
-                if pending_check.imm_var is not None and pending_check.imm_values:
-                    imm_intervals: list[tuple[int, int]] = []
-                    for v in pending_check.imm_values:
-                        imm_intervals.append((int(v), int(v + 1)))
-                    imm_constraint = _intervals_to_constraint(
-                        pending_check.imm_var, imm_intervals
-                    )
-                    if imm_constraint is not None:
-                        imm_constraints.append(imm_constraint)
-
                 combined_constraints = (
-                    list(expr_constraints) + imm_constraints + iterator_constraints
+                    list(expr_constraints) + iterator_constraints
                 )
 
                 if cfg.verbose:
@@ -2310,7 +2234,6 @@ class SymbolicSanitizer(Sanitizer):
                         addr_expr,
                         f" with iterator constraints: {iterator_constraints} ",
                         f" and expression-related constraints: {expr_constraints} ",
-                        f" and immediate constraints: {imm_constraints} ",
                     )
 
                 self._check_range_satisfiable(
