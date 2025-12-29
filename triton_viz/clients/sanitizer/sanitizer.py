@@ -13,7 +13,6 @@ from typing import (
     cast,
 )
 import sys
-import re
 
 import numpy as np
 from torch import Tensor
@@ -24,7 +23,6 @@ from z3 import (
     IntVal,
     If,
     Sum,
-    is_add,
     And,
     Or,
     Not,
@@ -36,7 +34,6 @@ from z3 import (
     BoolVal,
 )
 from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
-from z3.z3util import get_vars
 
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle, _get_np_dtype
@@ -168,7 +165,7 @@ def _iter_constraints_to_bool(
 
 
 def _and_constraints(
-    *constraints: Optional[ConstraintExpr | Sequence[ConstraintExpr]]
+    *constraints: Optional[ConstraintExpr | Sequence[ConstraintExpr]],
 ) -> ConstraintConjunction:
     result: Optional[BoolRef] = None
     for constraint in constraints:
@@ -256,9 +253,7 @@ class Sanitizer(Client):
     def post_run_callback(self, fn: Callable) -> bool:
         return True
 
-    def pre_warmup_callback(
-        self, jit_fn: Callable, *args: Any, **kwargs: Any
-    ) -> bool:
+    def pre_warmup_callback(self, jit_fn: Callable, *args: Any, **kwargs: Any) -> bool:
         return False
 
     def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
@@ -747,7 +742,9 @@ class ConstSymbolicExpr(SymbolicExpr):
 
         if self.loop_ctx:  # if the self is a loop iterator
             z3_expr: Z3Expr = self.loop_ctx.idx_z3
-        elif isinstance(value, np.ndarray):  # only const nodes can be created with ndarray
+        elif isinstance(
+            value, np.ndarray
+        ):  # only const nodes can be created with ndarray
             z3_expr = [IntVal(int(v)) for v in value.flat]
         elif isinstance(value, tuple):
             z3_expr = [IntVal(int(v)) for v in value]
@@ -802,7 +799,7 @@ class PidSymbolicExpr(SymbolicExpr):
         return SymbolicExpr.PID2, None
 
     def concretize(self) -> Any:
-        return self.concrete_fn(self.axis.to_py()) # type: ignore
+        return self.concrete_fn(self.axis.to_py())  # type: ignore
 
 
 class ArangeSymbolicExpr(SymbolicExpr):
@@ -833,7 +830,9 @@ class ArangeSymbolicExpr(SymbolicExpr):
         return v, constraints
 
     def concretize(self) -> Any:
-        return self.concrete_fn(self.ret_ty.to_py(), self.start.to_py(), self.end.to_py()) # type: ignore
+        return self.concrete_fn(
+            self.ret_ty.to_py(), self.start.to_py(), self.end.to_py()
+        )  # type: ignore
 
 
 class IndirectSymbolicExprBase(SymbolicExpr):
@@ -872,7 +871,7 @@ class IndirectSymbolicExprBase(SymbolicExpr):
             None,  # cache_modifier
             None,  # eviction_policy
             None,  # is_volatile
-        ) # type: ignore
+        )  # type: ignore
 
 
 class LoadSymbolicExpr(IndirectSymbolicExprBase):
@@ -956,7 +955,7 @@ class BinarySymbolicExpr(SymbolicExpr):
         np_op = self._NUMPY_OPS.get(self.op, None)
         if np_op is None:
             raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
-        return self.concrete_fn(lhs_concrete, rhs_concrete, np_op) # type: ignore
+        return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
 
     @staticmethod
     def _apply_binop(op_func, left, right):
@@ -1227,7 +1226,9 @@ class ReduceSymbolicExpr(SymbolicExpr):
         return reduce(lambda a, b: If(a <= b, a, b), arr), constraints
 
     _Z3_BUILDERS: ClassVar[
-        dict[str, Callable[["ReduceSymbolicExpr"], tuple[Z3Expr, ConstraintConjunction]]]
+        dict[
+            str, Callable[["ReduceSymbolicExpr"], tuple[Z3Expr, ConstraintConjunction]]
+        ]
     ] = {
         "sum": _reduce_sum,
         "max": _reduce_max,
@@ -1331,7 +1332,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         return z3_expr, constraints
 
     def concretize(self) -> Any:
-        return self.concrete_fn(self.ptr.concretize(), self.offset.concretize()) # type: ignore
+        return self.concrete_fn(self.ptr.concretize(), self.offset.concretize())  # type: ignore
 
 
 class AdvanceSymbolicExpr(SymbolicExpr):
@@ -1361,7 +1362,7 @@ class SplatSymbolicExpr(SymbolicExpr):
         return self.arg._to_z3()
 
     def concretize(self) -> Any:
-        return self.concrete_fn(self.block_type.to_py(), self.arg.concretize()) # type: ignore
+        return self.concrete_fn(self.block_type.to_py(), self.arg.concretize())  # type: ignore
 
 
 class ExpandDimsSymbolicExpr(SymbolicExpr):
@@ -1450,7 +1451,7 @@ class CastSymbolicExpr(SymbolicExpr):
 
     def concretize(self) -> Any:
         src_concrete = self.src.concretize()
-        return self.concrete_fn(src_concrete, self.dtype) # type: ignore
+        return self.concrete_fn(src_concrete, self.dtype)  # type: ignore
 
 
 class FpToFpSymbolicExpr(SymbolicExpr):
@@ -1534,7 +1535,7 @@ def _sexpr_or_str(expr: Any) -> str:
         return str(int(expr))
     sexpr = getattr(expr, "sexpr", None)
     if callable(sexpr):
-        return sexpr() # type: ignore
+        return sexpr()  # type: ignore
     return str(expr)
 
 
@@ -1612,7 +1613,6 @@ class SymbolicSanitizer(Sanitizer):
             return None
 
         return walk(expr)
-
 
     def _find_tensor_for_expr(
         self, symbolic_expr: SymbolicExpr, violation_addr: int

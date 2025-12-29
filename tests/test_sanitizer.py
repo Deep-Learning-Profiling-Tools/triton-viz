@@ -1,7 +1,7 @@
 import pytest
 import torch
 import numpy as np
-from typing import Any, Optional, cast
+from typing import Optional, cast
 
 import triton
 import triton.language as tl
@@ -20,9 +20,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
     _intervals_to_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
-from z3 import simplify, is_int_value
 from z3.z3 import ArithRef, BoolRef, IntNumRef
-from z3.z3util import get_vars
 
 # ======== Helpers ===========
 
@@ -31,6 +29,7 @@ class LoadIndexChecker(SymbolicSanitizer):
     """
     Record all offsets, then union into a set.
     """
+
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self._offset_lists: list[list[int]] = list()
@@ -52,7 +51,9 @@ class LoadIndexChecker(SymbolicSanitizer):
             cur = expr
             while cur.op == "addptr":
                 off = cur.offset
-                if off.op == "const":  # If any offset is not constant, we cannot sum it.
+                if (
+                    off.op == "const"
+                ):  # If any offset is not constant, we cannot sum it.
                     offsets.append(off.to_py())
                 cur = cur.ptr
 
@@ -86,6 +87,7 @@ class LoopBoundsChecker(SymbolicSanitizer):
     """
     Record concretized loop bounds.
     """
+
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self._bounds: list[tuple[int, int, int]] = list()
@@ -121,6 +123,7 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
     """
     Record when deferred checks are executed after loop exit.
     """
+
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self.after_loop_pending: list[int] = []
