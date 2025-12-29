@@ -753,10 +753,7 @@ class BasicSymbolicExpr(SymbolicExpr):
         if self.op == "const":
             return f"const={self.value}"
         if self.op == "pid":
-            axis_node = self.children.get("axis")
-            if axis_node is None:
-                raise ValueError("pid node is missing required children: axis")
-            axis_val = axis_node.to_py()
+            axis_val = self.axis.to_py()
             return f"pid_{axis_val}"
         return super()._node_label_core()
 
@@ -786,11 +783,7 @@ class BasicSymbolicExpr(SymbolicExpr):
         self.constraints = []
 
     def _build_pid(self) -> None:
-        axis_node = self.children.get("axis")
-        if axis_node is None:
-            raise ValueError("pid node is missing required child: axis")
-
-        axis_val = axis_node.to_py()
+        axis_val = self.axis.to_py()
         if axis_val == 0:
             self.z3 = SymbolicExpr.PID0
         elif axis_val == 1:
@@ -872,7 +865,6 @@ class IndirectSymbolicExpr(SymbolicExpr):
 
     def _post_init(self) -> None:
         if self.op == "load":
-            assert self.ptr is not None
             self.dtype = self.ptr.dtype.element_ty
 
     def _to_z3_impl(self) -> None:
@@ -945,11 +937,7 @@ class BinarySymbolicExpr(SymbolicExpr):
     }
 
     def _post_init(self) -> None:
-        lhs = self.children.get("lhs")
-        rhs = self.children.get("rhs")
-        if lhs is None or rhs is None:
-            raise ValueError("Binary op requires both lhs and rhs operands")
-        self.dtype = lhs.dtype
+        self.dtype = self.lhs.dtype
 
     def _to_z3_impl(self) -> None:
         lhs, constraints_lhs = self.lhs._to_z3()
@@ -1295,7 +1283,7 @@ class PointerSymbolicExpr(SymbolicExpr):
 
 class ReshapeSymbolicExpr(SymbolicExpr):
     OP_SPEC: ClassVar[dict[str, Spec]] = {
-        "splat": Spec(req=("shape", "arg")),
+        "splat": Spec(req=("block_type", "arg")),
         "expand_dims": Spec(req=("arg", "axis")),
         "broadcast": Spec(req=("arg", "shape")),
         "reshape": Spec(req=("arg", "shape")),
@@ -1305,22 +1293,11 @@ class ReshapeSymbolicExpr(SymbolicExpr):
 
     def _post_init(self) -> None:
         if self.op == "join":
-            lhs = self.children.get("lhs")
-            if lhs is None:
-                raise ValueError("Join op requires lhs")
-            self.dtype = lhs.dtype
+            self.dtype = self.lhs.dtype
         elif self.op == "splat":
-            shape_expr = self.children.get("shape")
-            arg_expr = self.children.get("arg")
-            if shape_expr is None or arg_expr is None or shape_expr.dtype is None:
-                raise ValueError("Splat op requires shape and arg")
-            shape = shape_expr.dtype.shape
-            self.dtype = tl.block_type(arg_expr.dtype, shape)
+            self.dtype = self.block_type.dtype
         elif self.op in ("expand_dims", "broadcast", "reshape", "trans"):
-            arg_expr = self.children.get("arg")
-            if arg_expr is None:
-                raise ValueError(f"{self.op} op requires arg")
-            self.dtype = arg_expr.dtype
+            self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> None:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1333,11 +1310,7 @@ class ReshapeSymbolicExpr(SymbolicExpr):
             fn = self.concrete_fn
             if fn is None:
                 raise RuntimeError(f"{self.op}'s concrete function is not set!")
-            shape_expr = self.children.get("shape")
-            arg_expr = self.children.get("arg")
-            if shape_expr is None or arg_expr is None:
-                raise ValueError("Splat op requires shape and arg")
-            return fn(shape_expr.to_py(), arg_expr.concretize())
+            return fn(self.block_type.to_py(), self.arg.concretize())
         return super()._concretize_impl()
 
     def _reshape_passthrough(self) -> None:
