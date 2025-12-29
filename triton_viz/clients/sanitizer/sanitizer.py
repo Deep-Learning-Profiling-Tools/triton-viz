@@ -139,6 +139,23 @@ def _intervals_to_constraint(
     return Or(*constraints)
 
 
+def _convert_constraints_to_bool(
+    expr_constraints: Sequence[ConstraintExpr],
+) -> list[BoolRef]:
+    bool_constraints: list[BoolRef] = []
+    for c in expr_constraints:
+        if isinstance(c, BoolRef):
+            bool_constraints.append(c)
+        elif isinstance(c, bool):
+            bool_constraints.append(BoolVal(c))
+        elif isinstance(c, IntNumRef):
+            bool_constraints.append(BoolVal(c.as_long() != 0))
+        elif isinstance(c, (int, float)):
+            bool_constraints.append(BoolVal(int(c) != 0))
+        else:
+            bool_constraints.append(cast(BoolRef, c != 0))
+    return bool_constraints
+
 @dataclass
 class PendingCheck:
     symbolic_expr: "SymbolicExpr"
@@ -1575,18 +1592,7 @@ class SymbolicSanitizer(Sanitizer):
         expr_constraints: Sequence[ConstraintExpr],
         symbolic_expr: SymbolicExpr,
     ) -> None:
-        bool_constraints: list[BoolRef] = []
-        for c in expr_constraints:
-            if isinstance(c, BoolRef):
-                bool_constraints.append(c)
-            elif isinstance(c, bool):
-                bool_constraints.append(BoolVal(c))
-            elif isinstance(c, IntNumRef):
-                bool_constraints.append(BoolVal(c.as_long() != 0))
-            elif isinstance(c, (int, float)):
-                bool_constraints.append(BoolVal(int(c) != 0))
-            else:
-                bool_constraints.append(cast(BoolRef, c != 0))
+        bool_constraints: list[BoolRef] = _convert_constraints_to_bool(expr_constraints)
 
         # Use push/pop on persistent solver
         solver = self.solver
@@ -2225,7 +2231,7 @@ class SymbolicSanitizer(Sanitizer):
             assert solver is not None
             assert addr_sym is not None
             solver.push()
-            solver.add(iterator_constraints)
+            solver.add(And(*_convert_constraints_to_bool(iterator_constraints)))
             for pending_check in ctx.pending_checks:
                 addr_expr = pending_check.addr_expr
                 expr_constraints = pending_check.constraints
