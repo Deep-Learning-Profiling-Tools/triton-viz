@@ -966,7 +966,7 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("ptr", ptr)
         self.add_child("mask", mask)
         self.add_child("other", other)
-        self.dtype = self.ptr.dtype.element_ty # type: ignore
+        self.dtype = self.ptr.dtype.element_ty  # type: ignore
 
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
@@ -1402,7 +1402,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         constraints = _and_constraints(constraints_ptr, constraints_offset)
         element_bytewidth = max(
             1, ptr_expr.dtype.scalar.element_ty.primitive_bitwidth // 8
-        )
+        ) # type: ignore
         if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
             z3_expr = ptr_z3 + offset_z3 * element_bytewidth
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
