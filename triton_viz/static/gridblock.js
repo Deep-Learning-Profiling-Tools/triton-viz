@@ -33,6 +33,8 @@ export class GridBlock {
         this.codeSidebarPre = null;
         this.codeSidebarVisible = true;
         this.codeFetchToken = 0;
+        this.sidebarWidth = 420;
+        this.splitterEl = null;
         this.activeOpType = null;
         this.activeOpIndex = null;
         this.viewState = { camera: null };
@@ -108,6 +110,9 @@ export class GridBlock {
             }
             if (this.programIdControls) this.codeSidebar.appendChild(this.programIdControls);
             this.mainArea.appendChild(this.codeSidebar);
+            this.setSidebarWidth(this.sidebarWidth);
+            this.splitterEl = this.createSplitter();
+            this.mainArea.appendChild(this.splitterEl);
         }
         this.mainArea.appendChild(this.bodyArea);
 
@@ -185,7 +190,49 @@ export class GridBlock {
         if (this.codeSidebar) {
             this.codeSidebar.style.display = visible ? 'flex' : 'none';
         }
+        if (this.splitterEl) {
+            this.splitterEl.style.display = visible ? 'block' : 'none';
+        }
         window.triton_viz_code_sidebar_visible = visible;
+    }
+
+    setSidebarWidth(width) {
+        if (!this.codeSidebar) return;
+        const px = Math.round(width);
+        this.sidebarWidth = px;
+        this.codeSidebar.style.width = `${px}px`;
+        this.codeSidebar.style.flex = `0 0 ${px}px`;
+    }
+
+    createSplitter() {
+        const splitter = document.createElement('div');
+        Object.assign(splitter.style, {
+            flex: '0 0 6px',
+            width: '6px',
+            cursor: 'col-resize',
+            background: 'rgba(255, 255, 255, 0.06)'
+        });
+        splitter.addEventListener('mousedown', (event) => {
+            if (!this.codeSidebar) return;
+            event.preventDefault();
+            const startX = event.clientX;
+            const startWidth = this.codeSidebar.getBoundingClientRect().width;
+            const minWidth = 240;
+            const maxWidth = Math.min(720, window.innerWidth * 0.6);
+            document.body.style.userSelect = 'none';
+            const onMove = (moveEvent) => {
+                const next = startWidth + (moveEvent.clientX - startX);
+                this.setSidebarWidth(Math.max(minWidth, Math.min(maxWidth, next)));
+            };
+            const onUp = () => {
+                document.body.style.userSelect = '';
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+        });
+        return splitter;
     }
 
     createCodeSidebar() {
