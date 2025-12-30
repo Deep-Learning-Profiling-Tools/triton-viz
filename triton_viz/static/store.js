@@ -224,8 +224,8 @@ export function createStoreVisualization(containerElement, op, viewState = null)
                 const [x, y, z] = instanceCoord(globalMesh, idx);
                 let v = 0.0;
                 try {
-                    if (dims === 3) v = values[x][y][z];
-                    else if (dims === 2) v = values[x][y];
+                    if (dims === 3) v = values[y][x][z];
+                    else if (dims === 2) v = values[y][x];
                     else if (dims === 1) v = values[x];
                 } catch (e) { /* ignore bad index */ }
                 const u = clamp(norm(v), 0, 1);
