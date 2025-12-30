@@ -18,9 +18,11 @@ from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     RangeWrapper,
     _intervals_to_constraint,
+    _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
 from z3.z3 import ArithRef, BoolRef, IntNumRef
+from z3 import Solver, Int, sat
 
 # ======== Helpers ===========
 
@@ -148,9 +150,11 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
                 ctx = self.loop_stack[-1]
                 pending = len(ctx.pending_checks)
-                iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
-                if iterator_constraint is not None:
-                    self.iterator_constraints.append(iterator_constraint)
+                self.iterator_constraints.append(
+                    _range_to_iterator_constraint(
+                        ctx.idx_z3, start=ctx.start, stop=ctx.stop, step=ctx.step
+                    )
+                )
             if orig_after is not None:
                 orig_after(lineno)
             self.after_loop_pending.append(pending)
@@ -310,6 +314,40 @@ def test_loop_deferred_checks_after_context():
     assert "loop_i_2 >= 0" in iterator_constraints_str
     assert "loop_i_2 < 4" in iterator_constraints_str
     assert loop_deferred_check_recorder.records
+
+
+def _assert_constraint_allows(constraint: BoolRef, var: ArithRef, val: int) -> None:
+    solver = Solver()
+    solver.add(constraint)
+    solver.add(var == val)
+    assert solver.check() == sat
+
+
+def _assert_constraint_forbids(constraint: BoolRef, var: ArithRef, val: int) -> None:
+    solver = Solver()
+    solver.add(constraint)
+    solver.add(var == val)
+    assert solver.check() != sat
+
+
+def test_range_to_iterator_constraint_step_positive():
+    i = Int("i")
+    constraint = _range_to_iterator_constraint(i, start=1, stop=10, step=2)
+    _assert_constraint_allows(constraint, i, 1)
+    _assert_constraint_allows(constraint, i, 3)
+    _assert_constraint_allows(constraint, i, 9)
+    _assert_constraint_forbids(constraint, i, 2)
+    _assert_constraint_forbids(constraint, i, 10)
+
+
+def test_range_to_iterator_constraint_step_negative():
+    i = Int("i")
+    constraint = _range_to_iterator_constraint(i, start=4, stop=-1, step=-2)
+    _assert_constraint_allows(constraint, i, 4)
+    _assert_constraint_allows(constraint, i, 2)
+    _assert_constraint_allows(constraint, i, 0)
+    _assert_constraint_forbids(constraint, i, 1)
+    _assert_constraint_forbids(constraint, i, -1)
 
 
 def test_loop_deferred_checks_simplify():

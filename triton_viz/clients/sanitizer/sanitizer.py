@@ -95,66 +95,31 @@ ConstraintConjunction: TypeAlias = Optional[BoolRef]
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
 
 
-def _add_interval_value(intervals: list[tuple[int, int]], idx: int) -> None:
-    if not intervals:
-        intervals.append((idx, idx + 1))
-        return
 
-    # Fast path for monotonic append (common for `range(...)` iteration).
-    last_start, last_end = intervals[-1]
-    if last_start <= idx < last_end:
-        return
-    if idx == last_end:
-        intervals[-1] = (last_start, idx + 1)
-        return
-    if idx > last_end:
-        intervals.append((idx, idx + 1))
-        return
+def _range_to_iterator_constraint(
+    var: ArithRef, *, start: int, stop: int, step: int
+) -> BoolRef:
+    """
+    Return a constraint describing values produced by `range(start, stop, step)`.
 
-    insert_at = bisect_left(intervals, (idx, idx + 1))
+    This is used to bound a loop iterator Z3 variable for satisfiability checks.
+    """
+    if step == 0:
+        raise ValueError("range() step cannot be 0")
 
-    if insert_at > 0:
-        left_start, left_end = intervals[insert_at - 1]
-        if left_start <= idx < left_end:
-            return
+    if step > 0:
+        bounds = And(var >= start, var < stop)
+    else:
+        # Python range with negative step iterates while value > stop.
+        bounds = And(var <= start, var > stop)
 
-    if insert_at < len(intervals):
-        right_start, right_end = intervals[insert_at]
-        if right_start <= idx < right_end:
-            return
+    abs_step = abs(step)
+    if abs_step == 1:
+        return bounds
 
-    merge_left = insert_at > 0 and intervals[insert_at - 1][1] == idx
-    merge_right = insert_at < len(intervals) and intervals[insert_at][0] == idx + 1
-
-    if merge_left and merge_right:
-        left_start, _ = intervals[insert_at - 1]
-        _, right_end = intervals[insert_at]
-        intervals[insert_at - 1] = (left_start, right_end)
-        intervals.pop(insert_at)
-        return
-
-    if merge_left:
-        left_start, _ = intervals[insert_at - 1]
-        intervals[insert_at - 1] = (left_start, idx + 1)
-        return
-
-    if merge_right:
-        _, right_end = intervals[insert_at]
-        intervals[insert_at] = (idx, right_end)
-        return
-
-    intervals.insert(insert_at, (idx, idx + 1))
-
-
-def _intervals_to_constraint(
-    var: ArithRef, intervals: Sequence[tuple[int, int]]
-) -> Optional[BoolRef]:
-    if not intervals:
-        return None
-    constraints = [And(var >= start, var < stop) for start, stop in intervals]
-    if len(constraints) == 1:
-        return constraints[0]
-    return Or(*constraints)
+    # `i in range(start, stop, step)` iff bounds hold and (i-start) is a multiple
+    # of abs(step). Use a positive modulus to avoid negative-divisor semantics.
+    return And(bounds, (var - start) % abs_step == 0)
 
 
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
@@ -210,13 +175,8 @@ class LoopContext:
     start: int = 0
     stop: int = 0
     step: int = 1
-    values: list[tuple[int, int]] = field(default_factory=list)
     signature_cache: dict[int, int] = field(default_factory=dict)
     pending_checks: list[PendingCheck] = field(default_factory=list)
-
-    def add_value(self, idx: int) -> None:
-        _add_interval_value(self.values, idx)
-
 
 @dataclass
 class RangeWrapper:
@@ -2311,7 +2271,6 @@ class SymbolicSanitizer(Sanitizer):
         @self.lock_fn
         def loop_hook_iter_overrider(lineno, idx):
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
-                self.loop_stack[-1].add_value(idx)
                 sym = SymbolicExpr.create("const", idx, tl.int32)
                 sym.loop_ctx = self.loop_stack[-1]
                 return tl.core.tensor(sym, tl.int32)
@@ -2332,10 +2291,12 @@ class SymbolicSanitizer(Sanitizer):
             addr_sym = self.addr_sym
             assert solver is not None
             assert addr_sym is not None
-            # add constraints for loop_i
-            if ctx.values:
+            iterator_constraint: Optional[BoolRef] = None
+            if ctx.pending_checks:
                 solver.push()
-                iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
+                iterator_constraint = _range_to_iterator_constraint(
+                    ctx.idx_z3, start=ctx.start, stop=ctx.stop, step=ctx.step
+                )
                 solver.add(iterator_constraint)
 
             for pending_check in ctx.pending_checks:
@@ -2356,7 +2317,7 @@ class SymbolicSanitizer(Sanitizer):
                     expr_constraints,
                     symbolic_expr,
                 )
-            if ctx.values:
+            if ctx.pending_checks:
                 solver.pop()
 
             if cfg.verbose:
