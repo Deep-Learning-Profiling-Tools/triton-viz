@@ -468,6 +468,36 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
     assert constraints is None
 
 
+def test_bitwise_bool_expr_eval():
+    a = SymbolicExpr.create("const", 1, tl.int32)
+    b = SymbolicExpr.create("const", 2, tl.int32)
+    cond_true = SymbolicExpr.create("less", a, b)
+    cond_false = SymbolicExpr.create("greater", a, b)
+
+    and_expr = SymbolicExpr.create("bitwise_and", cond_true, cond_false)
+    result, constraints = and_expr.eval(simplify_constraints=False)
+    assert isinstance(result, BoolRef)
+    assert str(result) == "False"
+    assert constraints is None
+
+    or_expr = SymbolicExpr.create("bitwise_or", cond_true, cond_false)
+    result, constraints = or_expr.eval(simplify_constraints=False)
+    assert isinstance(result, BoolRef)
+    assert str(result) == "True"
+    assert constraints is None
+
+    where_expr = SymbolicExpr.create(
+        "where",
+        and_expr,
+        SymbolicExpr.create("const", 1, tl.int32),
+        SymbolicExpr.create("const", 0, tl.int32),
+    )
+    result, constraints = where_expr.eval(simplify_constraints=False)
+    assert isinstance(result, list)
+    assert cast(IntNumRef, result[0]).as_long() == 0
+    assert constraints is None
+
+
 # ======== Pointer Symbolic Expr Operations =========
 
 

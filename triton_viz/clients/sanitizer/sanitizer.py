@@ -1103,6 +1103,8 @@ class BinarySymbolicExpr(SymbolicExpr):
         )
 
         def _bit_and(a, b):
+            if isinstance(a, BoolRef) and isinstance(b, BoolRef):
+                return And(a, b)
             return self._from_bv(self._to_bv(a, bitwidth) & self._to_bv(b, bitwidth))
 
         return self._apply_binop(_bit_and, lhs, rhs)
@@ -1118,6 +1120,8 @@ class BinarySymbolicExpr(SymbolicExpr):
         )
 
         def _bit_or(a, b):
+            if isinstance(a, BoolRef) and isinstance(b, BoolRef):
+                return Or(a, b)
             return self._from_bv(self._to_bv(a, bitwidth) | self._to_bv(b, bitwidth))
 
         return self._apply_binop(_bit_or, lhs, rhs)
