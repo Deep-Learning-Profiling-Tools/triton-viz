@@ -469,6 +469,10 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
 
 
 def test_bitwise_bool_expr_eval():
+    """
+    Test short circuiting behavior of bitwise_and and bitwise_or operators which do not
+    go through bitvector conversion like other binary operators.
+    """
     a = SymbolicExpr.create("const", 1, tl.int32)
     b = SymbolicExpr.create("const", 2, tl.int32)
     cond_true = SymbolicExpr.create("less", a, b)
