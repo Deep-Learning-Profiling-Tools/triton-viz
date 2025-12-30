@@ -17,7 +17,6 @@ from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
     SymbolicSanitizer,
     RangeWrapper,
-    _intervals_to_constraint,
     _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
