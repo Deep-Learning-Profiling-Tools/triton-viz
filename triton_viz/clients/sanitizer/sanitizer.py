@@ -148,9 +148,7 @@ def _add_interval_value(intervals: list[tuple[int, int]], idx: int) -> None:
 
 def _intervals_to_constraint(
     var: ArithRef, intervals: Sequence[tuple[int, int]]
-) -> Optional[BoolRef]:
-    if not intervals:
-        return None
+) -> BoolRef:
     constraints = [And(var >= start, var < stop) for start, stop in intervals]
     if len(constraints) == 1:
         return constraints[0]
@@ -1787,6 +1785,73 @@ class SymbolicSanitizer(Sanitizer):
 
         _check_single_addr(access_addr)
 
+    def _check_pending_checks_batched(
+        self,
+        pending_checks: Sequence[PendingCheck],
+        iterator_constraint: BoolRef,
+        *,
+        loop_lineno: int,
+    ) -> None:
+        solver = self.solver
+        addr_sym = self.addr_sym
+        assert solver is not None
+        assert addr_sym is not None
+
+        # Flatten vectorized addresses into per-lane atoms so we can reproduce the
+        # per-address semantics while still letting Z3 pick any satisfiable one.
+        atoms: list[tuple[PendingCheck, ExprRef]] = []
+        for pending_check in pending_checks:
+            addr_expr = pending_check.addr_expr
+            if isinstance(addr_expr, list):
+                for lane_addr in addr_expr:
+                    atoms.append((pending_check, lane_addr))
+            else:
+                atoms.append((pending_check, cast(ExprRef, addr_expr)))
+
+        solver.push()
+        solver.add(iterator_constraint)
+
+        # Use a single selector variable so Z3 can solve all pending checks
+        # through one disjunction, and we can map a SAT model back to the check.
+        which = Int(f"pending_sel_{loop_lineno}")
+        solver.add(which >= 0, which < len(atoms))
+
+        for atom_idx, (pending_check, addr_expr) in enumerate(atoms):
+            cond: BoolRef = cast(BoolRef, addr_sym == addr_expr)
+            constraints = pending_check.constraints
+            if constraints is not None:
+                # z3py stubs sometimes widen And(...)'s return type; cast back to BoolRef.
+                cond = cast(BoolRef, And(cond, constraints))
+            solver.add(Or(which != atom_idx, cond))
+
+        while solver.check() == sat:
+            model = solver.model()
+
+            which_val = model.evaluate(which, model_completion=True)
+            if not isinstance(which_val, IntNumRef):
+                raise RuntimeError("Unexpected selector type from Z3 model!")
+
+            atom_idx = which_val.as_long()
+            pending_check, _addr_expr = atoms[atom_idx]
+            symbolic_expr = pending_check.symbolic_expr
+
+            violation_val = model.evaluate(addr_sym, model_completion=True)
+            if not isinstance(violation_val, IntNumRef):
+                raise RuntimeError("Unexpected violation address type from Z3 model!")
+            violation_addr = violation_val.as_long()
+
+            tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+            op_type: type[Load] | type[Store] = (
+                Store if symbolic_expr.op == "store" else Load
+            )
+            self._report(op_type, tensor, violation_addr, symbolic_expr)
+
+            # In non-abort mode, keep enumerating other satisfiable pending atoms.
+            # In abort mode, _report exits, but keep the logic consistent.
+            solver.add(which != atom_idx)
+
+        solver.pop()
+
     def _handle_access_check(self, expr: SymbolicExpr) -> None:
         """
         Evaluate a memory access expression and either defer it (inside a loop)
@@ -2327,37 +2392,14 @@ class SymbolicSanitizer(Sanitizer):
             if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
                 return
             ctx = self.loop_stack.pop()
-            # execute pending checks
-            solver = self.solver
-            addr_sym = self.addr_sym
-            assert solver is not None
-            assert addr_sym is not None
-            # add constraints for loop_i
-            if ctx.values:
-                solver.push()
+            if ctx.values and ctx.pending_checks:
                 iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
-                solver.add(iterator_constraint)
-
-            for pending_check in ctx.pending_checks:
-                addr_expr = pending_check.addr_expr
-                expr_constraints = pending_check.constraints
-                symbolic_expr = pending_check.symbolic_expr
-
-                if cfg.verbose:
-                    print(
-                        "[Sanitizer] ▶ checking:",
-                        addr_expr,
-                        f" with iterator constraints: {iterator_constraint} ",
-                        f" and expression-related constraints: {expr_constraints} ",
-                    )
-
-                self._check_range_satisfiable(
-                    addr_expr,
-                    expr_constraints,
-                    symbolic_expr,
+                # Execute all pending checks in one Z3 query using a selector variable.
+                self._check_pending_checks_batched(
+                    ctx.pending_checks,
+                    iterator_constraint,
+                    loop_lineno=lineno,
                 )
-            if ctx.values:
-                solver.pop()
 
             if cfg.verbose:
                 print(
