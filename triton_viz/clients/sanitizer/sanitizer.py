@@ -2256,7 +2256,7 @@ class SymbolicSanitizer(Sanitizer):
 
             idx_z3 = Int(f"loop_i_{lineno}")
             sym = SymbolicExpr.create("const", idx_z3, tl.int32)
-            idx = tl.tensor(idx_z3, tl.int32)
+            idx = tl.tensor(sym, tl.int32)
             ctx = LoopContext(
                     lineno,
                     iterable.length,
