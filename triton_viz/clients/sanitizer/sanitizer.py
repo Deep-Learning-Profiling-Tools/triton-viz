@@ -1371,7 +1371,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         constraints = _and_constraints(constraints_ptr, constraints_offset)
         element_bytewidth = max(
             1, ptr_expr.dtype.scalar.element_ty.primitive_bitwidth // 8
-        )  # type: ignore
+        )
         if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
             z3_expr = ptr_z3 + offset_z3 * element_bytewidth
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
@@ -2262,14 +2262,14 @@ class SymbolicSanitizer(Sanitizer):
             sym = SymbolicExpr.create("const", idx_z3, tl.int32)
             idx = tl.tensor(sym, tl.int32)
             ctx = LoopContext(
-                    lineno,
-                    iterable.length,
-                    idx, 
-                    idx_z3,
-                    start=iterable.start,
-                    stop=iterable.stop,
-                    step=iterable.step,
-                )
+                lineno,
+                iterable.length,
+                idx,
+                idx_z3,
+                start=iterable.start,
+                stop=iterable.stop,
+                step=iterable.step,
+            )
             sym.loop_ctx = ctx
             self.loop_stack.append(ctx)
             if cfg.verbose:
