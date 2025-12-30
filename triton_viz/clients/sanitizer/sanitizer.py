@@ -1619,17 +1619,6 @@ SymbolicExpr.register_op_class(AtomicCasSymbolicExpr, ("atomic_cas",))
 SymbolicExpr.register_op_class(AtomicRmwSymbolicExpr, ("atomic_rmw",))
 
 
-def _sexpr_or_str(expr: Any) -> str:
-    if isinstance(expr, bool):
-        return "true" if expr else "false"
-    if isinstance(expr, (int, np.integer)):
-        return str(int(expr))
-    sexpr = getattr(expr, "sexpr", None)
-    if callable(sexpr):
-        return sexpr()  # type: ignore
-    return str(expr)
-
-
 def _make_signature(
     addr_expr: Z3Expr,
     constraints: ConstraintConjunction,
