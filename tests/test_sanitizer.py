@@ -127,9 +127,7 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self.after_loop_pending: list[int] = []
-        self.pending_checks_after_loop: list[list[tuple[Z3Expr, Optional[BoolRef]]]] = (
-            []
-        )
+        self.check_inside_loop: list[tuple[Z3Expr, Optional[BoolRef]]] = []
         self.iterator_constraints: list[BoolRef] = []
 
     def _check_range_satisfiable(
@@ -138,6 +136,7 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
         expr_constraints: Optional[BoolRef],
         symbolic_expr: SymbolicExpr,
     ) -> None:
+        self.check_inside_loop.append((access_addr, expr_constraints))
         super()._check_range_satisfiable(access_addr, expr_constraints, symbolic_expr)
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
@@ -149,9 +148,6 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
                 ctx = self.loop_stack[-1]
                 pending = len(ctx.pending_checks)
-                self.pending_checks_after_loop.append(
-                    [(pc.addr_expr, pc.constraints) for pc in ctx.pending_checks]
-                )
                 iterator_constraint = _intervals_to_constraint(ctx.idx_z3, ctx.values)
                 if iterator_constraint is not None:
                     self.iterator_constraints.append(iterator_constraint)
@@ -297,7 +293,7 @@ def test_loop_bounds_from_pid():
 
 def test_loop_deferred_checks_after_context():
     loop_deferred_check_recorder.after_loop_pending.clear()
-    loop_deferred_check_recorder.pending_checks_after_loop.clear()
+    loop_deferred_check_recorder.check_inside_loop.clear()
     loop_deferred_check_recorder.iterator_constraints.clear()
     loop_deferred_check_recorder.records.clear()
 
@@ -306,7 +302,7 @@ def test_loop_deferred_checks_after_context():
     loop_deferred_check_kernel[(1,)](out)
 
     assert loop_deferred_check_recorder.after_loop_pending == [1]
-    addr_expr, _ = loop_deferred_check_recorder.pending_checks_after_loop[0][0]
+    addr_expr, _ = loop_deferred_check_recorder.check_inside_loop[0]
     assert "4*loop_i_2" in str(addr_expr)
     iterator_constraints_str = " ".join(
         str(c) for c in loop_deferred_check_recorder.iterator_constraints
