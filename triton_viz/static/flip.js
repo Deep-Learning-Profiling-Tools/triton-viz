@@ -1,7 +1,6 @@
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import { setupScene, setupGeometries, createCube, CUBE_SIZE, GAP } from './load_utils.js';
-import { createFlip3D } from './flip_3d.js';
 
 export function createFlipVisualization(containerElement, op, viewState = null) {
     const API_BASE = window.__TRITON_VIZ_API__ || '';
@@ -84,19 +83,6 @@ export function createFlipVisualization(containerElement, op, viewState = null) 
     const sideMenu = document.createElement('div');
     Object.assign(sideMenu.style, { position:'absolute', top:'10px', right:'10px', width:'220px', padding:'10px', background:'rgba(0,0,0,0.7)', color:'#fff', borderRadius:'6px', zIndex:'2000' });
     overlay.appendChild(sideMenu);
-    // Steps overlay toggle
-    const stepsBtn = document.createElement('button');
-    stepsBtn.textContent = 'Flip Steps 3D';
-    Object.assign(stepsBtn.style, { position:'absolute', top:'10px', left:'10px', zIndex:'2001' });
-    overlay.appendChild(stepsBtn);
-    let stepsCleanup = null;
-    stepsBtn.addEventListener('click', ()=>{
-        if (stepsCleanup){ try{ stepsCleanup(); }catch(e){} stepsCleanup=null; stepsBtn.textContent='Flip Steps 3D'; return; }
-        // choose length along flipped dimension if 2D; otherwise use total W
-        const n = is2D ? (dim===0? H: W) : W;
-        stepsCleanup = createFlip3D(overlay, { length: Math.min(128, n) });
-        stepsBtn.textContent = 'Close Steps';
-    });
 
     async function getFlipValue(which, r, c){
         const body = { uuid: op.uuid, which, x: c, y: r };
@@ -168,7 +154,7 @@ export function createFlipVisualization(containerElement, op, viewState = null) 
     animate();
 
     const closeBtn = document.createElement('button'); closeBtn.textContent = 'Close'; Object.assign(closeBtn.style, { position:'absolute', top:'50px', left:'10px', zIndex:'2001' }); overlay.appendChild(closeBtn);
-    function cleanup(){ clearInterval(_hoverTimer); overlay.removeEventListener('mousemove', onMouseMove); overlay.removeEventListener('mouseleave', ()=>{}); if (stepsCleanup){ try{ stepsCleanup(); }catch(e){} stepsCleanup=null; } if (overlay && overlay.remove) overlay.remove(); }
+    function cleanup(){ clearInterval(_hoverTimer); overlay.removeEventListener('mousemove', onMouseMove); overlay.removeEventListener('mouseleave', ()=>{}); if (overlay && overlay.remove) overlay.remove(); }
     closeBtn.addEventListener('click', cleanup);
     try { window.current_op_uuid = op.uuid; } catch (e) {}
     return cleanup;
