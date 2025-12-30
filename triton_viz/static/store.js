@@ -11,7 +11,7 @@ import {
     COLOR_HOVER
 } from './load_utils.js';
 
-export function createStoreVisualization(containerElement, op) {
+export function createStoreVisualization(containerElement, op, viewState = null) {
 
         console.log(op.uuid);
         const API_BASE = window.__TRITON_VIZ_API__ || '';
@@ -29,7 +29,7 @@ export function createStoreVisualization(containerElement, op) {
         const sideMenu = createSideMenu(containerElement);
         // Controls bar
         const controlBar = document.createElement('div');
-        controlBar.style.position = 'fixed';
+        controlBar.style.position = 'absolute';
         controlBar.style.top = '10px';
         controlBar.style.left = '10px';
         controlBar.style.display = 'flex';
@@ -40,6 +40,21 @@ export function createStoreVisualization(containerElement, op) {
         colorizeToggle.textContent = 'Color by Value: OFF';
         controlBar.appendChild(colorizeToggle);
         containerElement.appendChild(controlBar);
+        const sliceNote = document.createElement('div');
+        sliceNote.innerHTML = '<span style="color:#00b3ff">■</span> blue = data selected by the slice';
+        Object.assign(sliceNote.style, {
+            position: 'absolute',
+            left: '10px',
+            bottom: '10px',
+            padding: '6px 8px',
+            background: 'rgba(0,0,0,0.6)',
+            color: '#fff',
+            font: '12px Arial, sans-serif',
+            borderRadius: '6px',
+            zIndex: '2000',
+            pointerEvents: 'none'
+        });
+        containerElement.appendChild(sliceNote);
         let hoveredHit = null;
         let lastHoverKey = null;
         let hoverToken = 0;
@@ -63,7 +78,6 @@ export function createStoreVisualization(containerElement, op) {
 
         scene.add(globalTensor);
 
-        addLabels(scene, globalTensor);
         const allTensorChildren = [globalMesh];
         const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
         const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
@@ -72,33 +86,32 @@ export function createStoreVisualization(containerElement, op) {
         globalHoverOutline.visible = false;
         globalTensor.add(globalHoverOutline);
 
-        // Overlay memory flow badges if available (NKI only)
-        try {
-            const badge = document.createElement('div');
-            badge.style.position = 'fixed';
-            badge.style.right = '10px';
-            badge.style.top = '60px';
-            badge.style.zIndex = '2500';
-            badge.style.background = 'rgba(0,0,0,0.65)';
-            badge.style.color = '#fff';
-            badge.style.padding = '6px 8px';
-            badge.style.borderRadius = '6px';
-            badge.style.font = '12px Arial';
-            const ms = (op.mem_src||'').toUpperCase();
-            const md = (op.mem_dst||'').toUpperCase();
-            const by = Number(op.bytes||0);
-            if (ms && md) {
-                badge.innerHTML = `<b>Memory Flow</b><br/>${ms} → ${md}${by?`<br/>${by} B`:''}`;
-                containerElement.appendChild(badge);
-            }
-        } catch(e){}
         const { center } = setupCamera(scene, camera);
         const orbitControls = new OrbitControls(camera, renderer.domElement);
         orbitControls.enableDamping = true;
         orbitControls.dampingFactor = 0.05;
         orbitControls.target.copy(center);
         orbitControls.update();
-        orbitControls.addEventListener('change', requestRender);
+        const applyCameraState = () => {
+            if (!viewState || !viewState.camera) return;
+            const { position, target } = viewState.camera;
+            if (position) camera.position.set(position[0], position[1], position[2]);
+            if (target) orbitControls.target.set(target[0], target[1], target[2]);
+            orbitControls.update();
+        };
+        const saveCameraState = () => {
+            if (!viewState) return;
+            viewState.camera = {
+                position: camera.position.toArray(),
+                target: orbitControls.target.toArray()
+            };
+        };
+        applyCameraState();
+        saveCameraState();
+        orbitControls.addEventListener('change', () => {
+            saveCameraState();
+            requestRender();
+        });
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
@@ -106,7 +119,7 @@ export function createStoreVisualization(containerElement, op) {
         const mouseDy = 0;
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, requestRender);
+        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState);
         colorizeToggle.addEventListener('click', async () => {
             colorizeOn = !colorizeOn;
             colorizeToggle.textContent = `Color by Value: ${colorizeOn ? 'ON' : 'OFF'}`;
@@ -236,7 +249,7 @@ export function createStoreVisualization(containerElement, op) {
         function createLegend(min, max) {
             destroyLegend();
             const wrapper = document.createElement('div');
-            wrapper.style.position = 'fixed';
+            wrapper.style.position = 'absolute';
             wrapper.style.left = '10px';
             wrapper.style.top = '50px';
             wrapper.style.padding = '6px 8px';
@@ -409,25 +422,6 @@ export function createStoreVisualization(containerElement, op) {
             menu.style.borderRadius = '5px';
             container.appendChild(menu);
             return menu;
-        }
-
-        function addLabels(scene, globalTensor) {
-            addLabel(scene, "Global Tensor", globalTensor.position);
-        }
-
-        function addLabel(scene, text, position) {
-            const canvas = document.createElement('canvas');
-            const context = canvas.getContext('2d');
-            context.font = 'Bold 24px Arial';
-            context.fillStyle = 'white';
-            context.fillText(text, 0, 24);
-
-            const texture = new THREE.CanvasTexture(canvas);
-            const material = new THREE.SpriteMaterial({ map: texture });
-            const sprite = new THREE.Sprite(material);
-            sprite.position.set(position.x, position.y + 2, position.z);
-            sprite.scale.set(4, 2, 1);
-            scene.add(sprite);
         }
 
 }

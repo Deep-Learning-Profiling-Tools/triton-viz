@@ -1,28 +1,53 @@
 import { GridBlock } from './gridblock.js';
-import { createInfoPopup, showInfoPopup } from './infoPopup.js';
 let globalData;
-let currentView = 'main';
+let currentView = 'tensor';
 let canvas, ctx;
 let maxX = 0, maxY = 0, maxZ = 0;
-let sliders = [], zSlider, precomputeButton, kernelGrid;
+let sliders = [], zSlider, kernelGrid;
+let programIdConfig;
 let backButton;
 let currentBlockData = null;
 let isInitialized = false;
 let containerElement;
 let infoPopup;
 let infoButton;
-function switchToMainView() {
-    currentView = 'main';
-    if (currentBlockData) {
-        currentBlockData.hideDetailedView();
-        currentBlockData = null;
-    }
-    containerElement.style.pointerEvents = 'none';
-    containerElement.style.display = 'none';
-    containerElement.innerHTML = '';
+function openRecordViewerAt(x, y, z) {
+    if (!programIdConfig) return;
+    const clamp = (v, maxV) => Math.max(0, Math.min(maxV, v));
+    const nx = clamp(x, programIdConfig.max.x);
+    const ny = clamp(y, programIdConfig.max.y);
+    const nz = clamp(z, programIdConfig.max.z);
+    programIdConfig.values = { x: nx, y: ny, z: nz };
+    const blockData = programIdConfig.getBlockData(nx, ny, nz);
+    currentBlockData = new GridBlock(
+        0,
+        0,
+        0,
+        0,
+        nx,
+        ny,
+        nz,
+        blockData,
+        switchToMainView,
+        containerElement,
+        canvas,
+        draw,
+        programIdConfig
+    );
+    currentView = 'tensor';
+    containerElement.style.pointerEvents = 'auto';
+    containerElement.style.display = 'block';
+    canvas.style.display = 'none';
+    currentBlockData.showDetailedView();
+}
 
-    canvas.style.display = 'block';
-    draw();
+function switchToMainView() {
+    currentBlockData = null;
+    openRecordViewerAt(
+        programIdConfig ? programIdConfig.values.x : 0,
+        programIdConfig ? programIdConfig.values.y : 0,
+        programIdConfig ? programIdConfig.values.z : 0
+    );
 }
 
 function initializeApp() {
@@ -38,6 +63,7 @@ function initializeApp() {
     }
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
+    canvas.style.display = 'none';
 
     canvas.addEventListener('mousedown', handleMouseEvent);
     canvas.addEventListener('mouseup', handleMouseEvent);
@@ -51,8 +77,6 @@ function initializeApp() {
 
     containerElement.style.pointerEvents = 'none';
     containerElement.style.display = 'none';
-
-    fetchData();
 }
 
 class Slider {
@@ -153,10 +177,11 @@ class Button {
 }
 
 class KernelGrid {
-    constructor(x, y, width, height, gridSize, visualizationData) {
+    constructor(x, y, width, height, gridSize, visualizationData, programIdConfig = null) {
         this.rect = { x, y, width, height };
         this.gridSize = gridSize;
         this.visualizationData = visualizationData;
+        this.programIdConfig = programIdConfig;
         this.currentZ = 0;
         this.blocks = [];
         this.calculateBlockSize();
@@ -185,7 +210,8 @@ class KernelGrid {
                     switchToMainView,
                     containerElement,
                     canvas,
-                    draw
+                    draw,
+                    this.programIdConfig
                 );
                 this.blocks.push(block);
             }
@@ -228,6 +254,13 @@ class KernelGrid {
                 this.selectedBlock.hideDetailedView();
             }
             this.selectedBlock = clickedBlock;
+            if (this.programIdConfig) {
+                this.programIdConfig.values = {
+                    x: clickedBlock.gridPosition.x,
+                    y: clickedBlock.gridPosition.y,
+                    z: clickedBlock.gridPosition.z
+                };
+            }
             clickedBlock.showDetailedView();
             return clickedBlock;
         }
@@ -267,32 +300,18 @@ function determineMaxValues(visualizationData) {
 }
 
 function initializeUIElements() {
-    sliders = [
-        new Slider(1300, 50, 250, 20, "Program Id 0", -1, maxX),
-        new Slider(1300, 120, 250, 20, "Program Id 1", -1, maxY),
-        new Slider(1300, 190, 250, 20, "Program Id 2", -1, maxZ)
-    ];
-
-    zSlider = new Slider(50, 860, 1200, 20, "Z-axis", 0, maxZ);
-    zSlider.enabled = maxZ > 0;
-
-    precomputeButton = new Button(1300, 260, 250, 40, "Precompute");
-    kernelGrid = new KernelGrid(50, 50, 1200, 800, [maxX + 1, maxY + 1, maxZ + 1], globalData.ops.visualization_data);
-    backButton = new Button(50, 50, 100, 40, "Back");
-    const buttonSize = 40;
-    const margin = 10;
-    infoButton = new Button(
-        canvas.width - buttonSize - margin,
-        margin,
-        buttonSize,
-        buttonSize,
-        "i",
-        true
-    );
-
+    sliders = [];
+    programIdConfig = {
+        values: { x: 0, y: 0, z: 0 },
+        max: { x: maxX, y: maxY, z: maxZ },
+        getBlockData: (x, y, z) => {
+            const viz = (globalData && globalData.ops && globalData.ops.visualization_data) || {};
+            const key1 = `(${x}, ${y}, ${z})`;
+            const key2 = `(${x},${y},${z})`;
+            return viz[key1] || viz[key2] || [];
+        }
+    };
     isInitialized = true;
-
-    infoPopup = createInfoPopup();
 }
 
 function switchToTensorView(clickedBlock) {
@@ -312,12 +331,7 @@ function handleMouseEvent(event) {
         console.warn('UI elements not initialized yet');
         return;
     }
-    if (infoButton) {
-        infoButton.handleEvent(event);
-        if (event.type === 'mousedown' && infoButton.isHovered) {
-            showInfoPopup(infoPopup);
-        }
-    }
+    if (currentView !== 'main') return;
     const { offsetX, offsetY } = event;
     if (currentView === 'main') {
         sliders.forEach((slider, index) => {
@@ -331,9 +345,6 @@ function handleMouseEvent(event) {
             if (kernelGrid) {
                 kernelGrid.updateZ(zSlider.value);
             }
-        }
-        if (precomputeButton) {
-            precomputeButton.handleEvent(event);
         }
         if (kernelGrid) {
             kernelGrid.handleMouseMove(offsetX, offsetY);
@@ -360,6 +371,7 @@ function draw() {
         console.error('Canvas context not available');
         return;
     }
+    if (currentView !== 'main') return;
 
     ctx.fillStyle = '#1e1e28';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -370,7 +382,6 @@ function draw() {
         if (zSlider && zSlider.enabled) {
             zSlider.draw(ctx);
         }
-        if (precomputeButton) precomputeButton.draw(ctx);
         if (infoButton) {
             infoButton.draw(ctx);
         }
@@ -386,7 +397,7 @@ async function fetchData() {
 
         determineMaxValues(globalData.ops.visualization_data);
         initializeUIElements();
-        draw();
+        openRecordViewerAt(0, 0, 0);
     } catch (error) {
         console.error('Error fetching data:', error);
     }

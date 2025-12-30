@@ -3,7 +3,7 @@ import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/control
 import { setupScene, setupGeometries, createCube, CUBE_SIZE, GAP } from './load_utils.js';
 import { createFlip3D } from './flip_3d.js';
 
-export function createFlipVisualization(containerElement, op) {
+export function createFlipVisualization(containerElement, op, viewState = null) {
     const API_BASE = window.__TRITON_VIZ_API__ || '';
     const overlay = document.createElement('div');
     Object.assign(overlay.style, {

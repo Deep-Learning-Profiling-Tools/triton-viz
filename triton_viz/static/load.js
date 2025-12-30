@@ -11,7 +11,7 @@ import {
     COLOR_HOVER
 } from './load_utils.js';
 
-export function createLoadVisualization(containerElement, op) {
+export function createLoadVisualization(containerElement, op, viewState = null) {
 
         console.log(op.uuid);
         const API_BASE = window.__TRITON_VIZ_API__ || '';
@@ -32,7 +32,7 @@ export function createLoadVisualization(containerElement, op) {
         const sideMenu = createSideMenu(containerElement);
         // Color map UI
         const controlBar = document.createElement('div');
-        controlBar.style.position = 'fixed';
+        controlBar.style.position = 'absolute';
         controlBar.style.top = '10px';
         controlBar.style.left = '10px';
         controlBar.style.display = 'flex';
@@ -42,10 +42,22 @@ export function createLoadVisualization(containerElement, op) {
         const colorizeToggle = document.createElement('button');
         colorizeToggle.textContent = 'Color by Value: OFF';
         controlBar.appendChild(colorizeToggle);
-        const codeToggle = document.createElement('button');
-        codeToggle.textContent = 'Show Code: OFF';
-        controlBar.appendChild(codeToggle);
         containerElement.appendChild(controlBar);
+        const sliceNote = document.createElement('div');
+        sliceNote.innerHTML = '<span style="color:#00b3ff">■</span> blue = data selected by the slice';
+        Object.assign(sliceNote.style, {
+            position: 'absolute',
+            left: '10px',
+            bottom: '10px',
+            padding: '6px 8px',
+            background: 'rgba(0,0,0,0.6)',
+            color: '#fff',
+            font: '12px Arial, sans-serif',
+            borderRadius: '6px',
+            zIndex: '2000',
+            pointerEvents: 'none'
+        });
+        containerElement.appendChild(sliceNote);
 
         // expose for debugging
         try {
@@ -61,7 +73,6 @@ export function createLoadVisualization(containerElement, op) {
         let hoverRaf = null;
         let lastMouseEvent = null;
         let legendEl = null;
-        let codePanel = null;
         let rafId = null;
         let renderPending = false;
 
@@ -79,7 +90,6 @@ export function createLoadVisualization(containerElement, op) {
         // Precompute highlighted coords in Global tensor for quick reset
         const highlightedGlobalIndices = globalTensor.userData.highlightedIndices;
 
-        addLabels(scene, globalTensor);
         const allTensorChildren = [globalMesh];
         const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
         const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
@@ -88,40 +98,39 @@ export function createLoadVisualization(containerElement, op) {
         globalHoverOutline.visible = false;
         globalTensor.add(globalHoverOutline);
 
-        // Overlay memory flow badges if available (NKI only)
-        try {
-            const badge = document.createElement('div');
-            badge.style.position = 'fixed';
-            badge.style.right = '10px';
-            badge.style.top = '60px';
-            badge.style.zIndex = '2500';
-            badge.style.background = 'rgba(0,0,0,0.65)';
-            badge.style.color = '#fff';
-            badge.style.padding = '6px 8px';
-            badge.style.borderRadius = '6px';
-            badge.style.font = '12px Arial';
-            const ms = (op.mem_src||'').toUpperCase();
-            const md = (op.mem_dst||'').toUpperCase();
-            const by = Number(op.bytes||0);
-            if (ms && md) {
-                badge.innerHTML = `<b>Memory Flow</b><br/>${ms} → ${md}${by?`<br/>${by} B`:''}`;
-                containerElement.appendChild(badge);
-            }
-        } catch(e){}
         const { center } = setupCamera(scene, camera);
         const orbitControls = new OrbitControls(camera, renderer.domElement);
         orbitControls.enableDamping = true;
         orbitControls.dampingFactor = 0.05;
         orbitControls.target.copy(center);
         orbitControls.update();
-        orbitControls.addEventListener('change', requestRender);
+        const applyCameraState = () => {
+            if (!viewState || !viewState.camera) return;
+            const { position, target } = viewState.camera;
+            if (position) camera.position.set(position[0], position[1], position[2]);
+            if (target) orbitControls.target.set(target[0], target[1], target[2]);
+            orbitControls.update();
+        };
+        const saveCameraState = () => {
+            if (!viewState) return;
+            viewState.camera = {
+                position: camera.position.toArray(),
+                target: orbitControls.target.toArray()
+            };
+        };
+        applyCameraState();
+        saveCameraState();
+        orbitControls.addEventListener('change', () => {
+            saveCameraState();
+            requestRender();
+        });
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
         const mouseDx = 0;
         const mouseDy = 0;
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, requestRender);
+        setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState);
         requestRender();
 
         function _updateMouseNDC(event) {
@@ -262,7 +271,7 @@ export function createLoadVisualization(containerElement, op) {
         function createLegend(min, max) {
             destroyLegend();
             const wrapper = document.createElement('div');
-            wrapper.style.position = 'fixed';
+            wrapper.style.position = 'absolute';
             wrapper.style.left = '10px';
             wrapper.style.top = '50px';
             wrapper.style.padding = '6px 8px';
@@ -298,63 +307,6 @@ export function createLoadVisualization(containerElement, op) {
 
             containerElement.appendChild(wrapper);
             legendEl = wrapper;
-        }
-
-        function destroyCodePanel() {
-            if (codePanel && codePanel.remove) codePanel.remove();
-            codePanel = null;
-        }
-
-        async function createCodePanel(frameIdx = 0, context = 8) {
-            destroyCodePanel();
-            const wrapper = document.createElement('div');
-            wrapper.style.position = 'fixed';
-            wrapper.style.right = '10px';
-            wrapper.style.top = '50px';
-            wrapper.style.width = '520px';
-            wrapper.style.maxHeight = '60vh';
-            wrapper.style.overflow = 'auto';
-            wrapper.style.padding = '8px 10px';
-            wrapper.style.background = 'rgba(0,0,0,0.65)';
-            wrapper.style.color = '#fff';
-            wrapper.style.font = '12px Menlo, Consolas, monospace';
-            wrapper.style.borderRadius = '6px';
-            wrapper.style.zIndex = '2000';
-
-            const header = document.createElement('div');
-            header.textContent = 'Operation Code & Context';
-            header.style.marginBottom = '6px';
-            header.style.opacity = '0.9';
-            wrapper.appendChild(header);
-
-            try {
-                const res = await fetch(`${API_BASE}/api/op_code`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uuid: op.uuid, frame_idx: frameIdx, context })
-                });
-                const data = await res.json();
-                const meta = document.createElement('div');
-                meta.style.marginBottom = '4px';
-                meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
-                wrapper.appendChild(meta);
-                const pre = document.createElement('pre');
-                pre.style.margin = '0';
-                pre.style.whiteSpace = 'pre';
-                const lines = (data.lines || []).map(l => {
-                    const mark = (data.highlight === l.no) ? '▶ ' : '  ';
-                    return `${mark}${String(l.no).padStart(6,' ')} | ${l.text||''}`;
-                }).join('\n');
-                pre.textContent = lines || '(no code available)';
-                wrapper.appendChild(pre);
-            } catch (e) {
-                const err = document.createElement('div');
-                err.textContent = 'Failed to load code context.';
-                wrapper.appendChild(err);
-            }
-
-            containerElement.appendChild(wrapper);
-            codePanel = wrapper;
         }
 
         function applyColorMap() {
@@ -454,16 +406,6 @@ export function createLoadVisualization(containerElement, op) {
             requestRender();
         });
 
-        codeToggle.addEventListener('click', async () => {
-            const on = codeToggle.textContent.endsWith('OFF');
-            codeToggle.textContent = `Show Code: ${on ? 'ON' : 'OFF'}`;
-            if (on) {
-                await createCodePanel(0, 8);
-            } else {
-                destroyCodePanel();
-            }
-        });
-
         function updateSideMenu(tensorName, x, y, z, value) {
             if (!tensorName) {
                 sideMenu.innerHTML = '';
@@ -495,25 +437,6 @@ export function createLoadVisualization(containerElement, op) {
             menu.style.borderRadius = '5px';
             container.appendChild(menu);
             return menu;
-        }
-
-        function addLabels(scene, globalTensor) {
-            addLabel(scene, "Global Tensor", globalTensor.position);
-        }
-
-        function addLabel(scene, text, position) {
-            const canvas = document.createElement('canvas');
-            const context = canvas.getContext('2d');
-            context.font = 'Bold 24px Arial';
-            context.fillStyle = 'white';
-            context.fillText(text, 0, 24);
-
-            const texture = new THREE.CanvasTexture(canvas);
-            const material = new THREE.SpriteMaterial({ map: texture });
-            const sprite = new THREE.Sprite(material);
-            sprite.position.set(position.x, position.y + 2, position.z);
-            sprite.scale.set(4, 2, 1);
-            scene.add(sprite);
         }
 
 }

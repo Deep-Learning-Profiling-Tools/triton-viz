@@ -93,6 +93,9 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
     }
 
     const spacing = CUBE_SIZE + GAP;
+    const centerX = (width - 1) * spacing / 2;
+    const centerY = -((height - 1) * spacing / 2);
+    const centerZ = -((depth - 1) * spacing / 2);
     const isGlobal = tensorName === 'Global';
     const instanceCount = isGlobal ? width * height * depth : coords.length;
     const cubeMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
@@ -162,7 +165,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
         for (let z = 0; z < depth; z++) {
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
-                    matrix.setPosition(x * spacing, -y * spacing, -z * spacing);
+                    matrix.setPosition(x * spacing - centerX, -y * spacing - centerY, -z * spacing - centerZ);
                     mesh.setMatrixAt(idx, matrix);
                     mesh.setColorAt(idx, highlightedIndices.has(idx) ? COLOR_SLICE : baseColor);
                     idx++;
@@ -172,7 +175,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
     } else {
         console.log(`Creating slice tensor with ${coords.length} coordinates`);
         coords.forEach(([x, y, z], idx) => {
-            matrix.setPosition(x * spacing, -y * spacing, -z * spacing);
+            matrix.setPosition(x * spacing - centerX, -y * spacing - centerY, -z * spacing - centerZ);
             mesh.setMatrixAt(idx, matrix);
             mesh.setColorAt(idx, baseColor);
         });
@@ -247,7 +250,7 @@ export function setupCamera(scene, camera) {
     return { center, cameraZ };
 }
 
-export function setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, onRender) {
+export function setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, onRender, onCameraChange) {
     window.addEventListener('resize', () => {
         camera.aspect = containerElement.clientWidth / containerElement.clientHeight;
         camera.updateProjectionMatrix();
@@ -257,6 +260,7 @@ export function setupEventListeners(containerElement, camera, renderer, onMouseM
     containerElement.addEventListener('mousemove', onMouseMove);
     window.addEventListener('keydown', (event) => {
         onKeyDown(event);
+        if (onCameraChange) onCameraChange();
         if (onRender) onRender();
     });
 
@@ -267,6 +271,7 @@ export function setupEventListeners(containerElement, camera, renderer, onMouseM
         const direction = event.deltaY > 0 ? 1 : -1;
         camera.position.z += direction * WHEEL_ZOOM_SPEED;
         camera.updateProjectionMatrix();
+        if (onCameraChange) onCameraChange();
         if (onRender) onRender();
     }, { passive: false });
 }

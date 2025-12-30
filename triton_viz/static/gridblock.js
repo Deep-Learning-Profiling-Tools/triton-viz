@@ -5,7 +5,7 @@ import { createStoreVisualization } from './store.js';
 import { createFlowDiagram } from './nki.js';
 
 export class GridBlock {
-    constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction) {
+    constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction, programIdConfig = null) {
         this.rect = { x, y, width, height };
         this.gridPosition = { x: gridX, y: gridY, z: gridZ };
         this.blockData = blockData;
@@ -19,6 +19,23 @@ export class GridBlock {
         this.isDetailedViewVisible = false;
         this.contentArea = null;
         this.currentSelectedTab = null;
+        this.programIdConfig = programIdConfig;
+        this.programIdControls = null;
+        this.programIdInputs = null;
+        this.programIdValueEls = null;
+        this.titleEl = null;
+        this.bodyArea = null;
+        this.headerBar = null;
+        this.mainArea = null;
+        this.codeSidebar = null;
+        this.codeSidebarHeader = null;
+        this.codeSidebarMeta = null;
+        this.codeSidebarPre = null;
+        this.codeSidebarVisible = true;
+        this.codeFetchToken = 0;
+        this.activeOpType = null;
+        this.activeOpIndex = null;
+        this.viewState = { camera: null };
     }
 
 
@@ -67,99 +84,173 @@ export class GridBlock {
         this.visualizationContainer = this.createVisualizationContainer();
         document.body.appendChild(this.visualizationContainer);
 
-        const title = this.createTitle();
-        const headerBar = this.createHeaderBar();
-        this.contentArea = this.createContentArea();
+        this.titleEl = this.createTitle();
+        this.programIdControls = this.createProgramIdControls();
+        this.bodyArea = document.createElement('div');
+        Object.assign(this.bodyArea.style, {
+            display: 'flex',
+            flexDirection: 'column',
+            flex: '1',
+            minWidth: '0',
+            minHeight: '0'
+        });
+        this.mainArea = document.createElement('div');
+        Object.assign(this.mainArea.style, {
+            display: 'flex',
+            flex: '1',
+            minHeight: '0',
+            minWidth: '0'
+        });
+        if (this.programIdControls) this.mainArea.appendChild(this.programIdControls);
+        this.mainArea.appendChild(this.bodyArea);
+        this.codeSidebar = this.createCodeSidebar();
+        if (this.codeSidebar) this.mainArea.appendChild(this.codeSidebar);
 
-        this.visualizationContainer.appendChild(title);
-        this.visualizationContainer.appendChild(headerBar);
-        this.visualizationContainer.appendChild(this.contentArea);
+        this.visualizationContainer.appendChild(this.titleEl);
+        this.visualizationContainer.appendChild(this.mainArea);
 
         const closeButton = this.createCloseButton();
         this.visualizationContainer.appendChild(closeButton);
-        // Add an explicit Back button (top-left) to return to main canvas view
-        const backButton = this.createBackButton();
-        this.visualizationContainer.appendChild(backButton);
-
-        // Ensure buttons panel sits above the canvas and accepts clicks
-        const buttonsPanel = this.visualizationContainer.querySelector('div');
-        if (buttonsPanel) {
-            buttonsPanel.style.pointerEvents = 'auto';
-            buttonsPanel.style.zIndex = '1002';
-        }
 
         this.isDetailedViewVisible = true;
         this.canvas.style.display = 'none';
         this.containerElement.style.display = 'block';
 
-        // Display the first operation visualization after the content area is added to the DOM
-        if (this.blockData.length > 0) {
-            this.displayOpVisualization(this.blockData[0]);
+        this.setCodeSidebarVisible(true);
+        this.refreshBody();
+    }
+
+    applyProgramIdSelection(x, y, z) {
+        if (!this.programIdConfig) return;
+        const { max } = this.programIdConfig;
+        const nx = Math.max(0, Math.min(max.x, x));
+        const ny = Math.max(0, Math.min(max.y, y));
+        const nz = Math.max(0, Math.min(max.z, z));
+        if (nx === this.gridPosition.x && ny === this.gridPosition.y && nz === this.gridPosition.z) return;
+        this.gridPosition = { x: nx, y: ny, z: nz };
+        this.programIdConfig.values = { x: nx, y: ny, z: nz };
+        if (this.programIdConfig.getBlockData) {
+            this.blockData = this.programIdConfig.getBlockData(nx, ny, nz);
         }
+        if (this.titleEl) {
+            this.titleEl.textContent = 'Triton Visualizer';
+        }
+        if (this.programIdInputs && this.programIdValueEls) {
+            this.programIdInputs.x.value = String(nx);
+            this.programIdInputs.y.value = String(ny);
+            this.programIdInputs.z.value = String(nz);
+            this.programIdValueEls.x.textContent = String(nx);
+            this.programIdValueEls.y.textContent = String(ny);
+            this.programIdValueEls.z.textContent = String(nz);
+        }
+        this.refreshBody();
+    }
 
-        // Add a global "Show Code" toggle once (applies to any op type)
-        const codeBtnId = 'global-code-toggle-btn';
-        if (!document.getElementById(codeBtnId)) {
-            const btn = document.createElement('button');
-            btn.id = codeBtnId;
-            btn.textContent = 'Show Code: OFF';
-            Object.assign(btn.style, {
-                position: 'fixed',
-                right: '10px',
-                top: '10px',
-                zIndex: '2001'
+    refreshBody() {
+        if (!this.bodyArea) return;
+        if (this.visualizationCleanupFunction) {
+            this.visualizationCleanupFunction();
+            this.visualizationCleanupFunction = null;
+        }
+        this.bodyArea.innerHTML = '';
+        this.headerBar = this.createHeaderBar();
+        this.contentArea = this.createContentArea();
+        this.bodyArea.appendChild(this.headerBar);
+        this.bodyArea.appendChild(this.contentArea);
+        if (this.blockData.length > 0) {
+            let nextOp = null;
+            if (this.activeOpIndex !== null && this.activeOpIndex < this.blockData.length) {
+                nextOp = this.blockData[this.activeOpIndex];
+            }
+            if (!nextOp && this.activeOpType) {
+                nextOp = this.blockData.find(op => op.type === this.activeOpType);
+            }
+            if (!nextOp) nextOp = this.blockData[0];
+            if (nextOp) {
+                const nextIndex = this.blockData.indexOf(nextOp);
+                const tab = this.headerBar.querySelector(`button[data-op-index="${nextIndex}"]`);
+                if (tab) this.setActiveTab(tab);
+                this.activeOpType = nextOp.type;
+                this.activeOpIndex = nextIndex;
+                this.displayOpVisualization(nextOp);
+            }
+            return;
+        }
+        this.updateCodeSidebar(null);
+    }
+
+    setCodeSidebarVisible(visible) {
+        this.codeSidebarVisible = visible;
+        if (this.codeSidebar) {
+            this.codeSidebar.style.display = visible ? 'flex' : 'none';
+        }
+        window.triton_viz_code_sidebar_visible = visible;
+    }
+
+    createCodeSidebar() {
+        const wrapper = document.createElement('div');
+        Object.assign(wrapper.style, {
+            flex: '0 0 420px',
+            width: '420px',
+            background: '#101019',
+            color: '#fff',
+            padding: '10px 12px',
+            borderLeft: '1px solid #2f2f38',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            overflow: 'auto',
+            height: '100%'
+        });
+        const header = document.createElement('div');
+        header.textContent = 'Operation Code & Context';
+        header.style.opacity = '0.9';
+        wrapper.appendChild(header);
+        const meta = document.createElement('div');
+        meta.style.opacity = '0.7';
+        wrapper.appendChild(meta);
+        const pre = document.createElement('pre');
+        pre.style.margin = '0';
+        pre.style.whiteSpace = 'pre';
+        pre.style.font = '12px Menlo, Consolas, monospace';
+        pre.style.lineHeight = '1.35';
+        pre.style.overflow = 'auto';
+        wrapper.appendChild(pre);
+        this.codeSidebarHeader = header;
+        this.codeSidebarMeta = meta;
+        this.codeSidebarPre = pre;
+        return wrapper;
+    }
+
+    async updateCodeSidebar(op) {
+        if (!this.codeSidebarMeta || !this.codeSidebarPre) return;
+        if (!op || !op.uuid) {
+            this.codeSidebarMeta.textContent = '';
+            this.codeSidebarPre.textContent = 'No operation selected.';
+            return;
+        }
+        const token = ++this.codeFetchToken;
+        this.codeSidebarMeta.textContent = '';
+        this.codeSidebarPre.textContent = 'Loading...';
+        try {
+            const API_BASE = window.__TRITON_VIZ_API__ || '';
+            const res = await fetch(`${API_BASE}/api/op_code`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ uuid: op.uuid, frame_idx: 0, context: 8 })
             });
-            document.body.appendChild(btn);
-
-            let panel = null;
-            const destroyPanel = () => { if (panel && panel.remove) panel.remove(); panel = null; };
-            const createPanel = async (uuid, frameIdx = 0, context = 8) => {
-                destroyPanel();
-                const wrapper = document.createElement('div');
-                Object.assign(wrapper.style, {
-                    position: 'fixed', right: '10px', top: '50px', width: '520px', maxHeight: '60vh', overflow: 'auto',
-                    padding: '8px 10px', background: 'rgba(0,0,0,0.65)', color: '#fff', font: '12px Menlo, Consolas, monospace',
-                    borderRadius: '6px', zIndex: '2000'
-                });
-                const header = document.createElement('div');
-                header.textContent = 'Operation Code & Context';
-                header.style.marginBottom = '6px';
-                header.style.opacity = '0.9';
-                wrapper.appendChild(header);
-                try {
-                    const API_BASE = window.__TRITON_VIZ_API__ || '';
-                    const res = await fetch(`${API_BASE}/api/op_code`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uuid, frame_idx: frameIdx, context }) });
-                    const data = await res.json();
-                    const meta = document.createElement('div');
-                    meta.style.marginBottom = '4px';
-                    meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
-                    wrapper.appendChild(meta);
-                    const pre = document.createElement('pre');
-                    pre.style.margin = '0';
-                    pre.style.whiteSpace = 'pre';
-                    const lines = (data.lines || []).map(l => {
-                        const mark = (data.highlight === l.no) ? '▶ ' : '  ';
-                        return `${mark}${String(l.no).padStart(6,' ')} | ${l.text||''}`;
-                    }).join('\n');
-                    pre.textContent = lines || '(no code available)';
-                    wrapper.appendChild(pre);
-                } catch (e) {
-                    const err = document.createElement('div');
-                    err.textContent = 'Failed to load code context.';
-                    wrapper.appendChild(err);
-                }
-                document.body.appendChild(wrapper);
-                panel = wrapper;
-            };
-
-            btn.addEventListener('click', async () => {
-                const turnOn = btn.textContent.endsWith('OFF');
-                btn.textContent = `Show Code: ${turnOn ? 'ON' : 'OFF'}`;
-                if (!this.blockData || this.blockData.length === 0) { if (!turnOn) destroyPanel(); return; }
-                // Prefer latest clicked/active uuid; fallback to first in current grid block
-                const activeUuid = window.current_op_uuid || (this.blockData[0] && this.blockData[0].uuid);
-                if (turnOn && activeUuid) await createPanel(activeUuid, 0, 8); else destroyPanel();
-            });
+            const data = await res.json();
+            if (token !== this.codeFetchToken) return;
+            this.codeSidebarMeta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
+            const lines = (data.lines || []).map(l => {
+                const mark = (data.highlight === l.no) ? '▶ ' : '  ';
+                return `${mark}${String(l.no).padStart(6, ' ')} | ${l.text || ''}`;
+            }).join('\n');
+            this.codeSidebarPre.textContent = lines || '(no code available)';
+        } catch (e) {
+            if (token !== this.codeFetchToken) return;
+            this.codeSidebarMeta.textContent = '';
+            this.codeSidebarPre.textContent = 'Failed to load code context.';
         }
     }
 
@@ -182,10 +273,81 @@ export class GridBlock {
 
     createTitle() {
         const title = document.createElement('h2');
-        title.textContent = `Operations at (${this.gridPosition.x}, ${this.gridPosition.y}, ${this.gridPosition.z})`;
+        title.textContent = 'Triton Visualizer';
         title.style.textAlign = 'center';
         title.style.margin = '10px 0';
         return title;
+    }
+
+    createProgramIdControls() {
+        if (!this.programIdConfig) return null;
+        const { max, values } = this.programIdConfig;
+        const wrapper = document.createElement('div');
+        Object.assign(wrapper.style, {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
+            padding: '12px',
+            background: '#242430',
+            borderRight: '1px solid #3a3a44',
+            flex: '0 0 220px',
+            width: '220px',
+            overflow: 'auto',
+            height: '100%',
+            boxSizing: 'border-box'
+        });
+
+        this.programIdInputs = {};
+        this.programIdValueEls = {};
+
+        const title = document.createElement('div');
+        title.textContent = 'Program ID';
+        title.style.fontWeight = '600';
+        wrapper.appendChild(title);
+
+        const createRow = (label, axis, maxValue, initialValue) => {
+            const row = document.createElement('div');
+            Object.assign(row.style, {
+                display: 'grid',
+                gridTemplateColumns: '28px 1fr 36px',
+                alignItems: 'center',
+                columnGap: '8px',
+                width: '100%'
+            });
+            const text = document.createElement('span');
+            text.textContent = label;
+            text.style.textAlign = 'right';
+            const input = document.createElement('input');
+            input.type = 'range';
+            input.min = '0';
+            input.max = String(maxValue);
+            input.value = String(initialValue);
+            input.style.width = '100%';
+            input.style.minWidth = '0';
+            const valueEl = document.createElement('span');
+            valueEl.textContent = String(initialValue);
+            valueEl.style.textAlign = 'left';
+            input.addEventListener('input', () => {
+                valueEl.textContent = input.value;
+                const nextX = Number(this.programIdInputs.x.value);
+                const nextY = Number(this.programIdInputs.y.value);
+                const nextZ = Number(this.programIdInputs.z.value);
+                this.applyProgramIdSelection(nextX, nextY, nextZ);
+            });
+            row.appendChild(text);
+            row.appendChild(input);
+            row.appendChild(valueEl);
+            wrapper.appendChild(row);
+            this.programIdInputs[axis] = input;
+            this.programIdValueEls[axis] = valueEl;
+        };
+
+        const initial = values || this.gridPosition;
+        createRow('X:', 'x', max.x, initial.x);
+        createRow('Y:', 'y', max.y, initial.y);
+        createRow('Z:', 'z', max.z, initial.z);
+
+        return wrapper;
     }
 
     createHeaderBar() {
@@ -201,7 +363,7 @@ export class GridBlock {
         this.currentSelectedTab = null;
         // tabs for each op
         this.blockData.forEach((op, index) => {
-            const opTab = this.createOperationTab(op, index === 0);
+            const opTab = this.createOperationTab(op, index === 0, index);
             opTab.addEventListener('click', () => this.handleTabClick(opTab, op));
             headerBar.appendChild(opTab);
             if (index === 0) this.currentSelectedTab = opTab;
@@ -219,9 +381,11 @@ export class GridBlock {
         return headerBar;
     }
 
-    createOperationTab(op, isFirst) {
+    createOperationTab(op, isFirst, index) {
         const opTab = document.createElement('button');
         opTab.textContent = op.type;
+        opTab.dataset.opType = op.type;
+        opTab.dataset.opIndex = String(index);
         Object.assign(opTab.style, {
             flex: '0 0 auto',
             marginRight: '5px',
@@ -241,6 +405,8 @@ export class GridBlock {
     }
 
     handleTabClick(clickedTab, op) {
+        this.activeOpType = op.type;
+        this.activeOpIndex = clickedTab && clickedTab.dataset ? Number(clickedTab.dataset.opIndex) : null;
         this.setActiveTab(clickedTab);
         this.displayOpVisualization(op);
     }
@@ -251,7 +417,8 @@ export class GridBlock {
             flex: '1',
             padding: '10px',
             overflow: 'hidden',
-            position: 'relative'
+            position: 'relative',
+            minHeight: '0'
         });
 
         if (this.blockData.length === 0) {
@@ -268,6 +435,7 @@ export class GridBlock {
             console.error('Content area is not initialized');
             return;
         }
+        this.activeOpType = op.type;
 
         if (this.visualizationCleanupFunction) {
             this.visualizationCleanupFunction();
@@ -287,16 +455,16 @@ export class GridBlock {
 
         switch (op.type) {
             case 'Dot':
-                this.visualizationCleanupFunction = createMatMulVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createMatMulVisualization(this.contentArea, op, this.viewState);
                 break;
             case 'Load':
-                this.visualizationCleanupFunction = createLoadVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createLoadVisualization(this.contentArea, op, this.viewState);
                 break;
             case 'Store':
-                this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op, this.viewState);
                 break;
             case 'Flip':
-                this.visualizationCleanupFunction = createFlipVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createFlipVisualization(this.contentArea, op, this.viewState);
                 break;
             default:
                 const unsupportedMsg = document.createElement('p');
@@ -304,6 +472,7 @@ export class GridBlock {
                 unsupportedMsg.style.textAlign = 'center';
                 this.contentArea.appendChild(unsupportedMsg);
         }
+        this.updateCodeSidebar(op);
     }
 
     displayFlowDiagram() {
@@ -312,6 +481,7 @@ export class GridBlock {
         this.contentArea.innerHTML = '';
         // Pass the entire block data (ops in this program) to Flow view
         this.visualizationCleanupFunction = createFlowDiagram(this.contentArea, this.blockData || []);
+        this.updateCodeSidebar(null);
     }
 
 
@@ -326,26 +496,6 @@ export class GridBlock {
         });
         closeButton.addEventListener('click', () => this.hideDetailedView());
         return closeButton;
-    }
-
-    createBackButton() {
-        const backButton = document.createElement('button');
-        backButton.textContent = 'Back';
-        Object.assign(backButton.style, {
-            position: 'fixed',
-            left: '10px',
-            bottom: '10px',
-            zIndex: '2002',
-            background: 'rgba(0,0,0,0.65)',
-            color: '#fff',
-            border: '1px solid #666',
-            padding: '6px 10px',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.5)'
-        });
-        backButton.addEventListener('click', () => this.hideDetailedView());
-        return backButton;
     }
 
     hideDetailedView() {
@@ -366,9 +516,5 @@ export class GridBlock {
         if (this.onClose) {
             this.onClose();
         }
-
-        this.canvas.style.display = 'block';
-        this.containerElement.style.display = 'none';
-        this.drawFunction();
     }
 }

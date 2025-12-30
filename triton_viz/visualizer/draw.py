@@ -110,6 +110,35 @@ def extract_load_coords(
     return global_coords, slice_coords
 
 
+def serialize_global_tensor(global_tensor: Tensor) -> dict:
+    try:
+        gt = global_tensor.data
+        if hasattr(gt, "cpu") and callable(getattr(gt, "cpu", None)):
+            try:
+                arr = gt.detach().cpu().numpy()
+            except Exception:
+                arr = np.asarray(gt)
+        elif hasattr(gt, "data"):
+            arr = np.asarray(getattr(gt, "data"))
+        elif hasattr(gt, "_value"):
+            arr = np.asarray(getattr(gt, "_value"))
+        else:
+            arr = np.asarray(gt)
+    except Exception:
+        arr = np.asarray([])
+
+    t_min = float(np.min(arr)) if arr.size else 0.0
+    t_max = float(np.max(arr)) if arr.size else 0.0
+
+    return {
+        "global_tensor": arr,
+        "dims": int(arr.ndim),
+        "shape": list(arr.shape),
+        "min": t_min,
+        "max": t_max,
+    }
+
+
 def make_3d(shape: tuple[int, ...]):
     if len(shape) == 1:
         return (1, 1, shape[0])
@@ -279,36 +308,8 @@ def prepare_visualization_data(program_records, tensor_table):
                 }
             )
 
-            # Normalize to NumPy array for downstream APIs, and cache basic stats
-            try:
-                import numpy as _np
-
-                gt = global_tensor.data
-                if hasattr(gt, "cpu") and callable(getattr(gt, "cpu", None)):
-                    try:
-                        arr = gt.detach().cpu().numpy()
-                    except Exception:
-                        arr = _np.asarray(gt)
-                elif hasattr(gt, "data"):
-                    arr = _np.asarray(getattr(gt, "data"))
-                elif hasattr(gt, "_value"):
-                    arr = _np.asarray(getattr(gt, "_value"))
-                else:
-                    arr = _np.asarray(gt)
-            except Exception:
-                import numpy as _np
-
-                arr = _np.asarray([])
-
-            t_min = float(np.min(arr)) if arr.size else 0.0
-            t_max = float(np.max(arr)) if arr.size else 0.0
-
             raw_tensor_data[record_uuid] = {
-                "global_tensor": arr,
-                "dims": int(arr.ndim),
-                "shape": list(arr.shape),
-                "min": t_min,
-                "max": t_max,
+                **serialize_global_tensor(global_tensor),
                 "tracebacks": [
                     {
                         "filename": f.filename,
@@ -342,6 +343,7 @@ def prepare_visualization_data(program_records, tensor_table):
             )
 
             raw_tensor_data[record_uuid] = {
+                **serialize_global_tensor(global_tensor),
                 "tracebacks": [
                     {
                         "filename": f.filename,

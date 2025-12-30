@@ -1,7 +1,7 @@
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 
-export function createMatMulVisualization(containerElement, op) {
+export function createMatMulVisualization(containerElement, op, viewState = null) {
     const API_BASE = window.__TRITON_VIZ_API__ || '';
     const { input_shape, other_shape, output_shape } = op;
     console.log(op.uuid)
@@ -20,7 +20,7 @@ export function createMatMulVisualization(containerElement, op) {
 
     const sideMenu = document.createElement('div');
     // Use fixed position and high z-index to ensure it's above WebGL canvas
-    sideMenu.style.position = 'fixed';
+    sideMenu.style.position = 'absolute';
     sideMenu.style.top = '10px';
     sideMenu.style.right = '10px';
     sideMenu.style.width = '200px';
@@ -34,27 +34,6 @@ export function createMatMulVisualization(containerElement, op) {
     sideMenu.style.pointerEvents = 'auto';
     containerElement.appendChild(sideMenu);
 
-    // Memory flow badge for Dot (SBUF→PSUM)
-    try {
-        const badge = document.createElement('div');
-        badge.style.position = 'fixed';
-        badge.style.right = '10px';
-        badge.style.top = '60px';
-        badge.style.zIndex = '2500';
-        badge.style.background = 'rgba(0,0,0,0.65)';
-        badge.style.color = '#fff';
-        badge.style.padding = '6px 8px';
-        badge.style.borderRadius = '6px';
-        badge.style.font = '12px Arial';
-        const ms = (op.mem_src||'').toUpperCase();
-        const md = (op.mem_dst||'').toUpperCase();
-        if (ms && md) {
-            const tiles = Array.isArray(op.tile_shape)? `${op.tile_shape[0]}x${op.tile_shape[1]}` : '';
-            const k = Number(op.k||0);
-            badge.innerHTML = `<b>Memory Flow</b><br/>${ms} → ${md}${tiles?`<br/>Tile: ${tiles}`:''}${k?`<br/>K: ${k}`:''}`;
-            containerElement.appendChild(badge);
-        }
-    } catch(e){}
     let hoveredHit = null;
     let lastHoverKey = null;
     let hoverToken = 0;
@@ -296,9 +275,9 @@ export function createMatMulVisualization(containerElement, op) {
     const CUBE_SIZE = 0.2;
     const GAP = 0.05;
 
-    const COLOR_A = new THREE.Color(0.53, 0.81, 0.98);
-    const COLOR_B = new THREE.Color(1.0, 0.65, 0.0);
-    const COLOR_C = new THREE.Color(1.0, 1.0, 1.0);
+    const COLOR_A = new THREE.Color(0.21, 0.46, 1.0);
+    const COLOR_B = new THREE.Color(1.0, 1.0, 0.31);
+    const COLOR_C = new THREE.Color(0.59, 1.0, 0.37);
     const COLOR_HIGHLIGHT = new THREE.Color(0.0, 0.0, 1.0);
     const COLOR_FILLED = new THREE.Color(0.0, 0.0, 1.0);
     const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);
@@ -343,11 +322,15 @@ export function createMatMulVisualization(containerElement, op) {
     const spacing = CUBE_SIZE + GAP;
 
     function matrixSize(dimensions) {
+        const rows = dimensions[0];
+        const cols = dimensions[1];
+        const width = (cols - 1) * spacing + CUBE_SIZE;
+        const height = (rows - 1) * spacing + CUBE_SIZE;
         return {
-            rows: dimensions[0],
-            cols: dimensions[1],
-            width: dimensions[1] * spacing,
-            height: dimensions[0] * spacing
+            rows,
+            cols,
+            width,
+            height
         };
     }
 
@@ -377,7 +360,7 @@ export function createMatMulVisualization(containerElement, op) {
         return mesh;
     }
 
-    const gap = spacing;
+    const gap = GAP;
     const sizeA = matrixSize(input_shape);
     const sizeB = matrixSize(other_shape);
     const sizeC = matrixSize(output_shape);
@@ -415,7 +398,26 @@ export function createMatMulVisualization(containerElement, op) {
     controls.dampingFactor = 0.05;
     controls.target.copy(center);
     controls.update();
-    controls.addEventListener('change', requestRender);
+    const applyCameraState = () => {
+        if (!viewState || !viewState.camera) return;
+        const { position, target } = viewState.camera;
+        if (position) camera.position.set(position[0], position[1], position[2]);
+        if (target) controls.target.set(target[0], target[1], target[2]);
+        controls.update();
+    };
+    const saveCameraState = () => {
+        if (!viewState) return;
+        viewState.camera = {
+            position: camera.position.toArray(),
+            target: controls.target.toArray()
+        };
+    };
+    applyCameraState();
+    saveCameraState();
+    controls.addEventListener('change', () => {
+        saveCameraState();
+        requestRender();
+    });
 
     function resetColors() {
         clearHighlights(true);
@@ -460,7 +462,7 @@ export function createMatMulVisualization(containerElement, op) {
     }
 
     const controlPanel = document.createElement('div');
-    controlPanel.style.position = 'fixed';
+    controlPanel.style.position = 'absolute';
     controlPanel.style.bottom = '10px';
     controlPanel.style.left = '10px';
     controlPanel.style.display = 'flex';
@@ -548,6 +550,7 @@ export function createMatMulVisualization(containerElement, op) {
         }
         camera.setRotationFromEuler(cameraRotation);
         camera.updateProjectionMatrix();
+        saveCameraState();
         requestRender();
     }
 
@@ -563,6 +566,7 @@ export function createMatMulVisualization(containerElement, op) {
         const direction = event.deltaY > 0 ? 1 : -1;
         camera.position.z += direction * WHEEL_ZOOM_SPEED;
         camera.updateProjectionMatrix();
+        saveCameraState();
         requestRender();
     }, { passive: false });
     requestRender();
