@@ -1,4 +1,3 @@
-from bisect import bisect_left
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property, reduce
@@ -95,7 +94,6 @@ ConstraintConjunction: TypeAlias = Optional[BoolRef]
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
 
 
-
 def _range_to_iterator_constraint(
     var: ArithRef, *, start: int, stop: int, step: int
 ) -> BoolRef:
@@ -171,12 +169,14 @@ class PendingCheck:
 class LoopContext:
     lineno: int
     length: int
+    idx: tl.tensor
     idx_z3: ArithRef
     start: int = 0
     stop: int = 0
     step: int = 1
     signature_cache: dict[int, int] = field(default_factory=dict)
     pending_checks: list[PendingCheck] = field(default_factory=list)
+
 
 @dataclass
 class RangeWrapper:
@@ -1367,7 +1367,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         constraints = _and_constraints(constraints_ptr, constraints_offset)
         element_bytewidth = max(
             1, ptr_expr.dtype.scalar.element_ty.primitive_bitwidth // 8
-        ) # type: ignore
+        )  # type: ignore
         if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
             z3_expr = ptr_z3 + offset_z3 * element_bytewidth
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
@@ -2255,31 +2255,27 @@ class SymbolicSanitizer(Sanitizer):
                 return
 
             idx_z3 = Int(f"loop_i_{lineno}")
-            self.loop_stack.append(
-                LoopContext(
+            sym = SymbolicExpr.create("const", idx_z3, tl.int32)
+            idx = tl.tensor(idx_z3, tl.int32)
+            ctx = LoopContext(
                     lineno,
                     iterable.length,
+                    idx, 
                     idx_z3,
                     start=iterable.start,
                     stop=iterable.stop,
                     step=iterable.step,
                 )
-            )
+            sym.loop_ctx = ctx
+            self.loop_stack.append(ctx)
             if cfg.verbose:
                 print(f"[Sanitizer] ▶ enter loop@{lineno}, len={iterable.length}")
 
         @self.lock_fn
         def loop_hook_iter_overrider(lineno, idx):
             if self.loop_stack and self.loop_stack[-1].lineno == lineno:
-                sym = SymbolicExpr.create("const", idx, tl.int32)
-                sym.loop_ctx = self.loop_stack[-1]
-                return tl.core.tensor(sym, tl.int32)
+                return self.loop_stack[-1].idx
             return idx
-
-        @self.lock_fn
-        def loop_hook_iter_listener(lineno, idx):
-            if cfg.verbose:
-                print(f"[Sanitizer] ▶ loop@{lineno} idx={idx}")
 
         @self.lock_fn
         def loop_hook_after(lineno: int) -> None:
@@ -2330,7 +2326,6 @@ class SymbolicSanitizer(Sanitizer):
             range_wrapper_factory=_wrap_range,
             before_loop_callback=loop_hook_before,
             loop_iter_overrider=loop_hook_iter_overrider,
-            loop_iter_listener=loop_hook_iter_listener,
             after_loop_callback=loop_hook_after,
         )
 
