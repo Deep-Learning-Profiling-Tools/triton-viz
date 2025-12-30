@@ -84,7 +84,6 @@ export class GridBlock {
         this.visualizationContainer = this.createVisualizationContainer();
         document.body.appendChild(this.visualizationContainer);
 
-        this.titleEl = this.createTitle();
         this.programIdControls = this.createProgramIdControls();
         this.bodyArea = document.createElement('div');
         Object.assign(this.bodyArea.style, {
@@ -101,19 +100,21 @@ export class GridBlock {
             minHeight: '0',
             minWidth: '0'
         });
-        if (this.programIdControls) this.mainArea.appendChild(this.programIdControls);
-        this.mainArea.appendChild(this.bodyArea);
         this.codeSidebar = this.createCodeSidebar();
-        if (this.codeSidebar) this.mainArea.appendChild(this.codeSidebar);
+        if (this.codeSidebar) {
+            this.titleEl = this.createTitle();
+            if (this.titleEl) {
+                this.codeSidebar.insertBefore(this.titleEl, this.codeSidebar.firstChild);
+            }
+            if (this.programIdControls) this.codeSidebar.appendChild(this.programIdControls);
+            this.mainArea.appendChild(this.codeSidebar);
+        }
+        this.mainArea.appendChild(this.bodyArea);
 
-        this.visualizationContainer.appendChild(this.titleEl);
         this.visualizationContainer.appendChild(this.mainArea);
 
-        const closeButton = this.createCloseButton();
-        this.visualizationContainer.appendChild(closeButton);
-
         this.isDetailedViewVisible = true;
-        this.canvas.style.display = 'none';
+        if (this.canvas) this.canvas.style.display = 'none';
         this.containerElement.style.display = 'block';
 
         this.setCodeSidebarVisible(true);
@@ -143,10 +144,10 @@ export class GridBlock {
             this.programIdValueEls.y.textContent = String(ny);
             this.programIdValueEls.z.textContent = String(nz);
         }
-        this.refreshBody();
+        this.refreshBody(false);
     }
 
-    refreshBody() {
+    refreshBody(updateCode = true) {
         if (!this.bodyArea) return;
         if (this.visualizationCleanupFunction) {
             this.visualizationCleanupFunction();
@@ -172,11 +173,11 @@ export class GridBlock {
                 if (tab) this.setActiveTab(tab);
                 this.activeOpType = nextOp.type;
                 this.activeOpIndex = nextIndex;
-                this.displayOpVisualization(nextOp);
+                this.displayOpVisualization(nextOp, updateCode);
             }
             return;
         }
-        this.updateCodeSidebar(null);
+        if (updateCode) this.updateCodeSidebar(null);
     }
 
     setCodeSidebarVisible(visible) {
@@ -195,7 +196,7 @@ export class GridBlock {
             background: '#101019',
             color: '#fff',
             padding: '10px 12px',
-            borderLeft: '1px solid #2f2f38',
+            borderRight: '1px solid #2f2f38',
             display: 'flex',
             flexDirection: 'column',
             gap: '6px',
@@ -274,8 +275,8 @@ export class GridBlock {
     createTitle() {
         const title = document.createElement('h2');
         title.textContent = 'Triton Visualizer';
-        title.style.textAlign = 'center';
-        title.style.margin = '10px 0';
+        title.style.textAlign = 'left';
+        title.style.margin = '4px 0 6px 0';
         return title;
     }
 
@@ -289,11 +290,11 @@ export class GridBlock {
             gap: '12px',
             padding: '12px',
             background: '#242430',
-            borderRight: '1px solid #3a3a44',
-            flex: '0 0 220px',
-            width: '220px',
+            borderTop: '1px solid #3a3a44',
+            flex: '0 0 auto',
+            width: '100%',
             overflow: 'auto',
-            height: '100%',
+            height: 'auto',
             boxSizing: 'border-box'
         });
 
@@ -324,6 +325,12 @@ export class GridBlock {
             input.value = String(initialValue);
             input.style.width = '100%';
             input.style.minWidth = '0';
+            const isFixed = maxValue === 0;
+            if (isFixed) {
+                input.disabled = true;
+                input.style.opacity = '0.6';
+                input.style.cursor = 'not-allowed';
+            }
             const valueEl = document.createElement('span');
             valueEl.textContent = String(initialValue);
             valueEl.style.textAlign = 'left';
@@ -430,7 +437,7 @@ export class GridBlock {
 
         return contentArea;
     }
-    displayOpVisualization(op) {
+    displayOpVisualization(op, updateCode = true) {
         if (!this.contentArea) {
             console.error('Content area is not initialized');
             return;
@@ -472,7 +479,7 @@ export class GridBlock {
                 unsupportedMsg.style.textAlign = 'center';
                 this.contentArea.appendChild(unsupportedMsg);
         }
-        this.updateCodeSidebar(op);
+        if (updateCode) this.updateCodeSidebar(op);
     }
 
     displayFlowDiagram() {
@@ -484,19 +491,6 @@ export class GridBlock {
         this.updateCodeSidebar(null);
     }
 
-
-    createCloseButton() {
-        const closeButton = document.createElement('button');
-        closeButton.textContent = 'Close';
-        Object.assign(closeButton.style, {
-            position: 'fixed',
-            top: '10px',
-            right: '10px',
-            zIndex: '1001'
-        });
-        closeButton.addEventListener('click', () => this.hideDetailedView());
-        return closeButton;
-    }
 
     hideDetailedView() {
         if (!this.isDetailedViewVisible) return;
