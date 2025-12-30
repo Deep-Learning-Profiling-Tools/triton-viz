@@ -653,9 +653,9 @@ function getTextColor(bgColor) {
             const { dims, values } = cache;
             try {
                 if (dims >= 3) {
-                    return values[userData.tensor0][userData.tensor1][userData.tensor2];
+                    return values[userData.tensor1][userData.tensor0][userData.tensor2];
                 } else if (dims === 2) {
-                    return values[userData.tensor0][userData.tensor1];
+                    return values[userData.tensor1][userData.tensor0];
                 } else if (dims === 1) {
                     return values[userData.tensor0];
                 }
