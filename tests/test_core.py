@@ -74,7 +74,7 @@ def test_unpatch_lang_restores_builtins():
 
 
 # ======== Nested JIT Call Tests =========
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+@triton_viz.trace(client=Sanitizer(abort_on_error=True))
 @triton.jit
 def trace_nested_inner_kernel(x):
     return x * 2
@@ -89,7 +89,7 @@ def test_trace_nested_jit_calls():
     This test ensures compatibility with the command line triton-sanitizer wrapper.
     """
 
-    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton_viz.trace(client=Sanitizer(abort_on_error=True))
     @triton.jit
     def trace_nested_call_kernel(ptr, n: tl.constexpr):
         x = tl.load(ptr + tl.arange(0, n))
@@ -183,7 +183,7 @@ if torch.cuda.is_available():  # Only test if CUDA is available
         ],
         key=["n_elements"],
     )
-    @triton_viz.trace(clients=Sanitizer(abort_on_error=True))
+    @triton_viz.trace(client=Sanitizer(abort_on_error=True))
     @triton.jit
     def add_kernel_no_mask(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
         """

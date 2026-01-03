@@ -239,7 +239,7 @@ if TRITON_VIZ:
     )
 
     print("Executing rotary embedding kernel with NKI interpreter...")
-    traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(nki_rope_kernel)
+    traced_kernel = triton_viz.trace(client=Tracer(), backend="nki")(nki_rope_kernel)
     kernel_instance = traced_kernel[kernel_grid]
     kernel_instance(*kernel_args)
 

@@ -11,7 +11,7 @@ BLOCK_SIZE_Y = 8
 BLOCK_SIZE_Z = 4
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def add_3d_slices_kernel(
     input_ptr1,

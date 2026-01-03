@@ -6,7 +6,7 @@ import triton_viz
 from triton_viz.clients import Tracer
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def flip_1d_kernel(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
@@ -18,7 +18,7 @@ def flip_1d_kernel(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
     tl.store(y_ptr + rev_offs, x, mask=mask)
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def flip_2d_kernel(
     x_ptr,

@@ -80,7 +80,7 @@ kernel_args = (lhs_small, rhs_small, result)
 
 if TRITON_VIZ:
     print("Executing matmul_kernel with NKI interpreter...")
-    traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(matmul_kernel)
+    traced_kernel = triton_viz.trace(client=Tracer(), backend="nki")(matmul_kernel)
     kernel_instance = traced_kernel[kernel_grid]
     kernel_instance(*kernel_args)
 

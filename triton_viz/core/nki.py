@@ -412,35 +412,41 @@ class Builder:
 nki_builder = Builder()
 
 
-def nki_patch_lang():
-    nl.ndarray = nki_builder.ndarray
-    nl.program_id = nki_builder.program_id
-    nl.arange = nki_builder.arange
-    nl.load = nki_builder.load
-    nl.store = nki_builder.store
+def nki_patch_lang(scope=None):
+    def _set_attr(obj, name, value):
+        if scope is None:
+            setattr(obj, name, value)
+        else:
+            scope.set_attr(obj, name, value)
+
+    _set_attr(nl, "ndarray", nki_builder.ndarray)
+    _set_attr(nl, "program_id", nki_builder.program_id)
+    _set_attr(nl, "arange", nki_builder.arange)
+    _set_attr(nl, "load", nki_builder.load)
+    _set_attr(nl, "store", nki_builder.store)
 
     # Also expose masked_load and masked_store functions
-    nl.masked_load = nki_builder.masked_load
-    nl.masked_store = nki_builder.masked_store
+    _set_attr(nl, "masked_load", nki_builder.masked_load)
+    _set_attr(nl, "masked_store", nki_builder.masked_store)
     # see https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/api/nki.language.html
 
     # TODO: implement
     # matmul-specific
     # nl.shared_hbm
     # nl.psum
-    nl.affine_range = nki_builder.range
+    _set_attr(nl, "affine_range", nki_builder.range)
     nl.par_dim
-    nl.zeros = nki_builder.zeros
-    nl.mgrid = NDArray(value=np.mgrid, buffer=nl.sbuf, name="mgrid")
-    nl.matmul = nki_builder.matmul
-    nl.copy = nki_builder.copy
-    nl.sum = nki_builder.sum
-    nl.square = nki_builder.square
-    nl.rsqrt = nki_builder.rsqrt
-    nl.multiply = nki_builder.multiply
+    _set_attr(nl, "zeros", nki_builder.zeros)
+    _set_attr(nl, "mgrid", NDArray(value=np.mgrid, buffer=nl.sbuf, name="mgrid"))
+    _set_attr(nl, "matmul", nki_builder.matmul)
+    _set_attr(nl, "copy", nki_builder.copy)
+    _set_attr(nl, "sum", nki_builder.sum)
+    _set_attr(nl, "square", nki_builder.square)
+    _set_attr(nl, "rsqrt", nki_builder.rsqrt)
+    _set_attr(nl, "multiply", nki_builder.multiply)
 
     # attention-specific
-    nl.load_transpose2d = nki_builder.load_transpose2d
+    _set_attr(nl, "load_transpose2d", nki_builder.load_transpose2d)
     # nisa.affine_select
     # nl.tensor_reduce
     # nisa.activation
@@ -448,26 +454,24 @@ def nki_patch_lang():
     # nisa.nc_transpose
 
     # Elementwise operators
-    nl.exp = nki_builder.exp
-    nl.relu = nki_builder.relu
-    nl.sigmoid = nki_builder.sigmoid
-    nl.tanh = nki_builder.tanh
-    nl.silu = nki_builder.silu
-    nl.gelu = nki_builder.gelu
-    nl.sqrt = nki_builder.sqrt
-    nl.abs = nki_builder.abs
-    nl.log = nki_builder.log
-    nl.pow = nki_builder.pow
-    nl.reciprocal = nki_builder.reciprocal
+    _set_attr(nl, "exp", nki_builder.exp)
+    _set_attr(nl, "relu", nki_builder.relu)
+    _set_attr(nl, "sigmoid", nki_builder.sigmoid)
+    _set_attr(nl, "tanh", nki_builder.tanh)
+    _set_attr(nl, "silu", nki_builder.silu)
+    _set_attr(nl, "gelu", nki_builder.gelu)
+    _set_attr(nl, "sqrt", nki_builder.sqrt)
+    _set_attr(nl, "abs", nki_builder.abs)
+    _set_attr(nl, "log", nki_builder.log)
+    _set_attr(nl, "pow", nki_builder.pow)
+    _set_attr(nl, "reciprocal", nki_builder.reciprocal)
 
-    nl.device_print = print
+    _set_attr(nl, "device_print", print)
 
 
-def nki_unpatch_lang():
-    # reload the original functions
-    import importlib
-
-    importlib.reload(nl)
+def nki_unpatch_lang(scope=None):
+    if scope is not None and hasattr(scope, "restore"):
+        scope.restore()
 
 
 class NKIInterpretedFunction:
