@@ -88,4 +88,4 @@ class BuildPyCommand(build_py):
 # Generate version file before setup to support editable install
 generate_version_file()
 
-setup(cmdclass={"build_py": BuildPyCommand})
+setup(cmdclass={"build_py": BuildPyCommand})  # type: ignore[arg-type]
