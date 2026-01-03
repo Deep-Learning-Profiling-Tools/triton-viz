@@ -86,9 +86,7 @@ kernel_args = (a_tensor.numpy(), g_tensor.numpy(), result)
 
 if TRITON_VIZ:
     print("Executing kernel with NKI interpreter...")
-    traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(
-        nki_rmsnorm_kernel
-    )
+    traced_kernel = triton_viz.trace(client=Tracer(), backend="nki")(nki_rmsnorm_kernel)
     kernel_instance = traced_kernel[kernel_grid]
     kernel_instance(*kernel_args)
 
