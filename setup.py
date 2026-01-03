@@ -1,6 +1,6 @@
 # setup.py
-import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 from setuptools import setup
@@ -55,11 +55,9 @@ def get_version_suffix():
 def get_base_version():
     """Read base version from pyproject.toml."""
     pyproject_path = Path(__file__).parent / "pyproject.toml"
-    content = pyproject_path.read_text()
-    match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
-    if match:
-        return match.group(1)
-    raise RuntimeError("Could not find version in pyproject.toml")
+    with open(pyproject_path, "rb") as f:
+        data = tomllib.load(f)
+    return data["project"]["version"]
 
 
 BASE_VERSION = get_base_version()
