@@ -1,5 +1,5 @@
 # setup.py
-import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -52,8 +52,17 @@ def get_version_suffix():
     return get_git_commit_hash()  # Not on a tag, add git hash
 
 
-# Base version (keep in sync with pyproject.toml)
-BASE_VERSION = "2.0"
+def get_base_version():
+    """Read base version from pyproject.toml."""
+    pyproject_path = Path(__file__).parent / "pyproject.toml"
+    content = pyproject_path.read_text()
+    match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
+    if match:
+        return match.group(1)
+    raise RuntimeError("Could not find version in pyproject.toml")
+
+
+BASE_VERSION = get_base_version()
 TRITON_VIZ_VERSION = BASE_VERSION + get_version_suffix()
 
 
