@@ -41,6 +41,23 @@ class Config:
         # --- Fake tensor flag ---
         self._virtual_memory = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "0") == "1"
 
+        # --- Sanitizer Cache Ablation Study ---
+        # Cache 1: SymExpr Node Cache - caches Z3 expressions in SymExpr._z3
+        self.enable_symbol_cache = (
+            os.getenv("SANITIZER_ENABLE_SYMBOL_CACHE", "1") == "1"
+        )
+
+        # Cache 2: Loop Iterator Cache - deduplicates memory patterns in loops
+        self.enable_loop_cache = os.getenv("SANITIZER_ENABLE_LOOP_CACHE", "1") == "1"
+
+        # Cache 3: Grid Cache - shared solver per kernel launch (incremental SMT)
+        self.enable_grid_cache = os.getenv("SANITIZER_ENABLE_GRID_CACHE", "1") == "1"
+
+        # Cache 4: Kernel Cache - skip re-analysis of identical kernel launches
+        self.enable_kernel_cache = (
+            os.getenv("SANITIZER_ENABLE_KERNEL_CACHE", "1") == "1"
+        )
+
         # --- Profiler Optimization Ablation Study ---
         # Optimization 1: enable load/store/dot skipping
         self._profiler_enable_load_store_skipping = (

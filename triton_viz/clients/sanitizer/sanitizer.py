@@ -2,6 +2,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property, reduce
 import math
+import re
 from typing import (
     Any,
     ClassVar,
@@ -163,6 +164,13 @@ class PendingCheck:
     symbolic_expr: "SymbolicExpr"
     addr_expr: Z3Expr
     constraints: ConstraintConjunction
+
+
+# Regex pattern for normalizing Z3 variable names in loop cache signatures.
+# Removes numeric suffixes from loop iterators and arange variables
+# (e.g., "loop_i_81" -> "loop_i", "arange_0_8" -> "arange")
+# to ensure identical address patterns produce the same signature.
+_LOOP_VAR_PATTERN = re.compile(r"(loop_i|arange)_\d+")
 
 
 @dataclass
@@ -746,8 +754,15 @@ class SymbolicExpr:
         return self._data_wrapper
 
     def _to_z3(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        if self.z3 is not None:
+        # Symbol Cache: Check if caching is enabled and result is already computed
+        if cfg.enable_symbol_cache and self.z3 is not None:
             return self.z3, self.constraints
+
+        # If cache is disabled and this node was already computed, clear it to recompute
+        # This ensures fresh computation without stale state accumulation
+        if not cfg.enable_symbol_cache and self.z3 is not None:
+            self.z3 = None
+            self.constraints = None
 
         self.z3, self.constraints = self._to_z3_impl()
         if self.z3 is None:
@@ -1587,22 +1602,41 @@ def _make_signature(
     constraints: ConstraintConjunction,
 ) -> int:
     """
-    Convert (addr, constraints) into a stable string signature.
-    • addr_expr can be a single z3 expr or list[expr]
-    • constraints is a conjunction of expr
+    Convert (addr, constraints) into a stable string signature for loop cache.
+
+    This function normalizes Z3 variable names before hashing to ensure that
+    expressions with the same pattern but different variable name suffixes
+    (e.g., "loop_i_81" vs "loop_i_82") produce identical signatures.
+
+    Args:
+        addr_expr: A single Z3 expression or list of Z3 expressions
+        constraints: A conjunction of constraint expressions, or None
+
+    Returns:
+        An integer hash that can be used as a cache key
     """
+    # Convert address expression(s) to sexpr string representation
     if isinstance(addr_expr, list):
-        if len(addr_expr) == 1:
-            addr_hash = hash(addr_expr[0])
-        else:
-            # Order-stable hashing avoids O(n log n) sorting in hot paths.
-            addr_hash = hash(tuple(hash(e) for e in addr_expr))
+        # Sort for deterministic ordering
+        addr_repr = "|".join(sorted(e.sexpr() for e in addr_expr))
     else:
-        addr_hash = hash(addr_expr)
+        addr_repr = addr_expr.sexpr()
 
-    constr_hash = 0 if constraints is None else hash(constraints)
+    # Convert constraints to sexpr string representation
+    if constraints is None:
+        constr_repr = ""
+    elif isinstance(constraints, list):
+        constr_repr = "|".join(sorted(c.sexpr() for c in constraints))
+    else:
+        # Single constraint (e.g., And(...))
+        constr_repr = constraints.sexpr()
 
-    return hash((addr_hash, constr_hash))
+    # Normalize variable names by removing numeric suffixes
+    # This ensures "loop_i_81" and "loop_i_82" are treated as equivalent
+    addr_repr = _LOOP_VAR_PATTERN.sub(r"\1", addr_repr)
+    constr_repr = _LOOP_VAR_PATTERN.sub(r"\1", constr_repr)
+
+    return hash(addr_repr + "##" + constr_repr)
 
 
 @dataclass(frozen=True)
@@ -1708,40 +1742,74 @@ class SymbolicSanitizer(Sanitizer):
         expr_constraints: ConstraintConjunction,
         symbolic_expr: SymbolicExpr,
     ) -> None:
-        # Use push/pop on persistent solver
-        solver = self.solver
-        addr_sym = self.addr_sym
-        assert solver is not None
-        assert addr_sym is not None
+        if cfg.enable_grid_cache:
+            # Grid Cache enabled: Use push/pop on persistent solver
+            solver = self.solver
+            addr_sym = self.addr_sym
+            assert solver is not None
+            assert addr_sym is not None
 
-        def _check_single_addr(addr_expr: Z3Expr) -> None:
-            solver.push()
-            solver.add(addr_sym == addr_expr)
-            if expr_constraints is not None:
-                solver.add(expr_constraints)
-            if solver.check() == sat:
-                # Get the model to find the violation address
-                model = solver.model()
-                violation_val = model.evaluate(addr_sym, model_completion=True)
-                if isinstance(violation_val, IntNumRef):
-                    violation_addr = violation_val.as_long()
-                else:
-                    raise RuntimeError(
-                        "Unexpected violation address type from Z3 model!"
-                    )
+            def _check_single_addr(addr_expr: Z3Expr) -> None:
+                solver.push()
+                solver.add(addr_sym == addr_expr)
+                if expr_constraints is not None:
+                    solver.add(expr_constraints)
+                if solver.check() == sat:
+                    # Get the model to find the violation address
+                    model = solver.model()
+                    violation_val = model.evaluate(addr_sym, model_completion=True)
+                    if isinstance(violation_val, IntNumRef):
+                        violation_addr = violation_val.as_long()
+                    else:
+                        raise RuntimeError(
+                            "Unexpected violation address type from Z3 model!"
+                        )
 
-                # Find the tensor that this address belongs to
-                tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+                    # Find the tensor that this address belongs to
+                    tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
 
-                # Determine operation type from symbolic expression
-                if symbolic_expr.op == "store":
-                    op_type: type[Load] | type[Store] = Store
-                else:
-                    op_type = Load
+                    # Determine operation type from symbolic expression
+                    if symbolic_expr.op == "store":
+                        op_type: type[Load] | type[Store] = Store
+                    else:
+                        op_type = Load
 
-                # Report with symbolic expression
-                self._report(op_type, tensor, violation_addr, symbolic_expr)
-            solver.pop()
+                    # Report with symbolic expression
+                    self._report(op_type, tensor, violation_addr, symbolic_expr)
+                solver.pop()
+        else:
+            # Grid Cache disabled: Create new solver for each check
+            addr_sym = Int("addr")
+
+            def _check_single_addr(addr_expr: Z3Expr) -> None:
+                solver = Solver()
+                solver.add(Not(self.addr_ok))
+                solver.add(self.pid_ok)
+                solver.add(addr_sym == addr_expr)
+                if expr_constraints is not None:
+                    solver.add(expr_constraints)
+                if solver.check() == sat:
+                    # Get the model to find the violation address
+                    model = solver.model()
+                    violation_val = model.evaluate(addr_sym, model_completion=True)
+                    if isinstance(violation_val, IntNumRef):
+                        violation_addr = violation_val.as_long()
+                    else:
+                        raise RuntimeError(
+                            "Unexpected violation address type from Z3 model!"
+                        )
+
+                    # Find the tensor that this address belongs to
+                    tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+
+                    # Determine operation type from symbolic expression
+                    if symbolic_expr.op == "store":
+                        op_type: type[Load] | type[Store] = Store
+                    else:
+                        op_type = Load
+
+                    # Report with symbolic expression
+                    self._report(op_type, tensor, violation_addr, symbolic_expr)
 
         if isinstance(access_addr, list):
             for addr in access_addr:
@@ -1764,19 +1832,23 @@ class SymbolicSanitizer(Sanitizer):
             return
 
         ctx = self.loop_stack[-1]
-        signature = _make_signature(z3_addr, z3_constraints)
-        pending_idx = ctx.signature_cache.get(signature)
-        if pending_idx is None:
+
+        # Loop Cache: Only use signature cache if enabled
+        if cfg.enable_loop_cache:
+            signature = _make_signature(z3_addr, z3_constraints)
+            pending_idx = ctx.signature_cache.get(signature)
+            if pending_idx is not None:
+                if cfg.verbose:
+                    print("[Sanitizer]  ↪ skip duplicated addr in loop")
+                return  # Skip duplicate check
             ctx.signature_cache[signature] = len(ctx.pending_checks)
-            pending_check = PendingCheck(
-                symbolic_expr=expr,
-                addr_expr=z3_addr,
-                constraints=z3_constraints,
-            )
-            ctx.pending_checks.append(pending_check)
-        else:
-            if cfg.verbose:
-                print("[Sanitizer]  ↪ skip duplicated addr in loop")
+
+        pending_check = PendingCheck(
+            symbolic_expr=expr,
+            addr_expr=z3_addr,
+            constraints=z3_constraints,
+        )
+        ctx.pending_checks.append(pending_check)
 
     def _report(
         self,
@@ -1811,13 +1883,16 @@ class SymbolicSanitizer(Sanitizer):
         self.cache_grid = None
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        if self.cache_grid:
+        # Kernel Cache: Skip re-analysis of identical kernel launches
+        if cfg.enable_kernel_cache and self.cache_grid:
             fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
             self._clear_cache()
             if fn_cache not in _fn_symbolic_cache_set:
                 _fn_symbolic_cache_set.add(fn_cache)
                 return True
             return False
+        if self.cache_grid:
+            self._clear_cache()
         if self.need_full_grid is None:
             return True
         return self.need_full_grid
