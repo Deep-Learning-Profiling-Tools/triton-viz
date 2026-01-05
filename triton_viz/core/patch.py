@@ -2,7 +2,7 @@ import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
@@ -51,7 +51,6 @@ from .data import (
     AtomicCas,
     AtomicRMW,
 )
-from .data import Flip  # separate import to avoid reordering noise
 import inspect
 import ast
 from triton.runtime.interpreter import (
@@ -65,6 +64,8 @@ from triton.runtime.interpreter import _tuple_create, _unwrap_tensor, _rewrap_te
 from triton.tools.tensor_descriptor import TensorDescriptor
 from triton.runtime import JITFunction
 
+from .flip_patch import patch_flip
+
 HAS_NKI = False
 nki_builder = None
 try:
@@ -73,6 +74,43 @@ try:
     HAS_NKI = True
 except ModuleNotFoundError:
     pass
+
+
+_MISSING = object()
+
+
+class _LangPatchScope:
+    """Tracks patched attributes so they can be restored."""
+
+    def __init__(self) -> None:
+        self._changes: list[tuple[object, str, object]] = []
+
+    def set_attr(self, obj: object, name: str, value: object) -> None:
+        original = getattr(obj, name, _MISSING)
+        self._changes.append((obj, name, original))
+        setattr(obj, name, value)
+
+    def restore(self) -> None:
+        while self._changes:
+            obj, name, original = self._changes.pop()
+            if original is _MISSING:
+                delattr(obj, name)
+            else:
+                setattr(obj, name, original)
+
+
+_LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": []}
+
+
+def _push_lang_patch_scope(backend: str, scope: Any) -> None:
+    _LANG_PATCH_SCOPES.setdefault(backend, []).append(scope)
+
+
+def _pop_lang_patch_scope(backend: str) -> Optional[Any]:
+    scopes = _LANG_PATCH_SCOPES.get(backend)
+    if not scopes:
+        return None
+    return scopes.pop()
 
 
 @dataclass
@@ -387,20 +425,25 @@ class PatchOp:
         self.adapter = adapter
 
     def __call__(self, *args, **kwargs):
-        # periodically sleep briefly so other worker threads can run
-        _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
-        _YIELD_SLEEP_SEC = 0.0005  # Small positive sleep to encourage OS-level yield
-        now = time.perf_counter()
-        last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
-        if now - last >= _YIELD_INTERVAL_SEC:
-            _thread_local_interpreter_state.last_yield_ts = now
-            time.sleep(_YIELD_SLEEP_SEC)
+        if cfg.num_sms > 1:
+            # periodically sleep briefly so other worker threads can run
+            _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
+            _YIELD_SLEEP_SEC = (
+                0.0005  # Small positive sleep to encourage OS-level yield
+            )
+            now = time.perf_counter()
+            last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
+            if now - last >= _YIELD_INTERVAL_SEC:
+                _thread_local_interpreter_state.last_yield_ts = now
+                time.sleep(_YIELD_SLEEP_SEC)
 
         if self.callbacks.before_callback:
             before_args = self.adapter(*args, **kwargs)
             self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in {**reduce_map, **scan_map, **reshape_map}:
+            if self.op_type in math_map:
+                raise NotImplementedError("Patching math ops not yet supported")
+            elif self.op_type in {**reduce_map, **scan_map, **reshape_map}:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -408,14 +451,15 @@ class PatchOp:
                     self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
                     args[0].dtype,
                 )
-            elif self.op_type in math_map:
-                raise NotImplementedError()
+                cast(Any, ret.handle).concrete_fn = self.op
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
-                from ..clients.sanitizer.sanitizer import SymbolicExpr
-
-                if isinstance(ret, SymbolicExpr):
-                    ret.concrete_fn = self.op
+                if self.op_type == RawLoad:
+                    cast(Any, ret).concrete_fn = TRITON_ORIGINAL_OPS[Load]
+                elif self.op_type == RawStore:
+                    cast(Any, ret).concrete_fn = TRITON_ORIGINAL_OPS[Store]
+                else:
+                    cast(Any, ret).concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
         if self.callbacks.after_callback:
@@ -448,12 +492,8 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: str):
         patched_op = PatchOp(original_op, op_type, callbacks, adapter)
         setattr(backend_builder, op_name, patched_op)
     elif backend == "triton" and op_type in {**reduce_map, **scan_map, **reshape_map}:
-        if op_type in reduce_map:
-            op_name = reduce_map[op_type].__name__
-        elif op_type in scan_map:
-            op_name = scan_map[op_type].__name__
-        elif op_type in reshape_map:
-            op_name = reshape_map[op_type].__name__
+        special_ops = {**reduce_map, **scan_map, **reshape_map}
+        op_name = special_ops[op_type].__name__
         original_op = getattr(tl, op_name)
         adapter = backend_adapters[op_type]
         patched_op = PatchOp(original_op, op_type, callbacks, adapter)
@@ -742,138 +782,27 @@ def unpatch_for_loop():
 
 def patch_lang(fn, backend):
     if backend == "triton":
-        triton_patch_lang(fn)
+        scope = triton_patch_lang(fn)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
-        nki_patch_lang()
+        scope = _LangPatchScope()
+        nki_patch_lang(scope)
     else:
         raise ValueError(
             f"Unsupported backend {backend} received. Triton-viz only supports one of ('triton', 'nki')."
         )
 
+    _push_lang_patch_scope(backend, scope)
+
     fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
-    # Wrap tl.flip to emit a Flip record after computing result
-    try:
-        _orig_flip = getattr(tl, "flip", None)
-        if _orig_flip is not None and not getattr(
-            _orig_flip, "__triton_viz_wrapped__", False
-        ):
-
-            def _viz_flip(x, *args, **kwargs):
-                # Call original flip implementation
-                ret = _orig_flip(x, *args, **kwargs)
-                # Best-effort extract dim
-                dim = None
-                if args:
-                    dim = args[0]
-                if "dim" in kwargs:
-                    dim = kwargs.get("dim")
-                # Best-effort shapes
-                in_shape = None
-                out_shape = None
-                x_arr = None
-                r_arr = None
-                try:
-                    # interpreter tensors may expose .data or .handle.data
-                    x_data = getattr(x, "data", None)
-                    if x_data is None and hasattr(x, "handle"):
-                        x_data = getattr(x.handle, "data", None)
-                    if x_data is not None:
-                        in_shape = tuple(x_data.shape)
-                        x_arr = x_data
-                except Exception:
-                    pass
-                try:
-                    r_data = getattr(ret, "data", None)
-                    if r_data is None and hasattr(ret, "handle"):
-                        r_data = getattr(ret.handle, "data", None)
-                    if r_data is not None:
-                        out_shape = tuple(r_data.shape)
-                        r_arr = r_data
-                except Exception:
-                    pass
-
-                # Emit a Flip record to the active tracer, if available
-                try:
-                    global _current_client_manager
-                    cm = _current_client_manager
-                    if cm is not None and hasattr(cm, "clients"):
-                        tracer = cm.get_client("tracer")
-                        if tracer is not None:
-                            input_payload = None
-                            output_payload = None
-                            try:
-                                # Avoid huge payloads: cap to 64k elements
-                                def _maybe_list(arr):
-                                    import numpy as _np
-
-                                    if arr is None:
-                                        return None
-                                    try:
-                                        if arr.size <= 65536:
-                                            return _np.asarray(arr).tolist()
-                                    except Exception:
-                                        pass
-                                    return None
-
-                                input_payload = _maybe_list(x_arr)
-                                output_payload = _maybe_list(r_arr)
-                            except Exception:
-                                pass
-
-                            rec = Flip(
-                                input_shape=in_shape or tuple(),
-                                output_shape=out_shape or (in_shape or tuple()),
-                                dim=int(dim) if dim is not None else 0,
-                                input_data=input_payload,
-                                output_data=output_payload,
-                            )
-                            # attach call path already handled by Flip.__post_init__
-                            tracer.records.append(rec)
-                except Exception:
-                    # Never fail kernel execution due to viz
-                    pass
-                return ret
-
-            # mark wrapper to avoid double-wrapping on subsequent patch_lang calls
-            setattr(_viz_flip, "__triton_viz_wrapped__", True)
-            tl.flip = _viz_flip  # type: ignore[assignment]
-    except Exception:
-        # If wrapping fails, continue without Flip records
-        pass
+    patch_flip(scope, lambda: _current_client_manager)
 
 
 def unpatch_lang(backend):
-    # TODO: once this (https://github.com/triton-lang/triton/pull/8735)
-    # gets into a stable release, we can simplify this unpatching logic by upgrading Triton.
-    # This PR is ugly to implement in triton-viz directly because it piggybacks off
-    # patching code. So until then, we just brute-force re-import all triton subpackages to unpatch
-
-    import importlib
-    import sys
-
-    if backend == "triton":
-        for name in ("core", "math", "extra"):
-            mod = getattr(tl, name, None)
-            if mod is not None and mod.__name__ in sys.modules:
-                importlib.reload(mod)
-
-        if tl.__name__ in sys.modules:
-            importlib.reload(tl)
-    elif backend == "nki":
-        from triton_viz.core.nki import nki_unpatch_lang
-
-        nki_unpatch_lang()
-
-    from triton.language import semantic as tl_semantic
-    from triton.compiler import code_generator as codegen
-
-    tl_semantic.TritonSemantic.tensor = tl.tensor
-    tl_semantic.TritonSemantic.lang = tl
-    codegen.tensor = tl.tensor
-    codegen.language = tl
-    codegen.constexpr = tl.constexpr
+    scope = _pop_lang_patch_scope(backend)
+    if scope is not None and hasattr(scope, "restore"):
+        scope.restore()
 
 
 @dataclass(frozen=True)
@@ -1048,12 +977,13 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
         self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
 
 
-def _jit_function_call(
-    self, *args, backend=None, **kwargs
-):  # NOTE: is this ever called?
+def _jit_function_call(self, *args, backend=None, **kwargs):
     assert backend is not None
     patch_lang(self.fn, backend)
-    return self.fn(*args, **kwargs)
+    try:
+        return self.fn(*args, **kwargs)
+    finally:
+        unpatch_lang(backend)
 
 
 @contextmanager
