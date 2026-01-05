@@ -311,6 +311,110 @@ class GridCacheTest:
         # (This is a behavioral test - the exact count depends on implementation)
 
 
+    def test_grid_cache_disabled_with_loop_iterator_constraint(self):
+        """
+        Regression test for bug: when grid cache is disabled, the iterator
+        constraint was not passed to the fresh solver, causing false positive
+        OOB errors for valid memory accesses inside loops.
+
+        The bug was in _check_range_satisfiable: when enable_grid_cache=False,
+        a new solver was created for each check, but it didn't include the
+        iterator constraint that bounds the loop variable (e.g., 0 <= i < n).
+
+        This test verifies that masked stores inside loops do NOT report
+        false OOB errors when grid cache is disabled.
+        """
+        cfg.enable_grid_cache = False
+        cfg.enable_loop_cache = False
+        cfg.enable_symbol_cache = False
+        cfg.enable_kernel_cache = False
+
+        sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+        @triton_viz.trace(client=sanitizer)
+        @triton.jit
+        def loop_with_mask_kernel(out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+            """
+            Kernel that iterates over data in blocks with proper masking.
+            This pattern is common in Triton kernels (e.g., JSD kernel).
+
+            The mask (offsets < n_elements) ensures no OOB access, but
+            without the iterator constraint in the solver, the sanitizer
+            would incorrectly report OOB because it doesn't know that
+            loop_i is bounded by range(0, n_iterations).
+            """
+            pid = tl.program_id(0)
+            row_start = pid * n_elements
+
+            # Iterate over the row in blocks
+            for block_start in range(0, n_elements, BLOCK_SIZE):
+                offsets = block_start + tl.arange(0, BLOCK_SIZE)
+                # This mask correctly bounds the access
+                mask = offsets < n_elements
+                # Store with mask - should NOT be OOB
+                tl.store(out_ptr + row_start + offsets, offsets, mask=mask)
+
+        # Create output tensor: 2 rows, 100 elements each
+        n_rows = 2
+        n_elements = 100
+        out = torch.empty((n_rows * n_elements,), dtype=torch.int32)
+
+        # Run with BLOCK_SIZE=128 (larger than n_elements, so mask is needed)
+        loop_with_mask_kernel[(n_rows,)](out, n_elements, BLOCK_SIZE=128)
+
+        # After the fix: no OOB should be reported because:
+        # 1. The mask correctly bounds offsets < n_elements
+        # 2. The iterator constraint bounds block_start to valid range
+        assert len(sanitizer.records) == 0, (
+            f"False positive OOB detected with grid_cache=False! "
+            f"Found {len(sanitizer.records)} records. "
+            f"This indicates the iterator constraint is not being passed "
+            f"to the solver when grid cache is disabled."
+        )
+
+    def test_grid_cache_disabled_detects_real_oob_in_loop(self):
+        """
+        Verify that with grid cache disabled, REAL OOB errors in loops
+        are still detected correctly.
+
+        This ensures the fix for false positives doesn't break true positive
+        detection.
+        """
+        cfg.enable_grid_cache = False
+        cfg.enable_loop_cache = False
+        cfg.enable_symbol_cache = False
+        cfg.enable_kernel_cache = False
+
+        sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+        @triton_viz.trace(client=sanitizer)
+        @triton.jit
+        def loop_with_real_oob_kernel(out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+            """
+            Kernel with actual OOB access - no mask on the store.
+            """
+            pid = tl.program_id(0)
+            row_start = pid * n_elements
+
+            for block_start in range(0, n_elements, BLOCK_SIZE):
+                offsets = block_start + tl.arange(0, BLOCK_SIZE)
+                # NO mask - this will cause OOB when block_start + BLOCK_SIZE > n_elements
+                tl.store(out_ptr + row_start + offsets, offsets)
+
+        n_rows = 1
+        n_elements = 100
+        out = torch.empty((n_rows * n_elements,), dtype=torch.int32)
+
+        # BLOCK_SIZE=128 > n_elements=100, so last block will OOB
+        loop_with_real_oob_kernel[(n_rows,)](out, n_elements, BLOCK_SIZE=128)
+
+        # Real OOB should still be detected
+        assert len(sanitizer.records) > 0, (
+            "Real OOB not detected with grid_cache=False! "
+            "The fix should not break true positive detection."
+        )
+
+
 # ======== Kernel Cache Tests ========
 
 

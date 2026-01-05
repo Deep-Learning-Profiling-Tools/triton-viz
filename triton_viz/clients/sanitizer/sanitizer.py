@@ -1741,6 +1741,7 @@ class SymbolicSanitizer(Sanitizer):
         access_addr: Z3Expr,
         expr_constraints: ConstraintConjunction,
         symbolic_expr: SymbolicExpr,
+        iterator_constraint: Optional[BoolRef] = None,
     ) -> None:
         if cfg.enable_grid_cache:
             # Grid Cache enabled: Use push/pop on persistent solver
@@ -1788,6 +1789,9 @@ class SymbolicSanitizer(Sanitizer):
                 solver.add(addr_sym == addr_expr)
                 if expr_constraints is not None:
                     solver.add(expr_constraints)
+                # Add iterator constraint if provided (for loop context checks)
+                if iterator_constraint is not None:
+                    solver.add(iterator_constraint)
                 if solver.check() == sat:
                     # Get the model to find the violation address
                     model = solver.model()
@@ -2390,6 +2394,7 @@ class SymbolicSanitizer(Sanitizer):
                     addr_expr,
                     expr_constraints,
                     symbolic_expr,
+                    iterator_constraint,
                 )
             if ctx.pending_checks:
                 solver.pop()
