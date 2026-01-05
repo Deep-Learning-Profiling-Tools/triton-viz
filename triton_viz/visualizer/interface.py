@@ -145,18 +145,6 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/debug")
-def debug_page():
-    update_global_data()
-    return render_template("debug.html")
-
-
-@app.route("/calibrate")
-def calibrate_page():
-    # A minimal page to calibrate mouse picking dx/dy
-    return render_template("calibrate.html")
-
-
 @app.route("/api/data")
 def get_data():
     global global_data
