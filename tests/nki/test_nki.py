@@ -3,9 +3,17 @@
 Test script to verify NDArray slicing functionality after fixes
 """
 import numpy as np
-from triton_viz.core.nki import NDArray
+import pytest
 
-# sys.path.insert(0, os.path.join(os.path.dirname(__file__), "triton_viz", "core"))
+try:
+    from triton_viz.core.nki import NDArray
+except ModuleNotFoundError:
+    pytest.skip(
+        "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
+        allow_module_level=True,
+    )
+
+pytestmark = pytest.mark.nki  # only run at "pytest -m nki"
 
 
 def test_ndarray_creation():

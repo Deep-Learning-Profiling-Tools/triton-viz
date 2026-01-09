@@ -680,6 +680,63 @@ function getTextColor(bgColor) {
             });
         }
 
+        function destroyCodePanel() {
+            if (codePanel && codePanel.remove) codePanel.remove();
+            codePanel = null;
+        }
+
+        async function createCodePanel(frameIdx = 0, context = 8) {
+            destroyCodePanel();
+            const wrapper = document.createElement('div');
+            wrapper.style.position = 'fixed';
+            wrapper.style.right = '10px';
+            wrapper.style.top = '50px';
+            wrapper.style.width = '520px';
+            wrapper.style.maxHeight = '60vh';
+            wrapper.style.overflow = 'auto';
+            wrapper.style.padding = '8px 10px';
+            wrapper.style.background = 'rgba(0,0,0,0.65)';
+            wrapper.style.color = '#fff';
+            wrapper.style.font = '12px Menlo, Consolas, monospace';
+            wrapper.style.borderRadius = '6px';
+            wrapper.style.zIndex = '2000';
+
+            const header = document.createElement('div');
+            header.textContent = 'Operation Code & Context';
+            header.style.marginBottom = '6px';
+            header.style.opacity = '0.9';
+            wrapper.appendChild(header);
+
+            try {
+                const res = await fetch(`${API_BASE}/api/op_code`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uuid: op.uuid, frame_idx: frameIdx, context })
+                });
+                const data = await res.json();
+                const meta = document.createElement('div');
+                meta.style.marginBottom = '4px';
+                meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
+                wrapper.appendChild(meta);
+                const pre = document.createElement('pre');
+                pre.style.margin = '0';
+                pre.style.whiteSpace = 'pre';
+                const lines = (data.lines || []).map(l => {
+                    const mark = (data.highlight === l.no) ? '▶ ' : '  ';
+                    return `${mark}${String(l.no).padStart(6,' ')} | ${l.text||''}`;
+                }).join('\n');
+                pre.textContent = lines || '(no code available)';
+                wrapper.appendChild(pre);
+            } catch (e) {
+                const err = document.createElement('div');
+                err.textContent = 'Failed to load code context.';
+                wrapper.appendChild(err);
+            }
+
+            containerElement.appendChild(wrapper);
+            codePanel = wrapper;
+        }
+
         function applyColorMapIfNeeded() {
             if (!colorizeOn || !tensorCache) return;
             applyColorToTensor(globalTensor, tensorCache.global);

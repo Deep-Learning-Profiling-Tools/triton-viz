@@ -6,15 +6,17 @@ from triton_viz.core import config as cfg
 from triton_viz.core.trace import launches
 from triton_viz.core.data import Load, Store, Dot
 
-# Ensure project root is on sys.path so we can import examples
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
 
-from examples.load_store import simple_kernel
+def _ensure_project_root() -> None:
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
 
 
 def main():
+    _ensure_project_root()
+    from examples.load_store import simple_kernel
+
     # Reset viz config to a clean state
     cfg.reset()
 

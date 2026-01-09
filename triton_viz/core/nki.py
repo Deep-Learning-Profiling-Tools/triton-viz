@@ -1,9 +1,16 @@
 import numpy as np
 
-import neuronxcc.nki.language as nl
+try:
+    import neuronxcc.nki.language as nl
+except (
+    ModuleNotFoundError
+) as exc:  # pragma: no cover - only hit when optional deps missing
+    raise ModuleNotFoundError(
+        "NeuronX dependencies are missing. Install triton-viz[nki] to enable the NKI interpreter."
+    ) from exc
 import inspect
 from .nki_extract_slice import transform_code
-from .nki_masked_load import masked_load, masked_store
+from .masked_load import masked_load, masked_store
 
 
 class NDArray:
@@ -41,48 +48,25 @@ class NDArray:
     def element_size(self):
         return self.dtype.itemsize
 
-    def cpu(self):  # THTODO: rm?
+    def cpu(self):
         return self
+
+    def detach(self):
+        return self
+
+    def numpy(self):
+        return self.data
 
     def get_offsets(self):
         """
         Generate offset arrays for each dimension based on shape and stride.
-
-        Args:
-            strides: Tuple of strides for each dimension (a, b, ..., z)
-
-        Returns:
-            Tuple of offset arrays: (arange(A)[:, None, ..., None]*a, arange(B)[None, :, ..., None]*b, ...)
+        Given array with shape (A, ..., Z) and strides (a, ..., z), return offsets:
+        a * arange(A)[:, None, ..., None] + ... + z * arange(Z)[None, None, ..., :]
         """
-        strides = self.data.strides
-        if self.data is None:
-            raise AttributeError("NDArray has no value - cannot compute offsets")
-
-        shape = self.shape
-        if len(shape) != len(strides):
-            raise ValueError(
-                f"Shape has {len(shape)} dimensions but strides has {len(strides)} dimensions"
-            )
-
-        # offsets = []
         offsets = 0
-        ndim = len(shape)
-
-        for i, (dim_size, stride) in enumerate(zip(shape, strides)):
-            # Create arange for this dimension
-            arange_vals = np.arange(dim_size)
-
-            # Create broadcast shape - put arange in position i, others as 1
-            broadcast_shape = [1] * ndim
-            broadcast_shape[i] = dim_size
-
-            # Reshape and multiply by stride
-            offset_array = (arange_vals * stride).reshape(broadcast_shape)
-            # offsets.append(NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}"))
-            offsets += NDArray(value=offset_array, name=f"{self.name}_offset_dim{i}")
-
-        # return tuple(offsets)
-        return offsets
+        for dim_size, stride in zip(self.shape, self.stride()):
+            offsets = np.expand_dims(offsets, -1) + np.arange(dim_size) * stride
+        return NDArray(value=offsets, name=self.name)
 
     def __repr__(self):
         return f"NDArray(shape={self.shape}, dtype={self.dtype}, name={self.name})"
@@ -100,6 +84,16 @@ class NDArray:
 
         # Create a new NDArray with the sliced data
         return NDArray(value=sliced_value, name=f"{self.name}_slice")
+
+    def __setitem__(self, keys, value):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+
+        # Apply the slicing to the underlying numpy array
+        new_keys = [k.data if isinstance(k, NDArray) else k for k in keys]
+        self.data[tuple(new_keys)] = value.data
+
+        return self
 
     def _binary_op(self, other, op_func, op_name, op_symbol):
         if isinstance(other, NDArray):
@@ -172,6 +166,18 @@ class NDArray:
     def __or__(self, other):
         return self._binary_op(other, lambda a, b: a | b, "or", "|")
 
+    def reshape(self, *args, **kwargs):
+        return NDArray(
+            value=self.data.reshape(*args), name=f"{self.name}_reshape", **kwargs
+        )
+
+    def broadcast_to(self, *args, **kwargs):
+        return NDArray(
+            value=np.broadcast_to(self.data, *args),
+            name=f"{self.name}_broadcast_to",
+            **kwargs,
+        )
+
 
 class Builder:
     def __init__(self, grid_dims=None):
@@ -183,7 +189,7 @@ class Builder:
         self.fn = None
         self.shared_hbm_arrays = {}
 
-    def set_grid_dim(self, grid_dims):
+    def set_grid_dim(self, *grid_dims):
         self.grid_dims = grid_dims
 
     def set_grid_idx(self, x, y, z):
@@ -370,6 +376,35 @@ class Builder:
     def copy(self, x: NDArray, **kwargs):
         return self._unary_op(x, np.copy, "copy", **kwargs)
 
+    def sum(self, x: NDArray, *args, mask=None, **kwargs):
+        if mask is not None:
+            kwargs["where"] = mask.data
+        return NDArray(
+            value=x.data.sum(*args, **kwargs), name=f"{x.name}_sum", **kwargs
+        )
+
+    def square(self, x: NDArray, **kwargs):
+        return self._unary_op(x, np.square, "square", **kwargs)
+
+    def rsqrt(self, x: NDArray, **kwargs):
+        return self._unary_op(x, lambda v: 1 / np.sqrt(v), "rsqrt", **kwargs)
+
+    def multiply(self, x: NDArray, y: NDArray, **kwargs):
+        if isinstance(y, NDArray):
+            return NDArray(
+                value=np.multiply(x.data, y.data),
+                name=f"{x.name}_multiply_{y.name}",
+                **kwargs,
+            )
+        elif np.isscalar(y):
+            return NDArray(
+                value=np.multiply(x.data, y),
+                name=f"{x.name}_multiply_scalar",
+                **kwargs,
+            )
+        else:
+            raise TypeError(f"Unsupported type for multiply: {type(y)}")
+
     def range(self, stop):
         return range(stop)
 
@@ -399,6 +434,10 @@ def nki_patch_lang():
     nl.mgrid = NDArray(value=np.mgrid, buffer=nl.sbuf, name="mgrid")
     nl.matmul = nki_builder.matmul
     nl.copy = nki_builder.copy
+    nl.sum = nki_builder.sum
+    nl.square = nki_builder.square
+    nl.rsqrt = nki_builder.rsqrt
+    nl.multiply = nki_builder.multiply
 
     # attention-specific
     nl.load_transpose2d = nki_builder.load_transpose2d
@@ -448,7 +487,7 @@ class NKIInterpretedFunction:
             raise ValueError(
                 f"Grid must be 1, 2, or 3 dimensions, got {len(grid_dims)}"
             )
-        nki_builder.set_grid_dim(grid_dims)
+        nki_builder.set_grid_dim(*grid_dims)
         nki_builder.shared_hbm_arrays = {}
         nki_builder.fn = self.fn
 

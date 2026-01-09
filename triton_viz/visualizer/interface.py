@@ -41,8 +41,10 @@ def _compute_sbuf_timeline(events: list[dict]) -> tuple[list[dict], int]:
         return [], 0
     usage = 0
     timeline = []
+    usage_values = []
     for ev in sorted(events, key=lambda e: e.get("time_idx", 0)):
         usage += int(ev.get("delta", 0))
+        usage_values.append(usage)
         timeline.append(
             {
                 "time_idx": int(ev.get("time_idx", 0)),
@@ -51,7 +53,7 @@ def _compute_sbuf_timeline(events: list[dict]) -> tuple[list[dict], int]:
                 "uuid": ev.get("uuid"),
             }
         )
-    max_usage = max((pt["usage"] for pt in timeline), default=0)
+    max_usage = max(usage_values) if usage_values else 0
     return timeline, max_usage
 
 

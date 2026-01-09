@@ -44,8 +44,9 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 
 ### Prerequisites
 
-- Python installed (preferably the latest available version).
+- Python installed (preferably the latest available version), minimum supported version is 3.10.
 - [Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
+- Note: the below commands must be run in order.
 
 Upon successfully installing Triton, install Torch using the following command:
 
@@ -71,12 +72,39 @@ pip install -e .
 
 You're all set!
 
+### Optional: Enable NKI Support
+
+If you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the NKI-specific tests:
+
+1. Follow the [AWS Neuron Torch-NeuronX Ubuntu 22.04 setup guide](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/setup/neuron-setup/pytorch/neuronx/ubuntu/torch-neuronx-ubuntu22.html#setup-torch-neuronx-ubuntu22) to add the Neuron APT repository and install the required system packages (for example `aws-neuronx-tools`, `aws-neuronx-runtime-lib`, `aws-neuronx-collectives`, and their dependencies).
+2. Instead of running `pip install -e .` in the above section, install Triton-Viz with the optional NKI extras so the Neuron Python packages (`neuronx-cc`, `libneuronxla`, `torch-neuronx`) are available:
+
+   ```sh
+   pip install -e .[nki]
+   # or pip install triton-viz[nki]
+   ```
+
+### Testing
+* To run core Triton-viz tests, run `pytest tests/`.
+* (if NKI installed) To run NKI-specific tests, run `pytest tests/ -m nki`.
+* To run all tests (Triton + NKI), run `pytest tests/ -m ""`.
+
 ## Working with Examples
 
 ```sh
 cd examples
 python <file_name>.py
 ```
+
+### CPU interpreter concurrency
+
+When running with the Triton CPU interpreter (`TRITON_INTERPRET=1`), you can emulate concurrent SMs by setting how many blocks execute in parallel:
+
+```sh
+export TRITON_VIZ_NUM_SMS=4  # or set triton_viz.config.num_sms in Python
+```
+
+This is useful for kernels that rely on cross-block synchronization (e.g., producer/consumer patterns) when testing without a GPU.
 
 ## More Puzzles
 

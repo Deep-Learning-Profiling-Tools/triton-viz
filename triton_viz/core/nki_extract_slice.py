@@ -8,7 +8,6 @@ class StoreCallTransformer(ast.NodeTransformer):
     into `masked_load(x, slice_obj)` with a preceding assignment.
     """
 
-    # MODIFICATION 1: We now visit the 'Expr' statement wrapper.
     def visit_Expr(self, node: ast.Expr) -> ast.AST | list[ast.AST]:
         """
         Intercept and transform expression statements.
@@ -19,9 +18,6 @@ class StoreCallTransformer(ast.NodeTransformer):
 
         call_node = node.value
 
-        # --- The logic from the old visit_Call starts here ---
-
-        # 1. IDENTIFY: Is this the specific call we want to transform?
         if not (
             isinstance(call_node.func, ast.Attribute)
             and isinstance(call_node.func.value, ast.Name)
@@ -30,17 +26,14 @@ class StoreCallTransformer(ast.NodeTransformer):
         ):
             return self.generic_visit(node)
 
-        # 2. VALIDATE: Does the call have the expected structure?
         if not call_node.args or not isinstance(call_node.args[0], ast.Subscript):
             return self.generic_visit(node)
 
-        # 3. DECONSTRUCT
         subscript_node = call_node.args[0]
         sliced_object = subscript_node.value
         slice_content = subscript_node.slice
         remaining_args = call_node.args[1:]
 
-        # 4. REBUILD
         # Convert to nl.masked_load or nl.masked_store
         func_name = "masked_" + call_node.func.attr
 
@@ -56,20 +49,17 @@ class StoreCallTransformer(ast.NodeTransformer):
             keywords=call_node.keywords,
         )
 
-        # 5. REPLACE
         return ast.Expr(value=new_call)
 
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
         """
         Handle assignment statements where the value is an nl.load or nl.store call.
         """
-        # Check if the value being assigned is a function call
         if not isinstance(node.value, ast.Call):
             return self.generic_visit(node)
 
         call_node = node.value
 
-        # 1. IDENTIFY: Is this the specific call we want to transform?
         if not (
             isinstance(call_node.func, ast.Attribute)
             and isinstance(call_node.func.value, ast.Name)
@@ -78,17 +68,14 @@ class StoreCallTransformer(ast.NodeTransformer):
         ):
             return self.generic_visit(node)
 
-        # 2. VALIDATE: Does the call have the expected structure?
         if not call_node.args or not isinstance(call_node.args[0], ast.Subscript):
             return self.generic_visit(node)
 
-        # 3. DECONSTRUCT
         subscript_node = call_node.args[0]
         sliced_object = subscript_node.value
         slice_content = subscript_node.slice
         remaining_args = call_node.args[1:]
 
-        # 4. REBUILD
         # Convert to nl.masked_load or nl.masked_store
         func_name = "masked_" + call_node.func.attr
 
@@ -104,7 +91,6 @@ class StoreCallTransformer(ast.NodeTransformer):
             keywords=call_node.keywords,
         )
 
-        # 5. REPLACE: Create a new assignment with the transformed call
         return ast.Assign(
             targets=node.targets,
             value=new_call,
@@ -147,7 +133,6 @@ def transform_code(source_code: str) -> str:
     return ast.unparse(new_tree)
 
 
-# --- Input Code ---
 source_code = """
 import numpy as np
 
@@ -165,12 +150,13 @@ other_lib.store(y[10:])
 nl.some_other_func(z[:5])
 """
 
-if __name__ == "__main__":
-    # --- Transformation ---
-    transformed_code = transform_code(source_code)
+expected_transformed_code = """\
+import numpy as np
+sbuf_value = nl.masked_load(x, (slice(2, 4, None), None, ..., nl.arange(128)[None, :]), mask=mask)
+nl.masked_store(x, (slice(2, 4, None), None, ..., nl.arange(128)[None, :]), sbuf_value, mask=mask)
+other_lib.store(y[10:])
+nl.some_other_func(z[:5])\
+"""
 
-    # --- Output ---
-    print("--- Original Code ---")
-    print(source_code)
-    print("\n--- Transformed Code ---")
-    print(transformed_code)
+if __name__ == "__main__":
+    assert transform_code(source_code) == expected_transformed_code

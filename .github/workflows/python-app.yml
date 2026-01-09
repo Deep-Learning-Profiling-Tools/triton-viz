@@ -30,10 +30,10 @@ jobs:
       with:
         path: 'triton_viz'
 
-    - name: Set up Python 3.10
+    - name: Set up Python 3.12
       uses: actions/setup-python@v3
       with:
-        python-version: '3.10'
+        python-version: '3.12'
 
     - name: Lint with pre-commit
       run: |
@@ -60,3 +60,13 @@ jobs:
       run: |
         cd triton_viz
         python -m pytest tests
+
+    - name: Install Triton-Viz with NKI extras
+      run: |
+        cd triton_viz
+        pip install -e .[nki]
+
+    - name: Run full (Triton + NKI) pytest suite
+      run: |
+        cd triton_viz
+        python -m pytest tests -m ""

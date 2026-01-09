@@ -26,7 +26,7 @@ from .data import (
     Rsqrt,
     CastImpl,
 )
-from .nki_masked_load import masked_load, masked_store
+from .masked_load import masked_load, masked_store
 from .nki_extract_slice import StoreCallTransformer, transform_code
 
 __all__ = [

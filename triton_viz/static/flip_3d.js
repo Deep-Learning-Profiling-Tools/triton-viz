@@ -96,34 +96,34 @@ export function createFlip3D(containerElement, options) {
     const rowGap = CUBE_SIZE * 4.2; // vertical distance per step row
     const columnGap = CUBE_SIZE * 6.0; // horizontal gap between view and swap panels
 
-    let currentY = 0;
+    let posY = 0;
     // initial 1D row (single panel)
     const initPanel = new THREE.Group();
     for (let i=0;i<length;i++){
         const color = hsv(hueAt(i), 1, 1);
         const cube = createCube(color, 'Flip', i, 0, 0, cubeGeometry, edgesGeometry, lineMaterial);
-        cube.position.set(i*(CUBE_SIZE+GAP), currentY, 0);
+        cube.position.set(i*(CUBE_SIZE+GAP), posY, 0);
         initPanel.add(cube);
     }
     const initLabel = createTextSprite('initial array');
-    initLabel.position.set(-CUBE_SIZE*3.2, currentY + CUBE_SIZE*0.5, 0);
+    initLabel.position.set(-CUBE_SIZE*3.2, posY + CUBE_SIZE*0.5, 0);
     initPanel.add(initLabel);
     root.add(initPanel); layers.push(initPanel);
 
-    currentY -= rowGap;
+    posY -= rowGap;
     let arr = Array.from({length}, (_,i)=>i);
     for (let s=0; s<steps.length; s++){
         const seg = steps[s];
         const lw = layoutWidth(seg, length);
         const viewX = 0;
         const swapX = viewX + lw + columnGap;
-        const viewPanel = buildPanel(arr, seg, currentY, `step ${s} view`, viewX);
+        const viewPanel = buildPanel(arr, seg, posY, `step ${s} view`, viewX);
         const swapped = swapBlocksArray(arr, seg);
-        const swapPanel = buildPanel(swapped, seg, currentY, `step ${s} swap`, swapX);
+        const swapPanel = buildPanel(swapped, seg, posY, `step ${s} swap`, swapX);
         root.add(viewPanel); root.add(swapPanel);
         layers.push(viewPanel); layers.push(swapPanel);
         arr = swapped.slice();
-        currentY -= rowGap;
+        posY -= rowGap;
     }
 
     // final reshape (1D row)
@@ -131,11 +131,11 @@ export function createFlip3D(containerElement, options) {
     for (let i=0;i<arr.length;i++){
         const color = hsv(hueAt(arr[i]), 1, 1);
         const cube = createCube(color, 'Flip', i, 0, 0, cubeGeometry, edgesGeometry, lineMaterial);
-        cube.position.set(i*(CUBE_SIZE+GAP), currentY, 0);
+        cube.position.set(i*(CUBE_SIZE+GAP), posY, 0);
         finalPanel.add(cube);
     }
     const finalLabel = createTextSprite('final reshape');
-    finalLabel.position.set(-CUBE_SIZE*3.2, currentY + CUBE_SIZE*0.5, 0);
+    finalLabel.position.set(-CUBE_SIZE*3.2, posY + CUBE_SIZE*0.5, 0);
     finalPanel.add(finalLabel);
     root.add(finalPanel); layers.push(finalPanel);
 
