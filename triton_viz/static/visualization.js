@@ -35,22 +35,71 @@ const controls = {
     precomputeBtn: null,
     infoBtn: null,
     themeToggle: null,
+    opColorizeBtn: null,
+    opShowCodeBtn: null,
+    opHistogramBtn: null,
 };
 
 let controlToastEl = null;
 let controlToastTimer = null;
 
-function setGlobalCodeButtonVisible(visible) {
-    const btn = document.getElementById('global-code-toggle-btn');
-    if (btn) {
-        btn.style.display = visible ? 'block' : 'none';
+const opControls = {
+    handlers: null,
+    state: {
+        colorize: false,
+        showCode: false,
+    },
+};
+
+function setOpControlState(nextState = {}) {
+    opControls.state = {
+        ...opControls.state,
+        ...nextState,
+    };
+    updateOpControls();
+}
+
+function setOpControlHandlers(handlers = null) {
+    opControls.handlers = handlers;
+    updateOpControls();
+}
+
+function resetOpControls() {
+    opControls.handlers = null;
+    opControls.state = { colorize: false, showCode: false };
+    if (window.__tritonVizCodeHide) {
+        window.__tritonVizCodeHide();
+    }
+    updateOpControls();
+}
+
+function updateToggleLabel(button, label, isOn) {
+    if (!button) return;
+    button.textContent = `${label}: ${isOn ? 'ON' : 'OFF'}`;
+    button.classList.toggle('active', isOn);
+}
+
+function updateOpControls() {
+    const { handlers, state } = opControls;
+    if (controls.opColorizeBtn) {
+        controls.opColorizeBtn.disabled = !handlers || !handlers.toggleColorize;
+        updateToggleLabel(controls.opColorizeBtn, 'Color by Value', !!state.colorize);
+    }
+    if (controls.opShowCodeBtn) {
+        controls.opShowCodeBtn.disabled = !handlers || !handlers.toggleShowCode;
+        updateToggleLabel(controls.opShowCodeBtn, 'Show Code', !!state.showCode);
+    }
+    if (controls.opHistogramBtn) {
+        controls.opHistogramBtn.disabled = !handlers || !handlers.showHistogram;
     }
 }
 
 try {
-    window.setGlobalCodeButtonVisible = setGlobalCodeButtonVisible;
+    window.setOpControlHandlers = setOpControlHandlers;
+    window.setOpControlState = setOpControlState;
+    window.resetOpControls = resetOpControls;
 } catch (err) {
-    console.warn('Unable to expose setGlobalCodeButtonVisible', err);
+    console.warn('Unable to expose op control helpers', err);
 }
 
 function closeOverallOverlay() {
@@ -67,11 +116,12 @@ function closeOverallOverlay() {
         canvas.style.display = 'block';
     }
     currentView = 'main';
+    resetOpControls();
 }
 
 function switchToMainView() {
     closeOverallOverlay();
-    setGlobalCodeButtonVisible(false);
+    resetOpControls();
 
     if (currentBlockData) {
         currentBlockData.hideDetailedView();
@@ -87,7 +137,31 @@ function switchToMainView() {
 
 function switchToTensorView(clickedBlock) {
     currentView = 'tensor';
+    resetOpControls();
     currentBlockData = clickedBlock;
+    if (currentBlockData) {
+        const coords = [
+            currentBlockData.gridPosition.x,
+            currentBlockData.gridPosition.y,
+            currentBlockData.gridPosition.z,
+        ];
+        coords.forEach((val, idx) => {
+            filterValues[idx] = val;
+            const slider = document.querySelector(`input[data-filter-index="${idx}"]`);
+            if (slider) {
+                slider.value = val;
+            }
+            const pill = document.getElementById(`pid-value-${idx}`);
+            if (pill) pill.textContent = String(val);
+            if (kernelGrid) {
+                kernelGrid.updateFilter(idx, val);
+            }
+        });
+        setZSlice(currentBlockData.gridPosition.z);
+        if (kernelGrid) {
+            kernelGrid.updateZ(currentBlockData.gridPosition.z);
+        }
+    }
 
     if (containerElement) {
         containerElement.style.pointerEvents = 'auto';
@@ -114,6 +188,9 @@ function initializeApp() {
     controls.precomputeBtn = document.getElementById('btn-precompute');
     controls.infoBtn = document.getElementById('btn-info');
     controls.themeToggle = document.getElementById('theme-toggle');
+    controls.opColorizeBtn = document.getElementById('btn-op-colorize');
+    controls.opShowCodeBtn = document.getElementById('btn-op-show-code');
+    controls.opHistogramBtn = document.getElementById('btn-op-histogram');
 
     if (!canvas || !canvasWrapper || !containerElement) {
         console.error('Essential visualization elements are missing.');
@@ -136,6 +213,7 @@ function initializeApp() {
 
     setupThemeToggle();
     setupControlEvents();
+    updateOpControls();
     resizeCanvas();
     fetchData();
 }
@@ -213,6 +291,31 @@ function setupControlEvents() {
                 kernelGrid.updateZ(next);
                 draw();
             }
+        });
+    }
+
+    if (controls.opColorizeBtn) {
+        controls.opColorizeBtn.addEventListener('click', () => {
+            const handler = opControls.handlers?.toggleColorize;
+            if (!handler) return;
+            const next = handler();
+            setOpControlState({ colorize: !!next });
+        });
+    }
+
+    if (controls.opShowCodeBtn) {
+        controls.opShowCodeBtn.addEventListener('click', () => {
+            const handler = opControls.handlers?.toggleShowCode;
+            if (!handler) return;
+            const next = handler();
+            setOpControlState({ showCode: !!next });
+        });
+    }
+
+    if (controls.opHistogramBtn) {
+        controls.opHistogramBtn.addEventListener('click', () => {
+            const handler = opControls.handlers?.showHistogram;
+            if (handler) handler();
         });
     }
 }
@@ -498,6 +601,13 @@ function handleProgramFilterChange(event) {
         kernelGrid.updateFilter(index, value);
         draw();
     }
+    if (currentBlockData && typeof currentBlockData.applyProgramIdSelection === 'function') {
+        const fallback = currentBlockData.gridPosition || { x: 0, y: 0, z: 0 };
+        const nextX = filterValues[0] >= 0 ? filterValues[0] : fallback.x;
+        const nextY = filterValues[1] >= 0 ? filterValues[1] : fallback.y;
+        const nextZ = filterValues[2] >= 0 ? filterValues[2] : fallback.z;
+        currentBlockData.applyProgramIdSelection(nextX, nextY, nextZ);
+    }
 }
 
 function updateZSliderState() {
@@ -601,8 +711,8 @@ async function showOverallOverlay() {
         showControlToast('No Load/Store ops available to aggregate.');
         return;
     }
+    resetOpControls();
     currentView = 'overall';
-    setGlobalCodeButtonVisible(false);
     if (canvas) canvas.style.display = 'none';
     if (!containerElement) return;
     containerElement.style.pointerEvents = 'auto';

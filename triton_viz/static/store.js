@@ -14,7 +14,6 @@ import {
 import { createHistogramOverlay } from './histogram.js';
 import { createFlipDemo } from './flip_demo.js';
 import { createFlip3D } from './flip_3d.js';
-import { enableDrag } from './ui_helpers.js';
 
 function createHeatmapOverlay(apiBase, uuid, onDataLoaded) {
         const button = document.createElement('button');
@@ -151,6 +150,7 @@ export function createStoreVisualization(containerElement, op) {
         .then(response => response.json())
         .then(data => console.log('Set current op:', data))
         .catch((error) => console.error('Error:', error));
+        try { window.current_op_uuid = op.uuid; } catch (e) {}
 
         let currentStep = 0;
         let frame = 0;
@@ -163,28 +163,6 @@ export function createStoreVisualization(containerElement, op) {
         containerElement.appendChild(stage);
 
         const sideMenu = createSideMenu(containerElement);
-        const controlBar = document.createElement('div');
-        controlBar.className = 'viz-floating-bar';
-        controlBar.style.flexWrap = 'wrap';
-
-        const dragHandle = document.createElement('button');
-        dragHandle.type = 'button';
-        dragHandle.className = 'viz-drag-handle drag-handle';
-        dragHandle.setAttribute('aria-label', 'Drag controls');
-        dragHandle.innerHTML = '<span aria-hidden="true">⠿</span> Drag';
-        controlBar.appendChild(dragHandle);
-
-        const makeGhostButton = (label) => {
-            const btn = document.createElement('button');
-            btn.className = 'viz-button ghost';
-            btn.textContent = label;
-            return btn;
-        };
-
-        const dragToggle = makeGhostButton('Drag Cubes: OFF');
-        controlBar.appendChild(dragToggle);
-        const flowToggle = makeGhostButton('Flow Arrow: ON');
-        controlBar.appendChild(flowToggle);
         const histogramUI = createHistogramOverlay(containerElement, {
             title: 'Store Value Distribution',
             apiBase: API_BASE,
@@ -197,86 +175,11 @@ export function createStoreVisualization(containerElement, op) {
                 bins,
             }),
         });
-        histogramUI.button.className = 'viz-button ghost';
-        controlBar.appendChild(histogramUI.button);
-        const heatmapUI = createHeatmapOverlay(API_BASE, op.uuid, (data) => {
-            if (data) {
-                tensorCache = normalizeTensorPayload(data);
-                if (colorizeOn && tensorCache) {
-                    applyColorByValue();
-                }
-            }
-        });
-        heatmapUI.button.className = 'viz-button ghost';
-        controlBar.appendChild(heatmapUI.button);
-        const colorToggle = makeGhostButton('Color by Value: OFF');
-        controlBar.appendChild(colorToggle);
-        // Per-op summary (bytes) toggle for Store
-        const summaryBtn = makeGhostButton('Summary: OFF');
-        controlBar.appendChild(summaryBtn);
-        containerElement.appendChild(controlBar);
-        enableDrag(controlBar, { handle: dragHandle, bounds: window, initialLeft: 32, initialTop: 32 });
         let dragModeOn = false;
         let hoveredCube = null;
         let flipCleanup = null;
         let colorizeOn = false;
         let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
-
-        // Store view summary panel (per-op bytes)
-        let summaryPanel = null;
-        const destroySummaryPanel = () => {
-            if (summaryPanel && summaryPanel.remove) summaryPanel.remove();
-            summaryPanel = null;
-        };
-
-        function openSummaryPanel() {
-            destroySummaryPanel();
-            const panel = document.createElement('div');
-            panel.className = 'info-card';
-            panel.style.position = 'fixed';
-            panel.style.left = '32px';
-            panel.style.maxWidth = '260px';
-            panel.style.zIndex = '2200';
-
-            const header = document.createElement('div');
-            header.className = 'panel-header drag-handle';
-            header.style.marginBottom = '6px';
-            header.innerHTML = '<span>Store Summary</span><span class="drag-grip" aria-hidden="true">⠿</span>';
-            const closeBtn = document.createElement('button');
-            closeBtn.className = 'viz-button ghost';
-            closeBtn.textContent = 'Close';
-            closeBtn.style.marginLeft = 'auto';
-            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-            closeBtn.addEventListener('click', () => {
-                destroySummaryPanel();
-                summaryBtn.textContent = 'Summary: OFF';
-            });
-            header.appendChild(closeBtn);
-            panel.appendChild(header);
-
-            const body = document.createElement('div');
-            body.style.fontSize = '11px';
-            body.innerHTML = `
-                <div style="font-weight:600;margin-bottom:4px;">Current op</div>
-                <div>Type: Store</div>
-                <div>Bytes: ${Number(op.bytes || 0)}</div>
-            `;
-
-            panel.appendChild(body);
-            document.body.appendChild(panel);
-            enableDrag(panel, { handle: header, bounds: window, initialLeft: 32, initialTop: window.innerHeight - 220 });
-            summaryPanel = panel;
-        }
-
-        summaryBtn.addEventListener('click', () => {
-            const turnOn = summaryBtn.textContent.endsWith('OFF');
-            summaryBtn.textContent = `Summary: ${turnOn ? 'ON' : 'OFF'}`;
-            if (turnOn) {
-                openSummaryPanel();
-            } else {
-                destroySummaryPanel();
-            }
-        });
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
         const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
@@ -299,19 +202,6 @@ export function createStoreVisualization(containerElement, op) {
         let currentBaseSlice = baseSliceDark.clone();
 
         let currentBackground = COLOR_BACKGROUND;
-        const backgroundSelect = document.createElement('select');
-        backgroundSelect.className = 'viz-select';
-        backgroundSelect.title = 'Canvas background';
-        backgroundSelect.innerHTML = `
-            <option value="#000000">Night</option>
-            <option value="#0b1120">Midnight</option>
-            <option value="#111827">Deep Blue</option>
-            <option value="#ffffff">Paper</option>
-            <option value="#f7f0e3">Beige</option>
-            <option value="#f5f7fb">Soft Gray</option>
-        `;
-        // insert before histogram button to stay away from Color toggle group
-        controlBar.insertBefore(backgroundSelect, histogramUI.button);
 
         const { scene, camera, renderer } = setupScene(stage, currentBackground);
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
@@ -421,9 +311,8 @@ export function createStoreVisualization(containerElement, op) {
         stage.addEventListener('mousedown', onMouseDown);
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
-        colorToggle.addEventListener('click', async () => {
+        async function toggleColorize() {
             colorizeOn = !colorizeOn;
-            colorToggle.textContent = `Color by Value: ${colorizeOn ? 'ON' : 'OFF'}`;
             if (colorizeOn) {
                 if (!tensorCache) {
                     tensorCache = await fetchStoreTensor();
@@ -432,24 +321,40 @@ export function createStoreVisualization(containerElement, op) {
                     applyColorByValue();
                 } else {
                     colorizeOn = false;
-                    colorToggle.textContent = 'Color by Value: OFF';
                 }
             } else {
                 resetColorByValue();
             }
-        });
-        dragToggle.addEventListener('click', () => {
-            dragModeOn = !dragModeOn;
-            dragToggle.textContent = `Drag Cubes: ${dragModeOn ? 'ON' : 'OFF'}`;
-            orbitControls.enabled = !dragModeOn;
-        });
+            return colorizeOn;
+        }
+
+        async function toggleShowCode() {
+            if (window.__tritonVizCodeToggle) {
+                return window.__tritonVizCodeToggle();
+            }
+            return false;
+        }
+
+        function showHistogram() {
+            if (histogramUI.show) {
+                histogramUI.show();
+            } else if (histogramUI.overlay) {
+                histogramUI.overlay.style.display = 'block';
+            }
+        }
+
+        if (window.setOpControlHandlers) {
+            window.setOpControlHandlers({
+                toggleColorize,
+                toggleShowCode,
+                showHistogram,
+            });
+        }
+        if (window.setOpControlState) {
+            window.setOpControlState({ colorize: colorizeOn, showCode: false });
+        }
+
         let flowArrowOn = true;
-        flowToggle.addEventListener('click', () => {
-            flowArrowOn = !flowArrowOn;
-            flowToggle.textContent = `Flow Arrow: ${flowArrowOn ? 'ON' : 'OFF'}`;
-            arrow.visible = flowArrowOn;
-            arrowLabel.visible = flowArrowOn;
-        });
         function isLightBackgroundHex(hex) {
             const h = (hex || '').toLowerCase();
             return h === '#ffffff' || h === '#f7f0e3' || h === '#f5f7fb';
@@ -480,15 +385,11 @@ export function createStoreVisualization(containerElement, op) {
             }
         }
 
-        backgroundSelect.addEventListener('change', (event) => {
-            const value = event.target.value;
-            currentBackground = new THREE.Color(value);
-            if (scene && scene.background) scene.background = currentBackground;
-            applyBackgroundTheme(value);
-            refreshTextOverlays();
-        });
-
-        applyBackgroundTheme(backgroundSelect.value || '#000000');
+        const defaultBackground = '#000000';
+        currentBackground = new THREE.Color(defaultBackground);
+        if (scene && scene.background) scene.background = currentBackground;
+        applyBackgroundTheme(defaultBackground);
+        refreshTextOverlays();
         // Removed Flip demo button from Store view; Flip visualization is available under Flip op.
         animate();
 
@@ -802,6 +703,30 @@ export function createStoreVisualization(containerElement, op) {
             container.appendChild(menu);
             return menu;
         }
+
+        return () => {
+            if (window.setOpControlHandlers) {
+                window.setOpControlHandlers(null);
+            }
+            if (window.setOpControlState) {
+                window.setOpControlState({ colorize: false, showCode: false });
+            }
+            if (window.__tritonVizCodeHide) {
+                window.__tritonVizCodeHide();
+            }
+            if (histogramUI.hide) {
+                histogramUI.hide();
+            }
+            if (renderer && renderer.dispose) {
+                renderer.dispose();
+            }
+            if (renderer && renderer.domElement && renderer.domElement.parentElement) {
+                renderer.domElement.parentElement.removeChild(renderer.domElement);
+            }
+            if (containerElement) {
+                containerElement.innerHTML = '';
+            }
+        };
 
 }
 

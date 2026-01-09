@@ -10,6 +10,7 @@ export function createFlipVisualization(containerElement, op, viewState = null) 
         zIndex: 3000, pointerEvents: 'auto'
     });
     containerElement.appendChild(overlay);
+    try { window.current_op_uuid = op.uuid; } catch (e) {}
 
     const { scene, camera, renderer } = setupScene(overlay, 0x15151b);
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -84,6 +85,20 @@ export function createFlipVisualization(containerElement, op, viewState = null) 
     Object.assign(sideMenu.style, { position:'absolute', top:'10px', right:'10px', width:'220px', padding:'10px', background:'rgba(0,0,0,0.7)', color:'#fff', borderRadius:'6px', zIndex:'2000' });
     overlay.appendChild(sideMenu);
 
+    function toggleShowCode() {
+        if (window.__tritonVizCodeToggle) {
+            return window.__tritonVizCodeToggle();
+        }
+        return false;
+    }
+
+    if (window.setOpControlHandlers) {
+        window.setOpControlHandlers({ toggleShowCode });
+    }
+    if (window.setOpControlState) {
+        window.setOpControlState({ colorize: false, showCode: false });
+    }
+
     async function getFlipValue(which, r, c){
         const body = { uuid: op.uuid, which, x: c, y: r };
         const res = await fetch(`${API_BASE}/api/getFlipValue`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -154,7 +169,21 @@ export function createFlipVisualization(containerElement, op, viewState = null) 
     animate();
 
     const closeBtn = document.createElement('button'); closeBtn.textContent = 'Close'; Object.assign(closeBtn.style, { position:'absolute', top:'50px', left:'10px', zIndex:'2001' }); overlay.appendChild(closeBtn);
-    function cleanup(){ clearInterval(_hoverTimer); overlay.removeEventListener('mousemove', onMouseMove); overlay.removeEventListener('mouseleave', ()=>{}); if (overlay && overlay.remove) overlay.remove(); }
+    function cleanup(){
+        if (window.setOpControlHandlers) {
+            window.setOpControlHandlers(null);
+        }
+        if (window.setOpControlState) {
+            window.setOpControlState({ colorize: false, showCode: false });
+        }
+        if (window.__tritonVizCodeHide) {
+            window.__tritonVizCodeHide();
+        }
+        clearInterval(_hoverTimer);
+        overlay.removeEventListener('mousemove', onMouseMove);
+        overlay.removeEventListener('mouseleave', ()=>{});
+        if (overlay && overlay.remove) overlay.remove();
+    }
     closeBtn.addEventListener('click', cleanup);
     try { window.current_op_uuid = op.uuid; } catch (e) {}
     return cleanup;

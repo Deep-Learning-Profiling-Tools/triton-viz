@@ -90,10 +90,16 @@ export function createHistogramOverlay(containerElement, options) {
     status.style.marginTop = "4px";
     overlay.appendChild(status);
 
-    button.addEventListener("click", () => {
+    function show() {
         overlay.style.display = "block";
         updateHistogram();
-    });
+    }
+
+    function hide() {
+        overlay.style.display = "none";
+    }
+
+    button.addEventListener("click", show);
 
     refreshBtn.addEventListener("click", () => {
         updateHistogram();
@@ -176,6 +182,8 @@ export function createHistogramOverlay(containerElement, options) {
     return {
         button,
         overlay,
+        show,
+        hide,
         destroy() {
             overlay.remove();
         },

@@ -233,6 +233,17 @@ body {
     color: var(--text-primary);
 }
 
+.viz-button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.viz-button.active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+}
+
 .viz-button.primary {
     background: var(--accent);
     color: #fff;

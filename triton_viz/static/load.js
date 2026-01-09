@@ -44,33 +44,6 @@ export function createLoadVisualization(containerElement, op) {
         let isPaused = false;
 
         const sideMenu = createSideMenu(containerElement);
-
-        const controlBar = document.createElement('div');
-        controlBar.className = 'viz-floating-bar';
-        controlBar.style.flexWrap = 'wrap';
-
-        const dragHandle = document.createElement('button');
-        dragHandle.type = 'button';
-        dragHandle.className = 'viz-drag-handle drag-handle';
-        dragHandle.setAttribute('aria-label', 'Drag controls');
-        dragHandle.innerHTML = '<span aria-hidden="true">⠿</span> Drag';
-        controlBar.appendChild(dragHandle);
-
-        const makeGhostButton = (label) => {
-            const btn = document.createElement('button');
-            btn.className = 'viz-button ghost';
-            btn.textContent = label;
-            return btn;
-        };
-
-        const colorizeToggle = makeGhostButton('Color by Value: OFF');
-        controlBar.appendChild(colorizeToggle);
-
-        const dragToggle = makeGhostButton('Drag Cubes: OFF');
-        controlBar.appendChild(dragToggle);
-
-        const codeToggle = makeGhostButton('Show Code: OFF');
-        controlBar.appendChild(codeToggle);
         const histogramUI = createHistogramOverlay(containerElement, {
             title: 'Load Value Distribution',
             apiBase: API_BASE,
@@ -82,113 +55,6 @@ export function createLoadVisualization(containerElement, op) {
                 source,
                 bins
             }),
-        });
-        histogramUI.button.className = 'viz-button ghost';
-        controlBar.appendChild(histogramUI.button);
-        // Per-op summary (bytes) toggle
-        const summaryBtn = makeGhostButton('Summary: OFF');
-        controlBar.appendChild(summaryBtn);
-        // Flow arrow toggle
-        const flowToggle = makeGhostButton('Flow Arrow: ON');
-        controlBar.appendChild(flowToggle);
-        // Background selector + color scheme controls
-        const backgroundSelect = document.createElement('select');
-        backgroundSelect.className = 'viz-select';
-        backgroundSelect.title = 'Canvas background';
-        backgroundSelect.innerHTML = `
-            <option value="#000000">Night</option>
-            <option value="#0b1120">Midnight</option>
-            <option value="#111827">Deep Blue</option>
-            <option value="#ffffff">Paper</option>
-            <option value="#f7f0e3">Beige</option>
-            <option value="#f5f7fb">Soft Gray</option>
-        `;
-        controlBar.appendChild(backgroundSelect);
-
-        const schemeSelect = document.createElement('select');
-        schemeSelect.className = 'viz-select';
-        schemeSelect.innerHTML = '<option value="mono">Mono</option><option value="viridis">Viridis</option>';
-        controlBar.appendChild(schemeSelect);
-
-        const colorPicker = document.createElement('input');
-        colorPicker.type = 'color';
-        colorPicker.value = '#3b82f6';
-        colorPicker.title = 'Choose base color for Mono';
-        controlBar.appendChild(colorPicker);
-        // Mouse pick calibration (dx/dy in pixels)
-        const calibWrap = document.createElement('div');
-        calibWrap.className = 'viz-inline-controls';
-        const calibLabel = document.createElement('span');
-        calibLabel.textContent = 'Calib';
-        const dxMinus = makeGhostButton('−X');
-        const dxPlus  = makeGhostButton('+X');
-        const dyMinus = makeGhostButton('−Y');
-        const dyPlus  = makeGhostButton('+Y');
-        const dxdyInfo = document.createElement('span');
-        dxdyInfo.className = 'value-pill';
-        const dxdyReset = makeGhostButton('Reset');
-        calibWrap.appendChild(calibLabel);
-        calibWrap.appendChild(dxMinus); calibWrap.appendChild(dxPlus);
-        calibWrap.appendChild(dyMinus); calibWrap.appendChild(dyPlus);
-        calibWrap.appendChild(dxdyInfo); calibWrap.appendChild(dxdyReset);
-        controlBar.appendChild(calibWrap);
-        containerElement.appendChild(controlBar);
-        enableDrag(controlBar, { handle: dragHandle, bounds: window, initialLeft: 32, initialTop: 32 });
-
-        // Load view summary panel (per-op bytes)
-        let summaryPanel = null;
-        const destroySummaryPanel = () => {
-            if (summaryPanel && summaryPanel.remove) summaryPanel.remove();
-            summaryPanel = null;
-        };
-
-        function openSummaryPanel() {
-            destroySummaryPanel();
-            const panel = document.createElement('div');
-            panel.className = 'info-card';
-            panel.style.position = 'fixed';
-            panel.style.left = '32px';
-            panel.style.maxWidth = '260px';
-            panel.style.zIndex = '2200';
-
-            const header = document.createElement('div');
-            header.className = 'panel-header drag-handle';
-            header.style.marginBottom = '6px';
-            header.innerHTML = '<span>Load Summary</span><span class="drag-grip" aria-hidden="true">⠿</span>';
-            const closeBtn = document.createElement('button');
-            closeBtn.className = 'viz-button ghost';
-            closeBtn.textContent = 'Close';
-            closeBtn.style.marginLeft = 'auto';
-            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-            closeBtn.addEventListener('click', () => {
-                destroySummaryPanel();
-                summaryBtn.textContent = 'Summary: OFF';
-            });
-            header.appendChild(closeBtn);
-            panel.appendChild(header);
-
-            const body = document.createElement('div');
-            body.style.fontSize = '11px';
-            body.innerHTML = `
-                <div style="font-weight:600;margin-bottom:4px;">Current op</div>
-                <div>Type: Load</div>
-                <div>Bytes: ${Number(op.bytes || 0)}</div>
-            `;
-
-            panel.appendChild(body);
-            document.body.appendChild(panel);
-            enableDrag(panel, { handle: header, bounds: window, initialLeft: 32, initialTop: window.innerHeight - 220 });
-            summaryPanel = panel;
-        }
-
-        summaryBtn.addEventListener('click', () => {
-            const turnOn = summaryBtn.textContent.endsWith('OFF');
-            summaryBtn.textContent = `Summary: ${turnOn ? 'ON' : 'OFF'}`;
-            if (turnOn) {
-                openSummaryPanel();
-            } else {
-                destroySummaryPanel();
-            }
         });
 
         // expose for debugging
@@ -348,8 +214,6 @@ function getTextColor(bgColor) {
         // persistent calibration offsets
         let mouseDx = Number(localStorage.getItem('viz_mouse_dx') || 0);
         let mouseDy = Number(localStorage.getItem('viz_mouse_dy') || 0);
-        function updateDxDyLabel(){ dxdyInfo.textContent = `dx=${mouseDx}, dy=${mouseDy}`; }
-        updateDxDyLabel();
         // Drag state
         let dragModeOn = false;
         let isDragging = false;
@@ -392,18 +256,13 @@ function getTextColor(bgColor) {
             }
         }
 
-        backgroundSelect.addEventListener('change', (event) => {
-            const value = event.target.value;
-            currentBackground = new THREE.Color(value);
-            if (scene && scene.background) {
-                scene.background = currentBackground;
-            }
-            applyBackgroundTheme(value);
-            refreshTextOverlays();
-        });
-
-        // 初始化一次，和默认背景同步
-        applyBackgroundTheme(backgroundSelect.value || '#000000');
+        const defaultBackground = '#000000';
+        currentBackground = new THREE.Color(defaultBackground);
+        if (scene && scene.background) {
+            scene.background = currentBackground;
+        }
+        applyBackgroundTheme(defaultBackground);
+        refreshTextOverlays();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
         setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown);
@@ -413,12 +272,6 @@ function getTextColor(bgColor) {
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
         let flowArrowOn = true;
-        flowToggle.addEventListener('click', () => {
-            flowArrowOn = !flowArrowOn;
-            flowToggle.textContent = `Flow Arrow: ${flowArrowOn ? 'ON' : 'OFF'}`;
-            arrow.visible = flowArrowOn;
-            arrowLabel.visible = flowArrowOn;
-        });
         animate();
 
         function _updateMouseNDC(event) {
@@ -612,7 +465,9 @@ function getTextColor(bgColor) {
             closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
             closeBtn.addEventListener('click', () => {
                 destroyCodePanel();
-                codeToggle.textContent = 'Show Code: OFF';
+                if (window.setOpControlState) {
+                    window.setOpControlState({ showCode: false });
+                }
             });
             header.appendChild(closeBtn);
             wrapper.appendChild(header);
@@ -678,63 +533,6 @@ function getTextColor(bgColor) {
                 const color = scheme === 'mono' ? monoColor(t, monoBaseHex) : viridisColor(t);
                 cube.material.color.copy(color);
             });
-        }
-
-        function destroyCodePanel() {
-            if (codePanel && codePanel.remove) codePanel.remove();
-            codePanel = null;
-        }
-
-        async function createCodePanel(frameIdx = 0, context = 8) {
-            destroyCodePanel();
-            const wrapper = document.createElement('div');
-            wrapper.style.position = 'fixed';
-            wrapper.style.right = '10px';
-            wrapper.style.top = '50px';
-            wrapper.style.width = '520px';
-            wrapper.style.maxHeight = '60vh';
-            wrapper.style.overflow = 'auto';
-            wrapper.style.padding = '8px 10px';
-            wrapper.style.background = 'rgba(0,0,0,0.65)';
-            wrapper.style.color = '#fff';
-            wrapper.style.font = '12px Menlo, Consolas, monospace';
-            wrapper.style.borderRadius = '6px';
-            wrapper.style.zIndex = '2000';
-
-            const header = document.createElement('div');
-            header.textContent = 'Operation Code & Context';
-            header.style.marginBottom = '6px';
-            header.style.opacity = '0.9';
-            wrapper.appendChild(header);
-
-            try {
-                const res = await fetch(`${API_BASE}/api/op_code`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uuid: op.uuid, frame_idx: frameIdx, context })
-                });
-                const data = await res.json();
-                const meta = document.createElement('div');
-                meta.style.marginBottom = '4px';
-                meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
-                wrapper.appendChild(meta);
-                const pre = document.createElement('pre');
-                pre.style.margin = '0';
-                pre.style.whiteSpace = 'pre';
-                const lines = (data.lines || []).map(l => {
-                    const mark = (data.highlight === l.no) ? '▶ ' : '  ';
-                    return `${mark}${String(l.no).padStart(6,' ')} | ${l.text||''}`;
-                }).join('\n');
-                pre.textContent = lines || '(no code available)';
-                wrapper.appendChild(pre);
-            } catch (e) {
-                const err = document.createElement('div');
-                err.textContent = 'Failed to load code context.';
-                wrapper.appendChild(err);
-            }
-
-            containerElement.appendChild(wrapper);
-            codePanel = wrapper;
         }
 
         function applyColorMapIfNeeded() {
@@ -925,70 +723,54 @@ function getTextColor(bgColor) {
             }
         }
 
-        colorizeToggle.addEventListener('click', async () => {
+        async function toggleColorize() {
             colorizeOn = !colorizeOn;
-            colorizeToggle.textContent = `Color by Value: ${colorizeOn ? 'ON' : 'OFF'}`;
             if (!colorizeOn) {
                 resetGlobalColors();
                 resetSliceColors();
                 destroyLegend();
-                return;
+                return colorizeOn;
             }
             if (!tensorCache) {
                 tensorCache = await fetchTensorPayload();
             }
             if (!tensorCache) {
                 colorizeOn = false;
-                colorizeToggle.textContent = 'Color by Value: OFF';
-                return;
+                return colorizeOn;
             }
             createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
             applyColorMapIfNeeded();
-        });
+            return colorizeOn;
+        }
 
-        schemeSelect.addEventListener('change', () => {
-            scheme = schemeSelect.value;
-            if (colorizeOn && tensorCache) {
-                applyColorMapIfNeeded();
-                createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
-            }
-            // color picker visible only for mono
-            colorPicker.style.display = scheme === 'mono' ? 'block' : 'none';
-        });
-
-        colorPicker.addEventListener('input', (e) => {
-            monoBaseHex = e.target.value || '#3b82f6';
-            if (scheme === 'mono' && colorizeOn && tensorCache) {
-                applyColorMapIfNeeded();
-                createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
-            }
-        });
-
-        // initialize picker visibility
-        colorPicker.style.display = 'block';
-
-        dragToggle.addEventListener('click', () => {
-            dragModeOn = !dragModeOn;
-            dragToggle.textContent = `Drag Cubes: ${dragModeOn ? 'ON' : 'OFF'}`;
-            orbitControls.enabled = !dragModeOn;
-        });
-
-        codeToggle.addEventListener('click', async () => {
-            const on = codeToggle.textContent.endsWith('OFF');
-            codeToggle.textContent = `Show Code: ${on ? 'ON' : 'OFF'}`;
-            if (on) {
+        async function toggleShowCode() {
+            const next = !codePanel;
+            if (next) {
                 await createCodePanel(0, 8);
             } else {
                 destroyCodePanel();
             }
-        });
+            return next;
+        }
 
-        // calibration handlers
-        dxMinus.addEventListener('click', ()=>{ mouseDx -= 1; localStorage.setItem('viz_mouse_dx', String(mouseDx)); updateDxDyLabel(); });
-        dxPlus.addEventListener('click',  ()=>{ mouseDx += 1; localStorage.setItem('viz_mouse_dx', String(mouseDx)); updateDxDyLabel(); });
-        dyMinus.addEventListener('click', ()=>{ mouseDy -= 1; localStorage.setItem('viz_mouse_dy', String(mouseDy)); updateDxDyLabel(); });
-        dyPlus.addEventListener('click',  ()=>{ mouseDy += 1; localStorage.setItem('viz_mouse_dy', String(mouseDy)); updateDxDyLabel(); });
-        dxdyReset.addEventListener('click', ()=>{ mouseDx = 0; mouseDy = 0; localStorage.setItem('viz_mouse_dx','0'); localStorage.setItem('viz_mouse_dy','0'); updateDxDyLabel(); });
+        function showHistogram() {
+            if (histogramUI.show) {
+                histogramUI.show();
+            } else if (histogramUI.overlay) {
+                histogramUI.overlay.style.display = 'block';
+            }
+        }
+
+        if (window.setOpControlHandlers) {
+            window.setOpControlHandlers({
+                toggleColorize,
+                toggleShowCode,
+                showHistogram,
+            });
+        }
+        if (window.setOpControlState) {
+            window.setOpControlState({ colorize: colorizeOn, showCode: !!codePanel });
+        }
 
         function updateSideMenu(tensorName, x, y, z, value) {
             if (!tensorName) {
@@ -1023,6 +805,32 @@ function getTextColor(bgColor) {
             container.appendChild(menu);
             return menu;
         }
+
+        return () => {
+            if (window.setOpControlHandlers) {
+                window.setOpControlHandlers(null);
+            }
+            if (window.setOpControlState) {
+                window.setOpControlState({ colorize: false, showCode: false });
+            }
+            if (window.__tritonVizCodeHide) {
+                window.__tritonVizCodeHide();
+            }
+            if (histogramUI.hide) {
+                histogramUI.hide();
+            }
+            destroyLegend();
+            destroyCodePanel();
+            if (renderer && renderer.dispose) {
+                renderer.dispose();
+            }
+            if (renderer && renderer.domElement && renderer.domElement.parentElement) {
+                renderer.domElement.parentElement.removeChild(renderer.domElement);
+            }
+            if (containerElement) {
+                containerElement.innerHTML = '';
+            }
+        };
 
 }
 

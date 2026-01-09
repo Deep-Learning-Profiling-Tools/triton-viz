@@ -461,21 +461,16 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         requestRender();
     }
 
-    const controlPanel = document.createElement('div');
-    controlPanel.style.position = 'absolute';
-    controlPanel.style.bottom = '10px';
-    controlPanel.style.left = '10px';
-    controlPanel.style.display = 'flex';
-    controlPanel.style.gap = '10px';
-    controlPanel.style.zIndex = '3000';
-    controlPanel.style.pointerEvents = 'auto';
-
-    // Removed animation controls; keep panel for color-by-value toggle only
-
-    // Color by Value (for C matrix) toggle + legend (mono blue)
-    const colorToggle = document.createElement('button');
-    colorToggle.textContent = 'Color by Value: OFF';
-    controlPanel.appendChild(colorToggle);
+    const histogramUI = createHistogramOverlay(containerElement, {
+        title: 'Dot Value Distribution',
+        apiBase: API_BASE,
+        sources: [{ value: 'C', label: 'C Output' }],
+        buildRequestBody: (_source, bins) => ({
+            uuid: op.uuid,
+            source: 'C',
+            bins
+        })
+    });
     let colorOn = false;
     let legendEl = null;
     function destroyLegend(){ if(legendEl && legendEl.remove) legendEl.remove(); legendEl=null; }
@@ -506,9 +501,46 @@ export function createMatMulVisualization(containerElement, op, viewState = null
             createLegend(mn,mx);
         }catch(e){}
     }
-    colorToggle.addEventListener('click', async ()=>{ colorOn=!colorOn; colorToggle.textContent=`Color by Value: ${colorOn?'ON':'OFF'}`; if(!colorOn){ destroyLegend(); resetColors(); } else { clearHighlights(true); const data=await fetchCValues(); applyColorCWithData(data); } requestRender(); });
+    async function toggleColorize() {
+        colorOn = !colorOn;
+        if (!colorOn) {
+            destroyLegend();
+            resetColors();
+            requestRender();
+            return colorOn;
+        }
+        clearHighlights(true);
+        const data = await fetchCValues();
+        applyColorCWithData(data);
+        requestRender();
+        return colorOn;
+    }
 
-    containerElement.appendChild(controlPanel);
+    async function toggleShowCode() {
+        if (window.__tritonVizCodeToggle) {
+            return window.__tritonVizCodeToggle();
+        }
+        return false;
+    }
+
+    function showHistogram() {
+        if (histogramUI.show) {
+            histogramUI.show();
+        } else if (histogramUI.overlay) {
+            histogramUI.overlay.style.display = 'block';
+        }
+    }
+
+    if (window.setOpControlHandlers) {
+        window.setOpControlHandlers({
+            toggleColorize,
+            toggleShowCode,
+            showHistogram,
+        });
+    }
+    if (window.setOpControlState) {
+        window.setOpControlState({ colorize: colorOn, showCode: false });
+    }
 
     const PAN_SPEED = 0.1;
     const TILT_SPEED = 0.02;
@@ -573,6 +605,19 @@ export function createMatMulVisualization(containerElement, op, viewState = null
 
 
     function cleanup() {
+        if (window.setOpControlHandlers) {
+            window.setOpControlHandlers(null);
+        }
+        if (window.setOpControlState) {
+            window.setOpControlState({ colorize: false, showCode: false });
+        }
+        if (window.__tritonVizCodeHide) {
+            window.__tritonVizCodeHide();
+        }
+        if (histogramUI.hide) {
+            histogramUI.hide();
+        }
+        destroyLegend();
         window.removeEventListener('resize', onResize);
         window.removeEventListener('keydown', onKeyDown);
         containerElement.removeEventListener('mousemove', onMouseMove);

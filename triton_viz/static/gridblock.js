@@ -97,33 +97,30 @@ export class GridBlock {
 
         this.isDetailedViewVisible = true;
         if (this.canvas) this.canvas.style.display = 'none';
+        try {
+            window.__tritonVizActiveBlock = this;
+        } catch (e) {}
 
         if (this.blockData.length > 0) {
             this.displayOpVisualization(this.blockData[0]);
         }
 
         this.ensureGlobalCodeToggle();
-        if (window.setGlobalCodeButtonVisible) {
-            window.setGlobalCodeButtonVisible(true);
-        }
     }
 
     ensureGlobalCodeToggle() {
-        const codeBtnId = 'global-code-toggle-btn';
-        if (document.getElementById(codeBtnId)) {
-            document.getElementById(codeBtnId).style.display = 'block';
-            return;
-        }
-        const btn = document.createElement('button');
-        btn.id = codeBtnId;
-        btn.textContent = 'Show Code: OFF';
-        btn.className = 'show-code-btn';
-        document.body.appendChild(btn);
-
+        if (window.__tritonVizCodeToggle) return;
         let panel = null;
+        let visible = false;
+
         const destroyPanel = () => {
             if (panel && panel.remove) panel.remove();
             panel = null;
+        };
+
+        const getActiveUuid = () => {
+            const activeBlock = window.__tritonVizActiveBlock;
+            return window.current_op_uuid || (activeBlock && activeBlock.blockData && activeBlock.blockData[0] && activeBlock.blockData[0].uuid);
         };
 
         const createPanel = async (uuid, frameIdx = 0, context = 8) => {
@@ -141,8 +138,11 @@ export class GridBlock {
             closeBtn.style.marginLeft = 'auto';
             closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
             closeBtn.addEventListener('click', () => {
+                visible = false;
                 destroyPanel();
-                btn.textContent = 'Show Code: OFF';
+                if (window.setOpControlState) {
+                    window.setOpControlState({ showCode: false });
+                }
             });
             header.appendChild(closeBtn);
             wrapper.appendChild(header);
@@ -177,20 +177,33 @@ export class GridBlock {
             enableDrag(wrapper, { handle: header, bounds: window });
         };
 
-        btn.addEventListener('click', async () => {
-            const turnOn = btn.textContent.endsWith('OFF');
-            btn.textContent = `Show Code: ${turnOn ? 'ON' : 'OFF'}`;
-            if (!this.blockData || this.blockData.length === 0) {
-                if (!turnOn) destroyPanel();
-                return;
-            }
-            const activeUuid = window.current_op_uuid || (this.blockData[0] && this.blockData[0].uuid);
-            if (turnOn && activeUuid) {
-                await createPanel(activeUuid, 0, 8);
-            } else {
+        const togglePanel = async (force) => {
+            const next = typeof force === 'boolean' ? force : !visible;
+            if (!next) {
+                visible = false;
                 destroyPanel();
+                return visible;
             }
-        });
+            const activeUuid = getActiveUuid();
+            if (!activeUuid) {
+                visible = false;
+                destroyPanel();
+                return visible;
+            }
+            visible = true;
+            await createPanel(activeUuid, 0, 8);
+            return visible;
+        };
+
+        const hidePanel = () => {
+            visible = false;
+            destroyPanel();
+            return visible;
+        };
+
+        window.__tritonVizCodeToggle = togglePanel;
+        window.__tritonVizCodeHide = hidePanel;
+        window.__tritonVizCodeVisible = () => visible;
     }
 
     createVisualizationContainer() {
@@ -466,8 +479,10 @@ export class GridBlock {
 
         if (this.canvas) this.canvas.style.display = 'block';
         this.drawFunction();
-        if (window.setGlobalCodeButtonVisible) {
-            window.setGlobalCodeButtonVisible(false);
-        }
+        try {
+            if (window.__tritonVizActiveBlock === this) {
+                window.__tritonVizActiveBlock = null;
+            }
+        } catch (e) {}
     }
 }
