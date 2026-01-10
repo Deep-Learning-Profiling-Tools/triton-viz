@@ -64,13 +64,6 @@ export function createHistogramOverlay(containerElement, options) {
     refreshBtn.textContent = "Refresh";
     controls.appendChild(refreshBtn);
 
-    const closeBtn = document.createElement("button");
-    closeBtn.textContent = "Close";
-    closeBtn.addEventListener("click", () => {
-        overlay.style.display = "none";
-    });
-    controls.appendChild(closeBtn);
-
     overlay.appendChild(controls);
 
     const info = document.createElement("div");

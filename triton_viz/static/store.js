@@ -176,6 +176,7 @@ export function createStoreVisualization(containerElement, op) {
                 bins,
             }),
         });
+        let histogramVisible = false;
         let dragModeOn = false;
         let hoveredCube = null;
         let flipCleanup = null;
@@ -349,23 +350,33 @@ export function createStoreVisualization(containerElement, op) {
             return false;
         }
 
-        function showHistogram() {
-            if (histogramUI.show) {
-                histogramUI.show();
-            } else if (histogramUI.overlay) {
-                histogramUI.overlay.style.display = 'block';
+        function toggleHistogram() {
+            histogramVisible = !histogramVisible;
+            if (histogramVisible) {
+                if (histogramUI.show) {
+                    histogramUI.show();
+                } else if (histogramUI.overlay) {
+                    histogramUI.overlay.style.display = 'block';
+                }
+                return histogramVisible;
             }
+            if (histogramUI.hide) {
+                histogramUI.hide();
+            } else if (histogramUI.overlay) {
+                histogramUI.overlay.style.display = 'none';
+            }
+            return histogramVisible;
         }
 
         if (window.setOpControlHandlers) {
             window.setOpControlHandlers({
                 toggleColorize,
                 toggleShowCode,
-                showHistogram,
+                toggleHistogram,
             });
         }
         if (window.setOpControlState) {
-            window.setOpControlState({ colorize: colorizeOn, showCode: false });
+            window.setOpControlState({ colorize: colorizeOn, showCode: false, histogram: false });
         }
 
         let flowArrowOn = true;
@@ -782,7 +793,7 @@ export function createStoreVisualization(containerElement, op) {
                 window.setOpControlHandlers(null);
             }
             if (window.setOpControlState) {
-                window.setOpControlState({ colorize: false, showCode: false });
+                window.setOpControlState({ colorize: false, showCode: false, histogram: false });
             }
             if (window.__tritonVizCodeHide) {
                 window.__tritonVizCodeHide();

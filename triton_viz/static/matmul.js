@@ -523,23 +523,35 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         return false;
     }
 
-    function showHistogram() {
-        if (histogramUI.show) {
-            histogramUI.show();
-        } else if (histogramUI.overlay) {
-            histogramUI.overlay.style.display = 'block';
+    let histogramVisible = false;
+
+    function toggleHistogram() {
+        histogramVisible = !histogramVisible;
+        if (histogramVisible) {
+            if (histogramUI.show) {
+                histogramUI.show();
+            } else if (histogramUI.overlay) {
+                histogramUI.overlay.style.display = 'block';
+            }
+            return histogramVisible;
         }
+        if (histogramUI.hide) {
+            histogramUI.hide();
+        } else if (histogramUI.overlay) {
+            histogramUI.overlay.style.display = 'none';
+        }
+        return histogramVisible;
     }
 
     if (window.setOpControlHandlers) {
         window.setOpControlHandlers({
             toggleColorize,
             toggleShowCode,
-            showHistogram,
+            toggleHistogram,
         });
     }
     if (window.setOpControlState) {
-        window.setOpControlState({ colorize: colorOn, showCode: false });
+        window.setOpControlState({ colorize: colorOn, showCode: false, histogram: false });
     }
 
     const PAN_SPEED = 0.1;
@@ -609,7 +621,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
             window.setOpControlHandlers(null);
         }
         if (window.setOpControlState) {
-            window.setOpControlState({ colorize: false, showCode: false });
+            window.setOpControlState({ colorize: false, showCode: false, histogram: false });
         }
         if (window.__tritonVizCodeHide) {
             window.__tritonVizCodeHide();

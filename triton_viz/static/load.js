@@ -56,6 +56,7 @@ export function createLoadVisualization(containerElement, op) {
                 bins
             }),
         });
+        let histogramVisible = false;
 
         // expose for debugging
         try {
@@ -749,23 +750,33 @@ function getTextColor(bgColor) {
             return false;
         }
 
-        function showHistogram() {
-            if (histogramUI.show) {
-                histogramUI.show();
-            } else if (histogramUI.overlay) {
-                histogramUI.overlay.style.display = 'block';
+        function toggleHistogram() {
+            histogramVisible = !histogramVisible;
+            if (histogramVisible) {
+                if (histogramUI.show) {
+                    histogramUI.show();
+                } else if (histogramUI.overlay) {
+                    histogramUI.overlay.style.display = 'block';
+                }
+                return histogramVisible;
             }
+            if (histogramUI.hide) {
+                histogramUI.hide();
+            } else if (histogramUI.overlay) {
+                histogramUI.overlay.style.display = 'none';
+            }
+            return histogramVisible;
         }
 
         if (window.setOpControlHandlers) {
             window.setOpControlHandlers({
                 toggleColorize,
                 toggleShowCode,
-                showHistogram,
+                toggleHistogram,
             });
         }
         if (window.setOpControlState) {
-            window.setOpControlState({ colorize: colorizeOn, showCode: false });
+            window.setOpControlState({ colorize: colorizeOn, showCode: false, histogram: false });
         }
 
         function updateSideMenu(tensorName, x, y, z, value) {
@@ -818,7 +829,7 @@ function getTextColor(bgColor) {
                 window.setOpControlHandlers(null);
             }
             if (window.setOpControlState) {
-                window.setOpControlState({ colorize: false, showCode: false });
+                window.setOpControlState({ colorize: false, showCode: false, histogram: false });
             }
             if (window.__tritonVizCodeHide) {
                 window.__tritonVizCodeHide();

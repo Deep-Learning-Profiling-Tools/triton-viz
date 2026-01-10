@@ -48,6 +48,7 @@ const opControls = {
     state: {
         colorize: false,
         showCode: false,
+        histogram: false,
     },
 };
 
@@ -66,7 +67,7 @@ function setOpControlHandlers(handlers = null) {
 
 function resetOpControls() {
     opControls.handlers = null;
-    opControls.state = { colorize: false, showCode: false };
+    opControls.state = { colorize: false, showCode: false, histogram: false };
     if (window.__tritonVizCodeHide) {
         window.__tritonVizCodeHide();
     }
@@ -86,7 +87,8 @@ function updateOpControls() {
         updateToggleLabel(controls.opColorizeBtn, 'Color by Value', !!state.colorize);
     }
     if (controls.opHistogramBtn) {
-        controls.opHistogramBtn.disabled = !handlers || !handlers.showHistogram;
+        controls.opHistogramBtn.disabled = !handlers || !handlers.toggleHistogram;
+        updateToggleLabel(controls.opHistogramBtn, 'Value Histogram', !!state.histogram);
     }
 }
 
@@ -311,8 +313,9 @@ function setupControlEvents() {
 
     if (controls.opHistogramBtn) {
         controls.opHistogramBtn.addEventListener('click', () => {
-            const handler = opControls.handlers?.showHistogram;
-            if (handler) handler();
+            const handler = opControls.handlers?.toggleHistogram;
+            if (!handler) return;
+            applyToggleResult(handler(), 'histogram');
         });
     }
 }
