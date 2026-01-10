@@ -160,8 +160,8 @@ function getTextColor(bgColor) {
         } catch(e){}
         const { center } = setupCamera(scene, camera);
         const orbitControls = new OrbitControls(camera, renderer.domElement);
-        orbitControls.enableDamping = true;
-        orbitControls.dampingFactor = 0.05;
+        orbitControls.enableDamping = false;
+        orbitControls.dampingFactor = 0;
         orbitControls.target.copy(center);
         orbitControls.update();
         const viewStateStore = window.__tritonVizCameraState || (window.__tritonVizCameraState = {});
@@ -1143,8 +1143,8 @@ export function createLoadOverallVisualization(containerElement, op) {
 
         const { center } = setupCamera(scene, camera);
         const orbitControls = new OrbitControls(camera, renderer.domElement);
-        orbitControls.enableDamping = true;
-        orbitControls.dampingFactor = 0.05;
+        orbitControls.enableDamping = false;
+        orbitControls.dampingFactor = 0;
         orbitControls.target.copy(center);
         orbitControls.update();
 

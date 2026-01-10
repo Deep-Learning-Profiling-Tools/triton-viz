@@ -408,8 +408,8 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     camera.position.set(center.x, center.y, center.z + cameraZ);
     camera.lookAt(center);
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
+    controls.enableDamping = false;
+    controls.dampingFactor = 0;
     controls.target.copy(center);
     controls.update();
     const applyCameraState = () => {
