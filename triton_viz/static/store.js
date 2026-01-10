@@ -9,7 +9,8 @@ import {
     setupCamera,
     setupEventListeners,
     cameraControls,
-    addLabels
+    addLabels,
+    CUBE_SIZE
 } from './load_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { createFlipDemo } from './flip_demo.js';
@@ -183,16 +184,17 @@ export function createStoreVisualization(containerElement, op) {
         let legendEl = null;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
-        const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
+        const COLOR_SLICE = new THREE.Color(1.0, 0.55, 0.0);    // Orange (highlight for store target)
         const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0); // Magenta (starting color for left slice)
         const COLOR_LOADED = new THREE.Color(1.0, 0.8, 0.0);    // Gold (final color for both slices)
         const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);  // Black
-        const COLOR_HIGHLIGHT = new THREE.Color(0.0, 0.0, 1.0);
+        const COLOR_HIGHLIGHT = new THREE.Color(1.0, 0.55, 0.0);
         const COLOR_FILLED = new THREE.Color(0.0, 0.8, 1.0);
         const COLOR_COOL = new THREE.Color(0.2, 0.4, 1.0);
         const COLOR_HOT = new THREE.Color(1.0, 0.3, 0.1);
         const TEMP_COLOR = new THREE.Color();
         const highlightedGlobalSet = new Set((op.global_coords || []).map(([x, y, z]) => `${x},${y},${z}`));
+        const HOVER_COLOR = new THREE.Color(1.0, 0.55, 0.0);
 
         const baseGlobalDark = COLOR_GLOBAL.clone();
         const baseSliceDark = COLOR_LEFT_SLICE.clone();
@@ -217,6 +219,15 @@ export function createStoreVisualization(containerElement, op) {
         scene.add(globalTensor);
         scene.add(sliceTensor);
 
+        const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
+        const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
+        const hoverMaterial = new THREE.LineBasicMaterial({ color: HOVER_COLOR });
+        const globalHoverOutline = new THREE.LineSegments(hoverEdgesGeometry, hoverMaterial);
+        const sliceHoverOutline = new THREE.LineSegments(hoverEdgesGeometry, hoverMaterial);
+        globalHoverOutline.visible = false;
+        sliceHoverOutline.visible = false;
+        globalTensor.add(globalHoverOutline);
+        sliceTensor.add(sliceHoverOutline);
         // Arrow helper (+ label) showing flow Slice -> Global
         const ARROW_COLOR = 0xff9800; // orange for store
         const arrow = new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(0,0,0), 1.0, ARROW_COLOR, 0.25, 0.12);
