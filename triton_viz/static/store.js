@@ -416,8 +416,14 @@ export function createStoreVisualization(containerElement, op) {
         requestRender();
 
         function _updateMouseNDC(event) {
-            mouse.x = (event.clientX / stage.clientWidth) * 2 - 1;
-            mouse.y = -(event.clientY / stage.clientHeight) * 2 + 1;
+            const rect = renderer.domElement.getBoundingClientRect();
+            const dpr = (window.devicePixelRatio || 1);
+            const px = (event.clientX - rect.left) * dpr;
+            const py = (event.clientY - rect.top) * dpr;
+            const w = rect.width * dpr;
+            const h = rect.height * dpr;
+            mouse.x = (px / w) * 2 - 1;
+            mouse.y = -(py / h) * 2 + 1;
         }
 
         function _raycastAll() {
