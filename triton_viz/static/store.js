@@ -5,7 +5,6 @@ import {
     setupGeometries,
     createTensor,
     calculateTensorSize,
-    updateCubeColor,
     setupCamera,
     setupEventListeners,
     cameraControls,
@@ -502,17 +501,6 @@ export function createStoreVisualization(containerElement, op) {
             orbitControls.update();
 
             if (!isPaused && frame < totalFrames) {
-                const index = Math.floor(frame / 2);
-                const factor = (frame % 2) / 1.0;
-
-                if (!allProgramsOn && index < op.global_coords.length) {
-                    const globalCoord = op.global_coords[index];
-                    const sliceCoord = op.slice_coords[index];
-
-                    updateCubeColor(globalTensor, globalCoord, COLOR_GLOBAL, COLOR_SLICE, factor);
-                    updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
-                }
-
                 frame++;
             }
 

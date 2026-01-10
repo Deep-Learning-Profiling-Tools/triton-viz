@@ -5,7 +5,6 @@ import {
     setupGeometries,
     createTensor,
     calculateTensorSize,
-    updateCubeColor,
     setupCamera,
     setupEventListeners,
     cameraControls,
@@ -101,6 +100,8 @@ function getTextColor(bgColor) {
 
         const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
         const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
+        const globalMesh = globalTensor.userData.mesh;
+        const sliceMesh = sliceTensor.userData.mesh;
 
         // Position slice tensor
         const globalSize = calculateTensorSize(op.global_shape);
@@ -529,6 +530,34 @@ function getTextColor(bgColor) {
             return new THREE.Color().setHSL(hue, 0.7, 0.55);
         }
 
+        function coordToInstanceId(mesh, coord) {
+            if (!mesh || !coord) return null;
+            const coords = mesh.userData.coords;
+            if (coords) {
+                if (!mesh.userData.coordIndex) {
+                    const map = new Map();
+                    coords.forEach((entry, idx) => map.set(entry.join(','), idx));
+                    mesh.userData.coordIndex = map;
+                }
+                return mesh.userData.coordIndex.get(coord.join(','));
+            }
+            const shape = mesh.userData.shape;
+            if (!shape) return null;
+            const perm = mesh.userData.coordPerm;
+            const base = [coord[0], coord[1], coord[2] || 0];
+            const mapped = perm && perm.length === 3
+                ? [base[perm.indexOf(0)], base[perm.indexOf(1)], base[perm.indexOf(2)]]
+                : base;
+            const width = shape.width;
+            const height = shape.height;
+            const depth = shape.depth;
+            const [x, y, z] = mapped;
+            if (x < 0 || y < 0 || z < 0 || x >= width || y >= height || z >= depth) {
+                return null;
+            }
+            return z * width * height + y * width + x;
+        }
+
         function paintCoords(mesh, coords, color) {
             if (!mesh || !coords) return;
             coords.forEach((coord) => {
@@ -605,17 +634,6 @@ function getTextColor(bgColor) {
 
             // Run highlight animation regardless of Color by Value state
             if (!isPaused && frame < totalFrames) {
-                const index = Math.floor(frame / 2);
-                const factor = (frame % 2) / 1.0;
-
-                if (!allProgramsOn && index < op.global_coords.length) {
-                    const globalCoord = op.global_coords[index];
-                    const sliceCoord = op.slice_coords[index];
-
-                    updateCubeColor(globalTensor, globalCoord, COLOR_GLOBAL, COLOR_SLICE, factor);
-                    updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
-                }
-
                 frame++;
             }
 
