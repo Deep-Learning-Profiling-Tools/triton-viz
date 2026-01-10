@@ -76,49 +76,53 @@ def torch_rmsnorm_kernel(a_tensor, g_tensor):
     return tensor * g_tensor
 
 
-TRITON_VIZ = True
-kernel_grid = (1, 1, 1)
-B, D = 32, 32
-a_tensor = torch.arange(B * D).float().view(B, D)
-g_tensor = torch.arange(D).float()
-result = torch.empty_like(a_tensor).numpy()
-kernel_args = (a_tensor.numpy(), g_tensor.numpy(), result)
+def _run_demo():
+    triton_viz_enabled = True
+    kernel_grid = (1, 1, 1)
+    b_dim, d_dim = 32, 32
+    a_tensor = torch.arange(b_dim * d_dim).float().view(b_dim, d_dim)
+    g_tensor = torch.arange(d_dim).float()
+    result = torch.empty_like(a_tensor).numpy()
+    kernel_args = (a_tensor.numpy(), g_tensor.numpy(), result)
 
-if TRITON_VIZ:
-    print("Executing kernel with NKI interpreter...")
-    traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(
-        nki_rmsnorm_kernel
-    )
-    kernel_instance = traced_kernel[kernel_grid]
-    kernel_instance(*kernel_args)
+    if triton_viz_enabled:
+        print("Executing kernel with NKI interpreter...")
+        traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(
+            nki_rmsnorm_kernel
+        )
+        kernel_instance = traced_kernel[kernel_grid]
+        kernel_instance(*kernel_args)
 
-    print(f"Number of launches: {len(launches)}")
-    if launches:
-        launch = launches[-1]
-        print(f"Number of records: {len(launch.records)}")
-        for i, record in enumerate(launch.records):
-            print(f"Record {i}: {type(record).__name__}")
-            if hasattr(record, "ptr"):
-                print(f"  ptr: {record.ptr}")
-            if hasattr(record, "offsets"):
-                print(f"  offsets shape: {record.offsets.shape}")
-            if hasattr(record, "masks"):
-                print(f"  masks shape: {record.masks.shape}")
+        print(f"Number of launches: {len(launches)}")
+        if launches:
+            launch = launches[-1]
+            print(f"Number of records: {len(launch.records)}")
+            for i, record in enumerate(launch.records):
+                print(f"Record {i}: {type(record).__name__}")
+                if hasattr(record, "ptr"):
+                    print(f"  ptr: {record.ptr}")
+                if hasattr(record, "offsets"):
+                    print(f"  offsets shape: {record.offsets.shape}")
+                if hasattr(record, "masks"):
+                    print(f"  masks shape: {record.masks.shape}")
 
-    # Try to launch visualization
-    try:
-        triton_viz.launch(share=False)
-    except Exception as e:
-        print(f"\nError during visualization: {e}")
-        import traceback
+        try:
+            triton_viz.launch(share=False)
+        except Exception as e:
+            print(f"\nError during visualization: {e}")
+            import traceback
 
-        traceback.print_exc()
-else:
-    print("Executing NKI JIT-ed matmul_kernel...")
-    compiled_kernel = nki.jit(nki_rmsnorm_kernel, kernel_return=False)
-    z2 = nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
+            traceback.print_exc()
+    else:
+        print("Executing NKI JIT-ed matmul_kernel...")
+        compiled_kernel = nki.jit(nki_rmsnorm_kernel, kernel_return=False)
+        nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
 
-z2 = result
-z1 = torch_rmsnorm_kernel(a_tensor, g_tensor).numpy()
-print(np.max(np.abs(z1 - z2)))
-assert np.allclose(z1, z2)
+    z2 = result
+    z1 = torch_rmsnorm_kernel(a_tensor, g_tensor).numpy()
+    print(np.max(np.abs(z1 - z2)))
+    assert np.allclose(z1, z2)
+
+
+if __name__ == "__main__":
+    _run_demo()

@@ -167,31 +167,6 @@ class Tracer(Client):
             rec.call_path = _extract_user_frames()
             self.records.append(rec)
 
-        # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
-        @self.lock_fn
-        def pre_raw_load_callback(ptr):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            offsets = ptr.data - tensor.data_ptr()
-            true_mask = np.ones_like(offsets, dtype=bool)
-            rec = Load(tensor.data_ptr(), offsets, true_mask)
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
-
-        @self.lock_fn
-        def pre_raw_store_callback(ptr, value):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            offsets = ptr.data - tensor.data_ptr()
-            true_mask = np.ones_like(offsets, dtype=bool)
-            rec = Store(tensor.data_ptr(), offsets, true_mask)
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
-
         @self.lock_fn
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:

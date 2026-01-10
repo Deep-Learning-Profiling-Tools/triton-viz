@@ -209,86 +209,79 @@ def torch_rope_kernel(q, k, cos, sin):
     return q_rot, k_rot
 
 
-# TRITON_VIZ test section
-TRITON_VIZ = True  # Set to True to see the trace
-# B, H, S, D = 2, 2, 4, 8
-H, S, D = 2, 4, 8
-# kernel_grid = (B, H)
-kernel_grid = (H,)
+def _run_demo():
+    triton_viz_enabled = True
+    h_dim, s_dim, d_dim = 2, 4, 8
+    kernel_grid = (h_dim,)
 
-if TRITON_VIZ:
-    # Setup test data
-    # q = torch.randn(B, H, S, D)
-    # k = torch.randn(B, H, S, D)
-    q = torch.randn(H, S, D)
-    k = torch.randn(H, S, D)
-    position_ids = torch.arange(S)
-    cos, sin = generate_pos_embedding(D, position_ids)
+    if triton_viz_enabled:
+        q = torch.randn(h_dim, s_dim, d_dim)
+        k = torch.randn(h_dim, s_dim, d_dim)
+        position_ids = torch.arange(s_dim)
+        cos, sin = generate_pos_embedding(d_dim, position_ids)
 
-    # output = torch.empty((2, B, H, S, D))
-    output_q = torch.empty((H, S, D))
-    output_k = torch.empty((H, S, D))
-    # Cast inputs to numpy for NKI tracing
-    kernel_args = (
-        q.numpy(),
-        k.numpy(),
-        cos.numpy(),
-        sin.numpy(),
-        output_q.numpy(),
-        output_k.numpy(),
-    )
+        output_q = torch.empty((h_dim, s_dim, d_dim))
+        output_k = torch.empty((h_dim, s_dim, d_dim))
+        kernel_args = (
+            q.numpy(),
+            k.numpy(),
+            cos.numpy(),
+            sin.numpy(),
+            output_q.numpy(),
+            output_k.numpy(),
+        )
 
-    print("Executing rotary embedding kernel with NKI interpreter...")
-    traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(nki_rope_kernel)
-    kernel_instance = traced_kernel[kernel_grid]
-    kernel_instance(*kernel_args)
+        print("Executing rotary embedding kernel with NKI interpreter...")
+        traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(
+            nki_rope_kernel
+        )
+        kernel_instance = traced_kernel[kernel_grid]
+        kernel_instance(*kernel_args)
 
-    print(f"Number of launches: {len(launches)}")
-    if launches:
-        launch = launches[-1]
-        print(f"Number of records: {len(launch.records)}")
-        # Optional: Print record details
+        print(f"Number of launches: {len(launches)}")
+        if launches:
+            launch = launches[-1]
+            print(f"Number of records: {len(launch.records)}")
 
-    try:
-        triton_viz.launch(share=False)
-    except Exception as e:
-        print(f"Visualization error: {e}")
+        try:
+            triton_viz.launch(share=False)
+        except Exception as e:
+            print(f"Visualization error: {e}")
+    else:
+        q = torch.randn(h_dim, s_dim, d_dim, dtype=torch.float32)
+        k = torch.randn(h_dim, s_dim, d_dim, dtype=torch.float32)
+        position_ids = torch.arange(s_dim)
+        cos, sin = generate_pos_embedding(d_dim, position_ids)
 
-else:
-    # Regular execution for comparison
-    # Ensure inputs are float32
-    q = torch.randn(H, S, D, dtype=torch.float32)
-    k = torch.randn(H, S, D, dtype=torch.float32)
-    position_ids = torch.arange(S)
-    cos, sin = generate_pos_embedding(D, position_ids)
+        print("Executing NKI JIT-ed rotary embedding kernel...")
+        compiled_kernel = nki.jit(nki_rope_kernel, kernel_return=False)
+        output_q_np = np.zeros((h_dim, s_dim, d_dim), dtype=np.float32)
+        output_k_np = np.zeros((h_dim, s_dim, d_dim), dtype=np.float32)
 
-    print("Executing NKI JIT-ed rotary embedding kernel...")
-    compiled_kernel = nki.jit(nki_rope_kernel, kernel_return=False)
-    output_q_np = np.zeros((H, S, D), dtype=np.float32)
-    output_k_np = np.zeros((H, S, D), dtype=np.float32)
+        nki.simulate_kernel(
+            compiled_kernel[kernel_grid],
+            q.numpy(),
+            k.numpy(),
+            cos.numpy(),
+            sin.numpy(),
+            output_q_np,
+            output_k_np,
+        )
 
-    nki.simulate_kernel(
-        compiled_kernel[kernel_grid],
-        q.numpy(),
-        k.numpy(),
-        cos.numpy(),
-        sin.numpy(),
-        output_q_np,
-        output_k_np,
-    )
+        expected_q, expected_k = torch_rope_kernel(q, k, cos, sin)
+        actual_q = torch.from_numpy(output_q_np)
+        actual_k = torch.from_numpy(output_k_np)
 
-    # Compare with torch reference
-    expected_q, expected_k = torch_rope_kernel(q, k, cos, sin)
-    actual_q = torch.from_numpy(output_q_np)
-    actual_k = torch.from_numpy(output_k_np)
+        max_diff_q = torch.max(torch.abs(expected_q - actual_q))
+        max_diff_k = torch.max(torch.abs(expected_k - actual_k))
 
-    max_diff_q = torch.max(torch.abs(expected_q - actual_q))
-    max_diff_k = torch.max(torch.abs(expected_k - actual_k))
+        print(f"Q max diff: {max_diff_q}")
+        print(f"K max diff: {max_diff_k}")
 
-    print(f"Q max diff: {max_diff_q}")
-    print(f"K max diff: {max_diff_k}")
+        assert torch.allclose(expected_q, actual_q, rtol=1e-3, atol=1e-3), "Q mismatch"
+        assert torch.allclose(expected_k, actual_k, rtol=1e-3, atol=1e-3), "K mismatch"
+        print("Results match!")
 
-    # Relaxed tolerance slightly for float32 accumulation differences
-    assert torch.allclose(expected_q, actual_q, rtol=1e-3, atol=1e-3), "Q mismatch"
-    assert torch.allclose(expected_k, actual_k, rtol=1e-3, atol=1e-3), "K mismatch"
-    print("Results match!")
+
+if __name__ == "__main__":
+    _run_demo()

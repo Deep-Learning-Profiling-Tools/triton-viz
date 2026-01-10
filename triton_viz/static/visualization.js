@@ -1,155 +1,299 @@
 import { GridBlock } from './gridblock.js';
 import { createInfoPopup, showInfoPopup } from './infoPopup.js';
+import { createLoadOverallVisualization } from './load.js';
+import { createStoreOverallVisualization } from './store.js';
+import { enableDrag } from './ui_helpers.js';
+
 let globalData;
 let currentView = 'main';
-let canvas, ctx;
-let maxX = 0, maxY = 0, maxZ = 0;
-let sliders = [], zSlider, precomputeButton, kernelGrid;
-let backButton;
+let canvas;
+let ctx;
+let canvasWrapper;
+let canvasLogicalWidth = 0;
+let canvasLogicalHeight = 0;
+let kernelGrid;
 let currentBlockData = null;
-let isInitialized = false;
 let containerElement;
 let infoPopup;
-let infoButton;
-function switchToMainView() {
+let isInitialized = false;
+let overallCleanup = null;
+let maxX = 0;
+let maxY = 0;
+let maxZ = 0;
+let zSlice = 0;
+const overallCache = {};
+const filterValues = [-1, -1, -1];
+const THEME_STORAGE_KEY = 'triton-viz-theme';
+
+const controls = {
+    panel: null,
+    pidContainer: null,
+    zSlider: null,
+    zValueLabel: null,
+    resetBtn: null,
+    overallBtn: null,
+    precomputeBtn: null,
+    infoBtn: null,
+    themeToggle: null,
+};
+
+let controlToastEl = null;
+let controlToastTimer = null;
+
+function setGlobalCodeButtonVisible(visible) {
+    const btn = document.getElementById('global-code-toggle-btn');
+    if (btn) {
+        btn.style.display = visible ? 'block' : 'none';
+    }
+}
+
+try {
+    window.setGlobalCodeButtonVisible = setGlobalCodeButtonVisible;
+} catch (err) {
+    console.warn('Unable to expose setGlobalCodeButtonVisible', err);
+}
+
+function closeOverallOverlay() {
+    if (overallCleanup) {
+        overallCleanup();
+        overallCleanup = null;
+    }
+    if (containerElement) {
+        containerElement.innerHTML = '';
+        containerElement.style.display = 'none';
+        containerElement.style.pointerEvents = 'none';
+    }
+    if (canvas) {
+        canvas.style.display = 'block';
+    }
     currentView = 'main';
+}
+
+function switchToMainView() {
+    closeOverallOverlay();
+    setGlobalCodeButtonVisible(false);
+
     if (currentBlockData) {
         currentBlockData.hideDetailedView();
         currentBlockData = null;
     }
-    containerElement.style.pointerEvents = 'none';
-    containerElement.style.display = 'none';
-    containerElement.innerHTML = '';
 
-    canvas.style.display = 'block';
+    if (canvas) {
+        canvas.style.display = 'block';
+    }
+
     draw();
+}
+
+function switchToTensorView(clickedBlock) {
+    currentView = 'tensor';
+    currentBlockData = clickedBlock;
+
+    if (containerElement) {
+        containerElement.style.pointerEvents = 'auto';
+        containerElement.style.display = 'block';
+    }
+
+    if (canvas) {
+        canvas.style.display = 'none';
+    }
+
+    clickedBlock.showDetailedView();
 }
 
 function initializeApp() {
     canvas = document.getElementById('canvas');
-    if (!canvas) {
-        console.error('Canvas element not found');
+    canvasWrapper = document.getElementById('canvas-wrapper');
+    containerElement = document.getElementById('visualization-container');
+    controls.panel = document.getElementById('control-panel');
+    controls.pidContainer = document.getElementById('pid-controls');
+    controls.zSlider = document.getElementById('z-slider');
+    controls.zValueLabel = document.getElementById('z-value');
+    controls.resetBtn = document.getElementById('reset-filters');
+    controls.overallBtn = document.getElementById('btn-overall');
+    controls.precomputeBtn = document.getElementById('btn-precompute');
+    controls.infoBtn = document.getElementById('btn-info');
+    controls.themeToggle = document.getElementById('theme-toggle');
+
+    if (!canvas || !canvasWrapper || !containerElement) {
+        console.error('Essential visualization elements are missing.');
         return;
     }
+
     ctx = canvas.getContext('2d');
     if (!ctx) {
-        console.error('Unable to get 2D context from canvas');
-        return;
-    }
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-
-    canvas.addEventListener('mousedown', handleMouseEvent);
-    canvas.addEventListener('mouseup', handleMouseEvent);
-    canvas.addEventListener('mousemove', handleMouseEvent);
-
-    containerElement = document.getElementById('visualization-container');
-    if (!containerElement) {
-        console.error('Visualization container element not found');
+        console.error('Unable to obtain 2D context');
         return;
     }
 
     containerElement.style.pointerEvents = 'none';
     containerElement.style.display = 'none';
 
+    canvas.addEventListener('mousedown', handleMouseEvent);
+    canvas.addEventListener('mouseup', handleMouseEvent);
+    canvas.addEventListener('mousemove', handleMouseEvent);
+    window.addEventListener('resize', resizeCanvas);
+
+    setupThemeToggle();
+    setupControlEvents();
+    resizeCanvas();
     fetchData();
 }
 
-class Slider {
-    constructor(x, y, width, height, label, min_value = -1, max_value = 100) {
-        this.rect = { x, y, width, height };
-        this.label = label;
-        this.min = min_value;
-        this.max = max_value;
-        this.value = min_value;
-        this.grabbed = false;
-        this.enabled = true;
-    }
-
-    draw(ctx) {
-        if (!this.enabled) return;
-        ctx.fillStyle = '#3c3c46';
-        ctx.fillRect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
-        const buttonX = this.rect.x + (this.value - this.min) / (this.max - this.min) * this.rect.width;
-        ctx.fillStyle = '#c8c8c8';
-        ctx.fillRect(buttonX - 5, this.rect.y - 2, 10, this.rect.height + 4);
-
-        ctx.fillStyle = '#c8c8c8';
-        ctx.font = '18px Arial';
-        ctx.fillText(this.label, this.rect.x, this.rect.y - 10);
-        ctx.fillText(this.value.toString(), this.rect.x + this.rect.width + 10, this.rect.y + this.rect.height / 2 + 5);
-    }
-
-    handleEvent(event) {
-        if (!this.enabled) return;
-        if (event.type === 'mousedown') {
-            if (this.isPointInside(event.offsetX, event.offsetY)) {
-                this.grabbed = true;
-            }
-        } else if (event.type === 'mouseup') {
-            this.grabbed = false;
-        } else if (event.type === 'mousemove' && this.grabbed) {
-            const mouseX = event.offsetX;
-            this.value = Math.round((mouseX - this.rect.x) / this.rect.width * (this.max - this.min) + this.min);
-            this.value = Math.max(this.min, Math.min(this.max, this.value));
-        }
-    }
-
-    isPointInside(x, y) {
-        return x >= this.rect.x && x <= this.rect.x + this.rect.width &&
-               y >= this.rect.y && y <= this.rect.y + this.rect.height;
+function setupThemeToggle() {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    const defaultTheme = stored || document.documentElement.dataset.theme || 'light';
+    applyTheme(defaultTheme);
+    if (controls.themeToggle) {
+        controls.themeToggle.addEventListener('click', () => {
+            const nextTheme = (document.documentElement.dataset.theme || 'light') === 'light' ? 'dark' : 'light';
+            applyTheme(nextTheme);
+        });
     }
 }
 
-class Button {
-    constructor(x, y, width, height, text, isIcon = false) {
-        this.rect = { x, y, width, height };
-        this.text = text;
-        this.isIcon = isIcon;
-        this.color = '#3c3c46';
-        this.hoverColor = '#50505a';
-        this.clickColor = '#64646e';
-        this.isHovered = false;
-        this.isClicked = false;
-        this.clickTime = 0;
+function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+    const icon = document.getElementById('theme-toggle-icon');
+    if (icon) {
+        icon.textContent = theme === 'light' ? '☀' : '🌙';
+    }
+    draw();
+}
+
+function setupControlEvents() {
+    if (controls.resetBtn) {
+        controls.resetBtn.addEventListener('click', () => {
+            for (let i = 0; i < filterValues.length; i += 1) {
+                filterValues[i] = -1;
+                const slider = document.querySelector(`input[data-filter-index="${i}"]`);
+                if (slider) {
+                    slider.value = -1;
+                }
+                const valuePill = document.getElementById(`pid-value-${i}`);
+                if (valuePill) valuePill.textContent = 'All';
+                if (kernelGrid) {
+                    kernelGrid.updateFilter(i, -1);
+                }
+            }
+            setZSlice(0);
+            if (kernelGrid) {
+                kernelGrid.updateZ(0);
+            }
+            draw();
+            showControlToast('Filters reset');
+        });
     }
 
-    draw(ctx) {
-        let color = this.color;
-        if (this.isClicked && Date.now() - this.clickTime < 100) {
-            color = this.clickColor;
-        } else if (this.isHovered) {
-            color = this.hoverColor;
+    if (controls.overallBtn) {
+        controls.overallBtn.addEventListener('click', showOverallOverlay);
+    }
+
+    if (controls.precomputeBtn) {
+        controls.precomputeBtn.addEventListener('click', () => {
+            showControlToast('Precompute mode is coming soon. This build previews the layout.');
+        });
+    }
+
+    if (controls.infoBtn) {
+        controls.infoBtn.addEventListener('click', () => {
+            if (!infoPopup) {
+                infoPopup = createInfoPopup();
+            }
+            showInfoPopup(infoPopup);
+        });
+    }
+
+    if (controls.zSlider) {
+        controls.zSlider.addEventListener('input', (event) => {
+            const next = Number(event.target.value);
+            setZSlice(next);
+            if (kernelGrid) {
+                kernelGrid.updateZ(next);
+                draw();
+            }
+        });
+    }
+}
+
+function showControlToast(message) {
+    if (!controls.panel) {
+        console.info(message);
+        return;
+    }
+    if (!controlToastEl) {
+        controlToastEl = document.createElement('div');
+        controlToastEl.id = 'control-panel-toast';
+        controlToastEl.className = 'info-card';
+        controls.panel.appendChild(controlToastEl);
+    }
+    controlToastEl.textContent = message;
+    controlToastEl.style.opacity = '1';
+    clearTimeout(controlToastTimer);
+    controlToastTimer = setTimeout(() => {
+        if (controlToastEl) {
+            controlToastEl.style.opacity = '0';
         }
+    }, 3200);
+}
 
-        ctx.fillStyle = color;
-        ctx.fillRect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
-        ctx.strokeStyle = '#c8c8c8';
-        ctx.strokeRect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
+function resizeCanvas() {
+    if (!canvas || !canvasWrapper || !ctx) return;
+    const rect = canvasWrapper.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvasLogicalWidth = rect.width;
+    canvasLogicalHeight = rect.height;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
 
-        ctx.fillStyle = '#c8c8c8';
-        ctx.font = this.isIcon ? 'bold 24px Arial' : '18px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(this.text, this.rect.x + this.rect.width / 2, this.rect.y + this.rect.height / 2);
+    if (kernelGrid) {
+        const gridRect = getKernelGridRect();
+        kernelGrid.resize(gridRect.x, gridRect.y, gridRect.width, gridRect.height);
     }
 
-    handleEvent(event) {
-        const { offsetX, offsetY } = event;
-        this.isHovered = this.isPointInside(offsetX, offsetY);
-        if (event.type === 'mousedown' && this.isHovered) {
-            this.isClicked = true;
-            this.clickTime = Date.now();
-            console.log(`Button '${this.text}' clicked!`);
-        } else if (event.type === 'mouseup') {
-            this.isClicked = false;
-        }
-    }
+    draw();
+}
 
-    isPointInside(x, y) {
-        return x >= this.rect.x && x <= this.rect.x + this.rect.width &&
-               y >= this.rect.y && y <= this.rect.y + this.rect.height;
+function getKernelGridRect() {
+    const PADDING = 32;
+    const BOTTOM_PADDING = 80;
+    const width = Math.max(320, canvasLogicalWidth - PADDING * 2);
+    const height = Math.max(320, canvasLogicalHeight - PADDING - BOTTOM_PADDING);
+    return { x: PADDING, y: PADDING, width, height };
+}
+
+function setZSlice(value) {
+    const clamped = Math.max(0, Math.min(value, maxZ));
+    zSlice = clamped;
+    if (controls.zSlider) {
+        controls.zSlider.value = clamped;
     }
+    if (controls.zValueLabel) {
+        controls.zValueLabel.textContent = clamped;
+    }
+}
+
+function getThemeColors() {
+    const styles = getComputedStyle(document.documentElement);
+    const pick = (name, fallback) => {
+        const value = styles.getPropertyValue(name);
+        return value ? value.trim() : fallback;
+    };
+    return {
+        canvasBg: pick('--canvas-bg', '#1e1e28'),
+        gridBg: pick('--grid-bg', '#f0f0f0'),
+        gridBorder: pick('--grid-border', '#d4d4d8'),
+        blockBg: pick('--block-bg', '#3c3c46'),
+        blockHoverBg: pick('--block-hover-bg', '#50505a'),
+        blockBorder: pick('--block-border', 'rgba(0,0,0,0.4)'),
+        textPrimary: pick('--text-primary', '#0f172a'),
+        textSecondary: pick('--text-secondary', '#475569'),
+    };
 }
 
 class KernelGrid {
@@ -159,29 +303,45 @@ class KernelGrid {
         this.visualizationData = visualizationData;
         this.currentZ = 0;
         this.blocks = [];
+        this.filterValues = [-1, -1, -1];
+        this.selectedBlock = null;
         this.calculateBlockSize();
         this.createBlocks();
-        this.selectedBlock = null;
-        this.filterValues = [-1, -1, -1]; // Default filter values for x, y, z
+    }
+
+    resize(x, y, width, height) {
+        this.rect = { x, y, width, height };
+        this.calculateBlockSize();
+        this.createBlocks();
     }
 
     calculateBlockSize() {
-        this.blockWidth = Math.floor(this.rect.width / this.gridSize[0]) - 1;
-        this.blockHeight = Math.floor(this.rect.height / this.gridSize[1]) - 1;
+        const [gridX, gridY] = this.gridSize;
+        const safeX = Math.max(1, gridX);
+        const safeY = Math.max(1, gridY);
+        this.blockWidth = Math.floor(this.rect.width / safeX) - 1;
+        this.blockHeight = Math.floor(this.rect.height / safeY) - 1;
     }
 
     createBlocks() {
         this.blocks = [];
-        for (let y = 0; y < this.gridSize[1]; y++) {
-            for (let x = 0; x < this.gridSize[0]; x++) {
+        const [gridX, gridY] = this.gridSize;
+        for (let y = 0; y < gridY; y += 1) {
+            for (let x = 0; x < gridX; x += 1) {
                 const blockX = this.rect.x + x * (this.blockWidth + 1);
                 const blockY = this.rect.y + y * (this.blockHeight + 1);
                 const gridKey1 = `(${x}, ${y}, ${this.currentZ})`;
                 const gridKey2 = `(${x},${y},${this.currentZ})`;
                 const blockData = this.visualizationData[gridKey1] || this.visualizationData[gridKey2] || [];
                 const block = new GridBlock(
-                    blockX, blockY, this.blockWidth, this.blockHeight,
-                    x, y, this.currentZ, blockData,
+                    blockX,
+                    blockY,
+                    this.blockWidth,
+                    this.blockHeight,
+                    x,
+                    y,
+                    this.currentZ,
+                    blockData,
                     switchToMainView,
                     containerElement,
                     canvas,
@@ -192,50 +352,43 @@ class KernelGrid {
         }
     }
 
-    draw(ctx) {
-        ctx.fillStyle = '#F0F0F0';
-        ctx.fillRect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
-        this.blocks.forEach(block => {
+    draw(ctxRef, palette) {
+        ctxRef.fillStyle = palette.gridBg;
+        ctxRef.fillRect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
+        ctxRef.strokeStyle = palette.gridBorder;
+        ctxRef.lineWidth = 1;
+        ctxRef.strokeRect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
+        this.blocks.forEach((block) => {
             if (this.shouldDrawBlock(block)) {
-                block.draw(ctx);
+                block.draw(ctxRef, palette);
             }
         });
     }
 
     shouldDrawBlock(block) {
-        return (this.filterValues[0] === -1 || block.gridPosition.x === this.filterValues[0]) &&
-               (this.filterValues[1] === -1 || block.gridPosition.y === this.filterValues[1]) &&
-               (this.filterValues[2] === -1 || block.gridPosition.z === this.filterValues[2]);
+        return (
+            (this.filterValues[0] === -1 || block.gridPosition.x === this.filterValues[0]) &&
+            (this.filterValues[1] === -1 || block.gridPosition.y === this.filterValues[1]) &&
+            (this.filterValues[2] === -1 || block.gridPosition.z === this.filterValues[2])
+        );
+    }
+
+    updateFilter(dimension, value) {
+        this.filterValues[dimension] = value;
     }
 
     updateZ(z) {
         this.currentZ = z;
         this.filterValues[2] = z;
-        this.blocks.forEach(block => {
+        this.blocks.forEach((block) => {
             block.gridPosition.z = z;
             const gridKey = `(${block.gridPosition.x}, ${block.gridPosition.y}, ${z})`;
             block.blockData = this.visualizationData[gridKey] || [];
         });
     }
 
-    handleClick(x, y) {
-        const clickedBlock = this.blocks.find(block =>
-            block.isPointInside(x, y) && this.shouldDrawBlock(block)
-        );
-        if (clickedBlock) {
-            console.log(`Clicked block at (${clickedBlock.gridPosition.x}, ${clickedBlock.gridPosition.y}, ${clickedBlock.gridPosition.z})`);
-            if (this.selectedBlock) {
-                this.selectedBlock.hideDetailedView();
-            }
-            this.selectedBlock = clickedBlock;
-            clickedBlock.showDetailedView();
-            return clickedBlock;
-        }
-        return null;
-    }
-
     handleMouseMove(x, y) {
-        this.blocks.forEach(block => {
+        this.blocks.forEach((block) => {
             if (this.shouldDrawBlock(block)) {
                 block.handleMouseMove(x, y);
             } else {
@@ -244,8 +397,19 @@ class KernelGrid {
         });
     }
 
-    updateFilter(dimension, value) {
-        this.filterValues[dimension] = value;
+    handleClick(x, y) {
+        const target = this.blocks.find(
+            (block) => block.isPointInside(x, y) && this.shouldDrawBlock(block)
+        );
+        if (target) {
+            if (this.selectedBlock && this.selectedBlock !== target) {
+                this.selectedBlock.hideDetailedView();
+            }
+            this.selectedBlock = target;
+            target.showDetailedView();
+            return target;
+        }
+        return null;
     }
 }
 
@@ -253,128 +417,555 @@ function determineMaxValues(visualizationData) {
     maxX = 0;
     maxY = 0;
     maxZ = 0;
-    const keys = Object.keys(visualizationData);
-    console.log('grid keys:', keys);
-    keys.forEach(key => {
+    Object.keys(visualizationData || {}).forEach((key) => {
         const [x, y, z] = key
             .replace(/[()]/g, '')
             .split(',')
-            .map(s => Number(String(s).trim()));
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
-        if (z > maxZ) maxZ = z;
+            .map((s) => Number(String(s).trim()));
+        if (Number.isFinite(x)) maxX = Math.max(maxX, x);
+        if (Number.isFinite(y)) maxY = Math.max(maxY, y);
+        if (Number.isFinite(z)) maxZ = Math.max(maxZ, z);
     });
 }
 
 function initializeUIElements() {
-    sliders = [
-        new Slider(1300, 50, 250, 20, "Program Id 0", -1, maxX),
-        new Slider(1300, 120, 250, 20, "Program Id 1", -1, maxY),
-        new Slider(1300, 190, 250, 20, "Program Id 2", -1, maxZ)
-    ];
-
-    zSlider = new Slider(50, 860, 1200, 20, "Z-axis", 0, maxZ);
-    zSlider.enabled = maxZ > 0;
-
-    precomputeButton = new Button(1300, 260, 250, 40, "Precompute");
-    kernelGrid = new KernelGrid(50, 50, 1200, 800, [maxX + 1, maxY + 1, maxZ + 1], globalData.ops.visualization_data);
-    backButton = new Button(50, 50, 100, 40, "Back");
-    const buttonSize = 40;
-    const margin = 10;
-    infoButton = new Button(
-        canvas.width - buttonSize - margin,
-        margin,
-        buttonSize,
-        buttonSize,
-        "i",
-        true
+    if (!globalData || !globalData.ops) return;
+    const vizData = globalData.ops.visualization_data || {};
+    const gridRect = getKernelGridRect();
+    kernelGrid = new KernelGrid(
+        gridRect.x,
+        gridRect.y,
+        gridRect.width,
+        gridRect.height,
+        [maxX + 1, maxY + 1, maxZ + 1],
+        vizData
     );
+    kernelGrid.updateZ(zSlice);
+    kernelGrid.updateFilter(0, filterValues[0]);
+    kernelGrid.updateFilter(1, filterValues[1]);
+    kernelGrid.updateFilter(2, filterValues[2]);
+    createProgramIdControls();
+    updateZSliderState();
+
+    if (!infoPopup) {
+        infoPopup = createInfoPopup();
+    }
 
     isInitialized = true;
-
-    infoPopup = createInfoPopup();
+    draw();
 }
 
-function switchToTensorView(clickedBlock) {
-    currentView = 'tensor';
-    currentBlockData = clickedBlock;
-    console.log("Switched to tensor view. Block data:", clickedBlock);
+function createProgramIdControls() {
+    if (!controls.pidContainer) return;
+    controls.pidContainer.innerHTML = '';
+    const labels = ['Program Id 0', 'Program Id 1', 'Program Id 2'];
+    const maxValues = [maxX, maxY, maxZ];
+    labels.forEach((label, index) => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'control-field';
+        const fieldLabel = document.createElement('label');
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = label;
+        const valueSpan = document.createElement('span');
+        valueSpan.className = 'value-pill';
+        valueSpan.id = `pid-value-${index}`;
+        valueSpan.textContent = filterValues[index] < 0 ? 'All' : String(filterValues[index]);
+        fieldLabel.appendChild(nameSpan);
+        fieldLabel.appendChild(valueSpan);
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.min = -1;
+        slider.max = maxValues[index];
+        slider.value = filterValues[index];
+        slider.dataset.filterIndex = index;
+        slider.disabled = maxValues[index] <= 0;
+        slider.addEventListener('input', handleProgramFilterChange);
+        wrapper.appendChild(fieldLabel);
+        wrapper.appendChild(slider);
+        controls.pidContainer.appendChild(wrapper);
+    });
+}
 
-    containerElement.style.pointerEvents = 'auto';
-    containerElement.style.display = 'block';
-    clickedBlock.showDetailedView();
+function handleProgramFilterChange(event) {
+    const index = Number(event.target.dataset.filterIndex);
+    const value = Number(event.target.value);
+    filterValues[index] = value;
+    const pill = document.getElementById(`pid-value-${index}`);
+    if (pill) {
+        pill.textContent = value < 0 ? 'All' : String(value);
+    }
+    if (kernelGrid) {
+        kernelGrid.updateFilter(index, value);
+        draw();
+    }
+}
 
-    canvas.style.display = 'none';
+function updateZSliderState() {
+    if (!controls.zSlider) return;
+    controls.zSlider.min = 0;
+    controls.zSlider.max = maxZ;
+    controls.zSlider.disabled = maxZ <= 0;
+    setZSlice(Math.min(zSlice, maxZ));
 }
 
 function handleMouseEvent(event) {
-    if (!isInitialized) {
-        console.warn('UI elements not initialized yet');
-        return;
-    }
-    if (infoButton) {
-        infoButton.handleEvent(event);
-        if (event.type === 'mousedown' && infoButton.isHovered) {
-            showInfoPopup(infoPopup);
-        }
-    }
+    if (!isInitialized || currentView !== 'main') return;
+    if (!kernelGrid) return;
     const { offsetX, offsetY } = event;
-    if (currentView === 'main') {
-        sliders.forEach((slider, index) => {
-            slider.handleEvent(event);
-            if (kernelGrid) {
-                kernelGrid.updateFilter(index, slider.value);
-            }
-        });
-        if (zSlider && zSlider.enabled) {
-            zSlider.handleEvent(event);
-            if (kernelGrid) {
-                kernelGrid.updateZ(zSlider.value);
-            }
-        }
-        if (precomputeButton) {
-            precomputeButton.handleEvent(event);
-        }
-        if (kernelGrid) {
-            kernelGrid.handleMouseMove(offsetX, offsetY);
-            if (event.type === 'mousedown') {
-                const clickedBlock = kernelGrid.handleClick(offsetX, offsetY);
-                if (clickedBlock) {
-                    switchToTensorView(clickedBlock);
-                }
-            }
-        }
-    } else if (currentView === 'tensor') {
-        if (backButton) {
-            backButton.handleEvent(event);
-            if (event.type === 'mousedown' && backButton.isHovered) {
-                switchToMainView();
-            }
+    if (event.type === 'mousemove') {
+        kernelGrid.handleMouseMove(offsetX, offsetY);
+    }
+    if (event.type === 'mousedown') {
+        const block = kernelGrid.handleClick(offsetX, offsetY);
+        if (block) {
+            switchToTensorView(block);
+            return;
         }
     }
     draw();
 }
 
 function draw() {
-    if (!ctx) {
-        console.error('Canvas context not available');
+    if (!ctx || !canvas) return;
+    ctx.clearRect(0, 0, canvasLogicalWidth, canvasLogicalHeight);
+    const palette = getThemeColors();
+    ctx.fillStyle = palette.canvasBg;
+    ctx.fillRect(0, 0, canvasLogicalWidth, canvasLogicalHeight);
+    if (currentView === 'main' && kernelGrid) {
+        kernelGrid.draw(ctx, palette);
+    }
+}
+
+function collectOpsByType(kind = 'any') {
+    if (!globalData || !globalData.ops || !globalData.ops.visualization_data) return [];
+    const vizData = globalData.ops.visualization_data;
+    const keys = Object.keys(vizData).sort((a, b) => {
+        const parse = (key) =>
+            key
+                .replace(/[()]/g, '')
+                .split(',')
+                .map((s) => Number(String(s).trim()));
+        const [ax, ay, az] = parse(a);
+        const [bx, by, bz] = parse(b);
+        if (ax !== bx) return ax - bx;
+        if (ay !== by) return ay - by;
+        return az - bz;
+    });
+    const ops = [];
+    keys.forEach((key) => {
+        const list = vizData[key] || [];
+        list.forEach((op) => {
+            if (op && op.overall_key && (kind === 'any' || op.type === kind)) {
+                ops.push(op);
+            }
+        });
+    });
+    return ops;
+}
+
+async function fetchOverallData(keys, kind) {
+    const unique = Array.from(new Set((keys || []).filter(Boolean)));
+    if (!unique.length) {
+        throw new Error('No overall data available');
+    }
+    const API_BASE = window.__TRITON_VIZ_API__ || '';
+    const endpoint = kind === 'store' ? 'store_overall' : 'load_overall';
+    const results = await Promise.all(
+        unique.map(async (key) => {
+            const resp = await fetch(`${API_BASE}/api/${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key }),
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.error) {
+                throw new Error(data && data.error ? data.error : 'Request failed');
+            }
+            return data;
+        })
+    );
+    const merged = {
+        shape: results[0]?.shape || [],
+        slice_shape: results[0]?.slice_shape || [],
+        tiles: [],
+    };
+    results.forEach((entry) => {
+        (entry.tiles || []).forEach((tile) => merged.tiles.push(tile));
+    });
+    return merged;
+}
+
+async function showOverallOverlay() {
+    const ops = collectOpsByType('any');
+    if (!ops.length) {
+        showControlToast('No Load/Store ops available to aggregate.');
         return;
     }
+    currentView = 'overall';
+    setGlobalCodeButtonVisible(false);
+    if (canvas) canvas.style.display = 'none';
+    if (!containerElement) return;
+    containerElement.style.pointerEvents = 'auto';
+    containerElement.style.display = 'block';
+    containerElement.innerHTML = '';
 
-    ctx.fillStyle = '#1e1e28';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const overlay = document.createElement('div');
+    overlay.className = 'overall-overlay';
+    const shell = document.createElement('div');
+    shell.className = 'overall-shell';
+    overlay.appendChild(shell);
 
-    if (currentView === 'main' || currentView === 'main') {
-        if (kernelGrid) kernelGrid.draw(ctx);
-        sliders.forEach(slider => slider.draw(ctx));
-        if (zSlider && zSlider.enabled) {
-            zSlider.draw(ctx);
+    const titleRow = document.createElement('div');
+    titleRow.className = 'overlay-title-row';
+    const title = document.createElement('h2');
+    title.textContent = 'Load / Store Overview';
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = `${ops.length} ops`;
+    titleRow.appendChild(title);
+    titleRow.appendChild(badge);
+    const showCodeBtn = document.createElement('button');
+    showCodeBtn.className = 'viz-button ghost';
+    showCodeBtn.textContent = 'Show Code: OFF';
+    titleRow.appendChild(showCodeBtn);
+
+    // Kernel Summary toggle + panel (op counts + load/store bytes).
+    let summaryPanel = null;
+    const destroySummaryPanel = () => {
+        if (summaryPanel && summaryPanel.remove) summaryPanel.remove();
+        summaryPanel = null;
+    };
+
+    const summaryBtn = document.createElement('button');
+    summaryBtn.className = 'viz-button ghost';
+    summaryBtn.textContent = 'Summary: OFF';
+    titleRow.appendChild(summaryBtn);
+
+    const openSummaryPanel = () => {
+        destroySummaryPanel();
+        try {
+            const panel = document.createElement('div');
+            panel.className = 'info-card';
+            panel.style.position = 'fixed';
+            panel.style.right = '24px';
+            panel.style.top = '96px';
+            panel.style.maxWidth = '320px';
+            panel.style.zIndex = '2200';
+
+            const header = document.createElement('div');
+            header.className = 'panel-header drag-handle';
+            header.style.marginBottom = '6px';
+            const titleSpan = document.createElement('span');
+            titleSpan.textContent = 'Kernel Summary';
+            header.appendChild(titleSpan);
+            const grip = document.createElement('span');
+            grip.className = 'drag-grip';
+            grip.setAttribute('aria-hidden', 'true');
+            grip.textContent = '⠿';
+            header.appendChild(grip);
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'viz-button ghost';
+            closeBtn.textContent = 'Close';
+            closeBtn.style.marginLeft = 'auto';
+            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+            closeBtn.addEventListener('click', () => {
+                destroySummaryPanel();
+                summaryBtn.textContent = 'Summary: OFF';
+            });
+            header.appendChild(closeBtn);
+            panel.appendChild(header);
+
+            const body = document.createElement('div');
+            body.style.fontSize = '11px';
+            body.style.display = 'flex';
+            body.style.flexDirection = 'column';
+            body.style.gap = '6px';
+
+            // 1) Op counts from visualization_data.
+            const vizData = (globalData && globalData.ops && globalData.ops.visualization_data) || {};
+            const opCounts = {};
+            Object.values(vizData).forEach((list) => {
+                (list || []).forEach((op) => {
+                    const t = (op && op.type) || 'Unknown';
+                    opCounts[t] = (opCounts[t] || 0) + 1;
+                });
+            });
+            const countsKeys = Object.keys(opCounts).sort();
+            const countsBlock = document.createElement('div');
+            const countsTitle = document.createElement('div');
+            countsTitle.textContent = 'Op counts';
+            countsTitle.style.fontWeight = '600';
+            countsTitle.style.marginBottom = '2px';
+            countsBlock.appendChild(countsTitle);
+            if (countsKeys.length) {
+                const list = document.createElement('ul');
+                list.style.margin = '0';
+                list.style.paddingLeft = '16px';
+                countsKeys.forEach((name) => {
+                    const li = document.createElement('li');
+                    li.textContent = `${name}: ${opCounts[name]}`;
+                    list.appendChild(li);
+                });
+                countsBlock.appendChild(list);
+            } else {
+                const empty = document.createElement('div');
+                empty.textContent = 'No ops recorded.';
+                countsBlock.appendChild(empty);
+            }
+            body.appendChild(countsBlock);
+
+            // 2) Load/Store bytes aggregated from per-op metadata, plus optional extra stats.
+            const analysis = globalData && globalData.analysis;
+            const metrics = analysis && Array.isArray(analysis.Metric) ? analysis.Metric : null;
+            const values = analysis && Array.isArray(analysis.Value) ? analysis.Value : null;
+            const bytesBlock = document.createElement('div');
+            const bytesTitle = document.createElement('div');
+            bytesTitle.textContent = 'Load / Store bytes';
+            bytesTitle.style.fontWeight = '600';
+            bytesTitle.style.margin = '6px 0 2px';
+            bytesBlock.appendChild(bytesTitle);
+
+            const vizBytes = { Load: 0, Store: 0 };
+            Object.values(vizData).forEach((list) => {
+                (list || []).forEach((op) => {
+                    if (!op || typeof op.bytes !== 'number') return;
+                    if (op.type === 'Load') {
+                        vizBytes.Load += Math.max(0, op.bytes);
+                    } else if (op.type === 'Store') {
+                        vizBytes.Store += Math.max(0, op.bytes);
+                    }
+                });
+            });
+
+            const table = document.createElement('table');
+            table.style.width = '100%';
+            table.style.borderCollapse = 'collapse';
+
+            const addRow = (label, value) => {
+                const row = document.createElement('tr');
+                const k = document.createElement('td');
+                const v = document.createElement('td');
+                k.textContent = label;
+                k.style.paddingRight = '4px';
+                k.style.verticalAlign = 'top';
+                v.textContent = String(value);
+                v.style.textAlign = 'right';
+                v.style.whiteSpace = 'nowrap';
+                row.appendChild(k);
+                row.appendChild(v);
+                table.appendChild(row);
+            };
+
+            addRow('Total load bytes', vizBytes.Load);
+            addRow('Total store bytes', vizBytes.Store);
+
+            // Number of grids that actually perform Load/Store.
+            const activeGridKeys = Object.entries(vizData).filter(([, list]) =>
+                (list || []).some((op) => op && (op.type === 'Load' || op.type === 'Store'))
+            );
+            addRow('Grids with Load/Store', activeGridKeys.length);
+
+            // If analysis metrics are available, append them as extra rows (excluding raw "Grid Size").
+            if (metrics && values && metrics.length === values.length && metrics.length > 0) {
+                metrics.forEach((name, idx) => {
+                    const label = String(name);
+                    if (String(label) === 'Grid Size') return;
+                    const value = values[idx];
+                    addRow(label, value);
+                });
+            }
+
+            bytesBlock.appendChild(table);
+            body.appendChild(bytesBlock);
+
+            panel.appendChild(body);
+            document.body.appendChild(panel);
+            enableDrag(panel, { handle: header, bounds: window, initialLeft: window.innerWidth - 360, initialTop: 96 });
+            summaryPanel = panel;
+        } catch (e) {
+            console.warn('Kernel summary panel failed:', e);
         }
-        if (precomputeButton) precomputeButton.draw(ctx);
-        if (infoButton) {
-            infoButton.draw(ctx);
+    };
+
+    summaryBtn.addEventListener('click', () => {
+        const turnOn = summaryBtn.textContent.endsWith('OFF');
+        summaryBtn.textContent = `Summary: ${turnOn ? 'ON' : 'OFF'}`;
+        if (turnOn) {
+            openSummaryPanel();
+        } else {
+            destroySummaryPanel();
         }
+    });
+
+    shell.appendChild(titleRow);
+
+    const tabs = document.createElement('div');
+    tabs.className = 'overall-tabs';
+    shell.appendChild(tabs);
+
+    const contentArea = document.createElement('div');
+    contentArea.className = 'overall-content';
+    shell.appendChild(contentArea);
+
+    const footerNote = document.createElement('div');
+    footerNote.className = 'info-card';
+    footerNote.textContent = 'Tip: switch themes or filters before capturing paper-ready shots.';
+    shell.appendChild(footerNote);
+
+    const backBtn = document.createElement('button');
+    backBtn.className = 'viz-button ghost overall-back';
+    backBtn.textContent = 'Back to Canvas';
+    backBtn.addEventListener('click', () => {
+        closeOverallOverlay();
+        switchToMainView();
+        destroyOverallCodePanel();
+        // Ensure kernel summary panel is cleaned up when leaving overall view
+        if (typeof destroySummaryPanel === 'function') {
+            destroySummaryPanel();
+            if (summaryBtn) summaryBtn.textContent = 'Summary: OFF';
+        }
+    });
+    shell.appendChild(backBtn);
+
+    containerElement.appendChild(overlay);
+
+    let currentTab = null;
+    let currentOverallOp = null;
+    let overallCodePanel = null;
+
+    const destroyOverallCodePanel = () => {
+        if (overallCodePanel && overallCodePanel.remove) overallCodePanel.remove();
+        overallCodePanel = null;
+    };
+
+    const openOverallCodePanel = async (op) => {
+        destroyOverallCodePanel();
+        if (!op || !op.uuid) {
+            showControlToast('No code available for this operation.');
+            return;
+        }
+        const wrapper = document.createElement('div');
+        wrapper.className = 'show-code-panel';
+        const header = document.createElement('div');
+        header.className = 'panel-header drag-handle';
+        header.innerHTML = '<span>Operation Code & Context</span><span class="drag-grip" aria-hidden="true">⠿</span>';
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'viz-button ghost';
+        closeBtn.textContent = 'Close';
+        closeBtn.style.marginLeft = 'auto';
+        closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+        closeBtn.addEventListener('click', () => {
+            destroyOverallCodePanel();
+            showCodeBtn.textContent = 'Show Code: OFF';
+        });
+        header.appendChild(closeBtn);
+        wrapper.appendChild(header);
+        const meta = document.createElement('div');
+        meta.style.marginBottom = '6px';
+        meta.style.fontSize = '12px';
+        wrapper.appendChild(meta);
+        const pre = document.createElement('pre');
+        pre.style.margin = '0';
+        wrapper.appendChild(pre);
+        document.body.appendChild(wrapper);
+        enableDrag(wrapper, { handle: header, bounds: window, initialLeft: window.innerWidth - 520, initialTop: 120 });
+        overallCodePanel = wrapper;
+        try {
+            const API_BASE = window.__TRITON_VIZ_API__ || '';
+            const res = await fetch(`${API_BASE}/api/op_code`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ uuid: op.uuid, frame_idx: 0, context: 8 })
+            });
+            const data = await res.json();
+            meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
+            const lines = (data.lines || []).map((line) => {
+                const mark = (data.highlight === line.no) ? '▶ ' : '  ';
+                return `${mark}${String(line.no).padStart(6, ' ')} | ${line.text || ''}`;
+            }).join('\n');
+            pre.textContent = lines || '(no code available)';
+        } catch (err) {
+            pre.textContent = `Failed to load code: ${err}`;
+        }
+    };
+
+    showCodeBtn.addEventListener('click', async () => {
+        const turnOn = showCodeBtn.textContent.endsWith('OFF');
+        showCodeBtn.textContent = `Show Code: ${turnOn ? 'ON' : 'OFF'}`;
+        if (!turnOn) {
+            destroyOverallCodePanel();
+            return;
+        }
+        if (currentOverallOp) {
+            await openOverallCodePanel(currentOverallOp);
+        } else {
+            showControlToast('Select an operation first.');
+            showCodeBtn.textContent = 'Show Code: OFF';
+        }
+    });
+
+    const selectOp = async (op, tabElement) => {
+        currentOverallOp = op;
+        if (currentTab) currentTab.classList.remove('active');
+        currentTab = tabElement;
+        currentTab.classList.add('active');
+        if (overallCleanup) {
+            overallCleanup();
+            overallCleanup = null;
+        }
+        contentArea.innerHTML = '<div class="overall-empty">Loading…</div>';
+        try {
+            const payload = await getOverallPayload(op);
+            contentArea.innerHTML = '';
+            const renderer = op.type === 'Store' ? createStoreOverallVisualization : createLoadOverallVisualization;
+            overallCleanup = renderer(contentArea, payload);
+            if (showCodeBtn.textContent.endsWith('ON')) {
+                await openOverallCodePanel(op);
+            }
+        } catch (err) {
+            contentArea.innerHTML = `<div class="overall-empty">${err}</div>`;
+        }
+    };
+
+    ops.forEach((op, idx) => {
+        const tab = document.createElement('button');
+        tab.textContent = `${idx + 1}. ${op.type} (${(op.global_shape || []).join('×') || 'shape'})`;
+        if (idx === 0) tab.classList.add('active');
+        tab.addEventListener('click', () => selectOp(op, tab));
+        tabs.appendChild(tab);
+        if (idx === 0) {
+            selectOp(op, tab);
+        }
+    });
+}
+
+async function getOverallPayload(op) {
+    if (!op.overall_key) {
+        throw new Error('Overall data unavailable for this operation.');
     }
+    const cacheKey = `${op.type}:${op.overall_key}`;
+    if (!overallCache[cacheKey]) {
+        const endpoint = op.type === 'Store' ? 'store_overall' : 'load_overall';
+        const API_BASE = window.__TRITON_VIZ_API__ || '';
+        const resp = await fetch(`${API_BASE}/api/${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: op.overall_key }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            throw new Error(data && data.error ? data.error : 'Request failed');
+        }
+        overallCache[cacheKey] = data;
+    }
+    const data = overallCache[cacheKey];
+    return {
+        ...op,
+        overall_mode: true,
+        overall_tiles: data.tiles || [],
+        overall_shape: data.shape || op.global_shape,
+        overall_slice_shape: data.slice_shape || op.slice_shape,
+    };
 }
 
 async function fetchData() {
@@ -382,24 +973,16 @@ async function fetchData() {
         const API_BASE = window.__TRITON_VIZ_API__ || '';
         const response = await fetch(`${API_BASE}/api/data`);
         globalData = await response.json();
-        console.log(globalData);
-
-        determineMaxValues(globalData.ops.visualization_data);
+        determineMaxValues(globalData?.ops?.visualization_data || {});
         initializeUIElements();
-        draw();
     } catch (error) {
         console.error('Error fetching data:', error);
+        showControlToast('Failed to load data. Please ensure the backend is running.');
     }
 }
 
-// Initialize app when DOM is loaded
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        initializeApp();
-        fetchData();
-    });
+    document.addEventListener('DOMContentLoaded', initializeApp);
 } else {
-    // DOM is already loaded
     initializeApp();
-    fetchData();
 }
