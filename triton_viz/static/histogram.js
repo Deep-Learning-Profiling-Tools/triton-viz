@@ -38,17 +38,43 @@ export function createHistogramOverlay(containerElement, options) {
 
     const controls = document.createElement("div");
     controls.style.display = "flex";
-    controls.style.gap = "8px";
+    controls.style.gap = "12px";
     controls.style.flexWrap = "wrap";
+    controls.style.alignItems = "flex-end";
+
+    const sourceGroup = document.createElement("div");
+    sourceGroup.style.display = "flex";
+    sourceGroup.style.flexDirection = "column";
+    sourceGroup.style.gap = "4px";
+
+    const sourceLabel = document.createElement("label");
+    sourceLabel.textContent = "Activation";
+    sourceLabel.style.fontSize = "12px";
+    sourceLabel.style.opacity = "0.8";
+    sourceGroup.appendChild(sourceLabel);
 
     const select = document.createElement("select");
+    select.id = "histogram-source";
     sources.forEach((src) => {
         const opt = document.createElement("option");
         opt.value = src.value;
         opt.textContent = src.label;
         select.appendChild(opt);
     });
-    controls.appendChild(select);
+    sourceLabel.htmlFor = select.id;
+    sourceGroup.appendChild(select);
+    controls.appendChild(sourceGroup);
+
+    const binsGroup = document.createElement("div");
+    binsGroup.style.display = "flex";
+    binsGroup.style.flexDirection = "column";
+    binsGroup.style.gap = "4px";
+
+    const binsLabel = document.createElement("label");
+    binsLabel.textContent = "Bins";
+    binsLabel.style.fontSize = "12px";
+    binsLabel.style.opacity = "0.8";
+    binsGroup.appendChild(binsLabel);
 
     const binInput = document.createElement("input");
     binInput.type = "number";
@@ -58,11 +84,10 @@ export function createHistogramOverlay(containerElement, options) {
     binInput.step = 2;
     binInput.style.width = "80px";
     binInput.title = "Number of bins";
-    controls.appendChild(binInput);
-
-    const refreshBtn = document.createElement("button");
-    refreshBtn.textContent = "Refresh";
-    controls.appendChild(refreshBtn);
+    binInput.id = "histogram-bins";
+    binsLabel.htmlFor = binInput.id;
+    binsGroup.appendChild(binInput);
+    controls.appendChild(binsGroup);
 
     overlay.appendChild(controls);
 
@@ -94,11 +119,10 @@ export function createHistogramOverlay(containerElement, options) {
 
     button.addEventListener("click", show);
 
-    refreshBtn.addEventListener("click", () => {
+    select.addEventListener("change", () => {
         updateHistogram();
     });
-
-    select.addEventListener("change", () => {
+    binInput.addEventListener("input", () => {
         updateHistogram();
     });
 

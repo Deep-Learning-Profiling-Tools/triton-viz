@@ -464,10 +464,14 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     const histogramUI = createHistogramOverlay(containerElement, {
         title: 'Dot Value Distribution',
         apiBase: API_BASE,
-        sources: [{ value: 'C', label: 'C Output' }],
-        buildRequestBody: (_source, bins) => ({
+        sources: [
+            { value: 'A', label: 'A Input' },
+            { value: 'B', label: 'B Input' },
+            { value: 'C', label: 'C Output' }
+        ],
+        buildRequestBody: (source, bins) => ({
             uuid: op.uuid,
-            source: 'C',
+            source,
             bins
         })
     });
