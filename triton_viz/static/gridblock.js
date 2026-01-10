@@ -151,8 +151,14 @@ export class GridBlock {
             header.className = 'panel-header drag-handle';
             header.style.fontWeight = '600';
             header.style.marginBottom = '8px';
-            header.innerHTML = '<span>Operation Code & Context</span><span class="drag-grip" aria-hidden="true">⠿</span>';
+            header.innerHTML = '<span>Code View</span><span class="drag-grip" aria-hidden="true">⠿</span>';
             wrapper.appendChild(header);
+            const blurb = document.createElement('div');
+            blurb.style.fontSize = '12px';
+            blurb.style.color = 'var(--text-secondary)';
+            blurb.style.marginBottom = '8px';
+            blurb.textContent = 'Arrow points to the line being visualized.';
+            wrapper.appendChild(blurb);
             try {
                 const API_BASE = window.__TRITON_VIZ_API__ || '';
                 const res = await fetch(`${API_BASE}/api/op_code`, {
