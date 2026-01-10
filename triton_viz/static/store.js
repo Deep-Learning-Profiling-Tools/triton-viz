@@ -184,6 +184,8 @@ export function createStoreVisualization(containerElement, op) {
         let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
         let legendEl = null;
         let labelSprites = [];
+        let allProgramsOn = false;
+        let allProgramTiles = null;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
         const COLOR_SLICE = new THREE.Color(1.0, 0.55, 0.0);    // Orange (highlight for store target)
@@ -213,6 +215,8 @@ export function createStoreVisualization(containerElement, op) {
 
         const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
         const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
+        const globalMesh = globalTensor.userData.mesh;
+        const sliceMesh = sliceTensor.userData.mesh;
 
         // Position slice tensor
         const globalSize = calculateTensorSize(op.global_shape);
@@ -275,6 +279,12 @@ export function createStoreVisualization(containerElement, op) {
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
         async function toggleColorize() {
+            if (allProgramsOn) {
+                allProgramsOn = false;
+                if (window.setOpControlState) {
+                    window.setOpControlState({ allPrograms: false });
+                }
+            }
             colorizeOn = !colorizeOn;
             if (colorizeOn) {
                 if (!tensorCache) {
@@ -318,15 +328,45 @@ export function createStoreVisualization(containerElement, op) {
             return histogramVisible;
         }
 
+        async function toggleAllPrograms() {
+            allProgramsOn = !allProgramsOn;
+            if (allProgramsOn) {
+                if (colorizeOn) {
+                    colorizeOn = false;
+                    destroyLegend();
+                    if (window.setOpControlState) {
+                        window.setOpControlState({ colorize: false });
+                    }
+                }
+                if (!allProgramTiles) {
+                    allProgramTiles = await fetchAllProgramTiles();
+                }
+                if (!allProgramTiles || !allProgramTiles.length) {
+                    allProgramsOn = false;
+                    return false;
+                }
+                applyAllProgramsTiles(allProgramTiles);
+                return true;
+            }
+            resetColorByValue();
+            return false;
+        }
+
         if (window.setOpControlHandlers) {
             window.setOpControlHandlers({
                 toggleColorize,
                 toggleShowCode,
                 toggleHistogram,
+                toggleAllPrograms: op.overall_key ? toggleAllPrograms : null,
             });
         }
         if (window.setOpControlState) {
-            window.setOpControlState({ colorize: colorizeOn, showCode: false, histogram: false });
+            window.setOpControlState({
+                colorize: colorizeOn,
+                showCode: false,
+                histogram: false,
+                allPrograms: false,
+            });
         }
 
         function isLightBackgroundHex(hex) {
@@ -465,7 +505,7 @@ export function createStoreVisualization(containerElement, op) {
                 const index = Math.floor(frame / 2);
                 const factor = (frame % 2) / 1.0;
 
-                if (index < op.global_coords.length) {
+                if (!allProgramsOn && index < op.global_coords.length) {
                     const globalCoord = op.global_coords[index];
                     const sliceCoord = op.slice_coords[index];
 
@@ -557,6 +597,88 @@ export function createStoreVisualization(containerElement, op) {
             sliceTensor.children.forEach((cube) => {
                 cube.material.color.copy(currentBaseSlice);
             });
+        }
+
+        function resetBaseColors() {
+            for (let idx = 0; idx < globalMesh.count; idx += 1) {
+                globalMesh.setColorAt(idx, currentBaseGlobal);
+            }
+            for (let idx = 0; idx < sliceMesh.count; idx += 1) {
+                sliceMesh.setColorAt(idx, currentBaseSlice);
+            }
+            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
+            if (sliceMesh.instanceColor) sliceMesh.instanceColor.needsUpdate = true;
+        }
+
+        function getRainbowColor(idx, total) {
+            const denom = total > 0 ? total : 1;
+            const hue = (idx / denom) % 1;
+            return new THREE.Color().setHSL(hue, 0.7, 0.55);
+        }
+
+        function coordToInstanceId(mesh, coord) {
+            if (!mesh || !coord) return null;
+            const coords = mesh.userData.coords;
+            if (coords) {
+                if (!mesh.userData.coordIndex) {
+                    const map = new Map();
+                    coords.forEach((entry, idx) => map.set(entry.join(','), idx));
+                    mesh.userData.coordIndex = map;
+                }
+                return mesh.userData.coordIndex.get(coord.join(','));
+            }
+            const shape = mesh.userData.shape;
+            if (!shape) return null;
+            const perm = mesh.userData.coordPerm;
+            const base = [coord[0], coord[1], coord[2] || 0];
+            const mapped = perm && perm.length === 3
+                ? [base[perm.indexOf(0)], base[perm.indexOf(1)], base[perm.indexOf(2)]]
+                : base;
+            const width = shape.width;
+            const height = shape.height;
+            const depth = shape.depth;
+            const [x, y, z] = mapped;
+            if (x < 0 || y < 0 || z < 0 || x >= width || y >= height || z >= depth) {
+                return null;
+            }
+            return z * width * height + y * width + x;
+        }
+
+        function paintCoords(mesh, coords, color) {
+            if (!mesh || !coords) return;
+            coords.forEach((coord) => {
+                const idx = coordToInstanceId(mesh, coord);
+                if (idx === null || idx === undefined) return;
+                mesh.setColorAt(idx, color);
+            });
+        }
+
+        async function fetchAllProgramTiles() {
+            if (!op.overall_key) return null;
+            const res = await fetch(`${API_BASE}/api/store_overall`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key: op.overall_key })
+            });
+            const data = await res.json();
+            if (!res.ok || data.error) {
+                console.warn('store_overall error:', data && data.error);
+                return null;
+            }
+            return data.tiles || [];
+        }
+
+        function applyAllProgramsTiles(tiles) {
+            if (!tiles || !tiles.length) return;
+            resetBaseColors();
+            const total = tiles.length;
+            tiles.forEach((tile, idx) => {
+                const color = getRainbowColor(idx, total);
+                paintCoords(globalMesh, tile.global_coords, color);
+                paintCoords(sliceMesh, tile.slice_coords, color);
+            });
+            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
+            if (sliceMesh.instanceColor) sliceMesh.instanceColor.needsUpdate = true;
         }
 
         function sampleStoreValue(cache, userData, fallback) {
@@ -685,7 +807,12 @@ export function createStoreVisualization(containerElement, op) {
                 window.setOpControlHandlers(null);
             }
             if (window.setOpControlState) {
-                window.setOpControlState({ colorize: false, showCode: false, histogram: false });
+                window.setOpControlState({
+                    colorize: false,
+                    showCode: false,
+                    histogram: false,
+                    allPrograms: false,
+                });
             }
             if (window.__tritonVizCodeHide) {
                 window.__tritonVizCodeHide();

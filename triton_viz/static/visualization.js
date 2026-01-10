@@ -22,7 +22,7 @@ let maxY = 0;
 let maxZ = 0;
 let zSlice = 0;
 const overallCache = {};
-const filterValues = [-1, -1, -1];
+const filterValues = [0, 0, 0];
 const THEME_STORAGE_KEY = 'triton-viz-theme';
 
 const controls = {
@@ -38,6 +38,7 @@ const controls = {
     resizer: null,
     opColorizeBtn: null,
     opHistogramBtn: null,
+    opAllProgramsBtn: null,
 };
 
 let controlToastEl = null;
@@ -49,6 +50,7 @@ const opControls = {
         colorize: false,
         showCode: false,
         histogram: false,
+        allPrograms: false,
     },
 };
 
@@ -67,7 +69,12 @@ function setOpControlHandlers(handlers = null) {
 
 function resetOpControls() {
     opControls.handlers = null;
-    opControls.state = { colorize: false, showCode: false, histogram: false };
+    opControls.state = {
+        colorize: false,
+        showCode: false,
+        histogram: false,
+        allPrograms: false,
+    };
     if (window.__tritonVizCodeHide) {
         window.__tritonVizCodeHide();
     }
@@ -89,6 +96,10 @@ function updateOpControls() {
     if (controls.opHistogramBtn) {
         controls.opHistogramBtn.disabled = !handlers || !handlers.toggleHistogram;
         updateToggleLabel(controls.opHistogramBtn, 'Value Histogram', !!state.histogram);
+    }
+    if (controls.opAllProgramsBtn) {
+        controls.opAllProgramsBtn.disabled = !handlers || !handlers.toggleAllPrograms;
+        updateToggleLabel(controls.opAllProgramsBtn, 'All Program IDs', !!state.allPrograms);
     }
 }
 
@@ -199,6 +210,7 @@ function initializeApp() {
     controls.themeToggle = document.getElementById('theme-toggle');
     controls.opColorizeBtn = document.getElementById('btn-op-colorize');
     controls.opHistogramBtn = document.getElementById('btn-op-histogram');
+    controls.opAllProgramsBtn = document.getElementById('btn-op-all-programs');
 
     if (!canvas || !canvasWrapper || !containerElement) {
         console.error('Essential visualization elements are missing.');
@@ -316,6 +328,14 @@ function setupControlEvents() {
             const handler = opControls.handlers?.toggleHistogram;
             if (!handler) return;
             applyToggleResult(handler(), 'histogram');
+        });
+    }
+
+    if (controls.opAllProgramsBtn) {
+        controls.opAllProgramsBtn.addEventListener('click', () => {
+            const handler = opControls.handlers?.toggleAllPrograms;
+            if (!handler) return;
+            applyToggleResult(handler(), 'allPrograms');
         });
     }
 }
@@ -437,7 +457,7 @@ class KernelGrid {
         this.visualizationData = visualizationData;
         this.currentZ = 0;
         this.blocks = [];
-        this.filterValues = [-1, -1, -1];
+        this.filterValues = [0, 0, 0];
         this.selectedBlock = null;
         this.calculateBlockSize();
         this.createBlocks();
