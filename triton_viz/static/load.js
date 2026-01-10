@@ -797,8 +797,8 @@ function getTextColor(bgColor) {
             const menu = document.createElement('div');
             Object.assign(menu.style, {
                 position: 'absolute',
-                top: '16px',
                 right: '16px',
+                bottom: '16px',
                 width: '220px',
                 padding: '10px',
                 background: 'rgba(0,0,0,0.65)',
