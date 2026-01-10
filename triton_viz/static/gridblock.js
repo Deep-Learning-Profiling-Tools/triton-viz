@@ -302,6 +302,15 @@ export class GridBlock {
             slider.max = String(maxValue);
             slider.value = String(initial);
             slider.disabled = maxValue <= 0;
+            const tickId = `detail-pid-ticks-${axis}`;
+            const ticks = document.createElement('datalist');
+            ticks.id = tickId;
+            for (let i = 0; i <= maxValue; i += 1) {
+                const opt = document.createElement('option');
+                opt.value = String(i);
+                ticks.appendChild(opt);
+            }
+            slider.setAttribute('list', tickId);
             slider.addEventListener('input', () => {
                 valueSpan.textContent = slider.value;
                 const nextX = Number(this.programIdInputs.x.value);
@@ -312,6 +321,7 @@ export class GridBlock {
             field.appendChild(nameSpan);
             field.appendChild(slider);
             field.appendChild(valueSpan);
+            field.appendChild(ticks);
             stack.appendChild(field);
             this.programIdInputs[axis] = slider;
             this.programIdValueEls[axis] = valueSpan;

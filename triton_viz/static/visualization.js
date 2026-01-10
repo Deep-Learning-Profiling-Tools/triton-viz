@@ -637,10 +637,20 @@ function createProgramIdControls() {
         slider.value = displayValue;
         slider.dataset.filterIndex = index;
         slider.disabled = isLocked;
+        const tickId = `pid-ticks-${index}`;
+        const ticks = document.createElement('datalist');
+        ticks.id = tickId;
+        for (let i = 0; i <= maxValues[index]; i += 1) {
+            const opt = document.createElement('option');
+            opt.value = String(i);
+            ticks.appendChild(opt);
+        }
+        slider.setAttribute('list', tickId);
         slider.addEventListener('input', handleProgramFilterChange);
         wrapper.appendChild(nameSpan);
         wrapper.appendChild(slider);
         wrapper.appendChild(valueSpan);
+        wrapper.appendChild(ticks);
         controls.pidContainer.appendChild(wrapper);
         if (isLocked && kernelGrid) {
             kernelGrid.updateFilter(index, 0);
