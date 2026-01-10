@@ -21,7 +21,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     const sideMenu = document.createElement('div');
     // Use fixed position and high z-index to ensure it's above WebGL canvas
     sideMenu.style.position = 'absolute';
-    sideMenu.style.top = '10px';
+    sideMenu.style.bottom = '10px';
     sideMenu.style.right = '10px';
     sideMenu.style.width = '200px';
     sideMenu.style.padding = '10px';
@@ -133,6 +133,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     const tmpPosition = new THREE.Vector3();
     const tmpQuat = new THREE.Quaternion();
     const tmpScale = new THREE.Vector3();
+    const tmpColor = new THREE.Color();
 
     function instanceLocalPosition(mesh, instanceId, target) {
         mesh.getMatrixAt(instanceId, tmpMatrix);
@@ -149,7 +150,20 @@ export function createMatMulVisualization(containerElement, op, viewState = null
 
     function clearHighlight(list, mesh, baseColor) {
         if (list.length === 0) return;
-        list.forEach((idx) => mesh.setColorAt(idx, baseColor));
+        const baseColors = mesh.userData.baseColors;
+        if (baseColors) {
+            list.forEach((idx) => {
+                const offset = idx * 3;
+                tmpColor.setRGB(
+                    baseColors[offset],
+                    baseColors[offset + 1],
+                    baseColors[offset + 2]
+                );
+                mesh.setColorAt(idx, tmpColor);
+            });
+        } else {
+            list.forEach((idx) => mesh.setColorAt(idx, baseColor));
+        }
         list.length = 0;
         if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
@@ -421,6 +435,9 @@ export function createMatMulVisualization(containerElement, op, viewState = null
 
     function resetColors() {
         clearHighlights(true);
+        matrixA.userData.baseColors = null;
+        matrixB.userData.baseColors = null;
+        matrixC.userData.baseColors = null;
         for (let idx = 0; idx < matrixA.count; idx++) {
             matrixA.setColorAt(idx, COLOR_A);
         }
@@ -476,46 +493,149 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         })
     });
     let colorOn = false;
-    let legendEl = null;
-    function destroyLegend(){ if(legendEl && legendEl.remove) legendEl.remove(); legendEl=null; }
-    function createLegend(min,max){
-        destroyLegend();
-        const w = document.createElement('div');
-        Object.assign(w.style,{position:'absolute', left:'10px', bottom:'60px', background:'rgba(0,0,0,0.6)', color:'#fff', padding:'6px 8px', borderRadius:'6px', zIndex:'2000', pointerEvents:'auto'});
-        const c = document.createElement('canvas'); c.width=220; c.height=10; const ctx=c.getContext('2d');
-        for(let x=0;x<c.width;x++){ const t=x/(c.width-1); const r=t,g=0.2,b=1-t; ctx.fillStyle=`rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`; ctx.fillRect(x,0,1,c.height);}
-        const lab=document.createElement('div'); lab.style.display='flex'; lab.style.justifyContent='space-between'; lab.style.marginTop='2px'; lab.innerHTML=`<span>${min.toFixed(3)}</span><span>${max.toFixed(3)}</span>`;
-        const ttl=document.createElement('div'); ttl.textContent='Value (C)'; ttl.style.marginBottom='4px'; ttl.style.opacity='0.9';
-        w.appendChild(ttl); w.appendChild(c); w.appendChild(lab); containerElement.appendChild(w); legendEl=w;
+    let legendContainer = null;
+    function destroyLegends() {
+        if (legendContainer && legendContainer.remove) legendContainer.remove();
+        legendContainer = null;
     }
-    async function fetchCValues(){
-        try{ const res=await fetch(`${API_BASE}/api/getMatmulC`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid: op.uuid})});
-            return await res.json(); }catch(e){ return {error:String(e)} }
+    function createLegendItem(label, min, max) {
+        const item = document.createElement('div');
+        item.style.display = 'grid';
+        item.style.gap = '4px';
+        const title = document.createElement('div');
+        title.textContent = `${label} Value`;
+        title.style.opacity = '0.9';
+        const canvas = document.createElement('canvas');
+        canvas.width = 220;
+        canvas.height = 10;
+        const ctx = canvas.getContext('2d');
+        for (let x = 0; x < canvas.width; x++) {
+            const t = x / (canvas.width - 1);
+            const r = t;
+            const g = 0.2;
+            const b = 1 - t;
+            ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+            ctx.fillRect(x, 0, 1, canvas.height);
+        }
+        const labels = document.createElement('div');
+        labels.style.display = 'flex';
+        labels.style.justifyContent = 'space-between';
+        labels.style.marginTop = '2px';
+        labels.innerHTML = `<span>${min.toFixed(3)}</span><span>${max.toFixed(3)}</span>`;
+        item.appendChild(title);
+        item.appendChild(canvas);
+        item.appendChild(labels);
+        return item;
     }
-    function applyColorCWithData(data){ if(!colorOn||!data||data.error) return; try{
-            const M=(data.shape||[])[0]||0, N=(data.shape||[])[1]||0; const vals2d=data.values||[];
-            const vals=[]; const rows=matrixC.userData.rows; const cols=matrixC.userData.cols;
-            for(let r=0;r<rows;r++){ for(let c=0;c<cols;c++){ vals.push((r<M&&c<N)? vals2d[r][c]:0.0); } }
-            const mn=Math.min(...vals), mx=Math.max(...vals);
-            for(let idx=0;idx<vals.length;idx++){
-                const v=vals[idx]; const u=(mx===mn)?0.5:(v-mn)/(mx-mn); const r=u,g=0.2,b=1-u;
-                matrixC.setColorAt(idx, new THREE.Color(r,g,b));
+    function createLegends(items) {
+        destroyLegends();
+        if (!items.length) return;
+        const wrapper = document.createElement('div');
+        Object.assign(wrapper.style, {
+            position: 'absolute',
+            left: '10px',
+            bottom: '10px',
+            background: 'rgba(0,0,0,0.6)',
+            color: '#fff',
+            padding: '8px',
+            borderRadius: '6px',
+            zIndex: '2000',
+            display: 'grid',
+            gap: '8px',
+            pointerEvents: 'auto',
+        });
+        items.forEach((item) => wrapper.appendChild(item));
+        containerElement.appendChild(wrapper);
+        legendContainer = wrapper;
+    }
+    async function fetchMatrixValues(name) {
+        try {
+            const res = await fetch(`${API_BASE}/api/getMatmul${name}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ uuid: op.uuid })
+            });
+            return await res.json();
+        } catch (e) {
+            return { error: String(e) };
+        }
+    }
+    function applyMatrixColors(mesh, data, label) {
+        if (!data || data.error) return null;
+        const rows = mesh.userData.rows;
+        const cols = mesh.userData.cols;
+        const values = Array.isArray(data.values) ? data.values : [];
+        const matrixValues = Array.isArray(values[0]) ? values : [values];
+        let min = Number.isFinite(data.min) ? data.min : Infinity;
+        let max = Number.isFinite(data.max) ? data.max : -Infinity;
+        const useDataBounds = Number.isFinite(data.min) && Number.isFinite(data.max);
+        if (!useDataBounds) {
+            for (let row = 0; row < rows; row++) {
+                const rowValues = matrixValues[row] || [];
+                for (let col = 0; col < cols; col++) {
+                    const raw = rowValues[col];
+                    const value = Number.isFinite(raw) ? raw : 0;
+                    min = Math.min(min, value);
+                    max = Math.max(max, value);
+                }
             }
-            if (matrixC.instanceColor) matrixC.instanceColor.needsUpdate = true;
-            createLegend(mn,mx);
-        }catch(e){}
+        }
+        if (!Number.isFinite(min)) min = 0;
+        if (!Number.isFinite(max)) max = min;
+        const denom = max - min || 1;
+        const count = rows * cols;
+        const baseColors = new Float32Array(count * 3);
+        for (let row = 0; row < rows; row++) {
+            const rowValues = matrixValues[row] || [];
+            for (let col = 0; col < cols; col++) {
+                const idx = row * cols + col;
+                const raw = rowValues[col];
+                const value = Number.isFinite(raw) ? raw : 0;
+                const t = (value - min) / denom;
+                const r = t;
+                const g = 0.2;
+                const b = 1 - t;
+                baseColors[idx * 3] = r;
+                baseColors[idx * 3 + 1] = g;
+                baseColors[idx * 3 + 2] = b;
+                tmpColor.setRGB(r, g, b);
+                mesh.setColorAt(idx, tmpColor);
+            }
+        }
+        mesh.userData.baseColors = baseColors;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        return { label, min, max };
     }
     async function toggleColorize() {
         colorOn = !colorOn;
         if (!colorOn) {
-            destroyLegend();
+            destroyLegends();
             resetColors();
             requestRender();
             return colorOn;
         }
         clearHighlights(true);
-        const data = await fetchCValues();
-        applyColorCWithData(data);
+        const [aData, bData, cData] = await Promise.all([
+            fetchMatrixValues('A'),
+            fetchMatrixValues('B'),
+            fetchMatrixValues('C'),
+        ]);
+        const aLegend = applyMatrixColors(matrixA, aData, 'A');
+        const bLegend = applyMatrixColors(matrixB, bData, 'B');
+        const cLegend = applyMatrixColors(matrixC, cData, 'C');
+        if (!aLegend || !bLegend || !cLegend) {
+            colorOn = false;
+            destroyLegends();
+            resetColors();
+            requestRender();
+            return colorOn;
+        }
+        const items = [
+            createLegendItem(aLegend.label, aLegend.min, aLegend.max),
+            createLegendItem(bLegend.label, bLegend.min, bLegend.max),
+            createLegendItem(cLegend.label, cLegend.min, cLegend.max),
+        ];
+        createLegends(items);
         requestRender();
         return colorOn;
     }

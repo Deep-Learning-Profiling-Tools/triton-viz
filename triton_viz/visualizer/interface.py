@@ -377,6 +377,64 @@ def get_matmul_c():
         return jsonify({"error": f"MatMul compute failed: {e}"}), 200
 
 
+@app.route("/api/getMatmulA", methods=["POST"])
+def get_matmul_a():
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    a = op.get("input_data")
+    if a is None:
+        return jsonify({"error": "MatMul A tensor not available"}), 200
+    try:
+        import numpy as _np
+
+        a_np = _np.asarray(a)
+        amin = float(_np.min(a_np)) if a_np.size else 0.0
+        amax = float(_np.max(a_np)) if a_np.size else 0.0
+        return jsonify(
+            {
+                "shape": list(a_np.shape),
+                "min": amin,
+                "max": amax,
+                "values": a_np.tolist(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"MatMul A fetch failed: {e}"}), 200
+
+
+@app.route("/api/getMatmulB", methods=["POST"])
+def get_matmul_b():
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    b = op.get("other_data")
+    if b is None:
+        return jsonify({"error": "MatMul B tensor not available"}), 200
+    try:
+        import numpy as _np
+
+        b_np = _np.asarray(b)
+        bmin = float(_np.min(b_np)) if b_np.size else 0.0
+        bmax = float(_np.max(b_np)) if b_np.size else 0.0
+        return jsonify(
+            {
+                "shape": list(b_np.shape),
+                "min": bmin,
+                "max": bmax,
+                "values": b_np.tolist(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"MatMul B fetch failed: {e}"}), 200
+
+
 @app.route("/api/getMatmulVectors", methods=["POST"])
 def get_matmul_vectors():
     """Return A[row, :] and B[:, col] for a given Dot op.
