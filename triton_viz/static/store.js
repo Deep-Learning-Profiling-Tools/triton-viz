@@ -152,10 +152,6 @@ export function createStoreVisualization(containerElement, op) {
         .catch((error) => console.error('Error:', error));
         try { window.current_op_uuid = op.uuid; } catch (e) {}
 
-        let currentStep = 0;
-        let frame = 0;
-        let isPaused = false;
-
         containerElement.innerHTML = '';
         containerElement.style.position = 'relative';
         const stage = document.createElement('div');
@@ -259,8 +255,7 @@ export function createStoreVisualization(containerElement, op) {
         orbitControls.dampingFactor = 0.05;
         orbitControls.target.copy(center);
         orbitControls.update();
-
-        const totalFrames = op.global_coords.length * 2 + 30;
+        orbitControls.addEventListener('change', requestRender);
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
@@ -292,12 +287,15 @@ export function createStoreVisualization(containerElement, op) {
                 if (tensorCache) {
                     applyColorByValue();
                     createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
+                    requestRender();
                 } else {
                     colorizeOn = false;
+                    requestRender();
                 }
             } else {
                 resetColorByValue();
                 destroyLegend();
+                requestRender();
             }
             return colorizeOn;
         }
@@ -396,6 +394,7 @@ export function createStoreVisualization(containerElement, op) {
                     lineMaterial.opacity = 0.28;
                 }
             }
+            requestRender();
         }
 
         const defaultBackground = '#000000';
@@ -404,7 +403,7 @@ export function createStoreVisualization(containerElement, op) {
         applyBackgroundTheme(defaultBackground);
         refreshTextOverlays();
         // Removed Flip demo button from Store view; Flip visualization is available under Flip op.
-        animate();
+        requestRender();
 
         function _updateMouseNDC(event) {
             mouse.x = (event.clientX / stage.clientWidth) * 2 - 1;
@@ -468,6 +467,7 @@ export function createStoreVisualization(containerElement, op) {
             } else {
                 updateSideMenu(null);
             }
+            requestRender();
         }
 
         function onMouseDown(event) {
@@ -494,22 +494,28 @@ export function createStoreVisualization(containerElement, op) {
             isDragging = false;
             dragTarget = null;
             stage.style.cursor = '';
+            requestRender();
         }
 
-        function animate() {
-            requestAnimationFrame(animate);
-            orbitControls.update();
-
-            if (!isPaused && frame < totalFrames) {
-                frame++;
+        let rafId = null;
+        let renderPending = false;
+        function requestRender() {
+            if (rafId !== null) {
+                renderPending = true;
+                return;
             }
+            rafId = requestAnimationFrame(renderFrame);
+        }
 
-            if (colorizeOn && tensorCache) {
-                applyColorByValue();
-            } else if (!colorizeOn) {
-                // ensure cached colors stay reset when exiting mode
-            }
+        function renderFrame() {
+            const needsMore = orbitControls.update();
             renderer.render(scene, camera);
+            if (needsMore || renderPending) {
+                renderPending = false;
+                rafId = requestAnimationFrame(renderFrame);
+                return;
+            }
+            rafId = null;
         }
 
 
@@ -1019,15 +1025,31 @@ export function createStoreOverallVisualization(containerElement, op) {
             scene.background = currentBackground;
             renderer.setClearColor(currentBackground, 1);
             renderTilesForBackground(value);
+            requestRender();
         });
 
         let rafId = null;
-        const animate = () => {
-            orbitControls.update();
+        let renderPending = false;
+        function requestRender() {
+            if (rafId !== null) {
+                renderPending = true;
+                return;
+            }
+            rafId = requestAnimationFrame(renderFrame);
+        }
+
+        function renderFrame() {
+            const needsMore = orbitControls.update();
             renderer.render(scene, camera);
-            rafId = requestAnimationFrame(animate);
-        };
-        animate();
+            if (needsMore || renderPending) {
+                renderPending = false;
+                rafId = requestAnimationFrame(renderFrame);
+                return;
+            }
+            rafId = null;
+        }
+
+        requestRender();
 
         return () => {
             if (rafId) cancelAnimationFrame(rafId);

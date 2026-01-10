@@ -37,10 +37,6 @@ export function createLoadVisualization(containerElement, op) {
         stage.className = 'viz-stage';
         containerElement.appendChild(stage);
 
-        let currentStep = 0;
-        let frame = 0;
-        let isPaused = false;
-
         const sideMenu = createSideMenu(containerElement);
         const histogramUI = createHistogramOverlay(containerElement, {
             title: 'Load Value Distribution',
@@ -207,6 +203,7 @@ function getTextColor(bgColor) {
                     lineMaterial.opacity = 0.28;
                 }
             }
+            requestRender();
         }
 
         const defaultBackground = '#000000';
@@ -218,13 +215,17 @@ function getTextColor(bgColor) {
         refreshTextOverlays();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown);
+        const handleKeyDown = (event) => {
+            onKeyDown(event);
+            requestRender();
+        };
+        setupEventListeners(stage, camera, renderer, onMouseMove, handleKeyDown, requestRender);
 
         // Additional pointer events for dragging
         stage.addEventListener('mousedown', onMouseDown);
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
-        animate();
+        requestRender();
 
         function _updateMouseNDC(event) {
             const rect = renderer.domElement.getBoundingClientRect();
@@ -296,6 +297,7 @@ function getTextColor(bgColor) {
             } else {
                 updateSideMenu(null);
             }
+            requestRender();
         }
 
         // --------- Colormap (Viridis-like) and Legend ---------
@@ -702,10 +704,12 @@ function getTextColor(bgColor) {
             }
             if (!tensorCache) {
                 colorizeOn = false;
+                requestRender();
                 return colorizeOn;
             }
             createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
             applyColorMapIfNeeded();
+            requestRender();
             return colorizeOn;
         }
 
@@ -1037,15 +1041,31 @@ export function createLoadOverallVisualization(containerElement, op) {
             scene.background = currentBackground;
             renderer.setClearColor(currentBackground, 1);
             renderTilesForBackground(value);
+            requestRender();
         });
 
         let rafId = null;
-        const animate = () => {
-            orbitControls.update();
+        let renderPending = false;
+        function requestRender() {
+            if (rafId !== null) {
+                renderPending = true;
+                return;
+            }
+            rafId = requestAnimationFrame(renderFrame);
+        }
+
+        function renderFrame() {
+            const needsMore = orbitControls.update();
             renderer.render(scene, camera);
-            rafId = requestAnimationFrame(animate);
-        };
-        animate();
+            if (needsMore || renderPending) {
+                renderPending = false;
+                rafId = requestAnimationFrame(renderFrame);
+                return;
+            }
+            rafId = null;
+        }
+
+        requestRender();
 
         return () => {
             if (rafId) cancelAnimationFrame(rafId);
