@@ -180,6 +180,7 @@ export function createStoreVisualization(containerElement, op) {
         let flipCleanup = null;
         let colorizeOn = false;
         let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
+        let legendEl = null;
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
         const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (starting color for global slice)
@@ -319,11 +320,13 @@ export function createStoreVisualization(containerElement, op) {
                 }
                 if (tensorCache) {
                     applyColorByValue();
+                    createLegend(tensorCache.scaleMin, tensorCache.scaleMax);
                 } else {
                     colorizeOn = false;
                 }
             } else {
                 resetColorByValue();
+                destroyLegend();
             }
             return colorizeOn;
         }
@@ -670,6 +673,54 @@ export function createStoreVisualization(containerElement, op) {
             applyColorsToTensor(sliceTensor, tensorCache.slice);
         }
 
+        function destroyLegend() {
+            if (legendEl && legendEl.remove) legendEl.remove();
+            legendEl = null;
+        }
+
+        function createLegend(min, max) {
+            destroyLegend();
+            const wrapper = document.createElement('div');
+            wrapper.style.position = 'absolute';
+            wrapper.style.top = '32px';
+            wrapper.style.left = '32px';
+            wrapper.style.background = 'rgba(0,0,0,0.7)';
+            wrapper.style.color = '#fff';
+            wrapper.style.padding = '8px 10px';
+            wrapper.style.borderRadius = '8px';
+            wrapper.style.fontSize = '12px';
+            wrapper.style.fontFamily = 'var(--font-sans)';
+            wrapper.style.zIndex = '2500';
+
+            const header = document.createElement('div');
+            header.style.fontWeight = '600';
+            header.style.marginBottom = '6px';
+            header.textContent = 'Value Scale';
+            wrapper.appendChild(header);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 220;
+            canvas.height = 12;
+            const ctx2 = canvas.getContext('2d');
+            for (let x = 0; x < canvas.width; x += 1) {
+                const t = x / (canvas.width - 1);
+                const color = TEMP_COLOR.copy(COLOR_COOL).lerp(COLOR_HOT, t);
+                ctx2.fillStyle = `#${color.getHexString()}`;
+                ctx2.fillRect(x, 0, 1, canvas.height);
+            }
+            wrapper.appendChild(canvas);
+
+            const labels = document.createElement('div');
+            labels.style.display = 'flex';
+            labels.style.justifyContent = 'space-between';
+            labels.style.marginTop = '4px';
+            labels.innerHTML = `<span>${min.toFixed(3)}</span><span>${max.toFixed(3)}</span>`;
+            wrapper.appendChild(labels);
+
+            stage.appendChild(wrapper);
+            legendEl = wrapper;
+        }
+
         function updateSideMenu(tensorName, x, y, z, value) {
             if (!tensorName) {
                 sideMenu.innerHTML = '';
@@ -717,6 +768,7 @@ export function createStoreVisualization(containerElement, op) {
             if (histogramUI.hide) {
                 histogramUI.hide();
             }
+            destroyLegend();
             if (renderer && renderer.dispose) {
                 renderer.dispose();
             }
