@@ -494,11 +494,26 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     });
     let colorOn = false;
     let legendContainer = null;
+    const COLORMAPS = {
+        A: [[0.1, 0.8, 0.9], [0.1, 0.2, 1.0]],
+        B: [[1.0, 0.95, 0.2], [1.0, 0.3, 0.0]],
+        C: [[0.4, 1.0, 0.4], [0.8, 0.2, 0.9]],
+    };
     function destroyLegends() {
         if (legendContainer && legendContainer.remove) legendContainer.remove();
         legendContainer = null;
     }
+    function clamp01(value) {
+        return Math.min(1, Math.max(0, value));
+    }
+    function lerp(a, b, t) {
+        return a + (b - a) * t;
+    }
+    function getColormap(label) {
+        return COLORMAPS[label] || COLORMAPS.C;
+    }
     function createLegendItem(label, min, max) {
+        const map = getColormap(label);
         const item = document.createElement('div');
         item.style.display = 'grid';
         item.style.gap = '4px';
@@ -510,10 +525,10 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         canvas.height = 10;
         const ctx = canvas.getContext('2d');
         for (let x = 0; x < canvas.width; x++) {
-            const t = x / (canvas.width - 1);
-            const r = t;
-            const g = 0.2;
-            const b = 1 - t;
+            const t = clamp01(x / (canvas.width - 1));
+            const r = lerp(map[0][0], map[1][0], t);
+            const g = lerp(map[0][1], map[1][1], t);
+            const b = lerp(map[0][2], map[1][2], t);
             ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
             ctx.fillRect(x, 0, 1, canvas.height);
         }
@@ -585,16 +600,17 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         const denom = max - min || 1;
         const count = rows * cols;
         const baseColors = new Float32Array(count * 3);
+        const map = getColormap(label);
         for (let row = 0; row < rows; row++) {
             const rowValues = matrixValues[row] || [];
             for (let col = 0; col < cols; col++) {
                 const idx = row * cols + col;
                 const raw = rowValues[col];
                 const value = Number.isFinite(raw) ? raw : 0;
-                const t = Math.min(1, Math.max(0, (value - min) / denom));
-                const r = t;
-                const g = 0.2;
-                const b = 1 - t;
+                const t = clamp01((value - min) / denom);
+                const r = lerp(map[0][0], map[1][0], t);
+                const g = lerp(map[0][1], map[1][1], t);
+                const b = lerp(map[0][2], map[1][2], t);
                 baseColors[idx * 3] = r;
                 baseColors[idx * 3 + 1] = g;
                 baseColors[idx * 3 + 2] = b;
