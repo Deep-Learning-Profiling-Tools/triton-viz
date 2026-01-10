@@ -7,6 +7,7 @@
     --shadow-soft: 0 18px 60px rgba(15, 23, 42, 0.15);
     --transition-fast: 160ms ease;
     --sidebar-width: 360px;
+    --sidebar-resizer-width: 8px;
 }
 
 :root,
@@ -70,7 +71,7 @@ body {
 
 .viz-app {
     display: grid;
-    grid-template-columns: var(--sidebar-width) 6px 1fr;
+    grid-template-columns: var(--sidebar-width) var(--sidebar-resizer-width) 1fr;
     height: 100vh;
     width: 100vw;
     overflow: hidden;
@@ -356,8 +357,8 @@ body {
 .detail-overlay {
     position: fixed;
     top: 0;
-    left: var(--sidebar-width);
-    width: calc(100vw - var(--sidebar-width));
+    left: calc(var(--sidebar-width) + var(--sidebar-resizer-width));
+    width: calc(100vw - var(--sidebar-width) - var(--sidebar-resizer-width));
     height: 100vh;
     background: #000;
     z-index: 2000;
@@ -776,12 +777,14 @@ body {
 }
 #sidebar-resizer {
     cursor: col-resize;
-    background: linear-gradient(180deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.45));
+    background: rgba(148, 163, 184, 0.35);
 }
 
 .sidebar-resizer {
-    width: 6px;
+    width: var(--sidebar-resizer-width);
+    height: 100%;
     position: relative;
+    z-index: 10;
 }
 
 .sidebar-resizer::before {
@@ -793,5 +796,9 @@ body {
     width: 2px;
     transform: translateX(-50%);
     border-radius: 999px;
+    background: rgba(148, 163, 184, 0.6);
+}
+
+.sidebar-resizer:hover {
     background: rgba(148, 163, 184, 0.6);
 }
