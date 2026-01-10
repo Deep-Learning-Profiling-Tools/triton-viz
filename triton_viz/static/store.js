@@ -181,6 +181,7 @@ export function createStoreVisualization(containerElement, op) {
         let labelSprites = [];
         let allProgramsOn = false;
         let allProgramTiles = null;
+        let overlapMeshes = { global: null, slice: null };
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
         const COLOR_SLICE = new THREE.Color(1.0, 0.55, 0.0);    // Orange (highlight for store target)
@@ -268,13 +269,18 @@ export function createStoreVisualization(containerElement, op) {
         const dragOffset = new THREE.Vector3();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown);
+        const handleKeyDown = (event) => {
+            onKeyDown(event);
+            requestRender();
+        };
+        setupEventListeners(stage, camera, renderer, onMouseMove, handleKeyDown, requestRender);
         stage.addEventListener('mousedown', onMouseDown);
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
         async function toggleColorize() {
             if (allProgramsOn) {
                 allProgramsOn = false;
+                clearOverlapMeshes();
                 if (window.setOpControlState) {
                     window.setOpControlState({ allPrograms: false });
                 }
@@ -340,12 +346,16 @@ export function createStoreVisualization(containerElement, op) {
                 }
                 if (!allProgramTiles || !allProgramTiles.length) {
                     allProgramsOn = false;
+                    requestRender();
                     return false;
                 }
                 applyAllProgramsTiles(allProgramTiles);
+                requestRender();
                 return true;
             }
             resetColorByValue();
+            clearOverlapMeshes();
+            requestRender();
             return false;
         }
 
@@ -647,6 +657,83 @@ export function createStoreVisualization(containerElement, op) {
             });
         }
 
+        function clearOverlapMeshes() {
+            const meshes = [overlapMeshes.global, overlapMeshes.slice];
+            meshes.forEach((mesh) => {
+                if (!mesh) return;
+                if (mesh.parent) mesh.parent.remove(mesh);
+                if (mesh.material && mesh.material.dispose) mesh.material.dispose();
+            });
+            overlapMeshes = { global: null, slice: null };
+        }
+
+        function buildSelectionMap(mesh, tiles, coordKey) {
+            const selection = new Map();
+            const total = tiles.length;
+            tiles.forEach((tile, idx) => {
+                const coords = tile[coordKey] || [];
+                if (!coords.length) return;
+                const color = getRainbowColor(idx, total);
+                coords.forEach((coord) => {
+                    const instanceId = coordToInstanceId(mesh, coord);
+                    if (instanceId === null || instanceId === undefined) return;
+                    const entry = selection.get(instanceId);
+                    if (entry) {
+                        entry.colors.push(color);
+                    } else {
+                        selection.set(instanceId, { colors: [color] });
+                    }
+                });
+            });
+            return selection;
+        }
+
+        function applySelectionMap(mesh, selection) {
+            const overlaps = [];
+            selection.forEach((entry, instanceId) => {
+                const colors = entry.colors || [];
+                if (!colors.length) return;
+                mesh.setColorAt(instanceId, colors[0]);
+                if (colors.length > 1) {
+                    const secondary = new THREE.Color(0, 0, 0);
+                    colors.slice(1).forEach((color) => secondary.add(color));
+                    secondary.multiplyScalar(1 / (colors.length - 1));
+                    overlaps.push({ instanceId, color: secondary });
+                }
+            });
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+            return overlaps;
+        }
+
+        function buildOverlapMesh(baseMesh, entries) {
+            if (!entries.length) return null;
+            const overlayMaterial = new THREE.MeshBasicMaterial({
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.9,
+            });
+            const overlayMesh = new THREE.InstancedMesh(baseMesh.geometry, overlayMaterial, entries.length);
+            overlayMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+            overlayMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(entries.length * 3), 3);
+            const matrix = new THREE.Matrix4();
+            const position = new THREE.Vector3();
+            const rotation = new THREE.Quaternion();
+            const scale = new THREE.Vector3();
+            const shrink = 0.7;
+            entries.forEach((entry, idx) => {
+                baseMesh.getMatrixAt(entry.instanceId, matrix);
+                matrix.decompose(position, rotation, scale);
+                scale.multiplyScalar(shrink);
+                matrix.compose(position, rotation, scale);
+                overlayMesh.setMatrixAt(idx, matrix);
+                overlayMesh.setColorAt(idx, entry.color);
+            });
+            overlayMesh.instanceMatrix.needsUpdate = true;
+            if (overlayMesh.instanceColor) overlayMesh.instanceColor.needsUpdate = true;
+            overlayMesh.renderOrder = 1;
+            return overlayMesh;
+        }
+
         async function fetchAllProgramTiles() {
             if (!op.overall_key) return null;
             const res = await fetch(`${API_BASE}/api/store_overall`, {
@@ -665,14 +752,15 @@ export function createStoreVisualization(containerElement, op) {
         function applyAllProgramsTiles(tiles) {
             if (!tiles || !tiles.length) return;
             resetBaseColors();
-            const total = tiles.length;
-            tiles.forEach((tile, idx) => {
-                const color = getRainbowColor(idx, total);
-                paintCoords(globalMesh, tile.global_coords, color);
-                paintCoords(sliceMesh, tile.slice_coords, color);
-            });
-            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
-            if (sliceMesh.instanceColor) sliceMesh.instanceColor.needsUpdate = true;
+            clearOverlapMeshes();
+            const globalSelection = buildSelectionMap(globalMesh, tiles, 'global_coords');
+            const sliceSelection = buildSelectionMap(sliceMesh, tiles, 'slice_coords');
+            const globalOverlaps = applySelectionMap(globalMesh, globalSelection);
+            const sliceOverlaps = applySelectionMap(sliceMesh, sliceSelection);
+            overlapMeshes.global = buildOverlapMesh(globalMesh, globalOverlaps);
+            overlapMeshes.slice = buildOverlapMesh(sliceMesh, sliceOverlaps);
+            if (overlapMeshes.global) globalTensor.add(overlapMeshes.global);
+            if (overlapMeshes.slice) sliceTensor.add(overlapMeshes.slice);
         }
 
         function sampleStoreValue(cache, userData, fallback) {
@@ -809,7 +897,11 @@ export function createStoreVisualization(containerElement, op) {
             if (histogramUI.hide) {
                 histogramUI.hide();
             }
+            clearOverlapMeshes();
             destroyLegend();
+            if (rafId !== null) {
+                cancelAnimationFrame(rafId);
+            }
             if (renderer && renderer.dispose) {
                 renderer.dispose();
             }

@@ -71,6 +71,7 @@ const TEXT_LIGHT = '#ffffff';
 const TEXT_DARK = '#111111';
         let allProgramsOn = false;
         let allProgramTiles = null;
+        let overlapMeshes = { global: null, slice: null };
 
 function getTextColor(bgColor) {
     try {
@@ -155,8 +156,7 @@ function getTextColor(bgColor) {
         orbitControls.dampingFactor = 0.05;
         orbitControls.target.copy(center);
         orbitControls.update();
-
-        const totalFrames = op.global_coords.length * 2 + 30;
+        orbitControls.addEventListener('change', requestRender);
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
@@ -554,6 +554,83 @@ function getTextColor(bgColor) {
             });
         }
 
+        function clearOverlapMeshes() {
+            const meshes = [overlapMeshes.global, overlapMeshes.slice];
+            meshes.forEach((mesh) => {
+                if (!mesh) return;
+                if (mesh.parent) mesh.parent.remove(mesh);
+                if (mesh.material && mesh.material.dispose) mesh.material.dispose();
+            });
+            overlapMeshes = { global: null, slice: null };
+        }
+
+        function buildSelectionMap(mesh, tiles, coordKey) {
+            const selection = new Map();
+            const total = tiles.length;
+            tiles.forEach((tile, idx) => {
+                const coords = tile[coordKey] || [];
+                if (!coords.length) return;
+                const color = getRainbowColor(idx, total);
+                coords.forEach((coord) => {
+                    const instanceId = coordToInstanceId(mesh, coord);
+                    if (instanceId === null || instanceId === undefined) return;
+                    const entry = selection.get(instanceId);
+                    if (entry) {
+                        entry.colors.push(color);
+                    } else {
+                        selection.set(instanceId, { colors: [color] });
+                    }
+                });
+            });
+            return selection;
+        }
+
+        function applySelectionMap(mesh, selection) {
+            const overlaps = [];
+            selection.forEach((entry, instanceId) => {
+                const colors = entry.colors || [];
+                if (!colors.length) return;
+                mesh.setColorAt(instanceId, colors[0]);
+                if (colors.length > 1) {
+                    const secondary = new THREE.Color(0, 0, 0);
+                    colors.slice(1).forEach((color) => secondary.add(color));
+                    secondary.multiplyScalar(1 / (colors.length - 1));
+                    overlaps.push({ instanceId, color: secondary });
+                }
+            });
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+            return overlaps;
+        }
+
+        function buildOverlapMesh(baseMesh, entries) {
+            if (!entries.length) return null;
+            const overlayMaterial = new THREE.MeshBasicMaterial({
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.9,
+            });
+            const overlayMesh = new THREE.InstancedMesh(baseMesh.geometry, overlayMaterial, entries.length);
+            overlayMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+            overlayMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(entries.length * 3), 3);
+            const matrix = new THREE.Matrix4();
+            const position = new THREE.Vector3();
+            const rotation = new THREE.Quaternion();
+            const scale = new THREE.Vector3();
+            const shrink = 0.7;
+            entries.forEach((entry, idx) => {
+                baseMesh.getMatrixAt(entry.instanceId, matrix);
+                matrix.decompose(position, rotation, scale);
+                scale.multiplyScalar(shrink);
+                matrix.compose(position, rotation, scale);
+                overlayMesh.setMatrixAt(idx, matrix);
+                overlayMesh.setColorAt(idx, entry.color);
+            });
+            overlayMesh.instanceMatrix.needsUpdate = true;
+            if (overlayMesh.instanceColor) overlayMesh.instanceColor.needsUpdate = true;
+            overlayMesh.renderOrder = 1;
+            return overlayMesh;
+        }
+
         async function fetchAllProgramTiles() {
             if (!op.overall_key) return null;
             const res = await fetch(`${API_BASE}/api/load_overall`, {
@@ -572,14 +649,15 @@ function getTextColor(bgColor) {
         function applyAllProgramsTiles(tiles) {
             if (!tiles || !tiles.length) return;
             resetBaseColors();
-            const total = tiles.length;
-            tiles.forEach((tile, idx) => {
-                const color = getRainbowColor(idx, total);
-                paintCoords(globalMesh, tile.global_coords, color);
-                paintCoords(sliceMesh, tile.slice_coords, color);
-            });
-            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
-            if (sliceMesh.instanceColor) sliceMesh.instanceColor.needsUpdate = true;
+            clearOverlapMeshes();
+            const globalSelection = buildSelectionMap(globalMesh, tiles, 'global_coords');
+            const sliceSelection = buildSelectionMap(sliceMesh, tiles, 'slice_coords');
+            const globalOverlaps = applySelectionMap(globalMesh, globalSelection);
+            const sliceOverlaps = applySelectionMap(sliceMesh, sliceSelection);
+            overlapMeshes.global = buildOverlapMesh(globalMesh, globalOverlaps);
+            overlapMeshes.slice = buildOverlapMesh(sliceMesh, sliceOverlaps);
+            if (overlapMeshes.global) globalTensor.add(overlapMeshes.global);
+            if (overlapMeshes.slice) sliceTensor.add(overlapMeshes.slice);
         }
 
         function onMouseDown(event) {
@@ -601,6 +679,7 @@ function getTextColor(bgColor) {
             isDragging = true;
             dragTarget = cube;
             stage.style.cursor = 'grabbing';
+            requestRender();
         }
 
         function onMouseUp() {
@@ -608,24 +687,28 @@ function getTextColor(bgColor) {
             isDragging = false;
             dragTarget = null;
             stage.style.cursor = '';
+            requestRender();
         }
 
-        function animate() {
-            requestAnimationFrame(animate);
-            // If colormap is OFF, ensure colors are reset every frame before animations
-            if (!colorizeOn && !allProgramsOn) {
-                resetGlobalColors();
-                resetSliceColors();
+        let rafId = null;
+        let renderPending = false;
+        function requestRender() {
+            if (rafId !== null) {
+                renderPending = true;
+                return;
             }
-            orbitControls.update();
+            rafId = requestAnimationFrame(renderFrame);
+        }
 
-            // Run highlight animation regardless of Color by Value state
-            if (!isPaused && frame < totalFrames) {
-                frame++;
-            }
-
-            applyColorMapIfNeeded();
+        function renderFrame() {
+            const needsMore = orbitControls.update();
             renderer.render(scene, camera);
+            if (needsMore || renderPending) {
+                renderPending = false;
+                rafId = requestAnimationFrame(renderFrame);
+                return;
+            }
+            rafId = null;
         }
 
 
@@ -688,6 +771,7 @@ function getTextColor(bgColor) {
         async function toggleColorize() {
             if (allProgramsOn) {
                 allProgramsOn = false;
+                clearOverlapMeshes();
                 if (window.setOpControlState) {
                     window.setOpControlState({ allPrograms: false });
                 }
@@ -697,6 +781,7 @@ function getTextColor(bgColor) {
                 resetGlobalColors();
                 resetSliceColors();
                 destroyLegend();
+                requestRender();
                 return colorizeOn;
             }
             if (!tensorCache) {
@@ -753,13 +838,17 @@ function getTextColor(bgColor) {
                 }
                 if (!allProgramTiles || !allProgramTiles.length) {
                     allProgramsOn = false;
+                    requestRender();
                     return false;
                 }
                 applyAllProgramsTiles(allProgramTiles);
+                requestRender();
                 return true;
             }
             resetGlobalColors();
             resetSliceColors();
+            clearOverlapMeshes();
+            requestRender();
             return false;
         }
 
@@ -834,7 +923,11 @@ function getTextColor(bgColor) {
             if (histogramUI.hide) {
                 histogramUI.hide();
             }
+            clearOverlapMeshes();
             destroyLegend();
+            if (rafId !== null) {
+                cancelAnimationFrame(rafId);
+            }
             if (renderer && renderer.dispose) {
                 renderer.dispose();
             }
