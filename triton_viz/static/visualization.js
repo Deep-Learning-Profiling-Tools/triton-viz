@@ -323,13 +323,14 @@ function setupControlEvents() {
 function setupSidebarResizer() {
     if (!controls.resizer || !controls.panel) return;
     const root = document.documentElement;
-    const minWidth = 240;
-    const maxWidth = 560;
+    const minWidth = 0;
     let startX = 0;
     let startWidth = 0;
 
     const onPointerMove = (event) => {
         const delta = event.clientX - startX;
+        const resizerWidth = controls.resizer.getBoundingClientRect().width || 0;
+        const maxWidth = Math.max(0, window.innerWidth - resizerWidth);
         const next = Math.min(maxWidth, Math.max(minWidth, startWidth + delta));
         root.style.setProperty('--sidebar-width', `${next}px`);
         resizeCanvas();
