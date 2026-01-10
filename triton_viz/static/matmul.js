@@ -827,7 +827,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         if (histogramUI.hide) {
             histogramUI.hide();
         }
-        destroyLegend();
+        destroyLegends();
         window.removeEventListener('resize', onResize);
         window.removeEventListener('keydown', onKeyDown);
         containerElement.removeEventListener('mousemove', onMouseMove);
