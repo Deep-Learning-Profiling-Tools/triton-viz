@@ -749,8 +749,19 @@ export function createStoreVisualization(containerElement, op) {
 
         function createSideMenu(container) {
             const menu = document.createElement('div');
-            menu.className = 'viz-side-panel';
-            menu.style.width = '240px';
+            Object.assign(menu.style, {
+                position: 'absolute',
+                top: '16px',
+                right: '16px',
+                width: '220px',
+                padding: '10px',
+                background: 'rgba(0,0,0,0.65)',
+                color: '#fff',
+                borderRadius: '8px',
+                fontFamily: 'var(--font-sans)',
+                fontSize: '12px',
+                zIndex: 2500,
+            });
             container.appendChild(menu);
             return menu;
         }
