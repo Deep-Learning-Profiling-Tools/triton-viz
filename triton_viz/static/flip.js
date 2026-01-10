@@ -176,7 +176,7 @@ export function createFlipVisualization(containerElement, op, viewState = null) 
         if (window.setOpControlState) {
             window.setOpControlState({ colorize: false, showCode: false });
         }
-        if (window.__tritonVizCodeHide) {
+        if (window.__tritonVizCodeHide && !window.__tritonVizPreserveCodePanel) {
             window.__tritonVizCodeHide();
         }
         clearInterval(_hoverTimer);

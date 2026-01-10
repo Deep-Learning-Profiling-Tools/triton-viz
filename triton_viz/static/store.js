@@ -814,7 +814,7 @@ export function createStoreVisualization(containerElement, op) {
                     allPrograms: false,
                 });
             }
-            if (window.__tritonVizCodeHide) {
+            if (window.__tritonVizCodeHide && !window.__tritonVizPreserveCodePanel) {
                 window.__tritonVizCodeHide();
             }
             if (histogramUI.hide) {

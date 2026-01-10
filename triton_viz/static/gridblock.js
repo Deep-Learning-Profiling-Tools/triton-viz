@@ -14,7 +14,7 @@ const DEFAULT_PALETTE = {
 };
 
 export class GridBlock {
-    constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction) {
+    constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction, programIdConfig = null) {
         this.rect = { x, y, width, height };
         this.gridPosition = { x: gridX, y: gridY, z: gridZ };
         this.blockData = blockData;
@@ -28,6 +28,15 @@ export class GridBlock {
         this.isDetailedViewVisible = false;
         this.contentArea = null;
         this.activeTab = null;
+        this.activeTabIndex = 0;
+        this.programIdConfig = programIdConfig;
+        this.programIdControls = null;
+        this.programIdInputs = null;
+        this.programIdValueEls = null;
+        this.titleEl = null;
+        this.badgeEl = null;
+        this.cardEl = null;
+        this.headerBar = null;
     }
 
     draw(ctx, palette = DEFAULT_PALETTE) {
@@ -71,9 +80,11 @@ export class GridBlock {
         this.visualizationContainer = this.createVisualizationContainer();
         const card = document.createElement('div');
         card.className = 'detail-card';
+        this.cardEl = card;
 
         const titleRow = this.createTitleRow();
         const headerBar = this.createHeaderBar();
+        this.headerBar = headerBar;
         this.contentArea = this.createContentArea();
 
         card.appendChild(titleRow);
@@ -102,6 +113,7 @@ export class GridBlock {
         } catch (e) {}
 
         if (this.blockData.length > 0) {
+            this.activeTabIndex = 0;
             this.displayOpVisualization(this.blockData[0]);
         }
 
@@ -240,7 +252,108 @@ export class GridBlock {
         badge.textContent = `${this.blockData.length} ops`;
         row.appendChild(title);
         row.appendChild(badge);
+        this.titleEl = title;
+        this.badgeEl = badge;
         return row;
+    }
+
+    createProgramIdControls() {
+        if (!this.programIdConfig) return null;
+        const { max } = this.programIdConfig;
+        const wrapper = document.createElement('section');
+        wrapper.className = 'control-group';
+        const header = document.createElement('div');
+        header.className = 'group-header';
+        header.innerHTML = '<span>Program IDs</span>';
+        wrapper.appendChild(header);
+
+        const stack = document.createElement('div');
+        stack.className = 'control-stack';
+        wrapper.appendChild(stack);
+
+        this.programIdInputs = {};
+        this.programIdValueEls = {};
+
+        const axes = [
+            { label: 'X', axis: 'x', maxValue: max.x },
+            { label: 'Y', axis: 'y', maxValue: max.y },
+            { label: 'Z', axis: 'z', maxValue: max.z },
+        ];
+
+        axes.forEach(({ label, axis, maxValue }) => {
+            const field = document.createElement('div');
+            field.className = 'control-field';
+            const fieldLabel = document.createElement('label');
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = label;
+            const valueSpan = document.createElement('span');
+            valueSpan.className = 'value-pill';
+            const initial = this.gridPosition[axis];
+            valueSpan.textContent = String(initial);
+            fieldLabel.appendChild(nameSpan);
+            fieldLabel.appendChild(valueSpan);
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = '0';
+            slider.max = String(maxValue);
+            slider.value = String(initial);
+            slider.disabled = maxValue <= 0;
+            slider.addEventListener('input', () => {
+                valueSpan.textContent = slider.value;
+                const nextX = Number(this.programIdInputs.x.value);
+                const nextY = Number(this.programIdInputs.y.value);
+                const nextZ = Number(this.programIdInputs.z.value);
+                this.applyProgramIdSelection(nextX, nextY, nextZ);
+            });
+            field.appendChild(fieldLabel);
+            field.appendChild(slider);
+            stack.appendChild(field);
+            this.programIdInputs[axis] = slider;
+            this.programIdValueEls[axis] = valueSpan;
+        });
+
+        return wrapper;
+    }
+
+    applyProgramIdSelection(x, y, z) {
+        if (!this.programIdConfig) return;
+        const { max } = this.programIdConfig;
+        const nx = Math.max(0, Math.min(max.x, x));
+        const ny = Math.max(0, Math.min(max.y, y));
+        const nz = Math.max(0, Math.min(max.z, z));
+        if (nx === this.gridPosition.x && ny === this.gridPosition.y && nz === this.gridPosition.z) return;
+        this.gridPosition = { x: nx, y: ny, z: nz };
+        this.programIdConfig.values = { x: nx, y: ny, z: nz };
+        if (this.programIdConfig.getBlockData) {
+            this.blockData = this.programIdConfig.getBlockData(nx, ny, nz);
+        }
+        if (this.titleEl) {
+            this.titleEl.textContent = `Program (${nx}, ${ny}, ${nz})`;
+        }
+        if (this.badgeEl) {
+            this.badgeEl.textContent = `${this.blockData.length} ops`;
+        }
+        if (this.programIdInputs && this.programIdValueEls) {
+            this.programIdInputs.x.value = String(nx);
+            this.programIdInputs.y.value = String(ny);
+            this.programIdInputs.z.value = String(nz);
+            this.programIdValueEls.x.textContent = String(nx);
+            this.programIdValueEls.y.textContent = String(ny);
+            this.programIdValueEls.z.textContent = String(nz);
+        }
+
+        if (this.headerBar && this.cardEl) {
+            this.headerBar.remove();
+            this.headerBar = this.createHeaderBar();
+            this.cardEl.insertBefore(this.headerBar, this.contentArea);
+        }
+        if (this.blockData.length > 0) {
+            const nextIndex = Math.min(this.activeTabIndex || 0, this.blockData.length - 1);
+            this.activeTabIndex = nextIndex;
+            this.displayOpVisualization(this.blockData[nextIndex], { refreshCodePanel: false });
+        } else if (this.contentArea) {
+            this.contentArea.innerHTML = '';
+        }
     }
 
     createHeaderBar() {
@@ -248,14 +361,24 @@ export class GridBlock {
         headerBar.className = 'detail-tabs';
         this.activeTab = null;
 
+        let defaultTab = null;
+        let preferredTab = null;
         this.blockData.forEach((op, index) => {
             const opTab = this.createOperationTab(op);
-            opTab.addEventListener('click', () => this.handleTabClick(opTab, op));
+            opTab.addEventListener('click', () => this.handleTabClick(opTab, op, index));
             headerBar.appendChild(opTab);
             if (index === 0) {
-                this.setActiveTab(opTab);
+                defaultTab = opTab;
+            }
+            if (this.activeTabIndex === index) {
+                preferredTab = opTab;
             }
         });
+        if (preferredTab) {
+            this.setActiveTab(preferredTab);
+        } else if (defaultTab) {
+            this.setActiveTab(defaultTab);
+        }
 
         const flowTab = this.createTabButton('Flow');
         flowTab.addEventListener('click', () => {
@@ -315,8 +438,11 @@ export class GridBlock {
         }
     }
 
-    handleTabClick(clickedTab, op) {
+    handleTabClick(clickedTab, op, index = null) {
         this.setActiveTab(clickedTab);
+        if (typeof index === 'number') {
+            this.activeTabIndex = index;
+        }
         this.displayOpVisualization(op);
     }
 
@@ -332,14 +458,24 @@ export class GridBlock {
         return contentArea;
     }
 
-    displayOpVisualization(op) {
+    displayOpVisualization(op, options = {}) {
         if (!this.contentArea) {
             console.error('Content area is not initialized');
             return;
         }
-        if (this.visualizationCleanupFunction) {
-            this.visualizationCleanupFunction();
-            this.visualizationCleanupFunction = null;
+        const preserveCodePanel = options.refreshCodePanel === false;
+        if (preserveCodePanel) {
+            try { window.__tritonVizPreserveCodePanel = true; } catch (e) {}
+        }
+        try {
+            if (this.visualizationCleanupFunction) {
+                this.visualizationCleanupFunction();
+                this.visualizationCleanupFunction = null;
+            }
+        } finally {
+            if (preserveCodePanel) {
+                try { window.__tritonVizPreserveCodePanel = false; } catch (e) {}
+            }
         }
         this.contentArea.innerHTML = '';
         try {
@@ -366,7 +502,9 @@ export class GridBlock {
             default:
                 this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;
         }
-        this.syncCodePanel(true);
+        if (options.refreshCodePanel !== false) {
+            this.syncCodePanel(true);
+        }
     }
 
     displayFlowDiagram() {
