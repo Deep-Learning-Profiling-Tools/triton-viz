@@ -1034,6 +1034,11 @@ export function createLoadOverallVisualization(containerElement, op) {
         sliceTensor.position.set(globalSize.x + 5, 0, 0);
         scene.add(globalTensor);
         scene.add(sliceTensor);
+        let labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
+        const refreshLabels = () => {
+            (labelSprites || []).forEach((sprite) => scene.remove(sprite));
+            labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground) || [];
+        };
 
         const globalMap = buildCubeMap(globalTensor);
         const sliceMap = buildCubeMap(sliceTensor);
@@ -1157,6 +1162,7 @@ export function createLoadOverallVisualization(containerElement, op) {
             scene.background = currentBackground;
             renderer.setClearColor(currentBackground, 1);
             renderTilesForBackground(value);
+            refreshLabels();
             requestRender();
         });
 

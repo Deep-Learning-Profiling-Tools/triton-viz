@@ -374,6 +374,51 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         return mesh;
     }
 
+    function createAxisLabel(text) {
+        const paddingX = 5;
+        const paddingY = 4;
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        ctx.font = 'Bold 16px Arial';
+        const metrics = ctx.measureText(text);
+        canvas.width = Math.ceil(metrics.width + paddingX * 2);
+        canvas.height = Math.ceil(20 + paddingY * 2);
+        ctx.font = 'Bold 16px Arial';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0f172a';
+        ctx.fillStyle = '#ffffff';
+        const y = canvas.height / 2;
+        ctx.strokeText(text, paddingX, y);
+        ctx.fillText(text, paddingX, y);
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.needsUpdate = true;
+        const material = new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthTest: false,
+            depthWrite: false,
+        });
+        const sprite = new THREE.Sprite(material);
+        const scaleX = Math.max(0.8, canvas.width / 80);
+        const scaleY = Math.max(0.5, canvas.height / 60);
+        sprite.scale.set(scaleX, scaleY, 1);
+        return sprite;
+    }
+
+    function addMatrixAxisLabels(mesh, labelPrefix) {
+        const rows = mesh.userData.rows;
+        const cols = mesh.userData.cols;
+        const bbox = new THREE.Box3().setFromObject(mesh);
+        const offset = (CUBE_SIZE + GAP) * 2;
+        const xLabel = createAxisLabel(`${labelPrefix} X: ${cols}`);
+        xLabel.position.set(bbox.max.x + offset, bbox.min.y - offset * 0.4, bbox.max.z);
+        scene.add(xLabel);
+        const yLabel = createAxisLabel(`${labelPrefix} Y: ${rows}`);
+        yLabel.position.set(bbox.min.x - offset, bbox.max.y + offset * 0.4, bbox.max.z);
+        scene.add(yLabel);
+    }
+
     const gap = GAP;
     const sizeA = matrixSize(input_shape);
     const sizeB = matrixSize(other_shape);
@@ -389,6 +434,9 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     scene.add(matrixA);
     scene.add(matrixB);
     scene.add(matrixC);
+    addMatrixAxisLabels(matrixA, 'A');
+    addMatrixAxisLabels(matrixB, 'B');
+    addMatrixAxisLabels(matrixC, 'C');
     const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
     const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
     const hoverOutline = new THREE.LineSegments(hoverEdgesGeometry, new THREE.LineBasicMaterial({ color: COLOR_HOVER }));
