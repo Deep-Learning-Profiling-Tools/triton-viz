@@ -84,6 +84,8 @@ body {
     display: flex;
     flex-direction: column;
     gap: 28px;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .panel-header {
@@ -175,6 +177,8 @@ body {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    flex: 1;
+    min-height: 0;
 }
 
 .control-field label {
@@ -558,14 +562,17 @@ body {
 .show-code-panel.is-sidebar {
     position: static;
     width: 100%;
-    max-height: 40vh;
-    overflow: auto;
+    max-height: none;
+    height: 100%;
     border-radius: var(--radius-md);
     box-shadow: none;
+    display: flex;
+    flex-direction: column;
 }
 
 .show-code-panel.is-sidebar pre {
-    max-height: 28vh;
+    flex: 1;
+    min-height: 0;
 }
 
 .show-code-panel pre {
