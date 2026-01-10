@@ -566,20 +566,28 @@ function createProgramIdControls() {
         const valueSpan = document.createElement('span');
         valueSpan.className = 'value-pill';
         valueSpan.id = `pid-value-${index}`;
-        valueSpan.textContent = filterValues[index] < 0 ? 'All' : String(filterValues[index]);
+        const isLocked = maxValues[index] <= 0;
+        if (isLocked) {
+            filterValues[index] = 0;
+        }
+        const displayValue = isLocked ? 0 : filterValues[index];
+        valueSpan.textContent = displayValue < 0 ? 'All' : String(displayValue);
         fieldLabel.appendChild(nameSpan);
         fieldLabel.appendChild(valueSpan);
         const slider = document.createElement('input');
         slider.type = 'range';
-        slider.min = -1;
+        slider.min = isLocked ? 0 : -1;
         slider.max = maxValues[index];
-        slider.value = filterValues[index];
+        slider.value = displayValue;
         slider.dataset.filterIndex = index;
-        slider.disabled = maxValues[index] <= 0;
+        slider.disabled = isLocked;
         slider.addEventListener('input', handleProgramFilterChange);
         wrapper.appendChild(fieldLabel);
         wrapper.appendChild(slider);
         controls.pidContainer.appendChild(wrapper);
+        if (isLocked && kernelGrid) {
+            kernelGrid.updateFilter(index, 0);
+        }
     });
 }
 
