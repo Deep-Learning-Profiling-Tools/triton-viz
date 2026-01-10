@@ -20,7 +20,7 @@
                 </button>
             </div>
 
-            <section class="control-group">
+            <section class="control-group is-program-ids">
                 <div class="group-header">
                     <span>Program IDs</span>
                     <button id="reset-filters" class="viz-button link" type="button">Reset</button>
@@ -50,7 +50,7 @@
                 <p class="control-note">Overall view aggregates every Load / Store op.</p>
             </section>
 
-            <section class="control-group">
+            <section class="control-group is-op-controls">
                 <div class="group-header">
                     <span>Operation Controls</span>
                 </div>
@@ -59,6 +59,7 @@
                     <button id="btn-op-show-code" class="viz-button ghost" type="button" disabled>Show Code: OFF</button>
                     <button id="btn-op-histogram" class="viz-button ghost" type="button" disabled>Value Histogram</button>
                 </div>
+                <div id="op-code-panel" class="op-code-panel"></div>
                 <p class="control-note">Open a block to enable operation controls.</p>
             </section>
 

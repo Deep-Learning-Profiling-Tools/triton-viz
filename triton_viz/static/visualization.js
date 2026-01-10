@@ -94,6 +94,16 @@ function updateOpControls() {
     }
 }
 
+function applyToggleResult(result, key) {
+    if (result && typeof result.then === 'function') {
+        result.then((value) => {
+            setOpControlState({ [key]: !!value });
+        });
+    } else {
+        setOpControlState({ [key]: !!result });
+    }
+}
+
 try {
     window.setOpControlHandlers = setOpControlHandlers;
     window.setOpControlState = setOpControlState;
@@ -298,8 +308,7 @@ function setupControlEvents() {
         controls.opColorizeBtn.addEventListener('click', () => {
             const handler = opControls.handlers?.toggleColorize;
             if (!handler) return;
-            const next = handler();
-            setOpControlState({ colorize: !!next });
+            applyToggleResult(handler(), 'colorize');
         });
     }
 
@@ -307,8 +316,7 @@ function setupControlEvents() {
         controls.opShowCodeBtn.addEventListener('click', () => {
             const handler = opControls.handlers?.toggleShowCode;
             if (!handler) return;
-            const next = handler();
-            setOpControlState({ showCode: !!next });
+            applyToggleResult(handler(), 'showCode');
         });
     }
 

@@ -71,7 +71,6 @@ export function createLoadVisualization(containerElement, op) {
         let legendEl = null;
         let scheme = 'mono';
         let monoBaseHex = '#3b82f6';
-        let codePanel = null;
 let labelSprites = [];
 const TEXT_LIGHT = '#ffffff';
 const TEXT_DARK = '#111111';
@@ -744,13 +743,10 @@ function getTextColor(bgColor) {
         }
 
         async function toggleShowCode() {
-            const next = !codePanel;
-            if (next) {
-                await createCodePanel(0, 8);
-            } else {
-                destroyCodePanel();
+            if (window.__tritonVizCodeToggle) {
+                return window.__tritonVizCodeToggle();
             }
-            return next;
+            return false;
         }
 
         function showHistogram() {
@@ -769,7 +765,7 @@ function getTextColor(bgColor) {
             });
         }
         if (window.setOpControlState) {
-            window.setOpControlState({ colorize: colorizeOn, showCode: !!codePanel });
+            window.setOpControlState({ colorize: colorizeOn, showCode: false });
         }
 
         function updateSideMenu(tensorName, x, y, z, value) {
@@ -820,7 +816,6 @@ function getTextColor(bgColor) {
                 histogramUI.hide();
             }
             destroyLegend();
-            destroyCodePanel();
             if (renderer && renderer.dispose) {
                 renderer.dispose();
             }

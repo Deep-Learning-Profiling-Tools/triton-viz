@@ -106,6 +106,10 @@ export class GridBlock {
         }
 
         this.ensureGlobalCodeToggle();
+        this.syncCodePanel(true);
+        if (document.body) {
+            document.body.classList.add('detail-open');
+        }
     }
 
     ensureGlobalCodeToggle() {
@@ -115,6 +119,10 @@ export class GridBlock {
 
         const destroyPanel = () => {
             if (panel && panel.remove) panel.remove();
+            const host = document.getElementById('op-code-panel');
+            if (host && host.contains(panel)) {
+                host.innerHTML = '';
+            }
             panel = null;
         };
 
@@ -172,9 +180,16 @@ export class GridBlock {
                 err.textContent = 'Failed to load code context.';
                 wrapper.appendChild(err);
             }
-            document.body.appendChild(wrapper);
+            const host = document.getElementById('op-code-panel');
+            if (host) {
+                host.innerHTML = '';
+                wrapper.classList.add('is-sidebar');
+                host.appendChild(wrapper);
+            } else {
+                document.body.appendChild(wrapper);
+                enableDrag(wrapper, { handle: header, bounds: window });
+            }
             panel = wrapper;
-            enableDrag(wrapper, { handle: header, bounds: window });
         };
 
         const togglePanel = async (force) => {
@@ -204,6 +219,21 @@ export class GridBlock {
         window.__tritonVizCodeToggle = togglePanel;
         window.__tritonVizCodeHide = hidePanel;
         window.__tritonVizCodeVisible = () => visible;
+    }
+
+    syncCodePanel(forceShow = false) {
+        if (!window.__tritonVizCodeToggle) return;
+        const isVisible = window.__tritonVizCodeVisible ? window.__tritonVizCodeVisible() : false;
+        if (!forceShow && !isVisible) return;
+        const result = window.__tritonVizCodeToggle(true);
+        if (!window.setOpControlState) return;
+        if (result && typeof result.then === 'function') {
+            result.then((visible) => {
+                window.setOpControlState({ showCode: !!visible });
+            });
+        } else {
+            window.setOpControlState({ showCode: !!result });
+        }
     }
 
     createVisualizationContainer() {
@@ -349,6 +379,7 @@ export class GridBlock {
             default:
                 this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;
         }
+        this.syncCodePanel();
     }
 
     displayFlowDiagram() {
@@ -484,5 +515,9 @@ export class GridBlock {
                 window.__tritonVizActiveBlock = null;
             }
         } catch (e) {}
+
+        if (document.body) {
+            document.body.classList.remove('detail-open');
+        }
     }
 }
