@@ -80,6 +80,23 @@ const TEXT_DARK = '#111111';
         let allProgramTiles = null;
         let overlapMeshes = { global: null, slice: null };
 
+        if (window.setOpControlHandlers) {
+            window.setOpControlHandlers({
+                toggleColorize,
+                toggleShowCode,
+                toggleHistogram,
+                toggleAllPrograms,
+            });
+        }
+        if (window.setOpControlState) {
+            window.setOpControlState({
+                colorize: colorizeOn,
+                showCode: false,
+                histogram: false,
+                allPrograms: false,
+            });
+        }
+
 function getTextColor(bgColor) {
     try {
         const c = (bgColor instanceof THREE.Color) ? bgColor : new THREE.Color(bgColor);
@@ -872,23 +889,6 @@ function getTextColor(bgColor) {
             clearOverlapMeshes();
             requestRender();
             return false;
-        }
-
-        if (window.setOpControlHandlers) {
-            window.setOpControlHandlers({
-                toggleColorize,
-                toggleShowCode,
-                toggleHistogram,
-                toggleAllPrograms: op.overall_key ? toggleAllPrograms : null,
-            });
-        }
-        if (window.setOpControlState) {
-            window.setOpControlState({
-                colorize: colorizeOn,
-                showCode: false,
-                histogram: false,
-                allPrograms: false,
-            });
         }
 
         function updateSideMenu(tensorName, x, y, z, value) {

@@ -190,6 +190,23 @@ export function createStoreVisualization(containerElement, op) {
         let allProgramTiles = null;
         let overlapMeshes = { global: null, slice: null };
 
+        if (window.setOpControlHandlers) {
+            window.setOpControlHandlers({
+                toggleColorize,
+                toggleShowCode,
+                toggleHistogram,
+                toggleAllPrograms,
+            });
+        }
+        if (window.setOpControlState) {
+            window.setOpControlState({
+                colorize: colorizeOn,
+                showCode: false,
+                histogram: false,
+                allPrograms: false,
+            });
+        }
+
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
         const COLOR_SLICE = new THREE.Color(1.0, 0.55, 0.0);    // Orange (highlight for store target)
         const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0); // Magenta (starting color for left slice)
@@ -382,23 +399,6 @@ export function createStoreVisualization(containerElement, op) {
             clearOverlapMeshes();
             requestRender();
             return false;
-        }
-
-        if (window.setOpControlHandlers) {
-            window.setOpControlHandlers({
-                toggleColorize,
-                toggleShowCode,
-                toggleHistogram,
-                toggleAllPrograms: op.overall_key ? toggleAllPrograms : null,
-            });
-        }
-        if (window.setOpControlState) {
-            window.setOpControlState({
-                colorize: colorizeOn,
-                showCode: false,
-                histogram: false,
-                allPrograms: false,
-            });
         }
 
         function isLightBackgroundHex(hex) {
