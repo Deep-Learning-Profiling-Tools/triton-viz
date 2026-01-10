@@ -107,57 +107,15 @@ function getTextColor(bgColor) {
         scene.add(globalTensor);
         scene.add(sliceTensor);
 
-        // Arrow helper (+ label) showing flow Global -> Slice
-        const ARROW_COLOR = 0xffcc00; // gold
-        const arrow = new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(0,0,0), 1.0, ARROW_COLOR, 0.25, 0.12);
-        arrow.visible = true;
-        scene.add(arrow);
-
-        function createTextSprite(text, backgroundColor) {
-            const c = document.createElement('canvas');
-            const ctx2 = c.getContext('2d');
-            const P = 4; // padding
-            ctx2.font = 'bold 18px Arial';
-            const metrics = ctx2.measureText(text);
-            const w = Math.ceil(metrics.width) + P*2;
-            const h = 28 + P*2;
-            c.width = w; c.height = h;
-            // redraw with proper size
-            const ctx3 = c.getContext('2d');
-            const luminance = (backgroundColor && backgroundColor.getLuminance) ? backgroundColor.getLuminance() : 0;
-            const textColor = luminance > 0.6 ? '#111111' : '#ffffff';
-            const bgColor = luminance > 0.6 ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.65)';
-            ctx3.fillStyle = bgColor;
-            ctx3.fillRect(0, 0, w, h);
-            ctx3.fillStyle = textColor;
-            ctx3.font = 'bold 18px Arial';
-            ctx3.textBaseline = 'middle';
-            ctx3.fillText(text, P, h/2);
-            const tex = new THREE.CanvasTexture(c);
-            tex.needsUpdate = true;
-            const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
-            const spr = new THREE.Sprite(mat);
-            // scale proportional to text size
-            const scaleX = Math.max(1, w / 64);
-            const scaleY = Math.max(0.5, h / 64);
-            spr.scale.set(scaleX, scaleY, 1);
-            return spr;
-        }
-
-        const labelText = (()=>{
-            const ms = (op.mem_src||'').toUpperCase();
-            const md = (op.mem_dst||'').toUpperCase();
-            if (ms && md) return `Load ${ms} → ${md}`;
-            return 'Load Global → Slice';
-        })();
-        let arrowLabel = createTextSprite(labelText, currentBackground);
-        arrowLabel.visible = true;
-        // place label above the midpoint between tensors
-        const midX = (globalTensor.position.x + sliceTensor.position.x) / 2;
-        const textColor = getTextColor(currentBackground);
-        arrowLabel.position.set(midX, 1.4, 0);
-        arrowLabel.material.color = new THREE.Color(textColor);
-        scene.add(arrowLabel);
+        const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
+        const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
+        const hoverMaterial = new THREE.LineBasicMaterial({ color: COLOR_HOVER });
+        const globalHoverOutline = new THREE.LineSegments(hoverEdgesGeometry, hoverMaterial);
+        const sliceHoverOutline = new THREE.LineSegments(hoverEdgesGeometry, hoverMaterial);
+        globalHoverOutline.visible = false;
+        sliceHoverOutline.visible = false;
+        globalTensor.add(globalHoverOutline);
+        sliceTensor.add(sliceHoverOutline);
 
         // Precompute highlighted coords in Global tensor for quick reset
         const highlightedGlobalSet = new Set(
@@ -176,13 +134,6 @@ function getTextColor(bgColor) {
         labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
 
         const refreshTextOverlays = () => {
-            if (arrowLabel) scene.remove(arrowLabel);
-            arrowLabel = createTextSprite(labelText, currentBackground);
-            arrowLabel.visible = true;
-            const midX = (globalTensor.position.x + sliceTensor.position.x) / 2;
-            arrowLabel.position.set(midX, 1.4, 0);
-            arrowLabel.material.color = new THREE.Color(getTextColor(currentBackground));
-            scene.add(arrowLabel);
             const list = Array.isArray(labelSprites) ? labelSprites : [];
             list.forEach((s) => scene.remove(s));
             labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground) || [];
@@ -271,7 +222,6 @@ function getTextColor(bgColor) {
         stage.addEventListener('mousedown', onMouseDown);
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
-        let flowArrowOn = true;
         animate();
 
         function _updateMouseNDC(event) {
@@ -610,38 +560,6 @@ function getTextColor(bgColor) {
                     updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
 
                     highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord);
-                    updateInfoPanel(globalCoord, sliceCoord, index);
-
-                    // Update arrow position/direction and label at midpoint
-                    if (flowArrowOn) {
-                        const gCube = globalTensor.children.find(c => c.userData && c.userData.tensor0 === globalCoord[0] && c.userData.tensor1 === globalCoord[1] && c.userData.tensor2 === globalCoord[2]);
-                        const sCube = sliceTensor.children.find(c => c.userData && c.userData.tensor0 === sliceCoord[0] && c.userData.tensor1 === sliceCoord[1] && c.userData.tensor2 === sliceCoord[2]);
-                        if (gCube && sCube) {
-                            const src = new THREE.Vector3();
-                            const dst = new THREE.Vector3();
-                            gCube.getWorldPosition(src);
-                            sCube.getWorldPosition(dst);
-                            const dir = new THREE.Vector3().subVectors(dst, src);
-                            const len = dir.length();
-                            if (len > 1e-6) {
-                                arrow.visible = true;
-                                arrow.setDirection(dir.normalize());
-                                // arrow length a bit shorter than full to avoid piercing cubes
-                                const safeLen = Math.max(0.1, len - 0.3);
-                                arrow.setLength(safeLen, 0.25, 0.12);
-                                arrow.position.copy(src);
-                                const mid = new THREE.Vector3().addVectors(src, dst).multiplyScalar(0.5);
-                                arrowLabel.position.copy(mid);
-                                arrowLabel.visible = true;
-                            } else {
-                                arrow.visible = false;
-                                arrowLabel.visible = false;
-                            }
-                        } else {
-                            arrow.visible = false;
-                            arrowLabel.visible = false;
-                        }
-                    }
                 }
 
                 frame++;
@@ -793,15 +711,6 @@ function getTextColor(bgColor) {
                 <p>Z: ${z + 1}</p>
                 <p>Dimensions: ${dims.join(' x ')}</p>
                 <p>Value: ${value !== undefined ? value : 'Loading...'}</p>
-            `;
-        }
-
-        function updateInfoPanel(globalCoord, sliceCoord, index) {
-            sideMenu.innerHTML = `
-                <h3>Current Operation</h3>
-                <p>Global Coords: (${globalCoord.join(', ')})</p>
-                <p>Slice Coords: (${sliceCoord.join(', ')})</p>
-                <p>Progress: ${index + 1}/${op.global_coords.length}</p>
             `;
         }
 

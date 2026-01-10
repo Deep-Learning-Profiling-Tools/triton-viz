@@ -229,61 +229,10 @@ export function createStoreVisualization(containerElement, op) {
         sliceHoverOutline.visible = false;
         globalTensor.add(globalHoverOutline);
         sliceTensor.add(sliceHoverOutline);
-        // Arrow helper (+ label) showing flow Slice -> Global
-        const ARROW_COLOR = 0xff9800; // orange for store
-        const arrow = new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(0,0,0), 1.0, ARROW_COLOR, 0.25, 0.12);
-        arrow.visible = true;
-        scene.add(arrow);
-
-        function createTextSprite(text) {
-            const c = document.createElement('canvas');
-            const ctx2 = c.getContext('2d');
-            const P = 4;
-            ctx2.font = 'bold 18px Arial';
-            const metrics = ctx2.measureText(text);
-            const w = Math.ceil(metrics.width) + P*2;
-            const h = 28 + P*2;
-            c.width = w; c.height = h;
-            const ctx3 = c.getContext('2d');
-            ctx3.fillStyle = 'rgba(0,0,0,0.65)';
-            ctx3.fillRect(0, 0, w, h);
-            ctx3.fillStyle = '#ffffff';
-            ctx3.font = 'bold 18px Arial';
-            ctx3.textBaseline = 'middle';
-            ctx3.fillText(text, P, h/2);
-            const tex = new THREE.CanvasTexture(c);
-            tex.needsUpdate = true;
-            const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
-            const spr = new THREE.Sprite(mat);
-            const scaleX = Math.max(1, w / 64);
-            const scaleY = Math.max(0.5, h / 64);
-            spr.scale.set(scaleX, scaleY, 1);
-            return spr;
-        }
-
-        const labelText = (()=>{
-            const ms = (op.mem_src||'').toUpperCase();
-            const md = (op.mem_dst||'').toUpperCase();
-            if (ms && md) return `Store ${ms} → ${md}`;
-            return 'Store Slice → Global';
-        })();
-        const arrowLabel = createTextSprite(labelText);
-        arrowLabel.visible = true;
-        const midX = (globalTensor.position.x + sliceTensor.position.x) / 2;
-        arrowLabel.position.set(midX, 1.4, 0);
-        arrowLabel.material.color = new THREE.Color(getTextColor(currentBackground));
-        scene.add(arrowLabel);
 
         labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
 
         const refreshTextOverlays = () => {
-            if (arrowLabel) scene.remove(arrowLabel);
-            const newLabel = createTextSprite(labelText);
-            newLabel.visible = true;
-            const midX2 = (globalTensor.position.x + sliceTensor.position.x) / 2;
-            newLabel.position.set(midX2, 1.4, 0);
-            newLabel.material.color = new THREE.Color(getTextColor(currentBackground));
-            scene.add(newLabel);
             labelSprites.forEach(s => scene.remove(s));
             labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
         };
@@ -379,7 +328,6 @@ export function createStoreVisualization(containerElement, op) {
             window.setOpControlState({ colorize: colorizeOn, showCode: false, histogram: false });
         }
 
-        let flowArrowOn = true;
         function isLightBackgroundHex(hex) {
             const h = (hex || '').toLowerCase();
             return h === '#ffffff' || h === '#f7f0e3' || h === '#f5f7fb';
@@ -524,37 +472,6 @@ export function createStoreVisualization(containerElement, op) {
                     updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
 
                     highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord);
-                    updateInfoPanel(globalCoord, sliceCoord, index);
-
-                    // Update arrow position/direction and label at midpoint (Slice -> Global)
-                    if (flowArrowOn) {
-                        const gCube = globalTensor.children.find(c => c.userData && c.userData.tensor0 === globalCoord[0] && c.userData.tensor1 === globalCoord[1] && c.userData.tensor2 === globalCoord[2]);
-                        const sCube = sliceTensor.children.find(c => c.userData && c.userData.tensor0 === sliceCoord[0] && c.userData.tensor1 === sliceCoord[1] && c.userData.tensor2 === sliceCoord[2]);
-                        if (gCube && sCube) {
-                            const src = new THREE.Vector3();
-                            const dst = new THREE.Vector3();
-                            sCube.getWorldPosition(src); // from slice
-                            gCube.getWorldPosition(dst); // to global
-                            const dir = new THREE.Vector3().subVectors(dst, src);
-                            const len = dir.length();
-                            if (len > 1e-6) {
-                                arrow.visible = true;
-                                arrow.setDirection(dir.normalize());
-                                const safeLen = Math.max(0.1, len - 0.3);
-                                arrow.setLength(safeLen, 0.25, 0.12);
-                                arrow.position.copy(src);
-                                const mid = new THREE.Vector3().addVectors(src, dst).multiplyScalar(0.5);
-                                arrowLabel.position.copy(mid);
-                                arrowLabel.visible = true;
-                            } else {
-                                arrow.visible = false;
-                                arrowLabel.visible = false;
-                            }
-                        } else {
-                            arrow.visible = false;
-                            arrowLabel.visible = false;
-                        }
-                    }
                 }
 
                 frame++;
@@ -757,15 +674,6 @@ export function createStoreVisualization(containerElement, op) {
                 <p>Z: ${z + 1}</p>
                 <p>Dimensions: ${dims.join(' x ')}</p>
                 <p>Value: ${value !== undefined ? value : 'Storeing...'}</p>
-            `;
-        }
-
-        function updateInfoPanel(globalCoord, sliceCoord, index) {
-            sideMenu.innerHTML = `
-                <h3>Current Operation</h3>
-                <p>Global Coords: (${globalCoord.join(', ')})</p>
-                <p>Slice Coords: (${sliceCoord.join(', ')})</p>
-                <p>Progress: ${index + 1}/${op.global_coords.length}</p>
             `;
         }
 
