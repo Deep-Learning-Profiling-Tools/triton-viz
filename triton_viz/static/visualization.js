@@ -35,6 +35,7 @@ const controls = {
     precomputeBtn: null,
     infoBtn: null,
     themeToggle: null,
+    resizer: null,
     opColorizeBtn: null,
     opHistogramBtn: null,
 };
@@ -185,6 +186,7 @@ function initializeApp() {
     canvasWrapper = document.getElementById('canvas-wrapper');
     containerElement = document.getElementById('visualization-container');
     controls.panel = document.getElementById('control-panel');
+    controls.resizer = document.getElementById('sidebar-resizer');
     controls.pidContainer = document.getElementById('pid-controls');
     controls.zSlider = document.getElementById('z-slider');
     controls.zValueLabel = document.getElementById('z-value');
@@ -217,6 +219,7 @@ function initializeApp() {
 
     setupThemeToggle();
     setupControlEvents();
+    setupSidebarResizer();
     updateOpControls();
     resizeCanvas();
     fetchData();
@@ -312,6 +315,36 @@ function setupControlEvents() {
             if (handler) handler();
         });
     }
+}
+
+function setupSidebarResizer() {
+    if (!controls.resizer || !controls.panel) return;
+    const root = document.documentElement;
+    const minWidth = 240;
+    const maxWidth = 560;
+    let startX = 0;
+    let startWidth = 0;
+
+    const onPointerMove = (event) => {
+        const delta = event.clientX - startX;
+        const next = Math.min(maxWidth, Math.max(minWidth, startWidth + delta));
+        root.style.setProperty('--sidebar-width', `${next}px`);
+        resizeCanvas();
+    };
+
+    const onPointerUp = (event) => {
+        controls.resizer.releasePointerCapture(event.pointerId);
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', onPointerUp);
+    };
+
+    controls.resizer.addEventListener('pointerdown', (event) => {
+        startX = event.clientX;
+        startWidth = controls.panel.getBoundingClientRect().width;
+        controls.resizer.setPointerCapture(event.pointerId);
+        window.addEventListener('pointermove', onPointerMove);
+        window.addEventListener('pointerup', onPointerUp);
+    });
 }
 
 function showControlToast(message) {

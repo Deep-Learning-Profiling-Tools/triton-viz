@@ -70,7 +70,7 @@ body {
 
 .viz-app {
     display: grid;
-    grid-template-columns: var(--sidebar-width) 1fr;
+    grid-template-columns: var(--sidebar-width) 6px 1fr;
     height: 100vh;
     width: 100vw;
     overflow: hidden;
@@ -761,8 +761,33 @@ body {
         grid-row: 2;
     }
 
+    .sidebar-resizer {
+        display: none;
+    }
+
     .detail-overlay {
         left: 0;
         width: 100vw;
     }
+}
+#sidebar-resizer {
+    cursor: col-resize;
+    background: linear-gradient(180deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.45));
+}
+
+.sidebar-resizer {
+    width: 6px;
+    position: relative;
+}
+
+.sidebar-resizer::before {
+    content: '';
+    position: absolute;
+    top: 16px;
+    bottom: 16px;
+    left: 50%;
+    width: 2px;
+    transform: translateX(-50%);
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.6);
 }
