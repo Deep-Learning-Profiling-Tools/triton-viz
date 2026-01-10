@@ -558,7 +558,6 @@ function getTextColor(bgColor) {
 
                     updateCubeColor(globalTensor, globalCoord, COLOR_GLOBAL, COLOR_SLICE, factor);
                     updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
-                    highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord);
                 }
 
                 frame++;
@@ -566,21 +565,6 @@ function getTextColor(bgColor) {
 
             applyColorMapIfNeeded();
             renderer.render(scene, camera);
-        }
-
-        function highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord) {
-            globalTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
-            sliceTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
-
-            const globalCube = globalTensor.children.find(c =>
-                c.userData && c.userData.tensor0 === globalCoord[0] && c.userData.tensor1 === globalCoord[1] && c.userData.tensor2 === globalCoord[2]
-            );
-            const sliceCube = sliceTensor.children.find(c =>
-                c.userData && c.userData.tensor0 === sliceCoord[0] && c.userData.tensor1 === sliceCoord[1] && c.userData.tensor2 === sliceCoord[2]
-            );
-
-            if (globalCube) globalCube.material.emissive.setHex(0x444444);
-            if (sliceCube) sliceCube.material.emissive.setHex(0x444444);
         }
 
 
