@@ -5,7 +5,7 @@ import triton.language as tl
 import triton_viz
 
 N = 64
-BLOCK = 64
+BLOCK = 16
 
 
 @triton_viz.trace("tracer")
@@ -24,7 +24,7 @@ def run():
     rand = torch.randperm(N, dtype=torch.int32, device=device)
     out = torch.empty_like(x)
     indirect_load_kernel[(1,)](x, rand, out, BLOCK=BLOCK)
-    triton_viz.launch(share=False)
+    triton_viz.launch(share=False, port=5002)
 
 
 if __name__ == "__main__":
