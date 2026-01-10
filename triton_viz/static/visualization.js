@@ -555,7 +555,7 @@ function initializeUIElements() {
 function createProgramIdControls() {
     if (!controls.pidContainer) return;
     controls.pidContainer.innerHTML = '';
-    const labels = ['Program Id 0', 'Program Id 1', 'Program Id 2'];
+    const labels = ['X', 'Y', 'Z'];
     const maxValues = [maxX, maxY, maxZ];
     labels.forEach((label, index) => {
         const wrapper = document.createElement('div');
