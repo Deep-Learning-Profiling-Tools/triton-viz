@@ -12,7 +12,6 @@ import {
     COLOR_EDGE,
 } from './load_utils.js';
 import { createHistogramOverlay } from './histogram.js';
-import { enableDrag } from './ui_helpers.js';
 
 export function createLoadVisualization(containerElement, op) {
 
@@ -349,27 +348,14 @@ function getTextColor(bgColor) {
             const wrapper = document.createElement('div');
             wrapper.className = 'viz-floating-badge value-legend';
             wrapper.style.left = '24px';
-            wrapper.style.top = '120px';
+            wrapper.style.top = '24px';
             wrapper.style.right = 'auto';
             wrapper.style.width = '260px';
 
             const header = document.createElement('div');
-            header.style.display = 'flex';
-            header.style.alignItems = 'center';
-            header.style.justifyContent = 'space-between';
+            header.style.fontWeight = '600';
             header.style.marginBottom = '8px';
-
-            const title = document.createElement('span');
-            title.textContent = scheme === 'mono' ? 'Value (Mono)' : 'Value (Viridis)';
-            title.style.fontWeight = '600';
-            header.appendChild(title);
-
-            const legendHandle = document.createElement('button');
-            legendHandle.type = 'button';
-            legendHandle.className = 'viz-drag-handle drag-handle';
-            legendHandle.innerHTML = '<span aria-hidden="true">⠿</span>';
-            legendHandle.style.marginLeft = '12px';
-            header.appendChild(legendHandle);
+            header.textContent = 'Value';
 
             wrapper.appendChild(header);
 
@@ -393,7 +379,6 @@ function getTextColor(bgColor) {
 
             stage.appendChild(wrapper);
             legendEl = wrapper;
-            enableDrag(wrapper, { handle: legendHandle, bounds: stage, initialLeft: 32, initialTop: 140 });
         }
 
         function destroyCodePanel() {

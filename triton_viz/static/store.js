@@ -714,21 +714,16 @@ export function createStoreVisualization(containerElement, op) {
         function createLegend(min, max) {
             destroyLegend();
             const wrapper = document.createElement('div');
-            wrapper.style.position = 'absolute';
-            wrapper.style.top = '32px';
-            wrapper.style.left = '32px';
-            wrapper.style.background = 'rgba(0,0,0,0.7)';
-            wrapper.style.color = '#fff';
-            wrapper.style.padding = '8px 10px';
-            wrapper.style.borderRadius = '8px';
-            wrapper.style.fontSize = '12px';
-            wrapper.style.fontFamily = 'var(--font-sans)';
-            wrapper.style.zIndex = '2500';
+            wrapper.className = 'viz-floating-badge value-legend';
+            wrapper.style.left = '24px';
+            wrapper.style.top = '24px';
+            wrapper.style.right = 'auto';
+            wrapper.style.width = '260px';
 
             const header = document.createElement('div');
             header.style.fontWeight = '600';
             header.style.marginBottom = '6px';
-            header.textContent = 'Value Scale';
+            header.textContent = 'Value';
             wrapper.appendChild(header);
 
             const canvas = document.createElement('canvas');
