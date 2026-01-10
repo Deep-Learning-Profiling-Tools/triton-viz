@@ -265,15 +265,15 @@ function setupControlEvents() {
     if (controls.resetBtn) {
         controls.resetBtn.addEventListener('click', () => {
             for (let i = 0; i < filterValues.length; i += 1) {
-                filterValues[i] = -1;
+                filterValues[i] = 0;
                 const slider = document.querySelector(`input[data-filter-index="${i}"]`);
                 if (slider) {
-                    slider.value = -1;
+                    slider.value = 0;
                 }
                 const valuePill = document.getElementById(`pid-value-${i}`);
-                if (valuePill) valuePill.textContent = 'All';
+                if (valuePill) valuePill.textContent = '0';
                 if (kernelGrid) {
-                    kernelGrid.updateFilter(i, -1);
+                    kernelGrid.updateFilter(i, 0);
                 }
             }
             setZSlice(0);
@@ -521,9 +521,9 @@ class KernelGrid {
 
     shouldDrawBlock(block) {
         return (
-            (this.filterValues[0] === -1 || block.gridPosition.x === this.filterValues[0]) &&
-            (this.filterValues[1] === -1 || block.gridPosition.y === this.filterValues[1]) &&
-            (this.filterValues[2] === -1 || block.gridPosition.z === this.filterValues[2])
+            block.gridPosition.x === this.filterValues[0] &&
+            block.gridPosition.y === this.filterValues[1] &&
+            block.gridPosition.z === this.filterValues[2]
         );
     }
 
@@ -627,11 +627,12 @@ function createProgramIdControls() {
         if (isLocked) {
             filterValues[index] = 0;
         }
-        const displayValue = isLocked ? 0 : filterValues[index];
-        valueSpan.textContent = displayValue < 0 ? 'All' : String(displayValue);
+        const displayValue = isLocked ? 0 : Math.max(0, filterValues[index]);
+        filterValues[index] = displayValue;
+        valueSpan.textContent = String(displayValue);
         const slider = document.createElement('input');
         slider.type = 'range';
-        slider.min = isLocked ? 0 : -1;
+        slider.min = 0;
         slider.max = maxValues[index];
         slider.value = displayValue;
         slider.dataset.filterIndex = index;
@@ -653,17 +654,16 @@ function handleProgramFilterChange(event) {
     filterValues[index] = value;
     const pill = document.getElementById(`pid-value-${index}`);
     if (pill) {
-        pill.textContent = value < 0 ? 'All' : String(value);
+        pill.textContent = String(value);
     }
     if (kernelGrid) {
         kernelGrid.updateFilter(index, value);
         draw();
     }
     if (currentBlockData && typeof currentBlockData.applyProgramIdSelection === 'function') {
-        const fallback = currentBlockData.gridPosition || { x: 0, y: 0, z: 0 };
-        const nextX = filterValues[0] >= 0 ? filterValues[0] : fallback.x;
-        const nextY = filterValues[1] >= 0 ? filterValues[1] : fallback.y;
-        const nextZ = filterValues[2] >= 0 ? filterValues[2] : fallback.z;
+        const nextX = filterValues[0];
+        const nextY = filterValues[1];
+        const nextZ = filterValues[2];
         currentBlockData.applyProgramIdSelection(nextX, nextY, nextZ);
     }
 }
