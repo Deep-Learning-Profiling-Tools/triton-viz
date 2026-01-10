@@ -464,6 +464,10 @@ body {
     display: none;
 }
 
+.detail-content .viz-floating-badge.value-legend {
+    display: block;
+}
+
 .detail-close,
 .detail-back {
     position: fixed;

@@ -344,7 +344,7 @@ function getTextColor(bgColor) {
         function createLegend(min, max) {
             destroyLegend();
             const wrapper = document.createElement('div');
-            wrapper.className = 'viz-floating-badge';
+            wrapper.className = 'viz-floating-badge value-legend';
             wrapper.style.left = '24px';
             wrapper.style.top = '120px';
             wrapper.style.right = 'auto';
@@ -558,7 +558,6 @@ function getTextColor(bgColor) {
 
                     updateCubeColor(globalTensor, globalCoord, COLOR_GLOBAL, COLOR_SLICE, factor);
                     updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
-
                     highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord);
                 }
 
@@ -568,7 +567,6 @@ function getTextColor(bgColor) {
             applyColorMapIfNeeded();
             renderer.render(scene, camera);
         }
-
 
         function highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord) {
             globalTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
@@ -584,6 +582,7 @@ function getTextColor(bgColor) {
             if (globalCube) globalCube.material.emissive.setHex(0x444444);
             if (sliceCube) sliceCube.material.emissive.setHex(0x444444);
         }
+
 
         async function getElementValue(tensorName, x, y, z) {
             let uuid = op.uuid;
