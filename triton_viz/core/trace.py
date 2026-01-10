@@ -109,6 +109,7 @@ class TritonTrace(KernelInterface, TraceInterface):
         self.fn = runner
 
         TraceInterface.__init__(self, client)
+
         # Preserve common function attributes for compatibility
         # with code that expects to access these attributes on the kernel
         if hasattr(runner, "__name__"):
