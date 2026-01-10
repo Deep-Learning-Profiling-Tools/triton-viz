@@ -412,6 +412,10 @@ body {
     box-shadow: 0 12px 32px rgba(37, 99, 235, 0.35);
 }
 
+.detail-overlay .overlay-title-row {
+    display: none;
+}
+
 .detail-content {
     flex: 1;
     background: #000;
