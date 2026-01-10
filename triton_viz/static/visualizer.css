@@ -227,6 +227,29 @@ body {
     box-shadow: 0 4px 10px rgba(37, 99, 235, 0.4);
 }
 
+.control-field input[type="range"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.control-field input[type="range"]:disabled::-webkit-slider-runnable-track {
+    background: rgba(148, 163, 184, 0.3);
+}
+
+.control-field input[type="range"]:disabled::-webkit-slider-thumb {
+    background: rgba(148, 163, 184, 0.7);
+    box-shadow: none;
+}
+
+.control-field input[type="range"]:disabled::-moz-range-track {
+    background: rgba(148, 163, 184, 0.3);
+}
+
+.control-field input[type="range"]:disabled::-moz-range-thumb {
+    background: rgba(148, 163, 184, 0.7);
+    box-shadow: none;
+}
+
 .button-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
