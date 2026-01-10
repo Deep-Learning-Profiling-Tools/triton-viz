@@ -140,19 +140,6 @@ export class GridBlock {
             header.style.fontWeight = '600';
             header.style.marginBottom = '8px';
             header.innerHTML = '<span>Operation Code & Context</span><span class="drag-grip" aria-hidden="true">⠿</span>';
-            const closeBtn = document.createElement('button');
-            closeBtn.className = 'viz-button ghost';
-            closeBtn.textContent = 'Close';
-            closeBtn.style.marginLeft = 'auto';
-            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-            closeBtn.addEventListener('click', () => {
-                visible = false;
-                destroyPanel();
-                if (window.setOpControlState) {
-                    window.setOpControlState({ showCode: false });
-                }
-            });
-            header.appendChild(closeBtn);
             wrapper.appendChild(header);
             try {
                 const API_BASE = window.__TRITON_VIZ_API__ || '';

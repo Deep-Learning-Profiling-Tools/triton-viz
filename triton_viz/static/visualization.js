@@ -36,7 +36,6 @@ const controls = {
     infoBtn: null,
     themeToggle: null,
     opColorizeBtn: null,
-    opShowCodeBtn: null,
     opHistogramBtn: null,
 };
 
@@ -84,10 +83,6 @@ function updateOpControls() {
     if (controls.opColorizeBtn) {
         controls.opColorizeBtn.disabled = !handlers || !handlers.toggleColorize;
         updateToggleLabel(controls.opColorizeBtn, 'Color by Value', !!state.colorize);
-    }
-    if (controls.opShowCodeBtn) {
-        controls.opShowCodeBtn.disabled = !handlers || !handlers.toggleShowCode;
-        updateToggleLabel(controls.opShowCodeBtn, 'Show Code', !!state.showCode);
     }
     if (controls.opHistogramBtn) {
         controls.opHistogramBtn.disabled = !handlers || !handlers.showHistogram;
@@ -199,7 +194,6 @@ function initializeApp() {
     controls.infoBtn = document.getElementById('btn-info');
     controls.themeToggle = document.getElementById('theme-toggle');
     controls.opColorizeBtn = document.getElementById('btn-op-colorize');
-    controls.opShowCodeBtn = document.getElementById('btn-op-show-code');
     controls.opHistogramBtn = document.getElementById('btn-op-histogram');
 
     if (!canvas || !canvasWrapper || !containerElement) {
@@ -309,14 +303,6 @@ function setupControlEvents() {
             const handler = opControls.handlers?.toggleColorize;
             if (!handler) return;
             applyToggleResult(handler(), 'colorize');
-        });
-    }
-
-    if (controls.opShowCodeBtn) {
-        controls.opShowCodeBtn.addEventListener('click', () => {
-            const handler = opControls.handlers?.toggleShowCode;
-            if (!handler) return;
-            applyToggleResult(handler(), 'showCode');
         });
     }
 
