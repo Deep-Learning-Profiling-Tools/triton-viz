@@ -183,6 +183,7 @@ export function createStoreVisualization(containerElement, op) {
         let colorizeOn = false;
         let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
         let legendEl = null;
+        let labelSprites = [];
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
         const COLOR_SLICE = new THREE.Color(1.0, 0.55, 0.0);    // Orange (highlight for store target)
@@ -470,7 +471,6 @@ export function createStoreVisualization(containerElement, op) {
 
                     updateCubeColor(globalTensor, globalCoord, COLOR_GLOBAL, COLOR_SLICE, factor);
                     updateCubeColor(sliceTensor, sliceCoord, COLOR_LEFT_SLICE, COLOR_LOADED, factor);
-
                     highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord);
                 }
 
@@ -484,7 +484,6 @@ export function createStoreVisualization(containerElement, op) {
             }
             renderer.render(scene, camera);
         }
-
 
         function highlightCurrentOperation(globalTensor, globalCoord, sliceTensor, sliceCoord) {
             globalTensor.children.forEach(cube => cube.material.emissive.setHex(0x000000));
@@ -500,6 +499,7 @@ export function createStoreVisualization(containerElement, op) {
             if (globalCube) globalCube.material.emissive.setHex(0x444444);
             if (sliceCube) sliceCube.material.emissive.setHex(0x444444);
         }
+
 
         async function getElementValue(tensorName, x, y, z) {
             let uuid = op.uuid;
