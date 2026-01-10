@@ -366,7 +366,7 @@ export class GridBlock {
             default:
                 this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;
         }
-        this.syncCodePanel();
+        this.syncCodePanel(true);
     }
 
     displayFlowDiagram() {
