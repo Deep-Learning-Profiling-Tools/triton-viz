@@ -174,6 +174,13 @@ export function createStoreVisualization(containerElement, op) {
         let histogramVisible = false;
         let dragModeOn = false;
         let hoveredCube = null;
+        let hoveredHit = null;
+        let lastHoverKey = null;
+        let hoverToken = 0;
+        let hoverRaf = null;
+        let lastMouseEvent = null;
+        let rafId = null;
+        let renderPending = false;
         let flipCleanup = null;
         let colorizeOn = false;
         let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
@@ -213,6 +220,8 @@ export function createStoreVisualization(containerElement, op) {
         const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
         const globalMesh = globalTensor.userData.mesh;
         const sliceMesh = sliceTensor.userData.mesh;
+        const allTensorMeshes = [globalMesh, sliceMesh];
+        const highlightedGlobalIndices = globalTensor.userData.highlightedIndices || new Set();
 
         // Position slice tensor
         const globalSize = calculateTensorSize(op.global_shape);
@@ -529,8 +538,6 @@ export function createStoreVisualization(containerElement, op) {
             requestRender();
         }
 
-        let rafId = null;
-        let renderPending = false;
         function requestRender() {
             if (rafId !== null) {
                 renderPending = true;

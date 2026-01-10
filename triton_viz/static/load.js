@@ -63,6 +63,13 @@ export function createLoadVisualization(containerElement, op) {
         let colorizeOn = false;
         let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
         let hoveredCube = null;
+        let hoveredHit = null;
+        let lastHoverKey = null;
+        let hoverToken = 0;
+        let hoverRaf = null;
+        let lastMouseEvent = null;
+        let rafId = null;
+        let renderPending = false;
         let legendEl = null;
         let scheme = 'mono';
         let monoBaseHex = '#3b82f6';
@@ -98,6 +105,7 @@ function getTextColor(bgColor) {
         const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
         const globalMesh = globalTensor.userData.mesh;
         const sliceMesh = sliceTensor.userData.mesh;
+        const allTensorMeshes = [globalMesh, sliceMesh];
 
         // Position slice tensor
         const globalSize = calculateTensorSize(op.global_shape);
@@ -706,8 +714,6 @@ function getTextColor(bgColor) {
             requestRender();
         }
 
-        let rafId = null;
-        let renderPending = false;
         function requestRender() {
             if (rafId !== null) {
                 renderPending = true;
