@@ -406,16 +406,26 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         return sprite;
     }
 
-    function addMatrixAxisLabels(mesh, labelPrefix) {
+    function addMatrixAxisLabels(mesh) {
         const rows = mesh.userData.rows;
         const cols = mesh.userData.cols;
         const bbox = new THREE.Box3().setFromObject(mesh);
-        const offset = (CUBE_SIZE + GAP) * 2;
-        const xLabel = createAxisLabel(`${labelPrefix} X: ${cols}`);
-        xLabel.position.set(bbox.max.x + offset, bbox.min.y - offset * 0.4, bbox.max.z);
+        const offset = (CUBE_SIZE + GAP) * 1.8;
+        const lineMaterial = new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.75 });
+        const xStart = new THREE.Vector3(bbox.min.x, bbox.max.y + offset, bbox.max.z);
+        const xEnd = new THREE.Vector3(bbox.max.x, bbox.max.y + offset, bbox.max.z);
+        const xMid = new THREE.Vector3((bbox.min.x + bbox.max.x) / 2, bbox.max.y + offset * 1.2, bbox.max.z);
+        scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([xStart, xEnd]), lineMaterial));
+        const xLabel = createAxisLabel(`${cols}`);
+        xLabel.position.copy(xMid);
         scene.add(xLabel);
-        const yLabel = createAxisLabel(`${labelPrefix} Y: ${rows}`);
-        yLabel.position.set(bbox.min.x - offset, bbox.max.y + offset * 0.4, bbox.max.z);
+
+        const yStart = new THREE.Vector3(bbox.min.x - offset, bbox.min.y, bbox.max.z);
+        const yEnd = new THREE.Vector3(bbox.min.x - offset, bbox.max.y, bbox.max.z);
+        const yMid = new THREE.Vector3(bbox.min.x - offset * 1.2, (bbox.min.y + bbox.max.y) / 2, bbox.max.z);
+        scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([yStart, yEnd]), lineMaterial));
+        const yLabel = createAxisLabel(`${rows}`);
+        yLabel.position.copy(yMid);
         scene.add(yLabel);
     }
 
@@ -434,9 +444,9 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     scene.add(matrixA);
     scene.add(matrixB);
     scene.add(matrixC);
-    addMatrixAxisLabels(matrixA, 'A');
-    addMatrixAxisLabels(matrixB, 'B');
-    addMatrixAxisLabels(matrixC, 'C');
+    addMatrixAxisLabels(matrixA);
+    addMatrixAxisLabels(matrixB);
+    addMatrixAxisLabels(matrixC);
     const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
     const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
     const hoverOutline = new THREE.LineSegments(hoverEdgesGeometry, new THREE.LineBasicMaterial({ color: COLOR_HOVER }));

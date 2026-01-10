@@ -356,24 +356,29 @@ function addAxisLabels(scene, tensor, colorOrBg) {
     if (!shape) return sprites;
     const bbox = new THREE.Box3().setFromObject(tensor);
     const offset = (CUBE_SIZE + GAP) * 2;
-    const xPos = new THREE.Vector3(
-        bbox.max.x + offset,
-        bbox.min.y - offset * 0.4,
-        bbox.max.z
-    );
-    const yPos = new THREE.Vector3(
-        bbox.min.x - offset,
-        bbox.max.y + offset * 0.4,
-        bbox.max.z
-    );
-    const zPos = new THREE.Vector3(
-        bbox.min.x - offset,
-        bbox.min.y - offset * 0.4,
-        bbox.min.z - offset
-    );
-    sprites.push(addAxisLabel(scene, `X: ${shape.width}`, xPos, colorOrBg));
-    sprites.push(addAxisLabel(scene, `Y: ${shape.height}`, yPos, colorOrBg));
-    sprites.push(addAxisLabel(scene, `Z: ${shape.depth}`, zPos, colorOrBg));
+    const { fill } = computeLabelPalette(colorOrBg);
+    const lineMaterial = new THREE.LineBasicMaterial({
+        color: new THREE.Color(fill),
+        transparent: true,
+        opacity: 0.8,
+    });
+    const xStart = new THREE.Vector3(bbox.min.x, bbox.max.y + offset, bbox.max.z);
+    const xEnd = new THREE.Vector3(bbox.max.x, bbox.max.y + offset, bbox.max.z);
+    const xMid = new THREE.Vector3((bbox.min.x + bbox.max.x) / 2, bbox.max.y + offset * 1.35, bbox.max.z);
+    sprites.push(addAxisLine(scene, xStart, xEnd, lineMaterial));
+    sprites.push(addAxisLabel(scene, `${shape.width}`, xMid, colorOrBg));
+
+    const yStart = new THREE.Vector3(bbox.min.x - offset, bbox.min.y, bbox.max.z);
+    const yEnd = new THREE.Vector3(bbox.min.x - offset, bbox.max.y, bbox.max.z);
+    const yMid = new THREE.Vector3(bbox.min.x - offset * 1.35, (bbox.min.y + bbox.max.y) / 2, bbox.max.z);
+    sprites.push(addAxisLine(scene, yStart, yEnd, lineMaterial));
+    sprites.push(addAxisLabel(scene, `${shape.height}`, yMid, colorOrBg));
+
+    const zStart = new THREE.Vector3(bbox.min.x - offset, bbox.min.y - offset * 0.6, bbox.min.z);
+    const zEnd = new THREE.Vector3(bbox.min.x - offset, bbox.min.y - offset * 0.6, bbox.max.z);
+    const zMid = new THREE.Vector3(bbox.min.x - offset * 1.35, bbox.min.y - offset * 0.6, (bbox.min.z + bbox.max.z) / 2);
+    sprites.push(addAxisLine(scene, zStart, zEnd, lineMaterial));
+    sprites.push(addAxisLabel(scene, `${shape.depth}`, zMid, colorOrBg));
     return sprites;
 }
 
@@ -431,6 +436,13 @@ function addLabel(scene, text, position, colorOrBg) {
     sprite.scale.set(scaleX, scaleY, 1);
     scene.add(sprite);
     return sprite;
+}
+
+function addAxisLine(scene, start, end, material) {
+    const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
+    const line = new THREE.Line(geometry, material);
+    scene.add(line);
+    return line;
 }
 
 function addAxisLabel(scene, text, position, colorOrBg) {
