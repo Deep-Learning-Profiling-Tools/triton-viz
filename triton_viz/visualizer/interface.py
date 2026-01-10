@@ -1,4 +1,5 @@
 import threading
+from typing import Any
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data
@@ -18,10 +19,11 @@ app = Flask(
 # Global variables to store the data
 global_data = None
 raw_tensor_data = None
-precomputed_c_values = {}
+precomputed_c_values: dict[str, dict[tuple[int, int], list[float]]] = {}
 current_fullscreen_op = None
 last_public_url = None
 last_local_port = None
+last_launch_snapshot = None
 sbuf_events = []
 load_overall_maps = {}
 store_overall_maps = {}
@@ -125,16 +127,25 @@ def precompute_c_values(op_data):
     return precomputed
 
 
-def update_global_data():
+def update_global_data(force: bool = False):
     global global_data
     global raw_tensor_data
     global precomputed_c_values
     global sbuf_events
     global load_overall_maps
     global store_overall_maps
+    global last_launch_snapshot
 
     # Collect all records from launches
     from ..core.trace import launches
+
+    total_records = 0
+    for launch in launches:
+        total_records += len(launch.records)
+    snapshot = (len(launches), total_records)
+    if not force and global_data is not None and snapshot == last_launch_snapshot:
+        return
+    last_launch_snapshot = snapshot
 
     all_records: list = []
     for launch in launches:
@@ -174,7 +185,7 @@ def update_global_data():
 
     # Convert analysis_data to a dictionary format similar to pandas DataFrame.to_dict()
     # analysis_data is a list of lists where each inner list contains [metric, value] pairs
-    df_dict = {"Metric": [], "Value": []}
+    df_dict: dict[str, list[Any]] = {"Metric": [], "Value": []}
     for record in analysis_data:
         for metric, value in record:
             df_dict["Metric"].append(metric)
@@ -214,7 +225,6 @@ def _safe_read_file_segment(filename: str, lineno: int, context: int = 8):
 
 @app.route("/")
 def index():
-    update_global_data()
     return render_template("index.html")
 
 
@@ -246,7 +256,7 @@ def get_sbuf_usage():
 
 @app.route("/api/update_data")
 def update_data():
-    update_global_data()
+    update_global_data(force=True)
     return jsonify({"status": "Data updated successfully"})
 
 
