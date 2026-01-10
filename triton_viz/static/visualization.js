@@ -616,9 +616,9 @@ function createProgramIdControls() {
     const maxValues = [maxX, maxY, maxZ];
     labels.forEach((label, index) => {
         const wrapper = document.createElement('div');
-        wrapper.className = 'control-field';
-        const fieldLabel = document.createElement('label');
+        wrapper.className = 'control-field is-inline';
         const nameSpan = document.createElement('span');
+        nameSpan.className = 'control-label';
         nameSpan.textContent = label;
         const valueSpan = document.createElement('span');
         valueSpan.className = 'value-pill';
@@ -629,8 +629,6 @@ function createProgramIdControls() {
         }
         const displayValue = isLocked ? 0 : filterValues[index];
         valueSpan.textContent = displayValue < 0 ? 'All' : String(displayValue);
-        fieldLabel.appendChild(nameSpan);
-        fieldLabel.appendChild(valueSpan);
         const slider = document.createElement('input');
         slider.type = 'range';
         slider.min = isLocked ? 0 : -1;
@@ -639,8 +637,9 @@ function createProgramIdControls() {
         slider.dataset.filterIndex = index;
         slider.disabled = isLocked;
         slider.addEventListener('input', handleProgramFilterChange);
-        wrapper.appendChild(fieldLabel);
+        wrapper.appendChild(nameSpan);
         wrapper.appendChild(slider);
+        wrapper.appendChild(valueSpan);
         controls.pidContainer.appendChild(wrapper);
         if (isLocked && kernelGrid) {
             kernelGrid.updateFilter(index, 0);

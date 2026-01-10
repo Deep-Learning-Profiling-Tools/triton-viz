@@ -282,16 +282,14 @@ export class GridBlock {
 
         axes.forEach(({ label, axis, maxValue }) => {
             const field = document.createElement('div');
-            field.className = 'control-field';
-            const fieldLabel = document.createElement('label');
+            field.className = 'control-field is-inline';
             const nameSpan = document.createElement('span');
+            nameSpan.className = 'control-label';
             nameSpan.textContent = label;
             const valueSpan = document.createElement('span');
             valueSpan.className = 'value-pill';
             const initial = this.gridPosition[axis];
             valueSpan.textContent = String(initial);
-            fieldLabel.appendChild(nameSpan);
-            fieldLabel.appendChild(valueSpan);
             const slider = document.createElement('input');
             slider.type = 'range';
             slider.min = '0';
@@ -305,8 +303,9 @@ export class GridBlock {
                 const nextZ = Number(this.programIdInputs.z.value);
                 this.applyProgramIdSelection(nextX, nextY, nextZ);
             });
-            field.appendChild(fieldLabel);
+            field.appendChild(nameSpan);
             field.appendChild(slider);
+            field.appendChild(valueSpan);
             stack.appendChild(field);
             this.programIdInputs[axis] = slider;
             this.programIdValueEls[axis] = valueSpan;

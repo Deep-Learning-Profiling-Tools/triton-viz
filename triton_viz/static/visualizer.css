@@ -190,6 +190,18 @@ body {
     margin-bottom: 4px;
 }
 
+.control-field.is-inline {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+}
+
+.control-field.is-inline .control-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
 .control-field input[type="range"] {
     width: 100%;
     -webkit-appearance: none;
