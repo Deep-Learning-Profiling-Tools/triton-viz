@@ -156,7 +156,27 @@ function getTextColor(bgColor) {
         orbitControls.dampingFactor = 0.05;
         orbitControls.target.copy(center);
         orbitControls.update();
-        orbitControls.addEventListener('change', requestRender);
+        const viewStateStore = window.__tritonVizCameraState || (window.__tritonVizCameraState = {});
+        const viewStateKey = `load:${op.overall_key || op.uuid}`;
+        const saveCameraState = () => {
+            viewStateStore[viewStateKey] = {
+                position: camera.position.toArray(),
+                target: orbitControls.target.toArray(),
+            };
+        };
+        const restoreCameraState = () => {
+            const state = viewStateStore[viewStateKey];
+            if (!state) return;
+            if (state.position) camera.position.set(...state.position);
+            if (state.target) orbitControls.target.set(...state.target);
+            orbitControls.update();
+        };
+        restoreCameraState();
+        saveCameraState();
+        orbitControls.addEventListener('change', () => {
+            saveCameraState();
+            requestRender();
+        });
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
@@ -215,11 +235,7 @@ function getTextColor(bgColor) {
         refreshTextOverlays();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        const handleKeyDown = (event) => {
-            onKeyDown(event);
-            requestRender();
-        };
-        setupEventListeners(stage, camera, renderer, onMouseMove, handleKeyDown, requestRender);
+        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState);
 
         // Additional pointer events for dragging
         stage.addEventListener('mousedown', onMouseDown);
@@ -923,6 +939,7 @@ function getTextColor(bgColor) {
             if (histogramUI.hide) {
                 histogramUI.hide();
             }
+            saveCameraState();
             clearOverlapMeshes();
             destroyLegend();
             if (rafId !== null) {

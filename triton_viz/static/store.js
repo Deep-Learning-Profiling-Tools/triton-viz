@@ -256,7 +256,27 @@ export function createStoreVisualization(containerElement, op) {
         orbitControls.dampingFactor = 0.05;
         orbitControls.target.copy(center);
         orbitControls.update();
-        orbitControls.addEventListener('change', requestRender);
+        const viewStateStore = window.__tritonVizCameraState || (window.__tritonVizCameraState = {});
+        const viewStateKey = `store:${op.overall_key || op.uuid}`;
+        const saveCameraState = () => {
+            viewStateStore[viewStateKey] = {
+                position: camera.position.toArray(),
+                target: orbitControls.target.toArray(),
+            };
+        };
+        const restoreCameraState = () => {
+            const state = viewStateStore[viewStateKey];
+            if (!state) return;
+            if (state.position) camera.position.set(...state.position);
+            if (state.target) orbitControls.target.set(...state.target);
+            orbitControls.update();
+        };
+        restoreCameraState();
+        saveCameraState();
+        orbitControls.addEventListener('change', () => {
+            saveCameraState();
+            requestRender();
+        });
 
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
@@ -269,11 +289,7 @@ export function createStoreVisualization(containerElement, op) {
         const dragOffset = new THREE.Vector3();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        const handleKeyDown = (event) => {
-            onKeyDown(event);
-            requestRender();
-        };
-        setupEventListeners(stage, camera, renderer, onMouseMove, handleKeyDown, requestRender);
+        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState);
         stage.addEventListener('mousedown', onMouseDown);
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
@@ -903,6 +919,7 @@ export function createStoreVisualization(containerElement, op) {
             if (histogramUI.hide) {
                 histogramUI.hide();
             }
+            saveCameraState();
             clearOverlapMeshes();
             destroyLegend();
             if (rafId !== null) {
