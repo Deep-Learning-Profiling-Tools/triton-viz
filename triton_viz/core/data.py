@@ -68,11 +68,6 @@ class Store(Op):
 
 
 @dataclass
-class MaskedStore(Op):
-    name: ClassVar[str] = "masked_store"
-
-
-@dataclass
 class RawLoad(Op):
     name: ClassVar[str] = "raw_load"
 
@@ -89,11 +84,6 @@ class Load(Op):
     backend: str = "nki"
     bytes: int = 0
     time_idx: int = 0
-
-
-@dataclass
-class MaskedLoad(Op):
-    name: ClassVar[str] = "masked_load"
 
 
 @dataclass

@@ -156,6 +156,11 @@ class TritonTrace(KernelInterface, TraceInterface):
         # we need to execute the underlying function directly
         return self.interpreted_fn(*args, **kwargs)
 
+    def warmup(self, *args, **kwargs):
+        with self.client_manager.patch_warmup(self.jit_fn):
+            if self.warmup_runner:
+                self.warmup_runner.warmup(*args, **kwargs)
+
 
 class NKITrace(KernelInterface, TraceInterface):
     def __init__(self, kernel, client: str | Client) -> None:

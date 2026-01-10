@@ -1909,7 +1909,7 @@ class SanitizerSymbolicExecution(Sanitizer):
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         self.grid_idx = grid_idx
 
-    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def op_program_id_overrider(axis):
             assert self.grid, "Grid not initialized!"
             return SymbolicExpr("pid", self.grid, axis)
