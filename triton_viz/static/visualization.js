@@ -1,5 +1,4 @@
 import { GridBlock } from './gridblock.js';
-import { createInfoPopup, showInfoPopup } from './infoPopup.js';
 import { createLoadOverallVisualization } from './load.js';
 import { createStoreOverallVisualization } from './store.js';
 import { enableDrag } from './ui_helpers.js';
@@ -14,7 +13,6 @@ let canvasLogicalHeight = 0;
 let kernelGrid;
 let currentBlockData = null;
 let containerElement;
-let infoPopup;
 let isInitialized = false;
 let overallCleanup = null;
 let maxX = 0;
@@ -194,6 +192,21 @@ function switchToTensorView(clickedBlock) {
     clickedBlock.showDetailedView();
 }
 
+function openProgramZeroBlock() {
+    if (!kernelGrid || kernelGrid.blocks.length === 0) return;
+    const target = kernelGrid.blocks.find(
+        (block) =>
+            block.gridPosition.x === 0 &&
+            block.gridPosition.y === 0 &&
+            block.gridPosition.z === 0 &&
+            Array.isArray(block.blockData) &&
+            block.blockData.length > 0
+    );
+    if (target) {
+        switchToTensorView(target);
+    }
+}
+
 function initializeApp() {
     canvas = document.getElementById('canvas');
     canvasWrapper = document.getElementById('canvas-wrapper');
@@ -206,7 +219,6 @@ function initializeApp() {
     controls.resetBtn = document.getElementById('reset-filters');
     controls.overallBtn = document.getElementById('btn-overall');
     controls.precomputeBtn = document.getElementById('btn-precompute');
-    controls.infoBtn = document.getElementById('btn-info');
     controls.themeToggle = document.getElementById('theme-toggle');
     controls.opColorizeBtn = document.getElementById('btn-op-colorize');
     controls.opHistogramBtn = document.getElementById('btn-op-histogram');
@@ -295,14 +307,6 @@ function setupControlEvents() {
         });
     }
 
-    if (controls.infoBtn) {
-        controls.infoBtn.addEventListener('click', () => {
-            if (!infoPopup) {
-                infoPopup = createInfoPopup();
-            }
-            showInfoPopup(infoPopup);
-        });
-    }
 
     if (controls.zSlider) {
         controls.zSlider.addEventListener('input', (event) => {
@@ -456,6 +460,7 @@ class KernelGrid {
         this.gridSize = gridSize;
         this.visualizationData = visualizationData;
         this.currentZ = 0;
+        this.gridDepth = Math.max(1, (gridSize[2] || 1));
         this.blocks = [];
         this.filterValues = [0, 0, 0];
         this.selectedBlock = null;
@@ -487,6 +492,19 @@ class KernelGrid {
                 const gridKey1 = `(${x}, ${y}, ${this.currentZ})`;
                 const gridKey2 = `(${x},${y},${this.currentZ})`;
                 const blockData = this.visualizationData[gridKey1] || this.visualizationData[gridKey2] || [];
+                const programIdConfig = {
+                    max: {
+                        x: Math.max(0, gridX - 1),
+                        y: Math.max(0, gridY - 1),
+                        z: Math.max(0, this.gridDepth - 1),
+                    },
+                    values: {
+                        x,
+                        y,
+                        z: this.currentZ,
+                    },
+                    getBlockData: (nx, ny, nz) => this.getBlockDataAt(nx, ny, nz),
+                };
                 const block = new GridBlock(
                     blockX,
                     blockY,
@@ -500,10 +518,21 @@ class KernelGrid {
                     containerElement,
                     canvas,
                     draw
+                    , programIdConfig
                 );
                 this.blocks.push(block);
             }
         }
+    }
+
+    getBlockDataAt(nx, ny, nz) {
+        const withSpaces = `(${nx}, ${ny}, ${nz})`;
+        const withoutSpaces = `(${nx},${ny},${nz})`;
+        return (
+            this.visualizationData[withSpaces] ||
+            this.visualizationData[withoutSpaces] ||
+            []
+        );
     }
 
     draw(ctxRef, palette) {
@@ -601,12 +630,9 @@ function initializeUIElements() {
     createProgramIdControls();
     updateZSliderState();
 
-    if (!infoPopup) {
-        infoPopup = createInfoPopup();
-    }
-
     isInitialized = true;
     draw();
+    openProgramZeroBlock();
 }
 
 function createProgramIdControls() {

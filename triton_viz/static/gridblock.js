@@ -1,5 +1,4 @@
 import { createMatMulVisualization } from './matmul.js';
-import { createFlipVisualization } from './flip.js';
 import { createLoadVisualization, createLoadOverallVisualization } from './load.js';
 import { createStoreVisualization, createStoreOverallVisualization } from './store.js';
 import { createFlowDiagram } from './nki.js';
@@ -30,9 +29,6 @@ export class GridBlock {
         this.activeTab = null;
         this.activeTabIndex = 0;
         this.programIdConfig = programIdConfig;
-        this.programIdControls = null;
-        this.programIdInputs = null;
-        this.programIdValueEls = null;
         this.titleEl = null;
         this.badgeEl = null;
         this.cardEl = null;
@@ -263,73 +259,6 @@ export class GridBlock {
         return row;
     }
 
-    createProgramIdControls() {
-        if (!this.programIdConfig) return null;
-        const { max } = this.programIdConfig;
-        const wrapper = document.createElement('section');
-        wrapper.className = 'control-group';
-        const header = document.createElement('div');
-        header.className = 'group-header';
-        header.innerHTML = '<span>Program IDs</span>';
-        wrapper.appendChild(header);
-
-        const stack = document.createElement('div');
-        stack.className = 'control-stack';
-        wrapper.appendChild(stack);
-
-        this.programIdInputs = {};
-        this.programIdValueEls = {};
-
-        const axes = [
-            { label: 'X', axis: 'x', maxValue: max.x },
-            { label: 'Y', axis: 'y', maxValue: max.y },
-            { label: 'Z', axis: 'z', maxValue: max.z },
-        ];
-
-        axes.forEach(({ label, axis, maxValue }) => {
-            const field = document.createElement('div');
-            field.className = 'control-field is-inline';
-            const nameSpan = document.createElement('span');
-            nameSpan.className = 'control-label';
-            nameSpan.textContent = label;
-            const valueSpan = document.createElement('span');
-            valueSpan.className = 'value-pill';
-            const initial = this.gridPosition[axis];
-            valueSpan.textContent = String(initial);
-            const slider = document.createElement('input');
-            slider.type = 'range';
-            slider.min = '0';
-            slider.max = String(maxValue);
-            slider.value = String(initial);
-            slider.disabled = maxValue <= 0;
-            const tickId = `detail-pid-ticks-${axis}`;
-            const ticks = document.createElement('datalist');
-            ticks.id = tickId;
-            for (let i = 0; i <= maxValue; i += 1) {
-                const opt = document.createElement('option');
-                opt.value = String(i);
-                ticks.appendChild(opt);
-            }
-            slider.setAttribute('list', tickId);
-            slider.addEventListener('input', () => {
-                valueSpan.textContent = slider.value;
-                const nextX = Number(this.programIdInputs.x.value);
-                const nextY = Number(this.programIdInputs.y.value);
-                const nextZ = Number(this.programIdInputs.z.value);
-                this.applyProgramIdSelection(nextX, nextY, nextZ);
-            });
-            field.appendChild(nameSpan);
-            field.appendChild(slider);
-            field.appendChild(valueSpan);
-            field.appendChild(ticks);
-            stack.appendChild(field);
-            this.programIdInputs[axis] = slider;
-            this.programIdValueEls[axis] = valueSpan;
-        });
-
-        return wrapper;
-    }
-
     applyProgramIdSelection(x, y, z) {
         if (!this.programIdConfig) return;
         const { max } = this.programIdConfig;
@@ -348,15 +277,6 @@ export class GridBlock {
         if (this.badgeEl) {
             this.badgeEl.textContent = `${this.blockData.length} ops`;
         }
-        if (this.programIdInputs && this.programIdValueEls) {
-            this.programIdInputs.x.value = String(nx);
-            this.programIdInputs.y.value = String(ny);
-            this.programIdInputs.z.value = String(nz);
-            this.programIdValueEls.x.textContent = String(nx);
-            this.programIdValueEls.y.textContent = String(ny);
-            this.programIdValueEls.z.textContent = String(nz);
-        }
-
         if (this.headerBar && this.cardEl) {
             this.headerBar.remove();
             this.headerBar = this.createHeaderBar();
@@ -510,9 +430,6 @@ export class GridBlock {
                 break;
             case 'Store':
                 this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op);
-                break;
-            case 'Flip':
-                this.visualizationCleanupFunction = createFlipVisualization(this.contentArea, op);
                 break;
             default:
                 this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;

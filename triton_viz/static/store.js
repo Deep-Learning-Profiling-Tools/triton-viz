@@ -12,8 +12,6 @@ import {
     CUBE_SIZE
 } from './load_utils.js';
 import { createHistogramOverlay } from './histogram.js';
-import { createFlipDemo } from './flip_demo.js';
-import { createFlip3D } from './flip_3d.js';
 
 function createHeatmapOverlay(apiBase, uuid, onDataLoaded) {
         const button = document.createElement('button');
@@ -256,6 +254,39 @@ export function createStoreVisualization(containerElement, op) {
         sliceHoverOutline.visible = false;
         globalTensor.add(globalHoverOutline);
         sliceTensor.add(sliceHoverOutline);
+        const hoverMatrix = new THREE.Matrix4();
+        const hoverPosition = new THREE.Vector3();
+        const hoverQuaternion = new THREE.Quaternion();
+        const hoverScale = new THREE.Vector3();
+        let activeHoverOutline = null;
+
+        function hideHoverOutlines() {
+            globalHoverOutline.visible = false;
+            sliceHoverOutline.visible = false;
+            activeHoverOutline = null;
+        }
+
+        function showHoverOutlineForMesh(mesh, instanceId) {
+            if (!mesh || typeof instanceId !== 'number' || instanceId < 0) {
+                return false;
+            }
+            const outline = mesh === globalMesh ? globalHoverOutline
+                : mesh === sliceMesh ? sliceHoverOutline
+                : null;
+            if (!outline) {
+                return false;
+            }
+            mesh.getMatrixAt(instanceId, hoverMatrix);
+            hoverMatrix.decompose(hoverPosition, hoverQuaternion, hoverScale);
+            outline.position.copy(hoverPosition);
+            outline.updateMatrixWorld();
+            outline.visible = true;
+            if (activeHoverOutline && activeHoverOutline !== outline) {
+                activeHoverOutline.visible = false;
+            }
+            activeHoverOutline = outline;
+            return true;
+        }
 
         labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
 
@@ -468,6 +499,26 @@ export function createStoreVisualization(containerElement, op) {
             return node;
         }
 
+        function resolveHitCoords(hit, mesh) {
+            if (!hit || !mesh || typeof hit.instanceId !== 'number' || hit.instanceId < 0) {
+                return null;
+            }
+            const coords = mesh.userData.coords;
+            if (Array.isArray(coords) && coords[hit.instanceId]) {
+                return coords[hit.instanceId];
+            }
+            const shape = mesh.userData.shape || {};
+            const width = Math.max(1, shape.width || 1);
+            const height = Math.max(1, shape.height || 1);
+            const depth = Math.max(1, shape.depth || 1);
+            const perLayer = Math.max(1, width * height);
+            const z = Math.min(depth - 1, Math.floor(hit.instanceId / perLayer));
+            const remainder = hit.instanceId - z * perLayer;
+            const y = Math.min(height - 1, Math.floor(remainder / Math.max(1, width)));
+            const x = Math.min(width - 1, remainder % Math.max(1, width));
+            return [x, y, z];
+        }
+
         async function onMouseMove(event) {
             _updateMouseNDC(event);
 
@@ -483,29 +534,32 @@ export function createStoreVisualization(containerElement, op) {
             const intersects = _raycastAll();
 
             if (hoveredCube) {
-                hoveredCube.getObjectByName('hoverOutline').visible = false;
                 hoveredCube = null;
             }
 
             if (intersects.length > 0) {
-                hoveredCube = _toTopLevelCube(intersects[0].object);
+                const hit = intersects[0];
+                hoveredCube = _toTopLevelCube(hit.object);
 
                 if (hoveredCube) {
-                    const hoverOutline = hoveredCube.getObjectByName('hoverOutline');
-                    if (hoverOutline) {
-                        hoverOutline.visible = true;
+                    showHoverOutlineForMesh(hoveredCube, hit.instanceId);
+                    const coords = resolveHitCoords(hit, hoveredCube);
+                    if (!coords) {
+                        hideHoverOutlines();
+                        updateSideMenu(null);
+                        requestRender();
+                        return;
                     }
-
-                    const { tensorName, tensor0, tensor1, tensor2 } = hoveredCube.userData;
-                    updateSideMenu(tensorName, tensor0, tensor1, tensor2, undefined);
-
-                    const res = await getElementValue(tensorName, tensor0, tensor1, tensor2);
-
-                    updateSideMenu(tensorName, tensor0, tensor1, tensor2, res.value);
-
-                    console.log(`Value: ${res.value}`);
+                    const [x, y, z] = coords;
+                    const tensorName = hoveredCube.userData?.tensorName || 'Global';
+                    updateSideMenu(tensorName, x, y, z, undefined);
+                    const res = await getElementValue(tensorName, x, y, z);
+                    updateSideMenu(tensorName, x, y, z, res?.value);
+                    console.log(`Value: ${res?.value}`);
                 }
             } else {
+                hoveredCube = null;
+                hideHoverOutlines();
                 updateSideMenu(null);
             }
             requestRender();
@@ -619,28 +673,33 @@ export function createStoreVisualization(containerElement, op) {
             };
         }
 
-        function resetColorByValue() {
-            globalTensor.children.forEach((cube) => {
-                const u = cube.userData;
-                if (!u) return;
-                const key = `${u.tensor0},${u.tensor1},${u.tensor2}`;
+        function resetGlobalColors() {
+            if (!globalMesh) return;
+            const shape = globalMesh.userData.shape || {};
+            for (let idx = 0; idx < globalMesh.count; idx += 1) {
+                const [x, y, z] = coordsFromIndex(idx, shape);
+                const key = `${x},${y},${z}`;
                 const base = highlightedGlobalSet.has(key) ? COLOR_SLICE : currentBaseGlobal;
-                cube.material.color.copy(base);
-            });
-            sliceTensor.children.forEach((cube) => {
-                cube.material.color.copy(currentBaseSlice);
-            });
+                globalMesh.setColorAt(idx, base);
+            }
+            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
         }
 
-        function resetBaseColors() {
-            for (let idx = 0; idx < globalMesh.count; idx += 1) {
-                globalMesh.setColorAt(idx, currentBaseGlobal);
-            }
+        function resetSliceColors() {
+            if (!sliceMesh) return;
             for (let idx = 0; idx < sliceMesh.count; idx += 1) {
                 sliceMesh.setColorAt(idx, currentBaseSlice);
             }
-            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
             if (sliceMesh.instanceColor) sliceMesh.instanceColor.needsUpdate = true;
+        }
+
+        function resetColorByValue() {
+            resetGlobalColors();
+            resetSliceColors();
+        }
+
+        function resetBaseColors() {
+            resetColorByValue();
         }
 
         function getRainbowColor(idx, total) {
@@ -792,41 +851,60 @@ export function createStoreVisualization(containerElement, op) {
             if (overlapMeshes.slice) sliceTensor.add(overlapMeshes.slice);
         }
 
-        function sampleStoreValue(cache, userData, fallback) {
-            if (!cache) return fallback;
-            const { dims, values } = cache;
-            try {
-                if (dims >= 3) {
-                    return values[userData.tensor1][userData.tensor0][userData.tensor2];
-                } else if (dims === 2) {
-                    return values[userData.tensor1][userData.tensor0];
-                } else if (dims === 1) {
-                    return values[userData.tensor0];
-                }
-            } catch (e) {
-                /* ignore */
-            }
-            return fallback;
+        function coordsFromIndex(index, shape) {
+            const width = Math.max(1, shape?.width || 1);
+            const height = Math.max(1, shape?.height || 1);
+            const depth = Math.max(1, shape?.depth || 1);
+            const perLayer = Math.max(1, width * height);
+            const z = Math.min(depth - 1, Math.floor(index / perLayer));
+            const remainder = index - z * perLayer;
+            const y = Math.min(height - 1, Math.floor(remainder / width));
+            const x = Math.min(width - 1, remainder % width);
+            return [x, y, z];
         }
 
-        function applyColorsToTensor(targetTensor, cache) {
-            if (!cache || !tensorCache) return;
+        function sampleValueFromCache(cache, coords) {
+            if (!cache || !cache.values) return 0;
+            const dims = cache.dims || 0;
+            const [x, y, z] = coords;
+            const values = cache.values;
+            if (dims >= 3) {
+                return values?.[y]?.[x]?.[z] ?? 0;
+            }
+            if (dims === 2) {
+                return values?.[y]?.[x] ?? 0;
+            }
+            if (dims === 1) {
+                return values?.[x] ?? 0;
+            }
+            return 0;
+        }
+
+        function computeStoreColor(t) {
+            return TEMP_COLOR.copy(COLOR_COOL).lerp(COLOR_HOT, t);
+        }
+
+        function applyColorToMesh(mesh, cache) {
+            if (!mesh || !cache || !tensorCache) return;
             const min = tensorCache.scaleMin;
             const max = tensorCache.scaleMax;
             const denom = max - min || 1;
-            targetTensor.children.forEach((cube) => {
-                const u = cube.userData;
-                if (!u) return;
-                const val = sampleStoreValue(cache, u, min);
+            const shape = mesh.userData.shape || {};
+            for (let idx = 0; idx < mesh.count; idx += 1) {
+                const coord = coordsFromIndex(idx, shape);
+                const val = sampleValueFromCache(cache, coord);
                 const t = Math.max(0, Math.min(1, (val - min) / denom));
-                cube.material.color.copy(TEMP_COLOR.copy(COLOR_COOL).lerp(COLOR_HOT, t));
-            });
+                mesh.setColorAt(idx, computeStoreColor(t));
+            }
+            if (mesh.instanceColor) {
+                mesh.instanceColor.needsUpdate = true;
+            }
         }
 
         function applyColorByValue() {
             if (!colorizeOn || !tensorCache) return;
-            applyColorsToTensor(globalTensor, tensorCache.global);
-            applyColorsToTensor(sliceTensor, tensorCache.slice);
+            applyColorToMesh(globalMesh, tensorCache.global);
+            applyColorToMesh(sliceMesh, tensorCache.slice);
         }
 
         function destroyLegend() {

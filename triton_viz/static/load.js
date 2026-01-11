@@ -10,6 +10,8 @@ import {
     cameraControls,
     addLabels,
     COLOR_EDGE,
+    CUBE_SIZE,
+    COLOR_HOVER,
 } from './load_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 
@@ -56,12 +58,10 @@ export function createLoadVisualization(containerElement, op) {
         try {
             window.last_op_global_shape = op.global_shape;
             window.last_global_coords = op.global_coords;
-            window.last_slice_shape = op.slice_shape;
-            window.last_slice_coords = op.slice_coords;
         } catch (e) {}
 
         let colorizeOn = false;
-        let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}, slice:{dims,values}}
+        let tensorCache = null; // {scaleMin, scaleMax, global:{dims,values}}
         let hoveredCube = null;
         let hoveredHit = null;
         let lastHoverKey = null;
@@ -109,8 +109,7 @@ function getTextColor(bgColor) {
 
         const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);    // Dark Gray (base for dark themes)
         const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);     // Cyan (highlighted global coords)
-        const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0); // Magenta (slice base in dark themes)
-        const COLOR_LOADED = new THREE.Color(1.0, 0.8, 0.0);    // Gold (final color for both slices)
+        const COLOR_LEFT_SLICE = new THREE.Color(1.0, 0.0, 1.0);
         const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);  // Black
 
         let currentBackground = COLOR_BACKGROUND;
@@ -119,16 +118,13 @@ function getTextColor(bgColor) {
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
 
         const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
-        const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
         const globalMesh = globalTensor.userData.mesh;
-        const sliceMesh = sliceTensor.userData.mesh;
-        const allTensorMeshes = [globalMesh, sliceMesh];
-
-        // Position slice tensor
-        const globalSize = calculateTensorSize(op.global_shape);
-        sliceTensor.position.set(globalSize.x + 5, 0, 0); // Adjusted tensor spacing
-
         scene.add(globalTensor);
+
+        const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
+        const sliceMesh = sliceTensor.userData.mesh;
+        const globalSize = calculateTensorSize(op.global_shape);
+        sliceTensor.position.set(globalSize.x + 5, 0, 0);
         scene.add(sliceTensor);
 
         const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
@@ -140,6 +136,39 @@ function getTextColor(bgColor) {
         sliceHoverOutline.visible = false;
         globalTensor.add(globalHoverOutline);
         sliceTensor.add(sliceHoverOutline);
+        const hoverMatrix = new THREE.Matrix4();
+        const hoverPosition = new THREE.Vector3();
+        const hoverQuaternion = new THREE.Quaternion();
+        const hoverScale = new THREE.Vector3();
+        let activeHoverOutline = null;
+
+        function hideHoverOutlines() {
+            globalHoverOutline.visible = false;
+            sliceHoverOutline.visible = false;
+            activeHoverOutline = null;
+        }
+
+        function showHoverOutlineForMesh(mesh, instanceId) {
+            if (!mesh || typeof instanceId !== 'number' || instanceId < 0) {
+                return false;
+            }
+            const outline = mesh === globalMesh ? globalHoverOutline
+                : mesh === sliceMesh ? sliceHoverOutline
+                : null;
+            if (!outline) {
+                return false;
+            }
+            mesh.getMatrixAt(instanceId, hoverMatrix);
+            hoverMatrix.decompose(hoverPosition, hoverQuaternion, hoverScale);
+            outline.position.copy(hoverPosition);
+            outline.updateMatrixWorld();
+            outline.visible = true;
+            if (activeHoverOutline && activeHoverOutline !== outline) {
+                activeHoverOutline.visible = false;
+            }
+            activeHoverOutline = outline;
+            return true;
+        }
 
         // Precompute highlighted coords in Global tensor for quick reset
         const highlightedGlobalSet = new Set(
@@ -295,6 +324,26 @@ function getTextColor(bgColor) {
             return node;
         }
 
+        function resolveHitCoords(hit, mesh) {
+            if (!hit || !mesh || typeof hit.instanceId !== 'number' || hit.instanceId < 0) {
+                return null;
+            }
+            const coords = mesh.userData.coords;
+            if (Array.isArray(coords) && coords[hit.instanceId]) {
+                return coords[hit.instanceId];
+            }
+            const shape = mesh.userData.shape || {};
+            const width = Math.max(1, shape.width || 1);
+            const height = Math.max(1, shape.height || 1);
+            const depth = Math.max(1, shape.depth || 1);
+            const layerSize = Math.max(1, width * height);
+            const z = Math.min(depth - 1, Math.floor(hit.instanceId / layerSize));
+            const remainder = hit.instanceId - z * layerSize;
+            const y = Math.min(height - 1, Math.floor(remainder / Math.max(1, width)));
+            const x = Math.min(width - 1, remainder % Math.max(1, width));
+            return [x, y, z];
+        }
+
         async function onMouseMove(event) {
             _updateMouseNDC(event);
 
@@ -312,27 +361,25 @@ function getTextColor(bgColor) {
 
             const intersects = _raycastAll();
 
-            if (hoveredCube) {
-                hoveredCube.getObjectByName('hoverOutline').visible = false;
-                hoveredCube = null;
-            }
+            hideHoverOutlines();
+            hoveredCube = null;
 
             if (intersects.length > 0) {
-                    hoveredCube = _toTopLevelCube(intersects[0].object);
-
+                const hit = intersects[0];
+                hoveredCube = _toTopLevelCube(hit.object);
                 if (hoveredCube) {
-                    const hoverOutline = hoveredCube.getObjectByName('hoverOutline');
-                    if (hoverOutline) {
-                        hoverOutline.visible = true;
+                    showHoverOutlineForMesh(hoveredCube, hit.instanceId);
+                    const { tensorName } = hoveredCube.userData;
+                    const coords = resolveHitCoords(hit, hoveredCube);
+                    if (!coords) {
+                        updateSideMenu(null);
+                        requestRender();
+                        return;
                     }
-
-                    const { tensorName, tensor0, tensor1, tensor2 } = hoveredCube.userData;
+                    const [tensor0, tensor1, tensor2] = coords;
                     updateSideMenu(tensorName, tensor0, tensor1, tensor2, undefined);
-
                     const res = await getElementValue(tensorName, tensor0, tensor1, tensor2);
-
                     updateSideMenu(tensorName, tensor0, tensor1, tensor2, res.value);
-
                     console.log(`Value: ${res.value}`);
                 }
             } else {

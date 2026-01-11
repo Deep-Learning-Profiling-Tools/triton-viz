@@ -181,6 +181,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
             highlightedIndices.add(idx);
         });
 
+        const coordList = [];
         let idx = 0;
         for (let z = 0; z < depth; z++) {
             for (let y = 0; y < height; y++) {
@@ -189,9 +190,11 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
                     mesh.setMatrixAt(idx, matrix);
                     mesh.setColorAt(idx, highlightedIndices.has(idx) ? COLOR_SLICE : baseColor);
                     idx++;
+                    coordList.push([x, y, z]);
                 }
             }
         }
+        mesh.userData.coords = coordList;
     } else {
         console.log(`Creating slice tensor with ${coords.length} coordinates`);
         coords.forEach(([x, y, z], idx) => {
