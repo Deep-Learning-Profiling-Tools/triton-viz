@@ -223,5 +223,5 @@ if torch.cuda.is_available():  # Only test if CUDA is available
 
         # The kernel launch uses n_elements=256, exceeding the valid tensor size.
         grid = lambda META: (triton.cdiv(256, META["BLOCK_SIZE"]),)
-        with pytest.raises(ValueError):
+        with pytest.raises(SystemExit):
             add_kernel_no_mask[grid](x_ptr=x, y_ptr=y, out_ptr=out, n_elements=256)
