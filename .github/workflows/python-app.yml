@@ -23,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TRITON_INTERPRET: "1"
-      TRITON_VERSION: "3.4.0"
 
     steps:
     - uses: actions/checkout@v3
@@ -49,7 +48,7 @@ jobs:
 
     - name: Install Triton
       run: |
-        pip install triton==${{ env.TRITON_VERSION }}
+        pip install -U triton --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
 
     - name: Install Triton-Viz
       run: |
