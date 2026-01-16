@@ -1,46 +1,70 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kernel Launch Configuration Visualization</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: #1e1e28;
-            color: #c8c8c8;
-            font-family: Arial, sans-serif;
-        }
-        canvas {
-            display: block;
-            margin: 0 auto;
-        }
-        #visualization-container {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 1000;
-        }
-        #operation-buttons {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-        }
-        .operation-button {
-            padding: 10px 20px;
-            margin-right: 10px;
-            font-size: 16px;
-            cursor: pointer;
-        }
-    </style>
+    <title>Triton Kernel Visualization</title>
+    <link rel="stylesheet" href="/static/visualizer.css">
 </head>
 <body>
-    <canvas id="canvas"></canvas>
-    <div id="visualization-container"></div>
+    <div class="viz-app">
+        <aside id="control-panel">
+            <div class="panel-header">
+                <div class="title-block">
+                    <span class="eyebrow">Triton Viz</span>
+                    <h1>Kernel Explorer</h1>
+                    <p class="control-note">Filter program IDs, move across slices, and jump into overview mode.</p>
+                </div>
+                <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+                    <span id="theme-toggle-icon" aria-hidden="true">☀</span>
+                </button>
+            </div>
+
+            <section class="control-group">
+                <div class="group-header">
+                    <span>Program IDs</span>
+                    <button id="reset-filters" class="viz-button link" type="button">Reset</button>
+                </div>
+                <div id="pid-controls" class="control-stack"></div>
+                <p class="control-note">Drag the sliders or set to -1 to show every program on that axis.</p>
+            </section>
+
+            <section class="control-group">
+                <div class="group-header">
+                    <span>Z Slice</span>
+                    <span id="z-value" class="value-pill">0</span>
+                </div>
+                <input id="z-slider" type="range" min="0" max="0" value="0">
+                <p class="control-note">Control which Z slice is visible to align screenshots.</p>
+            </section>
+
+            <section class="control-group">
+                <div class="group-header">
+                    <span>Actions</span>
+                </div>
+                <div class="button-grid">
+                    <button id="btn-overall" class="viz-button primary" type="button">Overall View</button>
+                    <button id="btn-precompute" class="viz-button ghost" type="button">Precompute</button>
+                    <button id="btn-info" class="viz-button ghost" type="button">Guide</button>
+                </div>
+                <p class="control-note">Overall view aggregates every Load / Store op.</p>
+            </section>
+
+            <section class="control-group">
+                <div class="group-header">
+                    <span>Code Peek</span>
+                </div>
+                <p class="control-note">
+                    Open the detailed view of any block to use the Show Code toggle for source context.
+                </p>
+            </section>
+        </aside>
+
+        <main id="canvas-wrapper">
+            <canvas id="canvas" aria-label="Kernel Visualization Canvas"></canvas>
+            <div id="visualization-container"></div>
+        </main>
+    </div>
 
     <script type="module" src="/static/visualization.js"></script>
 </body>

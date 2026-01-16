@@ -3,6 +3,8 @@ from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data
 import os
+import torch
+import numpy as np
 from flask_cloudflared import _run_cloudflared
 import requests
 import time
@@ -20,6 +22,39 @@ precomputed_c_values = {}
 current_fullscreen_op = None
 last_public_url = None
 last_local_port = None
+sbuf_events = []
+load_overall_maps = {}
+store_overall_maps = {}
+DEVICE_LIMITS = {
+    "TRN1_NC_V2": 24 * 1024 * 1024,
+    "TRN1_CHIP": 48 * 1024 * 1024,
+    "TRN1_2XL": 48 * 1024 * 1024,
+    "TRN1_32XL": 768 * 1024 * 1024,
+    "TRN2_NC_V3": 28 * 1024 * 1024,
+    "TRN2_CHIP": 224 * 1024 * 1024,
+    "TRN2_48XL": 3584 * 1024 * 1024,
+}
+
+
+def _compute_sbuf_timeline(events: list[dict]) -> tuple[list[dict], int]:
+    if not events:
+        return [], 0
+    usage = 0
+    timeline = []
+    usage_values = []
+    for ev in sorted(events, key=lambda e: e.get("time_idx", 0)):
+        usage += int(ev.get("delta", 0))
+        usage_values.append(usage)
+        timeline.append(
+            {
+                "time_idx": int(ev.get("time_idx", 0)),
+                "usage": usage,
+                "label": ev.get("label"),
+                "uuid": ev.get("uuid"),
+            }
+        )
+    max_usage = max(usage_values) if usage_values else 0
+    return timeline, max_usage
 
 
 # Server state management
@@ -47,30 +82,65 @@ class ServerState:
 _server_state = ServerState()
 
 
+def _to_numpy_array(value):
+    """Best-effort conversion to a numpy array."""
+    if value is None:
+        return np.asarray([])
+    if isinstance(value, np.ndarray):
+        return value
+    try:
+        if hasattr(value, "detach") and callable(getattr(value, "detach", None)):
+            value = value.detach()
+        if hasattr(value, "cpu") and callable(getattr(value, "cpu", None)):
+            value = value.cpu()
+        if hasattr(value, "numpy") and callable(getattr(value, "numpy", None)):
+            return value.numpy()
+        if hasattr(value, "data"):
+            return _to_numpy_array(value.data)
+        return np.asarray(value)
+    except Exception:
+        try:
+            return np.asarray(value)
+        except Exception:
+            return np.asarray([])
+
+
 def precompute_c_values(op_data):
-    input_data = op_data["input_data"]
-    other_data = op_data["other_data"]
-    rows, inner_dim = input_data.shape
-    cols = other_data.shape[1]
+    # Normalize to torch.Tensor (Dot operands may arrive as NumPy arrays)
+    input_tensor = torch.as_tensor(_to_numpy_array(op_data["input_data"]))
+    other_tensor = torch.as_tensor(_to_numpy_array(op_data["other_data"]))
+
+    rows, inner_dim = input_tensor.shape
+    cols = other_tensor.shape[1]
 
     precomputed = {}
     for i in range(rows):
         for j in range(cols):
             precomputed[(i, j)] = [0] * (inner_dim + 1)
             for k in range(1, inner_dim + 1):
-                precomputed[(i, j)][k] = input_data[i, :k] @ other_data[:k, j]
+                precomputed[(i, j)][k] = torch.dot(
+                    input_tensor[i, :k], other_tensor[:k, j]
+                ).item()
 
     return precomputed
 
 
 def update_global_data():
-    global global_data, raw_tensor_data, precomputed_c_values
+    global global_data
+    global raw_tensor_data
+    global precomputed_c_values
+    global sbuf_events
+    global load_overall_maps
+    global store_overall_maps
 
     # Collect all records from launches
     from ..core.trace import launches
 
-    all_records = []
+    all_records: list = []
     for launch in launches:
+        # Include the Launch object itself so analysis can attach per-kernel
+        # metadata (e.g., grid size) before consuming client records.
+        all_records.append(launch)
         all_records.extend(launch.records)
 
     # Pass the records to analyze_records
@@ -92,6 +162,9 @@ def update_global_data():
         }
     }
     raw_tensor_data = viz_data["raw_tensor_data"]
+    sbuf_events = raw_tensor_data.pop("__sbuf_events__", [])
+    load_overall_maps = viz_data.get("load_overall", {})
+    store_overall_maps = viz_data.get("store_overall", {})
 
     # Precompute C values for each Dot operation
     precomputed_c_values = {}
@@ -162,6 +235,25 @@ def get_data():
     global global_data
     update_global_data()
     return jsonify(global_data)
+
+
+@app.route("/api/sbuf")
+def get_sbuf_usage():
+    global sbuf_events
+    device = (request.args.get("device") or "A100").upper()
+    limit = DEVICE_LIMITS.get(device)
+    if limit is None:
+        limit = int(request.args.get("limit_bytes", 256 * 1024))
+    timeline, max_usage = _compute_sbuf_timeline(sbuf_events)
+    overflow = [pt for pt in timeline if pt["usage"] > limit]
+    return jsonify(
+        {
+            "timeline": timeline,
+            "limit_bytes": limit,
+            "max_usage": max_usage,
+            "overflow_points": overflow,
+        }
+    )
 
 
 @app.route("/api/update_data")
@@ -327,12 +419,100 @@ def get_matmul_vectors():
 
         a_np = _np.asarray(a)
         b_np = _np.asarray(b)
+        swizzle = bool(op.get("b_swizzle"))
         a_row = a_np[row, :].tolist()
-        b_col = b_np[:, col].tolist()
+        if swizzle:
+            # TEMP: until tracer auto-detects, demo may flag B swizzle by row access
+            b_vec = b_np[col, :]
+        else:
+            b_vec = b_np[:, col]
+        b_col = _np.asarray(b_vec).ravel().tolist()
         k = len(a_row)
-        return jsonify({"row": row, "col": col, "a_row": a_row, "b_col": b_col, "k": k})
+        return jsonify(
+            {
+                "row": row,
+                "col": col,
+                "a_row": a_row,
+                "b_col": b_col,
+                "k": k,
+                "swizzle": swizzle,
+            }
+        )
     except Exception as e:
         return jsonify({"error": f"MatMul vectors failed: {e}"}), 200
+
+
+@app.route("/api/histogram", methods=["POST"])
+def get_value_histogram():
+    """Return histogram statistics for tensors associated with an operation."""
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid or not raw_tensor_data or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+
+    source = (data.get("source") or "").upper()
+    bins = max(2, min(512, int(data.get("bins", 64))))
+    max_samples = max(1000, int(data.get("max_samples", 200000)))
+
+    op_payload = raw_tensor_data[uuid]
+    arr = None
+
+    if source in {"GLOBAL", "LOAD_GLOBAL"}:
+        arr = op_payload.get("global_tensor")
+    elif source == "A":
+        arr = op_payload.get("input_data")
+    elif source == "B":
+        arr = op_payload.get("other_data")
+    elif source == "C":
+        arr = op_payload.get("output_data")
+        if arr is None:
+            a = op_payload.get("input_data")
+            b = op_payload.get("other_data")
+            if a is not None and b is not None:
+                try:
+                    arr = np.matmul(_to_numpy_array(a), _to_numpy_array(b))
+                    op_payload["output_data"] = arr
+                except Exception:
+                    arr = None
+    else:
+        return jsonify({"error": f"Unsupported source '{source}'"}), 400
+
+    arr_np = _to_numpy_array(arr)
+    if arr_np.size == 0:
+        return jsonify(
+            {
+                "counts": [],
+                "edges": [],
+                "min": 0.0,
+                "max": 0.0,
+                "n": 0,
+                "sampled": 0,
+            }
+        )
+
+    flat = arr_np.astype(np.float64).ravel()
+    total = flat.size
+
+    if total > max_samples:
+        rng = np.random.default_rng()
+        idx = rng.choice(total, size=max_samples, replace=False)
+        sample = flat[idx]
+    else:
+        sample = flat
+
+    counts, edges = np.histogram(sample, bins=bins)
+
+    return jsonify(
+        {
+            "counts": counts.tolist(),
+            "edges": edges.tolist(),
+            "min": float(flat.min()),
+            "max": float(flat.max()),
+            "n": int(total),
+            "sampled": int(sample.size),
+        }
+    )
 
 
 @app.route("/api/getValue", methods=["POST"])
@@ -489,17 +669,60 @@ def get_load_tensor():
             t_min = float(_np.min(arr)) if arr.size else 0.0
         if t_max is None:
             t_max = float(_np.max(arr)) if arr.size else 0.0
-        return jsonify(
-            {
-                "shape": t_shape,
-                "dims": int(t_dims),
-                "min": float(t_min),
-                "max": float(t_max),
-                "values": arr.tolist(),
+        payload = {
+            "shape": t_shape,
+            "dims": int(t_dims),
+            "min": float(t_min),
+            "max": float(t_max),
+            "values": arr.tolist(),
+        }
+
+        slice_arr = op_data.get("slice_tensor")
+        if slice_arr is not None:
+            slice_np = _np.asarray(slice_arr)
+            slice_shape = op_data.get("slice_shape") or list(slice_np.shape)
+            slice_dims = op_data.get("slice_dims") or int(slice_np.ndim)
+            slice_min = op_data.get("slice_min")
+            slice_max = op_data.get("slice_max")
+            if slice_min is None:
+                slice_min = float(_np.min(slice_np)) if slice_np.size else 0.0
+            if slice_max is None:
+                slice_max = float(_np.max(slice_np)) if slice_np.size else 0.0
+            payload["slice"] = {
+                "shape": slice_shape,
+                "dims": int(slice_dims),
+                "min": float(slice_min),
+                "max": float(slice_max),
+                "values": slice_np.tolist(),
             }
-        )
+
+        return jsonify(payload)
     except Exception as e:
         return jsonify({"error": f"getLoadTensor failed: {e}"}), 200
+
+
+@app.route("/api/load_overall", methods=["POST"])
+def get_load_overall():
+    data = request.json or {}
+    key = data.get("key")
+    if not key:
+        return jsonify({"error": "Missing key"}), 400
+    entry = load_overall_maps.get(key)
+    if not entry:
+        return jsonify({"error": "Overall data not found"}), 404
+    return jsonify(entry)
+
+
+@app.route("/api/store_overall", methods=["POST"])
+def get_store_overall():
+    data = request.json or {}
+    key = data.get("key")
+    if not key:
+        return jsonify({"error": "Missing key"}), 400
+    entry = store_overall_maps.get(key)
+    if not entry:
+        return jsonify({"error": "Overall data not found"}), 404
+    return jsonify(entry)
 
 
 def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None):
