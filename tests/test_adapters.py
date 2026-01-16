@@ -8,13 +8,14 @@ from triton_viz.core.data import (
     ReduceSum,
     Store,
 )
-from triton_viz.core.patch import (
-    AdapterResult,
-    HAS_NKI,
-    NKI_ADAPTERS,
-    PatchOp,
-    TRITON_ADAPTERS,
-)
+
+from triton_viz.frontends.base import AdapterResult, OPERATION_REGISTRY
+from triton_viz.frontends.nki import HAS_NKI
+
+from triton_viz.core.patch import PatchOp
+
+TRITON_ADAPTERS = OPERATION_REGISTRY["triton"].adapters
+NKI_ADAPTERS = OPERATION_REGISTRY["nki"].adapters
 
 
 def test_adapter_result_kwargs_copy():

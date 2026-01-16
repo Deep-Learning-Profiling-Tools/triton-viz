@@ -13,43 +13,11 @@ from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
 
 from .data import (
-    Op,
-    Allocate,
-    RawLoad,
     Load,
+    Op,
+    RawLoad,
     RawStore,
     Store,
-    UnaryOp,
-    BinaryOp,
-    TernaryOp,
-    ProgramId,
-    Dot,
-    MakeRange,
-    AddPtr,
-    ReduceSum,
-    Splat,
-    ExpandDims,
-    Broadcast,
-    ReduceMax,
-    ReduceMin,
-    MakeBlockPointer,
-    TensorPointerLoad,
-    TensorPointerStore,
-    Idiv,
-    Rsqrt,
-    CastImpl,
-    Reshape,
-    Join,
-    Fabs,
-    Ashr,
-    Advance,
-    FpToFp,
-    Umulhi,
-    Trans,
-    CumSum,
-    Bitcast,
-    AtomicCas,
-    AtomicRMW,
 )
 import inspect
 from triton.runtime.interpreter import (
@@ -65,15 +33,7 @@ from triton.runtime import JITFunction
 from ..transformers.for_loop_patcher import _visit_For as triton_viz_visit_For
 
 from .flip_patch import patch_flip
-
-HAS_NKI = False
-nki_builder = None
-try:
-    from triton_viz.core.nki import nki_builder  # type: ignore
-
-    HAS_NKI = True
-except ModuleNotFoundError:
-    pass
+from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 
 
 _MISSING = object()
@@ -112,245 +72,6 @@ def _pop_lang_patch_scope(backend: str) -> Optional[Any]:
         return None
     return scopes.pop()
 
-
-@dataclass
-class AdapterResult:
-    """
-    For each backend, ops may have slightly different function signatures
-    which we run through (backend, function)-specific adapters to return
-    standardized args/kwargs for client callbacks.
-    """
-
-    args: tuple[Any, ...]
-    kwargs: dict[str, Any]
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.args = args
-        self.kwargs = kwargs
-
-
-def passthrough_adapter(*args: Any, **kwargs: Any) -> AdapterResult:
-    """Return arguments unchanged for clients that expect the original signature."""
-    return AdapterResult(*args, **kwargs)
-
-
-def _program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(axis)
-
-
-def _triton_raw_store_adapter(
-    ptr: Any, value: Any, *_args: Any, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, value)
-
-
-def _triton_store_adapter(
-    ptr: Any, _value: Any, mask: Any, *_args: Any, **kwargs: Any
-) -> AdapterResult:
-    keys = kwargs.get("keys")
-    return AdapterResult(ptr, mask, keys)
-
-
-def _triton_raw_load_adapter(ptr: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(ptr)
-
-
-def _triton_load_adapter(
-    ptr: Any, mask: Any, _other: Any, *_args: Any, **kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, mask, kwargs.get("keys"))
-
-
-def _triton_dot_adapter(a: Any, b: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(a, b)
-
-
-def _triton_reduce_sum_adapter(
-    input_tensor, axis=None, keep_dims=False, *_args, **_kwargs
-) -> AdapterResult:
-    return AdapterResult(input_tensor, axis, keep_dims)
-
-
-def _triton_addptr_adapter(
-    ptr: Any, offset: Any, *_args: Any, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, offset)
-
-
-def _nki_allocate_adapter(*_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult()
-
-
-def _nki_load_adapter(
-    src: Any, keys: Any, *, mask: Optional[Any] = None, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(src, mask, keys)
-
-
-def _nki_store_adapter(
-    dst: Any, keys: Any, value: Any, *, mask: Optional[Any] = None, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(dst, mask, keys)
-
-
-def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(x, y)
-
-
-def _nki_reduce_sum_adapter(
-    input_tensor: Any, *args: Any, mask: Any = None, **kwargs: Any
-) -> AdapterResult:
-    axis = args[0] if args else kwargs.get("axis")
-    keep_dims = kwargs.get("keep_dims", kwargs.get("keepdims", False))
-    return AdapterResult(input_tensor, axis, keep_dims)
-
-
-TRITON_NAMESPACES: dict[Any, dict[type[Op], str]] = {
-    interpreter_builder: {
-        ProgramId: "create_get_program_id",
-        RawStore: "create_store",
-        Store: "create_masked_store",
-        RawLoad: "create_load",
-        Load: "create_masked_load",
-        Dot: "create_dot",
-        UnaryOp: "unary_op",
-        BinaryOp: "binary_op",
-        TernaryOp: "ternary_op",
-        MakeRange: "create_make_range",
-        AddPtr: "create_addptr",
-        ExpandDims: "create_expand_dims",
-        Broadcast: "create_broadcast",
-        Splat: "create_splat",
-        MakeBlockPointer: "create_make_block_ptr",
-        TensorPointerLoad: "create_tensor_pointer_load",
-        TensorPointerStore: "create_tensor_pointer_store",
-        Idiv: "create_idiv",
-        Rsqrt: "create_rsqrt",
-        CastImpl: "cast_impl",
-        Reshape: "create_reshape",
-        Join: "create_join",
-        Fabs: "create_fabs",
-        Ashr: "create_ashr",
-        Advance: "create_advance",
-        FpToFp: "create_fp_to_fp",
-        Umulhi: "create_umulhi",
-        Bitcast: "create_bitcast",
-        AtomicCas: "create_atomic_cas",
-        AtomicRMW: "create_atomic_rmw",
-    },
-    tl: {
-        ReduceMax: "max",
-        ReduceMin: "min",
-        ReduceSum: "sum",
-        CumSum: "cumsum",
-        Trans: "trans",
-    },
-    tl.math: {
-        Umulhi: "umulhi",
-    },
-}
-TRITON_ORIGINAL_OPS: dict[Any, dict[str, Op]] = {}
-for namespace, attrs in TRITON_NAMESPACES.items():
-    for op, attr in attrs.items():
-        if op not in TRITON_ORIGINAL_OPS:  # umulhi use interpreter_builder, not tl.math
-            TRITON_ORIGINAL_OPS[op] = getattr(namespace, attr)
-TRITON_OP_LIST: set[type[Op]] = set()
-for op_to_attrs in TRITON_NAMESPACES.values():
-    TRITON_OP_LIST |= op_to_attrs.keys()
-
-TRITON_OP_ATTR_NAMES = TRITON_NAMESPACES[interpreter_builder]
-
-TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
-    ProgramId: _program_id_adapter,
-    RawStore: _triton_raw_store_adapter,
-    Store: _triton_store_adapter,
-    RawLoad: _triton_raw_load_adapter,
-    Load: _triton_load_adapter,
-    Dot: _triton_dot_adapter,
-    ReduceSum: _triton_reduce_sum_adapter,
-    AddPtr: _triton_addptr_adapter,
-}
-
-for op_type in TRITON_OP_LIST:
-    TRITON_ADAPTERS.setdefault(op_type, passthrough_adapter)
-
-NKI_OP_LIST: set[type[Op]] = set()
-NKI_ORIGINAL_OPS: dict[Any, dict[str, type[Op]]] = {}
-NKI_OP_ATTR_NAMES: dict[type[Op], str] = {}
-NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
-if HAS_NKI:
-    assert nki_builder is not None
-
-    NKI_NAMESPACES: dict[Any, dict[type[Op], str]] = {
-        nki_builder: {
-            ProgramId: "program_id",
-            Allocate: "ndarray",
-            Load: "masked_load",
-            Store: "masked_store",
-            Dot: "matmul",
-            UnaryOp: "_unary_op",
-            ReduceSum: "sum",
-            MakeRange: "arange",
-        }
-    }
-    for op_to_attrs in NKI_NAMESPACES.values():
-        NKI_OP_LIST |= op_to_attrs.keys()
-
-    NKI_OP_ATTR_NAMES = NKI_NAMESPACES[nki_builder]
-    for namespace, attrs in NKI_NAMESPACES.items():
-        for op, attr in attrs.items():
-            if (
-                op not in NKI_ORIGINAL_OPS
-            ):  # umulhi use interpreter_builder, not tl.math
-                NKI_ORIGINAL_OPS[op] = getattr(namespace, attr)
-
-    NKI_ADAPTERS = {
-        ProgramId: _program_id_adapter,
-        Allocate: _nki_allocate_adapter,
-        Load: _nki_load_adapter,
-        Store: _nki_store_adapter,
-        Dot: _nki_dot_adapter,
-        ReduceSum: _nki_reduce_sum_adapter,
-    }
-
-    for op_type in NKI_OP_LIST:
-        NKI_ADAPTERS.setdefault(op_type, passthrough_adapter)
-
-
-OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
-    "triton": {
-        "builder": interpreter_builder,
-        "op_list": TRITON_OP_LIST,
-        "original_ops": TRITON_ORIGINAL_OPS,
-        "op_attr_names": TRITON_OP_ATTR_NAMES,
-        "adapters": TRITON_ADAPTERS,
-        "namespaces": TRITON_NAMESPACES,
-    },
-    "nki": {
-        "builder": nki_builder,
-        "op_list": NKI_OP_LIST,
-        "original_ops": NKI_ORIGINAL_OPS,
-        "op_attr_names": NKI_OP_ATTR_NAMES,
-        "adapters": NKI_ADAPTERS,
-        "namespaces": NKI_NAMESPACES,
-    },
-}
-
-
-reduce_map: dict[type[Op], Callable] = {
-    ReduceMax: tl.max,
-    ReduceMin: tl.min,
-    ReduceSum: tl.sum,
-}
-scan_map: dict[type[Op], Callable] = {
-    CumSum: tl.cumsum,
-}
-math_map: dict[type[Op], Callable] = {
-    Umulhi: tl.math.umulhi,
-}
-reshape_map: dict[type[Op], Callable] = {
-    Trans: tl.trans,
-}
 
 _thread_local_interpreter_state = threading.local()
 _thread_local_interpreter_state.grid_idx = None  # just set a default
@@ -396,9 +117,9 @@ class PatchOp:
             before_args = self.adapter(*args, **kwargs)
             self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in math_map:
+            if self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl.math]:
                 raise NotImplementedError("Patching math ops not yet supported")
-            elif self.op_type in {**reduce_map, **scan_map, **reshape_map}:
+            elif self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl]:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -413,9 +134,13 @@ class PatchOp:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 if ret is not None:
                     if self.op_type == RawLoad:
-                        ret.concrete_fn = TRITON_ORIGINAL_OPS[Load]
+                        ret.concrete_fn = OPERATION_REGISTRY["triton"].original_ops[
+                            Load
+                        ]
                     elif self.op_type == RawStore:
-                        ret.concrete_fn = TRITON_ORIGINAL_OPS[Store]
+                        ret.concrete_fn = OPERATION_REGISTRY["triton"].original_ops[
+                            Store
+                        ]
                     else:
                         ret.concrete_fn = self.op
         else:
@@ -438,9 +163,10 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: str):
     if backend not in OPERATION_REGISTRY:
         raise ValueError(f"Unknown backend: {backend}")
 
-    backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
-    backend_adapters = OPERATION_REGISTRY[backend]["adapters"]
-    namespaces = OPERATION_REGISTRY[backend]["namespaces"]
+    registry = OPERATION_REGISTRY[backend]
+    backend_ops = registry.original_ops
+    backend_adapters = registry.adapters
+    namespaces = registry.namespaces
     for namespace, ops in namespaces.items():
         if op_type in ops:
             attr = ops[op_type]
@@ -459,8 +185,9 @@ def unpatch_op(op_type: type[Op], backend: str):
 
     :param op_type: The type of the operator to unregister the callback for.
     """
-    backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
-    namespaces = OPERATION_REGISTRY[backend]["namespaces"]
+    registry = OPERATION_REGISTRY[backend]
+    backend_ops = registry.original_ops
+    namespaces = registry.namespaces
     for namespace, ops in namespaces.items():
         if op_type in ops:
             attr = ops[op_type]
@@ -741,7 +468,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     if kwargs.pop("warmup", False):
         return
 
-    builder = OPERATION_REGISTRY[backend]["builder"]
+    builder = OPERATION_REGISTRY[backend].builder
 
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
