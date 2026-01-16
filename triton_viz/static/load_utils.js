@@ -97,7 +97,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
     console.log(`Creating ${tensorName} tensor:`, shape, coords);
     const tensor = new THREE.Group();
     // Normalize shape to width (X), height (Y), depth (Z)
-    let width, height, depth;
+    let depth, height, width;
     if (shape.length === 1) {
         width = shape[0];
         height = 1;
@@ -108,8 +108,8 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
         width = shape[1];
         depth = 1;
     } else {
-        // Assume incoming order already matches [width, height, depth]
-        [width, height, depth] = shape;
+        // Assume incoming order already matches [depth, height, width]
+        [depth, height, width] = shape;
     }
 
     const spacing = CUBE_SIZE + GAP;
@@ -208,7 +208,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.userData.tensorName = tensorName;
-    mesh.userData.shape = { width, height, depth };
+    mesh.userData.shape = { depth, height, width };
     mesh.computeBoundingBox();
     mesh.computeBoundingSphere();
 
@@ -222,7 +222,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
 
 export function calculateTensorSize(shape) {
     // Normalize shape for size calculation consistent with createTensor
-    let width, height, depth;
+    let depth, height, width;
     if (shape.length === 1) {
         width = shape[0];
         height = 1;
@@ -233,7 +233,7 @@ export function calculateTensorSize(shape) {
         width = shape[1];
         depth = 1;
     } else {
-        [width, height, depth] = shape;
+        [depth, height, width] = shape;
     }
     return new THREE.Vector3(
         width * (CUBE_SIZE + GAP),
