@@ -233,9 +233,15 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
     if not isinstance(client, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(client)}")
 
+    def _is_sanitizer_client(selected: Union[str, Client]) -> bool:
+        if isinstance(selected, str):
+            return selected.lower() == "sanitizer"
+        return isinstance(selected, Sanitizer)
+
     def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
-        # When sanitizer is disabled, skip tracing and return the original kernel unchanged
-        if not cfg.enable_sanitizer:
+        if _is_sanitizer_client(client) and not cfg.enable_sanitizer:
+            # when dry-running triton-sanitizer CLI (i.e. wrap kernels with sanitizer
+            # tracing but don't actually sanitize), don't actually trace the kernel
             return kernel
 
         # If the object is already initialized as a TraceInterface, just append the new client(s)
