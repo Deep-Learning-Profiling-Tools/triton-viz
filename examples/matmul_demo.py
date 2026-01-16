@@ -86,7 +86,7 @@ def run_demo():
     assert torch.allclose(c, ref, atol=1e-3), "matmul result mismatch"
 
     # Launch viz UI in blocking (share=True) mode
-    triton_viz.launch(share=False, port=5002)
+    triton_viz.launch(share=False, port=5001)
 
 
 if __name__ == "__main__":

@@ -531,61 +531,77 @@ function getTextColor(bgColor) {
             codePanel = wrapper;
         }
 
-        function sampleValue(cache, userData, fallback) {
-            if (!cache) return fallback;
-            const { dims, values } = cache;
-            try {
-                if (dims >= 3) {
-                    return values[userData.tensor1][userData.tensor0][userData.tensor2];
-                } else if (dims === 2) {
-                    return values[userData.tensor1][userData.tensor0];
-                } else if (dims === 1) {
-                    return values[userData.tensor0];
-                }
-            } catch (e) {
-                /* ignore */
-            }
-            return fallback;
+        function coordsFromIndex(index, shape) {
+            const width = Math.max(1, shape?.width || 1);
+            const height = Math.max(1, shape?.height || 1);
+            const depth = Math.max(1, shape?.depth || 1);
+            const layerSize = Math.max(1, width * height);
+            const z = Math.min(depth - 1, Math.floor(index / layerSize));
+            const remainder = index - z * layerSize;
+            const y = Math.min(height - 1, Math.floor(remainder / width));
+            const x = Math.min(width - 1, remainder % width);
+            return [x, y, z];
         }
 
-        function applyColorToTensor(targetTensor, cache) {
-            if (!cache || !tensorCache) return;
+        function sampleValueFromCache(cache, coords) {
+            if (!cache || !cache.values) return 0;
+            const dims = cache.dims || 0;
+            const [x, y, z] = coords;
+            const values = cache.values;
+            if (dims >= 3) {
+                return values?.[y]?.[x]?.[z] ?? 0;
+            }
+            if (dims === 2) {
+                return values?.[y]?.[x] ?? 0;
+            }
+            if (dims === 1) {
+                return values?.[x] ?? 0;
+            }
+            return 0;
+        }
+
+        function applyColorToMesh(mesh, cache) {
+            if (!mesh || !cache || !tensorCache) return;
             const min = tensorCache.scaleMin;
             const max = tensorCache.scaleMax;
             const denom = max - min || 1;
-            targetTensor.children.forEach((cube) => {
-                const u = cube.userData;
-                if (!u) return;
-                const val = sampleValue(cache, u, min);
+            const shape = mesh.userData.shape || {};
+            for (let idx = 0; idx < mesh.count; idx += 1) {
+                const coords = coordsFromIndex(idx, shape);
+                const val = sampleValueFromCache(cache, coords);
                 const t = Math.max(0, Math.min(1, (val - min) / denom));
                 const color = scheme === 'mono' ? monoColor(t, monoBaseHex) : viridisColor(t);
-                cube.material.color.copy(color);
-            });
+                mesh.setColorAt(idx, color);
+            }
+            if (mesh.instanceColor) {
+                mesh.instanceColor.needsUpdate = true;
+            }
         }
 
         function applyColorMapIfNeeded() {
             if (!colorizeOn || !tensorCache) return;
-            applyColorToTensor(globalTensor, tensorCache.global);
-            applyColorToTensor(sliceTensor, tensorCache.slice);
+            applyColorToMesh(globalMesh, tensorCache.global);
+            applyColorToMesh(sliceMesh, tensorCache.slice);
         }
 
         function resetGlobalColors() {
-            // Restore base colors according to current theme:
-            // - Global cubes use currentBaseGlobal
-            // - highlighted coords (in op.global_coords) use COLOR_SLICE
-            globalTensor.children.forEach((cube) => {
-                const u = cube.userData;
-                if (!u) return;
-                const key = `${u.tensor0},${u.tensor1},${u.tensor2}`;
+            if (!globalMesh) return;
+            const coords = globalMesh.userData.coords || [];
+            for (let idx = 0; idx < globalMesh.count; idx += 1) {
+                const coord = coords[idx];
+                const key = coord ? `${coord[0]},${coord[1]},${coord[2]}` : '';
                 const baseColor = highlightedGlobalSet.has(key) ? COLOR_SLICE : currentBaseGlobal;
-                cube.material.color.copy(baseColor);
-            });
+                globalMesh.setColorAt(idx, baseColor);
+            }
+            if (globalMesh.instanceColor) globalMesh.instanceColor.needsUpdate = true;
         }
 
         function resetSliceColors() {
-            sliceTensor.children.forEach((cube) => {
-                cube.material.color.copy(currentBaseSlice);
-            });
+            if (!sliceMesh) return;
+            for (let idx = 0; idx < sliceMesh.count; idx += 1) {
+                sliceMesh.setColorAt(idx, currentBaseSlice);
+            }
+            if (sliceMesh.instanceColor) sliceMesh.instanceColor.needsUpdate = true;
         }
 
         function resetBaseColors() {
