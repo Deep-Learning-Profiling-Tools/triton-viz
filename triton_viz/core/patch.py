@@ -932,14 +932,25 @@ def _jit_function_call(self, *args, backend=None, **kwargs):
         unpatch_lang(backend)
 
 
+patch_calls_scope = 0
+
+
 @contextmanager
 def patch_calls(backend):
-    old_grid_executor_call = GridExecutor.__call__
-    old_jit_function_call = JITFunction.__call__
-    GridExecutor.__call__ = partialmethod(_grid_executor_call, backend=backend)
-    JITFunction.__call__ = partialmethod(_jit_function_call, backend=backend)
+    global patch_calls_scope
+    if patch_calls_scope == 0:
+        # only patch at top-level scope (e.g. with patch_calls_top(): with patch_calls_bottom())
+        old_grid_executor_call = GridExecutor.__call__
+        old_jit_function_call = JITFunction.__call__
+        GridExecutor.__call__ = partialmethod(_grid_executor_call, backend=backend)
+        JITFunction.__call__ = partialmethod(_jit_function_call, backend=backend)
+    patch_calls_scope += 1
     try:
         yield
     finally:
-        GridExecutor.__call__ = old_grid_executor_call
-        JITFunction.__call__ = old_jit_function_call
+        patch_calls_scope -= 1
+        if patch_calls_scope == 0:
+            # only unpatch at top-level scope (e.g. in above example, don't
+            # unpatch in between patch_calls_bottom() and patch_calls_top() scopes
+            GridExecutor.__call__ = old_grid_executor_call
+            JITFunction.__call__ = old_jit_function_call
