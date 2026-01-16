@@ -205,109 +205,60 @@ def _nki_reduce_sum_adapter(
     return AdapterResult(input_tensor, axis, keep_dims)
 
 
-TRITON_OP_LIST = [
-    ProgramId,
-    RawStore,
-    Store,
-    RawLoad,
-    Load,
-    UnaryOp,
-    BinaryOp,
-    TernaryOp,
-    Dot,
-    MakeRange,
-    AddPtr,
-    Splat,
-    ExpandDims,
-    Broadcast,
-    ReduceMax,
-    ReduceMin,
-    ReduceSum,
-    MakeBlockPointer,
-    TensorPointerLoad,
-    TensorPointerStore,
-    Idiv,
-    Rsqrt,
-    CastImpl,
-    Reshape,
-    Join,
-    Fabs,
-    Ashr,
-    Advance,
-    FpToFp,
-    Umulhi,
-    Trans,
-    CumSum,
-    Bitcast,
-    AtomicCas,
-    AtomicRMW,
-]
-
-TRITON_ORIGINAL_OPS = {
-    ProgramId: interpreter_builder.create_get_program_id,
-    RawStore: interpreter_builder.create_store,
-    Store: interpreter_builder.create_masked_store,
-    RawLoad: interpreter_builder.create_load,
-    Load: interpreter_builder.create_masked_load,
-    Dot: interpreter_builder.create_dot,
-    UnaryOp: interpreter_builder.unary_op,
-    BinaryOp: interpreter_builder.binary_op,
-    TernaryOp: interpreter_builder.ternary_op,
-    MakeRange: interpreter_builder.create_make_range,
-    AddPtr: interpreter_builder.create_addptr,
-    ExpandDims: interpreter_builder.create_expand_dims,
-    Broadcast: interpreter_builder.create_broadcast,
-    Splat: interpreter_builder.create_splat,
-    MakeBlockPointer: interpreter_builder.create_make_block_ptr,
-    TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
-    TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
-    Idiv: interpreter_builder.create_idiv,
-    Rsqrt: interpreter_builder.create_rsqrt,
-    CastImpl: interpreter_builder.cast_impl,
-    Reshape: interpreter_builder.create_reshape,
-    Join: interpreter_builder.create_join,
-    Fabs: interpreter_builder.create_fabs,
-    Ashr: interpreter_builder.create_ashr,
-    Advance: interpreter_builder.create_advance,
-    FpToFp: interpreter_builder.create_fp_to_fp,
-    Umulhi: interpreter_builder.create_umulhi,
-    Bitcast: interpreter_builder.create_bitcast,
-    AtomicCas: interpreter_builder.create_atomic_cas,
-    AtomicRMW: interpreter_builder.create_atomic_rmw,
+TRITON_NAMESPACES: dict[Any, dict[type[Op], str]] = {
+    interpreter_builder: {
+        ProgramId: "create_get_program_id",
+        RawStore: "create_store",
+        Store: "create_masked_store",
+        RawLoad: "create_load",
+        Load: "create_masked_load",
+        Dot: "create_dot",
+        UnaryOp: "unary_op",
+        BinaryOp: "binary_op",
+        TernaryOp: "ternary_op",
+        MakeRange: "create_make_range",
+        AddPtr: "create_addptr",
+        ExpandDims: "create_expand_dims",
+        Broadcast: "create_broadcast",
+        Splat: "create_splat",
+        MakeBlockPointer: "create_make_block_ptr",
+        TensorPointerLoad: "create_tensor_pointer_load",
+        TensorPointerStore: "create_tensor_pointer_store",
+        Idiv: "create_idiv",
+        Rsqrt: "create_rsqrt",
+        CastImpl: "cast_impl",
+        Reshape: "create_reshape",
+        Join: "create_join",
+        Fabs: "create_fabs",
+        Ashr: "create_ashr",
+        Advance: "create_advance",
+        FpToFp: "create_fp_to_fp",
+        Umulhi: "create_umulhi",
+        Bitcast: "create_bitcast",
+        AtomicCas: "create_atomic_cas",
+        AtomicRMW: "create_atomic_rmw",
+    },
+    tl: {
+        ReduceMax: "max",
+        ReduceMin: "min",
+        ReduceSum: "sum",
+        CumSum: "cumsum",
+        Trans: "trans",
+    },
+    tl.math: {
+        Umulhi: "umulhi",
+    },
 }
+TRITON_ORIGINAL_OPS: dict[Any, dict[str, Op]] = {}
+for namespace, attrs in TRITON_NAMESPACES.items():
+    for op, attr in attrs.items():
+        if op not in TRITON_ORIGINAL_OPS:  # umulhi use interpreter_builder, not tl.math
+            TRITON_ORIGINAL_OPS[op] = getattr(namespace, attr)
+TRITON_OP_LIST: set[type[Op]] = set()
+for op_to_attrs in TRITON_NAMESPACES.values():
+    TRITON_OP_LIST |= op_to_attrs.keys()
 
-TRITON_OP_ATTR_NAMES = {
-    ProgramId: "create_get_program_id",
-    RawStore: "create_store",
-    Store: "create_masked_store",
-    RawLoad: "create_load",
-    Load: "create_masked_load",
-    Dot: "create_dot",
-    UnaryOp: "unary_op",
-    BinaryOp: "binary_op",
-    TernaryOp: "ternary_op",
-    MakeRange: "create_make_range",
-    AddPtr: "create_addptr",
-    ExpandDims: "create_expand_dims",
-    Broadcast: "create_broadcast",
-    Splat: "create_splat",
-    MakeBlockPointer: "create_make_block_ptr",
-    TensorPointerLoad: "create_tensor_pointer_load",
-    TensorPointerStore: "create_tensor_pointer_store",
-    Idiv: "create_idiv",
-    Rsqrt: "create_rsqrt",
-    CastImpl: "cast_impl",
-    Reshape: "create_reshape",
-    Join: "create_join",
-    Fabs: "create_fabs",
-    Ashr: "create_ashr",
-    Advance: "create_advance",
-    FpToFp: "create_fp_to_fp",
-    Umulhi: "create_umulhi",
-    Bitcast: "create_bitcast",
-    AtomicCas: "create_atomic_cas",
-    AtomicRMW: "create_atomic_rmw",
-}
+TRITON_OP_ATTR_NAMES = TRITON_NAMESPACES[interpreter_builder]
 
 TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
     ProgramId: _program_id_adapter,
@@ -323,45 +274,35 @@ TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
 for op_type in TRITON_OP_LIST:
     TRITON_ADAPTERS.setdefault(op_type, passthrough_adapter)
 
-NKI_OP_LIST: list[type[Op]] = []
-NKI_ORIGINAL_OPS: dict[type[Op], Callable] = {}
+NKI_OP_LIST: set[type[Op]] = set()
+NKI_ORIGINAL_OPS: dict[Any, dict[str, type[Op]]] = {}
 NKI_OP_ATTR_NAMES: dict[type[Op], str] = {}
 NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
 if HAS_NKI:
     assert nki_builder is not None
 
-    NKI_OP_LIST = [
-        Allocate,
-        ProgramId,
-        Load,
-        Store,
-        Dot,
-        UnaryOp,
-        ReduceSum,
-        MakeRange,
-    ]
-
-    NKI_ORIGINAL_OPS = {
-        ProgramId: nki_builder.program_id,
-        Allocate: nki_builder.ndarray,
-        Load: nki_builder.masked_load,
-        Store: nki_builder.masked_store,
-        Dot: nki_builder.matmul,
-        UnaryOp: nki_builder._unary_op,
-        ReduceSum: nki_builder.sum,
-        MakeRange: nki_builder.arange,
+    NKI_NAMESPACES: dict[Any, dict[type[Op], str]] = {
+        nki_builder: {
+            ProgramId: "program_id",
+            Allocate: "ndarray",
+            Load: "masked_load",
+            Store: "masked_store",
+            Dot: "matmul",
+            UnaryOp: "_unary_op",
+            ReduceSum: "sum",
+            MakeRange: "arange",
+        }
     }
+    for op_to_attrs in NKI_NAMESPACES.values():
+        NKI_OP_LIST |= op_to_attrs.keys()
 
-    NKI_OP_ATTR_NAMES = {
-        ProgramId: "program_id",
-        Allocate: "ndarray",
-        Load: "masked_load",
-        Store: "masked_store",
-        Dot: "matmul",
-        UnaryOp: "_unary_op",
-        ReduceSum: "sum",
-        MakeRange: "arange",
-    }
+    NKI_OP_ATTR_NAMES = NKI_NAMESPACES[nki_builder]
+    for namespace, attrs in NKI_NAMESPACES.items():
+        for op, attr in attrs.items():
+            if (
+                op not in NKI_ORIGINAL_OPS
+            ):  # umulhi use interpreter_builder, not tl.math
+                NKI_ORIGINAL_OPS[op] = getattr(namespace, attr)
 
     NKI_ADAPTERS = {
         ProgramId: _program_id_adapter,
@@ -383,6 +324,7 @@ OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
         "original_ops": TRITON_ORIGINAL_OPS,
         "op_attr_names": TRITON_OP_ATTR_NAMES,
         "adapters": TRITON_ADAPTERS,
+        "namespaces": TRITON_NAMESPACES,
     },
     "nki": {
         "builder": nki_builder,
@@ -390,6 +332,7 @@ OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
         "original_ops": NKI_ORIGINAL_OPS,
         "op_attr_names": NKI_OP_ATTR_NAMES,
         "adapters": NKI_ADAPTERS,
+        "namespaces": NKI_NAMESPACES,
     },
 }
 
@@ -468,16 +411,13 @@ class PatchOp:
                     fn.concrete_fn = self.op
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
-                fn = cast(Any, ret.handle)
-                if self.op_type == RawLoad:
-                    if fn is not None:
-                        fn.concrete_fn = TRITON_ORIGINAL_OPS[Load]
-                elif self.op_type == RawStore:
-                    if fn is not None:
-                        fn.concrete_fn = TRITON_ORIGINAL_OPS[Store]
-                else:
-                    if fn is not None:
-                        fn.concrete_fn = self.op
+                if ret is not None:
+                    if self.op_type == RawLoad:
+                        ret.concrete_fn = TRITON_ORIGINAL_OPS[Load]
+                    elif self.op_type == RawStore:
+                        ret.concrete_fn = TRITON_ORIGINAL_OPS[Store]
+                    else:
+                        ret.concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
         if self.callbacks.after_callback:
@@ -499,29 +439,16 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: str):
         raise ValueError(f"Unknown backend: {backend}")
 
     backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
-    backend_attr_names = OPERATION_REGISTRY[backend]["op_attr_names"]
     backend_adapters = OPERATION_REGISTRY[backend]["adapters"]
-    backend_builder = OPERATION_REGISTRY[backend]["builder"]
-
-    if op_type in backend_ops:
-        op_name = backend_attr_names[op_type]
-        original_op = backend_ops[op_type]
-        adapter = backend_adapters[op_type]
-        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(backend_builder, op_name, patched_op)
-    elif backend == "triton" and op_type in {**reduce_map, **scan_map, **reshape_map}:
-        special_ops = {**reduce_map, **scan_map, **reshape_map}
-        op_name = special_ops[op_type].__name__
-        original_op = getattr(tl, op_name)
-        adapter = backend_adapters[op_type]
-        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(tl, op_name, patched_op)
-    elif backend == "triton" and op_type in math_map:
-        op_name = math_map[op_type].__name__
-        original_op = getattr(tl.math, op_name)
-        adapter = backend_adapters[op_type]
-        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(tl.math, op_name, patched_op)
+    namespaces = OPERATION_REGISTRY[backend]["namespaces"]
+    for namespace, ops in namespaces.items():
+        if op_type in ops:
+            attr = ops[op_type]
+            original_op = backend_ops[op_type]
+            adapter = backend_adapters[op_type]
+            patched_op = PatchOp(original_op, op_type, callbacks, adapter)
+            setattr(namespace, attr, patched_op)
+            break
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
 
@@ -533,14 +460,15 @@ def unpatch_op(op_type: type[Op], backend: str):
     :param op_type: The type of the operator to unregister the callback for.
     """
     backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
-    backend_attr_names = OPERATION_REGISTRY[backend]["op_attr_names"]
-    backend_builder = OPERATION_REGISTRY[backend]["builder"]
-
-    if op_type in backend_ops:
-        original_op = backend_ops[op_type]  # type: ignore
-        # Use hardcoded name from _OP_ATTR_NAMES
-        op_name = backend_attr_names[op_type]  # type: ignore
-        setattr(backend_builder, op_name, original_op)
+    namespaces = OPERATION_REGISTRY[backend]["namespaces"]
+    for namespace, ops in namespaces.items():
+        if op_type in ops:
+            attr = ops[op_type]
+            original_op = backend_ops[op_type]
+            setattr(namespace, attr, original_op)
+            break
+    else:
+        raise ValueError(f"Patching operator {op_type} not supported")
 
 
 class _LoopIter:
