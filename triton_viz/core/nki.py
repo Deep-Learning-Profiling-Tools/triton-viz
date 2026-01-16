@@ -10,7 +10,7 @@ except (
     ) from exc
 import inspect
 import textwrap
-from .nki_extract_slice import transform_code
+from ..transformers.nki_extract_slice import transform_code
 from .masked_load import masked_load, masked_store
 
 
@@ -507,7 +507,7 @@ class NKIInterpretedFunction:
 
         # Apply AST transformer to convert nl.load/nl.store calls to nl.masked_load/nl.masked_store
         if hasattr(self.fn, "__code__"):
-            # Get the source code of the function
+            # Get the source code of the function (stripped of leading indents in case it was defined in scope)
             source_code = textwrap.dedent(inspect.getsource(self.fn))
             # Transform the source code using the AST transformer
             transformed_code = transform_code(source_code)
