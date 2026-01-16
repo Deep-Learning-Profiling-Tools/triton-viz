@@ -27,7 +27,7 @@ from .data import (
     CastImpl,
 )
 from .masked_load import masked_load, masked_store
-from .nki_extract_slice import StoreCallTransformer, transform_code
+from ..transformers.nki_extract_slice import StoreCallTransformer, transform_code
 
 __all__ = [
     "trace",
