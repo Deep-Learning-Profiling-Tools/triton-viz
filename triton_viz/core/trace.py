@@ -238,6 +238,12 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
         if not cfg.enable_sanitizer:
             return kernel
 
+        # If the object is already initialized as a TraceInterface, just append the new client(s)
+        if isinstance(kernel, TraceInterface):
+            trace = kernel
+            trace.add_client(client)
+            return trace
+
         # First-time wrapping
         # Triton backend need JIT/Interpreter/Autotuner；
         # NKI allow Python function（ NKIInterpretedFunction）
@@ -250,23 +256,6 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
                 return TritonTrace(kernel, client)
             else:
                 raise ValueError(f"Unknown backend: {backend}")
-
-        # Handle NKI functions specifically
-        if backend == "nki":
-            from .nki import NKIInterpretedFunction
-
-            if isinstance(kernel, NKIInterpretedFunction):
-                return NKITrace(kernel, client)
-            else:
-                # Wrap plain functions as NKIInterpretedFunction
-                interpreted_fn = NKIInterpretedFunction(kernel)
-                return NKITrace(interpreted_fn, client)
-
-        # If the object is already initialized as a TraceInterface, just append the new client(s)
-        if isinstance(kernel, TraceInterface):
-            trace = kernel
-            trace.add_client(client)
-            return trace
 
         raise TypeError(
             f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}"

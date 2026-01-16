@@ -197,6 +197,14 @@ def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResu
     return AdapterResult(x, y)
 
 
+def _nki_reduce_sum_adapter(
+    input_tensor: Any, *args: Any, mask: Any = None, **kwargs: Any
+) -> AdapterResult:
+    axis = args[0] if args else kwargs.get("axis")
+    keep_dims = kwargs.get("keep_dims", kwargs.get("keepdims", False))
+    return AdapterResult(input_tensor, axis, keep_dims)
+
+
 TRITON_OP_LIST = [
     ProgramId,
     RawStore,
@@ -329,6 +337,7 @@ if HAS_NKI:
         Store,
         Dot,
         UnaryOp,
+        ReduceSum,
         MakeRange,
     ]
 
@@ -339,6 +348,7 @@ if HAS_NKI:
         Store: nki_builder.masked_store,
         Dot: nki_builder.matmul,
         UnaryOp: nki_builder._unary_op,
+        ReduceSum: nki_builder.sum,
         MakeRange: nki_builder.arange,
     }
 
@@ -349,6 +359,7 @@ if HAS_NKI:
         Store: "masked_store",
         Dot: "matmul",
         UnaryOp: "_unary_op",
+        ReduceSum: "sum",
         MakeRange: "arange",
     }
 
@@ -358,6 +369,7 @@ if HAS_NKI:
         Load: _nki_load_adapter,
         Store: _nki_store_adapter,
         Dot: _nki_dot_adapter,
+        ReduceSum: _nki_reduce_sum_adapter,
     }
 
     for op_type in NKI_OP_LIST:
@@ -451,15 +463,21 @@ class PatchOp:
                     self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
                     args[0].dtype,
                 )
-                cast(Any, ret.handle).concrete_fn = self.op
+                fn = cast(Any, ret.handle)
+                if fn is not None:
+                    fn.concrete_fn = self.op
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
+                fn = cast(Any, ret.handle)
                 if self.op_type == RawLoad:
-                    cast(Any, ret).concrete_fn = TRITON_ORIGINAL_OPS[Load]
+                    if fn is not None:
+                        fn.concrete_fn = TRITON_ORIGINAL_OPS[Load]
                 elif self.op_type == RawStore:
-                    cast(Any, ret).concrete_fn = TRITON_ORIGINAL_OPS[Store]
+                    if fn is not None:
+                        fn.concrete_fn = TRITON_ORIGINAL_OPS[Store]
                 else:
-                    cast(Any, ret).concrete_fn = self.op
+                    if fn is not None:
+                        fn.concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
         if self.callbacks.after_callback:

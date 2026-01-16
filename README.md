@@ -48,6 +48,11 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 - [Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
 - Note: the below commands must be run in order.
 
+Triton install (need nightly):
+```
+pip install -U triton --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
+```
+
 Upon successfully installing Triton, install Torch using the following command:
 
 ```sh
