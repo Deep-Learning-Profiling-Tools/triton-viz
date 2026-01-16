@@ -2,7 +2,7 @@ import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
@@ -13,47 +13,13 @@ from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
 
 from .data import (
-    Op,
-    Allocate,
-    RawLoad,
     Load,
+    Op,
+    RawLoad,
     RawStore,
     Store,
-    UnaryOp,
-    BinaryOp,
-    TernaryOp,
-    ProgramId,
-    Dot,
-    MakeRange,
-    AddPtr,
-    ReduceSum,
-    Splat,
-    ExpandDims,
-    Broadcast,
-    ReduceMax,
-    ReduceMin,
-    MakeBlockPointer,
-    TensorPointerLoad,
-    TensorPointerStore,
-    Idiv,
-    Rsqrt,
-    CastImpl,
-    Reshape,
-    Join,
-    Fabs,
-    Ashr,
-    Advance,
-    FpToFp,
-    Umulhi,
-    Trans,
-    CumSum,
-    Bitcast,
-    AtomicCas,
-    AtomicRMW,
 )
-from .data import Flip  # separate import to avoid reordering noise
 import inspect
-import ast
 from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
@@ -64,300 +30,48 @@ from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
 from triton.runtime.interpreter import _tuple_create, _unwrap_tensor, _rewrap_tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
 from triton.runtime import JITFunction
+from ..transformers.for_loop_patcher import _visit_For as triton_viz_visit_For
 
-HAS_NKI = False
-nki_builder = None
-try:
-    from triton_viz.core.nki import nki_builder  # type: ignore
-
-    HAS_NKI = True
-except ModuleNotFoundError:
-    pass
+from .flip_patch import patch_flip
+from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 
 
-@dataclass
-class AdapterResult:
-    """
-    For each backend, ops may have slightly different function signatures
-    which we run through (backend, function)-specific adapters to return
-    standardized args/kwargs for client callbacks.
-    """
-
-    args: tuple[Any, ...]
-    kwargs: dict[str, Any]
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.args = args
-        self.kwargs = kwargs
+_MISSING = object()
 
 
-def passthrough_adapter(*args: Any, **kwargs: Any) -> AdapterResult:
-    """Return arguments unchanged for clients that expect the original signature."""
-    return AdapterResult(*args, **kwargs)
+class _LangPatchScope:
+    """Tracks patched attributes so they can be restored."""
+
+    def __init__(self) -> None:
+        self._changes: list[tuple[object, str, object]] = []
+
+    def set_attr(self, obj: object, name: str, value: object) -> None:
+        original = getattr(obj, name, _MISSING)
+        self._changes.append((obj, name, original))
+        setattr(obj, name, value)
+
+    def restore(self) -> None:
+        while self._changes:
+            obj, name, original = self._changes.pop()
+            if original is _MISSING:
+                delattr(obj, name)
+            else:
+                setattr(obj, name, original)
 
 
-def _program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(axis)
+_LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": []}
 
 
-def _triton_raw_store_adapter(
-    ptr: Any, value: Any, *_args: Any, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, value)
+def _push_lang_patch_scope(backend: str, scope: Any) -> None:
+    _LANG_PATCH_SCOPES.setdefault(backend, []).append(scope)
 
 
-def _triton_store_adapter(
-    ptr: Any, _value: Any, mask: Any, *_args: Any, **kwargs: Any
-) -> AdapterResult:
-    keys = kwargs.get("keys")
-    return AdapterResult(ptr, mask, keys)
+def _pop_lang_patch_scope(backend: str) -> Optional[Any]:
+    scopes = _LANG_PATCH_SCOPES.get(backend)
+    if not scopes:
+        return None
+    return scopes.pop()
 
-
-def _triton_raw_load_adapter(ptr: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(ptr)
-
-
-def _triton_load_adapter(
-    ptr: Any, mask: Any, _other: Any, *_args: Any, **kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, mask, kwargs.get("keys"))
-
-
-def _triton_dot_adapter(a: Any, b: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(a, b)
-
-
-def _triton_reduce_sum_adapter(
-    input_tensor, axis=None, keep_dims=False, *_args, **_kwargs
-) -> AdapterResult:
-    return AdapterResult(input_tensor, axis, keep_dims)
-
-
-def _triton_addptr_adapter(
-    ptr: Any, offset: Any, *_args: Any, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, offset)
-
-
-def _nki_allocate_adapter(*_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult()
-
-
-def _nki_load_adapter(
-    src: Any, keys: Any, *, mask: Optional[Any] = None, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(src, mask, keys)
-
-
-def _nki_store_adapter(
-    dst: Any, keys: Any, value: Any, *, mask: Optional[Any] = None, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(dst, mask, keys)
-
-
-def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(x, y)
-
-
-TRITON_OP_LIST = [
-    ProgramId,
-    RawStore,
-    Store,
-    RawLoad,
-    Load,
-    UnaryOp,
-    BinaryOp,
-    TernaryOp,
-    Dot,
-    MakeRange,
-    AddPtr,
-    Splat,
-    ExpandDims,
-    Broadcast,
-    ReduceMax,
-    ReduceMin,
-    ReduceSum,
-    MakeBlockPointer,
-    TensorPointerLoad,
-    TensorPointerStore,
-    Idiv,
-    Rsqrt,
-    CastImpl,
-    Reshape,
-    Join,
-    Fabs,
-    Ashr,
-    Advance,
-    FpToFp,
-    Umulhi,
-    Trans,
-    CumSum,
-    Bitcast,
-    AtomicCas,
-    AtomicRMW,
-]
-
-TRITON_ORIGINAL_OPS = {
-    ProgramId: interpreter_builder.create_get_program_id,
-    RawStore: interpreter_builder.create_store,
-    Store: interpreter_builder.create_masked_store,
-    RawLoad: interpreter_builder.create_load,
-    Load: interpreter_builder.create_masked_load,
-    Dot: interpreter_builder.create_dot,
-    UnaryOp: interpreter_builder.unary_op,
-    BinaryOp: interpreter_builder.binary_op,
-    TernaryOp: interpreter_builder.ternary_op,
-    MakeRange: interpreter_builder.create_make_range,
-    AddPtr: interpreter_builder.create_addptr,
-    ExpandDims: interpreter_builder.create_expand_dims,
-    Broadcast: interpreter_builder.create_broadcast,
-    Splat: interpreter_builder.create_splat,
-    MakeBlockPointer: interpreter_builder.create_make_block_ptr,
-    TensorPointerLoad: interpreter_builder.create_tensor_pointer_load,
-    TensorPointerStore: interpreter_builder.create_tensor_pointer_store,
-    Idiv: interpreter_builder.create_idiv,
-    Rsqrt: interpreter_builder.create_rsqrt,
-    CastImpl: interpreter_builder.cast_impl,
-    Reshape: interpreter_builder.create_reshape,
-    Join: interpreter_builder.create_join,
-    Fabs: interpreter_builder.create_fabs,
-    Ashr: interpreter_builder.create_ashr,
-    Advance: interpreter_builder.create_advance,
-    FpToFp: interpreter_builder.create_fp_to_fp,
-    Umulhi: interpreter_builder.create_umulhi,
-    Bitcast: interpreter_builder.create_bitcast,
-    AtomicCas: interpreter_builder.create_atomic_cas,
-    AtomicRMW: interpreter_builder.create_atomic_rmw,
-}
-
-TRITON_OP_ATTR_NAMES = {
-    ProgramId: "create_get_program_id",
-    RawStore: "create_store",
-    Store: "create_masked_store",
-    RawLoad: "create_load",
-    Load: "create_masked_load",
-    Dot: "create_dot",
-    UnaryOp: "unary_op",
-    BinaryOp: "binary_op",
-    TernaryOp: "ternary_op",
-    MakeRange: "create_make_range",
-    AddPtr: "create_addptr",
-    ExpandDims: "create_expand_dims",
-    Broadcast: "create_broadcast",
-    Splat: "create_splat",
-    MakeBlockPointer: "create_make_block_ptr",
-    TensorPointerLoad: "create_tensor_pointer_load",
-    TensorPointerStore: "create_tensor_pointer_store",
-    Idiv: "create_idiv",
-    Rsqrt: "create_rsqrt",
-    CastImpl: "cast_impl",
-    Reshape: "create_reshape",
-    Join: "create_join",
-    Fabs: "create_fabs",
-    Ashr: "create_ashr",
-    Advance: "create_advance",
-    FpToFp: "create_fp_to_fp",
-    Umulhi: "create_umulhi",
-    Bitcast: "create_bitcast",
-    AtomicCas: "create_atomic_cas",
-    AtomicRMW: "create_atomic_rmw",
-}
-
-TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
-    ProgramId: _program_id_adapter,
-    RawStore: _triton_raw_store_adapter,
-    Store: _triton_store_adapter,
-    RawLoad: _triton_raw_load_adapter,
-    Load: _triton_load_adapter,
-    Dot: _triton_dot_adapter,
-    ReduceSum: _triton_reduce_sum_adapter,
-    AddPtr: _triton_addptr_adapter,
-}
-
-for op_type in TRITON_OP_LIST:
-    TRITON_ADAPTERS.setdefault(op_type, passthrough_adapter)
-
-NKI_OP_LIST: list[type[Op]] = []
-NKI_ORIGINAL_OPS: dict[type[Op], Callable] = {}
-NKI_OP_ATTR_NAMES: dict[type[Op], str] = {}
-NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
-if HAS_NKI:
-    assert nki_builder is not None
-
-    NKI_OP_LIST = [
-        Allocate,
-        ProgramId,
-        Load,
-        Store,
-        Dot,
-        UnaryOp,
-        MakeRange,
-    ]
-
-    NKI_ORIGINAL_OPS = {
-        ProgramId: nki_builder.program_id,
-        Allocate: nki_builder.ndarray,
-        Load: nki_builder.masked_load,
-        Store: nki_builder.masked_store,
-        Dot: nki_builder.matmul,
-        UnaryOp: nki_builder._unary_op,
-        MakeRange: nki_builder.arange,
-    }
-
-    NKI_OP_ATTR_NAMES = {
-        ProgramId: "program_id",
-        Allocate: "ndarray",
-        Load: "masked_load",
-        Store: "masked_store",
-        Dot: "matmul",
-        UnaryOp: "_unary_op",
-        MakeRange: "arange",
-    }
-
-    NKI_ADAPTERS = {
-        ProgramId: _program_id_adapter,
-        Allocate: _nki_allocate_adapter,
-        Load: _nki_load_adapter,
-        Store: _nki_store_adapter,
-        Dot: _nki_dot_adapter,
-    }
-
-    for op_type in NKI_OP_LIST:
-        NKI_ADAPTERS.setdefault(op_type, passthrough_adapter)
-
-
-OPERATION_REGISTRY: dict[str, dict[str, Any]] = {
-    "triton": {
-        "builder": interpreter_builder,
-        "op_list": TRITON_OP_LIST,
-        "original_ops": TRITON_ORIGINAL_OPS,
-        "op_attr_names": TRITON_OP_ATTR_NAMES,
-        "adapters": TRITON_ADAPTERS,
-    },
-    "nki": {
-        "builder": nki_builder,
-        "op_list": NKI_OP_LIST,
-        "original_ops": NKI_ORIGINAL_OPS,
-        "op_attr_names": NKI_OP_ATTR_NAMES,
-        "adapters": NKI_ADAPTERS,
-    },
-}
-
-
-reduce_map: dict[type[Op], Callable] = {
-    ReduceMax: tl.max,
-    ReduceMin: tl.min,
-    ReduceSum: tl.sum,
-}
-scan_map: dict[type[Op], Callable] = {
-    CumSum: tl.cumsum,
-}
-math_map: dict[type[Op], Callable] = {
-    Umulhi: tl.math.umulhi,
-}
-reshape_map: dict[type[Op], Callable] = {
-    Trans: tl.trans,
-}
 
 _thread_local_interpreter_state = threading.local()
 _thread_local_interpreter_state.grid_idx = None  # just set a default
@@ -387,20 +101,25 @@ class PatchOp:
         self.adapter = adapter
 
     def __call__(self, *args, **kwargs):
-        # periodically sleep briefly so other worker threads can run
-        _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
-        _YIELD_SLEEP_SEC = 0.0005  # Small positive sleep to encourage OS-level yield
-        now = time.perf_counter()
-        last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
-        if now - last >= _YIELD_INTERVAL_SEC:
-            _thread_local_interpreter_state.last_yield_ts = now
-            time.sleep(_YIELD_SLEEP_SEC)
+        if cfg.num_sms > 1:
+            # periodically sleep briefly so other worker threads can run
+            _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
+            _YIELD_SLEEP_SEC = (
+                0.0005  # Small positive sleep to encourage OS-level yield
+            )
+            now = time.perf_counter()
+            last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
+            if now - last >= _YIELD_INTERVAL_SEC:
+                _thread_local_interpreter_state.last_yield_ts = now
+                time.sleep(_YIELD_SLEEP_SEC)
 
         if self.callbacks.before_callback:
             before_args = self.adapter(*args, **kwargs)
             self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in {**reduce_map, **scan_map, **reshape_map}:
+            if self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl.math]:
+                raise NotImplementedError("Patching math ops not yet supported")
+            elif self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl]:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -408,14 +127,22 @@ class PatchOp:
                     self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
                     args[0].dtype,
                 )
-            elif self.op_type in math_map:
-                raise NotImplementedError()
+                fn = cast(Any, ret.handle)
+                if fn is not None:
+                    fn.concrete_fn = self.op
             else:
                 ret = self.callbacks.op_overrider(*args, **kwargs)
-                from ..clients.sanitizer.sanitizer import SymbolicExpr
-
-                if isinstance(ret, SymbolicExpr):
-                    ret.concrete_fn = self.op
+                if ret is not None:
+                    if self.op_type == RawLoad:
+                        ret.concrete_fn = OPERATION_REGISTRY["triton"].original_ops[
+                            Load
+                        ]
+                    elif self.op_type == RawStore:
+                        ret.concrete_fn = OPERATION_REGISTRY["triton"].original_ops[
+                            Store
+                        ]
+                    else:
+                        ret.concrete_fn = self.op
         else:
             ret = self.op(*args, **kwargs)
         if self.callbacks.after_callback:
@@ -436,34 +163,18 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: str):
     if backend not in OPERATION_REGISTRY:
         raise ValueError(f"Unknown backend: {backend}")
 
-    backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
-    backend_attr_names = OPERATION_REGISTRY[backend]["op_attr_names"]
-    backend_adapters = OPERATION_REGISTRY[backend]["adapters"]
-    backend_builder = OPERATION_REGISTRY[backend]["builder"]
-
-    if op_type in backend_ops:
-        op_name = backend_attr_names[op_type]
-        original_op = backend_ops[op_type]
-        adapter = backend_adapters[op_type]
-        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(backend_builder, op_name, patched_op)
-    elif backend == "triton" and op_type in {**reduce_map, **scan_map, **reshape_map}:
-        if op_type in reduce_map:
-            op_name = reduce_map[op_type].__name__
-        elif op_type in scan_map:
-            op_name = scan_map[op_type].__name__
-        elif op_type in reshape_map:
-            op_name = reshape_map[op_type].__name__
-        original_op = getattr(tl, op_name)
-        adapter = backend_adapters[op_type]
-        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(tl, op_name, patched_op)
-    elif backend == "triton" and op_type in math_map:
-        op_name = math_map[op_type].__name__
-        original_op = getattr(tl.math, op_name)
-        adapter = backend_adapters[op_type]
-        patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-        setattr(tl.math, op_name, patched_op)
+    registry = OPERATION_REGISTRY[backend]
+    backend_ops = registry.original_ops
+    backend_adapters = registry.adapters
+    namespaces = registry.namespaces
+    for namespace, ops in namespaces.items():
+        if op_type in ops:
+            attr = ops[op_type]
+            original_op = backend_ops[op_type]
+            adapter = backend_adapters[op_type]
+            patched_op = PatchOp(original_op, op_type, callbacks, adapter)
+            setattr(namespace, attr, patched_op)
+            break
     else:
         raise ValueError(f"Patching operator {op_type} not supported")
 
@@ -474,15 +185,17 @@ def unpatch_op(op_type: type[Op], backend: str):
 
     :param op_type: The type of the operator to unregister the callback for.
     """
-    backend_ops = OPERATION_REGISTRY[backend]["original_ops"]
-    backend_attr_names = OPERATION_REGISTRY[backend]["op_attr_names"]
-    backend_builder = OPERATION_REGISTRY[backend]["builder"]
-
-    if op_type in backend_ops:
-        original_op = backend_ops[op_type]  # type: ignore
-        # Use hardcoded name from _OP_ATTR_NAMES
-        op_name = backend_attr_names[op_type]  # type: ignore
-        setattr(backend_builder, op_name, original_op)
+    registry = OPERATION_REGISTRY[backend]
+    backend_ops = registry.original_ops
+    namespaces = registry.namespaces
+    for namespace, ops in namespaces.items():
+        if op_type in ops:
+            attr = ops[op_type]
+            original_op = backend_ops[op_type]
+            setattr(namespace, attr, original_op)
+            break
+    else:
+        raise ValueError(f"Patching operator {op_type} not supported")
 
 
 class _LoopIter:
@@ -620,7 +333,7 @@ class _LoopPatcher:
         """Apply loop patching."""
         if not self._patched:
             self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
-            _OrigASTTransformer.visit_For = _visit_For  # type: ignore[assignment]
+            _OrigASTTransformer.visit_For = triton_viz_visit_For  # type: ignore[assignment]
             self._patched = True
 
     def unpatch(self) -> None:
@@ -636,84 +349,6 @@ class _LoopPatcher:
 
 
 _loop_patcher = _LoopPatcher()
-
-
-def _visit_For(self, node: ast.For):  # type: ignore[override]
-    """
-    for i in R:
-        ...
-    ==>
-    for i in _triton_viz_loop_patcher.hooks.loop_iter_wrapper(iter_callable, args, kwargs, lineno, range_type):
-        ...
-    where _triton_viz_loop_patcher.hooks.loop_iter_wrapper returns a _LoopIter object.
-    """
-    self.generic_visit(node)
-
-    # Detect range type
-    range_type = "unknown"
-    if isinstance(node.iter, ast.Call):
-        func = node.iter.func
-        if isinstance(func, ast.Name) and func.id == "range":
-            range_type = "python_range"
-        elif (
-            isinstance(func, ast.Attribute)
-            and isinstance(func.value, ast.Name)
-            and func.value.id == "tl"
-        ):
-            if func.attr == "range":
-                range_type = "tl_range"
-            elif func.attr == "static_range":
-                range_type = "tl_static_range"
-
-    if isinstance(node.iter, ast.Call):
-        iter_callable = node.iter.func
-        iter_args = ast.Tuple(elts=node.iter.args, ctx=ast.Load())
-        kw_keys = []
-        kw_vals = []
-        for kw in node.iter.keywords:
-            if kw.arg is None:  # skip **kwargs for simplicity
-                continue
-            kw_keys.append(ast.Constant(value=kw.arg))
-            kw_vals.append(kw.value)
-        iter_kwargs = ast.Dict(keys=kw_keys, values=kw_vals)
-    else:
-        iter_callable = ast.Lambda(
-            args=ast.arguments(
-                posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]
-            ),
-            body=node.iter,
-        )
-        iter_args = ast.Tuple(elts=[], ctx=ast.Load())
-        iter_kwargs = ast.Dict(keys=[], values=[])
-
-    new_iter = ast.Call(
-        func=ast.Attribute(
-            value=ast.Attribute(
-                value=ast.Name(id="_triton_viz_loop_patcher", ctx=ast.Load()),
-                attr="hooks",
-                ctx=ast.Load(),
-            ),
-            attr="loop_iter_wrapper",
-            ctx=ast.Load(),
-        ),
-        args=[
-            iter_callable,
-            iter_args,
-            iter_kwargs,
-            ast.Constant(value=node.lineno),
-            ast.Constant(value=range_type),
-        ],
-        keywords=[],
-    )
-
-    new_for = ast.For(
-        target=node.target,
-        iter=new_iter,
-        body=node.body,
-        orelse=node.orelse,
-        type_comment=node.type_comment,
-    )
-    return ast.fix_missing_locations(new_for)
 
 
 def patch_for_loop(loop_callbacks: ForLoopCallbacks):
@@ -742,138 +377,27 @@ def unpatch_for_loop():
 
 def patch_lang(fn, backend):
     if backend == "triton":
-        triton_patch_lang(fn)
+        scope = triton_patch_lang(fn)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
-        nki_patch_lang()
+        scope = _LangPatchScope()
+        nki_patch_lang(scope)
     else:
         raise ValueError(
             f"Unsupported backend {backend} received. Triton-viz only supports one of ('triton', 'nki')."
         )
 
+    _push_lang_patch_scope(backend, scope)
+
     fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
-    # Wrap tl.flip to emit a Flip record after computing result
-    try:
-        _orig_flip = getattr(tl, "flip", None)
-        if _orig_flip is not None and not getattr(
-            _orig_flip, "__triton_viz_wrapped__", False
-        ):
-
-            def _viz_flip(x, *args, **kwargs):
-                # Call original flip implementation
-                ret = _orig_flip(x, *args, **kwargs)
-                # Best-effort extract dim
-                dim = None
-                if args:
-                    dim = args[0]
-                if "dim" in kwargs:
-                    dim = kwargs.get("dim")
-                # Best-effort shapes
-                in_shape = None
-                out_shape = None
-                x_arr = None
-                r_arr = None
-                try:
-                    # interpreter tensors may expose .data or .handle.data
-                    x_data = getattr(x, "data", None)
-                    if x_data is None and hasattr(x, "handle"):
-                        x_data = getattr(x.handle, "data", None)
-                    if x_data is not None:
-                        in_shape = tuple(x_data.shape)
-                        x_arr = x_data
-                except Exception:
-                    pass
-                try:
-                    r_data = getattr(ret, "data", None)
-                    if r_data is None and hasattr(ret, "handle"):
-                        r_data = getattr(ret.handle, "data", None)
-                    if r_data is not None:
-                        out_shape = tuple(r_data.shape)
-                        r_arr = r_data
-                except Exception:
-                    pass
-
-                # Emit a Flip record to the active tracer, if available
-                try:
-                    global _current_client_manager
-                    cm = _current_client_manager
-                    if cm is not None and hasattr(cm, "clients"):
-                        tracer = cm.get_client("tracer")
-                        if tracer is not None:
-                            input_payload = None
-                            output_payload = None
-                            try:
-                                # Avoid huge payloads: cap to 64k elements
-                                def _maybe_list(arr):
-                                    import numpy as _np
-
-                                    if arr is None:
-                                        return None
-                                    try:
-                                        if arr.size <= 65536:
-                                            return _np.asarray(arr).tolist()
-                                    except Exception:
-                                        pass
-                                    return None
-
-                                input_payload = _maybe_list(x_arr)
-                                output_payload = _maybe_list(r_arr)
-                            except Exception:
-                                pass
-
-                            rec = Flip(
-                                input_shape=in_shape or tuple(),
-                                output_shape=out_shape or (in_shape or tuple()),
-                                dim=int(dim) if dim is not None else 0,
-                                input_data=input_payload,
-                                output_data=output_payload,
-                            )
-                            # attach call path already handled by Flip.__post_init__
-                            tracer.records.append(rec)
-                except Exception:
-                    # Never fail kernel execution due to viz
-                    pass
-                return ret
-
-            # mark wrapper to avoid double-wrapping on subsequent patch_lang calls
-            setattr(_viz_flip, "__triton_viz_wrapped__", True)
-            tl.flip = _viz_flip  # type: ignore[assignment]
-    except Exception:
-        # If wrapping fails, continue without Flip records
-        pass
+    patch_flip(scope, lambda: _current_client_manager)
 
 
 def unpatch_lang(backend):
-    # TODO: once this (https://github.com/triton-lang/triton/pull/8735)
-    # gets into a stable release, we can simplify this unpatching logic by upgrading Triton.
-    # This PR is ugly to implement in triton-viz directly because it piggybacks off
-    # patching code. So until then, we just brute-force re-import all triton subpackages to unpatch
-
-    import importlib
-    import sys
-
-    if backend == "triton":
-        for name in ("core", "math", "extra"):
-            mod = getattr(tl, name, None)
-            if mod is not None and mod.__name__ in sys.modules:
-                importlib.reload(mod)
-
-        if tl.__name__ in sys.modules:
-            importlib.reload(tl)
-    elif backend == "nki":
-        from triton_viz.core.nki import nki_unpatch_lang
-
-        nki_unpatch_lang()
-
-    from triton.language import semantic as tl_semantic
-    from triton.compiler import code_generator as codegen
-
-    tl_semantic.TritonSemantic.tensor = tl.tensor
-    tl_semantic.TritonSemantic.lang = tl
-    codegen.tensor = tl.tensor
-    codegen.language = tl
-    codegen.constexpr = tl.constexpr
+    scope = _pop_lang_patch_scope(backend)
+    if scope is not None and hasattr(scope, "restore"):
+        scope.restore()
 
 
 @dataclass(frozen=True)
@@ -944,7 +468,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     if kwargs.pop("warmup", False):
         return
 
-    builder = OPERATION_REGISTRY[backend]["builder"]
+    builder = OPERATION_REGISTRY[backend].builder
 
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
@@ -1048,22 +572,34 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
         self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
 
 
-def _jit_function_call(
-    self, *args, backend=None, **kwargs
-):  # NOTE: is this ever called?
+def _jit_function_call(self, *args, backend=None, **kwargs):
     assert backend is not None
     patch_lang(self.fn, backend)
-    return self.fn(*args, **kwargs)
+    try:
+        return self.fn(*args, **kwargs)
+    finally:
+        unpatch_lang(backend)
+
+
+patch_calls_scope = 0
 
 
 @contextmanager
 def patch_calls(backend):
-    old_grid_executor_call = GridExecutor.__call__
-    old_jit_function_call = JITFunction.__call__
-    GridExecutor.__call__ = partialmethod(_grid_executor_call, backend=backend)
-    JITFunction.__call__ = partialmethod(_jit_function_call, backend=backend)
+    global patch_calls_scope
+    if patch_calls_scope == 0:
+        # only patch at top-level scope (e.g. with patch_calls_top(): with patch_calls_bottom())
+        old_grid_executor_call = GridExecutor.__call__
+        old_jit_function_call = JITFunction.__call__
+        GridExecutor.__call__ = partialmethod(_grid_executor_call, backend=backend)
+        JITFunction.__call__ = partialmethod(_jit_function_call, backend=backend)
+    patch_calls_scope += 1
     try:
         yield
     finally:
-        GridExecutor.__call__ = old_grid_executor_call
-        JITFunction.__call__ = old_jit_function_call
+        patch_calls_scope -= 1
+        if patch_calls_scope == 0:
+            # only unpatch at top-level scope (e.g. in above example, don't
+            # unpatch in between patch_calls_bottom() and patch_calls_top() scopes
+            GridExecutor.__call__ = old_grid_executor_call
+            JITFunction.__call__ = old_jit_function_call

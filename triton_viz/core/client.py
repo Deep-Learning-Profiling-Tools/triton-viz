@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 from abc import ABC, abstractmethod
 from typing import ClassVar, Optional, Any
@@ -16,12 +16,13 @@ from .patch import (
 from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
 from .patch import patch_lang, unpatch_lang, OPERATION_REGISTRY
+from .config import config as cfg
 
 
 class Client(ABC):
     NAME: ClassVar[str]
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Whether this client needs ASM information from kernel warmup
         self.collect_asm: bool = False
         # Storage for ASM information if collected
@@ -31,12 +32,17 @@ class Client(ABC):
         # Lock for serializing shared state where needed
         self._lock = threading.RLock()
 
+    def _lock_context(self):
+        if cfg.num_sms > 1:
+            return self._lock
+        return nullcontext()
+
     def lock_fn(self, fn: Callable) -> Callable:
         """Forces serial execution of the given function."""
 
         @wraps(fn)
         def wrapped(*args, **kwargs):
-            with self._lock:
+            with self._lock_context():
                 return fn(*args, **kwargs)
 
         return wrapped
@@ -115,6 +121,11 @@ class ClientManager:
         self.launch = Launch()
         self._lock = threading.Lock()
 
+    def _lock_context(self):
+        if cfg.num_sms > 1:
+            return self._lock
+        return nullcontext()
+
     def get_client(self, name: str) -> Optional[Client]:
         return self.clients.get(name)
 
@@ -160,7 +171,7 @@ class ClientManager:
         with patch_calls(backend):
             for client in self.clients.values():
                 # get operations for the specified backend
-                backend_ops: list[type[Op]] = OPERATION_REGISTRY[backend]["op_list"]
+                backend_ops: set[type[Op]] = OPERATION_REGISTRY[backend].op_list
 
                 for op in backend_ops:
                     # patch ops
@@ -175,7 +186,7 @@ class ClientManager:
             try:
                 yield
             finally:
-                backend_ops = OPERATION_REGISTRY[backend]["op_list"]
+                backend_ops = OPERATION_REGISTRY[backend].op_list
 
                 for op in backend_ops:
                     unpatch_op(op, backend)
@@ -183,39 +194,39 @@ class ClientManager:
                 unpatch_lang(backend)
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        with self._lock:
+        with self._lock_context():
             rets = []
             for client in self.clients.values():
                 rets.append(client.pre_run_callback(fn))
             return all(rets) if rets else True
 
     def post_run_callback(self, fn: Callable) -> bool:
-        with self._lock:
+        with self._lock_context():
             rets = []
             for client in self.clients.values():
                 rets.append(client.post_run_callback(fn))
             return any(rets)
 
     def finalize(self) -> None:
-        with self._lock:
+        with self._lock_context():
             self.launch.records = []
             for client in self.clients.values():
                 self.launch.records += client.finalize()
 
     def arg_callback(self, name, arg, arg_cvt):
-        with self._lock:
+        with self._lock_context():
             if hasattr(arg, "data_ptr"):
                 self.launch.tensors.add(arg)
             for client in self.clients.values():
                 client.arg_callback(name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int]):
-        with self._lock:
+        with self._lock_context():
             self.launch.grid = grid
             for client in self.clients.values():
                 client.grid_callback(grid)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
-        with self._lock:
+        with self._lock_context():
             for client in self.clients.values():
                 client.grid_idx_callback(grid_idx)

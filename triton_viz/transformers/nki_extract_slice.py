@@ -51,6 +51,17 @@ class StoreCallTransformer(ast.NodeTransformer):
 
         return ast.Expr(value=new_call)
 
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        """
+        strip out decorators i.e.
+        @triton_viz.trace('tracer')
+        def nki_kernel(): ...
+
+        or else the NKI interpreter will only see a NKITrace object and not nki_kernel
+        """
+        node.decorator_list = []
+        return self.generic_visit(node)
+
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
         """
         Handle assignment statements where the value is an nl.load or nl.store call.

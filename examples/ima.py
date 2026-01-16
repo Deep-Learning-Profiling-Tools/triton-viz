@@ -3,7 +3,6 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import Sanitizer
 
 
 @triton.jit
@@ -13,7 +12,6 @@ def inner(ptr, offset):
     return val + 1
 
 
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
 @triton.jit
 def kernel(ptr, n):
     pid = tl.program_id(0)
@@ -22,9 +20,11 @@ def kernel(ptr, n):
     tl.store(ptr + pid, val)
 
 
-if __name__ == "__main__":
-    x = torch.arange(4, dtype=torch.float32)
+x = torch.arange(4, dtype=torch.float32)
 
-    # We'll launch a grid bigger than x.numel() to force a out-of-bounds error
-    grid = (x.numel() + 4,)
-    kernel[grid](x, x.numel())
+# We'll launch a grid bigger than x.numel() to force a out-of-bounds error
+grid = (x.numel() + 4,)
+
+triton_viz.config.enable_sanitizer = True
+tracer = triton_viz.trace("sanitizer")(kernel)
+tracer[grid](x, x.numel())
