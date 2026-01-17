@@ -7,7 +7,7 @@ from triton_viz.clients import Tracer
 
 
 # Simple matmul kernel producing a C = A @ B (fp32, small sizes for demo)
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def matmul_kernel(
     a_ptr,

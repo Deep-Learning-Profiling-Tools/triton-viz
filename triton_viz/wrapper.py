@@ -19,12 +19,12 @@ _original_autotune = triton.autotune
 
 def sanitizer_wrapper(kernel):
     abort_on_error = True
-    tracer = triton_viz.trace(clients=Sanitizer(abort_on_error=abort_on_error))
+    tracer = triton_viz.trace(client=Sanitizer(abort_on_error=abort_on_error))
     return tracer(kernel)
 
 
 def profiler_wrapper(kernel):
-    tracer = triton_viz.trace(clients=Profiler())
+    tracer = triton_viz.trace(client=Profiler())
     return tracer(kernel)
 
 

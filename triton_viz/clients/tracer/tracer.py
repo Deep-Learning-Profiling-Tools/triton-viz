@@ -76,7 +76,7 @@ class Tracer(Client):
             self.sample = True
 
         # Create a Grid record for this grid index
-        with self._lock:
+        with self._lock_context():
             self.records.append(Grid(idx=grid_idx))
 
     def grid_callback(self, grid: tuple[int, ...]):
@@ -171,8 +171,14 @@ class Tracer(Client):
         def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
                 return
-            input_shape = input.handle.data.shape
-            output_shape = ret.handle.data.shape
+            input_data = getattr(getattr(input, "handle", None), "data", None)
+            if input_data is None:
+                input_data = getattr(input, "data", None)
+            output_data = getattr(getattr(ret, "handle", None), "data", None)
+            if output_data is None:
+                output_data = getattr(ret, "data", None)
+            input_shape = input_data.shape if input_data is not None else ()
+            output_shape = output_data.shape if output_data is not None else ()
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
         @self.lock_fn
@@ -235,6 +241,6 @@ class Tracer(Client):
         self._set_thread_local("sample", value)
 
     def finalize(self) -> list:
-        with self._lock:
+        with self._lock_context():
             self.tensors.clear()
             return self.records

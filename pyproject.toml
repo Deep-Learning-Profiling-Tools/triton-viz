@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "triton-viz"
-version = "2.0"
+version = "3.0"
 description = "A visualization tool for Triton"
 authors = [
   {name = "Deep Learning Profiling Tools Team", email = "kzhou6@gmu.edu"}
