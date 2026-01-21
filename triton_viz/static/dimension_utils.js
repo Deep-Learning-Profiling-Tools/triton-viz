@@ -14,7 +14,6 @@ export function createCadDimension(scene, start, end, label, axis, color, option
     } = options;
 
     const group = new THREE.Group();
-    console.log(`[Dimension] Creating ${axis}-axis dimension for "${label}". distance=${length.toFixed(3)}, flipped=${isFlipped}`);
     const material = new THREE.LineBasicMaterial({
         color: color,
         transparent: true,
@@ -25,6 +24,11 @@ export function createCadDimension(scene, start, end, label, axis, color, option
     const dir = new THREE.Vector3().subVectors(end, start);
     const length = dir.length();
     const normalizedDir = dir.clone().normalize();
+
+    // Arrow flipping logic: if the distance is too short, flip arrows to outside
+    const isFlipped = length < flipThreshold;
+
+    console.log(`[Dimension] Creating ${axis}-axis dimension for "${label}". distance=${length.toFixed(3)}, flipped=${isFlipped}`);
 
     // Determine extension direction (perpendicular to normalizedDir)
     let extDir;
@@ -51,7 +55,6 @@ export function createCadDimension(scene, start, end, label, axis, color, option
     const d1 = start.clone().add(extDir.clone().multiplyScalar(dimLinePos));
     const d2 = end.clone().add(extDir.clone().multiplyScalar(dimLinePos));
 
-    // Arrow flipping logic
     // Arrowheads
     if (isFlipped) {
         // Points outside, pointing in (towards the extension lines/center)
@@ -72,7 +75,6 @@ export function createCadDimension(scene, start, end, label, axis, color, option
         group.add(createArrowhead(d2, normalizedDir, arrowSize, arrowWidth, material));
         group.add(createLine([d1, d2], material));
     }
-    }
 
     // Label
     const midPoint = new THREE.Vector3().addVectors(d1, d2).multiplyScalar(0.5);
@@ -92,7 +94,6 @@ function createLine(points, material) {
 
 function createArrowhead(tip, direction, size, width, material) {
     const group = new THREE.Group();
-    console.log(`[Dimension] Creating ${axis}-axis dimension for "${label}". distance=${length.toFixed(3)}, flipped=${isFlipped}`);
     const side = new THREE.Vector3();
     if (Math.abs(direction.x) > 0.5) {
         side.set(0, 1, 0);
