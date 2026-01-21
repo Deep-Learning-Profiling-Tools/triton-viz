@@ -57,17 +57,15 @@ export function createCadDimension(scene, start, end, label, axis, color, option
 
     // Arrowheads
     if (isFlipped) {
-        // Points outside, pointing in (towards the extension lines/center)
-        group.add(createArrowhead(d1, normalizedDir, arrowSize, arrowWidth, material));
-        group.add(createArrowhead(d2, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
+        // Flipped case: arrowheads at outer points, pointing inward towards extension lines.
+        const arrow1_outer = d1.clone().sub(normalizedDir.clone().multiplyScalar(arrowSize));
+        const arrow2_outer = d2.clone().add(normalizedDir.clone().multiplyScalar(arrowSize));
 
-        // Dimension lines extending outwards for flipped arrows
-        const arrow1_outer = d1.clone().sub(normalizedDir.clone().multiplyScalar(arrowSize * 2));
-        const arrow2_outer = d2.clone().add(normalizedDir.clone().multiplyScalar(arrowSize * 2));
-        group.add(createLine([arrow1_outer, d1], material));
-        group.add(createLine([d2, arrow2_outer], material));
+        // Use the outer points as tips, pointing towards the extension lines (normalizedDir for d1, -normalizedDir for d2)
+        group.add(createArrowhead(arrow1_outer, normalizedDir, arrowSize, arrowWidth, material));
+        group.add(createArrowhead(arrow2_outer, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
 
-        // Main dimension line
+        // Main dimension line stays between the extension lines per spec
         group.add(createLine([d1, d2], material));
     } else {
         // Points inside, pointing out (towards the extension lines)
