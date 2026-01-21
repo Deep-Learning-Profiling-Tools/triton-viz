@@ -6,7 +6,6 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.core.config import config as cfg
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicExpr,
@@ -14,25 +13,6 @@ from triton_viz.clients.sanitizer.sanitizer import (
 )
 
 from .conftest import LoadIndexChecker
-
-
-# ======== Null Sanitizer =========
-
-
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
-@triton.jit
-def null_sanitizer_kernel(idx_ptr):
-    a = tl.load(idx_ptr)
-    tl.store(idx_ptr, a + 5)
-
-
-def test_null_sanitizer():
-    try:
-        cfg.disable_sanitizer = True
-        idx = torch.arange(128, dtype=torch.int32)
-        null_sanitizer_kernel[(1,)](idx)
-    finally:
-        cfg.disable_sanitizer = False
 
 
 # ======== Loop Hook =========

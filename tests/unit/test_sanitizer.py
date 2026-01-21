@@ -11,7 +11,6 @@ from triton_viz.core.data import AddPtr, Trans
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicExpr,
-    NullSanitizer,
     SanitizerSymbolicExecution,
 )
 
@@ -21,15 +20,6 @@ from .conftest import (
 
 
 # ======== Init ===========
-def test_init_null_sanitizer():
-    try:
-        cfg.disable_sanitizer = True
-        s2 = Sanitizer(abort_on_error=True)
-        assert isinstance(s2, NullSanitizer)
-    finally:
-        cfg.disable_sanitizer = False
-
-
 def test_init_symbolic_execution():
     s3 = Sanitizer(abort_on_error=True)
     assert isinstance(s3, SanitizerSymbolicExecution) and s3.abort_on_error is True
