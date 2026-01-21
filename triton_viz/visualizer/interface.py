@@ -761,11 +761,25 @@ def get_load_tensor():
 def get_load_overall():
     data = request.json or {}
     key = data.get("key")
+    time_idx = data.get("time_idx")
     if not key:
         return jsonify({"error": "Missing key"}), 400
     entry = load_overall_maps.get(key)
     if not entry:
         return jsonify({"error": "Overall data not found"}), 404
+
+    if time_idx is not None:
+        try:
+            time_idx = int(time_idx)
+            # Filter tiles by time_idx
+            filtered_tiles = [
+                t for t in entry.get("tiles", []) if t.get("time_idx") == time_idx
+            ]
+            # Return a copy of the entry with only the matching tiles
+            return jsonify({**entry, "tiles": filtered_tiles})
+        except (ValueError, TypeError):
+            pass
+
     return jsonify(entry)
 
 
@@ -773,11 +787,25 @@ def get_load_overall():
 def get_store_overall():
     data = request.json or {}
     key = data.get("key")
+    time_idx = data.get("time_idx")
     if not key:
         return jsonify({"error": "Missing key"}), 400
     entry = store_overall_maps.get(key)
     if not entry:
         return jsonify({"error": "Overall data not found"}), 404
+
+    if time_idx is not None:
+        try:
+            time_idx = int(time_idx)
+            # Filter tiles by time_idx
+            filtered_tiles = [
+                t for t in entry.get("tiles", []) if t.get("time_idx") == time_idx
+            ]
+            # Return a copy of the entry with only the matching tiles
+            return jsonify({**entry, "tiles": filtered_tiles})
+        except (ValueError, TypeError):
+            pass
+
     return jsonify(entry)
 
 

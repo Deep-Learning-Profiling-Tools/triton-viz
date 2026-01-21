@@ -827,7 +827,7 @@ export function createStoreVisualization(containerElement, op) {
             const res = await fetch(`${API_BASE}/api/store_overall`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key: op.overall_key })
+                body: JSON.stringify({ key: op.overall_key, time_idx: op.time_idx })
             });
             const data = await res.json();
             if (!res.ok || data.error) {
