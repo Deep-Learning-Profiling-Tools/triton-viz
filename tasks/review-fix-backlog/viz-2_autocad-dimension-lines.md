@@ -16,4 +16,11 @@ Acceptance:
 - Dimension lines/numbers use distinct colors and tensor shapes are displayed with matching color coding.
 Notes:
 - base branch is thaihoa/viz-fixes per user
-Plan: TBD (low-level plan)
+Plan:
+- Plan: Overview
+  - Fix CAD dimension helper math so arrow flipping works per spec and does not throw at runtime.
+- Plan: Implementation
+  - Define `length`/`isFlipped` before use in `createCadDimension`, remove the stray brace, and ensure `flipThreshold` drives inside/outside arrow direction.
+  - Remove or scope debug logging in `createCadDimension`/`createArrowhead` so it does not reference undefined variables.
+- Plan: Validation
+  - Manual smoke test load/store/matmul views to confirm arrows flip when short and labels render with tensor colors.
