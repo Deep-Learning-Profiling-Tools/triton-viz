@@ -1,3 +1,4 @@
+import { createCadDimension } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 
 export const CUBE_SIZE = 0.2;
@@ -214,6 +215,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
 
     tensor.add(mesh);
     tensor.userData.mesh = mesh;
+    tensor.userData.color = baseColor;
     tensor.userData.highlightedIndices = highlightedIndices;
 
     console.log(`Created ${tensorName} tensor with ${instanceCount} cubes`);
@@ -273,11 +275,12 @@ export function setupCamera(scene, camera) {
     return { center, cameraZ };
 }
 
-export function setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, onRender, onCameraChange) {
+export function setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, onRender, onCameraChange, onResize) {
     window.addEventListener('resize', () => {
         camera.aspect = containerElement.clientWidth / containerElement.clientHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
+        if (onResize) onResize();
         if (onRender) onRender();
     });
     containerElement.addEventListener('mousemove', onMouseMove);
@@ -347,42 +350,37 @@ export function cameraControls(camera, cameraRotation) {
 export function addLabels(scene, globalTensor, sliceTensor, colorOrBg = '#ffffff') {
     const sprites = [];
     sprites.push(addLabel(scene, "Global Tensor", globalTensor.position, colorOrBg));
-    sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg));
+    sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg, globalTensor.userData.color));
     sprites.push(addLabel(scene, "Slice Tensor", sliceTensor.position, colorOrBg));
-    sprites.push(...addAxisLabels(scene, sliceTensor, colorOrBg));
+    sprites.push(...addAxisLabels(scene, sliceTensor, colorOrBg, sliceTensor.userData.color));
     return sprites;
 }
 
-function addAxisLabels(scene, tensor, colorOrBg) {
-    const sprites = [];
+function addAxisLabels(scene, tensor, colorOrBg, overrideColor) {
+    const groups = [];
     const shape = tensor?.userData?.mesh?.userData?.shape;
-    if (!shape) return sprites;
+    if (!shape) return groups;
     const bbox = new THREE.Box3().setFromObject(tensor);
-    const offset = (CUBE_SIZE + GAP) * 2;
+    const offsetBase = (CUBE_SIZE + GAP) * 1.5;
     const { fill } = computeLabelPalette(colorOrBg);
-    const lineMaterial = new THREE.LineBasicMaterial({
-        color: new THREE.Color(fill),
-        transparent: true,
-        opacity: 0.8,
-    });
-    const xStart = new THREE.Vector3(bbox.min.x, bbox.max.y + offset, bbox.max.z);
-    const xEnd = new THREE.Vector3(bbox.max.x, bbox.max.y + offset, bbox.max.z);
-    const xMid = new THREE.Vector3((bbox.min.x + bbox.max.x) / 2, bbox.max.y + offset * 1.35, bbox.max.z);
-    sprites.push(addAxisLine(scene, xStart, xEnd, lineMaterial));
-    sprites.push(addAxisLabel(scene, `${shape.width}`, xMid, colorOrBg));
+    const color = overrideColor || new THREE.Color(fill);
 
-    const yStart = new THREE.Vector3(bbox.min.x - offset, bbox.min.y, bbox.max.z);
-    const yEnd = new THREE.Vector3(bbox.min.x - offset, bbox.max.y, bbox.max.z);
-    const yMid = new THREE.Vector3(bbox.min.x - offset * 1.35, (bbox.min.y + bbox.max.y) / 2, bbox.max.z);
-    sprites.push(addAxisLine(scene, yStart, yEnd, lineMaterial));
-    sprites.push(addAxisLabel(scene, `${shape.height}`, yMid, colorOrBg));
+    // X axis (Width)
+    const xStart = new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z);
+    const xEnd = new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z);
+    groups.push(createCadDimension(scene, xStart, xEnd, `${shape.width}`, 'x', color, { offset: offsetBase }));
 
-    const zStart = new THREE.Vector3(bbox.min.x - offset, bbox.min.y - offset * 0.6, bbox.min.z);
-    const zEnd = new THREE.Vector3(bbox.min.x - offset, bbox.min.y - offset * 0.6, bbox.max.z);
-    const zMid = new THREE.Vector3(bbox.min.x - offset * 1.35, bbox.min.y - offset * 0.6, (bbox.min.z + bbox.max.z) / 2);
-    sprites.push(addAxisLine(scene, zStart, zEnd, lineMaterial));
-    sprites.push(addAxisLabel(scene, `${shape.depth}`, zMid, colorOrBg));
-    return sprites;
+    // Y axis (Height)
+    const yStart = new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z);
+    const yEnd = new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z);
+    groups.push(createCadDimension(scene, yStart, yEnd, `${shape.height}`, 'y', color, { offset: offsetBase }));
+
+    // Z axis (Depth)
+    const zStart = new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z);
+    const zEnd = new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z);
+    groups.push(createCadDimension(scene, zStart, zEnd, `${shape.depth}`, 'z', color, { offset: offsetBase }));
+
+    return groups;
 }
 
 function computeLabelPalette(colorOrBg) {
@@ -436,52 +434,6 @@ function addLabel(scene, text, position, colorOrBg) {
     sprite.position.set(position.x, position.y + 2, position.z);
     const scaleX = Math.max(1, canvas.width / 64);
     const scaleY = Math.max(0.6, canvas.height / 48);
-    sprite.scale.set(scaleX, scaleY, 1);
-    scene.add(sprite);
-    return sprite;
-}
-
-function addAxisLine(scene, start, end, material) {
-    const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
-    const line = new THREE.Line(geometry, material);
-    scene.add(line);
-    return line;
-}
-
-function addAxisLabel(scene, text, position, colorOrBg) {
-    const paddingX = 5;
-    const paddingY = 4;
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    ctx.font = 'Bold 18px Arial';
-    const metrics = ctx.measureText(text);
-    const textWidth = metrics.width;
-    const textHeight = 22;
-    canvas.width = Math.ceil(textWidth + paddingX * 2);
-    canvas.height = Math.ceil(textHeight + paddingY * 2);
-
-    const { fill, stroke } = computeLabelPalette(colorOrBg);
-    ctx.font = 'Bold 18px Arial';
-    ctx.textBaseline = 'middle';
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = stroke;
-    ctx.fillStyle = fill;
-    const y = canvas.height / 2;
-    ctx.strokeText(text, paddingX, y);
-    ctx.fillText(text, paddingX, y);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.needsUpdate = true;
-    const material = new THREE.SpriteMaterial({
-        map: texture,
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-    });
-    const sprite = new THREE.Sprite(material);
-    sprite.position.copy(position);
-    const scaleX = Math.max(0.8, canvas.width / 72);
-    const scaleY = Math.max(0.5, canvas.height / 56);
     sprite.scale.set(scaleX, scaleY, 1);
     scene.add(sprite);
     return sprite;

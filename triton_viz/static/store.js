@@ -1,3 +1,4 @@
+import { createShapeLegend } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import {
@@ -235,6 +236,10 @@ export function createStoreVisualization(containerElement, op) {
         const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
         const globalMesh = globalTensor.userData.mesh;
         const sliceMesh = sliceTensor.userData.mesh;
+        createShapeLegend(containerElement, [
+            { name: 'Global', shape: op.global_shape, color: '#' + COLOR_GLOBAL.getHexString() },
+            { name: 'Slice', shape: op.slice_shape, color: '#' + COLOR_LEFT_SLICE.getHexString() }
+        ]);
         const allTensorMeshes = [globalMesh, sliceMesh];
         const highlightedGlobalIndices = globalTensor.userData.highlightedIndices || new Set();
 
@@ -293,6 +298,10 @@ export function createStoreVisualization(containerElement, op) {
         const refreshTextOverlays = () => {
             labelSprites.forEach(s => scene.remove(s));
             labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
+            createShapeLegend(containerElement, [
+                { name: 'Global', shape: op.global_shape, color: '#' + COLOR_GLOBAL.getHexString() },
+                { name: 'Slice', shape: op.slice_shape, color: '#' + COLOR_LEFT_SLICE.getHexString() }
+            ]);
         };
 
         // Overlay memory flow badges if available (NKI only)
@@ -346,7 +355,7 @@ export function createStoreVisualization(containerElement, op) {
         const dragOffset = new THREE.Vector3();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState);
+        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState, refreshTextOverlays);
         stage.addEventListener('mousedown', onMouseDown);
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
@@ -1092,6 +1101,10 @@ export function createStoreOverallVisualization(containerElement, op) {
         sliceTensor.position.set(globalSize.x + 5, 0, 0);
         scene.add(globalTensor);
         scene.add(sliceTensor);
+        createShapeLegend(containerElement, [
+            { name: 'Global', shape: globalShape, color: '#' + COLOR_GLOBAL.getHexString() },
+            { name: 'Slice', shape: sliceShape, color: '#' + COLOR_SLICE.getHexString() }
+        ]);
         let labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
         const refreshLabels = () => {
             (labelSprites || []).forEach((sprite) => scene.remove(sprite));
