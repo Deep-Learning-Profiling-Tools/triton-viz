@@ -740,7 +740,7 @@ function getTextColor(bgColor) {
             const res = await fetch(`${API_BASE}/api/load_overall`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key: op.overall_key })
+                body: JSON.stringify({ key: op.overall_key, time_idx: op.time_idx })
             });
             const data = await res.json();
             if (!res.ok || data.error) {

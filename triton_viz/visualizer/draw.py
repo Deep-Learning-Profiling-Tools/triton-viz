@@ -201,6 +201,9 @@ def prepare_visualization_data(program_records, tensor_table):
     store_overall = {}
     for record in program_records:
         record_uuid = str(uuid.uuid4())[:8]
+        # Use the current length of visualization_data as the default time_idx
+        # This ensures that symmetric programs have matching time_idx for the same logical operation.
+        current_time = len(visualization_data)
 
         if isinstance(record, ExpandDims):
             print(record.input_shape, record.output_shape, record.index)
@@ -222,7 +225,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     # TEMP: the b_swizzle flag is injected only for demo until tracer can infer automatically
                     "b_swizzle": bool(getattr(record, "b_swizzle", False)),
                     "bytes": int(getattr(record, "bytes", 0)),
-                    "time_idx": int(getattr(record, "time_idx", -1)),
+                    "time_idx": int(getattr(record, "time_idx", current_time)),
                 }
             )
 
@@ -278,6 +281,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "output_shape": record.output_shape,
                     "dim": int(getattr(record, "dim", 0)),
                     "uuid": record_uuid,
+                    "time_idx": int(getattr(record, "time_idx", current_time)),
                 }
             )
 
@@ -310,6 +314,7 @@ def prepare_visualization_data(program_records, tensor_table):
             global_coords, slice_coords = extract_load_coords(record, global_tensor)
 
             ptr_key = f"LOAD:{int(getattr(record, 'ptr', id(global_tensor)))}"
+            time_idx = int(getattr(record, "time_idx", current_time))
 
             visualization_data.append(
                 {
@@ -320,11 +325,11 @@ def prepare_visualization_data(program_records, tensor_table):
                     "slice_coords": slice_coords,
                     "uuid": record_uuid,
                     "overall_key": ptr_key,
+                    "time_idx": time_idx,
                     # NKI flow meta (optional)
                     "mem_src": getattr(record, "mem_src", None),
                     "mem_dst": getattr(record, "mem_dst", None),
                     "bytes": int(getattr(record, "bytes", 0)),
-                    "time_idx": int(getattr(record, "time_idx", -1)),
                 }
             )
 
@@ -343,6 +348,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "global_coords": global_coords,
                     "slice_coords": slice_coords,
                     "ptr_key": ptr_key,
+                    "time_idx": time_idx,
                 }
             )
 
@@ -429,7 +435,7 @@ def prepare_visualization_data(program_records, tensor_table):
             }
             sbuf_events.append(
                 {
-                    "time_idx": int(getattr(record, "time_idx", len(sbuf_events))),
+                    "time_idx": time_idx,
                     "delta": int(getattr(record, "bytes", arr.nbytes)),
                     "label": "load",
                     "uuid": record_uuid,
@@ -442,6 +448,7 @@ def prepare_visualization_data(program_records, tensor_table):
             global_coords, slice_coords = extract_load_coords(record, global_tensor)
 
             ptr_key = f"STORE:{int(getattr(record, 'ptr', id(global_tensor)))}"
+            time_idx = int(getattr(record, "time_idx", current_time))
 
             visualization_data.append(
                 {
@@ -452,10 +459,10 @@ def prepare_visualization_data(program_records, tensor_table):
                     "slice_coords": slice_coords,
                     "uuid": record_uuid,
                     "overall_key": ptr_key,
+                    "time_idx": time_idx,
                     "mem_src": getattr(record, "mem_src", None),
                     "mem_dst": getattr(record, "mem_dst", None),
                     "bytes": int(getattr(record, "bytes", 0)),
-                    "time_idx": int(getattr(record, "time_idx", -1)),
                 }
             )
 
@@ -474,6 +481,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "global_coords": global_coords,
                     "slice_coords": slice_coords,
                     "ptr_key": ptr_key,
+                    "time_idx": time_idx,
                 }
             )
 
@@ -555,7 +563,7 @@ def prepare_visualization_data(program_records, tensor_table):
             }
             sbuf_events.append(
                 {
-                    "time_idx": int(getattr(record, "time_idx", len(sbuf_events))),
+                    "time_idx": time_idx,
                     "delta": -int(getattr(record, "bytes", arr.nbytes)),
                     "label": "store",
                     "uuid": record_uuid,
