@@ -195,6 +195,10 @@ function getTextColor(bgColor) {
             const list = Array.isArray(labelSprites) ? labelSprites : [];
             list.forEach((s) => scene.remove(s));
             labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground) || [];
+            createShapeLegend(containerElement, [
+                { name: 'Global', shape: op.global_shape, color: '#' + COLOR_GLOBAL.getHexString() },
+                { name: 'Slice', shape: op.slice_shape, color: '#' + COLOR_LEFT_SLICE.getHexString() }
+            ]);
         };
 
         // Overlay memory flow badges if available (NKI only)
@@ -294,7 +298,7 @@ function getTextColor(bgColor) {
         refreshTextOverlays();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState);
+        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState, refreshTextOverlays);
 
         // Additional pointer events for dragging
         stage.addEventListener('mousedown', onMouseDown);

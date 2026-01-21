@@ -215,6 +215,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
 
     tensor.add(mesh);
     tensor.userData.mesh = mesh;
+    tensor.userData.color = baseColor;
     tensor.userData.highlightedIndices = highlightedIndices;
 
     console.log(`Created ${tensorName} tensor with ${instanceCount} cubes`);
@@ -274,11 +275,12 @@ export function setupCamera(scene, camera) {
     return { center, cameraZ };
 }
 
-export function setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, onRender, onCameraChange) {
+export function setupEventListeners(containerElement, camera, renderer, onMouseMove, onKeyDown, onRender, onCameraChange, onResize) {
     window.addEventListener('resize', () => {
         camera.aspect = containerElement.clientWidth / containerElement.clientHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
+        if (onResize) onResize();
         if (onRender) onRender();
     });
     containerElement.addEventListener('mousemove', onMouseMove);
@@ -348,20 +350,20 @@ export function cameraControls(camera, cameraRotation) {
 export function addLabels(scene, globalTensor, sliceTensor, colorOrBg = '#ffffff') {
     const sprites = [];
     sprites.push(addLabel(scene, "Global Tensor", globalTensor.position, colorOrBg));
-    sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg));
+    sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg, globalTensor.userData.color));
     sprites.push(addLabel(scene, "Slice Tensor", sliceTensor.position, colorOrBg));
-    sprites.push(...addAxisLabels(scene, sliceTensor, colorOrBg));
+    sprites.push(...addAxisLabels(scene, sliceTensor, colorOrBg, sliceTensor.userData.color));
     return sprites;
 }
 
-function addAxisLabels(scene, tensor, colorOrBg) {
+function addAxisLabels(scene, tensor, colorOrBg, overrideColor) {
     const groups = [];
     const shape = tensor?.userData?.mesh?.userData?.shape;
     if (!shape) return groups;
     const bbox = new THREE.Box3().setFromObject(tensor);
     const offsetBase = (CUBE_SIZE + GAP) * 1.5;
     const { fill } = computeLabelPalette(colorOrBg);
-    const color = new THREE.Color(fill);
+    const color = overrideColor || new THREE.Color(fill);
 
     // X axis (Width)
     const xStart = new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z);

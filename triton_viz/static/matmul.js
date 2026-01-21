@@ -369,6 +369,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         mesh.userData.matrixName = matrixName;
         mesh.userData.rows = rows;
         mesh.userData.cols = cols;
+        mesh.userData.color = color;
         mesh.instanceMatrix.needsUpdate = true;
         if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
         mesh.computeBoundingBox();
@@ -382,7 +383,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         const cols = mesh.userData.cols;
         const bbox = new THREE.Box3().setFromObject(mesh);
         const offset = (CUBE_SIZE + GAP) * 1.5;
-        const color = new THREE.Color(1, 1, 1);
+        const color = mesh.userData.color || new THREE.Color(1, 1, 1);
 
         // X axis (Columns)
         const xStart = new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z);
@@ -504,6 +505,11 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         camera.aspect = containerElement.clientWidth / containerElement.clientHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
+        createShapeLegend(containerElement, [
+            { name: 'Matrix A', shape: input_shape, color: '#' + COLOR_A.getHexString() },
+            { name: 'Matrix B', shape: other_shape, color: '#' + COLOR_B.getHexString() },
+            { name: 'Matrix C', shape: output_shape, color: '#' + COLOR_C.getHexString() }
+        ]);
         requestRender();
     }
 

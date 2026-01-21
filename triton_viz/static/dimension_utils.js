@@ -14,6 +14,7 @@ export function createCadDimension(scene, start, end, label, axis, color, option
     } = options;
 
     const group = new THREE.Group();
+    console.log(`[Dimension] Creating ${axis}-axis dimension for "${label}". distance=${length.toFixed(3)}, flipped=${isFlipped}`);
     const material = new THREE.LineBasicMaterial({
         color: color,
         transparent: true,
@@ -51,27 +52,26 @@ export function createCadDimension(scene, start, end, label, axis, color, option
     const d2 = end.clone().add(extDir.clone().multiplyScalar(dimLinePos));
 
     // Arrow flipping logic
-    const isFlipped = length < flipThreshold;
-
     // Arrowheads
     if (isFlipped) {
-        // Points outside, pointing in
-        const arrow1_start = d1.clone().sub(normalizedDir.clone().multiplyScalar(arrowSize * 2));
-        const arrow2_start = d2.clone().add(normalizedDir.clone().multiplyScalar(arrowSize * 2));
-
-        group.add(createArrowhead(d1, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
-        group.add(createArrowhead(d2, normalizedDir, arrowSize, arrowWidth, material));
+        // Points outside, pointing in (towards the extension lines/center)
+        group.add(createArrowhead(d1, normalizedDir, arrowSize, arrowWidth, material));
+        group.add(createArrowhead(d2, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
 
         // Dimension lines extending outwards for flipped arrows
-        group.add(createLine([arrow1_start, d1], material));
-        group.add(createLine([d2, arrow2_start], material));
+        const arrow1_outer = d1.clone().sub(normalizedDir.clone().multiplyScalar(arrowSize * 2));
+        const arrow2_outer = d2.clone().add(normalizedDir.clone().multiplyScalar(arrowSize * 2));
+        group.add(createLine([arrow1_outer, d1], material));
+        group.add(createLine([d2, arrow2_outer], material));
+
         // Main dimension line
         group.add(createLine([d1, d2], material));
     } else {
-        // Points inside, pointing out
-        group.add(createArrowhead(d1, normalizedDir, arrowSize, arrowWidth, material));
-        group.add(createArrowhead(d2, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
+        // Points inside, pointing out (towards the extension lines)
+        group.add(createArrowhead(d1, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
+        group.add(createArrowhead(d2, normalizedDir, arrowSize, arrowWidth, material));
         group.add(createLine([d1, d2], material));
+    }
     }
 
     // Label
@@ -92,6 +92,7 @@ function createLine(points, material) {
 
 function createArrowhead(tip, direction, size, width, material) {
     const group = new THREE.Group();
+    console.log(`[Dimension] Creating ${axis}-axis dimension for "${label}". distance=${length.toFixed(3)}, flipped=${isFlipped}`);
     const side = new THREE.Vector3();
     if (Math.abs(direction.x) > 0.5) {
         side.set(0, 1, 0);

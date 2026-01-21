@@ -298,6 +298,10 @@ export function createStoreVisualization(containerElement, op) {
         const refreshTextOverlays = () => {
             labelSprites.forEach(s => scene.remove(s));
             labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
+            createShapeLegend(containerElement, [
+                { name: 'Global', shape: op.global_shape, color: '#' + COLOR_GLOBAL.getHexString() },
+                { name: 'Slice', shape: op.slice_shape, color: '#' + COLOR_LEFT_SLICE.getHexString() }
+            ]);
         };
 
         // Overlay memory flow badges if available (NKI only)
@@ -351,7 +355,7 @@ export function createStoreVisualization(containerElement, op) {
         const dragOffset = new THREE.Vector3();
 
         const onKeyDown = cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ'));
-        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState);
+        setupEventListeners(stage, camera, renderer, onMouseMove, onKeyDown, requestRender, saveCameraState, refreshTextOverlays);
         stage.addEventListener('mousedown', onMouseDown);
         stage.addEventListener('mouseup', onMouseUp);
         stage.addEventListener('mouseleave', onMouseUp);
