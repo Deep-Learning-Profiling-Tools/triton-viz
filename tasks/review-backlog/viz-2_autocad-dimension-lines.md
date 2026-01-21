@@ -6,7 +6,7 @@ Replace the existing dimension markers with CAD-style dimension lines:
     - Conditional Logic: If the distance between extension lines is less than [X] units, flip the arrows to the 'Outside' (pointing inward toward the extension lines). Otherwise, keep them 'Inside' (pointing outward)."
 Make the dimension lines/numbers different colors and display each visualize tensors' shape (with color coding) somewhere on the screen.
 
-Review-Round: 2
+Review-Round: 3
 Owner: Gemini Agent
 Deps: none
 Touches: triton_viz/static/load.js, triton_viz/static/store.js, triton_viz/static/matmul.js, triton_viz/static/visualizer.css
