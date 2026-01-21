@@ -7,7 +7,7 @@ Replace the existing dimension markers with CAD-style dimension lines:
 Make the dimension lines/numbers different colors and display each visualize tensors' shape (with color coding) somewhere on the screen.
 
 Review-Round: 1
-Owner:
+Owner: Gemini Agent
 Deps: none
 Touches: triton_viz/static/load.js, triton_viz/static/store.js, triton_viz/static/matmul.js, triton_viz/static/visualizer.css
 Acceptance:
