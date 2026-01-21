@@ -1,3 +1,4 @@
+import { createShapeLegend } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import {
@@ -126,6 +127,10 @@ function getTextColor(bgColor) {
         const globalSize = calculateTensorSize(op.global_shape);
         sliceTensor.position.set(globalSize.x + 5, 0, 0);
         scene.add(sliceTensor);
+        createShapeLegend(containerElement, [
+            { name: 'Global', shape: op.global_shape, color: '#' + COLOR_GLOBAL.getHexString() },
+            { name: 'Slice', shape: op.slice_shape, color: '#' + COLOR_LEFT_SLICE.getHexString() }
+        ]);
 
         const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
         const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
@@ -1097,6 +1102,10 @@ export function createLoadOverallVisualization(containerElement, op) {
         sliceTensor.position.set(globalSize.x + 5, 0, 0);
         scene.add(globalTensor);
         scene.add(sliceTensor);
+        createShapeLegend(containerElement, [
+            { name: 'Global', shape: globalShape, color: '#' + COLOR_GLOBAL.getHexString() },
+            { name: 'Slice', shape: sliceShape, color: '#' + COLOR_LEFT_SLICE.getHexString() }
+        ]);
         let labelSprites = addLabels(scene, globalTensor, sliceTensor, currentBackground);
         const refreshLabels = () => {
             (labelSprites || []).forEach((sprite) => scene.remove(sprite));

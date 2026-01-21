@@ -1,3 +1,4 @@
+import { createCadDimension, createShapeLegend } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import { createHistogramOverlay } from './histogram.js';
@@ -375,59 +376,23 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         return mesh;
     }
 
-    function createAxisLabel(text) {
-        const paddingX = 5;
-        const paddingY = 4;
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        ctx.font = 'Bold 16px Arial';
-        const metrics = ctx.measureText(text);
-        canvas.width = Math.ceil(metrics.width + paddingX * 2);
-        canvas.height = Math.ceil(20 + paddingY * 2);
-        ctx.font = 'Bold 16px Arial';
-        ctx.textBaseline = 'middle';
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#0f172a';
-        ctx.fillStyle = '#ffffff';
-        const y = canvas.height / 2;
-        ctx.strokeText(text, paddingX, y);
-        ctx.fillText(text, paddingX, y);
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.needsUpdate = true;
-        const material = new THREE.SpriteMaterial({
-            map: texture,
-            transparent: true,
-            depthTest: false,
-            depthWrite: false,
-        });
-        const sprite = new THREE.Sprite(material);
-        const scaleX = Math.max(0.8, canvas.width / 80);
-        const scaleY = Math.max(0.5, canvas.height / 60);
-        sprite.scale.set(scaleX, scaleY, 1);
-        return sprite;
-    }
 
     function addMatrixAxisLabels(mesh) {
         const rows = mesh.userData.rows;
         const cols = mesh.userData.cols;
         const bbox = new THREE.Box3().setFromObject(mesh);
-        const offset = (CUBE_SIZE + GAP) * 1.8;
-        const lineMaterial = new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.75 });
-        const xStart = new THREE.Vector3(bbox.min.x, bbox.max.y + offset, bbox.max.z);
-        const xEnd = new THREE.Vector3(bbox.max.x, bbox.max.y + offset, bbox.max.z);
-        const xMid = new THREE.Vector3((bbox.min.x + bbox.max.x) / 2, bbox.max.y + offset * 1.2, bbox.max.z);
-        scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([xStart, xEnd]), lineMaterial));
-        const xLabel = createAxisLabel(`${cols}`);
-        xLabel.position.copy(xMid);
-        scene.add(xLabel);
+        const offset = (CUBE_SIZE + GAP) * 1.5;
+        const color = new THREE.Color(1, 1, 1);
 
-        const yStart = new THREE.Vector3(bbox.min.x - offset, bbox.min.y, bbox.max.z);
-        const yEnd = new THREE.Vector3(bbox.min.x - offset, bbox.max.y, bbox.max.z);
-        const yMid = new THREE.Vector3(bbox.min.x - offset * 1.2, (bbox.min.y + bbox.max.y) / 2, bbox.max.z);
-        scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([yStart, yEnd]), lineMaterial));
-        const yLabel = createAxisLabel(`${rows}`);
-        yLabel.position.copy(yMid);
-        scene.add(yLabel);
+        // X axis (Columns)
+        const xStart = new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z);
+        const xEnd = new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z);
+        createCadDimension(scene, xStart, xEnd, `${cols}`, 'x', color, { offset: offset });
+
+        // Y axis (Rows)
+        const yStart = new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z);
+        const yEnd = new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z);
+        createCadDimension(scene, yStart, yEnd, `${rows}`, 'y', color, { offset: offset });
     }
 
     const gap = GAP;
@@ -448,6 +413,11 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     addMatrixAxisLabels(matrixA);
     addMatrixAxisLabels(matrixB);
     addMatrixAxisLabels(matrixC);
+    createShapeLegend(containerElement, [
+        { name: 'Matrix A', shape: input_shape, color: '#' + COLOR_A.getHexString() },
+        { name: 'Matrix B', shape: other_shape, color: '#' + COLOR_B.getHexString() },
+        { name: 'Matrix C', shape: output_shape, color: '#' + COLOR_C.getHexString() }
+    ]);
     const hoverGeometry = new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05);
     const hoverEdgesGeometry = new THREE.EdgesGeometry(hoverGeometry);
     const hoverOutline = new THREE.LineSegments(hoverEdgesGeometry, new THREE.LineBasicMaterial({ color: COLOR_HOVER }));

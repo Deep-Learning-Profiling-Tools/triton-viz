@@ -1,0 +1,186 @@
+import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
+
+export function createCadDimension(scene, start, end, label, axis, color, options = {}) {
+    const {
+        offset = 0.5,
+        extensionLength = 0.8,
+        extensionOffset = 0.1,
+        arrowSize = 0.15,
+        arrowWidth = 0.08,
+        textOffset = 0.25,
+        flipThreshold = 1.0,
+        lineWidth = 1,
+        opacity = 0.8
+    } = options;
+
+    const group = new THREE.Group();
+    const material = new THREE.LineBasicMaterial({
+        color: color,
+        transparent: true,
+        opacity: opacity,
+        linewidth: lineWidth
+    });
+
+    const dir = new THREE.Vector3().subVectors(end, start);
+    const length = dir.length();
+    const normalizedDir = dir.clone().normalize();
+
+    // Determine extension direction (perpendicular to normalizedDir)
+    let extDir;
+    if (axis === 'x') {
+        extDir = new THREE.Vector3(0, 1, 0); // Extension along Y
+    } else if (axis === 'y') {
+        extDir = new THREE.Vector3(-1, 0, 0); // Extension along X
+    } else {
+        extDir = new THREE.Vector3(-1, 0, 0); // Default to X for Z axis
+    }
+
+    // Extension points
+    const p1_start = start.clone().add(extDir.clone().multiplyScalar(extensionOffset));
+    const p1_end = start.clone().add(extDir.clone().multiplyScalar(extensionLength + extensionOffset));
+    const p2_start = end.clone().add(extDir.clone().multiplyScalar(extensionOffset));
+    const p2_end = end.clone().add(extDir.clone().multiplyScalar(extensionLength + extensionOffset));
+
+    // Extension lines
+    group.add(createLine([p1_start, p1_end], material));
+    group.add(createLine([p2_start, p2_end], material));
+
+    // Dimension line position
+    const dimLinePos = offset + extensionOffset;
+    const d1 = start.clone().add(extDir.clone().multiplyScalar(dimLinePos));
+    const d2 = end.clone().add(extDir.clone().multiplyScalar(dimLinePos));
+
+    // Arrow flipping logic
+    const isFlipped = length < flipThreshold;
+
+    // Arrowheads
+    if (isFlipped) {
+        // Points outside, pointing in
+        const arrow1_start = d1.clone().sub(normalizedDir.clone().multiplyScalar(arrowSize * 2));
+        const arrow2_start = d2.clone().add(normalizedDir.clone().multiplyScalar(arrowSize * 2));
+
+        group.add(createArrowhead(d1, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
+        group.add(createArrowhead(d2, normalizedDir, arrowSize, arrowWidth, material));
+
+        // Dimension lines extending outwards for flipped arrows
+        group.add(createLine([arrow1_start, d1], material));
+        group.add(createLine([d2, arrow2_start], material));
+        // Main dimension line
+        group.add(createLine([d1, d2], material));
+    } else {
+        // Points inside, pointing out
+        group.add(createArrowhead(d1, normalizedDir, arrowSize, arrowWidth, material));
+        group.add(createArrowhead(d2, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
+        group.add(createLine([d1, d2], material));
+    }
+
+    // Label
+    const midPoint = new THREE.Vector3().addVectors(d1, d2).multiplyScalar(0.5);
+    const labelPos = midPoint.clone().add(extDir.clone().multiplyScalar(textOffset));
+    const sprite = createTextSprite(label, color);
+    sprite.position.copy(labelPos);
+    group.add(sprite);
+
+    scene.add(group);
+    return group;
+}
+
+function createLine(points, material) {
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    return new THREE.Line(geometry, material);
+}
+
+function createArrowhead(tip, direction, size, width, material) {
+    const group = new THREE.Group();
+    const side = new THREE.Vector3();
+    if (Math.abs(direction.x) > 0.5) {
+        side.set(0, 1, 0);
+    } else {
+        side.set(1, 0, 0);
+    }
+    const perp = new THREE.Vector3().crossVectors(direction, side).normalize().multiplyScalar(width);
+
+    const p1 = tip.clone().sub(direction.clone().multiplyScalar(size)).add(perp);
+    const p2 = tip.clone().sub(direction.clone().multiplyScalar(size)).sub(perp);
+
+    group.add(createLine([tip, p1], material));
+    group.add(createLine([tip, p2], material));
+    group.add(createLine([p1, p2], material));
+
+    return group;
+}
+
+function createTextSprite(text, color) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const fontSize = 28;
+    ctx.font = 'Bold ' + fontSize + 'px Arial';
+    const metrics = ctx.measureText(text);
+    canvas.width = metrics.width + 10;
+    canvas.height = fontSize + 10;
+
+    ctx.font = 'Bold ' + fontSize + 'px Arial';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+
+    const colorStr = typeof color === 'string' ? color : '#' + color.getHexString();
+    ctx.fillStyle = colorStr;
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+    const sprite = new THREE.Sprite(material);
+
+    const aspect = canvas.width / canvas.height;
+    sprite.scale.set(0.15 * aspect, 0.15, 1);
+    return sprite;
+}
+
+export function createShapeLegend(container, tensors) {
+    let legend = container.querySelector('.viz-shape-legend');
+    if (!legend) {
+        legend = document.createElement('div');
+        legend.className = 'viz-shape-legend viz-floating-badge';
+        Object.assign(legend.style, {
+            top: 'auto',
+            bottom: '80px',
+            left: '24px',
+            right: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            padding: '12px',
+            background: 'rgba(0,0,0,0.7)',
+            borderRadius: '8px',
+            color: '#fff',
+            fontSize: '13px',
+            fontFamily: 'monospace',
+            zIndex: '2000'
+        });
+        container.appendChild(legend);
+    }
+
+    legend.innerHTML = '<div style="font-weight:bold; margin-bottom:4px; font-family:sans-serif;">Tensor Shapes</div>';
+    tensors.forEach(t => {
+        const item = document.createElement('div');
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.gap = '8px';
+
+        const swatch = document.createElement('div');
+        swatch.style.width = '12px';
+        swatch.style.height = '12px';
+        swatch.style.backgroundColor = t.color;
+        swatch.style.border = '1px solid #fff';
+
+        const label = document.createElement('span');
+        label.textContent = t.name + ': [' + t.shape.join(', ') + ']';
+        label.style.color = t.color;
+
+        item.appendChild(swatch);
+        item.appendChild(label);
+        legend.appendChild(item);
+    });
+
+    return legend;
+}

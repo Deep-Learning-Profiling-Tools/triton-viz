@@ -841,3 +841,18 @@ body {
 .sidebar-resizer:hover {
     background: rgba(148, 163, 184, 0.6);
 }
+
+/* Shape Legend Styles */
+.viz-shape-legend {
+    min-width: 200px;
+    border-left: 4px solid var(--accent);
+    transition: all var(--transition-fast);
+}
+
+.viz-shape-legend:hover {
+    background: var(--panel-muted);
+}
+
+.viz-shape-legend div {
+    white-space: nowrap;
+}
