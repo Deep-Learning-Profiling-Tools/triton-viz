@@ -1,5 +1,13 @@
 Context:
-Refactor the frontend to optimize for AI agent readability: decouple objects/state, use TypeScript instead of JavaScript, consolidate shared utils, make smaller functions.
+Refactor the frontend to optimize for AI agent readability: decouple objects/state, consolidate shared utils, make smaller functions. All visualizations (load/store/dot) must use the same shared implementation of:
+    - base 3D tensor visualization
+    - tensor coloring + colormaps based on value intensity (use Dot viz' current impl)
+    - tensor dimension labeling (use Load viz' current impl)
+    - sidebar widget addition (use Load viz' current impl)
+    - Program ID sliders (use Load viz' current impl)
+    - Value histograms (use Dot viz' current impl)
+    - hover -> outline cube and show data (use Dot viz' current impl)
+    - highlighting selection ranges of all program IDs (note: only applicable to Load/Store)
 
 Review-Round: 0
 Owner:
