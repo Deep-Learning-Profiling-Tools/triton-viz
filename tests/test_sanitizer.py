@@ -1,3 +1,10 @@
+# DEPRECATED: This file has been reorganized.
+# Unit tests moved to: tests/unit/test_sanitizer.py
+# End-to-end tests moved to: tests/e2e/test_sanitizer.py
+# This file is kept temporarily for reference and will be removed in a future cleanup.
+#
+# Please do not add new tests to this file.
+
 import pytest
 import torch
 import numpy as np
