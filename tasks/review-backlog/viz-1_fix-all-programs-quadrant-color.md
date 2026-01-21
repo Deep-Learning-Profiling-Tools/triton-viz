@@ -3,7 +3,7 @@ Fix bug: When I run `examples/matmul_demo.py`, on the first load record, the mat
 Expected: Since program (x, y) loads quadrant (x, 0) for record 0 so only quadrants (0, 0) and (1, 0) should be highlighted with rainbow colors (other quadrants remain gray) for this record.
 Reality: When I press all program IDs on, all quadrants are highlighted with rainbow colors.
 
-Review-Round: 0
+Review-Round: 1
 Owner: ai
 Deps: none
 Touches: triton_viz/static/load.js, triton_viz/static/load_utils.js
