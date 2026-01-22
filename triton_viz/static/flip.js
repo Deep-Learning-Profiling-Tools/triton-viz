@@ -1,6 +1,7 @@
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import { setupScene, setupGeometries, createCube, CUBE_SIZE, GAP } from './load_utils.js';
+import { createVectorText } from './dimension_utils.js';
 
 export function createFlipVisualization(containerElement, op, viewState = null) {
     const API_BASE = window.__TRITON_VIZ_API__ || '';
@@ -66,12 +67,7 @@ export function createFlipVisualization(containerElement, op, viewState = null) 
 
     // Title sprites
     function makeLabel(text){
-        const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d');
-        ctx.font = 'Bold 24px Arial'; const m = ctx.measureText(text);
-        canvas.width = m.width + 8; canvas.height = 40; ctx.font = 'Bold 24px Arial';
-        ctx.fillStyle = 'white'; ctx.fillText(text, 0, 28);
-        const tex = new THREE.CanvasTexture(canvas); const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
-        const sp = new THREE.Sprite(mat); sp.scale.set(4, 1.2, 1); return sp;
+        return createVectorText(text, 'white', { fontSize: 0.8 });
     }
     const labIn = makeLabel('Input'); labIn.position.set(-CUBE_SIZE*3.2, CUBE_SIZE*0.5, 0); inputGroup.add(labIn);
     const labOut = makeLabel('Output (flipped)'); labOut.position.set(-CUBE_SIZE*3.2, -H*(CUBE_SIZE+GAP) - CUBE_SIZE*4.0, - (CUBE_SIZE*6)); outputGroup.add(labOut);
