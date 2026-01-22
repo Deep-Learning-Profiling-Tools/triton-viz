@@ -10,7 +10,7 @@ from ...core.data import (
     Allocate,
     Flip,
 )
-from triton_viz.core.masked_load import masked_load
+from triton_viz.core.masked_load_store import masked_load
 from typing import Callable, Optional, Union
 import numpy as np
 import traceback
