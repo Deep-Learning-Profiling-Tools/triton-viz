@@ -1,7 +1,7 @@
 Context:
 Replace rasterized 3js text blitting with text vector rendering.
 
-Review-Round: 0
+Review-Round: 1
 Owner: Gemini
 Deps: none
 Touches: triton_viz/static/load.js, triton_viz/static/store.js, triton_viz/static/matmul.js, triton_viz/static/load_utils.js, triton_viz/static/dimension_utils.js, triton_viz/static/flip_3d.js, triton_viz/static/flip.js
