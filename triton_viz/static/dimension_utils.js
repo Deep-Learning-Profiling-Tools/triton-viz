@@ -1,5 +1,5 @@
-import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
-import { Text } from 'https://esm.sh/troika-three-text@0.49.0';
+import * as THREE from 'https://esm.sh/three@0.155.0';
+import { Text } from 'https://esm.sh/troika-three-text@0.52.4?deps=three@0.155.0';
 
 export function createVectorText(text, color, options = {}) {
     const {

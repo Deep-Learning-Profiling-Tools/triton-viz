@@ -2,7 +2,7 @@ import threading
 from typing import Any
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
-from .draw import get_visualization_data
+from .draw import get_visualization_data, delinearized, make_3d
 import os
 import torch
 import numpy as np
@@ -751,6 +751,63 @@ def get_load_tensor():
                 "max": float(slice_max),
                 "values": slice_np.tolist(),
             }
+
+        # Calculate highlights
+        if "offsets" in op_data:
+            offsets = np.asarray(op_data["offsets"])
+            masks = np.asarray(op_data["masks"])
+            shape = tuple(op_data["global_shape"])
+            dtype = op_data["global_dtype"]
+
+            shape_3d = make_3d(shape)
+            gz, gy, gx = delinearized(shape_3d, offsets, dtype, masks)
+
+            # Filter invalid
+            valid = (gx != -1) & (gy != -1) & (gz != -1)
+            if valid.any():
+                gx = gx[valid]
+                gy = gy[valid]
+                gz = gz[valid]
+                coords = np.stack([gx, gy, gz], axis=1)
+
+                min_c = coords.min(axis=0)
+                max_c = coords.max(axis=0)
+                dims = max_c - min_c + 1
+                volume = np.prod(dims)
+                unique_coords = np.unique(coords, axis=0)
+
+                if len(unique_coords) == volume:
+                    # Robust check: all coordinates in the box [min_c, max_c] must be present
+                    # We already know the count matches volume, so we just need to verify they are all distinct
+                    # and within bounds (which unique + bounding box logic already implies).
+                    # However, to be absolutely sure it's not a sparse set that happens to have 'volume' points:
+                    # Generate the dense set and compare.
+                    is_dense = True
+                    # Optimization: if it's really dense, every integer in the range [0, volume)
+                    # of linear indices relative to min_c must be present.
+                    # Linear index = (z-sz)*dx*dy + (y-sy)*dx + (x-sx)
+                    offsets_rel = unique_coords - min_c
+                    lin_indices = (
+                        offsets_rel[:, 2] * dims[1] * dims[0]
+                        + offsets_rel[:, 1] * dims[0]
+                        + offsets_rel[:, 0]
+                    )
+                    if not (np.sort(lin_indices) == np.arange(volume)).all():
+                        is_dense = False
+
+                    if is_dense:
+                        payload["highlights"] = {
+                            "type": "descriptor",
+                            "start": min_c.tolist(),
+                            "shape": dims.tolist(),
+                        }
+                    else:
+                        payload["highlights"] = {
+                            "type": "array",
+                            "data": coords.tolist(),
+                        }
+                else:
+                    payload["highlights"] = {"type": "array", "data": coords.tolist()}
 
         return jsonify(payload)
     except Exception as e:

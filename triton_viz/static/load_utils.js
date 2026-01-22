@@ -1,5 +1,5 @@
 import { createCadDimension, createVectorText } from './dimension_utils.js';
-import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
+import * as THREE from 'https://esm.sh/three@0.155.0';
 
 export const CUBE_SIZE = 0.2;
 export const GAP = 0.05;
@@ -129,58 +129,61 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
 
     if (isGlobal) {
         console.log(`Creating global tensor with dimensions: ${width}x${height}x${depth}`);
-        // auto-detect coordinate axis order from incoming coords (try first N samples)
-        const samples = coords.slice(0, Math.min(256, coords.length));
-        const maxIncoming = [0, 0, 0];
-        for (const [a, b, c] of samples) {
-            if (a > maxIncoming[0]) maxIncoming[0] = a;
-            if (b > maxIncoming[1]) maxIncoming[1] = b;
-            if (c > maxIncoming[2]) maxIncoming[2] = c;
-        }
-        const target = [width - 1, height - 1, depth - 1];
-        const perms = [
-            [0, 1, 2],
-            [0, 2, 1],
-            [1, 0, 2],
-            [1, 2, 0],
-            [2, 0, 1],
-            [2, 1, 0],
-        ];
-        function scorePerm(p) {
-            // sum of absolute diffs; heavy penalty if any exceeds target
-            let s = 0;
-            for (let i = 0; i < 3; i++) {
-                const diff = Math.abs(maxIncoming[i] - target[p[i]]);
-                s += diff;
-                if (maxIncoming[i] > target[p[i]]) s += 1000; // penalize out-of-range
-            }
-            return s;
-        }
-        let best = perms[0];
-        let bestScore = scorePerm(best);
-        for (let i = 1; i < perms.length; i++) {
-            const sc = scorePerm(perms[i]);
-            if (sc < bestScore) {
-                best = perms[i];
-                bestScore = sc;
-            }
-        }
 
-        const remap = ([a, b, c]) => {
-            const arr = [a, b, c];
-            return [arr[best.indexOf(0)], arr[best.indexOf(1)], arr[best.indexOf(2)]];
-        };
-
-        console.log(`Highlighting ${coords.length} coordinates in global tensor. perm used: ${best}`);
-        coords.forEach(([A, B, C]) => {
-            const [x, y, z] = remap([A, B, C]);
-            if (x < 0 || x >= width || y < 0 || y >= height || z < 0 || z >= depth) {
-                console.warn(`Could not find cube at (${A}, ${B}, ${C}) -> mapped to out-of-range (${x}, ${y}, ${z})`);
-                return;
+        let best = [0, 1, 2];
+        if (coords && coords.length > 0) {
+            // auto-detect coordinate axis order from incoming coords (try first N samples)
+            const samples = coords.slice(0, Math.min(256, coords.length));
+            const maxIncoming = [0, 0, 0];
+            for (const [a, b, c] of samples) {
+                if (a > maxIncoming[0]) maxIncoming[0] = a;
+                if (b > maxIncoming[1]) maxIncoming[1] = b;
+                if (c > maxIncoming[2]) maxIncoming[2] = c;
             }
-            const idx = z * (width * height) + y * width + x;
-            highlightedIndices.add(idx);
-        });
+            const target = [width - 1, height - 1, depth - 1];
+            const perms = [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ];
+            function scorePerm(p) {
+                // sum of absolute diffs; heavy penalty if any exceeds target
+                let s = 0;
+                for (let i = 0; i < 3; i++) {
+                    const diff = Math.abs(maxIncoming[i] - target[p[i]]);
+                    s += diff;
+                    if (maxIncoming[i] > target[p[i]]) s += 1000; // penalize out-of-range
+                }
+                return s;
+            }
+            let bestScore = scorePerm(best);
+            for (let i = 1; i < perms.length; i++) {
+                const sc = scorePerm(perms[i]);
+                if (sc < bestScore) {
+                    best = perms[i];
+                    bestScore = sc;
+                }
+            }
+
+            const remap = ([a, b, c]) => {
+                const arr = [a, b, c];
+                return [arr[best.indexOf(0)], arr[best.indexOf(1)], arr[best.indexOf(2)]];
+            };
+
+            console.log(`Highlighting ${coords.length} coordinates in global tensor. perm used: ${best}`);
+            coords.forEach(([A, B, C]) => {
+                const [x, y, z] = remap([A, B, C]);
+                if (x < 0 || x >= width || y < 0 || y >= height || z < 0 || z >= depth) {
+                    console.warn(`Could not find cube at (${A}, ${B}, ${C}) -> mapped to out-of-range (${x}, ${y}, ${z})`);
+                    return;
+                }
+                const idx = z * (width * height) + y * width + x;
+                highlightedIndices.add(idx);
+            });
+        }
 
         const coordList = [];
         let idx = 0;
@@ -220,6 +223,53 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
 
     console.log(`Created ${tensorName} tensor with ${instanceCount} cubes`);
     return tensor;
+}
+
+export function updateTensorHighlights(tensor, data, highlightColor, baseColor) {
+    if (!tensor || !tensor.userData.mesh) return;
+    const mesh = tensor.userData.mesh;
+    const coordsList = mesh.userData.coords;
+    if (!coordsList) return;
+    const count = mesh.count;
+
+    const hl = (highlightColor instanceof THREE.Color) ? highlightColor : new THREE.Color(highlightColor);
+    const base = (baseColor instanceof THREE.Color) ? baseColor : new THREE.Color(baseColor);
+
+    let isHighlighted = () => false;
+
+    if (data && data.type === 'descriptor') {
+        const { start, shape } = data;
+        const [sx, sy, sz] = start || [0,0,0];
+        const [dx, dy, dz] = shape || [0,0,0];
+        const ex = sx + dx;
+        const ey = sy + dy;
+        const ez = sz + dz;
+        isHighlighted = (x, y, z) => (x >= sx && x < ex && y >= sy && y < ey && z >= sz && z < ez);
+    } else if (data && Array.isArray(data.data)) {
+        const set = new Set();
+        data.data.forEach(c => set.add(`${c[0]},${c[1]},${c[2]}`));
+        isHighlighted = (x, y, z) => set.has(`${x},${y},${z}`);
+    } else if (Array.isArray(data)) {
+        // Fallback for raw array
+        const set = new Set();
+        data.forEach(c => set.add(`${c[0]},${c[1]},${c[2]}`));
+        isHighlighted = (x, y, z) => set.has(`${x},${y},${z}`);
+    }
+
+    const highlightSet = new Set();
+    // Also update userData.highlightedIndices for consistency if needed later
+    tensor.userData.highlightedIndices = highlightSet;
+
+    for (let i = 0; i < count; i++) {
+        const c = coordsList[i];
+        if (c && isHighlighted(c[0], c[1], c[2])) {
+            mesh.setColorAt(i, hl);
+            highlightSet.add(i);
+        } else {
+            mesh.setColorAt(i, base);
+        }
+    }
+    mesh.instanceColor.needsUpdate = true;
 }
 
 export function calculateTensorSize(shape) {
@@ -351,8 +401,10 @@ export function addLabels(scene, globalTensor, sliceTensor, colorOrBg = '#ffffff
     const sprites = [];
     sprites.push(addLabel(scene, "Global Tensor", globalTensor.position, colorOrBg));
     sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg, globalTensor.userData.color));
-    sprites.push(addLabel(scene, "Slice Tensor", sliceTensor.position, colorOrBg));
-    sprites.push(...addAxisLabels(scene, sliceTensor, colorOrBg, sliceTensor.userData.color));
+    if (sliceTensor) {
+        sprites.push(addLabel(scene, "Slice Tensor", sliceTensor.position, colorOrBg));
+        sprites.push(...addAxisLabels(scene, sliceTensor, colorOrBg, sliceTensor.userData.color));
+    }
     return sprites;
 }
 

@@ -80,7 +80,7 @@ def collect_launch(launch):
 
 def extract_load_coords(
     record, global_tensor: Tensor
-) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+) -> list[tuple[float, float, float]]:
     # Extract coordinates for the global tensor
     global_shape = make_3d(global_tensor.shape)
     global_z, global_y, global_x = delinearized(
@@ -97,18 +97,7 @@ def extract_load_coords(
         if xi != -1 and yi != -1 and zi != -1
     ]
 
-    # Extract coordinates for the slice tensor
-    # Infer shape from masks array
-    slice_mask = np.asarray(record.masks, dtype=bool, order="C")
-    slice_shape = make_3d(slice_mask.shape)
-    slice_z, slice_y, slice_x = slice_mask.reshape(*slice_shape).nonzero()
-
-    slice_coords = [
-        (float(xi), float(yi), float(zi))
-        for xi, yi, zi in zip(slice_x, slice_y, slice_z)
-    ]
-
-    return global_coords, slice_coords
+    return global_coords
 
 
 def make_3d(shape: tuple[int, ...]):
@@ -311,7 +300,8 @@ def prepare_visualization_data(program_records, tensor_table):
         elif isinstance(record, Load):
             global_tensor, slice_tensor = tensor_table[record.ptr]
             print(global_tensor)
-            global_coords, slice_coords = extract_load_coords(record, global_tensor)
+            # Calculate global_coords for overall map, but lazy load for detailed view
+            global_coords = extract_load_coords(record, global_tensor)
 
             ptr_key = f"LOAD:{int(getattr(record, 'ptr', id(global_tensor)))}"
             time_idx = int(getattr(record, "time_idx", current_time))
@@ -321,8 +311,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "type": "Load",
                     "global_shape": global_tensor.shape,
                     "slice_shape": record.masks.shape,
-                    "global_coords": global_coords,
-                    "slice_coords": slice_coords,
+                    # "global_coords": Lazy load
                     "uuid": record_uuid,
                     "overall_key": ptr_key,
                     "time_idx": time_idx,
@@ -346,7 +335,6 @@ def prepare_visualization_data(program_records, tensor_table):
                 {
                     "uuid": record_uuid,
                     "global_coords": global_coords,
-                    "slice_coords": slice_coords,
                     "ptr_key": ptr_key,
                     "time_idx": time_idx,
                 }
@@ -408,9 +396,6 @@ def prepare_visualization_data(program_records, tensor_table):
 
             t_min = float(np.min(arr)) if getattr(arr, "size", 0) else 0.0
             t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
-            slice_arr, slice_min, slice_max = build_slice_tensor(
-                record, global_tensor, arr
-            )
 
             raw_tensor_data[record_uuid] = {
                 "global_tensor": arr,
@@ -418,11 +403,6 @@ def prepare_visualization_data(program_records, tensor_table):
                 "shape": list(arr.shape),
                 "min": t_min,
                 "max": t_max,
-                "slice_tensor": slice_arr,
-                "slice_dims": int(slice_arr.ndim),
-                "slice_shape": list(slice_arr.shape),
-                "slice_min": slice_min,
-                "slice_max": slice_max,
                 "tracebacks": [
                     {
                         "filename": f.filename,
@@ -432,6 +412,11 @@ def prepare_visualization_data(program_records, tensor_table):
                     }
                     for f in getattr(record, "call_path", [])
                 ],
+                # Lazy load metadata
+                "global_shape": list(global_tensor.shape),
+                "global_dtype": str(global_tensor.dtype),
+                "offsets": serialize_for_json(record.offsets),
+                "masks": serialize_for_json(record.masks),
             }
             sbuf_events.append(
                 {
@@ -445,7 +430,7 @@ def prepare_visualization_data(program_records, tensor_table):
         elif isinstance(record, Store):
             global_tensor, slice_tensor = tensor_table[record.ptr]
 
-            global_coords, slice_coords = extract_load_coords(record, global_tensor)
+            global_coords = extract_load_coords(record, global_tensor)
 
             ptr_key = f"STORE:{int(getattr(record, 'ptr', id(global_tensor)))}"
             time_idx = int(getattr(record, "time_idx", current_time))
@@ -455,8 +440,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "type": "Store",
                     "global_shape": global_tensor.shape,
                     "slice_shape": record.masks.shape,
-                    "global_coords": global_coords,
-                    "slice_coords": slice_coords,
+                    # "global_coords": Lazy load
                     "uuid": record_uuid,
                     "overall_key": ptr_key,
                     "time_idx": time_idx,
@@ -479,7 +463,6 @@ def prepare_visualization_data(program_records, tensor_table):
                 {
                     "uuid": record_uuid,
                     "global_coords": global_coords,
-                    "slice_coords": slice_coords,
                     "ptr_key": ptr_key,
                     "time_idx": time_idx,
                 }
@@ -536,9 +519,6 @@ def prepare_visualization_data(program_records, tensor_table):
 
             t_min = float(np.min(arr)) if getattr(arr, "size", 0) else 0.0
             t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
-            slice_arr, slice_min, slice_max = build_slice_tensor(
-                record, global_tensor, arr
-            )
 
             raw_tensor_data[record_uuid] = {
                 "global_tensor": arr,
@@ -546,11 +526,6 @@ def prepare_visualization_data(program_records, tensor_table):
                 "shape": list(arr.shape),
                 "min": t_min,
                 "max": t_max,
-                "slice_tensor": slice_arr,
-                "slice_dims": int(slice_arr.ndim),
-                "slice_shape": list(slice_arr.shape),
-                "slice_min": slice_min,
-                "slice_max": slice_max,
                 "tracebacks": [
                     {
                         "filename": f.filename,
@@ -560,6 +535,11 @@ def prepare_visualization_data(program_records, tensor_table):
                     }
                     for f in getattr(record, "call_path", [])
                 ],
+                # Lazy load metadata
+                "global_shape": list(global_tensor.shape),
+                "global_dtype": str(global_tensor.dtype),
+                "offsets": serialize_for_json(record.offsets),
+                "masks": serialize_for_json(record.masks),
             }
             sbuf_events.append(
                 {

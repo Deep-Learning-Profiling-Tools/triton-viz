@@ -1,4 +1,4 @@
-import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
+import * as THREE from 'https://esm.sh/three@0.155.0';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import { setupScene, setupGeometries, createCube, CUBE_SIZE, GAP } from './load_utils.js';
 import { createVectorText } from './dimension_utils.js';
