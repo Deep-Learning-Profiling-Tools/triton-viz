@@ -13,11 +13,9 @@ from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
 
 from .data import (
-    Load,
     Op,
     RawLoad,
     RawStore,
-    Store,
 )
 import inspect
 from triton.runtime.interpreter import (
@@ -117,9 +115,12 @@ class PatchOp:
             before_args = self.adapter(*args, **kwargs)
             self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
         if self.callbacks.op_overrider:
-            if self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl.math]:
+            if (
+                self.op_type
+                in OPERATION_REGISTRY["triton"].namespaces[tl.math].values()
+            ):
                 raise NotImplementedError("Patching math ops not yet supported")
-            elif self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl]:
+            elif self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl].values():
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
@@ -130,16 +131,17 @@ class PatchOp:
                 fn = cast(Any, ret.handle)
                 if fn is not None:
                     fn.concrete_fn = self.op
-            else:
+            else:  # interpreter_builder
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 if ret is not None:
+                    original_ops = OPERATION_REGISTRY["triton"].original_ops
                     if self.op_type == RawLoad:
-                        ret.concrete_fn = OPERATION_REGISTRY["triton"].original_ops[
-                            Load
+                        ret.concrete_fn = original_ops[interpreter_builder][
+                            "create_masked_load"
                         ]
                     elif self.op_type == RawStore:
-                        ret.concrete_fn = OPERATION_REGISTRY["triton"].original_ops[
-                            Store
+                        ret.concrete_fn = original_ops[interpreter_builder][
+                            "create_masked_store"
                         ]
                     else:
                         ret.concrete_fn = self.op
@@ -152,11 +154,12 @@ class PatchOp:
         return ret
 
 
-def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: str):
+def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, backend: str):
     """
     Register a callback to be called before and after an operator is executed.
 
-    :param op_type: The type of the operator to register the callback for.
+    :param namespace: The namespace object that owns the operator.
+    :param attr: The attribute name for the operator on the namespace.
     :param callbacks: The OpCallbacks object containing before_callback, after_callback, and op_overrider.
     :param backend: The backend to use ('triton', 'nki', or None for current backend).
     """
@@ -164,38 +167,23 @@ def patch_op(op_type: type[Op], callbacks: OpCallbacks, backend: str):
         raise ValueError(f"Unknown backend: {backend}")
 
     registry = OPERATION_REGISTRY[backend]
-    backend_ops = registry.original_ops
-    backend_adapters = registry.adapters
-    namespaces = registry.namespaces
-    for namespace, ops in namespaces.items():
-        if op_type in ops:
-            attr = ops[op_type]
-            original_op = backend_ops[op_type]
-            adapter = backend_adapters[op_type]
-            patched_op = PatchOp(original_op, op_type, callbacks, adapter)
-            setattr(namespace, attr, patched_op)
-            break
-    else:
-        raise ValueError(f"Patching operator {op_type} not supported")
+    op_type = registry.namespaces[namespace][attr]
+    original_op = registry.original_ops[namespace][attr]
+    adapter = registry.adapters[op_type]
+    patched_op = PatchOp(original_op, op_type, callbacks, adapter)
+    setattr(namespace, attr, patched_op)
 
 
-def unpatch_op(op_type: type[Op], backend: str):
+def unpatch_op(namespace: Any, attr: str, backend: str):
     """
     Unregister a callback for an operator.
 
-    :param op_type: The type of the operator to unregister the callback for.
+    :param namespace: The namespace object that owns the operator.
+    :param attr: The attribute name for the operator on the namespace.
     """
     registry = OPERATION_REGISTRY[backend]
-    backend_ops = registry.original_ops
-    namespaces = registry.namespaces
-    for namespace, ops in namespaces.items():
-        if op_type in ops:
-            attr = ops[op_type]
-            original_op = backend_ops[op_type]
-            setattr(namespace, attr, original_op)
-            break
-    else:
-        raise ValueError(f"Patching operator {op_type} not supported")
+    original_op = registry.original_ops[namespace][attr]
+    setattr(namespace, attr, original_op)
 
 
 class _LoopIter:

@@ -168,15 +168,13 @@ class ClientManager:
 
     @contextmanager
     def patch_run(self, fn, backend: str):
+        namespaces = OPERATION_REGISTRY[backend].namespaces
         with patch_calls(backend):
             for client in self.clients.values():
-                # get operations for the specified backend
-                backend_ops: set[type[Op]] = OPERATION_REGISTRY[backend].op_list
-
-                for op in backend_ops:
-                    # patch ops
-                    callbacks = client.register_op_callback(op)
-                    patch_op(op, callbacks, backend=backend)
+                for namespace, attrs in namespaces.items():  # patch ops
+                    for attr, op in attrs.items():
+                        callbacks = client.register_op_callback(op)
+                        patch_op(namespace, attr, callbacks, backend=backend)
 
                 # patch for loops
                 loop_callbacks = client.register_for_loop_callback()
@@ -186,10 +184,9 @@ class ClientManager:
             try:
                 yield
             finally:
-                backend_ops = OPERATION_REGISTRY[backend].op_list
-
-                for op in backend_ops:
-                    unpatch_op(op, backend)
+                for namespace, attrs in namespaces.items():
+                    for attr, op in attrs.items():
+                        unpatch_op(namespace, attr, backend)
                 unpatch_for_loop()
                 unpatch_lang(backend)
 

@@ -15,8 +15,7 @@ from triton_viz.core.data import (
 from triton_viz.frontends.base import (
     AdapterResult,
     Frontend,
-    program_id_adapter,
-    register_frontend,
+    OPERATION_REGISTRY,
 )
 
 HAS_NKI = False
@@ -27,6 +26,10 @@ try:
     HAS_NKI = True
 except ModuleNotFoundError:
     pass
+
+
+def program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(axis)
 
 
 def _nki_allocate_adapter(*_args: Any, **_kwargs: Any) -> AdapterResult:
@@ -62,24 +65,21 @@ def _nki_reduce_sum_adapter(
     return AdapterResult(input_tensor, axis, keep_dims)
 
 
-NKI_OP_LIST: set[type[Op]] = set()
-NKI_ORIGINAL_OPS: dict[type[Op], Op] = {}
-NKI_OP_ATTR_NAMES: dict[type[Op], str] = {}
 NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
-NKI_NAMESPACES: dict[Any, dict[type[Op], str]] = {}
+NKI_NAMESPACES: dict[Any, dict[str, type[Op]]] = {}
 if HAS_NKI:
     assert nki_builder is not None
 
     NKI_NAMESPACES = {
         nki_builder: {
-            ProgramId: "program_id",
-            Allocate: "ndarray",
-            Load: "masked_load",
-            Store: "masked_store",
-            Dot: "matmul",
-            UnaryOp: "_unary_op",
-            ReduceSum: "sum",
-            MakeRange: "arange",
+            "program_id": ProgramId,
+            "ndarray": Allocate,
+            "masked_load": Load,
+            "masked_store": Store,
+            "matmul": Dot,
+            "_unary_op": UnaryOp,
+            "sum": ReduceSum,
+            "arange": MakeRange,
         }
     }
 
@@ -96,10 +96,6 @@ NKI_FRONTEND = Frontend.from_namespaces(
     builder=nki_builder,
     namespaces=NKI_NAMESPACES,
     adapters=NKI_ADAPTERS,
-    primary_namespace=nki_builder,
 )
-NKI_OP_LIST = NKI_FRONTEND.op_list
-NKI_ORIGINAL_OPS = NKI_FRONTEND.original_ops
-NKI_OP_ATTR_NAMES = NKI_FRONTEND.op_attr_names
 
-register_frontend("nki", NKI_FRONTEND)
+OPERATION_REGISTRY["nki"] = NKI_FRONTEND
