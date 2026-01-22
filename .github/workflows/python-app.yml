@@ -34,6 +34,11 @@ jobs:
       with:
         python-version: '3.12'
 
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
     - name: Lint with pre-commit
       run: |
         cd triton_viz
@@ -41,31 +46,21 @@ jobs:
         pre-commit run --all-files
 
     - name: Install Dependencies
-      if: steps.cache-pip.outputs.cache-hit != 'true'
-      run: |
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-        pip uninstall pytorch-triton -y
-
-    - name: Install Triton
-      run: |
-        pip install -U triton --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
-
-    - name: Install Triton-Viz
       run: |
         cd triton_viz
-        pip install -e .
+        uv sync --extra test
 
     - name: Test with pytest
       run: |
         cd triton_viz
-        python -m pytest tests
+        uv run pytest tests
 
     - name: Install Triton-Viz with NKI extras
       run: |
         cd triton_viz
-        pip install -e .[nki]
+        uv sync --extra test --extra nki
 
     - name: Run full (Triton + NKI) pytest suite
       run: |
         cd triton_viz
-        python -m pytest tests -m ""
+        uv run pytest tests -m ""
