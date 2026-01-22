@@ -1,4 +1,40 @@
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
+import { Text } from 'https://esm.sh/troika-three-text@0.49.0';
+
+export function createVectorText(text, color, options = {}) {
+    const {
+        fontSize = 0.15,
+        billboard = true,
+        depthTest = false,
+        strokeWidth = 0,
+        strokeColor = 0x000000
+    } = options;
+
+    const textMesh = new Text();
+    textMesh.text = text;
+    textMesh.fontSize = fontSize;
+    textMesh.color = color;
+    textMesh.anchorX = 'center';
+    textMesh.anchorY = 'middle';
+    textMesh.strokeWidth = strokeWidth;
+    textMesh.strokeColor = strokeColor;
+
+    // troika-three-text creates its material internally; we can override properties after first sync or via material property
+    if (depthTest === false) {
+        textMesh.material.depthTest = false;
+        textMesh.material.depthWrite = false;
+    }
+    textMesh.material.transparent = true;
+
+    if (billboard) {
+        textMesh.onBeforeRender = function(renderer, scene, camera) {
+            this.quaternion.copy(camera.quaternion);
+        };
+    }
+
+    textMesh.sync();
+    return textMesh;
+}
 
 export function createCadDimension(scene, start, end, label, axis, color, options = {}) {
     const {
@@ -77,9 +113,9 @@ export function createCadDimension(scene, start, end, label, axis, color, option
     // Label
     const midPoint = new THREE.Vector3().addVectors(d1, d2).multiplyScalar(0.5);
     const labelPos = midPoint.clone().add(extDir.clone().multiplyScalar(textOffset));
-    const sprite = createTextSprite(label, color);
-    sprite.position.copy(labelPos);
-    group.add(sprite);
+    const vectorText = createVectorText(label, color, { fontSize: 0.15, depthTest: false });
+    vectorText.position.copy(labelPos);
+    group.add(vectorText);
 
     scene.add(group);
     return group;
@@ -108,32 +144,6 @@ function createArrowhead(tip, direction, size, width, material) {
     group.add(createLine([p1, p2], material));
 
     return group;
-}
-
-function createTextSprite(text, color) {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const fontSize = 28;
-    ctx.font = 'Bold ' + fontSize + 'px Arial';
-    const metrics = ctx.measureText(text);
-    canvas.width = metrics.width + 10;
-    canvas.height = fontSize + 10;
-
-    ctx.font = 'Bold ' + fontSize + 'px Arial';
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'center';
-
-    const colorStr = typeof color === 'string' ? color : '#' + color.getHexString();
-    ctx.fillStyle = colorStr;
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
-    const sprite = new THREE.Sprite(material);
-
-    const aspect = canvas.width / canvas.height;
-    sprite.scale.set(0.15 * aspect, 0.15, 1);
-    return sprite;
 }
 
 export function createShapeLegend(container, tensors) {

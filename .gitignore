@@ -166,3 +166,5 @@ uv.lock
 
 # Auto-generated version file
 triton_viz/version.py
+.subagents/
+subagent*.txt

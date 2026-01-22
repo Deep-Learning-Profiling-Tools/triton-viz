@@ -1,4 +1,4 @@
-import { createCadDimension } from './dimension_utils.js';
+import { createCadDimension, createVectorText } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
 
 export const CUBE_SIZE = 0.2;
@@ -400,41 +400,14 @@ function computeLabelPalette(colorOrBg) {
 }
 
 function addLabel(scene, text, position, colorOrBg) {
-    // 轻量文本标签：无背景，仅描边+填充，避免"熊猫眼"效果
-    const paddingX = 6;
-    const paddingY = 6;
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    ctx.font = 'Bold 24px Arial';
-    const metrics = ctx.measureText(text);
-    const textWidth = metrics.width;
-    const textHeight = 28;
-    canvas.width = Math.ceil(textWidth + paddingX * 2);
-    canvas.height = Math.ceil(textHeight + paddingY * 2);
-
     const { fill, stroke } = computeLabelPalette(colorOrBg);
-    ctx.font = 'Bold 24px Arial';
-    ctx.textBaseline = 'middle';
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = stroke;
-    ctx.fillStyle = fill;
-    const y = canvas.height / 2;
-    ctx.strokeText(text, paddingX, y);
-    ctx.fillText(text, paddingX, y);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.needsUpdate = true;
-    const material = new THREE.SpriteMaterial({
-        map: texture,
-        transparent: true,
+    const vectorText = createVectorText(text, fill, {
+        fontSize: 0.8,
         depthTest: false,
-        depthWrite: false,
+        strokeWidth: 0.03,
+        strokeColor: stroke
     });
-    const sprite = new THREE.Sprite(material);
-    sprite.position.set(position.x, position.y + 2, position.z);
-    const scaleX = Math.max(1, canvas.width / 64);
-    const scaleY = Math.max(0.6, canvas.height / 48);
-    sprite.scale.set(scaleX, scaleY, 1);
-    scene.add(sprite);
-    return sprite;
+    vectorText.position.set(position.x, position.y + 2, position.z);
+    scene.add(vectorText);
+    return vectorText;
 }

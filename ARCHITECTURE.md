@@ -8,6 +8,7 @@ Dimension lines are rendered as CAD-style annotations:
 - **Extension Lines**: Perpendicular lines from tensor boundaries.
 - **Dimension Lines**: Parallel lines showing the span.
 - **Arrowheads**: Located at intersections, with automatic inside/outside flipping logic.
+- **Text Rendering**: High-quality vector text rendering using Multi-channel Signed Distance Fields (MSDF) via `Troika-Three-Text`, ensuring readability at all zoom levels without pixelation.
 - **Logic**: Implemented in `triton_viz/static/dimension_utils.js`.
 
 ### Shape Legend
