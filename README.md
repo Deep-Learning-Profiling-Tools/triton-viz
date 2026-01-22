@@ -69,7 +69,7 @@ If you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the
 uv sync --extra nki # or "uv sync --extra nki --extra test" if also running tests
 ```
 
-Note that you need to specify all features that you want when using `uv`, i.e. if you want both NKI and testing support, you must run `uv sync --extra nki --extra test` rather than:
+Note that you need to specify all features that you want _in one statement_ when using `uv sync`, i.e. if you want both NKI and testing support, you must run `uv sync --extra nki --extra test`. The below statements are wrong and will remove the NKI install when installing test packages:
 ```
 uv sync --extra nki
 uv sync --extra test
