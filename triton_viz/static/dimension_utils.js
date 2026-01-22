@@ -5,7 +5,9 @@ export function createVectorText(text, color, options = {}) {
     const {
         fontSize = 0.15,
         billboard = true,
-        depthTest = false
+        depthTest = false,
+        strokeWidth = 0,
+        strokeColor = 0x000000
     } = options;
 
     const textMesh = new Text();
@@ -14,10 +16,13 @@ export function createVectorText(text, color, options = {}) {
     textMesh.color = color;
     textMesh.anchorX = 'center';
     textMesh.anchorY = 'middle';
+    textMesh.strokeWidth = strokeWidth;
+    textMesh.strokeColor = strokeColor;
 
     // troika-three-text creates its material internally; we can override properties after first sync or via material property
     if (depthTest === false) {
         textMesh.material.depthTest = false;
+        textMesh.material.depthWrite = false;
     }
     textMesh.material.transparent = true;
 

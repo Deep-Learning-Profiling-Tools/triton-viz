@@ -403,10 +403,10 @@ function addLabel(scene, text, position, colorOrBg) {
     const { fill, stroke } = computeLabelPalette(colorOrBg);
     const vectorText = createVectorText(text, fill, {
         fontSize: 0.8,
-        depthTest: false
+        depthTest: false,
+        strokeWidth: 0.03,
+        strokeColor: stroke
     });
-    vectorText.strokeWidth = 0.03;
-    vectorText.strokeColor = stroke;
     vectorText.position.set(position.x, position.y + 2, position.z);
     scene.add(vectorText);
     return vectorText;
