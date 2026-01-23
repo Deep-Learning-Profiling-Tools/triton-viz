@@ -378,7 +378,7 @@ export class GridBlock {
         if (typeof index === 'number') {
             this.activeTabIndex = index;
         }
-        this.displayOpVisualization(op);
+        this.displayOpVisualization(op, { preserveViewState: true });
     }
 
     createContentArea() {
@@ -408,7 +408,7 @@ export class GridBlock {
             try { window.__tritonVizPreserveCodePanel = true; } catch (e) {}
         }
         const isTensorOp = op.type === 'Dot' || op.type === 'Load' || op.type === 'Store';
-        const reuseTensorView = canReuseViz && isTensorOp;
+        const reuseTensorView = canReuseViz && isTensorOp && this.lastOpType === op.type;
         try {
             if (!reuseTensorView && this.visualizationCleanupFunction) {
                 this.visualizationCleanupFunction();
@@ -443,6 +443,7 @@ export class GridBlock {
             default:
                 this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;
         }
+        this.lastOpType = op.type;
         if (options.refreshCodePanel !== false) {
             this.syncCodePanel(true);
         }

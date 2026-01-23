@@ -128,7 +128,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
     return tensor;
 }
 
-export function updateTensorHighlights(tensor, data, highlightColor, baseColor) {
+export function updateTensorHighlights(tensor, data, highlightColor, baseColor, matchCoords = null) {
     if (!tensor || !tensor.userData.mesh) return;
     const mesh = tensor.userData.mesh;
     const coordsList = mesh.userData.coords;
@@ -145,6 +145,8 @@ export function updateTensorHighlights(tensor, data, highlightColor, baseColor) 
     } else if (data && Array.isArray(data.data)) {
         const set = new Set(); data.data.forEach(c => set.add(`${c[0]},${c[1]},${c[2]}`));
         isHighlighted = (x,y,z) => set.has(`${x},${y},${z}`);
+    } else if (typeof matchCoords === 'function') {
+        isHighlighted = matchCoords;
     }
     const highlightSet = new Set();
     for (let i=0; i<count; i++) {

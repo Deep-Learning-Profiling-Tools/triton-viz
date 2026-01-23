@@ -61,6 +61,9 @@ export function createHistogramOverlay(containerElement, options) {
         opt.textContent = src.label;
         select.appendChild(opt);
     });
+    if (!select.value && select.options.length) {
+        select.selectedIndex = 0;
+    }
     sourceLabel.htmlFor = select.id;
     sourceGroup.appendChild(select);
     controls.appendChild(sourceGroup);
@@ -130,6 +133,9 @@ export function createHistogramOverlay(containerElement, options) {
         status.textContent = "Loading histogram...";
         info.textContent = "";
         const bins = parseInt(binInput.value, 10) || defaultBins;
+        if (!select.value && select.options.length) {
+            select.selectedIndex = 0;
+        }
 
         try {
             const body = buildRequestBody(select.value, bins);

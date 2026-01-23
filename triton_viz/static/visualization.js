@@ -89,7 +89,7 @@ function updateOpControls() {
     const { handlers, state } = opControls;
     if (controls.opColorizeBtn) {
         controls.opColorizeBtn.disabled = !handlers || !handlers.toggleColorize;
-        updateToggleLabel(controls.opColorizeBtn, 'Color by Value', !!state.colorize);
+        updateToggleLabel(controls.opColorizeBtn, 'Heatmap', !!state.colorize);
     }
     if (controls.opHistogramBtn) {
         controls.opHistogramBtn.disabled = !handlers || !handlers.toggleHistogram;

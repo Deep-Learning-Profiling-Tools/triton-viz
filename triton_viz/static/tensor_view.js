@@ -1,4 +1,5 @@
 import { createCadDimension, createShapeLegend } from './dimension_utils.js';
+import { clamp01, getHue, hslToRgb } from './colormap.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import {
@@ -18,18 +19,6 @@ import {
 } from './load_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { enableDrag } from './ui_helpers.js';
-
-const COLORMAPS = {
-    Load: [[0.0, 1.0, 0.95], [0.0, 0.2, 1.0]],
-    Store: [[1.0, 1.0, 0.0], [1.0, 0.25, 0.0]],
-    A: [[0.0, 1.0, 0.95], [0.0, 0.2, 1.0]],
-    B: [[1.0, 1.0, 0.0], [1.0, 0.25, 0.0]],
-    C: [[0.2, 1.0, 0.2], [1.0, 0.0, 0.9]],
-};
-
-function clamp01(value) { return Math.min(1, Math.max(0, value)); }
-function lerp(a, b, t) { return a + (b - a) * t; }
-function getColormap(label) { return COLORMAPS[label] || COLORMAPS.Load; }
 
 const VIZ_CACHE = new Map();
 
@@ -87,13 +76,14 @@ async function fetchTensorPayload(apiBase, uuid, endpoint = 'getLoadTensor') {
 function applyColorToMesh(mesh, cache, label) {
     if (!mesh || !cache) return;
     const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
-    const map = getColormap(label), count = mesh.count, shape = mesh.userData.shape;
+    const hue = getHue(label), count = mesh.count, shape = mesh.userData.shape;
     const c = new THREE.Color();
     for (let i = 0; i < count; i++) {
         const coords = coordsFromIndex(i, shape);
         const val = sampleValueFromCache(cache, coords);
         const t = clamp01((val - min) / denom);
-        c.setRGB(lerp(map[0][0], map[1][0], t), lerp(map[0][1], map[1][1], t), lerp(map[0][2], map[1][2], t));
+        const [r, g, b] = hslToRgb(hue, 0.9, t);
+        c.setRGB(r, g, b);
         mesh.setColorAt(i, c);
     }
     mesh.instanceColor.needsUpdate = true;
@@ -102,17 +92,33 @@ function applyColorToMesh(mesh, cache, label) {
 function applyDimmedColormap(mesh, cache, label, isHighlighted) {
     if (!mesh || !cache) return;
     const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
-    const map = getColormap(label), count = mesh.count, shape = mesh.userData.shape;
+    const hue = getHue(label), count = mesh.count, shape = mesh.userData.shape;
     const c = new THREE.Color();
     for (let i = 0; i < count; i++) {
         const coords = coordsFromIndex(i, shape);
         const val = sampleValueFromCache(cache, coords);
         const t = clamp01((val - min) / denom);
         if (isHighlighted(coords)) {
-            c.setRGB(lerp(map[0][0], map[1][0], t), lerp(map[0][1], map[1][1], t), lerp(map[0][2], map[1][2], t));
+            const [r, g, b] = hslToRgb(hue, 0.9, t);
+            c.setRGB(r, g, b);
         } else {
             c.setRGB(t, t, t);
         }
+        mesh.setColorAt(i, c);
+    }
+    mesh.instanceColor.needsUpdate = true;
+}
+
+function applyMonochromeColormap(mesh, cache) {
+    if (!mesh || !cache) return;
+    const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
+    const count = mesh.count, shape = mesh.userData.shape;
+    const c = new THREE.Color();
+    for (let i = 0; i < count; i++) {
+        const coords = coordsFromIndex(i, shape);
+        const val = sampleValueFromCache(cache, coords);
+        const t = clamp01((val - min) / denom);
+        c.setRGB(t, t, t);
         mesh.setColorAt(i, c);
     }
     mesh.instanceColor.needsUpdate = true;
@@ -147,7 +153,7 @@ function applyColorizedMesh(ctx, group, name) {
     if (predicate) {
         applyDimmedColormap(mesh, p, label, predicate);
     } else {
-        applyColorToMesh(mesh, p, label);
+        applyMonochromeColormap(mesh, p);
     }
 }
 
@@ -174,6 +180,15 @@ function applyDotHoverHighlight(ctx, row, col) {
     if (!aCache || !bCache) return;
     applyDimmedColormap(aGroup.userData.mesh, aCache, 'A', (coords) => coords[1] === row);
     applyDimmedColormap(bGroup.userData.mesh, bCache, 'B', (coords) => coords[0] === col);
+}
+
+function applyDotHoverOutline(ctx, row, col) {
+    const { tensors } = ctx;
+    const aGroup = tensors.get('A');
+    const bGroup = tensors.get('B');
+    if (!aGroup || !bGroup) return;
+    updateTensorHighlights(aGroup, null, ctx.highlightColor, aGroup.userData.mesh.userData.color_base, (x, y) => y === row);
+    updateTensorHighlights(bGroup, null, ctx.highlightColor, bGroup.userData.mesh.userData.color_base, (x) => x === col);
 }
 
 function captureHistogramState(histogramUI) {
@@ -207,7 +222,6 @@ function applyHistogramState(histogramUI, state) {
 }
 
 function createLegendItem(label, min, max) {
-    const map = getColormap(label);
     const item = document.createElement('div');
     Object.assign(item.style, { display: 'grid', gap: '4px', fontFamily: 'monospace', fontSize: '12px' });
     const title = document.createElement('div');
@@ -218,10 +232,8 @@ function createLegendItem(label, min, max) {
     const ctx = canvas.getContext('2d');
     for (let x = 0; x < canvas.width; x++) {
         const t = clamp01(x / (canvas.width - 1));
-        const r = lerp(map[0][0], map[1][0], t);
-        const g = lerp(map[0][1], map[1][1], t);
-        const b = lerp(map[0][2], map[1][2], t);
-        ctx.fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+        const v = Math.round(t * 255);
+        ctx.fillStyle = `rgb(${v},${v},${v})`;
         ctx.fillRect(x, 0, 1, canvas.height);
     }
     const labels = document.createElement('div');
@@ -303,7 +315,11 @@ function onMouseMove(event, ctx) {
                 const hoverKey = `${row},${col}`;
                 if (state.dotHoverKey !== hoverKey) {
                     state.dotHoverKey = hoverKey;
-                    applyDotHoverHighlight(ctx, row, col);
+                    if (state.colorizeOn) {
+                        applyDotHoverHighlight(ctx, row, col);
+                    } else {
+                        applyDotHoverOutline(ctx, row, col);
+                    }
                 }
             } else if (state.dotHoverKey) {
                 state.dotHoverKey = null;
@@ -536,7 +552,11 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             if (state.dotHoverKey && type === 'Dot') {
                 const [row, col] = state.dotHoverKey.split(',').map((val) => Number(val));
                 if (Number.isFinite(row) && Number.isFinite(col)) {
-                    applyDotHoverHighlight(cache, row, col);
+                    if (state.colorizeOn) {
+                        applyDotHoverHighlight(cache, row, col);
+                    } else {
+                        applyDotHoverOutline(cache, row, col);
+                    }
                 }
             }
         }
