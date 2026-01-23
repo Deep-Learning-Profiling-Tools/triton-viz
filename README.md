@@ -1,3 +1,36 @@
+<a name="readme-top"></a>
+# Triton-Viz: A Visualization Toolkit for programming with Triton
+<!-- PROJECT LOGO -->
+<br />
+<div align="center">
+    <img src="Logo.jpg" alt="Logo" width="320" height="320">
+</div>
+<br/>
+
+Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of making GPU programming on Triton more intuitive.
+
+<!-- TABLE OF CONTENTS -->
+<details>
+  <summary>Table of Contents</summary>
+  <ol>
+    <li>
+      <a href="#About">About</a>
+    <li>
+      <a href="#Getting-Started">Getting Started</a>
+      <ul>
+        <li><a href="#Prerequisites">Prerequisites</a></li>
+        <li><a href="#Installation-of-Triton_Viz">Installation of Triton_Viz</a></li>
+      </ul>
+    <li>
+      <a href="#Working-with-Examples">Working with examples</a>
+    <ul>
+        <li><a href="#More-Puzzles">More puzzles</a></li>
+      </ul>
+    </li>
+    <li><a href="#License">License</a></li>
+  </ol>
+</details>
+
 ## About
 
 Triton-Viz is a visualization and analysis toolkit specifically designed to complement the development and optimization of applications written in OpenAI's Triton, an open-source programming language aimed at simplifying the task of coding for accelerators such as GPUs.
