@@ -55,12 +55,12 @@ def matmul_kernel(
 
 def run_demo():
     torch.manual_seed(0)
-    M, N, K = 64, 64, 64
+    M, N, K = 32, 32, 64
     a = torch.randn((M, K), dtype=torch.float32)
     b = torch.randn((K, N), dtype=torch.float32)
     c = torch.empty((M, N), dtype=torch.float32)
 
-    BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 32
+    BLOCK_M, BLOCK_N, BLOCK_K = 16, 16, 32
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
     matmul_kernel[grid](

@@ -112,9 +112,16 @@ export function createCadDimension(scene, start, end, label, axis, color, option
 
     // Label
     const midPoint = new THREE.Vector3().addVectors(d1, d2).multiplyScalar(0.5);
-    const labelPos = midPoint.clone().add(extDir.clone().multiplyScalar(textOffset));
-    const vectorText = createVectorText(label, color, { fontSize: 0.15, depthTest: false });
+    // Position text very close to the line (minimal offset)
+    const labelPos = midPoint.clone().add(extDir.clone().multiplyScalar(textOffset * 0.5));
+    const vectorText = createVectorText(label, color, {
+        fontSize: 0.35,
+        depthTest: false,
+        strokeWidth: 0.04,
+        strokeColor: '#000'
+    });
     vectorText.position.copy(labelPos);
+    vectorText.renderOrder = 100; // Ensure it's rendered on top
     group.add(vectorText);
 
     scene.add(group);
@@ -165,10 +172,17 @@ export function createShapeLegend(container, tensors) {
             color: '#fff',
             fontSize: '13px',
             fontFamily: 'monospace',
-            zIndex: '2000'
+            zIndex: '2000',
+            border: '1px solid rgba(255,255,255,0.1)'
         });
         container.appendChild(legend);
     }
+
+    const AXIS_COLORS = {
+        x: '#f87171',
+        y: '#4ade80',
+        z: '#60a5fa'
+    };
 
     legend.innerHTML = '<div style="font-weight:bold; margin-bottom:4px; font-family:sans-serif;">Tensor Shapes</div>';
     tensors.forEach(t => {
@@ -181,11 +195,35 @@ export function createShapeLegend(container, tensors) {
         swatch.style.width = '12px';
         swatch.style.height = '12px';
         swatch.style.backgroundColor = t.color;
-        swatch.style.border = '1px solid #fff';
+        swatch.style.border = '1px solid rgba(255,255,255,0.5)';
 
         const label = document.createElement('span');
-        label.textContent = t.name + ': [' + t.shape.join(', ') + ']';
-        label.style.color = t.color;
+        label.style.color = '#fff';
+
+        // Render shape with colored dimension numbers
+        let shapeHtml = `${t.name}: [`;
+        const shape = t.shape || [];
+        const dimColors = t.dimColors || []; // Optional custom colors per dimension
+
+        if (shape.length === 1) {
+            const color = dimColors[0] || AXIS_COLORS.x;
+            shapeHtml += `<span style="color:${color}">${shape[0]}</span>`;
+        } else if (shape.length === 2) {
+            const color0 = dimColors[0] || AXIS_COLORS.y;
+            const color1 = dimColors[1] || AXIS_COLORS.x;
+            shapeHtml += `<span style="color:${color0}">${shape[0]}</span>, `;
+            shapeHtml += `<span style="color:${color1}">${shape[1]}</span>`;
+        } else if (shape.length >= 3) {
+            const color0 = dimColors[0] || AXIS_COLORS.z;
+            const color1 = dimColors[1] || AXIS_COLORS.y;
+            const color2 = dimColors[2] || AXIS_COLORS.x;
+            shapeHtml += `<span style="color:${color0}">${shape[0]}</span>, `;
+            shapeHtml += `<span style="color:${color1}">${shape[1]}</span>, `;
+            shapeHtml += `<span style="color:${color2}">${shape[2]}</span>`;
+        }
+        shapeHtml += ']';
+
+        label.innerHTML = shapeHtml;
 
         item.appendChild(swatch);
         item.appendChild(label);
