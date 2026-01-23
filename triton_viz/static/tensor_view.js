@@ -12,6 +12,7 @@ import {
     addLabels,
     COLOR_EDGE,
     CUBE_SIZE,
+    GAP,
     COLOR_HOVER,
     updateTensorHighlights,
 } from './load_utils.js';
@@ -123,6 +124,36 @@ function createLegendItem(label, min, max) {
     return item;
 }
 
+function addDimensionLines(scene, tensorGroup, dimColors = []) {
+    const mesh = tensorGroup?.userData?.mesh;
+    if (!mesh) return [];
+    const shape = mesh.userData.shape;
+    const shapeRaw = mesh.userData.shape_raw || [];
+    const bbox = new THREE.Box3().setFromObject(tensorGroup);
+    const offsetBase = (CUBE_SIZE + GAP) * 1.5;
+    const axisDefaults = { x: '#f87171', y: '#4ade80', z: '#60a5fa' };
+    const getColor = (axis) => {
+        if (shapeRaw.length === 1 && axis === 'x') return dimColors[0] || axisDefaults.x;
+        if (shapeRaw.length === 2 && axis === 'y') return dimColors[0] || axisDefaults.y;
+        if (shapeRaw.length === 2 && axis === 'x') return dimColors[1] || axisDefaults.x;
+        if (shapeRaw.length >= 3 && axis === 'z') return dimColors[0] || axisDefaults.z;
+        if (shapeRaw.length >= 3 && axis === 'y') return dimColors[1] || axisDefaults.y;
+        if (shapeRaw.length >= 3 && axis === 'x') return dimColors[2] || axisDefaults.x;
+        return axisDefaults[axis];
+    };
+    const groups = [];
+    if (shapeRaw.length >= 2) {
+        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${shape.width}`, 'x', getColor('x'), { offset: offsetBase }));
+        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), `${shape.height}`, 'y', getColor('y'), { offset: offsetBase }));
+    } else if (shapeRaw.length === 1) {
+        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${shape.width}`, 'x', getColor('x'), { offset: offsetBase }));
+    }
+    if (shapeRaw.length >= 3) {
+        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), `${shape.depth}`, 'z', getColor('z'), { offset: offsetBase }));
+    }
+    return groups;
+}
+
 // --- Interaction Handlers ---
 
 function onMouseMove(event, ctx) {
@@ -176,7 +207,7 @@ function onMouseUp(ctx) { ctx.state.isDragging = false; if (ctx.stage) ctx.stage
 // --- Main Exports ---
 
 export function createTensorVisualization(containerElement, op, options = {}) {
-    const { type = 'Load', colors = {}, tensorConfigs = [] } = options;
+    const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true } = options;
     const API_BASE = window.__TRITON_VIZ_API__ || '';
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape, color: colors.GLOBAL || '#333', position: [0,0,0], endpoint: 'getLoadTensor' }
@@ -219,7 +250,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         orbitControls.target.copy(center);
         orbitControls.update();
         const state = { colorizeOn: false, payloads: new Map(), rafId: null, renderPending: false, lastHoverKey: null, activeHoverOutline: hoverOutline };
-        const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null };
+        const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [] };
         ctx.requestRender = () => {
             if (state.rafId !== null) { state.renderPending = true; return; }
             state.rafId = requestAnimationFrame(() => { state.rafId = null; orbitControls.update(); renderer.render(scene, camera); if (state.renderPending) { state.renderPending = false; ctx.requestRender(); } });
@@ -254,7 +285,20 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             ctx.legendContainer = wrapper;
         };
         setupEventListeners(stage, camera, renderer, (e) => onMouseMove(e, ctx), cameraControls(camera, new THREE.Euler(0,0,0,'YXZ')), ctx.requestRender);
-        ctx.cleanup = () => { if (state.rafId) cancelAnimationFrame(state.rafId); ctx.destroyLegends(); if (stage.parentElement) stage.parentElement.removeChild(stage); if (sideMenu.parentElement) sideMenu.parentElement.removeChild(sideMenu); if (histogramUI.overlay?.parentElement) histogramUI.overlay.parentElement.removeChild(histogramUI.overlay); };
+        if (showDimLines) {
+            tensors.forEach((group, name) => {
+                ctx.dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
+            });
+        }
+        ctx.cleanup = () => {
+            if (state.rafId) cancelAnimationFrame(state.rafId);
+            ctx.destroyLegends();
+            ctx.dimLineGroups.forEach((group) => scene.remove(group));
+            ctx.dimLineGroups = [];
+            if (stage.parentElement) stage.parentElement.removeChild(stage);
+            if (sideMenu.parentElement) sideMenu.parentElement.removeChild(sideMenu);
+            if (histogramUI.overlay?.parentElement) histogramUI.overlay.parentElement.removeChild(histogramUI.overlay);
+        };
         cache = ctx;
         VIZ_CACHE.set(containerElement, cache);
     } else {
@@ -325,7 +369,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         name: name === 'Global' ? type : `Matrix ${name}`,
         shape: group.userData.mesh.userData.shape_raw,
         color: '#' + group.userData.mesh.userData.color_base.getHexString(),
-        dimColors: options.dimColors?.[name]
+        dimColors: dimColors?.[name]
     })));
 
     applyBackgroundTheme('#000000');

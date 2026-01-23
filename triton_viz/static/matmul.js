@@ -35,6 +35,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
             { name: 'B', shape: other_shape, color: '#ffeb3b', position: posB, endpoint: 'getMatmulB' },
             { name: 'C', shape: output_shape, color: '#4caf50', position: posC, endpoint: 'getMatmulC' }
         ],
+        showDimLines: true,
         dimColors: {
             A: [AXIS_COLORS.y, AXIS_COLORS.x], // M, K
             B: [AXIS_COLORS.x, AXIS_COLORS.z], // K, N
