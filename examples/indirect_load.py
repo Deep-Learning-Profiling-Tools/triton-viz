@@ -22,7 +22,7 @@ def run():
     torch.manual_seed(0)
     x = torch.arange(N, dtype=torch.float32, device=device)
     rand = torch.randperm(N, dtype=torch.int32, device=device)
-    out = torch.empty_like(x)
+    out = torch.zeros_like(x)
     indirect_load_kernel[(1,)](x, rand, out, BLOCK=BLOCK)
     triton_viz.launch(share=False, port=5001)
 
