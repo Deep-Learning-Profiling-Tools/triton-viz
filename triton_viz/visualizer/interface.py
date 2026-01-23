@@ -446,6 +446,7 @@ def get_matmul_b():
 
 
 @app.route("/api/getSBufData", methods=["POST"])
+@app.route("/api/histogram", methods=["POST"])
 def get_value_histogram():
     """Return histogram statistics for tensors associated with an operation."""
     global raw_tensor_data

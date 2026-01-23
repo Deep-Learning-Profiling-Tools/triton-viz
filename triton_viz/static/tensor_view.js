@@ -241,10 +241,16 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         ctx.createLegends = (items) => {
             ctx.destroyLegends();
             if (!items.length) return;
+            const shapeLegend = containerElement.querySelector('.viz-shape-legend');
             const wrapper = document.createElement('div');
-            Object.assign(wrapper.style, { position: 'absolute', left: '24px', bottom: '20px', background: 'rgba(0,0,0,0.65)', color: '#fff', padding: '12px', borderRadius: '8px', zIndex: '2000', display: 'grid', gap: '12px', pointerEvents: 'auto', border: '1px solid rgba(255,255,255,0.1)' });
+            Object.assign(wrapper.style, { display: 'grid', gap: '12px', marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(255,255,255,0.15)' });
             items.forEach(i => wrapper.appendChild(i));
-            containerElement.appendChild(wrapper);
+            if (shapeLegend) {
+                shapeLegend.appendChild(wrapper);
+            } else {
+                Object.assign(wrapper.style, { position: 'absolute', left: '24px', bottom: '20px', background: 'rgba(0,0,0,0.65)', color: '#fff', padding: '12px', borderRadius: '8px', zIndex: '2000', pointerEvents: 'auto', border: '1px solid rgba(255,255,255,0.1)' });
+                containerElement.appendChild(wrapper);
+            }
             ctx.legendContainer = wrapper;
         };
         setupEventListeners(stage, camera, renderer, (e) => onMouseMove(e, ctx), cameraControls(camera, new THREE.Euler(0,0,0,'YXZ')), ctx.requestRender);
