@@ -97,6 +97,22 @@ export TRITON_VIZ_NUM_SMS=4  # or set triton_viz.config.num_sms in Python
 
 This is useful for kernels that rely on cross-block synchronization (e.g., producer/consumer patterns) when testing without a GPU.
 
+### Environment variables
+
+Triton-Viz uses a small set of environment variables to configure runtime behavior. Unless noted, boolean flags are enabled only when set to `1`.
+
+- `TRITON_VIZ_VERBOSE` (default: `0`): enable verbose logging and extra debug output.
+- `TRITON_VIZ_NUM_SMS` (default: `1`): number of concurrent SMs to emulate for the CPU interpreter (min 1).
+- `TRITON_VIZ_PORT` (default: `8000` with `share=True`, `5001` with `share=False`): port for the Flask server.
+- `ENABLE_SANITIZER` (default: `1`): enable the sanitizer pipeline that checks memory accesses.
+- `ENABLE_PROFILER` (default: `1`): enable the profiler pipeline that collects performance data.
+- `ENABLE_TIMING` (default: `0`): collect timing data during execution.
+- `REPORT_GRID_EXECUTION_PROGRESS` (default: `0`): report per-program block execution progress in the interpreter.
+- `SANITIZER_ENABLE_FAKE_TENSOR` (default: `0`): use a fake tensor backend for sanitizer runs to avoid real memory reads.
+- `PROFILER_ENABLE_LOAD_STORE_SKIPPING` (default: `1`): skip redundant load/store checks to reduce profiling overhead.
+- `PROFILER_ENABLE_BLOCK_SAMPLING` (default: `1`): sample a subset of blocks to reduce profiling overhead.
+- `PROFILER_DISABLE_BUFFER_LOAD_CHECK` (default: `0`): disable buffer load checks in the profiler.
+
 ## More Puzzles
 
 If you're interested in fun puzzles to work with in Triton, do check out: [Triton Puzzles](https://github.com/srush/Triton-Puzzles)
