@@ -1,82 +1,177 @@
-"""End-to-end tests for sanitizer with kernel execution."""
-
 import torch
+import numpy as np
+from typing import Optional
 
 import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import Sanitizer
+from triton_viz.core.data import Load, RawLoad
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicExpr,
-    SanitizerSymbolicExecution,
+    Z3Expr,
+    SymbolicSanitizer,
+    RangeWrapper,
+    _range_to_iterator_constraint,
+)
+from triton_viz.core.callbacks import ForLoopCallbacks
+from z3.z3 import BoolRef
+
+
+# ======== Helpers ===========
+
+
+class LoadIndexChecker(SymbolicSanitizer):
+    """
+    Record all offsets, then union into a set.
+    """
+
+    def __init__(self, *a, **k) -> None:
+        super().__init__(*a, **k)
+        self._offset_lists: list[list[int]] = list()
+
+    @property
+    def observed_offsets(self) -> list[list[int]]:
+        return self._offset_lists
+
+    def register_op_callback(self, op_type):
+        op_callbacks = super().register_op_callback(op_type)
+        if op_type not in (Load, RawLoad) or op_callbacks.op_overrider is None:
+            return op_callbacks
+
+        orig_overrider = op_callbacks.op_overrider
+
+        def _sum_offsets_from_addptr(expr):
+            offsets = []
+
+            cur = expr
+            while cur.op == "addptr":
+                off = cur.offset
+                if (
+                    off.op == "const"
+                ):  # If any offset is not constant, we cannot sum it.
+                    offsets.append(off.to_py())
+                cur = cur.ptr
+
+            if len(offsets) == 0:
+                return None
+            return np.sum(offsets, axis=0)
+
+        def _new_load_overrider(ptr, *args, **kwargs):
+            # exec original overrider
+            load_expr = orig_overrider(ptr, *args, **kwargs)
+            p = load_expr.ptr
+            offs = _sum_offsets_from_addptr(p)
+            if offs is not None:
+                self._offset_lists.append(offs.tolist())
+            return load_expr
+
+        # Return OpCallbacks with the new overrider, preserving other callbacks
+        from triton_viz.core.callbacks import OpCallbacks
+
+        return OpCallbacks(
+            before_callback=op_callbacks.before_callback,
+            after_callback=op_callbacks.after_callback,
+            op_overrider=_new_load_overrider,
+        )
+
+
+load_index_checker: LoadIndexChecker = LoadIndexChecker(abort_on_error=False)
+
+
+class LoopBoundsChecker(SymbolicSanitizer):
+    """
+    Record concretized loop bounds.
+    """
+
+    def __init__(self, *a, **k) -> None:
+        super().__init__(*a, **k)
+        self._bounds: list[tuple[int, int, int]] = list()
+
+    @property
+    def observed_bounds(self) -> list[tuple[int, int, int]]:
+        return self._bounds
+
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        callbacks = super().register_for_loop_callback()
+        orig_before = callbacks.before_loop_callback
+
+        def _before_loop(lineno, iterable):
+            if orig_before is not None:
+                orig_before(lineno, iterable)
+            if isinstance(iterable, RangeWrapper):
+                self._bounds.append((iterable.start, iterable.stop, iterable.step))
+
+        return ForLoopCallbacks(
+            range_wrapper_factory=callbacks.range_wrapper_factory,
+            range_type_callback=callbacks.range_type_callback,
+            before_loop_callback=_before_loop,
+            loop_iter_overrider=callbacks.loop_iter_overrider,
+            loop_iter_listener=callbacks.loop_iter_listener,
+            after_loop_callback=callbacks.after_loop_callback,
+        )
+
+
+loop_bounds_checker: LoopBoundsChecker = LoopBoundsChecker(abort_on_error=True)
+
+
+class LoopDeferredCheckRecorder(SymbolicSanitizer):
+    """
+    Record when deferred checks are executed after loop exit.
+    """
+
+    def __init__(self, *a, **k) -> None:
+        super().__init__(*a, **k)
+        self.after_loop_pending: list[int] = []
+        self.check_inside_loop: list[tuple[Z3Expr, Optional[BoolRef]]] = []
+        self.iterator_constraints: list[BoolRef] = []
+
+    def _check_range_satisfiable(
+        self,
+        access_addr: Z3Expr,
+        expr_constraints: Optional[BoolRef],
+        symbolic_expr: SymbolicExpr,
+    ) -> None:
+        self.check_inside_loop.append((access_addr, expr_constraints))
+        super()._check_range_satisfiable(access_addr, expr_constraints, symbolic_expr)
+
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        callbacks = super().register_for_loop_callback()
+        orig_after = callbacks.after_loop_callback
+
+        def _after_loop(lineno: int) -> None:
+            pending = 0
+            if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+                ctx = self.loop_stack[-1]
+                pending = len(ctx.pending_checks)
+                self.iterator_constraints.append(
+                    _range_to_iterator_constraint(
+                        ctx.idx_z3, start=ctx.start, stop=ctx.stop, step=ctx.step
+                    )
+                )
+            if orig_after is not None:
+                orig_after(lineno)
+            self.after_loop_pending.append(pending)
+
+        return ForLoopCallbacks(
+            range_wrapper_factory=callbacks.range_wrapper_factory,
+            range_type_callback=callbacks.range_type_callback,
+            before_loop_callback=callbacks.before_loop_callback,
+            loop_iter_overrider=callbacks.loop_iter_overrider,
+            loop_iter_listener=callbacks.loop_iter_listener,
+            after_loop_callback=_after_loop,
+        )
+
+
+loop_deferred_check_recorder: LoopDeferredCheckRecorder = LoopDeferredCheckRecorder(
+    abort_on_error=False
 )
 
-from .conftest import LoadIndexChecker
+
+# ======== Kernels ===========
 
 
-# ======== Loop Hook =========
-
-
-def test_loop_hook_before_materializes_symbolic_bounds():
-    class _FakeRange:
-        def __init__(self, start, stop, step, length):
-            self.start = start
-            self.stop = stop
-            self.step = step
-            self._len = length
-
-        def __len__(self):
-            return self._len
-
-    sanitizer = SanitizerSymbolicExecution()
-    loop_callbacks = sanitizer.register_for_loop_callback()
-    assert loop_callbacks.before_loop_callback is not None
-    assert loop_callbacks.range_wrapper_factory is not None
-
-    # Positive step: min(start), max(stop)
-    start_expr = SymbolicExpr(
-        "add", SymbolicExpr.from_value(2), SymbolicExpr.from_value(3)
-    )
-    stop_expr = SymbolicExpr.from_value(8)
-    step_expr = SymbolicExpr.from_value(1)
-    wrapped = loop_callbacks.range_wrapper_factory(
-        None,
-        200,
-        "python_range",
-        (start_expr, stop_expr, step_expr),
-        {},
-        range,
-    )
-    loop_callbacks.before_loop_callback(200, wrapped)
-    ctx = sanitizer.loop_stack.pop()
-    assert ctx.start == 5  # min(start) == 5
-    assert ctx.stop == 8  # max(stop) == 8
-    assert ctx.step == 1
-
-    # Negative step: max(start), min(stop)
-    start_expr = SymbolicExpr.from_value(10)
-    stop_expr = SymbolicExpr.from_value(-2)
-    step_expr = SymbolicExpr.from_value(-3)
-    wrapped = loop_callbacks.range_wrapper_factory(
-        None,
-        201,
-        "python_range",
-        (start_expr, stop_expr, step_expr),
-        {},
-        range,
-    )
-    loop_callbacks.before_loop_callback(201, wrapped)
-    ctx = sanitizer.loop_stack.pop()
-    assert ctx.start == 10  # max(start)
-    assert ctx.stop == -2  # min(stop)
-    assert ctx.step == -3
-
-
-# ======== Indirect Load/Store =========
-
-
-@triton_viz.trace(clients=(san1 := LoadIndexChecker(abort_on_error=True)))
+@triton_viz.trace(client=load_index_checker)
 @triton.jit
 def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -88,7 +183,51 @@ def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
     tl.store(dst_ptr + offsets, out_val)
 
 
+@triton_viz.trace(client=loop_bounds_checker)
+@triton.jit
+def loop_bounds_kernel(start_ptr, stop_ptr, out_ptr):
+    start = tl.load(start_ptr)
+    stop = tl.load(stop_ptr)
+    for _ in range(start, stop):
+        pass
+    tl.store(out_ptr, start)
+
+
+@triton_viz.trace(client=loop_bounds_checker)
+@triton.jit
+def loop_bounds_pid_kernel(out_ptr):
+    pid = tl.program_id(0)
+    start = pid
+    stop = pid + 2
+    for _ in range(start, stop):
+        pass
+    tl.store(out_ptr + pid, start)
+
+
+@triton_viz.trace(client=loop_deferred_check_recorder)
+@triton.jit
+def loop_deferred_check_kernel(out_ptr):
+    for i in range(0, 4):
+        idx = i + 1
+        tl.store(out_ptr + idx, idx)
+
+
+@triton_viz.trace(client=load_index_checker)
+@triton.jit
+def loop_deferred_check_simplify_kernel(out_ptr):
+    pid = tl.program_id(0)
+    num_blocks = tl.num_programs(0) + 1
+    for i in range(0, num_blocks):
+        idx = pid + 1
+        tl.store(out_ptr + idx, idx)
+
+
+# ======== Indirect Load/Store Tests ===========
+
+
 def test_indirect_load():
+    load_index_checker.observed_offsets.clear()
+
     idx = torch.arange(128, dtype=torch.int32)
     src = torch.rand(128)
     dst = torch.empty_like(src)
@@ -98,182 +237,62 @@ def test_indirect_load():
 
     expected_offsets = idx.cpu().numpy().tolist()  # Ground truth
     observed_offsets = [
-        x for sublist in san1.observed_offsets for x in sublist
+        x for sublist in load_index_checker.observed_offsets for x in sublist
     ]  # Flatten the list of lists
     assert (
         expected_offsets == observed_offsets
     ), "Observed offsets do not match expected offsets."
 
 
-@triton_viz.trace(clients=(san2 := LoadIndexChecker(abort_on_error=True)))
-@triton.jit
-def triple_indirect_load_kernel(
-    idx1_ptr,  # int32*
-    idx2_ptr,  # int32*
-    src_ptr,  # fp32*
-    dst_ptr,  # fp32*
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-
-    idx1_val = tl.load(idx1_ptr + offsets)
-    idx2_val = tl.load(idx2_ptr + idx1_val)
-    out_val = tl.load(src_ptr + idx2_val)
-
-    tl.store(dst_ptr + offsets, out_val)
+# ======== Loop Tests ===========
 
 
-def test_triple_indirect_load(device):
-    N = 128
+def test_loop_bounds_from_load():
+    loop_bounds_checker.observed_bounds.clear()
+    start = torch.tensor([2], dtype=torch.int32)
+    stop = torch.tensor([6], dtype=torch.int32)
+    out = torch.empty((1,), dtype=torch.int32)
 
-    src = torch.rand(N, device=device, dtype=torch.float32)
-    idx2 = torch.randint(0, N, (N,), device=device, dtype=torch.int32)
-    idx1 = torch.randint(0, N, (N,), device=device, dtype=torch.int32)
+    loop_bounds_kernel[(1,)](start, stop, out)
 
-    dst = torch.empty_like(src)
+    assert loop_bounds_checker.observed_bounds == [(2, 6, 1)]
 
-    grid = lambda META: (triton.cdiv(N, META["BLOCK_SIZE"]),)
-    triple_indirect_load_kernel[grid](
-        idx1,
-        idx2,
-        src,
-        dst,
-        BLOCK_SIZE=32,
+
+def test_loop_bounds_from_pid():
+    loop_bounds_checker.observed_bounds.clear()
+    out = torch.empty((2,), dtype=torch.int32)
+
+    loop_bounds_pid_kernel[(2,)](out)
+
+    assert loop_bounds_checker.observed_bounds == [(0, 2, 1), (1, 3, 1)]
+
+
+def test_loop_deferred_checks_after_context():
+    loop_deferred_check_recorder.after_loop_pending.clear()
+    loop_deferred_check_recorder.check_inside_loop.clear()
+    loop_deferred_check_recorder.iterator_constraints.clear()
+    loop_deferred_check_recorder.records.clear()
+
+    out = torch.empty((2,), dtype=torch.int32)
+
+    loop_deferred_check_kernel[(1,)](out)
+
+    assert loop_deferred_check_recorder.after_loop_pending == [1]
+    addr_expr, _ = loop_deferred_check_recorder.check_inside_loop[0]
+    assert "4*loop_i_2" in str(addr_expr)
+    iterator_constraints_str = " ".join(
+        str(c) for c in loop_deferred_check_recorder.iterator_constraints
     )
-
-    expected_offsets = idx2[idx1].cpu().numpy().tolist()  # Ground Truth
-    observed_offsets = [
-        x for sublist in san2.observed_offsets for x in sublist
-    ]  # Flatten the list of lists
-    assert (
-        expected_offsets == observed_offsets
-    ), "Observed offsets do not match expected offsets."
+    assert "loop_i_2 >= 0" in iterator_constraints_str
+    assert "loop_i_2 < 4" in iterator_constraints_str
+    assert loop_deferred_check_recorder.records
 
 
-@triton_viz.trace(clients=(san3 := LoadIndexChecker(abort_on_error=True)))
-@triton.jit
-def dual_offset_load_kernel(
-    idx_a_ptr,  # int32*
-    idx_b_ptr,  # int32*
-    src_ptr,  # fp32*
-    dst_ptr,  # fp32*
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+def test_loop_deferred_checks_simplify():
+    load_index_checker.observed_offsets.clear()
 
-    a = tl.load(idx_a_ptr + offsets)
-    b = tl.load(idx_b_ptr + offsets)
-    out_val = tl.load(src_ptr + a + b)
+    out = torch.empty((3,), dtype=torch.int32)
 
-    tl.store(dst_ptr + offsets, out_val)
+    loop_deferred_check_simplify_kernel[(2,)](out)
 
-
-def test_dual_offset_load(device):
-    N = 128
-
-    src = torch.rand(N, device=device, dtype=torch.float32)
-    # Generate indices so that a + b is always in-range (0 ≤ a + b < N)
-    idx_a = torch.randint(0, N // 2, (N,), device=device, dtype=torch.int32)
-    idx_b = torch.randint(0, N // 2, (N,), device=device, dtype=torch.int32)
-    dst = torch.empty_like(src)
-
-    grid = lambda META: (triton.cdiv(N, META["BLOCK_SIZE"]),)
-    dual_offset_load_kernel[grid](
-        idx_a,
-        idx_b,
-        src,
-        dst,
-        BLOCK_SIZE=32,
-    )
-
-    expected_offsets = (idx_a + idx_b).cpu().numpy().tolist()  # Ground Truth
-    observed_offsets = [
-        x for sublist in san3.observed_offsets for x in sublist
-    ]  # Flatten the list of lists
-    assert (
-        expected_offsets == observed_offsets
-    ), "Observed offsets do not match expected offsets."
-
-
-# ======== For-Loop Optimization Tests =========
-
-
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
-@triton.jit
-def copy_row_kernel(
-    in_ptr,
-    out_ptr,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    TILE_N: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    num_tiles = tl.cdiv(N, TILE_N)
-    for tile_idx in range(0, num_tiles):
-        col_offsets = tile_idx * TILE_N + tl.arange(0, TILE_N)
-        mask = col_offsets < N
-
-        x = tl.load(in_ptr + pid * N + col_offsets, mask=mask, other=0.0)
-        y = x  # Copy operation
-        tl.store(out_ptr + pid * N + col_offsets, y, mask=mask)
-
-
-def test_copy_kernel():
-    torch.manual_seed(0)
-    M, N = 32, 1000
-    x = torch.randn((M, N), dtype=torch.float32)
-    y = torch.empty_like(x)
-    grid = (M,)
-    copy_row_kernel[grid](
-        x,
-        y,
-        M,
-        N,
-        TILE_N=128,
-    )
-
-
-# ======== Atomic Operations Tests =========
-
-
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
-@triton.jit
-def atomic_add_kernel(
-    output_ptr,
-    value: tl.constexpr,
-):
-    # Simple atomic add operation
-    tl.atomic_add(output_ptr, value)
-
-
-def test_atomic_add():
-    """Test that atomic_add operations work with the sanitizer."""
-    y = torch.zeros(1, dtype=torch.float32)
-    grid = (1,)
-    atomic_add_kernel[grid](y, value=5.0)
-    # Note: The sanitizer analyzes symbolically, so the actual value may not be updated
-    # This test verifies that the operation doesn't crash
-
-
-@triton_viz.trace(clients=Sanitizer(abort_on_error=True))
-@triton.jit
-def atomic_cas_kernel(
-    output_ptr,
-    cmp_value: tl.constexpr,
-    new_value: tl.constexpr,
-):
-    # Simple atomic compare-and-swap operation
-    tl.atomic_cas(output_ptr, cmp_value, new_value)
-
-
-def test_atomic_cas():
-    """Test that atomic_cas operations work with the sanitizer."""
-    y = torch.zeros(1, dtype=torch.float32)
-    grid = (1,)
-    atomic_cas_kernel[grid](y, cmp_value=0.0, new_value=5.0)
-    # Note: The sanitizer analyzes symbolically, so the actual value may not be updated
-    # This test verifies that the operation doesn't crash
+    assert load_index_checker.observed_offsets == []
