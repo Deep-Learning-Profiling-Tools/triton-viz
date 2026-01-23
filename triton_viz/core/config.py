@@ -1,208 +1,64 @@
 import os
 
 
+def _is_one(env: str, default: str = "0") -> bool:
+    return os.getenv(env, default) == "1"
+
+
+def _get_int_env(env: str, default: int, minimum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(env, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, value) if minimum is not None else value
+
+
 class Config:
+    """
+    Runtime configuration loaded from environment variables.
+
+    Fields map to environment variables with string values where "1" enables a flag:
+    - verbose: TRITON_VIZ_VERBOSE, enables verbose logging.
+    - num_sms: TRITON_VIZ_NUM_SMS, emulated concurrent SMs in the CPU interpreter
+      (min 1).
+    - enable_sanitizer: ENABLE_SANITIZER, toggles the sanitizer pipeline.
+    - enable_profiler: ENABLE_PROFILER, toggles the profiler pipeline.
+    - enable_timing: ENABLE_TIMING, collects timing info during execution.
+    - report_grid_execution_progress: REPORT_GRID_EXECUTION_PROGRESS, logs per
+      program block progress in the interpreter.
+    - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, uses a fake tensor backend in
+      sanitizer runs to avoid real memory reads.
+    - profiler_enable_load_store_skipping: PROFILER_ENABLE_LOAD_STORE_SKIPPING,
+      skips redundant load/store checks to speed profiling.
+    - profiler_enable_block_sampling: PROFILER_ENABLE_BLOCK_SAMPLING, samples a
+      subset of blocks to reduce profiling overhead.
+    - profiler_disable_buffer_load_check: PROFILER_DISABLE_BUFFER_LOAD_CHECK,
+      disables buffer load checks in the profiler.
+    """
+
     def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
-        # --- Verbose mode flag ---
-        self.verbose = os.getenv("TRITON_VIZ_VERBOSE", "0") == "1"
-
-        # --- Interpreter concurrency (CPU) ---
-        num_sms_env = os.getenv("TRITON_VIZ_NUM_SMS", "1")
-        try:
-            self._num_sms = max(1, int(num_sms_env))
-        except ValueError:
-            self._num_sms = 1
-
-        # --- Sanitizer enable flag ---
-        enable_sanitizer_env = os.getenv("ENABLE_SANITIZER")
-        if enable_sanitizer_env is None:
-            self._enable_sanitizer = not (os.getenv("DISABLE_SANITIZER", "0") == "1")
-        else:
-            self._enable_sanitizer = enable_sanitizer_env == "1"
-
-        # --- Profiler enable flag ---
-        enable_profiler_env = os.getenv("ENABLE_PROFILER")
-        if enable_profiler_env is None:
-            self._enable_profiler = not (os.getenv("DISABLE_PROFILER", "0") == "1")
-        else:
-            self._enable_profiler = enable_profiler_env == "1"
-
-        # --- Timing enable flag ---
-        self._enable_timing = os.getenv("ENABLE_TIMING", "0") == "1"
-
-        # --- Grid execution progress flag ---
-        self._report_grid_execution_progress = (
-            os.getenv("REPORT_GRID_EXECUTION_PROGRESS", "0") == "1"
-        )  # verify using setter
-
-        # --- Fake tensor flag ---
-        self._virtual_memory = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "0") == "1"
-
-        # --- Profiler Optimization Ablation Study ---
-        # Optimization 1: enable load/store/dot skipping
-        self._profiler_enable_load_store_skipping = (
-            os.getenv("PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1") == "1"
+        """Reload configuration from environment variables and apply defaults."""
+        self.verbose: bool = _is_one("TRITON_VIZ_VERBOSE")
+        self.num_sms: int = _get_int_env("TRITON_VIZ_NUM_SMS", 1, minimum=1)
+        self.enable_sanitizer: bool = _is_one("ENABLE_SANITIZER", "1")
+        self.enable_profiler: bool = _is_one("ENABLE_PROFILER", "1")
+        self.enable_timing: bool = _is_one("ENABLE_TIMING")
+        self.report_grid_execution_progress: bool = _is_one(
+            "REPORT_GRID_EXECUTION_PROGRESS"
         )
-
-        # Optimization 2: Profiler enable block sampling
-        self._profiler_enable_block_sampling = (
-            os.getenv("PROFILER_ENABLE_BLOCK_SAMPLING", "1") == "1"
+        self.virtual_memory: bool = _is_one("SANITIZER_ENABLE_FAKE_TENSOR")
+        self.profiler_enable_load_store_skipping: bool = _is_one(
+            "PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1"
         )
-
-        # --- Profiler Performance Issues Detection ---
-        # AMD Buffer Load Check: detects buffer_load instruction usage in kernel ASM
-        self._profiler_disable_buffer_load_check = (
-            os.getenv("PROFILER_DISABLE_BUFFER_LOAD_CHECK", "0") == "1"
+        self.profiler_enable_block_sampling: bool = _is_one(
+            "PROFILER_ENABLE_BLOCK_SAMPLING", "1"
         )
-
-    # ---------- enable_sanitizer ----------
-    @property
-    def enable_sanitizer(self) -> bool:
-        return self._enable_sanitizer
-
-    @enable_sanitizer.setter
-    def enable_sanitizer(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise TypeError("enable_sanitizer expects a bool.")
-
-        previous = getattr(self, "_enable_sanitizer", None)
-        self._enable_sanitizer = value
-
-        # User-friendly status messages
-        if value and not previous:
-            print("Triton Sanitizer enabled.")
-        elif not value and previous:
-            print("Triton Sanitizer disabled.")
-
-    # ---------- enable_profiler ----------
-    @property
-    def enable_profiler(self) -> bool:
-        return self._enable_profiler
-
-    @enable_profiler.setter
-    def enable_profiler(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise TypeError("enable_profiler expects a bool.")
-
-        previous = getattr(self, "_enable_profiler", None)
-        self._enable_profiler = value
-
-        # User-friendly status messages
-        if value and not previous:
-            print("Triton Profiler enabled.")
-        elif not value and previous:
-            print("Triton Profiler disabled.")
-
-    # ---------- enable_timing ----------
-    @property
-    def enable_timing(self) -> bool:
-        return self._enable_timing
-
-    @enable_timing.setter
-    def enable_timing(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise TypeError("enable_timing expects a bool.")
-        self._enable_timing = value
-
-        previous = getattr(self, "_enable_timing", None)
-        self._enable_timing = value
-
-        # User-friendly status messages
-        if value and not previous:
-            print("Triton timing enabled.")
-        elif not value and previous:
-            print("Triton timing disabled.")
-
-    # ---------- report_grid_execution_progress ----------
-    @property
-    def report_grid_execution_progress(self) -> bool:
-        return self._report_grid_execution_progress
-
-    @report_grid_execution_progress.setter
-    def report_grid_execution_progress(self, flag: bool) -> None:
-        if not isinstance(flag, bool):
-            raise TypeError("report_grid_execution_progress expects a bool.")
-        self._report_grid_execution_progress = flag
-        if flag:
-            print("Grid-progress reporting is now ON.")
-
-    # ---------- num_sms ----------
-    @property
-    def num_sms(self) -> int:
-        return self._num_sms
-
-    @num_sms.setter
-    def num_sms(self, value: int) -> None:
-        if not isinstance(value, int):
-            raise TypeError("num_sms expects an int.")
-        if value < 1:
-            raise ValueError("num_sms must be >= 1.")
-        self._num_sms = value
-
-    # ---------- profiler_enable_load_store_skipping ----------
-    @property
-    def profiler_enable_load_store_skipping(self) -> bool:
-        return self._profiler_enable_load_store_skipping
-
-    @profiler_enable_load_store_skipping.setter
-    def profiler_enable_load_store_skipping(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise TypeError("profiler_enable_load_store_skipping expects a bool.")
-
-        previous = getattr(self, "_profiler_enable_load_store_skipping", None)
-        self._profiler_enable_load_store_skipping = value
-
-        # User-friendly status messages
-        if value and not previous:
-            print("Profiler load/store/dot skipping enabled.")
-        elif not value and previous:
-            print("Profiler load/store/dot skipping disabled.")
-
-    # ---------- profiler_enable_block_sampling ----------
-    @property
-    def profiler_enable_block_sampling(self) -> bool:
-        return self._profiler_enable_block_sampling
-
-    @profiler_enable_block_sampling.setter
-    def profiler_enable_block_sampling(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise TypeError("profiler_enable_block_sampling expects a bool.")
-
-        previous = getattr(self, "_profiler_enable_block_sampling", None)
-        self._profiler_enable_block_sampling = value
-
-        # User-friendly status messages
-        if value and not previous:
-            print("Profiler block sampling enabled.")
-        elif not value and previous:
-            print("Profiler block sampling disabled.")
-
-    # ---------- virtual memory ----------
-    @property
-    def virtual_memory(self) -> bool:
-        return self._virtual_memory
-
-    # ---------- profiler_disable_buffer_load_check ----------
-    @property
-    def profiler_disable_buffer_load_check(self) -> bool:
-        return self._profiler_disable_buffer_load_check
-
-    @profiler_disable_buffer_load_check.setter
-    def profiler_disable_buffer_load_check(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise TypeError("profiler_disable_buffer_load_check expects a bool.")
-
-        previous = getattr(self, "_profiler_disable_buffer_load_check", None)
-        self._profiler_disable_buffer_load_check = value
-
-        # User-friendly status messages
-        if value and not previous:
-            print("Profiler buffer load check disabled.")
-        elif not value and previous:
-            print("Profiler buffer load check enabled.")
+        self.profiler_disable_buffer_load_check: bool = _is_one(
+            "PROFILER_DISABLE_BUFFER_LOAD_CHECK"
+        )
 
 
 config = Config()
