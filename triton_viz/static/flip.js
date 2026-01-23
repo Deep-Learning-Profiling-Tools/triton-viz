@@ -1,9 +1,9 @@
-import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
+import * as THREE from 'https://esm.sh/three@0.155.0';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import { setupScene, setupGeometries, createCube, CUBE_SIZE, GAP } from './load_utils.js';
-import { createFlip3D } from './flip_3d.js';
+import { createVectorText } from './dimension_utils.js';
 
-export function createFlipVisualization(containerElement, op) {
+export function createFlipVisualization(containerElement, op, viewState = null) {
     const API_BASE = window.__TRITON_VIZ_API__ || '';
     const overlay = document.createElement('div');
     Object.assign(overlay.style, {
@@ -11,6 +11,7 @@ export function createFlipVisualization(containerElement, op) {
         zIndex: 3000, pointerEvents: 'auto'
     });
     containerElement.appendChild(overlay);
+    try { window.current_op_uuid = op.uuid; } catch (e) {}
 
     const { scene, camera, renderer } = setupScene(overlay, 0x15151b);
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -66,12 +67,7 @@ export function createFlipVisualization(containerElement, op) {
 
     // Title sprites
     function makeLabel(text){
-        const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d');
-        ctx.font = 'Bold 24px Arial'; const m = ctx.measureText(text);
-        canvas.width = m.width + 8; canvas.height = 40; ctx.font = 'Bold 24px Arial';
-        ctx.fillStyle = 'white'; ctx.fillText(text, 0, 28);
-        const tex = new THREE.CanvasTexture(canvas); const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
-        const sp = new THREE.Sprite(mat); sp.scale.set(4, 1.2, 1); return sp;
+        return createVectorText(text, 'white', { fontSize: 0.8 });
     }
     const labIn = makeLabel('Input'); labIn.position.set(-CUBE_SIZE*3.2, CUBE_SIZE*0.5, 0); inputGroup.add(labIn);
     const labOut = makeLabel('Output (flipped)'); labOut.position.set(-CUBE_SIZE*3.2, -H*(CUBE_SIZE+GAP) - CUBE_SIZE*4.0, - (CUBE_SIZE*6)); outputGroup.add(labOut);
@@ -84,19 +80,20 @@ export function createFlipVisualization(containerElement, op) {
     const sideMenu = document.createElement('div');
     Object.assign(sideMenu.style, { position:'absolute', top:'10px', right:'10px', width:'220px', padding:'10px', background:'rgba(0,0,0,0.7)', color:'#fff', borderRadius:'6px', zIndex:'2000' });
     overlay.appendChild(sideMenu);
-    // Steps overlay toggle
-    const stepsBtn = document.createElement('button');
-    stepsBtn.textContent = 'Flip Steps 3D';
-    Object.assign(stepsBtn.style, { position:'absolute', top:'10px', left:'10px', zIndex:'2001' });
-    overlay.appendChild(stepsBtn);
-    let stepsCleanup = null;
-    stepsBtn.addEventListener('click', ()=>{
-        if (stepsCleanup){ try{ stepsCleanup(); }catch(e){} stepsCleanup=null; stepsBtn.textContent='Flip Steps 3D'; return; }
-        // choose length along flipped dimension if 2D; otherwise use total W
-        const n = is2D ? (dim===0? H: W) : W;
-        stepsCleanup = createFlip3D(overlay, { length: Math.min(128, n) });
-        stepsBtn.textContent = 'Close Steps';
-    });
+
+    function toggleShowCode() {
+        if (window.__tritonVizCodeToggle) {
+            return window.__tritonVizCodeToggle();
+        }
+        return false;
+    }
+
+    if (window.setOpControlHandlers) {
+        window.setOpControlHandlers({ toggleShowCode });
+    }
+    if (window.setOpControlState) {
+        window.setOpControlState({ colorize: false, showCode: false });
+    }
 
     async function getFlipValue(which, r, c){
         const body = { uuid: op.uuid, which, x: c, y: r };
@@ -130,7 +127,7 @@ export function createFlipVisualization(containerElement, op) {
     const _hoverTimer = setInterval(syncHoverHighlight, 60);
     function _updateMouseNDC(event) {
         const rect = renderer.domElement.getBoundingClientRect();
-        const dpr = (window.devicePixelRatio || 1);
+        const dpr = renderer.getPixelRatio();
         const px = (event.clientX - rect.left) * dpr;
         const py = (event.clientY - rect.top ) * dpr;
         const w = rect.width * dpr, h = rect.height * dpr;
@@ -168,7 +165,21 @@ export function createFlipVisualization(containerElement, op) {
     animate();
 
     const closeBtn = document.createElement('button'); closeBtn.textContent = 'Close'; Object.assign(closeBtn.style, { position:'absolute', top:'50px', left:'10px', zIndex:'2001' }); overlay.appendChild(closeBtn);
-    function cleanup(){ clearInterval(_hoverTimer); overlay.removeEventListener('mousemove', onMouseMove); overlay.removeEventListener('mouseleave', ()=>{}); if (stepsCleanup){ try{ stepsCleanup(); }catch(e){} stepsCleanup=null; } if (overlay && overlay.remove) overlay.remove(); }
+    function cleanup(){
+        if (window.setOpControlHandlers) {
+            window.setOpControlHandlers(null);
+        }
+        if (window.setOpControlState) {
+            window.setOpControlState({ colorize: false, showCode: false });
+        }
+        if (window.__tritonVizCodeHide && !window.__tritonVizPreserveCodePanel) {
+            window.__tritonVizCodeHide();
+        }
+        clearInterval(_hoverTimer);
+        overlay.removeEventListener('mousemove', onMouseMove);
+        overlay.removeEventListener('mouseleave', ()=>{});
+        if (overlay && overlay.remove) overlay.remove();
+    }
     closeBtn.addEventListener('click', cleanup);
     try { window.current_op_uuid = op.uuid; } catch (e) {}
     return cleanup;

@@ -20,34 +20,25 @@
                 </button>
             </div>
 
-            <section class="control-group">
+            <section class="control-group is-program-ids">
                 <div class="group-header">
                     <span>Program IDs</span>
                     <button id="reset-filters" class="viz-button link" type="button">Reset</button>
                 </div>
                 <div id="pid-controls" class="control-stack"></div>
-                <p class="control-note">Drag the sliders or set to -1 to show every program on that axis.</p>
+                <p class="control-note">Drag the sliders to focus on specific program IDs.</p>
             </section>
 
-            <section class="control-group">
+            <section class="control-group is-op-controls">
                 <div class="group-header">
-                    <span>Z Slice</span>
-                    <span id="z-value" class="value-pill">0</span>
-                </div>
-                <input id="z-slider" type="range" min="0" max="0" value="0">
-                <p class="control-note">Control which Z slice is visible to align screenshots.</p>
-            </section>
-
-            <section class="control-group">
-                <div class="group-header">
-                    <span>Actions</span>
+                    <span>Operation Controls</span>
                 </div>
                 <div class="button-grid">
-                    <button id="btn-overall" class="viz-button primary" type="button">Overall View</button>
-                    <button id="btn-precompute" class="viz-button ghost" type="button">Precompute</button>
-                    <button id="btn-info" class="viz-button ghost" type="button">Guide</button>
+                    <button id="btn-op-colorize" class="viz-button ghost" type="button" disabled>Color by Value: OFF</button>
+                    <button id="btn-op-all-programs" class="viz-button ghost" type="button" disabled>All Program IDs: OFF</button>
+                    <button id="btn-op-histogram" class="viz-button ghost" type="button" disabled>Value Histogram</button>
                 </div>
-                <p class="control-note">Overall view aggregates every Load / Store op.</p>
+                <p class="control-note">Open a block to enable operation controls.</p>
             </section>
 
             <section class="control-group">
@@ -58,8 +49,10 @@
                     Open the detailed view of any block to use the Show Code toggle for source context.
                 </p>
             </section>
+            <div id="op-code-panel" class="op-code-panel"></div>
         </aside>
 
+        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" tabindex="0"></div>
         <main id="canvas-wrapper">
             <canvas id="canvas" aria-label="Kernel Visualization Canvas"></canvas>
             <div id="visualization-container"></div>

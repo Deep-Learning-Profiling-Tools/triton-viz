@@ -1,5 +1,4 @@
 import { createMatMulVisualization } from './matmul.js';
-import { createFlipVisualization } from './flip.js';
 import { createLoadVisualization, createLoadOverallVisualization } from './load.js';
 import { createStoreVisualization, createStoreOverallVisualization } from './store.js';
 import { createFlowDiagram } from './nki.js';
@@ -14,7 +13,7 @@ const DEFAULT_PALETTE = {
 };
 
 export class GridBlock {
-    constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction) {
+    constructor(x, y, width, height, gridX, gridY, gridZ, blockData, onClose, containerElement, canvas, drawFunction, programIdConfig = null) {
         this.rect = { x, y, width, height };
         this.gridPosition = { x: gridX, y: gridY, z: gridZ };
         this.blockData = blockData;
@@ -28,6 +27,12 @@ export class GridBlock {
         this.isDetailedViewVisible = false;
         this.contentArea = null;
         this.activeTab = null;
+        this.activeTabIndex = 0;
+        this.programIdConfig = programIdConfig;
+        this.titleEl = null;
+        this.badgeEl = null;
+        this.cardEl = null;
+        this.headerBar = null;
     }
 
     draw(ctx, palette = DEFAULT_PALETTE) {
@@ -71,9 +76,11 @@ export class GridBlock {
         this.visualizationContainer = this.createVisualizationContainer();
         const card = document.createElement('div');
         card.className = 'detail-card';
+        this.cardEl = card;
 
         const titleRow = this.createTitleRow();
         const headerBar = this.createHeaderBar();
+        this.headerBar = headerBar;
         this.contentArea = this.createContentArea();
 
         card.appendChild(titleRow);
@@ -97,33 +104,39 @@ export class GridBlock {
 
         this.isDetailedViewVisible = true;
         if (this.canvas) this.canvas.style.display = 'none';
+        try {
+            window.__tritonVizActiveBlock = this;
+        } catch (e) {}
 
         if (this.blockData.length > 0) {
+            this.activeTabIndex = 0;
             this.displayOpVisualization(this.blockData[0]);
         }
 
         this.ensureGlobalCodeToggle();
-        if (window.setGlobalCodeButtonVisible) {
-            window.setGlobalCodeButtonVisible(true);
+        this.syncCodePanel(true);
+        if (document.body) {
+            document.body.classList.add('detail-open');
         }
     }
 
     ensureGlobalCodeToggle() {
-        const codeBtnId = 'global-code-toggle-btn';
-        if (document.getElementById(codeBtnId)) {
-            document.getElementById(codeBtnId).style.display = 'block';
-            return;
-        }
-        const btn = document.createElement('button');
-        btn.id = codeBtnId;
-        btn.textContent = 'Show Code: OFF';
-        btn.className = 'show-code-btn';
-        document.body.appendChild(btn);
-
+        if (window.__tritonVizCodeToggle) return;
         let panel = null;
+        let visible = false;
+
         const destroyPanel = () => {
             if (panel && panel.remove) panel.remove();
+            const host = document.getElementById('op-code-panel');
+            if (host && host.contains(panel)) {
+                host.innerHTML = '';
+            }
             panel = null;
+        };
+
+        const getActiveUuid = () => {
+            const activeBlock = window.__tritonVizActiveBlock;
+            return window.current_op_uuid || (activeBlock && activeBlock.blockData && activeBlock.blockData[0] && activeBlock.blockData[0].uuid);
         };
 
         const createPanel = async (uuid, frameIdx = 0, context = 8) => {
@@ -134,18 +147,14 @@ export class GridBlock {
             header.className = 'panel-header drag-handle';
             header.style.fontWeight = '600';
             header.style.marginBottom = '8px';
-            header.innerHTML = '<span>Operation Code & Context</span><span class="drag-grip" aria-hidden="true">⠿</span>';
-            const closeBtn = document.createElement('button');
-            closeBtn.className = 'viz-button ghost';
-            closeBtn.textContent = 'Close';
-            closeBtn.style.marginLeft = 'auto';
-            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-            closeBtn.addEventListener('click', () => {
-                destroyPanel();
-                btn.textContent = 'Show Code: OFF';
-            });
-            header.appendChild(closeBtn);
+            header.innerHTML = '<span>Code View</span><span class="drag-grip" aria-hidden="true">⠿</span>';
             wrapper.appendChild(header);
+            const blurb = document.createElement('div');
+            blurb.style.fontSize = '12px';
+            blurb.style.color = 'var(--text-secondary)';
+            blurb.style.marginBottom = '8px';
+            blurb.textContent = 'Arrow points to the line being visualized.';
+            wrapper.appendChild(blurb);
             try {
                 const API_BASE = window.__TRITON_VIZ_API__ || '';
                 const res = await fetch(`${API_BASE}/api/op_code`, {
@@ -172,25 +181,60 @@ export class GridBlock {
                 err.textContent = 'Failed to load code context.';
                 wrapper.appendChild(err);
             }
-            document.body.appendChild(wrapper);
+            const host = document.getElementById('op-code-panel');
+            if (host) {
+                host.innerHTML = '';
+                wrapper.classList.add('is-sidebar');
+                host.appendChild(wrapper);
+            } else {
+                document.body.appendChild(wrapper);
+                enableDrag(wrapper, { handle: header, bounds: window });
+            }
             panel = wrapper;
-            enableDrag(wrapper, { handle: header, bounds: window });
         };
 
-        btn.addEventListener('click', async () => {
-            const turnOn = btn.textContent.endsWith('OFF');
-            btn.textContent = `Show Code: ${turnOn ? 'ON' : 'OFF'}`;
-            if (!this.blockData || this.blockData.length === 0) {
-                if (!turnOn) destroyPanel();
-                return;
-            }
-            const activeUuid = window.current_op_uuid || (this.blockData[0] && this.blockData[0].uuid);
-            if (turnOn && activeUuid) {
-                await createPanel(activeUuid, 0, 8);
-            } else {
+        const togglePanel = async (force) => {
+            const next = typeof force === 'boolean' ? force : !visible;
+            if (!next) {
+                visible = false;
                 destroyPanel();
+                return visible;
             }
-        });
+            const activeUuid = getActiveUuid();
+            if (!activeUuid) {
+                visible = false;
+                destroyPanel();
+                return visible;
+            }
+            visible = true;
+            await createPanel(activeUuid, 0, 8);
+            return visible;
+        };
+
+        const hidePanel = () => {
+            visible = false;
+            destroyPanel();
+            return visible;
+        };
+
+        window.__tritonVizCodeToggle = togglePanel;
+        window.__tritonVizCodeHide = hidePanel;
+        window.__tritonVizCodeVisible = () => visible;
+    }
+
+    syncCodePanel(forceShow = false) {
+        if (!window.__tritonVizCodeToggle) return;
+        const isVisible = window.__tritonVizCodeVisible ? window.__tritonVizCodeVisible() : false;
+        if (!forceShow && !isVisible) return;
+        const result = window.__tritonVizCodeToggle(true);
+        if (!window.setOpControlState) return;
+        if (result && typeof result.then === 'function') {
+            result.then((visible) => {
+                window.setOpControlState({ showCode: !!visible });
+            });
+        } else {
+            window.setOpControlState({ showCode: !!result });
+        }
     }
 
     createVisualizationContainer() {
@@ -210,7 +254,41 @@ export class GridBlock {
         badge.textContent = `${this.blockData.length} ops`;
         row.appendChild(title);
         row.appendChild(badge);
+        this.titleEl = title;
+        this.badgeEl = badge;
         return row;
+    }
+
+    applyProgramIdSelection(x, y, z) {
+        if (!this.programIdConfig) return;
+        const { max } = this.programIdConfig;
+        const nx = Math.max(0, Math.min(max.x, x));
+        const ny = Math.max(0, Math.min(max.y, y));
+        const nz = Math.max(0, Math.min(max.z, z));
+        if (nx === this.gridPosition.x && ny === this.gridPosition.y && nz === this.gridPosition.z) return;
+        this.gridPosition = { x: nx, y: ny, z: nz };
+        this.programIdConfig.values = { x: nx, y: ny, z: nz };
+        if (this.programIdConfig.getBlockData) {
+            this.blockData = this.programIdConfig.getBlockData(nx, ny, nz);
+        }
+        if (this.titleEl) {
+            this.titleEl.textContent = `Program (${nx}, ${ny}, ${nz})`;
+        }
+        if (this.badgeEl) {
+            this.badgeEl.textContent = `${this.blockData.length} ops`;
+        }
+        if (this.headerBar && this.cardEl) {
+            this.headerBar.remove();
+            this.headerBar = this.createHeaderBar();
+            this.cardEl.insertBefore(this.headerBar, this.contentArea);
+        }
+        if (this.blockData.length > 0) {
+            const nextIndex = Math.min(this.activeTabIndex || 0, this.blockData.length - 1);
+            this.activeTabIndex = nextIndex;
+            this.displayOpVisualization(this.blockData[nextIndex], { refreshCodePanel: false, preserveViewState: true });
+        } else if (this.contentArea) {
+            this.contentArea.innerHTML = '';
+        }
     }
 
     createHeaderBar() {
@@ -218,14 +296,24 @@ export class GridBlock {
         headerBar.className = 'detail-tabs';
         this.activeTab = null;
 
+        let defaultTab = null;
+        let preferredTab = null;
         this.blockData.forEach((op, index) => {
             const opTab = this.createOperationTab(op);
-            opTab.addEventListener('click', () => this.handleTabClick(opTab, op));
+            opTab.addEventListener('click', () => this.handleTabClick(opTab, op, index));
             headerBar.appendChild(opTab);
             if (index === 0) {
-                this.setActiveTab(opTab);
+                defaultTab = opTab;
+            }
+            if (this.activeTabIndex === index) {
+                preferredTab = opTab;
             }
         });
+        if (preferredTab) {
+            this.setActiveTab(preferredTab);
+        } else if (defaultTab) {
+            this.setActiveTab(defaultTab);
+        }
 
         const flowTab = this.createTabButton('Flow');
         flowTab.addEventListener('click', () => {
@@ -285,9 +373,12 @@ export class GridBlock {
         }
     }
 
-    handleTabClick(clickedTab, op) {
+    handleTabClick(clickedTab, op, index = null) {
         this.setActiveTab(clickedTab);
-        this.displayOpVisualization(op);
+        if (typeof index === 'number') {
+            this.activeTabIndex = index;
+        }
+        this.displayOpVisualization(op, { preserveViewState: true });
     }
 
     createContentArea() {
@@ -302,16 +393,35 @@ export class GridBlock {
         return contentArea;
     }
 
-    displayOpVisualization(op) {
+    displayOpVisualization(op, options = {}) {
         if (!this.contentArea) {
             console.error('Content area is not initialized');
             return;
         }
-        if (this.visualizationCleanupFunction) {
-            this.visualizationCleanupFunction();
-            this.visualizationCleanupFunction = null;
+        let viewState = options.viewState || null;
+        const canReuseViz = options.preserveViewState && this.contentArea.__vizGetState;
+        if (!viewState && canReuseViz) {
+            viewState = this.contentArea.__vizGetState();
         }
-        this.contentArea.innerHTML = '';
+        const preserveCodePanel = options.refreshCodePanel === false;
+        if (preserveCodePanel) {
+            try { window.__tritonVizPreserveCodePanel = true; } catch (e) {}
+        }
+        const isTensorOp = op.type === 'Dot' || op.type === 'Load' || op.type === 'Store';
+        const reuseTensorView = canReuseViz && isTensorOp && this.lastOpType === op.type;
+        try {
+            if (!reuseTensorView && this.visualizationCleanupFunction) {
+                this.visualizationCleanupFunction();
+                this.visualizationCleanupFunction = null;
+            }
+        } finally {
+            if (preserveCodePanel) {
+                try { window.__tritonVizPreserveCodePanel = false; } catch (e) {}
+            }
+        }
+        if (!reuseTensorView) {
+            this.contentArea.innerHTML = '';
+        }
         try {
             window.last_op = op;
             window.last_op_global_shape = op.global_shape;
@@ -322,19 +432,20 @@ export class GridBlock {
 
         switch (op.type) {
             case 'Dot':
-                this.visualizationCleanupFunction = createMatMulVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createMatMulVisualization(this.contentArea, op, viewState);
                 break;
             case 'Load':
-                this.visualizationCleanupFunction = createLoadVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createLoadVisualization(this.contentArea, op, viewState);
                 break;
             case 'Store':
-                this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op);
-                break;
-            case 'Flip':
-                this.visualizationCleanupFunction = createFlipVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op, viewState);
                 break;
             default:
                 this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;
+        }
+        this.lastOpType = op.type;
+        if (options.refreshCodePanel !== false) {
+            this.syncCodePanel(true);
         }
     }
 
@@ -466,8 +577,14 @@ export class GridBlock {
 
         if (this.canvas) this.canvas.style.display = 'block';
         this.drawFunction();
-        if (window.setGlobalCodeButtonVisible) {
-            window.setGlobalCodeButtonVisible(false);
+        try {
+            if (window.__tritonVizActiveBlock === this) {
+                window.__tritonVizActiveBlock = null;
+            }
+        } catch (e) {}
+
+        if (document.body) {
+            document.body.classList.remove('detail-open');
         }
     }
 }

@@ -1,6 +1,7 @@
-import * as THREE from 'https://esm.sh/three@0.155.0/build/three.module.js';
+import * as THREE from 'https://esm.sh/three@0.155.0';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
 import { setupScene, setupGeometries, createCube, CUBE_SIZE, GAP } from './load_utils.js';
+import { createVectorText } from './dimension_utils.js';
 
 // 3D Flip visualization with layered rows (initial + step_i view + step_i swap)
 // API: createFlip3D(container, { length, steps }) => cleanup()
@@ -31,17 +32,7 @@ export function createFlip3D(containerElement, options) {
     const hueAt = (val)=> 360 * (val/(length-1||1));
 
     function createTextSprite(text){
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        ctx.font = 'Bold 28px Arial';
-        const metrics = ctx.measureText(text);
-        canvas.width = metrics.width + 8; canvas.height = 40;
-        ctx.font = 'Bold 28px Arial';
-        ctx.fillStyle = 'white'; ctx.fillText(text, 0, 28);
-        const tex = new THREE.CanvasTexture(canvas);
-        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
-        const sp = new THREE.Sprite(mat); sp.scale.set(4, 1.2, 1);
-        return sp;
+        return createVectorText(text, 'white', { fontSize: 0.8 });
     }
 
     // Build sequences with side-by-side panels per step

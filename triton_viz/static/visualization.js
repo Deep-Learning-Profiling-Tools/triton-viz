@@ -1,5 +1,4 @@
 import { GridBlock } from './gridblock.js';
-import { createInfoPopup, showInfoPopup } from './infoPopup.js';
 import { createLoadOverallVisualization } from './load.js';
 import { createStoreOverallVisualization } from './store.js';
 import { enableDrag } from './ui_helpers.js';
@@ -14,7 +13,6 @@ let canvasLogicalHeight = 0;
 let kernelGrid;
 let currentBlockData = null;
 let containerElement;
-let infoPopup;
 let isInitialized = false;
 let overallCleanup = null;
 let maxX = 0;
@@ -22,7 +20,7 @@ let maxY = 0;
 let maxZ = 0;
 let zSlice = 0;
 const overallCache = {};
-const filterValues = [-1, -1, -1];
+const filterValues = [0, 0, 0];
 const THEME_STORAGE_KEY = 'triton-viz-theme';
 
 const controls = {
@@ -35,22 +33,90 @@ const controls = {
     precomputeBtn: null,
     infoBtn: null,
     themeToggle: null,
+    resizer: null,
+    opColorizeBtn: null,
+    opHistogramBtn: null,
+    opAllProgramsBtn: null,
 };
 
 let controlToastEl = null;
 let controlToastTimer = null;
 
-function setGlobalCodeButtonVisible(visible) {
-    const btn = document.getElementById('global-code-toggle-btn');
-    if (btn) {
-        btn.style.display = visible ? 'block' : 'none';
+const opControls = {
+    handlers: null,
+    state: {
+        colorize: false,
+        showCode: false,
+        histogram: false,
+        allPrograms: false,
+    },
+};
+
+function setOpControlState(nextState = {}) {
+    opControls.state = {
+        ...opControls.state,
+        ...nextState,
+    };
+    updateOpControls();
+}
+
+function setOpControlHandlers(handlers = null) {
+    opControls.handlers = handlers;
+    updateOpControls();
+}
+
+function resetOpControls() {
+    opControls.handlers = null;
+    opControls.state = {
+        colorize: false,
+        showCode: false,
+        histogram: false,
+        allPrograms: false,
+    };
+    if (window.__tritonVizCodeHide) {
+        window.__tritonVizCodeHide();
+    }
+    updateOpControls();
+}
+
+function updateToggleLabel(button, label, isOn) {
+    if (!button) return;
+    button.textContent = `${label}: ${isOn ? 'ON' : 'OFF'}`;
+    button.classList.toggle('active', isOn);
+}
+
+function updateOpControls() {
+    const { handlers, state } = opControls;
+    if (controls.opColorizeBtn) {
+        controls.opColorizeBtn.disabled = !handlers || !handlers.toggleColorize;
+        updateToggleLabel(controls.opColorizeBtn, 'Heatmap', !!state.colorize);
+    }
+    if (controls.opHistogramBtn) {
+        controls.opHistogramBtn.disabled = !handlers || !handlers.toggleHistogram;
+        updateToggleLabel(controls.opHistogramBtn, 'Value Histogram', !!state.histogram);
+    }
+    if (controls.opAllProgramsBtn) {
+        controls.opAllProgramsBtn.disabled = !handlers || !handlers.toggleAllPrograms;
+        updateToggleLabel(controls.opAllProgramsBtn, 'All Program IDs', !!state.allPrograms);
+    }
+}
+
+function applyToggleResult(result, key) {
+    if (result && typeof result.then === 'function') {
+        result.then((value) => {
+            setOpControlState({ [key]: !!value });
+        });
+    } else {
+        setOpControlState({ [key]: !!result });
     }
 }
 
 try {
-    window.setGlobalCodeButtonVisible = setGlobalCodeButtonVisible;
+    window.setOpControlHandlers = setOpControlHandlers;
+    window.setOpControlState = setOpControlState;
+    window.resetOpControls = resetOpControls;
 } catch (err) {
-    console.warn('Unable to expose setGlobalCodeButtonVisible', err);
+    console.warn('Unable to expose op control helpers', err);
 }
 
 function closeOverallOverlay() {
@@ -67,11 +133,12 @@ function closeOverallOverlay() {
         canvas.style.display = 'block';
     }
     currentView = 'main';
+    resetOpControls();
 }
 
 function switchToMainView() {
     closeOverallOverlay();
-    setGlobalCodeButtonVisible(false);
+    resetOpControls();
 
     if (currentBlockData) {
         currentBlockData.hideDetailedView();
@@ -87,7 +154,31 @@ function switchToMainView() {
 
 function switchToTensorView(clickedBlock) {
     currentView = 'tensor';
+    resetOpControls();
     currentBlockData = clickedBlock;
+    if (currentBlockData) {
+        const coords = [
+            currentBlockData.gridPosition.x,
+            currentBlockData.gridPosition.y,
+            currentBlockData.gridPosition.z,
+        ];
+        coords.forEach((val, idx) => {
+            filterValues[idx] = val;
+            const slider = document.querySelector(`input[data-filter-index="${idx}"]`);
+            if (slider) {
+                slider.value = val;
+            }
+            const pill = document.getElementById(`pid-value-${idx}`);
+            if (pill) pill.textContent = String(val);
+            if (kernelGrid) {
+                kernelGrid.updateFilter(idx, val);
+            }
+        });
+        setZSlice(currentBlockData.gridPosition.z);
+        if (kernelGrid) {
+            kernelGrid.updateZ(currentBlockData.gridPosition.z);
+        }
+    }
 
     if (containerElement) {
         containerElement.style.pointerEvents = 'auto';
@@ -101,19 +192,37 @@ function switchToTensorView(clickedBlock) {
     clickedBlock.showDetailedView();
 }
 
+function openProgramZeroBlock() {
+    if (!kernelGrid || kernelGrid.blocks.length === 0) return;
+    const target = kernelGrid.blocks.find(
+        (block) =>
+            block.gridPosition.x === 0 &&
+            block.gridPosition.y === 0 &&
+            block.gridPosition.z === 0 &&
+            Array.isArray(block.blockData) &&
+            block.blockData.length > 0
+    );
+    if (target) {
+        switchToTensorView(target);
+    }
+}
+
 function initializeApp() {
     canvas = document.getElementById('canvas');
     canvasWrapper = document.getElementById('canvas-wrapper');
     containerElement = document.getElementById('visualization-container');
     controls.panel = document.getElementById('control-panel');
+    controls.resizer = document.getElementById('sidebar-resizer');
     controls.pidContainer = document.getElementById('pid-controls');
     controls.zSlider = document.getElementById('z-slider');
     controls.zValueLabel = document.getElementById('z-value');
     controls.resetBtn = document.getElementById('reset-filters');
     controls.overallBtn = document.getElementById('btn-overall');
     controls.precomputeBtn = document.getElementById('btn-precompute');
-    controls.infoBtn = document.getElementById('btn-info');
     controls.themeToggle = document.getElementById('theme-toggle');
+    controls.opColorizeBtn = document.getElementById('btn-op-colorize');
+    controls.opHistogramBtn = document.getElementById('btn-op-histogram');
+    controls.opAllProgramsBtn = document.getElementById('btn-op-all-programs');
 
     if (!canvas || !canvasWrapper || !containerElement) {
         console.error('Essential visualization elements are missing.');
@@ -136,6 +245,8 @@ function initializeApp() {
 
     setupThemeToggle();
     setupControlEvents();
+    setupSidebarResizer();
+    updateOpControls();
     resizeCanvas();
     fetchData();
 }
@@ -166,15 +277,15 @@ function setupControlEvents() {
     if (controls.resetBtn) {
         controls.resetBtn.addEventListener('click', () => {
             for (let i = 0; i < filterValues.length; i += 1) {
-                filterValues[i] = -1;
+                filterValues[i] = 0;
                 const slider = document.querySelector(`input[data-filter-index="${i}"]`);
                 if (slider) {
-                    slider.value = -1;
+                    slider.value = 0;
                 }
                 const valuePill = document.getElementById(`pid-value-${i}`);
-                if (valuePill) valuePill.textContent = 'All';
+                if (valuePill) valuePill.textContent = '0';
                 if (kernelGrid) {
-                    kernelGrid.updateFilter(i, -1);
+                    kernelGrid.updateFilter(i, 0);
                 }
             }
             setZSlice(0);
@@ -196,14 +307,6 @@ function setupControlEvents() {
         });
     }
 
-    if (controls.infoBtn) {
-        controls.infoBtn.addEventListener('click', () => {
-            if (!infoPopup) {
-                infoPopup = createInfoPopup();
-            }
-            showInfoPopup(infoPopup);
-        });
-    }
 
     if (controls.zSlider) {
         controls.zSlider.addEventListener('input', (event) => {
@@ -215,6 +318,61 @@ function setupControlEvents() {
             }
         });
     }
+
+    if (controls.opColorizeBtn) {
+        controls.opColorizeBtn.addEventListener('click', () => {
+            const handler = opControls.handlers?.toggleColorize;
+            if (!handler) return;
+            applyToggleResult(handler(), 'colorize');
+        });
+    }
+
+    if (controls.opHistogramBtn) {
+        controls.opHistogramBtn.addEventListener('click', () => {
+            const handler = opControls.handlers?.toggleHistogram;
+            if (!handler) return;
+            applyToggleResult(handler(), 'histogram');
+        });
+    }
+
+    if (controls.opAllProgramsBtn) {
+        controls.opAllProgramsBtn.addEventListener('click', () => {
+            const handler = opControls.handlers?.toggleAllPrograms;
+            if (!handler) return;
+            applyToggleResult(handler(), 'allPrograms');
+        });
+    }
+}
+
+function setupSidebarResizer() {
+    if (!controls.resizer || !controls.panel) return;
+    const root = document.documentElement;
+    const minWidth = 0;
+    let startX = 0;
+    let startWidth = 0;
+
+    const onPointerMove = (event) => {
+        const delta = event.clientX - startX;
+        const resizerWidth = controls.resizer.getBoundingClientRect().width || 0;
+        const maxWidth = Math.max(0, window.innerWidth - resizerWidth);
+        const next = Math.min(maxWidth, Math.max(minWidth, startWidth + delta));
+        root.style.setProperty('--sidebar-width', `${next}px`);
+        resizeCanvas();
+    };
+
+    const onPointerUp = (event) => {
+        controls.resizer.releasePointerCapture(event.pointerId);
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', onPointerUp);
+    };
+
+    controls.resizer.addEventListener('pointerdown', (event) => {
+        startX = event.clientX;
+        startWidth = controls.panel.getBoundingClientRect().width;
+        controls.resizer.setPointerCapture(event.pointerId);
+        window.addEventListener('pointermove', onPointerMove);
+        window.addEventListener('pointerup', onPointerUp);
+    });
 }
 
 function showControlToast(message) {
@@ -302,8 +460,9 @@ class KernelGrid {
         this.gridSize = gridSize;
         this.visualizationData = visualizationData;
         this.currentZ = 0;
+        this.gridDepth = Math.max(1, (gridSize[2] || 1));
         this.blocks = [];
-        this.filterValues = [-1, -1, -1];
+        this.filterValues = [0, 0, 0];
         this.selectedBlock = null;
         this.calculateBlockSize();
         this.createBlocks();
@@ -333,6 +492,19 @@ class KernelGrid {
                 const gridKey1 = `(${x}, ${y}, ${this.currentZ})`;
                 const gridKey2 = `(${x},${y},${this.currentZ})`;
                 const blockData = this.visualizationData[gridKey1] || this.visualizationData[gridKey2] || [];
+                const programIdConfig = {
+                    max: {
+                        x: Math.max(0, gridX - 1),
+                        y: Math.max(0, gridY - 1),
+                        z: Math.max(0, this.gridDepth - 1),
+                    },
+                    values: {
+                        x,
+                        y,
+                        z: this.currentZ,
+                    },
+                    getBlockData: (nx, ny, nz) => this.getBlockDataAt(nx, ny, nz),
+                };
                 const block = new GridBlock(
                     blockX,
                     blockY,
@@ -346,10 +518,21 @@ class KernelGrid {
                     containerElement,
                     canvas,
                     draw
+                    , programIdConfig
                 );
                 this.blocks.push(block);
             }
         }
+    }
+
+    getBlockDataAt(nx, ny, nz) {
+        const withSpaces = `(${nx}, ${ny}, ${nz})`;
+        const withoutSpaces = `(${nx},${ny},${nz})`;
+        return (
+            this.visualizationData[withSpaces] ||
+            this.visualizationData[withoutSpaces] ||
+            []
+        );
     }
 
     draw(ctxRef, palette) {
@@ -367,9 +550,9 @@ class KernelGrid {
 
     shouldDrawBlock(block) {
         return (
-            (this.filterValues[0] === -1 || block.gridPosition.x === this.filterValues[0]) &&
-            (this.filterValues[1] === -1 || block.gridPosition.y === this.filterValues[1]) &&
-            (this.filterValues[2] === -1 || block.gridPosition.z === this.filterValues[2])
+            block.gridPosition.x === this.filterValues[0] &&
+            block.gridPosition.y === this.filterValues[1] &&
+            block.gridPosition.z === this.filterValues[2]
         );
     }
 
@@ -447,42 +630,57 @@ function initializeUIElements() {
     createProgramIdControls();
     updateZSliderState();
 
-    if (!infoPopup) {
-        infoPopup = createInfoPopup();
-    }
-
     isInitialized = true;
     draw();
+    openProgramZeroBlock();
 }
 
 function createProgramIdControls() {
     if (!controls.pidContainer) return;
     controls.pidContainer.innerHTML = '';
-    const labels = ['Program Id 0', 'Program Id 1', 'Program Id 2'];
+    const labels = ['X', 'Y', 'Z'];
     const maxValues = [maxX, maxY, maxZ];
     labels.forEach((label, index) => {
         const wrapper = document.createElement('div');
-        wrapper.className = 'control-field';
-        const fieldLabel = document.createElement('label');
+        wrapper.className = 'control-field is-inline';
         const nameSpan = document.createElement('span');
+        nameSpan.className = 'control-label';
         nameSpan.textContent = label;
         const valueSpan = document.createElement('span');
         valueSpan.className = 'value-pill';
         valueSpan.id = `pid-value-${index}`;
-        valueSpan.textContent = filterValues[index] < 0 ? 'All' : String(filterValues[index]);
-        fieldLabel.appendChild(nameSpan);
-        fieldLabel.appendChild(valueSpan);
+        const isLocked = maxValues[index] <= 0;
+        if (isLocked) {
+            filterValues[index] = 0;
+        }
+        const displayValue = isLocked ? 0 : Math.max(0, filterValues[index]);
+        filterValues[index] = displayValue;
+        valueSpan.textContent = String(displayValue);
         const slider = document.createElement('input');
         slider.type = 'range';
-        slider.min = -1;
+        slider.min = 0;
         slider.max = maxValues[index];
-        slider.value = filterValues[index];
+        slider.value = displayValue;
         slider.dataset.filterIndex = index;
-        slider.disabled = maxValues[index] <= 0;
+        slider.disabled = isLocked;
+        const tickId = `pid-ticks-${index}`;
+        const ticks = document.createElement('datalist');
+        ticks.id = tickId;
+        for (let i = 0; i <= maxValues[index]; i += 1) {
+            const opt = document.createElement('option');
+            opt.value = String(i);
+            ticks.appendChild(opt);
+        }
+        slider.setAttribute('list', tickId);
         slider.addEventListener('input', handleProgramFilterChange);
-        wrapper.appendChild(fieldLabel);
+        wrapper.appendChild(nameSpan);
         wrapper.appendChild(slider);
+        wrapper.appendChild(valueSpan);
+        wrapper.appendChild(ticks);
         controls.pidContainer.appendChild(wrapper);
+        if (isLocked && kernelGrid) {
+            kernelGrid.updateFilter(index, 0);
+        }
     });
 }
 
@@ -492,11 +690,17 @@ function handleProgramFilterChange(event) {
     filterValues[index] = value;
     const pill = document.getElementById(`pid-value-${index}`);
     if (pill) {
-        pill.textContent = value < 0 ? 'All' : String(value);
+        pill.textContent = String(value);
     }
     if (kernelGrid) {
         kernelGrid.updateFilter(index, value);
         draw();
+    }
+    if (currentBlockData && typeof currentBlockData.applyProgramIdSelection === 'function') {
+        const nextX = filterValues[0];
+        const nextY = filterValues[1];
+        const nextZ = filterValues[2];
+        currentBlockData.applyProgramIdSelection(nextX, nextY, nextZ);
     }
 }
 
@@ -601,8 +805,8 @@ async function showOverallOverlay() {
         showControlToast('No Load/Store ops available to aggregate.');
         return;
     }
+    resetOpControls();
     currentView = 'overall';
-    setGlobalCodeButtonVisible(false);
     if (canvas) canvas.style.display = 'none';
     if (!containerElement) return;
     containerElement.style.pointerEvents = 'auto';

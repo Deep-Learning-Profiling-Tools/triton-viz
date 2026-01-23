@@ -45,9 +45,12 @@ from triton_viz.core.data import (
 from triton_viz.frontends.base import (
     AdapterResult,
     Frontend,
-    program_id_adapter,
-    register_frontend,
+    OPERATION_REGISTRY,
 )
+
+
+def program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(axis)
 
 
 def _triton_raw_store_adapter(
@@ -93,48 +96,48 @@ def _triton_addptr_adapter(
     return AdapterResult(ptr, offset)
 
 
-TRITON_NAMESPACES: dict[Any, dict[type[Op], str]] = {
+TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
     interpreter_builder: {
-        ProgramId: "create_get_program_id",
-        RawStore: "create_store",
-        Store: "create_masked_store",
-        RawLoad: "create_load",
-        Load: "create_masked_load",
-        Dot: "create_dot",
-        UnaryOp: "unary_op",
-        BinaryOp: "binary_op",
-        TernaryOp: "ternary_op",
-        MakeRange: "create_make_range",
-        AddPtr: "create_addptr",
-        ExpandDims: "create_expand_dims",
-        Broadcast: "create_broadcast",
-        Splat: "create_splat",
-        MakeBlockPointer: "create_make_block_ptr",
-        TensorPointerLoad: "create_tensor_pointer_load",
-        TensorPointerStore: "create_tensor_pointer_store",
-        Idiv: "create_idiv",
-        Rsqrt: "create_rsqrt",
-        CastImpl: "cast_impl",
-        Reshape: "create_reshape",
-        Join: "create_join",
-        Fabs: "create_fabs",
-        Ashr: "create_ashr",
-        Advance: "create_advance",
-        FpToFp: "create_fp_to_fp",
-        Umulhi: "create_umulhi",
-        Bitcast: "create_bitcast",
-        AtomicCas: "create_atomic_cas",
-        AtomicRMW: "create_atomic_rmw",
+        "create_get_program_id": ProgramId,
+        "create_store": RawStore,
+        "create_masked_store": Store,
+        "create_load": RawLoad,
+        "create_masked_load": Load,
+        "create_dot": Dot,
+        "unary_op": UnaryOp,
+        "binary_op": BinaryOp,
+        "ternary_op": TernaryOp,
+        "create_make_range": MakeRange,
+        "create_addptr": AddPtr,
+        "create_expand_dims": ExpandDims,
+        "create_broadcast": Broadcast,
+        "create_splat": Splat,
+        "create_make_block_ptr": MakeBlockPointer,
+        "create_tensor_pointer_load": TensorPointerLoad,
+        "create_tensor_pointer_store": TensorPointerStore,
+        "create_idiv": Idiv,
+        "create_rsqrt": Rsqrt,
+        "cast_impl": CastImpl,
+        "create_reshape": Reshape,
+        "create_join": Join,
+        "create_fabs": Fabs,
+        "create_ashr": Ashr,
+        "create_advance": Advance,
+        "create_fp_to_fp": FpToFp,
+        "create_umulhi": Umulhi,
+        "create_bitcast": Bitcast,
+        "create_atomic_cas": AtomicCas,
+        "create_atomic_rmw": AtomicRMW,
     },
     tl: {
-        ReduceMax: "max",
-        ReduceMin: "min",
-        ReduceSum: "sum",
-        CumSum: "cumsum",
-        Trans: "trans",
+        "max": ReduceMax,
+        "min": ReduceMin,
+        "sum": ReduceSum,
+        "cumsum": CumSum,
+        "trans": Trans,
     },
     tl.math: {
-        Umulhi: "umulhi",
+        "umulhi": Umulhi,
     },
 }
 TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
@@ -152,10 +155,6 @@ TRITON_FRONTEND = Frontend.from_namespaces(
     builder=interpreter_builder,
     namespaces=TRITON_NAMESPACES,
     adapters=TRITON_ADAPTERS,
-    primary_namespace=interpreter_builder,
 )
-TRITON_OP_LIST = TRITON_FRONTEND.op_list
-TRITON_ORIGINAL_OPS = TRITON_FRONTEND.original_ops
-TRITON_OP_ATTR_NAMES = TRITON_FRONTEND.op_attr_names
 
-register_frontend("triton", TRITON_FRONTEND)
+OPERATION_REGISTRY["triton"] = TRITON_FRONTEND

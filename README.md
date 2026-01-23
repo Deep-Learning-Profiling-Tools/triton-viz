@@ -40,6 +40,10 @@ Given that Triton allows developers to program at a higher level while still tar
 Triton-Viz addresses these challenges by providing real-time visualization of tensor operations and their memory usage.
 The best part about this tool is that while it does focus on visualizing GPU operations, users are not required to have GPU resources to run examples on their system.
 
+
+### Visualization Features
+- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows automatically flip outside when space is limited.
+- **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
 ## Getting Started
 
 ### Prerequisites
@@ -48,22 +52,6 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 - [Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
 - Note: the below commands must be run in order.
 
-Triton install (need nightly):
-```
-pip install -U triton --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
-```
-
-Upon successfully installing Triton, install Torch using the following command:
-
-```sh
-pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-```
-
-Upon successful installation of Torch make sure to uninstall `pytorch-triton` using the following command:
-
-```sh
-pip uninstall pytorch-triton
-```
 
 ### Installation of Triton-Viz
 
@@ -72,22 +60,24 @@ Clone the repository to your local machine:
 ```sh
 git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
 cd triton-viz
-pip install -e .
+uv sync # or "uv sync --extra test" if you're running tests
 ```
 
-You're all set!
+If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Otherwise you're all set!
 
 ### Optional: Enable NKI Support
 
 If you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the NKI-specific tests:
 
-1. Follow the [AWS Neuron Torch-NeuronX Ubuntu 22.04 setup guide](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/setup/neuron-setup/pytorch/neuronx/ubuntu/torch-neuronx-ubuntu22.html#setup-torch-neuronx-ubuntu22) to add the Neuron APT repository and install the required system packages (for example `aws-neuronx-tools`, `aws-neuronx-runtime-lib`, `aws-neuronx-collectives`, and their dependencies).
-2. Instead of running `pip install -e .` in the above section, install Triton-Viz with the optional NKI extras so the Neuron Python packages (`neuronx-cc`, `libneuronxla`, `torch-neuronx`) are available:
+```sh
+uv sync --extra nki # or "uv sync --extra nki --extra test" if also running tests
+```
 
-   ```sh
-   pip install -e .[nki]
-   # or pip install triton-viz[nki]
-   ```
+Note that you need to specify all features that you want _in one statement_ when using `uv sync`, i.e. if you want both NKI and testing support, you must run `uv sync --extra nki --extra test`. The below statements are wrong and will remove the NKI install when installing test packages:
+```
+uv sync --extra nki
+uv sync --extra test
+```
 
 ### Testing
 * To run core Triton-viz tests, run `pytest tests/`.
@@ -110,6 +100,22 @@ export TRITON_VIZ_NUM_SMS=4  # or set triton_viz.config.num_sms in Python
 ```
 
 This is useful for kernels that rely on cross-block synchronization (e.g., producer/consumer patterns) when testing without a GPU.
+
+### Environment variables
+
+Triton-Viz uses a small set of environment variables to configure runtime behavior. Unless noted, boolean flags are enabled only when set to `1`.
+
+- `TRITON_VIZ_VERBOSE` (default: `0`): enable verbose logging and extra debug output.
+- `TRITON_VIZ_NUM_SMS` (default: `1`): number of concurrent SMs to emulate for the CPU interpreter (min 1).
+- `TRITON_VIZ_PORT` (default: `8000` with `share=True`, `5001` with `share=False`): port for the Flask server.
+- `ENABLE_SANITIZER` (default: `1`): enable the sanitizer pipeline that checks memory accesses.
+- `ENABLE_PROFILER` (default: `1`): enable the profiler pipeline that collects performance data.
+- `ENABLE_TIMING` (default: `0`): collect timing data during execution.
+- `REPORT_GRID_EXECUTION_PROGRESS` (default: `0`): report per-program block execution progress in the interpreter.
+- `SANITIZER_ENABLE_FAKE_TENSOR` (default: `0`): use a fake tensor backend for sanitizer runs to avoid real memory reads.
+- `PROFILER_ENABLE_LOAD_STORE_SKIPPING` (default: `1`): skip redundant load/store checks to reduce profiling overhead.
+- `PROFILER_ENABLE_BLOCK_SAMPLING` (default: `1`): sample a subset of blocks to reduce profiling overhead.
+- `PROFILER_DISABLE_BUFFER_LOAD_CHECK` (default: `0`): disable buffer load checks in the profiler.
 
 ## More Puzzles
 
