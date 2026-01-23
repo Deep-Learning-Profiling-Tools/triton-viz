@@ -15,7 +15,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         return { rows, cols, width, height };
     }
 
-    const gap = 0;
+    const gap = -4 * spacing;
     const sizeA = matrixSize(input_shape);
     const sizeB = matrixSize(other_shape);
     const posC = [0, 0, 0];
