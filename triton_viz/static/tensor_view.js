@@ -21,6 +21,18 @@ import { createHistogramOverlay } from './histogram.js';
 import { enableDrag } from './ui_helpers.js';
 
 const VIZ_CACHE = new Map();
+const PROGRAM_COUNT_COLORS = [
+    '#22c55e',
+    '#facc15',
+    '#f97316',
+    '#ef4444',
+    '#a855f7',
+    '#3b82f6',
+    '#14b8a6',
+    '#f472b6',
+];
+const PROGRAM_COUNT_PALETTE = PROGRAM_COUNT_COLORS.map((c) => new THREE.Color(c));
+const PROGRAM_SUBSET_LIMIT = 256;
 
 // --- Top-Level Helpers ---
 
@@ -70,6 +82,26 @@ async function fetchTensorPayload(apiBase, uuid, endpoint = 'getLoadTensor') {
             values: data.values, shape: data.shape, dims: data.dims,
             highlights: data.highlights,
         };
+    } catch (e) { return null; }
+}
+
+async function fetchProgramCounts(apiBase, op) {
+    if (!op || !op.overall_key || op.time_idx === undefined) return null;
+    // fetch a sparse list of coords -> program count for this op
+    try {
+        const res = await fetch(`${apiBase}/api/getLoadStoreAllPrograms`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: op.type,
+                overall_key: op.overall_key,
+                time_idx: op.time_idx,
+                op_index: op.op_index,
+            })
+        });
+        const data = await res.json();
+        if (!data || data.error) return null;
+        return data;
     } catch (e) { return null; }
 }
 
@@ -124,6 +156,152 @@ function applyMonochromeColormap(mesh, cache) {
     mesh.instanceColor.needsUpdate = true;
 }
 
+function normalizeProgramCounts(payload) {
+    // normalize the sparse payload into a map for fast lookups
+    const map = new Map();
+    let maxCount = 0;
+    (payload?.counts || []).forEach((entry) => {
+        if (!entry || entry.length < 4) return;
+        const [x, y, z, count] = entry;
+        const safeCount = Number(count) || 0;
+        map.set(`${x},${y},${z}`, safeCount);
+        if (safeCount > maxCount) maxCount = safeCount;
+    });
+    maxCount = Math.max(maxCount, Number(payload?.max_count) || 0);
+    return { map, maxCount };
+}
+
+function normalizeProgramSubsets(payload) {
+    // normalize subset payload into lookup maps
+    const subsetMap = new Map();
+    const subsets = payload?.subsets || {};
+    const subsetCount = Number(payload?.subset_count) || Object.keys(subsets).length;
+    const countMap = new Map();
+    let maxCount = Number(payload?.max_count) || 0;
+    (payload?.coords || []).forEach((entry) => {
+        if (!entry || entry.length < 4) return;
+        const [x, y, z, key] = entry;
+        subsetMap.set(`${x},${y},${z}`, key);
+    });
+    (payload?.counts || []).forEach((entry) => {
+        if (!entry || entry.length < 4) return;
+        const [x, y, z, count] = entry;
+        const safeCount = Number(count) || 0;
+        countMap.set(`${x},${y},${z}`, safeCount);
+        if (safeCount > maxCount) maxCount = safeCount;
+    });
+    return { subsetMap, subsets, subsetCount, countMap, maxCount };
+}
+
+function buildSubsetHues(subsets) {
+    const keys = Object.keys(subsets || {});
+    const hues = new Map();
+    let hue = Math.random();
+    keys.forEach((key) => {
+        hue = (hue + 0.61803398875) % 1;
+        hues.set(key, hue);
+    });
+    return hues;
+}
+
+function applyProgramCountColors(mesh, counts, baseColor, palette) {
+    if (!mesh || !counts) return;
+    // paint each cube with a color based on the count bucket
+    const coordsList = mesh.userData.coords;
+    if (!coordsList) return;
+    const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
+    const countMap = counts.map;
+    const colors = palette || PROGRAM_COUNT_PALETTE;
+    const c = new THREE.Color();
+    for (let i = 0; i < mesh.count; i += 1) {
+        const coords = coordsList[i];
+        const count = coords ? countMap.get(`${coords[0]},${coords[1]},${coords[2]}`) || 0 : 0;
+        if (count <= 0) {
+            c.copy(base);
+        } else {
+            const idx = Math.min(count - 1, colors.length - 1);
+            c.copy(colors[idx]);
+        }
+        mesh.setColorAt(i, c);
+    }
+    mesh.instanceColor.needsUpdate = true;
+}
+
+function applyProgramCountHeatmap(mesh, cache, counts, palette, baseColor) {
+    if (!mesh || !cache || !counts) return;
+    const coordsList = mesh.userData.coords;
+    if (!coordsList) return;
+    const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
+    const countMap = counts.map;
+    const colors = palette || PROGRAM_COUNT_PALETTE;
+    const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
+    const c = new THREE.Color();
+    const hsl = { h: 0, s: 0, l: 0.5 };
+    for (let i = 0; i < mesh.count; i += 1) {
+        const coords = coordsList[i];
+        const count = coords ? countMap.get(`${coords[0]},${coords[1]},${coords[2]}`) || 0 : 0;
+        if (count <= 0) {
+            const val = coords ? sampleValueFromCache(cache, coords) : 0;
+            const t = clamp01((val - min) / denom);
+            c.setRGB(t, t, t);
+            mesh.setColorAt(i, c);
+            continue;
+        }
+        const idx = Math.min(count - 1, colors.length - 1);
+        colors[idx].getHSL(hsl);
+        const val = coords ? sampleValueFromCache(cache, coords) : 0;
+        const t = clamp01((val - min) / denom);
+        c.setHSL(hsl.h, 0.7, t);
+        mesh.setColorAt(i, c);
+    }
+    mesh.instanceColor.needsUpdate = true;
+}
+
+function applyProgramSubsetColors(mesh, subsetState, hues, baseColor) {
+    if (!mesh || !subsetState || !hues) return;
+    const coordsList = mesh.userData.coords;
+    if (!coordsList) return;
+    const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
+    const subsetMap = subsetState.subsetMap;
+    const c = new THREE.Color();
+    for (let i = 0; i < mesh.count; i += 1) {
+        const coords = coordsList[i];
+        const key = coords ? subsetMap.get(`${coords[0]},${coords[1]},${coords[2]}`) : null;
+        if (key && hues.has(key)) {
+            c.setHSL(hues.get(key), 0.6, 0.55);
+        } else {
+            c.copy(base);
+        }
+        mesh.setColorAt(i, c);
+    }
+    mesh.instanceColor.needsUpdate = true;
+}
+
+function applyProgramSubsetHeatmap(mesh, cache, subsetState, hues, baseColor) {
+    if (!mesh || !cache || !subsetState || !hues) return;
+    const coordsList = mesh.userData.coords;
+    if (!coordsList) return;
+    const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
+    const subsetMap = subsetState.subsetMap;
+    const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
+    const c = new THREE.Color();
+    for (let i = 0; i < mesh.count; i += 1) {
+        const coords = coordsList[i];
+        const key = coords ? subsetMap.get(`${coords[0]},${coords[1]},${coords[2]}`) : null;
+        if (!key || !hues.has(key)) {
+            const val = coords ? sampleValueFromCache(cache, coords) : 0;
+            const t = clamp01((val - min) / denom);
+            c.setRGB(t, t, t);
+            mesh.setColorAt(i, c);
+            continue;
+        }
+        const val = coords ? sampleValueFromCache(cache, coords) : 0;
+        const t = clamp01((val - min) / denom);
+        c.setHSL(hues.get(key), 0.7, t);
+        mesh.setColorAt(i, c);
+    }
+    mesh.instanceColor.needsUpdate = true;
+}
 function getHighlightPredicate(highlights) {
     if (!highlights) return null;
     if (highlights.type === 'descriptor') {
@@ -162,7 +340,19 @@ function restoreTensorColors(ctx) {
     tensors.forEach((group, name) => {
         const mesh = group.userData.mesh;
         const p = state.payloads.get(name);
-        if (state.colorizeOn && p) {
+        if (state.allProgramsOn && state.allProgramsMode === 'subset' && state.programSubsets) {
+            if (state.colorizeOn && p) {
+                applyProgramSubsetHeatmap(mesh, p, state.programSubsets, state.programSubsetHues, mesh.userData.color_base);
+            } else {
+                applyProgramSubsetColors(mesh, state.programSubsets, state.programSubsetHues, mesh.userData.color_base);
+            }
+        } else if (state.allProgramsOn && state.allProgramsMode === 'count' && state.programCounts) {
+            if (state.colorizeOn && p) {
+                applyProgramCountHeatmap(mesh, p, state.programCounts, PROGRAM_COUNT_PALETTE, mesh.userData.color_base);
+            } else {
+                applyProgramCountColors(mesh, state.programCounts, mesh.userData.color_base, PROGRAM_COUNT_PALETTE);
+            }
+        } else if (state.colorizeOn && p) {
             applyColorizedMesh(ctx, group, name);
         } else {
             updateTensorHighlights(group, p?.highlights, ctx.highlightColor, mesh.userData.color_base);
@@ -243,6 +433,93 @@ function createLegendItem(label, min, max) {
     return item;
 }
 
+function createProgramCountLegendItem(baseColor, maxCount, palette = PROGRAM_COUNT_PALETTE) {
+    const item = document.createElement('div');
+    Object.assign(item.style, { display: 'grid', gap: '6px', fontFamily: 'monospace', fontSize: '12px' });
+    const title = document.createElement('div');
+    title.textContent = 'Programs per element';
+    title.style.opacity = '0.9';
+    title.style.fontWeight = 'bold';
+    item.appendChild(title);
+    const rows = document.createElement('div');
+    rows.style.display = 'grid';
+    rows.style.gap = '4px';
+    const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
+    const addRow = (label, color) => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '6px';
+        const swatch = document.createElement('span');
+        swatch.style.display = 'inline-block';
+        swatch.style.width = '12px';
+        swatch.style.height = '12px';
+        swatch.style.borderRadius = '3px';
+        swatch.style.background = `#${color.getHexString()}`;
+        row.appendChild(swatch);
+        const text = document.createElement('span');
+        text.textContent = label;
+        row.appendChild(text);
+        rows.appendChild(row);
+    };
+    addRow('none', base);
+    const maxLegend = Math.min(maxCount, palette.length);
+    for (let i = 1; i <= maxLegend; i += 1) {
+        addRow(String(i), palette[i - 1]);
+    }
+    if (maxCount > palette.length && palette.length > 0) {
+        addRow(`>=${palette.length}`, palette[palette.length - 1]);
+    }
+    item.appendChild(rows);
+    return item;
+}
+
+function createProgramSubsetLegendItem(baseColor, subsets, hues) {
+    const item = document.createElement('div');
+    Object.assign(item.style, { display: 'grid', gap: '6px', fontFamily: 'monospace', fontSize: '12px' });
+    const title = document.createElement('div');
+    title.textContent = 'Program ID subsets';
+    title.style.opacity = '0.9';
+    title.style.fontWeight = 'bold';
+    item.appendChild(title);
+    const rows = document.createElement('div');
+    rows.style.display = 'grid';
+    rows.style.gap = '4px';
+    const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
+    const addRow = (label, color) => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '6px';
+        const swatch = document.createElement('span');
+        swatch.style.display = 'inline-block';
+        swatch.style.width = '12px';
+        swatch.style.height = '12px';
+        swatch.style.borderRadius = '3px';
+        swatch.style.background = `#${color.getHexString()}`;
+        row.appendChild(swatch);
+        const text = document.createElement('span');
+        text.textContent = label;
+        row.appendChild(text);
+        rows.appendChild(row);
+    };
+    addRow('none', base);
+    Object.keys(subsets || {}).forEach((key) => {
+        const pids = subsets[key] || [];
+        const label = pids.length
+            ? pids.map(([x, y, z]) => `(${x},${y},${z})`).join(' ')
+            : '(empty)';
+        const color = new THREE.Color();
+        if (hues && hues.has(key)) {
+            color.setHSL(hues.get(key), 0.6, 0.55);
+        } else {
+            color.copy(base);
+        }
+        addRow(label, color);
+    });
+    item.appendChild(rows);
+    return item;
+}
 function addDimensionLines(scene, tensorGroup, dimColors = []) {
     const mesh = tensorGroup?.userData?.mesh;
     if (!mesh) return [];
@@ -294,21 +571,41 @@ function onMouseMove(event, ctx) {
 
         if (key !== state.lastHoverKey) {
             state.lastHoverKey = key;
-            const coords = mesh.userData.coords[instanceId];
-            if (state.activeHoverOutline) {
-                const matrix = new THREE.Matrix4();
-                mesh.getMatrixAt(instanceId, matrix);
-                const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scale = new THREE.Vector3();
-                matrix.decompose(pos, quat, scale);
-                mesh.localToWorld(pos);
-                state.activeHoverOutline.position.copy(pos);
-                state.activeHoverOutline.visible = true;
-            }
-            const cacheEntry = state.payloads.get(tensorName);
-            const val = cacheEntry ? sampleValueFromCache(cacheEntry, coords) : 'Loading...';
-            const currentShape = mesh.userData.shape_raw;
+        const coords = mesh.userData.coords[instanceId];
+        if (state.activeHoverOutline) {
+            const matrix = new THREE.Matrix4();
+            mesh.getMatrixAt(instanceId, matrix);
+            const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scale = new THREE.Vector3();
+            matrix.decompose(pos, quat, scale);
+            mesh.localToWorld(pos);
+            state.activeHoverOutline.position.copy(pos);
+            state.activeHoverOutline.visible = true;
+        }
+        const cacheEntry = state.payloads.get(tensorName);
+        const val = cacheEntry ? sampleValueFromCache(cacheEntry, coords) : 'Loading...';
+        const currentShape = mesh.userData.shape_raw;
 
-            updateSideMenu(sideMenu, tensorName, coords, val, currentShape);
+        let extraHtml = '';
+        if (tensorName === 'Global') {
+            if (!state.programSubsets && !state.programCounts) {
+                ctx.ensureProgramDataForHover?.();
+            }
+            const key = `${coords[0]},${coords[1]},${coords[2]}`;
+            if (state.programSubsets) {
+                const subsetKey = state.programSubsets.subsetMap.get(key);
+                const subset = subsetKey ? state.programSubsets.subsets?.[subsetKey] || [] : [];
+                const label = subset.length
+                    ? subset.map(([x, y, z]) => `(${x},${y},${z})`).join(' ')
+                    : 'none';
+                extraHtml = `<p>Programs: ${label}</p>`;
+            } else if (state.programCounts) {
+                const count = state.programCounts.map.get(key) || 0;
+                extraHtml = `<p>Programs: ${count}</p>`;
+            } else if (state.programDataLoading) {
+                extraHtml = '<p>Programs: loading...</p>';
+            }
+        }
+        updateSideMenu(sideMenu, tensorName, coords, val, currentShape, extraHtml);
             if (ctx.type === 'Dot' && tensorName === 'C') {
                 const row = coords[1];
                 const col = coords[0];
@@ -388,7 +685,21 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         orbitControls.enableDamping = false;
         orbitControls.target.copy(center);
         orbitControls.update();
-        const state = { colorizeOn: false, payloads: new Map(), rafId: null, renderPending: false, lastHoverKey: null, activeHoverOutline: hoverOutline, dotHoverKey: null };
+        const state = {
+            colorizeOn: false,
+            payloads: new Map(),
+            rafId: null,
+            renderPending: false,
+            lastHoverKey: null,
+            activeHoverOutline: hoverOutline,
+            dotHoverKey: null,
+            allProgramsOn: false,
+            allProgramsMode: 'subset',
+            programCounts: null,
+            programSubsets: null,
+            programSubsetHues: null,
+            programDataLoading: false,
+        };
         const highlightColor = colors.HIGHLIGHT || new THREE.Color(0.0, 0.7, 1.0);
         const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [], highlightColor };
         ctx.requestRender = () => {
@@ -402,7 +713,21 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             tensors.forEach((group, name) => {
                 const mesh = group.userData.mesh;
                 const baseColor = isLight ? baseGlobalLight : mesh.userData.color_base;
-                updateTensorHighlights(group, state.payloads.get(name)?.highlights, highlightColor, baseColor);
+                if (state.allProgramsOn && state.allProgramsMode === 'subset' && state.programSubsets) {
+                    if (state.colorizeOn) {
+                        applyProgramSubsetHeatmap(mesh, state.payloads.get(name), state.programSubsets, state.programSubsetHues, baseColor);
+                    } else {
+                        applyProgramSubsetColors(mesh, state.programSubsets, state.programSubsetHues, baseColor);
+                    }
+                } else if (state.allProgramsOn && state.allProgramsMode === 'count' && state.programCounts) {
+                    if (state.colorizeOn) {
+                        applyProgramCountHeatmap(mesh, state.payloads.get(name), state.programCounts, PROGRAM_COUNT_PALETTE, baseColor);
+                    } else {
+                        applyProgramCountColors(mesh, state.programCounts, baseColor, PROGRAM_COUNT_PALETTE);
+                    }
+                } else {
+                    updateTensorHighlights(group, state.payloads.get(name)?.highlights, highlightColor, baseColor);
+                }
                 group.children.forEach(c => { if (c?.userData?.edges) c.userData.edges.visible = !isLight; });
             });
             if (!isLight && lineMaterial) { lineMaterial.color.set('#ffffff'); lineMaterial.opacity = 0.28; }
@@ -440,11 +765,13 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             }
             orbitControls.update();
             state.colorizeOn = !!nextState.colorizeOn;
+            state.allProgramsOn = !!nextState.allProgramsOn;
             applyHistogramState(histogramUI, nextState);
             if (window.setOpControlState) {
                 window.setOpControlState({
                     colorize: state.colorizeOn,
                     histogram: !!nextState.histogramVisible,
+                    allPrograms: state.allProgramsOn,
                 });
             }
         };
@@ -456,6 +783,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 },
                 target: [orbitControls.target.x, orbitControls.target.y, orbitControls.target.z],
                 colorizeOn: state.colorizeOn,
+                allProgramsOn: state.allProgramsOn,
                 ...captureHistogramState(histogramUI),
             };
         };
@@ -494,13 +822,122 @@ export function createTensorVisualization(containerElement, op, options = {}) {
 
     const { state, tensors, sideMenu, requestRender, applyBackgroundTheme, createLegends, destroyLegends } = cache;
     state.payloads.clear();
+    state.programCounts = null;
+    state.programSubsets = null;
+    state.programSubsetHues = null;
     sideMenu.innerHTML = '';
     window.current_op_uuid = op.uuid;
+    const getBaseCountColor = () => tensors.values().next().value?.userData?.mesh?.userData?.color_base || '#333333';
+    const getValueLegendItems = () => {
+        const items = [];
+        if (!state.colorizeOn) return items;
+        tensors.forEach((group, name) => {
+            const p = state.payloads.get(name);
+            if (p) {
+                items.push(createLegendItem(name === 'Global' ? type : name, p.scaleMin, p.scaleMax));
+            }
+        });
+        return items;
+    };
+    const renderProgramCounts = () => {
+        // paint counts across all cubes and attach the legend
+        destroyLegends();
+        tensors.forEach((group, name) => {
+            const p = state.payloads.get(name);
+            if (state.colorizeOn && p) {
+                applyProgramCountHeatmap(group.userData.mesh, p, state.programCounts, PROGRAM_COUNT_PALETTE, group.userData.mesh.userData.color_base);
+            } else {
+                applyProgramCountColors(group.userData.mesh, state.programCounts, group.userData.mesh.userData.color_base, PROGRAM_COUNT_PALETTE);
+            }
+        });
+        const items = getValueLegendItems();
+        items.push(createProgramCountLegendItem(getBaseCountColor(), state.programCounts.maxCount, PROGRAM_COUNT_PALETTE));
+        createLegends(items);
+    };
+    const renderProgramSubsets = () => {
+        // paint subset colors across all cubes and attach the legend
+        destroyLegends();
+        tensors.forEach((group, name) => {
+            const p = state.payloads.get(name);
+            if (state.colorizeOn && p) {
+                applyProgramSubsetHeatmap(group.userData.mesh, p, state.programSubsets, state.programSubsetHues, group.userData.mesh.userData.color_base);
+            } else {
+                applyProgramSubsetColors(group.userData.mesh, state.programSubsets, state.programSubsetHues, group.userData.mesh.userData.color_base);
+            }
+        });
+        const items = getValueLegendItems();
+        items.push(createProgramSubsetLegendItem(getBaseCountColor(), state.programSubsets.subsets, state.programSubsetHues));
+        createLegends(items);
+    };
+    const applyProgramPayload = (payload) => {
+        const subsets = normalizeProgramSubsets(payload);
+        if (subsets.subsetCount > PROGRAM_SUBSET_LIMIT) {
+            state.allProgramsMode = 'count';
+            state.programCounts = normalizeProgramCounts(payload);
+            state.programSubsets = null;
+            state.programSubsetHues = null;
+        } else {
+            state.allProgramsMode = 'subset';
+            state.programSubsets = subsets;
+            state.programSubsetHues = buildSubsetHues(subsets.subsets);
+            state.programCounts = null;
+        }
+    };
+    const ensureProgramData = async () => {
+        // fetch subset data for the current op if needed
+        if (!state.allProgramsOn) return false;
+        if (!state.programSubsets && !state.programCounts) {
+            const payload = await fetchProgramCounts(API_BASE, op);
+            if (!payload) {
+                state.allProgramsOn = false;
+                if (window.setOpControlState) window.setOpControlState({ allPrograms: false });
+                return false;
+            }
+            applyProgramPayload(payload);
+        }
+        if (state.allProgramsMode === 'subset' && state.programSubsets) {
+            renderProgramSubsets();
+        } else if (state.programCounts) {
+            renderProgramCounts();
+        }
+        requestRender();
+        return true;
+    };
+    const ensureProgramDataForHover = () => {
+        if (state.programSubsets || state.programCounts || state.programDataLoading) return;
+        state.programDataLoading = true;
+        fetchProgramCounts(API_BASE, op).then((payload) => {
+            if (payload) {
+                applyProgramPayload(payload);
+                if (state.allProgramsOn) {
+                    if (state.allProgramsMode === 'subset' && state.programSubsets) {
+                        renderProgramSubsets();
+                    } else if (state.programCounts) {
+                        renderProgramCounts();
+                    }
+                    requestRender();
+                }
+            }
+        }).finally(() => {
+            state.programDataLoading = false;
+        });
+    };
+    cache.ensureProgramDataForHover = ensureProgramDataForHover;
     if (window.setOpControlHandlers) {
         window.setOpControlHandlers({
             toggleColorize: async () => {
                 state.colorizeOn = !state.colorizeOn;
-                if (!state.colorizeOn) {
+                if (state.allProgramsOn) {
+                    if (!state.programSubsets && !state.programCounts) {
+                        await ensureProgramData();
+                        return state.colorizeOn;
+                    }
+                    if (state.allProgramsMode === 'subset' && state.programSubsets) {
+                        renderProgramSubsets();
+                    } else if (state.programCounts) {
+                        renderProgramCounts();
+                    }
+                } else if (!state.colorizeOn) {
                     destroyLegends();
                     tensors.forEach((group, name) => updateTensorHighlights(group, state.payloads.get(name)?.highlights, cache.highlightColor, group.userData.mesh.userData.color_base));
                 } else {
@@ -519,6 +956,26 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             },
             toggleShowCode: () => window.__tritonVizCodeToggle?.(),
             toggleHistogram: () => { if (cache.histogramUI.overlay.style.display === 'block') cache.histogramUI.hide?.(); else cache.histogramUI.show?.(); },
+            toggleAllPrograms: (type === 'Load' || type === 'Store') ? async () => {
+                state.allProgramsOn = !state.allProgramsOn;
+                if (!state.allProgramsOn) {
+                    state.programCounts = null;
+                    state.programSubsets = null;
+                    state.programSubsetHues = null;
+                    state.allProgramsMode = 'subset';
+                    destroyLegends();
+                    restoreTensorColors(cache);
+                    if (state.colorizeOn) {
+                        const items = getValueLegendItems();
+                        if (items.length) {
+                            createLegends(items);
+                        }
+                    }
+                    requestRender();
+                    return state.allProgramsOn;
+                }
+                return ensureProgramData();
+            } : null,
         });
     }
 
@@ -526,13 +983,17 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         return fetchTensorPayload(API_BASE, op.uuid, group.userData.endpoint).then(p => {
             if (p) {
                 state.payloads.set(name, p);
-                updateTensorHighlights(group, p.highlights, cache.highlightColor, group.userData.mesh.userData.color_base);
+                if (!state.allProgramsOn) {
+                    updateTensorHighlights(group, p.highlights, cache.highlightColor, group.userData.mesh.userData.color_base);
+                }
             }
         });
     });
 
-    Promise.all(fetchers).then(() => {
-        if (state.colorizeOn) {
+    Promise.all(fetchers).then(async () => {
+        if (state.allProgramsOn) {
+            await ensureProgramData();
+        } else if (state.colorizeOn) {
             const items = [];
             tensors.forEach((group, name) => {
                 const p = state.payloads.get(name);

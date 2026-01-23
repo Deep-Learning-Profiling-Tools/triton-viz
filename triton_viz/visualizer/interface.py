@@ -767,6 +767,128 @@ def get_load_tensor():
         return jsonify({"error": f"getLoadTensor failed: {e}"}), 200
 
 
+def _parse_grid_key(raw_key: str) -> tuple[int, int, int] | None:
+    key = str(raw_key or "").strip()
+    key = key.lstrip("(").rstrip(")")
+    parts = [p.strip() for p in key.split(",") if p.strip()]
+    if len(parts) != 3:
+        return None
+    try:
+        return int(parts[0]), int(parts[1]), int(parts[2])
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_load_store_program_subsets(op_type, overall_key, op_index, time_idx):
+    if not global_data or "ops" not in global_data:
+        return {
+            "coords": [],
+            "subsets": {},
+            "subset_count": 0,
+            "counts": [],
+            "max_count": 0,
+            "shape": [],
+        }
+    viz = global_data["ops"].get("visualization_data") or {}
+    uuid_to_pid: dict[str, tuple[int, int, int]] = {}
+    for grid_key, ops in viz.items():
+        pid = _parse_grid_key(grid_key)
+        if pid is None:
+            continue
+        for op in ops or []:
+            is_match = (
+                op.get("type") == op_type and op.get("overall_key") == overall_key
+            )
+            if not is_match:
+                continue
+            if op_index is not None:
+                is_match = op.get("op_index") == op_index
+            else:
+                is_match = op.get("time_idx") == time_idx
+            if is_match:
+                uuid = op.get("uuid")
+                if uuid:
+                    uuid_to_pid[uuid] = pid
+
+    overall_maps = load_overall_maps if op_type == "Load" else store_overall_maps
+    entry = overall_maps.get(overall_key)
+    if not entry or not uuid_to_pid:
+        return {
+            "coords": [],
+            "subsets": {},
+            "subset_count": 0,
+            "counts": [],
+            "max_count": 0,
+            "shape": list(entry.get("shape") or []) if entry else [],
+        }
+    shape = list(entry.get("shape") or [])
+    uuid_to_coords = {
+        tile.get("uuid"): tile.get("global_coords")
+        for tile in entry.get("tiles", [])
+        if tile.get("uuid") in uuid_to_pid
+    }
+
+    coord_subsets: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+    for uuid, pid in uuid_to_pid.items():
+        coords = uuid_to_coords.get(uuid) or []
+        if not coords:
+            continue
+        unique_coords = {(int(x), int(y), int(z)) for x, y, z in coords}
+        for coord in unique_coords:
+            coord_subsets.setdefault(coord, set()).add(pid)
+
+    subsets: dict[str, list[list[int]]] = {}
+    coords_list = []
+    counts_list = []
+    max_count = 0
+    for (x, y, z), pid_set in coord_subsets.items():
+        pid_list = sorted(pid_set)
+        subset_key = "|".join([f"{px},{py},{pz}" for px, py, pz in pid_list])
+        if subset_key not in subsets:
+            subsets[subset_key] = [[px, py, pz] for px, py, pz in pid_list]
+        count = len(pid_list)
+        max_count = max(max_count, count)
+        coords_list.append([x, y, z, subset_key])
+        counts_list.append([x, y, z, count])
+
+    return {
+        "coords": coords_list,
+        "subsets": subsets,
+        "subset_count": len(subsets),
+        "counts": counts_list,
+        "max_count": max_count,
+        "shape": shape,
+    }
+
+
+@app.route("/api/getLoadStoreAllPrograms", methods=["POST"])
+def get_load_store_all_programs():
+    data = request.json or {}
+    if global_data is None or raw_tensor_data is None:
+        update_global_data()
+    op_type = data.get("type")
+    overall_key = data.get("overall_key")
+    time_idx = data.get("time_idx")
+    op_index = data.get("op_index")
+    if not op_type or not overall_key or time_idx is None:
+        return jsonify({"error": "Missing type, overall_key, or time_idx"}), 400
+    op_type = str(op_type).strip().capitalize()
+    if op_type not in {"Load", "Store"}:
+        return jsonify({"error": "Unsupported type"}), 400
+    try:
+        time_idx = int(time_idx)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid time_idx"}), 400
+    try:
+        op_index = int(op_index) if op_index is not None else None
+    except (TypeError, ValueError):
+        op_index = None
+    payload = _collect_load_store_program_subsets(
+        op_type, overall_key, op_index, time_idx
+    )
+    return jsonify(payload)
+
+
 @app.route("/api/load_overall", methods=["POST"])
 def get_load_overall():
     data = request.json or {}

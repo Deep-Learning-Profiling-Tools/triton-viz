@@ -203,6 +203,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "other_shape": record.other_shape,
                     "output_shape": record.output_shape,
                     "uuid": record_uuid,
+                    "op_index": current_time,
                     # provide C values for color-by-value
                     "c_shape": record.output_shape,
                     # NKI meta (accumulate to PSUM)
@@ -269,6 +270,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "output_shape": record.output_shape,
                     "dim": int(getattr(record, "dim", 0)),
                     "uuid": record_uuid,
+                    "op_index": current_time,
                     "time_idx": int(getattr(record, "time_idx", current_time)),
                 }
             )
@@ -312,6 +314,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "slice_shape": record.masks.shape,
                     # "global_coords": Lazy load
                     "uuid": record_uuid,
+                    "op_index": current_time,
                     "overall_key": ptr_key,
                     "time_idx": time_idx,
                     # NKI flow meta (optional)
@@ -441,6 +444,7 @@ def prepare_visualization_data(program_records, tensor_table):
                     "slice_shape": record.masks.shape,
                     # "global_coords": Lazy load
                     "uuid": record_uuid,
+                    "op_index": current_time,
                     "overall_key": ptr_key,
                     "time_idx": time_idx,
                     "mem_src": getattr(record, "mem_src", None),
