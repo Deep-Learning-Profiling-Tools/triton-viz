@@ -52,22 +52,6 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 - [Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
 - Note: the below commands must be run in order.
 
-Triton install (need nightly):
-```
-pip install -U triton --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
-```
-
-Upon successfully installing Triton, install Torch using the following command:
-
-```sh
-pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-```
-
-Upon successful installation of Torch make sure to uninstall `pytorch-triton` using the following command:
-
-```sh
-pip uninstall pytorch-triton
-```
 
 ### Installation of Triton-Viz
 
@@ -76,22 +60,24 @@ Clone the repository to your local machine:
 ```sh
 git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
 cd triton-viz
-pip install -e .
+uv sync # or "uv sync --extra test" if you're running tests
 ```
 
-You're all set!
+If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Otherwise you're all set!
 
 ### Optional: Enable NKI Support
 
 If you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the NKI-specific tests:
 
-1. Follow the [AWS Neuron Torch-NeuronX Ubuntu 22.04 setup guide](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/setup/neuron-setup/pytorch/neuronx/ubuntu/torch-neuronx-ubuntu22.html#setup-torch-neuronx-ubuntu22) to add the Neuron APT repository and install the required system packages (for example `aws-neuronx-tools`, `aws-neuronx-runtime-lib`, `aws-neuronx-collectives`, and their dependencies).
-2. Instead of running `pip install -e .` in the above section, install Triton-Viz with the optional NKI extras so the Neuron Python packages (`neuronx-cc`, `libneuronxla`, `torch-neuronx`) are available:
+```sh
+uv sync --extra nki # or "uv sync --extra nki --extra test" if also running tests
+```
 
-   ```sh
-   pip install -e .[nki]
-   # or pip install triton-viz[nki]
-   ```
+Note that you need to specify all features that you want _in one statement_ when using `uv sync`, i.e. if you want both NKI and testing support, you must run `uv sync --extra nki --extra test`. The below statements are wrong and will remove the NKI install when installing test packages:
+```
+uv sync --extra nki
+uv sync --extra test
+```
 
 ### Testing
 * To run core Triton-viz tests, run `pytest tests/`.
