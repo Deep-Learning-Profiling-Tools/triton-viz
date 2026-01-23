@@ -1,7 +1,6 @@
 from triton_viz.core.data import (
     Tensor,
     Grid,
-    ExpandDims,
     Dot,
     Load,
     Store,
@@ -194,8 +193,8 @@ def prepare_visualization_data(program_records, tensor_table):
         # This ensures that symmetric programs have matching time_idx for the same logical operation.
         current_time = len(visualization_data)
 
-        if isinstance(record, ExpandDims):
-            print(record.input_shape, record.output_shape, record.index)
+        # if isinstance(record, ExpandDims):
+        #    print(record.input_shape, record.output_shape, record.index)
         if isinstance(record, Dot):
             visualization_data.append(
                 {
@@ -299,7 +298,7 @@ def prepare_visualization_data(program_records, tensor_table):
 
         elif isinstance(record, Load):
             global_tensor, slice_tensor = tensor_table[record.ptr]
-            print(global_tensor)
+            # print(global_tensor)
             # Calculate global_coords for overall map, but lazy load for detailed view
             global_coords = extract_load_coords(record, global_tensor)
 

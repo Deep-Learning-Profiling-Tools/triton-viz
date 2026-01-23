@@ -112,17 +112,22 @@ def precompute_c_values(op_data):
     input_tensor = torch.as_tensor(_to_numpy_array(op_data["input_data"]))
     other_tensor = torch.as_tensor(_to_numpy_array(op_data["other_data"]))
 
+    if input_tensor.ndim != 2 or other_tensor.ndim != 2:
+        return {}
+
     rows, inner_dim = input_tensor.shape
     cols = other_tensor.shape[1]
+    if rows == 0 or cols == 0 or inner_dim == 0:
+        return {}
+
+    contrib = torch.einsum("ik,kj->kij", input_tensor, other_tensor)
+    cum = torch.cumsum(contrib, dim=0).cpu()
 
     precomputed = {}
+    base = [0.0]
     for i in range(rows):
         for j in range(cols):
-            precomputed[(i, j)] = [0] * (inner_dim + 1)
-            for k in range(1, inner_dim + 1):
-                precomputed[(i, j)][k] = torch.dot(
-                    input_tensor[i, :k], other_tensor[:k, j]
-                ).item()
+            precomputed[(i, j)] = base + cum[:, i, j].tolist()
 
     return precomputed
 
