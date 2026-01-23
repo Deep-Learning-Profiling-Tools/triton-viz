@@ -118,15 +118,48 @@ function applyDimmedColormap(mesh, cache, label, isHighlighted) {
     mesh.instanceColor.needsUpdate = true;
 }
 
+function getHighlightPredicate(highlights) {
+    if (!highlights) return null;
+    if (highlights.type === 'descriptor') {
+        const { start, shape } = highlights;
+        const [sx, sy, sz] = start || [0, 0, 0];
+        const [dx, dy, dz] = shape || [0, 0, 0];
+        if ((dx || 0) <= 0 || (dy || 0) <= 0 || (dz || 0) <= 0) return null;
+        return (coords) => {
+            const [x, y, z] = coords;
+            return x >= sx && x < sx + dx && y >= sy && y < sy + dy && z >= sz && z < sz + dz;
+        };
+    }
+    if (Array.isArray(highlights.data) && highlights.data.length) {
+        const set = new Set();
+        highlights.data.forEach((c) => { set.add(`${c[0]},${c[1]},${c[2]}`); });
+        return (coords) => set.has(`${coords[0]},${coords[1]},${coords[2]}`);
+    }
+    return null;
+}
+
+function applyColorizedMesh(ctx, group, name) {
+    const mesh = group.userData.mesh;
+    const p = ctx.state.payloads.get(name);
+    if (!p) return;
+    const label = name === 'Global' ? ctx.type : name;
+    const predicate = getHighlightPredicate(p.highlights);
+    if (predicate) {
+        applyDimmedColormap(mesh, p, label, predicate);
+    } else {
+        applyColorToMesh(mesh, p, label);
+    }
+}
+
 function restoreTensorColors(ctx) {
     const { state, tensors, type } = ctx;
     tensors.forEach((group, name) => {
         const mesh = group.userData.mesh;
         const p = state.payloads.get(name);
         if (state.colorizeOn && p) {
-            applyColorToMesh(mesh, p, name === 'Global' ? type : name);
+            applyColorizedMesh(ctx, group, name);
         } else {
-            updateTensorHighlights(group, p?.highlights, new THREE.Color(0.0, 0.7, 1.0), mesh.userData.color_base);
+            updateTensorHighlights(group, p?.highlights, ctx.highlightColor, mesh.userData.color_base);
         }
     });
 }
@@ -141,6 +174,36 @@ function applyDotHoverHighlight(ctx, row, col) {
     if (!aCache || !bCache) return;
     applyDimmedColormap(aGroup.userData.mesh, aCache, 'A', (coords) => coords[1] === row);
     applyDimmedColormap(bGroup.userData.mesh, bCache, 'B', (coords) => coords[0] === col);
+}
+
+function captureHistogramState(histogramUI) {
+    const overlay = histogramUI?.overlay;
+    if (!overlay) return {};
+    const select = overlay.querySelector('#histogram-source');
+    const bins = overlay.querySelector('#histogram-bins');
+    return {
+        histogramVisible: overlay.style.display === 'block',
+        histogramSource: select ? select.value : null,
+        histogramBins: bins ? Number(bins.value) : null,
+    };
+}
+
+function applyHistogramState(histogramUI, state) {
+    const overlay = histogramUI?.overlay;
+    if (!overlay || !state) return;
+    const select = overlay.querySelector('#histogram-source');
+    const bins = overlay.querySelector('#histogram-bins');
+    if (select && state.histogramSource) {
+        select.value = state.histogramSource;
+    }
+    if (bins && Number.isFinite(state.histogramBins)) {
+        bins.value = state.histogramBins;
+    }
+    if (state.histogramVisible) {
+        histogramUI.show?.();
+    } else {
+        histogramUI.hide?.();
+    }
 }
 
 function createLegendItem(label, min, max) {
@@ -267,7 +330,7 @@ function onMouseUp(ctx) { ctx.state.isDragging = false; if (ctx.stage) ctx.stage
 // --- Main Exports ---
 
 export function createTensorVisualization(containerElement, op, options = {}) {
-    const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true } = options;
+    const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null } = options;
     const API_BASE = window.__TRITON_VIZ_API__ || '';
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape, color: colors.GLOBAL || '#333', position: [0,0,0], endpoint: 'getLoadTensor' }
@@ -310,7 +373,8 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         orbitControls.target.copy(center);
         orbitControls.update();
         const state = { colorizeOn: false, payloads: new Map(), rafId: null, renderPending: false, lastHoverKey: null, activeHoverOutline: hoverOutline, dotHoverKey: null };
-        const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [] };
+        const highlightColor = colors.HIGHLIGHT || new THREE.Color(0.0, 0.7, 1.0);
+        const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [], highlightColor };
         ctx.requestRender = () => {
             if (state.rafId !== null) { state.renderPending = true; return; }
             state.rafId = requestAnimationFrame(() => { state.rafId = null; orbitControls.update(); renderer.render(scene, camera); if (state.renderPending) { state.renderPending = false; ctx.requestRender(); } });
@@ -322,7 +386,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             tensors.forEach((group, name) => {
                 const mesh = group.userData.mesh;
                 const baseColor = isLight ? baseGlobalLight : mesh.userData.color_base;
-                updateTensorHighlights(group, state.payloads.get(name)?.highlights, new THREE.Color(0.0, 0.7, 1.0), baseColor);
+                updateTensorHighlights(group, state.payloads.get(name)?.highlights, highlightColor, baseColor);
                 group.children.forEach(c => { if (c?.userData?.edges) c.userData.edges.visible = !isLight; });
             });
             if (!isLight && lineMaterial) { lineMaterial.color.set('#ffffff'); lineMaterial.opacity = 0.28; }
@@ -344,12 +408,49 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             }
             ctx.legendContainer = wrapper;
         };
+        const applyViewState = (nextState) => {
+            if (!nextState) return;
+            const pos = nextState.camera?.position;
+            const quat = nextState.camera?.quaternion;
+            const target = nextState.target;
+            if (pos && pos.length === 3) {
+                camera.position.set(pos[0], pos[1], pos[2]);
+            }
+            if (quat && quat.length === 4) {
+                camera.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
+            }
+            if (target && target.length === 3) {
+                orbitControls.target.set(target[0], target[1], target[2]);
+            }
+            orbitControls.update();
+            state.colorizeOn = !!nextState.colorizeOn;
+            applyHistogramState(histogramUI, nextState);
+            if (window.setOpControlState) {
+                window.setOpControlState({
+                    colorize: state.colorizeOn,
+                    histogram: !!nextState.histogramVisible,
+                });
+            }
+        };
+        const getViewState = () => {
+            return {
+                camera: {
+                    position: [camera.position.x, camera.position.y, camera.position.z],
+                    quaternion: [camera.quaternion.x, camera.quaternion.y, camera.quaternion.z, camera.quaternion.w],
+                },
+                target: [orbitControls.target.x, orbitControls.target.y, orbitControls.target.z],
+                colorizeOn: state.colorizeOn,
+                ...captureHistogramState(histogramUI),
+            };
+        };
         setupEventListeners(stage, camera, renderer, (e) => onMouseMove(e, ctx), cameraControls(camera, new THREE.Euler(0,0,0,'YXZ')), ctx.requestRender);
         if (showDimLines) {
             tensors.forEach((group, name) => {
                 ctx.dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
             });
         }
+        applyViewState(viewState);
+        containerElement.__vizGetState = getViewState;
         ctx.cleanup = () => {
             if (state.rafId) cancelAnimationFrame(state.rafId);
             ctx.destroyLegends();
@@ -358,6 +459,10 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             if (stage.parentElement) stage.parentElement.removeChild(stage);
             if (sideMenu.parentElement) sideMenu.parentElement.removeChild(sideMenu);
             if (histogramUI.overlay?.parentElement) histogramUI.overlay.parentElement.removeChild(histogramUI.overlay);
+            if (containerElement.__vizGetState) {
+                containerElement.__vizGetState = null;
+            }
+            VIZ_CACHE.delete(containerElement);
         };
         cache = ctx;
         VIZ_CACHE.set(containerElement, cache);
@@ -381,14 +486,14 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 state.colorizeOn = !state.colorizeOn;
                 if (!state.colorizeOn) {
                     destroyLegends();
-                    tensors.forEach((group, name) => updateTensorHighlights(group, state.payloads.get(name)?.highlights, new THREE.Color(0.0, 0.7, 1.0), group.userData.mesh.userData.color_base));
+                    tensors.forEach((group, name) => updateTensorHighlights(group, state.payloads.get(name)?.highlights, cache.highlightColor, group.userData.mesh.userData.color_base));
                 } else {
                     const items = [];
                     tensors.forEach((group, name) => {
                         const p = state.payloads.get(name);
                         if (p) {
                             items.push(createLegendItem(name === 'Global' ? type : name, p.scaleMin, p.scaleMax));
-                            applyColorToMesh(group.userData.mesh, p, name === 'Global' ? type : name);
+                            applyColorizedMesh(cache, group, name);
                         }
                     });
                     createLegends(items);
@@ -405,7 +510,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         return fetchTensorPayload(API_BASE, op.uuid, group.userData.endpoint).then(p => {
             if (p) {
                 state.payloads.set(name, p);
-                updateTensorHighlights(group, p.highlights, new THREE.Color(0.0, 0.7, 1.0), group.userData.mesh.userData.color_base);
+                updateTensorHighlights(group, p.highlights, cache.highlightColor, group.userData.mesh.userData.color_base);
             }
         });
     });
@@ -417,14 +522,22 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 const p = state.payloads.get(name);
                 if (p) {
                     items.push(createLegendItem(name === 'Global' ? type : name, p.scaleMin, p.scaleMax));
-                    applyColorToMesh(group.userData.mesh, p, name === 'Global' ? type : name);
+                    applyColorizedMesh(cache, group, name);
                 }
             });
             createLegends(items);
-        } else if (state.dotHoverKey && type === 'Dot') {
-            const [row, col] = state.dotHoverKey.split(',').map((val) => Number(val));
-            if (Number.isFinite(row) && Number.isFinite(col)) {
-                applyDotHoverHighlight(cache, row, col);
+        } else {
+            tensors.forEach((group, name) => {
+                const p = state.payloads.get(name);
+                if (p) {
+                    updateTensorHighlights(group, p.highlights, cache.highlightColor, group.userData.mesh.userData.color_base);
+                }
+            });
+            if (state.dotHoverKey && type === 'Dot') {
+                const [row, col] = state.dotHoverKey.split(',').map((val) => Number(val));
+                if (Number.isFinite(row) && Number.isFinite(col)) {
+                    applyDotHoverHighlight(cache, row, col);
+                }
             }
         }
         requestRender();

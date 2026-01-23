@@ -15,7 +15,7 @@ export function createMatMulVisualization(containerElement, op, viewState = null
         return { rows, cols, width, height };
     }
 
-    const gap = 3 * spacing;
+    const gap = 0;
     const sizeA = matrixSize(input_shape);
     const sizeB = matrixSize(other_shape);
     const posC = [0, 0, 0];
@@ -31,16 +31,17 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     const cleanup = createTensorVisualization(containerElement, op, {
         type: 'Dot',
         tensorConfigs: [
-            { name: 'A', shape: input_shape, color: '#7fb0ff', position: posA, endpoint: 'getMatmulA' },
-            { name: 'B', shape: other_shape, color: '#ffe68a', position: posB, endpoint: 'getMatmulB' },
-            { name: 'C', shape: output_shape, color: '#7fd38a', position: posC, endpoint: 'getMatmulC' }
+            { name: 'A', shape: input_shape, color: '#a1d9fc', position: posA, endpoint: 'getMatmulA' },
+            { name: 'B', shape: other_shape, color: '#fcf8b0', position: posB, endpoint: 'getMatmulB' },
+            { name: 'C', shape: output_shape, color: '#adfca9', position: posC, endpoint: 'getMatmulC' }
         ],
         showDimLines: true,
         dimColors: {
             A: [AXIS_COLORS.y, AXIS_COLORS.x], // M, K
             B: [AXIS_COLORS.x, AXIS_COLORS.z], // K, N
             C: [AXIS_COLORS.y, AXIS_COLORS.z]  // M, N
-        }
+        },
+        viewState
     });
 
     return cleanup;

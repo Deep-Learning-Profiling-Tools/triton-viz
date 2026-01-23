@@ -285,7 +285,7 @@ export class GridBlock {
         if (this.blockData.length > 0) {
             const nextIndex = Math.min(this.activeTabIndex || 0, this.blockData.length - 1);
             this.activeTabIndex = nextIndex;
-            this.displayOpVisualization(this.blockData[nextIndex], { refreshCodePanel: false });
+            this.displayOpVisualization(this.blockData[nextIndex], { refreshCodePanel: false, preserveViewState: true });
         } else if (this.contentArea) {
             this.contentArea.innerHTML = '';
         }
@@ -398,12 +398,19 @@ export class GridBlock {
             console.error('Content area is not initialized');
             return;
         }
+        let viewState = options.viewState || null;
+        const canReuseViz = options.preserveViewState && this.contentArea.__vizGetState;
+        if (!viewState && canReuseViz) {
+            viewState = this.contentArea.__vizGetState();
+        }
         const preserveCodePanel = options.refreshCodePanel === false;
         if (preserveCodePanel) {
             try { window.__tritonVizPreserveCodePanel = true; } catch (e) {}
         }
+        const isTensorOp = op.type === 'Dot' || op.type === 'Load' || op.type === 'Store';
+        const reuseTensorView = canReuseViz && isTensorOp;
         try {
-            if (this.visualizationCleanupFunction) {
+            if (!reuseTensorView && this.visualizationCleanupFunction) {
                 this.visualizationCleanupFunction();
                 this.visualizationCleanupFunction = null;
             }
@@ -412,7 +419,9 @@ export class GridBlock {
                 try { window.__tritonVizPreserveCodePanel = false; } catch (e) {}
             }
         }
-        this.contentArea.innerHTML = '';
+        if (!reuseTensorView) {
+            this.contentArea.innerHTML = '';
+        }
         try {
             window.last_op = op;
             window.last_op_global_shape = op.global_shape;
@@ -423,13 +432,13 @@ export class GridBlock {
 
         switch (op.type) {
             case 'Dot':
-                this.visualizationCleanupFunction = createMatMulVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createMatMulVisualization(this.contentArea, op, viewState);
                 break;
             case 'Load':
-                this.visualizationCleanupFunction = createLoadVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createLoadVisualization(this.contentArea, op, viewState);
                 break;
             case 'Store':
-                this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op);
+                this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op, viewState);
                 break;
             default:
                 this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;
