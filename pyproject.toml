@@ -33,6 +33,10 @@ dependencies = [
   "tqdm",
 ]
 
+[tool.setuptools.packages.find]
+include=["triton_viz"]
+exclude=["tasks"]
+
 [tool.setuptools]
 include-package-data = true
 

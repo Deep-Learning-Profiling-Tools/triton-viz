@@ -40,6 +40,10 @@ Given that Triton allows developers to program at a higher level while still tar
 Triton-Viz addresses these challenges by providing real-time visualization of tensor operations and their memory usage.
 The best part about this tool is that while it does focus on visualizing GPU operations, users are not required to have GPU resources to run examples on their system.
 
+
+### Visualization Features
+- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows automatically flip outside when space is limited.
+- **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
 ## Getting Started
 
 ### Prerequisites

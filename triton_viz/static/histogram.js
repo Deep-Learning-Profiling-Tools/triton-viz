@@ -38,17 +38,46 @@ export function createHistogramOverlay(containerElement, options) {
 
     const controls = document.createElement("div");
     controls.style.display = "flex";
-    controls.style.gap = "8px";
+    controls.style.gap = "12px";
     controls.style.flexWrap = "wrap";
+    controls.style.alignItems = "flex-end";
+
+    const sourceGroup = document.createElement("div");
+    sourceGroup.style.display = "flex";
+    sourceGroup.style.flexDirection = "column";
+    sourceGroup.style.gap = "4px";
+
+    const sourceLabel = document.createElement("label");
+    sourceLabel.textContent = "Activation";
+    sourceLabel.style.fontSize = "12px";
+    sourceLabel.style.opacity = "0.8";
+    sourceGroup.appendChild(sourceLabel);
 
     const select = document.createElement("select");
+    select.id = "histogram-source";
     sources.forEach((src) => {
         const opt = document.createElement("option");
         opt.value = src.value;
         opt.textContent = src.label;
         select.appendChild(opt);
     });
-    controls.appendChild(select);
+    if (!select.value && select.options.length) {
+        select.selectedIndex = 0;
+    }
+    sourceLabel.htmlFor = select.id;
+    sourceGroup.appendChild(select);
+    controls.appendChild(sourceGroup);
+
+    const binsGroup = document.createElement("div");
+    binsGroup.style.display = "flex";
+    binsGroup.style.flexDirection = "column";
+    binsGroup.style.gap = "4px";
+
+    const binsLabel = document.createElement("label");
+    binsLabel.textContent = "Bins";
+    binsLabel.style.fontSize = "12px";
+    binsLabel.style.opacity = "0.8";
+    binsGroup.appendChild(binsLabel);
 
     const binInput = document.createElement("input");
     binInput.type = "number";
@@ -58,18 +87,10 @@ export function createHistogramOverlay(containerElement, options) {
     binInput.step = 2;
     binInput.style.width = "80px";
     binInput.title = "Number of bins";
-    controls.appendChild(binInput);
-
-    const refreshBtn = document.createElement("button");
-    refreshBtn.textContent = "Refresh";
-    controls.appendChild(refreshBtn);
-
-    const closeBtn = document.createElement("button");
-    closeBtn.textContent = "Close";
-    closeBtn.addEventListener("click", () => {
-        overlay.style.display = "none";
-    });
-    controls.appendChild(closeBtn);
+    binInput.id = "histogram-bins";
+    binsLabel.htmlFor = binInput.id;
+    binsGroup.appendChild(binInput);
+    controls.appendChild(binsGroup);
 
     overlay.appendChild(controls);
 
@@ -90,16 +111,21 @@ export function createHistogramOverlay(containerElement, options) {
     status.style.marginTop = "4px";
     overlay.appendChild(status);
 
-    button.addEventListener("click", () => {
+    function show() {
         overlay.style.display = "block";
         updateHistogram();
-    });
+    }
 
-    refreshBtn.addEventListener("click", () => {
-        updateHistogram();
-    });
+    function hide() {
+        overlay.style.display = "none";
+    }
+
+    button.addEventListener("click", show);
 
     select.addEventListener("change", () => {
+        updateHistogram();
+    });
+    binInput.addEventListener("input", () => {
         updateHistogram();
     });
 
@@ -107,6 +133,9 @@ export function createHistogramOverlay(containerElement, options) {
         status.textContent = "Loading histogram...";
         info.textContent = "";
         const bins = parseInt(binInput.value, 10) || defaultBins;
+        if (!select.value && select.options.length) {
+            select.selectedIndex = 0;
+        }
 
         try {
             const body = buildRequestBody(select.value, bins);
@@ -176,6 +205,8 @@ export function createHistogramOverlay(containerElement, options) {
     return {
         button,
         overlay,
+        show,
+        hide,
         destroy() {
             overlay.remove();
         },

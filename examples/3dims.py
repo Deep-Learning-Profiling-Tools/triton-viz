@@ -109,7 +109,7 @@ if __name__ == "__main__":
 
     # Call the kernel
     add_3d_slices(input1, input2, output)
-    triton_viz.launch()
+    triton_viz.launch(share=False, port=5002)
 
     # Verify the result
     expected_output = input1 + input2
