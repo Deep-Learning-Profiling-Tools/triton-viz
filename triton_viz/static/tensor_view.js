@@ -158,22 +158,6 @@ function onMouseMove(event, ctx) {
             const val = cacheEntry ? sampleValueFromCache(cacheEntry, coords) : 'Loading...';
             const currentShape = mesh.userData.shape_raw;
 
-            if (tensorName === 'C' && state.payloads.has('C')) {
-                const [row, col] = [coords[1], coords[0]];
-                fetch(`${API_BASE}/api/getMatmulVectors`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uuid: op.uuid, row, col })
-                }).then(r => r.json()).then(vectors => {
-                    if (state.lastHoverKey === key) {
-                        let extra = '';
-                        if (vectors && !vectors.error) {
-                            extra = `<hr/><div><b>A row</b>: [${vectors.a_row.slice(0,4).join(', ')}...]</div><div><b>B col</b>: [${vectors.b_col.slice(0,4).join(', ')}...]</div>`;
-                        }
-                        updateSideMenu(sideMenu, tensorName, coords, val, currentShape, extra);
-                    }
-                });
-            }
             updateSideMenu(sideMenu, tensorName, coords, val, currentShape);
             requestRender();
         }

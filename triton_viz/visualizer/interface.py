@@ -445,60 +445,7 @@ def get_matmul_b():
         return jsonify({"error": f"MatMul B fetch failed: {e}"}), 200
 
 
-@app.route("/api/getMatmulVectors", methods=["POST"])
-def get_matmul_vectors():
-    """Return A[row, :] and B[:, col] for a given Dot op.
-
-    Request JSON: { uuid, row, col }
-    Response JSON: {
-        "row": int,
-        "col": int,
-        "a_row": [float, ...],
-        "b_col": [float, ...],
-        "k": int
-    }
-    """
-    global raw_tensor_data
-    data = request.json or {}
-    uuid = data.get("uuid")
-    row = int(data.get("row", 0))
-    col = int(data.get("col", 0))
-    if not uuid or uuid not in raw_tensor_data:
-        return jsonify({"error": "Operation not found"}), 404
-    op = raw_tensor_data[uuid]
-    a = op.get("input_data")
-    b = op.get("other_data")
-    if a is None or b is None:
-        return jsonify({"error": "MatMul tensors not available"}), 200
-    try:
-        import numpy as _np
-
-        a_np = _np.asarray(a)
-        b_np = _np.asarray(b)
-        swizzle = bool(op.get("b_swizzle"))
-        a_row = a_np[row, :].tolist()
-        if swizzle:
-            # TEMP: until tracer auto-detects, demo may flag B swizzle by row access
-            b_vec = b_np[col, :]
-        else:
-            b_vec = b_np[:, col]
-        b_col = _np.asarray(b_vec).ravel().tolist()
-        k = len(a_row)
-        return jsonify(
-            {
-                "row": row,
-                "col": col,
-                "a_row": a_row,
-                "b_col": b_col,
-                "k": k,
-                "swizzle": swizzle,
-            }
-        )
-    except Exception as e:
-        return jsonify({"error": f"MatMul vectors failed: {e}"}), 200
-
-
-@app.route("/api/histogram", methods=["POST"])
+@app.route("/api/getSBufData", methods=["POST"])
 def get_value_histogram():
     """Return histogram statistics for tensors associated with an operation."""
     global raw_tensor_data
