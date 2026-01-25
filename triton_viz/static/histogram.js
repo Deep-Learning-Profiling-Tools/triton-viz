@@ -1,3 +1,6 @@
+import { postJson } from "./api.js";
+import { createDisposer } from "./utils/dispose.js";
+
 export function createHistogramOverlay(containerElement, options) {
     const {
         title = "Value Distribution",
@@ -120,12 +123,12 @@ export function createHistogramOverlay(containerElement, options) {
         overlay.style.display = "none";
     }
 
-    button.addEventListener("click", show);
-
-    select.addEventListener("change", () => {
+    const disposer = createDisposer();
+    disposer.listen(button, "click", show);
+    disposer.listen(select, "change", () => {
         updateHistogram();
     });
-    binInput.addEventListener("input", () => {
+    disposer.listen(binInput, "input", () => {
         updateHistogram();
     });
 
@@ -141,17 +144,7 @@ export function createHistogramOverlay(containerElement, options) {
             const body = buildRequestBody(select.value, bins);
             body.bins = bins;
             body.max_samples = body.max_samples || 200000;
-            const res = await fetch(`${apiBase}/api/histogram`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(body),
-            });
-            const data = await res.json();
-            if (!res.ok || data.error) {
-                throw new Error(data.error || "Failed to fetch histogram");
-            }
+            const data = await postJson("/api/histogram", body, { base: apiBase });
             drawHistogram(canvas, data.counts, data.edges);
             info.textContent = `Min: ${data.min.toFixed(6)} | Max: ${data.max.toFixed(6)} | Total values: ${data.n} | Sampled: ${data.sampled}`;
             status.textContent = "";
@@ -208,6 +201,7 @@ export function createHistogramOverlay(containerElement, options) {
         show,
         hide,
         destroy() {
+            disposer.dispose();
             overlay.remove();
         },
     };
