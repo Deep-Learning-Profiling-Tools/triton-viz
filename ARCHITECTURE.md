@@ -13,3 +13,7 @@ Dimension lines are rendered as CAD-style annotations:
 
 ### Shape Legend
 A floating DOM overlay that lists all active tensors and their shapes, color-coded to match the 3D meshes.
+
+### Active Program Workspace
+Program ID sliders select the active program (X/Y/Z). The workspace renders op tabs, Tensor/Flow views, and code peek for that active program.
+Logic lives in `triton_viz/static/op_workspace.js`, with wiring in `triton_viz/static/visualization.js`.

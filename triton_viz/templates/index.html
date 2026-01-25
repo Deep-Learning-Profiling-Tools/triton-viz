@@ -13,7 +13,7 @@
                 <div class="title-block">
                     <span class="eyebrow">Triton Viz</span>
                     <h1>Kernel Explorer</h1>
-                    <p class="control-note">Filter program IDs, move across slices, and jump into overview mode.</p>
+                    <p class="control-note">Filter program IDs and explore the active program workspace.</p>
                 </div>
                 <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
                     <span id="theme-toggle-icon" aria-hidden="true">☀</span>
@@ -38,7 +38,7 @@
                     <button id="btn-op-all-programs" class="viz-button ghost" type="button" disabled>All Program IDs: OFF</button>
                     <button id="btn-op-histogram" class="viz-button ghost" type="button" disabled>Value Histogram</button>
                 </div>
-                <p class="control-note">Open a block to enable operation controls.</p>
+                <p class="control-note">Operation controls follow the active program selection.</p>
             </section>
 
             <section class="control-group">
@@ -46,7 +46,7 @@
                     <span>Code Peek</span>
                 </div>
                 <p class="control-note">
-                    Open the detailed view of any block to use the Show Code toggle for source context.
+                    Use the code panel to view source context for the active operation.
                 </p>
             </section>
             <div id="op-code-panel" class="op-code-panel"></div>
@@ -54,7 +54,6 @@
 
         <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" tabindex="0"></div>
         <main id="canvas-wrapper">
-            <canvas id="canvas" aria-label="Kernel Visualization Canvas"></canvas>
             <div id="visualization-container"></div>
         </main>
     </div>
