@@ -1,4 +1,8 @@
 import { OpWorkspace } from './op_workspace.js';
+import { getJson } from './api.js';
+import { getState, resetToggles, setActiveProgram as setActiveProgramState, setToggles } from './state.js';
+import { logAction } from './logger.js';
+import { createDisposer } from './utils/dispose.js';
 
 let globalData;
 let visualizationData;
@@ -7,7 +11,9 @@ let opWorkspace;
 let maxX = 0;
 let maxY = 0;
 let maxZ = 0;
-const filterValues = [0, 0, 0];
+const PROGRAM_AXES = ['x', 'y', 'z'];
+const appDisposer = createDisposer();
+let pidDisposer = createDisposer();
 const THEME_STORAGE_KEY = 'triton-viz-theme';
 
 const controls = {
@@ -28,21 +34,16 @@ let controlToastTimer = null;
 
 const opControls = {
     handlers: null,
-    state: {
-        colorize: false,
-        showCode: false,
-        histogram: false,
-        allPrograms: false,
-    },
 };
 
 function setOpControlState(nextState = {}) {
-    opControls.state = {
-        ...opControls.state,
+    const toggles = {
+        ...getState().toggles,
         ...nextState,
     };
-    try { window.__tritonVizOpState = { ...opControls.state }; } catch (err) {}
-    updateOpControls();
+    setToggles(toggles);
+    try { window.__tritonVizOpState = { ...toggles }; } catch (err) {}
+    updateOpControls(toggles);
 }
 
 function setOpControlHandlers(handlers = null) {
@@ -52,17 +53,12 @@ function setOpControlHandlers(handlers = null) {
 
 function resetOpControls() {
     opControls.handlers = null;
-    opControls.state = {
-        colorize: false,
-        showCode: false,
-        histogram: false,
-        allPrograms: false,
-    };
-    try { window.__tritonVizOpState = { ...opControls.state }; } catch (err) {}
+    const nextState = resetToggles();
+    try { window.__tritonVizOpState = { ...nextState.toggles }; } catch (err) {}
     if (window.__tritonVizCodeHide) {
         window.__tritonVizCodeHide();
     }
-    updateOpControls();
+    updateOpControls(nextState.toggles);
 }
 
 function updateToggleLabel(button, label, isOn) {
@@ -71,19 +67,20 @@ function updateToggleLabel(button, label, isOn) {
     button.classList.toggle('active', isOn);
 }
 
-function updateOpControls() {
-    const { handlers, state } = opControls;
+function updateOpControls(state = null) {
+    const { handlers } = opControls;
+    const nextState = state || getState().toggles;
     if (controls.opColorizeBtn) {
         controls.opColorizeBtn.disabled = !handlers || !handlers.toggleColorize;
-        updateToggleLabel(controls.opColorizeBtn, 'Heatmap', !!state.colorize);
+        updateToggleLabel(controls.opColorizeBtn, 'Heatmap', !!nextState.colorize);
     }
     if (controls.opHistogramBtn) {
         controls.opHistogramBtn.disabled = !handlers || !handlers.toggleHistogram;
-        updateToggleLabel(controls.opHistogramBtn, 'Value Histogram', !!state.histogram);
+        updateToggleLabel(controls.opHistogramBtn, 'Value Histogram', !!nextState.histogram);
     }
     if (controls.opAllProgramsBtn) {
         controls.opAllProgramsBtn.disabled = !handlers || !handlers.toggleAllPrograms;
-        updateToggleLabel(controls.opAllProgramsBtn, 'All Program IDs', !!state.allPrograms);
+        updateToggleLabel(controls.opAllProgramsBtn, 'All Program IDs', !!nextState.allPrograms);
     }
 }
 
@@ -106,6 +103,9 @@ try {
 }
 
 function initializeApp() {
+    appDisposer.dispose();
+    pidDisposer.dispose();
+    pidDisposer = createDisposer();
     containerElement = document.getElementById('visualization-container');
     controls.panel = document.getElementById('control-panel');
     controls.resizer = document.getElementById('sidebar-resizer');
@@ -134,7 +134,7 @@ function setupThemeToggle() {
     const defaultTheme = stored || document.documentElement.dataset.theme || 'light';
     applyTheme(defaultTheme);
     if (controls.themeToggle) {
-        controls.themeToggle.addEventListener('click', () => {
+        appDisposer.listen(controls.themeToggle, 'click', () => {
             const nextTheme = (document.documentElement.dataset.theme || 'light') === 'light' ? 'dark' : 'light';
             applyTheme(nextTheme);
         });
@@ -152,38 +152,42 @@ function applyTheme(theme) {
 
 function setupControlEvents() {
     if (controls.resetBtn) {
-        controls.resetBtn.addEventListener('click', () => {
+        appDisposer.listen(controls.resetBtn, 'click', () => {
             setActiveProgram(0, 0, 0, { syncControls: true, force: true });
             showControlToast('Filters reset');
+            logAction('program_reset', { program: { ...getState().activeProgram } });
         });
     }
 
     if (controls.precomputeBtn) {
-        controls.precomputeBtn.addEventListener('click', () => {
+        appDisposer.listen(controls.precomputeBtn, 'click', () => {
             showControlToast('Precompute mode is coming soon. This build previews the layout.');
         });
     }
 
     if (controls.opColorizeBtn) {
-        controls.opColorizeBtn.addEventListener('click', () => {
+        appDisposer.listen(controls.opColorizeBtn, 'click', () => {
             const handler = opControls.handlers?.toggleColorize;
             if (!handler) return;
+            logAction('toggle_colorize', { next: !getState().toggles.colorize });
             applyToggleResult(handler(), 'colorize');
         });
     }
 
     if (controls.opHistogramBtn) {
-        controls.opHistogramBtn.addEventListener('click', () => {
+        appDisposer.listen(controls.opHistogramBtn, 'click', () => {
             const handler = opControls.handlers?.toggleHistogram;
             if (!handler) return;
+            logAction('toggle_histogram', { next: !getState().toggles.histogram });
             applyToggleResult(handler(), 'histogram');
         });
     }
 
     if (controls.opAllProgramsBtn) {
-        controls.opAllProgramsBtn.addEventListener('click', () => {
+        appDisposer.listen(controls.opAllProgramsBtn, 'click', () => {
             const handler = opControls.handlers?.toggleAllPrograms;
             if (!handler) return;
+            logAction('toggle_all_programs', { next: !getState().toggles.allPrograms });
             applyToggleResult(handler(), 'allPrograms');
         });
     }
@@ -195,6 +199,7 @@ function setupSidebarResizer() {
     const minWidth = 0;
     let startX = 0;
     let startWidth = 0;
+    const dragDisposer = createDisposer();
 
     const onPointerMove = (event) => {
         const delta = event.clientX - startX;
@@ -206,16 +211,15 @@ function setupSidebarResizer() {
 
     const onPointerUp = (event) => {
         controls.resizer.releasePointerCapture(event.pointerId);
-        window.removeEventListener('pointermove', onPointerMove);
-        window.removeEventListener('pointerup', onPointerUp);
+        dragDisposer.dispose();
     };
 
-    controls.resizer.addEventListener('pointerdown', (event) => {
+    appDisposer.listen(controls.resizer, 'pointerdown', (event) => {
         startX = event.clientX;
         startWidth = controls.panel.getBoundingClientRect().width;
         controls.resizer.setPointerCapture(event.pointerId);
-        window.addEventListener('pointermove', onPointerMove);
-        window.addEventListener('pointerup', onPointerUp);
+        dragDisposer.listen(window, 'pointermove', onPointerMove);
+        dragDisposer.listen(window, 'pointerup', onPointerUp);
     });
 }
 
@@ -267,13 +271,14 @@ function getBlockDataAt(nx, ny, nz) {
 }
 
 function syncProgramControls() {
-    for (let i = 0; i < filterValues.length; i += 1) {
+    const values = getState().activeProgram;
+    for (let i = 0; i < PROGRAM_AXES.length; i += 1) {
         const slider = document.querySelector(`input[data-filter-index="${i}"]`);
         if (slider) {
-            slider.value = filterValues[i];
+            slider.value = values[PROGRAM_AXES[i]] ?? 0;
         }
         const valuePill = document.getElementById(`pid-value-${i}`);
-        if (valuePill) valuePill.textContent = String(filterValues[i]);
+        if (valuePill) valuePill.textContent = String(values[PROGRAM_AXES[i]] ?? 0);
     }
 }
 
@@ -281,9 +286,7 @@ function setActiveProgram(x, y, z, { syncControls = false, force = false } = {})
     const nextX = Math.max(0, Math.min(maxX, x));
     const nextY = Math.max(0, Math.min(maxY, y));
     const nextZ = Math.max(0, Math.min(maxZ, z));
-    filterValues[0] = nextX;
-    filterValues[1] = nextY;
-    filterValues[2] = nextZ;
+    setActiveProgramState({ x: nextX, y: nextY, z: nextZ });
     if (syncControls) {
         syncProgramControls();
     }
@@ -295,6 +298,8 @@ function setActiveProgram(x, y, z, { syncControls = false, force = false } = {})
 function createProgramIdControls() {
     if (!controls.pidContainer) return;
     controls.pidContainer.innerHTML = '';
+    pidDisposer.dispose();
+    pidDisposer = createDisposer();
     const labels = ['X', 'Y', 'Z'];
     const maxValues = [maxX, maxY, maxZ];
     labels.forEach((label, index) => {
@@ -307,17 +312,16 @@ function createProgramIdControls() {
         valueSpan.className = 'value-pill';
         valueSpan.id = `pid-value-${index}`;
         const isLocked = maxValues[index] <= 0;
-        if (isLocked) {
-            filterValues[index] = 0;
-        }
-        const displayValue = isLocked ? 0 : Math.max(0, filterValues[index]);
-        filterValues[index] = displayValue;
-        valueSpan.textContent = String(displayValue);
+        const axis = PROGRAM_AXES[index];
+        const currentValues = getState().activeProgram;
+        const nextValue = isLocked ? 0 : Math.max(0, currentValues[axis] ?? 0);
+        setActiveProgramState({ ...currentValues, [axis]: nextValue });
+        valueSpan.textContent = String(nextValue);
         const slider = document.createElement('input');
         slider.type = 'range';
         slider.min = 0;
         slider.max = maxValues[index];
-        slider.value = displayValue;
+        slider.value = nextValue;
         slider.dataset.filterIndex = index;
         slider.disabled = isLocked;
         const tickId = `pid-ticks-${index}`;
@@ -329,7 +333,7 @@ function createProgramIdControls() {
             ticks.appendChild(opt);
         }
         slider.setAttribute('list', tickId);
-        slider.addEventListener('input', handleProgramFilterChange);
+        pidDisposer.listen(slider, 'input', handleProgramFilterChange);
         wrapper.appendChild(nameSpan);
         wrapper.appendChild(slider);
         wrapper.appendChild(valueSpan);
@@ -341,8 +345,11 @@ function createProgramIdControls() {
 function handleProgramFilterChange(event) {
     const index = Number(event.target.dataset.filterIndex);
     const value = Number(event.target.value);
-    filterValues[index] = value;
-    setActiveProgram(filterValues[0], filterValues[1], filterValues[2], { syncControls: true });
+    const axis = PROGRAM_AXES[index];
+    const current = getState().activeProgram;
+    const next = { ...current, [axis]: value };
+    logAction('program_slider', { axis, value });
+    setActiveProgram(next.x ?? 0, next.y ?? 0, next.z ?? 0, { syncControls: true });
 }
 
 function initializeUIElements() {
@@ -358,9 +365,7 @@ function initializeUIElements() {
 
 async function fetchData() {
     try {
-        const API_BASE = window.__TRITON_VIZ_API__ || '';
-        const response = await fetch(`${API_BASE}/api/data`);
-        globalData = await response.json();
+        globalData = await getJson('/api/data');
         determineMaxValues(globalData?.ops?.visualization_data || {});
         initializeUIElements();
     } catch (error) {

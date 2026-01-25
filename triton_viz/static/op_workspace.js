@@ -1,8 +1,10 @@
-import { createMatMulVisualization } from './matmul.js';
-import { createLoadVisualization } from './load.js';
-import { createStoreVisualization } from './store.js';
 import { createFlowDiagram } from './nki.js';
 import { enableDrag } from './ui_helpers.js';
+import { postJson } from './api.js';
+import { logAction, logInfo } from './logger.js';
+import { setActiveOp } from './state.js';
+import { getVisualizer } from './ops/registry.js';
+import './ops/defaults.js';
 
 export class OpWorkspace {
     constructor(containerElement, { getBlockData = null, maxValues = { x: 0, y: 0, z: 0 } } = {}) {
@@ -65,7 +67,7 @@ export class OpWorkspace {
             this.blockData = [];
         }
         if (changed) {
-            console.info('Active program changed', { x: nx, y: ny, z: nz });
+            logInfo('active program changed', { x: nx, y: ny, z: nz });
             if (window.resetOpControls) window.resetOpControls();
         }
         if (this.titleEl) {
@@ -141,6 +143,7 @@ export class OpWorkspace {
         flowTab.addEventListener('click', () => {
             this.setActiveTab(flowTab);
             this.displayFlowDiagram({ logTabChange: true });
+            logAction('flow_tab_click', { program: { ...this.gridPosition } });
         });
         headerBar.appendChild(flowTab);
 
@@ -180,6 +183,11 @@ export class OpWorkspace {
         if (typeof index === 'number') {
             this.activeTabIndex = index;
         }
+        logAction('op_tab_click', {
+            program: { ...this.gridPosition },
+            opType: op.type,
+            index,
+        });
         this.displayOpVisualization(op, { preserveViewState: true, logTabChange: true });
     }
 
@@ -206,7 +214,7 @@ export class OpWorkspace {
     }
 
     logTabChange(opType) {
-        console.info('Op tab changed', {
+        logInfo('op tab changed', {
             program: {
                 x: this.gridPosition.x,
                 y: this.gridPosition.y,
@@ -253,20 +261,15 @@ export class OpWorkspace {
             window.last_slice_coords = op.slice_coords;
         } catch (error) { /* noop */ }
 
-        switch (op.type) {
-            case 'Dot':
-                this.visualizationCleanupFunction = createMatMulVisualization(this.contentArea, op, viewState);
-                break;
-            case 'Load':
-                this.visualizationCleanupFunction = createLoadVisualization(this.contentArea, op, viewState);
-                break;
-            case 'Store':
-                this.visualizationCleanupFunction = createStoreVisualization(this.contentArea, op, viewState);
-                break;
-            default:
-                this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;
+        const visualizer = getVisualizer(op.type);
+        if (visualizer) {
+            this.visualizationCleanupFunction = visualizer(this.contentArea, op, viewState);
+        } else {
+            this.contentArea.textContent = `Visualization not supported for ${op.type} operations.`;
+            this.visualizationCleanupFunction = null;
         }
         this.lastOpType = op.type;
+        setActiveOp({ type: op.type, uuid: op.uuid });
         if (options.logTabChange) {
             this.logTabChange(op.type);
         }
@@ -283,6 +286,7 @@ export class OpWorkspace {
         }
         this.contentArea.innerHTML = '';
         this.visualizationCleanupFunction = createFlowDiagram(this.contentArea, this.blockData || []);
+        setActiveOp({ type: 'Flow', uuid: null });
         if (logTabChange) {
             this.logTabChange('Flow');
         }
@@ -324,13 +328,7 @@ export class OpWorkspace {
             blurb.textContent = 'Arrow points to the line being visualized.';
             wrapper.appendChild(blurb);
             try {
-                const API_BASE = window.__TRITON_VIZ_API__ || '';
-                const res = await fetch(`${API_BASE}/api/op_code`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uuid, frame_idx: frameIdx, context })
-                });
-                const data = await res.json();
+                const data = await postJson('/api/op_code', { uuid, frame_idx: frameIdx, context });
                 const meta = document.createElement('div');
                 meta.style.marginBottom = '6px';
                 meta.style.fontSize = '12px';
@@ -366,22 +364,26 @@ export class OpWorkspace {
             if (!next) {
                 visible = false;
                 destroyPanel();
+                logAction('code_peek_toggle', { visible, uuid: null, source: 'toggle' });
                 return visible;
             }
             const activeUuid = getActiveUuid();
             if (!activeUuid) {
                 visible = false;
                 destroyPanel();
+                logAction('code_peek_toggle', { visible, uuid: null, source: 'toggle' });
                 return visible;
             }
             visible = true;
             await createPanel(activeUuid, 0, 8);
+            logAction('code_peek_toggle', { visible, uuid: activeUuid, source: typeof force === 'boolean' ? 'sync' : 'toggle' });
             return visible;
         };
 
         const hidePanel = () => {
             visible = false;
             destroyPanel();
+            logAction('code_peek_toggle', { visible, uuid: null, source: 'toggle' });
             return visible;
         };
 

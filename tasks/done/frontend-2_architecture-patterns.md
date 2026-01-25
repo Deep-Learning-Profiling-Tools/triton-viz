@@ -2,10 +2,10 @@
 
 Context: make the frontend maintainable by consolidating shared logic, introducing a visualizer registry, a single state store, an API client layer, and cleanup helpers; keep all current UI behavior intact.
 
-Review-Round: 0
-Owner:
+Review-Round: 1
+Owner: codex
 Deps: [frontend-1]
-Touches: triton_viz/static/tensor_view.js, triton_viz/static/visualization.js, triton_viz/static/gridblock.js, triton_viz/static/nki.js, triton_viz/static/histogram.js, triton_viz/static/ui_helpers.js, triton_viz/ARCHITECTURE.md, ARCHITECTURE.md, MANUAL.md, README.md
+Touches: triton_viz/static/tensor_view.js, triton_viz/static/visualization.js, triton_viz/static/op_workspace.js, triton_viz/static/api.js, triton_viz/static/state.js, triton_viz/static/logger.js, triton_viz/static/ops/registry.js, triton_viz/static/ops/defaults.js, triton_viz/static/utils/dispose.js, triton_viz/static/histogram.js, triton_viz/static/load_utils.js, triton_viz/static/sbuf_panel.js, triton_viz/ARCHITECTURE.md, ARCHITECTURE.md, MANUAL.md, README.md, tests/frontend/api.test.mjs, tests/frontend/state.test.mjs, tests/frontend/registry.test.mjs
 Acceptance:
 - op visualizer dispatch uses a registry with a consistent interface
 - all fetch calls are routed through a shared API client

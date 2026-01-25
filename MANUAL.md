@@ -10,6 +10,9 @@
 ## Active Program Workspace
 Use the Program IDs sliders to select the active program (X, Y, Z). The workspace updates its op tabs, Tensor/Flow views, and code panel to match the active program.
 
+## Workspace Toggles
+Heatmap, Value Histogram, and All Program IDs toggles apply across op tabs and stay in sync as you move between operations.
+
 ## Visual Annotations
 
 ### CAD-style Dimension Lines

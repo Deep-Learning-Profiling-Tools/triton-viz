@@ -173,9 +173,22 @@ export function setupCamera(scene, camera) {
 }
 
 export function setupEventListeners(container, camera, renderer, onMouseMove, onKeyDown, onRender) {
-    container.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('keydown', (e) => { onKeyDown(e); if (onRender) onRender(); });
-    container.addEventListener('wheel', (e) => { e.preventDefault(); camera.position.z += e.deltaY*0.005; camera.updateProjectionMatrix(); if (onRender) onRender(); }, { passive: false });
+    const handleMouseMove = (event) => onMouseMove(event);
+    const handleKeyDown = (event) => { onKeyDown(event); if (onRender) onRender(); };
+    const handleWheel = (event) => {
+        event.preventDefault();
+        camera.position.z += event.deltaY * 0.005;
+        camera.updateProjectionMatrix();
+        if (onRender) onRender();
+    };
+    container.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('keydown', handleKeyDown);
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+        container.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('keydown', handleKeyDown);
+        container.removeEventListener('wheel', handleWheel, { passive: false });
+    };
 }
 
 export function cameraControls(camera, cameraRotation) {

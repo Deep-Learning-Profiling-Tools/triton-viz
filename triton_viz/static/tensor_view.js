@@ -19,6 +19,9 @@ import {
 } from './load_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { enableDrag } from './ui_helpers.js';
+import { getApiBase, postJson } from './api.js';
+import { getState } from './state.js';
+import { createDisposer } from './utils/dispose.js';
 
 const VIZ_CACHE = new Map();
 const PROGRAM_COUNT_COLORS = [
@@ -52,6 +55,33 @@ function sampleValueFromCache(cache, coords) {
     return cache.values?.[x] ?? 0;
 }
 
+function applyValueColormap(mesh, cache, paint) {
+    if (!mesh || !cache) return;
+    const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
+    const count = mesh.count, shape = mesh.userData.shape;
+    const c = new THREE.Color();
+    for (let i = 0; i < count; i++) {
+        const coords = coordsFromIndex(i, shape);
+        const val = sampleValueFromCache(cache, coords);
+        const t = clamp01((val - min) / denom);
+        paint(c, coords, val, t);
+        mesh.setColorAt(i, c);
+    }
+    mesh.instanceColor.needsUpdate = true;
+}
+
+function applyCoordColormap(mesh, paint) {
+    if (!mesh || !paint) return;
+    const coordsList = mesh.userData.coords;
+    if (!coordsList) return;
+    const c = new THREE.Color();
+    for (let i = 0; i < mesh.count; i += 1) {
+        paint(c, coordsList[i], i);
+        mesh.setColorAt(i, c);
+    }
+    mesh.instanceColor.needsUpdate = true;
+}
+
 function createSideMenu(container) {
     const menu = document.createElement('div');
     Object.assign(menu.style, {
@@ -70,13 +100,8 @@ function updateSideMenu(el, name, coords, val, shape, extraHtml = '') {
 
 async function fetchTensorPayload(apiBase, uuid, endpoint = 'getLoadTensor') {
     try {
-        const res = await fetch(`${apiBase}/api/${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uuid })
-        });
-        const data = await res.json();
-        if (!data || data.error) return null;
+        const data = await postJson(`/api/${endpoint}`, { uuid }, { base: apiBase });
+        if (!data) return null;
         return {
             scaleMin: data.min ?? 0, scaleMax: data.max ?? 0,
             values: data.values, shape: data.shape, dims: data.dims,
@@ -89,71 +114,42 @@ async function fetchProgramCounts(apiBase, op) {
     if (!op || !op.overall_key || op.time_idx === undefined) return null;
     // fetch a sparse list of coords -> program count for this op
     try {
-        const res = await fetch(`${apiBase}/api/getLoadStoreAllPrograms`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                type: op.type,
-                overall_key: op.overall_key,
-                time_idx: op.time_idx,
-                op_index: op.op_index,
-            })
-        });
-        const data = await res.json();
-        if (!data || data.error) return null;
-        return data;
+        return await postJson('/api/getLoadStoreAllPrograms', {
+            type: op.type,
+            overall_key: op.overall_key,
+            time_idx: op.time_idx,
+            op_index: op.op_index,
+        }, { base: apiBase });
     } catch (e) { return null; }
 }
 
 function applyColorToMesh(mesh, cache, label) {
     if (!mesh || !cache) return;
-    const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
-    const hue = getHue(label), count = mesh.count, shape = mesh.userData.shape;
-    const c = new THREE.Color();
-    for (let i = 0; i < count; i++) {
-        const coords = coordsFromIndex(i, shape);
-        const val = sampleValueFromCache(cache, coords);
-        const t = clamp01((val - min) / denom);
+    const hue = getHue(label);
+    applyValueColormap(mesh, cache, (color, _coords, _val, t) => {
         const [r, g, b] = hslToRgb(hue, 0.9, t);
-        c.setRGB(r, g, b);
-        mesh.setColorAt(i, c);
-    }
-    mesh.instanceColor.needsUpdate = true;
+        color.setRGB(r, g, b);
+    });
 }
 
 function applyDimmedColormap(mesh, cache, label, isHighlighted) {
     if (!mesh || !cache) return;
-    const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
-    const hue = getHue(label), count = mesh.count, shape = mesh.userData.shape;
-    const c = new THREE.Color();
-    for (let i = 0; i < count; i++) {
-        const coords = coordsFromIndex(i, shape);
-        const val = sampleValueFromCache(cache, coords);
-        const t = clamp01((val - min) / denom);
+    const hue = getHue(label);
+    applyValueColormap(mesh, cache, (color, coords, _val, t) => {
         if (isHighlighted(coords)) {
             const [r, g, b] = hslToRgb(hue, 0.9, t);
-            c.setRGB(r, g, b);
+            color.setRGB(r, g, b);
         } else {
-            c.setRGB(t, t, t);
+            color.setRGB(t, t, t);
         }
-        mesh.setColorAt(i, c);
-    }
-    mesh.instanceColor.needsUpdate = true;
+    });
 }
 
 function applyMonochromeColormap(mesh, cache) {
     if (!mesh || !cache) return;
-    const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
-    const count = mesh.count, shape = mesh.userData.shape;
-    const c = new THREE.Color();
-    for (let i = 0; i < count; i++) {
-        const coords = coordsFromIndex(i, shape);
-        const val = sampleValueFromCache(cache, coords);
-        const t = clamp01((val - min) / denom);
-        c.setRGB(t, t, t);
-        mesh.setColorAt(i, c);
-    }
-    mesh.instanceColor.needsUpdate = true;
+    applyValueColormap(mesh, cache, (color, _coords, _val, t) => {
+        color.setRGB(t, t, t);
+    });
 }
 
 function normalizeProgramCounts(payload) {
@@ -206,101 +202,72 @@ function buildSubsetHues(subsets) {
 
 function applyProgramCountColors(mesh, counts, baseColor, palette) {
     if (!mesh || !counts) return;
-    // paint each cube with a color based on the count bucket
-    const coordsList = mesh.userData.coords;
-    if (!coordsList) return;
     const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
     const countMap = counts.map;
     const colors = palette || PROGRAM_COUNT_PALETTE;
-    const c = new THREE.Color();
-    for (let i = 0; i < mesh.count; i += 1) {
-        const coords = coordsList[i];
+    applyCoordColormap(mesh, (color, coords) => {
         const count = coords ? countMap.get(`${coords[0]},${coords[1]},${coords[2]}`) || 0 : 0;
         if (count <= 0) {
-            c.copy(base);
+            color.copy(base);
         } else {
             const idx = Math.min(count - 1, colors.length - 1);
-            c.copy(colors[idx]);
+            color.copy(colors[idx]);
         }
-        mesh.setColorAt(i, c);
-    }
-    mesh.instanceColor.needsUpdate = true;
+    });
 }
 
 function applyProgramCountHeatmap(mesh, cache, counts, palette, baseColor) {
     if (!mesh || !cache || !counts) return;
-    const coordsList = mesh.userData.coords;
-    if (!coordsList) return;
     const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
     const countMap = counts.map;
     const colors = palette || PROGRAM_COUNT_PALETTE;
-    const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
-    const c = new THREE.Color();
     const hsl = { h: 0, s: 0, l: 0.5 };
-    for (let i = 0; i < mesh.count; i += 1) {
-        const coords = coordsList[i];
+    applyCoordColormap(mesh, (color, coords) => {
         const count = coords ? countMap.get(`${coords[0]},${coords[1]},${coords[2]}`) || 0 : 0;
         if (count <= 0) {
             const val = coords ? sampleValueFromCache(cache, coords) : 0;
             const t = clamp01((val - min) / denom);
-            c.setRGB(t, t, t);
-            mesh.setColorAt(i, c);
-            continue;
+            color.setRGB(t, t, t);
+            return;
         }
         const idx = Math.min(count - 1, colors.length - 1);
         colors[idx].getHSL(hsl);
         const val = coords ? sampleValueFromCache(cache, coords) : 0;
         const t = clamp01((val - min) / denom);
-        c.setHSL(hsl.h, 0.7, t);
-        mesh.setColorAt(i, c);
-    }
-    mesh.instanceColor.needsUpdate = true;
+        color.setHSL(hsl.h, 0.7, t);
+    });
 }
 
 function applyProgramSubsetColors(mesh, subsetState, hues, baseColor) {
     if (!mesh || !subsetState || !hues) return;
-    const coordsList = mesh.userData.coords;
-    if (!coordsList) return;
     const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
     const subsetMap = subsetState.subsetMap;
-    const c = new THREE.Color();
-    for (let i = 0; i < mesh.count; i += 1) {
-        const coords = coordsList[i];
+    applyCoordColormap(mesh, (color, coords) => {
         const key = coords ? subsetMap.get(`${coords[0]},${coords[1]},${coords[2]}`) : null;
         if (key && hues.has(key)) {
-            c.setHSL(hues.get(key), 0.6, 0.55);
+            color.setHSL(hues.get(key), 0.6, 0.55);
         } else {
-            c.copy(base);
+            color.copy(base);
         }
-        mesh.setColorAt(i, c);
-    }
-    mesh.instanceColor.needsUpdate = true;
+    });
 }
 
 function applyProgramSubsetHeatmap(mesh, cache, subsetState, hues, baseColor) {
     if (!mesh || !cache || !subsetState || !hues) return;
-    const coordsList = mesh.userData.coords;
-    if (!coordsList) return;
     const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
     const subsetMap = subsetState.subsetMap;
-    const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
-    const c = new THREE.Color();
-    for (let i = 0; i < mesh.count; i += 1) {
-        const coords = coordsList[i];
+    applyCoordColormap(mesh, (color, coords) => {
         const key = coords ? subsetMap.get(`${coords[0]},${coords[1]},${coords[2]}`) : null;
         if (!key || !hues.has(key)) {
             const val = coords ? sampleValueFromCache(cache, coords) : 0;
             const t = clamp01((val - min) / denom);
-            c.setRGB(t, t, t);
-            mesh.setColorAt(i, c);
-            continue;
+            color.setRGB(t, t, t);
+            return;
         }
         const val = coords ? sampleValueFromCache(cache, coords) : 0;
         const t = clamp01((val - min) / denom);
-        c.setHSL(hues.get(key), 0.7, t);
-        mesh.setColorAt(i, c);
-    }
-    mesh.instanceColor.needsUpdate = true;
+        color.setHSL(hues.get(key), 0.7, t);
+    });
 }
 function getHighlightPredicate(highlights) {
     if (!highlights) return null;
@@ -652,7 +619,8 @@ function onMouseUp(ctx) { ctx.state.isDragging = false; if (ctx.stage) ctx.stage
 export function createTensorVisualization(containerElement, op, options = {}) {
     const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null } = options;
     const supportsAllPrograms = type === 'Load' || type === 'Store';
-    const API_BASE = window.__TRITON_VIZ_API__ || '';
+    const API_BASE = getApiBase();
+    const initialToggles = getState().toggles || {};
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape, color: colors.GLOBAL || '#333', position: [0,0,0], endpoint: 'getLoadTensor' }
     ];
@@ -676,6 +644,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             buildRequestBody: (s, b) => ({ uuid: op.uuid, source: s, bins: b }),
         });
         const { scene, camera, renderer } = setupScene(stage, 0x000000);
+        const disposer = createDisposer();
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
         const tensors = new Map();
         configs.forEach(cfg => {
@@ -693,15 +662,16 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         orbitControls.enableDamping = false;
         orbitControls.target.copy(center);
         orbitControls.update();
+        disposer.add(() => orbitControls.dispose());
         const state = {
-            colorizeOn: false,
+            colorizeOn: !!initialToggles.colorize,
             payloads: new Map(),
             rafId: null,
             renderPending: false,
             lastHoverKey: null,
             activeHoverOutline: hoverOutline,
             dotHoverKey: null,
-            allProgramsOn: false,
+            allProgramsOn: !!initialToggles.allPrograms,
             allProgramsMode: 'subset',
             programCounts: null,
             programSubsets: null,
@@ -709,12 +679,12 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             programDataLoading: false,
         };
         const highlightColor = colors.HIGHLIGHT || new THREE.Color(0.0, 0.7, 1.0);
-        const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [], highlightColor };
+        const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, disposer, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [], highlightColor };
         ctx.requestRender = () => {
             if (state.rafId !== null) { state.renderPending = true; return; }
             state.rafId = requestAnimationFrame(() => { state.rafId = null; orbitControls.update(); renderer.render(scene, camera); if (state.renderPending) { state.renderPending = false; ctx.requestRender(); } });
         };
-        orbitControls.addEventListener('change', ctx.requestRender);
+        disposer.listen(orbitControls, 'change', ctx.requestRender);
         ctx.applyBackgroundTheme = (hex) => {
             const isLight = (hex || '').toLowerCase() === '#ffffff';
             const baseGlobalLight = new THREE.Color('#fefce8');
@@ -795,26 +765,37 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 ...captureHistogramState(histogramUI),
             };
         };
-        setupEventListeners(stage, camera, renderer, (e) => onMouseMove(e, ctx), cameraControls(camera, new THREE.Euler(0,0,0,'YXZ')), ctx.requestRender);
+        const cleanupListeners = setupEventListeners(
+            stage,
+            camera,
+            renderer,
+            (e) => onMouseMove(e, ctx),
+            cameraControls(camera, new THREE.Euler(0, 0, 0, 'YXZ')),
+            ctx.requestRender,
+        );
+        disposer.add(cleanupListeners);
+        disposer.add(() => renderer.dispose());
         if (showDimLines) {
             tensors.forEach((group, name) => {
                 ctx.dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
             });
         }
-        const fallbackState = (!viewState && window.__tritonVizOpState) ? {
-            colorizeOn: !!window.__tritonVizOpState.colorize,
-            allProgramsOn: !!window.__tritonVizOpState.allPrograms,
-            histogramVisible: !!window.__tritonVizOpState.histogram,
+        const fallbackState = !viewState ? {
+            colorizeOn: !!initialToggles.colorize,
+            allProgramsOn: !!initialToggles.allPrograms,
+            histogramVisible: !!initialToggles.histogram,
         } : null;
         applyViewState(viewState || fallbackState);
         containerElement.__vizGetState = getViewState;
         ctx.cleanup = () => {
             if (state.rafId) cancelAnimationFrame(state.rafId);
+            ctx.disposer.dispose();
             ctx.destroyLegends();
             ctx.dimLineGroups.forEach((group) => scene.remove(group));
             ctx.dimLineGroups = [];
             if (stage.parentElement) stage.parentElement.removeChild(stage);
             if (sideMenu.parentElement) sideMenu.parentElement.removeChild(sideMenu);
+            histogramUI.destroy?.();
             if (histogramUI.overlay?.parentElement) histogramUI.overlay.parentElement.removeChild(histogramUI.overlay);
             if (containerElement.__vizGetState) {
                 containerElement.__vizGetState = null;

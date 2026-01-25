@@ -1,3 +1,5 @@
+import { getApiBase, getJson } from './api.js';
+
 const DEVICE_PRESETS = [
     { value: 'TRN1_NC_V2', label: 'Trn1 NC-v2 (24 MiB)', limit: 24 * 1024 * 1024 },
     { value: 'TRN1_CHIP', label: 'Trn1 chip (48 MiB)', limit: 48 * 1024 * 1024 },
@@ -21,10 +23,8 @@ function formatBytes(bytes) {
     } while (Math.abs(bytes) >= thresh && u < units.length - 1);
     return `${bytes.toFixed(1)} ${units[u]}`;
 }
-
-
 export function renderSbufPanel() {
-    const API_BASE = window.__TRITON_VIZ_API__ || '';
+    const apiBase = getApiBase();
     const button = document.createElement('button');
     button.textContent = 'SBUF Usage';
 
@@ -118,7 +118,7 @@ export function renderSbufPanel() {
     });
 
     async function fetchAndRender() {
-        let url = `${API_BASE}/api/sbuf?device=${encodeURIComponent(deviceSelect.value)}`;
+        let url = `/api/sbuf?device=${encodeURIComponent(deviceSelect.value)}`;
         if (deviceSelect.value === 'CUSTOM') {
             const customVal = parseInt(customInput.value || '0', 10);
             if (customVal > 0) {
@@ -129,12 +129,11 @@ export function renderSbufPanel() {
         const ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         try {
-            const res = await fetch(url);
-            const data = await res.json();
+            const data = await getJson(url, { base: apiBase });
             drawTimeline(ctx, data.timeline, data.limit_bytes);
             summary.textContent = `Limit: ${formatBytes(data.limit_bytes)} | Max: ${formatBytes(data.max_usage)} | Overflow events: ${data.overflow_points.length}`;
         } catch (err) {
-            summary.textContent = `Error: ${err}`;
+            summary.textContent = `Error: ${err.message || err}`;
         }
     }
 
