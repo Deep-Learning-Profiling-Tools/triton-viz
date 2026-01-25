@@ -81,10 +81,6 @@ body {
     overflow: hidden;
 }
 
-body.tensor-only #canvas {
-    display: none;
-}
-
 #control-panel {
     padding: 28px 32px 32px;
     background: var(--panel-bg);
@@ -354,20 +350,13 @@ body.tensor-only #canvas {
     overflow: hidden;
 }
 
-#canvas {
-    width: 100%;
-    height: 100%;
-    display: block;
-}
-
 #visualization-container {
     position: absolute;
-    top: 0;
-    left: 0;
+    inset: 0;
     width: 100%;
     height: 100%;
-    pointer-events: none;
-    display: none;
+    pointer-events: auto;
+    display: block;
 }
 
 .viz-stage {
@@ -398,11 +387,8 @@ body.tensor-only #canvas {
 }
 
 .detail-overlay {
-    position: fixed;
-    top: 0;
-    left: calc(var(--sidebar-width) + var(--sidebar-resizer-width));
-    width: calc(100vw - var(--sidebar-width) - var(--sidebar-resizer-width));
-    height: 100vh;
+    position: absolute;
+    inset: 0;
     background: #000;
     z-index: 2000;
     display: flex;
@@ -762,8 +748,7 @@ body.tensor-only #canvas {
     }
 
     .detail-overlay {
-        left: 0;
-        width: 100vw;
+        width: 100%;
     }
 }
 #sidebar-resizer {

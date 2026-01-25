@@ -42,6 +42,7 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 
 
 ### Visualization Features
+- **Active Program Workspace**: Program ID sliders select the active program and drive the op tabs, Tensor View, and Flow View.
 - **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows move outside when space is limited.
 - **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
 ## Getting Started
