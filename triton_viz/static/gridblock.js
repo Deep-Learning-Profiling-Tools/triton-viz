@@ -1,6 +1,6 @@
 import { createMatMulVisualization } from './matmul.js';
-import { createLoadVisualization, createLoadOverallVisualization } from './load.js';
-import { createStoreVisualization, createStoreOverallVisualization } from './store.js';
+import { createLoadVisualization } from './load.js';
+import { createStoreVisualization } from './store.js';
 import { createFlowDiagram } from './nki.js';
 import { enableDrag } from './ui_helpers.js';
 
@@ -88,10 +88,6 @@ export class GridBlock {
         card.appendChild(this.contentArea);
         this.visualizationContainer.appendChild(card);
 
-        const closeButton = this.createCloseButton();
-        const backButton = this.createBackButton();
-        this.visualizationContainer.appendChild(closeButton);
-        this.visualizationContainer.appendChild(backButton);
 
         if (this.containerElement) {
             this.containerElement.innerHTML = '';
@@ -322,26 +318,6 @@ export class GridBlock {
         });
         headerBar.appendChild(flowTab);
 
-        const loadOps = this.blockData.filter((op) => op.type === 'Load' && op.overall_key);
-        if (loadOps.length) {
-            const loadTab = this.createTabButton('Load Overall');
-            loadTab.addEventListener('click', async () => {
-                this.setActiveTab(loadTab);
-                await this.displayLoadOverallView(loadOps);
-            });
-            headerBar.appendChild(loadTab);
-        }
-
-        const storeOps = this.blockData.filter((op) => op.type === 'Store' && op.overall_key);
-        if (storeOps.length) {
-            const storeTab = this.createTabButton('Store Overall');
-            storeTab.addEventListener('click', async () => {
-                this.setActiveTab(storeTab);
-                await this.displayStoreOverallView(storeOps);
-            });
-            headerBar.appendChild(storeTab);
-        }
-
         return headerBar;
     }
 
@@ -457,98 +433,6 @@ export class GridBlock {
         }
         this.contentArea.innerHTML = '';
         this.visualizationCleanupFunction = createFlowDiagram(this.contentArea, this.blockData || []);
-    }
-
-    async displayLoadOverallView(loadOps) {
-        if (!this.contentArea) return;
-        this.contentArea.innerHTML = '<div class="overall-empty">Loading load overview…</div>';
-        try {
-            const data = await this.fetchOverallData(loadOps.map((op) => op.overall_key), 'load');
-            if (this.visualizationCleanupFunction) {
-                this.visualizationCleanupFunction();
-                this.visualizationCleanupFunction = null;
-            }
-            const base = loadOps[0] || {};
-            const opPayload = {
-                ...base,
-                overall_mode: true,
-                overall_tiles: data.tiles || [],
-                overall_shape: data.shape || base.global_shape,
-                overall_slice_shape: data.slice_shape || base.slice_shape,
-            };
-            this.visualizationCleanupFunction = createLoadOverallVisualization(this.contentArea, opPayload);
-        } catch (err) {
-            this.contentArea.innerHTML = `<div class="overall-empty">Failed to load overall view: ${err}</div>`;
-        }
-    }
-
-    async displayStoreOverallView(storeOps) {
-        if (!this.contentArea) return;
-        this.contentArea.innerHTML = '<div class="overall-empty">Loading store overview…</div>';
-        try {
-            const data = await this.fetchOverallData(storeOps.map((op) => op.overall_key), 'store');
-            if (this.visualizationCleanupFunction) {
-                this.visualizationCleanupFunction();
-                this.visualizationCleanupFunction = null;
-            }
-            const base = storeOps[0] || {};
-            const opPayload = {
-                ...base,
-                overall_mode: true,
-                overall_tiles: data.tiles || [],
-                overall_shape: data.shape || base.global_shape,
-                overall_slice_shape: data.slice_shape || base.slice_shape,
-            };
-            this.visualizationCleanupFunction = createStoreOverallVisualization(this.contentArea, opPayload);
-        } catch (err) {
-            this.contentArea.innerHTML = `<div class="overall-empty">Failed to load overall view: ${err}</div>`;
-        }
-    }
-
-    async fetchOverallData(keys, kind) {
-        const uniqueKeys = Array.from(new Set((keys || []).filter(Boolean)));
-        if (!uniqueKeys.length) {
-            throw new Error('No overall data available');
-        }
-        const API_BASE = window.__TRITON_VIZ_API__ || '';
-        const endpoint = kind === 'store' ? 'store_overall' : 'load_overall';
-        const results = await Promise.all(uniqueKeys.map(async (key) => {
-            const resp = await fetch(`${API_BASE}/api/${endpoint}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key })
-            });
-            const data = await resp.json();
-            if (!resp.ok || data.error) {
-                throw new Error(data && data.error ? data.error : 'Request failed');
-            }
-            return data;
-        }));
-        const merged = {
-            shape: results[0]?.shape || [],
-            slice_shape: results[0]?.slice_shape || [],
-            tiles: [],
-        };
-        results.forEach((entry) => {
-            (entry.tiles || []).forEach((tile) => merged.tiles.push(tile));
-        });
-        return merged;
-    }
-
-    createCloseButton() {
-        const closeButton = document.createElement('button');
-        closeButton.className = 'detail-close';
-        closeButton.textContent = 'Close';
-        closeButton.addEventListener('click', () => this.hideDetailedView());
-        return closeButton;
-    }
-
-    createBackButton() {
-        const backButton = document.createElement('button');
-        backButton.className = 'detail-back';
-        backButton.textContent = 'Back to grid';
-        backButton.addEventListener('click', () => this.hideDetailedView());
-        return backButton;
     }
 
     hideDetailedView() {

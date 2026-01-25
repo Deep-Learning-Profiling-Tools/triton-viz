@@ -1,4 +1,4 @@
-import { createTensorVisualization, createOverallVisualization } from './tensor_view.js';
+import { createTensorVisualization } from './tensor_view.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 
 export function createStoreVisualization(containerElement, op, viewState = null) {
@@ -11,8 +11,4 @@ export function createStoreVisualization(containerElement, op, viewState = null)
         hasHeatmap: true,
         viewState
     });
-}
-
-export function createStoreOverallVisualization(containerElement, op) {
-    return createOverallVisualization(containerElement, op, { type: 'Store' });
 }

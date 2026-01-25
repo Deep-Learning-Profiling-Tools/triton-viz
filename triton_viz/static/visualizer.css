@@ -81,6 +81,10 @@ body {
     overflow: hidden;
 }
 
+body.tensor-only #canvas {
+    display: none;
+}
+
 #control-panel {
     padding: 28px 32px 32px;
     background: var(--panel-bg);
@@ -515,62 +519,6 @@ body {
     font-size: 12px;
     background: var(--accent-soft);
     color: var(--accent-strong);
-}
-
-.overall-overlay {
-    position: absolute;
-    inset: 0;
-    padding: 32px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    pointer-events: auto;
-}
-
-.overall-shell {
-    background: var(--panel-bg);
-    border-radius: var(--radius-xl);
-    padding: 32px;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-    border: 1px solid var(--panel-border);
-    box-shadow: var(--shadow-soft);
-}
-
-.overall-tabs {
-    display: flex;
-    gap: 8px;
-    overflow-x: auto;
-}
-
-.overall-tabs button {
-    border: 1px solid rgba(148, 163, 184, 0.4);
-    border-radius: 999px;
-    background: transparent;
-    padding: 8px 14px;
-    cursor: pointer;
-    color: var(--text-secondary);
-}
-
-.overall-tabs button.active {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
-    box-shadow: 0 8px 22px rgba(37, 99, 235, 0.35);
-}
-
-.overall-content {
-    flex: 1;
-    min-height: 400px;
-    background: var(--grid-bg);
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--grid-border);
-    overflow: hidden;
-}
-
-.overall-back {
-    align-self: flex-end;
 }
 
 .show-code-btn {

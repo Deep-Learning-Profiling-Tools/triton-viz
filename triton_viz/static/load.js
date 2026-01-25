@@ -1,4 +1,4 @@
-import { createTensorVisualization, createOverallVisualization } from './tensor_view.js';
+import { createTensorVisualization } from './tensor_view.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 
 export function createLoadVisualization(containerElement, op, viewState = null) {
@@ -10,8 +10,4 @@ export function createLoadVisualization(containerElement, op, viewState = null) 
         },
         viewState
     });
-}
-
-export function createLoadOverallVisualization(containerElement, op) {
-    return createOverallVisualization(containerElement, op, { type: 'Load' });
 }

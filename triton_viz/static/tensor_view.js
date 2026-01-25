@@ -337,16 +337,17 @@ function applyColorizedMesh(ctx, group, name) {
 
 function restoreTensorColors(ctx) {
     const { state, tensors, type } = ctx;
+    const supportsAllPrograms = type === 'Load' || type === 'Store';
     tensors.forEach((group, name) => {
         const mesh = group.userData.mesh;
         const p = state.payloads.get(name);
-        if (state.allProgramsOn && state.allProgramsMode === 'subset' && state.programSubsets) {
+        if (supportsAllPrograms && state.allProgramsOn && state.allProgramsMode === 'subset' && state.programSubsets) {
             if (state.colorizeOn && p) {
                 applyProgramSubsetHeatmap(mesh, p, state.programSubsets, state.programSubsetHues, mesh.userData.color_base);
             } else {
                 applyProgramSubsetColors(mesh, state.programSubsets, state.programSubsetHues, mesh.userData.color_base);
             }
-        } else if (state.allProgramsOn && state.allProgramsMode === 'count' && state.programCounts) {
+        } else if (supportsAllPrograms && state.allProgramsOn && state.allProgramsMode === 'count' && state.programCounts) {
             if (state.colorizeOn && p) {
                 applyProgramCountHeatmap(mesh, p, state.programCounts, PROGRAM_COUNT_PALETTE, mesh.userData.color_base);
             } else {
@@ -605,7 +606,13 @@ function onMouseMove(event, ctx) {
                 extraHtml = '<p>Programs: loading...</p>';
             }
         }
-        updateSideMenu(sideMenu, tensorName, coords, val, currentShape, extraHtml);
+        let displayCoords = (ctx.type === 'Dot' && tensorName !== 'Global' && Array.isArray(coords))
+            ? [coords[1], coords[0], coords[2]]
+            : coords;
+        if (Array.isArray(displayCoords) && Array.isArray(currentShape) && currentShape.length === 2) {
+            displayCoords = displayCoords.slice(0, 2);
+        }
+        updateSideMenu(sideMenu, tensorName, displayCoords, val, currentShape, extraHtml);
             if (ctx.type === 'Dot' && tensorName === 'C') {
                 const row = coords[1];
                 const col = coords[0];
@@ -644,6 +651,7 @@ function onMouseUp(ctx) { ctx.state.isDragging = false; if (ctx.stage) ctx.stage
 
 export function createTensorVisualization(containerElement, op, options = {}) {
     const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null } = options;
+    const supportsAllPrograms = type === 'Load' || type === 'Store';
     const API_BASE = window.__TRITON_VIZ_API__ || '';
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape, color: colors.GLOBAL || '#333', position: [0,0,0], endpoint: 'getLoadTensor' }
@@ -713,13 +721,13 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             tensors.forEach((group, name) => {
                 const mesh = group.userData.mesh;
                 const baseColor = isLight ? baseGlobalLight : mesh.userData.color_base;
-                if (state.allProgramsOn && state.allProgramsMode === 'subset' && state.programSubsets) {
+                if (supportsAllPrograms && state.allProgramsOn && state.allProgramsMode === 'subset' && state.programSubsets) {
                     if (state.colorizeOn) {
                         applyProgramSubsetHeatmap(mesh, state.payloads.get(name), state.programSubsets, state.programSubsetHues, baseColor);
                     } else {
                         applyProgramSubsetColors(mesh, state.programSubsets, state.programSubsetHues, baseColor);
                     }
-                } else if (state.allProgramsOn && state.allProgramsMode === 'count' && state.programCounts) {
+                } else if (supportsAllPrograms && state.allProgramsOn && state.allProgramsMode === 'count' && state.programCounts) {
                     if (state.colorizeOn) {
                         applyProgramCountHeatmap(mesh, state.payloads.get(name), state.programCounts, PROGRAM_COUNT_PALETTE, baseColor);
                     } else {
@@ -793,7 +801,12 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 ctx.dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
             });
         }
-        applyViewState(viewState);
+        const fallbackState = (!viewState && window.__tritonVizOpState) ? {
+            colorizeOn: !!window.__tritonVizOpState.colorize,
+            allProgramsOn: !!window.__tritonVizOpState.allPrograms,
+            histogramVisible: !!window.__tritonVizOpState.histogram,
+        } : null;
+        applyViewState(viewState || fallbackState);
         containerElement.__vizGetState = getViewState;
         ctx.cleanup = () => {
             if (state.rafId) cancelAnimationFrame(state.rafId);
@@ -885,7 +898,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
     };
     const ensureProgramData = async () => {
         // fetch subset data for the current op if needed
-        if (!state.allProgramsOn) return false;
+        if (!supportsAllPrograms || !state.allProgramsOn) return false;
         if (!state.programSubsets && !state.programCounts) {
             const payload = await fetchProgramCounts(API_BASE, op);
             if (!payload) {
@@ -904,6 +917,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         return true;
     };
     const ensureProgramDataForHover = () => {
+        if (!supportsAllPrograms) return;
         if (state.programSubsets || state.programCounts || state.programDataLoading) return;
         state.programDataLoading = true;
         fetchProgramCounts(API_BASE, op).then((payload) => {
@@ -927,7 +941,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         window.setOpControlHandlers({
             toggleColorize: async () => {
                 state.colorizeOn = !state.colorizeOn;
-                if (state.allProgramsOn) {
+                if (supportsAllPrograms && state.allProgramsOn) {
                     if (!state.programSubsets && !state.programCounts) {
                         await ensureProgramData();
                         return state.colorizeOn;
@@ -956,7 +970,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             },
             toggleShowCode: () => window.__tritonVizCodeToggle?.(),
             toggleHistogram: () => { if (cache.histogramUI.overlay.style.display === 'block') cache.histogramUI.hide?.(); else cache.histogramUI.show?.(); },
-            toggleAllPrograms: (type === 'Load' || type === 'Store') ? async () => {
+            toggleAllPrograms: supportsAllPrograms ? async () => {
                 state.allProgramsOn = !state.allProgramsOn;
                 if (!state.allProgramsOn) {
                     state.programCounts = null;
@@ -983,7 +997,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         return fetchTensorPayload(API_BASE, op.uuid, group.userData.endpoint).then(p => {
             if (p) {
                 state.payloads.set(name, p);
-                if (!state.allProgramsOn) {
+                if (!supportsAllPrograms || !state.allProgramsOn) {
                     updateTensorHighlights(group, p.highlights, cache.highlightColor, group.userData.mesh.userData.color_base);
                 }
             }
@@ -991,7 +1005,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
     });
 
     Promise.all(fetchers).then(async () => {
-        if (state.allProgramsOn) {
+        if (supportsAllPrograms && state.allProgramsOn) {
             await ensureProgramData();
         } else if (state.colorizeOn) {
             const items = [];
@@ -1034,81 +1048,4 @@ export function createTensorVisualization(containerElement, op, options = {}) {
     applyBackgroundTheme('#000000');
     requestRender();
     return cache.cleanup;
-}
-
-export function createOverallVisualization(containerElement, op, options = {}) {
-    const { type = 'Load' } = options;
-    const COLOR_GLOBAL = new THREE.Color(0.2, 0.2, 0.2);
-    const COLOR_BACKGROUND = new THREE.Color(0.0, 0.0, 0.0);
-    const tiles = op.overall_tiles || [];
-    const globalShape = op.overall_shape || op.global_shape || [];
-    containerElement.innerHTML = '';
-    const sceneRoot = document.createElement('div');
-    sceneRoot.className = 'viz-stage';
-    containerElement.appendChild(sceneRoot);
-    const legend = document.createElement('div');
-    Object.assign(legend.style, { position: 'absolute', top: '10px', right: '10px', background: 'rgba(0,0,0,0.65)', color: '#fff', padding: '8px 10px', borderRadius: '6px', maxHeight: '200px', overflow: 'auto', fontSize: '12px', zIndex: 10 });
-    legend.innerHTML = '<strong>Program Blocks</strong><br/>';
-    sceneRoot.appendChild(legend);
-    let currentBackground = COLOR_BACKGROUND;
-    const controlBar = document.createElement('div');
-    Object.assign(controlBar.style, { position: 'absolute', top: '10px', left: '10px', zIndex: 12, display: 'flex', gap: '8px', alignItems: 'center', background: 'rgba(0,0,0,0.55)', color: '#fff', padding: '6px 8px', borderRadius: '6px', fontSize: '12px' });
-    const bgLabel = document.createElement('span');
-    bgLabel.textContent = 'Background';
-    controlBar.appendChild(bgLabel);
-    const backgroundSelect = document.createElement('select');
-    [['Dark', '#000000'], ['Paper', '#ffffff'], ['Beige', '#f7f0e3'], ['Slate', '#0f172a']].forEach(([label, value]) => {
-        const opt = document.createElement('option'); opt.value = value; opt.textContent = label; backgroundSelect.appendChild(opt);
-    });
-    backgroundSelect.value = '#000000';
-    controlBar.appendChild(backgroundSelect);
-    sceneRoot.appendChild(controlBar);
-    const { scene, camera, renderer } = setupScene(sceneRoot, currentBackground);
-    const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
-    const globalTensor = createTensor(globalShape, [], COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
-    scene.add(globalTensor);
-    createShapeLegend(containerElement, [{ name: 'Global', shape: globalShape, color: '#' + COLOR_GLOBAL.getHexString() }]);
-    let labelSprites = addLabels(scene, globalTensor, null, currentBackground);
-    const refreshLabels = () => { (labelSprites || []).forEach((sprite) => scene.remove(sprite)); labelSprites = addLabels(scene, globalTensor, null, currentBackground) || []; };
-    const buildCubeMap = (tensor) => {
-        const map = new Map();
-        tensor.children.forEach((cube) => { if (cube.userData && typeof cube.userData.tensor0 === 'number') { const key = `${cube.userData.tensor0},${cube.userData.tensor1},${cube.userData.tensor2}`; map.set(key, cube); } });
-        return map;
-    };
-    const paintCoords = (map, coords = [], color) => { coords.forEach(([x, y, z = 0]) => { const key = `${Math.round(x)},${Math.round(y)},${Math.round(z)}`; const cube = map.get(key); if (cube) cube.material.color.copy(color); }); };
-    const createLegendRow = (idx, color) => {
-        const row = document.createElement('div');
-        row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px';
-        const swatch = document.createElement('span');
-        Object.assign(swatch.style, { display: 'inline-block', width: '14px', height: '14px', background: `#${color.getHexString()}` });
-        row.appendChild(swatch);
-        const label = document.createElement('span');
-        label.textContent = `Program Block ${idx + 1}`;
-        row.appendChild(label);
-        return row;
-    };
-    const globalMap = buildCubeMap(globalTensor);
-    const renderTilesForBackground = (bgHex) => {
-        const isLight = (bgHex || '').toLowerCase() === '#ffffff' || (bgHex || '').toLowerCase() === '#f7f0e3';
-        const baseGlobal = isLight ? new THREE.Color('#fefce8') : COLOR_GLOBAL;
-        globalTensor.children.forEach((cube) => { if (cube && cube.material && cube.material.color) cube.material.color.copy(baseGlobal); });
-        legend.innerHTML = '<strong>Program Blocks</strong><br/>';
-        tiles.forEach((tile, idx) => {
-            const color = isLight ? new THREE.Color(['#ff8a3c', '#ffd54a', '#a3e635', '#34d399', '#5fd4ff', '#4f8bff', '#6366f1', '#f9739b'][idx % 8]) : new THREE.Color().setHSL((idx * 0.17) % 1, 0.65, 0.55);
-            legend.appendChild(createLegendRow(idx, color));
-            paintCoords(globalMap, tile.global_coords, color);
-        });
-    };
-    renderTilesForBackground(backgroundSelect.value || '#000000');
-    const { center } = setupCamera(scene, camera);
-    const orbitControls = new OrbitControls(camera, renderer.domElement);
-    orbitControls.enableDamping = false; orbitControls.target.copy(center); orbitControls.update();
-    renderer.setClearColor(currentBackground, 1);
-    sceneRoot.appendChild(renderer.domElement);
-    backgroundSelect.addEventListener('change', (event) => { const value = event.target.value; currentBackground = new THREE.Color(value); scene.background = currentBackground; renderer.setClearColor(currentBackground, 1); renderTilesForBackground(value); refreshLabels(); requestRender(); });
-    let rafId = null; let renderPending = false;
-    const requestRender = () => { if (rafId !== null) { renderPending = true; return; } rafId = requestAnimationFrame(renderFrame); };
-    const renderFrame = () => { orbitControls.update(); renderer.render(scene, camera); if (renderPending) { renderPending = false; rafId = requestAnimationFrame(renderFrame); } else rafId = null; };
-    requestRender();
-    return () => { if (rafId) cancelAnimationFrame(rafId); renderer.dispose(); containerElement.innerHTML = ''; };
 }

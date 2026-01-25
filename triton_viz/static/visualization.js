@@ -1,7 +1,4 @@
 import { GridBlock } from './gridblock.js';
-import { createLoadOverallVisualization } from './load.js';
-import { createStoreOverallVisualization } from './store.js';
-import { enableDrag } from './ui_helpers.js';
 
 let globalData;
 let currentView = 'main';
@@ -14,12 +11,10 @@ let kernelGrid;
 let currentBlockData = null;
 let containerElement;
 let isInitialized = false;
-let overallCleanup = null;
 let maxX = 0;
 let maxY = 0;
 let maxZ = 0;
 let zSlice = 0;
-const overallCache = {};
 const filterValues = [0, 0, 0];
 const THEME_STORAGE_KEY = 'triton-viz-theme';
 
@@ -29,7 +24,6 @@ const controls = {
     zSlider: null,
     zValueLabel: null,
     resetBtn: null,
-    overallBtn: null,
     precomputeBtn: null,
     infoBtn: null,
     themeToggle: null,
@@ -57,6 +51,7 @@ function setOpControlState(nextState = {}) {
         ...opControls.state,
         ...nextState,
     };
+    try { window.__tritonVizOpState = { ...opControls.state }; } catch (err) {}
     updateOpControls();
 }
 
@@ -73,6 +68,7 @@ function resetOpControls() {
         histogram: false,
         allPrograms: false,
     };
+    try { window.__tritonVizOpState = { ...opControls.state }; } catch (err) {}
     if (window.__tritonVizCodeHide) {
         window.__tritonVizCodeHide();
     }
@@ -119,25 +115,7 @@ try {
     console.warn('Unable to expose op control helpers', err);
 }
 
-function closeOverallOverlay() {
-    if (overallCleanup) {
-        overallCleanup();
-        overallCleanup = null;
-    }
-    if (containerElement) {
-        containerElement.innerHTML = '';
-        containerElement.style.display = 'none';
-        containerElement.style.pointerEvents = 'none';
-    }
-    if (canvas) {
-        canvas.style.display = 'block';
-    }
-    currentView = 'main';
-    resetOpControls();
-}
-
 function switchToMainView() {
-    closeOverallOverlay();
     resetOpControls();
 
     if (currentBlockData) {
@@ -208,6 +186,9 @@ function openProgramZeroBlock() {
 }
 
 function initializeApp() {
+    if (document.body) {
+        document.body.classList.add('tensor-only');
+    }
     canvas = document.getElementById('canvas');
     canvasWrapper = document.getElementById('canvas-wrapper');
     containerElement = document.getElementById('visualization-container');
@@ -217,7 +198,6 @@ function initializeApp() {
     controls.zSlider = document.getElementById('z-slider');
     controls.zValueLabel = document.getElementById('z-value');
     controls.resetBtn = document.getElementById('reset-filters');
-    controls.overallBtn = document.getElementById('btn-overall');
     controls.precomputeBtn = document.getElementById('btn-precompute');
     controls.themeToggle = document.getElementById('theme-toggle');
     controls.opColorizeBtn = document.getElementById('btn-op-colorize');
@@ -297,9 +277,6 @@ function setupControlEvents() {
         });
     }
 
-    if (controls.overallBtn) {
-        controls.overallBtn.addEventListener('click', showOverallOverlay);
-    }
 
     if (controls.precomputeBtn) {
         controls.precomputeBtn.addEventListener('click', () => {
@@ -740,437 +717,6 @@ function draw() {
     }
 }
 
-function collectOpsByType(kind = 'any') {
-    if (!globalData || !globalData.ops || !globalData.ops.visualization_data) return [];
-    const vizData = globalData.ops.visualization_data;
-    const keys = Object.keys(vizData).sort((a, b) => {
-        const parse = (key) =>
-            key
-                .replace(/[()]/g, '')
-                .split(',')
-                .map((s) => Number(String(s).trim()));
-        const [ax, ay, az] = parse(a);
-        const [bx, by, bz] = parse(b);
-        if (ax !== bx) return ax - bx;
-        if (ay !== by) return ay - by;
-        return az - bz;
-    });
-    const ops = [];
-    keys.forEach((key) => {
-        const list = vizData[key] || [];
-        list.forEach((op) => {
-            if (op && op.overall_key && (kind === 'any' || op.type === kind)) {
-                ops.push(op);
-            }
-        });
-    });
-    return ops;
-}
-
-async function fetchOverallData(keys, kind) {
-    const unique = Array.from(new Set((keys || []).filter(Boolean)));
-    if (!unique.length) {
-        throw new Error('No overall data available');
-    }
-    const API_BASE = window.__TRITON_VIZ_API__ || '';
-    const endpoint = kind === 'store' ? 'store_overall' : 'load_overall';
-    const results = await Promise.all(
-        unique.map(async (key) => {
-            const resp = await fetch(`${API_BASE}/api/${endpoint}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key }),
-            });
-            const data = await resp.json();
-            if (!resp.ok || data.error) {
-                throw new Error(data && data.error ? data.error : 'Request failed');
-            }
-            return data;
-        })
-    );
-    const merged = {
-        shape: results[0]?.shape || [],
-        slice_shape: results[0]?.slice_shape || [],
-        tiles: [],
-    };
-    results.forEach((entry) => {
-        (entry.tiles || []).forEach((tile) => merged.tiles.push(tile));
-    });
-    return merged;
-}
-
-async function showOverallOverlay() {
-    const ops = collectOpsByType('any');
-    if (!ops.length) {
-        showControlToast('No Load/Store ops available to aggregate.');
-        return;
-    }
-    resetOpControls();
-    currentView = 'overall';
-    if (canvas) canvas.style.display = 'none';
-    if (!containerElement) return;
-    containerElement.style.pointerEvents = 'auto';
-    containerElement.style.display = 'block';
-    containerElement.innerHTML = '';
-
-    const overlay = document.createElement('div');
-    overlay.className = 'overall-overlay';
-    const shell = document.createElement('div');
-    shell.className = 'overall-shell';
-    overlay.appendChild(shell);
-
-    const titleRow = document.createElement('div');
-    titleRow.className = 'overlay-title-row';
-    const title = document.createElement('h2');
-    title.textContent = 'Load / Store Overview';
-    const badge = document.createElement('span');
-    badge.className = 'badge';
-    badge.textContent = `${ops.length} ops`;
-    titleRow.appendChild(title);
-    titleRow.appendChild(badge);
-    const showCodeBtn = document.createElement('button');
-    showCodeBtn.className = 'viz-button ghost';
-    showCodeBtn.textContent = 'Show Code: OFF';
-    titleRow.appendChild(showCodeBtn);
-
-    // Kernel Summary toggle + panel (op counts + load/store bytes).
-    let summaryPanel = null;
-    const destroySummaryPanel = () => {
-        if (summaryPanel && summaryPanel.remove) summaryPanel.remove();
-        summaryPanel = null;
-    };
-
-    const summaryBtn = document.createElement('button');
-    summaryBtn.className = 'viz-button ghost';
-    summaryBtn.textContent = 'Summary: OFF';
-    titleRow.appendChild(summaryBtn);
-
-    const openSummaryPanel = () => {
-        destroySummaryPanel();
-        try {
-            const panel = document.createElement('div');
-            panel.className = 'info-card';
-            panel.style.position = 'fixed';
-            panel.style.right = '24px';
-            panel.style.top = '96px';
-            panel.style.maxWidth = '320px';
-            panel.style.zIndex = '2200';
-
-            const header = document.createElement('div');
-            header.className = 'panel-header drag-handle';
-            header.style.marginBottom = '6px';
-            const titleSpan = document.createElement('span');
-            titleSpan.textContent = 'Kernel Summary';
-            header.appendChild(titleSpan);
-            const grip = document.createElement('span');
-            grip.className = 'drag-grip';
-            grip.setAttribute('aria-hidden', 'true');
-            grip.textContent = '⠿';
-            header.appendChild(grip);
-            const closeBtn = document.createElement('button');
-            closeBtn.className = 'viz-button ghost';
-            closeBtn.textContent = 'Close';
-            closeBtn.style.marginLeft = 'auto';
-            closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-            closeBtn.addEventListener('click', () => {
-                destroySummaryPanel();
-                summaryBtn.textContent = 'Summary: OFF';
-            });
-            header.appendChild(closeBtn);
-            panel.appendChild(header);
-
-            const body = document.createElement('div');
-            body.style.fontSize = '11px';
-            body.style.display = 'flex';
-            body.style.flexDirection = 'column';
-            body.style.gap = '6px';
-
-            // 1) Op counts from visualization_data.
-            const vizData = (globalData && globalData.ops && globalData.ops.visualization_data) || {};
-            const opCounts = {};
-            Object.values(vizData).forEach((list) => {
-                (list || []).forEach((op) => {
-                    const t = (op && op.type) || 'Unknown';
-                    opCounts[t] = (opCounts[t] || 0) + 1;
-                });
-            });
-            const countsKeys = Object.keys(opCounts).sort();
-            const countsBlock = document.createElement('div');
-            const countsTitle = document.createElement('div');
-            countsTitle.textContent = 'Op counts';
-            countsTitle.style.fontWeight = '600';
-            countsTitle.style.marginBottom = '2px';
-            countsBlock.appendChild(countsTitle);
-            if (countsKeys.length) {
-                const list = document.createElement('ul');
-                list.style.margin = '0';
-                list.style.paddingLeft = '16px';
-                countsKeys.forEach((name) => {
-                    const li = document.createElement('li');
-                    li.textContent = `${name}: ${opCounts[name]}`;
-                    list.appendChild(li);
-                });
-                countsBlock.appendChild(list);
-            } else {
-                const empty = document.createElement('div');
-                empty.textContent = 'No ops recorded.';
-                countsBlock.appendChild(empty);
-            }
-            body.appendChild(countsBlock);
-
-            // 2) Load/Store bytes aggregated from per-op metadata, plus optional extra stats.
-            const analysis = globalData && globalData.analysis;
-            const metrics = analysis && Array.isArray(analysis.Metric) ? analysis.Metric : null;
-            const values = analysis && Array.isArray(analysis.Value) ? analysis.Value : null;
-            const bytesBlock = document.createElement('div');
-            const bytesTitle = document.createElement('div');
-            bytesTitle.textContent = 'Load / Store bytes';
-            bytesTitle.style.fontWeight = '600';
-            bytesTitle.style.margin = '6px 0 2px';
-            bytesBlock.appendChild(bytesTitle);
-
-            const vizBytes = { Load: 0, Store: 0 };
-            Object.values(vizData).forEach((list) => {
-                (list || []).forEach((op) => {
-                    if (!op || typeof op.bytes !== 'number') return;
-                    if (op.type === 'Load') {
-                        vizBytes.Load += Math.max(0, op.bytes);
-                    } else if (op.type === 'Store') {
-                        vizBytes.Store += Math.max(0, op.bytes);
-                    }
-                });
-            });
-
-            const table = document.createElement('table');
-            table.style.width = '100%';
-            table.style.borderCollapse = 'collapse';
-
-            const addRow = (label, value) => {
-                const row = document.createElement('tr');
-                const k = document.createElement('td');
-                const v = document.createElement('td');
-                k.textContent = label;
-                k.style.paddingRight = '4px';
-                k.style.verticalAlign = 'top';
-                v.textContent = String(value);
-                v.style.textAlign = 'right';
-                v.style.whiteSpace = 'nowrap';
-                row.appendChild(k);
-                row.appendChild(v);
-                table.appendChild(row);
-            };
-
-            addRow('Total load bytes', vizBytes.Load);
-            addRow('Total store bytes', vizBytes.Store);
-
-            // Number of grids that actually perform Load/Store.
-            const activeGridKeys = Object.entries(vizData).filter(([, list]) =>
-                (list || []).some((op) => op && (op.type === 'Load' || op.type === 'Store'))
-            );
-            addRow('Grids with Load/Store', activeGridKeys.length);
-
-            // If analysis metrics are available, append them as extra rows (excluding raw "Grid Size").
-            if (metrics && values && metrics.length === values.length && metrics.length > 0) {
-                metrics.forEach((name, idx) => {
-                    const label = String(name);
-                    if (String(label) === 'Grid Size') return;
-                    const value = values[idx];
-                    addRow(label, value);
-                });
-            }
-
-            bytesBlock.appendChild(table);
-            body.appendChild(bytesBlock);
-
-            panel.appendChild(body);
-            document.body.appendChild(panel);
-            enableDrag(panel, { handle: header, bounds: window, initialLeft: window.innerWidth - 360, initialTop: 96 });
-            summaryPanel = panel;
-        } catch (e) {
-            console.warn('Kernel summary panel failed:', e);
-        }
-    };
-
-    summaryBtn.addEventListener('click', () => {
-        const turnOn = summaryBtn.textContent.endsWith('OFF');
-        summaryBtn.textContent = `Summary: ${turnOn ? 'ON' : 'OFF'}`;
-        if (turnOn) {
-            openSummaryPanel();
-        } else {
-            destroySummaryPanel();
-        }
-    });
-
-    shell.appendChild(titleRow);
-
-    const tabs = document.createElement('div');
-    tabs.className = 'overall-tabs';
-    shell.appendChild(tabs);
-
-    const contentArea = document.createElement('div');
-    contentArea.className = 'overall-content';
-    shell.appendChild(contentArea);
-
-    const footerNote = document.createElement('div');
-    footerNote.className = 'info-card';
-    footerNote.textContent = 'Tip: switch themes or filters before capturing paper-ready shots.';
-    shell.appendChild(footerNote);
-
-    const backBtn = document.createElement('button');
-    backBtn.className = 'viz-button ghost overall-back';
-    backBtn.textContent = 'Back to Canvas';
-    backBtn.addEventListener('click', () => {
-        closeOverallOverlay();
-        switchToMainView();
-        destroyOverallCodePanel();
-        // Ensure kernel summary panel is cleaned up when leaving overall view
-        if (typeof destroySummaryPanel === 'function') {
-            destroySummaryPanel();
-            if (summaryBtn) summaryBtn.textContent = 'Summary: OFF';
-        }
-    });
-    shell.appendChild(backBtn);
-
-    containerElement.appendChild(overlay);
-
-    let currentTab = null;
-    let currentOverallOp = null;
-    let overallCodePanel = null;
-
-    const destroyOverallCodePanel = () => {
-        if (overallCodePanel && overallCodePanel.remove) overallCodePanel.remove();
-        overallCodePanel = null;
-    };
-
-    const openOverallCodePanel = async (op) => {
-        destroyOverallCodePanel();
-        if (!op || !op.uuid) {
-            showControlToast('No code available for this operation.');
-            return;
-        }
-        const wrapper = document.createElement('div');
-        wrapper.className = 'show-code-panel';
-        const header = document.createElement('div');
-        header.className = 'panel-header drag-handle';
-        header.innerHTML = '<span>Operation Code & Context</span><span class="drag-grip" aria-hidden="true">⠿</span>';
-        const closeBtn = document.createElement('button');
-        closeBtn.className = 'viz-button ghost';
-        closeBtn.textContent = 'Close';
-        closeBtn.style.marginLeft = 'auto';
-        closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-        closeBtn.addEventListener('click', () => {
-            destroyOverallCodePanel();
-            showCodeBtn.textContent = 'Show Code: OFF';
-        });
-        header.appendChild(closeBtn);
-        wrapper.appendChild(header);
-        const meta = document.createElement('div');
-        meta.style.marginBottom = '6px';
-        meta.style.fontSize = '12px';
-        wrapper.appendChild(meta);
-        const pre = document.createElement('pre');
-        pre.style.margin = '0';
-        wrapper.appendChild(pre);
-        document.body.appendChild(wrapper);
-        enableDrag(wrapper, { handle: header, bounds: window, initialLeft: window.innerWidth - 520, initialTop: 120 });
-        overallCodePanel = wrapper;
-        try {
-            const API_BASE = window.__TRITON_VIZ_API__ || '';
-            const res = await fetch(`${API_BASE}/api/op_code`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ uuid: op.uuid, frame_idx: 0, context: 8 })
-            });
-            const data = await res.json();
-            meta.textContent = `${data.filename || ''}:${data.lineno || ''}`;
-            const lines = (data.lines || []).map((line) => {
-                const mark = (data.highlight === line.no) ? '▶ ' : '  ';
-                return `${mark}${String(line.no).padStart(6, ' ')} | ${line.text || ''}`;
-            }).join('\n');
-            pre.textContent = lines || '(no code available)';
-        } catch (err) {
-            pre.textContent = `Failed to load code: ${err}`;
-        }
-    };
-
-    showCodeBtn.addEventListener('click', async () => {
-        const turnOn = showCodeBtn.textContent.endsWith('OFF');
-        showCodeBtn.textContent = `Show Code: ${turnOn ? 'ON' : 'OFF'}`;
-        if (!turnOn) {
-            destroyOverallCodePanel();
-            return;
-        }
-        if (currentOverallOp) {
-            await openOverallCodePanel(currentOverallOp);
-        } else {
-            showControlToast('Select an operation first.');
-            showCodeBtn.textContent = 'Show Code: OFF';
-        }
-    });
-
-    const selectOp = async (op, tabElement) => {
-        currentOverallOp = op;
-        if (currentTab) currentTab.classList.remove('active');
-        currentTab = tabElement;
-        currentTab.classList.add('active');
-        if (overallCleanup) {
-            overallCleanup();
-            overallCleanup = null;
-        }
-        contentArea.innerHTML = '<div class="overall-empty">Loading…</div>';
-        try {
-            const payload = await getOverallPayload(op);
-            contentArea.innerHTML = '';
-            const renderer = op.type === 'Store' ? createStoreOverallVisualization : createLoadOverallVisualization;
-            overallCleanup = renderer(contentArea, payload);
-            if (showCodeBtn.textContent.endsWith('ON')) {
-                await openOverallCodePanel(op);
-            }
-        } catch (err) {
-            contentArea.innerHTML = `<div class="overall-empty">${err}</div>`;
-        }
-    };
-
-    ops.forEach((op, idx) => {
-        const tab = document.createElement('button');
-        tab.textContent = `${idx + 1}. ${op.type} (${(op.global_shape || []).join('×') || 'shape'})`;
-        if (idx === 0) tab.classList.add('active');
-        tab.addEventListener('click', () => selectOp(op, tab));
-        tabs.appendChild(tab);
-        if (idx === 0) {
-            selectOp(op, tab);
-        }
-    });
-}
-
-async function getOverallPayload(op) {
-    if (!op.overall_key) {
-        throw new Error('Overall data unavailable for this operation.');
-    }
-    const cacheKey = `${op.type}:${op.overall_key}`;
-    if (!overallCache[cacheKey]) {
-        const endpoint = op.type === 'Store' ? 'store_overall' : 'load_overall';
-        const API_BASE = window.__TRITON_VIZ_API__ || '';
-        const resp = await fetch(`${API_BASE}/api/${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: op.overall_key }),
-        });
-        const data = await resp.json();
-        if (!resp.ok || data.error) {
-            throw new Error(data && data.error ? data.error : 'Request failed');
-        }
-        overallCache[cacheKey] = data;
-    }
-    const data = overallCache[cacheKey];
-    return {
-        ...op,
-        overall_mode: true,
-        overall_tiles: data.tiles || [],
-        overall_shape: data.shape || op.global_shape,
-        overall_slice_shape: data.slice_shape || op.slice_shape,
-    };
-}
 
 async function fetchData() {
     try {
