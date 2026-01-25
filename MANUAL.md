@@ -13,6 +13,9 @@ Use the Program IDs sliders to select the active program (X, Y, Z). The workspac
 ## Workspace Toggles
 Heatmap, Value Histogram, and All Program IDs toggles apply across op tabs and stay in sync as you move between operations.
 
+## Frontend Build
+If you modify the frontend TypeScript sources in `src/`, rebuild the static assets with `npm run build:frontend`.
+
 ## Visual Annotations
 
 ### CAD-style Dimension Lines

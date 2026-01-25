@@ -1,0 +1,12 @@
+{
+    "name": "triton-viz-frontend",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "build:frontend": "tsc -p tsconfig.json",
+        "test:frontend": "node --test tests/frontend/*.mjs"
+    },
+    "devDependencies": {
+        "typescript": "^5.6.3"
+    }
+}

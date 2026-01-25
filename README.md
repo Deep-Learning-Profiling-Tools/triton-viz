@@ -67,6 +67,15 @@ uv sync # or "uv sync --extra test" if you're running tests
 
 If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Otherwise you're all set!
 
+### Frontend Build
+
+If you edit frontend TypeScript sources under `src/`, rebuild the static assets:
+
+```sh
+npm install
+npm run build:frontend
+```
+
 ### Optional: Enable NKI Support
 
 If you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the NKI-specific tests:

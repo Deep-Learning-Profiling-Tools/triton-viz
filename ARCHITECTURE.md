@@ -18,6 +18,9 @@ A floating DOM overlay that lists all active tensors and their shapes, color-cod
 Program ID sliders select the active program (X/Y/Z). The workspace renders op tabs, Tensor/Flow views, and code peek for that active program.
 Logic lives in `triton_viz/static/op_workspace.js`, with wiring in `triton_viz/static/visualization.js`.
 
+### Front-end TypeScript Build
+Frontend sources live in `src/` and compile to `triton_viz/static/` via `npm run build:frontend`. The browser entrypoint is `src/main.ts`, which outputs `triton_viz/static/main.js` for `index.html`.
+
 ### Front-end Core Modules
 - `triton_viz/static/api.js`: base-aware JSON client for frontend requests.
 - `triton_viz/static/state.js`: single source of truth for active program/op/toggles.

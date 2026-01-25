@@ -13,3 +13,5 @@
 - `dimension_utils.js`: Shared utilities for CAD-style dimensioning, legends, and high-quality vector text rendering.
 - `load_utils.js`: General 3D scene and tensor setup helpers.
 - `visualization.js`: Fetches data, wires controls, and drives the active program workspace.
+- `src/`: TypeScript sources that compile to `triton_viz/static/`.
+- `static/main.js`: Browser entrypoint compiled from `src/main.ts`.
