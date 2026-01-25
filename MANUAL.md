@@ -14,7 +14,7 @@ Tensors in the visualization are annotated with CAD-style dimension lines to ind
 - **Extension Lines**: Perpendicular lines at the start and end of each dimension.
 - **Dimension Lines**: Parallel lines showing the span of the dimension.
 - **Arrowheads**: Located at the intersection of dimension and extension lines.
-- **Auto-flipping Arrows**: If a dimension is too small to fit the arrows inside, they will automatically flip to the outside, pointing inward.
+- **Auto-offset Arrows**: If a dimension is too small to fit the arrows inside, they move to the outside, pointing inward.
 
 ### Color Coding
 Dimension lines and numbers are color-coded to match the tensor they belong to.
