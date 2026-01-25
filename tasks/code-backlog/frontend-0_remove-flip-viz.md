@@ -3,7 +3,7 @@
 Context: "remove the flip viz" while keeping all other visible UI (Tensor/Flow view, control sidebar, Program IDs filters, op controls, code peek panel, shape legend) unchanged.
 
 Review-Round: 0
-Owner:
+Owner: codex
 Deps: none
 Touches: triton_viz/static/flip.js, triton_viz/static/flip_3d.js, triton_viz/ARCHITECTURE.md, ARCHITECTURE.md, MANUAL.md, README.md
 Acceptance:
