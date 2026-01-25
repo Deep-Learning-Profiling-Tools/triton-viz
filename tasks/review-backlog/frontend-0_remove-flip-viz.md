@@ -2,7 +2,7 @@
 
 Context: "remove the flip viz" while keeping all other visible UI (Tensor/Flow view, control sidebar, Program IDs filters, op controls, code peek panel, shape legend) unchanged.
 
-Review-Round: 1
+Review-Round: 2
 Owner: codex
 Deps: none
 Touches: triton_viz/static/flip.js, triton_viz/static/flip_3d.js, triton_viz/ARCHITECTURE.md, ARCHITECTURE.md, MANUAL.md, README.md
@@ -10,7 +10,7 @@ Acceptance:
 - flip visualization modules are removed and the app loads without errors
 - no imports/references to flip visualization remain in static JS or docs
 - existing Tensor/Flow views and sidebar controls remain unchanged
-Notes: Plan section is the low-level plan; use it verbatim without replacement. review fix claimed.
+Notes: Plan section is the low-level plan; use it verbatim without replacement. review fix claimed. manual UI smoke test not run.
 Priority: P1
 
 Plan:
