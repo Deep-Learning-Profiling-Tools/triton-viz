@@ -42,7 +42,7 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 
 
 ### Visualization Features
-- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows automatically flip outside when space is limited.
+- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows move outside when space is limited.
 - **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
 ## Getting Started
 
