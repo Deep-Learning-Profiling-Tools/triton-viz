@@ -2,8 +2,8 @@
 
 Context: remove the click-to-open grid UI; default to opening program (0,0,0) and keep the Tensor/Flow views, control sidebar (Program IDs filters X/Y/Z, op controls, code peek panel), and shape legend unchanged.
 
-Review-Round: 0
-Owner:
+Review-Round: 1
+Owner: codex
 Deps: [frontend-0]
 Touches: triton_viz/static/visualization.js, triton_viz/static/gridblock.js, triton_viz/templates/index.html, triton_viz/static/visualizer.css, triton_viz/ARCHITECTURE.md, ARCHITECTURE.md, MANUAL.md, README.md
 Acceptance:
