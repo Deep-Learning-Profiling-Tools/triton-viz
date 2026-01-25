@@ -10,7 +10,7 @@ Acceptance:
 - flip visualization modules are removed and the app loads without errors
 - no imports/references to flip visualization remain in static JS or docs
 - existing Tensor/Flow views and sidebar controls remain unchanged
-Notes: Plan section is the low-level plan; use it verbatim without replacement.
+Notes: Plan section is the low-level plan; use it verbatim without replacement. review fix claimed.
 Priority: P1
 
 Plan:
