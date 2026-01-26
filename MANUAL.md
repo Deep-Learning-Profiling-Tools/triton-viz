@@ -7,6 +7,15 @@
   - `Arrow Keys`: Tilt/Rotate camera.
   - `O/P`: Zoom out/in.
 
+## Active Program Workspace
+Use the Program IDs sliders to select the active program (X, Y, Z). The workspace updates its op tabs, Tensor/Flow views, and code panel to match the active program.
+
+## Workspace Toggles
+Heatmap, Value Histogram, and All Program IDs toggles apply across op tabs and stay in sync as you move between operations.
+
+## Frontend Build
+If you modify the frontend TypeScript sources in `src/`, rebuild the static assets with `npm run build:frontend`.
+
 ## Visual Annotations
 
 ### CAD-style Dimension Lines
@@ -14,7 +23,7 @@ Tensors in the visualization are annotated with CAD-style dimension lines to ind
 - **Extension Lines**: Perpendicular lines at the start and end of each dimension.
 - **Dimension Lines**: Parallel lines showing the span of the dimension.
 - **Arrowheads**: Located at the intersection of dimension and extension lines.
-- **Auto-flipping Arrows**: If a dimension is too small to fit the arrows inside, they will automatically flip to the outside, pointing inward.
+- **Auto-offset Arrows**: If a dimension is too small to fit the arrows inside, they move to the outside, pointing inward.
 
 ### Color Coding
 Dimension lines and numbers are color-coded to match the tensor they belong to.

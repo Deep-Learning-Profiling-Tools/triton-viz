@@ -21,9 +21,7 @@ const infoPages = [
         `
     }
 ];
-
 let currentPage = 0;
-
 function createNavButton(label, onClick) {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -37,17 +35,16 @@ function createNavButton(label, onClick) {
     btn.addEventListener('click', onClick);
     return btn;
 }
-
 function updatePage(popup) {
     const region = popup.querySelector('[data-info-content]');
-    if (!region) return;
+    if (!region)
+        return;
     const page = infoPages[currentPage] || infoPages[0];
     region.innerHTML = `
         <h2 style="margin-top:0;color:#f9fafb;">${page.title}</h2>
         ${page.content}
     `;
 }
-
 export function createInfoPopup() {
     const popup = document.createElement('div');
     popup.setAttribute('data-info-popup', 'true');
@@ -107,9 +104,9 @@ export function createInfoPopup() {
     updatePage(popup);
     return popup;
 }
-
 export function showInfoPopup(popup) {
-    if (!popup) return;
+    if (!popup)
+        return;
     popup.style.display = 'block';
     popup.scrollTop = 0;
 }

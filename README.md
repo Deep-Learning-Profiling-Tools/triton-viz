@@ -42,7 +42,9 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 
 
 ### Visualization Features
-- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows automatically flip outside when space is limited.
+- **Active Program Workspace**: Program ID sliders select the active program and drive the op tabs, Tensor View, and Flow View.
+- **Shared Workspace Toggles**: Heatmap, histogram, and all-program views stay in sync across op tabs.
+- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows move outside when space is limited.
 - **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
 ## Getting Started
 
@@ -64,6 +66,15 @@ uv sync # or "uv sync --extra test" if you're running tests
 ```
 
 If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Otherwise you're all set!
+
+### Frontend Build
+
+If you edit frontend TypeScript sources under `src/`, rebuild the static assets:
+
+```sh
+npm install
+npm run build:frontend
+```
 
 ### Optional: Enable NKI Support
 

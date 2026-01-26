@@ -1,3 +1,4 @@
+import { getApiBase, getJson } from './api.js';
 const DEVICE_PRESETS = [
     { value: 'TRN1_NC_V2', label: 'Trn1 NC-v2 (24 MiB)', limit: 24 * 1024 * 1024 },
     { value: 'TRN1_CHIP', label: 'Trn1 chip (48 MiB)', limit: 48 * 1024 * 1024 },
@@ -8,11 +9,12 @@ const DEVICE_PRESETS = [
     { value: 'TRN2_48X', label: 'trn2.48xlarge (≈3.5 GiB)', limit: 3584 * 1024 * 1024 },
     { value: 'CUSTOM', label: 'Custom', limit: null },
 ];
-
 function formatBytes(bytes) {
-    if (!Number.isFinite(bytes)) return '0 B';
+    if (!Number.isFinite(bytes))
+        return '0 B';
     const thresh = 1024;
-    if (Math.abs(bytes) < thresh) return `${bytes} B`;
+    if (Math.abs(bytes) < thresh)
+        return `${bytes} B`;
     const units = ['KB', 'MB', 'GB', 'TB'];
     let u = -1;
     do {
@@ -21,13 +23,10 @@ function formatBytes(bytes) {
     } while (Math.abs(bytes) >= thresh && u < units.length - 1);
     return `${bytes.toFixed(1)} ${units[u]}`;
 }
-
-
 export function renderSbufPanel() {
-    const API_BASE = window.__TRITON_VIZ_API__ || '';
+    const apiBase = getApiBase();
     const button = document.createElement('button');
     button.textContent = 'SBUF Usage';
-
     const overlay = document.createElement('div');
     Object.assign(overlay.style, {
         position: 'fixed',
@@ -52,22 +51,20 @@ export function renderSbufPanel() {
     });
     window.addEventListener('mouseup', () => (dragMode = false));
     window.addEventListener('mousemove', (event) => {
-        if (!dragMode) return;
+        if (!dragMode)
+            return;
         overlay.style.left = `${event.clientX - dragOffsetX}px`;
         overlay.style.top = `${event.clientY - dragOffsetY}px`;
     });
-
     const header = document.createElement('div');
     header.textContent = 'SBUF Occupancy';
     header.style.fontWeight = 'bold';
     header.style.marginBottom = '8px';
     overlay.appendChild(header);
-
     const controls = document.createElement('div');
     controls.style.display = 'flex';
     controls.style.gap = '8px';
     controls.style.alignItems = 'center';
-
     const deviceSelect = document.createElement('select');
     DEVICE_PRESETS.forEach((preset) => {
         const opt = document.createElement('option');
@@ -76,37 +73,30 @@ export function renderSbufPanel() {
         deviceSelect.appendChild(opt);
     });
     controls.appendChild(deviceSelect);
-
     const customInput = document.createElement('input');
     customInput.type = 'number';
     customInput.placeholder = 'bytes';
     customInput.style.width = '120px';
     customInput.disabled = true;
     controls.appendChild(customInput);
-
     const refreshBtn = document.createElement('button');
     refreshBtn.textContent = 'Refresh';
     controls.appendChild(refreshBtn);
-
     const closeBtn = document.createElement('button');
     closeBtn.textContent = 'Close';
     closeBtn.addEventListener('click', () => (overlay.style.display = 'none'));
     controls.appendChild(closeBtn);
-
     overlay.appendChild(controls);
-
     const summary = document.createElement('div');
     summary.style.fontSize = '12px';
     summary.style.margin = '8px 0';
     overlay.appendChild(summary);
-
     const canvas = document.createElement('canvas');
     canvas.width = 480;
     canvas.height = 220;
     canvas.style.background = '#111';
     canvas.style.border = '1px solid #555';
     overlay.appendChild(canvas);
-
     button.addEventListener('click', () => {
         overlay.style.display = 'block';
         fetchAndRender();
@@ -116,9 +106,8 @@ export function renderSbufPanel() {
         customInput.disabled = deviceSelect.value !== 'CUSTOM';
         fetchAndRender();
     });
-
     async function fetchAndRender() {
-        let url = `${API_BASE}/api/sbuf?device=${encodeURIComponent(deviceSelect.value)}`;
+        let url = `/api/sbuf?device=${encodeURIComponent(deviceSelect.value)}`;
         if (deviceSelect.value === 'CUSTOM') {
             const customVal = parseInt(customInput.value || '0', 10);
             if (customVal > 0) {
@@ -129,15 +118,18 @@ export function renderSbufPanel() {
         const ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         try {
-            const res = await fetch(url);
-            const data = await res.json();
-            drawTimeline(ctx, data.timeline, data.limit_bytes);
-            summary.textContent = `Limit: ${formatBytes(data.limit_bytes)} | Max: ${formatBytes(data.max_usage)} | Overflow events: ${data.overflow_points.length}`;
-        } catch (err) {
-            summary.textContent = `Error: ${err}`;
+            const data = await getJson(url, { base: apiBase });
+            const timeline = data?.timeline || [];
+            const limitBytes = data?.limit_bytes || 0;
+            const maxUsage = data?.max_usage || 0;
+            const overflowPoints = data?.overflow_points || [];
+            drawTimeline(ctx, timeline, limitBytes);
+            summary.textContent = `Limit: ${formatBytes(limitBytes)} | Max: ${formatBytes(maxUsage)} | Overflow events: ${overflowPoints.length}`;
+        }
+        catch (err) {
+            summary.textContent = `Error: ${err.message || err}`;
         }
     }
-
     function drawTimeline(ctx, timeline, limit) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         if (!timeline || !timeline.length) {
@@ -151,30 +143,27 @@ export function renderSbufPanel() {
         const minTime = timeline[0].time_idx;
         const maxTime = timeline[timeline.length - 1].time_idx || minTime + 1;
         const maxUsage = Math.max(limit, ...timeline.map((p) => p.usage));
-
         ctx.strokeStyle = '#555';
         ctx.strokeRect(margin, margin, width, height);
-
         const scaleX = (t) => margin + ((t - minTime) / (maxTime - minTime || 1)) * width;
         const scaleY = (u) => margin + height - (u / (maxUsage || 1)) * height;
-
         ctx.strokeStyle = '#ff4444';
         ctx.beginPath();
         ctx.moveTo(margin, scaleY(limit));
         ctx.lineTo(margin + width, scaleY(limit));
         ctx.stroke();
-
         ctx.strokeStyle = '#00e0ff';
         ctx.beginPath();
         timeline.forEach((pt, idx) => {
             const x = scaleX(pt.time_idx);
             const y = scaleY(pt.usage);
-            if (idx === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
+            if (idx === 0)
+                ctx.moveTo(x, y);
+            else
+                ctx.lineTo(x, y);
         });
         ctx.stroke();
     }
-
     document.body.appendChild(overlay);
     return button;
 }
