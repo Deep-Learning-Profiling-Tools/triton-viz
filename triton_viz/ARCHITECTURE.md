@@ -1,17 +1,29 @@
-# Triton-Viz Static Modules
+# Triton-Viz Frontend Architecture
 
-- `load.js`: Handles load operation visualization.
-- `store.js`: Handles store operation visualization.
-- `matmul.js`: Handles matrix multiplication visualization.
-- `op_workspace.js`: Active program workspace that renders op tabs and views.
-- `ops/registry.js`: Registry for op visualizers with a shared create interface.
-- `ops/defaults.js`: Built-in op visualizer registrations.
-- `api.js`: Base-aware JSON client for frontend requests.
-- `state.js`: Shared UI state for active program/op/toggles.
-- `utils/dispose.js`: Cleanup helper for listeners and timers.
-- `logger.js`: Lightweight action logging.
-- `dimension_utils.js`: Shared utilities for CAD-style dimensioning, legends, and high-quality vector text rendering.
-- `load_utils.js`: General 3D scene and tensor setup helpers.
-- `visualization.js`: Fetches data, wires controls, and drives the active program workspace.
-- `src/`: TypeScript sources that compile to `triton_viz/static/`.
-- `static/main.js`: Browser entrypoint compiled from `src/main.ts`.
+This file summarizes the static frontend modules and how they map to the UI described in `GLOSSARY.md`.
+
+## Static Module Map
+- `static/main.js`: browser entrypoint compiled from `src/main.ts`.
+- `static/visualization.js`: bootstraps the UI and fetches `/api/data`.
+- `static/op_workspace.js`: Active Program Workspace, Op Tabs, and Code Peek Panel.
+- `static/tensor_view.js`: Tensor View rendering, legends, and histogram overlay.
+- `static/load_utils.js`: camera controls, scene helpers, and tensor mesh setup.
+- `static/dimension_utils.js`: CAD-style dimension lines and vector text.
+- `static/ops/registry.js`: op visualizer registry.
+- `static/ops/defaults.js`: built-in op visualizers.
+- `static/logger.js`: action logging with `logAction`.
+- `static/state.js`: shared Active Program and toggle state.
+- `static/utils/dispose.js`: listener cleanup utilities.
+- `static/histogram.js`: histogram overlay UI and `/api/histogram` calls.
+- `static/sbuf_panel.js`: NKI scratch-buffer timeline panel.
+
+## Build Pipeline
+- Source: `src/*.ts`.
+- Output: `triton_viz/static/*.js`.
+- Command: `npm run build:frontend`.
+
+## Data Sources
+- `/api/data` initializes the UI and op registry data.
+- `/api/op_code` feeds the Code Peek Panel.
+- `/api/histogram` feeds the histogram overlay.
+- Tensor endpoints (for example `/api/getLoadTensor`) feed the Tensor View.

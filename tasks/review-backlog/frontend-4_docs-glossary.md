@@ -3,7 +3,7 @@
 Context: document the frontend cleanly for AI agents by adding a canonical glossary and rewriting architecture/manual docs to match the UI and data flow.
 
 Review-Round: 0
-Owner:
+Owner: codex
 Deps: [frontend-3]
 Touches: GLOSSARY.md, ARCHITECTURE.md, MANUAL.md, README.md, triton_viz/ARCHITECTURE.md
 Acceptance:
