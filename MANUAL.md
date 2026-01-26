@@ -1,39 +1,43 @@
 # Triton Viz User Manual
 
+Refer to `GLOSSARY.md` for canonical UI terms and payload names.
+
 ## Navigation and Controls
-- **Orbit Controls**: Use mouse left-click to rotate, right-click to pan, and scroll to zoom.
-- **Keyboard Shortcuts**:
-  - `W/A/S/D`: Pan camera.
-  - `Arrow Keys`: Tilt/Rotate camera.
-  - `O/P`: Zoom out/in.
+- Mouse: left-drag to orbit, right-drag to pan, scroll to zoom.
+- Keyboard:
+  - W/A/S/D: pan camera.
+  - Arrow keys: tilt/rotate camera.
+  - O/P: zoom out/in.
+
+## Program ID Controls
+- Use the X/Y/Z sliders to set the Active Program.
+- The Reset button returns all axes to their default values.
+- Changing the Active Program refreshes Op Tabs and all views.
+
+## Operation Controls
+- Color by Value: enables heatmap coloring in the Tensor View.
+- All Program IDs: shows per-program sampling across all program IDs.
+- Value Histogram: opens the histogram overlay for the active tensor.
 
 ## Active Program Workspace
-Use the Program IDs sliders to select the active program (X, Y, Z). The workspace updates its op tabs, Tensor/Flow views, and code panel to match the active program.
+- Op Tabs switch between operations for the Active Program.
+- Tensor View shows 3D tensor meshes with CAD-style dimension lines.
+- Flow View appears for ops that provide a flow diagram.
+- The Side Info Panel shows hover details (coordinates, shapes, values).
 
-## Workspace Toggles
-Heatmap, Value Histogram, and All Program IDs toggles apply across op tabs and stay in sync as you move between operations.
+## Code Peek Panel
+- The Code Peek Panel displays source context for the active op.
+- Use the op controls to toggle or refresh code visibility.
+
+## Legends and Overlays
+- Shape Legend: lists visible tensors with their shapes and colors.
+- Value Legend: shows the colormap range when Color by Value is enabled.
+- Histogram Overlay: lets you pick a tensor source and bin count.
 
 ## Frontend Build
-If you modify the frontend TypeScript sources in `src/`, rebuild the static assets with `npm run build:frontend`.
+If you modify frontend TypeScript sources in `src/`, rebuild the static assets:
 
-## Visual Annotations
-
-### CAD-style Dimension Lines
-Tensors in the visualization are annotated with CAD-style dimension lines to indicate their shapes.
-- **Extension Lines**: Perpendicular lines at the start and end of each dimension.
-- **Dimension Lines**: Parallel lines showing the span of the dimension.
-- **Arrowheads**: Located at the intersection of dimension and extension lines.
-- **Auto-offset Arrows**: If a dimension is too small to fit the arrows inside, they move to the outside, pointing inward.
-
-### Color Coding
-Dimension lines and numbers are color-coded to match the tensor they belong to.
-- **Global Tensor**: Usually rendered with its designated theme color.
-- **Slice Tensor**: Rendered with a distinct color (e.g., Cyan or Magenta) to highlight the loaded/stored region.
-
-### Shape Legend
-A floating legend is displayed at the bottom-left of the screen, showing the name, shape, and color of each tensor currently being visualized. This legend updates automatically when window is resized or when switching between different operations.
-
-## Overlays and Panels
-- **Value Legend**: Shows the colormap and value range when colorization is enabled.
-- **Side Menu**: Displays detailed information about the hovered element (coordinates, dimensions, value).
-- **Code Panel**: Shows the source code context for the current operation.
+```sh
+npm install
+npm run build:frontend
+```

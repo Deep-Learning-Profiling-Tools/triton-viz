@@ -1,29 +1,42 @@
 # Architecture
 
-## Front-end Annotation Layer
-The front-end utilizes Three.js for 3D tensor visualization and a custom annotation layer for dimension lines and legends.
+This document describes how the Triton-Viz frontend is structured and how data flows from the backend into the UI.
+Terms are defined in `GLOSSARY.md` and used consistently below.
 
-### CAD Dimension Overlays
-Dimension lines are rendered as CAD-style annotations:
-- **Extension Lines**: Perpendicular lines from tensor boundaries.
-- **Dimension Lines**: Parallel lines showing the span.
-- **Arrowheads**: Located at intersections, with automatic inside/outside placement logic.
-- **Text Rendering**: High-quality vector text rendering using Multi-channel Signed Distance Fields (MSDF) via `Troika-Three-Text`, ensuring readability at all zoom levels without pixelation.
-- **Logic**: Implemented in `triton_viz/static/dimension_utils.js`.
+## Overview
+- Backend (Flask) serves the HTML template and JSON APIs from `triton_viz/visualizer/interface.py`.
+- Frontend TypeScript lives in `src/` and compiles to `triton_viz/static/` via `npm run build:frontend`.
+- The browser entrypoint is `triton_viz/static/main.js`, compiled from `src/main.ts`.
 
-### Shape Legend
-A floating DOM overlay that lists all active tensors and their shapes, color-coded to match the 3D meshes.
+## Data Flow
+1. `src/visualization.ts` fetches `/api/data` and initializes the Active Program Workspace.
+2. Program ID Controls update shared state and re-render the active op views.
+3. Op Tabs switch between operation visualizers registered in `src/ops/registry.ts`.
+4. Tensor View requests tensors via `/api/getLoadTensor`, `/api/getStoreTensor`, or op-specific endpoints.
+5. Histogram Overlay posts to `/api/histogram` for value distributions.
+6. Code Peek Panel posts to `/api/op_code` for source context.
+7. Optional NKI panels fetch `/api/sbuf` to render scratch-buffer timelines.
 
-### Active Program Workspace
-Program ID sliders select the active program (X/Y/Z). The workspace renders op tabs, Tensor/Flow views, and code peek for that active program.
-Logic lives in `triton_viz/static/op_workspace.js`, with wiring in `triton_viz/static/visualization.js`.
+## UI Layout
+- Control Panel: Program ID Controls, Operation Controls, and Code Peek Panel.
+- Active Program Workspace: main canvas that renders Op Tabs, Tensor View, Flow View, and legends.
+- Legends and panels: Shape Legend, Value Legend, and Side Info Panel are managed by Tensor View.
 
-### Front-end TypeScript Build
-Frontend sources live in `src/` and compile to `triton_viz/static/` via `npm run build:frontend`. The browser entrypoint is `src/main.ts`, which outputs `triton_viz/static/main.js` for `index.html`.
+## Key Modules
+- `src/visualization.ts`: app bootstrap, state wiring, program slider setup, and global data fetch.
+- `src/op_workspace.ts`: Op Tabs, view switching, and Code Peek Panel rendering.
+- `src/tensor_view.ts`: Three.js scene setup, tensor meshes, highlights, and histogram overlay.
+- `src/load_utils.ts`: camera controls and shared 3D scene helpers.
+- `src/dimension_utils.ts`: CAD-style dimension lines and vector text overlays.
+- `src/state.ts`: shared state for active program and toggle values.
+- `src/logger.ts`: action and info logging with `logAction` and `logInfo`.
+- `src/ops/*`: op-specific visualizers registered in the op registry.
 
-### Front-end Core Modules
-- `triton_viz/static/api.js`: base-aware JSON client for frontend requests.
-- `triton_viz/static/state.js`: single source of truth for active program/op/toggles.
-- `triton_viz/static/ops/registry.js`: op visualizer registry; `ops/defaults.js` wires built-ins.
-- `triton_viz/static/utils/dispose.js`: shared cleanup helper for listeners and timers.
-- `triton_viz/static/logger.js`: centralized action logging.
+## Build and Static Assets
+- Source of truth: `src/` TypeScript modules.
+- Output target: `triton_viz/static/` (including `main.js`).
+- Command: `npm run build:frontend`.
+
+## Diagnostics
+- Action logs are emitted via `logAction` using canonical event names in `GLOSSARY.md`.
+- Errors during `/api/data` fetch are surfaced in the control panel.

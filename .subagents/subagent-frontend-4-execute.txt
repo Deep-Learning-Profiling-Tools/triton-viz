@@ -1,0 +1,181 @@
+OpenAI Codex v0.89.0 (research preview)
+--------
+workdir: /home/trtx/College/keren/triton-viz/cr-frontend-4
+model: gpt-5.2-codex
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: low
+reasoning summaries: auto
+session id: 019bf9e8-235a-7961-b557-8303b2e431e1
+--------
+user
+Activate the skill 'ai-execute'.
+Your task is frontend-4.
+Follow these instructions: Implement tasks/code-backlog/frontend-4_docs-glossary.md on branch cr/frontend-4. Update docs (GLOSSARY.md, ARCHITECTURE.md, MANUAL.md, README.md, triton_viz/ARCHITECTURE.md) per plan. Keep style clean, concise; avoid unnecessary comments. Run any relevant doc or frontend tests if available. Output COMPLETED on success.
+
+When finished, provide a concise summary of your work and the outcome (COMPLETED or ABORTED).
+mcp startup: no servers
+
+thinking
+**Identifying required skill**
+
+I see the task needs the ai-execute skill and reviewing the read skill next.
+tool local.read_mcp_resource({"server":"local","uri":"file:///home/trtx/.codex/skills/ai-execute/SKILL.md"})
+local.read_mcp_resource({"server":"local","uri":"file:///home/trtx/.codex/skills/ai-execute/SKILL.md"}) failed in 0ms:
+
+thinking
+**Choosing cat over mcp**
+exec
+/bin/bash -lc 'cat /home/trtx/.codex/skills/ai-execute/SKILL.md' in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 51ms:
+---
+name: ai-execute
+description: Autonomous-only (AI-Loop protocol) skill that claims a planned task, creates a CR worktree, implements code/tests/docs per plan, and submits for review without merging. Reserved for AI autonomous coding; do not use for human+AI.
+metadata:
+  short-description: Implement one task end-to-end
+---
+
+# Protocol
+
+### Canonical task tracker
+- `tasks/` is the **single source of truth** for tasks, status, ownership, dependencies, and coordination metadata.
+- Task state is defined by directory:
+  - `tasks/todo/` pending, unplanned
+  - `tasks/code-backlog/` planned or in-progress coding work
+  - `tasks/review-backlog/` awaiting review
+  - `tasks/review-fix-backlog/` awaiting review fixes
+  - `tasks/integrator-backlog/` approved, awaiting merge
+  - `tasks/done/` merged and complete
+
+### Claiming and locking
+
+thinking
+**Searching for task files**
+exec
+/bin/bash -lc 'ls tasks' in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 51ms:
+code-backlog
+done
+todo
+exec
+/bin/bash -lc 'ls tasks/code-backlog' in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 51ms:
+frontend-4_docs-glossary.md
+exec
+/bin/bash -lc 'cat tasks/code-backlog/frontend-4_docs-glossary.md' in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 51ms:
+# Task: documentation overhaul with glossary
+
+Context: document the frontend cleanly for AI agents by adding a canonical glossary and rewriting architecture/manual docs to match the UI and data flow.
+
+Review-Round: 0
+Owner:
+Deps: [frontend-3]
+Touches: GLOSSARY.md, ARCHITECTURE.md, MANUAL.md, README.md, triton_viz/ARCHITECTURE.md
+Acceptance:
+- GLOSSARY.md defines canonical UI terms, data types, and events
+- ARCHITECTURE.md and MANUAL.md match the current UI and code structure
+- README.md includes concise build/run guidance
+Notes: Plan section is the low-level plan; use it verbatim without replacement.
+Priority: P1
+
+Plan:
+- Overview: add a glossary and align all docs to the current UI, naming, and data flow.
+- Mental model: ARCHITECTURE explains how it works; MANUAL explains how to use it; GLOSSARY anchors naming and term mapping.
+- Interfaces / contracts: document public payload shapes and event names in the glossary and architecture docs.
+- Files / functions / data structures: create `GLOSSARY.md`; rewrite `ARCHITECTURE.md`, `MANUAL.md`, `README.md`, and `triton_viz/ARCHITECTURE.md` to use glossary terms.
+
+thinking
+**Checking frontend-3 dependency status**
+exec
+/bin/bash -lc 'ls tasks/done' in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 50ms:
+frontend-0_remove-flip-viz.md
+frontend-1_remove-grid-overview.md
+frontend-2_architecture-patterns.md
+frontend-3_ts-migration.md
+
+thinking
+**Checking existing worktree**
+exec
+/bin/bash -lc 'git worktree list' in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 51ms:
+/home/trtx/College/keren/triton-viz/main           ef4b416 [main]
+/home/trtx/College/keren/triton-viz/cr-frontend-4  df59a60 [cr/frontend-4]
+/home/trtx/College/keren/triton-viz/viz-ts         94e162f [viz-ts]
+
+thinking
+**Preparing to explore glossary files**
+
+I'm switching to the worktree named cr-frontend-4 and planning to check documentation and code for glossary references using ripgrep.
+exec
+/bin/bash -lc ls in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 50ms:
+ARCHITECTURE.md
+LICENSE
+Logo.jpg
+MANUAL.md
+README.md
+examples
+mypy.ini
+package.json
+pyproject.toml
+pytest.ini
+reviews
+setup.py
+src
+subagent-frontend-4-execute.txt
+tasks
+tests
+triton_viz
+tsconfig.json
+
+thinking
+**Planning doc and frontend scan**
+
+I'm preparing to read documentation and frontend sources using searches for data-component attributes to guide exploration.
+exec
+/bin/bash -lc 'rg -n "data-component|data-action|event|payload|log" src triton_viz' in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 51ms:
+triton_viz/static/ui_helpers.js:28:    const onPointerDown = (event) => {
+triton_viz/static/ui_helpers.js:29:        pointerId = event.pointerId;
+triton_viz/static/ui_helpers.js:35:        startX = event.clientX;
+triton_viz/static/ui_helpers.js:36:        startY = event.clientY;
+triton_viz/static/ui_helpers.js:42:    const onPointerMove = (event) => {
+triton_viz/static/ui_helpers.js:43:        if (event.pointerId !== pointerId)
+triton_viz/static/ui_helpers.js:45:        const deltaX = event.clientX - startX;
+triton_viz/static/ui_helpers.js:46:        const deltaY = event.clientY - startY;
+triton_viz/static/ui_helpers.js:64:    const onPointerUp = (event) => {
+triton_viz/static/ui_helpers.js:65:        if (event.pointerId !== pointerId)
+triton_viz/static/utils/dispose.js:9:    const listen = (target, event, handler, options) => {
+triton_viz/static/utils/dispose.js:12:        target.addEventListener(event, handler, options);
+triton_viz/static/utils/dispose.js:13:        return add(() => target.removeEventListener(event, handler, options));
+triton_viz/static/visualizer.css:358:    pointer-events: auto;
+triton_viz/static/visualizer.css:592:    pointer-events: auto;
+triton_viz/static/nki.js:21:    const events = opsByProgram
+triton_viz/static/nki.js:31:    if (events.length === 0) {
+triton_viz/static/nki.js:36:    events.sort((a, b) => a.t - b.t);
+triton_viz/static/nki.js:37:    const tMin = events[0].t;
+triton_viz/static/nki.js:38:    const tMax = events[events.length - 1].t || (tMin + 1);
+
+thinking
+**Opening existing documentation**
+exec
+/bin/bash -lc "sed -n '1,200p' GLOSSARY.md" in /home/trtx/College/keren/triton-viz/cr-frontend-4 exited 2 in 51ms:
+sed: can't read GLOSSARY.md: No such file or directory
+
+thinking
+**Reviewing architecture documentation**
+exec
+/bin/bash -lc "sed -n '1,200p' ARCHITECTURE.md" in /home/trtx/College/keren/triton-viz/cr-frontend-4 succeeded in 51ms:
+# Architecture
+
+## Front-end Annotation Layer
+The front-end utilizes Three.js for 3D tensor visualization and a custom annotation layer for dimension lines and legends.
+
+### CAD Dimension Overlays
+Dimension lines are rendered as CAD-style annotations:
+- **Extension Lines**: Perpendicular lines from tensor boundaries.
+- **Dimension Lines**: Parallel lines showing the span.
+- **Arrowheads**: Located at intersections, with automatic inside/outside placement logic.
+- **Text Rendering**: High-quality vector text rendering using Multi-channel Signed Distance Fields (MSDF) via `Troika-Three-Text`, ensuring readability at all zoom levels without pixelation.
+- **Logic**: Implemented in `triton_viz/static/dimension_utils.js`.
+
+### Shape Legend
+A floating DOM overlay that lists all active tensors and their shapes, color-coded to match the 3D meshes.
+
+### Active Program Workspace
+Program ID sliders select the active program (X/Y/Z). The workspace renders op tabs, Tensor/Flow views, and code peek for that active program.

@@ -46,6 +46,12 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 - **Shared Workspace Toggles**: Heatmap, histogram, and all-program views stay in sync across op tabs.
 - **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows move outside when space is limited.
 - **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
+
+### Documentation
+- `GLOSSARY.md`: canonical UI terms, payloads, and event names.
+- `ARCHITECTURE.md`: frontend data flow and module layout.
+- `MANUAL.md`: user workflows and control behavior.
+- `triton_viz/ARCHITECTURE.md`: static module map and build notes.
 ## Getting Started
 
 ### Prerequisites
