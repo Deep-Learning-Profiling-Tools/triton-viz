@@ -1,9 +1,8 @@
-# Review: frontend-3 (round 2)
+NIT: none.
+QUESTION: none.
 
-No findings.
-
-Tests
-- `npm run build:frontend`
-- `npm run test:frontend`
+Tests:
+- npm run build:frontend
+- npm run test:frontend
 
 APPROVE
