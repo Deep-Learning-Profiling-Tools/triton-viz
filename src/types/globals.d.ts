@@ -21,3 +21,7 @@ interface Window {
     last_slice_shape?: number[];
     last_slice_coords?: number[];
 }
+
+interface HTMLElement {
+    __vizGetState?: () => unknown;
+}

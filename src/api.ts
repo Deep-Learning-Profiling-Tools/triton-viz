@@ -1,6 +1,6 @@
 export type RequestOptions = {
     method?: string;
-    body?: unknown;
+    body?: BodyInit | null;
     headers?: Record<string, string>;
     base?: string;
     signal?: AbortSignal | null;
@@ -38,7 +38,7 @@ export async function requestJson<T = unknown>(path: string, options: RequestOpt
     } = options;
     const url = buildUrl(path, base);
     const nextHeaders = { ...headers };
-    let nextBody = body;
+    let nextBody: BodyInit | null = body as BodyInit | null;
     if (body !== null && body !== undefined && typeof body !== 'string' && !(body instanceof FormData)) {
         nextBody = JSON.stringify(body);
         if (!nextHeaders['Content-Type']) {
@@ -71,6 +71,10 @@ export function getJson<T = unknown>(path: string, options: RequestOptions = {})
     return requestJson<T>(path, { ...options, method: 'GET' });
 }
 
-export function postJson<T = unknown>(path: string, body: unknown, options: RequestOptions = {}) {
-    return requestJson<T>(path, { ...options, method: 'POST', body });
+export function postJson<T = unknown>(
+    path: string,
+    body: BodyInit | Record<string, unknown> | null,
+    options: RequestOptions = {},
+) {
+    return requestJson<T>(path, { ...options, method: 'POST', body: body as BodyInit | null });
 }

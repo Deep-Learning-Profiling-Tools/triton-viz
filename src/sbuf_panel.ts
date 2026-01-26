@@ -1,4 +1,5 @@
 import { getApiBase, getJson } from './api.js';
+import type { SbufTimelinePayload } from './types.js';
 
 const DEVICE_PRESETS = [
     { value: 'TRN1_NC_V2', label: 'Trn1 NC-v2 (24 MiB)', limit: 24 * 1024 * 1024 },
@@ -129,9 +130,13 @@ export function renderSbufPanel() {
         const ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         try {
-            const data = await getJson(url, { base: apiBase });
-            drawTimeline(ctx, data.timeline, data.limit_bytes);
-            summary.textContent = `Limit: ${formatBytes(data.limit_bytes)} | Max: ${formatBytes(data.max_usage)} | Overflow events: ${data.overflow_points.length}`;
+            const data = await getJson<SbufTimelinePayload>(url, { base: apiBase });
+            const timeline = data?.timeline || [];
+            const limitBytes = data?.limit_bytes || 0;
+            const maxUsage = data?.max_usage || 0;
+            const overflowPoints = data?.overflow_points || [];
+            drawTimeline(ctx, timeline, limitBytes);
+            summary.textContent = `Limit: ${formatBytes(limitBytes)} | Max: ${formatBytes(maxUsage)} | Overflow events: ${overflowPoints.length}`;
         } catch (err) {
             summary.textContent = `Error: ${err.message || err}`;
         }

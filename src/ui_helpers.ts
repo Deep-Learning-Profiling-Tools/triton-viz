@@ -1,4 +1,11 @@
-export function enableDrag(panel, options = {}) {
+type DragOptions = {
+    handle?: HTMLElement;
+    bounds?: HTMLElement | Window | null;
+    initialLeft?: number;
+    initialTop?: number;
+};
+
+export function enableDrag(panel: HTMLElement | null, options: DragOptions = {}) {
     if (!panel) return;
     const {
         handle = panel,
@@ -9,11 +16,12 @@ export function enableDrag(panel, options = {}) {
 
     const useViewport = bounds === window;
     const boundsElement = useViewport ? null : (bounds || panel.parentElement || document.body);
+    const boundsEl = boundsElement as HTMLElement | null;
 
-    if (!useViewport && boundsElement) {
-        const computed = getComputedStyle(boundsElement);
+    if (!useViewport && boundsEl) {
+        const computed = getComputedStyle(boundsEl);
         if (computed.position === 'static') {
-            boundsElement.style.position = 'relative';
+            boundsEl.style.position = 'relative';
         }
     }
 
@@ -27,7 +35,7 @@ export function enableDrag(panel, options = {}) {
 
     handle.classList.add('is-draggable');
 
-    let pointerId = null;
+    let pointerId: number | null = null;
     let startX = 0;
     let startY = 0;
     let startLeft = 0;
@@ -35,7 +43,7 @@ export function enableDrag(panel, options = {}) {
 
     const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
-    const onPointerDown = (event) => {
+    const onPointerDown = (event: PointerEvent) => {
         pointerId = event.pointerId;
         if (handle.setPointerCapture) {
             handle.setPointerCapture(pointerId);
@@ -50,7 +58,7 @@ export function enableDrag(panel, options = {}) {
         window.addEventListener('pointerup', onPointerUp);
     };
 
-    const onPointerMove = (event) => {
+    const onPointerMove = (event: PointerEvent) => {
         if (event.pointerId !== pointerId) return;
         const deltaX = event.clientX - startX;
         const deltaY = event.clientY - startY;
@@ -62,9 +70,9 @@ export function enableDrag(panel, options = {}) {
             const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
             nextLeft = clamp(nextLeft, 0, maxLeft);
             nextTop = clamp(nextTop, 0, maxTop);
-        } else if (boundsElement) {
-            const maxLeft = Math.max(0, boundsElement.clientWidth - panel.offsetWidth);
-            const maxTop = Math.max(0, boundsElement.clientHeight - panel.offsetHeight);
+        } else if (boundsEl) {
+            const maxLeft = Math.max(0, boundsEl.clientWidth - panel.offsetWidth);
+            const maxTop = Math.max(0, boundsEl.clientHeight - panel.offsetHeight);
             nextLeft = clamp(nextLeft, 0, maxLeft);
             nextTop = clamp(nextTop, 0, maxTop);
         }
@@ -73,7 +81,7 @@ export function enableDrag(panel, options = {}) {
         panel.style.top = `${nextTop}px`;
     };
 
-    const onPointerUp = (event) => {
+    const onPointerUp = (event: PointerEvent) => {
         if (event.pointerId !== pointerId) return;
         if (handle.hasPointerCapture && handle.hasPointerCapture(pointerId)) {
             handle.releasePointerCapture(pointerId);

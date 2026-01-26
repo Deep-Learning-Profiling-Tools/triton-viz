@@ -5,9 +5,25 @@ import { logAction, logInfo } from './logger.js';
 import { setActiveOp } from './state.js';
 import { getVisualizer } from './ops/registry.js';
 import './ops/defaults.js';
-import type { OpRecord } from './types.js';
+import type { OpCodePayload, OpRecord } from './types.js';
 
 export class OpWorkspace {
+    containerElement: HTMLElement | null;
+    getBlockData: ((x: number, y: number, z: number) => OpRecord[]) | null;
+    maxValues: { x: number; y: number; z: number };
+    gridPosition: { x: number; y: number; z: number };
+    blockData: OpRecord[];
+    visualizationContainer: HTMLElement | null;
+    visualizationCleanupFunction: (() => void) | null;
+    contentArea: HTMLElement | null;
+    activeTab: HTMLElement | null;
+    activeTabIndex: number;
+    lastOpType: string | null;
+    titleEl: HTMLElement | null;
+    badgeEl: HTMLElement | null;
+    cardEl: HTMLElement | null;
+    headerBar: HTMLElement | null;
+
     constructor(containerElement, { getBlockData = null, maxValues = { x: 0, y: 0, z: 0 } } = {}) {
         this.containerElement = containerElement;
         this.getBlockData = getBlockData;
@@ -329,7 +345,7 @@ export class OpWorkspace {
             blurb.textContent = 'Arrow points to the line being visualized.';
             wrapper.appendChild(blurb);
             try {
-                const data = await postJson('/api/op_code', { uuid, frame_idx: frameIdx, context });
+                const data = await postJson<OpCodePayload>('/api/op_code', { uuid, frame_idx: frameIdx, context });
                 const meta = document.createElement('div');
                 meta.style.marginBottom = '6px';
                 meta.style.fontSize = '12px';
@@ -399,8 +415,8 @@ export class OpWorkspace {
         if (!forceShow && !isVisible) return;
         const result = window.__tritonVizCodeToggle(true);
         if (!window.setOpControlState) return;
-        if (result && typeof result.then === 'function') {
-            result.then((visible) => {
+        if (result && typeof (result as any).then === 'function') {
+            (result as Promise<boolean>).then((visible) => {
                 window.setOpControlState({ showCode: !!visible });
             });
         } else {

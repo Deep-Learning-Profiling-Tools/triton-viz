@@ -1,7 +1,29 @@
 import { postJson } from "./api.js";
 import { createDisposer } from "./utils/dispose.js";
 
-export function createHistogramOverlay(containerElement, options) {
+type HistogramSource = {
+    value: string;
+    label: string;
+};
+
+type HistogramOptions = {
+    title?: string;
+    sources?: HistogramSource[];
+    apiBase?: string;
+    buildRequestBody: (source: string, bins: number) => Record<string, unknown>;
+    defaultBins?: number;
+};
+
+type HistogramPayload = {
+    counts: number[];
+    edges: number[];
+    min: number;
+    max: number;
+    n: number;
+    sampled: number;
+};
+
+export function createHistogramOverlay(containerElement: HTMLElement, options: HistogramOptions) {
     const {
         title = "Value Distribution",
         sources = [],
@@ -84,10 +106,10 @@ export function createHistogramOverlay(containerElement, options) {
 
     const binInput = document.createElement("input");
     binInput.type = "number";
-    binInput.value = defaultBins;
-    binInput.min = 4;
-    binInput.max = 512;
-    binInput.step = 2;
+    binInput.value = String(defaultBins);
+    binInput.min = "4";
+    binInput.max = "512";
+    binInput.step = "2";
     binInput.style.width = "80px";
     binInput.title = "Number of bins";
     binInput.id = "histogram-bins";
@@ -144,7 +166,7 @@ export function createHistogramOverlay(containerElement, options) {
             const body = buildRequestBody(select.value, bins);
             body.bins = bins;
             body.max_samples = body.max_samples || 200000;
-            const data = await postJson("/api/histogram", body, { base: apiBase });
+            const data = await postJson<HistogramPayload>("/api/histogram", body, { base: apiBase });
             drawHistogram(canvas, data.counts, data.edges);
             info.textContent = `Min: ${data.min.toFixed(6)} | Max: ${data.max.toFixed(6)} | Total values: ${data.n} | Sampled: ${data.sampled}`;
             status.textContent = "";

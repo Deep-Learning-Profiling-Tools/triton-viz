@@ -1,24 +1,34 @@
 export function createDisposer() {
-    const disposers = new Set();
+    type Disposer = () => void;
+    const disposers = new Set<Disposer>();
+    type EventTargetLike = {
+        addEventListener: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => void;
+        removeEventListener: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => void;
+    };
 
-    const add = (disposer) => {
+    const add = (disposer: Disposer) => {
         if (typeof disposer !== 'function') return null;
         disposers.add(disposer);
         return disposer;
     };
 
-    const listen = (target, event, handler, options) => {
+    const listen = (
+        target: EventTargetLike | null,
+        event: string,
+        handler: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+    ) => {
         if (!target || !target.addEventListener) return null;
         target.addEventListener(event, handler, options);
         return add(() => target.removeEventListener(event, handler, options));
     };
 
-    const interval = (handler, delay) => {
+    const interval = (handler: () => void, delay: number) => {
         const id = setInterval(handler, delay);
         return add(() => clearInterval(id));
     };
 
-    const timeout = (handler, delay) => {
+    const timeout = (handler: () => void, delay: number) => {
         const id = setTimeout(handler, delay);
         return add(() => clearTimeout(id));
     };

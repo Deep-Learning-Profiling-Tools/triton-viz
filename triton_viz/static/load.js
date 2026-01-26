@@ -1,6 +1,5 @@
 import { createTensorVisualization } from './tensor_view.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
-
 export function createLoadVisualization(containerElement, op, viewState = null) {
     return createTensorVisualization(containerElement, op, {
         type: 'Load',

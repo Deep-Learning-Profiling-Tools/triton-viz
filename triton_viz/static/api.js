@@ -1,33 +1,30 @@
 const getDefaultBase = () => {
-    if (typeof globalThis === 'undefined') return '';
+    if (typeof globalThis === 'undefined')
+        return '';
     return globalThis.__TRITON_VIZ_API__ || '';
 };
-
 const buildUrl = (path, baseOverride) => {
-    if (!path) return baseOverride || getDefaultBase();
-    if (/^https?:\/\//i.test(path)) return path;
+    if (!path)
+        return baseOverride || getDefaultBase();
+    if (/^https?:\/\//i.test(path))
+        return path;
     const base = baseOverride !== undefined ? baseOverride : getDefaultBase();
-    if (!base) return path.startsWith('/') ? path : `/${path}`;
+    if (!base)
+        return path.startsWith('/') ? path : `/${path}`;
     return `${base}${path.startsWith('/') ? '' : '/'}${path}`;
 };
-
 const parseJson = (text) => {
-    if (!text) return null;
+    if (!text)
+        return null;
     try {
         return JSON.parse(text);
-    } catch (err) {
+    }
+    catch (err) {
         return null;
     }
 };
-
 export async function requestJson(path, options = {}) {
-    const {
-        method = 'GET',
-        body = null,
-        headers = {},
-        base,
-        signal,
-    } = options;
+    const { method = 'GET', body = null, headers = {}, base, signal, } = options;
     const url = buildUrl(path, base);
     const nextHeaders = { ...headers };
     let nextBody = body;
@@ -54,15 +51,12 @@ export async function requestJson(path, options = {}) {
     }
     return data;
 }
-
 export function getApiBase() {
     return getDefaultBase();
 }
-
 export function getJson(path, options = {}) {
     return requestJson(path, { ...options, method: 'GET' });
 }
-
 export function postJson(path, body, options = {}) {
-    return requestJson(path, { ...options, method: 'POST', body });
+    return requestJson(path, { ...options, method: 'POST', body: body });
 }

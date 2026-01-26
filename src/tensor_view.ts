@@ -22,9 +22,9 @@ import { enableDrag } from './ui_helpers.js';
 import { getApiBase, postJson } from './api.js';
 import { getState } from './state.js';
 import { createDisposer } from './utils/dispose.js';
-import type { OpRecord } from './types.js';
+import type { OpRecord, ProgramCountsPayload, TensorPayload } from './types.js';
 
-const VIZ_CACHE = new Map();
+const VIZ_CACHE = new Map<HTMLElement, any>();
 const PROGRAM_COUNT_COLORS = [
     '#22c55e',
     '#facc15',
@@ -101,7 +101,7 @@ function updateSideMenu(el, name, coords, val, shape, extraHtml = '') {
 
 async function fetchTensorPayload(apiBase, uuid, endpoint = 'getLoadTensor') {
     try {
-        const data = await postJson(`/api/${endpoint}`, { uuid }, { base: apiBase });
+        const data = await postJson<TensorPayload>(`/api/${endpoint}`, { uuid }, { base: apiBase });
         if (!data) return null;
         return {
             scaleMin: data.min ?? 0, scaleMax: data.max ?? 0,
@@ -115,7 +115,7 @@ async function fetchProgramCounts(apiBase, op) {
     if (!op || !op.overall_key || op.time_idx === undefined) return null;
     // fetch a sparse list of coords -> program count for this op
     try {
-        return await postJson('/api/getLoadStoreAllPrograms', {
+        return await postJson<ProgramCountsPayload>('/api/getLoadStoreAllPrograms', {
             type: op.type,
             overall_key: op.overall_key,
             time_idx: op.time_idx,
@@ -489,7 +489,7 @@ function createProgramSubsetLegendItem(baseColor, subsets, hues) {
     item.appendChild(rows);
     return item;
 }
-function addDimensionLines(scene, tensorGroup, dimColors = []) {
+function addDimensionLines(scene: any, tensorGroup: any, dimColors: any[] = []) {
     const mesh = tensorGroup?.userData?.mesh;
     if (!mesh) return [];
     const shape = mesh.userData.shape;
@@ -521,14 +521,14 @@ function addDimensionLines(scene, tensorGroup, dimColors = []) {
 
 // --- Interaction Handlers ---
 
-function onMouseMove(event, ctx) {
+function onMouseMove(event: PointerEvent, ctx: any) {
     const { renderer, camera, tensors, state, sideMenu, requestRender, raycaster, mouse, API_BASE, op } = ctx;
     const rect = renderer.domElement.getBoundingClientRect();
     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
     raycaster.setFromCamera(mouse, camera);
-    const meshes = Array.from(tensors.values()).map(t => t.userData.mesh);
+    const meshes = Array.from(tensors.values()).map((t: any) => t.userData.mesh);
     const hits = raycaster.intersectObjects(meshes);
 
     if (hits.length > 0) {
@@ -627,12 +627,13 @@ export function createTensorVisualization(
         dimColors?: Record<string, any>;
         showDimLines?: boolean;
         viewState?: unknown;
+        hasHeatmap?: boolean;
     } = {},
 ) {
     const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null } = options;
     const supportsAllPrograms = type === 'Load' || type === 'Store';
     const API_BASE = getApiBase();
-    const initialToggles = getState().toggles || {};
+    const initialToggles = getState().toggles;
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape, color: colors.GLOBAL || '#333', position: [0,0,0], endpoint: 'getLoadTensor' }
     ];
@@ -658,7 +659,7 @@ export function createTensorVisualization(
         const { scene, camera, renderer } = setupScene(stage, 0x000000);
         const disposer = createDisposer();
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
-        const tensors = new Map();
+        const tensors = new Map<string, any>();
         configs.forEach(cfg => {
             const group = createTensor(cfg.shape, null, cfg.color, cfg.name, cubeGeometry, edgesGeometry, lineMaterial);
             group.position.set(...(cfg.position || [0,0,0]));
@@ -691,7 +692,7 @@ export function createTensorVisualization(
             programDataLoading: false,
         };
         const highlightColor = colors.HIGHLIGHT || new THREE.Color(0.0, 0.7, 1.0);
-        const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, disposer, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [], highlightColor };
+        const ctx: any = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, disposer, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [], highlightColor };
         ctx.requestRender = () => {
             if (state.rafId !== null) { state.renderPending = true; return; }
             state.rafId = requestAnimationFrame(() => { state.rafId = null; orbitControls.update(); renderer.render(scene, camera); if (state.renderPending) { state.renderPending = false; ctx.requestRender(); } });

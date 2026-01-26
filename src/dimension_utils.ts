@@ -1,7 +1,31 @@
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import { Text } from 'https://esm.sh/troika-three-text@0.52.4?deps=three@0.155.0';
 
-export function createVectorText(text, color, options = {}) {
+type VectorTextOptions = {
+    fontSize?: number;
+    billboard?: boolean;
+    depthTest?: boolean;
+    strokeWidth?: number;
+    strokeColor?: number | string;
+};
+
+type CadDimensionOptions = {
+    offset?: number;
+    extensionLength?: number;
+    extensionOffset?: number;
+    arrowSize?: number;
+    arrowWidth?: number;
+    textOffset?: number;
+    flipThreshold?: number;
+    lineWidth?: number;
+    opacity?: number;
+};
+
+export function createVectorText(
+    text: string,
+    color: any,
+    options: VectorTextOptions = {},
+) {
     const {
         fontSize = 0.15,
         billboard = true,
@@ -36,7 +60,15 @@ export function createVectorText(text, color, options = {}) {
     return textMesh;
 }
 
-export function createCadDimension(scene, start, end, label, axis, color, options = {}) {
+export function createCadDimension(
+    scene: any,
+    start: any,
+    end: any,
+    label: string,
+    axis: 'x' | 'y' | 'z',
+    color: any,
+    options: CadDimensionOptions = {},
+) {
     const {
         offset = 0.5,
         extensionLength = 0.8,

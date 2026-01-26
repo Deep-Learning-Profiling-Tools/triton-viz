@@ -53,7 +53,7 @@ export function setupGeometries() {
     return { cubeGeometry, edgesGeometry, lineMaterial };
 }
 
-export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
+export function createTensor(shape, coords, color, tensorName, cubeGeometry, _edgesGeometry = null, _lineMaterial = null) {
     console.log(`Creating ${tensorName} tensor:`, shape, coords);
     const tensor = new THREE.Group();
     let depth, height, width;
@@ -136,7 +136,7 @@ export function updateTensorHighlights(tensor, data, highlightColor, baseColor, 
     const count = mesh.count;
     const hl = (highlightColor instanceof THREE.Color) ? highlightColor : new THREE.Color(highlightColor);
     const base = (baseColor instanceof THREE.Color) ? baseColor : new THREE.Color(baseColor);
-    let isHighlighted = () => false;
+    let isHighlighted = (_x, _y, _z) => false;
     if (data && data.type === 'descriptor') {
         const { start, shape } = data;
         const [sx, sy, sz] = start || [0,0,0], [dx, dy, dz] = shape || [0,0,0];

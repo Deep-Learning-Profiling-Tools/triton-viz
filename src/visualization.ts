@@ -201,7 +201,7 @@ function setupSidebarResizer() {
     let startWidth = 0;
     const dragDisposer = createDisposer();
 
-    const onPointerMove = (event) => {
+    const onPointerMove = (event: PointerEvent) => {
         const delta = event.clientX - startX;
         const resizerWidth = controls.resizer.getBoundingClientRect().width || 0;
         const maxWidth = Math.max(0, window.innerWidth - resizerWidth);
@@ -209,12 +209,12 @@ function setupSidebarResizer() {
         root.style.setProperty('--sidebar-width', `${next}px`);
     };
 
-    const onPointerUp = (event) => {
+    const onPointerUp = (event: PointerEvent) => {
         controls.resizer.releasePointerCapture(event.pointerId);
         dragDisposer.dispose();
     };
 
-    appDisposer.listen(controls.resizer, 'pointerdown', (event) => {
+    appDisposer.listen(controls.resizer, 'pointerdown', (event: PointerEvent) => {
         startX = event.clientX;
         startWidth = controls.panel.getBoundingClientRect().width;
         controls.resizer.setPointerCapture(event.pointerId);
@@ -273,9 +273,9 @@ function getBlockDataAt(nx, ny, nz) {
 function syncProgramControls() {
     const values = getState().activeProgram;
     for (let i = 0; i < PROGRAM_AXES.length; i += 1) {
-        const slider = document.querySelector(`input[data-filter-index="${i}"]`);
+        const slider = document.querySelector(`input[data-filter-index="${i}"]`) as HTMLInputElement | null;
         if (slider) {
-            slider.value = values[PROGRAM_AXES[i]] ?? 0;
+            slider.value = String(values[PROGRAM_AXES[i]] ?? 0);
         }
         const valuePill = document.getElementById(`pid-value-${i}`);
         if (valuePill) valuePill.textContent = String(values[PROGRAM_AXES[i]] ?? 0);
@@ -319,10 +319,10 @@ function createProgramIdControls() {
         valueSpan.textContent = String(nextValue);
         const slider = document.createElement('input');
         slider.type = 'range';
-        slider.min = 0;
-        slider.max = maxValues[index];
-        slider.value = nextValue;
-        slider.dataset.filterIndex = index;
+        slider.min = '0';
+        slider.max = String(maxValues[index]);
+        slider.value = String(nextValue);
+        slider.dataset.filterIndex = String(index);
         slider.disabled = isLocked;
         const tickId = `pid-ticks-${index}`;
         const ticks = document.createElement('datalist');
