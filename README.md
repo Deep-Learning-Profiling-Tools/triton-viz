@@ -46,6 +46,7 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 - **Shared Workspace Toggles**: Heatmap, histogram, and all-program views stay in sync across op tabs.
 - **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows move outside when space is limited.
 - **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
+- **Dev Overlay**: Optional overlay that labels UI roots via `data-component` attributes for development.
 
 ### Documentation
 - `GLOSSARY.md`: canonical UI terms, payloads, and event names.

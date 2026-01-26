@@ -12,11 +12,13 @@ This glossary defines the canonical UI terms, data types, and events used across
 - Flow View: flow diagram view when an op provides a flow visualization.
 - Code Peek Panel: right-side panel in the control panel that renders code context.
 - Theme Toggle: light/dark toggle in the control panel header.
+- Dev Overlay: optional badge layer that labels `data-component` roots.
 
 ## Core Concepts
 - Active Program: the currently selected program coordinate triple (x, y, z).
 - Program Axes: the three axes used for program IDs: x, y, z.
 - Toggle State: shared on/off UI state for colorize, histogram, all programs, and code panel visibility.
+- Data Component: `data-component` attribute on a UI root used by the Dev Overlay.
 
 ## Data Types and Payloads
 - OpRecord: operation metadata for a single op, including shapes and UUIDs.
@@ -45,6 +47,7 @@ Events are logged with `logAction` and include an action name plus a details obj
 - toggle_histogram: toggled Value Histogram (next: boolean).
 - toggle_all_programs: toggled All Program IDs (next: boolean).
 - code_peek_toggle: toggled the code peek panel (visible, uuid, source).
+- dev_overlay_toggle: toggled the Dev Overlay (enabled, source).
 
 ## Canonical File Mapping
 - src/visualization.ts: UI bootstrap, data fetch, and control wiring.

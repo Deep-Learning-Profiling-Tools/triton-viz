@@ -21,9 +21,10 @@ Terms are defined in `GLOSSARY.md` and used consistently below.
 - Control Panel: Program ID Controls, Operation Controls, and Code Peek Panel.
 - Active Program Workspace: main canvas that renders Op Tabs, Tensor View, Flow View, and legends.
 - Legends and panels: Shape Legend, Value Legend, and Side Info Panel are managed by Tensor View.
+- Dev Overlay: optional badge layer for `data-component` roots, enabled by query param or key toggle.
 
 ## Key Modules
-- `src/visualization.ts`: app bootstrap, state wiring, program slider setup, and global data fetch.
+- `src/visualization.ts`: app bootstrap, state wiring, program slider setup, global data fetch, and dev overlay toggle.
 - `src/op_workspace.ts`: Op Tabs, view switching, and Code Peek Panel rendering.
 - `src/tensor_view.ts`: Three.js scene setup, tensor meshes, highlights, and histogram overlay.
 - `src/load_utils.ts`: camera controls and shared 3D scene helpers.

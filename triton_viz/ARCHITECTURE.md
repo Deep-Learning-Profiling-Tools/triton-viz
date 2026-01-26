@@ -4,7 +4,7 @@ This file summarizes the static frontend modules and how they map to the UI desc
 
 ## Static Module Map
 - `static/main.js`: browser entrypoint compiled from `src/main.ts`.
-- `static/visualization.js`: bootstraps the UI and fetches `/api/data`.
+- `static/visualization.js`: bootstraps the UI, fetches `/api/data`, and handles dev overlay badges.
 - `static/op_workspace.js`: Active Program Workspace, Op Tabs, and Code Peek Panel.
 - `static/tensor_view.js`: Tensor View rendering, legends, and histogram overlay.
 - `static/load_utils.js`: camera controls, scene helpers, and tensor mesh setup.

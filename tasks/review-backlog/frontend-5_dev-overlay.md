@@ -3,7 +3,7 @@
 Context: add an optional dev-only overlay to show internal component names without cluttering the UI for normal users.
 
 Review-Round: 0
-Owner:
+Owner: codex
 Deps: [frontend-2]
 Touches: triton_viz/static/visualization.js, triton_viz/static/visualizer.css, triton_viz/templates/index.html, triton_viz/ARCHITECTURE.md, ARCHITECTURE.md, MANUAL.md, README.md
 Acceptance:

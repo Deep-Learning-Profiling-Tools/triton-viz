@@ -14,6 +14,10 @@ const PROGRAM_AXES = ['x', 'y', 'z'];
 const appDisposer = createDisposer();
 let pidDisposer = createDisposer();
 const THEME_STORAGE_KEY = 'triton-viz-theme';
+const DEV_OVERLAY_QUERY_KEY = 'dev';
+const DEV_OVERLAY_TOGGLE = 'KeyD';
+let devOverlayEnabled = false;
+let devOverlayRoot = null;
 const controls = {
     panel: null,
     pidContainer: null,
@@ -120,6 +124,7 @@ function initializeApp() {
     setupThemeToggle();
     setupControlEvents();
     setupSidebarResizer();
+    setupDevOverlay();
     updateOpControls();
     fetchData();
 }
@@ -141,6 +146,76 @@ function applyTheme(theme) {
     if (icon) {
         icon.textContent = theme === 'light' ? '☀' : '🌙';
     }
+}
+function setupDevOverlay() {
+    const params = new URLSearchParams(window.location.search);
+    const enabledFromQuery = params.get(DEV_OVERLAY_QUERY_KEY) === '1';
+    setDevOverlay(enabledFromQuery, 'query');
+    appDisposer.listen(window, 'resize', () => {
+        if (devOverlayEnabled)
+            updateDevOverlay();
+    });
+    appDisposer.listen(window, 'scroll', () => {
+        if (devOverlayEnabled)
+            updateDevOverlay();
+    }, true);
+    appDisposer.listen(document, 'keydown', (event) => {
+        const keyEvent = event;
+        if (!keyEvent.ctrlKey || !keyEvent.shiftKey)
+            return;
+        if (keyEvent.code !== DEV_OVERLAY_TOGGLE)
+            return;
+        const target = keyEvent.target;
+        if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+            return;
+        keyEvent.preventDefault();
+        setDevOverlay(!devOverlayEnabled, 'keyboard');
+    });
+    const observer = new MutationObserver(() => {
+        if (devOverlayEnabled)
+            updateDevOverlay();
+    });
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-component'] });
+    appDisposer.add(() => observer.disconnect());
+}
+function setDevOverlay(enabled, source) {
+    if (enabled === devOverlayEnabled)
+        return;
+    devOverlayEnabled = enabled;
+    if (!enabled) {
+        if (devOverlayRoot)
+            devOverlayRoot.remove();
+        devOverlayRoot = null;
+        logAction('dev_overlay_toggle', { enabled, source });
+        return;
+    }
+    if (!devOverlayRoot) {
+        devOverlayRoot = document.createElement('div');
+        devOverlayRoot.className = 'dev-overlay';
+        document.body.appendChild(devOverlayRoot);
+    }
+    updateDevOverlay();
+    logAction('dev_overlay_toggle', { enabled, source });
+}
+function updateDevOverlay() {
+    if (!devOverlayRoot)
+        return;
+    devOverlayRoot.innerHTML = '';
+    const nodes = document.querySelectorAll('[data-component]');
+    nodes.forEach((node) => {
+        const label = node.getAttribute('data-component');
+        if (!label)
+            return;
+        const rect = node.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0)
+            return;
+        const badge = document.createElement('div');
+        badge.className = 'dev-overlay-badge';
+        badge.textContent = label;
+        badge.style.left = `${Math.max(0, rect.left + 6)}px`;
+        badge.style.top = `${Math.max(0, rect.top + 6)}px`;
+        devOverlayRoot.appendChild(badge);
+    });
 }
 function setupControlEvents() {
     if (controls.resetBtn) {
