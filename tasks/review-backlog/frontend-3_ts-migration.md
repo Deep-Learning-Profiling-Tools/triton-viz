@@ -2,7 +2,7 @@
 
 Context: use TypeScript for the frontend so types are enforced and debugging is easier; keep the existing UI intact.
 
-Review-Round: 1
+Review-Round: 2
 Owner: codex (review-fix-1)
 Deps: [frontend-2]
 Touches: triton_viz/static/*, triton_viz/templates/index.html, package.json, tsconfig.json, triton_viz/ARCHITECTURE.md, ARCHITECTURE.md, MANUAL.md, README.md
