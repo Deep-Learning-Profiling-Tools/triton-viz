@@ -7,8 +7,8 @@
     <link rel="stylesheet" href="/static/visualizer.css">
 </head>
 <body>
-    <div class="viz-app">
-        <aside id="control-panel">
+    <div class="viz-app" data-component="app">
+        <aside id="control-panel" data-component="control-panel">
             <div class="panel-header">
                 <div class="title-block">
                     <span class="eyebrow">Triton Viz</span>
@@ -20,7 +20,7 @@
                 </button>
             </div>
 
-            <section class="control-group is-program-ids">
+            <section class="control-group is-program-ids" data-component="program-controls">
                 <div class="group-header">
                     <span>Program IDs</span>
                     <button id="reset-filters" class="viz-button link" type="button">Reset</button>
@@ -29,7 +29,7 @@
                 <p class="control-note">Drag the sliders to focus on specific program IDs.</p>
             </section>
 
-            <section class="control-group is-op-controls">
+            <section class="control-group is-op-controls" data-component="operation-controls">
                 <div class="group-header">
                     <span>Operation Controls</span>
                 </div>
@@ -41,7 +41,7 @@
                 <p class="control-note">Operation controls follow the active program selection.</p>
             </section>
 
-            <section class="control-group">
+            <section class="control-group" data-component="code-peek">
                 <div class="group-header">
                     <span>Code Peek</span>
                 </div>
@@ -49,12 +49,12 @@
                     Use the code panel to view source context for the active operation.
                 </p>
             </section>
-            <div id="op-code-panel" class="op-code-panel"></div>
+            <div id="op-code-panel" class="op-code-panel" data-component="code-panel"></div>
         </aside>
 
-        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" tabindex="0"></div>
-        <main id="canvas-wrapper">
-            <div id="visualization-container"></div>
+        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" tabindex="0" data-component="sidebar-resizer"></div>
+        <main id="canvas-wrapper" data-component="workspace">
+            <div id="visualization-container" data-component="visualization"></div>
         </main>
     </div>
 

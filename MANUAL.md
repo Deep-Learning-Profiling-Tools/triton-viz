@@ -34,6 +34,11 @@ Refer to `GLOSSARY.md` for canonical UI terms and payload names.
 - Value Legend: shows the colormap range when Color by Value is enabled.
 - Histogram Overlay: lets you pick a tensor source and bin count.
 
+## Dev Overlay
+- Enable the Dev Overlay with `?dev=1` in the URL or press Ctrl+Shift+D.
+- Badges display the `data-component` values for major UI roots.
+- The overlay is off by default and does not affect layout or clicks.
+
 ## Frontend Build
 If you modify frontend TypeScript sources in `src/`, rebuild the static assets:
 

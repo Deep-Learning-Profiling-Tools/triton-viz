@@ -793,3 +793,23 @@ body {
 .viz-shape-legend div {
     white-space: nowrap;
 }
+
+.dev-overlay {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+    font-family: "IBM Plex Mono", "Space Mono", monospace;
+}
+
+.dev-overlay-badge {
+    position: absolute;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(15, 23, 42, 0.85);
+    color: #f8fafc;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
+}
