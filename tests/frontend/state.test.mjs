@@ -7,7 +7,7 @@ import {
     setActiveProgram,
     setToggles,
     subscribe,
-} from '../../triton_viz/static/state.js';
+} from '../../triton_viz/static/core/state.js';
 
 function resetState() {
     setActiveProgram({ x: 0, y: 0, z: 0 });

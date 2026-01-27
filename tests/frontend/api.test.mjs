@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { getJson, postJson, requestJson } from '../../triton_viz/static/api.js';
+import { getJson, postJson, requestJson } from '../../triton_viz/static/core/api.js';
 
 function mockFetch(handler) {
     const original = globalThis.fetch;
