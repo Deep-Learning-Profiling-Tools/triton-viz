@@ -13,6 +13,7 @@ type ThreeGeometry = any;
 type ThreeMaterial = any;
 type ThreeGroup = any;
 type ThreeVector3 = any;
+type ThreeBox3 = any;
 
 export const CUBE_SIZE = 0.2;
 export const GAP = 0.05;
@@ -221,14 +222,28 @@ export function calculateTensorSize(shape: TensorShape): ThreeVector3 {
     return new THREE.Vector3(w*(CUBE_SIZE+GAP), h*(CUBE_SIZE+GAP), d*(CUBE_SIZE+GAP));
 }
 
+export function fitCameraToBounds(camera: ThreeCamera, bounds: ThreeBox3, center?: ThreeVector3, padding = 1.15): { center: ThreeVector3; cameraZ: number } {
+    const target = center ?? bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const vFov = camera.fov * (Math.PI / 180);
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+    const fitHeight = (size.y / 2) / Math.tan(vFov / 2);
+    const fitWidth = (size.x / 2) / Math.tan(hFov / 2);
+    const fitDepth = size.z / 2;
+    // pick the dominant distance so the whole box fits with a small padding
+    const cameraZ = Math.max(fitHeight, fitWidth, fitDepth) * padding;
+    camera.position.set(target.x, target.y, target.z + cameraZ);
+    // keep clip planes wide enough to avoid slicing big tensors
+    camera.near = Math.max(0.1, cameraZ - size.z * 2);
+    camera.far = Math.max(camera.far, cameraZ + size.z * 4);
+    camera.lookAt(target);
+    camera.updateProjectionMatrix();
+    return { center: target, cameraZ };
+}
+
 export function setupCamera(scene: ThreeScene, camera: ThreeCamera): { center: ThreeVector3; cameraZ: number } {
     const box = new THREE.Box3().setFromObject(scene);
-    const center = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const fov = camera.fov * (Math.PI/180);
-    let cameraZ = Math.abs(maxDim/2/Math.tan(fov/2)) * 1.5;
-    camera.position.set(center.x, center.y, center.z + cameraZ);
-    camera.lookAt(center); return { center, cameraZ };
+    return fitCameraToBounds(camera, box);
 }
 
 export function setupEventListeners(

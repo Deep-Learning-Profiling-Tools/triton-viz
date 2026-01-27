@@ -8,6 +8,7 @@ import {
     createTensor,
     calculateTensorSize,
     setupCamera,
+    fitCameraToBounds,
     setupEventListeners,
     cameraControls,
     addLabels,
@@ -35,6 +36,7 @@ type ThreeRenderer = any;
 type ThreeLineMaterial = any;
 type ThreeRaycaster = any;
 type ThreeVector2 = any;
+type ThreeVector3 = any;
 type ThreeLineSegments = any;
 type ThreeOrbitControls = any;
 type TensorConfig = {
@@ -810,9 +812,12 @@ export function createTensorVisualization(
         showDimLines?: boolean;
         viewState?: ViewState | null;
         hasHeatmap?: boolean;
+        layoutBounds?: { width: number; height: number; depth?: number; center?: [number, number, number] };
+        fitToTensors?: boolean;
+        cameraPadding?: number;
     } = {},
 ): (() => void) | void {
-    const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null } = options;
+    const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null, layoutBounds = null, fitToTensors = true, cameraPadding = 1.15 } = options;
     const supportsAllPrograms = type === 'Load' || type === 'Store';
     const API_BASE = getApiBase();
     const initialToggles = getState().toggles;
@@ -821,7 +826,7 @@ export function createTensorVisualization(
     ];
 
     let cache = VIZ_CACHE.get(containerElement);
-    const shapeKey = JSON.stringify(configs.map(c => c.shape));
+    const shapeKey = JSON.stringify({ shapes: configs.map(c => c.shape), layoutBounds });
     const isSameContext = cache && cache.type === type && cache.shapeKey === shapeKey;
 
     if (!isSameContext) {
@@ -853,15 +858,66 @@ export function createTensorVisualization(
             scene.add(group);
             tensors.set(cfg.name, group);
         });
+        if (layoutBounds) {
+            const depth = layoutBounds.depth ?? CUBE_SIZE;
+            const layoutBox = new THREE.Mesh(
+                new THREE.BoxGeometry(layoutBounds.width, layoutBounds.height, depth),
+                new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }),
+            );
+            const center = layoutBounds.center ?? [0, 0, 0];
+            layoutBox.position.set(center[0], center[1], center[2] ?? 0);
+            scene.add(layoutBox);
+        }
         const hoverOutline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05)), new THREE.LineBasicMaterial({ color: COLOR_HOVER }));
         hoverOutline.visible = false;
         scene.add(hoverOutline);
-        const { center } = setupCamera(scene, camera);
+        const dimLineGroups: any[] = [];
+        if (showDimLines) {
+            tensors.forEach((group, name) => {
+                dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
+            });
+        }
+        let cameraCenter = new THREE.Vector3(0, 0, 0);
+        let fitRadius = 0;
+        const bounds = new THREE.Box3();
+        let hasBounds = false;
+        let tensorCenter: ThreeVector3 | null = null;
+        if (fitToTensors) {
+            tensors.forEach((group) => bounds.union(new THREE.Box3().setFromObject(group)));
+            hasBounds = true;
+            if (!bounds.isEmpty()) tensorCenter = bounds.getCenter(new THREE.Vector3());
+        }
+        if (showDimLines) {
+            dimLineGroups.forEach((group) => bounds.union(new THREE.Box3().setFromObject(group)));
+            bounds.expandByScalar(1.0);
+            hasBounds = true;
+        }
+        if (layoutBounds) {
+            const c = layoutBounds.center ?? [0, 0, 0];
+            const center = new THREE.Vector3(c[0], c[1], c[2] ?? 0);
+            const size = new THREE.Vector3(layoutBounds.width, layoutBounds.height, layoutBounds.depth ?? CUBE_SIZE);
+            bounds.union(new THREE.Box3().setFromCenterAndSize(center, size));
+            hasBounds = true;
+        }
+        if (hasBounds && !bounds.isEmpty()) {
+            cameraCenter = fitCameraToBounds(camera, bounds, tensorCenter ?? undefined, cameraPadding).center;
+            fitRadius = bounds.getBoundingSphere(new THREE.Sphere()).radius;
+        } else {
+            const { center } = setupCamera(scene, camera);
+            cameraCenter = center;
+        }
         const orbitControls = new OrbitControls(camera, renderer.domElement);
         orbitControls.enableDamping = false;
-        orbitControls.target.copy(center);
+        orbitControls.target.copy(cameraCenter);
         orbitControls.update();
         disposer.add(() => orbitControls.dispose());
+        const syncClipPlanes = (): void => {
+            if (!fitRadius) return;
+            const dist = camera.position.distanceTo(orbitControls.target);
+            camera.near = Math.max(0.05, dist - fitRadius * 2.5);
+            camera.far = Math.max(camera.far, dist + fitRadius * 2.5);
+            camera.updateProjectionMatrix();
+        };
         const state: VizState = {
             colorizeOn: !!initialToggles.colorize,
             payloads: new Map(),
@@ -878,10 +934,10 @@ export function createTensorVisualization(
             programDataLoading: false,
         };
         const highlightColor = (colors.HIGHLIGHT instanceof THREE.Color) ? colors.HIGHLIGHT : new THREE.Color(colors.HIGHLIGHT || 0x00b3ff);
-        const ctx: VizContext = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, disposer, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups: [], highlightColor, requestRender: () => {}, applyBackgroundTheme: () => {}, destroyLegends: () => {}, createLegends: () => {} };
+        const ctx: VizContext = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, disposer, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups, highlightColor, requestRender: () => {}, applyBackgroundTheme: () => {}, destroyLegends: () => {}, createLegends: () => {} };
         ctx.requestRender = () => {
             if (state.rafId !== null) { state.renderPending = true; return; }
-            state.rafId = requestAnimationFrame(() => { state.rafId = null; orbitControls.update(); renderer.render(scene, camera); if (state.renderPending) { state.renderPending = false; ctx.requestRender(); } });
+            state.rafId = requestAnimationFrame(() => { state.rafId = null; orbitControls.update(); syncClipPlanes(); renderer.render(scene, camera); if (state.renderPending) { state.renderPending = false; ctx.requestRender(); } });
         };
         disposer.listen(orbitControls, 'change', ctx.requestRender);
         ctx.applyBackgroundTheme = (hex: string) => {
@@ -984,11 +1040,6 @@ export function createTensorVisualization(
         );
         disposer.add(cleanupListeners);
         disposer.add(() => renderer.dispose());
-        if (showDimLines) {
-            tensors.forEach((group, name) => {
-                ctx.dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
-            });
-        }
         const fallbackState = !viewState ? {
             colorizeOn: !!initialToggles.colorize,
             allProgramsOn: !!initialToggles.allPrograms,

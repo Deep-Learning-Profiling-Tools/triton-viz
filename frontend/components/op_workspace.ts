@@ -6,6 +6,7 @@ import { setActiveOp } from '../core/state.js';
 import { getVisualizer } from '../ops/registry.js';
 import '../ops/defaults.js';
 import type { OpCodePayload, OpRecord } from '../types/types.js';
+import type { ViewState } from './tensor_view.js';
 
 export class OpWorkspace {
     containerElement: HTMLElement | null;
@@ -19,6 +20,8 @@ export class OpWorkspace {
     activeTab: HTMLElement | null;
     activeTabIndex: number;
     lastOpType: string | null;
+    activeOpUuid: string | null;
+    viewStateByUuid: Map<string, ViewState>;
     titleEl: HTMLElement | null;
     badgeEl: HTMLElement | null;
     cardEl: HTMLElement | null;
@@ -42,6 +45,8 @@ export class OpWorkspace {
         this.activeTab = null;
         this.activeTabIndex = 0;
         this.lastOpType = null;
+        this.activeOpUuid = null;
+        this.viewStateByUuid = new Map();
         this.titleEl = null;
         this.badgeEl = null;
         this.cardEl = null;
@@ -109,8 +114,9 @@ export class OpWorkspace {
             this.activeTabIndex = nextIndex;
             const nextOp = this.blockData[nextIndex];
             if (nextOp) {
+                const preserveViewState = this.lastOpType === nextOp.type;
                 this.displayOpVisualization(nextOp, {
-                    preserveViewState: true,
+                    preserveViewState,
                     logTabChange: true,
                 });
             } else {
@@ -216,7 +222,8 @@ export class OpWorkspace {
             opType: op.type,
             index,
         });
-        this.displayOpVisualization(op, { preserveViewState: true, logTabChange: true });
+        const preserveViewState = this.lastOpType === op.type;
+        this.displayOpVisualization(op, { preserveViewState, logTabChange: true });
     }
 
     createContentArea(): HTMLElement {
@@ -265,11 +272,20 @@ export class OpWorkspace {
             console.error('Content area is not initialized');
             return;
         }
-        let viewState = options.viewState || null;
-        const canReuseViz = options.preserveViewState && this.contentArea.__vizGetState;
-        if (!viewState && canReuseViz) {
-            viewState = this.contentArea.__vizGetState?.() ?? null;
+        const prevUuid = this.activeOpUuid ?? window.current_op_uuid ?? null;
+        // cache the current view state before swapping tabs
+        if (prevUuid && this.contentArea.__vizGetState) {
+            const prevState = this.contentArea.__vizGetState?.() as ViewState | null;
+            if (prevState) this.viewStateByUuid.set(prevUuid, prevState);
         }
+        const nextUuid = op.uuid ?? null;
+        let viewState = options.viewState || null;
+        // restore per-op view state when revisiting a tab
+        if (!viewState && nextUuid && this.viewStateByUuid.has(nextUuid)) {
+            viewState = this.viewStateByUuid.get(nextUuid) ?? null;
+        }
+        const isSameOp = !!prevUuid && !!nextUuid && prevUuid === nextUuid;
+        const canReuseViz = !!options.preserveViewState && isSameOp && !!this.contentArea.__vizGetState;
         const preserveCodePanel = options.refreshCodePanel === false;
         if (preserveCodePanel) {
             try { window.__tritonVizPreserveCodePanel = true; } catch (error) {}
@@ -310,6 +326,7 @@ export class OpWorkspace {
             this.visualizationCleanupFunction = null;
         }
         this.lastOpType = op.type;
+        this.activeOpUuid = nextUuid;
         setActiveOp({ type: op.type, uuid: op.uuid });
         if (options.logTabChange) {
             this.logTabChange(op.type);

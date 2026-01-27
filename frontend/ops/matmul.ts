@@ -20,15 +20,22 @@ export function createMatMulVisualization(containerElement: HTMLElement, op: OpR
         return { rows, cols, width, height };
     }
 
-    const gap = -4 * spacing;
+    const gapX = 0 * spacing;
+    const gapY = 0 * spacing;
     const sizeA = matrixSize(input_shape || []);
     const sizeB = matrixSize(other_shape || []);
     const shapeA = input_shape || [];
     const shapeB = other_shape || [];
     const shapeC = output_shape || [];
+    const sizeC = matrixSize(shapeC);
+    const layoutCols = Math.max(sizeA.cols, sizeB.cols, sizeC.cols);
+    const layoutRows = Math.max(sizeA.rows, sizeB.rows, sizeC.rows);
+    const layoutWidth = (layoutCols - 1) * spacing + CUBE_SIZE;
+    const layoutHeight = (layoutRows - 1) * spacing + CUBE_SIZE;
+    const dimExtension = 0.8 + 0.1;
     const posC: Vec3 = [0, 0, 0];
-    const posA: Vec3 = [-(sizeA.width + gap), 0, 0];
-    const posB: Vec3 = [0, sizeB.height + gap, 0];
+    const posA: Vec3 = [-(sizeC.width / 2 + dimExtension + sizeA.width / 2 + gapX), 0, 0];
+    const posB: Vec3 = [0, sizeC.height / 2 + dimExtension + sizeB.height / 2 + gapY, 0];
 
     const AXIS_COLORS = {
         x: '#f87171', // Red -> K
@@ -36,6 +43,11 @@ export function createMatMulVisualization(containerElement: HTMLElement, op: OpR
         z: '#60a5fa'  // Blue -> N
     };
 
+    const dimLinePos = (CUBE_SIZE + GAP) * 1.5 + 0.1;
+    const boundsWidth = sizeC.width + dimLinePos + sizeA.width + gapX;
+    const boundsHeight = sizeC.height + dimLinePos + sizeB.height + gapY;
+    const boundsCenterX = -boundsWidth / 2;
+    const boundsCenterY = -boundsHeight / 2;
     const cleanup = createTensorVisualization(containerElement, op, {
         type: 'Dot',
         tensorConfigs: [
@@ -49,6 +61,9 @@ export function createMatMulVisualization(containerElement: HTMLElement, op: OpR
             B: [AXIS_COLORS.x, AXIS_COLORS.z], // K, N
             C: [AXIS_COLORS.y, AXIS_COLORS.z]  // M, N
         },
+        layoutBounds: { width: boundsWidth, height: boundsHeight, depth: CUBE_SIZE, center: [boundsCenterX, boundsCenterY, 0] },
+        fitToTensors: true,
+        cameraPadding: 0.75,
         viewState
     });
 
