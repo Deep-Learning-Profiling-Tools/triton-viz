@@ -26,9 +26,9 @@ def matmul_kernel(lhs, rhs, result):
     K_, N = rhs.shape
     assert K == K_, "lhs and rhs must have the same contraction dimension"
 
-    TILE_M = 8
-    TILE_K = 8
-    TILE_N = 16
+    TILE_M = 2
+    TILE_K = 2
+    TILE_N = 4
 
     # Use affine_range to loop over tiles
     for m in nl.affine_range(math.ceil(M / TILE_M)):
@@ -72,8 +72,8 @@ def matmul_kernel(lhs, rhs, result):
 def _run_demo():
     triton_viz_enabled = True
     kernel_grid = (1, 1, 1)
-    lhs_small = np.arange(4*16).astype(np.float32).reshape(2*4, 2*4)
-    rhs_small = np.arange(4*32).astype(np.float32).reshape(2*4, 2*8)
+    lhs_small = np.arange(16).astype(np.float32).reshape(4, 4)
+    rhs_small = np.arange(32).astype(np.float32).reshape(4, 8)
     result = np.empty((lhs_small.shape[0], rhs_small.shape[1]), dtype=lhs_small.dtype)
     kernel_args = (lhs_small, rhs_small, result)
 
