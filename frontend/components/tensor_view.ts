@@ -939,6 +939,22 @@ export function createTensorVisualization(
             if (state.rafId !== null) { state.renderPending = true; return; }
             state.rafId = requestAnimationFrame(() => { state.rafId = null; orbitControls.update(); syncClipPlanes(); renderer.render(scene, camera); if (state.renderPending) { state.renderPending = false; ctx.requestRender(); } });
         };
+        let lastWidth = 0;
+        let lastHeight = 0;
+        const resizeRenderer = (): void => {
+            const width = Math.max(1, Math.floor(stage.clientWidth));
+            const height = Math.max(1, Math.floor(stage.clientHeight));
+            if (width === lastWidth && height === lastHeight) return;
+            lastWidth = width; lastHeight = height;
+            renderer.setSize(width, height);
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+            ctx.requestRender();
+        };
+        const resizeObserver = new ResizeObserver(() => resizeRenderer());
+        resizeObserver.observe(stage);
+        disposer.add(() => resizeObserver.disconnect()); // keep webgl canvas in sync with layout resizes
+        resizeRenderer();
         disposer.listen(orbitControls, 'change', ctx.requestRender);
         ctx.applyBackgroundTheme = (hex: string) => {
             const isLight = (hex || '').toLowerCase() === '#ffffff';
