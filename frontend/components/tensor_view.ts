@@ -325,12 +325,28 @@ function normalizeProgramSubsets(payload: ProgramSubsetsPayload | null): Program
 function buildSubsetHues(subsets: Record<string, Coord3[]>): Map<string, number> {
     const keys = Object.keys(subsets || {}).sort();
     const hues = new Map<string, number>();
+    const used: number[] = [];
+    const GOLDEN = 0.618033988749895;
+    const minSep = 1 / Math.min(36, Math.max(8, keys.length * 2));
     keys.forEach((key) => {
-        let hash = 5381;
+        let hash = 2166136261;
         for (let i = 0; i < key.length; i += 1) {
-            hash = ((hash << 5) + hash) ^ key.charCodeAt(i); // deterministic hash
+            hash ^= key.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
         }
-        const hue = ((hash >>> 0) % 360) / 360;
+        let hue = (hash >>> 0) / 4294967296;
+        let tries = 0;
+        const tooClose = (candidate: number): boolean => {
+            return used.some((h) => {
+                const d = Math.abs(candidate - h);
+                return Math.min(d, 1 - d) < minSep;
+            });
+        };
+        while (tooClose(hue) && tries < 128) { // avoid visible repeats
+            hue = (hue + GOLDEN) % 1;
+            tries += 1;
+        }
+        used.push(hue);
         hues.set(key, hue);
     });
     return hues;
