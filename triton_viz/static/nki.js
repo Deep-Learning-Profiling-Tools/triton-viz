@@ -17,16 +17,18 @@ export function createFlowDiagram(containerElement, opsByProgram) {
     canvas.style.height = `${height}px`;
     wrapper.appendChild(canvas);
     const ctx = canvas.getContext('2d');
+    if (!ctx)
+        return () => { containerElement.innerHTML = ''; };
     // Normalize time to X range
     const events = opsByProgram
-        .filter(op => op.time_idx !== undefined && op.time_idx >= 0)
-        .map(op => ({
-        t: op.time_idx,
+        .filter((op) => op.time_idx !== undefined && op.time_idx >= 0)
+        .map((op) => ({
+        t: op.time_idx || 0,
         src: (op.mem_src || '').toUpperCase(),
         dst: (op.mem_dst || '').toUpperCase(),
         bytes: Number(op.bytes || 0),
         type: op.type,
-        uuid: op.uuid
+        uuid: op.uuid ?? null
     }));
     if (events.length === 0) {
         ctx.fillStyle = '#aaa';
@@ -34,8 +36,13 @@ export function createFlowDiagram(containerElement, opsByProgram) {
         return () => { containerElement.innerHTML = ''; };
     }
     events.sort((a, b) => a.t - b.t);
-    const tMin = events[0].t;
-    const tMax = events[events.length - 1].t || (tMin + 1);
+    const firstEvent = events[0];
+    const lastEvent = events[events.length - 1];
+    if (!firstEvent || !lastEvent) {
+        return () => { containerElement.innerHTML = ''; };
+    }
+    const tMin = firstEvent.t;
+    const tMax = lastEvent.t || (tMin + 1);
     // classify copy operations (PSUM -> SBUF)
     events.forEach(e => {
         if ((e.type || '').toLowerCase() === 'store' && e.src === 'PSUM' && e.dst === 'SBUF') {
@@ -51,14 +58,14 @@ export function createFlowDiagram(containerElement, opsByProgram) {
     ctx.fillStyle = '#ddd';
     ctx.strokeStyle = '#444';
     laneNames.forEach(name => {
-        const y = laneY[name];
+        const y = laneY[name] ?? 0;
         ctx.beginPath();
         ctx.moveTo(80, y);
         ctx.lineTo(dynamicWidth - 20, y);
         ctx.stroke();
         ctx.fillText(name, 20, y + 5);
     });
-    const toX = t => 80 + (dynamicWidth - 120) * (t - tMin) / Math.max(1, (tMax - tMin));
+    const toX = (t) => 80 + (dynamicWidth - 120) * (t - tMin) / Math.max(1, (tMax - tMin));
     // Color mapping per type
     const colorFor = (type) => {
         switch ((type || '').toLowerCase()) {
@@ -71,8 +78,8 @@ export function createFlowDiagram(containerElement, opsByProgram) {
     };
     // Draw arrows for each event
     events.forEach((e, idx) => {
-        const y1 = laneY[e.src] ?? laneY.SBUF;
-        const y2 = laneY[e.dst] ?? laneY.SBUF;
+        const y1 = laneY[e.src] ?? laneY.SBUF ?? 0;
+        const y2 = laneY[e.dst] ?? laneY.SBUF ?? 0;
         const x = toX(e.t);
         const col = colorFor(e.type);
         // Arrow thickness by bytes (log scaled)

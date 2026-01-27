@@ -1,4 +1,9 @@
-const infoPages = [
+type InfoPage = {
+    title: string;
+    content: string;
+};
+
+const infoPages: InfoPage[] = [
     {
         title: 'exploring programs',
         content: `
@@ -21,8 +26,10 @@ const infoPages = [
         `
     }
 ];
+
 let currentPage = 0;
-function createNavButton(label, onClick) {
+
+function createNavButton(label: string, onClick: () => void): HTMLButtonElement {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.innerHTML = label;
@@ -35,19 +42,19 @@ function createNavButton(label, onClick) {
     btn.addEventListener('click', onClick);
     return btn;
 }
-function updatePage(popup) {
-    const region = popup.querySelector('[data-info-content]');
-    if (!region)
-        return;
+
+function updatePage(popup: HTMLElement): void {
+    const region = popup.querySelector('[data-info-content]') as HTMLElement | null;
+    if (!region) return;
     const page = infoPages[currentPage] || infoPages[0];
-    if (!page)
-        return;
+    if (!page) return;
     region.innerHTML = `
         <h2 style="margin-top:0;color:#f9fafb;">${page.title}</h2>
         ${page.content}
     `;
 }
-export function createInfoPopup() {
+
+export function createInfoPopup(): HTMLDivElement {
     const popup = document.createElement('div');
     popup.setAttribute('data-info-popup', 'true');
     Object.assign(popup.style, {
@@ -106,9 +113,9 @@ export function createInfoPopup() {
     updatePage(popup);
     return popup;
 }
-export function showInfoPopup(popup) {
-    if (!popup)
-        return;
+
+export function showInfoPopup(popup: HTMLElement | null): void {
+    if (!popup) return;
     popup.style.display = 'block';
     popup.scrollTop = 0;
 }

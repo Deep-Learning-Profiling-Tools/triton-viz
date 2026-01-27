@@ -5,9 +5,10 @@ export const HUES = {
     B: 45,
     C: 140,
 };
+const DEFAULT_HUE = 200;
 export function clamp01(value) { return Math.min(1, Math.max(0, value)); }
 export function lerp(a, b, t) { return a + (b - a) * t; }
-export function getHue(label) { return HUES[label] ?? HUES.Load; }
+export function getHue(label) { return HUES[label] ?? DEFAULT_HUE; }
 export function hslToRgb(h, s, l) {
     const c = (1 - Math.abs(2 * l - 1)) * s;
     const hp = h / 60;

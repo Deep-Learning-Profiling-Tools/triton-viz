@@ -1,75 +1,86 @@
-import { OpWorkspace } from './op_workspace.js';
+import { OpWorkspace } from '../components/op_workspace.js';
 import { getJson } from './api.js';
 import { getState, resetToggles, setActiveProgram as setActiveProgramState, setToggles } from './state.js';
 import { logAction } from './logger.js';
-import { createDisposer } from './utils/dispose.js';
-let globalData = null;
-let visualizationData = null;
-let containerElement = null;
-let opWorkspace = null;
+import { createDisposer } from '../utils/dispose.js';
+import type { OpRecord, ProgramAxes } from '../types/types.js';
+
+type VisualizationData = Record<string, OpRecord[]>;
+type OpControlHandlers = {
+    toggleColorize?: () => boolean | Promise<boolean>;
+    toggleHistogram?: () => boolean | Promise<boolean>;
+    toggleAllPrograms?: (() => boolean | Promise<boolean>) | null;
+};
+type ToggleKey = 'colorize' | 'histogram' | 'allPrograms' | 'showCode';
+
+let globalData: { ops?: { visualization_data?: VisualizationData } } | null = null;
+let visualizationData: VisualizationData | null = null;
+let containerElement: HTMLElement | null = null;
+let opWorkspace: OpWorkspace | null = null;
 let maxX = 0;
 let maxY = 0;
 let maxZ = 0;
-const PROGRAM_AXES = ['x', 'y', 'z'];
+const PROGRAM_AXES: Array<keyof ProgramAxes> = ['x', 'y', 'z'];
 const appDisposer = createDisposer();
 let pidDisposer = createDisposer();
 const THEME_STORAGE_KEY = 'triton-viz-theme';
 const DEV_OVERLAY_QUERY_KEY = 'dev';
 const DEV_OVERLAY_TOGGLE = 'KeyD';
 let devOverlayEnabled = false;
-let devOverlayRoot = null;
+let devOverlayRoot: HTMLDivElement | null = null;
+
 const controls = {
-    panel: null,
-    pidContainer: null,
-    resetBtn: null,
-    precomputeBtn: null,
-    infoBtn: null,
-    themeToggle: null,
-    resizer: null,
-    opColorizeBtn: null,
-    opHistogramBtn: null,
-    opAllProgramsBtn: null,
+    panel: null as HTMLElement | null,
+    pidContainer: null as HTMLElement | null,
+    resetBtn: null as HTMLButtonElement | null,
+    precomputeBtn: null as HTMLButtonElement | null,
+    infoBtn: null as HTMLButtonElement | null,
+    themeToggle: null as HTMLButtonElement | null,
+    resizer: null as HTMLElement | null,
+    opColorizeBtn: null as HTMLButtonElement | null,
+    opHistogramBtn: null as HTMLButtonElement | null,
+    opAllProgramsBtn: null as HTMLButtonElement | null,
 };
-let controlToastEl = null;
-let controlToastTimer = null;
+
+let controlToastEl: HTMLDivElement | null = null;
+let controlToastTimer: number | null = null;
+
 const opControls = {
-    handlers: null,
+    handlers: null as OpControlHandlers | null,
 };
-function setOpControlState(nextState = {}) {
+
+function setOpControlState(nextState: Partial<Record<ToggleKey, boolean>> = {}): void {
     const toggles = {
         ...getState().toggles,
         ...nextState,
     };
     setToggles(toggles);
-    try {
-        window.__tritonVizOpState = { ...toggles };
-    }
-    catch (err) { }
+    try { window.__tritonVizOpState = { ...toggles }; } catch (err) {}
     updateOpControls(toggles);
 }
-function setOpControlHandlers(handlers) {
+
+function setOpControlHandlers(handlers: OpControlHandlers | null): void {
     opControls.handlers = handlers;
     updateOpControls();
 }
-function resetOpControls() {
+
+function resetOpControls(): void {
     opControls.handlers = null;
     const nextState = resetToggles();
-    try {
-        window.__tritonVizOpState = { ...nextState.toggles };
-    }
-    catch (err) { }
+    try { window.__tritonVizOpState = { ...nextState.toggles }; } catch (err) {}
     if (window.__tritonVizCodeHide) {
         window.__tritonVizCodeHide();
     }
     updateOpControls(nextState.toggles);
 }
-function updateToggleLabel(button, label, isOn) {
-    if (!button)
-        return;
+
+function updateToggleLabel(button: HTMLButtonElement | null, label: string, isOn: boolean): void {
+    if (!button) return;
     button.textContent = `${label}: ${isOn ? 'ON' : 'OFF'}`;
     button.classList.toggle('active', isOn);
 }
-function updateOpControls(state = null) {
+
+function updateOpControls(state: ReturnType<typeof getState>['toggles'] | null = null): void {
     const { handlers } = opControls;
     const nextState = state || getState().toggles;
     if (controls.opColorizeBtn) {
@@ -85,25 +96,26 @@ function updateOpControls(state = null) {
         updateToggleLabel(controls.opAllProgramsBtn, 'All Program IDs', !!nextState.allPrograms);
     }
 }
-function applyToggleResult(result, key) {
-    if (result && typeof result.then === 'function') {
-        result.then((value) => {
+
+function applyToggleResult(result: boolean | Promise<boolean>, key: ToggleKey): void {
+    if (result && typeof (result as Promise<boolean>).then === 'function') {
+        (result as Promise<boolean>).then((value) => {
             setOpControlState({ [key]: !!value });
         });
-    }
-    else {
+    } else {
         setOpControlState({ [key]: !!result });
     }
 }
+
 try {
     window.setOpControlHandlers = setOpControlHandlers;
     window.setOpControlState = setOpControlState;
     window.resetOpControls = resetOpControls;
-}
-catch (err) {
+} catch (err) {
     console.warn('Unable to expose op control helpers', err);
 }
-function initializeApp() {
+
+function initializeApp(): void {
     appDisposer.dispose();
     pidDisposer.dispose();
     pidDisposer = createDisposer();
@@ -111,16 +123,18 @@ function initializeApp() {
     controls.panel = document.getElementById('control-panel');
     controls.resizer = document.getElementById('sidebar-resizer');
     controls.pidContainer = document.getElementById('pid-controls');
-    controls.resetBtn = document.getElementById('reset-filters');
-    controls.precomputeBtn = document.getElementById('btn-precompute');
-    controls.themeToggle = document.getElementById('theme-toggle');
-    controls.opColorizeBtn = document.getElementById('btn-op-colorize');
-    controls.opHistogramBtn = document.getElementById('btn-op-histogram');
-    controls.opAllProgramsBtn = document.getElementById('btn-op-all-programs');
+    controls.resetBtn = document.getElementById('reset-filters') as HTMLButtonElement | null;
+    controls.precomputeBtn = document.getElementById('btn-precompute') as HTMLButtonElement | null;
+    controls.themeToggle = document.getElementById('theme-toggle') as HTMLButtonElement | null;
+    controls.opColorizeBtn = document.getElementById('btn-op-colorize') as HTMLButtonElement | null;
+    controls.opHistogramBtn = document.getElementById('btn-op-histogram') as HTMLButtonElement | null;
+    controls.opAllProgramsBtn = document.getElementById('btn-op-all-programs') as HTMLButtonElement | null;
+
     if (!containerElement) {
         console.error('Essential visualization elements are missing.');
         return;
     }
+
     setupThemeToggle();
     setupControlEvents();
     setupSidebarResizer();
@@ -128,7 +142,8 @@ function initializeApp() {
     updateOpControls();
     fetchData();
 }
-function setupThemeToggle() {
+
+function setupThemeToggle(): void {
     const stored = localStorage.getItem(THEME_STORAGE_KEY);
     const defaultTheme = stored || document.documentElement.dataset.theme || 'light';
     applyTheme(defaultTheme);
@@ -139,7 +154,8 @@ function setupThemeToggle() {
         });
     }
 }
-function applyTheme(theme) {
+
+function applyTheme(theme: string): void {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(THEME_STORAGE_KEY, theme);
     const icon = document.getElementById('theme-toggle-icon');
@@ -147,44 +163,38 @@ function applyTheme(theme) {
         icon.textContent = theme === 'light' ? '☀' : '🌙';
     }
 }
-function setupDevOverlay() {
+
+function setupDevOverlay(): void {
     const params = new URLSearchParams(window.location.search);
     const enabledFromQuery = params.get(DEV_OVERLAY_QUERY_KEY) === '1';
     setDevOverlay(enabledFromQuery, 'query');
     appDisposer.listen(window, 'resize', () => {
-        if (devOverlayEnabled)
-            updateDevOverlay();
+        if (devOverlayEnabled) updateDevOverlay();
     });
     appDisposer.listen(window, 'scroll', () => {
-        if (devOverlayEnabled)
-            updateDevOverlay();
+        if (devOverlayEnabled) updateDevOverlay();
     }, true);
     appDisposer.listen(document, 'keydown', (event) => {
-        const keyEvent = event;
-        if (!keyEvent.ctrlKey || !keyEvent.shiftKey)
-            return;
-        if (keyEvent.code !== DEV_OVERLAY_TOGGLE)
-            return;
-        const target = keyEvent.target;
-        if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
-            return;
+        const keyEvent = event as KeyboardEvent;
+        if (!keyEvent.ctrlKey || !keyEvent.shiftKey) return;
+        if (keyEvent.code !== DEV_OVERLAY_TOGGLE) return;
+        const target = keyEvent.target as HTMLElement | null;
+        if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
         keyEvent.preventDefault();
         setDevOverlay(!devOverlayEnabled, 'keyboard');
     });
     const observer = new MutationObserver(() => {
-        if (devOverlayEnabled)
-            updateDevOverlay();
+        if (devOverlayEnabled) updateDevOverlay();
     });
     observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-component'] });
     appDisposer.add(() => observer.disconnect());
 }
-function setDevOverlay(enabled, source) {
-    if (enabled === devOverlayEnabled)
-        return;
+
+function setDevOverlay(enabled: boolean, source: string): void {
+    if (enabled === devOverlayEnabled) return;
     devOverlayEnabled = enabled;
     if (!enabled) {
-        if (devOverlayRoot)
-            devOverlayRoot.remove();
+        if (devOverlayRoot) devOverlayRoot.remove();
         devOverlayRoot = null;
         logAction('dev_overlay_toggle', { enabled, source });
         return;
@@ -197,19 +207,17 @@ function setDevOverlay(enabled, source) {
     updateDevOverlay();
     logAction('dev_overlay_toggle', { enabled, source });
 }
-function updateDevOverlay() {
+
+function updateDevOverlay(): void {
     const root = devOverlayRoot;
-    if (!root)
-        return;
+    if (!root) return;
     root.innerHTML = '';
     const nodes = document.querySelectorAll('[data-component]');
     nodes.forEach((node) => {
         const label = node.getAttribute('data-component');
-        if (!label)
-            return;
+        if (!label) return;
         const rect = node.getBoundingClientRect();
-        if (rect.width === 0 && rect.height === 0)
-            return;
+        if (rect.width === 0 && rect.height === 0) return;
         const badge = document.createElement('div');
         badge.className = 'dev-overlay-badge';
         badge.textContent = label;
@@ -218,7 +226,8 @@ function updateDevOverlay() {
         root.appendChild(badge);
     });
 }
-function setupControlEvents() {
+
+function setupControlEvents(): void {
     if (controls.resetBtn) {
         appDisposer.listen(controls.resetBtn, 'click', () => {
             setActiveProgram(0, 0, 0, { syncControls: true, force: true });
@@ -226,42 +235,43 @@ function setupControlEvents() {
             logAction('program_reset', { program: { ...getState().activeProgram } });
         });
     }
+
     if (controls.precomputeBtn) {
         appDisposer.listen(controls.precomputeBtn, 'click', () => {
             showControlToast('Precompute mode is coming soon. This build previews the layout.');
         });
     }
+
     if (controls.opColorizeBtn) {
         appDisposer.listen(controls.opColorizeBtn, 'click', () => {
             const handler = opControls.handlers?.toggleColorize;
-            if (!handler)
-                return;
+            if (!handler) return;
             logAction('toggle_colorize', { next: !getState().toggles.colorize });
             applyToggleResult(handler(), 'colorize');
         });
     }
+
     if (controls.opHistogramBtn) {
         appDisposer.listen(controls.opHistogramBtn, 'click', () => {
             const handler = opControls.handlers?.toggleHistogram;
-            if (!handler)
-                return;
+            if (!handler) return;
             logAction('toggle_histogram', { next: !getState().toggles.histogram });
             applyToggleResult(handler(), 'histogram');
         });
     }
+
     if (controls.opAllProgramsBtn) {
         appDisposer.listen(controls.opAllProgramsBtn, 'click', () => {
             const handler = opControls.handlers?.toggleAllPrograms;
-            if (!handler)
-                return;
+            if (!handler) return;
             logAction('toggle_all_programs', { next: !getState().toggles.allPrograms });
             applyToggleResult(handler(), 'allPrograms');
         });
     }
 }
-function setupSidebarResizer() {
-    if (!controls.resizer || !controls.panel)
-        return;
+
+function setupSidebarResizer(): void {
+    if (!controls.resizer || !controls.panel) return;
     const resizer = controls.resizer;
     const panel = controls.panel;
     const root = document.documentElement;
@@ -269,21 +279,24 @@ function setupSidebarResizer() {
     let startX = 0;
     let startWidth = 0;
     const dragDisposer = createDisposer();
-    const onPointerMove = (event) => {
-        const pointerEvent = event;
+
+    const onPointerMove = (event: Event): void => {
+        const pointerEvent = event as PointerEvent;
         const delta = pointerEvent.clientX - startX;
         const resizerWidth = resizer.getBoundingClientRect().width || 0;
         const maxWidth = Math.max(0, window.innerWidth - resizerWidth);
         const next = Math.min(maxWidth, Math.max(minWidth, startWidth + delta));
         root.style.setProperty('--sidebar-width', `${next}px`);
     };
-    const onPointerUp = (event) => {
-        const pointerEvent = event;
+
+    const onPointerUp = (event: Event): void => {
+        const pointerEvent = event as PointerEvent;
         resizer.releasePointerCapture(pointerEvent.pointerId);
         dragDisposer.dispose();
     };
-    appDisposer.listen(resizer, 'pointerdown', (event) => {
-        const pointerEvent = event;
+
+    appDisposer.listen(resizer, 'pointerdown', (event: Event) => {
+        const pointerEvent = event as PointerEvent;
         startX = pointerEvent.clientX;
         startWidth = panel.getBoundingClientRect().width;
         resizer.setPointerCapture(pointerEvent.pointerId);
@@ -291,7 +304,8 @@ function setupSidebarResizer() {
         dragDisposer.listen(window, 'pointerup', onPointerUp);
     });
 }
-function showControlToast(message) {
+
+function showControlToast(message: string): void {
     if (!controls.panel) {
         console.info(message);
         return;
@@ -304,15 +318,15 @@ function showControlToast(message) {
     }
     controlToastEl.textContent = message;
     controlToastEl.style.opacity = '1';
-    if (controlToastTimer)
-        clearTimeout(controlToastTimer);
+    if (controlToastTimer) clearTimeout(controlToastTimer);
     controlToastTimer = window.setTimeout(() => {
         if (controlToastEl) {
             controlToastEl.style.opacity = '0';
         }
     }, 3200);
 }
-function determineMaxValues(opsData) {
+
+function determineMaxValues(opsData: VisualizationData | null): void {
     maxX = 0;
     maxY = 0;
     maxZ = 0;
@@ -324,31 +338,30 @@ function determineMaxValues(opsData) {
         const x = parts[0] ?? NaN;
         const y = parts[1] ?? NaN;
         const z = parts[2] ?? NaN;
-        if (Number.isFinite(x))
-            maxX = Math.max(maxX, x);
-        if (Number.isFinite(y))
-            maxY = Math.max(maxY, y);
-        if (Number.isFinite(z))
-            maxZ = Math.max(maxZ, z);
+        if (Number.isFinite(x)) maxX = Math.max(maxX, x);
+        if (Number.isFinite(y)) maxY = Math.max(maxY, y);
+        if (Number.isFinite(z)) maxZ = Math.max(maxZ, z);
     });
 }
-function getBlockDataAt(nx, ny, nz) {
-    if (!visualizationData)
-        return [];
+
+function getBlockDataAt(nx: number, ny: number, nz: number): OpRecord[] {
+    if (!visualizationData) return [];
     const withSpaces = `(${nx}, ${ny}, ${nz})`;
     const withoutSpaces = `(${nx},${ny},${nz})`;
-    return (visualizationData[withSpaces] ||
+    return (
+        visualizationData[withSpaces] ||
         visualizationData[withoutSpaces] ||
-        []);
+        []
+    );
 }
-function syncProgramControls() {
+
+function syncProgramControls(): void {
     const values = getState().activeProgram;
     for (let i = 0; i < PROGRAM_AXES.length; i += 1) {
-        const slider = document.querySelector(`input[data-filter-index="${i}"]`);
+        const slider = document.querySelector(`input[data-filter-index="${i}"]`) as HTMLInputElement | null;
         if (slider) {
             const axis = PROGRAM_AXES[i];
-            if (axis)
-                slider.value = String(values[axis] ?? 0);
+            if (axis) slider.value = String(values[axis] ?? 0);
         }
         const valuePill = document.getElementById(`pid-value-${i}`);
         if (valuePill) {
@@ -357,7 +370,13 @@ function syncProgramControls() {
         }
     }
 }
-function setActiveProgram(x, y, z, { syncControls = false, force = false } = {}) {
+
+function setActiveProgram(
+    x: number,
+    y: number,
+    z: number,
+    { syncControls = false, force = false }: { syncControls?: boolean; force?: boolean } = {},
+): void {
     const nextX = Math.max(0, Math.min(maxX, x));
     const nextY = Math.max(0, Math.min(maxY, y));
     const nextZ = Math.max(0, Math.min(maxZ, z));
@@ -369,10 +388,10 @@ function setActiveProgram(x, y, z, { syncControls = false, force = false } = {})
         opWorkspace.setProgram(nextX, nextY, nextZ, { force });
     }
 }
-function createProgramIdControls() {
+
+function createProgramIdControls(): void {
     const pidContainer = controls.pidContainer;
-    if (!pidContainer)
-        return;
+    if (!pidContainer) return;
     pidContainer.innerHTML = '';
     pidDisposer.dispose();
     pidDisposer = createDisposer();
@@ -390,8 +409,7 @@ function createProgramIdControls() {
         const maxValue = maxValues[index] ?? 0;
         const isLocked = maxValue <= 0;
         const axis = PROGRAM_AXES[index];
-        if (!axis)
-            return;
+        if (!axis) return;
         const currentValues = getState().activeProgram;
         const nextValue = isLocked ? 0 : Math.max(0, currentValues[axis] ?? 0);
         setActiveProgramState({ ...currentValues, [axis]: nextValue });
@@ -420,23 +438,22 @@ function createProgramIdControls() {
         pidContainer.appendChild(wrapper);
     });
 }
-function handleProgramFilterChange(event) {
-    const target = event.target;
-    if (!target)
-        return;
+
+function handleProgramFilterChange(event: Event): void {
+    const target = event.target as HTMLInputElement | null;
+    if (!target) return;
     const index = Number(target.dataset.filterIndex);
     const value = Number(target.value);
     const axis = PROGRAM_AXES[index];
-    if (!axis)
-        return;
+    if (!axis) return;
     const current = getState().activeProgram;
     const next = { ...current, [axis]: value };
     logAction('program_slider', { axis, value });
     setActiveProgram(next.x ?? 0, next.y ?? 0, next.z ?? 0, { syncControls: true });
 }
-function initializeUIElements() {
-    if (!globalData || !globalData.ops)
-        return;
+
+function initializeUIElements(): void {
+    if (!globalData || !globalData.ops) return;
     visualizationData = globalData.ops.visualization_data || {};
     opWorkspace = new OpWorkspace(containerElement, {
         getBlockData: getBlockDataAt,
@@ -445,20 +462,20 @@ function initializeUIElements() {
     createProgramIdControls();
     setActiveProgram(0, 0, 0, { syncControls: true, force: true });
 }
-async function fetchData() {
+
+async function fetchData(): Promise<void> {
     try {
         globalData = await getJson('/api/data');
         determineMaxValues(globalData?.ops?.visualization_data || {});
         initializeUIElements();
-    }
-    catch (error) {
+    } catch (error) {
         console.error('Error fetching data:', error);
         showControlToast('Failed to load data. Please ensure the backend is running.');
     }
 }
+
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initializeApp);
-}
-else {
+} else {
     initializeApp();
 }

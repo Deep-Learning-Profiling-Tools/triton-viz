@@ -50,9 +50,8 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 
 ### Documentation
 - `GLOSSARY.md`: canonical UI terms, payloads, and event names.
-- `ARCHITECTURE.md`: frontend data flow and module layout.
-- `MANUAL.md`: user workflows and control behavior.
-- `triton_viz/ARCHITECTURE.md`: static module map and build notes.
+Frontend sources live in `frontend/` with `core/`, `components/`, `ops/`, `utils/`, and `types/` subfolders.
+Authoring assets live in `frontend/assets/` (CSS) and `frontend/templates/` (HTML) and are copied into `triton_viz/static/` and `triton_viz/templates/` during `npm run build:frontend`.
 ## Getting Started
 
 ### Prerequisites
@@ -76,11 +75,17 @@ If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Other
 
 ### Frontend Build
 
-If you edit frontend TypeScript sources under `src/`, rebuild the static assets:
+If you edit frontend TypeScript sources under `frontend/`, rebuild the static assets:
 
 ```sh
 npm install
 npm run build:frontend
+```
+
+### Frontend Tests
+
+```sh
+npm run test:frontend
 ```
 
 ### Optional: Enable NKI Support

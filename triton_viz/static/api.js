@@ -1,7 +1,8 @@
 const getDefaultBase = () => {
     if (typeof globalThis === 'undefined')
         return '';
-    return globalThis.__TRITON_VIZ_API__ || '';
+    const globalBase = globalThis.__TRITON_VIZ_API__;
+    return globalBase || '';
 };
 const buildUrl = (path, baseOverride) => {
     if (!path)
@@ -23,6 +24,9 @@ const parseJson = (text) => {
         return null;
     }
 };
+const isApiError = (value) => {
+    return !!value && typeof value === 'object' && 'error' in value;
+};
 export async function requestJson(path, options = {}) {
     const { method = 'GET', body = null, headers = {}, base, signal, } = options;
     const url = buildUrl(path, base);
@@ -34,19 +38,17 @@ export async function requestJson(path, options = {}) {
             nextHeaders['Content-Type'] = 'application/json';
         }
     }
-    const response = await fetch(url, {
-        method,
-        headers: nextHeaders,
-        body: nextBody,
-        signal,
-    });
+    const requestInit = { method, headers: nextHeaders, body: nextBody };
+    if (signal !== undefined)
+        requestInit.signal = signal;
+    const response = await fetch(url, requestInit);
     const text = await response.text();
     const data = parseJson(text);
     if (!response.ok) {
-        const message = (data && data.error) ? data.error : `${response.status} ${response.statusText}`.trim();
+        const message = isApiError(data) && data.error ? data.error : `${response.status} ${response.statusText}`.trim();
         throw new Error(message || 'request failed');
     }
-    if (data && data.error) {
+    if (isApiError(data) && data.error) {
         throw new Error(data.error);
     }
     return data;
