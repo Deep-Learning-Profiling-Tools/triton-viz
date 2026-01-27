@@ -22,6 +22,7 @@ export class OpWorkspace {
     lastOpType: string | null;
     activeOpUuid: string | null;
     viewStateByUuid: Map<string, ViewState>;
+    viewStateByType: Map<string, ViewState>;
     titleEl: HTMLElement | null;
     badgeEl: HTMLElement | null;
     cardEl: HTMLElement | null;
@@ -47,6 +48,7 @@ export class OpWorkspace {
         this.lastOpType = null;
         this.activeOpUuid = null;
         this.viewStateByUuid = new Map();
+        this.viewStateByType = new Map();
         this.titleEl = null;
         this.badgeEl = null;
         this.cardEl = null;
@@ -276,13 +278,19 @@ export class OpWorkspace {
         // cache the current view state before swapping tabs
         if (prevUuid && this.contentArea.__vizGetState) {
             const prevState = this.contentArea.__vizGetState?.() as ViewState | null;
-            if (prevState) this.viewStateByUuid.set(prevUuid, prevState);
+            if (prevState) {
+                this.viewStateByUuid.set(prevUuid, prevState);
+                if (this.lastOpType) this.viewStateByType.set(this.lastOpType, prevState);
+            }
         }
         const nextUuid = op.uuid ?? null;
         let viewState = options.viewState || null;
         // restore per-op view state when revisiting a tab
         if (!viewState && nextUuid && this.viewStateByUuid.has(nextUuid)) {
             viewState = this.viewStateByUuid.get(nextUuid) ?? null;
+        }
+        if (!viewState && options.preserveViewState && this.viewStateByType.has(op.type)) {
+            viewState = this.viewStateByType.get(op.type) ?? null;
         }
         const isSameOp = !!prevUuid && !!nextUuid && prevUuid === nextUuid;
         const canReuseViz = !!options.preserveViewState && isSameOp && !!this.contentArea.__vizGetState;
