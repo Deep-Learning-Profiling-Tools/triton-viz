@@ -218,7 +218,10 @@ function updateSideMenu(
     extraHtml = '',
 ): void {
     const shapeStr = Array.isArray(shape) ? `[${shape.join(', ')}]` : '(unknown)';
-    el.innerHTML = `<h3>${name} Tensor</h3><p>Coords: [${coords.join(', ')}]</p><p>Value: ${val}</p><p>Shape: ${shapeStr}</p>${extraHtml}`;
+    const indexCoords = Array.isArray(coords) ? coords.slice().reverse() : [];
+    const indexExpr = indexCoords.map((coord) => `[${coord}]`).join('');
+    const valueLine = indexExpr ? `tensor${indexExpr} = ${val}` : `tensor = ${val}`;
+    el.innerHTML = `<h3>${name} Tensor</h3><p>${valueLine}</p><p>Shape: ${shapeStr}</p>${extraHtml}`;
 }
 
 async function fetchTensorPayload(apiBase: string, uuid: string, endpoint = 'getLoadTensor'): Promise<PayloadCache | null> {

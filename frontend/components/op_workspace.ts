@@ -361,7 +361,7 @@ export class OpWorkspace {
             header.className = 'panel-header drag-handle';
             header.style.fontWeight = '600';
             header.style.marginBottom = '8px';
-            header.innerHTML = '<span>Code View</span><span class="drag-grip" aria-hidden="true">::</span>';
+            header.innerHTML = '<span>Code View</span>';
             wrapper.appendChild(header);
             const blurb = document.createElement('div');
             blurb.style.fontSize = '12px';
