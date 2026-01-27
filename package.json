@@ -4,7 +4,7 @@
     "type": "module",
     "scripts": {
         "build:frontend": "tsc -p tsconfig.json && cp frontend/assets/visualizer.css triton_viz/static/visualizer.css && cp frontend/templates/index.html triton_viz/templates/index.html",
-        "test:frontend": "node --test tests/frontend/*.mjs"
+        "test:frontend": "npm run build:frontend && node --test tests/frontend/*.mjs"
     },
     "devDependencies": {
         "typescript": "^5.6.3"
