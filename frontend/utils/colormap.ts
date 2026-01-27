@@ -1,16 +1,17 @@
-export const HUES = {
+export const HUES: Record<string, number> = {
     Load: 200,
     Store: 45,
     A: 200,
     B: 45,
     C: 140,
 };
+const DEFAULT_HUE = 200;
 
-export function clamp01(value) { return Math.min(1, Math.max(0, value)); }
-export function lerp(a, b, t) { return a + (b - a) * t; }
-export function getHue(label) { return HUES[label] ?? HUES.Load; }
+export function clamp01(value: number): number { return Math.min(1, Math.max(0, value)); }
+export function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
+export function getHue(label: string): number { return HUES[label] ?? DEFAULT_HUE; }
 
-export function hslToRgb(h, s, l) {
+export function hslToRgb(h: number, s: number, l: number): [number, number, number] {
     const c = (1 - Math.abs(2 * l - 1)) * s;
     const hp = h / 60;
     const x = c * (1 - Math.abs((hp % 2) - 1));

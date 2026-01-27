@@ -1,4 +1,37 @@
-export function createHistogramOverlay(containerElement, options) {
+import { postJson } from "../core/api.js";
+import { createDisposer } from "../utils/dispose.js";
+
+type HistogramSource = {
+    value: string;
+    label: string;
+};
+
+type HistogramOptions = {
+    title?: string;
+    sources?: HistogramSource[];
+    apiBase?: string;
+    buildRequestBody: (source: string, bins: number) => Record<string, unknown>;
+    defaultBins?: number;
+};
+
+type HistogramPayload = {
+    counts: number[];
+    edges: number[];
+    min: number;
+    max: number;
+    n: number;
+    sampled: number;
+};
+
+export type HistogramOverlay = {
+    button: HTMLButtonElement;
+    overlay: HTMLDivElement;
+    show: () => void;
+    hide: () => void;
+    destroy: () => void;
+};
+
+export function createHistogramOverlay(containerElement: HTMLElement, options: HistogramOptions): HistogramOverlay {
     const {
         title = "Value Distribution",
         sources = [],
@@ -81,10 +114,10 @@ export function createHistogramOverlay(containerElement, options) {
 
     const binInput = document.createElement("input");
     binInput.type = "number";
-    binInput.value = defaultBins;
-    binInput.min = 4;
-    binInput.max = 512;
-    binInput.step = 2;
+    binInput.value = String(defaultBins);
+    binInput.min = "4";
+    binInput.max = "512";
+    binInput.step = "2";
     binInput.style.width = "80px";
     binInput.title = "Number of bins";
     binInput.id = "histogram-bins";
@@ -111,25 +144,25 @@ export function createHistogramOverlay(containerElement, options) {
     status.style.marginTop = "4px";
     overlay.appendChild(status);
 
-    function show() {
+    function show(): void {
         overlay.style.display = "block";
         updateHistogram();
     }
 
-    function hide() {
+    function hide(): void {
         overlay.style.display = "none";
     }
 
-    button.addEventListener("click", show);
-
-    select.addEventListener("change", () => {
+    const disposer = createDisposer();
+    disposer.listen(button, "click", show);
+    disposer.listen(select, "change", () => {
         updateHistogram();
     });
-    binInput.addEventListener("input", () => {
+    disposer.listen(binInput, "input", () => {
         updateHistogram();
     });
 
-    async function updateHistogram() {
+    async function updateHistogram(): Promise<void> {
         status.textContent = "Loading histogram...";
         info.textContent = "";
         const bins = parseInt(binInput.value, 10) || defaultBins;
@@ -141,31 +174,23 @@ export function createHistogramOverlay(containerElement, options) {
             const body = buildRequestBody(select.value, bins);
             body.bins = bins;
             body.max_samples = body.max_samples || 200000;
-            const res = await fetch(`${apiBase}/api/histogram`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(body),
-            });
-            const data = await res.json();
-            if (!res.ok || data.error) {
-                throw new Error(data.error || "Failed to fetch histogram");
-            }
+            const data = await postJson<HistogramPayload>("/api/histogram", body, { base: apiBase });
             drawHistogram(canvas, data.counts, data.edges);
             info.textContent = `Min: ${data.min.toFixed(6)} | Max: ${data.max.toFixed(6)} | Total values: ${data.n} | Sampled: ${data.sampled}`;
             status.textContent = "";
         } catch (err) {
-            status.textContent = `Histogram error: ${err.message}`;
+            const message = err instanceof Error ? err.message : String(err);
+            status.textContent = `Histogram error: ${message}`;
             const ctx = canvas.getContext("2d");
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
     }
 
-    function drawHistogram(canvasEl, counts, edges) {
+    function drawHistogram(canvasEl: HTMLCanvasElement, counts: number[], edges: number[]): void {
         const ctx = canvasEl.getContext("2d");
+        if (!ctx) return;
         ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-        if (!counts || !counts.length) {
+        if (!counts || !counts.length || !edges || edges.length < 2) {
             ctx.fillStyle = "#888";
             ctx.fillText("No data", 20, 30);
             return;
@@ -195,8 +220,10 @@ export function createHistogramOverlay(containerElement, options) {
 
         ctx.fillStyle = "#ccc";
         ctx.font = "10px monospace";
-        ctx.fillText(`${edges[0].toFixed(4)}`, originX, originY + 12);
+        const firstEdge = edges[0];
         const lastEdge = edges[edges.length - 1];
+        if (firstEdge === undefined || lastEdge === undefined) return;
+        ctx.fillText(`${firstEdge.toFixed(4)}`, originX, originY + 12);
         ctx.fillText(`${lastEdge.toFixed(4)}`, originX + width - 40, originY + 12);
     }
 
@@ -208,6 +235,7 @@ export function createHistogramOverlay(containerElement, options) {
         show,
         hide,
         destroy() {
+            disposer.dispose();
             overlay.remove();
         },
     };

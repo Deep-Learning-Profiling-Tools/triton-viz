@@ -656,10 +656,10 @@ def get_load_tensor():
       }
     """
     global raw_tensor_data
-    data = request.json
+    data = request.json or {}
     uuid = data.get("uuid")
 
-    if uuid is None or uuid not in raw_tensor_data:
+    if raw_tensor_data is None or uuid is None or uuid not in raw_tensor_data:
         return jsonify({"error": "Operation not found"}), 404
 
     op_data = raw_tensor_data[uuid]

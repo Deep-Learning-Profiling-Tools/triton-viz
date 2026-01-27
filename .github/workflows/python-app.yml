@@ -50,6 +50,12 @@ jobs:
         cd triton_viz
         uv sync --extra test
 
+    - name: Run frontend tests
+      run: |
+        cd triton_viz
+        npm install
+        npm run test:frontend
+
     - name: Test with pytest
       run: |
         cd triton_viz

@@ -1,7 +1,39 @@
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import { Text } from 'https://esm.sh/troika-three-text@0.52.4?deps=three@0.155.0';
 
-export function createVectorText(text, color, options = {}) {
+type ThreeScene = any;
+type ThreeVector3 = any;
+type ThreeGroup = any;
+type ThreeLineBasicMaterial = any;
+type ThreeLine = any;
+type ColorInput = any;
+type TroikaText = any;
+
+type VectorTextOptions = {
+    fontSize?: number;
+    billboard?: boolean;
+    depthTest?: boolean;
+    strokeWidth?: number;
+    strokeColor?: number | string;
+};
+
+type CadDimensionOptions = {
+    offset?: number;
+    extensionLength?: number;
+    extensionOffset?: number;
+    arrowSize?: number;
+    arrowWidth?: number;
+    textOffset?: number;
+    flipThreshold?: number;
+    lineWidth?: number;
+    opacity?: number;
+};
+
+export function createVectorText(
+    text: string,
+    color: ColorInput,
+    options: VectorTextOptions = {},
+): TroikaText {
     const {
         fontSize = 0.15,
         billboard = true,
@@ -10,7 +42,7 @@ export function createVectorText(text, color, options = {}) {
         strokeColor = 0x000000
     } = options;
 
-    const textMesh = new Text();
+    const textMesh = new (Text as any)();
     textMesh.text = text;
     textMesh.fontSize = fontSize;
     textMesh.color = color;
@@ -27,7 +59,7 @@ export function createVectorText(text, color, options = {}) {
     textMesh.material.transparent = true;
 
     if (billboard) {
-        textMesh.onBeforeRender = function(renderer, scene, camera) {
+        textMesh.onBeforeRender = function (_renderer: any, _scene: any, camera: any) {
             this.quaternion.copy(camera.quaternion);
         };
     }
@@ -36,7 +68,15 @@ export function createVectorText(text, color, options = {}) {
     return textMesh;
 }
 
-export function createCadDimension(scene, start, end, label, axis, color, options = {}) {
+export function createCadDimension(
+    scene: ThreeScene,
+    start: ThreeVector3,
+    end: ThreeVector3,
+    label: string,
+    axis: 'x' | 'y' | 'z',
+    color: ColorInput,
+    options: CadDimensionOptions = {},
+): ThreeGroup {
     const {
         offset = 0.5,
         extensionLength = 0.8,
@@ -128,12 +168,18 @@ export function createCadDimension(scene, start, end, label, axis, color, option
     return group;
 }
 
-function createLine(points, material) {
+function createLine(points: ThreeVector3[], material: ThreeLineBasicMaterial): ThreeLine {
     const geometry = new THREE.BufferGeometry().setFromPoints(points);
     return new THREE.Line(geometry, material);
 }
 
-function createArrowhead(tip, direction, size, width, material) {
+function createArrowhead(
+    tip: ThreeVector3,
+    direction: ThreeVector3,
+    size: number,
+    width: number,
+    material: ThreeLineBasicMaterial,
+): ThreeGroup {
     const group = new THREE.Group();
     const side = new THREE.Vector3();
     if (Math.abs(direction.x) > 0.5) {
@@ -153,8 +199,15 @@ function createArrowhead(tip, direction, size, width, material) {
     return group;
 }
 
-export function createShapeLegend(container, tensors) {
-    let legend = container.querySelector('.viz-shape-legend');
+type ShapeLegendEntry = {
+    name: string;
+    shape?: number[];
+    color: string;
+    dimColors?: string[];
+};
+
+export function createShapeLegend(container: HTMLElement, tensors: ShapeLegendEntry[]): HTMLElement {
+    let legend = container.querySelector('.viz-shape-legend') as HTMLElement | null;
     if (!legend) {
         legend = document.createElement('div');
         legend.className = 'viz-shape-legend viz-floating-badge';

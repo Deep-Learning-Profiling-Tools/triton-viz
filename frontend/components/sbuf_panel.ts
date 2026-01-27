@@ -1,4 +1,13 @@
-const DEVICE_PRESETS = [
+import { getApiBase, getJson } from '../core/api.js';
+import type { SbufTimelinePayload } from '../types/types.js';
+
+type DevicePreset = {
+    value: string;
+    label: string;
+    limit: number | null;
+};
+
+const DEVICE_PRESETS: DevicePreset[] = [
     { value: 'TRN1_NC_V2', label: 'Trn1 NC-v2 (24 MiB)', limit: 24 * 1024 * 1024 },
     { value: 'TRN1_CHIP', label: 'Trn1 chip (48 MiB)', limit: 48 * 1024 * 1024 },
     { value: 'TRN1_2X', label: 'trn1.2xlarge (48 MiB)', limit: 48 * 1024 * 1024 },
@@ -9,7 +18,7 @@ const DEVICE_PRESETS = [
     { value: 'CUSTOM', label: 'Custom', limit: null },
 ];
 
-function formatBytes(bytes) {
+function formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes)) return '0 B';
     const thresh = 1024;
     if (Math.abs(bytes) < thresh) return `${bytes} B`;
@@ -21,10 +30,8 @@ function formatBytes(bytes) {
     } while (Math.abs(bytes) >= thresh && u < units.length - 1);
     return `${bytes.toFixed(1)} ${units[u]}`;
 }
-
-
-export function renderSbufPanel() {
-    const API_BASE = window.__TRITON_VIZ_API__ || '';
+export function renderSbufPanel(): HTMLButtonElement {
+    const apiBase = getApiBase();
     const button = document.createElement('button');
     button.textContent = 'SBUF Usage';
 
@@ -45,13 +52,13 @@ export function renderSbufPanel() {
     let dragMode = false;
     let dragOffsetX = 0;
     let dragOffsetY = 0;
-    overlay.addEventListener('mousedown', (event) => {
+    overlay.addEventListener('mousedown', (event: MouseEvent) => {
         dragMode = true;
         dragOffsetX = event.clientX - overlay.offsetLeft;
         dragOffsetY = event.clientY - overlay.offsetTop;
     });
     window.addEventListener('mouseup', () => (dragMode = false));
-    window.addEventListener('mousemove', (event) => {
+    window.addEventListener('mousemove', (event: MouseEvent) => {
         if (!dragMode) return;
         overlay.style.left = `${event.clientX - dragOffsetX}px`;
         overlay.style.top = `${event.clientY - dragOffsetY}px`;
@@ -117,8 +124,8 @@ export function renderSbufPanel() {
         fetchAndRender();
     });
 
-    async function fetchAndRender() {
-        let url = `${API_BASE}/api/sbuf?device=${encodeURIComponent(deviceSelect.value)}`;
+    async function fetchAndRender(): Promise<void> {
+        let url = `/api/sbuf?device=${encodeURIComponent(deviceSelect.value)}`;
         if (deviceSelect.value === 'CUSTOM') {
             const customVal = parseInt(customInput.value || '0', 10);
             if (customVal > 0) {
@@ -127,18 +134,22 @@ export function renderSbufPanel() {
         }
         summary.textContent = 'Loading...';
         const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
         try {
-            const res = await fetch(url);
-            const data = await res.json();
-            drawTimeline(ctx, data.timeline, data.limit_bytes);
-            summary.textContent = `Limit: ${formatBytes(data.limit_bytes)} | Max: ${formatBytes(data.max_usage)} | Overflow events: ${data.overflow_points.length}`;
+            const data = await getJson<SbufTimelinePayload>(url, { base: apiBase });
+            const timeline = data?.timeline || [];
+            const limitBytes = data?.limit_bytes || 0;
+            const maxUsage = data?.max_usage || 0;
+            const overflowPoints = data?.overflow_points || [];
+            if (ctx) drawTimeline(ctx, timeline, limitBytes);
+            summary.textContent = `Limit: ${formatBytes(limitBytes)} | Max: ${formatBytes(maxUsage)} | Overflow events: ${overflowPoints.length}`;
         } catch (err) {
-            summary.textContent = `Error: ${err}`;
+            const message = err instanceof Error ? err.message : String(err);
+            summary.textContent = `Error: ${message}`;
         }
     }
 
-    function drawTimeline(ctx, timeline, limit) {
+    function drawTimeline(ctx: CanvasRenderingContext2D, timeline: SbufTimelinePayload['timeline'], limit: number): void {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         if (!timeline || !timeline.length) {
             ctx.fillStyle = '#ccc';
@@ -148,15 +159,18 @@ export function renderSbufPanel() {
         const margin = 30;
         const width = canvas.width - margin * 2;
         const height = canvas.height - margin * 2;
-        const minTime = timeline[0].time_idx;
-        const maxTime = timeline[timeline.length - 1].time_idx || minTime + 1;
+        const first = timeline[0];
+        const last = timeline[timeline.length - 1];
+        if (!first || !last) return;
+        const minTime = first.time_idx;
+        const maxTime = last.time_idx || minTime + 1;
         const maxUsage = Math.max(limit, ...timeline.map((p) => p.usage));
 
         ctx.strokeStyle = '#555';
         ctx.strokeRect(margin, margin, width, height);
 
-        const scaleX = (t) => margin + ((t - minTime) / (maxTime - minTime || 1)) * width;
-        const scaleY = (u) => margin + height - (u / (maxUsage || 1)) * height;
+        const scaleX = (t: number): number => margin + ((t - minTime) / (maxTime - minTime || 1)) * width;
+        const scaleY = (u: number): number => margin + height - (u / (maxUsage || 1)) * height;
 
         ctx.strokeStyle = '#ff4444';
         ctx.beginPath();
