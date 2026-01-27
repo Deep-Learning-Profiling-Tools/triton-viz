@@ -318,11 +318,14 @@ function normalizeProgramSubsets(payload: ProgramSubsetsPayload | null): Program
 }
 
 function buildSubsetHues(subsets: Record<string, Coord3[]>): Map<string, number> {
-    const keys = Object.keys(subsets || {});
+    const keys = Object.keys(subsets || {}).sort();
     const hues = new Map<string, number>();
-    let hue = Math.random();
     keys.forEach((key) => {
-        hue = (hue + 0.61803398875) % 1;
+        let hash = 5381;
+        for (let i = 0; i < key.length; i += 1) {
+            hash = ((hash << 5) + hash) ^ key.charCodeAt(i); // deterministic hash
+        }
+        const hue = ((hash >>> 0) % 360) / 360;
         hues.set(key, hue);
     });
     return hues;
