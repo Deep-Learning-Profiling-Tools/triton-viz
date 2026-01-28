@@ -1,0 +1,17 @@
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def k1(X, n: tl.constexpr):
+    return
+
+
+@triton.autotune(configs=[triton.Config({})], key=["n"])
+@triton.jit
+def k2(X, n: tl.constexpr):
+    return
+
+
+if __name__ == "__main__":
+    pass
