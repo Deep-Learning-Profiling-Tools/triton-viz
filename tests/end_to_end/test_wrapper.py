@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import tempfile
 import textwrap
 import subprocess
@@ -321,7 +320,6 @@ def test_cli_invocation():
                 """
             )
         )
-        sys.modules.pop("triton_viz.wrapper", None)
 
         # --- 3) Start Subprocess to simulate CLI invocation ---
         # load sitecustomize.py
