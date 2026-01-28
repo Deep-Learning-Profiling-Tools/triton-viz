@@ -1,5 +1,19 @@
 import { createCadDimension, createVectorText } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
+import type { TensorHighlights } from '../types/types.js';
+
+type TensorShape = number[];
+type TensorCoords = [number, number, number];
+type ColorInput = any;
+type HighlightPredicate = (x: number, y: number, z: number) => boolean;
+type ThreeScene = any;
+type ThreeCamera = any;
+type ThreeRenderer = any;
+type ThreeGeometry = any;
+type ThreeMaterial = any;
+type ThreeGroup = any;
+type ThreeVector3 = any;
+type ThreeBox3 = any;
 
 export const CUBE_SIZE = 0.2;
 export const GAP = 0.05;
@@ -8,7 +22,11 @@ export const COLOR_EDGE = new THREE.Color(0.5, 0.5, 0.5);
 
 const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);
 
-export function setupScene(container, backgroundColor = 0x000000) {
+export function setupScene(container: HTMLElement, backgroundColor = 0x000000): {
+    scene: ThreeScene;
+    camera: ThreeCamera;
+    renderer: ThreeRenderer;
+} {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(backgroundColor);
     const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
@@ -33,7 +51,11 @@ export function setupScene(container, backgroundColor = 0x000000) {
     return { scene, camera, renderer };
 }
 
-export function setupGeometries() {
+export function setupGeometries(): {
+    cubeGeometry: ThreeGeometry;
+    edgesGeometry: ThreeGeometry;
+    lineMaterial: ThreeMaterial;
+} {
     const cubeGeometry = new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE);
     const normals = cubeGeometry.attributes.normal;
     const colorArray = new Float32Array(cubeGeometry.attributes.position.count * 3);
@@ -53,13 +75,21 @@ export function setupGeometries() {
     return { cubeGeometry, edgesGeometry, lineMaterial };
 }
 
-export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
+export function createTensor(
+    shape: TensorShape,
+    coords: TensorCoords[] | null,
+    color: ColorInput,
+    tensorName: string,
+    cubeGeometry: ThreeGeometry,
+    _edgesGeometry: ThreeGeometry | null = null,
+    _lineMaterial: ThreeMaterial | null = null,
+): ThreeGroup {
     console.log(`Creating ${tensorName} tensor:`, shape, coords);
     const tensor = new THREE.Group();
-    let depth, height, width;
-    if (shape.length === 1) { width = shape[0]; height = 1; depth = 1; }
-    else if (shape.length === 2) { height = shape[0]; width = shape[1]; depth = 1; }
-    else { [depth, height, width] = shape; }
+    let depth = 1, height = 1, width = 1;
+    if (shape.length === 1) { width = shape[0] ?? 1; }
+    else if (shape.length === 2) { height = shape[0] ?? 1; width = shape[1] ?? 1; }
+    else { depth = shape[0] ?? 1; height = shape[1] ?? 1; width = shape[2] ?? 1; }
 
     const spacing = CUBE_SIZE + GAP;
     const centerX = (width - 1) * spacing / 2;
@@ -80,23 +110,42 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
     mesh.userData.shape = { depth, height, width };
 
     const matrix = new THREE.Matrix4();
-    const highlightedIndices = new Set();
+    const highlightedIndices = new Set<number>();
 
     if (isDense) {
         let best = [0, 1, 2];
         if (coords && coords.length > 0) {
             const samples = coords.slice(0, Math.min(256, coords.length));
             const maxIncoming = [0, 0, 0];
-            samples.forEach(c => { if (c[0]>maxIncoming[0]) maxIncoming[0]=c[0]; if (c[1]>maxIncoming[1]) maxIncoming[1]=c[1]; if (c[2]>maxIncoming[2]) maxIncoming[2]=c[2]; });
+            samples.forEach((c: TensorCoords) => {
+                const [cx = 0, cy = 0, cz = 0] = c;
+                if (cx > (maxIncoming[0] ?? 0)) maxIncoming[0] = cx;
+                if (cy > (maxIncoming[1] ?? 0)) maxIncoming[1] = cy;
+                if (cz > (maxIncoming[2] ?? 0)) maxIncoming[2] = cz;
+            });
             const target = [width - 1, height - 1, depth - 1];
             const perms = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
-            const score = (p) => { let s=0; for(let i=0;i<3;i++){ s+=Math.abs(maxIncoming[i]-target[p[i]]); if(maxIncoming[i]>target[p[i]]) s+=1000; } return s; };
+            const score = (p: number[]): number => {
+                let s = 0;
+                for (let i = 0; i < 3; i++) {
+                    const index = p[i] ?? 0;
+                    const targetVal = target[index] ?? 0;
+                    const maxVal = maxIncoming[i] ?? 0;
+                    s += Math.abs(maxVal - targetVal);
+                    if (maxVal > targetVal) s += 1000;
+                }
+                return s;
+            };
             let bestScore = score(best);
-            perms.forEach(p => { let sc=score(p); if(sc<bestScore){ best=p; bestScore=sc; } });
-            const remap = (c) => [c[best.indexOf(0)], c[best.indexOf(1)], c[best.indexOf(2)]];
-            coords.forEach(c => { const [x,y,z]=remap(c); if(x>=0&&x<width&&y>=0&&y<height&&z>=0&&z<depth) highlightedIndices.add(z*(width*height)+y*width+x); });
+            perms.forEach((p: number[]) => { const sc=score(p); if(sc<bestScore){ best=p; bestScore=sc; } });
+            const remap = (c: TensorCoords): TensorCoords => [
+                c[best.indexOf(0)] ?? 0,
+                c[best.indexOf(1)] ?? 0,
+                c[best.indexOf(2)] ?? 0,
+            ];
+            coords.forEach((c: TensorCoords) => { const [x,y,z]=remap(c); if(x>=0&&x<width&&y>=0&&y<height&&z>=0&&z<depth) highlightedIndices.add(z*(width*height)+y*width+x); });
         }
-        const coordList = [];
+        const coordList: TensorCoords[] = [];
         let idx = 0;
         for (let z=0; z<depth; z++) {
             for (let y=0; y<height; y++) {
@@ -111,7 +160,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
         mesh.userData.coords = coordList;
     } else {
         const cArr = coords || [];
-        cArr.forEach(([x, y, z], idx) => {
+        cArr.forEach(([x, y, z]: TensorCoords, idx: number) => {
             matrix.setPosition(x*spacing-centerX, -y*spacing-centerY, -z*spacing-centerZ);
             mesh.setMatrixAt(idx, matrix); mesh.setColorAt(idx, baseColor);
         });
@@ -128,22 +177,33 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry) {
     return tensor;
 }
 
-export function updateTensorHighlights(tensor, data, highlightColor, baseColor, matchCoords = null) {
+export function updateTensorHighlights(
+    tensor: ThreeGroup,
+    data: TensorHighlights | null | undefined,
+    highlightColor: ColorInput,
+    baseColor: ColorInput,
+    matchCoords: HighlightPredicate | null = null,
+): void {
     if (!tensor || !tensor.userData.mesh) return;
     const mesh = tensor.userData.mesh;
-    const coordsList = mesh.userData.coords;
+    const coordsList: TensorCoords[] | undefined = mesh.userData.coords;
     if (!coordsList) return;
     const count = mesh.count;
     const hl = (highlightColor instanceof THREE.Color) ? highlightColor : new THREE.Color(highlightColor);
     const base = (baseColor instanceof THREE.Color) ? baseColor : new THREE.Color(baseColor);
-    let isHighlighted = () => false;
+    let isHighlighted: HighlightPredicate = (_x, _y, _z) => false;
     if (data && data.type === 'descriptor') {
         const { start, shape } = data;
-        const [sx, sy, sz] = start || [0,0,0], [dx, dy, dz] = shape || [0,0,0];
+        const sx = start?.[0] ?? 0;
+        const sy = start?.[1] ?? 0;
+        const sz = start?.[2] ?? 0;
+        const dx = shape?.[0] ?? 0;
+        const dy = shape?.[1] ?? 0;
+        const dz = shape?.[2] ?? 0;
         const ex = sx+dx, ey = sy+dy, ez = sz+dz;
         isHighlighted = (x,y,z) => (x>=sx&&x<ex && y>=sy&&y<ey && z>=sz&&z<ez);
     } else if (data && Array.isArray(data.data)) {
-        const set = new Set(); data.data.forEach(c => set.add(`${c[0]},${c[1]},${c[2]}`));
+        const set = new Set<string>(); data.data.forEach((c: number[]) => { const [x=0,y=0,z=0]=c; set.add(`${x},${y},${z}`); });
         isHighlighted = (x,y,z) => set.has(`${x},${y},${z}`);
     } else if (typeof matchCoords === 'function') {
         isHighlighted = matchCoords;
@@ -154,33 +214,68 @@ export function updateTensorHighlights(tensor, data, highlightColor, baseColor, 
         if (c && isHighlighted(c[0],c[1],c[2])) { mesh.setColorAt(i, hl); highlightSet.add(i); }
         else { mesh.setColorAt(i, base); }
     }
-    mesh.instanceColor.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 }
 
-export function calculateTensorSize(shape) {
-    let d, h, w; if (shape.length===1) { w=shape[0]; h=1; d=1; } else if (shape.length===2) { h=shape[0]; w=shape[1]; d=1; } else { [d,h,w]=shape; }
+export function calculateTensorSize(shape: TensorShape): ThreeVector3 {
+    let d = 1, h = 1, w = 1; if (shape.length===1) { w=shape[0] ?? 1; } else if (shape.length===2) { h=shape[0] ?? 1; w=shape[1] ?? 1; } else { d=shape[0] ?? 1; h=shape[1] ?? 1; w=shape[2] ?? 1; }
     return new THREE.Vector3(w*(CUBE_SIZE+GAP), h*(CUBE_SIZE+GAP), d*(CUBE_SIZE+GAP));
 }
 
-export function setupCamera(scene, camera) {
+export function fitCameraToBounds(camera: ThreeCamera, bounds: ThreeBox3, center?: ThreeVector3, padding = 1.15): { center: ThreeVector3; cameraZ: number } {
+    const target = center ?? bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const vFov = camera.fov * (Math.PI / 180);
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+    const fitHeight = (size.y / 2) / Math.tan(vFov / 2);
+    const fitWidth = (size.x / 2) / Math.tan(hFov / 2);
+    const fitDepth = size.z / 2;
+    // pick the dominant distance so the whole box fits with a small padding
+    const cameraZ = Math.max(fitHeight, fitWidth, fitDepth) * padding;
+    camera.position.set(target.x, target.y, target.z + cameraZ);
+    // keep clip planes wide enough to avoid slicing big tensors
+    camera.near = Math.max(0.1, cameraZ - size.z * 2);
+    camera.far = Math.max(camera.far, cameraZ + size.z * 4);
+    camera.lookAt(target);
+    camera.updateProjectionMatrix();
+    return { center: target, cameraZ };
+}
+
+export function setupCamera(scene: ThreeScene, camera: ThreeCamera): { center: ThreeVector3; cameraZ: number } {
     const box = new THREE.Box3().setFromObject(scene);
-    const center = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const fov = camera.fov * (Math.PI/180);
-    let cameraZ = Math.abs(maxDim/2/Math.tan(fov/2)) * 1.5;
-    camera.position.set(center.x, center.y, center.z + cameraZ);
-    camera.lookAt(center); return { center, cameraZ };
+    return fitCameraToBounds(camera, box);
 }
 
-export function setupEventListeners(container, camera, renderer, onMouseMove, onKeyDown, onRender) {
-    container.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('keydown', (e) => { onKeyDown(e); if (onRender) onRender(); });
-    container.addEventListener('wheel', (e) => { e.preventDefault(); camera.position.z += e.deltaY*0.005; camera.updateProjectionMatrix(); if (onRender) onRender(); }, { passive: false });
+export function setupEventListeners(
+    container: HTMLElement,
+    camera: ThreeCamera,
+    renderer: ThreeRenderer,
+    onMouseMove: (event: MouseEvent) => void,
+    onKeyDown: (event: KeyboardEvent) => void,
+    onRender?: () => void,
+): () => void {
+    const wheelOptions = { passive: false } as AddEventListenerOptions;
+    const handleMouseMove = (event: MouseEvent) => onMouseMove(event);
+    const handleKeyDown = (event: KeyboardEvent) => { onKeyDown(event); if (onRender) onRender(); };
+    const handleWheel = (event: WheelEvent) => {
+        event.preventDefault();
+        camera.position.z += event.deltaY * 0.005;
+        camera.updateProjectionMatrix();
+        if (onRender) onRender();
+    };
+    container.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('keydown', handleKeyDown);
+    container.addEventListener('wheel', handleWheel, wheelOptions);
+    return () => {
+        container.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('keydown', handleKeyDown);
+        container.removeEventListener('wheel', handleWheel, wheelOptions);
+    };
 }
 
-export function cameraControls(camera, cameraRotation) {
+export function cameraControls(camera: ThreeCamera, cameraRotation: any): (e: KeyboardEvent) => void {
     const PAN = 0.1, TILT = 0.02, ZOOM = 0.5;
-    return function(e) {
+    return function(e: KeyboardEvent): void {
         switch (e.key.toLowerCase()) {
             case 'w': camera.position.y += PAN; break; case 's': camera.position.y -= PAN; break;
             case 'a': camera.position.x -= PAN; break; case 'd': camera.position.x += PAN; break;
@@ -192,15 +287,25 @@ export function cameraControls(camera, cameraRotation) {
     };
 }
 
-export function addLabels(scene, globalTensor, sliceTensor, colorOrBg = '#ffffff') {
+export function addLabels(
+    scene: ThreeScene,
+    globalTensor: ThreeGroup,
+    sliceTensor: ThreeGroup,
+    colorOrBg: ColorInput = '#ffffff',
+): any[] {
     const sprites = [];
     sprites.push(addLabel(scene, "Global Tensor", globalTensor.position, colorOrBg));
     sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg, globalTensor.userData.color));
     return sprites;
 }
 
-function addAxisLabels(scene, tensor, colorOrBg, overrideColor) {
-    const groups = []; const shape = tensor?.userData?.mesh?.userData?.shape; if (!shape) return groups;
+function addAxisLabels(
+    scene: ThreeScene,
+    tensor: ThreeGroup,
+    colorOrBg: ColorInput,
+    overrideColor: ColorInput,
+): any[] {
+    const groups: any[] = []; const shape = tensor?.userData?.mesh?.userData?.shape; if (!shape) return groups;
     const bbox = new THREE.Box3().setFromObject(tensor);
     const offsetBase = (CUBE_SIZE + GAP) * 1.5;
     const AXIS_COLORS = { x: '#f87171', y: '#4ade80', z: '#60a5fa' };
@@ -210,12 +315,12 @@ function addAxisLabels(scene, tensor, colorOrBg, overrideColor) {
     return groups;
 }
 
-function computeLabelPalette(colorOrBg) {
+function computeLabelPalette(colorOrBg: ColorInput): { fill: string; stroke: string } {
     let l = 0; try { const c = (colorOrBg instanceof THREE.Color) ? colorOrBg : new THREE.Color(colorOrBg || 0x000000); l = 0.2126*c.r + 0.7152*c.g + 0.0722*c.b; } catch(e){}
     return l > 0.55 ? { fill: '#111111', stroke: '#f8fafc' } : { fill: '#ffffff', stroke: '#0f172a' };
 }
 
-function addLabel(scene, text, position, colorOrBg) {
+function addLabel(scene: ThreeScene, text: string, position: ThreeVector3, colorOrBg: ColorInput): any {
     const { fill, stroke } = computeLabelPalette(colorOrBg);
     const vectorText = createVectorText(text, fill, { fontSize: 0.8, depthTest: false, strokeWidth: 0.03, strokeColor: stroke });
     vectorText.position.set(position.x, position.y + 2, position.z); scene.add(vectorText); return vectorText;

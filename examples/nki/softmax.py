@@ -39,9 +39,7 @@ def _run_demo():
 
     if triton_viz_enabled:
         print("Executing softmax_kernel with NKI interpreter...")
-        traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(
-            softmax_kernel
-        )
+        traced_kernel = triton_viz.trace(client=Tracer(), backend="nki")(softmax_kernel)
         kernel_instance = traced_kernel[kernel_grid]
         kernel_instance(*kernel_args)
 
