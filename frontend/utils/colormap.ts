@@ -1,3 +1,4 @@
+/** Default hue assignments for known labels. */
 export const HUES: Record<string, number> = {
     Load: 200,
     Store: 45,
@@ -7,10 +8,34 @@ export const HUES: Record<string, number> = {
 };
 const DEFAULT_HUE = 200;
 
+/**
+ * Clamp a value to [0, 1].
+ * @param value - Input value.
+ * @returns The clamped value.
+ */
 export function clamp01(value: number): number { return Math.min(1, Math.max(0, value)); }
+/**
+ * Linearly interpolate between two values.
+ * @param a - Start value.
+ * @param b - End value.
+ * @param t - Interpolation factor in [0, 1].
+ * @returns The interpolated value.
+ */
 export function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
+/**
+ * Resolve a hue for a label, falling back to the default.
+ * @param label - Label to resolve.
+ * @returns The hue in degrees.
+ */
 export function getHue(label: string): number { return HUES[label] ?? DEFAULT_HUE; }
 
+/**
+ * Convert HSL to RGB.
+ * @param h - Hue in degrees.
+ * @param s - Saturation in [0, 1].
+ * @param l - Lightness in [0, 1].
+ * @returns RGB channels in [0, 1].
+ */
 export function hslToRgb(h: number, s: number, l: number): [number, number, number] {
     const c = (1 - Math.abs(2 * l - 1)) * s;
     const hp = h / 60;

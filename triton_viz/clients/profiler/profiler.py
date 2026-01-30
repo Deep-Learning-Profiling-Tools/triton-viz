@@ -38,6 +38,15 @@ class AggregatedMaskOpStats:
 
 
 class Profiler(Client):
+    """Collect profiling metrics for a traced kernel.
+
+    Attributes:
+        callpath: Whether to store user call stacks on records.
+        disable_for_loop_unroll_check: Skip loop unroll diagnostics if True.
+        disable_load_mask_percentage_check: Skip mask ratio diagnostics if True.
+        k: Optional number of blocks to sample.
+    """
+
     NAME = "profiler"
 
     def __init__(

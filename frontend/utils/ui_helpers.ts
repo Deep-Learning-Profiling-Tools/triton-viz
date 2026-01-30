@@ -5,6 +5,11 @@ type DragOptions = {
     initialTop?: number;
 };
 
+/**
+ * Enable drag-to-move behavior for a floating panel.
+ * @param panel - Panel element to reposition.
+ * @param options - Drag configuration options.
+ */
 export function enableDrag(panel: HTMLElement | null, options: DragOptions = {}): void {
     if (!panel) return;
     const {

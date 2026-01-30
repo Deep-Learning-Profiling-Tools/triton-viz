@@ -2,11 +2,7 @@ import ast
 
 
 class StoreCallTransformer(ast.NodeTransformer):
-    """
-    A targeted AST transformer to rewrite `nl.store(x[...], ...)` calls
-    into `masked_store(x, slice_obj, ...)` and `nl.load(x[...])` calls
-    into `masked_load(x, slice_obj)` with a preceding assignment.
-    """
+    """Rewrite NKI load/store subscripts into masked helper calls."""
 
     def visit_Expr(self, node: ast.Expr) -> ast.AST | list[ast.AST]:
         """
@@ -134,8 +130,13 @@ class StoreCallTransformer(ast.NodeTransformer):
 
 
 def transform_code(source_code: str) -> str:
-    """
-    Applies the StoreCallTransformer to a string of Python code.
+    """Transform NKI load/store subscripts into masked helper calls.
+
+    Args:
+        source_code: Python source to transform.
+
+    Returns:
+        Transformed Python source code.
     """
     tree = ast.parse(source_code)
     transformer = StoreCallTransformer()

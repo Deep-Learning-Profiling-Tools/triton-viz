@@ -70,18 +70,15 @@ def _get_valid_indices(
 def masked_load(
     ndarray: np.ndarray, keys: tuple, mask: np.ndarray = None
 ) -> np.ndarray:
-    """
-    Load array elements with masking for out-of-bounds errors.
+    """Load indexed values while masking out-of-bounds lanes.
 
     Args:
-        ndarray: Input numpy array
-        keys: Indexing keys (tuple of slices, integers, arrays, etc.)
-        mask: Boolean mask array. If None, returns direct indexing.
-              Where mask is False at OOB indices, garbage values are kept.
-              Mask shape should match the shape of the result, not the input array.
+        ndarray: Input array to read from.
+        keys: Indexing keys (slices/ints/arrays).
+        mask: Optional mask of valid lanes matching the result shape.
 
     Returns:
-        Indexed array with masked error handling
+        The indexed array with invalid lanes masked out.
     """
     try:  # fast path case - if keys aren't OOB, just go with that
         out = ndarray[keys].copy()
@@ -140,22 +137,13 @@ def masked_load(
 def masked_store(
     ndarray: np.ndarray, keys: tuple, value: np.ndarray, mask: np.ndarray = None
 ) -> None:
-    """
-    Store array elements with masking for out-of-bounds errors.
-    General idea of this procedure is to get all the indices that the slice + mask needs for a single advanced indexing assign.
-    - to handle OOB accesses we infer the min possible array size where array[keys] wouldn't have any OOBs
-    - we can get the indices for each dim by selecting from an mgrid
+    """Store values into an array while honoring a result-shaped mask.
 
     Args:
-        ndarray: Input numpy array to store values into
-        keys: Indexing keys (tuple of slices, integers, arrays, etc.)
-        value: Values to store
-        mask: Boolean mask array. If None, performs direct indexing.
-              Where mask is False at OOB indices, values are not stored.
-              Mask shape should match the shape of the result, not the input array.
-
-    Returns:
-        None (modifies ndarray in-place)
+        ndarray: Input array to write into.
+        keys: Indexing keys (slices/ints/arrays).
+        value: Values to store.
+        mask: Optional mask of valid lanes matching the result shape.
     """
     # Handle mask=None case
     if mask is None:

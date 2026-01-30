@@ -10,6 +10,12 @@ type FlowEvent = {
   uuid?: string | null;
 };
 
+/**
+ * Render a minimal NKI flow diagram for a program block.
+ * @param containerElement - Host element for the flow diagram.
+ * @param opsByProgram - Ops to visualize as flow events.
+ * @returns Cleanup function to remove the diagram.
+ */
 export function createFlowDiagram(containerElement: HTMLElement, opsByProgram: OpRecord[]): () => void {
 // Minimal NKI flow view: three lanes (HBM, SBUF, PSUM) and arrows per op time_idx
 // opsByProgram: array of op objects for a grid block (Load/Store/Dot/Copy) with mem_* fields
@@ -145,5 +151,5 @@ export function createFlowDiagram(containerElement: HTMLElement, opsByProgram: O
   return () => { containerElement.innerHTML = ''; };
 }
 
-// Backward compatibility alias
+/** Backward compatibility alias for NKI flow diagrams. */
 export const createNKIFlow = createFlowDiagram;

@@ -93,6 +93,7 @@ type VizState = {
     programDataLoading: boolean;
     isDragging?: boolean;
 };
+/** Snapshot of UI state that can be persisted across renders. */
 export type ViewState = {
     camera?: { position?: number[]; quaternion?: number[] };
     target?: number[];
@@ -817,6 +818,13 @@ function onMouseUp(ctx: VizContext): void { ctx.state.isDragging = false; if (ct
 
 // --- Main Exports ---
 
+/**
+ * Build the tensor visualization UI for an op.
+ * @param containerElement - Host element for the visualization.
+ * @param op - Operation payload to render.
+ * @param viewState - Optional persisted view state.
+ * @returns Cleanup function for tearing down listeners and WebGL.
+ */
 export function createTensorVisualization(
     containerElement: HTMLElement,
     op: OpRecord,

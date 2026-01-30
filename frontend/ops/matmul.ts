@@ -6,6 +6,13 @@ import type { ViewState } from '../components/tensor_view.js';
 type MatrixSize = { rows: number; cols: number; width: number; height: number };
 type Vec3 = [number, number, number];
 
+/**
+ * Render the visualization for a dot/matmul op.
+ * @param containerElement - Host element for the visualization.
+ * @param op - Op payload to render.
+ * @param viewState - Optional persisted view state.
+ * @returns Cleanup function when available.
+ */
 export function createMatMulVisualization(containerElement: HTMLElement, op: OpRecord, viewState: ViewState | null = null): (() => void) | void {
     const { input_shape, other_shape, output_shape } = op;
     const CUBE_SIZE = 0.2;

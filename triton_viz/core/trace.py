@@ -221,11 +221,14 @@ class NKITrace(KernelInterface, TraceInterface):
 
 
 def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
-    """
-    Create a trace object that can be used to run a kernel with instrumentation client(s).
+    """Build a kernel wrapper that records ops via the selected client.
 
-    :param kernel: The kernel to run.
-    :param client: A client to run with the kernel. Defaults to Tracer() if not specified.
+    Args:
+        client: Client instance or name to attach (defaults to Tracer).
+        backend: Backend name to trace (\"triton\" or \"nki\").
+
+    Returns:
+        A decorator that wraps a kernel with tracing instrumentation.
     """
     if client is None:
         client = Tracer()
@@ -271,8 +274,6 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
 
 
 def clear() -> None:
-    """
-    Clear all traces.
-    """
+    """Clear all recorded launches from the global trace buffer."""
     global launches
     launches.clear()

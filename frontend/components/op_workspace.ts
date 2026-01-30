@@ -8,24 +8,43 @@ import '../ops/defaults.js';
 import type { OpCodePayload, OpRecord } from '../types/types.js';
 import type { ViewState } from './tensor_view.js';
 
+/** Workspace container for op tabs, flow view, and tensor details. */
 export class OpWorkspace {
+    /** Root container for the workspace. */
     containerElement: HTMLElement | null;
+    /** Function to fetch op records for a program coordinate. */
     getBlockData: ((x: number, y: number, z: number) => OpRecord[]) | null;
+    /** Maximum program coordinates available. */
     maxValues: { x: number; y: number; z: number };
+    /** Current program coordinates. */
     gridPosition: { x: number; y: number; z: number };
+    /** Ops for the active program. */
     blockData: OpRecord[];
+    /** Container for visualization content. */
     visualizationContainer: HTMLElement | null;
+    /** Cleanup function for the active visualization. */
     visualizationCleanupFunction: (() => void) | null;
+    /** Content area containing tabs and views. */
     contentArea: (HTMLElement & { __vizGetState?: () => unknown }) | null;
+    /** Currently selected tab element. */
     activeTab: HTMLElement | null;
+    /** Index of the active tab. */
     activeTabIndex: number;
+    /** Last op type rendered for state reuse. */
     lastOpType: string | null;
+    /** UUID for the active op. */
     activeOpUuid: string | null;
+    /** View state keyed by op UUID. */
     viewStateByUuid: Map<string, ViewState>;
+    /** View state keyed by op type. */
     viewStateByType: Map<string, ViewState>;
+    /** Title element for the active program. */
     titleEl: HTMLElement | null;
+    /** Badge element with op count. */
     badgeEl: HTMLElement | null;
+    /** Card element wrapping the workspace. */
     cardEl: HTMLElement | null;
+    /** Header bar containing op tabs. */
     headerBar: HTMLElement | null;
 
     constructor(

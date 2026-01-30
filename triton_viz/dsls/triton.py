@@ -42,7 +42,7 @@ from triton_viz.core.data import (
     Umulhi,
     UnaryOp,
 )
-from triton_viz.frontends.base import (
+from triton_viz.dsls.base import (
     AdapterResult,
     Frontend,
     OPERATION_REGISTRY,

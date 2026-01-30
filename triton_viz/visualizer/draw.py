@@ -21,6 +21,11 @@ LAST_RECORD_ONLY = True
 
 
 def collect_grid():
+    """Collect the latest per-program records and tensor tables.
+
+    Returns:
+        Tuple of (records_by_grid, tensor_table, failures) for the last launch.
+    """
     # If imported at module level, it may capture an empty launches list before trace.py completes initialization.
     # By importing here, we ensure we get the current state of launches with all traced kernel executions.
     from ..core.trace import launches as current_launches

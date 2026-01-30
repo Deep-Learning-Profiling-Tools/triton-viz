@@ -31,7 +31,7 @@ from triton.runtime import JITFunction
 from ..transformers.for_loop_patcher import _visit_For as triton_viz_visit_For
 
 from .flip_patch import patch_flip
-from ..frontends.base import AdapterResult, OPERATION_REGISTRY
+from ..dsls.base import AdapterResult, OPERATION_REGISTRY
 
 
 _MISSING = object()

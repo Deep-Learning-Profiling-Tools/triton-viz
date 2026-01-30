@@ -23,6 +23,7 @@ type HistogramPayload = {
     sampled: number;
 };
 
+/** Controls returned by the histogram overlay factory. */
 export type HistogramOverlay = {
     button: HTMLButtonElement;
     overlay: HTMLDivElement;
@@ -31,6 +32,12 @@ export type HistogramOverlay = {
     destroy: () => void;
 };
 
+/**
+ * Build a histogram overlay with fetch logic and controls.
+ * @param containerElement - Element that owns the overlay.
+ * @param options - Overlay configuration and request builder.
+ * @returns Overlay controls and elements.
+ */
 export function createHistogramOverlay(containerElement: HTMLElement, options: HistogramOptions): HistogramOverlay {
     const {
         title = "Value Distribution",

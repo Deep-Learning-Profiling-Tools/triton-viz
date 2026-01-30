@@ -29,6 +29,13 @@ type CadDimensionOptions = {
     opacity?: number;
 };
 
+/**
+ * Create a troika text mesh configured for vector labels.
+ * @param text - Label text to render.
+ * @param color - Text color.
+ * @param options - Rendering options for size and styling.
+ * @returns A configured troika text mesh.
+ */
 export function createVectorText(
     text: string,
     color: ColorInput,
@@ -68,6 +75,17 @@ export function createVectorText(
     return textMesh;
 }
 
+/**
+ * Draw a CAD-style dimension line with arrows and label.
+ * @param scene - Scene to attach the dimension group to.
+ * @param start - Start point for the dimension.
+ * @param end - End point for the dimension.
+ * @param label - Text label to display.
+ * @param axis - Axis label for direction context.
+ * @param color - Line/text color.
+ * @param options - Layout and styling options.
+ * @returns The dimension group added to the scene.
+ */
 export function createCadDimension(
     scene: ThreeScene,
     start: ThreeVector3,
@@ -206,6 +224,12 @@ type ShapeLegendEntry = {
     dimColors?: string[];
 };
 
+/**
+ * Render or update the floating shape legend for tensors.
+ * @param container - DOM container to host the legend.
+ * @param tensors - Tensor entries to display.
+ * @returns The legend element.
+ */
 export function createShapeLegend(container: HTMLElement, tensors: ShapeLegendEntry[]): HTMLElement {
     let legend = container.querySelector('.viz-shape-legend') as HTMLElement | null;
     if (!legend) {

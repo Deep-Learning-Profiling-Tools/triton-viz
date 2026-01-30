@@ -9,6 +9,15 @@ import z3
 
 @dataclass
 class TracebackInfo:
+    """User code location associated with an op.
+
+    Attributes:
+        filename: Source file path.
+        lineno: Line number in the file.
+        func_name: Function name at the frame.
+        line_of_code: Source line text.
+    """
+
     filename: str
     lineno: int
     func_name: str
@@ -17,6 +26,14 @@ class TracebackInfo:
 
 @dataclass
 class OutOfBoundsRecord:
+    """Base out-of-bounds record for a load/store op.
+
+    Attributes:
+        op_type: Operation type for the access.
+        tensor: Tensor involved in the access.
+        user_code_tracebacks: User code frames for context.
+    """
+
     op_type: type[Union[Store, Load]]
     tensor: torch.Tensor
     user_code_tracebacks: list[TracebackInfo]
@@ -24,6 +41,16 @@ class OutOfBoundsRecord:
 
 @dataclass
 class OutOfBoundsRecordBruteForce(OutOfBoundsRecord):
+    """Out-of-bounds record with explicit mask diagnostics.
+
+    Attributes:
+        offsets: Offsets used for the access.
+        masks: Mask values applied to the access.
+        valid_access_masks: Mask for in-bounds lanes.
+        invalid_access_masks: Mask for out-of-bounds lanes.
+        corrected_offsets: Offsets corrected to in-bounds values.
+    """
+
     offsets: NDArray[np.int_]
     masks: NDArray[np.bool_]
     valid_access_masks: NDArray[np.bool_]

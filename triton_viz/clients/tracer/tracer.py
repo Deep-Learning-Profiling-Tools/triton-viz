@@ -29,6 +29,14 @@ def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
 
 
 class Tracer(Client):
+    """Trace per-op records for visualization.
+
+    Attributes:
+        callpath: Whether to store user call stacks on records.
+        grid_idx: Optional grid index filter for sampling.
+        records: Collected op records for the launch.
+    """
+
     NAME = "tracer"
 
     def __init__(

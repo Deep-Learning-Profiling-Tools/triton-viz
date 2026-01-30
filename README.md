@@ -41,17 +41,6 @@ Triton-Viz addresses these challenges by providing real-time visualization of te
 The best part about this tool is that while it does focus on visualizing GPU operations, users are not required to have GPU resources to run examples on their system.
 
 
-### Visualization Features
-- **Active Program Workspace**: Program ID sliders select the active program and drive the op tabs, Tensor View, and Flow View.
-- **Shared Workspace Toggles**: Heatmap, histogram, and all-program views stay in sync across op tabs.
-- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows move outside when space is limited.
-- **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
-- **Dev Overlay**: Optional overlay that labels UI roots via `data-component` attributes for development.
-
-### Documentation
-- `GLOSSARY.md`: canonical UI terms, payloads, and event names.
-Frontend sources live in `frontend/` with `core/`, `components/`, `ops/`, `utils/`, and `types/` subfolders.
-Authoring assets live in `frontend/assets/` (CSS) and `frontend/templates/` (HTML) and are copied into `triton_viz/static/` and `triton_viz/templates/` during `npm run build:frontend`.
 ## Getting Started
 
 ### Prerequisites

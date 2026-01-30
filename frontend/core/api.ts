@@ -1,3 +1,4 @@
+/** Options used when issuing API requests. */
 export type RequestOptions = {
     method?: string;
     body?: BodyInit | null;
@@ -35,6 +36,12 @@ const isApiError = (value: unknown): value is ApiError => {
     return !!value && typeof value === 'object' && 'error' in value;
 };
 
+/**
+ * Fetch JSON from the API with optional overrides.
+ * @param path - API path or absolute URL.
+ * @param options - Request overrides.
+ * @returns Parsed JSON payload.
+ */
 export async function requestJson<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
     const {
         method = 'GET',
@@ -67,14 +74,31 @@ export async function requestJson<T = unknown>(path: string, options: RequestOpt
     return data as T;
 }
 
+/**
+ * Resolve the configured API base URL.
+ * @returns API base string or empty string.
+ */
 export function getApiBase(): string {
     return getDefaultBase();
 }
 
+/**
+ * Issue a GET request and parse JSON.
+ * @param path - API path or absolute URL.
+ * @param options - Request overrides.
+ * @returns Parsed JSON payload.
+ */
 export function getJson<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
     return requestJson<T>(path, { ...options, method: 'GET' });
 }
 
+/**
+ * Issue a POST request and parse JSON.
+ * @param path - API path or absolute URL.
+ * @param body - Request body payload.
+ * @param options - Request overrides.
+ * @returns Parsed JSON payload.
+ */
 export function postJson<T = unknown>(
     path: string,
     body: BodyInit | Record<string, unknown> | null,

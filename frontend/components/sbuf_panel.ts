@@ -30,6 +30,10 @@ function formatBytes(bytes: number): string {
     } while (Math.abs(bytes) >= thresh && u < units.length - 1);
     return `${bytes.toFixed(1)} ${units[u]}`;
 }
+/**
+ * Create the SBUF usage panel toggle button.
+ * @returns A button that opens the SBUF overlay.
+ */
 export function renderSbufPanel(): HTMLButtonElement {
     const apiBase = getApiBase();
     const button = document.createElement('button');

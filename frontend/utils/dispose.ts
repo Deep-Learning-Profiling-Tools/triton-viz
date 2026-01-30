@@ -5,6 +5,7 @@ type EventTargetLike = {
     removeEventListener: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => void;
 };
 
+/** Container for cleanup helpers that unregister listeners and timers. */
 export type DisposerBag = {
     add: (disposer: Disposer) => DisposerHandle;
     listen: (
@@ -18,6 +19,10 @@ export type DisposerBag = {
     dispose: () => void;
 };
 
+/**
+ * Create a disposer bag for managing listeners and timers.
+ * @returns Disposer helpers for cleanup.
+ */
 export function createDisposer(): DisposerBag {
     const disposers = new Set<Disposer>();
 

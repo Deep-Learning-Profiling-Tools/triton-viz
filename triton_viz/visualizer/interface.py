@@ -959,9 +959,14 @@ def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None)
 
 
 def launch(share: bool = True, port: int | None = None):
-    """
-    Launch the Triton-Viz Flask server.
+    """Launch the Triton-Viz Flask server.
 
+    Args:
+        share: Whether to expose a public Cloudflare URL.
+        port: Optional local port override.
+
+    Returns:
+        Tuple of (local_url, public_url) for the server.
     """
     print("Launching Triton viz tool")
     default_port = 8000 if share else 5001

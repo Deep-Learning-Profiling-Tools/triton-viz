@@ -22,6 +22,12 @@ export const COLOR_EDGE = new THREE.Color(0.5, 0.5, 0.5);
 
 const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);
 
+/**
+ * Initialize a Three.js scene, camera, and renderer in a container.
+ * @param container - Host element for the renderer.
+ * @param backgroundColor - Scene background color.
+ * @returns Scene, camera, and renderer objects.
+ */
 export function setupScene(container: HTMLElement, backgroundColor = 0x000000): {
     scene: ThreeScene;
     camera: ThreeCamera;
@@ -51,6 +57,10 @@ export function setupScene(container: HTMLElement, backgroundColor = 0x000000): 
     return { scene, camera, renderer };
 }
 
+/**
+ * Build shared geometries and materials for tensor rendering.
+ * @returns Geometries and materials used by instanced meshes.
+ */
 export function setupGeometries(): {
     cubeGeometry: ThreeGeometry;
     edgesGeometry: ThreeGeometry;
@@ -75,6 +85,17 @@ export function setupGeometries(): {
     return { cubeGeometry, edgesGeometry, lineMaterial };
 }
 
+/**
+ * Create an instanced mesh group representing a tensor.
+ * @param shape - Tensor shape in [z,y,x] or similar order.
+ * @param coords - Optional sparse coordinates to highlight.
+ * @param color - Base color for the tensor.
+ * @param tensorName - Display name for the tensor.
+ * @param cubeGeometry - Shared cube geometry.
+ * @param _edgesGeometry - Optional edge geometry override.
+ * @param _lineMaterial - Optional line material override.
+ * @returns A Three.js group containing the tensor mesh.
+ */
 export function createTensor(
     shape: TensorShape,
     coords: TensorCoords[] | null,
@@ -177,6 +198,14 @@ export function createTensor(
     return tensor;
 }
 
+/**
+ * Apply highlight colors to a tensor mesh based on selection data.
+ * @param tensor - Tensor group to update.
+ * @param data - Highlight payload or descriptor.
+ * @param highlightColor - Color for highlighted cells.
+ * @param baseColor - Base color for non-highlighted cells.
+ * @param matchCoords - Optional predicate for matching coordinates.
+ */
 export function updateTensorHighlights(
     tensor: ThreeGroup,
     data: TensorHighlights | null | undefined,
@@ -217,11 +246,24 @@ export function updateTensorHighlights(
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 }
 
+/**
+ * Compute the rendered size for a tensor shape.
+ * @param shape - Tensor shape array.
+ * @returns Vector3 size in scene units.
+ */
 export function calculateTensorSize(shape: TensorShape): ThreeVector3 {
     let d = 1, h = 1, w = 1; if (shape.length===1) { w=shape[0] ?? 1; } else if (shape.length===2) { h=shape[0] ?? 1; w=shape[1] ?? 1; } else { d=shape[0] ?? 1; h=shape[1] ?? 1; w=shape[2] ?? 1; }
     return new THREE.Vector3(w*(CUBE_SIZE+GAP), h*(CUBE_SIZE+GAP), d*(CUBE_SIZE+GAP));
 }
 
+/**
+ * Fit the camera to a bounding box with optional padding.
+ * @param camera - Camera to reposition.
+ * @param bounds - Bounding box to frame.
+ * @param center - Optional center override.
+ * @param padding - Distance multiplier for framing.
+ * @returns Updated center and camera Z distance.
+ */
 export function fitCameraToBounds(camera: ThreeCamera, bounds: ThreeBox3, center?: ThreeVector3, padding = 1.15): { center: ThreeVector3; cameraZ: number } {
     const target = center ?? bounds.getCenter(new THREE.Vector3());
     const size = bounds.getSize(new THREE.Vector3());
@@ -241,11 +283,27 @@ export function fitCameraToBounds(camera: ThreeCamera, bounds: ThreeBox3, center
     return { center: target, cameraZ };
 }
 
+/**
+ * Fit the camera to the objects in a scene.
+ * @param scene - Scene containing the objects.
+ * @param camera - Camera to reposition.
+ * @returns Updated center and camera Z distance.
+ */
 export function setupCamera(scene: ThreeScene, camera: ThreeCamera): { center: ThreeVector3; cameraZ: number } {
     const box = new THREE.Box3().setFromObject(scene);
     return fitCameraToBounds(camera, box);
 }
 
+/**
+ * Wire mouse/keyboard handlers for a 3D tensor view.
+ * @param container - Event target container.
+ * @param camera - Camera to adjust on wheel events.
+ * @param renderer - Renderer used for sizing.
+ * @param onMouseMove - Mouse move handler.
+ * @param onKeyDown - Key down handler.
+ * @param onRender - Optional render callback.
+ * @returns Cleanup function to remove listeners.
+ */
 export function setupEventListeners(
     container: HTMLElement,
     camera: ThreeCamera,
@@ -273,6 +331,12 @@ export function setupEventListeners(
     };
 }
 
+/**
+ * Build a keyboard handler for camera movement.
+ * @param camera - Camera to move.
+ * @param cameraRotation - Mutable Euler rotation.
+ * @returns Keyboard event handler.
+ */
 export function cameraControls(camera: ThreeCamera, cameraRotation: any): (e: KeyboardEvent) => void {
     const PAN = 0.1, TILT = 0.02, ZOOM = 0.5;
     return function(e: KeyboardEvent): void {
@@ -287,6 +351,14 @@ export function cameraControls(camera: ThreeCamera, cameraRotation: any): (e: Ke
     };
 }
 
+/**
+ * Add axis labels and a global label for a tensor group.
+ * @param scene - Scene to append labels to.
+ * @param globalTensor - Global tensor group to label.
+ * @param sliceTensor - Slice tensor group (unused for now).
+ * @param colorOrBg - Label color or background hint.
+ * @returns Created label objects.
+ */
 export function addLabels(
     scene: ThreeScene,
     globalTensor: ThreeGroup,

@@ -197,6 +197,9 @@ class Sanitizer(Client):
     """
     Factory class that returns the concrete sanitizer implementation
     based on the value of ``cfg.enable_sanitizer``.
+
+    Attributes:
+        abort_on_error: Whether to raise on the first detected error.
     """
 
     NAME = "sanitizer"

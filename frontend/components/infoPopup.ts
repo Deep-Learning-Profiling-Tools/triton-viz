@@ -54,6 +54,10 @@ function updatePage(popup: HTMLElement): void {
     `;
 }
 
+/**
+ * Create the onboarding info popup element.
+ * @returns The popup element added to the DOM.
+ */
 export function createInfoPopup(): HTMLDivElement {
     const popup = document.createElement('div');
     popup.setAttribute('data-info-popup', 'true');
@@ -114,6 +118,10 @@ export function createInfoPopup(): HTMLDivElement {
     return popup;
 }
 
+/**
+ * Show the info popup and reset scroll position.
+ * @param popup - Popup element to show.
+ */
 export function showInfoPopup(popup: HTMLElement | null): void {
     if (!popup) return;
     popup.style.display = 'block';
