@@ -1,0 +1,258 @@
+import pytest
+from typing import cast
+
+import triton.language as tl
+
+from triton_viz.core.config import config as cfg
+from triton_viz.clients import Sanitizer
+from triton_viz.clients.sanitizer.sanitizer import (
+    SymbolicExpr,
+    NullSanitizer,
+    SymbolicSanitizer,
+    _range_to_iterator_constraint,
+)
+from z3.z3 import ArithRef, BoolRef, IntNumRef
+from z3 import Solver, Int, sat
+
+
+# ======== Init Tests ===========
+
+
+def test_sanitizer_init():
+    original = cfg.enable_sanitizer
+    try:
+        cfg.enable_sanitizer = True
+        assert isinstance(Sanitizer(), SymbolicSanitizer)
+
+        cfg.enable_sanitizer = False
+        assert isinstance(Sanitizer(), NullSanitizer)
+    finally:
+        cfg.enable_sanitizer = original
+
+
+# ======== Range Constraint Tests ===========
+
+
+def test_range_to_iterator_constraint():
+    def assert_constraint_allows(constraint: BoolRef, var: ArithRef, val: int) -> None:
+        solver = Solver()
+        solver.add(constraint)
+        solver.add(var == val)
+        assert solver.check() == sat
+
+    def assert_constraint_forbids(constraint: BoolRef, var: ArithRef, val: int) -> None:
+        solver = Solver()
+        solver.add(constraint)
+        solver.add(var == val)
+        assert solver.check() != sat
+
+    # Positive step: range(1, 10, 2) -> [1, 3, 5, 7, 9]
+    i = Int("i")
+    constraint = _range_to_iterator_constraint(i, start=1, stop=10, step=2)
+    assert_constraint_allows(constraint, i, 1)
+    assert_constraint_allows(constraint, i, 3)
+    assert_constraint_allows(constraint, i, 9)
+    assert_constraint_forbids(constraint, i, 2)
+    assert_constraint_forbids(constraint, i, 10)
+
+    # Negative step: range(4, -1, -2) -> [4, 2, 0]
+    i = Int("i")
+    constraint = _range_to_iterator_constraint(i, start=4, stop=-1, step=-2)
+    assert_constraint_allows(constraint, i, 4)
+    assert_constraint_allows(constraint, i, 2)
+    assert_constraint_allows(constraint, i, 0)
+    assert_constraint_forbids(constraint, i, 1)
+    assert_constraint_forbids(constraint, i, -1)
+
+
+# ======== Reduce Operations Tests =========
+
+
+@pytest.mark.parametrize("op", ["max", "min", "sum"])
+@pytest.mark.parametrize("data", [[1, 5, 3, 2], [42]])
+def test_reduce_expr_eval(op: str, data):
+    import numpy as np
+    import builtins
+
+    input_arr = SymbolicExpr.create("const", np.array(data), tl.int32)
+    reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
+
+    result, _ = reduce_expr.eval(simplify_constraints=False)
+    # Use reflection to call the matching Python builtin, e.g. builtins.max([1,5,3,2]) -> 5
+    assert cast(IntNumRef, result).as_long() == getattr(builtins, op)(data)
+
+
+# ======== Basic Symbolic Expr Operations Tests =========
+
+
+@pytest.mark.parametrize("value", [(1, 2, 3), 4])
+def test_basic_expr_const_eval(value):
+    # Test that "const" SymbolicExpr correctly evaluates both scalar (e.g. 4)
+    # and vector (e.g. (1, 2, 3)) constants.
+    const_expr = SymbolicExpr.create("const", value, tl.int32)
+    result, constraints = const_expr.eval(simplify_constraints=False)
+    if isinstance(value, (list, tuple)):
+        # Vector constants return a list of Z3 ints.
+        assert [cast(IntNumRef, v).as_long() for v in cast(list, result)] == list(value)
+    else:
+        # Scalar constants return a single Z3 int.
+        assert cast(IntNumRef, result).as_long() == value
+    # Constants produce no constraints.
+    assert constraints is None
+
+
+@pytest.mark.parametrize(
+    "axis,expected_pid",
+    [
+        (0, SymbolicExpr.PID0),
+        (1, SymbolicExpr.PID1),
+        (2, SymbolicExpr.PID2),
+    ],
+)
+def test_basic_expr_pid_eval(axis, expected_pid):
+    # Test that "pid" expr returns the corresponding predefined symbolic variable (PID0/PID1/PID2).
+    pid_expr = SymbolicExpr.create("pid", axis)
+    result, constraints = pid_expr.eval(simplify_constraints=False)
+    assert result == expected_pid
+    assert constraints is None
+
+
+@pytest.mark.parametrize("start,end", [(4, 8), (0, 4)])
+def test_basic_expr_arange_eval(start, end):
+    # Test that arange expr produces a named symbolic variable with range constraints.
+    arange_expr = SymbolicExpr.create("arange", tl.int32, start, end)
+    result, constraints = arange_expr.eval(simplify_constraints=False)
+    result = cast(ArithRef, result)
+    assert result.decl().name() == f"arange_{start}_{end}"
+    assert constraints is not None
+    constraints_str = str(constraints)
+    assert f"{result} >= {start}" in constraints_str
+    assert f"{result} < {end}" in constraints_str
+
+
+# ======== Unary Symbolic Expr Operations Tests =========
+
+
+@pytest.mark.parametrize(
+    "op,value,expected",
+    [
+        ("abs", -3, 3),
+        ("fabs", -7, 7),
+    ],
+)
+def test_unary_expr_eval(op: str, value: int, expected: int):
+    # Test that unary ops (abs, fabs) correctly evaluate on constant inputs.
+    arg = SymbolicExpr.create("const", value, tl.int32)
+    expr = SymbolicExpr.create(op, arg)
+    result, constraints = expr.eval(simplify_constraints=False)
+    assert cast(IntNumRef, result).as_long() == expected
+    assert constraints is None
+
+
+# ======== Binary Symbolic Expr Operations Tests =========
+
+
+@pytest.mark.parametrize(
+    "op,lhs,rhs,expected",
+    [
+        ("add", 2, 3, 5),
+        ("sub", 7, 4, 3),
+        ("mul", 3, 5, 15),
+        ("idiv", 8, 2, 4),
+        ("mod", 7, 4, 3),
+        ("less", 2, 9, True),
+        ("less_equal", 3, 3, True),
+        ("greater", 5, 2, True),
+        ("greater_equal", 5, 7, False),
+        ("equal", 4, 4, True),
+        ("not_equal", 4, 4, False),
+        ("maximum", 2, 9, 9),
+        ("minimum", 2, 9, 2),
+        ("bitwise_and", 6, 3, 2),
+        ("bitwise_or", 6, 3, 7),
+        ("bitwise_xor", 6, 3, 5),
+    ],
+)
+def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
+    # Test arithmetic, comparison, and bitwise binary ops on constant inputs.
+    lhs_expr = SymbolicExpr.create("const", lhs, tl.int32)
+    rhs_expr = SymbolicExpr.create("const", rhs, tl.int32)
+    expr = SymbolicExpr.create(op, lhs_expr, rhs_expr)
+    result, constraints = expr.eval(simplify_constraints=False)
+    if isinstance(expected, bool):
+        assert str(result) == str(expected)
+    else:
+        assert cast(IntNumRef, result).as_long() == expected
+    assert constraints is None
+
+
+def test_bitwise_bool_expr_eval():
+    """
+    Test short circuiting behavior of bitwise_and and bitwise_or operators which do not
+    go through bitvector conversion like other binary operators.
+    """
+    a = SymbolicExpr.create("const", 1, tl.int32)
+    b = SymbolicExpr.create("const", 2, tl.int32)
+    cond_true = SymbolicExpr.create("less", a, b)
+    cond_false = SymbolicExpr.create("greater", a, b)
+
+    and_expr = SymbolicExpr.create("bitwise_and", cond_true, cond_false)
+    result, constraints = and_expr.eval(simplify_constraints=False)
+    assert isinstance(result, BoolRef)
+    assert str(result) == "False"
+    assert constraints is None
+
+    or_expr = SymbolicExpr.create("bitwise_or", cond_true, cond_false)
+    result, constraints = or_expr.eval(simplify_constraints=False)
+    assert isinstance(result, BoolRef)
+    assert str(result) == "True"
+    assert constraints is None
+
+    where_expr = SymbolicExpr.create(
+        "where",
+        and_expr,
+        SymbolicExpr.create("const", 1, tl.int32),
+        SymbolicExpr.create("const", 0, tl.int32),
+    )
+    result, constraints = where_expr.eval(simplify_constraints=False)
+    assert isinstance(result, list)
+    assert cast(IntNumRef, result[0]).as_long() == 0
+    assert constraints is None
+
+
+# ======== Pointer Symbolic Expr Operations Tests =========
+
+
+def test_pointer_expr_addptr_eval():
+    # Test that addptr scales offset by element size (100 + 3 * 4 = 112).
+    base = SymbolicExpr.create("const", 100, tl.pointer_type(tl.int32))
+    offset = SymbolicExpr.create("const", 3, tl.int32)
+    expr = SymbolicExpr.create("addptr", base, offset)
+    result, constraints = expr.eval(simplify_constraints=False)
+    assert cast(IntNumRef, result).as_long() == 112
+    assert constraints is None
+
+
+# ======== Reshape Symbolic Expr Operations Tests =========
+
+
+@pytest.mark.parametrize(
+    "op,extra",
+    [
+        ("splat", tl.block_type(tl.int32, [2])),
+        ("expand_dims", 0),
+        ("broadcast", (2,)),
+        ("reshape", (2,)),
+        ("trans", (0,)),
+    ],
+)
+def test_reshape_expr_eval(op: str, extra):
+    # Test that reshape ops (splat, expand_dims, broadcast, reshape, trans) preserve scalar value.
+    arg = SymbolicExpr.create("const", 5, tl.int32)
+    if op == "splat":
+        expr = SymbolicExpr.create(op, extra, arg)
+    else:
+        expr = SymbolicExpr.create(op, arg, extra)
+    result, constraints = expr.eval(simplify_constraints=False)
+    assert cast(IntNumRef, result).as_long() == 5
+    assert constraints is None
