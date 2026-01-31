@@ -32,11 +32,6 @@ def _get_user_code_location() -> tuple[str, int, str] | None:
     """
     Lightweight function to capture the current user code location.
 
-    This is much faster than traceback.extract_stack() because it:
-    1. Directly traverses frame objects instead of creating FrameSummary objects
-    2. Only extracts essential info (filename, lineno, func_name)
-    3. Does not read source files
-
     Returns:
         A tuple of (filename, lineno, func_name) for the user code frame,
         or None if no user code frame is found.
@@ -74,9 +69,6 @@ def _location_to_traceback_info(
 ) -> TracebackInfo:
     """
     Convert a lightweight source location tuple to a full TracebackInfo object.
-
-    This reads the source line from file, so it should only be called when
-    an error is being reported.
 
     Args:
         source_location: A tuple of (filename, lineno, func_name)

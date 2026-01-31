@@ -168,10 +168,6 @@ def _and_constraints(
 class PendingCheck:
     """
     Represents a deferred memory access check inside a loop.
-
-    The source_location is captured at the time the check is created (when
-    tl.load/tl.store is called), so that accurate line information can be
-    reported even when the actual check happens after the loop ends.
     """
 
     symbolic_expr: "SymbolicExpr"
@@ -1726,17 +1722,6 @@ class SymbolicSanitizer(Sanitizer):
         symbolic_expr: SymbolicExpr,
         source_location: Optional[tuple[str, int, str]] = None,
     ) -> None:
-        """
-        Check if a memory access can violate valid address ranges.
-
-        Args:
-            access_addr: Z3 expression representing the memory address(es)
-            expr_constraints: Additional constraints on the expression
-            symbolic_expr: The symbolic expression tree for the access
-            source_location: Optional pre-captured source location (filename, lineno, func_name).
-                           If provided, used for error reporting instead of capturing at report time.
-                           This is essential for deferred checks in loops.
-        """
         # Use push/pop on persistent solver
         solver = self.solver
         addr_sym = self.addr_sym
@@ -1822,18 +1807,6 @@ class SymbolicSanitizer(Sanitizer):
         symbolic_expr: Optional[SymbolicExpr] = None,
         source_location: Optional[tuple[str, int, str]] = None,
     ) -> None:
-        """
-        Report an out-of-bounds memory access violation.
-
-        Args:
-            op_type: The type of operation (Load or Store)
-            tensor: The tensor involved in the violation
-            violation_address: The memory address that caused the violation
-            symbolic_expr: Optional symbolic expression tree for the access
-            source_location: Optional pre-captured source location (filename, lineno, func_name).
-                           If provided, converts to TracebackInfo (reading source line from file).
-                           If None, falls back to _get_traceback_info() for immediate checks.
-        """
         # Use pre-captured location if available (for deferred checks in loops),
         # otherwise capture it now (for immediate checks outside loops)
         if source_location is not None:
