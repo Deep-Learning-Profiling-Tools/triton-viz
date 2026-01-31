@@ -10,6 +10,7 @@ Clients are data-collection modules that attach to the core tracing pipeline. Ea
 
 ## Terms defined here
 - **client**: a `Client` subclass with callback hooks invoked by `ClientManager`.
+- **op**: A tensor operation (e.g. load/store/matmul). Ops are DSL-agnostic.
 - **record**: a concrete `Op` instance or analysis record emitted by a client.
 - **callback**: a hook like `register_op_callback()`, `pre_run_callback()`, or `grid_idx_callback()`.
 - **op overrider**: an optional callback that replaces an operation (e.g. skip loads in profiler).
@@ -23,8 +24,8 @@ Clients are data-collection modules that attach to the core tracing pipeline. Ea
 ## Main logic flows
 - **Registration flow**:
   - `ClientManager.add_clients()` stores unique clients.
-  - `register_op_callback()` is called per op type when patching.
-  - `register_for_loop_callback()` enables loop-level instrumentation.
+  - `register_op_callback()` allows the user to add extra code to run before/after an op is ran. Registration is called once per op type when patching.
+  - `register_for_loop_callback()` allows adding extra code to run before/after/during for loop iterations. Registration is called once when patching.
 - **Execution flow**:
   - `grid_callback()` fires once per launch to set up sampling.
   - `grid_idx_callback()` fires per program index.
@@ -49,7 +50,3 @@ Clients are data-collection modules that attach to the core tracing pipeline. Ea
 - `Tracer` uses a sorted tensor list to map raw pointers to tensors; keep that invariant if you copy the pattern.
 - `Profiler` may skip ops to reduce overhead; do not assume real data is available.
 - `Sanitizer` swaps implementations based on config, so construction can return a different class.
-
-## Debug recipe
-- Start by printing in `grid_idx_callback()` to validate sampling and grid traversal.
-- Verify adapters by logging argument shapes inside `register_op_callback()`.

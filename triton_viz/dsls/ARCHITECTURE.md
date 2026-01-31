@@ -48,7 +48,3 @@ This folder defines how each DSL backend (Triton, NKI, etc.) is patched and norm
 - `OPERATION_REGISTRY` must be populated at import time; missing imports mean no patching.
 - If NKI is not installed, `NKI_NAMESPACES` stays empty; do not rely on it by default.
 - Adapter output order defines what clients see; keep it stable.
-
-## Debug recipe
-- Verify a namespace map by logging `OPERATION_REGISTRY[backend].namespaces` at startup.
-- Temporarily wrap an adapter to print received args when debugging a signature mismatch.

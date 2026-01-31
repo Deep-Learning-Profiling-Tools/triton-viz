@@ -44,7 +44,7 @@ This folder owns the runtime plumbing that makes Triton-Viz work: kernel tracing
 4. If the visualizer should render it, add support under `triton_viz/visualizer/` and `frontend/ops/`.
 
 ## Required vs optional patterns
-- **Required**: every op in `OPERATION_REGISTRY` must map to an `Op` type, and every `Op` type must have an adapter.
+- **Required**: every op in `OPERATION_REGISTRY` must map to an `Op` type.
 - **Optional**: clients can ignore op types they do not care about; `OpCallbacks()` is a no-op.
 
 ## Gotchas and invariants
@@ -52,8 +52,3 @@ This folder owns the runtime plumbing that makes Triton-Viz work: kernel tracing
 - When `cfg.num_sms > 1`, client callbacks must be thread-safe or wrapped with `lock_fn()`.
 - `TritonTrace.__call__` bypasses `run()` when invoked inside another kernel.
 - `NKITrace` uses its own interpreter builder; it does not share Triton JIT behavior.
-
-## Debug recipe
-- Set `TRITON_VIZ_VERBOSE=1` for extra logging.
-- Start by instrumenting `ClientManager.arg_callback()` and `grid_idx_callback()` to confirm traversal.
-- If ops are missing, check `OPERATION_REGISTRY[backend].namespaces` and adapter wiring.

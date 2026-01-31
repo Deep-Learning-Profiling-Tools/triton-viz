@@ -51,7 +51,3 @@ The frontend renders visualization payloads from the Flask server and provides U
 - The UI assumes `visualization_data` is grouped by program id strings.
 - `window.setOpControlHandlers` is used by op renderers to bind controls.
 - If an op renderer is missing, the tab still renders but shows a fallback.
-
-## Debug recipe
-- Start with `/api/data` and confirm the op `type` matches your registry key.
-- Use the dev overlay (`Ctrl+Shift+D`) to locate component roots.

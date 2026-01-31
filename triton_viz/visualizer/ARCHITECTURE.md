@@ -43,7 +43,3 @@ This folder owns the Flask server and the data-prep pipeline that turns traced r
 - The visualizer currently assumes "last launch only" in `draw.py`.
 - `update_global_data()` only recomputes if the launch snapshot changed.
 - `raw_tensor_data` is keyed by op UUID; keep UUIDs stable across derived payloads.
-
-## Debug recipe
-- Hit `/api/data` first and inspect the `visualization_data` payload.
-- For missing ops, verify they appear in `draw.collect_launch()` and are not filtered.
