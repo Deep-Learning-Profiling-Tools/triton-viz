@@ -1,6 +1,4 @@
 import torch
-from tqdm import tqdm
-import time
 
 import triton
 import triton.language as tl
@@ -41,13 +39,8 @@ def test_gemm():
     C = torch.empty((M, N))
     tile_size = 16
 
-    for _ in range(warmup := 10):
-        gemm_kernel[(M // tile_size, N // tile_size)](A, B, C, M, N, K, tile_size)
-
-    tic = time.perf_counter()
-    for _ in tqdm(range(runs := 100)):
-        gemm_kernel[(M // tile_size, N // tile_size)](A, B, C, M, N, K, tile_size)
-    print("matmul duration:", time.perf_counter() - tic)
+    gemm_kernel[(M // tile_size, N // tile_size)](A, B, C, M, N, K, tile_size)
+    print("GEMM ran without any out-of-bounds errors!")
 
 
 test_gemm()

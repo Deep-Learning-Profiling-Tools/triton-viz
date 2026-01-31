@@ -3,11 +3,13 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-    <img src="Logo.jpg" alt="Logo" width="320" height="320">
+    <img src="docs/logo.png" alt="Logo" width="320" height="320">
 </div>
 <br/>
 
-Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of making GPU programming on Triton more intuitive.
+Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of making kernel programming in tile-based DSLs like Triton more intuitive.
+
+Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to see our tool in action!
 
 <!-- TABLE OF CONTENTS -->
 <details>
@@ -27,6 +29,9 @@ Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep l
         <li><a href="#More-Puzzles">More puzzles</a></li>
       </ul>
     </li>
+    <li><a href="#Webpage-Notes">Webpage notes</a></li>
+    <li><a href="#Analysis-Clients">Analysis clients</a></li>
+    <li><a href="#Visualizer-Features">Visualizer features</a></li>
     <li><a href="#License">License</a></li>
   </ol>
 </details>
@@ -41,24 +46,11 @@ Triton-Viz addresses these challenges by providing real-time visualization of te
 The best part about this tool is that while it does focus on visualizing GPU operations, users are not required to have GPU resources to run examples on their system.
 
 
-### Visualization Features
-- **Active Program Workspace**: Program ID sliders select the active program and drive the op tabs, Tensor View, and Flow View.
-- **Shared Workspace Toggles**: Heatmap, histogram, and all-program views stay in sync across op tabs.
-- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows move outside when space is limited.
-- **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
-- **Dev Overlay**: Optional overlay that labels UI roots via `data-component` attributes for development.
-
-### Documentation
-- `GLOSSARY.md`: canonical UI terms, payloads, and event names.
-Frontend sources live in `frontend/` with `core/`, `components/`, `ops/`, `utils/`, and `types/` subfolders.
-Authoring assets live in `frontend/assets/` (CSS) and `frontend/templates/` (HTML) and are copied into `triton_viz/static/` and `triton_viz/templates/` during `npm run build:frontend`.
 ## Getting Started
 
 ### Prerequisites
 
 - Python installed (preferably the latest available version), minimum supported version is 3.10.
-- [Triton](https://github.com/openai/triton/blob/main/README.md) installed. Follow the installation instructions in the linked repository.
-- Note: the below commands must be run in order.
 
 
 ### Installation of Triton-Viz
@@ -75,17 +67,11 @@ If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Other
 
 ### Frontend Build
 
-If you edit frontend TypeScript sources under `frontend/`, rebuild the static assets:
+If you want to run the visualizer, build the TS sources:
 
 ```sh
 npm install
 npm run build:frontend
-```
-
-### Frontend Tests
-
-```sh
-npm run test:frontend
 ```
 
 ### Optional: Enable NKI Support
@@ -106,6 +92,7 @@ uv sync --extra test
 * To run core Triton-viz tests, run `pytest tests/`.
 * (if NKI installed) To run NKI-specific tests, run `pytest tests/ -m nki`.
 * To run all tests (Triton + NKI), run `pytest tests/ -m ""`.
+* To run visualizer frontend tests, run `npm run test:frontend`.
 
 ## Working with Examples
 
@@ -114,15 +101,26 @@ cd examples
 python <file_name>.py
 ```
 
-### CPU interpreter concurrency
+## Webpage Notes
 
-When running with the Triton CPU interpreter (`TRITON_INTERPRET=1`), you can emulate concurrent SMs by setting how many blocks execute in parallel:
+- Triton is best supported today; Amazon NKI DSL support is in active development.
+- The web visualizer requires a browser with WebGL/OpenGL enabled (standard in modern browsers).
 
-```sh
-export TRITON_VIZ_NUM_SMS=4  # or set triton_viz.config.num_sms in Python
-```
+## Analysis Clients
 
-This is useful for kernels that rely on cross-block synchronization (e.g., producer/consumer patterns) when testing without a GPU.
+Analyze kernels across visualization, profiling, and sanitization with a single line of code.
+
+- Visualizer: currently supports load, store, and matmul operations for 1/2/3D tensors (more operations and dimensions coming soon).
+- Profiler: flags non-unrolled loops, inefficient mask usage, and missing buffer_load optimizations while tracking load/store byte counts with low-overhead sampling.
+- Sanitizer: symbolically checks tensor memory accesses for out-of-bounds errors and emits reports with tensor metadata, call stack, and expression trees; optional fake-memory backend avoids real reads.
+
+## Visualizer Features
+
+- 3D View: inspect tensor layouts and memory access patterns from any perspective.
+- Program IDs: examine op inputs/outputs at specific PIDs and see per-program load/store footprints.
+- Code Mapping: map visual ops back to source lines for debugging.
+- Heatmaps: spot outliers, zeros, or saturation with value color gradients.
+- Histograms: review value distributions to guide quantization decisions.
 
 ### Environment variables
 

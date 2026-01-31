@@ -175,13 +175,13 @@ export class OpWorkspace {
             this.setActiveTab(defaultTab);
         }
 
-        const flowTab = this.createTabButton('Flow');
-        flowTab.addEventListener('click', () => {
-            this.setActiveTab(flowTab);
-            this.displayFlowDiagram({ logTabChange: true });
-            logAction('flow_tab_click', { program: { ...this.gridPosition } });
-        });
-        headerBar.appendChild(flowTab);
+        // const flowTab = this.createTabButton('Flow');
+        // flowTab.addEventListener('click', () => {
+        //     this.setActiveTab(flowTab);
+        //     this.displayFlowDiagram({ logTabChange: true });
+        //     logAction('flow_tab_click', { program: { ...this.gridPosition } });
+        // });
+        // headerBar.appendChild(flowTab);
 
         return headerBar;
     }

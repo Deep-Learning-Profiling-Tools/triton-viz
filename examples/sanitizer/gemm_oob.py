@@ -22,7 +22,7 @@ def gemm_kernel(
     for k_block in range(K // TILE_SIZE):
         range_k_block = TILE_SIZE * k_block + range_k
         A_off = K * range_m_block + range_k_block[None, :]
-        A_tile = tl.load(A + A_off + 1)  # Out-Of-Bounds Access!
+        A_tile = tl.load(A + A_off + 1)  # Out-Of-Bounds Access HERE!
 
         B_off = N * range_k_block[:, None] + range_n_block
         B_tile = tl.load(B + B_off)
