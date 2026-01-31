@@ -166,10 +166,6 @@ def _and_constraints(
 
 @dataclass
 class PendingCheck:
-    """
-    Represents a deferred memory access check inside a loop.
-    """
-
     symbolic_expr: "SymbolicExpr"
     addr_expr: Z3Expr
     constraints: ConstraintConjunction

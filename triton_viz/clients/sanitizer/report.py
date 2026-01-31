@@ -60,15 +60,6 @@ def _get_user_code_location() -> tuple[str, int, str] | None:
 def _location_to_traceback_info(
     source_location: tuple[str, int, str],
 ) -> TracebackInfo:
-    """
-    Convert a lightweight source location tuple to a full TracebackInfo object.
-
-    Args:
-        source_location: A tuple of (filename, lineno, func_name)
-
-    Returns:
-        A TracebackInfo object with full information including source line.
-    """
     filename, lineno, func_name = source_location
     line_of_code = linecache.getline(filename, lineno).rstrip()
     return TracebackInfo(
