@@ -24,7 +24,7 @@ def run():
     rand = torch.randperm(N, dtype=torch.int32, device=device)
     out = torch.zeros_like(x)
     indirect_load_kernel[(1,)](x, rand, out, BLOCK=BLOCK)
-    #triton_viz.launch(share=False, port=5001)
+    # triton_viz.launch(share=False, port=5001)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,7 @@ import torch
 import triton
 import triton.language as tl
 import triton_viz
-from triton_viz.clients import Tracer
 from triton_viz.core.config import config as cfg
-from triton_viz.core.trace import launches
 
 
 @triton_viz.trace("profiler")
