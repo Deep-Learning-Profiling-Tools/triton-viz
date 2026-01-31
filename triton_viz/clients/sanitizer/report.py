@@ -1,3 +1,4 @@
+import linecache
 import sys
 import traceback
 from pathlib import Path
@@ -68,30 +69,6 @@ def _get_user_code_location() -> Optional[tuple[str, int, str]]:
     return None
 
 
-def _read_source_line(filename: str, lineno: int) -> str:
-    """
-    Read a single line of source code from a file.
-
-    This is called only when an error is detected, to minimize I/O overhead
-    during normal execution.
-
-    Args:
-        filename: Path to the source file
-        lineno: Line number to read (1-indexed)
-
-    Returns:
-        The source line content, or empty string if reading fails.
-    """
-    try:
-        with open(filename, "r") as f:
-            for i, line in enumerate(f, 1):
-                if i == lineno:
-                    return line.rstrip()
-    except (FileNotFoundError, IOError):
-        pass
-    return ""
-
-
 def _location_to_traceback_info(
     source_location: tuple[str, int, str],
 ) -> TracebackInfo:
@@ -108,7 +85,7 @@ def _location_to_traceback_info(
         A TracebackInfo object with full information including source line.
     """
     filename, lineno, func_name = source_location
-    line_of_code = _read_source_line(filename, lineno)
+    line_of_code = linecache.getline(filename, lineno).rstrip()
     return TracebackInfo(
         filename=filename,
         lineno=lineno,
