@@ -1,5 +1,8 @@
+import linecache
+import sys
 import traceback
-from typing import Optional, TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -13,6 +16,58 @@ from .data import (
 
 if TYPE_CHECKING:
     from .sanitizer import SymbolicExpr
+
+
+# Paths that identify framework code (not user code)
+_FRAMEWORK_PATHS = [
+    "triton_viz/core/",
+    "triton_viz/clients/",
+    "triton/runtime/",
+    "triton/language/",
+    "site-packages/triton/",
+]
+
+
+def _get_user_code_location() -> tuple[str, int, str] | None:
+    from types import FrameType
+
+    frame: FrameType | None = sys._getframe()
+
+    while frame is not None:
+        filename = Path(frame.f_code.co_filename).as_posix()
+
+        # Skip Python internals
+        if filename.startswith("<"):
+            frame = frame.f_back
+            continue
+
+        # Check if this is user code (not in framework paths)
+        is_framework = any(path in filename for path in _FRAMEWORK_PATHS)
+
+        # User code: not in framework paths, OR in examples directory
+        if not is_framework or "examples/" in filename:
+            return (
+                frame.f_code.co_filename,
+                frame.f_lineno,
+                frame.f_code.co_name,
+            )
+
+        frame = frame.f_back
+
+    return None
+
+
+def _location_to_traceback_info(
+    source_location: tuple[str, int, str],
+) -> TracebackInfo:
+    filename, lineno, func_name = source_location
+    line_of_code = linecache.getline(filename, lineno).rstrip()
+    return TracebackInfo(
+        filename=filename,
+        lineno=lineno,
+        func_name=func_name,
+        line_of_code=line_of_code,
+    )
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -95,7 +150,7 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
 
 
 def print_oob_record_pdb_style(
-    oob_record: OutOfBoundsRecord, symbolic_expr: Optional["SymbolicExpr"] = None
+    oob_record: OutOfBoundsRecord, symbolic_expr: "SymbolicExpr | None" = None
 ):
     """
     Print a comprehensive diagnostic report for OOB errors in PDB-style format.
@@ -104,7 +159,7 @@ def print_oob_record_pdb_style(
     ----------
     oob_record : OutOfBoundsRecord
         The record containing information about out-of-bounds accesses.
-    symbolic_expr : Optional[SymbolicExpr]
+    symbolic_expr : SymbolicExpr | None
         The symbolic expression tree that led to the OOB access.
     """
     from pathlib import Path
