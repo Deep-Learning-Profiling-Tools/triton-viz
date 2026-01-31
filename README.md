@@ -3,7 +3,7 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-    <img src="logo.png" alt="Logo" width="320" height="320">
+    <img src="docs/logo.png" alt="Logo" width="320" height="320">
 </div>
 <br/>
 
