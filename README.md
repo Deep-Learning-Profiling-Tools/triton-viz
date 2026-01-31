@@ -41,17 +41,11 @@ Triton-Viz addresses these challenges by providing real-time visualization of te
 The best part about this tool is that while it does focus on visualizing GPU operations, users are not required to have GPU resources to run examples on their system.
 
 
-### Visualization Features
-- **Active Program Workspace**: Program ID sliders select the active program and drive the op tabs, Tensor View, and Flow View.
-- **Shared Workspace Toggles**: Heatmap, histogram, and all-program views stay in sync across op tabs.
-- **CAD-style Dimension Lines**: Tensor dimensions are annotated with AutoCAD-style extension lines, parallel dimension lines, and arrowheads. Arrows move outside when space is limited.
-- **Color-coded Shape Legend**: A floating legend displays the shapes of all visualized tensors with matching color coding for easy identification.
-- **Dev Overlay**: Optional overlay that labels UI roots via `data-component` attributes for development.
-
 ### Documentation
 - `GLOSSARY.md`: canonical UI terms, payloads, and event names.
 Frontend sources live in `frontend/` with `core/`, `components/`, `ops/`, `utils/`, and `types/` subfolders.
 Authoring assets live in `frontend/assets/` (CSS) and `frontend/templates/` (HTML) and are copied into `triton_viz/static/` and `triton_viz/templates/` during `npm run build:frontend`.
+
 ## Getting Started
 
 ### Prerequisites
@@ -75,17 +69,11 @@ If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Other
 
 ### Frontend Build
 
-If you edit frontend TypeScript sources under `frontend/`, rebuild the static assets:
+If you want to run the visualizer, build the TS sources:
 
 ```sh
 npm install
 npm run build:frontend
-```
-
-### Frontend Tests
-
-```sh
-npm run test:frontend
 ```
 
 ### Optional: Enable NKI Support
@@ -106,6 +94,7 @@ uv sync --extra test
 * To run core Triton-viz tests, run `pytest tests/`.
 * (if NKI installed) To run NKI-specific tests, run `pytest tests/ -m nki`.
 * To run all tests (Triton + NKI), run `pytest tests/ -m ""`.
+* To run visualizer frontend tests, run `npm run test:frontend`.
 
 ## Working with Examples
 
@@ -113,16 +102,6 @@ uv sync --extra test
 cd examples
 python <file_name>.py
 ```
-
-### CPU interpreter concurrency
-
-When running with the Triton CPU interpreter (`TRITON_INTERPRET=1`), you can emulate concurrent SMs by setting how many blocks execute in parallel:
-
-```sh
-export TRITON_VIZ_NUM_SMS=4  # or set triton_viz.config.num_sms in Python
-```
-
-This is useful for kernels that rely on cross-block synchronization (e.g., producer/consumer patterns) when testing without a GPU.
 
 ### Environment variables
 
