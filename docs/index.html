@@ -992,6 +992,7 @@ if __name__ == "__main__":
                     </div>
                     <!-- Profiler Client -->
                     <div class="client-content" id="client-prof">
+                        <p class="visualizer-note">The profiler flags performance hazards like non-unrolled loops, inefficient mask usage, and missing buffer_load optimizations while tracking load/store byte counts with low-overhead sampling.</p>
                         <div class="client-grid">
                             <div class="client-col-left">
                                 <div class="code-container">
@@ -1082,6 +1083,7 @@ Consider enabling Buffer Load optimization.
                                                         </div>
                                                         <!-- Sanitizer Client -->
                                                         <div class="client-content" id="client-san">
+                                                            <p class="visualizer-note">The sanitizer symbolically checks tensor memory accesses for out-of-bounds errors and emits rich reports with tensor metadata, call stack, and expression trees, with an optional fake-memory backend to avoid real reads.</p>
                                                             <!-- Sanitizer Sub-Tabs -->
                                                             <div class="features-tabs" style="border: none; padding-bottom: 1rem; justify-content: start;">
                                                                 <button class="tab-btn active" onclick="switchSanitizer(event, 'san-pass')">No Out-of-Bounds</button>
