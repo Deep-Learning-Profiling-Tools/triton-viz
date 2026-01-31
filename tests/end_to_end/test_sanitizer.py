@@ -299,3 +299,64 @@ def test_loop_deferred_checks_simplify():
     loop_deferred_check_simplify_kernel[(2,)](out)
 
     assert load_index_checker.observed_offsets == []
+
+
+# ======== Line Number Reporting Tests ===========
+
+
+# Create a dedicated sanitizer for line number tests
+line_number_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=line_number_checker)
+@triton.jit
+def oob_in_loop_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    """Kernel where OOB occurs inside a loop at the tl.load line."""
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    for _ in range(2):
+        # This line should be reported in the traceback when OOB occurs
+        val = tl.load(ptr + offsets + 1000)  # OOB access due to +1000 offset
+        tl.store(ptr + offsets, val)
+
+
+def test_loop_oob_reports_correct_line_number():
+    """
+    Test that sanitizer reports the correct line number for OOB errors in loops.
+
+    Previously, the sanitizer would report the function definition line instead
+    of the actual tl.load/tl.store line that caused the error. This was because
+    traceback was captured at loop exit time rather than when the memory
+    operation was executed.
+    """
+    line_number_checker.records.clear()
+
+    data = torch.zeros((16,), dtype=torch.float32)
+
+    oob_in_loop_kernel[(1,)](data, N=16, BLOCK_SIZE=16)
+
+    # Verify that OOB was detected
+    assert len(line_number_checker.records) > 0, "Expected OOB to be detected"
+
+    record = line_number_checker.records[0]
+    assert len(record.user_code_tracebacks) > 0, "Expected traceback info"
+
+    tb_info = record.user_code_tracebacks[0]
+
+    # The error should point to the tl.load line, not the function definition
+    assert "tl.load" in tb_info.line_of_code, (
+        f"Expected traceback to point to tl.load line, "
+        f"but got: {tb_info.line_of_code!r}"
+    )
+
+    # Verify the line contains the OOB offset
+    assert "+1000" in tb_info.line_of_code or "1000" in tb_info.line_of_code, (
+        f"Expected line to contain the OOB offset, "
+        f"but got: {tb_info.line_of_code!r}"
+    )
+
+    # Verify function name
+    assert tb_info.func_name == "oob_in_loop_kernel", (
+        f"Expected func_name to be 'oob_in_loop_kernel', "
+        f"but got: {tb_info.func_name!r}"
+    )
