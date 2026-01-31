@@ -7,7 +7,9 @@
 </div>
 <br/>
 
-Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of making GPU programming on Triton more intuitive.
+Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of making kernel programming in tile-based DSLs like Triton more intuitive.
+
+Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to see our tool in action!
 
 <!-- TABLE OF CONTENTS -->
 <details>

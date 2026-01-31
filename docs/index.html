@@ -108,6 +108,25 @@
         .btn-primary:hover {
             background: var(--accent-hover);
         }
+        .sponsors {
+            text-align: center;
+            margin: 3rem auto 1.5rem;
+            max-width: 720px;
+        }
+        .sponsors h3 {
+            font-size: clamp(1.5rem, 2vw, 2.4rem);
+            letter-spacing: 0.03em;
+            color: var(--accent);
+            margin-bottom: 0.75rem;
+        }
+        .sponsors p {
+            margin: 0 auto;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .sponsors a {
+            color: var(--accent-hover);
+        }
         /* Hero Section */
         .hero {
             padding: 10rem 1rem 6rem;
@@ -1317,6 +1336,10 @@ End of IMA Diagnostic Report</pre>
             document.getElementById(caseId).classList.add('active');
         }
     </script>
+    <section class="sponsors">
+        <h3>Sponsored by</h3>
+        <p>Special thanks to <a href="https://www.amd.com/" target="_blank">AMD</a> for supporting Triton-Viz.</p>
+    </section>
     <!-- CTA Section -->
     <section class="cta">
         <h2>Ready to visualize your kernels?</h2>
