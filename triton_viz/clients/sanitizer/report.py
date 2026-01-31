@@ -2,7 +2,7 @@ import linecache
 import sys
 import traceback
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -28,7 +28,7 @@ _FRAMEWORK_PATHS = [
 ]
 
 
-def _get_user_code_location() -> Optional[tuple[str, int, str]]:
+def _get_user_code_location() -> tuple[str, int, str] | None:
     """
     Lightweight function to capture the current user code location.
 
@@ -43,7 +43,7 @@ def _get_user_code_location() -> Optional[tuple[str, int, str]]:
     """
     from types import FrameType
 
-    frame: Optional[FrameType] = sys._getframe()
+    frame: FrameType | None = sys._getframe()
 
     while frame is not None:
         filename = Path(frame.f_code.co_filename).as_posix()
@@ -174,7 +174,7 @@ def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
 
 
 def print_oob_record_pdb_style(
-    oob_record: OutOfBoundsRecord, symbolic_expr: Optional["SymbolicExpr"] = None
+    oob_record: OutOfBoundsRecord, symbolic_expr: "SymbolicExpr | None" = None
 ):
     """
     Print a comprehensive diagnostic report for OOB errors in PDB-style format.
@@ -183,7 +183,7 @@ def print_oob_record_pdb_style(
     ----------
     oob_record : OutOfBoundsRecord
         The record containing information about out-of-bounds accesses.
-    symbolic_expr : Optional[SymbolicExpr]
+    symbolic_expr : SymbolicExpr | None
         The symbolic expression tree that led to the OOB access.
     """
     from pathlib import Path
