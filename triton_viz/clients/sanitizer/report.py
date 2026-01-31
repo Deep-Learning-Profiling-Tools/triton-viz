@@ -1,5 +1,6 @@
 import sys
 import traceback
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 import numpy as np
@@ -44,7 +45,7 @@ def _get_user_code_location() -> Optional[tuple[str, int, str]]:
     frame: Optional[FrameType] = sys._getframe()
 
     while frame is not None:
-        filename = frame.f_code.co_filename.replace("\\", "/")
+        filename = Path(frame.f_code.co_filename).as_posix()
 
         # Skip Python internals
         if filename.startswith("<"):
