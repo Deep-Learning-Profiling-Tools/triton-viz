@@ -588,8 +588,8 @@ npm install
 npm run build:frontend
 
 # Step 3: run
-uv run examples/matmu.py</code>
-                        <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git\ncd triton-viz\nuv sync\nnpm install\nnpm run build:frontend\nuv run examples/matmu.py')" title="Copy to clipboard">
+uv run examples/visualizer/matmul.py</code>
+                        <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git\ncd triton-viz\nuv sync\nnpm install\nnpm run build:frontend\nuv run examples/visualizer/matmul.py')" title="Copy to clipboard">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                         </button>
                     </div>
@@ -633,7 +633,7 @@ uv run examples/matmu.py</code>
                             <div class="client-grid">
                                 <div class="client-col-left">
                                     <div class="code-container">
-                                        <div class="code-header">examples/3dims.py</div>
+                                        <div class="code-header">examples/visualizer/3dims.py</div>
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -709,7 +709,7 @@ if __name__ == "__main__":
                             <div class="client-grid">
                                 <div class="client-col-left">
                                     <div class="code-container">
-                                        <div class="code-header">examples/3dims.py</div>
+                                        <div class="code-header">examples/visualizer/3dims.py</div>
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -785,7 +785,7 @@ if __name__ == "__main__":
                             <div class="client-grid">
                                 <div class="client-col-left">
                                     <div class="code-container">
-                                        <div class="code-header">examples/matmu.py</div>
+                                        <div class="code-header">examples/visualizer/matmul.py</div>
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -861,7 +861,7 @@ if __name__ == "__main__":
                             <div class="client-grid">
                                 <div class="client-col-left">
                                     <div class="code-container">
-                                        <div class="code-header">examples/matmu.py</div>
+                                        <div class="code-header">examples/visualizer/matmul.py</div>
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -937,7 +937,7 @@ if __name__ == "__main__":
                             <div class="client-grid">
                                 <div class="client-col-left">
                                     <div class="code-container">
-                                        <div class="code-header">examples/matmu.py</div>
+                                        <div class="code-header">examples/visualizer/matmul.py</div>
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -1015,7 +1015,7 @@ if __name__ == "__main__":
                         <div class="client-grid">
                             <div class="client-col-left">
                                 <div class="code-container">
-                                    <div class="code-header">examples/load_store.py</div>
+                                    <div class="code-header">examples/profiler/load_store.py</div>
                                     <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -1113,7 +1113,7 @@ Consider enabling Buffer Load optimization.
                                                                 <div class="client-grid">
                                                                     <div class="client-col-left">
                                                                         <div class="code-container">
-                                                                            <div class="code-header">examples/gemm.py</div>
+                                                                            <div class="code-header">examples/sanitizer/gemm.py</div>
                                                                             <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -1174,7 +1174,7 @@ test_gemm()
                                                                 <div class="client-grid">
                                                                     <div class="client-col-left">
                                                                         <div class="code-container">
-                                                                            <div class="code-header">examples/gemm.py</div>
+                                                                            <div class="code-header">examples/sanitizer/gemm.py</div>
                                                                             <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -1227,7 +1227,7 @@ test_gemm()
                                                                             <div class="term-header">TERMINAL OUTPUT</div>
                                                                             <pre class="term-body" style="font-size: 0.8rem;"><span class="term-red">🚨 ILLEGAL MEMORY ACCESS DETECTED 🚨</span>
 ━━━ Code Context ━━━
-File: /home/trtx/College/keren/triton-viz/homepage/examples/gemm.py
+File: /home/trtx/College/keren/triton-viz/homepage/examples/sanitizer/gemm.py
 Function: gemm_kernel
 Line 13:
   10 │
