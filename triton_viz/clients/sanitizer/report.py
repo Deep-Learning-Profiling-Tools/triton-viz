@@ -1,3 +1,4 @@
+import sys
 import traceback
 from typing import Optional, TYPE_CHECKING
 
@@ -13,6 +14,106 @@ from .data import (
 
 if TYPE_CHECKING:
     from .sanitizer import SymbolicExpr
+
+
+# Paths that identify framework code (not user code)
+_FRAMEWORK_PATHS = [
+    "triton_viz/core/",
+    "triton_viz/clients/",
+    "triton/runtime/",
+    "triton/language/",
+    "site-packages/triton/",
+]
+
+
+def _get_user_code_location() -> Optional[tuple[str, int, str]]:
+    """
+    Lightweight function to capture the current user code location.
+
+    This is much faster than traceback.extract_stack() because it:
+    1. Directly traverses frame objects instead of creating FrameSummary objects
+    2. Only extracts essential info (filename, lineno, func_name)
+    3. Does not read source files
+
+    Returns:
+        A tuple of (filename, lineno, func_name) for the user code frame,
+        or None if no user code frame is found.
+    """
+    from types import FrameType
+
+    frame: Optional[FrameType] = sys._getframe()
+
+    while frame is not None:
+        filename = frame.f_code.co_filename.replace("\\", "/")
+
+        # Skip Python internals
+        if filename.startswith("<"):
+            frame = frame.f_back
+            continue
+
+        # Check if this is user code (not in framework paths)
+        is_framework = any(path in filename for path in _FRAMEWORK_PATHS)
+
+        # User code: not in framework paths, OR in examples directory
+        if not is_framework or "examples/" in filename:
+            return (
+                frame.f_code.co_filename,
+                frame.f_lineno,
+                frame.f_code.co_name,
+            )
+
+        frame = frame.f_back
+
+    return None
+
+
+def _read_source_line(filename: str, lineno: int) -> str:
+    """
+    Read a single line of source code from a file.
+
+    This is called only when an error is detected, to minimize I/O overhead
+    during normal execution.
+
+    Args:
+        filename: Path to the source file
+        lineno: Line number to read (1-indexed)
+
+    Returns:
+        The source line content, or empty string if reading fails.
+    """
+    try:
+        with open(filename, "r") as f:
+            for i, line in enumerate(f, 1):
+                if i == lineno:
+                    return line.rstrip()
+    except (FileNotFoundError, IOError):
+        pass
+    return ""
+
+
+def _location_to_traceback_info(
+    source_location: tuple[str, int, str],
+) -> TracebackInfo:
+    """
+    Convert a lightweight source location tuple to a full TracebackInfo object.
+
+    This reads the source line from file, so it should only be called when
+    an error is being reported.
+
+    Args:
+        source_location: A tuple of (filename, lineno, func_name)
+
+    Returns:
+        A TracebackInfo object with full information including source line.
+    """
+    filename, lineno, func_name = source_location
+    line_of_code = _read_source_line(filename, lineno)
+    return TracebackInfo(
+        filename=filename,
+        lineno=lineno,
+        func_name=func_name,
+        line_of_code=line_of_code,
+    )
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):

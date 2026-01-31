@@ -131,9 +131,12 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
         access_addr: Z3Expr,
         expr_constraints: Optional[BoolRef],
         symbolic_expr: SymbolicExpr,
+        source_location: Optional[tuple[str, int, str]] = None,
     ) -> None:
         self.check_inside_loop.append((access_addr, expr_constraints))
-        super()._check_range_satisfiable(access_addr, expr_constraints, symbolic_expr)
+        super()._check_range_satisfiable(
+            access_addr, expr_constraints, symbolic_expr, source_location
+        )
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         callbacks = super().register_for_loop_callback()

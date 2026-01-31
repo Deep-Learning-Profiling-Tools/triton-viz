@@ -84,7 +84,13 @@ from ..utils import (
     check_inner_stride_equal_to_one,
 )
 from .data import OutOfBoundsRecordZ3
-from .report import _get_traceback_info, print_oob_record, print_oob_record_pdb_style
+from .report import (
+    _get_traceback_info,
+    _get_user_code_location,
+    _location_to_traceback_info,
+    print_oob_record,
+    print_oob_record_pdb_style,
+)
 from ...core.config import config as cfg
 
 
@@ -160,9 +166,20 @@ def _and_constraints(
 
 @dataclass
 class PendingCheck:
+    """
+    Represents a deferred memory access check inside a loop.
+
+    The source_location is captured at the time the check is created (when
+    tl.load/tl.store is called), so that accurate line information can be
+    reported even when the actual check happens after the loop ends.
+    """
+
     symbolic_expr: "SymbolicExpr"
     addr_expr: Z3Expr
     constraints: ConstraintConjunction
+    # Lightweight source location: (filename, lineno, func_name)
+    # Captured immediately to preserve accurate line info for deferred checks
+    source_location: Optional[tuple[str, int, str]] = None
 
 
 @dataclass
@@ -1707,7 +1724,19 @@ class SymbolicSanitizer(Sanitizer):
         access_addr: Z3Expr,
         expr_constraints: ConstraintConjunction,
         symbolic_expr: SymbolicExpr,
+        source_location: Optional[tuple[str, int, str]] = None,
     ) -> None:
+        """
+        Check if a memory access can violate valid address ranges.
+
+        Args:
+            access_addr: Z3 expression representing the memory address(es)
+            expr_constraints: Additional constraints on the expression
+            symbolic_expr: The symbolic expression tree for the access
+            source_location: Optional pre-captured source location (filename, lineno, func_name).
+                           If provided, used for error reporting instead of capturing at report time.
+                           This is essential for deferred checks in loops.
+        """
         # Use push/pop on persistent solver
         solver = self.solver
         addr_sym = self.addr_sym
@@ -1739,8 +1768,10 @@ class SymbolicSanitizer(Sanitizer):
                 else:
                     op_type = Load
 
-                # Report with symbolic expression
-                self._report(op_type, tensor, violation_addr, symbolic_expr)
+                # Report with symbolic expression and source location
+                self._report(
+                    op_type, tensor, violation_addr, symbolic_expr, source_location
+                )
             solver.pop()
 
         if isinstance(access_addr, list):
@@ -1767,11 +1798,16 @@ class SymbolicSanitizer(Sanitizer):
         signature = _make_signature(z3_addr, z3_constraints)
         pending_idx = ctx.signature_cache.get(signature)
         if pending_idx is None:
+            # Capture source location now while we're still in the user's tl.load/tl.store call.
+            # This is a lightweight operation that only traverses frame objects.
+            # The actual source line will be read later only if an error is detected.
+            source_location = _get_user_code_location()
             ctx.signature_cache[signature] = len(ctx.pending_checks)
             pending_check = PendingCheck(
                 symbolic_expr=expr,
                 addr_expr=z3_addr,
                 constraints=z3_constraints,
+                source_location=source_location,
             )
             ctx.pending_checks.append(pending_check)
         else:
@@ -1784,8 +1820,27 @@ class SymbolicSanitizer(Sanitizer):
         tensor: Tensor,
         violation_address: int,
         symbolic_expr: Optional[SymbolicExpr] = None,
+        source_location: Optional[tuple[str, int, str]] = None,
     ) -> None:
-        traceback_info = _get_traceback_info()
+        """
+        Report an out-of-bounds memory access violation.
+
+        Args:
+            op_type: The type of operation (Load or Store)
+            tensor: The tensor involved in the violation
+            violation_address: The memory address that caused the violation
+            symbolic_expr: Optional symbolic expression tree for the access
+            source_location: Optional pre-captured source location (filename, lineno, func_name).
+                           If provided, converts to TracebackInfo (reading source line from file).
+                           If None, falls back to _get_traceback_info() for immediate checks.
+        """
+        # Use pre-captured location if available (for deferred checks in loops),
+        # otherwise capture it now (for immediate checks outside loops)
+        if source_location is not None:
+            traceback_info = [_location_to_traceback_info(source_location)]
+        else:
+            traceback_info = _get_traceback_info()
+
         tensor_name = self._get_tensor_name(tensor)
         oob_record = OutOfBoundsRecordZ3(
             op_type=op_type,
@@ -2285,7 +2340,7 @@ class SymbolicSanitizer(Sanitizer):
             if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
                 return
             ctx = self.loop_stack.pop()
-            # execute pending checks
+            # Execute pending checks that were deferred during loop execution
             solver = self.solver
             addr_sym = self.addr_sym
             assert solver is not None
@@ -2302,6 +2357,9 @@ class SymbolicSanitizer(Sanitizer):
                 addr_expr = pending_check.addr_expr
                 expr_constraints = pending_check.constraints
                 symbolic_expr = pending_check.symbolic_expr
+                # Use the source location captured when the check was created,
+                # not the current location (which would be the loop exit point)
+                source_location = pending_check.source_location
 
                 if cfg.verbose:
                     print(
@@ -2315,6 +2373,7 @@ class SymbolicSanitizer(Sanitizer):
                     addr_expr,
                     expr_constraints,
                     symbolic_expr,
+                    source_location,
                 )
             if ctx.pending_checks:
                 solver.pop()
