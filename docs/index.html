@@ -550,7 +550,10 @@
         <div class="hero-badge">
             <span>Open Source</span> | MIT Licensed
         </div>
-        <h1>Visualize and debug your Triton GPU kernels</h1>
+        <h1>Analyze and debug your tile-based DSL kernels</h1>
+        <p style="display: block; font-size: 0.95rem; color: var(--text-muted); margin-top: -1rem; margin-bottom: 2.5rem;">
+            Note: Triton is best supported today; Amazon NKI DSL support is in active development.
+        </p>
         <div class="install-container">
             <div class="install-box">
                 <div class="install-step">
@@ -561,7 +564,7 @@ git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
 cd triton-viz
 
 # Step 2: install
-uv sync
+uv sync # or "uv sync --extra nki" if you want to visualize NKI kernels
 npm install
 npm run build:frontend
 
