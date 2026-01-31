@@ -1421,7 +1421,7 @@ End of IMA Diagnostic Report</pre>
             const updated = lines.map(line => {
                 const trimmed = line.trim();
                 const matches = patterns.some(pattern => trimmed.startsWith(pattern));
-                const isError = trimmed.includes('force OOB access');
+                const isError = trimmed.includes('Out-Of-Bounds Access HERE!');
                 const highlighted = highlightPythonLine(line);
                 if (isError) {
                     return `<span class="hl-error-line">${highlighted}</span>`;
