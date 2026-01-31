@@ -1174,7 +1174,7 @@ test_gemm()
                                                                 <div class="client-grid">
                                                                     <div class="client-col-left">
                                                                         <div class="code-container">
-                                                                            <div class="code-header">examples/sanitizer/gemm.py</div>
+                                                                            <div class="code-header">examples/sanitizer/gemm_oob.py</div>
                                                                             <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
@@ -1197,7 +1197,7 @@ def gemm_kernel(
     for k_block in range(K // TILE_SIZE):
         range_k_block = TILE_SIZE * k_block + range_k
         A_off = K * range_m_block + range_k_block[None, :]
-        A_tile = tl.load(A + A_off + 1) # force OOB access
+        A_tile = tl.load(A + A_off + 1) # Out-Of-Bounds Access HERE!
 
         B_off = N * range_k_block[:, None] + range_n_block
         B_tile = tl.load(B + B_off)
@@ -1227,16 +1227,16 @@ test_gemm()
                                                                             <div class="term-header">TERMINAL OUTPUT</div>
                                                                             <pre class="term-body" style="font-size: 0.8rem;"><span class="term-red">🚨 ILLEGAL MEMORY ACCESS DETECTED 🚨</span>
 ━━━ Code Context ━━━
-File: /home/trtx/College/keren/triton-viz/homepage/examples/sanitizer/gemm.py
+File: triton-viz/examples/sanitizer/gemm_oob.py
 Function: gemm_kernel
-Line 13:
-  10 │
-  11 │ @triton_viz.trace("sanitizer")
-  12 │ @triton.jit
-→   13 │ def gemm_kernel(
-  14 │     A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE_SIZE: tl.constexpr
-  15 │ ):
-  16 │     m_block = tl.program_id(0)
+Line 25:
+  22 │     for k_block in range(K // TILE_SIZE):
+  23 │         range_k_block = TILE_SIZE * k_block + range_k
+  24 │         A_off = K * range_m_block + range_k_block[None, :]
+→ 25 │         A_tile = tl.load(A + A_off + 1) # Out-Of-Bounds Access HERE!
+  26 │
+  27 │         B_off = N * range_k_block[:, None] + range_n_block
+  28 │         B_tile = tl.load(B + B_off)
 ━━━ Tensor Information ━━━
 arg:         A
 dtype:       torch.float32             shape:       torch.Size([32, 32])
@@ -1244,8 +1244,8 @@ strides:     (32, 1)                   device:      cpu
 contiguous:  True                      base_ptr:    0x000000002fa75080
 size:        4096 bytes                valid_range: [0x000000002fa75080, 0x000000002fa76080)
 ━━━ Call Stack ━━━
-#1 gemm_kernel at gemm.py:13
-   └─ def gemm_kernel(
+#1 gemm_kernel at gemm_oob.py:25
+   └─ A_tile = tl.load(A + A_off + 1) # Out-Of-Bounds Access HERE!
 ━━━ Violation Details ━━━
 Violation address: 0x000000002fa76080
 ━━━ Symbolic Expression Tree ━━━
