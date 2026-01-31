@@ -29,13 +29,6 @@ _FRAMEWORK_PATHS = [
 
 
 def _get_user_code_location() -> tuple[str, int, str] | None:
-    """
-    Lightweight function to capture the current user code location.
-
-    Returns:
-        A tuple of (filename, lineno, func_name) for the user code frame,
-        or None if no user code frame is found.
-    """
     from types import FrameType
 
     frame: FrameType | None = sys._getframe()
