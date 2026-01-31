@@ -1,0 +1,1437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Triton-Viz | Visualization Toolkit for Triton GPU Programming</title>
+    <link rel="icon" href="logo.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #080808;
+            --bg-secondary: #121212;
+            --bg-tertiary: #1a1a1a;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent: #22d3ee;
+            --accent-hover: #67e8f9;
+            --border: #262626;
+            --gradient-start: #22d3ee;
+            --gradient-end: #0ea5e9;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'JetBrains Mono', monospace;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+        /* Navigation */
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            padding: 1rem 2rem;
+            background: rgba(10, 10, 11, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+        }
+        .nav-container {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            font-weight: 600;
+            font-size: 1.25rem;
+        }
+        .logo img {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+        }
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+        }
+        .nav-links a {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+        .nav-cta {
+            display: flex;
+            gap: 1rem;
+        }
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+        }
+        .btn-ghost {
+            background: transparent;
+            color: var(--text-secondary);
+        }
+        .btn-ghost:hover {
+            color: var(--text-primary);
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: #000;
+        }
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+        .sponsors {
+            text-align: center;
+            margin: 3rem auto 1.5rem;
+            max-width: 720px;
+        }
+        .sponsors h3 {
+            font-size: clamp(1.5rem, 2vw, 2.4rem);
+            letter-spacing: 0.03em;
+            color: var(--accent);
+            margin-bottom: 0.75rem;
+        }
+        .sponsors p {
+            margin: 0 auto;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .sponsors a {
+            color: var(--accent-hover);
+        }
+        /* Hero Section */
+        .hero {
+            padding: 10rem 1rem 6rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            position: relative;
+        }
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 2rem;
+        }
+        .hero-badge span {
+            color: var(--accent);
+        }
+        .hero h1 {
+            font-size: clamp(2.5rem, 6vw, 4rem);
+            font-weight: 700;
+            line-height: 1.1;
+            max-width: 900px;
+            margin-bottom: 2rem;
+            letter-spacing: -0.02em;
+        }
+        .hero p {
+            font-size: 1.1rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin-bottom: 3rem;
+            display: none; /* Hidden based on user preference for immediate install */
+        }
+        .install-container {
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto 3rem;
+        }
+        .install-box {
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            text-align: left;
+        }
+        .install-step {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .install-step:last-child {
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+        .install-label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+        }
+        .install-command {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            background: var(--bg-tertiary);
+            padding: 0.75rem;
+            border-radius: 4px;
+        }
+        .install-command code {
+            color: var(--accent);
+            word-break: break-all;
+        }
+        .copy-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 0.25rem;
+            cursor: pointer;
+            transition: color 0.2s;
+            flex-shrink: 0;
+        }
+        .copy-btn:hover {
+            color: var(--text-primary);
+        }
+        /* Features Section */
+        .features {
+            padding: 6rem 1rem;
+            background: var(--bg-secondary);
+        }
+        .section-container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+        .section-header {
+            text-align: left;
+            margin-bottom: 4rem;
+        }
+        .section-header h2 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+        }
+        .section-header p {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            max-width: 600px;
+            margin: 0;
+        }
+        .features-interface {
+            max-width: 100%;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+        .features-tabs {
+            display: flex;
+            justify-content: flex-start;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1.5rem;
+        }
+        .tab-btn {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            cursor: pointer;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        .tab-btn:hover {
+            color: var(--text-primary);
+            background: var(--bg-tertiary);
+        }
+        .tab-btn.active {
+            color: var(--accent);
+            background: rgba(34, 211, 238, 0.05);
+            border-color: rgba(34, 211, 238, 0.2);
+        }
+        .feature-display {
+            min-height: 600px;
+        }
+        .feature-content {
+            display: none;
+            text-align: left;
+        }
+        .feature-content.active {
+            display: block;
+        }
+        .video-frame {
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 2rem;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+            width: 100%;
+            position: relative;
+        }
+        .video-hint {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+            z-index: 10;
+            pointer-events: none;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .video-frame video {
+            width: 100%;
+            height: auto;
+            display: block;
+            max-height: 80vh;
+            object-fit: contain;
+            margin: 0 auto;
+        }
+        .feature-description {
+            color: var(--text-secondary);
+            max-width: 800px;
+            margin: 0 auto;
+            font-size: 1.1rem;
+            line-height: 1.6;
+        }
+        /* Clients Section */
+        .clients-section {
+            padding: 6rem 0;
+            background: var(--bg-secondary);
+        }
+        .clients-section .section-container {
+            max-width: 1800px;
+            padding: 0 1.5rem;
+        }
+        .client-content {
+            display: none;
+        }
+        .client-content.active {
+            display: block;
+        }
+        .visualizer-note {
+            margin: 0 0 1rem;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            text-align: left;
+        }
+        .client-grid {
+            display: grid;
+            grid-template-columns: minmax(620px, 1.25fr) minmax(520px, 1fr);
+            gap: 1.75rem;
+            align-items: start;
+            margin-top: 2rem;
+        }
+        .client-col-left {
+            position: sticky;
+            top: 6rem;
+        }
+        .client-col-right {
+            min-width: 0; /* Prevent grid blowout */
+        }
+        @media (max-width: 1024px) {
+            .client-grid {
+                grid-template-columns: 1fr;
+            }
+            .client-col-left {
+                position: static;
+            }
+        }
+        .terminal-output {
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            width: 100%;
+            margin-bottom: 1.5rem;
+            text-align: left;
+            font-family: 'JetBrains Mono', monospace;
+            overflow: hidden;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+        }
+        .term-header {
+            background: var(--bg-tertiary);
+            padding: 0.35rem 0.75rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+            letter-spacing: 0.1em;
+        }
+        .term-body {
+            padding: 0.5rem 0.75rem;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            line-height: 1.6;
+            white-space: pre;
+            overflow-x: auto;
+        }
+        .term-green { color: #4ade80; }
+        .term-red { color: #f87171; }
+        .code-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.5rem 0.75rem;
+            width: 100%;
+            max-width: 100%;
+            overflow: hidden;
+        }
+        .code-header {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.35rem;
+        }
+        .code-container pre {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem;
+            line-height: 1.7;
+            white-space: pre;
+            display: block;
+            width: max-content;
+            min-width: 100%;
+            max-width: 100%;
+            overflow-x: auto;
+            overflow-y: hidden;
+            -webkit-overflow-scrolling: touch;
+            touch-action: pan-x;
+        }
+        .token.keyword { color: #f472b6; }
+        .token.function { color: #38bdf8; }
+        .token.comment { color: #64748b; }
+        .token.decorator { color: #fbbf24; }
+        .token.string { color: #34d399; }
+        .tviz-line {
+            display: inline-block;
+            width: 100%;
+            padding: 0 0.5rem;
+            margin: 0 -0.5rem;
+            background: rgba(34, 211, 238, 0.08);
+            border-left: 2px solid var(--accent);
+        }
+        .hl-error-line {
+            display: inline-block;
+            width: 100%;
+            padding: 0 0.5rem;
+            margin: 0 -0.5rem;
+            background: rgba(248, 113, 113, 0.12);
+            border-left: 2px solid #f87171;
+        }
+        .hl-keyword { color: #f472b6; }
+        .hl-string { color: #34d399; }
+        .hl-comment { color: #64748b; }
+        .hl-number { color: #fbbf24; }
+        .hl-decorator { color: #fbbf24; }
+        /* CTA Section */
+        .cta {
+            padding: 8rem 1rem;
+            text-align: center;
+            position: relative;
+        }
+        .cta h2 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            letter-spacing: -0.01em;
+        }
+        .cta p {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            margin-bottom: 2rem;
+        }
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .btn-large {
+            padding: 0.875rem 2rem;
+            font-size: 1rem;
+        }
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        .btn-outline:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--accent);
+        }
+        /* Footer */
+        footer {
+            padding: 3rem 1rem;
+            border-top: 1px solid var(--border);
+            text-align: left;
+        }
+        .footer-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 1.5rem;
+        }
+        .footer-links {
+            display: flex;
+            gap: 2rem;
+        }
+        .footer-links a {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+        .footer-links a:hover {
+            color: var(--text-primary);
+        }
+        .footer-copy {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        /* Responsive */
+        @media (max-width: 768px) {
+            .nav-links {
+                display: none;
+            }
+            .hero h1 {
+                font-size: 2rem;
+            }
+            .section-header h2 {
+                font-size: 1.75rem;
+            }
+        }
+        .sanitizer-case {
+            display: none;
+        }
+        .sanitizer-case.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav>
+        <div class="nav-container">
+            <a href="#" class="logo">
+                <img src="logo.png" alt="Triton-Viz">
+                <span>Triton-Viz</span>
+            </a>
+        </div>
+    </nav>
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-badge">
+            <span>Open Source</span> | MIT Licensed
+        </div>
+        <h1>Analyze and debug your tile-based DSL kernels</h1>
+        <p style="display: block; font-size: 0.95rem; color: var(--text-muted); margin-top: -1rem; margin-bottom: 2.5rem;">
+            Note: Triton is best supported today; Amazon NKI DSL support is in active development.
+        </p>
+        <div class="install-container">
+            <div class="install-box">
+                <div class="install-step">
+                    <div class="install-label">Quick Start (Local Development)</div>
+                    <div class="install-command">
+                        <code style="white-space: pre-wrap;"># Step 1: git clone repo
+git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
+cd triton-viz
+
+# Step 2: install
+uv sync # or "uv sync --extra nki" if you want to visualize NKI kernels
+npm install
+npm run build:frontend
+
+# Step 3: run
+uv run examples/visualizer/matmul.py</code>
+                        <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git\ncd triton-viz\nuv sync\nnpm install\nnpm run build:frontend\nuv run examples/visualizer/matmul.py')" title="Copy to clipboard">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <p style="font-size: 0.9rem; color: var(--text-muted); text-align: center; margin-top: 1rem;">
+                Note: A browser with <strong>WebGL/OpenGL enabled</strong> is required (standard in modern browsers). <br>
+                See <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz#readme" target="_blank" style="color: var(--accent); text-decoration: underline;">README.md</a> for full documentation.
+            </p>
+        </div>
+    </section>
+    <!-- Clients Section -->
+    <section class="clients-section" id="clients">
+        <div class="section-container">
+            <div class="section-header">
+                <h2>Analysis Clients</h2>
+                <p>Analyze kernels between visualization, profiling, and sanitization with a single line of code</p>
+            </div>
+            <div class="features-interface">
+                <!-- Top Level Client Tabs -->
+                <div class="features-tabs">
+                    <button class="tab-btn active" onclick="switchClient(event, 'client-viz')">Visualizer</button>
+                    <button class="tab-btn" onclick="switchClient(event, 'client-prof')">Profiler</button>
+                    <button class="tab-btn" onclick="switchClient(event, 'client-san')">Sanitizer</button>
+                </div>
+                    <div class="feature-display" style="min-height: auto;">
+                        <!-- Visualizer Client (Merged Features) -->
+                        <div class="client-content active" id="client-viz">
+                            <p class="visualizer-note">The visualizer currently supports a detailed look into load, store, and matmul operations for 1/2/3D tensors (more operations and dimensions coming soon).</p>
+                            <!-- Visualizer Sub-Tabs -->
+                            <div class="features-tabs" style="border: none; padding-bottom: 1rem; justify-content: flex-start;">
+                                <button class="tab-btn active" onclick="switchFeature(event, 'feat-3d')">3D View</button>
+                                <button class="tab-btn" onclick="switchFeature(event, 'feat-pid')">Program IDs</button>
+                                <button class="tab-btn" onclick="switchFeature(event, 'feat-code')">Code Mapping</button>
+                                <button class="tab-btn" onclick="switchFeature(event, 'feat-heatmap')">Heatmaps</button>
+                            <button class="tab-btn" onclick="switchFeature(event, 'feat-histogram')">Histograms</button>
+                        </div>
+                        <!-- Visualizer Content -->
+                        <!-- 3D View (Uses 3dims.py) -->
+                        <div class="feature-content active" id="feat-3d">
+                            <div class="client-grid">
+                                <div class="client-col-left">
+                                    <div class="code-container">
+                                        <div class="code-header">examples/visualizer/3dims.py</div>
+                                        <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("tracer")
+@triton.jit
+def add_3d_slices_kernel(
+    input_ptr1,
+    input_ptr2,
+    output_ptr,
+    stride_x,
+    stride_y,
+    stride_z,
+    slice_x,
+    slice_y,
+    slice_z,
+    BLOCK_SIZE_X: tl.constexpr,
+    BLOCK_SIZE_Y: tl.constexpr,
+    BLOCK_SIZE_Z: tl.constexpr,
+):
+    # kernel definition here
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    input1 = torch.randn(16, 16, 32, device="cpu")
+    input2 = torch.randn(16, 16, 32, device="cpu")
+    output = torch.empty_like(input1)
+
+    slice_z, slice_y, slice_x = input1.shape
+    stride_z, stride_y, stride_x = input1.stride()
+
+    grid = (
+        triton.cdiv(slice_x, BLOCK_SIZE_X),
+        triton.cdiv(slice_y, BLOCK_SIZE_Y),
+        triton.cdiv(slice_z, BLOCK_SIZE_Z),
+    )
+
+    # Launch kernel
+    add_3d_slices_kernel[grid](
+        input1,
+        input2,
+        output,
+        stride_x,
+        stride_y,
+        stride_z,
+        slice_x,
+        slice_y,
+        slice_z,
+        BLOCK_SIZE_X=BLOCK_SIZE_X,
+        BLOCK_SIZE_Y=BLOCK_SIZE_Y,
+        BLOCK_SIZE_Z=BLOCK_SIZE_Z,
+    )
+    triton_viz.launch(share=False, port=5001)
+</code></pre>
+                                    </div>
+                                </div>
+                                <div class="client-col-right">
+                                    <div class="video-frame">
+                                        <div class="video-hint">Fullscreen for full detail</div>
+                                        <video autoplay loop muted playsinline controls>
+                                            <source src="vids/3d.mp4" type="video/mp4">
+                                        </video>
+                                    </div>
+                                    <p class="feature-description" style="margin-top: 1rem; text-align: left;">Interactive 3D rendering allows you to inspect tensor layouts and memory access patterns from any perspective. Left-click and drag to change camera angle. Scroll to zoom. Right-click and drag to pan.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Program IDs (Uses 3dims.py) -->
+                        <div class="feature-content" id="feat-pid">
+                            <div class="client-grid">
+                                <div class="client-col-left">
+                                    <div class="code-container">
+                                        <div class="code-header">examples/visualizer/3dims.py</div>
+                                        <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("tracer")
+@triton.jit
+def add_3d_slices_kernel(
+    input_ptr1,
+    input_ptr2,
+    output_ptr,
+    stride_x,
+    stride_y,
+    stride_z,
+    slice_x,
+    slice_y,
+    slice_z,
+    BLOCK_SIZE_X: tl.constexpr,
+    BLOCK_SIZE_Y: tl.constexpr,
+    BLOCK_SIZE_Z: tl.constexpr,
+):
+    # kernel definition here
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    input1 = torch.randn(16, 16, 32, device="cpu")
+    input2 = torch.randn(16, 16, 32, device="cpu")
+    output = torch.empty_like(input1)
+
+    slice_z, slice_y, slice_x = input1.shape
+    stride_z, stride_y, stride_x = input1.stride()
+
+    grid = (
+        triton.cdiv(slice_x, BLOCK_SIZE_X),
+        triton.cdiv(slice_y, BLOCK_SIZE_Y),
+        triton.cdiv(slice_z, BLOCK_SIZE_Z),
+    )
+
+    # Launch kernel
+    add_3d_slices_kernel[grid](
+        input1,
+        input2,
+        output,
+        stride_x,
+        stride_y,
+        stride_z,
+        slice_x,
+        slice_y,
+        slice_z,
+        BLOCK_SIZE_X=BLOCK_SIZE_X,
+        BLOCK_SIZE_Y=BLOCK_SIZE_Y,
+        BLOCK_SIZE_Z=BLOCK_SIZE_Z,
+    )
+    triton_viz.launch(share=False, port=5001)
+</code></pre>
+                                    </div>
+                                </div>
+                                <div class="client-col-right">
+                                    <div class="video-frame">
+                                        <div class="video-hint">Fullscreen for full detail</div>
+                                        <video autoplay loop muted playsinline controls>
+                                            <source src="vids/pid.mp4" type="video/mp4">
+                                        </video>
+                                    </div>
+                                    <p class="feature-description" style="margin-top: 1rem; text-align: left;">Inspect operation inputs/outputs at specific Program IDs (PIDs) to understand block-level behavior. View which elements are loaded/stored in each program (highlighted in blue/orange respectively). Toggle "All Program IDs" to see how all programs load tensor values simultaneously.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Code Mapping (Uses matmu.py) -->
+                        <div class="feature-content" id="feat-code">
+                            <div class="client-grid">
+                                <div class="client-col-left">
+                                    <div class="code-container">
+                                        <div class="code-header">examples/visualizer/matmul.py</div>
+                                        <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("tracer")
+@triton.jit
+def matmul_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    # kernel definition here
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    M, N, K = 32, 32, 64
+    a = torch.randn((M, K), dtype=torch.float32)
+    b = torch.randn((K, N), dtype=torch.float32)
+    c = torch.empty((M, N), dtype=torch.float32)
+
+    BLOCK_M, BLOCK_N, BLOCK_K = 16, 16, 32
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+
+    matmul_kernel[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+    )
+    triton_viz.launch(share=False, port=5001)
+</code></pre>
+                                    </div>
+                                </div>
+                                <div class="client-col-right">
+                                    <div class="video-frame">
+                                        <div class="video-hint">Fullscreen for full detail</div>
+                                        <video autoplay loop muted playsinline controls>
+                                            <source src="vids/code.mp4" type="video/mp4">
+                                        </video>
+                                    </div>
+                                    <p class="feature-description" style="margin-top: 1rem; text-align: left;">Directly map visual operations back to your source code lines for seamless debugging.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Heatmaps (Uses matmu.py) -->
+                        <div class="feature-content" id="feat-heatmap">
+                            <div class="client-grid">
+                                <div class="client-col-left">
+                                    <div class="code-container">
+                                        <div class="code-header">examples/visualizer/matmul.py</div>
+                                        <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("tracer")
+@triton.jit
+def matmul_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    # kernel definition here
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    M, N, K = 32, 32, 64
+    a = torch.randn((M, K), dtype=torch.float32)
+    b = torch.randn((K, N), dtype=torch.float32)
+    c = torch.empty((M, N), dtype=torch.float32)
+
+    BLOCK_M, BLOCK_N, BLOCK_K = 16, 16, 32
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+
+    matmul_kernel[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+    )
+    triton_viz.launch(share=False, port=5001)
+</code></pre>
+                                    </div>
+                                </div>
+                                <div class="client-col-right">
+                                    <div class="video-frame">
+                                        <div class="video-hint">Fullscreen for full detail</div>
+                                        <video autoplay loop muted playsinline controls>
+                                            <source src="vids/heatmap.mp4" type="video/mp4">
+                                        </video>
+                                    </div>
+                                    <p class="feature-description" style="margin-top: 1rem; text-align: left;">Visualize tensor values with color gradients to quickly identify outliers, zeros, or saturation.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Histograms (Uses matmu.py) -->
+                        <div class="feature-content" id="feat-histogram">
+                            <div class="client-grid">
+                                <div class="client-col-left">
+                                    <div class="code-container">
+                                        <div class="code-header">examples/visualizer/matmul.py</div>
+                                        <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("tracer")
+@triton.jit
+def matmul_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    # kernel definition here
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    M, N, K = 32, 32, 64
+    a = torch.randn((M, K), dtype=torch.float32)
+    b = torch.randn((K, N), dtype=torch.float32)
+    c = torch.empty((M, N), dtype=torch.float32)
+
+    BLOCK_M, BLOCK_N, BLOCK_K = 16, 16, 32
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+
+    matmul_kernel[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+    )
+    triton_viz.launch(share=False, port=5001)
+</code></pre>
+                                    </div>
+                                </div>
+                                <div class="client-col-right">
+                                    <div class="video-frame">
+                                        <div class="video-hint">Fullscreen for full detail</div>
+                                        <video autoplay loop muted playsinline controls>
+                                            <source src="vids/histogram.mp4" type="video/mp4">
+                                        </video>
+                                    </div>
+                                    <p class="feature-description" style="margin-top: 1rem; text-align: left;">Analyze the distribution of values within your tensors to understand data distributions and make the best quantization decisions.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Profiler Client -->
+                    <div class="client-content" id="client-prof">
+                        <p class="visualizer-note">The profiler flags performance hazards like non-unrolled loops, inefficient mask usage, and missing buffer_load optimizations while tracking load/store byte counts with low-overhead sampling.</p>
+                        <div class="client-grid">
+                            <div class="client-col-left">
+                                <div class="code-container">
+                                    <div class="code-header">examples/profiler/load_store.py</div>
+                                    <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("profiler")
+@triton.jit
+def simple_kernel(
+    x_ptr,
+    output_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets &lt; n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    tl.store(output_ptr + offsets, x, mask=mask)
+
+
+if __name__ == "__main__":
+    cfg.reset()
+    device = "cpu"
+    size = 12
+    BLOCK_SIZE = 8
+    torch.manual_seed(0)
+    x = torch.arange(size, dtype=torch.float32, device=device)
+    output = torch.empty_like(x)
+    grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
+    simple_kernel[grid](x, output, size, BLOCK_SIZE)
+</code></pre>
+                                </div>
+                                <p class="feature-description" style="margin-top: 1rem; text-align: left;">Collects detailed performance metrics including cycle counts, memory bandwidth, and cache hit rates.</p>
+                            </div>
+                            <div class="client-col-right">
+                                <div class="terminal-output" style="max-height: 600px; overflow-y: auto;">
+                                    <div class="term-header">TERMINAL OUTPUT</div>
+                                    <pre class="term-body" style="font-size: 0.75rem; line-height: 1.4;">============================================================ Profiler Issues Summary ============================================================
+============================================================
+---------- Profiler: For-Loop Unrolling Statistics ---------
+============================================================
+No for-loops detected.
+============================================================
+============================================================
+---------- Profiler: Mask Ratio Statistics -----------------
+============================================================
+────────────────────────────────────────
+Overall Load Operations:
+  Total mask elements:     8
+  False elements:          4
+  Masked percentage:       50.00%
+Overall Store Operations:
+  Total mask elements:     8
+  False elements:          4
+  Masked percentage:       50.00%
+────────────────────────────────────────
+Per-Operation Breakdown:
+Top 5 Operations by False Elements:
+────────────────────────────────────────
+#1. LOAD at load_store.py:22
+    Total elements: 8
+    False elements: 4 (50.0%)
+    Code: x = tl.load(x_ptr + offsets, mask=mask)
+#2. STORE at load_store.py:23
+    Total elements: 8
+    False elements: 4 (50.0%)
+    Code: tl.store(output_ptr + offsets, x, mask=mask)
+============================================================
+============================================================
+---------- Profiler: Buffer Load Issue Detection -----------
+============================================================
+>>>>>> Warning: Potential Buffer Load Issue Detected! <<<<<<
+Some memory access offsets are within 32-bit range,
+but Buffer Load optimization was NOT used in the kernel.
+This may lead to suboptimal performance on AMD GPUs.
+Consider enabling Buffer Load optimization.
+============================================================
+============================================================ Profiler Issues Summary Ends =======================================================</pre>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <!-- Sanitizer Client -->
+                                                        <div class="client-content" id="client-san">
+                                                            <p class="visualizer-note">The sanitizer symbolically checks tensor memory accesses for out-of-bounds errors and emits rich reports with tensor metadata, call stack, and expression trees, with an optional fake-memory backend to avoid real reads.</p>
+                                                            <!-- Sanitizer Sub-Tabs -->
+                                                            <div class="features-tabs" style="border: none; padding-bottom: 1rem; justify-content: start;">
+                                                                <button class="tab-btn active" onclick="switchSanitizer(event, 'san-pass')">No Out-of-Bounds</button>
+                                                                <button class="tab-btn" onclick="switchSanitizer(event, 'san-fail')">Out-of-Bounds Access</button>
+                                                            </div>
+                                                            <!-- Pass Case -->
+                                                            <div class="sanitizer-case active" id="san-pass">
+                                                                <div class="client-grid">
+                                                                    <div class="client-col-left">
+                                                                        <div class="code-container">
+                                                                            <div class="code-header">examples/sanitizer/gemm.py</div>
+                                                                            <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("sanitizer")
+@triton.jit
+def gemm_kernel(
+    A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE_SIZE: tl.constexpr
+):
+    m_block = tl.program_id(0)
+    n_block = tl.program_id(1)
+    range_m = tl.arange(0, TILE_SIZE)
+    range_n = tl.arange(0, TILE_SIZE)
+    range_k = tl.arange(0, TILE_SIZE)
+    range_m_block = TILE_SIZE * m_block + range_m[:, None]
+    range_n_block = TILE_SIZE * n_block + range_n[None, :]
+    accum = tl.zeros((TILE_SIZE, TILE_SIZE), dtype=tl.float32)
+    for k_block in range(K // TILE_SIZE):
+        range_k_block = TILE_SIZE * k_block + range_k
+        A_off = K * range_m_block + range_k_block[None, :]
+        A_tile = tl.load(A + A_off)
+
+        B_off = N * range_k_block[:, None] + range_n_block
+        B_tile = tl.load(B + B_off)
+
+        accum += tl.dot(A_tile, B_tile, allow_tf32=False)
+    C_off = N * range_m_block + range_n_block
+    tl.store(C + C_off, accum)
+
+
+def test_gemm():
+    M, N, K = 32, 32, 32
+    A = torch.randn((M, K))
+    B = torch.randn((K, N))
+    C = torch.empty((M, N))
+    tile_size = 16
+
+    gemm_kernel[(M // tile_size, N // tile_size)](A, B, C, M, N, K, tile_size)
+    print("GEMM ran without any out-of-bounds errors!")
+
+test_gemm()
+</code></pre>
+                                                                        </div>
+                                                                        <p class="feature-description" style="margin-top: 1rem; text-align: left;">When code is correct, the sanitizer validates all memory accesses without interrupting execution.</p>
+                                                                    </div>
+                                                                    <div class="client-col-right">
+                                                                        <div class="terminal-output">
+                                                                            <div class="term-header">TERMINAL OUTPUT</div>
+                                                                            <pre class="term-body">GEMM ran without any out-of-bounds errors!</pre>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            <!-- Fail Case -->
+                                                            <div class="sanitizer-case" id="san-fail">
+                                                                <div class="client-grid">
+                                                                    <div class="client-col-left">
+                                                                        <div class="code-container">
+                                                                            <div class="code-header">examples/sanitizer/gemm_oob.py</div>
+                                                                            <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("sanitizer")
+@triton.jit
+def gemm_kernel(
+    A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE_SIZE: tl.constexpr
+):
+    m_block = tl.program_id(0)
+    n_block = tl.program_id(1)
+    range_m = tl.arange(0, TILE_SIZE)
+    range_n = tl.arange(0, TILE_SIZE)
+    range_k = tl.arange(0, TILE_SIZE)
+    range_m_block = TILE_SIZE * m_block + range_m[:, None]
+    range_n_block = TILE_SIZE * n_block + range_n[None, :]
+    accum = tl.zeros((TILE_SIZE, TILE_SIZE), dtype=tl.float32)
+    for k_block in range(K // TILE_SIZE):
+        range_k_block = TILE_SIZE * k_block + range_k
+        A_off = K * range_m_block + range_k_block[None, :]
+        A_tile = tl.load(A + A_off + 1) # Out-Of-Bounds Access HERE!
+
+        B_off = N * range_k_block[:, None] + range_n_block
+        B_tile = tl.load(B + B_off)
+
+        accum += tl.dot(A_tile, B_tile, allow_tf32=False)
+    C_off = N * range_m_block + range_n_block
+    tl.store(C + C_off, accum)
+
+
+def test_gemm():
+    M, N, K = 32, 32, 32
+    A = torch.randn((M, K))
+    B = torch.randn((K, N))
+    C = torch.empty((M, N))
+    tile_size = 16
+
+    gemm_kernel[(M // tile_size, N // tile_size)](A, B, C, M, N, K, tile_size)
+    print("GEMM ran without any out-of-bounds errors!")
+
+test_gemm()
+</code></pre>
+                                                                        </div>
+                                                                        <p class="feature-description" style="margin-top: 1rem; text-align: left;">The sanitizer catches invalid memory accesses instantly, providing a detailed report with tensor info, call stack, and symbolic expression trees.</p>
+                                                                    </div>
+                                                                    <div class="client-col-right">
+                                                                        <div class="terminal-output" style="max-height: 600px; overflow-y: auto;">
+                                                                            <div class="term-header">TERMINAL OUTPUT</div>
+                                                                            <pre class="term-body" style="font-size: 0.8rem;"><span class="term-red">🚨 ILLEGAL MEMORY ACCESS DETECTED 🚨</span>
+━━━ Code Context ━━━
+File: triton-viz/examples/sanitizer/gemm_oob.py
+Function: gemm_kernel
+Line 25:
+  22 │     for k_block in range(K // TILE_SIZE):
+  23 │         range_k_block = TILE_SIZE * k_block + range_k
+  24 │         A_off = K * range_m_block + range_k_block[None, :]
+→ 25 │         A_tile = tl.load(A + A_off + 1) # Out-Of-Bounds Access HERE!
+  26 │
+  27 │         B_off = N * range_k_block[:, None] + range_n_block
+  28 │         B_tile = tl.load(B + B_off)
+━━━ Tensor Information ━━━
+arg:         A
+dtype:       torch.float32             shape:       torch.Size([32, 32])
+strides:     (32, 1)                   device:      cpu
+contiguous:  True                      base_ptr:    0x000000002fa75080
+size:        4096 bytes                valid_range: [0x000000002fa75080, 0x000000002fa76080)
+━━━ Call Stack ━━━
+#1 gemm_kernel at gemm_oob.py:25
+   └─ A_tile = tl.load(A + A_off + 1) # Out-Of-Bounds Access HERE!
+━━━ Violation Details ━━━
+Violation address: 0x000000002fa76080
+━━━ Symbolic Expression Tree ━━━
+load [dtype=pointer<fp32>]
+├── ptr: addptr [dtype=<['16', '16'], pointer<fp32>>]
+│   ├── ptr: splat [dtype=<['16', '16'], pointer<fp32>>]
+│   │   ├── block_type: const=<['16', '16'], pointer<fp32>> [dtype=<['16', '16'], pointer<fp32>>]
+│   │   └── arg: const=799494272 [dtype=pointer<fp32>]
+│   └── offset: add [dtype=<['16', '1'], int32>]
+│       ├── lhs: add [dtype=<['16', '1'], int32>]
+│       │   ├── lhs: broadcast [dtype=<['16', '1'], int32>]
+│       │   │   └── arg: mul [dtype=<['16', '1'], int32>]
+│       │   │       ├── lhs: splat [dtype=<['16', '1'], int32>]
+│       │   │       │   ├── block_type: const=<['16', '1'], int32> [dtype=<['16', '1'], int32>]
+│       │   │       │   └── arg: const=32 [dtype=int32]
+│       │   │       └── rhs: add [dtype=<['16', '1'], int32>]
+│       │   │           ├── lhs: splat [dtype=<['16', '1'], int32>]
+│       │   │           │   ├── block_type: const=<['16', '1'], int32> [dtype=<['16', '1'], int32>]
+│       │   │           │   └── arg: mul [dtype=int32]
+│       │   │           │       ├── lhs: const=16 [dtype=int32]
+│       │   │           │       └── rhs: pid_0 [dtype=int32]
+│       │   │           │           └── axis: const=0 [dtype=int32]
+│       │   │           └── rhs: expand_dims [dtype=<['16'], int32>]
+│       │   │               ├── arg: arange [dtype=<['16'], int32>]
+│       │   │               │   ├── ret_ty: const=<['16'], int32> [dtype=<['16'], int32>]
+│       │   │               │   ├── start: const=0 [dtype=int32]
+│       │   │               │   └── end: const=16 [dtype=int32]
+│       │   │               └── axis: const=1 [dtype=int32]
+│       │   └── rhs: broadcast [dtype=<['16'], int32>]
+│       │       └── arg: expand_dims [dtype=<['16'], int32>]
+│       │           ├── arg: add [dtype=<['16'], int32>]
+│       │           │   ├── lhs: splat [dtype=<['16'], int32>]
+│       │           │   │   ├── block_type: const=<['16'], int32> [dtype=<['16'], int32>]
+│       │           │   │   └── arg: mul [dtype=int32]
+│       │           │   │       ├── lhs: const=16 [dtype=int32]
+│       │           │   │       └── rhs: const=loop_i_12 [dtype=int32]
+│       │           │   └── rhs: arange [dtype=<['16'], int32>]
+│       │           │       ├── ret_ty: const=<['16'], int32> [dtype=<['16'], int32>]
+│       │           │       ├── start: const=0 [dtype=int32]
+│       │           │       └── end: const=16 [dtype=int32]
+│       │           └── axis: const=0 [dtype=int32]
+│       └── rhs: splat [dtype=<['16', '16'], int32>]
+│           ├── block_type: const=<['16', '16'], int32> [dtype=<['16', '16'], int32>]
+│           └── arg: const=1 [dtype=int32]
+├── mask: None
+└── other: None
+End of IMA Diagnostic Report</pre>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                </div>
+            </div>
+        </div>
+    </section>
+    <script>
+        function switchFeature(event, featureId) {
+            // Remove active class from all tabs in the features section
+            const tabsContainer = event.currentTarget.parentElement;
+            tabsContainer.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            // Toggle feature content ONLY within the visualizer client
+            const visualizerContainer = document.getElementById('client-viz');
+            visualizerContainer.querySelectorAll('.feature-content').forEach(content => content.classList.remove('active'));
+            // Add active class to clicked tab and target content
+            event.currentTarget.classList.add('active');
+            document.getElementById(featureId).classList.add('active');
+        }
+        function switchClient(event, clientId) {
+            // Remove active class from all tabs in the clients section
+            const tabsContainer = event.currentTarget.parentElement;
+            tabsContainer.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            // Remove active class from all client content
+            document.querySelectorAll('.client-content').forEach(content => content.classList.remove('active'));
+            // Add active class to clicked tab and target content
+            event.currentTarget.classList.add('active');
+            document.getElementById(clientId).classList.add('active');
+        }
+        function switchSanitizer(event, caseId) {
+            // Remove active class from all tabs in the sanitizer section
+            const tabsContainer = event.currentTarget.parentElement;
+            tabsContainer.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            // Remove active class from all sanitizer cases
+            const sanitizerContainer = document.getElementById('client-san');
+            sanitizerContainer.querySelectorAll('.sanitizer-case').forEach(content => content.classList.remove('active'));
+            // Add active class to clicked tab and target content
+            event.currentTarget.classList.add('active');
+            document.getElementById(caseId).classList.add('active');
+        }
+    </script>
+    <section class="sponsors">
+        <h3>Sponsored by</h3>
+        <p>Special thanks to <a href="https://www.amd.com/" target="_blank">AMD</a> for supporting Triton-Viz.</p>
+    </section>
+    <!-- CTA Section -->
+    <section class="cta">
+        <h2>Ready to visualize your kernels?</h2>
+        <p>Get started with Triton-Viz in minutes. No GPU required for development.</p>
+        <div class="cta-buttons">
+            <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz" class="btn btn-primary btn-large" target="_blank">View on GitHub</a>
+            <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz/tree/main/examples" class="btn btn-outline btn-large" target="_blank">Browse Examples</a>
+        </div>
+    </section>
+    <!-- Footer -->
+    <footer>
+        <div class="footer-content">
+            <div class="footer-links">
+                <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz" target="_blank">GitHub</a>
+                <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz/blob/main/LICENSE" target="_blank">MIT License</a>
+                <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz/issues" target="_blank">Issues</a>
+            </div>
+            <div class="footer-copy">
+                &copy; 2025 Triton-Viz. Built for the deep learning community.
+            </div>
+        </div>
+    </footer>
+<script>
+    function escapeHtml(text) {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+    function splitComment(line) {
+        let inSingle = false;
+        let inDouble = false;
+        for (let i = 0; i < line.length; i += 1) {
+            const ch = line[i];
+            const prev = line[i - 1];
+            if (ch === "'" && !inDouble && prev !== '\\\\') {
+                inSingle = !inSingle;
+            } else if (ch === '"' && !inSingle && prev !== '\\\\') {
+                inDouble = !inDouble;
+            } else if (ch === '#' && !inSingle && !inDouble) {
+                return [line.slice(0, i), line.slice(i)];
+            }
+        }
+        return [line, ''];
+    }
+    function highlightPythonLine(line) {
+        const [codePartRaw, commentRaw] = splitComment(line);
+        const strings = [];
+        let codePart = codePartRaw.replace(/('([^'\\\\]|\\\\.)*'|\"([^\"\\\\]|\\\\.)*\")/g, match => {
+            strings.push(match);
+            return `__STR_${strings.length - 1}__`;
+        });
+        codePart = codePart.replace(/\b\d+(?:\.\d+)?\b/g, match => `__NUM__${match}__NUM__`);
+        codePart = codePart.replace(/\b(import|from|as|def|return|if|elif|else|for|while|in|not|and|or|with|class|pass|break|continue|assert|lambda|try|except|finally|raise|yield|True|False|None)\b/g, match => `__KW__${match}__KW__`);
+        let highlighted = escapeHtml(codePart);
+        highlighted = highlighted.replace(/__NUM__([^_]+)__NUM__/g, (_, value) => `<span class="hl-number">${value}</span>`);
+        highlighted = highlighted.replace(/__KW__([^_]+)__KW__/g, (_, value) => `<span class="hl-keyword">${value}</span>`);
+        if (highlighted.trim().startsWith('@')) {
+            highlighted = `<span class="hl-decorator">${highlighted}</span>`;
+        }
+        highlighted = highlighted.replace(/__STR_(\d+)__/g, (_, idx) => {
+            const value = strings[Number(idx)] || '';
+            return `<span class="hl-string">${escapeHtml(value)}</span>`;
+        });
+        if (commentRaw) {
+            highlighted += `<span class="hl-comment">${escapeHtml(commentRaw)}</span>`;
+        }
+        return highlighted;
+    }
+    function highlightTritonVizLines() {
+        const patterns = [
+            'import triton_viz',
+            'from triton_viz',
+            '@triton_viz.trace',
+            'triton_viz.launch',
+        ];
+        document.querySelectorAll('pre code.language-python').forEach(code => {
+            const lines = code.textContent.split('\n');
+            const updated = lines.map(line => {
+                const trimmed = line.trim();
+                const matches = patterns.some(pattern => trimmed.startsWith(pattern));
+                const isError = trimmed.includes('Out-Of-Bounds Access HERE!');
+                const highlighted = highlightPythonLine(line);
+                if (isError) {
+                    return `<span class="hl-error-line">${highlighted}</span>`;
+                }
+                return matches ? `<span class="tviz-line">${highlighted}</span>` : highlighted;
+            });
+            code.innerHTML = updated.join('\n');
+        });
+    }
+    highlightTritonVizLines();
+</script>
+</body>
+</html>
