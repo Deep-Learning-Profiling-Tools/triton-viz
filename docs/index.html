@@ -6,20 +6,20 @@
     <title>Triton-Viz | Visualization Toolkit for Triton GPU Programming</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-primary: #0a0a0b;
-            --bg-secondary: #111113;
-            --bg-tertiary: #18181b;
-            --text-primary: #fafafa;
-            --text-secondary: #a1a1aa;
-            --text-muted: #71717a;
-            --accent: #6366f1;
-            --accent-hover: #818cf8;
-            --border: #27272a;
-            --gradient-start: #6366f1;
-            --gradient-end: #8b5cf6;
+            --bg-primary: #080808;
+            --bg-secondary: #121212;
+            --bg-tertiary: #1a1a1a;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent: #22d3ee;
+            --accent-hover: #67e8f9;
+            --border: #262626;
+            --gradient-start: #22d3ee;
+            --gradient-end: #0ea5e9;
         }
 
         * {
@@ -29,7 +29,7 @@
         }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-family: 'JetBrains Mono', monospace;
             background: var(--bg-primary);
             color: var(--text-primary);
             line-height: 1.6;
@@ -117,7 +117,7 @@
 
         .btn-primary {
             background: var(--accent);
-            color: white;
+            color: #000;
         }
 
         .btn-primary:hover {
@@ -126,13 +126,12 @@
 
         /* Hero Section */
         .hero {
-            min-height: 100vh;
+            padding: 10rem 2rem 6rem;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
             text-align: center;
-            padding: 8rem 2rem 4rem;
             position: relative;
         }
 
@@ -144,7 +143,7 @@
             transform: translateX(-50%);
             width: 800px;
             height: 800px;
-            background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, transparent 70%);
+            background: radial-gradient(circle, rgba(34, 211, 238, 0.1) 0%, transparent 70%);
             pointer-events: none;
         }
 
@@ -155,7 +154,7 @@
             padding: 0.5rem 1rem;
             background: var(--bg-tertiary);
             border: 1px solid var(--border);
-            border-radius: 100px;
+            border-radius: 4px;
             font-size: 0.85rem;
             color: var(--text-secondary);
             margin-bottom: 2rem;
@@ -171,49 +170,49 @@
             line-height: 1.1;
             max-width: 900px;
             margin-bottom: 1.5rem;
-            background: linear-gradient(135deg, var(--text-primary) 0%, var(--text-secondary) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
+            letter-spacing: -0.02em;
         }
 
         .hero p {
-            font-size: 1.25rem;
+            font-size: 1.1rem;
             color: var(--text-secondary);
             max-width: 600px;
             margin-bottom: 3rem;
         }
 
         .install-box {
-            background: var(--bg-secondary);
+            background: #000;
             border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 1.5rem 2rem;
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
             margin-bottom: 2rem;
-        }
-
-        .install-label {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin-bottom: 0.75rem;
-        }
-
-        .install-command {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 1rem;
-            color: var(--accent);
             display: flex;
             align-items: center;
             gap: 1rem;
         }
 
+        .install-command {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--accent);
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex: 1;
+        }
+
         .install-command code {
-            background: var(--bg-tertiary);
-            padding: 0.75rem 1.25rem;
-            border-radius: 8px;
-            border: 1px solid var(--border);
+            background: transparent;
+            padding: 0;
+            border-radius: 0;
+            border: none;
+            color: var(--text-primary);
+        }
+
+        .install-command code::before {
+            content: '$ ';
+            color: var(--accent);
+            opacity: 0.7;
         }
 
         .copy-btn {
@@ -260,46 +259,90 @@
             margin: 0 auto;
         }
 
-        .features-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 1.5rem;
-        }
-
-        .feature-card {
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 2rem;
-            transition: all 0.3s;
-        }
-
-        .feature-card:hover {
-            border-color: var(--accent);
-            transform: translateY(-4px);
-        }
-
-        .feature-icon {
-            width: 48px;
-            height: 48px;
-            background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
-            border-radius: 12px;
+        .features-interface {
+            max-width: 1200px;
+            margin: 0 auto;
             display: flex;
-            align-items: center;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        .features-tabs {
+            display: flex;
             justify-content: center;
-            font-size: 1.5rem;
-            margin-bottom: 1.25rem;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1.5rem;
         }
 
-        .feature-card h3 {
-            font-size: 1.25rem;
-            font-weight: 600;
-            margin-bottom: 0.75rem;
-        }
-
-        .feature-card p {
+        .tab-btn {
+            background: transparent;
+            border: 1px solid transparent;
             color: var(--text-secondary);
-            font-size: 0.95rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            cursor: pointer;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .tab-btn:hover {
+            color: var(--text-primary);
+            background: var(--bg-tertiary);
+        }
+
+        .tab-btn.active {
+            color: var(--accent);
+            background: rgba(34, 211, 238, 0.05);
+            border-color: rgba(34, 211, 238, 0.2);
+        }
+
+        .feature-display {
+            min-height: 600px;
+        }
+
+        .feature-content {
+            display: none;
+            animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            text-align: center;
+        }
+
+        .feature-content.active {
+            display: block;
+        }
+
+        .video-frame {
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 2rem;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+            width: 100%;
+        }
+
+        .video-frame video {
+            width: 100%;
+            height: auto;
+            display: block;
+            max-height: 80vh;
+            object-fit: contain;
+            margin: 0 auto;
+        }
+
+        .feature-description {
+            color: var(--text-secondary);
+            max-width: 800px;
+            margin: 0 auto;
+            font-size: 1.1rem;
+            line-height: 1.6;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         /* Workflow Section */
@@ -307,55 +350,37 @@
             padding: 6rem 2rem;
         }
 
-        .workflow-steps {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 2rem;
-            margin-top: 3rem;
+        .code-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            max-width: 800px;
+            margin: 0 auto;
+            overflow-x: auto;
         }
 
-        @media (max-width: 900px) {
-            .workflow-steps {
-                grid-template-columns: repeat(2, 1fr);
-            }
+        .code-header {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.5rem;
         }
 
-        @media (max-width: 500px) {
-            .workflow-steps {
-                grid-template-columns: 1fr;
-            }
+        .code-container pre {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem;
+            line-height: 1.7;
         }
 
-        .workflow-step {
-            text-align: center;
-            position: relative;
-        }
-
-        .step-number {
-            width: 56px;
-            height: 56px;
-            background: var(--bg-tertiary);
-            border: 2px solid var(--accent);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.5rem;
-            font-weight: 700;
-            color: var(--accent);
-            margin: 0 auto 1.5rem;
-        }
-
-        .workflow-step h3 {
-            font-size: 1.1rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-        }
-
-        .workflow-step p {
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-        }
+        .token.keyword { color: #f472b6; }
+        .token.function { color: #38bdf8; }
+        .token.comment { color: #64748b; }
+        .token.decorator { color: #fbbf24; }
+        .token.string { color: #34d399; }
 
         /* Operations Section */
         .operations {
@@ -411,7 +436,7 @@
             transform: translateX(-50%);
             width: 600px;
             height: 600px;
-            background: radial-gradient(circle, rgba(139, 92, 246, 0.1) 0%, transparent 70%);
+            background: radial-gradient(circle, rgba(34, 211, 238, 0.05) 0%, transparent 70%);
             pointer-events: none;
         }
 
@@ -419,6 +444,7 @@
             font-size: 2.5rem;
             font-weight: 700;
             margin-bottom: 1rem;
+            letter-spacing: -0.01em;
         }
 
         .cta p {
@@ -510,32 +536,22 @@
                 <img src="/Logo.jpg" alt="Triton-Viz">
                 <span>Triton-Viz</span>
             </a>
-            <div class="nav-links">
-                <a href="#features">Features</a>
-                <a href="#workflow">How It Works</a>
-                <a href="#operations">Operations</a>
-                <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz" target="_blank">GitHub</a>
-            </div>
-            <div class="nav-cta">
-                <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz" class="btn btn-primary" target="_blank">Get Started</a>
-            </div>
         </div>
     </nav>
 
     <!-- Hero Section -->
     <section class="hero">
         <div class="hero-badge">
-            <span>Open Source</span> &bull; MIT Licensed
+            <span>Open Source</span> | MIT Licensed
         </div>
         <h1>Visualize and debug your Triton GPU kernels</h1>
         <p>Interactive 3D tensor visualization, memory access patterns, and operation analysis for Triton kernel development. No GPU required.</p>
 
         <div class="install-box">
-            <div class="install-label">Quick Install</div>
             <div class="install-command">
-                <code>git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git && cd triton-viz && uv sync</code>
-                <button class="copy-btn" onclick="navigator.clipboard.writeText('git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git && cd triton-viz && uv sync')">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <code>pip install triton-viz</code>
+                <button class="copy-btn" onclick="navigator.clipboard.writeText('pip install triton-viz')">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                         <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                     </svg>
@@ -548,72 +564,107 @@
     <section class="features" id="features">
         <div class="section-container">
             <div class="section-header">
-                <h2>Powerful Visualization Features</h2>
-                <p>Everything you need to understand and optimize your Triton kernels</p>
+                <h2>Visualization Features</h2>
             </div>
-            <div class="features-grid">
-                <div class="feature-card">
-                    <div class="feature-icon">&#x1F4CA;</div>
-                    <h3>3D Tensor View</h3>
-                    <p>Interactive WebGL rendering with real-time hover detection, camera controls, and persistent view states.</p>
+            
+            <div class="features-interface">
+                <div class="features-tabs">
+                    <button class="tab-btn active" onclick="switchFeature(event, 'feat-3d')">3D View</button>
+                    <button class="tab-btn" onclick="switchFeature(event, 'feat-heatmap')">Heatmaps</button>
+                    <button class="tab-btn" onclick="switchFeature(event, 'feat-histogram')">Histograms</button>
+                    <button class="tab-btn" onclick="switchFeature(event, 'feat-code')">Code Mapping</button>
+                    <button class="tab-btn" onclick="switchFeature(event, 'feat-pid')">Program IDs</button>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#x1F3A8;</div>
-                    <h3>Value Heatmaps</h3>
-                    <p>Color tensors by value with per-operation color schemes and multi-program access count visualization.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#x1F4C8;</div>
-                    <h3>Histogram Analysis</h3>
-                    <p>Analyze value distributions with configurable bins, statistics display, and per-tensor selection.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#x1F4D0;</div>
-                    <h3>CAD-style Dimensions</h3>
-                    <p>Tensor shapes annotated with extension lines, arrowheads, and color-coded legends for easy identification.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#x1F50D;</div>
-                    <h3>Memory Analysis</h3>
-                    <p>Track operation counts, memory usage, scratch buffer timelines, and out-of-bounds access detection.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#x1F4BB;</div>
-                    <h3>Code Context</h3>
-                    <p>Source code peek panel with line highlighting for each operation, prioritizing user code over framework internals.</p>
+
+                <div class="feature-display">
+                    <div class="feature-content active" id="feat-3d">
+                        <div class="video-frame">
+                            <video autoplay loop muted playsinline controls>
+                                <source src="vids/3d.mp4" type="video/mp4">
+                            </video>
+                        </div>
+                        <p class="feature-description">Interactive 3D rendering allows you to inspect tensor layouts and memory access patterns from any angle.</p>
+                    </div>
+
+                    <div class="feature-content" id="feat-heatmap">
+                        <div class="video-frame">
+                            <video autoplay loop muted playsinline controls>
+                                <source src="vids/heatmap.mp4" type="video/mp4">
+                            </video>
+                        </div>
+                        <p class="feature-description">Visualize tensor values with color gradients to quickly identify outliers, zeros, or saturation.</p>
+                    </div>
+
+                    <div class="feature-content" id="feat-histogram">
+                        <div class="video-frame">
+                            <video autoplay loop muted playsinline controls>
+                                <source src="vids/histogram.mp4" type="video/mp4">
+                            </video>
+                        </div>
+                        <p class="feature-description">Analyze the distribution of values within your tensors to understand data characteristics and debugging issues.</p>
+                    </div>
+
+                    <div class="feature-content" id="feat-code">
+                        <div class="video-frame">
+                            <video autoplay loop muted playsinline controls>
+                                <source src="vids/code.mp4" type="video/mp4">
+                            </video>
+                        </div>
+                        <p class="feature-description">Directly map visual operations back to your source code lines for seamless debugging.</p>
+                    </div>
+
+                    <div class="feature-content" id="feat-pid">
+                        <div class="video-frame">
+                            <video autoplay loop muted playsinline controls>
+                                <source src="vids/pid.mp4" type="video/mp4">
+                            </video>
+                        </div>
+                        <p class="feature-description">Filter and inspect specific Program IDs (PIDs) to understand parallel execution and block-level behavior.</p>
+                    </div>
                 </div>
             </div>
         </div>
     </section>
 
+    <script>
+        function switchFeature(event, featureId) {
+            // Remove active class from all tabs and content
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.feature-content').forEach(content => content.classList.remove('active'));
+            
+            // Add active class to clicked tab and target content
+            event.currentTarget.classList.add('active');
+            document.getElementById(featureId).classList.add('active');
+        }
+    </script>
+
     <!-- Workflow Section -->
     <section class="workflow" id="workflow">
         <div class="section-container">
             <div class="section-header">
-                <h2>How It Works</h2>
-                <p>From kernel code to visual insights in four simple steps</p>
+                <h2>Easy Integration</h2>
+                <p>Add two lines of code to visualize any Triton kernel</p>
             </div>
-            <div class="workflow-steps">
-                <div class="workflow-step">
-                    <div class="step-number">1</div>
-                    <h3>Decorate</h3>
-                    <p>Add @triton_viz.trace decorator to your Triton kernel function</p>
-                </div>
-                <div class="workflow-step">
-                    <div class="step-number">2</div>
-                    <h3>Execute</h3>
-                    <p>Run your kernel with TRITON_INTERPRET=1 to trace operations</p>
-                </div>
-                <div class="workflow-step">
-                    <div class="step-number">3</div>
-                    <h3>Launch</h3>
-                    <p>Call triton_viz.launch() to start the visualization server</p>
-                </div>
-                <div class="workflow-step">
-                    <div class="step-number">4</div>
-                    <h3>Explore</h3>
-                    <p>Navigate programs, inspect tensors, and analyze memory patterns</p>
-                </div>
+            <div class="code-container">
+                <div class="code-header">trace and launch</div>
+                <pre><code><span class="token keyword">import</span> triton_viz
+<span class="token keyword">from</span> triton_viz.clients <span class="token keyword">import</span> Tracer
+
+<span class="token comment"># 1. Decorate your kernel</span>
+<span class="token decorator">@triton_viz.trace(client=Tracer())</span>
+<span class="token decorator">@triton.jit</span>
+<span class="token keyword">def</span> <span class="token function">add_kernel</span>(x_ptr, y_ptr, output_ptr, ...):
+    ...
+
+<span class="token comment"># 2. Launch the visualizer</span>
+triton_viz.launch()</code></pre>
+            </div>
+            <div class="code-container" style="margin-top: 2rem;">
+                <div class="code-header">run an example</div>
+                <pre><code><span class="token comment"># Clone and run the GEMM example</span>
+git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
+<span class="token keyword">cd</span> triton-viz
+uv run examples/gemm.py</code></pre>
             </div>
         </div>
     </section>
