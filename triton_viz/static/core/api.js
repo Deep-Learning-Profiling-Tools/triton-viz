@@ -2,7 +2,13 @@ const getDefaultBase = () => {
     if (typeof globalThis === 'undefined')
         return '';
     const globalBase = globalThis.__TRITON_VIZ_API__;
-    return globalBase || '';
+    if (globalBase)
+        return globalBase;
+    if (typeof window === 'undefined' || !window.location)
+        return '';
+    // derive a stable base from the current page location for proxy paths
+    const baseUrl = new URL('.', window.location.href);
+    return baseUrl.href.replace(/\/$/, '');
 };
 const buildUrl = (path, baseOverride) => {
     if (!path)

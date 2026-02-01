@@ -22,6 +22,29 @@ export const COLOR_EDGE = new THREE.Color(0.5, 0.5, 0.5);
 
 const COLOR_SLICE = new THREE.Color(0.0, 0.7, 1.0);
 
+// quick feature test for WebGL availability in the current browser.
+export function canUseWebgl(): boolean {
+    if (typeof document === 'undefined') return false;
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    return !!gl;
+}
+
+// render a visible warning when WebGL is missing or disabled.
+export function renderWebglWarning(container: HTMLElement): () => void {
+    const existing = container.querySelector('.webgl-warning');
+    if (existing) {
+        return () => existing.remove();
+    }
+    const warning = document.createElement('div');
+    warning.className = 'webgl-warning info-card';
+    warning.setAttribute('role', 'alert');
+    warning.setAttribute('aria-live', 'assertive');
+    warning.textContent = 'WebGL is required for the 3D visualizer. Enable WebGL in your browser settings and reload this page.';
+    container.appendChild(warning);
+    return () => warning.remove();
+}
+
 export function setupScene(container: HTMLElement, backgroundColor = 0x000000): {
     scene: ThreeScene;
     camera: ThreeCamera;

@@ -17,6 +17,8 @@ import {
     GAP,
     COLOR_HOVER,
     updateTensorHighlights,
+    canUseWebgl,
+    renderWebglWarning,
 } from '../utils/three_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { enableDrag } from '../utils/ui_helpers.js';
@@ -852,6 +854,10 @@ export function createTensorVisualization(
         const stage = document.createElement('div');
         stage.className = 'viz-stage';
         containerElement.appendChild(stage);
+        if (!canUseWebgl()) {
+            // show a visible message when WebGL is disabled and skip initialization.
+            return renderWebglWarning(containerElement);
+        }
         const sideMenu = createSideMenu(containerElement);
         const histogramUI = createHistogramOverlay(containerElement, {
             title: `${type} Value Distribution`,
@@ -859,7 +865,15 @@ export function createTensorVisualization(
             sources: configs.map(c => ({ value: c.name.toUpperCase(), label: `${c.name} Tensor` })),
             buildRequestBody: (s, b) => ({ uuid: op.uuid, source: s, bins: b }),
         });
-        const { scene, camera, renderer } = setupScene(stage, 0x000000);
+        let scene: ThreeScene;
+        let camera: ThreeCamera;
+        let renderer: ThreeRenderer;
+        try {
+            ({ scene, camera, renderer } = setupScene(stage, 0x000000));
+        } catch (err) {
+            // webgl can still fail even after a feature test.
+            return renderWebglWarning(containerElement);
+        }
         const disposer = createDisposer();
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
         const tensors = new Map<string, TensorGroup>();

@@ -708,6 +708,21 @@ body {
     color: var(--text-secondary);
 }
 
+/* webgl fallback banner */
+.webgl-warning {
+    position: absolute;
+    inset: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 14px;
+    color: #f8fafc;
+    border-color: var(--warning);
+    background: rgba(15, 23, 42, 0.88);
+    box-shadow: var(--shadow-soft);
+}
+
 .is-draggable {
     cursor: grab;
     user-select: none;

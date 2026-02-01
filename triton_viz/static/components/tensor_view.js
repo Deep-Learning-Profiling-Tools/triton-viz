@@ -2,7 +2,7 @@ import { createCadDimension, createShapeLegend } from '../utils/dimension_utils.
 import { clamp01, getHue, hslToRgb } from '../utils/colormap.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
-import { setupScene, setupGeometries, createTensor, setupCamera, fitCameraToBounds, setupEventListeners, cameraControls, CUBE_SIZE, GAP, COLOR_HOVER, updateTensorHighlights, } from '../utils/three_utils.js';
+import { setupScene, setupGeometries, createTensor, setupCamera, fitCameraToBounds, setupEventListeners, cameraControls, CUBE_SIZE, GAP, COLOR_HOVER, updateTensorHighlights, canUseWebgl, renderWebglWarning, } from '../utils/three_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { getApiBase, postJson } from '../core/api.js';
 import { getState } from '../core/state.js';
@@ -685,6 +685,10 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         const stage = document.createElement('div');
         stage.className = 'viz-stage';
         containerElement.appendChild(stage);
+        if (!canUseWebgl()) {
+            // show a visible message when WebGL is disabled and skip initialization.
+            return renderWebglWarning(containerElement);
+        }
         const sideMenu = createSideMenu(containerElement);
         const histogramUI = createHistogramOverlay(containerElement, {
             title: `${type} Value Distribution`,
@@ -692,7 +696,16 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             sources: configs.map(c => ({ value: c.name.toUpperCase(), label: `${c.name} Tensor` })),
             buildRequestBody: (s, b) => ({ uuid: op.uuid, source: s, bins: b }),
         });
-        const { scene, camera, renderer } = setupScene(stage, 0x000000);
+        let scene;
+        let camera;
+        let renderer;
+        try {
+            ({ scene, camera, renderer } = setupScene(stage, 0x000000));
+        }
+        catch (err) {
+            // webgl can still fail even after a feature test.
+            return renderWebglWarning(containerElement);
+        }
         const disposer = createDisposer();
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
         const tensors = new Map();

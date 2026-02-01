@@ -1,5 +1,6 @@
 import threading
 from typing import Any
+import sys
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data, delinearized, make_3d
@@ -958,19 +959,33 @@ def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None)
     app.run(host="0.0.0.0", port=cloudflared_port, debug=False, use_reloader=False)
 
 
-def launch(share: bool = True, port: int | None = None):
+def _is_interactive() -> bool:
+    if getattr(sys, "ps1", None):
+        return True
+    if getattr(sys, "flags", None) and sys.flags.interactive:
+        return True
+    return "ipykernel" in sys.modules
+
+
+def launch(share: bool = True, port: int | None = None, block: bool | None = None):
     """
     Launch the Triton-Viz Flask server.
 
+    :param block: Whether to block the caller when share=True. Defaults to
+                  True outside interactive sessions.
     """
     print("Launching Triton viz tool")
     default_port = 8000 if share else 5001
     actual_port = port or int(os.getenv("TRITON_VIZ_PORT", default_port))
+    if block is None:
+        block = share and not _is_interactive()
 
     if share:
         print("--------")
         flask_thread = threading.Thread(
-            target=run_flask_with_cloudflared, args=(actual_port, None)
+            target=run_flask_with_cloudflared,
+            args=(actual_port, None),
+            daemon=False,
         )
         flask_thread.start()
 
@@ -993,6 +1008,12 @@ def launch(share: bool = True, port: int | None = None):
             print("--------")
         except requests.exceptions.RequestException:
             print("Setting up public URL... Please wait.")
+
+        if block:
+            try:
+                flask_thread.join()
+            except KeyboardInterrupt:
+                pass
 
         return local_url, public_url
     else:
