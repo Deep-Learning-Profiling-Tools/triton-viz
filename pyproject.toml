@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include=["triton_viz"]
+include=["triton_viz*"]
 exclude=["tasks"]
 
 [tool.setuptools]
