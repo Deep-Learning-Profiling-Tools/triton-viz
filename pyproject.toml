@@ -57,7 +57,5 @@ test = [
   "torch",
 ]
 nki = [
-  "neuronx-cc @ https://pip.repos.neuron.amazonaws.com/neuronx-cc/neuronx_cc-2.22.12471.0%2Bb4a00d10-cp310-cp310-linux_x86_64.whl ; python_version == '3.10'",
-  "neuronx-cc @ https://pip.repos.neuron.amazonaws.com/neuronx-cc/neuronx_cc-2.21.33363.0%2B82129205-cp311-cp311-linux_x86_64.whl ; python_version == '3.11'",
-  "neuronx-cc @ https://pip.repos.neuron.amazonaws.com/neuronx-cc/neuronx_cc-2.22.12471.0%2Bb4a00d10-cp312-cp312-linux_x86_64.whl ; python_version == '3.12'"
+  "neuronx-cc==2.22; python_version >= '3.10' and python_version <= '3.12'"
 ]
