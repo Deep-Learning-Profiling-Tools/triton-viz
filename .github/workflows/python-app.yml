@@ -64,9 +64,6 @@ jobs:
     - name: Install Triton-Viz with NKI extras
       run: |
         cd triton_viz
-        # Extract "neuronx-cc==x.xx" from pyproject.toml and install from AWS Neuron repo
-        NKI_DEP=$(python -c "import tomllib; deps=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']['nki']; req=next(d for d in deps if 'neuronx-cc' in d); print(req.split(';')[0].strip())")
-        uv pip install "$NKI_DEP" --extra-index-url https://pip.repos.neuron.amazonaws.com
         uv sync --extra test --extra nki
 
     - name: Run full (Triton + NKI) pytest suite

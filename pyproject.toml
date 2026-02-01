@@ -57,5 +57,9 @@ test = [
   "torch",
 ]
 nki = [
-  "neuronx-cc==2.22; python_version >= '3.10' and python_version <= '3.12'"
+  "neuronx-cc==2.22.*; python_version >= '3.10' and python_version <= '3.12'"
 ]
+
+[tool.uv]
+extra-index-url = ["https://pip.repos.neuron.amazonaws.com"]
+index-strategy = "unsafe-best-match"
