@@ -168,5 +168,17 @@ If you find this repo useful for your research, please cite our paper:
   location = {Pittsburgh, Pennsylvania, United States},
   series = {SIGCSE TS '25}
 }
+
+@inproceedings{wu2026tritonsanitizer,
+  author    = {Wu, Hao and Zhao, Qidong and Chen, Songqing and Chen, Yang and Hao, Yueming and Liu, Tony C. W. and Chen, Sijia and Aziz, Adnan and Zhou, Keren},
+  title     = {Triton-Sanitizer: A Fast and Device-Agnostic Memory Sanitizer for Triton with Rich Diagnostic Context},
+  year      = {2026},
+  publisher = {Association for Computing Machinery},
+  address   = {New York, NY, USA},
+  location  = {Pittsburgh, PA, USA},
+  booktitle = {Proceedings of the 31st ACM International Conference on Architectural Support for Programming Languages and Operating Systems},
+  series    = {ASPLOS '26},
+  keywords  = {GPU, Debugging, Symbolic Execution, Memory Safety, Triton, Memory Access Errors}
+}
 ```
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
