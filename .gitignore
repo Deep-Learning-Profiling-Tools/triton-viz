@@ -54,7 +54,6 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-triton_viz/static/
 
 # Translations
 *.mo
@@ -170,4 +169,3 @@ uv.lock
 triton_viz/version.py
 .subagents/
 subagent*.txt
-triton_viz/templates/index.html
