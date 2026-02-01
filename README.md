@@ -67,7 +67,9 @@ If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Other
 
 ### Frontend Build
 
-If you want to run the visualizer, build the TS sources:
+The PyPI package ships with prebuilt frontend assets in `triton_viz/static`, so
+you do not need npm to run the visualizer. If you want to modify the frontend,
+rebuild the TS sources:
 
 ```sh
 npm install
