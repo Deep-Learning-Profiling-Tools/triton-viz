@@ -55,7 +55,13 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 
 ### Installation of Triton-Viz
 
-Clone the repository to your local machine:
+Most users can install directly from GitHub:
+
+```sh
+pip install git+https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
+```
+
+If you want to run examples from this repo, contribute, or build the frontend, install from source instead:
 
 ```sh
 git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
@@ -78,7 +84,7 @@ npm run build:frontend
 
 ### Optional: Enable NKI Support
 
-If you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the NKI-specific tests:
+For source installs, if you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the NKI-specific tests:
 
 ```sh
 uv sync --extra nki # or "uv sync --extra nki --extra test" if also running tests
@@ -97,6 +103,8 @@ uv sync --extra test
 * To run visualizer frontend tests, run `npm run test:frontend`.
 
 ## Working with Examples
+
+Examples live in this repo. Clone it first if you installed via pip.
 
 ```sh
 cd examples
