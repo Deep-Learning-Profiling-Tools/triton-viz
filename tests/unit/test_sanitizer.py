@@ -256,3 +256,42 @@ def test_reshape_expr_eval(op: str, extra):
     result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == 5
     assert constraints is None
+
+
+# ======== Regression Tests: expand_dims/broadcast Shape Fix =========
+
+
+def test_expand_dims_updates_shape():
+    """
+    Regression test: expand_dims must update dtype to reflect the new shape.
+
+    Before fix (main): shape returns () because dtype was copied from arg
+    After fix: shape returns (1,) with the inserted dimension
+    """
+    # Scalar constant has empty shape
+    arg = SymbolicExpr.create("const", 5, tl.int32)
+    assert arg.shape == ()
+
+    # expand_dims at axis 0 should insert dimension of size 1
+    expr = SymbolicExpr.create("expand_dims", arg, 0)
+
+    # FAILS on main (returns ()), PASSES on fixed branch
+    assert expr.shape == (1,), f"Expected shape (1,), got {expr.shape}"
+
+
+def test_broadcast_updates_shape():
+    """
+    Regression test: broadcast must update dtype to reflect the target shape.
+
+    Before fix (main): shape returns () because dtype was copied from arg
+    After fix: shape returns (4,) which is the broadcast target
+    """
+    # Scalar constant has empty shape
+    arg = SymbolicExpr.create("const", 5, tl.int32)
+    assert arg.shape == ()
+
+    # broadcast to shape (4,)
+    expr = SymbolicExpr.create("broadcast", arg, (4,))
+
+    # FAILS on main (returns ()), PASSES on fixed branch
+    assert expr.shape == (4,), f"Expected shape (4,), got {expr.shape}"
