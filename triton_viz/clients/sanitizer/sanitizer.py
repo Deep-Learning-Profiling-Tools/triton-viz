@@ -866,6 +866,8 @@ class ArangeSymbolicExpr(SymbolicExpr):
     ret_ty: ConstSymbolicExpr
     start: ConstSymbolicExpr
     end: ConstSymbolicExpr
+    # Class-level counter for generating unique variable names
+    _arange_counter: ClassVar[int] = 0
 
     def __init__(self, op: str, ret_ty: Any, start: Any, end: Any):
         super().__init__(op)
@@ -876,17 +878,21 @@ class ArangeSymbolicExpr(SymbolicExpr):
         start_const = cast(ConstSymbolicExpr, self.start)
         end_const = cast(ConstSymbolicExpr, self.end)
         self.dtype = tl.block_type(tl.int32, [end_const.value - start_const.value])
+        # Assign a unique ID for this arange instance
+        self._unique_id = ArangeSymbolicExpr._arange_counter
+        ArangeSymbolicExpr._arange_counter += 1
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         start = self.start.to_py()
         end = self.end.to_py()
-        key = (start, end)
-        if key in SymbolicExpr.ARANGE_DICT:
-            return SymbolicExpr.ARANGE_DICT[key]
-        name = f"arange_{start}_{end}"
+        # Use unique ID to ensure each arange instance has its own Z3 variable.
+        # This is critical for multi-dimensional tensors where different dimensions
+        # may use arange with the same (start, end) but should be independent.
+        # The _to_z3() method in the base class caches the result per instance,
+        # so the same ArangeSymbolicExpr object will always return the same variable.
+        name = f"arange_{self._unique_id}_{start}_{end}"
         v = Int(name)
         constraints = _and_constraints(v >= start, v < end)
-        SymbolicExpr.ARANGE_DICT[key] = (v, constraints)
         return v, constraints
 
     def concretize(self) -> Any:
