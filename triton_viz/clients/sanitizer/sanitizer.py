@@ -1436,21 +1436,67 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
         self.add_child("axis", axis)
-        self.dtype = self.arg.dtype
+        # Update dtype to reflect the new shape with an inserted dimension of size 1
+        arg_shape = list(self.arg.shape) if self.arg.shape else []
+        axis_val = (
+            axis
+            if isinstance(axis, int)
+            else axis.to_py()
+            if hasattr(axis, "to_py")
+            else 0
+        )
+        # Handle negative axis
+        if axis_val < 0:
+            axis_val = len(arg_shape) + 1 + axis_val
+        # Insert dimension of size 1 at the specified axis
+        new_shape = arg_shape[:axis_val] + [1] + arg_shape[axis_val:]
+        # Get the element type from arg's dtype
+        arg_dtype = self.arg.dtype
+        if arg_dtype is not None and hasattr(arg_dtype, "element_ty"):
+            elem_ty = arg_dtype.element_ty
+        else:
+            elem_ty = arg_dtype if arg_dtype else tl.int32
+        self.dtype = tl.block_type(elem_ty, new_shape) if new_shape else arg_dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        # expand_dims adds a dimension of size 1, which doesn't change the Z3 expression
+        # since the new dimension has only one possible index value (0).
+        # The Z3 expression and constraints remain the same as the argument.
         return self.arg._to_z3()
 
 
 class BroadcastSymbolicExpr(SymbolicExpr):
     arg: "SymbolicExpr"
+    target_shape: tuple[int, ...]
 
     def __init__(self, op: str, arg: Any, shape: Any):
         super().__init__(op)
         self.add_child("arg", arg)
-        self.dtype = self.arg.dtype
+        # Store the target shape for broadcasting
+        if isinstance(shape, (list, tuple)):
+            self.target_shape = tuple(shape)
+        elif hasattr(shape, "to_py"):
+            self.target_shape = tuple(shape.to_py())
+        else:
+            self.target_shape = ()
+        # Update dtype to reflect the broadcast shape
+        arg_dtype = self.arg.dtype
+        if arg_dtype is not None and hasattr(arg_dtype, "element_ty"):
+            elem_ty = arg_dtype.element_ty
+        else:
+            elem_ty = arg_dtype if arg_dtype else tl.int32
+        self.dtype = (
+            tl.block_type(elem_ty, list(self.target_shape))
+            if self.target_shape
+            else arg_dtype
+        )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        # Broadcasting replicates values across new dimensions.
+        # For Z3 symbolic execution, the expression remains the same because:
+        # - Dimensions of size 1 in the source are replicated (same value for all indices)
+        # - The Z3 variable represents "any valid index" in the original dimension
+        # The constraints from the argument are preserved and apply to all broadcast positions.
         return self.arg._to_z3()
 
 
