@@ -308,13 +308,6 @@ nested_loop_checker = SymbolicSanitizer(abort_on_error=False)
 @triton_viz.trace(client=nested_loop_checker)
 @triton.jit
 def nested_loop_outer_dep_kernel(out_ptr):
-    """
-    Access: out_ptr[i * 4 + j] where i in [0,3), j in [0,4)
-    Valid indices: 0..11 (buffer size = 12)
-
-    Without fix: Z3 only knows j in [0,4), i is unbounded -> false positive OOB
-    With fix: Z3 knows i in [0,3) and j in [0,4) -> max index = 11 < 12, valid
-    """
     for i in range(0, 3):
         for j in range(0, 4):
             idx = i * 4 + j
@@ -322,19 +315,12 @@ def nested_loop_outer_dep_kernel(out_ptr):
 
 
 def test_nested_loop_no_false_positive():
-    """
-    Regression test for nested loop outer constraint fix.
-
-    Before fix: This test FAILS (false positive OOB detected)
-    After fix: This test PASSES (no OOB, access is valid)
-    """
     nested_loop_checker.records.clear()
 
     # Buffer size = 12, exactly fits i*4+j where i in [0,3), j in [0,4)
     out = torch.empty((12,), dtype=torch.int32)
     nested_loop_outer_dep_kernel[(1,)](out)
 
-    # After fix: no OOB should be reported (records should be empty)
     assert (
         len(nested_loop_checker.records) == 0
     ), f"False positive OOB detected. Records: {nested_loop_checker.records}"
