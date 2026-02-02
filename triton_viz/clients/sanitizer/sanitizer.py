@@ -1459,9 +1459,6 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
         self.dtype = tl.block_type(elem_ty, new_shape) if new_shape else arg_dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        # expand_dims adds a dimension of size 1, which doesn't change the Z3 expression
-        # since the new dimension has only one possible index value (0).
-        # The Z3 expression and constraints remain the same as the argument.
         return self.arg._to_z3()
 
 
@@ -1492,11 +1489,6 @@ class BroadcastSymbolicExpr(SymbolicExpr):
         )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        # Broadcasting replicates values across new dimensions.
-        # For Z3 symbolic execution, the expression remains the same because:
-        # - Dimensions of size 1 in the source are replicated (same value for all indices)
-        # - The Z3 variable represents "any valid index" in the original dimension
-        # The constraints from the argument are preserved and apply to all broadcast positions.
         return self.arg._to_z3()
 
 
