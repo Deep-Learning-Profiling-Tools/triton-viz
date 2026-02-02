@@ -301,6 +301,31 @@ def test_loop_deferred_checks_simplify():
     assert load_index_checker.observed_offsets == []
 
 
+# Dedicated sanitizer for nested loop regression test
+nested_loop_checker = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=nested_loop_checker)
+@triton.jit
+def nested_loop_outer_dep_kernel(out_ptr):
+    for i in range(0, 3):
+        for j in range(0, 4):
+            idx = i * 4 + j
+            tl.store(out_ptr + idx, idx)
+
+
+def test_nested_loop_no_false_positive():
+    nested_loop_checker.records.clear()
+
+    # Buffer size = 12, exactly fits i*4+j where i in [0,3), j in [0,4)
+    out = torch.empty((12,), dtype=torch.int32)
+    nested_loop_outer_dep_kernel[(1,)](out)
+
+    assert (
+        len(nested_loop_checker.records) == 0
+    ), f"False positive OOB detected. Records: {nested_loop_checker.records}"
+
+
 # ======== Line Number Reporting Tests ===========
 
 
