@@ -70,3 +70,20 @@ jobs:
       run: |
         cd triton_viz
         uv run pytest tests -m ""
+
+  test-pip-install:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.12'
+
+    - name: Install with pip
+      run: pip install -e .
+
+    - name: Verify installation
+      run: python -c "import triton_viz; print(triton_viz.__version__)"
