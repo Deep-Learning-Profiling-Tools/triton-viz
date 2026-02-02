@@ -489,10 +489,10 @@ class SymbolicExpr:
     def shape(self) -> tuple[int, ...]:
         if not self.dtype:
             return ()
-        if self.dtype is tl.block_type:
-            return self.dtype.shape
-        elif self.dtype is tl.pointer_type:
-            return self.dtype.element_ty.shape
+        if isinstance(self.dtype, tl.block_type):
+            return tuple(int(x) for x in self.dtype.shape)
+        elif isinstance(self.dtype, tl.pointer_type):
+            return tuple(int(x) for x in self.dtype.element_ty.shape)
         return ()
 
     def add_child(self, name: str, value: Any) -> None:
