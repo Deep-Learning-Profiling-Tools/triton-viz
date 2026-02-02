@@ -83,7 +83,9 @@ jobs:
         python-version: '3.12'
 
     - name: Install with pip
-      run: pip install -e .
+      run: |
+        pip install numpy
+        pip install -e .
 
     - name: Verify installation
       run: python -c "import triton_viz; print(triton_viz.__version__)"
