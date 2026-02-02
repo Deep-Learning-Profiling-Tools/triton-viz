@@ -489,10 +489,10 @@ class SymbolicExpr:
     def shape(self) -> tuple[int, ...]:
         if not self.dtype:
             return ()
-        if self.dtype is tl.block_type:
-            return self.dtype.shape
-        elif self.dtype is tl.pointer_type:
-            return self.dtype.element_ty.shape
+        if isinstance(self.dtype, tl.block_type):
+            return tuple(int(x) for x in self.dtype.shape)
+        elif isinstance(self.dtype, tl.pointer_type):
+            return tuple(int(x) for x in self.dtype.element_ty.shape)
         return ()
 
     def add_child(self, name: str, value: Any) -> None:
@@ -2320,13 +2320,28 @@ class SymbolicSanitizer(Sanitizer):
             addr_sym = self.addr_sym
             assert solver is not None
             assert addr_sym is not None
-            iterator_constraint: Optional[BoolRef] = None
+            all_iterator_constraints: list[BoolRef] = []
             if ctx.pending_checks:
                 solver.push()
+                # Add constraint for the current (innermost) loop
                 iterator_constraint = _range_to_iterator_constraint(
                     ctx.idx_z3, start=ctx.start, stop=ctx.stop, step=ctx.step
                 )
                 solver.add(iterator_constraint)
+                all_iterator_constraints.append(iterator_constraint)
+
+                # Also add constraints for all outer loops that are still active.
+                # This is critical for nested loops where the address expression
+                # depends on outer loop variables.
+                for outer_ctx in self.loop_stack:
+                    outer_constraint = _range_to_iterator_constraint(
+                        outer_ctx.idx_z3,
+                        start=outer_ctx.start,
+                        stop=outer_ctx.stop,
+                        step=outer_ctx.step,
+                    )
+                    solver.add(outer_constraint)
+                    all_iterator_constraints.append(outer_constraint)
 
             for pending_check in ctx.pending_checks:
                 addr_expr = pending_check.addr_expr
@@ -2340,7 +2355,7 @@ class SymbolicSanitizer(Sanitizer):
                     print(
                         "[Sanitizer] ▶ checking:",
                         addr_expr,
-                        f" with iterator constraints: {iterator_constraint} ",
+                        f" with iterator constraints: {all_iterator_constraints} ",
                         f" and expression-related constraints: {expr_constraints} ",
                     )
 
