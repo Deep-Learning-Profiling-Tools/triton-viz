@@ -1438,13 +1438,7 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
         self.add_child("axis", axis)
         # Update dtype to reflect the new shape with an inserted dimension of size 1
         arg_shape = list(self.arg.shape) if self.arg.shape else []
-        axis_val = (
-            axis
-            if isinstance(axis, int)
-            else axis.to_py()
-            if hasattr(axis, "to_py")
-            else 0
-        )
+        axis_val = axis if isinstance(axis, int) else axis.to_py()
         # Handle negative axis
         if axis_val < 0:
             axis_val = len(arg_shape) + 1 + axis_val
