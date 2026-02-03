@@ -270,6 +270,20 @@ def test_expand_dims_updates_shape():
     expr = SymbolicExpr.create("expand_dims", arg, 0)
     assert expr.shape == (1,), f"Expected shape (1,), got {expr.shape}"
 
+    # Test with tensor input and positive axis
+    tensor_arg = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    assert tensor_arg.shape == (8,)
+    expr2 = SymbolicExpr.create("expand_dims", tensor_arg, 0)
+    assert expr2.shape == (1, 8), f"Expected shape (1, 8), got {expr2.shape}"
+    expr3 = SymbolicExpr.create("expand_dims", tensor_arg, 1)
+    assert expr3.shape == (8, 1), f"Expected shape (8, 1), got {expr3.shape}"
+
+    # Test with negative axis
+    expr4 = SymbolicExpr.create("expand_dims", tensor_arg, -1)
+    assert expr4.shape == (8, 1), f"Expected shape (8, 1), got {expr4.shape}"
+    expr5 = SymbolicExpr.create("expand_dims", tensor_arg, -2)
+    assert expr5.shape == (1, 8), f"Expected shape (1, 8), got {expr5.shape}"
+
 
 def test_broadcast_updates_shape():
     # Scalar constant has empty shape
