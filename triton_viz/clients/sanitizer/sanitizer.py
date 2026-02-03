@@ -1450,13 +1450,7 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
             axis_val = len(arg_shape) + 1 + axis_val
         # Insert dimension of size 1 at the specified axis
         new_shape = arg_shape[:axis_val] + [1] + arg_shape[axis_val:]
-        # Get the element type from arg's dtype
-        arg_dtype = self.arg.dtype
-        if arg_dtype is not None and hasattr(arg_dtype, "element_ty"):
-            elem_ty = arg_dtype.element_ty
-        else:
-            elem_ty = arg_dtype if arg_dtype else tl.int32
-        self.dtype = tl.block_type(elem_ty, new_shape) if new_shape else arg_dtype
+        self.dtype = tl.block_type(cast(Any, self.arg.dtype).scalar, new_shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
