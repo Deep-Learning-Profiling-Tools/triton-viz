@@ -4,7 +4,7 @@ import sys
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data, delinearized, make_3d
-from ..utils.traceback_utils import safe_read_file_segment, score_traceback_frame
+from ..utils.traceback_utils import safe_read_file_segment
 import os
 import torch
 import numpy as np
@@ -256,38 +256,18 @@ def get_op_code():
     if raw_tensor_data is None:
         update_global_data()
     uuid = data.get("uuid") or current_fullscreen_op
-    frame_idx = int(data.get("frame_idx", 0))
     context = int(data.get("context", 8))
     if not uuid or raw_tensor_data is None or uuid not in raw_tensor_data:
         return jsonify({"error": "Operation not found"}), 404
     tb_list = raw_tensor_data[uuid].get("tracebacks") or []
     if not tb_list:
         return jsonify({"error": "Traceback not available"}), 200
-    # Heuristic: pick the BEST user frame under CWD (closest to op)
-    cwd = os.path.realpath(os.getcwd())
-
-    # Prefer frames from tail (closest to current) and highest score
-    best = None
-    best_score = -(10**9)
-    for tb in reversed(tb_list):
-        sc = score_traceback_frame(tb, cwd=cwd)
-        if sc > best_score:
-            best, best_score = tb, sc
-    chosen = best if best is not None else None
-    if chosen is None:
-        # fallback: use requested frame or last non-<string> frame
-        frame_idx = max(0, min(frame_idx, len(tb_list) - 1))
-        chosen = tb_list[frame_idx]
-        for tb in reversed(tb_list):
-            fn = tb.get("filename") or ""
-            if not fn.startswith("<"):
-                chosen = tb
-                break
-    tb = chosen
+    # Last frame = innermost user code, closest to tl.load/tl.store
+    tb = tb_list[-1]
     filename = tb.get("filename")
     lineno = int(tb.get("lineno", 0))
     line_of_code = tb.get("line")
-    seg = safe_read_file_segment(filename, lineno, context, cwd=cwd)
+    seg = safe_read_file_segment(filename, lineno, context)
     if seg is None:
         # fallback with single line
         seg = {

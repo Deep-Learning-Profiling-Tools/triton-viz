@@ -228,43 +228,6 @@ def safe_read_file_segment(
         return None
 
 
-def score_traceback_frame(tb: dict, cwd: str | None = None) -> int:
-    """Score a traceback frame dict for relevance to the user's kernel code.
-
-    Higher scores indicate the frame is more likely the interesting user code.
-    *cwd* defaults to ``os.path.realpath(os.getcwd())``.
-    """
-    if cwd is None:
-        cwd = os.path.realpath(os.getcwd())
-
-    fn = tb.get("filename") or ""
-    line = (tb.get("line") or "").strip()
-    name = tb.get("name") or ""
-    p = os.path.realpath(fn)
-    score = 0
-
-    if "tl.load" in line or "tl.store" in line:
-        score += 100
-    elif "tl." in line:
-        score += 50
-
-    if p.startswith(cwd):
-        score += 5
-    if any(
-        s in p
-        for s in ["site-packages", "triton_viz/", "triton/", "runpy.py", "IPython"]
-    ):
-        score -= 10
-
-    if name.endswith("_kernel") or "kernel" in name:
-        score += 3
-
-    if "examples" in p:
-        score += 1
-
-    return score
-
-
 # ---------------------------------------------------------------------------
 # Statement extraction (originally in clients/utils.py)
 # ---------------------------------------------------------------------------
