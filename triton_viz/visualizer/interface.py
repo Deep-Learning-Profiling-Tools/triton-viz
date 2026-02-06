@@ -4,7 +4,7 @@ import sys
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data, delinearized, make_3d
-from ..utils.traceback_utils import safe_read_file_segment
+from ..utils.traceback_utils import read_source_segment
 import os
 import torch
 import numpy as np
@@ -267,7 +267,12 @@ def get_op_code():
     filename = tb.get("filename")
     lineno = int(tb.get("lineno", 0))
     line_of_code = tb.get("line")
-    seg = safe_read_file_segment(filename, lineno, context)
+    # Only allow reading files under cwd (prevent path traversal via HTTP API)
+    cwd = os.path.realpath(os.getcwd())
+    path = os.path.realpath(filename) if filename else ""
+    seg = (
+        read_source_segment(filename, lineno, context) if path.startswith(cwd) else None
+    )
     if seg is None:
         # fallback with single line
         seg = {

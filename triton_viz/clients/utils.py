@@ -12,7 +12,6 @@ import torch
 
 from ..utils.traceback_utils import (  # noqa: F401
     extract_complete_statement_from_line,
-    get_source_location_from_stack,
 )
 
 

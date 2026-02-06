@@ -4,7 +4,6 @@ import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
 
 
 # Unified superset of framework path fragments used to filter out non-user frames.
@@ -76,7 +75,7 @@ def frame_to_traceback_info(frame: traceback.FrameSummary) -> "TracebackInfo":
 # ---------------------------------------------------------------------------
 
 
-def get_user_code_location() -> tuple[str, int, str] | None:
+def locate_user_frame() -> tuple[str, int, str] | None:
     """Walk the live call stack and return the first user-code location.
 
     Returns ``(filename, lineno, func_name)`` or ``None``.
@@ -122,90 +121,23 @@ def location_to_traceback_info(
     )
 
 
-def get_sanitizer_traceback_info() -> list["TracebackInfo"]:
-    """Extract user-code frames for sanitizer OOB reports.
-
-    This is the logic previously in ``report._get_traceback_info``.
-    """
-    stack_summary = traceback.extract_stack()
-    user_code_tracebacks: list[TracebackInfo] = []
-
-    # First pass: collect user code frames that follow a patch.py call
-    for i, frame in enumerate(stack_summary):
-        if any(path in frame.filename.replace("\\", "/") for path in FRAMEWORK_PATHS):
-            if "examples/" not in frame.filename.replace("\\", "/"):
-                continue
-
-        if frame.filename.startswith("<"):
-            continue
-
-        if i > 0:
-            prev_frame = stack_summary[i - 1]
-            if "triton_viz/core/patch.py" in prev_frame.filename:
-                user_code_tracebacks.append(
-                    TracebackInfo(
-                        filename=frame.filename,
-                        lineno=frame.lineno or 0,
-                        func_name=frame.name,
-                        line_of_code=frame.line or "",
-                    )
-                )
-
-    # Fallback: look for frames after _jit_function_call / _grid_executor_call
-    if not user_code_tracebacks:
-        for i, frame in enumerate(stack_summary):
-            if (
-                "_jit_function_call" in frame.name
-                or "_grid_executor_call" in frame.name
-            ) and "triton_viz/core/patch.py" in frame.filename:
-                if i + 1 < len(stack_summary):
-                    next_frame = stack_summary[i + 1]
-                    if not any(path in next_frame.filename for path in FRAMEWORK_PATHS):
-                        user_code_tracebacks.append(
-                            TracebackInfo(
-                                filename=next_frame.filename,
-                                lineno=next_frame.lineno or 0,
-                                func_name=next_frame.name,
-                                line_of_code=next_frame.line or "",
-                            )
-                        )
-
-    # Reverse so the most immediate error location comes first
-    user_code_tracebacks.reverse()
-
-    # Remove duplicates while preserving order
-    seen: set[tuple[str, int]] = set()
-    unique_tracebacks: list[TracebackInfo] = []
-    for tb in user_code_tracebacks:
-        key = (tb.filename, tb.lineno)
-        if key not in seen:
-            seen.add(key)
-            unique_tracebacks.append(tb)
-
-    return unique_tracebacks
-
-
 # ---------------------------------------------------------------------------
 # Source code reading utilities (originally in interface.py)
 # ---------------------------------------------------------------------------
 
 
-def safe_read_file_segment(
+def read_source_segment(
     filename: str,
     lineno: int,
     context: int = 8,
-    cwd: str | None = None,
 ) -> dict | None:
     """Read a segment of a source file around *lineno*.
 
-    Only files under *cwd* (defaults to ``os.getcwd()``) are allowed.
+    Returns a dict with ``filename``, ``lineno``, ``start``, ``end``,
+    ``highlight``, and ``lines`` keys, or ``None`` on failure.
     """
     try:
-        if cwd is None:
-            cwd = os.path.realpath(os.getcwd())
         path = os.path.realpath(filename)
-        if not path.startswith(cwd):
-            return None
         start = max(1, lineno - context)
         end = lineno + context
         lines: list[dict] = []
@@ -349,33 +281,3 @@ def extract_complete_statement_from_line(filename: str, lineno: int | None) -> s
         return full_statement.strip()
     except Exception:
         return ""
-
-
-def get_source_location_from_stack(
-    exclude_patterns: list[str] | None = None,
-) -> Tuple[int, str, str]:
-    """Extract user code location from the current call stack.
-
-    Filters out internal framework frames and returns
-    ``(lineno, filename, complete_statement)``, or ``(0, "", "")`` if not found.
-    """
-    if exclude_patterns is None:
-        exclude_patterns = [
-            "triton/runtime",
-            "triton/language",
-            "triton_viz/core",
-            "triton_viz/clients",
-        ]
-
-    stack = traceback.extract_stack()
-
-    for frame in reversed(stack):
-        if not frame.lineno:
-            continue
-        if not any(pattern in frame.filename for pattern in exclude_patterns):
-            full_statement = extract_complete_statement_from_line(
-                frame.filename, frame.lineno
-            )
-            return frame.lineno, frame.filename, full_statement
-
-    return 0, "", ""

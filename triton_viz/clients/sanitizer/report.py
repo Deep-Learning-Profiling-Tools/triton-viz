@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ...core.data import Load, Store
+from ...utils.traceback_utils import read_source_segment
 from .data import (
     OutOfBoundsRecord,
     OutOfBoundsRecordBruteForce,
@@ -129,32 +130,22 @@ def print_oob_record_pdb_style(
         print(f"{bold}{cyan}━━━ Code Context ━━━{reset_color}")
 
         for tb_info in oob_record.user_code_tracebacks:
-            # Try to read the source file to show context
-            try:
-                with open(tb_info.filename, "r") as f:
-                    lines = f.readlines()
-
-                # Show 3 lines before and after for context
-                start_line = max(0, tb_info.lineno - 4)
-                end_line = min(len(lines), tb_info.lineno + 3)
-
+            seg = read_source_segment(tb_info.filename, tb_info.lineno, context=3)
+            if seg is not None:
                 print(f"  {magenta}File:{reset_color} {tb_info.filename}")
                 print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
                 print(f"  {magenta}Line {tb_info.lineno}:{reset_color}")
 
-                for i in range(start_line, end_line):
-                    line_num = i + 1
-                    line_content = lines[i].rstrip()
-
+                for line in seg["lines"]:
+                    line_num = line["no"]
+                    line_content = line["text"]
                     if line_num == tb_info.lineno:
-                        # Highlight the problematic line
                         print(
                             f"{op_color}→ {line_num:4d} │ {line_content}{reset_color}"
                         )
                     else:
                         print(f"  {line_num:4d} │ {line_content}")
-
-            except (FileNotFoundError, IOError):
+            else:
                 # Fallback if we can't read the file
                 print(
                     f"  {magenta}File:{reset_color} {tb_info.filename}:{tb_info.lineno}"
