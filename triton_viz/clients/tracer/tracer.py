@@ -10,10 +10,10 @@ from ...core.data import (
     Allocate,
     Flip,
 )
+from ...utils.traceback_utils import extract_user_frames
 from triton_viz.core.masked_load_store import masked_load
 from typing import Callable, Optional, Union
 import numpy as np
-import traceback
 
 
 def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
@@ -83,35 +83,6 @@ class Tracer(Client):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        def _extract_user_frames() -> list[traceback.FrameSummary]:
-            stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
-            # drop current frames (this function and callers)
-            stack = stack[:-2]
-            cleaned: list[traceback.FrameSummary] = []
-            for f in stack:
-                fn = f.filename.replace("\\", "/")
-                if any(
-                    s in fn
-                    for s in [
-                        "triton_viz/core/",
-                        "triton_viz/clients/",
-                        "triton/runtime/",
-                        "triton/language/",
-                        "site-packages/triton/",
-                        "runpy.py",
-                        "IPython",
-                    ]
-                ):
-                    continue
-                cleaned.append(f)
-            if cleaned:
-                return cleaned
-            # fallback to last non "<...>" frame
-            for f in reversed(stack):
-                if not f.filename.startswith("<"):
-                    return [f]
-            return stack[-1:]
-
         def post_allocate_callback(ret):
             assert hasattr(ret, "data")
             self.tensors.append(ret)
@@ -140,7 +111,7 @@ class Tracer(Client):
                 tensor = ptr
 
             rec = Load(tensor.data_ptr(), offsets, mask.data)
-            rec.call_path = _extract_user_frames()
+            rec.call_path = extract_user_frames(skip_tail=2)
             self.records.append(rec)
 
         @self.lock_fn
@@ -164,7 +135,7 @@ class Tracer(Client):
                 tensor = ptr
 
             rec = Store(tensor.data_ptr(), offsets, mask_data)
-            rec.call_path = _extract_user_frames()
+            rec.call_path = extract_user_frames(skip_tail=2)
             self.records.append(rec)
 
         @self.lock_fn
@@ -190,7 +161,7 @@ class Tracer(Client):
             ret_shape = ret.data.shape
             # Pass input/other raw arrays so draw.py can render MatMul
             rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
-            rec.call_path = _extract_user_frames()
+            rec.call_path = extract_user_frames(skip_tail=2)
             self.records.append(rec)
 
         def post_flip_callback(ret, x, *args, **kwargs):
@@ -211,7 +182,7 @@ class Tracer(Client):
                 in_shape = tuple(getattr(in_shape, "shape", []) or [])
                 out_shape = tuple(getattr(out_shape, "shape", []) or [])
             rec = Flip(in_shape, out_shape, int(dim) if dim is not None else 0)
-            rec.call_path = _extract_user_frames()
+            rec.call_path = extract_user_frames(skip_tail=2)
             self.records.append(rec)
 
         if op_type is Allocate:

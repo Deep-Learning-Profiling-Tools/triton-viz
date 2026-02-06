@@ -4,6 +4,7 @@ import sys
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data, delinearized, make_3d
+from ..utils.traceback_utils import safe_read_file_segment, score_traceback_frame
 import os
 import torch
 import numpy as np
@@ -200,35 +201,6 @@ def update_global_data(force: bool = False):
     global_data["analysis"] = df_dict
 
 
-def _safe_read_file_segment(filename: str, lineno: int, context: int = 8):
-    try:
-        # only allow files under current working dir for safety
-        cwd = os.path.realpath(os.getcwd())
-        path = os.path.realpath(filename)
-        if not path.startswith(cwd):
-            return None
-        start = max(1, lineno - context)
-        end = lineno + context
-        lines = []
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for i, line in enumerate(f, start=1):
-                if i < start:
-                    continue
-                if i > end:
-                    break
-                lines.append({"no": i, "text": line.rstrip("\n")})
-        return {
-            "filename": path,
-            "lineno": lineno,
-            "start": start,
-            "end": end,
-            "highlight": lineno,
-            "lines": lines,
-        }
-    except Exception:
-        return None
-
-
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -294,43 +266,11 @@ def get_op_code():
     # Heuristic: pick the BEST user frame under CWD (closest to op)
     cwd = os.path.realpath(os.getcwd())
 
-    def _score(tb: dict) -> int:
-        fn = tb.get("filename") or ""
-        line = (tb.get("line") or "").strip()
-        name = tb.get("name") or ""
-        p = os.path.realpath(fn)
-        score = 0
-
-        # 强优先：明确的 Triton 语言内核操作符
-        if "tl.load" in line or "tl.store" in line:
-            score += 100
-        elif "tl." in line:
-            score += 50
-
-        # 位置相关：项目代码优先，三方/框架降权
-        if p.startswith(cwd):
-            score += 5
-        if any(
-            s in p
-            for s in ["site-packages", "triton_viz/", "triton/", "runpy.py", "IPython"]
-        ):
-            score -= 10
-
-        # 语义相关：函数名看起来像 kernel 的加分
-        if name.endswith("_kernel") or "kernel" in name:
-            score += 3
-
-        # 体验相关：examples 目录小幅加分
-        if "examples" in p:
-            score += 1
-
-        return score
-
     # Prefer frames from tail (closest to current) and highest score
     best = None
     best_score = -(10**9)
     for tb in reversed(tb_list):
-        sc = _score(tb)
+        sc = score_traceback_frame(tb, cwd=cwd)
         if sc > best_score:
             best, best_score = tb, sc
     chosen = best if best is not None else None
@@ -347,7 +287,7 @@ def get_op_code():
     filename = tb.get("filename")
     lineno = int(tb.get("lineno", 0))
     line_of_code = tb.get("line")
-    seg = _safe_read_file_segment(filename, lineno, context)
+    seg = safe_read_file_segment(filename, lineno, context, cwd=cwd)
     if seg is None:
         # fallback with single line
         seg = {

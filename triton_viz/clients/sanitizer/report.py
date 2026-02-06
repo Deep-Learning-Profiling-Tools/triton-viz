@@ -1,14 +1,9 @@
-import linecache
-import sys
-import traceback
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from ...core.data import Load, Store
 from .data import (
-    TracebackInfo,
     OutOfBoundsRecord,
     OutOfBoundsRecordBruteForce,
     OutOfBoundsRecordZ3,
@@ -16,58 +11,6 @@ from .data import (
 
 if TYPE_CHECKING:
     from .sanitizer import SymbolicExpr
-
-
-# Paths that identify framework code (not user code)
-_FRAMEWORK_PATHS = [
-    "triton_viz/core/",
-    "triton_viz/clients/",
-    "triton/runtime/",
-    "triton/language/",
-    "site-packages/triton/",
-]
-
-
-def _get_user_code_location() -> tuple[str, int, str] | None:
-    from types import FrameType
-
-    frame: FrameType | None = sys._getframe()
-
-    while frame is not None:
-        filename = Path(frame.f_code.co_filename).as_posix()
-
-        # Skip Python internals
-        if filename.startswith("<"):
-            frame = frame.f_back
-            continue
-
-        # Check if this is user code (not in framework paths)
-        is_framework = any(path in filename for path in _FRAMEWORK_PATHS)
-
-        # User code: not in framework paths, OR in examples directory
-        if not is_framework or "examples/" in filename:
-            return (
-                frame.f_code.co_filename,
-                frame.f_lineno,
-                frame.f_code.co_name,
-            )
-
-        frame = frame.f_back
-
-    return None
-
-
-def _location_to_traceback_info(
-    source_location: tuple[str, int, str],
-) -> TracebackInfo:
-    filename, lineno, func_name = source_location
-    line_of_code = linecache.getline(filename, lineno).rstrip()
-    return TracebackInfo(
-        filename=filename,
-        lineno=lineno,
-        func_name=func_name,
-        line_of_code=line_of_code,
-    )
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
@@ -312,96 +255,3 @@ def print_oob_record_pdb_style(
             print(f"  {symbolic_expr}")
 
     print(f"{bold}End of IMA Diagnostic Report{reset_color}\n")
-
-
-def _get_traceback_info():
-    """
-    Extract user code frames from the call stack, focusing on actual user code
-    that contains the memory access operations.
-
-    Why do both _grid_executor_call and _jit_function_call appear in the call stacks?
-    1) Main kernel dispatch (kernel[grid](...)) triggers _grid_executor_call.
-    2) Inlined @triton.jit functions trigger _jit_function_call.
-    3) Some code sees only _grid_executor_call if no separate JIT function is present or patched.
-    4) Complex kernels (e.g., fused_attention) may show both: outer dispatch and inner JIT calls.
-    """
-    stack_summary = traceback.extract_stack()
-    user_code_tracebacks = []
-
-    # Filter out framework code to find user code frames
-    # We want to find frames that:
-    # 1. Are not in triton_viz internal files (except examples)
-    # 2. Are not in triton runtime/language files
-    # 3. Are user-defined functions
-
-    framework_paths = [
-        "triton_viz/core/",
-        "triton_viz/clients/",
-        "triton/runtime/",
-        "triton/language/",
-        "site-packages/triton/",
-    ]
-
-    # First pass: collect all potential user code frames
-    for i, frame in enumerate(stack_summary):
-        # Skip framework code
-        if any(path in frame.filename.replace("\\", "/") for path in framework_paths):
-            # Exception: include examples directory
-            if "examples/" not in frame.filename.replace("\\", "/"):
-                continue
-
-        # Skip Python internals
-        if frame.filename.startswith("<"):
-            continue
-
-        # Check if this frame is just after a patch.py call
-        # This usually indicates a transition from framework to user code
-        if i > 0:
-            prev_frame = stack_summary[i - 1]
-            if "triton_viz/core/patch.py" in prev_frame.filename:
-                # This is likely user code called by the framework
-                user_code_tracebacks.append(
-                    TracebackInfo(
-                        filename=frame.filename,
-                        lineno=frame.lineno,
-                        func_name=frame.name,
-                        line_of_code=frame.line,
-                    )
-                )
-
-    # If we didn't find any user code using the above method,
-    # fall back to the original approach but collect ALL relevant frames
-    if not user_code_tracebacks:
-        for i, frame in enumerate(stack_summary):
-            if (
-                "_jit_function_call" in frame.name
-                or "_grid_executor_call" in frame.name
-            ) and "triton_viz/core/patch.py" in frame.filename:
-                # Look at the next frame which should be user code
-                if i + 1 < len(stack_summary):
-                    next_frame = stack_summary[i + 1]
-                    # Only add if it's not already in our list and is user code
-                    if not any(path in next_frame.filename for path in framework_paths):
-                        user_code_tracebacks.append(
-                            TracebackInfo(
-                                filename=next_frame.filename,
-                                lineno=next_frame.lineno,
-                                func_name=next_frame.name,
-                                line_of_code=next_frame.line,
-                            )
-                        )
-
-    # Reverse the list so the most immediate error location comes first
-    # (closest to the actual tl.load/tl.store operation)
-    user_code_tracebacks.reverse()
-
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_tracebacks = []
-    for tb in user_code_tracebacks:
-        key = (tb.filename, tb.lineno)
-        if key not in seen:
-            seen.add(key)
-            unique_tracebacks.append(tb)
-
-    return unique_tracebacks

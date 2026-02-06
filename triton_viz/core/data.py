@@ -5,12 +5,7 @@ import numpy.typing as npt
 import numpy as np
 import torch
 
-TRITON_FRAMES = [
-    "triton/runtime",
-    "triton/language",
-    "triton_viz/core/client.py",
-    "triton_viz/core/trace.py",
-]
+from ..utils.traceback_utils import extract_user_frames
 
 
 @dataclass
@@ -19,23 +14,7 @@ class Op:
     call_path: list[traceback.FrameSummary] = field(init=False, default_factory=list)
 
     def __post_init__(self):
-        full_stack = traceback.extract_stack()[:-2]
-        # keep original for fallback
-        self.call_path = full_stack
-        clean_call_path = []
-        for frame in full_stack:
-            if not any(
-                triton_frame in frame.filename for triton_frame in TRITON_FRAMES
-            ):
-                clean_call_path.append(frame)
-        # if filtering removed all frames, fallback to last meaningful frame(s)
-        if clean_call_path:
-            self.call_path = clean_call_path
-        else:
-            for frame in reversed(full_stack):
-                if not str(frame.filename).startswith("<"):
-                    self.call_path = [frame]
-                    break
+        self.call_path = extract_user_frames(skip_tail=2)
 
 
 @dataclass
