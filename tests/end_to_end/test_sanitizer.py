@@ -385,3 +385,66 @@ def test_loop_oob_reports_correct_line_number():
         f"Expected func_name to be 'oob_in_loop_kernel', "
         f"but got: {tb_info.func_name!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# gemm_oob call-stack extraction test
+# ---------------------------------------------------------------------------
+# Runs the actual examples/sanitizer/gemm_oob.py and verifies that the
+# sanitizer output (Code Context, Call Stack) matches docs/index.html.
+
+
+def test_gemm_oob_call_stack():
+    """
+    Run examples/sanitizer/gemm_oob.py and verify the reported call-stack
+    matches what is documented in docs/index.html:
+
+      ━━━ Code Context ━━━
+      File: triton-viz/examples/sanitizer/gemm_oob.py
+      Function: gemm_kernel
+      Line 25:
+        22 │     for k_block in range(K // TILE_SIZE):
+        ...
+      → 25 │         A_tile = tl.load(A + A_off + 1) # Out-Of-Bounds Access HERE!
+      ━━━ Call Stack ━━━
+      #1 gemm_kernel at gemm_oob.py:25
+         └─ A_tile = tl.load(A + A_off + 1) # Out-Of-Bounds Access HERE!
+    """
+    import pathlib
+    import subprocess
+    import sys
+
+    example_file = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "examples"
+        / "sanitizer"
+        / "gemm_oob.py"
+    )
+    assert example_file.exists(), f"Example file not found: {example_file}"
+
+    import re
+
+    result = subprocess.run(
+        [sys.executable, str(example_file)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    # Strip ANSI escape codes so plain-text assertions work
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
+
+    # ---- Code Context checks (matching docs/index.html) ----
+    assert "Code Context" in output, "Missing 'Code Context' section in output"
+    assert "gemm_oob.py" in output, "Missing filename 'gemm_oob.py' in output"
+    assert (
+        "Function: gemm_kernel" in output
+    ), "Missing 'Function: gemm_kernel' in output"
+    assert "Line 25:" in output, "Missing 'Line 25:' in output"
+    assert (
+        "tl.load(A + A_off + 1)" in output
+    ), "Missing 'tl.load(A + A_off + 1)' in Code Context"
+
+    # ---- Call Stack checks ----
+    assert (
+        "#1 gemm_kernel at gemm_oob.py:25" in output
+    ), "Missing expected call stack entry '#1 gemm_kernel at gemm_oob.py:25'"
