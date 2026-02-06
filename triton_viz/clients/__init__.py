@@ -2,6 +2,7 @@ from .profiler.profiler import Profiler
 from .profiler.data import LoadStoreBytes, OpTypeCounts
 from .sanitizer.sanitizer import Sanitizer
 from .sanitizer.data import OutOfBoundsRecord
+from .symbolic_engine import SymbolicExpr
 from .tracer.tracer import Tracer
 
 __all__ = [
@@ -10,5 +11,6 @@ __all__ = [
     "LoadStoreBytes",
     "OpTypeCounts",
     "OutOfBoundsRecord",
+    "SymbolicExpr",
     "Tracer",
 ]

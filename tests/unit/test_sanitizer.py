@@ -5,8 +5,8 @@ import triton.language as tl
 
 from triton_viz.core.config import config as cfg
 from triton_viz.clients import Sanitizer
+from triton_viz.clients.symbolic_engine import SymbolicExpr
 from triton_viz.clients.sanitizer.sanitizer import (
-    SymbolicExpr,
     NullSanitizer,
     SymbolicSanitizer,
     _range_to_iterator_constraint,

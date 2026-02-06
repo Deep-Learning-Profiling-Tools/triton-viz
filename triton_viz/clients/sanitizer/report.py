@@ -15,7 +15,7 @@ from .data import (
 )
 
 if TYPE_CHECKING:
-    from .sanitizer import SymbolicExpr
+    from ..symbolic_engine import SymbolicExpr
 
 
 # Paths that identify framework code (not user code)
