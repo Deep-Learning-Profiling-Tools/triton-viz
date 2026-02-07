@@ -11,7 +11,7 @@ from .data import (
 )
 
 if TYPE_CHECKING:
-    from .sanitizer import SymbolicExpr
+    from ..symbolic_engine import SymbolicExpr
 
 
 def print_oob_record(oob_record: OutOfBoundsRecord, max_display=10):
