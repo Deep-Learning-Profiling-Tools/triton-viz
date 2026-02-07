@@ -79,10 +79,13 @@ from ..symbolic_engine import (
     ConstraintConjunction,
 )
 from .data import OutOfBoundsRecordZ3
+from ...utils.traceback_utils import (
+    extract_user_frames,
+    frame_to_traceback_info,
+    locate_user_frame,
+    location_to_traceback_info,
+)
 from .report import (
-    _get_traceback_info,
-    _get_user_code_location,
-    _location_to_traceback_info,
     print_oob_record,
     print_oob_record_pdb_style,
 )
@@ -414,7 +417,7 @@ class SymbolicSanitizer(Sanitizer):
             # Capture source location now while we're still in the user's tl.load/tl.store call.
             # This is a lightweight operation that only traverses frame objects.
             # The actual source line will be read later only if an error is detected.
-            source_location = _get_user_code_location()
+            source_location = locate_user_frame()
             ctx.signature_cache[signature] = len(ctx.pending_checks)
             pending_check = PendingCheck(
                 symbolic_expr=expr,
@@ -438,9 +441,9 @@ class SymbolicSanitizer(Sanitizer):
         # Use pre-captured location if available (for deferred checks in loops),
         # otherwise capture it now (for immediate checks outside loops)
         if source_location is not None:
-            traceback_info = [_location_to_traceback_info(source_location)]
+            traceback_info = [location_to_traceback_info(source_location)]
         else:
-            traceback_info = _get_traceback_info()
+            traceback_info = [frame_to_traceback_info(f) for f in extract_user_frames()]
 
         tensor_name = self._get_tensor_name(tensor)
         oob_record = OutOfBoundsRecordZ3(

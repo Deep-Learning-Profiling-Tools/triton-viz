@@ -6,13 +6,7 @@ from typing import Union, Any, Optional
 import torch
 import z3
 
-
-@dataclass
-class TracebackInfo:
-    filename: str
-    lineno: int
-    func_name: str
-    line_of_code: str
+from ...utils.traceback_utils import TracebackInfo
 
 
 @dataclass

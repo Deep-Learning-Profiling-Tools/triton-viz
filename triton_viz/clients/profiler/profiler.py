@@ -3,7 +3,10 @@ from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import Op, Load, Store, AddPtr, Dot
 from ...core.config import config as cfg
 from .data import LoadStoreBytes
-from ..utils import get_source_location_from_stack
+from ...utils.traceback_utils import (
+    extract_user_frames,
+    extract_complete_statement_from_line,
+)
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
 from dataclasses import dataclass, replace
@@ -217,8 +220,14 @@ class Profiler(Client):
                 self.load_mask_false_count += false_count
 
                 # Record per-operation statistics
-                lineno, filename, code_line = get_source_location_from_stack()
-                if lineno > 0:  # Only record if we got valid line info
+                frames = extract_user_frames()
+                if frames:
+                    _f = frames[-1]
+                    lineno, filename = _f.lineno or 0, _f.filename
+                    code_line = extract_complete_statement_from_line(filename, lineno)
+                else:
+                    lineno, filename, code_line = 0, "", ""
+                if lineno > 0:
                     self.mask_op_stats.append(
                         MaskOpStats(
                             op_type="load",
@@ -248,8 +257,14 @@ class Profiler(Client):
                 self.store_mask_false_count += false_count
 
                 # Record per-operation statistics
-                lineno, filename, code_line = get_source_location_from_stack()
-                if lineno > 0:  # Only record if we got valid line info
+                frames = extract_user_frames()
+                if frames:
+                    _f = frames[-1]
+                    lineno, filename = _f.lineno or 0, _f.filename
+                    code_line = extract_complete_statement_from_line(filename, lineno)
+                else:
+                    lineno, filename, code_line = 0, "", ""
+                if lineno > 0:
                     self.mask_op_stats.append(
                         MaskOpStats(
                             op_type="store",
