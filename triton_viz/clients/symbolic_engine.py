@@ -1228,14 +1228,14 @@ class AdvanceSymbolicExpr(SymbolicExpr):
     ndim: int
     delta_keys: list[str]
 
-    def __init__(self, op: str, ptr: Any, delta_list: Sequence[Any]):
+    def __init__(self, op: str, ptr: Any, offset_list: Sequence[Any]):
         super().__init__(op)
         self.add_child("ptr", ptr)
-        self.ndim = len(delta_list)
+        self.ndim = len(offset_list)
         self.delta_keys: list[str] = []
         for i in range(self.ndim):
             dk = f"delta_{i}"
-            self.add_child(dk, delta_list[i])
+            self.add_child(dk, offset_list[i])
             self.delta_keys.append(dk)
         self.dtype = ptr.dtype
 
