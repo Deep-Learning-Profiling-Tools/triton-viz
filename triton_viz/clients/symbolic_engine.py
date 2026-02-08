@@ -1143,6 +1143,12 @@ class CumsumSymbolicExpr(SymbolicExpr):
 
 class MakeBlockPtrSymbolicExpr(SymbolicExpr):
     base: SymbolicExpr
+    ndim: int
+    block_shape_values: list[int]
+    order_values: list[int]
+    shape_keys: list[str]
+    stride_keys: list[str]
+    offset_keys: list[str]
 
     def __init__(
         self,
@@ -1219,6 +1225,8 @@ class AddPtrSymbolicExpr(SymbolicExpr):
 
 class AdvanceSymbolicExpr(SymbolicExpr):
     ptr: SymbolicExpr
+    ndim: int
+    delta_keys: list[str]
 
     def __init__(self, op: str, ptr: Any, delta_list: Sequence[Any]):
         super().__init__(op)
@@ -1419,6 +1427,7 @@ class AtomicRmwSymbolicExpr(SymbolicExpr):
 
 class TensorPointerLoadSymbolicExpr(SymbolicExpr):
     ptr: SymbolicExpr
+    boundary_check: tuple[int, ...]
 
     def __init__(self, op: str, ptr: Any, boundary_check: Any):
         super().__init__(op)
