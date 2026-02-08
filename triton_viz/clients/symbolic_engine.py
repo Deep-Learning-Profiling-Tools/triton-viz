@@ -1163,13 +1163,15 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
         self._stride_keys: list[str] = []
         self._offset_keys: list[str] = []
         for i in range(self.ndim):
-            sk, stk, ok = f"shape_{i}", f"stride_{i}", f"offset_{i}"
-            self.add_child(sk, shape_list[i])
-            self.add_child(stk, stride_list[i])
-            self.add_child(ok, offset_list[i])
-            self._shape_keys.append(sk)
-            self._stride_keys.append(stk)
-            self._offset_keys.append(ok)
+            shape_key = f"shape_{i}"
+            stride_key = f"stride_{i}"
+            offset_key = f"offset_{i}"
+            self.add_child(shape_key, shape_list[i])
+            self.add_child(stride_key, stride_list[i])
+            self.add_child(offset_key, offset_list[i])
+            self._shape_keys.append(shape_key)
+            self._stride_keys.append(stride_key)
+            self._offset_keys.append(offset_key)
         self.dtype = base.dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
