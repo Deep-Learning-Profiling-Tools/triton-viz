@@ -293,3 +293,138 @@ def test_broadcast_updates_shape():
     # broadcast to shape (4,)
     expr = SymbolicExpr.create("broadcast", arg, (4,))
     assert expr.shape == (4,), f"Expected shape (4,), got {expr.shape}"
+
+
+# ======== Block Pointer Symbolic Expr Tests =========
+
+
+def test_make_block_ptr_symbolic_expr_creation():
+    """Create MakeBlockPtrSymbolicExpr with concrete values, verify children and attributes."""
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
+    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
+    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
+    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+    block_shape_vals = [32]
+    order_vals = [0]
+
+    expr = SymbolicExpr.create(
+        "make_block_ptr",
+        base,
+        shape_list,
+        stride_list,
+        offset_list,
+        block_shape_vals,
+        order_vals,
+    )
+    assert expr.op == "make_block_ptr"
+    assert expr.ndim == 1
+    assert expr.block_shape_values == [32]
+    assert expr.order_values == [0]
+    assert expr.base is base
+    assert expr._shape_keys == ["shape_0"]
+    assert expr._stride_keys == ["stride_0"]
+    assert expr._offset_keys == ["offset_0"]
+    assert getattr(expr, "shape_0") is not None
+    assert getattr(expr, "stride_0") is not None
+    assert getattr(expr, "offset_0") is not None
+
+
+def test_advance_symbolic_expr_creation():
+    """Create Advance wrapping MakeBlockPtr, verify children."""
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
+    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
+    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
+    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+
+    mbp = SymbolicExpr.create(
+        "make_block_ptr",
+        base,
+        shape_list,
+        stride_list,
+        offset_list,
+        [32],
+        [0],
+    )
+
+    delta = SymbolicExpr.create("const", 32, tl.int32)
+    adv = SymbolicExpr.create("advance", mbp, [delta])
+    assert adv.op == "advance"
+    assert adv.ndim == 1
+    assert adv._delta_keys == ["delta_0"]
+    assert adv.ptr is mbp
+    assert getattr(adv, "delta_0") is delta
+
+
+def test_tensor_pointer_load_z3_eval():
+    """Create make_block_ptr -> tensor_pointer_load, call .eval(), verify Z3 expression."""
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
+    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
+    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
+    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+
+    mbp = SymbolicExpr.create(
+        "make_block_ptr",
+        base,
+        shape_list,
+        stride_list,
+        offset_list,
+        [32],
+        [0],
+    )
+
+    load_expr = SymbolicExpr.create("tensor_pointer_load", mbp, (0,))
+    z3_expr, constraints = load_expr.eval()
+
+    # Should have Z3 expression with base address (1000) and block index variable
+    z3_str = str(z3_expr)
+    assert "1000" in z3_str, f"Expected base address in Z3 expr, got: {z3_str}"
+    assert "blk_k_0" in z3_str, f"Expected block index variable, got: {z3_str}"
+
+    # Constraints should include block index bounds and boundary check
+    assert constraints is not None
+    constr_str = str(constraints)
+    assert "blk_k_0" in constr_str
+
+
+def test_resolve_block_ptr_through_advance_chain():
+    """Create make_block_ptr -> advance -> advance, verify accumulated offsets."""
+    from triton_viz.clients.symbolic_engine import TensorPointerLoadSymbolicExpr
+
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
+    shape_list = [SymbolicExpr.create("const", 128, tl.int32)]
+    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
+    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+
+    mbp = SymbolicExpr.create(
+        "make_block_ptr",
+        base,
+        shape_list,
+        stride_list,
+        offset_list,
+        [32],
+        [0],
+    )
+
+    delta1 = SymbolicExpr.create("const", 32, tl.int32)
+    adv1 = SymbolicExpr.create("advance", mbp, [delta1])
+
+    delta2 = SymbolicExpr.create("const", 32, tl.int32)
+    adv2 = SymbolicExpr.create("advance", adv1, [delta2])
+
+    # Create a load to use its _resolve_block_ptr_components
+    load_expr = SymbolicExpr.create("tensor_pointer_load", adv2, ())
+    assert isinstance(load_expr, TensorPointerLoadSymbolicExpr)
+
+    (
+        resolved_base,
+        shapes,
+        strides,
+        offsets,
+        bs,
+    ) = load_expr._resolve_block_ptr_components(adv2)
+    assert resolved_base is base
+    assert bs == [32]
+
+    # Offsets should be accumulated: 0 + 32 + 32 = 64
+    off_z3, _ = offsets[0].eval()
+    assert cast(IntNumRef, off_z3).as_long() == 64

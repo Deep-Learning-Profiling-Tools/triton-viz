@@ -379,7 +379,7 @@ class SymbolicSanitizer(Sanitizer):
                 tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
 
                 # Determine operation type from symbolic expression
-                if symbolic_expr.op == "store":
+                if symbolic_expr.op in ("store", "tensor_pointer_store"):
                     op_type: type[Load] | type[Store] = Store
                 else:
                     op_type = Load
@@ -688,7 +688,21 @@ class SymbolicSanitizer(Sanitizer):
         def op_make_block_ptr_overrider(
             base, shape, strides, offsets, tensor_shape, order
         ):
-            raise NotImplementedError("MakeBlockPtr is not supported yet.")
+            base_sym = SymbolicExpr.from_value(base)
+            shape_syms = [SymbolicExpr.from_value(s) for s in shape]
+            stride_syms = [SymbolicExpr.from_value(s) for s in strides]
+            offset_syms = [SymbolicExpr.from_value(o) for o in offsets]
+            block_shape_vals = [int(b) for b in tensor_shape]
+            order_vals = [int(o) for o in order]
+            return SymbolicExpr.create(
+                "make_block_ptr",
+                base_sym,
+                shape_syms,
+                stride_syms,
+                offset_syms,
+                block_shape_vals,
+                order_vals,
+            )
 
         def op_tensor_pointer_load_overrider(
             ptr,
@@ -698,12 +712,21 @@ class SymbolicSanitizer(Sanitizer):
             eviction_policy,
             is_volatile,
         ):
-            raise NotImplementedError("TensorPointerLoad is not supported yet.")
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            ret = SymbolicExpr.create("tensor_pointer_load", ptr_sym, boundary_check)
+            self._handle_access_check(ret)
+            return ret
 
         def op_tensor_pointer_store_overrider(
             ptr, value, boundary_check, cache_modifier, eviction_policy
         ):
-            raise NotImplementedError("TensorPointerStore is not supported yet.")
+            ptr_sym = SymbolicExpr.from_value(ptr)
+            value_sym = SymbolicExpr.from_value(value)
+            ret = SymbolicExpr.create(
+                "tensor_pointer_store", ptr_sym, value_sym, boundary_check
+            )
+            self._handle_access_check(ret)
+            return ret
 
         def op_idiv_overrider(lhs, rhs):
             result = SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
@@ -740,10 +763,9 @@ class SymbolicSanitizer(Sanitizer):
             return SymbolicExpr.create("ashr", lhs_sym, rhs_sym)
 
         def op_advance_overrider(ptr, offsets):
-            # Advance operation for block pointers
             ptr_sym = SymbolicExpr.from_value(ptr)
-            offsets_sym = SymbolicExpr.from_value(offsets)
-            return SymbolicExpr.create("advance", ptr_sym, offsets_sym)
+            delta_syms = [SymbolicExpr.from_value(o) for o in offsets]
+            return SymbolicExpr.create("advance", ptr_sym, delta_syms)
 
         def op_umulhi_overrider(lhs, rhs):
             lhs_sym = SymbolicExpr.from_value(lhs)
