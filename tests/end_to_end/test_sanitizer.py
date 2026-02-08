@@ -447,3 +447,48 @@ def test_gemm_oob_call_stack():
     assert (
         "#1 gemm_kernel at gemm_oob.py:25" in output
     ), "Missing expected call stack entry '#1 gemm_kernel at gemm_oob.py:25'"
+
+
+def test_swiglu_fwd_oob_call_stack():
+    """
+    Run tritonbench_kernels/swiglu_fwd.py via triton-sanitizer and verify the
+    reported Code Context points to the actual OOB line in the kernel, not the
+    CLI entry point.
+    """
+    import pathlib
+    import subprocess
+    import sys
+    import os
+    import re
+
+    script = (
+        pathlib.Path(__file__).resolve().parent
+        / "tritonbench_kernels"
+        / "swiglu_fwd.py"
+    )
+    assert script.exists(), f"Script not found: {script}"
+
+    sanitizer = os.path.join(os.path.dirname(sys.executable), "triton-sanitizer")
+    result = subprocess.run(
+        [sanitizer, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    # Strip ANSI escape codes so plain-text assertions work
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
+
+    # ---- Code Context checks ----
+    assert "Code Context" in output, "Missing 'Code Context' section in output"
+    assert "swiglu_fwd.py" in output, "Missing filename 'swiglu_fwd.py' in output"
+    assert (
+        "Function: _swiglu_fwd_kernel" in output
+    ), "Missing 'Function: _swiglu_fwd_kernel' in output"
+    assert (
+        "tl.load(Y + cols, mask=cols < ncols, other=0.).to(tl.float32)" in output
+    ), "Missing expected OOB line in Code Context"
+
+    # ---- Call Stack checks ----
+    assert (
+        "_swiglu_fwd_kernel at swiglu_fwd.py:" in output
+    ), "Missing expected call stack entry '_swiglu_fwd_kernel at swiglu_fwd.py:'"

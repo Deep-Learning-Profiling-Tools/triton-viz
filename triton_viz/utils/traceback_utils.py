@@ -11,12 +11,15 @@ FRAMEWORK_PATHS: list[str] = [
     "triton_viz/core/",
     "triton_viz/clients/",
     "triton_viz/utils/",
+    "triton_viz/wrapper",
     "triton/runtime/",
     "triton/language/",
     "site-packages/triton/",
-    "runpy.py",
+    "runpy",
     "IPython",
 ]
+
+_BIN_DIR = os.path.normcase(os.path.dirname(sys.executable))
 
 
 @dataclass
@@ -47,6 +50,9 @@ def extract_user_frames(skip_tail: int = 0) -> list[traceback.FrameSummary]:
     for f in stack:
         fn = f.filename.replace("\\", "/")
         if any(s in fn for s in FRAMEWORK_PATHS):
+            continue
+        # Skip console_scripts entry points (e.g. triton-sanitizer, triton-profiler)
+        if os.path.normcase(os.path.dirname(os.path.abspath(f.filename))) == _BIN_DIR:
             continue
         cleaned.append(f)
 
