@@ -1159,9 +1159,9 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
         self.ndim = len(block_shape_vals)
         self.block_shape_values = list(block_shape_vals)
         self.order_values = list(order_vals)
-        self._shape_keys: list[str] = []
-        self._stride_keys: list[str] = []
-        self._offset_keys: list[str] = []
+        self.shape_keys: list[str] = []
+        self.stride_keys: list[str] = []
+        self.offset_keys: list[str] = []
         for i in range(self.ndim):
             shape_key = f"shape_{i}"
             stride_key = f"stride_{i}"
@@ -1169,9 +1169,9 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
             self.add_child(shape_key, shape_list[i])
             self.add_child(stride_key, stride_list[i])
             self.add_child(offset_key, offset_list[i])
-            self._shape_keys.append(shape_key)
-            self._stride_keys.append(stride_key)
-            self._offset_keys.append(offset_key)
+            self.shape_keys.append(shape_key)
+            self.stride_keys.append(stride_key)
+            self.offset_keys.append(offset_key)
         self.dtype = base.dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
@@ -1224,11 +1224,11 @@ class AdvanceSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("ptr", ptr)
         self.ndim = len(delta_list)
-        self._delta_keys: list[str] = []
+        self.delta_keys: list[str] = []
         for i in range(self.ndim):
             dk = f"delta_{i}"
             self.add_child(dk, delta_list[i])
-            self._delta_keys.append(dk)
+            self.delta_keys.append(dk)
         self.dtype = ptr.dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
@@ -1448,15 +1448,15 @@ class TensorPointerLoadSymbolicExpr(SymbolicExpr):
     ]:
         """Walk advance chain -> (base, shapes[], strides[], offsets[], block_shape[])"""
         if isinstance(ptr, MakeBlockPtrSymbolicExpr):
-            shapes = [getattr(ptr, k) for k in ptr._shape_keys]
-            strides = [getattr(ptr, k) for k in ptr._stride_keys]
-            offsets = [getattr(ptr, k) for k in ptr._offset_keys]
+            shapes = [getattr(ptr, k) for k in ptr.shape_keys]
+            strides = [getattr(ptr, k) for k in ptr.stride_keys]
+            offsets = [getattr(ptr, k) for k in ptr.offset_keys]
             return ptr.base, shapes, strides, offsets, ptr.block_shape_values
         elif isinstance(ptr, AdvanceSymbolicExpr):
             base, shapes, strides, offsets, bs = self._resolve_block_ptr_components(
                 ptr.ptr
             )
-            deltas = [getattr(ptr, k) for k in ptr._delta_keys]
+            deltas = [getattr(ptr, k) for k in ptr.delta_keys]
             new_offsets = [
                 SymbolicExpr.create("add", off, d) for off, d in zip(offsets, deltas)
             ]

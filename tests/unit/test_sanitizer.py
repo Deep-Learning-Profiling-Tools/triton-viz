@@ -321,9 +321,9 @@ def test_make_block_ptr_symbolic_expr_creation():
     assert expr.block_shape_values == [32]
     assert expr.order_values == [0]
     assert expr.base is base
-    assert expr._shape_keys == ["shape_0"]
-    assert expr._stride_keys == ["stride_0"]
-    assert expr._offset_keys == ["offset_0"]
+    assert expr.shape_keys == ["shape_0"]
+    assert expr.stride_keys == ["stride_0"]
+    assert expr.offset_keys == ["offset_0"]
     assert getattr(expr, "shape_0") is not None
     assert getattr(expr, "stride_0") is not None
     assert getattr(expr, "offset_0") is not None
@@ -350,7 +350,7 @@ def test_advance_symbolic_expr_creation():
     adv = SymbolicExpr.create("advance", mbp, [delta])
     assert adv.op == "advance"
     assert adv.ndim == 1
-    assert adv._delta_keys == ["delta_0"]
+    assert adv.delta_keys == ["delta_0"]
     assert adv.ptr is mbp
     assert getattr(adv, "delta_0") is delta
 

@@ -763,9 +763,10 @@ class SymbolicSanitizer(Sanitizer):
             return SymbolicExpr.create("ashr", lhs_sym, rhs_sym)
 
         def op_advance_overrider(ptr, offsets):
+            # Advance operation for block pointers
             ptr_sym = SymbolicExpr.from_value(ptr)
-            delta_syms = [SymbolicExpr.from_value(o) for o in offsets]
-            return SymbolicExpr.create("advance", ptr_sym, delta_syms)
+            offset_syms = [SymbolicExpr.from_value(o) for o in offsets]
+            return SymbolicExpr.create("advance", ptr_sym, offset_syms)
 
         def op_umulhi_overrider(lhs, rhs):
             lhs_sym = SymbolicExpr.from_value(lhs)
