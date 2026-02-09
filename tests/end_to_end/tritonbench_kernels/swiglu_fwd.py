@@ -61,28 +61,28 @@ def test_swiglu_fwd():
     # Test case 1
     batch_size = 4
     ncols = 128
-    xy = torch.randn(batch_size, 2 * ncols, device="cuda", dtype=torch.float32)
+    xy = torch.randn(batch_size, 2 * ncols, dtype=torch.float32)
     out = _swiglu_fwd(xy)
     results["test_case_1"] = out.detach().cpu()
 
     # Test case 2
     batch_size = 8
     ncols = 256
-    xy = torch.randn(batch_size, 2 * ncols, device="cuda", dtype=torch.float32)
+    xy = torch.randn(batch_size, 2 * ncols, dtype=torch.float32)
     out = _swiglu_fwd(xy)
     results["test_case_2"] = out.detach().cpu()
 
     # Test case 3
     batch_size = 16
     ncols = 512
-    xy = torch.randn(batch_size, 2 * ncols, device="cuda", dtype=torch.float32)
+    xy = torch.randn(batch_size, 2 * ncols, dtype=torch.float32)
     out = _swiglu_fwd(xy)
     results["test_case_3"] = out.detach().cpu()
 
     # Test case 4
     batch_size = 32
     ncols = 1024
-    xy = torch.randn(batch_size, 2 * ncols, device="cuda", dtype=torch.float32)
+    xy = torch.randn(batch_size, 2 * ncols, dtype=torch.float32)
     out = _swiglu_fwd(xy)
     results["test_case_4"] = out.detach().cpu()
 
