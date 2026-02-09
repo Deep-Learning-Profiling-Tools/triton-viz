@@ -755,3 +755,161 @@ def test_block_tensor_2d_loop_advance_non_oob():
     assert (
         len(block_sanitizer.records) == 0
     ), f"Expected no OOB records, got {len(block_sanitizer.records)}"
+
+
+# ---------------------------------------------------------------------------
+# TritonBench kernel sanitizer tests
+# ---------------------------------------------------------------------------
+# Run real-world kernels from TritonBench via triton-sanitizer as subprocesses
+# to verify the sanitizer handles various block pointer patterns correctly.
+
+
+def _run_triton_sanitizer(script_path, timeout=120):
+    """Helper: run a script through triton-sanitizer, return stripped output."""
+    import os
+    import re
+    import subprocess
+    import sys
+
+    sanitizer = os.path.join(os.path.dirname(sys.executable), "triton-sanitizer")
+    result = subprocess.run(
+        [sanitizer, str(script_path)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
+    return result, output
+
+
+def test_flash_attn_sanitizer():
+    """
+    Run flash_attn.py via triton-sanitizer.
+    The kernel uses block pointers with tl.advance in a loop (flash attention
+    pattern). Shapes are exact multiples of block sizes so no OOB is expected.
+    """
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parent
+        / "tritonbench_kernels"
+        / "flash_attn.py"
+    )
+    assert script.exists(), f"Script not found: {script}"
+
+    result, output = _run_triton_sanitizer(script)
+
+    # The script should not crash with a Python traceback
+    assert result.returncode == 0, (
+        f"triton-sanitizer exited with code {result.returncode}.\n"
+        f"Output:\n{output[-2000:]}"
+    )
+    # No OOB expected — shapes are exact multiples of block sizes
+    assert (
+        "ILLEGAL MEMORY ACCESS" not in output
+    ), f"Unexpected OOB detected in flash_attn.py:\n{output[-2000:]}"
+
+
+def test_int_scaled_matmul_sanitizer():
+    """
+    Run int_scaled_matmul.py via triton-sanitizer.
+    Contains two kernels: one uses block pointers with boundary_check, the other
+    uses regular pointer arithmetic with masks. No OOB expected.
+    """
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parent
+        / "tritonbench_kernels"
+        / "int_scaled_matmul.py"
+    )
+    assert script.exists(), f"Script not found: {script}"
+
+    result, output = _run_triton_sanitizer(script)
+
+    assert result.returncode == 0, (
+        f"triton-sanitizer exited with code {result.returncode}.\n"
+        f"Output:\n{output[-2000:]}"
+    )
+    assert (
+        "ILLEGAL MEMORY ACCESS" not in output
+    ), f"Unexpected OOB detected in int_scaled_matmul.py:\n{output[-2000:]}"
+
+
+def test_reversed_cumsum_sanitizer():
+    """
+    Run reversed_cumsum.py via triton-sanitizer.
+    Uses @triton.autotune with block pointers and boundary_check=(0, 1).
+    No OOB expected.
+    """
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parent
+        / "tritonbench_kernels"
+        / "reversed_cumsum.py"
+    )
+    assert script.exists(), f"Script not found: {script}"
+
+    result, output = _run_triton_sanitizer(script)
+
+    assert result.returncode == 0, (
+        f"triton-sanitizer exited with code {result.returncode}.\n"
+        f"Output:\n{output[-2000:]}"
+    )
+    assert (
+        "ILLEGAL MEMORY ACCESS" not in output
+    ), f"Unexpected OOB detected in reversed_cumsum.py:\n{output[-2000:]}"
+
+
+def test_reversed_cumsum_scalar_sanitizer():
+    """
+    Run reversed_cumsum_scalar.py via triton-sanitizer.
+    Uses @triton.autotune with 1D block pointers and boundary_check=(0,).
+    No OOB expected.
+    """
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parent
+        / "tritonbench_kernels"
+        / "reversed_cumsum_scalar.py"
+    )
+    assert script.exists(), f"Script not found: {script}"
+
+    result, output = _run_triton_sanitizer(script)
+
+    assert result.returncode == 0, (
+        f"triton-sanitizer exited with code {result.returncode}.\n"
+        f"Output:\n{output[-2000:]}"
+    )
+    assert (
+        "ILLEGAL MEMORY ACCESS" not in output
+    ), f"Unexpected OOB detected in reversed_cumsum_scalar.py:\n{output[-2000:]}"
+
+
+def test_matmul_tma_sanitizer():
+    """
+    Run matmul_tma.py via triton-sanitizer.
+    Uses block pointers without boundary_check for a single-block TMA-style
+    matmul. BLOCK_M=M, BLOCK_N=N, BLOCK_K=K so all accesses are in-bounds.
+    No OOB expected.
+    """
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parent
+        / "tritonbench_kernels"
+        / "matmul_tma.py"
+    )
+    assert script.exists(), f"Script not found: {script}"
+
+    result, output = _run_triton_sanitizer(script)
+
+    assert result.returncode == 0, (
+        f"triton-sanitizer exited with code {result.returncode}.\n"
+        f"Output:\n{output[-2000:]}"
+    )
+    assert (
+        "ILLEGAL MEMORY ACCESS" not in output
+    ), f"Unexpected OOB detected in matmul_tma.py:\n{output[-2000:]}"
