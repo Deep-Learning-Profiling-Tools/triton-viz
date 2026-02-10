@@ -54,22 +54,22 @@ def test_chunk_global_reversed_cumsum_scalar():
     results = {}
 
     # Test case 1
-    s1 = torch.rand((B, H, T), dtype=torch.float32).cuda()
+    s1 = torch.rand((B, H, T), dtype=torch.float32)
     result1 = chunk_global_reversed_cumsum_scalar(s1)
     results["test_case_1"] = result1
 
     # Test case 2
-    s2 = torch.rand((B, H, T), dtype=torch.float32).cuda()
+    s2 = torch.rand((B, H, T), dtype=torch.float32)
     result2 = chunk_global_reversed_cumsum_scalar(s2)
     results["test_case_2"] = result2
 
     # Test case 3
-    s3 = torch.rand((B, H, T), dtype=torch.float32).cuda()
+    s3 = torch.rand((B, H, T), dtype=torch.float32)
     result3 = chunk_global_reversed_cumsum_scalar(s3)
     results["test_case_3"] = result3
 
     # Test case 4
-    s4 = torch.rand((B, H, T), dtype=torch.float32).cuda()
+    s4 = torch.rand((B, H, T), dtype=torch.float32)
     result4 = chunk_global_reversed_cumsum_scalar(s4)
     results["test_case_4"] = result4
 

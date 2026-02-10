@@ -85,25 +85,25 @@ def test_chunk_global_reversed_cumsum_vector():
 
     # Test case 1
     B, H, T, S = 2, 3, 4, 5
-    s = torch.rand((B, H, T, S), dtype=torch.float32).cuda()
+    s = torch.rand((B, H, T, S), dtype=torch.float32)
     result = chunk_global_reversed_cumsum_vector(s)
     results["test_case_1"] = result
 
     # Test case 2
     B, H, T, S = 1, 1, 8, 8
-    s = torch.rand((B, H, T, S), dtype=torch.float32).cuda()
+    s = torch.rand((B, H, T, S), dtype=torch.float32)
     result = chunk_global_reversed_cumsum_vector(s)
     results["test_case_2"] = result
 
     # Test case 3
     B, H, T, S = 4, 2, 16, 16
-    s = torch.rand((B, H, T, S), dtype=torch.float32).cuda()
+    s = torch.rand((B, H, T, S), dtype=torch.float32)
     result = chunk_global_reversed_cumsum_vector(s)
     results["test_case_3"] = result
 
     # Test case 4
     B, H, T, S = 3, 3, 32, 32
-    s = torch.rand((B, H, T, S), dtype=torch.float32).cuda()
+    s = torch.rand((B, H, T, S), dtype=torch.float32)
     result = chunk_global_reversed_cumsum_vector(s)
     results["test_case_4"] = result
 

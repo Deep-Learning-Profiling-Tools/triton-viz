@@ -171,15 +171,9 @@ def test_flash_attn_triton():
     dim = 64
 
     # Create random input tensors
-    q = torch.randn(
-        (batch_size, num_heads, seq_len, dim), dtype=torch.float16, device="cuda"
-    )
-    k = torch.randn(
-        (batch_size, num_heads, seq_len, dim), dtype=torch.float16, device="cuda"
-    )
-    v = torch.randn(
-        (batch_size, num_heads, seq_len, dim), dtype=torch.float16, device="cuda"
-    )
+    q = torch.randn((batch_size, num_heads, seq_len, dim), dtype=torch.float16)
+    k = torch.randn((batch_size, num_heads, seq_len, dim), dtype=torch.float16)
+    v = torch.randn((batch_size, num_heads, seq_len, dim), dtype=torch.float16)
 
     # Test with causal=True
     output_causal = flash_attn_triton(q, k, v, causal=True, sm_scale=1.0)

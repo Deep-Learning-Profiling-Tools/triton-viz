@@ -64,13 +64,13 @@ def matmul_tma_load_store(
 def warpper_tma_load_store(M, N, K, NUM_CTAS, NUM_WARPS, TRANS_A, TRANS_B, OUTPUT_F16):
     # Prepare input matrices
     if TRANS_A:
-        a = torch.randn((K, M), device="cuda", dtype=torch.float16).T
+        a = torch.randn((K, M), dtype=torch.float16).T
     else:
-        a = torch.randn((M, K), device="cuda", dtype=torch.float16)
+        a = torch.randn((M, K), dtype=torch.float16)
     if TRANS_B:
-        b = torch.randn((N, K), device="cuda", dtype=torch.float16).T
+        b = torch.randn((N, K), dtype=torch.float16).T
     else:
-        b = torch.randn((K, N), device="cuda", dtype=torch.float16)
+        b = torch.randn((K, N), dtype=torch.float16)
 
     # Prepare output matrix
     c = torch.empty((M, N), device=a.device, dtype=torch.float32)
