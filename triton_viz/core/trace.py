@@ -81,20 +81,28 @@ class TritonTrace(KernelInterface, TraceInterface):
             runner._do_bench = dummy_benchmarker
             # replace the fn with an InterpretedFunction to avoid re-jitting
             runner.fn = self.interpreted_fn
-            # make a deepcopy of the runner for warmup
-            warmup_runner = deepcopy(runner)
-            warmup_runner.fn = self.jit_fn
             self.runner = runner
-            self.warmup_runner = warmup_runner
+            # make a deepcopy of the runner for warmup
+            # skip warmup in interpreter mode (jit_fn is None)
+            if self.jit_fn is not None:
+                warmup_runner = deepcopy(runner)
+                warmup_runner.fn = self.jit_fn
+                self.warmup_runner = warmup_runner
+            else:
+                self.warmup_runner = None
         elif isinstance(runner, Heuristics):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
             # replace the fn with an InterpretedFunction to avoid re-jitting
             runner.fn = self.interpreted_fn
-            # make a deepcopy of the runner for warmup
-            warmup_runner = deepcopy(runner)
-            warmup_runner.fn = self.jit_fn
             self.runner = runner
-            self.warmup_runner = warmup_runner
+            # make a deepcopy of the runner for warmup
+            # skip warmup in interpreter mode (jit_fn is None)
+            if self.jit_fn is not None:
+                warmup_runner = deepcopy(runner)
+                warmup_runner.fn = self.jit_fn
+                self.warmup_runner = warmup_runner
+            else:
+                self.warmup_runner = None
         else:
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner)
             self.runner = self.interpreted_fn
