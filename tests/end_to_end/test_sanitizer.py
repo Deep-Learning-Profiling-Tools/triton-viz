@@ -485,7 +485,7 @@ def test_swiglu_fwd_oob_call_stack():
         "Function: _swiglu_fwd_kernel" in output
     ), "Missing 'Function: _swiglu_fwd_kernel' in output"
     assert (
-        "tl.load(Y + cols, mask=cols < ncols, other=0.).to(tl.float32)" in output
+        "tl.load(Y + cols, mask=cols < ncols, other=0.0).to(tl.float32)" in output
     ), "Missing expected OOB line in Code Context"
 
     # ---- Call Stack checks ----
