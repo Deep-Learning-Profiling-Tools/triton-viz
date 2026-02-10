@@ -47,8 +47,7 @@ def _swiglu_fwd(xy, out=None):
     assert out.stride(-1) == 1
     M, N = x.shape
     grid = lambda META: (M, triton.cdiv(N, META["BLOCK_N"]))
-    with torch.cuda.device(x.device.index):
-        _swiglu_fwd_kernel[grid](x, y, out, x.stride(0), y.stride(0), out.stride(0), N)
+    _swiglu_fwd_kernel[grid](x, y, out, x.stride(0), y.stride(0), out.stride(0), N)
     return out.reshape(*batch_shape, out.shape[-1])
 
 
@@ -63,28 +62,28 @@ def test_swiglu_fwd():
     ncols = 128
     xy = torch.randn(batch_size, 2 * ncols, dtype=torch.float32)
     out = _swiglu_fwd(xy)
-    results["test_case_1"] = out.detach().cpu()
+    results["test_case_1"] = out.detach()
 
     # Test case 2
     batch_size = 8
     ncols = 256
     xy = torch.randn(batch_size, 2 * ncols, dtype=torch.float32)
     out = _swiglu_fwd(xy)
-    results["test_case_2"] = out.detach().cpu()
+    results["test_case_2"] = out.detach()
 
     # Test case 3
     batch_size = 16
     ncols = 512
     xy = torch.randn(batch_size, 2 * ncols, dtype=torch.float32)
     out = _swiglu_fwd(xy)
-    results["test_case_3"] = out.detach().cpu()
+    results["test_case_3"] = out.detach()
 
     # Test case 4
     batch_size = 32
     ncols = 1024
     xy = torch.randn(batch_size, 2 * ncols, dtype=torch.float32)
     out = _swiglu_fwd(xy)
-    results["test_case_4"] = out.detach().cpu()
+    results["test_case_4"] = out.detach()
 
     return results
 
