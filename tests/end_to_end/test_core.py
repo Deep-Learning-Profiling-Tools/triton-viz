@@ -149,3 +149,19 @@ if torch.cuda.is_available():  # Only test if CUDA is available
         grid = lambda META: (triton.cdiv(256, META["BLOCK_SIZE"]),)
         with pytest.raises(SystemExit):
             add_kernel_no_mask[grid](x_ptr=x, y_ptr=y, out_ptr=out, n_elements=256)
+
+
+# ======== Autotuner + Interpreter Mode =========
+def test_autotune_interpreter_mode():
+    """
+    Test that tracing an autotuned kernel does not crash in interpreter mode
+    (TRITON_INTERPRET=1), where jit_fn is None and warmup should be skipped.
+    """
+
+    @triton.autotune(configs=[triton.Config({"BLOCK": 32})], key=["n"])
+    @triton.jit
+    def noop_kernel(n, BLOCK: tl.constexpr):
+        pass
+
+    traced = triton_viz.trace(client=Sanitizer())(noop_kernel)
+    traced[(1,)](n=32)
