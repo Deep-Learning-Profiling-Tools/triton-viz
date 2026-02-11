@@ -1,7 +1,10 @@
 import threading
+from typing import Any
+import sys
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
-from .draw import get_visualization_data
+from .draw import get_visualization_data, delinearized, make_3d
+from ..utils.traceback_utils import read_source_segment
 import os
 import torch
 import numpy as np
@@ -18,10 +21,11 @@ app = Flask(
 # Global variables to store the data
 global_data = None
 raw_tensor_data = None
-precomputed_c_values = {}
+precomputed_c_values: dict[str, dict[tuple[int, int], list[float]]] = {}
 current_fullscreen_op = None
 last_public_url = None
 last_local_port = None
+last_launch_snapshot = None
 sbuf_events = []
 load_overall_maps = {}
 store_overall_maps = {}
@@ -41,8 +45,10 @@ def _compute_sbuf_timeline(events: list[dict]) -> tuple[list[dict], int]:
         return [], 0
     usage = 0
     timeline = []
+    usage_values = []
     for ev in sorted(events, key=lambda e: e.get("time_idx", 0)):
         usage += int(ev.get("delta", 0))
+        usage_values.append(usage)
         timeline.append(
             {
                 "time_idx": int(ev.get("time_idx", 0)),
@@ -51,7 +57,7 @@ def _compute_sbuf_timeline(events: list[dict]) -> tuple[list[dict], int]:
                 "uuid": ev.get("uuid"),
             }
         )
-    max_usage = max((pt["usage"] for pt in timeline), default=0)
+    max_usage = max(usage_values) if usage_values else 0
     return timeline, max_usage
 
 
@@ -108,31 +114,45 @@ def precompute_c_values(op_data):
     input_tensor = torch.as_tensor(_to_numpy_array(op_data["input_data"]))
     other_tensor = torch.as_tensor(_to_numpy_array(op_data["other_data"]))
 
+    if input_tensor.ndim != 2 or other_tensor.ndim != 2:
+        return {}
+
     rows, inner_dim = input_tensor.shape
     cols = other_tensor.shape[1]
+    if rows == 0 or cols == 0 or inner_dim == 0:
+        return {}
+
+    contrib = torch.einsum("ik,kj->kij", input_tensor, other_tensor)
+    cum = torch.cumsum(contrib, dim=0).cpu()
 
     precomputed = {}
+    base = [0.0]
     for i in range(rows):
         for j in range(cols):
-            precomputed[(i, j)] = [0] * (inner_dim + 1)
-            for k in range(1, inner_dim + 1):
-                precomputed[(i, j)][k] = torch.dot(
-                    input_tensor[i, :k], other_tensor[:k, j]
-                ).item()
+            precomputed[(i, j)] = base + cum[:, i, j].tolist()
 
     return precomputed
 
 
-def update_global_data():
+def update_global_data(force: bool = False):
     global global_data
     global raw_tensor_data
     global precomputed_c_values
     global sbuf_events
     global load_overall_maps
     global store_overall_maps
+    global last_launch_snapshot
 
     # Collect all records from launches
     from ..core.trace import launches
+
+    total_records = 0
+    for launch in launches:
+        total_records += len(launch.records)
+    snapshot = (len(launches), total_records)
+    if not force and global_data is not None and snapshot == last_launch_snapshot:
+        return
+    last_launch_snapshot = snapshot
 
     all_records: list = []
     for launch in launches:
@@ -172,7 +192,7 @@ def update_global_data():
 
     # Convert analysis_data to a dictionary format similar to pandas DataFrame.to_dict()
     # analysis_data is a list of lists where each inner list contains [metric, value] pairs
-    df_dict = {"Metric": [], "Value": []}
+    df_dict: dict[str, list[Any]] = {"Metric": [], "Value": []}
     for record in analysis_data:
         for metric, value in record:
             df_dict["Metric"].append(metric)
@@ -181,51 +201,9 @@ def update_global_data():
     global_data["analysis"] = df_dict
 
 
-def _safe_read_file_segment(filename: str, lineno: int, context: int = 8):
-    try:
-        # only allow files under current working dir for safety
-        cwd = os.path.realpath(os.getcwd())
-        path = os.path.realpath(filename)
-        if not path.startswith(cwd):
-            return None
-        start = max(1, lineno - context)
-        end = lineno + context
-        lines = []
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for i, line in enumerate(f, start=1):
-                if i < start:
-                    continue
-                if i > end:
-                    break
-                lines.append({"no": i, "text": line.rstrip("\n")})
-        return {
-            "filename": path,
-            "lineno": lineno,
-            "start": start,
-            "end": end,
-            "highlight": lineno,
-            "lines": lines,
-        }
-    except Exception:
-        return None
-
-
 @app.route("/")
 def index():
-    update_global_data()
     return render_template("index.html")
-
-
-@app.route("/debug")
-def debug_page():
-    update_global_data()
-    return render_template("debug.html")
-
-
-@app.route("/calibrate")
-def calibrate_page():
-    # A minimal page to calibrate mouse picking dx/dy
-    return render_template("calibrate.html")
 
 
 @app.route("/api/data")
@@ -256,7 +234,7 @@ def get_sbuf_usage():
 
 @app.route("/api/update_data")
 def update_data():
-    update_global_data()
+    update_global_data(force=True)
     return jsonify({"status": "Data updated successfully"})
 
 
@@ -278,70 +256,23 @@ def get_op_code():
     if raw_tensor_data is None:
         update_global_data()
     uuid = data.get("uuid") or current_fullscreen_op
-    frame_idx = int(data.get("frame_idx", 0))
     context = int(data.get("context", 8))
     if not uuid or raw_tensor_data is None or uuid not in raw_tensor_data:
         return jsonify({"error": "Operation not found"}), 404
     tb_list = raw_tensor_data[uuid].get("tracebacks") or []
     if not tb_list:
         return jsonify({"error": "Traceback not available"}), 200
-    # Heuristic: pick the BEST user frame under CWD (closest to op)
-    cwd = os.path.realpath(os.getcwd())
-
-    def _score(tb: dict) -> int:
-        fn = tb.get("filename") or ""
-        line = (tb.get("line") or "").strip()
-        name = tb.get("name") or ""
-        p = os.path.realpath(fn)
-        score = 0
-
-        # 强优先：明确的 Triton 语言内核操作符
-        if "tl.load" in line or "tl.store" in line:
-            score += 100
-        elif "tl." in line:
-            score += 50
-
-        # 位置相关：项目代码优先，三方/框架降权
-        if p.startswith(cwd):
-            score += 5
-        if any(
-            s in p
-            for s in ["site-packages", "triton_viz/", "triton/", "runpy.py", "IPython"]
-        ):
-            score -= 10
-
-        # 语义相关：函数名看起来像 kernel 的加分
-        if name.endswith("_kernel") or "kernel" in name:
-            score += 3
-
-        # 体验相关：examples 目录小幅加分
-        if "examples" in p:
-            score += 1
-
-        return score
-
-    # Prefer frames from tail (closest to current) and highest score
-    best = None
-    best_score = -(10**9)
-    for tb in reversed(tb_list):
-        sc = _score(tb)
-        if sc > best_score:
-            best, best_score = tb, sc
-    chosen = best if best is not None else None
-    if chosen is None:
-        # fallback: use requested frame or last non-<string> frame
-        frame_idx = max(0, min(frame_idx, len(tb_list) - 1))
-        chosen = tb_list[frame_idx]
-        for tb in reversed(tb_list):
-            fn = tb.get("filename") or ""
-            if not fn.startswith("<"):
-                chosen = tb
-                break
-    tb = chosen
+    # Last frame = innermost user code, closest to tl.load/tl.store
+    tb = tb_list[-1]
     filename = tb.get("filename")
     lineno = int(tb.get("lineno", 0))
     line_of_code = tb.get("line")
-    seg = _safe_read_file_segment(filename, lineno, context)
+    # Only allow reading files under cwd (prevent path traversal via HTTP API)
+    cwd = os.path.realpath(os.getcwd())
+    path = os.path.realpath(filename) if filename else ""
+    seg = (
+        read_source_segment(filename, lineno, context) if path.startswith(cwd) else None
+    )
     if seg is None:
         # fallback with single line
         seg = {
@@ -387,59 +318,65 @@ def get_matmul_c():
         return jsonify({"error": f"MatMul compute failed: {e}"}), 200
 
 
-@app.route("/api/getMatmulVectors", methods=["POST"])
-def get_matmul_vectors():
-    """Return A[row, :] and B[:, col] for a given Dot op.
-
-    Request JSON: { uuid, row, col }
-    Response JSON: {
-        "row": int,
-        "col": int,
-        "a_row": [float, ...],
-        "b_col": [float, ...],
-        "k": int
-    }
-    """
+@app.route("/api/getMatmulA", methods=["POST"])
+def get_matmul_a():
     global raw_tensor_data
     data = request.json or {}
     uuid = data.get("uuid")
-    row = int(data.get("row", 0))
-    col = int(data.get("col", 0))
     if not uuid or uuid not in raw_tensor_data:
         return jsonify({"error": "Operation not found"}), 404
     op = raw_tensor_data[uuid]
     a = op.get("input_data")
-    b = op.get("other_data")
-    if a is None or b is None:
-        return jsonify({"error": "MatMul tensors not available"}), 200
+    if a is None:
+        return jsonify({"error": "MatMul A tensor not available"}), 200
     try:
         import numpy as _np
 
         a_np = _np.asarray(a)
-        b_np = _np.asarray(b)
-        swizzle = bool(op.get("b_swizzle"))
-        a_row = a_np[row, :].tolist()
-        if swizzle:
-            # TEMP: until tracer auto-detects, demo may flag B swizzle by row access
-            b_vec = b_np[col, :]
-        else:
-            b_vec = b_np[:, col]
-        b_col = _np.asarray(b_vec).ravel().tolist()
-        k = len(a_row)
+        amin = float(_np.min(a_np)) if a_np.size else 0.0
+        amax = float(_np.max(a_np)) if a_np.size else 0.0
         return jsonify(
             {
-                "row": row,
-                "col": col,
-                "a_row": a_row,
-                "b_col": b_col,
-                "k": k,
-                "swizzle": swizzle,
+                "shape": list(a_np.shape),
+                "min": amin,
+                "max": amax,
+                "values": a_np.tolist(),
             }
         )
     except Exception as e:
-        return jsonify({"error": f"MatMul vectors failed: {e}"}), 200
+        return jsonify({"error": f"MatMul A fetch failed: {e}"}), 200
 
 
+@app.route("/api/getMatmulB", methods=["POST"])
+def get_matmul_b():
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+    op = raw_tensor_data[uuid]
+    b = op.get("other_data")
+    if b is None:
+        return jsonify({"error": "MatMul B tensor not available"}), 200
+    try:
+        import numpy as _np
+
+        b_np = _np.asarray(b)
+        bmin = float(_np.min(b_np)) if b_np.size else 0.0
+        bmax = float(_np.max(b_np)) if b_np.size else 0.0
+        return jsonify(
+            {
+                "shape": list(b_np.shape),
+                "min": bmin,
+                "max": bmax,
+                "values": b_np.tolist(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"MatMul B fetch failed: {e}"}), 200
+
+
+@app.route("/api/getSBufData", methods=["POST"])
 @app.route("/api/histogram", methods=["POST"])
 def get_value_histogram():
     """Return histogram statistics for tensors associated with an operation."""
@@ -645,10 +582,10 @@ def get_load_tensor():
       }
     """
     global raw_tensor_data
-    data = request.json
+    data = request.json or {}
     uuid = data.get("uuid")
 
-    if uuid is None or uuid not in raw_tensor_data:
+    if raw_tensor_data is None or uuid is None or uuid not in raw_tensor_data:
         return jsonify({"error": "Operation not found"}), 404
 
     op_data = raw_tensor_data[uuid]
@@ -694,20 +631,213 @@ def get_load_tensor():
                 "values": slice_np.tolist(),
             }
 
+        # Calculate highlights
+        if "offsets" in op_data:
+            offsets = np.asarray(op_data["offsets"])
+            masks = np.asarray(op_data["masks"])
+            shape = tuple(op_data["global_shape"])
+            dtype = op_data["global_dtype"]
+
+            shape_3d = make_3d(shape)
+            gz, gy, gx = delinearized(shape_3d, offsets, dtype, masks)
+
+            # Filter invalid
+            valid = (gx != -1) & (gy != -1) & (gz != -1)
+            if valid.any():
+                gx = gx[valid]
+                gy = gy[valid]
+                gz = gz[valid]
+                coords = np.stack([gx, gy, gz], axis=1)
+
+                min_c = coords.min(axis=0)
+                max_c = coords.max(axis=0)
+                dims = max_c - min_c + 1
+                volume = np.prod(dims)
+                unique_coords = np.unique(coords, axis=0)
+
+                if len(unique_coords) == volume:
+                    # Robust check: all coordinates in the box [min_c, max_c] must be present
+                    # We already know the count matches volume, so we just need to verify they are all distinct
+                    # and within bounds (which unique + bounding box logic already implies).
+                    # However, to be absolutely sure it's not a sparse set that happens to have 'volume' points:
+                    # Generate the dense set and compare.
+                    is_dense = True
+                    # Optimization: if it's really dense, every integer in the range [0, volume)
+                    # of linear indices relative to min_c must be present.
+                    # Linear index = (z-sz)*dx*dy + (y-sy)*dx + (x-sx)
+                    offsets_rel = unique_coords - min_c
+                    lin_indices = (
+                        offsets_rel[:, 2] * dims[1] * dims[0]
+                        + offsets_rel[:, 1] * dims[0]
+                        + offsets_rel[:, 0]
+                    )
+                    if not (np.sort(lin_indices) == np.arange(volume)).all():
+                        is_dense = False
+
+                    if is_dense:
+                        payload["highlights"] = {
+                            "type": "descriptor",
+                            "start": min_c.tolist(),
+                            "shape": dims.tolist(),
+                        }
+                    else:
+                        payload["highlights"] = {
+                            "type": "array",
+                            "data": coords.tolist(),
+                        }
+                else:
+                    payload["highlights"] = {"type": "array", "data": coords.tolist()}
+
         return jsonify(payload)
     except Exception as e:
         return jsonify({"error": f"getLoadTensor failed: {e}"}), 200
+
+
+def _parse_grid_key(raw_key: str) -> tuple[int, int, int] | None:
+    key = str(raw_key or "").strip()
+    key = key.lstrip("(").rstrip(")")
+    parts = [p.strip() for p in key.split(",") if p.strip()]
+    if len(parts) != 3:
+        return None
+    try:
+        return int(parts[0]), int(parts[1]), int(parts[2])
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_load_store_program_subsets(op_type, overall_key, op_index, time_idx):
+    if not global_data or "ops" not in global_data:
+        return {
+            "coords": [],
+            "subsets": {},
+            "subset_count": 0,
+            "counts": [],
+            "max_count": 0,
+            "shape": [],
+        }
+    viz = global_data["ops"].get("visualization_data") or {}
+    uuid_to_pid: dict[str, tuple[int, int, int]] = {}
+    for grid_key, ops in viz.items():
+        pid = _parse_grid_key(grid_key)
+        if pid is None:
+            continue
+        for op in ops or []:
+            is_match = (
+                op.get("type") == op_type and op.get("overall_key") == overall_key
+            )
+            if not is_match:
+                continue
+            if op_index is not None:
+                is_match = op.get("op_index") == op_index
+            else:
+                is_match = op.get("time_idx") == time_idx
+            if is_match:
+                uuid = op.get("uuid")
+                if uuid:
+                    uuid_to_pid[uuid] = pid
+
+    overall_maps = load_overall_maps if op_type == "Load" else store_overall_maps
+    entry = overall_maps.get(overall_key)
+    if not entry or not uuid_to_pid:
+        return {
+            "coords": [],
+            "subsets": {},
+            "subset_count": 0,
+            "counts": [],
+            "max_count": 0,
+            "shape": list(entry.get("shape") or []) if entry else [],
+        }
+    shape = list(entry.get("shape") or [])
+    uuid_to_coords = {
+        tile.get("uuid"): tile.get("global_coords")
+        for tile in entry.get("tiles", [])
+        if tile.get("uuid") in uuid_to_pid
+    }
+
+    coord_subsets: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+    for uuid, pid in uuid_to_pid.items():
+        coords = uuid_to_coords.get(uuid) or []
+        if not coords:
+            continue
+        unique_coords = {(int(x), int(y), int(z)) for x, y, z in coords}
+        for coord in unique_coords:
+            coord_subsets.setdefault(coord, set()).add(pid)
+
+    subsets: dict[str, list[list[int]]] = {}
+    coords_list = []
+    counts_list = []
+    max_count = 0
+    for (x, y, z), pid_set in coord_subsets.items():
+        pid_list = sorted(pid_set)
+        subset_key = "|".join([f"{px},{py},{pz}" for px, py, pz in pid_list])
+        if subset_key not in subsets:
+            subsets[subset_key] = [[px, py, pz] for px, py, pz in pid_list]
+        count = len(pid_list)
+        max_count = max(max_count, count)
+        coords_list.append([x, y, z, subset_key])
+        counts_list.append([x, y, z, count])
+
+    return {
+        "coords": coords_list,
+        "subsets": subsets,
+        "subset_count": len(subsets),
+        "counts": counts_list,
+        "max_count": max_count,
+        "shape": shape,
+    }
+
+
+@app.route("/api/getLoadStoreAllPrograms", methods=["POST"])
+def get_load_store_all_programs():
+    data = request.json or {}
+    if global_data is None or raw_tensor_data is None:
+        update_global_data()
+    op_type = data.get("type")
+    overall_key = data.get("overall_key")
+    time_idx = data.get("time_idx")
+    op_index = data.get("op_index")
+    if not op_type or not overall_key or time_idx is None:
+        return jsonify({"error": "Missing type, overall_key, or time_idx"}), 400
+    op_type = str(op_type).strip().capitalize()
+    if op_type not in {"Load", "Store"}:
+        return jsonify({"error": "Unsupported type"}), 400
+    try:
+        time_idx = int(time_idx)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid time_idx"}), 400
+    try:
+        op_index = int(op_index) if op_index is not None else None
+    except (TypeError, ValueError):
+        op_index = None
+    payload = _collect_load_store_program_subsets(
+        op_type, overall_key, op_index, time_idx
+    )
+    return jsonify(payload)
 
 
 @app.route("/api/load_overall", methods=["POST"])
 def get_load_overall():
     data = request.json or {}
     key = data.get("key")
+    time_idx = data.get("time_idx")
     if not key:
         return jsonify({"error": "Missing key"}), 400
     entry = load_overall_maps.get(key)
     if not entry:
         return jsonify({"error": "Overall data not found"}), 404
+
+    if time_idx is not None:
+        try:
+            time_idx = int(time_idx)
+            # Filter tiles by time_idx
+            filtered_tiles = [
+                t for t in entry.get("tiles", []) if t.get("time_idx") == time_idx
+            ]
+            # Return a copy of the entry with only the matching tiles
+            return jsonify({**entry, "tiles": filtered_tiles})
+        except (ValueError, TypeError):
+            pass
+
     return jsonify(entry)
 
 
@@ -715,11 +845,25 @@ def get_load_overall():
 def get_store_overall():
     data = request.json or {}
     key = data.get("key")
+    time_idx = data.get("time_idx")
     if not key:
         return jsonify({"error": "Missing key"}), 400
     entry = store_overall_maps.get(key)
     if not entry:
         return jsonify({"error": "Overall data not found"}), 404
+
+    if time_idx is not None:
+        try:
+            time_idx = int(time_idx)
+            # Filter tiles by time_idx
+            filtered_tiles = [
+                t for t in entry.get("tiles", []) if t.get("time_idx") == time_idx
+            ]
+            # Return a copy of the entry with only the matching tiles
+            return jsonify({**entry, "tiles": filtered_tiles})
+        except (ValueError, TypeError):
+            pass
+
     return jsonify(entry)
 
 
@@ -740,19 +884,33 @@ def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None)
     app.run(host="0.0.0.0", port=cloudflared_port, debug=False, use_reloader=False)
 
 
-def launch(share: bool = True, port: int | None = None):
+def _is_interactive() -> bool:
+    if getattr(sys, "ps1", None):
+        return True
+    if getattr(sys, "flags", None) and sys.flags.interactive:
+        return True
+    return "ipykernel" in sys.modules
+
+
+def launch(share: bool = True, port: int | None = None, block: bool | None = None):
     """
     Launch the Triton-Viz Flask server.
 
+    :param block: Whether to block the caller when share=True. Defaults to
+                  True outside interactive sessions.
     """
     print("Launching Triton viz tool")
     default_port = 8000 if share else 5001
     actual_port = port or int(os.getenv("TRITON_VIZ_PORT", default_port))
+    if block is None:
+        block = share and not _is_interactive()
 
     if share:
         print("--------")
         flask_thread = threading.Thread(
-            target=run_flask_with_cloudflared, args=(actual_port, None)
+            target=run_flask_with_cloudflared,
+            args=(actual_port, None),
+            daemon=False,
         )
         flask_thread.start()
 
@@ -775,6 +933,12 @@ def launch(share: bool = True, port: int | None = None):
             print("--------")
         except requests.exceptions.RequestException:
             print("Setting up public URL... Please wait.")
+
+        if block:
+            try:
+                flask_thread.join()
+            except KeyboardInterrupt:
+                pass
 
         return local_url, public_url
     else:

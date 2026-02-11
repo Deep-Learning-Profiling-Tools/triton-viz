@@ -1,0 +1,13 @@
+import triton_viz
+
+
+def fake_trace(*args, **kwargs):
+    print("TRACE_CALLED")
+
+    def _decorator(fn):
+        return fn
+
+    return _decorator
+
+
+triton_viz.trace = fake_trace

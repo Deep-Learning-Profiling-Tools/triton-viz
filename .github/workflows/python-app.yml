@@ -23,17 +23,21 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TRITON_INTERPRET: "1"
-      TRITON_VERSION: "3.4.0"
 
     steps:
     - uses: actions/checkout@v3
       with:
         path: 'triton_viz'
 
-    - name: Set up Python 3.10
+    - name: Set up Python 3.12
       uses: actions/setup-python@v3
       with:
-        python-version: '3.10'
+        python-version: '3.12'
+
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
     - name: Lint with pre-commit
       run: |
@@ -42,21 +46,44 @@ jobs:
         pre-commit run --all-files
 
     - name: Install Dependencies
-      if: steps.cache-pip.outputs.cache-hit != 'true'
-      run: |
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
-        pip uninstall pytorch-triton -y
-
-    - name: Install Triton
-      run: |
-        pip install triton==${{ env.TRITON_VERSION }}
-
-    - name: Install Triton-Viz
       run: |
         cd triton_viz
-        pip install -e .
+        uv sync --extra test
+
+    - name: Run frontend tests
+      run: |
+        cd triton_viz
+        npm install
+        npm run test:frontend
 
     - name: Test with pytest
       run: |
         cd triton_viz
-        python -m pytest tests
+        uv run pytest tests
+
+    - name: Install Triton-Viz with NKI extras
+      run: |
+        cd triton_viz
+        uv sync --extra test --extra nki
+
+    - name: Run full (Triton + NKI) pytest suite
+      run: |
+        cd triton_viz
+        uv run pytest tests -m ""
+
+  test-pip-install:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.12'
+
+    - name: Install with pip
+      run: pip install -e ".[test]"
+
+    - name: Verify installation
+      run: python -c "import triton_viz; print(triton_viz.__version__)"

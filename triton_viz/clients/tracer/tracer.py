@@ -7,17 +7,13 @@ from ...core.data import (
     ReduceSum,
     Dot,
     Grid,
-    MaskedLoad,
-    MaskedStore,
-    RawLoad,
-    RawStore,
     Allocate,
     Flip,
 )
-from triton_viz.core.nki_masked_load import masked_load
+from ...utils.traceback_utils import extract_user_frames
+from triton_viz.core.masked_load_store import masked_load
 from typing import Callable, Optional, Union
 import numpy as np
-import traceback
 
 
 def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
@@ -80,99 +76,16 @@ class Tracer(Client):
             self.sample = True
 
         # Create a Grid record for this grid index
-        self.records.append(Grid(idx=grid_idx))
+        with self._lock_context():
+            self.records.append(Grid(idx=grid_idx))
 
     def grid_callback(self, grid: tuple[int, ...]):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
-    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
-        active_backend = (kwargs or {}).get("backend", "triton")
-        # simple per-launch logical clock for NKI flow ordering
-        if not hasattr(self, "_nki_time"):  # initialize once
-            self._nki_time = 0
-
-        def _extract_user_frames() -> list[traceback.FrameSummary]:
-            stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
-            # drop current frames (this function and callers)
-            stack = stack[:-2]
-            cleaned: list[traceback.FrameSummary] = []
-            for f in stack:
-                fn = f.filename.replace("\\", "/")
-                if any(
-                    s in fn
-                    for s in [
-                        "triton_viz/core/",
-                        "triton_viz/clients/",
-                        "triton/runtime/",
-                        "triton/language/",
-                        "site-packages/triton/",
-                        "runpy.py",
-                        "IPython",
-                    ]
-                ):
-                    continue
-                cleaned.append(f)
-            if cleaned:
-                return cleaned
-            # fallback to last non "<...>" frame
-            for f in reversed(stack):
-                if not f.filename.startswith("<"):
-                    return [f]
-            return stack[-1:]
-
-        def _safe_elem_size(obj, default: int = 1) -> int:
-            try:
-                # Tensor-like object with element_size()
-                if hasattr(obj, "element_size") and callable(
-                    getattr(obj, "element_size", None)
-                ):
-                    return int(obj.element_size())
-            except Exception:
-                pass
-            try:
-                # Fallback to dtype.itemsize if available
-                dt = getattr(obj, "dtype", None)
-                if dt is not None and hasattr(dt, "itemsize"):
-                    return int(dt.itemsize)
-            except Exception:
-                pass
-            return int(default)
-
-        def _count_true(mask_arr) -> int:
-            try:
-                return int(np.count_nonzero(mask_arr))
-            except Exception:
-                return 0
-
-        def pre_load_callback(ptr, mask, *args, **kwargs):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            rec = Load(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            # Backend-specific annotations
-            try:
-                if active_backend == "triton":
-                    rec.backend = "triton"
-                    rec.mem_src = None
-                    rec.mem_dst = None
-                    # bytes = number of True mask elements * element size
-                    elem_sz = _safe_elem_size(tensor, 1)
-                    n_elems = _count_true(mask.data)
-                    rec.bytes = int(n_elems * elem_sz)
-                    rec.time_idx = -1
-                else:  # nki
-                    rec.backend = "nki"
-                    # defaults in data.py already reflect HBM->SBUF for Load
-                    elem_sz = _safe_elem_size(tensor, 1)
-                    n_elems = _count_true(mask.data)
-                    rec.bytes = int(n_elems * elem_sz)
-                    rec.time_idx = int(self._nki_time)
-                    self._nki_time += 1
-            except Exception:
-                pass
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        def post_allocate_callback(ret):
+            assert hasattr(ret, "data")
+            self.tensors.append(ret)
 
         def _convert_keys_to_numpy(keys):
             """Convert any NDArrays in keys to numpy arrays."""
@@ -183,165 +96,64 @@ class Tracer(Client):
             else:
                 return keys
 
-        def post_allocate_callback(ret, *args, **kwargs):
-            assert hasattr(ret, "data")
-            self.tensors.append(ret)
-
-        def pre_masked_load_callback(ptr, keys, mask=None, *args, **kwargs):
+        @self.lock_fn
+        def pre_load_callback(ptr, mask, keys):
             if not self.sample:
                 return
-            keys = _convert_keys_to_numpy(keys)
-            rec = Load(
-                ptr.data_ptr(),
-                masked_load(ptr.get_offsets().data, keys, mask=mask.data),
-                mask.data,
-            )
-            try:
-                if active_backend == "triton":
-                    rec.backend = "triton"
-                    rec.mem_src = None
-                    rec.mem_dst = None
-                    elem_sz = _safe_elem_size(ptr, 1)
-                    n_elems = _count_true(getattr(mask, "data", mask))
-                    rec.bytes = int(n_elems * elem_sz)
-                    rec.time_idx = -1
-                else:
-                    rec.backend = "nki"
-                    elem_sz = _safe_elem_size(
-                        ptr, _safe_elem_size(getattr(ptr, "dtype", None), 1)
-                    )
-                    n_elems = _count_true(getattr(mask, "data", mask))
-                    rec.bytes = int(n_elems * elem_sz)
-                    rec.time_idx = int(self._nki_time)
-                    self._nki_time += 1
-            except Exception:
-                pass
-            self.records.append(rec)
 
-        def pre_store_callback(ptr, value, mask, *args, **kwargs):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            rec = Store(tensor.data_ptr(), ptr.data - tensor.data_ptr(), mask.data)
-            try:
-                if active_backend == "triton":
-                    rec.backend = "triton"
-                    rec.mem_src = None
-                    rec.mem_dst = None
-                    elem_sz = _safe_elem_size(tensor, _safe_elem_size(value, 1))
-                    n_elems = _count_true(mask.data)
-                    rec.bytes = int(n_elems * elem_sz)
-                    rec.time_idx = -1
-                else:
-                    rec.backend = "nki"
-                    # defaults in data.py already reflect SBUF->HBM for Store
-                    elem_sz = _safe_elem_size(value, 1)
-                    n_elems = _count_true(mask.data)
-                    rec.bytes = int(n_elems * elem_sz)
-                    rec.time_idx = int(self._nki_time)
-                    self._nki_time += 1
-            except Exception:
-                pass
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
-
-        def pre_masked_store_callback(ptr, keys, value, mask=None, *args, **kwargs):
-            if not self.sample:
-                return
-            keys = _convert_keys_to_numpy(keys)
-            if mask is None:
-                offsets = masked_load(ptr.get_offsets().data, keys)
-                mask_data = np.ones_like(offsets, dtype=bool)
+            if keys is None:  # i.e. for triton, ptr = pointer + offsets
+                first_ptr = np.reshape(ptr.data, (-1))[0]
+                tensor = self._get_tensor(first_ptr)
+                offsets = ptr.data - tensor.data_ptr()
             else:
+                keys = _convert_keys_to_numpy(keys)
+                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
+                tensor = ptr
+
+            rec = Load(tensor.data_ptr(), offsets, mask.data)
+            rec.call_path = extract_user_frames(skip_tail=2)
+            self.records.append(rec)
+
+        @self.lock_fn
+        def pre_store_callback(ptr, mask, keys):
+            if not self.sample:
+                return
+
+            if keys is None:  # i.e. for triton, ptr = pointer + offsets, so keys=None
+                first_ptr = np.reshape(ptr.data, (-1))[0]
+                tensor = self._get_tensor(first_ptr)
+                offsets = ptr.data - tensor.data_ptr()
                 mask_data = mask.data
-                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
-            rec = Store(ptr.data_ptr(), offsets, mask_data)
-            try:
-                if active_backend == "triton":
-                    rec.backend = "triton"
-                    rec.mem_src = None
-                    rec.mem_dst = None
-                    elem_sz = _safe_elem_size(value, _safe_elem_size(ptr, 1))
-                    n_elems = _count_true(mask_data)
-                    rec.bytes = int(n_elems * elem_sz)
-                    rec.time_idx = -1
+            else:
+                keys = _convert_keys_to_numpy(keys)
+                if mask is None:
+                    offsets = masked_load(ptr.get_offsets().data, keys)
+                    mask_data = np.ones_like(offsets).astype(bool)
                 else:
-                    rec.backend = "nki"
-                    elem_sz = _safe_elem_size(value, 1)
-                    n_elems = _count_true(mask_data)
-                    rec.bytes = int(n_elems * elem_sz)
-                    rec.time_idx = int(self._nki_time)
-                    self._nki_time += 1
-            except Exception:
-                pass
+                    mask_data = mask.data
+                    offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
+                tensor = ptr
+
+            rec = Store(tensor.data_ptr(), offsets, mask_data)
+            rec.call_path = extract_user_frames(skip_tail=2)
             self.records.append(rec)
 
-        # Raw (unmasked) ops: synthesize a full True mask based on ptr shape
-        def pre_raw_load_callback(ptr, *_, **__):
+        @self.lock_fn
+        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
             if not self.sample:
                 return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            offsets = ptr.data - tensor.data_ptr()
-            true_mask = np.ones_like(offsets, dtype=bool)
-            rec = Load(tensor.data_ptr(), offsets, true_mask)
-            try:
-                if active_backend == "triton":
-                    rec.backend = "triton"
-                    rec.mem_src = None
-                    rec.mem_dst = None
-                    elem_sz = _safe_elem_size(tensor, 1)
-                    rec.bytes = int(offsets.size * elem_sz)
-                    rec.time_idx = -1
-                else:
-                    rec.backend = "nki"
-                    elem_sz = _safe_elem_size(tensor, 1)
-                    rec.bytes = int(offsets.size * elem_sz)
-                    rec.time_idx = int(self._nki_time)
-                    self._nki_time += 1
-            except Exception:
-                pass
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
-
-        def pre_raw_store_callback(ptr, value=None, *_, **__):
-            if not self.sample:
-                return
-            first_ptr = np.reshape(ptr.data, (-1))[0]
-            tensor = self._get_tensor(first_ptr)
-            offsets = ptr.data - tensor.data_ptr()
-            true_mask = np.ones_like(offsets, dtype=bool)
-            rec = Store(tensor.data_ptr(), offsets, true_mask)
-            try:
-                if active_backend == "triton":
-                    rec.backend = "triton"
-                    rec.mem_src = None
-                    rec.mem_dst = None
-                    elem_sz = _safe_elem_size(value if value is not None else tensor, 1)
-                    rec.bytes = int(offsets.size * elem_sz)
-                    rec.time_idx = -1
-                else:
-                    rec.backend = "nki"
-                    elem_sz = _safe_elem_size(value if value is not None else tensor, 1)
-                    rec.bytes = int(offsets.size * elem_sz)
-                    rec.time_idx = int(self._nki_time)
-                    self._nki_time += 1
-            except Exception:
-                pass
-            rec.call_path = _extract_user_frames()
-            self.records.append(rec)
-
-        def post_reduce_sum_callback(
-            ret, input, axis=None, keep_dims=False, *args, **kwargs
-        ):
-            if not self.sample:
-                return
-            input_shape = input.handle.data.shape
-            output_shape = ret.handle.data.shape
+            input_data = getattr(getattr(input, "handle", None), "data", None)
+            if input_data is None:
+                input_data = getattr(input, "data", None)
+            output_data = getattr(getattr(ret, "handle", None), "data", None)
+            if output_data is None:
+                output_data = getattr(ret, "data", None)
+            input_shape = input_data.shape if input_data is not None else ()
+            output_shape = output_data.shape if output_data is not None else ()
             self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
 
-        def post_dot_callback(ret, input, other, *args, **kwargs):
+        @self.lock_fn
+        def post_dot_callback(ret, input, other):
             if not self.sample:
                 return
             input_shape = input.data.shape
@@ -349,17 +161,7 @@ class Tracer(Client):
             ret_shape = ret.data.shape
             # Pass input/other raw arrays so draw.py can render MatMul
             rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
-            try:
-                if active_backend == "nki":
-                    # Annotate flow for Dot as SBUF -> PSUM
-                    rec.mem_src = "SBUF"
-                    rec.mem_dst = "PSUM"
-                    rec.backend = "nki"
-                    rec.time_idx = int(self._nki_time)
-                    self._nki_time += 1
-            except Exception:
-                pass
-            rec.call_path = _extract_user_frames()
+            rec.call_path = extract_user_frames(skip_tail=2)
             self.records.append(rec)
 
         def post_flip_callback(ret, x, *args, **kwargs):
@@ -380,23 +182,15 @@ class Tracer(Client):
                 in_shape = tuple(getattr(in_shape, "shape", []) or [])
                 out_shape = tuple(getattr(out_shape, "shape", []) or [])
             rec = Flip(in_shape, out_shape, int(dim) if dim is not None else 0)
-            rec.call_path = _extract_user_frames()
+            rec.call_path = extract_user_frames(skip_tail=2)
             self.records.append(rec)
 
         if op_type is Allocate:
             return OpCallbacks(after_callback=post_allocate_callback)
         elif op_type is Load:
             return OpCallbacks(before_callback=pre_load_callback)
-        elif op_type is MaskedLoad:
-            return OpCallbacks(before_callback=pre_masked_load_callback)
         elif op_type is Store:
             return OpCallbacks(before_callback=pre_store_callback)
-        elif op_type is MaskedStore:
-            return OpCallbacks(before_callback=pre_masked_store_callback)
-        elif op_type is RawLoad:
-            return OpCallbacks(before_callback=pre_raw_load_callback)
-        elif op_type is RawStore:
-            return OpCallbacks(before_callback=pre_raw_store_callback)
         elif op_type is ReduceSum:
             return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:
@@ -409,6 +203,15 @@ class Tracer(Client):
     def register_for_loop_callback(self):
         return ForLoopCallbacks()
 
+    @property
+    def sample(self) -> bool:
+        return self._get_thread_local("sample", True)
+
+    @sample.setter
+    def sample(self, value: bool) -> None:
+        self._set_thread_local("sample", value)
+
     def finalize(self) -> list:
-        self.tensors.clear()
-        return self.records
+        with self._lock_context():
+            self.tensors.clear()
+            return self.records

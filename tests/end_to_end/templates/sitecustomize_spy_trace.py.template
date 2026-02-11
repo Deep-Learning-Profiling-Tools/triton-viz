@@ -1,0 +1,44 @@
+import atexit
+import json
+
+import triton_viz as _tv
+
+_orig_trace = _tv.trace
+_records = []
+
+
+def _spy_trace(*t_args, **t_kwargs):
+    _decorator = _orig_trace(*t_args, **t_kwargs)
+
+    def _apply(target):
+        name = (
+            getattr(target, "__name__", None)
+            or getattr(target, "__qualname__", None)
+            or repr(target)
+        )
+        typ = type(target).__name__
+        mod = getattr(target, "__module__", None)
+
+        _records.append({
+            "name": name,
+            "type": typ,
+            "module": mod,
+        })
+
+        return _decorator(target)
+
+    return _apply
+
+
+_tv.trace = _spy_trace
+
+_LOG_PATH = $log_path
+
+
+@atexit.register
+def _dump_records():
+    try:
+        with open(_LOG_PATH, "w") as f:
+            json.dump(_records, f)
+    except Exception:
+        pass
