@@ -1,0 +1,10 @@
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def dummy_kernel(x_ptr, y_ptr, z_ptr, BLOCK_SIZE: tl.constexpr):
+    pass
+
+
+dummy_kernel[(1,)](None, None, None, BLOCK_SIZE=1)

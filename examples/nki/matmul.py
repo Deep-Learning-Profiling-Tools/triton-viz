@@ -69,48 +69,50 @@ def matmul_kernel(lhs, rhs, result):
             )
 
 
-TRITON_VIZ = True
-kernel_grid = (1, 1, 1)
-lhs_small = np.arange(16).astype(np.float32).reshape(4, 4)
-rhs_small = np.arange(32).astype(np.float32).reshape(4, 8)
-# lhs_small = np.arange(9).astype(np.float32).reshape(3, 3)
-# rhs_small = np.arange(18).astype(np.float32).reshape(3, 6)
-result = np.empty((lhs_small.shape[0], rhs_small.shape[1]), dtype=lhs_small.dtype)
-kernel_args = (lhs_small, rhs_small, result)
+def _run_demo():
+    triton_viz_enabled = True
+    kernel_grid = (1, 1, 1)
+    lhs_small = np.arange(16).astype(np.float32).reshape(4, 4)
+    rhs_small = np.arange(32).astype(np.float32).reshape(4, 8)
+    result = np.empty((lhs_small.shape[0], rhs_small.shape[1]), dtype=lhs_small.dtype)
+    kernel_args = (lhs_small, rhs_small, result)
 
-if TRITON_VIZ:
-    print("Executing matmul_kernel with NKI interpreter...")
-    traced_kernel = triton_viz.trace(clients=Tracer(), backend="nki")(matmul_kernel)
-    kernel_instance = traced_kernel[kernel_grid]
-    kernel_instance(*kernel_args)
+    if triton_viz_enabled:
+        print("Executing matmul_kernel with NKI interpreter...")
+        traced_kernel = triton_viz.trace(client=Tracer(), backend="nki")(matmul_kernel)
+        kernel_instance = traced_kernel[kernel_grid]
+        kernel_instance(*kernel_args)
 
-    print(f"Number of launches: {len(launches)}")
-    if launches:
-        launch = launches[-1]
-        print(f"Number of records: {len(launch.records)}")
-        for i, record in enumerate(launch.records):
-            print(f"Record {i}: {type(record).__name__}")
-            if hasattr(record, "ptr"):
-                print(f"  ptr: {record.ptr}")
-            if hasattr(record, "offsets"):
-                print(f"  offsets shape: {record.offsets.shape}")
-            if hasattr(record, "masks"):
-                print(f"  masks shape: {record.masks.shape}")
+        print(f"Number of launches: {len(launches)}")
+        if launches:
+            launch = launches[-1]
+            print(f"Number of records: {len(launch.records)}")
+            for i, record in enumerate(launch.records):
+                print(f"Record {i}: {type(record).__name__}")
+                if hasattr(record, "ptr"):
+                    print(f"  ptr: {record.ptr}")
+                if hasattr(record, "offsets"):
+                    print(f"  offsets shape: {record.offsets.shape}")
+                if hasattr(record, "masks"):
+                    print(f"  masks shape: {record.masks.shape}")
 
-    # Try to launch visualization
-    try:
-        triton_viz.launch(share=False)
-    except Exception as e:
-        print(f"\nError during visualization: {e}")
-        import traceback
+        try:
+            triton_viz.launch(share=False)
+        except Exception as e:
+            print(f"\nError during visualization: {e}")
+            import traceback
 
-        traceback.print_exc()
-else:
-    print("Executing NKI JIT-ed matmul_kernel...")
-    compiled_kernel = nki.jit(matmul_kernel, kernel_return=False)
-    z2 = nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
+            traceback.print_exc()
+    else:
+        print("Executing NKI JIT-ed matmul_kernel...")
+        compiled_kernel = nki.jit(matmul_kernel, kernel_return=False)
+        nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
 
-z2 = result
-z1 = lhs_small @ rhs_small
-print(np.max(np.abs(z1 - z2)))
-assert np.allclose(z1, z2)
+    z2 = result
+    z1 = lhs_small @ rhs_small
+    print(np.max(np.abs(z1 - z2)))
+    assert np.allclose(z1, z2)
+
+
+if __name__ == "__main__":
+    _run_demo()

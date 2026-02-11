@@ -7,14 +7,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "triton-viz"
-version = "2.0"
+version = "3.0"
 description = "A visualization tool for Triton"
 authors = [
   {name = "Deep Learning Profiling Tools Team", email = "kzhou6@gmu.edu"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -25,14 +25,17 @@ dependencies = [
   "triton",
   "pyarrow",
   "pre-commit",
-  "pytest",
-  "z3-solver",
+  "z3-solver==4.15.3.0",
   "anytree",
   "cairocffi",
   "flask",
   "flask_cloudflared",
   "tqdm",
 ]
+
+[tool.setuptools.packages.find]
+include=["triton_viz*"]
+exclude=["tasks"]
 
 [tool.setuptools]
 include-package-data = true
@@ -46,3 +49,17 @@ homepage = "https://github.com/Deep-Learning-Profiling-Tools/triton-viz"
 [project.scripts]
 triton-sanitizer = "triton_viz.wrapper:apply_sanitizer"
 triton-profiler = "triton_viz.wrapper:apply_profiler"
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "numpy",
+  "torch",
+]
+nki = [
+  "neuronx-cc==2.22.*; python_version >= '3.10' and python_version <= '3.12'"
+]
+
+[tool.uv]
+extra-index-url = ["https://pip.repos.neuron.amazonaws.com"]
+index-strategy = "unsafe-best-match"
