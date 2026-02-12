@@ -49,11 +49,23 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 ## Getting Started
 
 ### Prerequisites
-
-- Python installed (preferably the latest available version), minimum supported version is 3.10.
+- Python >= 3.10
 
 
 ### Installation of Triton-Viz
+
+#### Windows-specific Setup
+
+Triton-viz depends on Triton, which can only be installed on Windows Subsystem for Linux (WSL). If installing on Windows and you don't have WSL + Python set up, first install WSL by right clicking PowerShell/Command Prompt and selecting "Run as administrator", run `wsl --install`, and reboot.
+
+Then in WSL, install Python
+```sh
+sudo apt install python3
+```
+
+Once that's done, follow "General Installation" instructions.
+
+#### General Installation
 
 Most users can install directly from PyPI:
 
@@ -68,8 +80,6 @@ git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
 cd triton-viz
 uv sync # or "uv sync --extra test" if you're running tests
 ```
-
-If you want to run tests, run `uv sync --extra test` instead of `uv sync`. Otherwise you're all set!
 
 ### Frontend Build
 
@@ -90,16 +100,16 @@ For PyPI installs, install with the `nki` extra and AWS Neuron repository:
 pip install triton-viz[nki] --extra-index-url https://pip.repos.neuron.amazonaws.com
 ```
 
-For source installs, if you want to exercise the Neuron Kernel Interface (NKI) interpreter or run the NKI-specific tests:
+For source installs:
 
 ```sh
-uv sync --extra nki # or "uv sync --extra nki --extra test" if also running tests
+uv sync --extra nki # or "uv sync --extra nki --extra test" if also running NKI-related tests
 ```
 
 Note that you need to specify all features that you want _in one statement_ when using `uv sync`, i.e. if you want both NKI and testing support, you must run `uv sync --extra nki --extra test`. The below statements are wrong and will remove the NKI install when installing test packages:
 ```
-uv sync --extra nki
-uv sync --extra test
+uv sync --extra nki # NKI support but no testing 
+uv sync --extra test # tests but no NKI support
 ```
 
 ### Testing
@@ -110,17 +120,10 @@ uv sync --extra test
 
 ## Working with Examples
 
-Examples live in this repo. Clone it first if you installed via pip.
-
 ```sh
 cd examples
 python <file_name>.py
 ```
-
-## Webpage Notes
-
-- Triton is best supported today; Amazon NKI DSL support is in active development.
-- The web visualizer requires a browser with WebGL/OpenGL enabled (standard in modern browsers).
 
 ## Analysis Clients
 
@@ -129,14 +132,6 @@ Analyze kernels across visualization, profiling, and sanitization with a single 
 - Visualizer: currently supports load, store, and matmul operations for 1/2/3D tensors (more operations and dimensions coming soon).
 - Profiler: flags non-unrolled loops, inefficient mask usage, and missing buffer_load optimizations while tracking load/store byte counts with low-overhead sampling.
 - Sanitizer: symbolically checks tensor memory accesses for out-of-bounds errors and emits reports with tensor metadata, call stack, and expression trees; optional fake-memory backend avoids real reads.
-
-## Visualizer Features
-
-- 3D View: inspect tensor layouts and memory access patterns from any perspective.
-- Program IDs: examine op inputs/outputs at specific PIDs and see per-program load/store footprints.
-- Code Mapping: map visual ops back to source lines for debugging.
-- Heatmaps: spot outliers, zeros, or saturation with value color gradients.
-- Histograms: review value distributions to guide quantization decisions.
 
 ### Environment variables
 
