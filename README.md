@@ -54,18 +54,7 @@ The best part about this tool is that while it does focus on visualizing GPU ope
 
 ### Installation of Triton-Viz
 
-#### Windows-specific Setup
-
-Triton-viz depends on Triton, which can only be installed on Windows Subsystem for Linux (WSL). If installing on Windows and you don't have WSL + Python set up, first install WSL by right clicking PowerShell/Command Prompt and selecting "Run as administrator", run `wsl --install`, and reboot.
-
-Then in WSL, install Python
-```sh
-sudo apt install python3
-```
-
-Once that's done, follow "General Installation" instructions.
-
-#### General Installation
+> **Windows Note:** Triton-viz depends on Triton, which can only be installed on Windows Subsystem for Linux (WSL). Once installed, follow below instructions in WSL.
 
 Most users can install directly from PyPI:
 
