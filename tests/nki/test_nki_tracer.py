@@ -223,3 +223,26 @@ def test_tracer_records_dot():
         assert record.input_shape == (TILE_M, TILE_K)
         assert record.other_shape == (TILE_K, TILE_N)
         assert record.output_shape == (TILE_M, TILE_N)
+
+
+def test_tracer_records_dot_transpose_x_kwarg():
+    triton_viz.clear()
+
+    @triton_viz.trace(client=Tracer(), backend="nki")
+    def dot_kernel(lhs, rhs, out):
+        out[...] = nl.matmul(lhs, rhs, transpose_x=True)
+
+    lhs = NDArray(value=np.arange(6, dtype=np.float32).reshape(2, 3))
+    rhs = NDArray(value=np.arange(8, dtype=np.float32).reshape(2, 4))
+    out = NDArray(value=np.empty((3, 4), dtype=np.float32))
+
+    dot_kernel[(1,)](lhs, rhs, out)
+
+    assert np.allclose(out.data, lhs.data.T @ rhs.data)
+
+    dot_records = [r for r in launches[-1].records if isinstance(r, Dot)]
+    assert len(dot_records) == 1
+    record = dot_records[0]
+    assert record.input_shape == (3, 2)
+    assert record.other_shape == (2, 4)
+    assert record.output_shape == (3, 4)
