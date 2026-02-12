@@ -108,7 +108,7 @@ uv sync --extra nki # or "uv sync --extra nki --extra test" if also running NKI-
 
 Note that you need to specify all features that you want _in one statement_ when using `uv sync`, i.e. if you want both NKI and testing support, you must run `uv sync --extra nki --extra test`. The below statements are wrong and will remove the NKI install when installing test packages:
 ```
-uv sync --extra nki # NKI support but no testing 
+uv sync --extra nki # NKI support but no testing
 uv sync --extra test # tests but no NKI support
 ```
 
