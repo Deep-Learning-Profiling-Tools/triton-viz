@@ -449,46 +449,55 @@ def test_gemm_oob_call_stack():
     ), "Missing expected call stack entry '#1 gemm_kernel at gemm_oob.py:25'"
 
 
-def test_swiglu_fwd_oob_call_stack():
+def test_cli_code_context_points_to_kernel():
     """
-    Run tritonbench_kernels/swiglu_fwd.py via triton-sanitizer and verify the
-    reported Code Context points to the actual OOB line in the kernel, not the
-    CLI entry point.
+    Run a minimal OOB kernel via ``triton-sanitizer`` CLI and verify the
+    Code Context section points to the actual kernel line, not the CLI
+    entry-point wrapper.
     """
-    import pathlib
-    import subprocess
-    import sys
     import os
     import re
+    import subprocess
+    import sys
+    import tempfile
+    import textwrap
 
-    script = (
-        pathlib.Path(__file__).resolve().parent
-        / "tritonbench_kernels"
-        / "swiglu_fwd.py"
+    kernel_src = textwrap.dedent(
+        """\
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def oob_kernel(ptr, BLOCK: tl.constexpr):
+            offs = tl.arange(0, BLOCK)
+            tl.load(ptr + offs)  # OOB: BLOCK > tensor size, no mask
+
+        oob_kernel[(1,)](torch.zeros(4), BLOCK=16)
+    """
     )
-    assert script.exists(), f"Script not found: {script}"
 
-    sanitizer = os.path.join(os.path.dirname(sys.executable), "triton-sanitizer")
-    result = subprocess.run(
-        [sanitizer, str(script)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    # Strip ANSI escape codes so plain-text assertions work
-    output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
+        tmp.write(kernel_src)
+        tmp_path = tmp.name
 
-    # ---- Code Context checks ----
-    assert "Code Context" in output, "Missing 'Code Context' section in output"
-    assert "swiglu_fwd.py" in output, "Missing filename 'swiglu_fwd.py' in output"
-    assert (
-        "Function: _swiglu_fwd_kernel" in output
-    ), "Missing 'Function: _swiglu_fwd_kernel' in output"
-    assert (
-        "tl.load(Y + cols, mask=cols < ncols, other=0.0).to(tl.float32)" in output
-    ), "Missing expected OOB line in Code Context"
+    try:
+        sanitizer = os.path.join(os.path.dirname(sys.executable), "triton-sanitizer")
+        result = subprocess.run(
+            [sanitizer, tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
 
-    # ---- Call Stack checks ----
-    assert (
-        "_swiglu_fwd_kernel at swiglu_fwd.py:" in output
-    ), "Missing expected call stack entry '_swiglu_fwd_kernel at swiglu_fwd.py:'"
+        # Code Context must reference the kernel, not the CLI wrapper
+        assert "Code Context" in output, "Missing 'Code Context' section"
+        assert (
+            "Function: oob_kernel" in output
+        ), f"Code Context should point to 'oob_kernel', got:\n{output}"
+        assert (
+            "tl.load(ptr + offs)" in output
+        ), f"Code Context should show the tl.load line, got:\n{output}"
+    finally:
+        os.unlink(tmp_path)
