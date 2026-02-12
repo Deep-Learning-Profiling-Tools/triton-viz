@@ -5,7 +5,7 @@ from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
 from .config import config as cfg
-from ..clients import Sanitizer, Profiler, Tracer
+from ..clients import Sanitizer, Profiler, Tracer, RaceDetector
 from .client import ClientManager, Client
 from .data import Launch
 from typing import Callable, Optional, Union
@@ -29,6 +29,8 @@ class TraceInterface:
                 return Profiler()
             if name == "tracer":
                 return Tracer()
+            if name == "race_detector":
+                return RaceDetector()
             raise ValueError(f"Unknown client: {client}")
         elif isinstance(client, Client):
             return client
