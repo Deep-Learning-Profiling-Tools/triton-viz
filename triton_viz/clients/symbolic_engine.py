@@ -1425,15 +1425,11 @@ class AtomicRmwSymbolicExpr(SymbolicExpr):
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
 
-class TensorPointerLoadSymbolicExpr(SymbolicExpr):
+class TensorPointerSymbolicExpr(SymbolicExpr):
+    """Common base for block-pointer load/store expressions."""
+
     ptr: SymbolicExpr
     boundary_check: tuple[int, ...]
-
-    def __init__(self, op: str, ptr: Any, boundary_check: Any):
-        super().__init__(op)
-        self.add_child("ptr", ptr)
-        self.boundary_check = tuple(boundary_check) if boundary_check else ()
-        self.dtype = self._resolve_element_dtype(ptr)
 
     @staticmethod
     def _resolve_element_dtype(
@@ -1516,12 +1512,19 @@ class TensorPointerLoadSymbolicExpr(SymbolicExpr):
         return addr, _and_constraints(*parts)
 
 
-class TensorPointerStoreSymbolicExpr(TensorPointerLoadSymbolicExpr):
+class TensorPointerLoadSymbolicExpr(TensorPointerSymbolicExpr):
+    def __init__(self, op: str, ptr: Any, boundary_check: Any):
+        super().__init__(op)
+        self.add_child("ptr", ptr)
+        self.boundary_check = tuple(boundary_check) if boundary_check else ()
+        self.dtype = self._resolve_element_dtype(ptr)
+
+
+class TensorPointerStoreSymbolicExpr(TensorPointerSymbolicExpr):
     value: SymbolicExpr
 
     def __init__(self, op: str, ptr: Any, value: Any, boundary_check: Any):
-        # Call SymbolicExpr.__init__ directly, not TensorPointerLoadSymbolicExpr
-        SymbolicExpr.__init__(self, op)
+        super().__init__(op)
         self.add_child("ptr", ptr)
         self.add_child("value", value)
         self.boundary_check = tuple(boundary_check) if boundary_check else ()
