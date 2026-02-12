@@ -755,3 +755,57 @@ def test_block_tensor_2d_loop_advance_non_oob():
     assert (
         len(block_sanitizer.records) == 0
     ), f"Expected no OOB records, got {len(block_sanitizer.records)}"
+
+
+def test_cli_code_context_points_to_kernel():
+    """
+    Run a minimal OOB kernel via ``triton-sanitizer`` CLI and verify the
+    Code Context section points to the actual kernel line, not the CLI
+    entry-point wrapper.
+    """
+    import os
+    import re
+    import subprocess
+    import sys
+    import tempfile
+    import textwrap
+
+    kernel_src = textwrap.dedent(
+        """\
+        import torch
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def oob_kernel(ptr, BLOCK: tl.constexpr):
+            offs = tl.arange(0, BLOCK)
+            tl.load(ptr + offs)  # OOB: BLOCK > tensor size, no mask
+
+        oob_kernel[(1,)](torch.zeros(4), BLOCK=16)
+    """
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
+        tmp.write(kernel_src)
+        tmp_path = tmp.name
+
+    try:
+        sanitizer = os.path.join(os.path.dirname(sys.executable), "triton-sanitizer")
+        result = subprocess.run(
+            [sanitizer, tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
+
+        # Code Context must reference the kernel, not the CLI wrapper
+        assert "Code Context" in output, "Missing 'Code Context' section"
+        assert (
+            "Function: oob_kernel" in output
+        ), f"Code Context should point to 'oob_kernel', got:\n{output}"
+        assert (
+            "tl.load(ptr + offs)" in output
+        ), f"Code Context should show the tl.load line, got:\n{output}"
+    finally:
+        os.unlink(tmp_path)
