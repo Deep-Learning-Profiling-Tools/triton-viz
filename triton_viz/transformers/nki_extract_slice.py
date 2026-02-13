@@ -3,9 +3,10 @@ import ast
 
 class StoreCallTransformer(ast.NodeTransformer):
     """
-    A targeted AST transformer to rewrite `nl.store(x[...], ...)` calls
-    into `masked_store(x, slice_obj, ...)` and `nl.load(x[...])` calls
-    into `masked_load(x, slice_obj)` with a preceding assignment.
+    A targeted AST transformer to rewrite:
+    - `nl.store(x[...], ...)` -> `nl.masked_store(x, slice_obj, ...)`
+    - `nl.load(x[...], ...)` -> `nl.masked_load(x, slice_obj, ...)`
+    - `nl.load_transpose2d(x[...], ...)` -> `nl.load_transpose2d(x, slice_obj, ...)`
     """
 
     def visit_Expr(self, node: ast.Expr) -> ast.AST | list[ast.AST]:
@@ -16,39 +17,9 @@ class StoreCallTransformer(ast.NodeTransformer):
         if not isinstance(node.value, ast.Call):
             return self.generic_visit(node)
 
-        call_node = node.value
-
-        if not (
-            isinstance(call_node.func, ast.Attribute)
-            and isinstance(call_node.func.value, ast.Name)
-            and call_node.func.value.id == "nl"
-            and call_node.func.attr in ("store", "load")
-        ):
+        new_call = self._rewrite_nl_slice_call(node.value)
+        if new_call is None:
             return self.generic_visit(node)
-
-        if not call_node.args or not isinstance(call_node.args[0], ast.Subscript):
-            return self.generic_visit(node)
-
-        subscript_node = call_node.args[0]
-        sliced_object = subscript_node.value
-        slice_content = subscript_node.slice
-        remaining_args = call_node.args[1:]
-
-        # Convert to nl.masked_load or nl.masked_store
-        func_name = "masked_" + call_node.func.attr
-
-        new_call = ast.Call(
-            func=ast.Attribute(
-                value=ast.Name(id="nl", ctx=ast.Load()), attr=func_name, ctx=ast.Load()
-            ),
-            args=[
-                sliced_object,
-                self._create_slice_value_node(slice_content),
-                *remaining_args,
-            ],
-            keywords=call_node.keywords,
-        )
-
         return ast.Expr(value=new_call)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
@@ -69,28 +40,37 @@ class StoreCallTransformer(ast.NodeTransformer):
         if not isinstance(node.value, ast.Call):
             return self.generic_visit(node)
 
-        call_node = node.value
+        new_call = self._rewrite_nl_slice_call(node.value)
+        if new_call is None:
+            return self.generic_visit(node)
+        return ast.Assign(
+            targets=node.targets,
+            value=new_call,
+            type_comment=getattr(node, "type_comment", None),
+        )
 
+    def _rewrite_nl_slice_call(self, call_node: ast.Call) -> ast.Call | None:
         if not (
             isinstance(call_node.func, ast.Attribute)
             and isinstance(call_node.func.value, ast.Name)
             and call_node.func.value.id == "nl"
-            and call_node.func.attr in ("store", "load")
+            and call_node.func.attr in ("store", "load", "load_transpose2d")
         ):
-            return self.generic_visit(node)
+            return None
 
         if not call_node.args or not isinstance(call_node.args[0], ast.Subscript):
-            return self.generic_visit(node)
+            return None
 
         subscript_node = call_node.args[0]
         sliced_object = subscript_node.value
         slice_content = subscript_node.slice
         remaining_args = call_node.args[1:]
-
-        # Convert to nl.masked_load or nl.masked_store
-        func_name = "masked_" + call_node.func.attr
-
-        new_call = ast.Call(
+        func_name = (
+            "masked_" + call_node.func.attr
+            if call_node.func.attr in ("store", "load")
+            else "load_transpose2d"
+        )
+        return ast.Call(
             func=ast.Attribute(
                 value=ast.Name(id="nl", ctx=ast.Load()), attr=func_name, ctx=ast.Load()
             ),
@@ -100,12 +80,6 @@ class StoreCallTransformer(ast.NodeTransformer):
                 *remaining_args,
             ],
             keywords=call_node.keywords,
-        )
-
-        return ast.Assign(
-            targets=node.targets,
-            value=new_call,
-            type_comment=getattr(node, "type_comment", None),
         )
 
     def _create_slice_value_node(self, node: ast.AST) -> ast.AST:
@@ -142,32 +116,3 @@ def transform_code(source_code: str) -> str:
     new_tree = transformer.visit(tree)
     ast.fix_missing_locations(new_tree)
     return ast.unparse(new_tree)
-
-
-source_code = """
-import numpy as np
-
-# This load call should also be transformed
-sbuf_value = nl.load(x[2:4, None, ..., nl.arange(128)[None, :]], mask=mask)
-
-# This is the call we want to transform
-nl.store(x[2:4, None, ..., nl.arange(128)[None, :]], sbuf_value, mask=mask)
-
-
-# This call should be ignored
-other_lib.store(y[10:])
-
-# This call should also be ignored
-nl.some_other_func(z[:5])
-"""
-
-expected_transformed_code = """\
-import numpy as np
-sbuf_value = nl.masked_load(x, (slice(2, 4, None), None, ..., nl.arange(128)[None, :]), mask=mask)
-nl.masked_store(x, (slice(2, 4, None), None, ..., nl.arange(128)[None, :]), sbuf_value, mask=mask)
-other_lib.store(y[10:])
-nl.some_other_func(z[:5])\
-"""
-
-if __name__ == "__main__":
-    assert transform_code(source_code) == expected_transformed_code
