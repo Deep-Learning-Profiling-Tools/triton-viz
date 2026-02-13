@@ -193,15 +193,27 @@ export function updateTensorHighlights(tensor, data, highlightColor, baseColor, 
     const base = (baseColor instanceof THREE.Color) ? baseColor : new THREE.Color(baseColor);
     let isHighlighted = (_x, _y, _z) => false;
     if (data && data.type === 'descriptor') {
-        const { start, shape } = data;
+        const { start, shape, stride } = data;
         const sx = start?.[0] ?? 0;
         const sy = start?.[1] ?? 0;
         const sz = start?.[2] ?? 0;
         const dx = shape?.[0] ?? 0;
         const dy = shape?.[1] ?? 0;
         const dz = shape?.[2] ?? 0;
-        const ex = sx + dx, ey = sy + dy, ez = sz + dz;
-        isHighlighted = (x, y, z) => (x >= sx && x < ex && y >= sy && y < ey && z >= sz && z < ez);
+        const tx = Math.max(1, Math.abs(stride?.[0] ?? 1));
+        const ty = Math.max(1, Math.abs(stride?.[1] ?? 1));
+        const tz = Math.max(1, Math.abs(stride?.[2] ?? 1));
+        const inAxis = (coord, axisStart, axisShape, axisStride) => {
+            if (axisShape <= 0)
+                return false;
+            const delta = coord - axisStart;
+            if (delta < 0 || delta % axisStride !== 0)
+                return false;
+            return (delta / axisStride) < axisShape;
+        };
+        isHighlighted = (x, y, z) => (inAxis(x, sx, dx, tx)
+            && inAxis(y, sy, dy, ty)
+            && inAxis(z, sz, dz, tz));
     }
     else if (data && Array.isArray(data.data)) {
         const set = new Set();
