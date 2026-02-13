@@ -64,6 +64,58 @@ def _push_lang_patch_scope(backend: str, scope: Any) -> None:
     _LANG_PATCH_SCOPES.setdefault(backend, []).append(scope)
 
 
+def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
+    """
+    Stores Triton attributes into a LangPatchScope for later unpatching.
+    This is to be run before patching with the interpreter.
+    This is equivalent to what triton>=3.6.0 does natively
+    but also works for triton<3.6.0.
+    """
+
+    def _capture_builtin_attrs(scope: _LangPatchScope, obj: Any) -> None:
+        for name, member in inspect.getmembers(obj):
+            if tl.core.is_builtin(member):
+                scope.set_attr(obj, name, member)
+
+    scope = _LangPatchScope()
+    tensor_attrs = ("__index__", "__bool__", "__repr__", "__str__", "T")
+    lang_attrs = (
+        "range",
+        "static_range",
+        "static_assert",
+        "static_print",
+        "multiple_of",
+        "max_contiguous",
+        "max_constancy",
+        "reduce",
+        "associative_scan",
+    )
+    langs = [
+        value
+        for value in fn.__globals__.values()
+        if inspect.ismodule(value) and value in [tl, tl.core]
+    ]
+    for lang in langs:
+        _capture_builtin_attrs(scope, lang)
+        _capture_builtin_attrs(scope, lang.tensor)
+        if lang == tl:
+            _capture_builtin_attrs(scope, lang.math)
+
+        for attr in tensor_attrs:
+            if hasattr(lang.tensor, attr):
+                scope.set_attr(lang.tensor, attr, getattr(lang.tensor, attr))
+
+        for attr in lang_attrs:
+            if hasattr(lang, attr):
+                scope.set_attr(lang, attr, getattr(lang, attr))
+        scope.set_attr(lang.dtype, "to_ir", lang.dtype.to_ir)
+
+    if hasattr(tl.core, "tensor_descriptor_base"):
+        _capture_builtin_attrs(scope, tl.core.tensor_descriptor_base)
+
+    return scope
+
+
 def _pop_lang_patch_scope(backend: str) -> Optional[Any]:
     scopes = _LANG_PATCH_SCOPES.get(backend)
     if not scopes:
@@ -365,7 +417,8 @@ def unpatch_for_loop():
 
 def patch_lang(fn, backend):
     if backend == "triton":
-        scope = triton_patch_lang(fn)
+        scope = _triton_snapshot_scope(fn)
+        triton_patch_lang(fn)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
