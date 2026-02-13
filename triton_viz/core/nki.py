@@ -248,7 +248,7 @@ class Builder:
         else:
             return keys
 
-    def masked_load(self, src: NDArray, keys, *, mask=None, **kwargs):
+    def load(self, src: NDArray, keys, *, mask=None, **kwargs):
         """Load array elements with masking for out-of-bounds errors."""
         # Convert NDArray to numpy array
         ndarray = src.data
@@ -263,7 +263,7 @@ class Builder:
         # Convert result back to NDArray
         return NDArray(value=result, name=f"{src.name}_masked_load", **kwargs)
 
-    def masked_store(self, dst: NDArray, keys, value: NDArray, *, mask=None, **kwargs):
+    def store(self, dst: NDArray, keys, value: NDArray, *, mask=None, **kwargs):
         """Store array elements with masking for out-of-bounds errors."""
         # Convert NDArrays to numpy arrays
         ndarray = dst.data
@@ -283,7 +283,7 @@ class Builder:
     ):
         if keys is None:
             keys = tuple(slice(None) for _ in range(src.data.ndim))
-        loaded = self.masked_load(src, keys, mask=mask, **kwargs)
+        loaded = self.load(src, keys, mask=mask, **kwargs)
         value = loaded.data.astype(dtype) if dtype is not None else loaded.data
         return NDArray(value=value.T, name=f"{src.name}_load_transpose2d", **kwargs)
 
@@ -403,11 +403,8 @@ def nki_patch_lang(scope=None):
     _set_attr(nl, "program_id", nki_builder.program_id)
     _set_attr(nl, "arange", nki_builder.arange)
 
-    # Also expose masked_load and masked_store functions
-    _set_attr(
-        nl, "masked_load", nki_builder.masked_load
-    )  # nl.load AST-rewritten to nl.masked_load
-    _set_attr(nl, "masked_store", nki_builder.masked_store)  # same for nl.store
+    _set_attr(nl, "load", nki_builder.load)
+    _set_attr(nl, "store", nki_builder.store)
     # see https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/api/nki.language.html
 
     # TODO: implement
@@ -484,7 +481,7 @@ class NKIInterpretedFunction:
         if client_manager is not None:
             client_manager.grid_callback(grid_dims)
 
-        # Apply AST transformer to convert nl.load/nl.store calls to nl.masked_load/nl.masked_store
+        # Apply AST transformers
         if hasattr(self.fn, "__code__"):
             # Get the source code of the function (stripped of leading indents in case it was defined in scope)
             source_code = textwrap.dedent(inspect.getsource(self.fn))

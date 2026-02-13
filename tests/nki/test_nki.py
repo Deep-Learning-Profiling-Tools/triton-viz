@@ -131,7 +131,7 @@ def test_load_transpose2d_matches_masked_load_then_transpose():
         np.array([[0, 1, 2], [1, 2, 3]]),
     )
     mask = np.array([[True, True, True], [True, True, False]])
-    expected = builder.masked_load(src, keys, mask=mask).data.T
+    expected = builder.load(src, keys, mask=mask).data.T
     result = builder.load_transpose2d(src, keys, mask=mask)
     assert np.array_equal(result.data, expected)
     assert result.data.dtype == src.data.dtype

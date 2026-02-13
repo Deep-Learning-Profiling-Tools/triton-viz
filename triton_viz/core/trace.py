@@ -164,7 +164,6 @@ class NKITrace(KernelInterface, TraceInterface):
         from .nki import NKIInterpretedFunction
 
         if isinstance(kernel, GenericKernel):
-            # This is wrong
             self.interpreter_fn = NKIInterpretedFunction(kernel.func)
             self.func = kernel.func
         elif isinstance(kernel, NKIInterpretedFunction):

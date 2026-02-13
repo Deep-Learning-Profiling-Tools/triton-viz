@@ -74,8 +74,8 @@ if HAS_NKI:
         nki_builder: {
             "program_id": ProgramId,
             "ndarray": Allocate,
-            "masked_load": Load,
-            "masked_store": Store,
+            "load": Load,
+            "store": Store,
             "matmul": Dot,
             "_unary_op": UnaryOp,
             "sum": ReduceSum,
