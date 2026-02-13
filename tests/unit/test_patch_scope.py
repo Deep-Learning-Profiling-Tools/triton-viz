@@ -3,23 +3,23 @@ import pytest
 import triton.language as tl
 
 from triton_viz.core import patch as patch_mod
-from triton_viz.core.patch import _legacy_triton_snapshot_scope
+from triton_viz.core.patch import _triton_snapshot_scope
 
 
 def _dummy_kernel():
-    """Provides tl/tl.core globals for legacy language patch scope capture."""
+    """Provides tl/tl.core globals for language patch scope capture."""
     return tl.arange(0, 1)
 
 
-def test_legacy_scope_restores_tensor_magic_methods():
-    """Legacy scope must restore tensor magic methods patched by interpreter mode."""
+def test_scope_restores_tensor_magic_methods():
+    """Scope must restore tensor magic methods patched by interpreter mode."""
     tensor = tl.tensor
     attrs = [
         attr
         for attr in ("__index__", "__bool__", "__repr__", "__str__", "T")
         if hasattr(tensor, attr)
     ]
-    scope = _legacy_triton_snapshot_scope(_dummy_kernel)
+    scope = _triton_snapshot_scope(_dummy_kernel)
     originals = {attr: getattr(tensor, attr) for attr in attrs}
 
     try:
@@ -38,8 +38,8 @@ def test_legacy_scope_restores_tensor_magic_methods():
         assert getattr(tensor, attr) is original
 
 
-def test_legacy_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
-    """Legacy scope must restore descriptor builtins on tensor_descriptor_base."""
+def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
+    """Scope must restore descriptor builtins on tensor_descriptor_base."""
     if not hasattr(tl.core, "tensor_descriptor_base"):
         pytest.skip("tensor_descriptor_base is not available")
 
@@ -62,7 +62,7 @@ def test_legacy_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
         patch_mod.tl.core, "is_builtin", lambda member: member is sentinel
     )
 
-    scope = _legacy_triton_snapshot_scope(_dummy_kernel)
+    scope = _triton_snapshot_scope(_dummy_kernel)
     replacement = lambda *_args, **_kwargs: None
 
     try:

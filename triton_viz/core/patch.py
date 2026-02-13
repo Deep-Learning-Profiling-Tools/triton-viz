@@ -1,5 +1,4 @@
 import triton.language as tl
-import triton
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -9,7 +8,6 @@ from queue import SimpleQueue, Empty
 import threading
 import time
 from functools import partialmethod
-from packaging.version import Version
 
 from .config import config as cfg
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -37,7 +35,6 @@ from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 
 
 _MISSING = object()
-_TRITON_HAS_PATCH_SCOPE = Version(triton.__version__) >= Version("3.6.0")
 
 
 class _LangPatchScope:
@@ -67,12 +64,12 @@ def _push_lang_patch_scope(backend: str, scope: Any) -> None:
     _LANG_PATCH_SCOPES.setdefault(backend, []).append(scope)
 
 
-def _legacy_triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
+def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
     """
     Stores Triton attributes into a LangPatchScope for later unpatching.
     This is to be run before patching with the interpreter.
-    Triton >= 3.6.0 does this natively but this will allow Triton < 3.6.0
-    to be unpatched correctly.
+    This is equivalent to what triton>=3.6.0 does natively
+    but also works for triton<3.6.0.
     """
 
     def _capture_builtin_attrs(scope: _LangPatchScope, obj: Any) -> None:
@@ -420,11 +417,8 @@ def unpatch_for_loop():
 
 def patch_lang(fn, backend):
     if backend == "triton":
-        if _TRITON_HAS_PATCH_SCOPE:
-            scope = triton_patch_lang(fn)
-        else:
-            scope = _legacy_triton_snapshot_scope(fn)
-            triton_patch_lang(fn)
+        scope = _triton_snapshot_scope(fn)
+        triton_patch_lang(fn)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
