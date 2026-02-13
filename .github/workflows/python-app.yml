@@ -21,8 +21,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      TRITON_INTERPRET: "1"
 
     steps:
     - uses: actions/checkout@v3

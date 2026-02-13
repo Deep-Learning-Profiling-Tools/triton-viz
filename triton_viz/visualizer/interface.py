@@ -568,6 +568,52 @@ def get_flip_value():
         return jsonify({"error": f"Flip get value failed: {e}"}), 200
 
 
+def _build_highlight_descriptor(coords: np.ndarray) -> dict[str, list[int]] | None:
+    """Infer a shape+stride descriptor from highlighted coordinates.
+
+    Returns:
+        `{"start": [...], "shape": [...], "stride": [...]}`
+        when `coords` forms a dense Cartesian grid along each axis.
+
+    Notes:
+        - `start` is the minimum coordinate per axis.
+        - `shape` is the number of positions per axis.
+        - `stride` is the uniform step per axis (defaults to 1 for singleton axes).
+        - Supports arbitrary rank for input shaped `(n_points, rank)`.
+        - Returns `None` for sparse/irregular coordinate sets that cannot be
+          represented by a single descriptor.
+    """
+    coords = np.asarray(coords, dtype=np.int64)
+    if coords.ndim != 2 or coords.size == 0:
+        return None
+
+    unique_coords = np.unique(coords, axis=0)
+    rank = int(unique_coords.shape[1])
+    axis_vals = [np.unique(unique_coords[:, axis]) for axis in range(rank)]
+    if any(vals.size == 0 for vals in axis_vals):
+        return None
+
+    starts = [int(vals[0]) for vals in axis_vals]
+    shape = [int(vals.size) for vals in axis_vals]
+    stride = [1] * rank
+    for axis, vals in enumerate(axis_vals):
+        if vals.size <= 1:
+            continue
+        steps = np.diff(vals)
+        step = int(steps[0])
+        if step <= 0 or not np.all(steps == step):
+            return None
+        stride[axis] = step
+
+    expected = np.stack(np.meshgrid(*axis_vals, indexing="ij"), axis=-1).reshape(
+        -1, rank
+    )
+    if not np.array_equal(unique_coords, expected):
+        return None
+
+    return {"start": starts, "shape": shape, "stride": stride}
+
+
 @app.route("/api/getLoadTensor", methods=["POST"])
 def get_load_tensor():
     """Return entire global tensor for a given Load/Store op, with min/max.
@@ -648,43 +694,9 @@ def get_load_tensor():
                 gy = gy[valid]
                 gz = gz[valid]
                 coords = np.stack([gx, gy, gz], axis=1)
-
-                min_c = coords.min(axis=0)
-                max_c = coords.max(axis=0)
-                dims = max_c - min_c + 1
-                volume = np.prod(dims)
-                unique_coords = np.unique(coords, axis=0)
-
-                if len(unique_coords) == volume:
-                    # Robust check: all coordinates in the box [min_c, max_c] must be present
-                    # We already know the count matches volume, so we just need to verify they are all distinct
-                    # and within bounds (which unique + bounding box logic already implies).
-                    # However, to be absolutely sure it's not a sparse set that happens to have 'volume' points:
-                    # Generate the dense set and compare.
-                    is_dense = True
-                    # Optimization: if it's really dense, every integer in the range [0, volume)
-                    # of linear indices relative to min_c must be present.
-                    # Linear index = (z-sz)*dx*dy + (y-sy)*dx + (x-sx)
-                    offsets_rel = unique_coords - min_c
-                    lin_indices = (
-                        offsets_rel[:, 2] * dims[1] * dims[0]
-                        + offsets_rel[:, 1] * dims[0]
-                        + offsets_rel[:, 0]
-                    )
-                    if not (np.sort(lin_indices) == np.arange(volume)).all():
-                        is_dense = False
-
-                    if is_dense:
-                        payload["highlights"] = {
-                            "type": "descriptor",
-                            "start": min_c.tolist(),
-                            "shape": dims.tolist(),
-                        }
-                    else:
-                        payload["highlights"] = {
-                            "type": "array",
-                            "data": coords.tolist(),
-                        }
+                descriptor = _build_highlight_descriptor(coords)
+                if descriptor is not None:
+                    payload["highlights"] = {"type": "descriptor", **descriptor}
                 else:
                     payload["highlights"] = {"type": "array", "data": coords.tolist()}
 
