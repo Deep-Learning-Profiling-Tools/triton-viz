@@ -638,8 +638,6 @@ class ConstSymbolicExpr(SymbolicExpr):
             np_array = np.array(seq, dtype=_get_np_dtype(dtype))
             return TensorHandle(np_array, dtype)
         elif isinstance(self.value, TensorHandle):
-            if self.value.data.size != 1:
-                raise RuntimeError("Only scalar TensorHandle is supported in const!")
             return self.value
 
         raise RuntimeError(f"Unsupported const value type: {type(self.value)}")
