@@ -174,7 +174,12 @@ class SymbolicExprDataWrapper:
 
 class SymbolicExpr:
     BASIC_OPS: ClassVar[tuple[str, ...]] = ("const", "pid", "arange")
-    INDIRECT_OPS: ClassVar[tuple[str, ...]] = ("load", "store")
+    INDIRECT_OPS: ClassVar[tuple[str, ...]] = (
+        "load",
+        "store",
+        "tensor_pointer_load",
+        "tensor_pointer_store",
+    )
     UNARY_OPS: ClassVar[tuple[str, ...]] = (
         "cos",
         "exp",
@@ -1138,32 +1143,47 @@ class CumsumSymbolicExpr(SymbolicExpr):
 
 class MakeBlockPtrSymbolicExpr(SymbolicExpr):
     base: SymbolicExpr
-    strides: SymbolicExpr
-    offsets: SymbolicExpr
-    block_shape: SymbolicExpr
-    order: SymbolicExpr
+    ndim: int
+    block_shape_values: list[int]
+    order_values: list[int]
+    shape_keys: list[str]
+    stride_keys: list[str]
+    offset_keys: list[str]
 
     def __init__(
         self,
         op: str,
         base: Any,
-        shape: Any,
-        strides: Any,
-        offsets: Any,
-        block_shape: Any,
-        order: Any,
+        shape_list: Sequence[Any],
+        stride_list: Sequence[Any],
+        offset_list: Sequence[Any],
+        block_shape_vals: Sequence[int],
+        order_vals: Sequence[int],
     ):
         super().__init__(op)
         self.add_child("base", base)
-        self.add_child("shape", shape)
-        self.add_child("strides", strides)
-        self.add_child("offsets", offsets)
-        self.add_child("block_shape", block_shape)
-        self.add_child("order", order)
+        self.ndim = len(block_shape_vals)
+        self.block_shape_values = list(block_shape_vals)
+        self.order_values = list(order_vals)
+        self.shape_keys: list[str] = []
+        self.stride_keys: list[str] = []
+        self.offset_keys: list[str] = []
+        for i in range(self.ndim):
+            shape_key = f"shape_{i}"
+            stride_key = f"stride_{i}"
+            offset_key = f"offset_{i}"
+            self.add_child(shape_key, shape_list[i])
+            self.add_child(stride_key, stride_list[i])
+            self.add_child(offset_key, offset_list[i])
+            self.shape_keys.append(shape_key)
+            self.stride_keys.append(stride_key)
+            self.offset_keys.append(offset_key)
         self.dtype = base.dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+        raise NotImplementedError(
+            "Use TensorPointerLoad/Store to access block pointers"
+        )
 
 
 class AddPtrSymbolicExpr(SymbolicExpr):
@@ -1205,15 +1225,24 @@ class AddPtrSymbolicExpr(SymbolicExpr):
 
 class AdvanceSymbolicExpr(SymbolicExpr):
     ptr: SymbolicExpr
-    offsets: SymbolicExpr
+    ndim: int
+    delta_keys: list[str]
 
-    def __init__(self, op: str, ptr: Any, offsets: Any):
+    def __init__(self, op: str, ptr: Any, offset_list: Sequence[Any]):
         super().__init__(op)
         self.add_child("ptr", ptr)
-        self.add_child("offsets", offsets)
+        self.ndim = len(offset_list)
+        self.delta_keys: list[str] = []
+        for i in range(self.ndim):
+            dk = f"delta_{i}"
+            self.add_child(dk, offset_list[i])
+            self.delta_keys.append(dk)
+        self.dtype = ptr.dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError("Advance operation is not implemented yet")
+        raise NotImplementedError(
+            "Use TensorPointerLoad/Store to access block pointers"
+        )
 
 
 class SplatSymbolicExpr(SymbolicExpr):
@@ -1396,6 +1425,112 @@ class AtomicRmwSymbolicExpr(SymbolicExpr):
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
 
+class TensorPointerSymbolicExpr(SymbolicExpr):
+    """Common base for block-pointer load/store expressions."""
+
+    ptr: SymbolicExpr
+    boundary_check: tuple[int, ...]
+
+    @staticmethod
+    def _resolve_element_dtype(
+        ptr: SymbolicExpr,
+    ) -> Optional[tl.core.dtype]:
+        dt = ptr.dtype
+        if dt is None:
+            return None
+        if isinstance(dt, tl.pointer_type):
+            return dt.element_ty
+        return dt
+
+    def _resolve_block_ptr_components(
+        self, ptr: SymbolicExpr
+    ) -> tuple[
+        SymbolicExpr,
+        list[SymbolicExpr],
+        list[SymbolicExpr],
+        list[SymbolicExpr],
+        list[int],
+    ]:
+        """Walk advance chain -> (base, shapes[], strides[], offsets[], block_shape[])"""
+        if isinstance(ptr, MakeBlockPtrSymbolicExpr):
+            shapes = [getattr(ptr, k) for k in ptr.shape_keys]
+            strides = [getattr(ptr, k) for k in ptr.stride_keys]
+            offsets = [getattr(ptr, k) for k in ptr.offset_keys]
+            return ptr.base, shapes, strides, offsets, ptr.block_shape_values
+        elif isinstance(ptr, AdvanceSymbolicExpr):
+            base, shapes, strides, offsets, bs = self._resolve_block_ptr_components(
+                ptr.ptr
+            )
+            deltas = [getattr(ptr, k) for k in ptr.delta_keys]
+            new_offsets = [
+                SymbolicExpr.create("add", off, d) for off, d in zip(offsets, deltas)
+            ]
+            return base, shapes, strides, new_offsets, bs
+        raise TypeError(f"Expected block pointer, got {type(ptr)}")
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        (
+            base,
+            shapes,
+            strides,
+            offsets,
+            block_shape,
+        ) = self._resolve_block_ptr_components(self.ptr)
+
+        base_dtype = base.dtype
+        if isinstance(base_dtype, tl.pointer_type) and hasattr(
+            base_dtype.element_ty, "primitive_bitwidth"
+        ):
+            elem_size = max(1, base_dtype.element_ty.primitive_bitwidth // 8)
+        else:
+            elem_size = 1
+
+        base_z3, c_base = base._to_z3()
+        addr = base_z3
+        parts: list[ConstraintExpr | Sequence[ConstraintExpr]] = []
+        if c_base:
+            parts.append(c_base)
+
+        for d in range(len(block_shape)):
+            k_d = Int(f"blk_k_{d}")
+            off_z3, c_off = offsets[d]._to_z3()
+            stride_z3, c_stride = strides[d]._to_z3()
+
+            addr = addr + (off_z3 + k_d) * stride_z3 * elem_size
+            parts.append(And(k_d >= 0, k_d < block_shape[d]))
+            if c_off:
+                parts.append(c_off)
+            if c_stride:
+                parts.append(c_stride)
+
+            if d in self.boundary_check:
+                shape_z3, c_shape = shapes[d]._to_z3()
+                parts.append(And(off_z3 + k_d >= 0, off_z3 + k_d < shape_z3))
+                if c_shape:
+                    parts.append(c_shape)
+
+        return addr, _and_constraints(*parts)
+
+
+class TensorPointerLoadSymbolicExpr(TensorPointerSymbolicExpr):
+    def __init__(self, op: str, ptr: Any, boundary_check: Any):
+        super().__init__(op)
+        self.add_child("ptr", ptr)
+        self.boundary_check = tuple(boundary_check) if boundary_check else ()
+        self.dtype = self._resolve_element_dtype(ptr)
+
+
+class TensorPointerStoreSymbolicExpr(TensorPointerSymbolicExpr):
+    value: SymbolicExpr
+
+    def __init__(self, op: str, ptr: Any, value: Any, boundary_check: Any):
+        super().__init__(op)
+        self.add_child("ptr", ptr)
+        self.add_child("value", value)
+        self.boundary_check = tuple(boundary_check) if boundary_check else ()
+        self.dtype = self._resolve_element_dtype(ptr)
+
+
 SymbolicExpr.register_op_class(ConstSymbolicExpr, ("const",))
 SymbolicExpr.register_op_class(PidSymbolicExpr, ("pid",))
 SymbolicExpr.register_op_class(ArangeSymbolicExpr, ("arange",))
@@ -1420,3 +1555,7 @@ SymbolicExpr.register_op_class(CastSymbolicExpr, ("cast_impl", "bitcast"))
 SymbolicExpr.register_op_class(FpToFpSymbolicExpr, ("fp_to_fp",))
 SymbolicExpr.register_op_class(AtomicCasSymbolicExpr, ("atomic_cas",))
 SymbolicExpr.register_op_class(AtomicRmwSymbolicExpr, ("atomic_rmw",))
+SymbolicExpr.register_op_class(TensorPointerLoadSymbolicExpr, ("tensor_pointer_load",))
+SymbolicExpr.register_op_class(
+    TensorPointerStoreSymbolicExpr, ("tensor_pointer_store",)
+)

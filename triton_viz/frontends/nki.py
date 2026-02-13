@@ -21,7 +21,7 @@ from triton_viz.frontends.base import (
 HAS_NKI = False
 nki_builder = None
 try:
-    from triton_viz.core.nki import nki_builder  # type: ignore
+    from triton_viz.core.nki import NDArray, nki_builder  # type: ignore
 
     HAS_NKI = True
 except ModuleNotFoundError:
@@ -54,6 +54,9 @@ def _nki_store_adapter(
 
 
 def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    assert HAS_NKI
+    if _kwargs.get("transpose_x", False):
+        x = NDArray(value=x.data.T, name=x.name)
     return AdapterResult(x, y)
 
 
