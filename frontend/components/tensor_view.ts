@@ -995,7 +995,6 @@ export function createTensorVisualization(
         dimColors?: Record<string, string[]>;
         showDimLines?: boolean;
         viewState?: ViewState | null;
-        hasHeatmap?: boolean;
         layoutBounds?: { width: number; height: number; depth?: number; center?: [number, number, number] };
         fitToTensors?: boolean;
         cameraPadding?: number;
@@ -1318,6 +1317,14 @@ export function createTensorVisualization(
     if (!cache) return;
     const vizCache = cache;
     const { state, tensors, sideMenu, requestRender, applyBackgroundTheme, createLegends, destroyLegends } = vizCache;
+    const syncOpControlState = (): void => {
+        if (!window.setOpControlState) return;
+        window.setOpControlState({
+            colorize: state.colorizeOn,
+            histogram: vizCache.histogramUI.overlay.style.display === 'block',
+            allPrograms: state.allProgramsOn,
+        });
+    };
     state.payloads.clear();
     state.programCounts = null;
     state.programSubsets = null;
@@ -1533,6 +1540,7 @@ export function createTensorVisualization(
             } : null,
         });
     }
+    syncOpControlState();
 
     const fetchers = opUuid ? Array.from(tensors.entries()).map(([name, group]) => {
         return fetchTensorPayload(API_BASE, opUuid, group.userData.endpoint || 'getLoadTensor').then(p => {
@@ -1583,7 +1591,6 @@ export function createTensorVisualization(
             }
         }
         refreshDescriptorDimensionLines(vizCache);
-        renderShapeLegend();
         requestRender();
     });
 
