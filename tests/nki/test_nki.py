@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 try:
-    from triton_viz.core.nki import NDArray
+    from triton_viz.core.nki import Builder, NDArray
 except ModuleNotFoundError:
     pytest.skip(
         "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
@@ -114,8 +114,36 @@ def test_arithmetic():
     print()
 
 
+def test_load_transpose2d_matches_masked_load_then_transpose():
+    builder = Builder()
+    src = NDArray(value=np.arange(12, dtype=np.int32).reshape(3, 4), name="src")
+
+    full = builder.load_transpose2d(src)
+    assert np.array_equal(full.data, src.data.T)
+    assert full.data.dtype == src.data.dtype
+
+    cast = builder.load_transpose2d(src, dtype=np.float32)
+    assert np.array_equal(cast.data, src.data.T.astype(np.float32))
+    assert cast.data.dtype == np.float32
+
+    keys = (
+        np.array([[0, 1, 2], [2, 1, 3]]),
+        np.array([[0, 1, 2], [1, 2, 3]]),
+    )
+    mask = np.array([[True, True, True], [True, True, False]])
+    expected = builder.load(src, keys, mask=mask).data.T
+    result = builder.load_transpose2d(src, keys, mask=mask)
+    assert np.array_equal(result.data, expected)
+    assert result.data.dtype == src.data.dtype
+
+    cast_result = builder.load_transpose2d(src, keys, mask=mask, dtype=np.float64)
+    assert np.array_equal(cast_result.data, expected.astype(np.float64))
+    assert cast_result.data.dtype == np.float64
+
+
 if __name__ == "__main__":
     test_ndarray_creation()
     test_slicing()
     test_arithmetic()
+    test_load_transpose2d_matches_masked_load_then_transpose()
     print("All tests completed successfully!")

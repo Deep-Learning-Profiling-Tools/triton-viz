@@ -239,36 +239,6 @@ class Builder:
         else:
             raise ValueError(f"Invalid axis: {axis}. Must be 0, 1, or 2.")
 
-    def load(self, src: NDArray, *, mask=None, dtype=None, **kwargs):
-        value = src.data
-        if isinstance(mask, NDArray):
-            value = value[mask.data]
-        elif mask is not None:
-            value = value[mask]
-        if dtype is not None:
-            value = value.astype(dtype)
-
-        mask_value = getattr(mask, "data", np.ones_like(src))
-        new_shape = []
-        for i, _v in enumerate(mask_value.shape):
-            assert np.unique(mask_value.sum(i)).size <= 2
-            new_dim = mask_value.sum(i).flatten()[0]
-            new_shape.append(new_dim)
-
-        value = value.reshape(new_shape)
-        return NDArray(value=value, name=src.name, **kwargs)
-
-    def load_transpose2d(self, src: NDArray, *, mask=None, dtype=None, **kwargs):
-        # THTODO
-        value = src.data
-        return self.load(
-            NDArray(value=value.T, name=src.name), mask=mask, dtype=dtype, **kwargs
-        )
-
-    def store(self, dst: NDArray, value: NDArray, *, mask=None, **kwargs):
-        dst.data[mask.data] = value.data.ravel()
-        return dst
-
     def _convert_keys_to_numpy(self, keys):
         """Convert any NDArrays in keys to numpy arrays."""
         if isinstance(keys, (tuple, list)):
@@ -278,7 +248,7 @@ class Builder:
         else:
             return keys
 
-    def masked_load(self, src: NDArray, keys, *, mask=None, **kwargs):
+    def load(self, src: NDArray, keys, *, mask=None, **kwargs):
         """Load array elements with masking for out-of-bounds errors."""
         # Convert NDArray to numpy array
         ndarray = src.data
@@ -293,7 +263,7 @@ class Builder:
         # Convert result back to NDArray
         return NDArray(value=result, name=f"{src.name}_masked_load", **kwargs)
 
-    def masked_store(self, dst: NDArray, keys, value: NDArray, *, mask=None, **kwargs):
+    def store(self, dst: NDArray, keys, value: NDArray, *, mask=None, **kwargs):
         """Store array elements with masking for out-of-bounds errors."""
         # Convert NDArrays to numpy arrays
         ndarray = dst.data
@@ -307,6 +277,15 @@ class Builder:
         masked_store(ndarray, numpy_keys, value_array, mask=mask_value)
 
         return dst
+
+    def load_transpose2d(
+        self, src: NDArray, keys=None, *, mask=None, dtype=None, **kwargs
+    ):
+        if keys is None:
+            keys = tuple(slice(None) for _ in range(src.data.ndim))
+        loaded = self.load(src, keys, mask=mask, **kwargs)
+        value = loaded.data.astype(dtype) if dtype is not None else loaded.data
+        return NDArray(value=value.T, name=f"{src.name}_load_transpose2d", **kwargs)
 
     def _unary_op(self, x: NDArray, np_func, op_name, **kwargs):
         return NDArray(value=np_func(x.data), name=f"{x.name}_{op_name}", **kwargs)
@@ -423,12 +402,9 @@ def nki_patch_lang(scope=None):
     _set_attr(nl, "ndarray", nki_builder.ndarray)
     _set_attr(nl, "program_id", nki_builder.program_id)
     _set_attr(nl, "arange", nki_builder.arange)
+
     _set_attr(nl, "load", nki_builder.load)
     _set_attr(nl, "store", nki_builder.store)
-
-    # Also expose masked_load and masked_store functions
-    _set_attr(nl, "masked_load", nki_builder.masked_load)
-    _set_attr(nl, "masked_store", nki_builder.masked_store)
     # see https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/api/nki.language.html
 
     # TODO: implement
@@ -505,7 +481,7 @@ class NKIInterpretedFunction:
         if client_manager is not None:
             client_manager.grid_callback(grid_dims)
 
-        # Apply AST transformer to convert nl.load/nl.store calls to nl.masked_load/nl.masked_store
+        # Apply AST transformers
         if hasattr(self.fn, "__code__"):
             # Get the source code of the function (stripped of leading indents in case it was defined in scope)
             source_code = textwrap.dedent(inspect.getsource(self.fn))
