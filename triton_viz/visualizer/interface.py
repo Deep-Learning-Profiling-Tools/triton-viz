@@ -1,6 +1,7 @@
 import threading
 from typing import Any
 import sys
+import socket
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
 from .draw import get_visualization_data, delinearized, make_3d
@@ -10,7 +11,6 @@ import torch
 import numpy as np
 from flask_cloudflared import _run_cloudflared
 import requests
-import time
 
 app = Flask(
     __name__,
@@ -888,7 +888,7 @@ def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None)
     """
     cloudflared_port = port
     if tunnel_port is None:
-        tunnel_port = cloudflared_port + 1
+        tunnel_port = _find_available_port(cloudflared_port + 1)
     tunnel_url = _run_cloudflared(cloudflared_port, tunnel_port)
     _server_state.set_public_url(tunnel_url)
     _server_state.set_local_port(cloudflared_port)
@@ -902,6 +902,22 @@ def _is_interactive() -> bool:
     if getattr(sys, "flags", None) and sys.flags.interactive:
         return True
     return "ipykernel" in sys.modules
+
+
+def _is_port_available(port: int) -> bool:
+    """Return whether a TCP port is available on localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        return sock.connect_ex(("127.0.0.1", port)) != 0
+
+
+def _find_available_port(start_port: int, max_attempts: int = 100) -> int:
+    """Find the first available port in a bounded range."""
+    for port in range(start_port, start_port + max_attempts):
+        if _is_port_available(port):
+            return port
+    raise RuntimeError(
+        f"No available port found from {start_port} in {max_attempts} tries"
+    )
 
 
 def launch(share: bool = True, port: int | None = None, block: bool | None = None):
@@ -919,6 +935,12 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
 
     if share:
         print("--------")
+        selected_port = _find_available_port(actual_port)
+        if selected_port != actual_port:
+            print(f"Port {actual_port} is busy, using {selected_port}")
+        actual_port = selected_port
+        _server_state.set_public_url(None)
+        _server_state.set_local_port(actual_port)
         flask_thread = threading.Thread(
             target=run_flask_with_cloudflared,
             args=(actual_port, None),
@@ -926,33 +948,13 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
         )
         flask_thread.start()
 
-        # Wait for the server to start
-        time.sleep(5)
-
-        # Try to get the tunnel URL by making a request to the local server
-        local_url = f"http://localhost:{actual_port}"
-        public_url = _server_state.get_public_url()
-
-        try:
-            # touch local server to ensure it's up
-            _ = requests.get(local_url)
-            print(f"Running on local URL:  {local_url}")
-            if public_url:
-                print(f"Running on public URL: {public_url}")
-            print(
-                "\nThis share link expires in 72 hours. For free permanent hosting and GPU upgrades, check out Spaces: https://huggingface.co/spaces"
-            )
-            print("--------")
-        except requests.exceptions.RequestException:
-            print("Setting up public URL... Please wait.")
-
         if block:
             try:
                 flask_thread.join()
             except KeyboardInterrupt:
                 pass
 
-        return local_url, public_url
+        return None
     else:
         print("--------")
         local_url = f"http://localhost:{actual_port}"
