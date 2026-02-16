@@ -10,7 +10,6 @@ export function createStoreVisualization(containerElement: HTMLElement, op: OpRe
             GLOBAL: new THREE.Color(0.2, 0.2, 0.2),
             HIGHLIGHT: new THREE.Color(1.0, 0.55, 0.0)
         },
-        hasHeatmap: true,
         viewState
     });
 }
