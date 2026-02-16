@@ -254,8 +254,8 @@ def prepare_visualization_data(program_records, tensor_table):
                     {
                         "filename": f.filename,
                         "lineno": f.lineno,
-                        "line": f.line,
-                        "name": f.name,
+                        "line": f.line_of_code,
+                        "name": f.func_name,
                     }
                     for f in getattr(record, "call_path", [])
                 ],
@@ -280,8 +280,8 @@ def prepare_visualization_data(program_records, tensor_table):
                     {
                         "filename": f.filename,
                         "lineno": f.lineno,
-                        "line": f.line,
-                        "name": f.name,
+                        "line": f.line_of_code,
+                        "name": f.func_name,
                     }
                     for f in getattr(record, "call_path", [])
                 ],
@@ -409,8 +409,8 @@ def prepare_visualization_data(program_records, tensor_table):
                     {
                         "filename": f.filename,
                         "lineno": f.lineno,
-                        "line": f.line,
-                        "name": f.name,
+                        "line": f.line_of_code,
+                        "name": f.func_name,
                     }
                     for f in getattr(record, "call_path", [])
                 ],
@@ -533,8 +533,8 @@ def prepare_visualization_data(program_records, tensor_table):
                     {
                         "filename": f.filename,
                         "lineno": f.lineno,
-                        "line": f.line,
-                        "name": f.name,
+                        "line": f.line_of_code,
+                        "name": f.func_name,
                     }
                     for f in getattr(record, "call_path", [])
                 ],

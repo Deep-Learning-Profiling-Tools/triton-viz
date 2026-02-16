@@ -111,7 +111,7 @@ class Tracer(Client):
                 tensor = ptr
 
             rec = Load(tensor.data_ptr(), offsets, mask.data)
-            rec.call_path = extract_user_frames(skip_tail=2)
+            rec.call_path = extract_user_frames(1)
             self.records.append(rec)
 
         @self.lock_fn
@@ -135,7 +135,7 @@ class Tracer(Client):
                 tensor = ptr
 
             rec = Store(tensor.data_ptr(), offsets, mask_data)
-            rec.call_path = extract_user_frames(skip_tail=2)
+            rec.call_path = extract_user_frames(1)
             self.records.append(rec)
 
         @self.lock_fn
@@ -161,7 +161,7 @@ class Tracer(Client):
             ret_shape = ret.data.shape
             # Pass input/other raw arrays so draw.py can render MatMul
             rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
-            rec.call_path = extract_user_frames(skip_tail=2)
+            rec.call_path = extract_user_frames(1)
             self.records.append(rec)
 
         def post_flip_callback(ret, x, *args, **kwargs):
@@ -182,7 +182,7 @@ class Tracer(Client):
                 in_shape = tuple(getattr(in_shape, "shape", []) or [])
                 out_shape = tuple(getattr(out_shape, "shape", []) or [])
             rec = Flip(in_shape, out_shape, int(dim) if dim is not None else 0)
-            rec.call_path = extract_user_frames(skip_tail=2)
+            rec.call_path = extract_user_frames(1)
             self.records.append(rec)
 
         if op_type is Allocate:

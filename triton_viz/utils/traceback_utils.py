@@ -1,25 +1,12 @@
 import linecache
 import os
 import sys
-import traceback
 from dataclasses import dataclass
-from pathlib import Path
+from types import FrameType
+from typing import Callable
 
-
-# Unified superset of framework path fragments used to filter out non-user frames.
-FRAMEWORK_PATHS: list[str] = [
-    "triton_viz/core/",
-    "triton_viz/clients/",
-    "triton_viz/utils/",
-    "triton_viz/wrapper",
-    "triton/runtime/",
-    "triton/language/",
-    "site-packages/triton/",
-    "runpy",
-    "IPython",
-]
-
-_BIN_DIR = os.path.normcase(os.path.dirname(sys.executable))
+# IDs all triton_viz-traced functions to display its code within clients
+CODE_KEYS: set[tuple[str, str]] = set()
 
 
 @dataclass
@@ -35,45 +22,36 @@ class TracebackInfo:
 # ---------------------------------------------------------------------------
 
 
-def extract_user_frames(skip_tail: int = 0) -> list[traceback.FrameSummary]:
-    """Return user-code frames from the current call stack.
-
-    Framework frames (matching any entry in ``FRAMEWORK_PATHS``) are removed.
-    ``skip_tail`` additional frames are stripped from the *end* of the raw stack
-    before filtering (useful to exclude the caller itself).
+def get_code_key(obj: FrameType | Callable) -> tuple[str, str]:
     """
-    stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
-    if skip_tail > 0:
-        stack = stack[:-skip_tail]
-
-    cleaned: list[traceback.FrameSummary] = []
-    for f in stack:
-        fn = f.filename.replace("\\", "/")
-        if any(s in fn for s in FRAMEWORK_PATHS):
-            continue
-        # Skip console_scripts entry points (e.g. triton-sanitizer, triton-profiler)
-        if os.path.normcase(os.path.dirname(os.path.abspath(f.filename))) == _BIN_DIR:
-            continue
-        cleaned.append(f)
-
-    if cleaned:
-        return cleaned
-
-    # fallback: last non-"<...>" frame
-    for f in reversed(stack):
-        if not f.filename.startswith("<"):
-            return [f]
-    return stack[-1:] if stack else []
+    Given an object that points to a function (a call frame/function itself),
+    inspect the function's code and create a key that tells triton-viz to display
+    the code for displaying in clients (i.e. Code View in visualizer).
+    """
+    code = obj.f_code if isinstance(obj, FrameType) else obj.__code__
+    return (os.path.realpath(code.co_filename), code.co_qualname)
 
 
-def frame_to_traceback_info(frame: traceback.FrameSummary) -> "TracebackInfo":
-    """Convert a ``FrameSummary`` to a ``TracebackInfo``."""
-    return TracebackInfo(
-        filename=frame.filename,
-        lineno=frame.lineno or 0,
-        func_name=frame.name,
-        line_of_code=frame.line or "",
-    )
+def extract_user_frames(num_frames: int = 0) -> list[TracebackInfo]:
+    """
+    Return traceback info from frames from the current call stack that are running
+    inside functions marked with @triton_viz.trace(...) or @triton_viz.trace_source.
+    Args:
+        num_frames: max number of frames to return (i.e. num_frames = 1 means that only last frame
+        inside a traced function is returned). If zero (default), return all frames.
+    """
+    matched: list[TracebackInfo] = []
+    enough_frames = lambda: num_frames != 0 and len(matched) >= num_frames
+    frame: FrameType | None = sys._getframe(1)
+    while frame and not enough_frames():
+        code_key = get_code_key(frame)
+        if code_key in CODE_KEYS:
+            filename, func_name = code_key
+            lineno = frame.f_lineno
+            line_of_code = linecache.getline(filename, lineno).rstrip()
+            matched.insert(0, TracebackInfo(filename, lineno, func_name, line_of_code))
+        frame = frame.f_back
+    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -81,41 +59,9 @@ def frame_to_traceback_info(frame: traceback.FrameSummary) -> "TracebackInfo":
 # ---------------------------------------------------------------------------
 
 
-def locate_user_frame() -> tuple[str, int, str] | None:
-    """Walk the live call stack and return the first user-code location.
-
-    Returns ``(filename, lineno, func_name)`` or ``None``.
-    """
-    from types import FrameType
-
-    frame: FrameType | None = sys._getframe()
-
-    while frame is not None:
-        filename = Path(frame.f_code.co_filename).as_posix()
-
-        # Skip Python internals
-        if filename.startswith("<"):
-            frame = frame.f_back
-            continue
-
-        is_framework = any(path in filename for path in FRAMEWORK_PATHS)
-
-        # User code: not in framework paths, OR in examples directory
-        if not is_framework or "examples/" in filename:
-            return (
-                frame.f_code.co_filename,
-                frame.f_lineno,
-                frame.f_code.co_name,
-            )
-
-        frame = frame.f_back
-
-    return None
-
-
 def location_to_traceback_info(
     source_location: tuple[str, int, str],
-) -> "TracebackInfo":
+) -> TracebackInfo:
     """Convert a ``(filename, lineno, func_name)`` tuple to ``TracebackInfo``."""
     filename, lineno, func_name = source_location
     line_of_code = linecache.getline(filename, lineno).rstrip()

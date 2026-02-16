@@ -14,7 +14,7 @@ class Op:
     call_path: list[traceback.FrameSummary] = field(init=False, default_factory=list)
 
     def __post_init__(self):
-        self.call_path = extract_user_frames(skip_tail=2)
+        self.call_path = extract_user_frames(1)
 
 
 @dataclass
