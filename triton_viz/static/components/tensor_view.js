@@ -20,6 +20,11 @@ const PROGRAM_COUNT_COLORS = [
 ];
 const PROGRAM_COUNT_PALETTE = PROGRAM_COUNT_COLORS.map((c) => new THREE.Color(c));
 const PROGRAM_SUBSET_LIMIT = 256;
+const DESCRIPTOR_AXIS_COLORS = {
+    x: '#f59e0b',
+    y: '#d946ef',
+    z: '#22d3ee',
+};
 // --- Top-Level Helpers ---
 function coordsFromIndex(index, shape) {
     const w = Math.max(1, shape.width), h = Math.max(1, shape.height);
@@ -290,23 +295,59 @@ function applyProgramSubsetHeatmap(mesh, cache, subsetState, hues, baseColor) {
         color.setHSL(hues.get(key), 0.7, t);
     });
 }
+function parseDescriptorHighlight(highlights) {
+    if (!highlights || highlights.type !== 'descriptor')
+        return null;
+    const sx = Number(highlights.start?.[0] ?? 0);
+    const sy = Number(highlights.start?.[1] ?? 0);
+    const sz = Number(highlights.start?.[2] ?? 0);
+    const dx = Number(highlights.shape?.[0] ?? 0);
+    const dy = Number(highlights.shape?.[1] ?? 0);
+    const dz = Number(highlights.shape?.[2] ?? 0);
+    if (dx <= 0 || dy <= 0 || dz <= 0)
+        return null;
+    const tx = Math.max(1, Math.abs(Number(highlights.stride?.[0] ?? 1)));
+    const ty = Math.max(1, Math.abs(Number(highlights.stride?.[1] ?? 1)));
+    const tz = Math.max(1, Math.abs(Number(highlights.stride?.[2] ?? 1)));
+    return {
+        start: [sx, sy, sz],
+        shape: [dx, dy, dz],
+        stride: [tx, ty, tz],
+    };
+}
+function descriptorContainsCoord(descriptor, coords) {
+    const [x, y, z] = coords;
+    const [sx, sy, sz] = descriptor.start;
+    const [dx, dy, dz] = descriptor.shape;
+    const [tx, ty, tz] = descriptor.stride;
+    const inAxis = (coord, axisStart, axisShape, axisStride) => {
+        if (axisShape <= 0)
+            return false;
+        const delta = coord - axisStart;
+        if (delta < 0 || delta % axisStride !== 0)
+            return false;
+        return (delta / axisStride) < axisShape;
+    };
+    return (inAxis(x, sx, dx, tx)
+        && inAxis(y, sy, dy, ty)
+        && inAxis(z, sz, dz, tz));
+}
+function reorderDescriptorForTensor(values, tensorRank, fallback) {
+    const x = values[0] ?? fallback;
+    const y = values[1] ?? fallback;
+    const z = values[2] ?? fallback;
+    if (tensorRank === 1)
+        return [x];
+    if (tensorRank === 2)
+        return [y, x];
+    return [z, y, x];
+}
 function getHighlightPredicate(highlights) {
     if (!highlights)
         return null;
-    if (highlights.type === 'descriptor') {
-        const { start, shape } = highlights;
-        const sx = start?.[0] ?? 0;
-        const sy = start?.[1] ?? 0;
-        const sz = start?.[2] ?? 0;
-        const dx = shape?.[0] ?? 0;
-        const dy = shape?.[1] ?? 0;
-        const dz = shape?.[2] ?? 0;
-        if (dx <= 0 || dy <= 0 || dz <= 0)
-            return null;
-        return (coords) => {
-            const [x, y, z] = coords;
-            return x >= sx && x < sx + dx && y >= sy && y < sy + dy && z >= sz && z < sz + dz;
-        };
+    const descriptor = parseDescriptorHighlight(highlights);
+    if (descriptor) {
+        return (coords) => descriptorContainsCoord(descriptor, coords);
     }
     if (Array.isArray(highlights.data) && highlights.data.length) {
         const set = new Set();
@@ -460,17 +501,23 @@ function createProgramCountLegendItem(baseColor, maxCount, palette = PROGRAM_COU
     const addRow = (label, color) => {
         const row = document.createElement('div');
         row.style.display = 'flex';
-        row.style.alignItems = 'center';
+        row.style.alignItems = 'flex-start';
         row.style.gap = '6px';
+        row.style.whiteSpace = 'normal';
         const swatch = document.createElement('span');
         swatch.style.display = 'inline-block';
         swatch.style.width = '12px';
         swatch.style.height = '12px';
         swatch.style.borderRadius = '3px';
         swatch.style.background = `#${color.getHexString()}`;
+        swatch.style.flex = '0 0 12px';
+        swatch.style.marginTop = '2px';
         row.appendChild(swatch);
         const text = document.createElement('span');
         text.textContent = label;
+        text.style.whiteSpace = 'normal';
+        text.style.overflowWrap = 'anywhere';
+        text.style.lineHeight = '1.25';
         row.appendChild(text);
         rows.appendChild(row);
     };
@@ -500,17 +547,23 @@ function createProgramSubsetLegendItem(baseColor, subsets, hues) {
     const addRow = (label, color) => {
         const row = document.createElement('div');
         row.style.display = 'flex';
-        row.style.alignItems = 'center';
+        row.style.alignItems = 'flex-start';
         row.style.gap = '6px';
+        row.style.whiteSpace = 'normal';
         const swatch = document.createElement('span');
         swatch.style.display = 'inline-block';
         swatch.style.width = '12px';
         swatch.style.height = '12px';
         swatch.style.borderRadius = '3px';
         swatch.style.background = `#${color.getHexString()}`;
+        swatch.style.flex = '0 0 12px';
+        swatch.style.marginTop = '2px';
         row.appendChild(swatch);
         const text = document.createElement('span');
         text.textContent = label;
+        text.style.whiteSpace = 'normal';
+        text.style.overflowWrap = 'anywhere';
+        text.style.lineHeight = '1.25';
         row.appendChild(text);
         rows.appendChild(row);
     };
@@ -568,6 +621,64 @@ function addDimensionLines(scene, tensorGroup, dimColors = []) {
         groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), `${shape.depth}`, 'z', getColor('z'), { offset: offsetBase }));
     }
     return groups;
+}
+function getDescriptorSelectionBounds(mesh, descriptor) {
+    const tensorShape = mesh.userData.shape;
+    const spacing = CUBE_SIZE + GAP;
+    const centerX = (tensorShape.width - 1) * spacing / 2;
+    const centerY = -((tensorShape.height - 1) * spacing / 2);
+    const centerZ = -((tensorShape.depth - 1) * spacing / 2);
+    const [sx, sy, sz] = descriptor.start;
+    const [dx, dy, dz] = descriptor.shape;
+    const [tx, ty, tz] = descriptor.stride;
+    const ex = sx + (dx - 1) * tx;
+    const ey = sy + (dy - 1) * ty;
+    const ez = sz + (dz - 1) * tz;
+    const toX = (x) => x * spacing - centerX;
+    const toY = (y) => -y * spacing - centerY;
+    const toZ = (z) => -z * spacing - centerZ;
+    const half = CUBE_SIZE / 2;
+    const min = new THREE.Vector3(Math.min(toX(sx), toX(ex)) - half, Math.min(toY(sy), toY(ey)) - half, Math.min(toZ(sz), toZ(ez)) - half);
+    const max = new THREE.Vector3(Math.max(toX(sx), toX(ex)) + half, Math.max(toY(sy), toY(ey)) + half, Math.max(toZ(sz), toZ(ez)) + half);
+    return { min, max };
+}
+function addDescriptorDimensionLines(scene, tensorGroup, highlights) {
+    const mesh = tensorGroup?.userData?.mesh;
+    if (!mesh)
+        return [];
+    const descriptor = parseDescriptorHighlight(highlights);
+    if (!descriptor)
+        return [];
+    const shapeRaw = mesh.userData.shape_raw || [];
+    const bbox = getDescriptorSelectionBounds(mesh, descriptor);
+    const offsetBase = (CUBE_SIZE + GAP) * 0.85;
+    const groups = [];
+    if (shapeRaw.length >= 2) {
+        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${descriptor.shape[0]}`, 'x', DESCRIPTOR_AXIS_COLORS.x, { offset: offsetBase, opacity: 0.95 }));
+        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), `${descriptor.shape[1]}`, 'y', DESCRIPTOR_AXIS_COLORS.y, { offset: offsetBase, opacity: 0.95 }));
+    }
+    else if (shapeRaw.length === 1) {
+        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${descriptor.shape[0]}`, 'x', DESCRIPTOR_AXIS_COLORS.x, { offset: offsetBase, opacity: 0.95 }));
+    }
+    if (shapeRaw.length >= 3) {
+        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), `${descriptor.shape[2]}`, 'z', DESCRIPTOR_AXIS_COLORS.z, { offset: offsetBase, opacity: 0.95 }));
+    }
+    return groups;
+}
+function clearDescriptorDimensionLines(ctx) {
+    ctx.descriptorDimLineGroups.forEach((group) => ctx.scene.remove(group));
+    ctx.descriptorDimLineGroups = [];
+}
+function refreshDescriptorDimensionLines(ctx) {
+    clearDescriptorDimensionLines(ctx);
+    if (!ctx.showDimLines || ctx.state.allProgramsOn)
+        return;
+    ctx.tensors.forEach((group, name) => {
+        const p = ctx.state.payloads.get(name);
+        if (!p)
+            return;
+        ctx.descriptorDimLineGroups.push(...addDescriptorDimensionLines(ctx.scene, group, p.highlights));
+    });
 }
 // --- Interaction Handlers ---
 function onMouseMove(event, ctx) {
@@ -797,7 +908,35 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             programDataLoading: false,
         };
         const highlightColor = (colors.HIGHLIGHT instanceof THREE.Color) ? colors.HIGHLIGHT : new THREE.Color(colors.HIGHLIGHT || 0x00b3ff);
-        const ctx = { type, shapeKey, containerElement, sideMenu, histogramUI, stage, API_BASE, op, scene, camera, renderer, tensors, orbitControls, lineMaterial, state, disposer, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), legendContainer: null, dimLineGroups, highlightColor, requestRender: () => { }, applyBackgroundTheme: () => { }, destroyLegends: () => { }, createLegends: () => { } };
+        const ctx = {
+            type,
+            shapeKey,
+            containerElement,
+            sideMenu,
+            histogramUI,
+            stage,
+            API_BASE,
+            op,
+            scene,
+            camera,
+            renderer,
+            tensors,
+            orbitControls,
+            lineMaterial,
+            state,
+            disposer,
+            raycaster: new THREE.Raycaster(),
+            mouse: new THREE.Vector2(),
+            legendContainer: null,
+            dimLineGroups,
+            descriptorDimLineGroups: [],
+            showDimLines,
+            highlightColor,
+            requestRender: () => { },
+            applyBackgroundTheme: () => { },
+            destroyLegends: () => { },
+            createLegends: () => { },
+        };
         ctx.requestRender = () => {
             if (state.rafId !== null) {
                 state.renderPending = true;
@@ -940,6 +1079,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             ctx.destroyLegends();
             ctx.dimLineGroups.forEach((group) => scene.remove(group));
             ctx.dimLineGroups = [];
+            clearDescriptorDimensionLines(ctx);
             if (stage.parentElement)
                 stage.parentElement.removeChild(stage);
             if (sideMenu.parentElement)
@@ -970,14 +1110,51 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         return;
     const vizCache = cache;
     const { state, tensors, sideMenu, requestRender, applyBackgroundTheme, createLegends, destroyLegends } = vizCache;
+    const syncOpControlState = () => {
+        if (!window.setOpControlState)
+            return;
+        window.setOpControlState({
+            colorize: state.colorizeOn,
+            histogram: vizCache.histogramUI.overlay.style.display === 'block',
+            allPrograms: state.allProgramsOn,
+        });
+    };
     state.payloads.clear();
     state.programCounts = null;
     state.programSubsets = null;
     state.programSubsetHues = null;
+    clearDescriptorDimensionLines(vizCache);
     sideMenu.innerHTML = '';
     const opUuid = op.uuid ?? null;
     window.current_op_uuid = opUuid;
     const getBaseCountColor = () => tensors.values().next().value?.userData?.mesh?.userData?.color_base || '#333333';
+    const renderShapeLegend = () => {
+        createShapeLegend(containerElement, Array.from(tensors.entries()).map(([name, group]) => {
+            const entry = {
+                name: name === 'Global' ? type : `Matrix ${name}`,
+                color: '#' + group.userData.mesh.userData.color_base.getHexString(),
+            };
+            const shape = group.userData.mesh.userData.shape_raw;
+            if (shape)
+                entry.shape = shape;
+            const dimColor = dimColors?.[name];
+            if (dimColor)
+                entry.dimColors = dimColor;
+            const descriptor = parseDescriptorHighlight(state.payloads.get(name)?.highlights);
+            if (descriptor && shape && shape.length > 0) {
+                const selectionColor = vizCache.highlightColor instanceof THREE.Color
+                    ? `#${vizCache.highlightColor.getHexString()}`
+                    : String(vizCache.highlightColor || '#00b3ff');
+                const selectionDimColors = reorderDescriptorForTensor([DESCRIPTOR_AXIS_COLORS.x, DESCRIPTOR_AXIS_COLORS.y, DESCRIPTOR_AXIS_COLORS.z], shape.length, selectionColor);
+                entry.descriptor = {
+                    shape: reorderDescriptorForTensor(descriptor.shape, shape.length, 1),
+                    color: selectionColor,
+                    dimColors: selectionDimColors,
+                };
+            }
+            return entry;
+        }));
+    };
     const getValueLegendItems = () => {
         const items = [];
         if (!state.colorizeOn)
@@ -1027,6 +1204,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         const items = getValueLegendItems();
         items.push(createProgramSubsetLegendItem(getBaseCountColor(), programSubsets.subsets, state.programSubsetHues));
         createLegends(items);
+        refreshDescriptorDimensionLines(vizCache);
     };
     const applyProgramPayload = (payload) => {
         const subsets = normalizeProgramSubsets(payload);
@@ -1063,6 +1241,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         else if (state.programCounts) {
             renderProgramCounts();
         }
+        refreshDescriptorDimensionLines(vizCache);
         requestRender();
         return true;
     };
@@ -1082,6 +1261,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                     else if (state.programCounts) {
                         renderProgramCounts();
                     }
+                    refreshDescriptorDimensionLines(vizCache);
                     requestRender();
                 }
             }
@@ -1150,6 +1330,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                             createLegends(items);
                         }
                     }
+                    refreshDescriptorDimensionLines(vizCache);
                     requestRender();
                     return state.allProgramsOn;
                 }
@@ -1157,16 +1338,20 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             } : null,
         });
     }
+    syncOpControlState();
     const fetchers = opUuid ? Array.from(tensors.entries()).map(([name, group]) => {
         return fetchTensorPayload(API_BASE, opUuid, group.userData.endpoint || 'getLoadTensor').then(p => {
             if (p) {
                 state.payloads.set(name, p);
+                refreshDescriptorDimensionLines(vizCache);
+                renderShapeLegend();
                 if (!supportsAllPrograms || !state.allProgramsOn) {
                     updateTensorHighlights(group, p.highlights, vizCache.highlightColor, group.userData.mesh.userData.color_base);
                 }
             }
         });
     }) : [];
+    renderShapeLegend();
     Promise.all(fetchers).then(async () => {
         if (supportsAllPrograms && state.allProgramsOn) {
             await ensureProgramData();
@@ -1203,21 +1388,9 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 }
             }
         }
+        refreshDescriptorDimensionLines(vizCache);
         requestRender();
     });
-    createShapeLegend(containerElement, Array.from(tensors.entries()).map(([name, group]) => {
-        const entry = {
-            name: name === 'Global' ? type : `Matrix ${name}`,
-            color: '#' + group.userData.mesh.userData.color_base.getHexString(),
-        };
-        const shape = group.userData.mesh.userData.shape_raw;
-        if (shape)
-            entry.shape = shape;
-        const dimColor = dimColors?.[name];
-        if (dimColor)
-            entry.dimColors = dimColor;
-        return entry;
-    }));
     applyBackgroundTheme('#000000');
     requestRender();
     return vizCache.cleanup;

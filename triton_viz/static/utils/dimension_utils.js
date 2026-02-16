@@ -25,7 +25,7 @@ export function createVectorText(text, color, options = {}) {
     return textMesh;
 }
 export function createCadDimension(scene, start, end, label, axis, color, options = {}) {
-    const { offset = 0.5, extensionLength = 0.8, extensionOffset = 0.1, arrowSize = 0.15, arrowWidth = 0.08, textOffset = 0.25, flipThreshold = 1.0, lineWidth = 1, opacity = 0.8 } = options;
+    const { offset = 0.5, extensionLength = 0.8, extensionOffset = 0.1, arrowSize = 0.15, arrowWidth = 0.08, textOffset = 0.25, flipThreshold = 1.0, lineWidth = 3, opacity = 0.8 } = options;
     const group = new THREE.Group();
     const material = new THREE.LineBasicMaterial({
         color: color,
@@ -148,9 +148,12 @@ export function createShapeLegend(container, tensors) {
     legend.innerHTML = '<div style="font-weight:bold; margin-bottom:4px; font-family:sans-serif;">Tensor Shapes</div>';
     tensors.forEach(t => {
         const item = document.createElement('div');
-        item.style.display = 'flex';
-        item.style.alignItems = 'center';
-        item.style.gap = '8px';
+        item.style.display = 'grid';
+        item.style.gap = '2px';
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '8px';
         const swatch = document.createElement('div');
         swatch.style.width = '12px';
         swatch.style.height = '12px';
@@ -182,8 +185,33 @@ export function createShapeLegend(container, tensors) {
         }
         shapeHtml += ']';
         label.innerHTML = shapeHtml;
-        item.appendChild(swatch);
-        item.appendChild(label);
+        row.appendChild(swatch);
+        row.appendChild(label);
+        item.appendChild(row);
+        if (t.descriptor && t.descriptor.shape.length > 0) {
+            const descriptorShape = t.descriptor.shape;
+            const descriptorColor = t.descriptor.color;
+            const descriptorDimColors = t.descriptor.dimColors || [];
+            const renderArray = (arr) => arr.map((v, i) => {
+                const color = descriptorDimColors[i] || descriptorColor;
+                return `<span style="color:${color}">${v}</span>`;
+            }).join(', ');
+            const selectionRow = document.createElement('div');
+            selectionRow.style.display = 'flex';
+            selectionRow.style.alignItems = 'center';
+            selectionRow.style.gap = '8px';
+            const selectionSwatch = document.createElement('div');
+            selectionSwatch.style.width = '12px';
+            selectionSwatch.style.height = '12px';
+            selectionSwatch.style.backgroundColor = descriptorColor;
+            selectionSwatch.style.border = '1px solid rgba(255,255,255,0.5)';
+            const selectionLabel = document.createElement('span');
+            selectionLabel.style.color = '#fff';
+            selectionLabel.innerHTML = `selection: [${renderArray(descriptorShape)}]`;
+            selectionRow.appendChild(selectionSwatch);
+            selectionRow.appendChild(selectionLabel);
+            item.appendChild(selectionRow);
+        }
         legend.appendChild(item);
     });
     return legend;

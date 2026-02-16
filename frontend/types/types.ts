@@ -27,6 +27,7 @@ export interface TensorHighlights {
     type?: string;
     start?: number[];
     shape?: number[];
+    stride?: number[];
     data?: number[][];
 }
 
