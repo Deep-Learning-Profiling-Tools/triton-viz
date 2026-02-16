@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "setuptools",
-  "triton",
+  "triton>=3.4.0",
   "pyarrow",
   "pre-commit",
   "z3-solver==4.15.3.0",
