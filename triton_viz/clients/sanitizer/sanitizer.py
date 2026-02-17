@@ -35,8 +35,6 @@ from ...core.data import (
     MakeBlockPointer,
     TensorPointerLoad,
     TensorPointerStore,
-    AtomicCas,
-    AtomicRMW,
 )
 from ..utils import (
     check_storage_contiguous,
@@ -551,18 +549,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self._handle_access_check(ret)
         return ret
 
-    def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
-        ptr_sym = SymbolicExpr.from_value(ptr)
-        cmp_sym = SymbolicExpr.from_value(cmp)
-        val_sym = SymbolicExpr.from_value(val)
-        return SymbolicExpr.create("atomic_cas", ptr_sym, cmp_sym, val_sym)
-
-    def _op_atomic_rmw_overrider(self, rmwOp, ptr, val, mask, sem, scope):
-        ptr_sym = SymbolicExpr.from_value(ptr)
-        val_sym = SymbolicExpr.from_value(val)
-        mask_sym = SymbolicExpr.from_value(mask)
-        return SymbolicExpr.create("atomic_rmw", ptr_sym, val_sym, mask_sym)
-
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         overrider_map = self._build_op_overrider_map()
         overrider_map.update(
@@ -574,8 +560,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
                 MakeBlockPointer: self._op_make_block_ptr_overrider,
                 TensorPointerLoad: self._op_tensor_pointer_load_overrider,
                 TensorPointerStore: self._op_tensor_pointer_store_overrider,
-                AtomicCas: self._op_atomic_cas_overrider,
-                AtomicRMW: self._op_atomic_rmw_overrider,
             }
         )
         overrider = overrider_map.get(op_type)
