@@ -8,6 +8,7 @@ from .config import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
+from . import patch
 from typing import Callable, Optional, Union
 
 
@@ -150,6 +151,18 @@ class TritonTrace(KernelInterface, TraceInterface):
     def __call__(self, *args, **kwargs):
         # When a traced JIT function is called from within another JIT function,
         # we need to execute the underlying function directly
+
+        # check that client sets match for calling and called functions
+        outer_client_manager = getattr(patch, "_current_client_manager", None)
+        if outer_client_manager is not None:
+            outer_clients = set(outer_client_manager.clients)
+            inner_clients = set(self.client_manager.clients)
+            if outer_clients != inner_clients:
+                raise RuntimeError(
+                    "nested traced calls require matching clients; "
+                    f"outer={outer_clients}, inner={inner_clients}"
+                )
+
         return self.interpreted_fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
