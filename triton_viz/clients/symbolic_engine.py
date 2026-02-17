@@ -63,6 +63,8 @@ from ..core.data import (
     Umulhi,
     CumSum,
     Bitcast,
+    AtomicCas,
+    AtomicRMW,
 )
 
 
@@ -1798,6 +1800,18 @@ class SymbolicClient(Client):
     def _op_bitcast_overrider(self, src, dst_type):
         return SymbolicExpr.create("bitcast", SymbolicExpr.from_value(src), dst_type)
 
+    def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        cmp_sym = SymbolicExpr.from_value(cmp)
+        val_sym = SymbolicExpr.from_value(val)
+        return SymbolicExpr.create("atomic_cas", ptr_sym, cmp_sym, val_sym)
+
+    def _op_atomic_rmw_overrider(self, rmwOp, ptr, val, mask, sem, scope):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        val_sym = SymbolicExpr.from_value(val)
+        mask_sym = SymbolicExpr.from_value(mask)
+        return SymbolicExpr.create("atomic_rmw", ptr_sym, val_sym, mask_sym)
+
     def _build_op_overrider_map(self) -> dict[type[Op], Callable]:
         """Return a mapping of shared Op types to their overrider methods."""
         return {
@@ -1827,6 +1841,8 @@ class SymbolicClient(Client):
             Umulhi: self._op_umulhi_overrider,
             CumSum: self._op_cumsum_overrider,
             Bitcast: self._op_bitcast_overrider,
+            AtomicCas: self._op_atomic_cas_overrider,
+            AtomicRMW: self._op_atomic_rmw_overrider,
         }
 
     def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
