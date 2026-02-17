@@ -7,10 +7,9 @@ import triton.language as tl
 
 import triton_viz
 from triton_viz.core.data import Load, RawLoad
-from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr
+from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr, RangeWrapper
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
-    RangeWrapper,
     _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
@@ -143,8 +142,8 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
 
         def _after_loop(lineno: int) -> None:
             pending = 0
-            if self.loop_stack and self.loop_stack[-1].lineno == lineno:
-                ctx = self.loop_stack[-1]
+            if self._loop_stack and self._loop_stack[-1].lineno == lineno:
+                ctx = self._loop_stack[-1]
                 pending = len(ctx.pending_checks)
                 self.iterator_constraints.append(
                     _range_to_iterator_constraint(
