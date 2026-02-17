@@ -432,7 +432,7 @@ def patch_lang(fn, backend):
     _push_lang_patch_scope(backend, scope)
 
     fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
-    patch_flip(scope, lambda: _current_client_manager)
+    patch_flip(scope, lambda: _current_trace_runtime)
 
 
 def unpatch_lang(backend):
@@ -515,15 +515,15 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
     # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
     argspec = inspect.getfullargspec(self.fn)
-    triton_viz_args = ["client_manager", "jit_fn"]
+    triton_viz_args = ["trace_runtime", "jit_fn"]
     kwargs = {
         k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
     }
-    client_manager = kwargs.pop("client_manager")
+    trace_runtime = kwargs.pop("trace_runtime")
 
-    # Expose client_manager to tl.flip wrapper via a module-global
-    global _current_client_manager
-    _current_client_manager = client_manager
+    # Expose trace_runtime to tl.flip wrapper via a module-global
+    global _current_trace_runtime
+    _current_trace_runtime = trace_runtime
     kwargs.pop("jit_fn")
     if cfg.virtual_memory:
         args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs)
@@ -539,7 +539,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
             ret = arg
         else:
             ret = _implicit_cvt(arg)
-        client_manager.arg_callback(name, arg, ret)
+        trace_runtime.arg_callback(name, arg, ret)
         call_args[name] = ret
     call_args.pop("self", None)
     # Iterate through grid
@@ -548,7 +548,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     grid = grid + (1,) * (3 - len(grid))
 
     builder.set_grid_dim(*grid)
-    client_manager.grid_callback(grid)
+    trace_runtime.grid_callback(grid)
     total_blocks = grid[0] * grid[1] * grid[2]
     max_workers = min(cfg.num_sms, total_blocks)
 
@@ -568,11 +568,11 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
                 except Empty:
                     return
                 interpreter_builder.set_grid_idx(x, y, z)
-                client_manager.grid_idx_callback((x, y, z))
-                if not client_manager.pre_run_callback(self.fn):
+                trace_runtime.grid_idx_callback((x, y, z))
+                if not trace_runtime.pre_run_callback(self.fn):
                     continue
                 self.fn(**call_args)
-                if not client_manager.post_run_callback(self.fn):
+                if not trace_runtime.post_run_callback(self.fn):
                     stop_event.set()
                     return
 
@@ -586,11 +586,11 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
             for y in range(grid[1]):
                 for z in range(grid[2]):
                     interpreter_builder.set_grid_idx(x, y, z)
-                    client_manager.grid_idx_callback((x, y, z))
-                    if not client_manager.pre_run_callback(self.fn):
+                    trace_runtime.grid_idx_callback((x, y, z))
+                    if not trace_runtime.pre_run_callback(self.fn):
                         continue
                     self.fn(**call_args)
-                    if not client_manager.post_run_callback(self.fn):
+                    if not trace_runtime.post_run_callback(self.fn):
                         return
 
     if cfg.enable_timing:

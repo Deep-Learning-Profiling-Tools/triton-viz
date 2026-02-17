@@ -136,7 +136,6 @@ def test_tracer_records_dot():
     TILE_K = 2
     TILE_N = 4
 
-    @triton_viz.trace(client=Tracer(), backend="nki")
     def matmul_kernel(lhs, rhs, result):
         """NKI matmul_kernel to compute a matrix multiplication operation in a tiled manner
 

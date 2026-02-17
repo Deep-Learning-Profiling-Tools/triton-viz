@@ -6,7 +6,7 @@ import triton.language as tl
 from .data import Flip
 
 
-def patch_flip(scope: Any, get_client_manager: Callable[[], Any]) -> None:
+def patch_flip(scope: Any, get_trace_runtime: Callable[[], Any]) -> None:
     # Wrap tl.flip to emit a Flip record after computing result.
     try:
         _orig_flip = getattr(tl, "flip", None)
@@ -49,8 +49,8 @@ def patch_flip(scope: Any, get_client_manager: Callable[[], Any]) -> None:
 
             # Emit a Flip record to the active tracer, if available
             try:
-                cm = get_client_manager()
-                if cm is not None and hasattr(cm, "clients"):
+                cm = get_trace_runtime()
+                if cm is not None and hasattr(cm, "get_client"):
                     tracer = cm.get_client("tracer")
                     if tracer is not None:
                         input_payload = None

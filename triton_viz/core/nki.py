@@ -473,13 +473,13 @@ class NKIInterpretedFunction:
         nki_builder.fn = self.fn
 
         kwargs.pop("warmup", None)  # Remove warmup from kwargs if it exists
-        client_manager = kwargs.pop(
-            "client_manager", None
-        )  # Remove client_manager from kwargs if it exists
+        trace_runtime = kwargs.pop(
+            "trace_runtime", None
+        )  # Remove trace_runtime from kwargs if it exists
 
         # Call grid_callback once before grid execution (similar to Triton)
-        if client_manager is not None:
-            client_manager.grid_callback(grid_dims)
+        if trace_runtime is not None:
+            trace_runtime.grid_callback(grid_dims)
 
         # Apply AST transformers
         if hasattr(self.fn, "__code__"):
@@ -512,7 +512,7 @@ class NKIInterpretedFunction:
         for name, arg in name_args.items():
             call_args[name] = arg
             ret = arg
-            client_manager.arg_callback(name, arg, ret)
+            trace_runtime.arg_callback(name, arg, ret)
 
         for x in range(grid_dims[0]):
             for y in range(grid_dims[1]):
@@ -520,11 +520,11 @@ class NKIInterpretedFunction:
                     nki_builder.set_grid_idx(x, y, z)
 
                     # Call grid_idx_callback for each grid iteration (similar to Triton)
-                    if client_manager is not None:
-                        client_manager.grid_idx_callback((x, y, z))
+                    if trace_runtime is not None:
+                        trace_runtime.grid_idx_callback((x, y, z))
 
-                    if not client_manager.pre_run_callback(self.fn):
+                    if not trace_runtime.pre_run_callback(self.fn):
                         return
                     self.fn(*args, **kwargs)
-                    if not client_manager.post_run_callback(self.fn):
+                    if not trace_runtime.post_run_callback(self.fn):
                         return

@@ -8,42 +8,19 @@ import triton_viz
 from triton_viz.clients import Sanitizer
 
 
-# ======== Trace Decorator Tests =========
-def test_trace_decorator_add_clients():
-    """
-    Test goal:
-    1. Apply @trace("sanitizer") and @trace("profiler") to add the Sanitizer and Profiler clients.
-    2. Apply @trace("tracer") to append a Tracer client.
-    3. Apply @trace(("sanitizer",)) with a duplicate Sanitizer, which should be
-       ignored by the de-duplication logic.
+# ======== TraceRuntime Decorator Tests =========
+def test_trace_decorator_rejects_stacking():
+    """Applying trace() to an already traced kernel should fail."""
 
-    The final Trace object should contain exactly one instance each of
-    Sanitizer, Profiler, and Tracer (total = 3 clients).
-    """
-
-    @triton_viz.trace("sanitizer")
-    @triton_viz.trace("profiler")
-    @triton_viz.trace("tracer")
-    @triton_viz.trace(
-        Sanitizer(abort_on_error=True)
-    )  # Duplicate Sanitizer (should be ignored)
     @triton.jit
     def my_kernel(x_ptr, y_ptr, out_ptr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         tl.store(out_ptr + offs, tl.load(x_ptr + offs) + tl.load(y_ptr + offs))
 
-    # Should be wrapped as a Trace object.
-    from triton_viz.core.trace import TritonTrace
-
-    assert isinstance(my_kernel, TritonTrace)
-
-    # Verify client de-duplication and addition logic
-    clients = my_kernel.client_manager.clients
-    assert len(clients) == 3
-    assert sum(c == "sanitizer" for c in clients) == 1
-    assert sum(c == "profiler" for c in clients) == 1
-    assert sum(c == "tracer" for c in clients) == 1
+    traced = triton_viz.trace("tracer")(my_kernel)
+    with pytest.raises(ValueError, match="already traced"):
+        triton_viz.trace("profiler")(traced)
 
 
 # ======== Unpatch Tests =========
@@ -76,10 +53,10 @@ def trace_nested_inner_kernel(x):
 
 def test_trace_nested_jit_calls():
     """
-    Test that Trace class properly handles nested JIT function calls via __call__ method.
+    Test that TraceRuntime class properly handles nested JIT function calls via __call__ method.
 
     When a traced JIT function is called from within another JIT function,
-    the Trace wrapper needs to properly delegate to the underlying function.
+    the TraceRuntime wrapper needs to properly delegate to the underlying function.
     This test ensures compatibility with the command line triton-sanitizer wrapper.
     """
 

@@ -1,4 +1,7 @@
 from copy import deepcopy
+from contextlib import contextmanager, nullcontext
+from functools import wraps
+import threading
 from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.autotuner import Heuristics
 from triton.runtime.interpreter import InterpretedFunction
@@ -6,18 +9,39 @@ from triton import JITFunction
 
 from .config import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
-from .client import ClientManager, Client
+from .client import Client
 from .data import Launch
+from .patch import (
+    patch_calls,
+    patch_for_loop,
+    patch_lang,
+    patch_op,
+    unpatch_for_loop,
+    unpatch_lang,
+    unpatch_op,
+    OPERATION_REGISTRY,
+)
 from typing import Callable, Optional, Union
 
 
 launches: list[Launch] = []
 
 
-class TraceInterface:
+class TraceRuntime:
+    """
+    Internal tracing runtime shared by traced kernel wrappers.
+
+    Users do not instantiate this directly. They call `triton_viz.trace(...)`,
+    which returns a `TritonTrace` (or `NKITrace`) object. This mixin provides
+    the common lifecycle used by those user-facing wrappers:
+    patching interpreter ops, forwarding callbacks to the selected client,
+    and collecting the final `Launch` record.
+    """
+
     def __init__(self, client: Union[str, Client]) -> None:
-        self.client_manager = ClientManager()
-        self.add_client(client)
+        self.client = self._normalize_client(client)
+        self.launch = Launch()
+        self._lock = threading.Lock()
 
     @staticmethod
     def _normalize_client(client: Union[str, Client]) -> Client:
@@ -35,15 +59,89 @@ class TraceInterface:
         else:
             raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def add_client(self, new_client: Union[str, Client]) -> None:
-        self.client_manager.add_clients([self._normalize_client(new_client)])
-
     def finalize(self):
-        self.client_manager.finalize()
-        launches.append(self.client_manager.launch)
+        with self._lock_context():
+            self.launch.records = self.client.finalize()
+        launches.append(self.launch)
+
+    def _lock_context(self):
+        if cfg.num_sms > 1:
+            return self._lock
+        return nullcontext()
+
+    def get_client(self, name: str) -> Optional[Client]:
+        if self.client.NAME == name:
+            return self.client
+        return None
+
+    @contextmanager
+    def patch_warmup(self, jit_fn):
+        if not hasattr(jit_fn, "warmup"):
+            yield
+            return
+
+        def patcher(fn):
+            @wraps(fn)
+            def wrapped(*args, **kwargs):
+                if not self.client.pre_warmup_callback(jit_fn, *args, **kwargs):
+                    return None
+                kwargs.pop("warmup", None)
+                ret = fn(*args, **kwargs)
+                self.client.post_warmup_callback(jit_fn, ret)
+                return ret
+
+            return wrapped
+
+        jit_fn.warmup = patcher(jit_fn.warmup)
+        try:
+            yield
+        finally:
+            jit_fn.warmup = jit_fn.warmup.__wrapped__
+
+    @contextmanager
+    def patch_run(self, fn, backend: str):
+        namespaces = OPERATION_REGISTRY[backend].namespaces
+        with patch_calls(backend):
+            for namespace, attrs in namespaces.items():
+                for attr, op in attrs.items():
+                    callbacks = self.client.register_op_callback(op)
+                    patch_op(namespace, attr, callbacks, backend=backend)
+            patch_for_loop(self.client.register_for_loop_callback())
+            patch_lang(fn, backend)
+            try:
+                yield
+            finally:
+                for namespace, attrs in namespaces.items():
+                    for attr in attrs:
+                        unpatch_op(namespace, attr, backend)
+                unpatch_for_loop()
+                unpatch_lang(backend)
+
+    def pre_run_callback(self, fn: Callable) -> bool:
+        with self._lock_context():
+            return self.client.pre_run_callback(fn)
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        with self._lock_context():
+            return self.client.post_run_callback(fn)
+
+    def arg_callback(self, name, arg, arg_cvt):
+        with self._lock_context():
+            if hasattr(arg, "data_ptr"):
+                self.launch.tensors.add(arg)
+            self.client.arg_callback(name, arg, arg_cvt)
+
+    def grid_callback(self, grid: tuple[int]):
+        with self._lock_context():
+            self.launch.grid = grid
+            self.client.grid_callback(grid)
+
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]):
+        with self._lock_context():
+            self.client.grid_idx_callback(grid_idx)
 
 
-class TritonTrace(KernelInterface, TraceInterface):
+class TritonTrace(KernelInterface, TraceRuntime):
     def __init__(
         self,
         runner: Union[JITFunction, InterpretedFunction, Autotuner, Heuristics],
@@ -103,7 +201,7 @@ class TritonTrace(KernelInterface, TraceInterface):
 
         self.fn = runner
 
-        TraceInterface.__init__(self, client)
+        TraceRuntime.__init__(self, client)
 
         # Preserve common function attributes for compatibility
         # with code that expects to access these attributes on the kernel
@@ -136,12 +234,12 @@ class TritonTrace(KernelInterface, TraceInterface):
             self.src = self.jit_fn.src
 
     def run(self, *args, **kwargs):
-        with self.client_manager.patch_warmup(self.jit_fn):
+        with self.patch_warmup(self.jit_fn):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
 
-        with self.client_manager.patch_run(self.base_fn, backend="triton"):
-            kwargs.update({"client_manager": self.client_manager})
+        with self.patch_run(self.base_fn, backend="triton"):
+            kwargs.update({"trace_runtime": self})
             kwargs.update({"jit_fn": self.jit_fn})
             ret = self.runner.run(*args, **kwargs)
             self.finalize()
@@ -153,12 +251,14 @@ class TritonTrace(KernelInterface, TraceInterface):
         return self.interpreted_fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
-        with self.client_manager.patch_warmup(self.jit_fn):
+        with self.patch_warmup(self.jit_fn):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
 
 
-class NKITrace(KernelInterface, TraceInterface):
+class NKITrace(KernelInterface, TraceRuntime):
+    """User-facing traced wrapper for NKI kernels."""
+
     def __init__(self, kernel, client: str | Client) -> None:
         from neuronxcc.nki.compile import GenericKernel
         from .nki import NKIInterpretedFunction
@@ -173,11 +273,11 @@ class NKITrace(KernelInterface, TraceInterface):
             self.interpreter_fn = NKIInterpretedFunction(kernel)
             self.func = kernel
 
-        TraceInterface.__init__(self, client)
+        TraceRuntime.__init__(self, client)
 
     def __getattr__(self, name):
         # Forward any missing attributes to the underlying runner
-        # This allows Trace to transparently proxy attributes like 'src', 'hash', etc.
+        # This allows TraceRuntime to transparently proxy attributes like 'src', 'hash', etc.
         # Use object.__getattribute__ to avoid infinite recursion
         try:
             fn = object.__getattribute__(self, "fn")
@@ -211,8 +311,8 @@ class NKITrace(KernelInterface, TraceInterface):
         return self[(1, 1, 1)](*args, **kwargs)
 
     def run(self, *args, **kwargs):
-        with self.client_manager.patch_run(self.func, backend="nki"):
-            kwargs.update({"client_manager": self.client_manager})
+        with self.patch_run(self.func, backend="nki"):
+            kwargs.update({"trace_runtime": self})
             ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()
             return ret
@@ -242,11 +342,11 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
             # tracing but don't actually sanitize), don't actually trace the kernel
             return kernel
 
-        # If the object is already initialized as a TraceInterface, just append the new client(s)
-        if isinstance(kernel, TraceInterface):
-            trace = kernel
-            trace.add_client(client)
-            return trace
+        # multi-client stacking is not supported
+        if isinstance(kernel, TraceRuntime):
+            raise ValueError(
+                "Kernel is already traced. Stacking multiple @trace decorators is not supported."
+            )
 
         # First-time wrapping
         # Triton backend need JIT/Interpreter/Autotuner；
@@ -262,7 +362,7 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
                 raise ValueError(f"Unknown backend: {backend}")
 
         raise TypeError(
-            f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}"
+            f"Expected JITFunction, InterpretedFunction or TraceRuntime, got {type(kernel)}"
         )
 
     return decorator
