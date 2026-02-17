@@ -607,7 +607,7 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Liger-Kernel fused_linear_jsd: 12 parameter combinations
+# Liger-Kernel fused_linear_jsd: 12 parameter combinations (grouped)
 # Matches test_correctness_functional parameter space exactly
 # ---------------------------------------------------------------------------
 
@@ -696,23 +696,34 @@ def _liger_run(d):
     )
 
 
-for _B, _T, _H, _V in _LIGER_SHAPES:
-    for _scalar, _dtype in _LIGER_DTYPES:
-        for _temperature, _beta, _ignore_index in _LIGER_PARAMS:
-            _BT = _B * _T
-            _dtype_str = "bf16" if _dtype == torch.bfloat16 else "f32"
-            _param_str = "default" if _beta == 0.5 else "custom"
-            _name = f"liger_jsd_{_BT}x{_V}_{_dtype_str}_{_param_str}"
-            BENCHMARKS[_name] = {
-                "setup": _make_liger_setup(
-                    _BT, _H, _V, _scalar, _dtype, _beta, _ignore_index
-                ),
-                "run": _liger_run,
-                "sanitizer": jsd_sanitizer,
-            }
+_LIGER_CONFIGS = [
+    (_B * _T, _H, _V, _scalar, _dtype, _beta, _ignore_index)
+    for _B, _T, _H, _V in _LIGER_SHAPES
+    for _scalar, _dtype in _LIGER_DTYPES
+    for _temperature, _beta, _ignore_index in _LIGER_PARAMS
+]
+
+
+def _liger_setup_all():
+    return [
+        _make_liger_setup(BT, H, V, scalar, dtype, beta, ignore_index)()
+        for BT, H, V, scalar, dtype, beta, ignore_index in _LIGER_CONFIGS
+    ]
+
+
+def _liger_run_all(configs):
+    for d in configs:
+        _liger_run(d)
+
+
+BENCHMARKS["liger_jsd"] = {
+    "setup": _liger_setup_all,
+    "run": _liger_run_all,
+    "sanitizer": [jsd_sanitizer, element_mul_sanitizer],
+}
 
 # ---------------------------------------------------------------------------
-# FlagGems LayerNorm: 30 parameter combinations
+# FlagGems LayerNorm: 15 parameter combinations (grouped)
 # Matches test_accuracy_layernorm parameter space exactly
 # ---------------------------------------------------------------------------
 
@@ -867,18 +878,25 @@ def _flaggems_ln_run(d):
         )
 
 
-_DTYPE_NAMES = {torch.float16: "f16", torch.float32: "f32", torch.bfloat16: "bf16"}
+def _flaggems_layernorm_setup_all():
+    return [
+        _make_flaggems_ln_setup(M, N, dtype, wb_none)()
+        for M, N in _FLAGGEMS_LN_SHAPES
+        for dtype in _FLAGGEMS_LN_DTYPES
+        for wb_none in _FLAGGEMS_LN_WB
+    ]
 
-for _M, _N in _FLAGGEMS_LN_SHAPES:
-    for _dtype in _FLAGGEMS_LN_DTYPES:
-        for _wb_none in _FLAGGEMS_LN_WB:
-            _dtype_str = _DTYPE_NAMES[_dtype]
-            _name = f"flaggems_ln_{_M}x{_N}_{_dtype_str}"
-            BENCHMARKS[_name] = {
-                "setup": _make_flaggems_ln_setup(_M, _N, _dtype, _wb_none),
-                "run": _flaggems_ln_run,
-                "sanitizer": flaggems_sanitizer,
-            }
+
+def _flaggems_layernorm_run_all(configs):
+    for d in configs:
+        _flaggems_ln_run(d)
+
+
+BENCHMARKS["flaggems_layernorm"] = {
+    "setup": _flaggems_layernorm_setup_all,
+    "run": _flaggems_layernorm_run_all,
+    "sanitizer": flaggems_sanitizer,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +920,13 @@ def run_benchmarks(
         print(f"  [{name}] ", end="", flush=True)
 
         data = bench["setup"]()
-        san = bench["sanitizer"]
+        sanitizers = bench["sanitizer"]
+        if not isinstance(sanitizers, list):
+            sanitizers = [sanitizers]
+
+        def _reset_all():
+            for san in sanitizers:
+                _reset_sanitizer(san)
 
         # Set per-benchmark timeout (Unix only)
         has_alarm = hasattr(signal, "SIGALRM")
@@ -913,13 +937,13 @@ def run_benchmarks(
         try:
             # Warmup
             for _ in range(warmup):
-                _reset_sanitizer(san)
+                _reset_all()
                 bench["run"](data)
 
             # Measured iterations
             times: list[float] = []
             for _ in range(iterations):
-                _reset_sanitizer(san)
+                _reset_all()
                 t0 = time.perf_counter()
                 bench["run"](data)
                 t1 = time.perf_counter()
