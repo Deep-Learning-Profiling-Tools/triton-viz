@@ -39,25 +39,20 @@ class TraceRuntime:
     """
 
     def __init__(self, client: Union[str, Client]) -> None:
-        self.client = self._normalize_client(client)
         self.launch = Launch()
         self._lock = threading.Lock()
-
-    @staticmethod
-    def _normalize_client(client: Union[str, Client]) -> Client:
-        if isinstance(client, str):
-            name = client.lower()
-            if name == "sanitizer":
-                return Sanitizer()
-            if name == "profiler":
-                return Profiler()
-            if name == "tracer":
-                return Tracer()
-            raise ValueError(f"Unknown client: {client}")
-        elif isinstance(client, Client):
-            return client
+        if isinstance(client, Client):
+            self.client = client
         else:
-            raise TypeError(f"Expected str or Client, got {type(client)}")
+            client_map: dict[str, type[Client]] = {
+                "sanitizer": Sanitizer,
+                "profiler": Profiler,
+                "tracer": Tracer,
+            }
+            assert (
+                client in client_map
+            ), f"Expected client in {set(client_map)}, received: {client}"
+            self.client = client_map[client]()
 
     def finalize(self):
         with self._lock_context():
@@ -68,11 +63,6 @@ class TraceRuntime:
         if cfg.num_sms > 1:
             return self._lock
         return nullcontext()
-
-    def get_client(self, name: str) -> Optional[Client]:
-        if self.client.NAME == name:
-            return self.client
-        return None
 
     @contextmanager
     def patch_warmup(self, jit_fn):

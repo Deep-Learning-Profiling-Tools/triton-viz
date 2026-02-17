@@ -49,9 +49,9 @@ def patch_flip(scope: Any, get_trace_runtime: Callable[[], Any]) -> None:
 
             # Emit a Flip record to the active tracer, if available
             try:
-                cm = get_trace_runtime()
-                if cm is not None and hasattr(cm, "get_client"):
-                    tracer = cm.get_client("tracer")
+                trace_runtime = get_trace_runtime()
+                if hasattr(trace_runtime, "client"):
+                    tracer = trace_runtime.client
                     if tracer is not None:
                         input_payload = None
                         output_payload = None
