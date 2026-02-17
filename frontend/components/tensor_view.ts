@@ -29,6 +29,7 @@ import type { HistogramOverlay } from './histogram.js';
 import type { OpRecord, ProgramCountsPayload, ProgramSubsetsPayload, TensorPayload } from '../types/types.js';
 
 type Coord3 = [number, number, number];
+type TensorCoord = number[];
 type TensorCoords = Coord3[];
 type ColorInput = any;
 type ThreeColor = any;
@@ -65,9 +66,21 @@ type ProgramSubsetState = {
     maxCount: number;
 };
 type DescriptorHighlight = {
-    start: [number, number, number];
-    shape: [number, number, number];
-    stride: [number, number, number];
+    start: number[];
+    shape: number[];
+    stride: number[];
+};
+type TensorViewSpec = {
+    axisLabels: string[];
+    visibleAxes: number[];
+    hiddenAxes: number[];
+    hiddenIndices: number[];
+    visibleText: string;
+    displayShape: number[];
+};
+type TensorViewSnapshot = {
+    visible: string;
+    hiddenIndices: number[];
 };
 type TensorMesh = {
     count: number;
@@ -75,6 +88,8 @@ type TensorMesh = {
         shape: { width: number; height: number; depth: number };
         shape_raw?: number[];
         coords?: TensorCoords;
+        coords_display?: TensorCoord[];
+        coords_full?: TensorCoord[];
         tensorName?: string;
         color_base?: ThreeColor;
     };
@@ -98,6 +113,7 @@ type VizState = {
     programSubsets: ProgramSubsetState | null;
     programSubsetHues: Map<string, number> | null;
     programDataLoading: boolean;
+    tensorViews: Map<string, TensorViewSpec>;
     isDragging?: boolean;
 };
 export type ViewState = {
@@ -108,6 +124,7 @@ export type ViewState = {
     histogramVisible?: boolean;
     histogramSource?: string | null;
     histogramBins?: number | null;
+    tensorViews?: Record<string, TensorViewSnapshot>;
 };
 type VizContext = {
     type: string;
@@ -118,6 +135,9 @@ type VizContext = {
     stage: HTMLDivElement;
     API_BASE: string;
     op: OpRecord;
+    configByName: Map<string, TensorConfig>;
+    cubeGeometry: any;
+    edgesGeometry: any;
     scene: ThreeScene;
     camera: ThreeCamera;
     renderer: ThreeRenderer;
@@ -132,7 +152,9 @@ type VizContext = {
     dimLineGroups: any[];
     descriptorDimLineGroups: any[];
     showDimLines: boolean;
+    supportsAllPrograms: boolean;
     highlightColor: ThreeColor;
+    tensorViewControls: HTMLElement | null;
     requestRender: () => void;
     applyBackgroundTheme: (hex: string) => void;
     destroyLegends: () => void;
@@ -162,33 +184,113 @@ const DESCRIPTOR_AXIS_COLORS = {
 
 // --- Top-Level Helpers ---
 
-function coordsFromIndex(index: number, shape: { width: number; height: number }): Coord3 {
-    const w = Math.max(1, shape.width), h = Math.max(1, shape.height);
-    const z = Math.floor(index / (w * h)), rem = index % (w * h);
-    const y = Math.floor(rem / w), x = rem % w;
-    return [x, y, z];
+function sampleValueFromCache(cache: PayloadCache, coords: TensorCoord): number {
+    if (!cache || !cache.values) return 0;
+    let cursor: any = cache.values;
+    for (let axis = 0; axis < coords.length; axis += 1) {
+        if (!Array.isArray(cursor)) return Number(cursor ?? 0);
+        const idx = coords[axis] ?? 0;
+        cursor = cursor[idx];
+    }
+    return Number(cursor ?? 0);
 }
 
-function sampleValueFromCache(cache: PayloadCache, coords: Coord3): number {
-    if (!cache || !cache.values) return 0;
-    const [x, y, z] = coords;
-    const dims = cache.dims || (Array.isArray(cache.values[0]) ? (Array.isArray(cache.values[0][0]) ? 3 : 2) : 1);
-    if (dims >= 3) return Number((cache.values as number[][][] | undefined)?.[y]?.[x]?.[z] ?? 0);
-    if (dims === 2) return Number((cache.values as number[][] | undefined)?.[y]?.[x] ?? 0);
-    return Number((cache.values as number[] | undefined)?.[x] ?? 0);
+function getMeshFullCoords(mesh: TensorMesh, index: number): TensorCoord {
+    return (
+        mesh.userData.coords_full?.[index]
+        || mesh.userData.coords_display?.[index]
+        || mesh.userData.coords?.[index]
+        || [0, 0, 0]
+    );
+}
+
+function getMeshDisplayCoords(mesh: TensorMesh, index: number): TensorCoord {
+    return mesh.userData.coords_display?.[index] || getMeshFullCoords(mesh, index);
+}
+
+function getAxisLabel(axis: number): string {
+    const letters = 'abcdefghijklmnopqrstuvwxyz';
+    return letters[axis] || `d${axis}`;
+}
+
+function getAxisLabels(rank: number): string[] {
+    return Array.from({ length: rank }, (_, axis) => getAxisLabel(axis));
+}
+
+function defaultVisibleAxes(rank: number): number[] {
+    if (rank <= 3) return Array.from({ length: rank }, (_, axis) => axis);
+    return Array.from({ length: 3 }, (_, offset) => rank - 3 + offset);
+}
+
+function normalizeViewShape(shapeRaw: number[]): number[] {
+    if (!Array.isArray(shapeRaw) || shapeRaw.length === 0) return [1];
+    return shapeRaw.map((dim) => Math.max(1, Number(dim) || 1));
+}
+
+function buildTensorViewSpec(
+    shapeRaw: number[],
+    visibleText = '',
+    hiddenIndices: number[] = [],
+): TensorViewSpec {
+    const rank = shapeRaw.length;
+    const axisLabels = getAxisLabels(rank);
+    const axisFromLabel = new Map<string, number>();
+    axisLabels.forEach((label, axis) => axisFromLabel.set(label, axis));
+    const parsedVisible: number[] = [];
+    const usedVisible = new Set<number>();
+    const chars = (visibleText || '').toLowerCase().split('');
+    chars.forEach((ch) => {
+        const axis = axisFromLabel.get(ch);
+        if (axis === undefined || usedVisible.has(axis)) return;
+        usedVisible.add(axis);
+        parsedVisible.push(axis);
+    });
+    const visibleAxes = parsedVisible.length > 0 ? parsedVisible : defaultVisibleAxes(rank);
+    const visibleSet = new Set(visibleAxes);
+    const hiddenAxes = Array.from({ length: rank }, (_, axis) => axis).filter((axis) => !visibleSet.has(axis));
+    const nextHiddenIndices = Array.from({ length: rank }, (_, axis) => {
+        const dim = Math.max(1, shapeRaw[axis] ?? 1);
+        const prev = Number(hiddenIndices[axis] ?? 0);
+        return Math.min(dim - 1, Math.max(0, Number.isFinite(prev) ? prev : 0));
+    });
+    const displayShape = visibleAxes.map((axis) => Math.max(1, shapeRaw[axis] ?? 1));
+    return {
+        axisLabels,
+        visibleAxes,
+        hiddenAxes,
+        hiddenIndices: nextHiddenIndices,
+        visibleText: visibleAxes.map((axis) => axisLabels[axis]).join(''),
+        displayShape,
+    };
+}
+
+function mapDisplayToFullCoords(displayCoord: TensorCoord, spec: TensorViewSpec): TensorCoord {
+    const full = spec.hiddenIndices.slice();
+    spec.visibleAxes.forEach((axis, displayAxis) => {
+        full[axis] = Number(displayCoord[displayAxis] ?? 0);
+    });
+    return full;
+}
+
+function arraysEqual(a: number[] = [], b: number[] = []): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
 }
 
 function applyValueColormap(
     mesh: TensorMesh,
     cache: PayloadCache,
-    paint: (color: ThreeColor, coords: Coord3, val: number, t: number) => void,
+    paint: (color: ThreeColor, coords: TensorCoord, val: number, t: number) => void,
 ): void {
     if (!mesh || !cache) return;
     const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
-    const count = mesh.count, shape = mesh.userData.shape;
+    const count = mesh.count;
     const c = new THREE.Color();
     for (let i = 0; i < count; i++) {
-        const coords = coordsFromIndex(i, shape);
+        const coords = getMeshFullCoords(mesh, i);
         const val = sampleValueFromCache(cache, coords);
         const t = clamp01((val - min) / denom);
         paint(c, coords, val, t);
@@ -234,8 +336,7 @@ function updateSideMenu(
     extraHtml = '',
 ): void {
     const shapeStr = Array.isArray(shape) ? `[${shape.join(', ')}]` : '(unknown)';
-    const indexCoords = Array.isArray(coords) ? coords.slice().reverse() : [];
-    const indexExpr = indexCoords.map((coord) => `[${coord}]`).join('');
+    const indexExpr = (Array.isArray(coords) ? coords : []).map((coord) => `[${coord}]`).join('');
     const valueLine = indexExpr ? `tensor${indexExpr} = ${val}` : `tensor = ${val}`;
     el.innerHTML = `<h3>${name} Tensor</h3><p>${valueLine}</p><p>Shape: ${shapeStr}</p>${extraHtml}`;
 }
@@ -278,7 +379,7 @@ function applyDimmedColormap(
     mesh: TensorMesh,
     cache: PayloadCache,
     label: string,
-    isHighlighted: (coords: Coord3) => boolean,
+    isHighlighted: (coords: TensorCoord) => boolean,
 ): void {
     if (!mesh || !cache) return;
     const hue = getHue(label);
@@ -462,53 +563,76 @@ function parseDescriptorHighlight(
     highlights: TensorPayload['highlights'] | null | undefined,
 ): DescriptorHighlight | null {
     if (!highlights || highlights.type !== 'descriptor') return null;
-    const sx = Number(highlights.start?.[0] ?? 0);
-    const sy = Number(highlights.start?.[1] ?? 0);
-    const sz = Number(highlights.start?.[2] ?? 0);
-    const dx = Number(highlights.shape?.[0] ?? 0);
-    const dy = Number(highlights.shape?.[1] ?? 0);
-    const dz = Number(highlights.shape?.[2] ?? 0);
-    if (dx <= 0 || dy <= 0 || dz <= 0) return null;
-    const tx = Math.max(1, Math.abs(Number(highlights.stride?.[0] ?? 1)));
-    const ty = Math.max(1, Math.abs(Number(highlights.stride?.[1] ?? 1)));
-    const tz = Math.max(1, Math.abs(Number(highlights.stride?.[2] ?? 1)));
+    const rank = Math.max(
+        highlights.start?.length || 0,
+        highlights.shape?.length || 0,
+        highlights.stride?.length || 0,
+    );
+    if (rank <= 0) return null;
+    const start = Array.from({ length: rank }, (_, axis) => Number(highlights.start?.[axis] ?? 0));
+    const shape = Array.from({ length: rank }, (_, axis) => Number(highlights.shape?.[axis] ?? 0));
+    const stride = Array.from({ length: rank }, (_, axis) => Math.max(1, Math.abs(Number(highlights.stride?.[axis] ?? 1))));
+    if (shape.some((dim) => dim <= 0)) return null;
     return {
-        start: [sx, sy, sz],
-        shape: [dx, dy, dz],
-        stride: [tx, ty, tz],
+        start,
+        shape,
+        stride,
     };
 }
 
-function descriptorContainsCoord(descriptor: DescriptorHighlight, coords: Coord3): boolean {
-    const [x, y, z] = coords;
-    const [sx, sy, sz] = descriptor.start;
-    const [dx, dy, dz] = descriptor.shape;
-    const [tx, ty, tz] = descriptor.stride;
+function descriptorContainsCoord(descriptor: DescriptorHighlight, coords: TensorCoord): boolean {
     const inAxis = (coord: number, axisStart: number, axisShape: number, axisStride: number): boolean => {
         if (axisShape <= 0) return false;
         const delta = coord - axisStart;
         if (delta < 0 || delta % axisStride !== 0) return false;
         return (delta / axisStride) < axisShape;
     };
-    return (
-        inAxis(x, sx, dx, tx)
-        && inAxis(y, sy, dy, ty)
-        && inAxis(z, sz, dz, tz)
-    );
+    for (let axis = 0; axis < descriptor.shape.length; axis += 1) {
+        if (
+            !inAxis(
+                coords[axis] ?? 0,
+                descriptor.start[axis] ?? 0,
+                descriptor.shape[axis] ?? 0,
+                descriptor.stride[axis] ?? 1,
+            )
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function projectDescriptorForView(descriptor: DescriptorHighlight, spec: TensorViewSpec): DescriptorHighlight | null {
+    for (let i = 0; i < spec.hiddenAxes.length; i += 1) {
+        const axis = spec.hiddenAxes[i];
+        if (axis === undefined) continue;
+        const idx = spec.hiddenIndices[axis] ?? 0;
+        const start = descriptor.start[axis] ?? 0;
+        const shape = descriptor.shape[axis] ?? 0;
+        const stride = descriptor.stride[axis] ?? 1;
+        if (shape <= 0) return null;
+        const delta = idx - start;
+        if (delta < 0 || delta % stride !== 0) return null;
+        if ((delta / stride) >= shape) return null;
+    }
+    return {
+        start: spec.visibleAxes.map((axis) => descriptor.start[axis] ?? 0),
+        shape: spec.visibleAxes.map((axis) => descriptor.shape[axis] ?? 0),
+        stride: spec.visibleAxes.map((axis) => descriptor.stride[axis] ?? 1),
+    };
 }
 
 function reorderDescriptorForTensor<T>(values: T[], tensorRank: number, fallback: T): T[] {
-    const x = values[0] ?? fallback;
-    const y = values[1] ?? fallback;
-    const z = values[2] ?? fallback;
-    if (tensorRank === 1) return [x];
-    if (tensorRank === 2) return [y, x];
-    return [z, y, x];
+    const out: T[] = [];
+    for (let i = 0; i < tensorRank; i += 1) {
+        out.push(values[i] ?? fallback);
+    }
+    return out;
 }
 
 function getHighlightPredicate(
     highlights: TensorPayload['highlights'] | null | undefined,
-): ((coords: Coord3) => boolean) | null {
+): ((coords: TensorCoord) => boolean) | null {
     if (!highlights) return null;
     const descriptor = parseDescriptorHighlight(highlights);
     if (descriptor) {
@@ -516,8 +640,8 @@ function getHighlightPredicate(
     }
     if (Array.isArray(highlights.data) && highlights.data.length) {
         const set = new Set();
-        highlights.data.forEach((c) => { set.add(`${c[0]},${c[1]},${c[2]}`); });
-        return (coords) => set.has(`${coords[0]},${coords[1]},${coords[2]}`);
+        highlights.data.forEach((c) => { set.add(c.join(',')); });
+        return (coords) => set.has(coords.join(','));
     }
     return null;
 }
@@ -536,8 +660,8 @@ function applyColorizedMesh(ctx: VizContext, group: TensorGroup, name: string): 
 }
 
 function restoreTensorColors(ctx: VizContext): void {
-    const { state, tensors, type } = ctx;
-    const supportsAllPrograms = type === 'Load' || type === 'Store';
+    const { state, tensors } = ctx;
+    const supportsAllPrograms = ctx.supportsAllPrograms;
     tensors.forEach((group, name) => {
         const mesh = group.userData.mesh;
         const p = state.payloads.get(name);
@@ -569,8 +693,8 @@ function applyDotHoverHighlight(ctx: VizContext, row: number, col: number): void
     const aCache = state.payloads.get('A');
     const bCache = state.payloads.get('B');
     if (!aCache || !bCache) return;
-    applyDimmedColormap(aGroup.userData.mesh, aCache, 'A', (coords) => coords[1] === row);
-    applyDimmedColormap(bGroup.userData.mesh, bCache, 'B', (coords) => coords[0] === col);
+    applyDimmedColormap(aGroup.userData.mesh, aCache, 'A', (coords) => coords[0] === row);
+    applyDimmedColormap(bGroup.userData.mesh, bCache, 'B', (coords) => coords[1] === col);
 }
 
 function applyDotHoverOutline(ctx: VizContext, row: number, col: number): void {
@@ -759,6 +883,7 @@ function addDimensionLines(scene: ThreeScene, tensorGroup: TensorGroup, dimColor
     if (!mesh) return [];
     const shape = mesh.userData.shape;
     const shapeRaw = mesh.userData.shape_raw || [];
+    if (shapeRaw.length > 3) return [];
     const bbox = new THREE.Box3().setFromObject(tensorGroup);
     const offsetBase = (CUBE_SIZE + GAP) * 1.5;
     const axisDefaults = { x: '#f87171', y: '#4ade80', z: '#60a5fa' };
@@ -786,13 +911,30 @@ function addDimensionLines(scene: ThreeScene, tensorGroup: TensorGroup, dimColor
 
 function getDescriptorSelectionBounds(mesh: TensorMesh, descriptor: DescriptorHighlight): { min: ThreeVector3; max: ThreeVector3 } {
     const tensorShape = mesh.userData.shape;
+    if (!descriptor || descriptor.shape.length < 1 || descriptor.shape.length > 3) {
+        const fallback = new THREE.Vector3(0, 0, 0);
+        return { min: fallback.clone(), max: fallback };
+    }
     const spacing = CUBE_SIZE + GAP;
     const centerX = (tensorShape.width - 1) * spacing / 2;
     const centerY = -((tensorShape.height - 1) * spacing / 2);
     const centerZ = -((tensorShape.depth - 1) * spacing / 2);
-    const [sx, sy, sz] = descriptor.start;
-    const [dx, dy, dz] = descriptor.shape;
-    const [tx, ty, tz] = descriptor.stride;
+    const axisFromDisplay = (axis: 'x' | 'y' | 'z'): number => {
+        if (descriptor.shape.length === 1) return 0;
+        if (descriptor.shape.length === 2) return axis === 'x' ? 1 : 0;
+        if (axis === 'x') return 2;
+        if (axis === 'y') return 1;
+        return 0;
+    };
+    const sx = descriptor.start[axisFromDisplay('x')] ?? 0;
+    const sy = descriptor.start[axisFromDisplay('y')] ?? 0;
+    const sz = descriptor.start[axisFromDisplay('z')] ?? 0;
+    const dx = descriptor.shape[axisFromDisplay('x')] ?? 1;
+    const dy = descriptor.shape[axisFromDisplay('y')] ?? 1;
+    const dz = descriptor.shape[axisFromDisplay('z')] ?? 1;
+    const tx = descriptor.stride[axisFromDisplay('x')] ?? 1;
+    const ty = descriptor.stride[axisFromDisplay('y')] ?? 1;
+    const tz = descriptor.stride[axisFromDisplay('z')] ?? 1;
     const ex = sx + (dx - 1) * tx;
     const ey = sy + (dy - 1) * ty;
     const ez = sz + (dz - 1) * tz;
@@ -817,21 +959,31 @@ function addDescriptorDimensionLines(
     scene: ThreeScene,
     tensorGroup: TensorGroup,
     highlights: TensorPayload['highlights'] | null | undefined,
+    spec: TensorViewSpec | null = null,
 ): any[] {
     const mesh = tensorGroup?.userData?.mesh;
     if (!mesh) return [];
-    const descriptor = parseDescriptorHighlight(highlights);
+    const descriptorRaw = parseDescriptorHighlight(highlights);
+    const descriptor = descriptorRaw && spec ? projectDescriptorForView(descriptorRaw, spec) : descriptorRaw;
     if (!descriptor) return [];
     const shapeRaw = mesh.userData.shape_raw || [];
+    if (shapeRaw.length > 3 || descriptor.shape.length > 3) return [];
     const bbox = getDescriptorSelectionBounds(mesh, descriptor);
     const offsetBase = (CUBE_SIZE + GAP) * 0.85;
+    const axisFromDisplay = (axis: 'x' | 'y' | 'z'): number => {
+        if (descriptor.shape.length === 1) return 0;
+        if (descriptor.shape.length === 2) return axis === 'x' ? 1 : 0;
+        if (axis === 'x') return 2;
+        if (axis === 'y') return 1;
+        return 0;
+    };
     const groups: any[] = [];
     if (shapeRaw.length >= 2) {
         groups.push(createCadDimension(
             scene,
             new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z),
             new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z),
-            `${descriptor.shape[0]}`,
+            `${descriptor.shape[axisFromDisplay('x')] ?? 1}`,
             'x',
             DESCRIPTOR_AXIS_COLORS.x,
             { offset: offsetBase, opacity: 0.95 },
@@ -840,7 +992,7 @@ function addDescriptorDimensionLines(
             scene,
             new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z),
             new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z),
-            `${descriptor.shape[1]}`,
+            `${descriptor.shape[axisFromDisplay('y')] ?? 1}`,
             'y',
             DESCRIPTOR_AXIS_COLORS.y,
             { offset: offsetBase, opacity: 0.95 },
@@ -850,7 +1002,7 @@ function addDescriptorDimensionLines(
             scene,
             new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z),
             new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z),
-            `${descriptor.shape[0]}`,
+            `${descriptor.shape[axisFromDisplay('x')] ?? 1}`,
             'x',
             DESCRIPTOR_AXIS_COLORS.x,
             { offset: offsetBase, opacity: 0.95 },
@@ -861,7 +1013,7 @@ function addDescriptorDimensionLines(
             scene,
             new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z),
             new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z),
-            `${descriptor.shape[2]}`,
+            `${descriptor.shape[axisFromDisplay('z')] ?? 1}`,
             'z',
             DESCRIPTOR_AXIS_COLORS.z,
             { offset: offsetBase, opacity: 0.95 },
@@ -881,8 +1033,9 @@ function refreshDescriptorDimensionLines(ctx: VizContext): void {
     ctx.tensors.forEach((group, name) => {
         const p = ctx.state.payloads.get(name);
         if (!p) return;
+        const spec = ctx.state.tensorViews.get(name) || null;
         ctx.descriptorDimLineGroups.push(
-            ...addDescriptorDimensionLines(ctx.scene, group, p.highlights),
+            ...addDescriptorDimensionLines(ctx.scene, group, p.highlights, spec),
         );
     });
 }
@@ -909,7 +1062,9 @@ function onMouseMove(event: MouseEvent, ctx: VizContext): void {
         if (key !== state.lastHoverKey) {
             state.lastHoverKey = key;
         }
-        const coords = (mesh.userData.coords?.[instanceId] ?? [0, 0, 0]) as Coord3;
+        const coords3 = (mesh.userData.coords?.[instanceId] ?? [0, 0, 0]) as Coord3;
+        const coordsFull = getMeshFullCoords(mesh, instanceId);
+        const coordsDisplay = getMeshDisplayCoords(mesh, instanceId);
         if (state.activeHoverOutline) {
             const matrix = new THREE.Matrix4();
             mesh.getMatrixAt(instanceId, matrix);
@@ -920,15 +1075,15 @@ function onMouseMove(event: MouseEvent, ctx: VizContext): void {
             state.activeHoverOutline.visible = true;
         }
         const cacheEntry = state.payloads.get(tensorName);
-        const val = cacheEntry ? sampleValueFromCache(cacheEntry, coords) : 'Loading...';
+        const val = cacheEntry ? sampleValueFromCache(cacheEntry, coordsFull) : 'Loading...';
         const currentShape = mesh.userData.shape_raw;
 
         let extraHtml = '';
-        if (tensorName === 'Global') {
+        if (tensorName === 'Global' && ctx.supportsAllPrograms) {
             if (!state.programSubsets && !state.programCounts) {
                 ctx.ensureProgramDataForHover?.();
             }
-            const key = `${coords[0]},${coords[1]},${coords[2]}`;
+            const key = `${coords3[0]},${coords3[1]},${coords3[2]}`;
             if (state.programSubsets) {
                 const subsetKey = state.programSubsets.subsetMap.get(key);
                 const subset = subsetKey ? state.programSubsets.subsets?.[subsetKey] || [] : [];
@@ -943,16 +1098,10 @@ function onMouseMove(event: MouseEvent, ctx: VizContext): void {
                 extraHtml = '<p>Programs: loading...</p>';
             }
         }
-        let displayCoords: Coord3 | number[] = (ctx.type === 'Dot' && tensorName !== 'Global' && Array.isArray(coords))
-            ? [coords[1], coords[0], coords[2]]
-            : coords;
-        if (Array.isArray(displayCoords) && Array.isArray(currentShape) && currentShape.length === 2) {
-            displayCoords = displayCoords.slice(0, 2);
-        }
-        updateSideMenu(sideMenu, tensorName, displayCoords, val, currentShape || null, extraHtml);
+        updateSideMenu(sideMenu, tensorName, coordsDisplay, val, currentShape || null, extraHtml);
         if (ctx.type === 'Dot' && tensorName === 'C') {
-            const row = coords[1];
-            const col = coords[0];
+            const row = Number(coordsDisplay[0] ?? 0);
+            const col = Number(coordsDisplay[1] ?? 0);
             const hoverKey = `${row},${col}`;
             if (state.dotHoverKey !== hoverKey) {
                 state.dotHoverKey = hoverKey;
@@ -1001,12 +1150,13 @@ export function createTensorVisualization(
     } = {},
 ): (() => void) | void {
     const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null, layoutBounds = null, fitToTensors = true, cameraPadding = 1.15 } = options;
-    const supportsAllPrograms = type === 'Load' || type === 'Store';
     const API_BASE = getApiBase();
     const initialToggles = getState().toggles;
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape || [], color: colors.GLOBAL || '#333', position: [0,0,0], endpoint: 'getLoadTensor' }
     ];
+    const supportsAllPrograms = (type === 'Load' || type === 'Store') && configs.every((cfg) => (cfg.shape || []).length <= 3);
+    const configByNameMap = new Map<string, TensorConfig>(configs.map((cfg) => [cfg.name, cfg as TensorConfig]));
 
     let cache = VIZ_CACHE.get(containerElement);
     const shapeKey = JSON.stringify({ shapes: configs.map(c => c.shape), layoutBounds });
@@ -1041,9 +1191,31 @@ export function createTensorVisualization(
         }
         const disposer = createDisposer();
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
+        const initialTensorViews = new Map<string, TensorViewSpec>();
+        configs.forEach((cfg) => {
+            const snapshot = viewState?.tensorViews?.[cfg.name];
+            initialTensorViews.set(
+                cfg.name,
+                buildTensorViewSpec(
+                    normalizeViewShape(cfg.shape || []),
+                    snapshot?.visible || '',
+                    snapshot?.hiddenIndices || [],
+                ),
+            );
+        });
         const tensors = new Map<string, TensorGroup>();
         configs.forEach(cfg => {
-            const group = createTensor(cfg.shape, null, cfg.color, cfg.name, cubeGeometry, edgesGeometry, lineMaterial) as TensorGroup;
+            const spec = initialTensorViews.get(cfg.name) || buildTensorViewSpec(normalizeViewShape(cfg.shape || []));
+            const group = createTensor(
+                spec.displayShape,
+                null,
+                cfg.color,
+                cfg.name,
+                cubeGeometry,
+                edgesGeometry,
+                lineMaterial,
+                { mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec) },
+            ) as TensorGroup;
             group.position.set(...(cfg.position || [0,0,0]));
             if (cfg.endpoint) {
                 group.userData.endpoint = cfg.endpoint;
@@ -1127,6 +1299,7 @@ export function createTensorVisualization(
             programSubsets: null,
             programSubsetHues: null,
             programDataLoading: false,
+            tensorViews: new Map(initialTensorViews),
         };
         const highlightColor = (colors.HIGHLIGHT instanceof THREE.Color) ? colors.HIGHLIGHT : new THREE.Color(colors.HIGHLIGHT || 0x00b3ff);
         const ctx: VizContext = {
@@ -1138,6 +1311,9 @@ export function createTensorVisualization(
             stage,
             API_BASE,
             op,
+            configByName: configByNameMap,
+            cubeGeometry,
+            edgesGeometry,
             scene,
             camera,
             renderer,
@@ -1152,7 +1328,9 @@ export function createTensorVisualization(
             dimLineGroups,
             descriptorDimLineGroups: [],
             showDimLines,
+            supportsAllPrograms,
             highlightColor,
+            tensorViewControls: null,
             requestRender: () => {},
             applyBackgroundTheme: () => {},
             destroyLegends: () => {},
@@ -1223,6 +1401,16 @@ export function createTensorVisualization(
             }
             ctx.legendContainer = wrapper;
         };
+        const serializeTensorViews = (): Record<string, TensorViewSnapshot> => {
+            const out: Record<string, TensorViewSnapshot> = {};
+            state.tensorViews.forEach((spec, name) => {
+                out[name] = {
+                    visible: spec.visibleText,
+                    hiddenIndices: spec.hiddenIndices.slice(),
+                };
+            });
+            return out;
+        };
         const applyViewState = (nextState?: ViewState | null): void => {
             if (!nextState) return;
             const pos = nextState.camera?.position;
@@ -1239,7 +1427,7 @@ export function createTensorVisualization(
             }
             orbitControls.update();
             state.colorizeOn = !!nextState.colorizeOn;
-            state.allProgramsOn = !!nextState.allProgramsOn;
+            state.allProgramsOn = supportsAllPrograms ? !!nextState.allProgramsOn : false;
             applyHistogramState(histogramUI, nextState);
             if (window.setOpControlState) {
                 window.setOpControlState({
@@ -1257,6 +1445,7 @@ export function createTensorVisualization(
             histogramVisible?: boolean;
             histogramSource?: string | null;
             histogramBins?: number | null;
+            tensorViews: Record<string, TensorViewSnapshot>;
         } => {
             return {
                 camera: {
@@ -1266,6 +1455,7 @@ export function createTensorVisualization(
                 target: [orbitControls.target.x, orbitControls.target.y, orbitControls.target.z],
                 colorizeOn: state.colorizeOn,
                 allProgramsOn: state.allProgramsOn,
+                tensorViews: serializeTensorViews(),
                 ...captureHistogramState(histogramUI),
             };
         };
@@ -1295,6 +1485,7 @@ export function createTensorVisualization(
             clearDescriptorDimensionLines(ctx);
             if (stage.parentElement) stage.parentElement.removeChild(stage);
             if (sideMenu.parentElement) sideMenu.parentElement.removeChild(sideMenu);
+            if (ctx.tensorViewControls?.parentElement) ctx.tensorViewControls.parentElement.removeChild(ctx.tensorViewControls);
             histogramUI.destroy?.();
             if (histogramUI.overlay?.parentElement) histogramUI.overlay.parentElement.removeChild(histogramUI.overlay);
             if (containerElement.__vizGetState) {
@@ -1316,7 +1507,20 @@ export function createTensorVisualization(
 
     if (!cache) return;
     const vizCache = cache;
-    const { state, tensors, sideMenu, requestRender, applyBackgroundTheme, createLegends, destroyLegends } = vizCache;
+    const {
+        state,
+        tensors,
+        sideMenu,
+        requestRender,
+        applyBackgroundTheme,
+        createLegends,
+        destroyLegends,
+        configByName,
+        cubeGeometry,
+        edgesGeometry,
+        scene,
+        stage,
+    } = vizCache;
     const syncOpControlState = (): void => {
         if (!window.setOpControlState) return;
         window.setOpControlState({
@@ -1350,18 +1554,20 @@ export function createTensorVisualization(
             if (shape) entry.shape = shape;
             const dimColor = dimColors?.[name];
             if (dimColor) entry.dimColors = dimColor;
-            const descriptor = parseDescriptorHighlight(state.payloads.get(name)?.highlights);
+            const spec = state.tensorViews.get(name) || null;
+            const descriptorRaw = parseDescriptorHighlight(state.payloads.get(name)?.highlights);
+            const descriptor = descriptorRaw && spec ? projectDescriptorForView(descriptorRaw, spec) : descriptorRaw;
             if (descriptor && shape && shape.length > 0) {
                 const selectionColor = vizCache.highlightColor instanceof THREE.Color
                     ? `#${vizCache.highlightColor.getHexString()}`
                     : String(vizCache.highlightColor || '#00b3ff');
                 const selectionDimColors = reorderDescriptorForTensor(
                     [DESCRIPTOR_AXIS_COLORS.x, DESCRIPTOR_AXIS_COLORS.y, DESCRIPTOR_AXIS_COLORS.z],
-                    shape.length,
+                    descriptor.shape.length,
                     selectionColor,
                 );
                 entry.descriptor = {
-                    shape: reorderDescriptorForTensor(descriptor.shape, shape.length, 1),
+                    shape: descriptor.shape.slice(),
                     color: selectionColor,
                     dimColors: selectionDimColors,
                 };
@@ -1369,6 +1575,177 @@ export function createTensorVisualization(
             return entry;
         }));
     };
+    const rebuildDimensionLines = (): void => {
+        vizCache.dimLineGroups.forEach((group) => scene.remove(group));
+        vizCache.dimLineGroups = [];
+        if (!vizCache.showDimLines) return;
+        tensors.forEach((group, name) => {
+            vizCache.dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
+        });
+    };
+    const rebuildTensorFromView = (name: string): void => {
+        const cfg = configByName.get(name);
+        const oldGroup = tensors.get(name);
+        if (!cfg || !oldGroup) return;
+        const shape = normalizeViewShape(cfg.shape || []);
+        const spec = state.tensorViews.get(name) || buildTensorViewSpec(shape);
+        const nextGroup = createTensor(
+            spec.displayShape,
+            null,
+            oldGroup.userData.mesh.userData.color_base || cfg.color,
+            name,
+            cubeGeometry,
+            edgesGeometry,
+            vizCache.lineMaterial,
+            { mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec) },
+        ) as TensorGroup;
+        nextGroup.position.copy(oldGroup.position);
+        const endpoint = oldGroup.userData.endpoint || cfg.endpoint;
+        if (endpoint) nextGroup.userData.endpoint = endpoint;
+        else if (nextGroup.userData.endpoint) delete nextGroup.userData.endpoint;
+        scene.remove(oldGroup);
+        const oldMaterial = (oldGroup.userData.mesh as any)?.material;
+        if (oldMaterial && typeof oldMaterial.dispose === 'function') oldMaterial.dispose();
+        scene.add(nextGroup);
+        tensors.set(name, nextGroup);
+    };
+    const rebuildAllTensorsFromView = (): void => {
+        Array.from(tensors.keys()).forEach((name) => rebuildTensorFromView(name));
+        rebuildDimensionLines();
+        renderShapeLegend();
+        restoreTensorColors(vizCache);
+        refreshDescriptorDimensionLines(vizCache);
+        requestRender();
+    };
+    const ensureTensorViewsInitialized = (): void => {
+        configByName.forEach((cfg, name) => {
+            if (state.tensorViews.has(name)) return;
+            state.tensorViews.set(name, buildTensorViewSpec(normalizeViewShape(cfg.shape || [])));
+        });
+    };
+    const applyTensorViewState = (snapshots?: Record<string, TensorViewSnapshot>): void => {
+        ensureTensorViewsInitialized();
+        if (!snapshots) return;
+        let changed = false;
+        configByName.forEach((cfg, name) => {
+            const snapshot = snapshots[name];
+            if (!snapshot) return;
+            const shape = normalizeViewShape(cfg.shape || []);
+            const nextSpec = buildTensorViewSpec(shape, snapshot.visible, snapshot.hiddenIndices || []);
+            const prevSpec = state.tensorViews.get(name);
+            if (
+                !prevSpec
+                || prevSpec.visibleText !== nextSpec.visibleText
+                || !arraysEqual(prevSpec.hiddenIndices, nextSpec.hiddenIndices)
+            ) {
+                state.tensorViews.set(name, nextSpec);
+                changed = true;
+            }
+        });
+        if (changed) rebuildAllTensorsFromView();
+    };
+    const renderTensorViewControls = (): void => {
+        if (configByName.size === 0) {
+            if (vizCache.tensorViewControls) {
+                vizCache.tensorViewControls.remove();
+                vizCache.tensorViewControls = null;
+            }
+            return;
+        }
+        if (!vizCache.tensorViewControls) {
+            const panel = document.createElement('div');
+            panel.className = 'viz-ndim-controls';
+            stage.appendChild(panel);
+            vizCache.tensorViewControls = panel;
+        }
+        const root = vizCache.tensorViewControls as HTMLElement;
+        root.innerHTML = '';
+        Array.from(configByName.keys()).sort().forEach((name) => {
+            const cfg = configByName.get(name);
+            if (!cfg) return;
+            const shape = normalizeViewShape(cfg.shape || []);
+            const spec = state.tensorViews.get(name) || buildTensorViewSpec(shape);
+            state.tensorViews.set(name, spec);
+
+            const section = document.createElement('div');
+            section.className = 'viz-ndim-section';
+            const title = document.createElement('div');
+            title.className = 'viz-ndim-title';
+            title.textContent = `${name} tensor`;
+            section.appendChild(title);
+
+            const visibleRow = document.createElement('div');
+            visibleRow.className = 'viz-ndim-row';
+            const visibleLabel = document.createElement('label');
+            visibleLabel.textContent = 'Visible dimensions:';
+            visibleLabel.className = 'viz-ndim-label';
+            const visibleInput = document.createElement('input');
+            visibleInput.type = 'text';
+            visibleInput.value = spec.visibleText;
+            visibleInput.className = 'viz-ndim-visible';
+            visibleInput.spellcheck = false;
+            const applyVisible = (): void => {
+                const nextSpec = buildTensorViewSpec(shape, visibleInput.value, state.tensorViews.get(name)?.hiddenIndices || []);
+                state.tensorViews.set(name, nextSpec);
+                visibleInput.value = nextSpec.visibleText;
+                renderTensorViewControls();
+                rebuildAllTensorsFromView();
+            };
+            visibleInput.addEventListener('change', applyVisible);
+            visibleRow.appendChild(visibleLabel);
+            visibleRow.appendChild(visibleInput);
+            section.appendChild(visibleRow);
+
+            if (spec.hiddenAxes.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'viz-ndim-hint';
+                empty.textContent = 'all dimensions are visible.';
+                section.appendChild(empty);
+                root.appendChild(section);
+                return;
+            }
+            spec.hiddenAxes.forEach((axis) => {
+                const row = document.createElement('div');
+                row.className = 'viz-ndim-row';
+                const label = document.createElement('label');
+                label.className = 'viz-ndim-label';
+                label.textContent = `${spec.axisLabels[axis]}:`;
+                const slider = document.createElement('input');
+                slider.type = 'range';
+                slider.min = '0';
+                slider.max = String(Math.max(0, (shape[axis] ?? 1) - 1));
+                slider.value = String(spec.hiddenIndices[axis] ?? 0);
+                slider.className = 'viz-ndim-slider';
+                const value = document.createElement('input');
+                value.type = 'number';
+                value.min = '0';
+                value.max = String(Math.max(0, (shape[axis] ?? 1) - 1));
+                value.value = String(spec.hiddenIndices[axis] ?? 0);
+                value.className = 'viz-ndim-index';
+                const applyAxisValue = (raw: string): void => {
+                    const currentSpec = state.tensorViews.get(name) || spec;
+                    const max = Math.max(0, (shape[axis] ?? 1) - 1);
+                    const parsed = Number(raw);
+                    const nextValue = Math.min(max, Math.max(0, Number.isFinite(parsed) ? Math.round(parsed) : 0));
+                    const hiddenIndices = currentSpec.hiddenIndices.slice();
+                    hiddenIndices[axis] = nextValue;
+                    state.tensorViews.set(name, buildTensorViewSpec(shape, currentSpec.visibleText, hiddenIndices));
+                    slider.value = String(nextValue);
+                    value.value = String(nextValue);
+                    rebuildAllTensorsFromView();
+                };
+                slider.addEventListener('input', () => applyAxisValue(slider.value));
+                value.addEventListener('change', () => applyAxisValue(value.value));
+                row.appendChild(label);
+                row.appendChild(slider);
+                row.appendChild(value);
+                section.appendChild(row);
+            });
+            root.appendChild(section);
+        });
+    };
+    applyTensorViewState(viewState?.tensorViews);
+    renderTensorViewControls();
     const getValueLegendItems = (): HTMLElement[] => {
         const items: HTMLElement[] = [];
         if (!state.colorizeOn) return items;

@@ -3,7 +3,7 @@ from typing import Any
 import sys
 from flask import Flask, render_template, jsonify, request
 from .analysis import analyze_records
-from .draw import get_visualization_data, delinearized, make_3d
+from .draw import get_visualization_data
 from ..utils.traceback_utils import read_source_segment
 import os
 import torch
@@ -614,6 +614,64 @@ def _build_highlight_descriptor(coords: np.ndarray) -> dict[str, list[int]] | No
     return {"start": starts, "shape": shape, "stride": stride}
 
 
+def _dtype_element_size(dtype: Any) -> int:
+    """Best-effort dtype element size in bytes."""
+    if isinstance(dtype, str):
+        sizes = {
+            "torch.float32": 4,
+            "float32": 4,
+            "torch.float64": 8,
+            "float64": 8,
+            "torch.int32": 4,
+            "int32": 4,
+            "torch.int64": 8,
+            "int64": 8,
+            "torch.float16": 2,
+            "float16": 2,
+            "torch.bfloat16": 2,
+            "bfloat16": 2,
+            "torch.int8": 1,
+            "int8": 1,
+            "torch.uint8": 1,
+            "uint8": 1,
+            "torch.bool": 1,
+            "bool": 1,
+        }
+        return max(1, int(sizes.get(dtype, 4)))
+    try:
+        return max(1, int(dtype.element_ty.primitive_bitwidth // 8))
+    except Exception:
+        return 4
+
+
+def _coords_from_offsets(
+    shape: tuple[int, ...],
+    offsets: np.ndarray,
+    masks: np.ndarray,
+    dtype: Any,
+) -> np.ndarray:
+    """Convert byte offsets + mask into dense N-d coordinates."""
+    shape = tuple(max(1, int(dim)) for dim in shape)
+    if len(shape) == 0:
+        return np.empty((0, 0), dtype=np.int64)
+    mask_arr = np.asarray(masks, dtype=bool)
+    offset_arr = np.asarray(offsets, dtype=np.int64)
+    if offset_arr.shape != mask_arr.shape:
+        offset_arr = np.broadcast_to(offset_arr, mask_arr.shape)
+
+    element_size = _dtype_element_size(dtype)
+    linear_indices = offset_arr // element_size
+    flat_mask = mask_arr.reshape(-1)
+    flat_linear = linear_indices.reshape(-1)
+    total = int(np.prod(shape))
+    valid = flat_mask & (flat_linear >= 0) & (flat_linear < total)
+    if not np.any(valid):
+        return np.empty((0, len(shape)), dtype=np.int64)
+    valid_linear = flat_linear[valid]
+    unravel = np.column_stack(np.unravel_index(valid_linear, shape))
+    return np.asarray(unravel, dtype=np.int64)
+
+
 @app.route("/api/getLoadTensor", methods=["POST"])
 def get_load_tensor():
     """Return entire global tensor for a given Load/Store op, with min/max.
@@ -683,22 +741,14 @@ def get_load_tensor():
             masks = np.asarray(op_data["masks"])
             shape = tuple(op_data["global_shape"])
             dtype = op_data["global_dtype"]
-
-            shape_3d = make_3d(shape)
-            gz, gy, gx = delinearized(shape_3d, offsets, dtype, masks)
-
-            # Filter invalid
-            valid = (gx != -1) & (gy != -1) & (gz != -1)
-            if valid.any():
-                gx = gx[valid]
-                gy = gy[valid]
-                gz = gz[valid]
-                coords = np.stack([gx, gy, gz], axis=1)
+            coords = _coords_from_offsets(shape, offsets, masks, dtype)
+            if coords.size > 0:
                 descriptor = _build_highlight_descriptor(coords)
-                if descriptor is not None:
-                    payload["highlights"] = {"type": "descriptor", **descriptor}
-                else:
-                    payload["highlights"] = {"type": "array", "data": coords.tolist()}
+                payload["highlights"] = (
+                    {"type": "descriptor", **descriptor}
+                    if descriptor is not None
+                    else {"type": "array", "data": coords.tolist()}
+                )
 
         return jsonify(payload)
     except Exception as e:

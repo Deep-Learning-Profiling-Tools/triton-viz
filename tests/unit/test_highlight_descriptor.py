@@ -1,6 +1,9 @@
 import numpy as np
 
-from triton_viz.visualizer.interface import _build_highlight_descriptor
+from triton_viz.visualizer.interface import (
+    _build_highlight_descriptor,
+    _coords_from_offsets,
+)
 
 
 def test_build_highlight_descriptor_strided_grid():
@@ -58,3 +61,31 @@ def test_build_highlight_descriptor_4d_sparse_returns_none():
         ]
     )
     assert _build_highlight_descriptor(coords) is None
+
+
+def test_coords_from_offsets_supports_nd_shapes():
+    """Converts masked byte offsets into N-d coordinates."""
+    shape = (2, 3, 4, 5)
+    coords = np.array(
+        [
+            [1, 2, 3, 4],
+            [0, 1, 0, 2],
+            [1, 0, 2, 1],
+        ],
+        dtype=np.int64,
+    )
+    linear = np.ravel_multi_index(coords.T, shape)
+    offsets = linear * 4
+    masks = np.array([True, True, True], dtype=bool)
+    result = _coords_from_offsets(shape, offsets, masks, "torch.float32")
+    np.testing.assert_array_equal(result, coords)
+
+
+def test_coords_from_offsets_filters_masked_and_oob():
+    """Drops masked-out entries and out-of-bounds accesses."""
+    shape = (2, 2, 2)
+    valid = np.ravel_multi_index(np.array([[1], [0], [1]]), shape)[0]
+    offsets = np.array([valid * 4, 999999, 0], dtype=np.int64)
+    masks = np.array([True, True, False], dtype=bool)
+    result = _coords_from_offsets(shape, offsets, masks, "torch.float32")
+    np.testing.assert_array_equal(result, np.array([[1, 0, 1]], dtype=np.int64))

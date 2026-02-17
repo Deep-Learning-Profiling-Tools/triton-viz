@@ -161,28 +161,15 @@ export function createShapeLegend(container, tensors) {
         swatch.style.border = '1px solid rgba(255,255,255,0.5)';
         const label = document.createElement('span');
         label.style.color = '#fff';
-        // Render shape with colored dimension numbers
+        // render all shape dims, keeping first 3 axis colors for continuity
         let shapeHtml = `${t.name}: [`;
         const shape = t.shape || [];
-        const dimColors = t.dimColors || []; // Optional custom colors per dimension
-        if (shape.length === 1) {
-            const color = dimColors[0] || AXIS_COLORS.x;
-            shapeHtml += `<span style="color:${color}">${shape[0]}</span>`;
-        }
-        else if (shape.length === 2) {
-            const color0 = dimColors[0] || AXIS_COLORS.y;
-            const color1 = dimColors[1] || AXIS_COLORS.x;
-            shapeHtml += `<span style="color:${color0}">${shape[0]}</span>, `;
-            shapeHtml += `<span style="color:${color1}">${shape[1]}</span>`;
-        }
-        else if (shape.length >= 3) {
-            const color0 = dimColors[0] || AXIS_COLORS.z;
-            const color1 = dimColors[1] || AXIS_COLORS.y;
-            const color2 = dimColors[2] || AXIS_COLORS.x;
-            shapeHtml += `<span style="color:${color0}">${shape[0]}</span>, `;
-            shapeHtml += `<span style="color:${color1}">${shape[1]}</span>, `;
-            shapeHtml += `<span style="color:${color2}">${shape[2]}</span>`;
-        }
+        const dimColors = t.dimColors || [];
+        const defaultColors = [AXIS_COLORS.z, AXIS_COLORS.y, AXIS_COLORS.x];
+        shapeHtml += shape.map((dim, axis) => {
+            const color = dimColors[axis] || defaultColors[axis] || AXIS_COLORS.x;
+            return `<span style="color:${color}">${dim}</span>`;
+        }).join(', ');
         shapeHtml += ']';
         label.innerHTML = shapeHtml;
         row.appendChild(swatch);
