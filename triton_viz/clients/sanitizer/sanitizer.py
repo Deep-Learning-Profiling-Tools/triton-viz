@@ -415,8 +415,11 @@ class SymbolicSanitizer(Sanitizer):
             # Capture source location now while we're still in the user's tl.load/tl.store call.
             # This is a lightweight operation that only traverses frame objects.
             # The actual source line will be read later only if an error is detected.
-            frame = extract_user_frames(1)[-1]
-            source_location = (frame.filename, frame.lineno, frame.func_name)
+            frames = extract_user_frames(num_frames=1)
+            frame = frames[-1] if frames else None
+            source_location = (
+                (frame.filename, frame.lineno, frame.func_name) if frame else None
+            )
             ctx.signature_cache[signature] = len(ctx.pending_checks)
             pending_check = PendingCheck(
                 symbolic_expr=expr,

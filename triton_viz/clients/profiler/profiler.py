@@ -220,7 +220,7 @@ class Profiler(Client):
                 self.load_mask_false_count += false_count
 
                 # Record per-operation statistics
-                frames = extract_user_frames(1)
+                frames = extract_user_frames(num_frames=1)
                 if frames:
                     _f = frames[-1]
                     lineno, filename = _f.lineno or 0, _f.filename
@@ -257,7 +257,7 @@ class Profiler(Client):
                 self.store_mask_false_count += false_count
 
                 # Record per-operation statistics
-                frames = extract_user_frames(1)
+                frames = extract_user_frames(num_frames=1)
                 if frames:
                     _f = frames[-1]
                     lineno, filename = _f.lineno or 0, _f.filename
