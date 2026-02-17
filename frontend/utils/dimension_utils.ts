@@ -21,6 +21,7 @@ type CadDimensionOptions = {
     offset?: number;
     extensionLength?: number;
     extensionOffset?: number;
+    extensionDirection?: ThreeVector3;
     arrowSize?: number;
     arrowWidth?: number;
     textOffset?: number;
@@ -79,8 +80,9 @@ export function createCadDimension(
 ): ThreeGroup {
     const {
         offset = 0.5,
-        extensionLength = 0.8,
+        extensionLength = 0.08,
         extensionOffset = 0.1,
+        extensionDirection,
         arrowSize = 0.15,
         arrowWidth = 0.08,
         textOffset = 0.25,
@@ -106,30 +108,30 @@ export function createCadDimension(
 
     console.log(`[Dimension] Creating ${axis}-axis dimension for "${label}". distance=${length.toFixed(3)}, flipped=${isFlipped}`);
 
-    // Determine extension direction (perpendicular to normalizedDir)
-    let extDir;
-    if (axis === 'x') {
-        extDir = new THREE.Vector3(0, 1, 0); // Extension along Y
-    } else if (axis === 'y') {
-        extDir = new THREE.Vector3(-1, 0, 0); // Extension along X
-    } else {
-        extDir = new THREE.Vector3(-1, 0, 0); // Default to X for Z axis
+    // determine extension direction (perpendicular to normalizedDir)
+    let extDir = extensionDirection
+        ? extensionDirection.clone().normalize()
+        : null;
+    if (!extDir || extDir.lengthSq() < 1e-9) {
+        if (axis === 'x') extDir = new THREE.Vector3(0, 1, 0);
+        else extDir = new THREE.Vector3(-1, 0, 0);
     }
 
-    // Extension points
+    // dimension line points
+    const dimLinePos = offset + extensionOffset;
+    const d1 = start.clone().add(extDir.clone().multiplyScalar(dimLinePos));
+    const d2 = end.clone().add(extDir.clone().multiplyScalar(dimLinePos));
+
+    // extension points: always connect object->dimension line
+    const extEndPos = dimLinePos + Math.max(0, extensionLength);
     const p1_start = start.clone().add(extDir.clone().multiplyScalar(extensionOffset));
-    const p1_end = start.clone().add(extDir.clone().multiplyScalar(extensionLength + extensionOffset));
+    const p1_end = start.clone().add(extDir.clone().multiplyScalar(extEndPos));
     const p2_start = end.clone().add(extDir.clone().multiplyScalar(extensionOffset));
-    const p2_end = end.clone().add(extDir.clone().multiplyScalar(extensionLength + extensionOffset));
+    const p2_end = end.clone().add(extDir.clone().multiplyScalar(extEndPos));
 
     // Extension lines
     group.add(createLine([p1_start, p1_end], material));
     group.add(createLine([p2_start, p2_end], material));
-
-    // Dimension line position
-    const dimLinePos = offset + extensionOffset;
-    const d1 = start.clone().add(extDir.clone().multiplyScalar(dimLinePos));
-    const d2 = end.clone().add(extDir.clone().multiplyScalar(dimLinePos));
 
     // Arrowheads
     if (isFlipped) {
@@ -166,6 +168,14 @@ export function createCadDimension(
 
     scene.add(group);
     return group;
+}
+
+export function defaultAxisColor(axis: number): string {
+    const base = ['#60a5fa', '#4ade80', '#f87171'];
+    if (axis < base.length) return base[axis] ?? base[0] ?? '#60a5fa';
+    const color = new THREE.Color();
+    color.setHSL((axis * 0.1618) % 1, 0.65, 0.58);
+    return `#${color.getHexString()}`;
 }
 
 function createLine(points: ThreeVector3[], material: ThreeLineBasicMaterial): ThreeLine {
@@ -237,13 +247,26 @@ export function createShapeLegend(container: HTMLElement, tensors: ShapeLegendEn
         container.appendChild(legend);
     }
 
-    const AXIS_COLORS = {
-        x: '#f87171',
-        y: '#4ade80',
-        z: '#60a5fa'
-    };
-
-    legend.innerHTML = '<div style="font-weight:bold; margin-bottom:4px; font-family:sans-serif;">Tensor Shapes</div>';
+    let title = legend.querySelector('.viz-shape-legend-title') as HTMLElement | null;
+    if (!title) {
+        title = document.createElement('div');
+        title.className = 'viz-shape-legend-title';
+        title.style.fontWeight = 'bold';
+        title.style.marginBottom = '4px';
+        title.style.fontFamily = 'sans-serif';
+        title.textContent = 'Tensor Shapes';
+        legend.prepend(title);
+    }
+    let body = legend.querySelector('.viz-shape-legend-body') as HTMLElement | null;
+    if (!body) {
+        body = document.createElement('div');
+        body.className = 'viz-shape-legend-body';
+        body.style.display = 'grid';
+        body.style.gap = '8px';
+        if (title.nextSibling) legend.insertBefore(body, title.nextSibling);
+        else legend.appendChild(body);
+    }
+    body.innerHTML = '';
     tensors.forEach(t => {
         const item = document.createElement('div');
         item.style.display = 'grid';
@@ -263,13 +286,12 @@ export function createShapeLegend(container: HTMLElement, tensors: ShapeLegendEn
         const label = document.createElement('span');
         label.style.color = '#fff';
 
-        // render all shape dims, keeping first 3 axis colors for continuity
+        // render all shape dims
         let shapeHtml = `${t.name}: [`;
         const shape = t.shape || [];
         const dimColors = t.dimColors || [];
-        const defaultColors = [AXIS_COLORS.z, AXIS_COLORS.y, AXIS_COLORS.x];
         shapeHtml += shape.map((dim, axis) => {
-            const color = dimColors[axis] || defaultColors[axis] || AXIS_COLORS.x;
+            const color = dimColors[axis] || defaultAxisColor(axis);
             return `<span style="color:${color}">${dim}</span>`;
         }).join(', ');
         shapeHtml += ']';
@@ -308,7 +330,7 @@ export function createShapeLegend(container: HTMLElement, tensors: ShapeLegendEn
             item.appendChild(selectionRow);
         }
 
-        legend.appendChild(item);
+        body.appendChild(item);
     });
 
     return legend;
