@@ -65,6 +65,8 @@ from ..core.data import (
     Bitcast,
     AtomicCas,
     AtomicRMW,
+    RawLoad,
+    RawStore,
 )
 
 
@@ -1800,6 +1802,16 @@ class SymbolicClient(Client):
     def _op_bitcast_overrider(self, src, dst_type):
         return SymbolicExpr.create("bitcast", SymbolicExpr.from_value(src), dst_type)
 
+    def _op_raw_load_overrider(self, ptr, cache_modifier, eviction_policy, is_volatile):
+        return self._op_load_overrider(
+            ptr, None, None, cache_modifier, eviction_policy, is_volatile
+        )
+
+    def _op_raw_store_overrider(self, ptr, value, cache_modifier, eviction_policy):
+        return self._op_store_overrider(
+            ptr, value, None, cache_modifier, eviction_policy
+        )
+
     def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
         ptr_sym = SymbolicExpr.from_value(ptr)
         cmp_sym = SymbolicExpr.from_value(cmp)
@@ -1843,6 +1855,8 @@ class SymbolicClient(Client):
             Bitcast: self._op_bitcast_overrider,
             AtomicCas: self._op_atomic_cas_overrider,
             AtomicRMW: self._op_atomic_rmw_overrider,
+            RawLoad: self._op_raw_load_overrider,
+            RawStore: self._op_raw_store_overrider,
         }
 
     def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:

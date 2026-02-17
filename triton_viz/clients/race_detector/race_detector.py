@@ -88,11 +88,6 @@ class RaceDetector(SymbolicClient):
 
     # ── Race-detector-specific operation overriders ─────────────
 
-    def _op_raw_load_overrider(self, ptr, cache_modifier, eviction_policy, is_volatile):
-        return self._op_load_overrider(
-            ptr, None, None, cache_modifier, eviction_policy, is_volatile
-        )
-
     def _op_load_overrider(self, ptr, mask, other, *args):
         if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
             self._need_concrete_fallback = True
@@ -106,11 +101,6 @@ class RaceDetector(SymbolicClient):
         ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
         self._record_symbolic_access(AccessType.LOAD, ptr_sym, mask_sym)
         return ret
-
-    def _op_raw_store_overrider(self, ptr, value, cache_modifier, eviction_policy):
-        return self._op_store_overrider(
-            ptr, value, None, cache_modifier, eviction_policy
-        )
 
     def _op_store_overrider(self, ptr, value, mask, *args):
         if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
@@ -148,19 +138,19 @@ class RaceDetector(SymbolicClient):
         raise NotImplementedError("TensorPointerStore is not supported yet.")
 
     def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
-        ptr_sym = SymbolicExpr.from_value(ptr)
-        cmp_sym = SymbolicExpr.from_value(cmp)
-        val_sym = SymbolicExpr.from_value(val)
-        ret = SymbolicExpr.create("atomic_cas", ptr_sym, cmp_sym, val_sym)
-        self._record_symbolic_access(AccessType.ATOMIC, ptr_sym, None)
+        ret = super()._op_atomic_cas_overrider(ptr, cmp, val, sem, scope)
+        self._record_symbolic_access(
+            AccessType.ATOMIC, SymbolicExpr.from_value(ptr), None
+        )
         return ret
 
     def _op_atomic_rmw_overrider(self, rmwOp, ptr, val, mask, sem, scope):
-        ptr_sym = SymbolicExpr.from_value(ptr)
-        val_sym = SymbolicExpr.from_value(val)
-        mask_sym = SymbolicExpr.from_value(mask)
-        ret = SymbolicExpr.create("atomic_rmw", ptr_sym, val_sym, mask_sym)
-        self._record_symbolic_access(AccessType.ATOMIC, ptr_sym, mask_sym)
+        ret = super()._op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope)
+        self._record_symbolic_access(
+            AccessType.ATOMIC,
+            SymbolicExpr.from_value(ptr),
+            SymbolicExpr.from_value(mask),
+        )
         return ret
 
     # ── For-loop hook overrides ──────────────────────────────────
@@ -175,15 +165,11 @@ class RaceDetector(SymbolicClient):
         overrider_map = self._build_op_overrider_map()
         overrider_map.update(
             {
-                RawLoad: self._op_raw_load_overrider,
                 Load: self._op_load_overrider,
-                RawStore: self._op_raw_store_overrider,
                 Store: self._op_store_overrider,
                 MakeBlockPointer: self._op_make_block_ptr_overrider,
                 TensorPointerLoad: self._op_tensor_pointer_load_overrider,
                 TensorPointerStore: self._op_tensor_pointer_store_overrider,
-                AtomicCas: self._op_atomic_cas_overrider,
-                AtomicRMW: self._op_atomic_rmw_overrider,
             }
         )
 
