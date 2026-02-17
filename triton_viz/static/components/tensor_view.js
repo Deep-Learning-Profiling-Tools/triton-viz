@@ -746,6 +746,13 @@ function fallbackWorldDirection(rank, axis) {
 function axisWorldKey(rank, axis) {
     return (rank - 1 - axis) % 3;
 }
+function axisWorldName(worldKey) {
+    if (worldKey === 1)
+        return 'y';
+    if (worldKey === 2)
+        return 'z';
+    return 'x';
+}
 function extensionDirectionFor(worldAxis, order, diagonal = false) {
     const baseByAxis = {
         x: [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)],
@@ -784,16 +791,51 @@ function addAxisDimensionLines(scene, tensorGroup, axisSizes, axisStarts, axisSt
         const stride = Math.max(1, Number(axisStrides[axis] ?? 1));
         const start = startCoord.slice();
         const end = startCoord.slice();
-        const max = shapeRaw[axis] ?? 1;
-        end[axis] = Math.min(max - 1, Math.max(0, (start[axis] ?? 0) + (size - 1) * stride));
         const targetWorldKey = axisWorldKey(shapeRaw.length, axis);
-        for (let companion = axis + 1; companion < axisSizes.length; companion += 1) {
-            if (axisWorldKey(shapeRaw.length, companion) !== targetWorldKey)
-                continue;
-            const companionSize = Math.max(1, Number(axisSizes[companion] ?? 1));
-            const companionStride = Math.max(1, Number(axisStrides[companion] ?? 1));
-            const companionMax = shapeRaw[companion] ?? 1;
-            end[companion] = Math.min(companionMax - 1, Math.max(0, (start[companion] ?? 0) + (companionSize - 1) * companionStride));
+        const axisWorld = axisWorldName(targetWorldKey);
+        if (targetWorldKey === 2) {
+            const zAxes = [];
+            const xAxes = [];
+            const yAxes = [];
+            for (let dimAxis = 0; dimAxis < shapeRaw.length; dimAxis += 1) {
+                const key = axisWorldKey(shapeRaw.length, dimAxis);
+                if (key === 2)
+                    zAxes.push(dimAxis);
+                else if (key === 1)
+                    yAxes.push(dimAxis);
+                else
+                    xAxes.push(dimAxis);
+            }
+            const setMax = (dimAxis) => {
+                const max = Math.max(0, (shapeRaw[dimAxis] ?? 1) - 1);
+                start[dimAxis] = max;
+                end[dimAxis] = max;
+            };
+            xAxes.forEach(setMax);
+            yAxes.forEach(setMax);
+            const zPos = zAxes.indexOf(axis);
+            for (let i = 0; i < zAxes.length; i += 1) {
+                const zAxis = zAxes[i];
+                if (zAxis === undefined)
+                    continue;
+                const zMax = Math.max(0, (shapeRaw[zAxis] ?? 1) - 1);
+                const zSize = Math.max(1, Number(axisSizes[zAxis] ?? 1));
+                const zStride = Math.max(1, Number(axisStrides[zAxis] ?? 1));
+                const zEnd = Math.min(zMax, Math.max(0, (start[zAxis] ?? 0) + (zSize - 1) * zStride));
+                end[zAxis] = i >= zPos ? zEnd : (start[zAxis] ?? 0);
+            }
+        }
+        else {
+            const max = shapeRaw[axis] ?? 1;
+            end[axis] = Math.min(max - 1, Math.max(0, (start[axis] ?? 0) + (size - 1) * stride));
+            for (let companion = axis + 1; companion < axisSizes.length; companion += 1) {
+                if (axisWorldKey(shapeRaw.length, companion) !== targetWorldKey)
+                    continue;
+                const companionSize = Math.max(1, Number(axisSizes[companion] ?? 1));
+                const companionStride = Math.max(1, Number(axisStrides[companion] ?? 1));
+                const companionMax = shapeRaw[companion] ?? 1;
+                end[companion] = Math.min(companionMax - 1, Math.max(0, (start[companion] ?? 0) + (companionSize - 1) * companionStride));
+            }
         }
         const startPos = worldPositionForDisplayCoord(mesh, start, shapeRaw);
         const endPos = worldPositionForDisplayCoord(mesh, end, shapeRaw);
@@ -803,7 +845,6 @@ function addAxisDimensionLines(scene, tensorGroup, axisSizes, axisStarts, axisSt
         const axisDir = delta.lengthSq() > 1e-9
             ? delta.clone().normalize()
             : fallbackWorldDirection(shapeRaw.length, axis);
-        const axisWorld = dominantAxis(axisDir);
         const extentStart = startPos.clone().add(axisDir.clone().multiplyScalar(-CUBE_SIZE / 2));
         const extentEnd = endPos.clone().add(axisDir.clone().multiplyScalar(CUBE_SIZE / 2));
         const color = colorOverride || dimColors[axis] || defaultDimColorForAxis(shapeRaw.length, axis);
@@ -824,6 +865,7 @@ function addAxisDimensionLines(scene, tensorGroup, axisSizes, axisStarts, axisSt
     const majorStep = (CUBE_SIZE + GAP) * 2.1;
     const minorStep = (CUBE_SIZE + GAP) * 0.55;
     const tierTolerance = (CUBE_SIZE + GAP) * 0.75;
+    const xyCornerDirection = new THREE.Vector3();
     ['x', 'y', 'z'].forEach((axisWorld) => {
         const axisEntries = groupByAxis[axisWorld];
         if (axisEntries.length === 0)
@@ -839,13 +881,28 @@ function addAxisDimensionLines(scene, tensorGroup, axisSizes, axisStarts, axisSt
             }
             const withinTier = tierCounts.get(tier) || 0;
             tierCounts.set(tier, withinTier + 1);
-            const useDiagonal = axisWorld === 'z' && axisEntries.length > 1;
-            const directionOrder = useDiagonal ? 1 : 0;
+            const useDiagonal = axisWorld === 'z';
+            const directionOrder = useDiagonal ? 1 : 0; // z family uses -45deg basis
             let extensionDirection = extensionDirectionFor(axisWorld, directionOrder, useDiagonal);
             const mid = entry.extentStart.clone().add(entry.extentEnd).multiplyScalar(0.5);
             const outward = mid.clone().sub(tensorCenter);
-            if (outward.dot(extensionDirection) < 0) {
-                extensionDirection = extensionDirection.clone().negate();
+            if (useDiagonal) {
+                const xy = xyCornerDirection.clone();
+                xy.z = 0;
+                if (xy.lengthSq() > 1e-9 && extensionDirection.dot(xy) > 0) {
+                    extensionDirection = extensionDirection.clone().negate();
+                }
+                else if (xy.lengthSq() <= 1e-9 && outward.dot(extensionDirection) < 0) {
+                    extensionDirection = extensionDirection.clone().negate();
+                }
+            }
+            else {
+                if (outward.dot(extensionDirection) < 0) {
+                    extensionDirection = extensionDirection.clone().negate();
+                }
+                if (axisWorld === 'x' || axisWorld === 'y') {
+                    xyCornerDirection.add(extensionDirection);
+                }
             }
             const edgeShift = extensionDirection.clone().multiplyScalar(CUBE_SIZE / 2);
             groups.push(createCadDimension(scene, entry.extentStart.clone().add(edgeShift), entry.extentEnd.clone().add(edgeShift), entry.label, axisWorld, entry.color, {
