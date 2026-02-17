@@ -18,6 +18,35 @@ class TracebackInfo:
 
 
 # ---------------------------------------------------------------------------
+# Framework-frame detection (lazy-initialized to avoid circular imports)
+# ---------------------------------------------------------------------------
+
+_FRAMEWORK_ROOTS: tuple[str, ...] | None = None
+
+
+def _get_framework_roots() -> tuple[str, ...]:
+    global _FRAMEWORK_ROOTS
+    if _FRAMEWORK_ROOTS is None:
+        import triton as _triton
+        import triton_viz as _triton_viz
+
+        _FRAMEWORK_ROOTS = tuple(
+            {
+                os.path.realpath(os.path.dirname(_triton.__file__)),
+                os.path.realpath(os.path.dirname(_triton_viz.__file__)),
+            }
+        )
+    return _FRAMEWORK_ROOTS
+
+
+def _is_framework_frame(frame: FrameType) -> bool:
+    fn = frame.f_code.co_filename
+    if fn.startswith("<"):
+        return True
+    return any(os.path.realpath(fn).startswith(root) for root in _get_framework_roots())
+
+
+# ---------------------------------------------------------------------------
 # Frame extraction
 # ---------------------------------------------------------------------------
 
@@ -34,24 +63,40 @@ def get_code_key(obj: FrameType | Callable) -> tuple[str, str]:
 
 def extract_user_frames(num_frames: int = 0) -> list[TracebackInfo]:
     """
-    Return traceback info from frames from the current call stack that are running
-    inside functions marked with @triton_viz.trace(...) or @triton_viz.trace_source.
-    Args:
-        num_frames: max number of frames to return (i.e. num_frames = 1 means that only last frame
-        inside a traced function is returned). If zero (default), return all frames.
+    Walk the call stack from inner frame outward, collecting non-framework
+    frames until hitting a CODE_KEYS boundary (the @trace-decorated kernel).
+
+    The boundary frame itself is included. Framework frames (triton, triton_viz
+    internals) are skipped. ``num_frames`` trims to the innermost *N* frames
+    after collection (0 = return all).
     """
-    matched: list[TracebackInfo] = []
-    enough_frames = lambda: num_frames != 0 and len(matched) >= num_frames
+    collected: list[TracebackInfo] = []
     frame: FrameType | None = sys._getframe(1)
-    while frame and not enough_frames():
+    while frame:
+        if _is_framework_frame(frame):
+            frame = frame.f_back
+            continue
+
         code_key = get_code_key(frame)
+        filename = os.path.realpath(frame.f_code.co_filename)
+        func_name = frame.f_code.co_qualname
+        lineno = frame.f_lineno
+        line_of_code = linecache.getline(filename, lineno).rstrip()
+        collected.append(TracebackInfo(filename, lineno, func_name, line_of_code))
+
+        # Stop once we reach a frame registered via @trace (the kernel boundary)
         if code_key in CODE_KEYS:
-            filename, func_name = code_key
-            lineno = frame.f_lineno
-            line_of_code = linecache.getline(filename, lineno).rstrip()
-            matched.insert(0, TracebackInfo(filename, lineno, func_name, line_of_code))
+            break
+
         frame = frame.f_back
-    return matched
+
+    # collected is inner-first; reverse to outer-first (kernel → helper → op)
+    collected.reverse()
+
+    if num_frames and len(collected) > num_frames:
+        collected = collected[-num_frames:]
+
+    return collected
 
 
 # ---------------------------------------------------------------------------

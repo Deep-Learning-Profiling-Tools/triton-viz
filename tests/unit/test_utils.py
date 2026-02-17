@@ -13,6 +13,7 @@ from triton_viz.core.trace import trace_source
 from triton_viz.utils import traceback_utils
 from triton_viz.utils.traceback_utils import (
     TracebackInfo,
+    extract_user_frames,
     location_to_traceback_info,
 )
 
@@ -134,13 +135,14 @@ def test_sanitizer_trace_source_uses_oob_line(use_decorator: bool):
 
 
 @pytest.mark.parametrize("use_decorator", [True, False])
-def test_sanitizer_without_oob_trace_source_uses_gemm_callsite(use_decorator: bool):
-    """Sanitizer should fall back to caller line when helper is not traced."""
+def test_sanitizer_without_oob_trace_source_uses_oob_line(use_decorator: bool):
+    """Boundary-marker: undecorated helpers are auto-captured, same as decorated."""
     tb_info = _capture_sanitizer_traceback(
         with_oob_trace_source=False, use_decorator=use_decorator
     )
-    assert "gemm_kernel" in tb_info.func_name
-    assert "oob()" in tb_info.line_of_code
+    # With boundary-marker, oob is captured even without @trace_source
+    assert "oob" in tb_info.func_name
+    assert "_handle_access_check" in tb_info.line_of_code
 
 
 @pytest.mark.parametrize("use_decorator", [True, False])
@@ -154,10 +156,37 @@ def test_tracer_trace_source_uses_oob_line(use_decorator: bool):
 
 
 @pytest.mark.parametrize("use_decorator", [True, False])
-def test_tracer_without_oob_trace_source_uses_gemm_callsite(use_decorator: bool):
-    """Tracer should record caller line when helper is not trace-sourced."""
+def test_tracer_without_oob_trace_source_uses_oob_line(use_decorator: bool):
+    """Boundary-marker: undecorated helpers are auto-captured, same as decorated."""
     tb_info = _capture_tracer_frame(
         with_oob_trace_source=False, use_decorator=use_decorator
     )
-    assert tb_info.func_name.endswith("gemm_kernel")
-    assert "oob()" in tb_info.line_of_code
+    # With boundary-marker, oob is captured even without @trace_source
+    assert tb_info.func_name.endswith("oob")
+    assert "load_callback" in tb_info.line_of_code
+
+
+def test_undecorated_helper_captured_via_boundary_marker():
+    """Verify that a completely undecorated helper between framework code and
+    the @trace-registered kernel is automatically included in extract_user_frames."""
+    captured: list[TracebackInfo] = []
+
+    # helper_a calls helper_b which captures frames — neither is decorated
+    def helper_b():
+        captured.extend(extract_user_frames())
+
+    def helper_a():
+        helper_b()
+
+    # Only the kernel is registered via trace_source (as @trace would do)
+    @trace_source
+    def my_kernel():
+        helper_a()
+
+    my_kernel()
+
+    func_names = [tb.func_name for tb in captured]
+    # All three should appear: kernel, helper_a, helper_b
+    assert any("my_kernel" in fn for fn in func_names)
+    assert any("helper_a" in fn for fn in func_names)
+    assert any("helper_b" in fn for fn in func_names)

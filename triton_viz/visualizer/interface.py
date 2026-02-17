@@ -267,7 +267,12 @@ def get_op_code():
     filename = tb.get("filename")
     lineno = int(tb.get("lineno", 0))
     line_of_code = tb.get("line")
-    seg = read_source_segment(filename, lineno, context) if filename else None
+    # Only allow reading files under cwd (prevent path traversal via HTTP API)
+    cwd = os.path.realpath(os.getcwd())
+    path = os.path.realpath(filename) if filename else ""
+    seg = (
+        read_source_segment(filename, lineno, context) if path.startswith(cwd) else None
+    )
     if seg is None:
         # fallback with single line
         seg = {
