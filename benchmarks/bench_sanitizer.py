@@ -60,6 +60,8 @@ gemm_oob_sanitizer = SymbolicSanitizer(abort_on_error=False)
 indirect_sanitizer = SymbolicSanitizer(abort_on_error=False)
 nested_sanitizer = SymbolicSanitizer(abort_on_error=False)
 block_ptr_sanitizer = SymbolicSanitizer(abort_on_error=False)
+jsd_sanitizer = SymbolicSanitizer(abort_on_error=False)
+element_mul_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 # ---------------------------------------------------------------------------
 # Kernels
@@ -171,6 +173,79 @@ def block_pointer_loop_advance_kernel(ptr, N: tl.constexpr, BLOCK: tl.constexpr)
         block_ptr = tl.advance(block_ptr, (BLOCK,))
 
 
+@triton_viz.trace(client=jsd_sanitizer)
+@triton.jit
+def jsd_kernel(
+    X_ptr,  # input in logspace, X = log Q
+    X_stride,
+    Y_ptr,  # ground truth in logspace, Y = log P
+    Y_stride,
+    loss_ptr,
+    loss_stride,
+    dX_ptr,
+    dX_stride,
+    label_ptr,
+    beta,
+    n_non_ignore: int,
+    ignore_index: tl.constexpr,
+    n_cols,
+    BLOCK_SIZE: tl.constexpr,
+    HAS_LABEL: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    X_ptr += pid * X_stride
+    dX_ptr += pid * dX_stride
+    Y_ptr += pid * Y_stride
+    loss_ptr += pid * loss_stride
+    label_ptr += pid
+
+    if HAS_LABEL:
+        label = tl.load(label_ptr)
+        if label == ignore_index:
+            for i in range(0, n_cols, BLOCK_SIZE):
+                offsets = i + tl.arange(0, BLOCK_SIZE)
+                tl.store(dX_ptr + offsets, 0.0, mask=offsets < n_cols)
+            return
+
+    for i in range(0, n_cols, BLOCK_SIZE):
+        offsets = i + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        X = tl.load(X_ptr + offsets, mask=mask, other=float("-inf")).to(tl.float32)
+        Y = tl.load(Y_ptr + offsets, mask=mask, other=float("-inf")).to(tl.float32)
+
+        Q = tl.exp(X)
+        P = tl.exp(Y)
+        M = beta * P + (1 - beta) * Q
+        log_M = tl.log(M)
+
+        loss = beta * P * Y + (1 - beta) * Q * X - M * log_M
+        loss = loss / n_non_ignore
+        tl.store(loss_ptr + offsets, loss, mask=mask)
+
+        dX = (1 - beta) * Q * (X - log_M) / n_non_ignore
+        tl.store(dX_ptr + offsets, dX, mask=mask)
+
+
+@triton_viz.trace(client=element_mul_sanitizer)
+@triton.jit
+def element_mul_kernel(
+    X_ptr,
+    X_stride,
+    grad_output_ptr,
+    n_cols,
+    BLOCK_SIZE: tl.constexpr,
+):
+    program_id = tl.program_id(0).to(tl.int64)
+    X_ptr += program_id * X_stride
+
+    grad_output = tl.load(grad_output_ptr)
+
+    for i in range(0, n_cols, BLOCK_SIZE):
+        X_offsets = i + tl.arange(0, BLOCK_SIZE)
+        X_block = tl.load(X_ptr + X_offsets, mask=X_offsets < n_cols)
+        tl.store(X_ptr + X_offsets, X_block * grad_output, mask=X_offsets < n_cols)
+
+
 # ---------------------------------------------------------------------------
 # Benchmark definitions
 # ---------------------------------------------------------------------------
@@ -180,6 +255,57 @@ def _reset_sanitizer(san: SymbolicSanitizer):
     """Clear sanitizer state and the global cache so re-runs are not skipped."""
     _fn_symbolic_cache_set.clear()
     san.records.clear()
+
+
+def _setup_jsd_data():
+    """Setup data for the JSD kernel benchmark.
+
+    Mirrors liger_kernel test_fused_linear_jsd/test_correctness_functional
+    with CI-appropriate sizes (BT=8, V=64).
+    """
+    BT, V = 8, 64
+    BLOCK_SIZE = min(65536 // 2, triton.next_power_of_2(V))
+    student_log_probs = torch.log_softmax(
+        torch.randn(BT, V, dtype=torch.float32), dim=-1
+    ).contiguous()
+    teacher_log_probs = torch.log_softmax(
+        torch.randn(BT, V, dtype=torch.float32), dim=-1
+    ).contiguous()
+    loss = torch.zeros(BT, V, dtype=torch.float32)
+    dX = torch.empty_like(student_log_probs)
+    labels = torch.randint(0, V, (BT,), dtype=torch.long)
+    # Set ~half of labels to ignore_index
+    labels[: BT // 2] = -100
+    n_non_ignore = int((labels != -100).sum().item())
+    return {
+        "student_log_probs": student_log_probs,
+        "teacher_log_probs": teacher_log_probs,
+        "loss": loss,
+        "dX": dX,
+        "labels": labels,
+        "n_rows": BT,
+        "V": V,
+        "BLOCK_SIZE": BLOCK_SIZE,
+        "n_non_ignore": n_non_ignore,
+    }
+
+
+def _setup_element_mul_data():
+    """Setup data for the element_mul kernel benchmark.
+
+    Mirrors the backward pass of liger_kernel fused_linear_jsd.
+    """
+    BT, H = 8, 64
+    BLOCK_SIZE = min(65536 // 2, triton.next_power_of_2(H))
+    X = torch.randn(BT, H, dtype=torch.float32).contiguous()
+    grad_output = torch.tensor(0.5, dtype=torch.float32)
+    return {
+        "X": X,
+        "grad_output": grad_output,
+        "n_rows": BT,
+        "n_cols": H,
+        "BLOCK_SIZE": BLOCK_SIZE,
+    }
 
 
 BENCHMARKS: dict[str, dict[str, Any]] = {
@@ -241,6 +367,39 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
             d["data"], N=256, BLOCK=64
         ),
         "sanitizer": block_ptr_sanitizer,
+    },
+    # ---- Liger-Kernel benchmarks (from test_fused_linear_jsd) ----
+    "liger_jsd": {
+        "setup": lambda: _setup_jsd_data(),
+        "run": lambda d: jsd_kernel[(d["n_rows"],)](
+            X_ptr=d["student_log_probs"],
+            X_stride=d["student_log_probs"].stride(0),
+            Y_ptr=d["teacher_log_probs"],
+            Y_stride=d["teacher_log_probs"].stride(0),
+            loss_ptr=d["loss"],
+            loss_stride=d["loss"].stride(0),
+            dX_ptr=d["dX"],
+            dX_stride=d["dX"].stride(0),
+            label_ptr=d["labels"],
+            beta=0.5,
+            n_non_ignore=d["n_non_ignore"],
+            ignore_index=-100,
+            n_cols=d["V"],
+            BLOCK_SIZE=d["BLOCK_SIZE"],
+            HAS_LABEL=True,
+        ),
+        "sanitizer": jsd_sanitizer,
+    },
+    "liger_element_mul": {
+        "setup": lambda: _setup_element_mul_data(),
+        "run": lambda d: element_mul_kernel[(d["n_rows"],)](
+            d["X"],
+            d["X"].stride(0),
+            d["grad_output"],
+            d["n_cols"],
+            BLOCK_SIZE=d["BLOCK_SIZE"],
+        ),
+        "sanitizer": element_mul_sanitizer,
     },
 }
 
