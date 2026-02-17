@@ -7,10 +7,9 @@ import triton.language as tl
 
 import triton_viz
 from triton_viz.core.data import Load, RawLoad
-from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr
+from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr, RangeWrapper
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
-    RangeWrapper,
     _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
