@@ -816,12 +816,16 @@ def _collect_load_store_program_subsets(op_type, overall_key, op_index, time_idx
         if tile.get("uuid") in uuid_to_pid
     }
 
-    coord_subsets: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+    coord_subsets: dict[tuple[int, ...], set[tuple[int, int, int]]] = {}
     for uuid, pid in uuid_to_pid.items():
         coords = uuid_to_coords.get(uuid) or []
         if not coords:
             continue
-        unique_coords = {(int(x), int(y), int(z)) for x, y, z in coords}
+        unique_coords = {
+            tuple(int(v) for v in coord)
+            for coord in coords
+            if isinstance(coord, (list, tuple)) and len(coord) > 0
+        }
         for coord in unique_coords:
             coord_subsets.setdefault(coord, set()).add(pid)
 
@@ -829,15 +833,15 @@ def _collect_load_store_program_subsets(op_type, overall_key, op_index, time_idx
     coords_list = []
     counts_list = []
     max_count = 0
-    for (x, y, z), pid_set in coord_subsets.items():
+    for coord, pid_set in coord_subsets.items():
         pid_list = sorted(pid_set)
         subset_key = "|".join([f"{px},{py},{pz}" for px, py, pz in pid_list])
         if subset_key not in subsets:
             subsets[subset_key] = [[px, py, pz] for px, py, pz in pid_list]
         count = len(pid_list)
         max_count = max(max_count, count)
-        coords_list.append([x, y, z, subset_key])
-        counts_list.append([x, y, z, count])
+        coords_list.append([*coord, subset_key])
+        counts_list.append([*coord, count])
 
     return {
         "coords": coords_list,

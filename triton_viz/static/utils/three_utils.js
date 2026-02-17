@@ -1,5 +1,6 @@
 import { createCadDimension, createVectorText } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
+const OUTER_LEVEL_GAP_SCALE = 5;
 export const CUBE_SIZE = 0.2;
 export const GAP = 0.05;
 export const COLOR_HOVER = new THREE.Color(1.0, 1.0, 0.0);
@@ -275,46 +276,51 @@ function legacyCoordFromDisplay(coord) {
 }
 function positionForDisplayCoord(coord, shape) {
     const baseCell = { x: CUBE_SIZE, y: CUBE_SIZE, z: CUBE_SIZE };
-    return recursivePosition(coord, shape, baseCell);
+    return recursivePosition(coord, shape, baseCell, 0);
 }
-function recursivePosition(coord, shape, cellExtent) {
+function recursivePosition(coord, shape, cellExtent, level) {
     if (shape.length <= 3)
-        return baseGridPosition(coord, shape, cellExtent);
+        return baseGridPosition(coord, shape, cellExtent, level);
     const split = shape.length - 3;
     const outerShape = shape.slice(0, split);
     const innerShape = shape.slice(split);
     const outerCoord = coord.slice(0, split);
     const innerCoord = coord.slice(split);
-    const innerExtent = recursiveExtent(innerShape, cellExtent);
-    const outerPos = recursivePosition(outerCoord, outerShape, innerExtent);
-    const innerPos = recursivePosition(innerCoord, innerShape, cellExtent);
+    const innerExtent = recursiveExtent(innerShape, cellExtent, level);
+    const outerPos = recursivePosition(outerCoord, outerShape, innerExtent, level + 1);
+    const innerPos = recursivePosition(innerCoord, innerShape, cellExtent, level);
     return new THREE.Vector3(outerPos.x + innerPos.x, outerPos.y + innerPos.y, outerPos.z + innerPos.z);
 }
-function recursiveExtent(shape, cellExtent) {
+function recursiveExtent(shape, cellExtent, level) {
     if (shape.length <= 3)
-        return baseGridExtent(shape, cellExtent);
+        return baseGridExtent(shape, cellExtent, level);
     const split = shape.length - 3;
     const outerShape = shape.slice(0, split);
     const innerShape = shape.slice(split);
-    const innerExtent = recursiveExtent(innerShape, cellExtent);
-    return recursiveExtent(outerShape, innerExtent);
+    const innerExtent = recursiveExtent(innerShape, cellExtent, level);
+    return recursiveExtent(outerShape, innerExtent, level + 1);
 }
-function baseGridExtent(shape, cellExtent) {
+function levelGap(level) {
+    return GAP * Math.pow(OUTER_LEVEL_GAP_SCALE, Math.max(0, level));
+}
+function baseGridExtent(shape, cellExtent, level) {
     const { depth, height, width } = shapeDepthHeightWidth(shape);
-    const stepX = cellExtent.x + GAP;
-    const stepY = cellExtent.y + GAP;
-    const stepZ = cellExtent.z + GAP;
+    const gap = levelGap(level);
+    const stepX = cellExtent.x + gap;
+    const stepY = cellExtent.y + gap;
+    const stepZ = cellExtent.z + gap;
     return {
         x: (width - 1) * stepX + cellExtent.x,
         y: (height - 1) * stepY + cellExtent.y,
         z: (depth - 1) * stepZ + cellExtent.z,
     };
 }
-function baseGridPosition(coord, shape, cellExtent) {
+function baseGridPosition(coord, shape, cellExtent, level) {
     const { depth, height, width } = shapeDepthHeightWidth(shape);
-    const stepX = cellExtent.x + GAP;
-    const stepY = cellExtent.y + GAP;
-    const stepZ = cellExtent.z + GAP;
+    const gap = levelGap(level);
+    const stepX = cellExtent.x + gap;
+    const stepY = cellExtent.y + gap;
+    const stepZ = cellExtent.z + gap;
     const centerX = (width - 1) * stepX / 2;
     const centerY = (height - 1) * stepY / 2;
     const centerZ = (depth - 1) * stepZ / 2;

@@ -60,7 +60,7 @@ type PayloadCache = {
 type ProgramCountState = { map: Map<string, number>; maxCount: number };
 type ProgramSubsetState = {
     subsetMap: Map<string, string>;
-    subsets: Record<string, Coord3[]>;
+    subsets: Record<string, number[][]>;
     subsetCount: number;
     countMap: Map<string, number>;
     maxCount: number;
@@ -72,6 +72,7 @@ type DescriptorHighlight = {
 };
 type TensorViewSpec = {
     axisLabels: string[];
+    displaySlots: Array<number | null>;
     visibleAxes: number[];
     hiddenAxes: number[];
     hiddenIndices: number[];
@@ -236,16 +237,32 @@ function buildTensorViewSpec(
     const axisLabels = getAxisLabels(rank);
     const axisFromLabel = new Map<string, number>();
     axisLabels.forEach((label, axis) => axisFromLabel.set(label, axis));
-    const parsedVisible: number[] = [];
-    const usedVisible = new Set<number>();
-    const chars = (visibleText || '').toLowerCase().split('');
-    chars.forEach((ch) => {
-        const axis = axisFromLabel.get(ch);
-        if (axis === undefined || usedVisible.has(axis)) return;
-        usedVisible.add(axis);
-        parsedVisible.push(axis);
-    });
-    const visibleAxes = parsedVisible.length > 0 ? parsedVisible : defaultVisibleAxes(rank);
+    const rawText = (visibleText || '').toLowerCase().trim();
+    const isPositionalPlaceholder = rawText.length === rank
+        && rawText.split('').every((ch, axis) => ch === '1' || ch === axisLabels[axis]);
+    let visibleAxes: number[] = [];
+    let displaySlots: Array<number | null> = [];
+    let canonicalText = '';
+    if (isPositionalPlaceholder) {
+        displaySlots = rawText.split('').map((ch, axis) => {
+            if (ch === '1') return null;
+            visibleAxes.push(axis);
+            return axis;
+        });
+        canonicalText = displaySlots.map((slot, axis) => (slot === null ? '1' : axisLabels[axis])).join('');
+    } else {
+        const parsedVisible: number[] = [];
+        const usedVisible = new Set<number>();
+        rawText.split('').forEach((ch) => {
+            const axis = axisFromLabel.get(ch);
+            if (axis === undefined || usedVisible.has(axis)) return;
+            usedVisible.add(axis);
+            parsedVisible.push(axis);
+        });
+        visibleAxes = parsedVisible.length > 0 ? parsedVisible : defaultVisibleAxes(rank);
+        displaySlots = visibleAxes.map((axis) => axis);
+        canonicalText = visibleAxes.map((axis) => axisLabels[axis]).join('');
+    }
     const visibleSet = new Set(visibleAxes);
     const hiddenAxes = Array.from({ length: rank }, (_, axis) => axis).filter((axis) => !visibleSet.has(axis));
     const nextHiddenIndices = Array.from({ length: rank }, (_, axis) => {
@@ -253,20 +270,22 @@ function buildTensorViewSpec(
         const prev = Number(hiddenIndices[axis] ?? 0);
         return Math.min(dim - 1, Math.max(0, Number.isFinite(prev) ? prev : 0));
     });
-    const displayShape = visibleAxes.map((axis) => Math.max(1, shapeRaw[axis] ?? 1));
+    const displayShape = displaySlots.map((slot) => (slot === null ? 1 : Math.max(1, shapeRaw[slot] ?? 1)));
     return {
         axisLabels,
+        displaySlots,
         visibleAxes,
         hiddenAxes,
         hiddenIndices: nextHiddenIndices,
-        visibleText: visibleAxes.map((axis) => axisLabels[axis]).join(''),
+        visibleText: canonicalText,
         displayShape,
     };
 }
 
 function mapDisplayToFullCoords(displayCoord: TensorCoord, spec: TensorViewSpec): TensorCoord {
     const full = spec.hiddenIndices.slice();
-    spec.visibleAxes.forEach((axis, displayAxis) => {
+    spec.displaySlots.forEach((axis, displayAxis) => {
+        if (axis === null) return;
         full[axis] = Number(displayCoord[displayAxis] ?? 0);
     });
     return full;
@@ -278,6 +297,10 @@ function arraysEqual(a: number[] = [], b: number[] = []): boolean {
         if (a[i] !== b[i]) return false;
     }
     return true;
+}
+
+function coordKey(coords: TensorCoord): string {
+    return coords.join(',');
 }
 
 function applyValueColormap(
@@ -301,10 +324,10 @@ function applyValueColormap(
 
 function applyCoordColormap(
     mesh: TensorMesh,
-    paint: (color: ThreeColor, coords: Coord3, index: number) => void,
+    paint: (color: ThreeColor, coords: TensorCoord, index: number) => void,
 ): void {
     if (!mesh || !paint) return;
-    const coordsList = mesh.userData.coords;
+    const coordsList = mesh.userData.coords_full || mesh.userData.coords_display || mesh.userData.coords;
     if (!coordsList) return;
     const c = new THREE.Color();
     for (let i = 0; i < mesh.count; i += 1) {
@@ -405,10 +428,11 @@ function normalizeProgramCounts(payload: ProgramCountsPayload | null): ProgramCo
     const map = new Map();
     let maxCount = 0;
     (payload?.counts || []).forEach((entry) => {
-        if (!entry || entry.length < 4) return;
-        const [x, y, z, count] = entry;
+        if (!entry || entry.length < 2) return;
+        const coord = entry.slice(0, -1).map((v) => Number(v));
+        const count = entry[entry.length - 1];
         const safeCount = Number(count) || 0;
-        map.set(`${x},${y},${z}`, safeCount);
+        map.set(coordKey(coord), safeCount);
         if (safeCount > maxCount) maxCount = safeCount;
     });
     maxCount = Math.max(maxCount, Number(payload?.max_count) || 0);
@@ -418,26 +442,28 @@ function normalizeProgramCounts(payload: ProgramCountsPayload | null): ProgramCo
 function normalizeProgramSubsets(payload: ProgramSubsetsPayload | null): ProgramSubsetState {
     // normalize subset payload into lookup maps
     const subsetMap = new Map<string, string>();
-    const subsets = (payload?.subsets || {}) as Record<string, Coord3[]>;
+    const subsets = (payload?.subsets || {}) as Record<string, number[][]>;
     const subsetCount = Number(payload?.subset_count) || Object.keys(subsets).length;
     const countMap = new Map<string, number>();
     let maxCount = Number(payload?.max_count) || 0;
     (payload?.coords || []).forEach((entry) => {
-        if (!entry || entry.length < 4) return;
-        const [x, y, z, key] = entry;
-        subsetMap.set(`${x},${y},${z}`, String(key));
+        if (!entry || entry.length < 2) return;
+        const coord = entry.slice(0, -1).map((v) => Number(v));
+        const key = entry[entry.length - 1];
+        subsetMap.set(coordKey(coord), String(key));
     });
     (payload?.counts || []).forEach((entry) => {
-        if (!entry || entry.length < 4) return;
-        const [x, y, z, count] = entry;
+        if (!entry || entry.length < 2) return;
+        const coord = entry.slice(0, -1).map((v) => Number(v));
+        const count = entry[entry.length - 1];
         const safeCount = Number(count) || 0;
-        countMap.set(`${x},${y},${z}`, safeCount);
+        countMap.set(coordKey(coord), safeCount);
         if (safeCount > maxCount) maxCount = safeCount;
     });
     return { subsetMap, subsets, subsetCount, countMap, maxCount };
 }
 
-function buildSubsetHues(subsets: Record<string, Coord3[]>): Map<string, number> {
+function buildSubsetHues(subsets: Record<string, number[][]>): Map<string, number> {
     const keys = Object.keys(subsets || {}).sort();
     const hues = new Map<string, number>();
     const used: number[] = [];
@@ -478,7 +504,7 @@ function applyProgramCountColors(
     const countMap = counts.map;
     const colors = palette || PROGRAM_COUNT_PALETTE;
     applyCoordColormap(mesh, (color, coords) => {
-        const count = coords ? countMap.get(`${coords[0]},${coords[1]},${coords[2]}`) || 0 : 0;
+        const count = coords ? countMap.get(coordKey(coords)) || 0 : 0;
         if (count <= 0) {
             color.copy(base);
         } else {
@@ -501,7 +527,7 @@ function applyProgramCountHeatmap(
     const colors = palette || PROGRAM_COUNT_PALETTE;
     const hsl = { h: 0, s: 0, l: 0.5 };
     applyCoordColormap(mesh, (color, coords) => {
-        const count = coords ? countMap.get(`${coords[0]},${coords[1]},${coords[2]}`) || 0 : 0;
+        const count = coords ? countMap.get(coordKey(coords)) || 0 : 0;
         if (count <= 0) {
             const val = coords ? sampleValueFromCache(cache, coords) : 0;
             const t = clamp01((val - min) / denom);
@@ -526,7 +552,7 @@ function applyProgramSubsetColors(
     const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
     const subsetMap = subsetState.subsetMap;
     applyCoordColormap(mesh, (color, coords) => {
-        const key = coords ? subsetMap.get(`${coords[0]},${coords[1]},${coords[2]}`) : null;
+        const key = coords ? subsetMap.get(coordKey(coords)) : null;
         if (key && hues.has(key)) {
             color.setHSL(hues.get(key), 0.6, 0.55);
         } else {
@@ -546,7 +572,7 @@ function applyProgramSubsetHeatmap(
     const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
     const subsetMap = subsetState.subsetMap;
     applyCoordColormap(mesh, (color, coords) => {
-        const key = coords ? subsetMap.get(`${coords[0]},${coords[1]},${coords[2]}`) : null;
+        const key = coords ? subsetMap.get(coordKey(coords)) : null;
         if (!key || !hues.has(key)) {
             const val = coords ? sampleValueFromCache(cache, coords) : 0;
             const t = clamp01((val - min) / denom);
@@ -616,9 +642,9 @@ function projectDescriptorForView(descriptor: DescriptorHighlight, spec: TensorV
         if ((delta / stride) >= shape) return null;
     }
     return {
-        start: spec.visibleAxes.map((axis) => descriptor.start[axis] ?? 0),
-        shape: spec.visibleAxes.map((axis) => descriptor.shape[axis] ?? 0),
-        stride: spec.visibleAxes.map((axis) => descriptor.stride[axis] ?? 1),
+        start: spec.displaySlots.map((axis) => (axis === null ? 0 : (descriptor.start[axis] ?? 0))),
+        shape: spec.displaySlots.map((axis) => (axis === null ? 1 : (descriptor.shape[axis] ?? 0))),
+        stride: spec.displaySlots.map((axis) => (axis === null ? 1 : (descriptor.stride[axis] ?? 1))),
     };
 }
 
@@ -824,7 +850,7 @@ function createProgramCountLegendItem(
 
 function createProgramSubsetLegendItem(
     baseColor: ColorInput,
-    subsets: Record<string, Coord3[]>,
+    subsets: Record<string, number[][]>,
     hues: Map<string, number> | null,
 ): HTMLDivElement {
     const item = document.createElement('div');
@@ -865,7 +891,7 @@ function createProgramSubsetLegendItem(
     Object.keys(subsets || {}).forEach((key) => {
         const pids = subsets[key] || [];
         const label = pids.length
-            ? pids.map(([x, y, z]) => `(${x},${y},${z})`).join(' ')
+            ? pids.map((pid) => `(${(pid || []).join(',')})`).join(' ')
             : '(empty)';
         const color = new THREE.Color();
         if (hues && hues.has(key)) {
@@ -1083,12 +1109,12 @@ function onMouseMove(event: MouseEvent, ctx: VizContext): void {
             if (!state.programSubsets && !state.programCounts) {
                 ctx.ensureProgramDataForHover?.();
             }
-            const key = `${coords3[0]},${coords3[1]},${coords3[2]}`;
+            const key = coordKey(coordsFull);
             if (state.programSubsets) {
                 const subsetKey = state.programSubsets.subsetMap.get(key);
                 const subset = subsetKey ? state.programSubsets.subsets?.[subsetKey] || [] : [];
                 const label = subset.length
-                    ? subset.map(([x, y, z]) => `(${x},${y},${z})`).join(' ')
+                    ? subset.map((pid) => `(${(pid || []).join(',')})`).join(' ')
                     : 'none';
                 extraHtml = `<p>Programs: ${label}</p>`;
             } else if (state.programCounts) {
@@ -1098,7 +1124,7 @@ function onMouseMove(event: MouseEvent, ctx: VizContext): void {
                 extraHtml = '<p>Programs: loading...</p>';
             }
         }
-        updateSideMenu(sideMenu, tensorName, coordsDisplay, val, currentShape || null, extraHtml);
+        updateSideMenu(sideMenu, tensorName, coordsFull, val, currentShape || null, extraHtml);
         if (ctx.type === 'Dot' && tensorName === 'C') {
             const row = Number(coordsDisplay[0] ?? 0);
             const col = Number(coordsDisplay[1] ?? 0);
@@ -1155,7 +1181,7 @@ export function createTensorVisualization(
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape || [], color: colors.GLOBAL || '#333', position: [0,0,0], endpoint: 'getLoadTensor' }
     ];
-    const supportsAllPrograms = (type === 'Load' || type === 'Store') && configs.every((cfg) => (cfg.shape || []).length <= 3);
+    const supportsAllPrograms = type === 'Load' || type === 'Store';
     const configByNameMap = new Map<string, TensorConfig>(configs.map((cfg) => [cfg.name, cfg as TensorConfig]));
 
     let cache = VIZ_CACHE.get(containerElement);

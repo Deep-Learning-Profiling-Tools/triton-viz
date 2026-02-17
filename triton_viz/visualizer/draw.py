@@ -77,26 +77,60 @@ def collect_launch(launch):
     return all_grids, tensor_table, failures
 
 
-def extract_load_coords(
-    record, global_tensor: Tensor
-) -> list[tuple[float, float, float]]:
-    # Extract coordinates for the global tensor
-    global_shape = make_3d(global_tensor.shape)
-    global_z, global_y, global_x = delinearized(
-        global_shape,
-        record.offsets,
-        global_tensor.dtype,
-        record.masks,
-    )
+def extract_load_coords(record, global_tensor: Tensor) -> list[tuple[float, ...]]:
+    """Extract accessed coordinates in the tensor's native rank."""
+    shape = tuple(max(1, int(dim)) for dim in global_tensor.shape)
+    if len(shape) == 0:
+        return []
 
-    # Report (x, y, z); delinearized returns (z, y, x)
-    global_coords = [
-        (float(xi), float(yi), float(zi))
-        for xi, yi, zi in zip(global_x, global_y, global_z)
-        if xi != -1 and yi != -1 and zi != -1
-    ]
+    offsets = np.asarray(record.offsets, dtype=np.int64)
+    masks = np.asarray(record.masks, dtype=bool)
+    if offsets.shape != masks.shape:
+        offsets = np.broadcast_to(offsets, masks.shape)
 
-    return global_coords
+    element_size = _dtype_element_size(global_tensor.dtype)
+    linear_indices = offsets // element_size
+    flat_mask = masks.reshape(-1)
+    flat_linear = linear_indices.reshape(-1)
+    total = int(np.prod(shape))
+    valid = flat_mask & (flat_linear >= 0) & (flat_linear < total)
+    if not np.any(valid):
+        return []
+
+    valid_linear = flat_linear[valid]
+    coords = np.column_stack(np.unravel_index(valid_linear, shape))
+    unique_coords = np.unique(coords, axis=0)
+    return [tuple(float(v) for v in coord) for coord in unique_coords]
+
+
+def _dtype_element_size(dtype) -> int:
+    """Best-effort dtype element size in bytes."""
+    if isinstance(dtype, str):
+        dtype_sizes = {
+            "torch.float32": 4,
+            "float32": 4,
+            "torch.float64": 8,
+            "float64": 8,
+            "torch.int32": 4,
+            "int32": 4,
+            "torch.int64": 8,
+            "int64": 8,
+            "torch.float16": 2,
+            "float16": 2,
+            "torch.bfloat16": 2,
+            "bfloat16": 2,
+            "torch.int8": 1,
+            "int8": 1,
+            "torch.uint8": 1,
+            "uint8": 1,
+            "torch.bool": 1,
+            "bool": 1,
+        }
+        return max(1, int(dtype_sizes.get(dtype, 4)))
+    try:
+        return max(1, int(dtype.element_ty.primitive_bitwidth // 8))
+    except Exception:
+        return 4
 
 
 def make_3d(shape: tuple[int, ...]):
