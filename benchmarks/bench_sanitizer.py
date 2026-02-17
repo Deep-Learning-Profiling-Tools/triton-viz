@@ -62,6 +62,7 @@ nested_sanitizer = SymbolicSanitizer(abort_on_error=False)
 block_ptr_sanitizer = SymbolicSanitizer(abort_on_error=False)
 jsd_sanitizer = SymbolicSanitizer(abort_on_error=False)
 element_mul_sanitizer = SymbolicSanitizer(abort_on_error=False)
+flaggems_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 # ---------------------------------------------------------------------------
 # Kernels
@@ -247,6 +248,292 @@ def element_mul_kernel(
 
 
 # ---------------------------------------------------------------------------
+# FlagGems LayerNorm kernels
+# Adapted from FlagGems/src/flag_gems/ops/layernorm.py
+# ---------------------------------------------------------------------------
+
+
+@triton_viz.trace(client=flaggems_sanitizer)
+@triton.jit
+def flaggems_ln_persistent_kernel(
+    in_ptr,
+    out_ptr,
+    weight_ptr,
+    bias_ptr,
+    out_mean_ptr,
+    out_rstd_ptr,
+    M,
+    N,
+    eps,
+    TILE_N: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    n_offsets = tl.arange(0, TILE_N)
+    mask = n_offsets < N
+
+    x = tl.load(in_ptr + pid * N + n_offsets, mask, other=0.0).to(tl.float32)
+    m = tl.sum(x) / N
+    d = x - m
+    s = tl.where(mask, d * d, 0)
+    sum_square = tl.sum(s)
+    var = sum_square / N
+    rstd = 1.0 / tl.sqrt(var + eps)
+
+    tl.store(out_mean_ptr + pid, m)
+    tl.store(out_rstd_ptr + pid, rstd)
+
+    if weight_ptr is None:
+        w = 1
+    else:
+        w = tl.load(weight_ptr + n_offsets, mask=mask)
+    if bias_ptr is None:
+        b = 0
+    else:
+        b = tl.load(bias_ptr + n_offsets, mask=mask)
+    out = (x - m) * rstd * w + b
+    tl.store(out_ptr + pid * N + n_offsets, out, mask=mask)
+
+
+@triton_viz.trace(client=flaggems_sanitizer)
+@triton.jit
+def flaggems_ln_multiline_kernel(
+    in_ptr,
+    out_ptr,
+    weight_ptr,
+    bias_ptr,
+    out_mean_ptr,
+    out_rstd_ptr,
+    M,
+    N,
+    eps,
+    TILE_M: tl.constexpr,
+    TILE_N: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    m_offsets = pid * TILE_M + tl.arange(0, TILE_M)
+    m_mask = m_offsets < M
+
+    n_offsets = tl.arange(0, TILE_N)[None, :]
+    n_mask = n_offsets < N
+    mask = m_mask[:, None] & n_mask
+
+    x = tl.load(in_ptr + m_offsets[:, None] * N + n_offsets, mask, other=0.0).to(
+        tl.float32
+    )
+    m = tl.sum(x, axis=1) / N
+    d = x - m[:, None]
+    s = tl.where(mask, d * d, 0)
+    sum_square = tl.sum(s, axis=1)
+    var = sum_square / N
+    rstd = 1.0 / tl.sqrt(var + eps)
+
+    tl.store(out_mean_ptr + m_offsets, m, mask=m_mask)
+    tl.store(out_rstd_ptr + m_offsets, rstd, mask=m_mask)
+
+    if weight_ptr is None:
+        w = 1
+    else:
+        w = tl.load(weight_ptr + n_offsets, mask=n_mask)
+    if bias_ptr is None:
+        b = 0
+    else:
+        b = tl.load(bias_ptr + n_offsets, mask=n_mask)
+    out = (x - m[:, None]) * rstd[:, None] * w + b
+    tl.store(out_ptr + m_offsets[:, None] * N + n_offsets, out, mask=mask)
+
+
+@triton_viz.trace(client=flaggems_sanitizer)
+@triton.jit
+def flaggems_ln_loop_kernel(
+    in_ptr,
+    out_ptr,
+    weight_ptr,
+    bias_ptr,
+    out_mean_ptr,
+    out_rstd_ptr,
+    M,
+    N,
+    eps,
+    TILE_N: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+
+    # Welford online mean/variance
+    m = tl.zeros((TILE_N,), dtype=tl.float32)
+    s = tl.zeros((TILE_N,), dtype=tl.float32)
+    cnt = tl.zeros((TILE_N,), dtype=tl.int32)
+    num_steps = tl.cdiv(N, TILE_N)
+    for step in range(0, num_steps - 1, 1):
+        start_n = step * TILE_N
+        n_offsets = start_n + tl.arange(0, TILE_N)
+        x = tl.load(in_ptr + pid * N + n_offsets).to(tl.float32)
+        new_m = m + (x - m) / (step + 1)
+        new_s = s + (x - new_m) * (x - m)
+        cnt += 1
+        m = new_m
+        s = new_s
+
+    # last step with masking
+    for step in range(num_steps - 1, num_steps, 1):
+        start_n = step * TILE_N
+        n_offsets = start_n + tl.arange(0, TILE_N)
+        mask = n_offsets < N
+        x = tl.load(in_ptr + pid * N + n_offsets, mask=mask).to(tl.float32)
+        new_m = tl.where(mask, m + (x - m) / (step + 1), m)
+        new_s = tl.where(mask, s + (x - new_m) * (x - m), s)
+        cnt += mask.to(tl.int32)
+        m = new_m
+        s = new_s
+
+    final_m = tl.sum(m * cnt) / N
+    var = tl.sum(s + cnt * (m - final_m) * (m - final_m)) / N
+    rstd = 1.0 / tl.sqrt(var + eps)
+    m = final_m
+    tl.store(out_mean_ptr + pid, m)
+    tl.store(out_rstd_ptr + pid, rstd)
+
+    # Normalize - reverse sweep (inlined prev_multiple_of)
+    prev_multiple = tl.cdiv(N, TILE_N) * TILE_N - TILE_N
+    # first step with masking
+    for start_n in range(0, TILE_N, TILE_N):
+        n_offsets = (prev_multiple - start_n) + tl.arange(0, TILE_N)
+        mask = n_offsets < N
+        x = tl.load(in_ptr + pid * N + n_offsets, mask=mask, other=0.0).to(tl.float32)
+        if weight_ptr is None:
+            w = 1
+        else:
+            w = tl.load(weight_ptr + n_offsets, mask=mask)
+        if bias_ptr is None:
+            b = 0
+        else:
+            b = tl.load(bias_ptr + n_offsets, mask=mask)
+        out = w * (x - m) * rstd + b
+        tl.store(out_ptr + pid * N + n_offsets, out, mask=mask)
+
+    for start_n in range(TILE_N, N, TILE_N):
+        n_offsets = (prev_multiple - start_n) + tl.arange(0, TILE_N)
+        x = tl.load(in_ptr + pid * N + n_offsets).to(tl.float32)
+        if weight_ptr is None:
+            w = 1
+        else:
+            w = tl.load(weight_ptr + n_offsets)
+        if bias_ptr is None:
+            b = 0
+        else:
+            b = tl.load(bias_ptr + n_offsets)
+        out = w * (x - m) * rstd + b
+        tl.store(out_ptr + pid * N + n_offsets, out)
+
+
+@triton_viz.trace(client=flaggems_sanitizer)
+@triton.jit
+def flaggems_ln_backward_kernel(
+    dY,
+    X,
+    W,
+    Mean,
+    Rstd,
+    dX,
+    M,
+    N,
+    BLOCK_ROW_SIZE: tl.constexpr,
+    BLOCK_COL_SIZE: tl.constexpr,
+):
+    pid = (
+        tl.program_id(0).to(tl.int64) * BLOCK_ROW_SIZE
+        + tl.arange(0, BLOCK_ROW_SIZE)[:, None]
+    )
+    row_mask = pid < M
+    dY += pid * N
+    X += pid * N
+    dX += pid * N
+    Mean += pid
+    Rstd += pid
+
+    mean = tl.load(Mean).to(tl.float32)
+    rstd = tl.load(Rstd).to(tl.float32)
+
+    dx_part2 = tl.zeros([BLOCK_ROW_SIZE, BLOCK_COL_SIZE], dtype=tl.float32)
+    dx_part3 = tl.zeros([BLOCK_ROW_SIZE, BLOCK_COL_SIZE], dtype=tl.float32)
+
+    for off in range(0, N, BLOCK_COL_SIZE):
+        cols = off + tl.arange(0, BLOCK_COL_SIZE)
+        col_mask = cols[None, :] < N
+        mask = row_mask & col_mask
+        dy = tl.load(dY + cols[None, :], mask).to(tl.float32)
+        x = tl.load(X + cols[None, :], mask).to(tl.float32)
+        x = tl.where(mask, x - mean, 0.0)
+        x_hat = x * rstd
+        if W is None:
+            w = 1
+        else:
+            w = tl.load(W + cols, mask=cols < N).to(tl.float32)
+        dx_hat = dy * w
+        dx_part2 += dx_hat
+        dx_part3 += dx_hat * x_hat
+
+    dx_2 = tl.sum(dx_part2, axis=1)[:, None]
+    dx_3 = tl.sum(dx_part3, axis=1)[:, None]
+
+    for off in range(0, N, BLOCK_COL_SIZE):
+        cols = off + tl.arange(0, BLOCK_COL_SIZE)
+        col_mask = cols[None, :] < N
+        mask = row_mask & col_mask
+        dy = tl.load(dY + cols[None, :], mask).to(tl.float32)
+        x = tl.load(X + cols[None, :], mask).to(tl.float32)
+        if W is None:
+            w = 1
+        else:
+            w = tl.load(W + cols, mask=cols < N).to(tl.float32)
+        x = tl.where(mask, x - mean, 0.0)
+        x_hat = x * rstd
+        dx_hat = dy * w
+        dx = rstd * (dx_hat - (dx_2 + x_hat * dx_3) / N)
+        tl.store(dX + cols, dx, mask=mask)
+
+
+@triton_viz.trace(client=flaggems_sanitizer)
+@triton.jit
+def flaggems_ln_wb_backward_kernel(
+    dY,
+    X,
+    Mean,
+    Rstd,
+    dW,
+    dB,
+    M,
+    N,
+    BLOCK_ROW_SIZE: tl.constexpr,
+    BLOCK_COL_SIZE: tl.constexpr,
+):
+    pid = (
+        tl.program_id(0).to(tl.int64) * BLOCK_COL_SIZE
+        + tl.arange(0, BLOCK_COL_SIZE)[None, :]
+    )
+    col_mask = pid < N
+    dY += pid
+    X += pid
+    accW = tl.zeros([BLOCK_ROW_SIZE, BLOCK_COL_SIZE], dtype=tl.float32)
+    accB = tl.zeros([BLOCK_ROW_SIZE, BLOCK_COL_SIZE], dtype=tl.float32)
+    for off in range(0, M, BLOCK_ROW_SIZE):
+        rows = off + tl.arange(0, BLOCK_ROW_SIZE)
+        row_mask = rows[:, None] < M
+        mask = row_mask & col_mask
+        dy = tl.load(dY + rows[:, None] * N, mask).to(tl.float32)
+        x = tl.load(X + rows[:, None] * N, mask).to(tl.float32)
+        mean = tl.load(Mean + rows, mask=rows < M)[:, None].to(tl.float32)
+        rstd = tl.load(Rstd + rows, mask=rows < M)[:, None].to(tl.float32)
+        x = tl.where(col_mask, x - mean, 0.0)
+        x_hat = x * rstd
+        accW += dy * x_hat
+        accB += dy
+    dw = tl.sum(accW, axis=0)
+    tl.store(dW + pid, dw[None, :], mask=col_mask)
+    db = tl.sum(accB, axis=0)
+    tl.store(dB + pid, db[None, :], mask=col_mask)
+
+
+# ---------------------------------------------------------------------------
 # Benchmark definitions
 # ---------------------------------------------------------------------------
 
@@ -422,6 +709,176 @@ for _B, _T, _H, _V in _LIGER_SHAPES:
                 ),
                 "run": _liger_run,
                 "sanitizer": jsd_sanitizer,
+            }
+
+# ---------------------------------------------------------------------------
+# FlagGems LayerNorm: 30 parameter combinations
+# Matches test_accuracy_layernorm parameter space exactly
+# ---------------------------------------------------------------------------
+
+_FLAGGEMS_LN_SHAPES = [
+    (200, 36),
+    (4096, 100),
+    (1, 40999),
+    (100, 40499),
+    (4096, 256),
+]
+_FLAGGEMS_LN_DTYPES = [torch.float16, torch.float32, torch.bfloat16]
+_FLAGGEMS_LN_WB = [False, True]  # wb_none values
+
+_LN_BWD_BLOCK_ROW = 4
+_LN_BWD_BLOCK_COL = 1024
+_LN_WB_BWD_BLOCK_ROW = 8
+_LN_WB_BWD_BLOCK_COL = 1024
+_LN_LOOP_TILE_N = 1024
+
+
+def _make_flaggems_ln_setup(M, N, dtype, wb_none):
+    def setup():
+        inp = torch.randn(M, N, dtype=dtype)
+        out = torch.empty_like(inp)
+        mean = torch.empty(M, dtype=torch.float32)
+        rstd = torch.empty(M, dtype=torch.float32)
+        weight = None if wb_none else torch.randn(N, dtype=dtype)
+        bias = None if wb_none else torch.randn(N, dtype=dtype)
+
+        # Backward tensors
+        out_grad = torch.randn(M, N, dtype=dtype)
+        in_grad = torch.empty_like(inp)
+        weight_grad = None if wb_none else torch.empty(N, dtype=dtype)
+        bias_grad = None if wb_none else torch.empty(N, dtype=dtype)
+
+        # Forward grid and tile sizes
+        if N <= 128:
+            TILE_N = triton.next_power_of_2(N)
+            TILE_M = triton.cdiv(1024, TILE_N)
+            fwd_grid = (triton.cdiv(M, TILE_M),)
+            kernel_variant = "multiline"
+        elif N <= 4096:
+            TILE_N = triton.next_power_of_2(N)
+            TILE_M = 0
+            fwd_grid = (M,)
+            kernel_variant = "persistent"
+        else:
+            TILE_N = _LN_LOOP_TILE_N
+            TILE_M = 0
+            fwd_grid = (M,)
+            kernel_variant = "loop"
+
+        bwd_grid = (triton.cdiv(M, _LN_BWD_BLOCK_ROW),)
+        wb_bwd_grid = (triton.cdiv(N, _LN_WB_BWD_BLOCK_COL),)
+
+        return {
+            "M": M,
+            "N": N,
+            "inp": inp,
+            "out": out,
+            "mean": mean,
+            "rstd": rstd,
+            "weight": weight,
+            "bias": bias,
+            "out_grad": out_grad,
+            "in_grad": in_grad,
+            "weight_grad": weight_grad,
+            "bias_grad": bias_grad,
+            "kernel_variant": kernel_variant,
+            "TILE_N": TILE_N,
+            "TILE_M": TILE_M,
+            "fwd_grid": fwd_grid,
+            "bwd_grid": bwd_grid,
+            "wb_bwd_grid": wb_bwd_grid,
+            "wb_none": wb_none,
+        }
+
+    return setup
+
+
+def _flaggems_ln_run(d):
+    M, N = d["M"], d["N"]
+    eps = 1e-5
+
+    # Forward
+    if d["kernel_variant"] == "multiline":
+        flaggems_ln_multiline_kernel[d["fwd_grid"]](
+            d["inp"],
+            d["out"],
+            d["weight"],
+            d["bias"],
+            d["mean"],
+            d["rstd"],
+            M,
+            N,
+            eps,
+            d["TILE_M"],
+            d["TILE_N"],
+        )
+    elif d["kernel_variant"] == "persistent":
+        flaggems_ln_persistent_kernel[d["fwd_grid"]](
+            d["inp"],
+            d["out"],
+            d["weight"],
+            d["bias"],
+            d["mean"],
+            d["rstd"],
+            M,
+            N,
+            eps,
+            d["TILE_N"],
+        )
+    else:
+        flaggems_ln_loop_kernel[d["fwd_grid"]](
+            d["inp"],
+            d["out"],
+            d["weight"],
+            d["bias"],
+            d["mean"],
+            d["rstd"],
+            M,
+            N,
+            eps,
+            d["TILE_N"],
+        )
+
+    # Backward
+    flaggems_ln_backward_kernel[d["bwd_grid"]](
+        d["out_grad"],
+        d["inp"],
+        d["weight"],
+        d["mean"],
+        d["rstd"],
+        d["in_grad"],
+        M,
+        N,
+        BLOCK_ROW_SIZE=_LN_BWD_BLOCK_ROW,
+        BLOCK_COL_SIZE=_LN_BWD_BLOCK_COL,
+    )
+    if not d["wb_none"]:
+        flaggems_ln_wb_backward_kernel[d["wb_bwd_grid"]](
+            d["out_grad"],
+            d["inp"],
+            d["mean"],
+            d["rstd"],
+            d["weight_grad"],
+            d["bias_grad"],
+            M,
+            N,
+            BLOCK_ROW_SIZE=_LN_WB_BWD_BLOCK_ROW,
+            BLOCK_COL_SIZE=_LN_WB_BWD_BLOCK_COL,
+        )
+
+
+_DTYPE_NAMES = {torch.float16: "f16", torch.float32: "f32", torch.bfloat16: "bf16"}
+
+for _M, _N in _FLAGGEMS_LN_SHAPES:
+    for _dtype in _FLAGGEMS_LN_DTYPES:
+        for _wb_none in _FLAGGEMS_LN_WB:
+            _dtype_str = _DTYPE_NAMES[_dtype]
+            _wb_str = "no_wb" if _wb_none else "wb"
+            _name = f"flaggems_ln_{_M}x{_N}_{_dtype_str}_{_wb_str}"
+            BENCHMARKS[_name] = {
+                "setup": _make_flaggems_ln_setup(_M, _N, _dtype, _wb_none),
+                "run": _flaggems_ln_run,
+                "sanitizer": flaggems_sanitizer,
             }
 
 
