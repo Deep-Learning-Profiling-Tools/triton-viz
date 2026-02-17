@@ -28,9 +28,7 @@ from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import (
     Op,
-    RawLoad,
     Load,
-    RawStore,
     Store,
     MakeBlockPointer,
     TensorPointerLoad,
@@ -467,11 +465,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
     # ── Sanitizer-specific operation overriders ─────────────────
 
-    def _op_raw_load_overrider(self, ptr, cache_modifier, eviction_policy, is_volatile):
-        return self._op_load_overrider(
-            ptr, None, None, cache_modifier, eviction_policy, is_volatile
-        )
-
     def _op_load_overrider(self, ptr, mask, other, *args):
         if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
             self.need_full_grid = True
@@ -485,11 +478,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
         self._handle_access_check(ret)
         return ret
-
-    def _op_raw_store_overrider(self, ptr, value, cache_modifier, eviction_policy):
-        return self._op_store_overrider(
-            ptr, value, None, cache_modifier, eviction_policy
-        )
 
     def _op_store_overrider(self, ptr, value, mask, *args):
         if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
@@ -553,9 +541,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         overrider_map = self._build_op_overrider_map()
         overrider_map.update(
             {
-                RawLoad: self._op_raw_load_overrider,
                 Load: self._op_load_overrider,
-                RawStore: self._op_raw_store_overrider,
                 Store: self._op_store_overrider,
                 MakeBlockPointer: self._op_make_block_ptr_overrider,
                 TensorPointerLoad: self._op_tensor_pointer_load_overrider,
