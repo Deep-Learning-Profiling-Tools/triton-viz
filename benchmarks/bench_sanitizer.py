@@ -257,57 +257,6 @@ def _reset_sanitizer(san: SymbolicSanitizer):
     san.records.clear()
 
 
-def _setup_jsd_data():
-    """Setup data for the JSD kernel benchmark.
-
-    Mirrors liger_kernel test_fused_linear_jsd/test_correctness_functional
-    with CI-appropriate sizes (BT=8, V=64).
-    """
-    BT, V = 8, 64
-    BLOCK_SIZE = min(65536 // 2, triton.next_power_of_2(V))
-    student_log_probs = torch.log_softmax(
-        torch.randn(BT, V, dtype=torch.float32), dim=-1
-    ).contiguous()
-    teacher_log_probs = torch.log_softmax(
-        torch.randn(BT, V, dtype=torch.float32), dim=-1
-    ).contiguous()
-    loss = torch.zeros(BT, V, dtype=torch.float32)
-    dX = torch.empty_like(student_log_probs)
-    labels = torch.randint(0, V, (BT,), dtype=torch.long)
-    # Set ~half of labels to ignore_index
-    labels[: BT // 2] = -100
-    n_non_ignore = int((labels != -100).sum().item())
-    return {
-        "student_log_probs": student_log_probs,
-        "teacher_log_probs": teacher_log_probs,
-        "loss": loss,
-        "dX": dX,
-        "labels": labels,
-        "n_rows": BT,
-        "V": V,
-        "BLOCK_SIZE": BLOCK_SIZE,
-        "n_non_ignore": n_non_ignore,
-    }
-
-
-def _setup_element_mul_data():
-    """Setup data for the element_mul kernel benchmark.
-
-    Mirrors the backward pass of liger_kernel fused_linear_jsd.
-    """
-    BT, H = 8, 64
-    BLOCK_SIZE = min(65536 // 2, triton.next_power_of_2(H))
-    X = torch.randn(BT, H, dtype=torch.float32).contiguous()
-    grad_output = torch.tensor(0.5, dtype=torch.float32)
-    return {
-        "X": X,
-        "grad_output": grad_output,
-        "n_rows": BT,
-        "n_cols": H,
-        "BLOCK_SIZE": BLOCK_SIZE,
-    }
-
-
 BENCHMARKS: dict[str, dict[str, Any]] = {
     "simple_load_store": {
         "setup": lambda: {
@@ -368,40 +317,112 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
         ),
         "sanitizer": block_ptr_sanitizer,
     },
-    # ---- Liger-Kernel benchmarks (from test_fused_linear_jsd) ----
-    "liger_jsd": {
-        "setup": lambda: _setup_jsd_data(),
-        "run": lambda d: jsd_kernel[(d["n_rows"],)](
-            X_ptr=d["student_log_probs"],
-            X_stride=d["student_log_probs"].stride(0),
-            Y_ptr=d["teacher_log_probs"],
-            Y_stride=d["teacher_log_probs"].stride(0),
-            loss_ptr=d["loss"],
-            loss_stride=d["loss"].stride(0),
-            dX_ptr=d["dX"],
-            dX_stride=d["dX"].stride(0),
-            label_ptr=d["labels"],
-            beta=0.5,
-            n_non_ignore=d["n_non_ignore"],
-            ignore_index=-100,
-            n_cols=d["V"],
-            BLOCK_SIZE=d["BLOCK_SIZE"],
-            HAS_LABEL=True,
-        ),
-        "sanitizer": jsd_sanitizer,
-    },
-    "liger_element_mul": {
-        "setup": lambda: _setup_element_mul_data(),
-        "run": lambda d: element_mul_kernel[(d["n_rows"],)](
-            d["X"],
-            d["X"].stride(0),
-            d["grad_output"],
-            d["n_cols"],
-            BLOCK_SIZE=d["BLOCK_SIZE"],
-        ),
-        "sanitizer": element_mul_sanitizer,
-    },
 }
+
+# ---------------------------------------------------------------------------
+# Liger-Kernel fused_linear_jsd: 12 parameter combinations
+# Matches test_correctness_functional parameter space exactly
+# ---------------------------------------------------------------------------
+
+_LIGER_SHAPES = [
+    (2, 4, 2048, 3200),  # small
+    (2, 2048, 4096, 32000),  # llama2/mistral
+    (4, 423, 8192, 32000),  # random shape
+]
+_LIGER_DTYPES = [
+    (0.5, torch.bfloat16),
+    (0.5, torch.float32),
+]
+_LIGER_PARAMS = [
+    (1.0, 0.5, -100),  # default
+    (2.0, 0.1, 42),  # custom
+]
+
+MAX_FUSED_SIZE = 65536 // 2
+
+
+def _make_liger_setup(BT, H, V, scalar, dtype, beta, ignore_index):
+    def setup():
+        BLOCK_SIZE_JSD = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+        student_log_probs = torch.log_softmax(
+            torch.randn(BT, V, dtype=dtype) * scalar, dim=-1
+        ).contiguous()
+        teacher_log_probs = torch.log_softmax(
+            torch.randn(BT, V, dtype=dtype) * scalar, dim=-1
+        ).contiguous()
+        loss = torch.zeros(BT, V, dtype=torch.float32)
+        dX = torch.empty(BT, V, dtype=dtype)
+        labels = torch.randint(0, V, (BT,), dtype=torch.long)
+        labels[: max(1, BT // 2)] = ignore_index
+        n_non_ignore = int((labels != ignore_index).sum().item())
+
+        H_student = H // 2
+        BLOCK_SIZE_MUL = min(MAX_FUSED_SIZE, triton.next_power_of_2(H_student))
+        grad_input = torch.randn(BT, H_student, dtype=dtype).contiguous()
+        grad_output = torch.tensor(0.5, dtype=dtype)
+
+        return {
+            "BT": BT,
+            "V": V,
+            "student_log_probs": student_log_probs,
+            "teacher_log_probs": teacher_log_probs,
+            "loss": loss,
+            "dX": dX,
+            "labels": labels,
+            "BLOCK_SIZE_JSD": BLOCK_SIZE_JSD,
+            "n_non_ignore": n_non_ignore,
+            "beta": beta,
+            "ignore_index": ignore_index,
+            "grad_input": grad_input,
+            "grad_output": grad_output,
+            "H_student": H_student,
+            "BLOCK_SIZE_MUL": BLOCK_SIZE_MUL,
+        }
+
+    return setup
+
+
+def _liger_run(d):
+    jsd_kernel[(d["BT"],)](
+        X_ptr=d["student_log_probs"],
+        X_stride=d["student_log_probs"].stride(0),
+        Y_ptr=d["teacher_log_probs"],
+        Y_stride=d["teacher_log_probs"].stride(0),
+        loss_ptr=d["loss"],
+        loss_stride=d["loss"].stride(0),
+        dX_ptr=d["dX"],
+        dX_stride=d["dX"].stride(0),
+        label_ptr=d["labels"],
+        beta=d["beta"],
+        n_non_ignore=d["n_non_ignore"],
+        ignore_index=d["ignore_index"],
+        n_cols=d["V"],
+        BLOCK_SIZE=d["BLOCK_SIZE_JSD"],
+        HAS_LABEL=True,
+    )
+    element_mul_kernel[(d["BT"],)](
+        d["grad_input"],
+        d["grad_input"].stride(0),
+        d["grad_output"],
+        d["H_student"],
+        BLOCK_SIZE=d["BLOCK_SIZE_MUL"],
+    )
+
+
+for _B, _T, _H, _V in _LIGER_SHAPES:
+    for _scalar, _dtype in _LIGER_DTYPES:
+        for _temperature, _beta, _ignore_index in _LIGER_PARAMS:
+            _BT = _B * _T
+            _dtype_str = "bf16" if _dtype == torch.bfloat16 else "f32"
+            _param_str = "default" if _beta == 0.5 else "custom"
+            _name = f"liger_jsd_{_BT}x{_V}_{_dtype_str}_{_param_str}"
+            BENCHMARKS[_name] = {
+                "setup": _make_liger_setup(
+                    _BT, _H, _V, _scalar, _dtype, _beta, _ignore_index
+                ),
+                "run": _liger_run,
+                "sanitizer": jsd_sanitizer,
+            }
 
 
 # ---------------------------------------------------------------------------
