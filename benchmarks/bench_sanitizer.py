@@ -724,7 +724,7 @@ _FLAGGEMS_LN_SHAPES = [
     (4096, 256),
 ]
 _FLAGGEMS_LN_DTYPES = [torch.float16, torch.float32, torch.bfloat16]
-_FLAGGEMS_LN_WB = [False, True]  # wb_none values
+_FLAGGEMS_LN_WB = [True]  # wb_none=True only (with weight/bias errors)
 
 _LN_BWD_BLOCK_ROW = 4
 _LN_BWD_BLOCK_COL = 1024
@@ -873,8 +873,7 @@ for _M, _N in _FLAGGEMS_LN_SHAPES:
     for _dtype in _FLAGGEMS_LN_DTYPES:
         for _wb_none in _FLAGGEMS_LN_WB:
             _dtype_str = _DTYPE_NAMES[_dtype]
-            _wb_str = "no_wb" if _wb_none else "wb"
-            _name = f"flaggems_ln_{_M}x{_N}_{_dtype_str}_{_wb_str}"
+            _name = f"flaggems_ln_{_M}x{_N}_{_dtype_str}"
             BENCHMARKS[_name] = {
                 "setup": _make_flaggems_ln_setup(_M, _N, _dtype, _wb_none),
                 "run": _flaggems_ln_run,
