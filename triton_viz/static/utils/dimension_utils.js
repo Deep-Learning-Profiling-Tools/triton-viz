@@ -138,13 +138,13 @@ export function createShapeLegend(container, tensors) {
             flexDirection: 'column',
             gap: '8px',
             padding: '12px',
-            background: 'rgba(0,0,0,0.7)',
+            background: '#efe6d5',
             borderRadius: '8px',
-            color: '#fff',
+            color: '#1f2937',
             fontSize: '13px',
             fontFamily: 'monospace',
             zIndex: '2000',
-            border: '1px solid rgba(255,255,255,0.1)'
+            border: '1px solid rgba(31, 41, 55, 0.25)'
         });
         container.appendChild(legend);
     }
@@ -182,9 +182,9 @@ export function createShapeLegend(container, tensors) {
         swatch.style.width = '12px';
         swatch.style.height = '12px';
         swatch.style.backgroundColor = t.color;
-        swatch.style.border = '1px solid rgba(255,255,255,0.5)';
+        swatch.style.border = '1px solid rgba(31, 41, 55, 0.35)';
         const label = document.createElement('span');
-        label.style.color = '#fff';
+        label.style.color = '#1f2937';
         // render all shape dims
         let shapeHtml = `${t.name}: [`;
         const shape = t.shape || [];
@@ -214,9 +214,9 @@ export function createShapeLegend(container, tensors) {
             selectionSwatch.style.width = '12px';
             selectionSwatch.style.height = '12px';
             selectionSwatch.style.backgroundColor = descriptorColor;
-            selectionSwatch.style.border = '1px solid rgba(255,255,255,0.5)';
+            selectionSwatch.style.border = '1px solid rgba(31, 41, 55, 0.35)';
             const selectionLabel = document.createElement('span');
-            selectionLabel.style.color = '#fff';
+            selectionLabel.style.color = '#1f2937';
             selectionLabel.innerHTML = `selection: [${renderArray(descriptorShape)}]`;
             selectionRow.appendChild(selectionSwatch);
             selectionRow.appendChild(selectionLabel);

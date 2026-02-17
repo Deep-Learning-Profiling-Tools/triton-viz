@@ -961,6 +961,33 @@ function axisWorldName(worldKey: number): 'x' | 'y' | 'z' {
     return 'x';
 }
 
+function colorForAxisFamily(worldKey: number, familyPos: number, familyCount: number): string {
+    const p = Math.max(1, familyCount);
+    const level = Math.min(p, Math.max(1, familyPos + 1));
+    const t = level / p;
+    const color = new THREE.Color();
+    if (worldKey === 1) color.setRGB(0, t, 0);
+    else if (worldKey === 2) color.setRGB(0, 0, t);
+    else color.setRGB(t, 0, 0);
+    return `#${color.getHexString()}`;
+}
+
+function defaultDimColorsForShape(rank: number): string[] {
+    const familyAxes = new Map<number, number[]>();
+    for (let axis = 0; axis < rank; axis += 1) {
+        const key = axisWorldKey(rank, axis);
+        const prev = familyAxes.get(key) || [];
+        prev.push(axis);
+        familyAxes.set(key, prev);
+    }
+    return Array.from({ length: rank }, (_, axis) => {
+        const key = axisWorldKey(rank, axis);
+        const family = familyAxes.get(key) || [];
+        const familyPos = Math.max(0, family.indexOf(axis));
+        return colorForAxisFamily(key, familyPos, family.length);
+    });
+}
+
 function extensionDirectionFor(worldAxis: 'x' | 'y' | 'z', order: number, diagonal = false): ThreeVector3 {
     const baseByAxis = {
         x: [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)],
@@ -1007,6 +1034,13 @@ function addAxisDimensionLines(
         const dim = shapeRaw[axis] ?? 1;
         return Math.min(dim - 1, Math.max(0, Number(v) || 0));
     });
+    const familyAxes = new Map<number, number[]>();
+    for (let axis = 0; axis < axisSizes.length; axis += 1) {
+        const key = axisWorldKey(shapeRaw.length, axis);
+        const prev = familyAxes.get(key) || [];
+        prev.push(axis);
+        familyAxes.set(key, prev);
+    }
     for (let axis = 0; axis < axisSizes.length; axis += 1) {
         const size = Math.max(1, Number(axisSizes[axis] ?? 1));
         const stride = Math.max(1, Number(axisStrides[axis] ?? 1));
@@ -1064,7 +1098,10 @@ function addAxisDimensionLines(
             : fallbackWorldDirection(shapeRaw.length, axis);
         const extentStart = startPos.clone().add(axisDir.clone().multiplyScalar(-CUBE_SIZE / 2));
         const extentEnd = endPos.clone().add(axisDir.clone().multiplyScalar(CUBE_SIZE / 2));
-        const color = colorOverride || dimColors[axis] || defaultDimColorForAxis(shapeRaw.length, axis);
+        const family = familyAxes.get(targetWorldKey) || [];
+        const familyPos = Math.max(0, family.indexOf(axis));
+        const familyColor = colorForAxisFamily(targetWorldKey, familyPos, family.length);
+        const color = colorOverride || dimColors[axis] || familyColor || defaultDimColorForAxis(shapeRaw.length, axis);
         const labelCore = shapeRaw.length > 3 || labelPrefix ? `${getAxisLabel(axis)}=${size}` : `${size}`;
         entries.push({
             axisWorld,
@@ -1758,7 +1795,10 @@ export function createTensorVisualization(
                 color: '#' + group.userData.mesh.userData.color_base.getHexString(),
             };
             const shape = group.userData.mesh.userData.shape_raw;
-            if (shape) entry.shape = shape;
+            if (shape) {
+                entry.shape = shape;
+                entry.dimColors = defaultDimColorsForShape(shape.length);
+            }
             const dimColor = dimColors?.[name];
             if (dimColor) entry.dimColors = dimColor;
             const spec = state.tensorViews.get(name) || null;
