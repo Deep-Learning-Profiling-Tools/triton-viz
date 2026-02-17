@@ -142,8 +142,8 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
 
         def _after_loop(lineno: int) -> None:
             pending = 0
-            if self._loop_stack and self._loop_stack[-1].lineno == lineno:
-                ctx = self._loop_stack[-1]
+            if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+                ctx = self.loop_stack[-1]
                 pending = len(ctx.pending_checks)
                 self.iterator_constraints.append(
                     _range_to_iterator_constraint(

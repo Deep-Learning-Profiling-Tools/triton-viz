@@ -1652,11 +1652,9 @@ class SymbolicClient(Client):
 
     def __init__(self):
         super().__init__()
-        self._loop_stack: list[LoopContext] = []
+        self.loop_stack: list[LoopContext] = []
         SymbolicExpr.set_loop_ctx_provider(
-            lambda *_args, **_kwargs: (
-                self._loop_stack[-1] if self._loop_stack else None
-            )
+            lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
         )
 
     # ── Shared operation overriders ───────────────────────────────
@@ -1949,21 +1947,21 @@ class SymbolicClient(Client):
             step=iterable.step,
         )
         sym.loop_ctx = ctx
-        self._loop_stack.append(ctx)
+        self.loop_stack.append(ctx)
 
     def _loop_hook_iter_overrider(self, lineno, idx):
         if self._should_skip_loop_hooks():
             return idx
-        if self._loop_stack and self._loop_stack[-1].lineno == lineno:
-            return self._loop_stack[-1].idx
+        if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            return self.loop_stack[-1].idx
         return idx
 
     def _loop_hook_after(self, lineno: int) -> None:
         if self._should_skip_loop_hooks():
             return
-        if not self._loop_stack or self._loop_stack[-1].lineno != lineno:
+        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
             return
-        self._loop_stack.pop()
+        self.loop_stack.pop()
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return ForLoopCallbacks(

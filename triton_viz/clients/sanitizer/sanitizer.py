@@ -325,11 +325,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         """
         # check memory access using z3
         z3_addr, z3_constraints = expr.eval()
-        if not self._loop_stack:
+        if not self.loop_stack:
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)
             return
 
-        ctx = self._loop_stack[-1]
+        ctx = self.loop_stack[-1]
         signature = _make_signature(z3_addr, z3_constraints)
         pending_idx = ctx.signature_cache.get(signature)
         if pending_idx is None:
@@ -598,9 +598,9 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             print(f"[Sanitizer] ▶ enter loop@{lineno}, len={iterable.length}")
 
     def _loop_hook_after(self, lineno: int) -> None:
-        if not self._loop_stack or self._loop_stack[-1].lineno != lineno:
+        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
             return
-        ctx = self._loop_stack.pop()
+        ctx = self.loop_stack.pop()
         # Execute pending checks that were deferred during loop execution
         solver = self.solver
         addr_sym = self.addr_sym
@@ -619,7 +619,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             # Also add constraints for all outer loops that are still active.
             # This is critical for nested loops where the address expression
             # depends on outer loop variables.
-            for outer_ctx in self._loop_stack:
+            for outer_ctx in self.loop_stack:
                 outer_constraint = _range_to_iterator_constraint(
                     outer_ctx.idx_z3,
                     start=outer_ctx.start,
