@@ -33,6 +33,38 @@ from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle, _get_np_dtype
 
+from ..core.client import Client
+from ..core.callbacks import OpCallbacks, ForLoopCallbacks
+from ..core.data import (
+    Op,
+    UnaryOp,
+    BinaryOp,
+    TernaryOp,
+    ProgramId,
+    Dot,
+    MakeRange,
+    AddPtr,
+    ExpandDims,
+    Broadcast,
+    ReduceSum,
+    ReduceMax,
+    ReduceMin,
+    Splat,
+    Idiv,
+    Rsqrt,
+    CastImpl,
+    Reshape,
+    Trans,
+    Join,
+    Fabs,
+    Ashr,
+    Advance,
+    FpToFp,
+    Umulhi,
+    CumSum,
+    Bitcast,
+)
+
 
 Z3Expr: TypeAlias = Union[ExprRef, list[ExprRef], Tactic, Probe]
 ConstraintExpr: TypeAlias = Union[ExprRef, bool, int, float]
@@ -643,8 +675,6 @@ class ConstSymbolicExpr(SymbolicExpr):
             np_array = np.array(seq, dtype=_get_np_dtype(dtype))
             return TensorHandle(np_array, dtype)
         elif isinstance(self.value, TensorHandle):
-            if self.value.data.size != 1:
-                raise RuntimeError("Only scalar TensorHandle is supported in const!")
             return self.value
 
         raise RuntimeError(f"Unsupported const value type: {type(self.value)}")
@@ -1559,3 +1589,384 @@ SymbolicExpr.register_op_class(TensorPointerLoadSymbolicExpr, ("tensor_pointer_l
 SymbolicExpr.register_op_class(
     TensorPointerStoreSymbolicExpr, ("tensor_pointer_store",)
 )
+
+
+# ── Shared constants and utilities for symbolic clients ──────────
+
+_UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
+    np.cos: "cos",
+    np.exp: "exp",
+    np.exp2: "exp2",
+    np.abs: "abs",
+    np.floor: "floor",
+    np.ceil: "ceil",
+    np.log: "log",
+    np.log2: "log2",
+    np.sqrt: "sqrt",
+    np.sin: "sin",
+}
+
+_BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
+    np.add: "add",
+    np.subtract: "sub",
+    np.multiply: "mul",
+    np.divide: "div",
+    np.less: "less",
+    np.less_equal: "less_equal",
+    np.greater: "greater",
+    np.greater_equal: "greater_equal",
+    np.not_equal: "not_equal",
+    np.equal: "equal",
+    np.fmod: "mod",
+    np.maximum: "maximum",
+    np.minimum: "minimum",
+    np.bitwise_and: "bitwise_and",
+    np.bitwise_or: "bitwise_or",
+    np.bitwise_xor: "bitwise_xor",
+    np.right_shift: "right_shift",
+    np.left_shift: "left_shift",
+}
+
+
+@dataclass
+class RangeWrapper:
+    iterable: Any
+    length: int
+    start: int
+    stop: int
+    step: int
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self.iterable)
+
+    def __len__(self) -> int:
+        return self.length
+
+
+class SymbolicClient(Client):
+    """Base class for clients that use the symbolic engine.
+
+    Provides shared operation overriders and for-loop infrastructure.
+    Subclasses must implement domain-specific memory operation handlers.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.loop_stack: list[LoopContext] = []
+        SymbolicExpr.set_loop_ctx_provider(
+            lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
+        )
+
+    # ── Shared operation overriders ───────────────────────────────
+
+    def _op_program_id_overrider(self, axis):
+        return SymbolicExpr.create("pid", axis)
+
+    def _op_unary_op_overrider(self, arg, op):
+        arg_sym = SymbolicExpr.from_value(arg)
+        name = _UNARY_NUMPY_TO_SYM_OP.get(op)
+        if name is None:
+            raise NotImplementedError(f"Unsupported unary operation: {op}")
+        return SymbolicExpr.create(name, arg_sym)
+
+    def _op_binary_op_overrider(self, lhs, rhs, op):
+        lhs_sym = SymbolicExpr.from_value(lhs)
+        rhs_sym = SymbolicExpr.from_value(rhs)
+        op_name = _BINARY_NUMPY_TO_SYM_OP.get(op)
+        if op_name is None:
+            raise NotImplementedError(f"Unsupported binary operation: {op}")
+        return SymbolicExpr.create(op_name, lhs_sym, rhs_sym)
+
+    def _op_ternary_op_overrider(self, lhs, rhs, other, op):
+        lhs_sym = SymbolicExpr.from_value(lhs)
+        rhs_sym = SymbolicExpr.from_value(rhs)
+        other_sym = SymbolicExpr.from_value(other)
+        if op is np.where:
+            return SymbolicExpr.create("where", lhs_sym, rhs_sym, other_sym)
+        raise NotImplementedError(f"Unsupported ternary operation: {op}")
+
+    def _op_addptr_overrider(self, ptr, offset):
+        return SymbolicExpr.create(
+            "addptr",
+            SymbolicExpr.from_value(ptr),
+            SymbolicExpr.from_value(offset),
+        )
+
+    def _op_dot_overrider(self, a, b, d, input_precision, max_num_imprecise_acc):
+        a_sym = SymbolicExpr.from_value(a)
+        b_sym = SymbolicExpr.from_value(b)
+        d_sym = SymbolicExpr.from_value(d) if d is not None else None
+        return SymbolicExpr.create("dot", a_sym, b_sym, d_sym)
+
+    def _op_make_range_overrider(self, ret_ty, start, end):
+        return SymbolicExpr.create(
+            "arange",
+            SymbolicExpr.from_value(ret_ty),
+            SymbolicExpr.from_value(start),
+            SymbolicExpr.from_value(end),
+        )
+
+    def _op_expand_dims_overrider(self, arg, axis):
+        return SymbolicExpr.create("expand_dims", SymbolicExpr.from_value(arg), axis)
+
+    def _op_broadcast_overrider(self, arg, shape):
+        return SymbolicExpr.create("broadcast", SymbolicExpr.from_value(arg), shape)
+
+    def _op_reduce_sum_overrider(self, input, axis=None, keep_dims=False, **kwargs):
+        return SymbolicExpr.create(
+            "sum", SymbolicExpr.from_value(input), axis, keep_dims
+        )
+
+    def _op_reduce_max_overrider(self, input, axis=None, keep_dims=False, **kwargs):
+        return SymbolicExpr.create(
+            "max", SymbolicExpr.from_value(input), axis, keep_dims
+        )
+
+    def _op_reduce_min_overrider(self, input, axis=None, keep_dims=False, **kwargs):
+        return SymbolicExpr.create(
+            "min", SymbolicExpr.from_value(input), axis, keep_dims
+        )
+
+    def _op_splat_overrider(self, shape, arg):
+        return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))
+
+    def _op_idiv_overrider(self, lhs, rhs):
+        return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
+
+    def _op_rsqrt_overrider(self, arg):
+        return SymbolicExpr.create("rsqrt", SymbolicExpr.from_value(arg))
+
+    def _op_cast_impl_overrider(self, src, dst_type):
+        return SymbolicExpr.create("cast_impl", src, dst_type)
+
+    def _op_reshape_overrider(self, arg, shape, allow_reorder):
+        return SymbolicExpr.create(
+            "reshape",
+            SymbolicExpr.from_value(arg),
+            SymbolicExpr.from_value(shape),
+        )
+
+    def _op_trans_overrider(self, arg, perm=[1, 0]):
+        return SymbolicExpr.create("trans", SymbolicExpr.from_value(arg), perm)
+
+    def _op_join_overrider(self, lhs, rhs):
+        return SymbolicExpr.create(
+            "join",
+            SymbolicExpr.from_value(lhs),
+            SymbolicExpr.from_value(rhs),
+        )
+
+    def _op_fabs_overrider(self, arg):
+        return SymbolicExpr.create("fabs", SymbolicExpr.from_value(arg))
+
+    def _op_ashr_overrider(self, lhs, rhs):
+        return SymbolicExpr.create(
+            "ashr",
+            SymbolicExpr.from_value(lhs),
+            SymbolicExpr.from_value(rhs),
+        )
+
+    def _op_advance_overrider(self, ptr, offsets):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        offset_syms = [SymbolicExpr.from_value(o) for o in offsets]
+        return SymbolicExpr.create("advance", ptr_sym, offset_syms)
+
+    def _op_fp_to_fp_overrider(self, src, dst_type, rounding_mode):
+        return SymbolicExpr.create(
+            "fp_to_fp",
+            SymbolicExpr.from_value(src),
+            dst_type,
+            rounding_mode,
+        )
+
+    def _op_umulhi_overrider(self, lhs, rhs):
+        return SymbolicExpr.create(
+            "umulhi",
+            SymbolicExpr.from_value(lhs),
+            SymbolicExpr.from_value(rhs),
+        )
+
+    def _op_cumsum_overrider(self, input, axis, reverse=False, dtype=None):
+        return SymbolicExpr.create(
+            "cumsum",
+            SymbolicExpr.from_value(input),
+            axis,
+            reverse,
+            dtype,
+        )
+
+    def _op_bitcast_overrider(self, src, dst_type):
+        return SymbolicExpr.create("bitcast", SymbolicExpr.from_value(src), dst_type)
+
+    def _build_op_overrider_map(self) -> dict[type[Op], Callable]:
+        """Return a mapping of shared Op types to their overrider methods."""
+        return {
+            ProgramId: self._op_program_id_overrider,
+            UnaryOp: self._op_unary_op_overrider,
+            BinaryOp: self._op_binary_op_overrider,
+            TernaryOp: self._op_ternary_op_overrider,
+            AddPtr: self._op_addptr_overrider,
+            Dot: self._op_dot_overrider,
+            MakeRange: self._op_make_range_overrider,
+            ExpandDims: self._op_expand_dims_overrider,
+            Broadcast: self._op_broadcast_overrider,
+            ReduceSum: self._op_reduce_sum_overrider,
+            ReduceMax: self._op_reduce_max_overrider,
+            ReduceMin: self._op_reduce_min_overrider,
+            Splat: self._op_splat_overrider,
+            Idiv: self._op_idiv_overrider,
+            Rsqrt: self._op_rsqrt_overrider,
+            CastImpl: self._op_cast_impl_overrider,
+            Reshape: self._op_reshape_overrider,
+            Trans: self._op_trans_overrider,
+            Join: self._op_join_overrider,
+            Fabs: self._op_fabs_overrider,
+            Ashr: self._op_ashr_overrider,
+            Advance: self._op_advance_overrider,
+            FpToFp: self._op_fp_to_fp_overrider,
+            Umulhi: self._op_umulhi_overrider,
+            CumSum: self._op_cumsum_overrider,
+            Bitcast: self._op_bitcast_overrider,
+        }
+
+    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
+        overrider_map = self._build_op_overrider_map()
+        overrider = overrider_map.get(op_type)
+        if overrider is not None:
+            return OpCallbacks(op_overrider=self.lock_fn(overrider))
+        return OpCallbacks()
+
+    # ── For-loop infrastructure ───────────────────────────────────
+
+    def _on_data_dependent_value(self) -> None:
+        """Hook called when a data-dependent value forces concretization.
+
+        Subclasses must override to set their fallback flag.
+        """
+        raise NotImplementedError
+
+    def _should_skip_loop_hooks(self) -> bool:
+        """Return True to skip loop hook processing."""
+        return False
+
+    def _materialize_loop_value(self, expr: Any) -> int:
+        if isinstance(expr, SymbolicExpr):
+            if expr.op == "const":
+                return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+            elif expr.has_op("load"):
+                self._on_data_dependent_value()
+                expr = expr.replace_subtree("load")
+                return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+            else:
+                z3_expr, _ = expr.eval()
+                if isinstance(z3_expr, IntNumRef):
+                    return z3_expr.as_long()
+                self._on_data_dependent_value()
+                expr = expr.replace_subtree()
+                return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+        return int(expr)
+
+    def _wrap_range(
+        self,
+        iterable,
+        _lineno,
+        _range_type,
+        iter_args=None,
+        iter_kwargs=None,
+        _iter_callable=None,
+    ):
+        if self._should_skip_loop_hooks():
+            return None
+        iter_args = tuple(iter_args or ())
+        iter_kwargs = iter_kwargs or {}
+
+        if isinstance(iterable, RangeWrapper):
+            return iterable
+
+        args = tuple(SymbolicExpr.from_value(v) for v in iter_args)
+        if not args and iter_kwargs:
+            start_expr = SymbolicExpr.from_value(iter_kwargs.get("start", 0))
+            stop_expr = SymbolicExpr.from_value(
+                iter_kwargs.get("stop", iter_kwargs.get("end"))
+            )
+            step_expr = SymbolicExpr.from_value(iter_kwargs.get("step", 1))
+            if stop_expr is not None:
+                args = (start_expr, stop_expr, step_expr)
+
+        if not args and (
+            isinstance(iterable, range)
+            or (
+                hasattr(iterable, "start")
+                and hasattr(iterable, "stop")
+                and hasattr(iterable, "step")
+            )
+        ):
+            args = tuple(
+                SymbolicExpr.from_value(getattr(iterable, attr, default))
+                for attr, default in (("start", 0), ("stop", 0), ("step", 1))
+            )
+
+        if not args:
+            return None
+
+        start_expr, stop_expr, step_expr = 0, None, 1
+        if len(args) == 1:
+            stop_expr = args[0]
+        elif len(args) == 2:
+            start_expr, stop_expr = args[0], args[1]
+        else:
+            start_expr, stop_expr, step_expr = args[0], args[1], args[2]
+
+        step = self._materialize_loop_value(step_expr)
+        start = self._materialize_loop_value(start_expr)
+        stop = self._materialize_loop_value(stop_expr)
+
+        concrete_range = range(start, stop, step)
+        length = len(concrete_range)
+
+        return RangeWrapper(
+            concrete_range, length=length, start=start, stop=stop, step=step
+        )
+
+    def _loop_hook_before(self, lineno, iterable):
+        if self._should_skip_loop_hooks():
+            return
+        if not isinstance(iterable, RangeWrapper):
+            return
+
+        idx_z3 = Int(f"loop_i_{lineno}")
+        sym = SymbolicExpr.create("const", idx_z3, tl.int32)
+        idx = tl.tensor(sym, tl.int32)
+        ctx = LoopContext(
+            lineno,
+            iterable.length,
+            idx,
+            idx_z3,
+            start=iterable.start,
+            stop=iterable.stop,
+            step=iterable.step,
+        )
+        sym.loop_ctx = ctx
+        self.loop_stack.append(ctx)
+
+    def _loop_hook_iter_overrider(self, lineno, idx):
+        if self._should_skip_loop_hooks():
+            return idx
+        if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            return self.loop_stack[-1].idx
+        return idx
+
+    def _loop_hook_after(self, lineno: int) -> None:
+        if self._should_skip_loop_hooks():
+            return
+        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
+            return
+        self.loop_stack.pop()
+
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        return ForLoopCallbacks(
+            range_wrapper_factory=self.lock_fn(self._wrap_range),
+            before_loop_callback=self.lock_fn(self._loop_hook_before),
+            loop_iter_overrider=self.lock_fn(self._loop_hook_iter_overrider),
+            after_loop_callback=self.lock_fn(self._loop_hook_after),
+        )
