@@ -142,6 +142,7 @@ class Sanitizer(Client):
     """
 
     NAME = "sanitizer"
+    use_dummy_benchmarker = True
 
     def __new__(cls: type[SanitizerT], *args: Any, **kwargs: Any) -> SanitizerT:
         if cls is Sanitizer:

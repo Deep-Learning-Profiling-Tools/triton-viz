@@ -15,6 +15,11 @@ from typing import Callable, Optional, Union
 launches: list[Launch] = []
 
 
+def dummy_benchmarker(fn, quantiles):
+    fn()
+    return (1.0, 1.0, 1.0)
+
+
 class TraceInterface:
     def __init__(self, client: Union[str, Client]) -> None:
         self.client_manager = ClientManager()
@@ -71,15 +76,15 @@ class TritonTrace(KernelInterface, TraceInterface):
                 return unpack_kernel(source.fn)
             raise TypeError(f"Unsupported runner type: {type(source)}")
 
+        normalized_client = self._normalize_client(client)
+
         if isinstance(runner, Autotuner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
 
             # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
-            def dummy_benchmarker(fn, quantiles):
-                fn()
-                return (1.0, 1.0, 1.0)
-
-            runner._do_bench = dummy_benchmarker
+            # Only apply for symbolic clients (e.g. Sanitizer) that don't need real benchmarks.
+            if normalized_client.use_dummy_benchmarker:
+                runner._do_bench = dummy_benchmarker
             runner.fn = self.interpreted_fn
             self.runner = runner
         elif isinstance(runner, Heuristics):
@@ -104,7 +109,7 @@ class TritonTrace(KernelInterface, TraceInterface):
 
         self.fn = runner
 
-        TraceInterface.__init__(self, client)
+        TraceInterface.__init__(self, normalized_client)
 
         # Preserve common function attributes for compatibility
         # with code that expects to access these attributes on the kernel
@@ -135,6 +140,12 @@ class TritonTrace(KernelInterface, TraceInterface):
             self.src = runner.src
         elif self.jit_fn and hasattr(self.jit_fn, "src"):
             self.src = self.jit_fn.src
+
+    def add_client(self, new_client: Union[str, Client]) -> None:
+        normalized = self._normalize_client(new_client)
+        if normalized.use_dummy_benchmarker and isinstance(self.fn, Autotuner):
+            self.fn._do_bench = dummy_benchmarker
+        super().add_client(normalized)
 
     def run(self, *args, **kwargs):
         with self.client_manager.patch_warmup(self.jit_fn):

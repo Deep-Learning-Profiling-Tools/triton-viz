@@ -21,6 +21,7 @@ from .config import config as cfg
 
 class Client(ABC):
     NAME: ClassVar[str]
+    use_dummy_benchmarker: ClassVar[bool] = False
 
     def __init__(self) -> None:
         # Whether this client needs ASM information from kernel warmup

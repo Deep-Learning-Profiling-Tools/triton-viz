@@ -223,3 +223,40 @@ def test_kernel_cache_autotune_with_dummy_benchmarker():
         assert (
             bench_fn is not None and bench_fn.__name__ == "dummy_benchmarker"
         ), f"Expected dummy_benchmarker, got: {bench_fn}"
+
+
+def test_autotune_no_dummy_benchmarker_for_tracer():
+    """
+    Test that non-symbolic clients (Tracer) do NOT install dummy_benchmarker
+    on autotuned kernels.
+    """
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+            triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
+        ],
+        key=["n_elements"],
+    )
+    @triton.jit
+    def autotune_kernel_no_dummy(
+        x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr
+    ):
+        pid = tl.program_id(axis=0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask)
+        y = tl.load(y_ptr + offsets, mask=mask)
+        output = x + y
+        tl.store(out_ptr + offsets, output, mask=mask)
+
+    traced_kernel = triton_viz.trace(client=Tracer())(autotune_kernel_no_dummy)
+
+    # Verify dummy benchmarker is NOT installed for non-symbolic client
+    assert hasattr(traced_kernel, "runner")
+    assert hasattr(traced_kernel.runner, "_do_bench")
+    bench_fn = traced_kernel.runner._do_bench
+    assert (
+        bench_fn.__name__ != "dummy_benchmarker"
+    ), "Tracer should not install dummy_benchmarker"
