@@ -1,6 +1,11 @@
 import numpy as np
 
-from triton_viz.visualizer.interface import _build_highlight_descriptor
+import triton_viz.visualizer.interface as viz_interface
+from triton_viz.visualizer.interface import (
+    _build_highlight_descriptor,
+    _collect_load_store_program_subsets,
+    _coords_from_offsets,
+)
 
 
 def test_build_highlight_descriptor_strided_grid():
@@ -58,3 +63,91 @@ def test_build_highlight_descriptor_4d_sparse_returns_none():
         ]
     )
     assert _build_highlight_descriptor(coords) is None
+
+
+def test_coords_from_offsets_supports_nd_shapes():
+    """Converts masked byte offsets into N-d coordinates."""
+    shape = (2, 3, 4, 5)
+    coords = np.array(
+        [
+            [1, 2, 3, 4],
+            [0, 1, 0, 2],
+            [1, 0, 2, 1],
+        ],
+        dtype=np.int64,
+    )
+    linear = np.ravel_multi_index(coords.T, shape)
+    offsets = linear * 4
+    masks = np.array([True, True, True], dtype=bool)
+    result = _coords_from_offsets(shape, offsets, masks, "torch.float32")
+    np.testing.assert_array_equal(result, coords)
+
+
+def test_coords_from_offsets_filters_masked_and_oob():
+    """Drops masked-out entries and out-of-bounds accesses."""
+    shape = (2, 2, 2)
+    valid = np.ravel_multi_index(np.array([[1], [0], [1]]), shape)[0]
+    offsets = np.array([valid * 4, 999999, 0], dtype=np.int64)
+    masks = np.array([True, True, False], dtype=bool)
+    result = _coords_from_offsets(shape, offsets, masks, "torch.float32")
+    np.testing.assert_array_equal(result, np.array([[1, 0, 1]], dtype=np.int64))
+
+
+def test_collect_load_store_program_subsets_supports_nd_coords():
+    """Aggregates per-coordinate program sets for N-d global coords."""
+    old_global_data = viz_interface.global_data
+    old_load_maps = viz_interface.load_overall_maps
+    old_store_maps = viz_interface.store_overall_maps
+    try:
+        viz_interface.global_data = {
+            "ops": {
+                "visualization_data": {
+                    "(0,0,0)": [
+                        {
+                            "type": "Load",
+                            "overall_key": "LOAD:ptr",
+                            "time_idx": 0,
+                            "op_index": 0,
+                            "uuid": "u0",
+                        }
+                    ],
+                    "(1,0,0)": [
+                        {
+                            "type": "Load",
+                            "overall_key": "LOAD:ptr",
+                            "time_idx": 0,
+                            "op_index": 0,
+                            "uuid": "u1",
+                        }
+                    ],
+                }
+            }
+        }
+        viz_interface.load_overall_maps = {
+            "LOAD:ptr": {
+                "shape": [2, 2, 2, 2, 2],
+                "tiles": [
+                    {
+                        "uuid": "u0",
+                        "global_coords": [[0, 1, 0, 1, 0], [1, 1, 0, 1, 0]],
+                    },
+                    {
+                        "uuid": "u1",
+                        "global_coords": [[1, 1, 0, 1, 0]],
+                    },
+                ],
+            }
+        }
+        viz_interface.store_overall_maps = {}
+
+        payload = _collect_load_store_program_subsets("Load", "LOAD:ptr", 0, 0)
+        coord_to_count = {
+            tuple(entry[:-1]): int(entry[-1]) for entry in payload["counts"]
+        }
+        assert coord_to_count[(0, 1, 0, 1, 0)] == 1
+        assert coord_to_count[(1, 1, 0, 1, 0)] == 2
+        assert payload["subset_count"] == 2
+    finally:
+        viz_interface.global_data = old_global_data
+        viz_interface.load_overall_maps = old_load_maps
+        viz_interface.store_overall_maps = old_store_maps
