@@ -19,6 +19,7 @@ import {
     canUseWebgl,
     renderWebglWarning,
     positionForTensorCoord,
+    tensorBoundsSizeForShape,
 } from '../utils/three_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { enableDrag } from '../utils/ui_helpers.js';
@@ -102,6 +103,7 @@ type TensorMesh = {
 type TensorGroup = { userData: { mesh: TensorMesh; endpoint?: string }; position: any; children: any[] };
 type VizState = {
     colorizeOn: boolean;
+    editTensorViewOn: boolean;
     payloads: Map<string, PayloadCache>;
     rafId: number | null;
     renderPending: boolean;
@@ -151,6 +153,7 @@ type VizContext = {
     mouse: ThreeVector2;
     legendContainer: HTMLElement | null;
     dimLineGroups: any[];
+    sliceOutlineGroups: any[];
     descriptorDimLineGroups: any[];
     showDimLines: boolean;
     supportsAllPrograms: boolean;
@@ -300,7 +303,12 @@ function isLayoutPreservingView(spec: TensorViewSpec, fullShape: number[]): bool
     return true;
 }
 
+function shouldUseFullLayoutPosition(spec: TensorViewSpec, fullShape: number[]): boolean {
+    return isLayoutPreservingView(spec, fullShape) && spec.hiddenAxes.length > 0;
+}
+
 function computeViewPlacementOffset(spec: TensorViewSpec, fullShape: number[]): Coord3 {
+    if (shouldUseFullLayoutPosition(spec, fullShape)) return [0, 0, 0];
     if (!isLayoutPreservingView(spec, fullShape) || spec.hiddenAxes.length === 0) return [0, 0, 0];
     const displayOrigin = new Array(spec.displaySlots.length).fill(0);
     const fullOrigin = mapDisplayToFullCoords(displayOrigin, spec);
@@ -1065,6 +1073,7 @@ function addAxisDimensionLines(
     const groups: any[] = [];
     const tensorCenter = new THREE.Box3().setFromObject(tensorGroup).getCenter(new THREE.Vector3());
     const entries: Array<{
+        axis: number;
         axisWorld: 'x' | 'y' | 'z';
         extentStart: ThreeVector3;
         extentEnd: ThreeVector3;
@@ -1146,6 +1155,7 @@ function addAxisDimensionLines(
         const color = colorOverride || dimColors[axis] || familyColor || defaultDimColorForAxis(shapeRaw.length, axis);
         const labelCore = `${getAxisLabel(axis)}: ${size}`;
         entries.push({
+            axis,
             axisWorld,
             extentStart,
             extentEnd,
@@ -1158,24 +1168,14 @@ function addAxisDimensionLines(
     entries.forEach((entry) => {
         groupByAxis[entry.axisWorld].push(entry);
     });
-    const majorStep = (CUBE_SIZE + GAP) * 2.1;
-    const minorStep = (CUBE_SIZE + GAP) * 0.55;
-    const tierTolerance = (CUBE_SIZE + GAP) * 0.75;
+    const linearStep = (CUBE_SIZE + GAP) * 1.35;
     const xyCornerDirection = new THREE.Vector3();
     (['x', 'y', 'z'] as const).forEach((axisWorld) => {
         const axisEntries = groupByAxis[axisWorld];
         if (axisEntries.length === 0) return;
-        axisEntries.sort((a, b) => a.span - b.span);
-        const tierSpans: number[] = [];
-        const tierCounts = new Map<number, number>();
-        axisEntries.forEach((entry) => {
-            let tier = tierSpans.findIndex((span) => Math.abs(span - entry.span) <= tierTolerance);
-            if (tier < 0) {
-                tier = tierSpans.length;
-                tierSpans.push(entry.span);
-            }
-            const withinTier = tierCounts.get(tier) || 0;
-            tierCounts.set(tier, withinTier + 1);
+        axisEntries.sort((a, b) => a.axis - b.axis);
+        axisEntries.forEach((entry, lineIdx) => {
+            const reverseIdx = axisEntries.length - 1 - lineIdx;
             const useDiagonal = axisWorld === 'z';
             const directionOrder = useDiagonal ? 1 : 0; // z family uses -45deg basis
             let extensionDirection = extensionDirectionFor(axisWorld, directionOrder, useDiagonal);
@@ -1206,7 +1206,7 @@ function addAxisDimensionLines(
                 axisWorld,
                 entry.color,
                 {
-                    offset: offsetBase + tier * majorStep + withinTier * minorStep,
+                    offset: offsetBase + reverseIdx * linearStep,
                     extensionOffset: 0,
                     extensionLength: (CUBE_SIZE + GAP) * 0.2,
                     textOffset: 0,
@@ -1231,6 +1231,58 @@ function addDimensionLines(scene: ThreeScene, tensorGroup: TensorGroup, dimColor
         new Array(shapeRaw.length).fill(1),
         dimColors,
     );
+}
+
+function createSliceReferenceOutline(shapeRaw: number[], baseColor: ColorInput): any {
+    const size = tensorBoundsSizeForShape(shapeRaw);
+    const color = baseColor instanceof THREE.Color
+        ? baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.45)
+        : new THREE.Color(baseColor || '#cbd5e1').lerp(new THREE.Color('#ffffff'), 0.45);
+    const material = new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.35,
+        depthTest: true,
+        depthWrite: false,
+    });
+    const outline = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+        material,
+    );
+    outline.frustumCulled = false;
+    outline.renderOrder = 1500;
+    return outline;
+}
+
+function buildSliceReferenceOutlines(
+    scene: ThreeScene,
+    tensors: Map<string, TensorGroup>,
+    configByName: Map<string, TensorConfig>,
+): any[] {
+    const groups: any[] = [];
+    tensors.forEach((tensorGroup, name) => {
+        const cfg = configByName.get(name);
+        if (!cfg) return;
+        const shape = normalizeViewShape(cfg.shape || []);
+        const outline = createSliceReferenceOutline(shape, tensorGroup.userData.mesh.userData.color_base || '#cbd5e1');
+        const [bx = 0, by = 0, bz = 0] = cfg.position || [0, 0, 0];
+        outline.position.set(bx, by, bz);
+        scene.add(outline);
+        groups.push(outline);
+    });
+    return groups;
+}
+
+function clearSliceReferenceOutlines(ctx: VizContext): void {
+    ctx.sliceOutlineGroups.forEach((group) => {
+        ctx.scene.remove(group);
+        const geometry = group?.geometry;
+        const material = group?.material;
+        if (geometry?.dispose) geometry.dispose();
+        if (Array.isArray(material)) material.forEach((m: any) => m?.dispose?.());
+        else if (material?.dispose) material.dispose();
+    });
+    ctx.sliceOutlineGroups = [];
 }
 
 function getDescriptorSelectionBounds(mesh: TensorMesh, descriptor: DescriptorHighlight): { min: ThreeVector3; max: ThreeVector3 } {
@@ -1494,6 +1546,7 @@ export function createTensorVisualization(
         configs.forEach(cfg => {
             const shape = normalizeViewShape(cfg.shape || []);
             const spec = initialTensorViews.get(cfg.name) || buildTensorViewSpec(shape);
+            const useFullLayoutPosition = shouldUseFullLayoutPosition(spec, shape);
             const group = createTensor(
                 spec.displayShape,
                 null,
@@ -1502,7 +1555,13 @@ export function createTensorVisualization(
                 cubeGeometry,
                 edgesGeometry,
                 lineMaterial,
-                { mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec) },
+                {
+                    mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec),
+                    ...(useFullLayoutPosition ? {
+                        mapDisplayCoordToPosition: (coord: TensorCoord) => mapDisplayToFullCoords(coord, spec),
+                        positionShape: shape,
+                    } : {}),
+                },
             ) as TensorGroup;
             const [bx = 0, by = 0, bz = 0] = cfg.position || [0, 0, 0];
             const [ox, oy, oz] = computeViewPlacementOffset(spec, shape);
@@ -1524,6 +1583,7 @@ export function createTensorVisualization(
                 dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
             });
         }
+        const sliceOutlineGroups = buildSliceReferenceOutlines(scene, tensors, configByNameMap);
         let cameraCenter = new THREE.Vector3(0, 0, 0);
         let fitRadius = 0;
         const bounds = new THREE.Box3();
@@ -1537,6 +1597,10 @@ export function createTensorVisualization(
         if (showDimLines) {
             dimLineGroups.forEach((group) => bounds.union(new THREE.Box3().setFromObject(group)));
             bounds.expandByScalar(1.0);
+            hasBounds = true;
+        }
+        if (sliceOutlineGroups.length > 0) {
+            sliceOutlineGroups.forEach((group) => bounds.union(new THREE.Box3().setFromObject(group)));
             hasBounds = true;
         }
         if (layoutBounds) {
@@ -1567,6 +1631,7 @@ export function createTensorVisualization(
         };
         const state: VizState = {
             colorizeOn: !!initialToggles.colorize,
+            editTensorViewOn: !!initialToggles.editTensorView,
             payloads: new Map(),
             rafId: null,
             renderPending: false,
@@ -1606,6 +1671,7 @@ export function createTensorVisualization(
             mouse: new THREE.Vector2(),
             legendContainer: null,
             dimLineGroups,
+            sliceOutlineGroups,
             descriptorDimLineGroups: [],
             showDimLines,
             supportsAllPrograms,
@@ -1765,6 +1831,7 @@ export function createTensorVisualization(
             ctx.destroyLegends();
             ctx.dimLineGroups.forEach((group) => scene.remove(group));
             ctx.dimLineGroups = [];
+            clearSliceReferenceOutlines(ctx);
             clearDescriptorDimensionLines(ctx);
             if (stage.parentElement) stage.parentElement.removeChild(stage);
             if (sideMenu.parentElement) sideMenu.parentElement.removeChild(sideMenu);
@@ -1810,6 +1877,7 @@ export function createTensorVisualization(
             colorize: state.colorizeOn,
             histogram: vizCache.histogramUI.overlay.style.display === 'block',
             allPrograms: state.allProgramsOn,
+            editTensorView: state.editTensorViewOn,
         });
     };
     state.payloads.clear();
@@ -1869,12 +1937,19 @@ export function createTensorVisualization(
             vizCache.dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
         });
     };
+    const rebuildSliceReferenceOutlines = (): void => {
+        clearSliceReferenceOutlines(vizCache);
+        vizCache.sliceOutlineGroups.push(
+            ...buildSliceReferenceOutlines(scene, tensors, configByName),
+        );
+    };
     const rebuildTensorFromView = (name: string): void => {
         const cfg = configByName.get(name);
         const oldGroup = tensors.get(name);
         if (!cfg || !oldGroup) return;
         const shape = normalizeViewShape(cfg.shape || []);
         const spec = state.tensorViews.get(name) || buildTensorViewSpec(shape);
+        const useFullLayoutPosition = shouldUseFullLayoutPosition(spec, shape);
         const nextGroup = createTensor(
             spec.displayShape,
             null,
@@ -1883,7 +1958,13 @@ export function createTensorVisualization(
             cubeGeometry,
             edgesGeometry,
             vizCache.lineMaterial,
-            { mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec) },
+            {
+                mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec),
+                ...(useFullLayoutPosition ? {
+                    mapDisplayCoordToPosition: (coord: TensorCoord) => mapDisplayToFullCoords(coord, spec),
+                    positionShape: shape,
+                } : {}),
+            },
         ) as TensorGroup;
         const [bx = 0, by = 0, bz = 0] = cfg.position || [0, 0, 0];
         const [ox, oy, oz] = computeViewPlacementOffset(spec, shape);
@@ -1899,6 +1980,7 @@ export function createTensorVisualization(
     };
     const rebuildAllTensorsFromView = (): void => {
         Array.from(tensors.keys()).forEach((name) => rebuildTensorFromView(name));
+        rebuildSliceReferenceOutlines();
         rebuildDimensionLines();
         renderShapeLegend();
         restoreTensorColors(vizCache);
@@ -1947,6 +2029,11 @@ export function createTensorVisualization(
             vizCache.tensorViewControls = panel;
         }
         const root = vizCache.tensorViewControls as HTMLElement;
+        if (!state.editTensorViewOn) {
+            root.style.display = 'none';
+            return;
+        }
+        root.style.display = '';
         root.innerHTML = '';
         Array.from(configByName.keys()).sort().forEach((name) => {
             const cfg = configByName.get(name);
@@ -2211,6 +2298,12 @@ export function createTensorVisualization(
                 }
                 return ensureProgramData();
             } : null,
+            toggleEditTensorView: (): boolean => {
+                state.editTensorViewOn = !state.editTensorViewOn;
+                renderTensorViewControls();
+                requestRender();
+                return state.editTensorViewOn;
+            },
         });
     }
     syncOpControlState();

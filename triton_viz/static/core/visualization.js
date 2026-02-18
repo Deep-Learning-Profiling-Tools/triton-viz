@@ -29,6 +29,7 @@ const controls = {
     opColorizeBtn: null,
     opHistogramBtn: null,
     opAllProgramsBtn: null,
+    opEditTensorViewBtn: null,
 };
 let controlToastEl = null;
 let controlToastTimer = null;
@@ -84,6 +85,10 @@ function updateOpControls(state = null) {
         controls.opAllProgramsBtn.disabled = !handlers || !handlers.toggleAllPrograms;
         updateToggleLabel(controls.opAllProgramsBtn, 'All Program IDs', !!nextState.allPrograms);
     }
+    if (controls.opEditTensorViewBtn) {
+        controls.opEditTensorViewBtn.disabled = !handlers || !handlers.toggleEditTensorView;
+        updateToggleLabel(controls.opEditTensorViewBtn, 'Edit Tensor View', !!nextState.editTensorView);
+    }
 }
 function applyToggleResult(result, key) {
     if (result && typeof result.then === 'function') {
@@ -117,6 +122,7 @@ function initializeApp() {
     controls.opColorizeBtn = document.getElementById('btn-op-colorize');
     controls.opHistogramBtn = document.getElementById('btn-op-histogram');
     controls.opAllProgramsBtn = document.getElementById('btn-op-all-programs');
+    controls.opEditTensorViewBtn = document.getElementById('btn-op-edit-tensor-view');
     if (!containerElement) {
         console.error('Essential visualization elements are missing.');
         return;
@@ -256,6 +262,15 @@ function setupControlEvents() {
                 return;
             logAction('toggle_all_programs', { next: !getState().toggles.allPrograms });
             applyToggleResult(handler(), 'allPrograms');
+        });
+    }
+    if (controls.opEditTensorViewBtn) {
+        appDisposer.listen(controls.opEditTensorViewBtn, 'click', () => {
+            const handler = opControls.handlers?.toggleEditTensorView;
+            if (!handler)
+                return;
+            logAction('toggle_edit_tensor_view', { next: !getState().toggles.editTensorView });
+            applyToggleResult(handler(), 'editTensorView');
         });
     }
 }

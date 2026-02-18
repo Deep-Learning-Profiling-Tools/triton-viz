@@ -17,6 +17,8 @@ type TensorCoordNd = number[];
 type Extent3 = { x: number; y: number; z: number };
 type TensorCreateOptions = {
     mapDisplayCoordToFull?: (coord: TensorCoordNd) => TensorCoordNd;
+    mapDisplayCoordToPosition?: (coord: TensorCoordNd) => TensorCoordNd;
+    positionShape?: TensorShape;
 };
 const OUTER_LEVEL_GAP_SCALE = 5;
 
@@ -116,6 +118,7 @@ export function createTensor(
     console.log(`Creating ${tensorName} tensor:`, shape, coords);
     const tensor = new THREE.Group();
     const normalizedShape = normalizeTensorShape(shape);
+    const normalizedPositionShape = normalizeTensorShape(options.positionShape || normalizedShape);
     const { depth, height, width } = shapeDepthHeightWidth(normalizedShape);
 
     const isGlobal = tensorName === 'Global';
@@ -176,7 +179,10 @@ export function createTensor(
                 ? options.mapDisplayCoordToFull(displayCoord.slice())
                 : displayCoord.slice();
             const legacyCoord = legacyCoordFromDisplay(displayCoord);
-            const position = positionForDisplayCoord(displayCoord, normalizedShape);
+            const positionCoord = options.mapDisplayCoordToPosition
+                ? options.mapDisplayCoordToPosition(displayCoord.slice())
+                : displayCoord.slice();
+            const position = positionForDisplayCoord(positionCoord, normalizedPositionShape);
             matrix.setPosition(position.x, position.y, position.z);
             mesh.setMatrixAt(idx, matrix);
             mesh.setColorAt(idx, highlightedIndices.has(idx) ? COLOR_SLICE : baseColor);
@@ -356,6 +362,12 @@ function recursiveExtent(shape: TensorShape, cellExtent: Extent3, level: number)
     const innerShape = shape.slice(split);
     const innerExtent = recursiveExtent(innerShape, cellExtent, level);
     return recursiveExtent(outerShape, innerExtent, level + 1);
+}
+
+export function tensorBoundsSizeForShape(shape: TensorShape): ThreeVector3 {
+    const normalizedShape = normalizeTensorShape(shape);
+    const extent = recursiveExtent(normalizedShape, { x: CUBE_SIZE, y: CUBE_SIZE, z: CUBE_SIZE }, 0);
+    return new THREE.Vector3(extent.x, extent.y, extent.z);
 }
 
 function levelGap(level: number): number {

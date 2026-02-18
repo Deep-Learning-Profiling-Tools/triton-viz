@@ -76,6 +76,7 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry, _ed
     console.log(`Creating ${tensorName} tensor:`, shape, coords);
     const tensor = new THREE.Group();
     const normalizedShape = normalizeTensorShape(shape);
+    const normalizedPositionShape = normalizeTensorShape(options.positionShape || normalizedShape);
     const { depth, height, width } = shapeDepthHeightWidth(normalizedShape);
     const isGlobal = tensorName === 'Global';
     const isDense = isGlobal || !coords; // Treat as dense if named Global or no coords provided
@@ -140,7 +141,10 @@ export function createTensor(shape, coords, color, tensorName, cubeGeometry, _ed
                 ? options.mapDisplayCoordToFull(displayCoord.slice())
                 : displayCoord.slice();
             const legacyCoord = legacyCoordFromDisplay(displayCoord);
-            const position = positionForDisplayCoord(displayCoord, normalizedShape);
+            const positionCoord = options.mapDisplayCoordToPosition
+                ? options.mapDisplayCoordToPosition(displayCoord.slice())
+                : displayCoord.slice();
+            const position = positionForDisplayCoord(positionCoord, normalizedPositionShape);
             matrix.setPosition(position.x, position.y, position.z);
             mesh.setMatrixAt(idx, matrix);
             mesh.setColorAt(idx, highlightedIndices.has(idx) ? COLOR_SLICE : baseColor);
@@ -301,6 +305,11 @@ function recursiveExtent(shape, cellExtent, level) {
     const innerShape = shape.slice(split);
     const innerExtent = recursiveExtent(innerShape, cellExtent, level);
     return recursiveExtent(outerShape, innerExtent, level + 1);
+}
+export function tensorBoundsSizeForShape(shape) {
+    const normalizedShape = normalizeTensorShape(shape);
+    const extent = recursiveExtent(normalizedShape, { x: CUBE_SIZE, y: CUBE_SIZE, z: CUBE_SIZE }, 0);
+    return new THREE.Vector3(extent.x, extent.y, extent.z);
 }
 function levelGap(level) {
     return GAP * Math.pow(OUTER_LEVEL_GAP_SCALE, Math.max(0, level));

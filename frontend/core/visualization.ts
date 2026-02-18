@@ -10,8 +10,9 @@ type OpControlHandlers = {
     toggleColorize?: () => boolean | Promise<boolean>;
     toggleHistogram?: () => boolean | Promise<boolean>;
     toggleAllPrograms?: (() => boolean | Promise<boolean>) | null;
+    toggleEditTensorView?: () => boolean | Promise<boolean>;
 };
-type ToggleKey = 'colorize' | 'histogram' | 'allPrograms' | 'showCode';
+type ToggleKey = 'colorize' | 'histogram' | 'allPrograms' | 'showCode' | 'editTensorView';
 
 let globalData: { ops?: { visualization_data?: VisualizationData } } | null = null;
 let visualizationData: VisualizationData | null = null;
@@ -40,6 +41,7 @@ const controls = {
     opColorizeBtn: null as HTMLButtonElement | null,
     opHistogramBtn: null as HTMLButtonElement | null,
     opAllProgramsBtn: null as HTMLButtonElement | null,
+    opEditTensorViewBtn: null as HTMLButtonElement | null,
 };
 
 let controlToastEl: HTMLDivElement | null = null;
@@ -95,6 +97,10 @@ function updateOpControls(state: ReturnType<typeof getState>['toggles'] | null =
         controls.opAllProgramsBtn.disabled = !handlers || !handlers.toggleAllPrograms;
         updateToggleLabel(controls.opAllProgramsBtn, 'All Program IDs', !!nextState.allPrograms);
     }
+    if (controls.opEditTensorViewBtn) {
+        controls.opEditTensorViewBtn.disabled = !handlers || !handlers.toggleEditTensorView;
+        updateToggleLabel(controls.opEditTensorViewBtn, 'Edit Tensor View', !!nextState.editTensorView);
+    }
 }
 
 function applyToggleResult(result: boolean | Promise<boolean>, key: ToggleKey): void {
@@ -129,6 +135,7 @@ function initializeApp(): void {
     controls.opColorizeBtn = document.getElementById('btn-op-colorize') as HTMLButtonElement | null;
     controls.opHistogramBtn = document.getElementById('btn-op-histogram') as HTMLButtonElement | null;
     controls.opAllProgramsBtn = document.getElementById('btn-op-all-programs') as HTMLButtonElement | null;
+    controls.opEditTensorViewBtn = document.getElementById('btn-op-edit-tensor-view') as HTMLButtonElement | null;
 
     if (!containerElement) {
         console.error('Essential visualization elements are missing.');
@@ -266,6 +273,15 @@ function setupControlEvents(): void {
             if (!handler) return;
             logAction('toggle_all_programs', { next: !getState().toggles.allPrograms });
             applyToggleResult(handler(), 'allPrograms');
+        });
+    }
+
+    if (controls.opEditTensorViewBtn) {
+        appDisposer.listen(controls.opEditTensorViewBtn, 'click', () => {
+            const handler = opControls.handlers?.toggleEditTensorView;
+            if (!handler) return;
+            logAction('toggle_edit_tensor_view', { next: !getState().toggles.editTensorView });
+            applyToggleResult(handler(), 'editTensorView');
         });
     }
 }
