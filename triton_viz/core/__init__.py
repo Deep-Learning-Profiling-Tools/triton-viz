@@ -1,4 +1,4 @@
-from .trace import trace, trace_source, clear
+from .trace import trace, clear
 from .data import (
     Op,
     ProgramId,
@@ -30,7 +30,6 @@ from .masked_load_store import masked_load, masked_store
 
 __all__ = [
     "trace",
-    "trace_source",
     "clear",
     "Op",
     "ProgramId",
