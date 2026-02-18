@@ -1,16 +1,14 @@
 import torch
 import triton
 import triton.language as tl
-
 import triton_viz
-from triton_viz.clients import Tracer
 
 
 BLOCK = 1024
 SHAPE = (2, 3, 4, 3, 4, 2, 4, 2, 3)
 
 
-@triton_viz.trace(client=Tracer())
+@triton_viz.trace("tracer")
 @triton.jit
 def copy_9d_kernel(
     x_ptr,
