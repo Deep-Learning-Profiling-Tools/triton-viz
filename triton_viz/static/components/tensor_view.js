@@ -2,7 +2,7 @@ import { createCadDimension, createShapeLegend, defaultAxisColor } from '../util
 import { clamp01, getHue, hslToRgb } from '../utils/colormap.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
-import { setupScene, setupGeometries, createTensor, setupCamera, fitCameraToBounds, setupEventListeners, cameraControls, CUBE_SIZE, GAP, COLOR_HOVER, updateTensorHighlights, canUseWebgl, renderWebglWarning, } from '../utils/three_utils.js';
+import { setupScene, setupGeometries, createTensor, setupCamera, fitCameraToBounds, setupEventListeners, cameraControls, CUBE_SIZE, GAP, COLOR_HOVER, updateTensorHighlights, canUseWebgl, renderWebglWarning, positionForTensorCoord, } from '../utils/three_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { getApiBase, postJson } from '../core/api.js';
 import { getState } from '../core/state.js';
@@ -123,6 +123,47 @@ function mapDisplayToFullCoords(displayCoord, spec) {
         full[axis] = Number(displayCoord[displayAxis] ?? 0);
     });
     return full;
+}
+function isLayoutPreservingView(spec, fullShape) {
+    if (spec.displaySlots.length !== fullShape.length)
+        return false;
+    for (let axis = 0; axis < fullShape.length; axis += 1) {
+        const slot = spec.displaySlots[axis];
+        if (slot !== null && slot !== axis)
+            return false;
+    }
+    return true;
+}
+function computeViewPlacementOffset(spec, fullShape) {
+    if (!isLayoutPreservingView(spec, fullShape) || spec.hiddenAxes.length === 0)
+        return [0, 0, 0];
+    const displayOrigin = new Array(spec.displaySlots.length).fill(0);
+    const fullOrigin = mapDisplayToFullCoords(displayOrigin, spec);
+    const displayPos = positionForTensorCoord(displayOrigin, spec.displayShape);
+    const fullPos = positionForTensorCoord(fullOrigin, fullShape);
+    return [
+        fullPos.x - displayPos.x,
+        fullPos.y - displayPos.y,
+        fullPos.z - displayPos.z,
+    ];
+}
+function buildTensorViewPreview(spec) {
+    const rank = spec.axisLabels.length;
+    const hiddenSet = new Set(spec.hiddenAxes);
+    const slices = Array.from({ length: rank }, (_, axis) => (hiddenSet.has(axis) ? String(spec.hiddenIndices[axis] ?? 0) : ':'));
+    let expr = `tensor[${slices.join(', ')}]`;
+    const keptAxes = Array.from({ length: rank }, (_, axis) => axis).filter((axis) => !hiddenSet.has(axis));
+    const desiredAxes = spec.displaySlots.filter((axis) => axis !== null);
+    if (desiredAxes.length > 1) {
+        const permute = desiredAxes.map((axis) => keptAxes.indexOf(axis));
+        const isIdentity = permute.every((idx, i) => idx === i);
+        if (!isIdentity)
+            expr += `.permute(${permute.join(', ')})`;
+    }
+    if (spec.displaySlots.some((axis) => axis === null)) {
+        expr += `.reshape(${spec.displayShape.join(', ')})`;
+    }
+    return expr;
 }
 function arraysEqual(a = [], b = []) {
     if (a.length !== b.length)
@@ -886,7 +927,7 @@ function addAxisDimensionLines(scene, tensorGroup, axisSizes, axisStarts, axisSt
         const familyPos = Math.max(0, family.indexOf(axis));
         const familyColor = colorForAxisFamily(targetWorldKey, familyPos, family.length);
         const color = colorOverride || dimColors[axis] || familyColor || defaultDimColorForAxis(shapeRaw.length, axis);
-        const labelCore = shapeRaw.length > 3 || labelPrefix ? `${getAxisLabel(axis)}=${size}` : `${size}`;
+        const labelCore = `${getAxisLabel(axis)}: ${size}`;
         entries.push({
             axisWorld,
             extentStart,
@@ -947,6 +988,7 @@ function addAxisDimensionLines(scene, tensorGroup, axisSizes, axisStarts, axisSt
                 offset: offsetBase + tier * majorStep + withinTier * minorStep,
                 extensionOffset: 0,
                 extensionLength: (CUBE_SIZE + GAP) * 0.2,
+                textOffset: 0,
                 extensionDirection,
                 opacity: opacity ?? 0.9,
             }));
@@ -1181,9 +1223,12 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         });
         const tensors = new Map();
         configs.forEach(cfg => {
-            const spec = initialTensorViews.get(cfg.name) || buildTensorViewSpec(normalizeViewShape(cfg.shape || []));
+            const shape = normalizeViewShape(cfg.shape || []);
+            const spec = initialTensorViews.get(cfg.name) || buildTensorViewSpec(shape);
             const group = createTensor(spec.displayShape, null, cfg.color, cfg.name, cubeGeometry, edgesGeometry, lineMaterial, { mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec) });
-            group.position.set(...(cfg.position || [0, 0, 0]));
+            const [bx = 0, by = 0, bz = 0] = cfg.position || [0, 0, 0];
+            const [ox, oy, oz] = computeViewPlacementOffset(spec, shape);
+            group.position.set(bx + ox, by + oy, bz + oz);
             if (cfg.endpoint) {
                 group.userData.endpoint = cfg.endpoint;
             }
@@ -1193,13 +1238,6 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             scene.add(group);
             tensors.set(cfg.name, group);
         });
-        if (layoutBounds) {
-            const depth = layoutBounds.depth ?? CUBE_SIZE;
-            const layoutBox = new THREE.Mesh(new THREE.BoxGeometry(layoutBounds.width, layoutBounds.height, depth), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }));
-            const center = layoutBounds.center ?? [0, 0, 0];
-            layoutBox.position.set(center[0], center[1], center[2] ?? 0);
-            scene.add(layoutBox);
-        }
         const hoverOutline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05)), new THREE.LineBasicMaterial({ color: COLOR_HOVER }));
         hoverOutline.visible = false;
         scene.add(hoverOutline);
@@ -1314,6 +1352,9 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 ctx.requestRender();
             } });
         };
+        const handleTextSync = () => { ctx.requestRender(); };
+        window.addEventListener('triton-viz-text-sync', handleTextSync);
+        disposer.add(() => window.removeEventListener('triton-viz-text-sync', handleTextSync));
         let lastWidth = 0;
         let lastHeight = 0;
         const resizeRenderer = () => {
@@ -1556,7 +1597,9 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         const shape = normalizeViewShape(cfg.shape || []);
         const spec = state.tensorViews.get(name) || buildTensorViewSpec(shape);
         const nextGroup = createTensor(spec.displayShape, null, oldGroup.userData.mesh.userData.color_base || cfg.color, name, cubeGeometry, edgesGeometry, vizCache.lineMaterial, { mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec) });
-        nextGroup.position.copy(oldGroup.position);
+        const [bx = 0, by = 0, bz = 0] = cfg.position || [0, 0, 0];
+        const [ox, oy, oz] = computeViewPlacementOffset(spec, shape);
+        nextGroup.position.set(bx + ox, by + oy, bz + oz);
         const endpoint = oldGroup.userData.endpoint || cfg.endpoint;
         if (endpoint)
             nextGroup.userData.endpoint = endpoint;
@@ -1656,6 +1699,10 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             visibleRow.appendChild(visibleLabel);
             visibleRow.appendChild(visibleInput);
             section.appendChild(visibleRow);
+            const preview = document.createElement('div');
+            preview.className = 'viz-ndim-preview';
+            preview.textContent = buildTensorViewPreview(spec);
+            section.appendChild(preview);
             if (spec.hiddenAxes.length === 0) {
                 const empty = document.createElement('div');
                 empty.className = 'viz-ndim-hint';
@@ -1689,12 +1736,15 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                     const nextValue = Math.min(max, Math.max(0, Number.isFinite(parsed) ? Math.round(parsed) : 0));
                     const hiddenIndices = currentSpec.hiddenIndices.slice();
                     hiddenIndices[axis] = nextValue;
-                    state.tensorViews.set(name, buildTensorViewSpec(shape, currentSpec.visibleText, hiddenIndices));
+                    const nextSpec = buildTensorViewSpec(shape, currentSpec.visibleText, hiddenIndices);
+                    state.tensorViews.set(name, nextSpec);
                     slider.value = String(nextValue);
                     value.value = String(nextValue);
+                    preview.textContent = buildTensorViewPreview(nextSpec);
                     rebuildAllTensorsFromView();
                 };
                 slider.addEventListener('input', () => applyAxisValue(slider.value));
+                value.addEventListener('input', () => applyAxisValue(value.value));
                 value.addEventListener('change', () => applyAxisValue(value.value));
                 row.appendChild(label);
                 row.appendChild(slider);

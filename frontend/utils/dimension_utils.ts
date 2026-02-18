@@ -1,5 +1,7 @@
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import { Text } from 'https://esm.sh/troika-three-text@0.52.4?deps=three@0.155.0';
+// @ts-ignore: remote esm loader module has no local type declarations
+import { FontLoader } from 'https://esm.sh/three@0.155.0/examples/jsm/loaders/FontLoader.js';
 
 type ThreeScene = any;
 type ThreeVector3 = any;
@@ -15,6 +17,7 @@ type VectorTextOptions = {
     depthTest?: boolean;
     strokeWidth?: number;
     strokeColor?: number | string;
+    onSync?: () => void;
 };
 
 type CadDimensionOptions = {
@@ -30,6 +33,93 @@ type CadDimensionOptions = {
     opacity?: number;
 };
 
+const DIMENSION_FONT_URL = 'https://unpkg.com/three@0.155.0/examples/fonts/helvetiker_bold.typeface.json';
+let cachedDimensionFont: any = null;
+let dimensionFontPromise: Promise<any> | null = null;
+
+function ensureDimensionFont(): Promise<any> {
+    if (cachedDimensionFont) return Promise.resolve(cachedDimensionFont);
+    if (dimensionFontPromise) return dimensionFontPromise;
+    const loader = new FontLoader();
+    dimensionFontPromise = fetch(DIMENSION_FONT_URL)
+        .then((resp) => resp.json())
+        .then((json) => {
+            cachedDimensionFont = loader.parse(json as any);
+            return cachedDimensionFont;
+        })
+        .catch(() => null);
+    return dimensionFontPromise;
+}
+
+function createDimensionLabelSprite(text: string, color: ColorInput, worldHeight = 0.19333333333333333): any {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const fontPx = 220;
+    const padX = 42;
+    const padY = 30;
+    ctx.font = `700 ${fontPx}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+    const textWidth = Math.ceil(ctx.measureText(text).width);
+    canvas.width = Math.max(256, textWidth + padX * 2);
+    canvas.height = Math.max(192, fontPx + padY * 2);
+    ctx.font = `700 ${fontPx}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 26;
+    ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+    ctx.fillStyle = '#ffffff';
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    ctx.strokeText(text, cx, cy);
+    ctx.fillText(text, cx, cy);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+    });
+    const sprite = new THREE.Sprite(material);
+    const aspect = canvas.width / canvas.height;
+    const height = Math.max(0.4, worldHeight);
+    sprite.scale.set(height * aspect, height, 1);
+    sprite.frustumCulled = false;
+    sprite.renderOrder = 9999;
+    return sprite;
+}
+
+function createDimensionLabelShapeMesh(text: string, color: ColorInput, worldHeight = 0.19333333333333333): any {
+    if (!cachedDimensionFont) return null;
+    const shapes = cachedDimensionFont.generateShapes(text, worldHeight);
+    if (!shapes || shapes.length === 0) return null;
+    const geometry = new THREE.ShapeGeometry(shapes);
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox;
+    if (bbox) {
+        const cx = (bbox.min.x + bbox.max.x) / 2;
+        const cy = (bbox.min.y + bbox.max.y) / 2;
+        geometry.translate(-cx, -cy, 0);
+    }
+    const material = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        side: THREE.DoubleSide,
+        depthTest: false,
+        depthWrite: false,
+        transparent: true,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 10000;
+    mesh.onBeforeRender = function (_renderer: any, _scene: any, camera: any) {
+        this.quaternion.copy(camera.quaternion);
+    };
+    return mesh;
+}
+
 export function createVectorText(
     text: string,
     color: ColorInput,
@@ -40,7 +130,8 @@ export function createVectorText(
         billboard = true,
         depthTest = false,
         strokeWidth = 0,
-        strokeColor = 0x000000
+        strokeColor = 0x000000,
+        onSync,
     } = options;
 
     const textMesh = new (Text as any)();
@@ -52,12 +143,16 @@ export function createVectorText(
     textMesh.strokeWidth = strokeWidth;
     textMesh.strokeColor = strokeColor;
 
-    // troika-three-text creates its material internally; we can override properties after first sync or via material property
-    if (depthTest === false) {
-        textMesh.material.depthTest = false;
-        textMesh.material.depthWrite = false;
-    }
-    textMesh.material.transparent = true;
+    const applyMaterialSettings = (): void => {
+        const material = textMesh.material;
+        if (!material) return;
+        if (depthTest === false) {
+            material.depthTest = false;
+            material.depthWrite = false;
+        }
+        material.transparent = true;
+    };
+    applyMaterialSettings();
 
     if (billboard) {
         textMesh.onBeforeRender = function (_renderer: any, _scene: any, camera: any) {
@@ -65,7 +160,13 @@ export function createVectorText(
         };
     }
 
-    textMesh.sync();
+    textMesh.sync(() => {
+        applyMaterialSettings();
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('triton-viz-text-sync'));
+        }
+        onSync?.();
+    });
     return textMesh;
 }
 
@@ -83,12 +184,9 @@ export function createCadDimension(
         extensionLength = 0.08,
         extensionOffset = 0.1,
         extensionDirection,
-        arrowSize = 0.15,
-        arrowWidth = 0.08,
         textOffset = 0.25,
-        flipThreshold = 1.0,
         lineWidth = 3,
-        opacity = 0.8
+        opacity = 0.8,
     } = options;
 
     const group = new THREE.Group();
@@ -101,12 +199,7 @@ export function createCadDimension(
 
     const dir = new THREE.Vector3().subVectors(end, start);
     const length = dir.length();
-    const normalizedDir = dir.clone().normalize();
-
-    // Arrow flipping logic: if the distance is too short, flip arrows to outside
-    const isFlipped = length < flipThreshold;
-
-    console.log(`[Dimension] Creating ${axis}-axis dimension for "${label}". distance=${length.toFixed(3)}, flipped=${isFlipped}`);
+    console.log(`[Dimension] Creating ${axis}-axis dimension for "${label}". distance=${length.toFixed(3)}`);
 
     // determine extension direction (perpendicular to normalizedDir)
     let extDir = extensionDirection
@@ -132,39 +225,28 @@ export function createCadDimension(
     // Extension lines
     group.add(createLine([p1_start, p1_end], material));
     group.add(createLine([p2_start, p2_end], material));
-
-    // Arrowheads
-    if (isFlipped) {
-        // Flipped case: arrowheads at outer points, pointing inward towards extension lines.
-        const arrow1_outer = d1.clone().sub(normalizedDir.clone().multiplyScalar(arrowSize));
-        const arrow2_outer = d2.clone().add(normalizedDir.clone().multiplyScalar(arrowSize));
-
-        // Use the outer points as tips, pointing towards the extension lines (normalizedDir for d1, -normalizedDir for d2)
-        group.add(createArrowhead(arrow1_outer, normalizedDir, arrowSize, arrowWidth, material));
-        group.add(createArrowhead(arrow2_outer, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
-
-        // Main dimension line stays between the extension lines per spec
-        group.add(createLine([d1, d2], material));
-    } else {
-        // Points inside, pointing out (towards the extension lines)
-        group.add(createArrowhead(d1, normalizedDir.clone().negate(), arrowSize, arrowWidth, material));
-        group.add(createArrowhead(d2, normalizedDir, arrowSize, arrowWidth, material));
-        group.add(createLine([d1, d2], material));
-    }
+    group.add(createLine([d1, d2], material));
 
     // Label
     const midPoint = new THREE.Vector3().addVectors(d1, d2).multiplyScalar(0.5);
     // Position text very close to the line (minimal offset)
     const labelPos = midPoint.clone().add(extDir.clone().multiplyScalar(textOffset * 0.5));
-    const vectorText = createVectorText(label, color, {
-        fontSize: 0.35,
-        depthTest: false,
-        strokeWidth: 0.04,
-        strokeColor: '#000'
+    const fallbackSprite = createDimensionLabelSprite(label, color, 0.17333333333333334);
+    if (fallbackSprite) {
+        fallbackSprite.position.copy(labelPos);
+        group.add(fallbackSprite);
+    }
+    ensureDimensionFont().then((font) => {
+        if (!font) return;
+        const shapeMesh = createDimensionLabelShapeMesh(label, color, 0.17333333333333334);
+        if (!shapeMesh) return;
+        shapeMesh.position.copy(labelPos);
+        group.add(shapeMesh);
+        if (fallbackSprite) fallbackSprite.visible = false;
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('triton-viz-text-sync'));
+        }
     });
-    vectorText.position.copy(labelPos);
-    vectorText.renderOrder = 100; // Ensure it's rendered on top
-    group.add(vectorText);
 
     scene.add(group);
     return group;
@@ -181,32 +263,6 @@ export function defaultAxisColor(axis: number): string {
 function createLine(points: ThreeVector3[], material: ThreeLineBasicMaterial): ThreeLine {
     const geometry = new THREE.BufferGeometry().setFromPoints(points);
     return new THREE.Line(geometry, material);
-}
-
-function createArrowhead(
-    tip: ThreeVector3,
-    direction: ThreeVector3,
-    size: number,
-    width: number,
-    material: ThreeLineBasicMaterial,
-): ThreeGroup {
-    const group = new THREE.Group();
-    const side = new THREE.Vector3();
-    if (Math.abs(direction.x) > 0.5) {
-        side.set(0, 1, 0);
-    } else {
-        side.set(1, 0, 0);
-    }
-    const perp = new THREE.Vector3().crossVectors(direction, side).normalize().multiplyScalar(width);
-
-    const p1 = tip.clone().sub(direction.clone().multiplyScalar(size)).add(perp);
-    const p2 = tip.clone().sub(direction.clone().multiplyScalar(size)).sub(perp);
-
-    group.add(createLine([tip, p1], material));
-    group.add(createLine([tip, p2], material));
-    group.add(createLine([p1, p2], material));
-
-    return group;
 }
 
 type ShapeLegendEntry = {

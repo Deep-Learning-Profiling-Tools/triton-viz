@@ -1,4 +1,3 @@
-import { createCadDimension, createVectorText } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 const OUTER_LEVEL_GAP_SCALE = 5;
 export const CUBE_SIZE = 0.2;
@@ -278,6 +277,9 @@ function positionForDisplayCoord(coord, shape) {
     const baseCell = { x: CUBE_SIZE, y: CUBE_SIZE, z: CUBE_SIZE };
     return recursivePosition(coord, shape, baseCell, 0);
 }
+export function positionForTensorCoord(coord, shape) {
+    return positionForDisplayCoord(coord, normalizeTensorShape(shape));
+}
 function recursivePosition(coord, shape, cellExtent, level) {
     if (shape.length <= 3)
         return baseGridPosition(coord, shape, cellExtent, level);
@@ -389,76 +391,5 @@ export function setupEventListeners(container, camera, renderer, onMouseMove, on
     };
 }
 export function cameraControls(camera, cameraRotation) {
-    const PAN = 0.1, TILT = 0.02, ZOOM = 0.5;
-    return function (e) {
-        switch (e.key.toLowerCase()) {
-            case 'w':
-                camera.position.y += PAN;
-                break;
-            case 's':
-                camera.position.y -= PAN;
-                break;
-            case 'a':
-                camera.position.x -= PAN;
-                break;
-            case 'd':
-                camera.position.x += PAN;
-                break;
-            case 'arrowup':
-                cameraRotation.x -= TILT;
-                break;
-            case 'arrowdown':
-                cameraRotation.x += TILT;
-                break;
-            case 'arrowleft':
-                cameraRotation.y -= TILT;
-                break;
-            case 'arrowright':
-                cameraRotation.y += TILT;
-                break;
-            case 'o':
-                camera.position.z += ZOOM;
-                break;
-            case 'p':
-                camera.position.z -= ZOOM;
-                break;
-        }
-        camera.setRotationFromEuler(cameraRotation);
-        camera.updateProjectionMatrix();
-    };
-}
-export function addLabels(scene, globalTensor, sliceTensor, colorOrBg = '#ffffff') {
-    const sprites = [];
-    sprites.push(addLabel(scene, "Global Tensor", globalTensor.position, colorOrBg));
-    sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg, globalTensor.userData.color));
-    return sprites;
-}
-function addAxisLabels(scene, tensor, colorOrBg, overrideColor) {
-    const groups = [];
-    const shape = tensor?.userData?.mesh?.userData?.shape;
-    if (!shape)
-        return groups;
-    const bbox = new THREE.Box3().setFromObject(tensor);
-    const offsetBase = (CUBE_SIZE + GAP) * 1.5;
-    const AXIS_COLORS = { x: '#f87171', y: '#4ade80', z: '#60a5fa' };
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${shape.width}`, 'x', AXIS_COLORS.x, { offset: offsetBase }));
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), `${shape.height}`, 'y', AXIS_COLORS.y, { offset: offsetBase }));
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), `${shape.depth}`, 'z', AXIS_COLORS.z, { offset: offsetBase }));
-    return groups;
-}
-function computeLabelPalette(colorOrBg) {
-    let l = 0;
-    try {
-        const c = (colorOrBg instanceof THREE.Color) ? colorOrBg : new THREE.Color(colorOrBg || 0x000000);
-        l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-    }
-    catch (e) { }
-    return l > 0.55 ? { fill: '#111111', stroke: '#f8fafc' } : { fill: '#ffffff', stroke: '#0f172a' };
-}
-function addLabel(scene, text, position, colorOrBg) {
-    const { fill, stroke } = computeLabelPalette(colorOrBg);
-    const vectorText = createVectorText(text, fill, { fontSize: 0.8, depthTest: false, strokeWidth: 0.03, strokeColor: stroke });
-    vectorText.position.set(position.x, position.y + 2, position.z);
-    scene.add(vectorText);
-    return vectorText;
+    return function (_e) { };
 }

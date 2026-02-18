@@ -1,4 +1,3 @@
-import { createCadDimension, createVectorText } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import type { TensorHighlights } from '../types/types.js';
 
@@ -324,6 +323,10 @@ function positionForDisplayCoord(coord: TensorCoordNd, shape: TensorShape): Thre
     return recursivePosition(coord, shape, baseCell, 0);
 }
 
+export function positionForTensorCoord(coord: TensorCoordNd, shape: TensorShape): ThreeVector3 {
+    return positionForDisplayCoord(coord, normalizeTensorShape(shape));
+}
+
 function recursivePosition(
     coord: TensorCoordNd,
     shape: TensorShape,
@@ -453,54 +456,5 @@ export function setupEventListeners(
 }
 
 export function cameraControls(camera: ThreeCamera, cameraRotation: any): (e: KeyboardEvent) => void {
-    const PAN = 0.1, TILT = 0.02, ZOOM = 0.5;
-    return function(e: KeyboardEvent): void {
-        switch (e.key.toLowerCase()) {
-            case 'w': camera.position.y += PAN; break; case 's': camera.position.y -= PAN; break;
-            case 'a': camera.position.x -= PAN; break; case 'd': camera.position.x += PAN; break;
-            case 'arrowup': cameraRotation.x -= TILT; break; case 'arrowdown': cameraRotation.x += TILT; break;
-            case 'arrowleft': cameraRotation.y -= TILT; break; case 'arrowright': cameraRotation.y += TILT; break;
-            case 'o': camera.position.z += ZOOM; break; case 'p': camera.position.z -= ZOOM; break;
-        }
-        camera.setRotationFromEuler(cameraRotation); camera.updateProjectionMatrix();
-    };
-}
-
-export function addLabels(
-    scene: ThreeScene,
-    globalTensor: ThreeGroup,
-    sliceTensor: ThreeGroup,
-    colorOrBg: ColorInput = '#ffffff',
-): any[] {
-    const sprites = [];
-    sprites.push(addLabel(scene, "Global Tensor", globalTensor.position, colorOrBg));
-    sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg, globalTensor.userData.color));
-    return sprites;
-}
-
-function addAxisLabels(
-    scene: ThreeScene,
-    tensor: ThreeGroup,
-    colorOrBg: ColorInput,
-    overrideColor: ColorInput,
-): any[] {
-    const groups: any[] = []; const shape = tensor?.userData?.mesh?.userData?.shape; if (!shape) return groups;
-    const bbox = new THREE.Box3().setFromObject(tensor);
-    const offsetBase = (CUBE_SIZE + GAP) * 1.5;
-    const AXIS_COLORS = { x: '#f87171', y: '#4ade80', z: '#60a5fa' };
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${shape.width}`, 'x', AXIS_COLORS.x, { offset: offsetBase }));
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), `${shape.height}`, 'y', AXIS_COLORS.y, { offset: offsetBase }));
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), `${shape.depth}`, 'z', AXIS_COLORS.z, { offset: offsetBase }));
-    return groups;
-}
-
-function computeLabelPalette(colorOrBg: ColorInput): { fill: string; stroke: string } {
-    let l = 0; try { const c = (colorOrBg instanceof THREE.Color) ? colorOrBg : new THREE.Color(colorOrBg || 0x000000); l = 0.2126*c.r + 0.7152*c.g + 0.0722*c.b; } catch(e){}
-    return l > 0.55 ? { fill: '#111111', stroke: '#f8fafc' } : { fill: '#ffffff', stroke: '#0f172a' };
-}
-
-function addLabel(scene: ThreeScene, text: string, position: ThreeVector3, colorOrBg: ColorInput): any {
-    const { fill, stroke } = computeLabelPalette(colorOrBg);
-    const vectorText = createVectorText(text, fill, { fontSize: 0.8, depthTest: false, strokeWidth: 0.03, strokeColor: stroke });
-    vectorText.position.set(position.x, position.y + 2, position.z); scene.add(vectorText); return vectorText;
+    return function(_e: KeyboardEvent): void {};
 }
