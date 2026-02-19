@@ -3,10 +3,11 @@ from typing import Any, Optional
 from collections import defaultdict
 
 import numpy as np
-from z3 import Solver, Int, And, Or, sat, substitute
+from z3 import Solver, Int, And, Or, sat, substitute, is_bool
 from z3.z3 import ArithRef
 
 from ...core.callbacks import OpCallbacks
+from ...core.config import config as cfg
 from ...core.data import (
     Op,
     RawLoad,
@@ -40,6 +41,7 @@ class RaceDetector(SymbolicClient):
         # Each entry: (OpCallbacks, original_overrider_fn)
         self._op_callbacks: list[tuple[OpCallbacks, Callable]] = []
         self._races: list[RaceRecord] = []
+        self._event_counter: int = 0
 
     # ── Client interface ─────────────────────────────────────────
 
@@ -73,14 +75,20 @@ class RaceDetector(SymbolicClient):
 
     def grid_callback(self, grid: tuple[int, ...]):
         self._grid = tuple(int(g) for g in grid)
-        self._phase = "symbolic"
         self._need_concrete_fallback = False
         self._symbolic_accesses.clear()
         self._concrete_accesses.clear()
         self._races.clear()
+        self._event_counter = 0
         # Re-enable overriders (may have been disabled by a previous concrete fallback)
         for cb, orig_overrider in self._op_callbacks:
             cb.op_overrider = orig_overrider
+        if cfg.num_sms > 1:
+            # Symbolic phase is not thread-safe when multiple blocks execute in parallel.
+            self._phase = "concrete"
+            self._disable_overriders()
+        else:
+            self._phase = "symbolic"
         SymbolicExpr.ARANGE_DICT.clear()
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
@@ -140,7 +148,10 @@ class RaceDetector(SymbolicClient):
     def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
         ret = super()._op_atomic_cas_overrider(ptr, cmp, val, sem, scope)
         self._record_symbolic_access(
-            AccessType.ATOMIC, SymbolicExpr.from_value(ptr), None
+            AccessType.ATOMIC,
+            SymbolicExpr.from_value(ptr),
+            None,
+            atomic_op="cas",
         )
         return ret
 
@@ -150,6 +161,7 @@ class RaceDetector(SymbolicClient):
             AccessType.ATOMIC,
             SymbolicExpr.from_value(ptr),
             SymbolicExpr.from_value(mask),
+            atomic_op=f"rmw:{str(rmwOp).lower()}",
         )
         return ret
 
@@ -184,6 +196,7 @@ class RaceDetector(SymbolicClient):
                 return
             offsets = ptr.data.flatten().astype(np.int64)
             masks = mask.data.flatten().astype(bool)
+            event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
                     access_type=AccessType.LOAD,
@@ -192,6 +205,7 @@ class RaceDetector(SymbolicClient):
                     masks=masks,
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
+                    event_id=event_id,
                 )
             )
 
@@ -204,6 +218,7 @@ class RaceDetector(SymbolicClient):
                 return
             offsets = ptr.data.flatten().astype(np.int64)
             masks = np.ones(offsets.shape, dtype=bool)
+            event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
                     access_type=AccessType.LOAD,
@@ -212,6 +227,7 @@ class RaceDetector(SymbolicClient):
                     masks=masks,
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
+                    event_id=event_id,
                 )
             )
 
@@ -224,6 +240,7 @@ class RaceDetector(SymbolicClient):
                 return
             offsets = ptr.data.flatten().astype(np.int64)
             masks = mask.data.flatten().astype(bool)
+            event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
                     access_type=AccessType.STORE,
@@ -232,6 +249,7 @@ class RaceDetector(SymbolicClient):
                     masks=masks,
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
+                    event_id=event_id,
                 )
             )
 
@@ -244,6 +262,7 @@ class RaceDetector(SymbolicClient):
                 return
             offsets = ptr.data.flatten().astype(np.int64)
             masks = np.ones(offsets.shape, dtype=bool)
+            event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
                     access_type=AccessType.STORE,
@@ -252,6 +271,7 @@ class RaceDetector(SymbolicClient):
                     masks=masks,
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
+                    event_id=event_id,
                 )
             )
 
@@ -263,7 +283,12 @@ class RaceDetector(SymbolicClient):
             if grid_idx is None:
                 return
             offsets = ptr.data.flatten().astype(np.int64)
-            masks = mask.data.flatten().astype(bool)
+            masks = (
+                mask.data.flatten().astype(bool)
+                if mask is not None
+                else np.ones(offsets.shape, dtype=bool)
+            )
+            event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
                     access_type=AccessType.ATOMIC,
@@ -272,6 +297,8 @@ class RaceDetector(SymbolicClient):
                     masks=masks,
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
+                    event_id=event_id,
+                    atomic_op=f"rmw:{str(rmwOp).lower()}",
                 )
             )
 
@@ -284,6 +311,7 @@ class RaceDetector(SymbolicClient):
                 return
             offsets = ptr.data.flatten().astype(np.int64)
             masks = np.ones(offsets.shape, dtype=bool)
+            event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
                     access_type=AccessType.ATOMIC,
@@ -292,6 +320,8 @@ class RaceDetector(SymbolicClient):
                     masks=masks,
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
+                    event_id=event_id,
+                    atomic_op="cas",
                 )
             )
 
@@ -329,6 +359,7 @@ class RaceDetector(SymbolicClient):
         self._concrete_accesses.clear()
         self._races.clear()
         self._phase = "init"
+        self._event_counter = 0
         return races
 
     # ── Internal helpers ─────────────────────────────────────────
@@ -338,12 +369,14 @@ class RaceDetector(SymbolicClient):
         access_type: AccessType,
         ptr_expr: SymbolicExpr,
         mask_expr: Optional[SymbolicExpr],
+        atomic_op: Optional[str] = None,
     ) -> None:
         is_data_dependent = ptr_expr.has_op("load")
         if mask_expr is not None and mask_expr.has_op("load"):
             is_data_dependent = True
         if is_data_dependent:
             self._need_concrete_fallback = True
+        event_id = self._next_event_id()
         self._symbolic_accesses.append(
             SymbolicMemoryAccess(
                 access_type=access_type,
@@ -351,12 +384,19 @@ class RaceDetector(SymbolicClient):
                 mask_expr=mask_expr,
                 is_data_dependent=is_data_dependent,
                 call_path=extract_user_frames(),
+                event_id=event_id,
+                atomic_op=atomic_op,
             )
         )
 
     def _disable_overriders(self) -> None:
         for cb, _orig in self._op_callbacks:
             cb.op_overrider = None
+
+    def _next_event_id(self) -> int:
+        event_id = self._event_counter
+        self._event_counter += 1
+        return event_id
 
     def _concretize_block0(self) -> None:
         for sym_access in self._symbolic_accesses:
@@ -381,8 +421,81 @@ class RaceDetector(SymbolicClient):
                     masks=masks,
                     grid_idx=(0, 0, 0),
                     call_path=sym_access.call_path,
+                    event_id=sym_access.event_id,
+                    atomic_op=sym_access.atomic_op,
                 )
             )
+
+    def _symbolic_ptr_signature(self, ptr_expr: SymbolicExpr) -> tuple[str, ...]:
+        ptr_z3, _ = ptr_expr.eval()
+        if isinstance(ptr_z3, list):
+            return tuple(str(e) for e in ptr_z3)
+        return (str(ptr_z3),)
+
+    def _detect_symbolic_barrier_keys(
+        self, accesses: list[SymbolicMemoryAccess]
+    ) -> set[tuple[str, ...]]:
+        stats: dict[tuple[str, ...], dict[str, int]] = defaultdict(
+            lambda: {"add": 0, "cas": 0}
+        )
+        for acc in accesses:
+            if acc.access_type != AccessType.ATOMIC:
+                continue
+            atomic_op = (acc.atomic_op or "").lower()
+            is_add = "add" in atomic_op
+            is_cas = "cas" in atomic_op
+            if not is_add and not is_cas:
+                continue
+            ptr_key = self._symbolic_ptr_signature(acc.ptr_expr)
+            if is_add:
+                stats[ptr_key]["add"] += 1
+            if is_cas:
+                stats[ptr_key]["cas"] += 1
+        return {
+            ptr_key
+            for ptr_key, state in stats.items()
+            if state["add"] > 0 and state["cas"] > 0
+        }
+
+    def _apply_symbolic_epoch_annotations(
+        self, accesses: list[SymbolicMemoryAccess]
+    ) -> None:
+        for acc in accesses:
+            acc.epoch = 0
+
+        barrier_keys = self._detect_symbolic_barrier_keys(accesses)
+        if not barrier_keys:
+            return
+
+        ordered = sorted(accesses, key=lambda a: a.event_id)
+        epoch = 0
+        in_barrier_candidate = False
+        seen_add = False
+        seen_cas = False
+
+        for acc in ordered:
+            is_barrier_atomic = (
+                acc.access_type == AccessType.ATOMIC
+                and self._symbolic_ptr_signature(acc.ptr_expr) in barrier_keys
+            )
+            if is_barrier_atomic:
+                atomic_op = (acc.atomic_op or "").lower()
+                in_barrier_candidate = True
+                if "add" in atomic_op:
+                    seen_add = True
+                if "cas" in atomic_op:
+                    seen_cas = True
+                acc.epoch = epoch
+                continue
+
+            if in_barrier_candidate:
+                if seen_add and seen_cas:
+                    epoch += 1
+                in_barrier_candidate = False
+                seen_add = False
+                seen_cas = False
+
+            acc.epoch = epoch
 
     def _check_symbolic_races(self) -> list[RaceRecord]:
         if not self._symbolic_accesses:
@@ -395,6 +508,7 @@ class RaceDetector(SymbolicClient):
             acc.ptr_expr.eval()
             if acc.mask_expr is not None:
                 acc.mask_expr.eval()
+        self._apply_symbolic_epoch_annotations(self._symbolic_accesses)
 
         # Create block-specific PID variables
         pid_a = [Int(f"pid_a_{i}") for i in range(3)]
@@ -442,6 +556,15 @@ class RaceDetector(SymbolicClient):
                 return [substitute(e, *pairs) for e in expr]
             return substitute(expr, *pairs)
 
+        def _add_mask_constraint(solver: Solver, mask_value) -> None:
+            if isinstance(mask_value, list):
+                bool_terms = [term for term in mask_value if is_bool(term)]
+                if bool_terms:
+                    solver.add(Or(*bool_terms))
+                return
+            if is_bool(mask_value):
+                solver.add(mask_value)
+
         races: list[RaceRecord] = []
         accesses = self._symbolic_accesses
 
@@ -449,6 +572,8 @@ class RaceDetector(SymbolicClient):
             for j in range(i, len(accesses)):
                 acc_a = accesses[i]
                 acc_b = accesses[j]
+                if acc_a.epoch != acc_b.epoch:
+                    continue
 
                 race_type = _classify_race_type(acc_a.access_type, acc_b.access_type)
                 if race_type is None:
@@ -491,20 +616,14 @@ class RaceDetector(SymbolicClient):
                 if acc_a.mask_expr is not None:
                     mask_z3_a, mask_constr_a = acc_a.mask_expr.eval()
                     mask_a_sub = _apply_sub(mask_z3_a, sub_a)
-                    if isinstance(mask_a_sub, list):
-                        solver.add(Or(*mask_a_sub))
-                    else:
-                        solver.add(mask_a_sub)
+                    _add_mask_constraint(solver, mask_a_sub)
                     if mask_constr_a is not None:
                         solver.add(_apply_sub(mask_constr_a, sub_a))
 
                 if acc_b.mask_expr is not None:
                     mask_z3_b, mask_constr_b = acc_b.mask_expr.eval()
                     mask_b_sub = _apply_sub(mask_z3_b, sub_b)
-                    if isinstance(mask_b_sub, list):
-                        solver.add(Or(*mask_b_sub))
-                    else:
-                        solver.add(mask_b_sub)
+                    _add_mask_constraint(solver, mask_b_sub)
                     if mask_constr_b is not None:
                         solver.add(_apply_sub(mask_constr_b, sub_b))
 
@@ -536,6 +655,7 @@ class RaceDetector(SymbolicClient):
                         masks=np.array([True]),
                         grid_idx=block_a_idx,
                         call_path=acc_a.call_path,
+                        epoch=acc_a.epoch,
                     )
                     mem_b = MemoryAccess(
                         access_type=acc_b.access_type,
@@ -544,6 +664,7 @@ class RaceDetector(SymbolicClient):
                         masks=np.array([True]),
                         grid_idx=block_b_idx,
                         call_path=acc_b.call_path,
+                        epoch=acc_b.epoch,
                     )
                     races.append(
                         RaceRecord(
@@ -577,6 +698,117 @@ def _classify_race_type(
     return None
 
 
+def _active_offsets(access: MemoryAccess) -> np.ndarray:
+    active = access.offsets[access.masks]
+    return np.unique(active).astype(np.int64)
+
+
+def _touches_address(access: MemoryAccess, addr_set: set[int]) -> bool:
+    for off in _active_offsets(access):
+        if int(off) in addr_set:
+            return True
+    return False
+
+
+def _is_barrier_atomic(access: MemoryAccess, barrier_addrs: set[int]) -> bool:
+    if access.access_type != AccessType.ATOMIC:
+        return False
+    if not _touches_address(access, barrier_addrs):
+        return False
+    atomic_op = (access.atomic_op or "").lower()
+    return "add" in atomic_op or "cas" in atomic_op
+
+
+def _detect_global_barrier_addresses(accesses: list[MemoryAccess]) -> set[int]:
+    blocks = {acc.grid_idx for acc in accesses}
+    if len(blocks) < 2:
+        return set()
+
+    stats: dict[int, dict[str, set[tuple[int, ...]]]] = defaultdict(
+        lambda: {"add": set(), "cas": set()}
+    )
+
+    for acc in accesses:
+        if acc.access_type != AccessType.ATOMIC:
+            continue
+        atomic_op = (acc.atomic_op or "").lower()
+        is_add = "add" in atomic_op
+        is_cas = "cas" in atomic_op
+        if not is_add and not is_cas:
+            continue
+        for off in _active_offsets(acc):
+            addr = int(off)
+            if is_add:
+                stats[addr]["add"].add(acc.grid_idx)
+            if is_cas:
+                stats[addr]["cas"].add(acc.grid_idx)
+
+    barrier_addrs: set[int] = set()
+    for addr, state in stats.items():
+        if state["add"] >= blocks and state["cas"] >= blocks:
+            barrier_addrs.add(addr)
+    return barrier_addrs
+
+
+def _annotate_block_epochs(
+    block_accesses: list[MemoryAccess], barrier_addrs: set[int]
+) -> int:
+    block_accesses.sort(key=lambda a: a.event_id)
+    epoch = 0
+    in_barrier_candidate = False
+    seen_add = False
+    seen_cas = False
+
+    for acc in block_accesses:
+        if _is_barrier_atomic(acc, barrier_addrs):
+            atomic_op = (acc.atomic_op or "").lower()
+            in_barrier_candidate = True
+            if "add" in atomic_op:
+                seen_add = True
+            if "cas" in atomic_op:
+                seen_cas = True
+            acc.epoch = epoch
+            continue
+
+        if in_barrier_candidate:
+            if seen_add and seen_cas:
+                epoch += 1
+            in_barrier_candidate = False
+            seen_add = False
+            seen_cas = False
+
+        acc.epoch = epoch
+
+    return epoch
+
+
+def _apply_epoch_annotations(accesses: list[MemoryAccess]) -> None:
+    for acc in accesses:
+        acc.epoch = 0
+
+    barrier_addrs = _detect_global_barrier_addresses(accesses)
+    if not barrier_addrs:
+        return
+
+    per_block: dict[tuple[int, ...], list[MemoryAccess]] = defaultdict(list)
+    for acc in accesses:
+        per_block[acc.grid_idx].append(acc)
+
+    completed_rounds_per_block: dict[tuple[int, ...], int] = {}
+    for grid_idx, block_accesses in per_block.items():
+        completed_rounds_per_block[grid_idx] = _annotate_block_epochs(
+            block_accesses, barrier_addrs
+        )
+
+    globally_completed_rounds = min(completed_rounds_per_block.values(), default=0)
+    if globally_completed_rounds <= 0:
+        return
+
+    for acc in accesses:
+        if acc.epoch > globally_completed_rounds:
+            acc.epoch = globally_completed_rounds
+
+
 def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
     """Detect data races using an inverted index on byte addresses.
 
@@ -585,16 +817,17 @@ def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
     2. At least one access is a write (Store)
     3. The accesses are not both atomic
     """
+    _apply_epoch_annotations(accesses)
+
     addr_to_accesses: dict[int, list[MemoryAccess]] = defaultdict(list)
 
     for access in accesses:
-        active_offsets = access.offsets[access.masks]
-        unique_offsets = np.unique(active_offsets)
+        unique_offsets = _active_offsets(access)
         for off in unique_offsets:
             addr_to_accesses[int(off)].append(access)
 
     races: list[RaceRecord] = []
-    seen_pairs: set[tuple[tuple[int, ...], tuple[int, ...], RaceType, int]] = set()
+    seen_pairs: set[tuple[tuple[int, ...], tuple[int, ...], RaceType, int, int]] = set()
 
     for addr, access_list in addr_to_accesses.items():
         if len(access_list) < 2:
@@ -617,6 +850,8 @@ def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
 
                 for acc_a in accesses_a:
                     for acc_b in accesses_b:
+                        if acc_a.epoch != acc_b.epoch:
+                            continue
                         if (
                             acc_a.access_type == AccessType.ATOMIC
                             and acc_b.access_type == AccessType.ATOMIC
@@ -630,7 +865,13 @@ def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
                         race_type = _classify_race(acc_a, acc_b)
                         if race_type is None:
                             continue
-                        dedup_key = (pair_key[0], pair_key[1], race_type, addr)
+                        dedup_key = (
+                            pair_key[0],
+                            pair_key[1],
+                            race_type,
+                            addr,
+                            acc_a.epoch,
+                        )
                         if dedup_key in seen_pairs:
                             continue
                         seen_pairs.add(dedup_key)

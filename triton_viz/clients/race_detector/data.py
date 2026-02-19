@@ -28,6 +28,9 @@ class MemoryAccess:
     masks: npt.NDArray[np.bool_]
     grid_idx: tuple[int, ...]
     call_path: list[traceback.FrameSummary] = field(default_factory=list)
+    epoch: int = 0
+    event_id: int = 0
+    atomic_op: str | None = None
 
 
 @dataclass
@@ -39,6 +42,9 @@ class SymbolicMemoryAccess:
     mask_expr: Any  # Optional SymbolicExpr for the mask
     is_data_dependent: bool
     call_path: list[traceback.FrameSummary] = field(default_factory=list)
+    epoch: int = 0
+    event_id: int = 0
+    atomic_op: str | None = None
 
 
 @dataclass

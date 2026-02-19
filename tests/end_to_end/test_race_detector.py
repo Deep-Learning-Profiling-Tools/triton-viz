@@ -7,6 +7,18 @@ from triton_viz.core.trace import launches
 from triton_viz.clients import RaceDetector, RaceType
 
 
+class _ModeTrackingRaceDetector(RaceDetector):
+    """Expose which path produced launch records for test assertions."""
+
+    def __init__(self):
+        super().__init__()
+        self.finalize_phase = None
+
+    def finalize(self) -> list:
+        self.finalize_phase = self._phase
+        return super().finalize()
+
+
 # ======== WAW — Overlapping Store (Wrong Stride) ========
 
 
@@ -108,3 +120,124 @@ def test_no_race_atomic_histogram():
 
     races = launches[-1].records
     assert len(races) == 0
+
+
+# ======== Minimal While+CAS Smoke Test ========
+
+
+def test_while_loop_atomic_cas_minimal_case():
+    """Minimal while-loop CAS kernel should run and report no races."""
+    previous_num_sms = triton_viz.config.num_sms
+    triton_viz.config.num_sms = 2
+
+    try:
+        detector = _ModeTrackingRaceDetector()
+
+        @triton_viz.trace(detector)
+        @triton.jit
+        def kernel(out_ptr, sync_ptr, MAX_SPIN: tl.constexpr):
+            pid = tl.program_id(0)
+            spins = 0
+            while tl.atomic_cas(sync_ptr, 1, 1) != 1 and spins < MAX_SPIN:
+                spins += 1
+            tl.store(out_ptr + pid, tl.cast(spins, tl.int32))
+
+        n_blocks = 2
+        max_spin = 4
+        out = torch.empty((n_blocks,), dtype=torch.int32)
+        sync = torch.zeros((1,), dtype=torch.int32)
+        kernel[(n_blocks,)](out, sync, max_spin)
+
+        assert detector.finalize_phase == "concrete"
+        assert torch.all(out == max_spin)
+        races = launches[-1].records
+        assert len(races) == 0
+    finally:
+        triton_viz.config.num_sms = previous_num_sms
+
+
+# ======== Two-phase Global Barrier ========
+
+
+def test_two_phase_barrier_symbolic_no_race():
+    """Symbolic path: cross-phase overlaps after barrier should not race."""
+
+    previous_num_sms = triton_viz.config.num_sms
+    triton_viz.config.num_sms = 1
+
+    try:
+        detector = _ModeTrackingRaceDetector()
+
+        @triton_viz.trace(detector)
+        @triton.jit
+        def kernel(out_ptr, sync_ptr, N_BLOCKS: tl.constexpr):
+            pid = tl.program_id(0)
+
+            # Phase 0: block i writes slot i.
+            tl.store(out_ptr + pid, tl.cast(pid, tl.float32))
+
+            # Symbolic barrier marker: add + cas on the same sync address.
+            tl.atomic_add(sync_ptr, 1)
+            tl.atomic_cas(sync_ptr, 0, 0)
+
+            # Phase 1: block i writes slot (i + 1) % N_BLOCKS.
+            dst = (pid + 1) % N_BLOCKS
+            tl.store(out_ptr + dst, tl.cast(pid + 100, tl.float32))
+
+        n_blocks = 4
+        out = torch.zeros((n_blocks,), dtype=torch.float32)
+        sync = torch.zeros((1,), dtype=torch.int32)
+        kernel[(n_blocks,)](out, sync, n_blocks)
+
+        races = launches[-1].records
+        assert detector.finalize_phase == "z3_done"
+        assert len(races) == 0
+    finally:
+        triton_viz.config.num_sms = previous_num_sms
+
+
+def test_two_phase_barrier_concrete_no_race():
+    """Two phase stores separated by a global CAS barrier should not race."""
+
+    previous_num_sms = triton_viz.config.num_sms
+    triton_viz.config.num_sms = 4
+
+    try:
+        detector = _ModeTrackingRaceDetector()
+
+        @triton_viz.trace(detector)
+        @triton.jit
+        def kernel(out_ptr, sync_ptr, N_BLOCKS: tl.constexpr):
+            pid = tl.program_id(0)
+
+            # Phase 0: block i writes slot i.
+            tl.store(out_ptr + pid, tl.cast(pid, tl.float32))
+
+            # Global sync: each block arrives, then spins until all have arrived.
+            tl.atomic_add(sync_ptr, 1)
+            spins = 0
+            max_spin = 10000
+            while (
+                tl.atomic_cas(sync_ptr, N_BLOCKS, N_BLOCKS) != N_BLOCKS
+                and spins < max_spin
+            ):
+                spins += 1
+
+            # Phase 1: block i writes slot (i + 1) % N_BLOCKS.
+            dst = (pid + 1) % N_BLOCKS
+            tl.store(out_ptr + dst, tl.cast(pid + 100, tl.float32))
+
+        n_blocks = 4
+        out = torch.zeros((n_blocks,), dtype=torch.float32)
+        sync = torch.zeros((1,), dtype=torch.int32)
+        kernel[(n_blocks,)](out, sync, n_blocks)
+
+        # Validate the barrier completed before checking race reports.
+        assert int(sync.item()) == n_blocks
+
+        races = launches[-1].records
+        assert detector.finalize_phase == "concrete"
+        # Desired behavior with phase-aware modeling: no races.
+        assert len(races) == 0
+    finally:
+        triton_viz.config.num_sms = previous_num_sms
