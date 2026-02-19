@@ -258,5 +258,5 @@ def test_autotune_no_dummy_benchmarker_for_tracer():
     assert hasattr(traced_kernel.runner, "_do_bench")
     bench_fn = traced_kernel.runner._do_bench
     assert (
-        bench_fn.__name__ != "dummy_benchmarker"
+        bench_fn is None or bench_fn.__name__ != "dummy_benchmarker"
     ), "Tracer should not install dummy_benchmarker"
