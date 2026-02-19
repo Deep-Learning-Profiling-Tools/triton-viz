@@ -1,8 +1,8 @@
-import { createCadDimension, createShapeLegend } from '../utils/dimension_utils.js';
+import { createCadDimension, createShapeLegend, defaultAxisColor } from '../utils/dimension_utils.js';
 import { clamp01, getHue, hslToRgb } from '../utils/colormap.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import { OrbitControls } from 'https://esm.sh/three@0.155.0/examples/jsm/controls/OrbitControls.js';
-import { setupScene, setupGeometries, createTensor, setupCamera, fitCameraToBounds, setupEventListeners, cameraControls, CUBE_SIZE, GAP, COLOR_HOVER, updateTensorHighlights, canUseWebgl, renderWebglWarning, } from '../utils/three_utils.js';
+import { setupScene, setupGeometries, createTensor, setupCamera, fitCameraToBounds, setupEventListeners, cameraControls, CUBE_SIZE, GAP, COLOR_HOVER, updateTensorHighlights, canUseWebgl, renderWebglWarning, positionForTensorCoord, tensorBoundsSizeForShape, } from '../utils/three_utils.js';
 import { createHistogramOverlay } from './histogram.js';
 import { getApiBase, postJson } from '../core/api.js';
 import { getState } from '../core/state.js';
@@ -20,37 +20,176 @@ const PROGRAM_COUNT_COLORS = [
 ];
 const PROGRAM_COUNT_PALETTE = PROGRAM_COUNT_COLORS.map((c) => new THREE.Color(c));
 const PROGRAM_SUBSET_LIMIT = 256;
+const SHOW_DESCRIPTOR_DIM_LINES = false;
 const DESCRIPTOR_AXIS_COLORS = {
     x: '#f59e0b',
     y: '#d946ef',
     z: '#22d3ee',
 };
 // --- Top-Level Helpers ---
-function coordsFromIndex(index, shape) {
-    const w = Math.max(1, shape.width), h = Math.max(1, shape.height);
-    const z = Math.floor(index / (w * h)), rem = index % (w * h);
-    const y = Math.floor(rem / w), x = rem % w;
-    return [x, y, z];
-}
 function sampleValueFromCache(cache, coords) {
     if (!cache || !cache.values)
         return 0;
-    const [x, y, z] = coords;
-    const dims = cache.dims || (Array.isArray(cache.values[0]) ? (Array.isArray(cache.values[0][0]) ? 3 : 2) : 1);
-    if (dims >= 3)
-        return Number(cache.values?.[y]?.[x]?.[z] ?? 0);
-    if (dims === 2)
-        return Number(cache.values?.[y]?.[x] ?? 0);
-    return Number(cache.values?.[x] ?? 0);
+    let cursor = cache.values;
+    for (let axis = 0; axis < coords.length; axis += 1) {
+        if (!Array.isArray(cursor))
+            return Number(cursor ?? 0);
+        const idx = coords[axis] ?? 0;
+        cursor = cursor[idx];
+    }
+    return Number(cursor ?? 0);
+}
+function getMeshFullCoords(mesh, index) {
+    return (mesh.userData.coords_full?.[index]
+        || mesh.userData.coords_display?.[index]
+        || mesh.userData.coords?.[index]
+        || [0, 0, 0]);
+}
+function getMeshDisplayCoords(mesh, index) {
+    return mesh.userData.coords_display?.[index] || getMeshFullCoords(mesh, index);
+}
+function getAxisLabel(axis) {
+    const letters = 'abcdefghijklmnopqrstuvwxyz';
+    return letters[axis] || `d${axis}`;
+}
+function getAxisLabels(rank) {
+    return Array.from({ length: rank }, (_, axis) => getAxisLabel(axis));
+}
+function defaultVisibleAxes(rank) {
+    return Array.from({ length: rank }, (_, axis) => axis);
+}
+function normalizeViewShape(shapeRaw) {
+    if (!Array.isArray(shapeRaw) || shapeRaw.length === 0)
+        return [1];
+    return shapeRaw.map((dim) => Math.max(1, Number(dim) || 1));
+}
+function buildTensorViewSpec(shapeRaw, visibleText = '', hiddenIndices = []) {
+    const rank = shapeRaw.length;
+    const axisLabels = getAxisLabels(rank);
+    const axisFromLabel = new Map();
+    axisLabels.forEach((label, axis) => axisFromLabel.set(label, axis));
+    const rawText = (visibleText || '').toLowerCase().trim();
+    const isPositionalPlaceholder = rawText.length === rank
+        && rawText.split('').every((ch, axis) => ch === '1' || ch === axisLabels[axis]);
+    let visibleAxes = [];
+    let displaySlots = [];
+    let canonicalText = '';
+    if (isPositionalPlaceholder) {
+        displaySlots = rawText.split('').map((ch, axis) => {
+            if (ch === '1')
+                return null;
+            visibleAxes.push(axis);
+            return axis;
+        });
+        canonicalText = displaySlots.map((slot, axis) => (slot === null ? '1' : axisLabels[axis])).join('');
+    }
+    else {
+        const parsedVisible = [];
+        const usedVisible = new Set();
+        rawText.split('').forEach((ch) => {
+            const axis = axisFromLabel.get(ch);
+            if (axis === undefined || usedVisible.has(axis))
+                return;
+            usedVisible.add(axis);
+            parsedVisible.push(axis);
+        });
+        visibleAxes = parsedVisible.length > 0 ? parsedVisible : defaultVisibleAxes(rank);
+        displaySlots = visibleAxes.map((axis) => axis);
+        canonicalText = visibleAxes.map((axis) => axisLabels[axis]).join('');
+    }
+    const visibleSet = new Set(visibleAxes);
+    const hiddenAxes = Array.from({ length: rank }, (_, axis) => axis).filter((axis) => !visibleSet.has(axis));
+    const nextHiddenIndices = Array.from({ length: rank }, (_, axis) => {
+        const dim = Math.max(1, shapeRaw[axis] ?? 1);
+        const prev = Number(hiddenIndices[axis] ?? 0);
+        return Math.min(dim - 1, Math.max(0, Number.isFinite(prev) ? prev : 0));
+    });
+    const displayShape = displaySlots.map((slot) => (slot === null ? 1 : Math.max(1, shapeRaw[slot] ?? 1)));
+    return {
+        axisLabels,
+        displaySlots,
+        visibleAxes,
+        hiddenAxes,
+        hiddenIndices: nextHiddenIndices,
+        visibleText: canonicalText,
+        displayShape,
+    };
+}
+function mapDisplayToFullCoords(displayCoord, spec) {
+    const full = spec.hiddenIndices.slice();
+    spec.displaySlots.forEach((axis, displayAxis) => {
+        if (axis === null)
+            return;
+        full[axis] = Number(displayCoord[displayAxis] ?? 0);
+    });
+    return full;
+}
+function isLayoutPreservingView(spec, fullShape) {
+    if (spec.displaySlots.length !== fullShape.length)
+        return false;
+    for (let axis = 0; axis < fullShape.length; axis += 1) {
+        const slot = spec.displaySlots[axis];
+        if (slot !== null && slot !== axis)
+            return false;
+    }
+    return true;
+}
+function shouldUseFullLayoutPosition(spec, fullShape) {
+    return isLayoutPreservingView(spec, fullShape) && spec.hiddenAxes.length > 0;
+}
+function computeViewPlacementOffset(spec, fullShape) {
+    if (shouldUseFullLayoutPosition(spec, fullShape))
+        return [0, 0, 0];
+    if (!isLayoutPreservingView(spec, fullShape) || spec.hiddenAxes.length === 0)
+        return [0, 0, 0];
+    const displayOrigin = new Array(spec.displaySlots.length).fill(0);
+    const fullOrigin = mapDisplayToFullCoords(displayOrigin, spec);
+    const displayPos = positionForTensorCoord(displayOrigin, spec.displayShape);
+    const fullPos = positionForTensorCoord(fullOrigin, fullShape);
+    return [
+        fullPos.x - displayPos.x,
+        fullPos.y - displayPos.y,
+        fullPos.z - displayPos.z,
+    ];
+}
+function buildTensorViewPreview(spec) {
+    const rank = spec.axisLabels.length;
+    const hiddenSet = new Set(spec.hiddenAxes);
+    const slices = Array.from({ length: rank }, (_, axis) => (hiddenSet.has(axis) ? String(spec.hiddenIndices[axis] ?? 0) : ':'));
+    let expr = `tensor[${slices.join(', ')}]`;
+    const keptAxes = Array.from({ length: rank }, (_, axis) => axis).filter((axis) => !hiddenSet.has(axis));
+    const desiredAxes = spec.displaySlots.filter((axis) => axis !== null);
+    if (desiredAxes.length > 1) {
+        const permute = desiredAxes.map((axis) => keptAxes.indexOf(axis));
+        const isIdentity = permute.every((idx, i) => idx === i);
+        if (!isIdentity)
+            expr += `.permute(${permute.join(', ')})`;
+    }
+    if (spec.displaySlots.some((axis) => axis === null)) {
+        expr += `.reshape(${spec.displayShape.join(', ')})`;
+    }
+    return expr;
+}
+function arraysEqual(a = [], b = []) {
+    if (a.length !== b.length)
+        return false;
+    for (let i = 0; i < a.length; i += 1) {
+        if (a[i] !== b[i])
+            return false;
+    }
+    return true;
+}
+function coordKey(coords) {
+    return coords.join(',');
 }
 function applyValueColormap(mesh, cache, paint) {
     if (!mesh || !cache)
         return;
     const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
-    const count = mesh.count, shape = mesh.userData.shape;
+    const count = mesh.count;
     const c = new THREE.Color();
     for (let i = 0; i < count; i++) {
-        const coords = coordsFromIndex(i, shape);
+        const coords = getMeshFullCoords(mesh, i);
         const val = sampleValueFromCache(cache, coords);
         const t = clamp01((val - min) / denom);
         paint(c, coords, val, t);
@@ -62,7 +201,7 @@ function applyValueColormap(mesh, cache, paint) {
 function applyCoordColormap(mesh, paint) {
     if (!mesh || !paint)
         return;
-    const coordsList = mesh.userData.coords;
+    const coordsList = mesh.userData.coords_full || mesh.userData.coords_display || mesh.userData.coords;
     if (!coordsList)
         return;
     const c = new THREE.Color();
@@ -88,8 +227,7 @@ function createSideMenu(container) {
 }
 function updateSideMenu(el, name, coords, val, shape, extraHtml = '') {
     const shapeStr = Array.isArray(shape) ? `[${shape.join(', ')}]` : '(unknown)';
-    const indexCoords = Array.isArray(coords) ? coords.slice().reverse() : [];
-    const indexExpr = indexCoords.map((coord) => `[${coord}]`).join('');
+    const indexExpr = (Array.isArray(coords) ? coords : []).map((coord) => `[${coord}]`).join('');
     const valueLine = indexExpr ? `tensor${indexExpr} = ${val}` : `tensor = ${val}`;
     el.innerHTML = `<h3>${name} Tensor</h3><p>${valueLine}</p><p>Shape: ${shapeStr}</p>${extraHtml}`;
 }
@@ -159,11 +297,12 @@ function normalizeProgramCounts(payload) {
     const map = new Map();
     let maxCount = 0;
     (payload?.counts || []).forEach((entry) => {
-        if (!entry || entry.length < 4)
+        if (!entry || entry.length < 2)
             return;
-        const [x, y, z, count] = entry;
+        const coord = entry.slice(0, -1).map((v) => Number(v));
+        const count = entry[entry.length - 1];
         const safeCount = Number(count) || 0;
-        map.set(`${x},${y},${z}`, safeCount);
+        map.set(coordKey(coord), safeCount);
         if (safeCount > maxCount)
             maxCount = safeCount;
     });
@@ -178,17 +317,19 @@ function normalizeProgramSubsets(payload) {
     const countMap = new Map();
     let maxCount = Number(payload?.max_count) || 0;
     (payload?.coords || []).forEach((entry) => {
-        if (!entry || entry.length < 4)
+        if (!entry || entry.length < 2)
             return;
-        const [x, y, z, key] = entry;
-        subsetMap.set(`${x},${y},${z}`, String(key));
+        const coord = entry.slice(0, -1).map((v) => Number(v));
+        const key = entry[entry.length - 1];
+        subsetMap.set(coordKey(coord), String(key));
     });
     (payload?.counts || []).forEach((entry) => {
-        if (!entry || entry.length < 4)
+        if (!entry || entry.length < 2)
             return;
-        const [x, y, z, count] = entry;
+        const coord = entry.slice(0, -1).map((v) => Number(v));
+        const count = entry[entry.length - 1];
         const safeCount = Number(count) || 0;
-        countMap.set(`${x},${y},${z}`, safeCount);
+        countMap.set(coordKey(coord), safeCount);
         if (safeCount > maxCount)
             maxCount = safeCount;
     });
@@ -230,7 +371,7 @@ function applyProgramCountColors(mesh, counts, baseColor, palette) {
     const countMap = counts.map;
     const colors = palette || PROGRAM_COUNT_PALETTE;
     applyCoordColormap(mesh, (color, coords) => {
-        const count = coords ? countMap.get(`${coords[0]},${coords[1]},${coords[2]}`) || 0 : 0;
+        const count = coords ? countMap.get(coordKey(coords)) || 0 : 0;
         if (count <= 0) {
             color.copy(base);
         }
@@ -248,7 +389,7 @@ function applyProgramCountHeatmap(mesh, cache, counts, palette, baseColor) {
     const colors = palette || PROGRAM_COUNT_PALETTE;
     const hsl = { h: 0, s: 0, l: 0.5 };
     applyCoordColormap(mesh, (color, coords) => {
-        const count = coords ? countMap.get(`${coords[0]},${coords[1]},${coords[2]}`) || 0 : 0;
+        const count = coords ? countMap.get(coordKey(coords)) || 0 : 0;
         if (count <= 0) {
             const val = coords ? sampleValueFromCache(cache, coords) : 0;
             const t = clamp01((val - min) / denom);
@@ -268,7 +409,7 @@ function applyProgramSubsetColors(mesh, subsetState, hues, baseColor) {
     const base = baseColor instanceof THREE.Color ? baseColor : new THREE.Color(baseColor);
     const subsetMap = subsetState.subsetMap;
     applyCoordColormap(mesh, (color, coords) => {
-        const key = coords ? subsetMap.get(`${coords[0]},${coords[1]},${coords[2]}`) : null;
+        const key = coords ? subsetMap.get(coordKey(coords)) : null;
         if (key && hues.has(key)) {
             color.setHSL(hues.get(key), 0.6, 0.55);
         }
@@ -283,7 +424,7 @@ function applyProgramSubsetHeatmap(mesh, cache, subsetState, hues, baseColor) {
     const min = cache.scaleMin, max = cache.scaleMax, denom = max - min || 1;
     const subsetMap = subsetState.subsetMap;
     applyCoordColormap(mesh, (color, coords) => {
-        const key = coords ? subsetMap.get(`${coords[0]},${coords[1]},${coords[2]}`) : null;
+        const key = coords ? subsetMap.get(coordKey(coords)) : null;
         if (!key || !hues.has(key)) {
             const val = coords ? sampleValueFromCache(cache, coords) : 0;
             const t = clamp01((val - min) / denom);
@@ -298,28 +439,21 @@ function applyProgramSubsetHeatmap(mesh, cache, subsetState, hues, baseColor) {
 function parseDescriptorHighlight(highlights) {
     if (!highlights || highlights.type !== 'descriptor')
         return null;
-    const sx = Number(highlights.start?.[0] ?? 0);
-    const sy = Number(highlights.start?.[1] ?? 0);
-    const sz = Number(highlights.start?.[2] ?? 0);
-    const dx = Number(highlights.shape?.[0] ?? 0);
-    const dy = Number(highlights.shape?.[1] ?? 0);
-    const dz = Number(highlights.shape?.[2] ?? 0);
-    if (dx <= 0 || dy <= 0 || dz <= 0)
+    const rank = Math.max(highlights.start?.length || 0, highlights.shape?.length || 0, highlights.stride?.length || 0);
+    if (rank <= 0)
         return null;
-    const tx = Math.max(1, Math.abs(Number(highlights.stride?.[0] ?? 1)));
-    const ty = Math.max(1, Math.abs(Number(highlights.stride?.[1] ?? 1)));
-    const tz = Math.max(1, Math.abs(Number(highlights.stride?.[2] ?? 1)));
+    const start = Array.from({ length: rank }, (_, axis) => Number(highlights.start?.[axis] ?? 0));
+    const shape = Array.from({ length: rank }, (_, axis) => Number(highlights.shape?.[axis] ?? 0));
+    const stride = Array.from({ length: rank }, (_, axis) => Math.max(1, Math.abs(Number(highlights.stride?.[axis] ?? 1))));
+    if (shape.some((dim) => dim <= 0))
+        return null;
     return {
-        start: [sx, sy, sz],
-        shape: [dx, dy, dz],
-        stride: [tx, ty, tz],
+        start,
+        shape,
+        stride,
     };
 }
 function descriptorContainsCoord(descriptor, coords) {
-    const [x, y, z] = coords;
-    const [sx, sy, sz] = descriptor.start;
-    const [dx, dy, dz] = descriptor.shape;
-    const [tx, ty, tz] = descriptor.stride;
     const inAxis = (coord, axisStart, axisShape, axisStride) => {
         if (axisShape <= 0)
             return false;
@@ -328,19 +462,42 @@ function descriptorContainsCoord(descriptor, coords) {
             return false;
         return (delta / axisStride) < axisShape;
     };
-    return (inAxis(x, sx, dx, tx)
-        && inAxis(y, sy, dy, ty)
-        && inAxis(z, sz, dz, tz));
+    for (let axis = 0; axis < descriptor.shape.length; axis += 1) {
+        if (!inAxis(coords[axis] ?? 0, descriptor.start[axis] ?? 0, descriptor.shape[axis] ?? 0, descriptor.stride[axis] ?? 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+function projectDescriptorForView(descriptor, spec) {
+    for (let i = 0; i < spec.hiddenAxes.length; i += 1) {
+        const axis = spec.hiddenAxes[i];
+        if (axis === undefined)
+            continue;
+        const idx = spec.hiddenIndices[axis] ?? 0;
+        const start = descriptor.start[axis] ?? 0;
+        const shape = descriptor.shape[axis] ?? 0;
+        const stride = descriptor.stride[axis] ?? 1;
+        if (shape <= 0)
+            return null;
+        const delta = idx - start;
+        if (delta < 0 || delta % stride !== 0)
+            return null;
+        if ((delta / stride) >= shape)
+            return null;
+    }
+    return {
+        start: spec.displaySlots.map((axis) => (axis === null ? 0 : (descriptor.start[axis] ?? 0))),
+        shape: spec.displaySlots.map((axis) => (axis === null ? 1 : (descriptor.shape[axis] ?? 0))),
+        stride: spec.displaySlots.map((axis) => (axis === null ? 1 : (descriptor.stride[axis] ?? 1))),
+    };
 }
 function reorderDescriptorForTensor(values, tensorRank, fallback) {
-    const x = values[0] ?? fallback;
-    const y = values[1] ?? fallback;
-    const z = values[2] ?? fallback;
-    if (tensorRank === 1)
-        return [x];
-    if (tensorRank === 2)
-        return [y, x];
-    return [z, y, x];
+    const out = [];
+    for (let i = 0; i < tensorRank; i += 1) {
+        out.push(values[i] ?? fallback);
+    }
+    return out;
 }
 function getHighlightPredicate(highlights) {
     if (!highlights)
@@ -351,8 +508,8 @@ function getHighlightPredicate(highlights) {
     }
     if (Array.isArray(highlights.data) && highlights.data.length) {
         const set = new Set();
-        highlights.data.forEach((c) => { set.add(`${c[0]},${c[1]},${c[2]}`); });
-        return (coords) => set.has(`${coords[0]},${coords[1]},${coords[2]}`);
+        highlights.data.forEach((c) => { set.add(c.join(',')); });
+        return (coords) => set.has(coords.join(','));
     }
     return null;
 }
@@ -371,8 +528,8 @@ function applyColorizedMesh(ctx, group, name) {
     }
 }
 function restoreTensorColors(ctx) {
-    const { state, tensors, type } = ctx;
-    const supportsAllPrograms = type === 'Load' || type === 'Store';
+    const { state, tensors } = ctx;
+    const supportsAllPrograms = ctx.supportsAllPrograms;
     tensors.forEach((group, name) => {
         const mesh = group.userData.mesh;
         const p = state.payloads.get(name);
@@ -410,8 +567,8 @@ function applyDotHoverHighlight(ctx, row, col) {
     const bCache = state.payloads.get('B');
     if (!aCache || !bCache)
         return;
-    applyDimmedColormap(aGroup.userData.mesh, aCache, 'A', (coords) => coords[1] === row);
-    applyDimmedColormap(bGroup.userData.mesh, bCache, 'B', (coords) => coords[0] === col);
+    applyDimmedColormap(aGroup.userData.mesh, aCache, 'A', (coords) => coords[0] === row);
+    applyDimmedColormap(bGroup.userData.mesh, bCache, 'B', (coords) => coords[1] === col);
 }
 function applyDotHoverOutline(ctx, row, col) {
     const { tensors } = ctx;
@@ -571,7 +728,7 @@ function createProgramSubsetLegendItem(baseColor, subsets, hues) {
     Object.keys(subsets || {}).forEach((key) => {
         const pids = subsets[key] || [];
         const label = pids.length
-            ? pids.map(([x, y, z]) => `(${x},${y},${z})`).join(' ')
+            ? pids.map((pid) => `(${(pid || []).join(',')})`).join(' ')
             : '(empty)';
         const color = new THREE.Color();
         if (hues && hues.has(key)) {
@@ -585,52 +742,339 @@ function createProgramSubsetLegendItem(baseColor, subsets, hues) {
     item.appendChild(rows);
     return item;
 }
+function linearIndexFromCoord(coord, shape) {
+    let idx = 0;
+    let stride = 1;
+    for (let axis = shape.length - 1; axis >= 0; axis -= 1) {
+        const dim = Math.max(1, Number(shape[axis] ?? 1));
+        const value = Number(coord[axis] ?? 0);
+        if (!Number.isFinite(value) || value < 0 || value >= dim)
+            return -1;
+        idx += value * stride;
+        stride *= dim;
+    }
+    return idx;
+}
+function worldPositionForDisplayCoord(mesh, coord, shape) {
+    const idx = linearIndexFromCoord(coord, shape);
+    if (idx < 0 || idx >= mesh.count)
+        return null;
+    const matrix = new THREE.Matrix4();
+    mesh.getMatrixAt(idx, matrix);
+    const pos = new THREE.Vector3();
+    const quat = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    matrix.decompose(pos, quat, scale);
+    mesh.localToWorld(pos);
+    return pos;
+}
+function dominantAxis(delta) {
+    const ax = Math.abs(delta.x);
+    const ay = Math.abs(delta.y);
+    const az = Math.abs(delta.z);
+    if (ay >= ax && ay >= az)
+        return 'y';
+    if (az >= ax && az >= ay)
+        return 'z';
+    return 'x';
+}
+function defaultDimColorForAxis(_rank, axis) {
+    return defaultAxisColor(axis);
+}
+function fallbackWorldDirection(rank, axis) {
+    const mapped = (rank - 1 - axis) % 3;
+    if (mapped === 0)
+        return new THREE.Vector3(1, 0, 0);
+    if (mapped === 1)
+        return new THREE.Vector3(0, -1, 0);
+    return new THREE.Vector3(0, 0, -1);
+}
+function axisWorldKey(rank, axis) {
+    return (rank - 1 - axis) % 3;
+}
+function axisWorldName(worldKey) {
+    if (worldKey === 1)
+        return 'y';
+    if (worldKey === 2)
+        return 'z';
+    return 'x';
+}
+function colorForAxisFamily(worldKey, familyPos, familyCount) {
+    const p = Math.max(1, familyCount);
+    const level = Math.min(p, Math.max(1, familyPos + 1));
+    const t = level / p;
+    const color = new THREE.Color();
+    if (worldKey === 1)
+        color.setRGB(0, t, 0);
+    else if (worldKey === 2)
+        color.setRGB(0, 0, t);
+    else
+        color.setRGB(t, 0, 0);
+    return `#${color.getHexString()}`;
+}
+function defaultDimColorsForShape(rank) {
+    const familyAxes = new Map();
+    for (let axis = 0; axis < rank; axis += 1) {
+        const key = axisWorldKey(rank, axis);
+        const prev = familyAxes.get(key) || [];
+        prev.push(axis);
+        familyAxes.set(key, prev);
+    }
+    return Array.from({ length: rank }, (_, axis) => {
+        const key = axisWorldKey(rank, axis);
+        const family = familyAxes.get(key) || [];
+        const familyPos = Math.max(0, family.indexOf(axis));
+        return colorForAxisFamily(key, familyPos, family.length);
+    });
+}
+function extensionDirectionFor(worldAxis, order, diagonal = false) {
+    const baseByAxis = {
+        x: [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)],
+        y: [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 1)],
+        z: [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0)],
+    };
+    const [a, b] = baseByAxis[worldAxis];
+    if (!a || !b)
+        return new THREE.Vector3(0, 1, 0);
+    if (!diagonal) {
+        const orthogonal = [a, b, a.clone().negate(), b.clone().negate()];
+        return orthogonal[order % orthogonal.length].clone();
+    }
+    const d1 = a.clone().add(b).normalize();
+    const d2 = a.clone().sub(b).normalize();
+    const diagonalDirs = [d1, d2, d1.clone().negate(), d2.clone().negate()];
+    return diagonalDirs[order % diagonalDirs.length].clone();
+}
+function addAxisDimensionLines(scene, tensorGroup, axisSizes, axisStarts, axisStrides, dimColors = [], options = {}) {
+    const mesh = tensorGroup?.userData?.mesh;
+    if (!mesh)
+        return [];
+    const shapeRaw = (mesh.userData.shape_raw || []).map((d) => Math.max(1, Number(d) || 1));
+    if (shapeRaw.length === 0)
+        return [];
+    const { offsetBase = (CUBE_SIZE + GAP) * 1.5, opacity, colorOverride, labelPrefix = '' } = options;
+    const groups = [];
+    const tensorCenter = new THREE.Box3().setFromObject(tensorGroup).getCenter(new THREE.Vector3());
+    const entries = [];
+    const startCoord = axisStarts.map((v, axis) => {
+        const dim = shapeRaw[axis] ?? 1;
+        return Math.min(dim - 1, Math.max(0, Number(v) || 0));
+    });
+    const familyAxes = new Map();
+    for (let axis = 0; axis < axisSizes.length; axis += 1) {
+        const key = axisWorldKey(shapeRaw.length, axis);
+        const prev = familyAxes.get(key) || [];
+        prev.push(axis);
+        familyAxes.set(key, prev);
+    }
+    for (let axis = 0; axis < axisSizes.length; axis += 1) {
+        const size = Math.max(1, Number(axisSizes[axis] ?? 1));
+        const stride = Math.max(1, Number(axisStrides[axis] ?? 1));
+        const start = startCoord.slice();
+        const end = startCoord.slice();
+        const targetWorldKey = axisWorldKey(shapeRaw.length, axis);
+        const axisWorld = axisWorldName(targetWorldKey);
+        if (targetWorldKey === 2) {
+            const zAxes = [];
+            const xAxes = [];
+            const yAxes = [];
+            for (let dimAxis = 0; dimAxis < shapeRaw.length; dimAxis += 1) {
+                const key = axisWorldKey(shapeRaw.length, dimAxis);
+                if (key === 2)
+                    zAxes.push(dimAxis);
+                else if (key === 1)
+                    yAxes.push(dimAxis);
+                else
+                    xAxes.push(dimAxis);
+            }
+            const setMax = (dimAxis) => {
+                const max = Math.max(0, (shapeRaw[dimAxis] ?? 1) - 1);
+                start[dimAxis] = max;
+                end[dimAxis] = max;
+            };
+            xAxes.forEach(setMax);
+            yAxes.forEach(setMax);
+            const zPos = zAxes.indexOf(axis);
+            for (let i = 0; i < zAxes.length; i += 1) {
+                const zAxis = zAxes[i];
+                if (zAxis === undefined)
+                    continue;
+                const zMax = Math.max(0, (shapeRaw[zAxis] ?? 1) - 1);
+                const zSize = Math.max(1, Number(axisSizes[zAxis] ?? 1));
+                const zStride = Math.max(1, Number(axisStrides[zAxis] ?? 1));
+                const zEnd = Math.min(zMax, Math.max(0, (start[zAxis] ?? 0) + (zSize - 1) * zStride));
+                end[zAxis] = i >= zPos ? zEnd : (start[zAxis] ?? 0);
+            }
+        }
+        else {
+            const max = shapeRaw[axis] ?? 1;
+            end[axis] = Math.min(max - 1, Math.max(0, (start[axis] ?? 0) + (size - 1) * stride));
+            for (let companion = axis + 1; companion < axisSizes.length; companion += 1) {
+                if (axisWorldKey(shapeRaw.length, companion) !== targetWorldKey)
+                    continue;
+                const companionSize = Math.max(1, Number(axisSizes[companion] ?? 1));
+                const companionStride = Math.max(1, Number(axisStrides[companion] ?? 1));
+                const companionMax = shapeRaw[companion] ?? 1;
+                end[companion] = Math.min(companionMax - 1, Math.max(0, (start[companion] ?? 0) + (companionSize - 1) * companionStride));
+            }
+        }
+        const startPos = worldPositionForDisplayCoord(mesh, start, shapeRaw);
+        const endPos = worldPositionForDisplayCoord(mesh, end, shapeRaw);
+        if (!startPos || !endPos)
+            continue;
+        const delta = new THREE.Vector3().subVectors(endPos, startPos);
+        const axisDir = delta.lengthSq() > 1e-9
+            ? delta.clone().normalize()
+            : fallbackWorldDirection(shapeRaw.length, axis);
+        const extentStart = startPos.clone().add(axisDir.clone().multiplyScalar(-CUBE_SIZE / 2));
+        const extentEnd = endPos.clone().add(axisDir.clone().multiplyScalar(CUBE_SIZE / 2));
+        const family = familyAxes.get(targetWorldKey) || [];
+        const familyPos = Math.max(0, family.indexOf(axis));
+        const familyColor = colorForAxisFamily(targetWorldKey, familyPos, family.length);
+        const color = colorOverride || dimColors[axis] || familyColor || defaultDimColorForAxis(shapeRaw.length, axis);
+        const labelCore = `${getAxisLabel(axis)}: ${size}`;
+        entries.push({
+            axis,
+            axisWorld,
+            extentStart,
+            extentEnd,
+            span: extentStart.distanceTo(extentEnd),
+            color,
+            label: `${labelPrefix}${labelCore}`,
+        });
+    }
+    const groupByAxis = { x: [], y: [], z: [] };
+    entries.forEach((entry) => {
+        groupByAxis[entry.axisWorld].push(entry);
+    });
+    const linearStep = (CUBE_SIZE + GAP) * 1.35;
+    const xyCornerDirection = new THREE.Vector3();
+    ['x', 'y', 'z'].forEach((axisWorld) => {
+        const axisEntries = groupByAxis[axisWorld];
+        if (axisEntries.length === 0)
+            return;
+        axisEntries.sort((a, b) => a.axis - b.axis);
+        axisEntries.forEach((entry, lineIdx) => {
+            const reverseIdx = axisEntries.length - 1 - lineIdx;
+            const useDiagonal = axisWorld === 'z';
+            const directionOrder = useDiagonal ? 1 : 0; // z family uses -45deg basis
+            let extensionDirection = extensionDirectionFor(axisWorld, directionOrder, useDiagonal);
+            const mid = entry.extentStart.clone().add(entry.extentEnd).multiplyScalar(0.5);
+            const outward = mid.clone().sub(tensorCenter);
+            if (useDiagonal) {
+                const xy = xyCornerDirection.clone();
+                xy.z = 0;
+                if (xy.lengthSq() > 1e-9 && extensionDirection.dot(xy) > 0) {
+                    extensionDirection = extensionDirection.clone().negate();
+                }
+                else if (xy.lengthSq() <= 1e-9 && outward.dot(extensionDirection) < 0) {
+                    extensionDirection = extensionDirection.clone().negate();
+                }
+            }
+            else {
+                if (outward.dot(extensionDirection) < 0) {
+                    extensionDirection = extensionDirection.clone().negate();
+                }
+                if (axisWorld === 'x' || axisWorld === 'y') {
+                    xyCornerDirection.add(extensionDirection);
+                }
+            }
+            const edgeShift = extensionDirection.clone().multiplyScalar(CUBE_SIZE / 2);
+            groups.push(createCadDimension(scene, entry.extentStart.clone().add(edgeShift), entry.extentEnd.clone().add(edgeShift), entry.label, axisWorld, entry.color, {
+                offset: offsetBase + reverseIdx * linearStep,
+                extensionOffset: 0,
+                extensionLength: (CUBE_SIZE + GAP) * 0.2,
+                textOffset: 0,
+                extensionDirection,
+                opacity: opacity ?? 0.9,
+            }));
+        });
+    });
+    return groups;
+}
 function addDimensionLines(scene, tensorGroup, dimColors = []) {
     const mesh = tensorGroup?.userData?.mesh;
     if (!mesh)
         return [];
-    const shape = mesh.userData.shape;
-    const shapeRaw = mesh.userData.shape_raw || [];
-    const bbox = new THREE.Box3().setFromObject(tensorGroup);
-    const offsetBase = (CUBE_SIZE + GAP) * 1.5;
-    const axisDefaults = { x: '#f87171', y: '#4ade80', z: '#60a5fa' };
-    const getColor = (axis) => {
-        if (shapeRaw.length === 1 && axis === 'x')
-            return dimColors[0] || axisDefaults.x;
-        if (shapeRaw.length === 2 && axis === 'y')
-            return dimColors[0] || axisDefaults.y;
-        if (shapeRaw.length === 2 && axis === 'x')
-            return dimColors[1] || axisDefaults.x;
-        if (shapeRaw.length >= 3 && axis === 'z')
-            return dimColors[0] || axisDefaults.z;
-        if (shapeRaw.length >= 3 && axis === 'y')
-            return dimColors[1] || axisDefaults.y;
-        if (shapeRaw.length >= 3 && axis === 'x')
-            return dimColors[2] || axisDefaults.x;
-        return axisDefaults[axis];
-    };
+    const shapeRaw = (mesh.userData.shape_raw || []).map((d) => Math.max(1, Number(d) || 1));
+    return addAxisDimensionLines(scene, tensorGroup, shapeRaw, new Array(shapeRaw.length).fill(0), new Array(shapeRaw.length).fill(1), dimColors);
+}
+function createSliceReferenceOutline(shapeRaw, baseColor) {
+    const size = tensorBoundsSizeForShape(shapeRaw);
+    const color = baseColor instanceof THREE.Color
+        ? baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.45)
+        : new THREE.Color(baseColor || '#cbd5e1').lerp(new THREE.Color('#ffffff'), 0.45);
+    const material = new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.35,
+        depthTest: true,
+        depthWrite: false,
+    });
+    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)), material);
+    outline.frustumCulled = false;
+    outline.renderOrder = 1500;
+    return outline;
+}
+function buildSliceReferenceOutlines(scene, tensors, configByName) {
     const groups = [];
-    if (shapeRaw.length >= 2) {
-        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${shape.width}`, 'x', getColor('x'), { offset: offsetBase }));
-        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), `${shape.height}`, 'y', getColor('y'), { offset: offsetBase }));
-    }
-    else if (shapeRaw.length === 1) {
-        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${shape.width}`, 'x', getColor('x'), { offset: offsetBase }));
-    }
-    if (shapeRaw.length >= 3) {
-        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), `${shape.depth}`, 'z', getColor('z'), { offset: offsetBase }));
-    }
+    tensors.forEach((tensorGroup, name) => {
+        const cfg = configByName.get(name);
+        if (!cfg)
+            return;
+        const shape = normalizeViewShape(cfg.shape || []);
+        const outline = createSliceReferenceOutline(shape, tensorGroup.userData.mesh.userData.color_base || '#cbd5e1');
+        const [bx = 0, by = 0, bz = 0] = cfg.position || [0, 0, 0];
+        outline.position.set(bx, by, bz);
+        scene.add(outline);
+        groups.push(outline);
+    });
     return groups;
+}
+function clearSliceReferenceOutlines(ctx) {
+    ctx.sliceOutlineGroups.forEach((group) => {
+        ctx.scene.remove(group);
+        const geometry = group?.geometry;
+        const material = group?.material;
+        if (geometry?.dispose)
+            geometry.dispose();
+        if (Array.isArray(material))
+            material.forEach((m) => m?.dispose?.());
+        else if (material?.dispose)
+            material.dispose();
+    });
+    ctx.sliceOutlineGroups = [];
 }
 function getDescriptorSelectionBounds(mesh, descriptor) {
     const tensorShape = mesh.userData.shape;
+    if (!descriptor || descriptor.shape.length < 1 || descriptor.shape.length > 3) {
+        const fallback = new THREE.Vector3(0, 0, 0);
+        return { min: fallback.clone(), max: fallback };
+    }
     const spacing = CUBE_SIZE + GAP;
     const centerX = (tensorShape.width - 1) * spacing / 2;
     const centerY = -((tensorShape.height - 1) * spacing / 2);
     const centerZ = -((tensorShape.depth - 1) * spacing / 2);
-    const [sx, sy, sz] = descriptor.start;
-    const [dx, dy, dz] = descriptor.shape;
-    const [tx, ty, tz] = descriptor.stride;
+    const axisFromDisplay = (axis) => {
+        if (descriptor.shape.length === 1)
+            return 0;
+        if (descriptor.shape.length === 2)
+            return axis === 'x' ? 1 : 0;
+        if (axis === 'x')
+            return 2;
+        if (axis === 'y')
+            return 1;
+        return 0;
+    };
+    const sx = descriptor.start[axisFromDisplay('x')] ?? 0;
+    const sy = descriptor.start[axisFromDisplay('y')] ?? 0;
+    const sz = descriptor.start[axisFromDisplay('z')] ?? 0;
+    const dx = descriptor.shape[axisFromDisplay('x')] ?? 1;
+    const dy = descriptor.shape[axisFromDisplay('y')] ?? 1;
+    const dz = descriptor.shape[axisFromDisplay('z')] ?? 1;
+    const tx = descriptor.stride[axisFromDisplay('x')] ?? 1;
+    const ty = descriptor.stride[axisFromDisplay('y')] ?? 1;
+    const tz = descriptor.stride[axisFromDisplay('z')] ?? 1;
     const ex = sx + (dx - 1) * tx;
     const ey = sy + (dy - 1) * ty;
     const ez = sz + (dz - 1) * tz;
@@ -642,28 +1086,23 @@ function getDescriptorSelectionBounds(mesh, descriptor) {
     const max = new THREE.Vector3(Math.max(toX(sx), toX(ex)) + half, Math.max(toY(sy), toY(ey)) + half, Math.max(toZ(sz), toZ(ez)) + half);
     return { min, max };
 }
-function addDescriptorDimensionLines(scene, tensorGroup, highlights) {
+function addDescriptorDimensionLines(scene, tensorGroup, highlights, spec = null) {
     const mesh = tensorGroup?.userData?.mesh;
     if (!mesh)
         return [];
-    const descriptor = parseDescriptorHighlight(highlights);
+    const descriptorRaw = parseDescriptorHighlight(highlights);
+    const descriptor = descriptorRaw && spec ? projectDescriptorForView(descriptorRaw, spec) : descriptorRaw;
     if (!descriptor)
         return [];
     const shapeRaw = mesh.userData.shape_raw || [];
-    const bbox = getDescriptorSelectionBounds(mesh, descriptor);
-    const offsetBase = (CUBE_SIZE + GAP) * 0.85;
-    const groups = [];
-    if (shapeRaw.length >= 2) {
-        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${descriptor.shape[0]}`, 'x', DESCRIPTOR_AXIS_COLORS.x, { offset: offsetBase, opacity: 0.95 }));
-        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), `${descriptor.shape[1]}`, 'y', DESCRIPTOR_AXIS_COLORS.y, { offset: offsetBase, opacity: 0.95 }));
-    }
-    else if (shapeRaw.length === 1) {
-        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${descriptor.shape[0]}`, 'x', DESCRIPTOR_AXIS_COLORS.x, { offset: offsetBase, opacity: 0.95 }));
-    }
-    if (shapeRaw.length >= 3) {
-        groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), `${descriptor.shape[2]}`, 'z', DESCRIPTOR_AXIS_COLORS.z, { offset: offsetBase, opacity: 0.95 }));
-    }
-    return groups;
+    const rank = Math.min(shapeRaw.length, descriptor.shape.length);
+    if (rank <= 0)
+        return [];
+    return addAxisDimensionLines(scene, tensorGroup, descriptor.shape.slice(0, rank), descriptor.start.slice(0, rank), descriptor.stride.slice(0, rank), [], {
+        offsetBase: (CUBE_SIZE + GAP) * 0.85,
+        opacity: 0.95,
+        colorOverride: '#00b3ff',
+    });
 }
 function clearDescriptorDimensionLines(ctx) {
     ctx.descriptorDimLineGroups.forEach((group) => ctx.scene.remove(group));
@@ -671,13 +1110,16 @@ function clearDescriptorDimensionLines(ctx) {
 }
 function refreshDescriptorDimensionLines(ctx) {
     clearDescriptorDimensionLines(ctx);
+    if (!SHOW_DESCRIPTOR_DIM_LINES)
+        return;
     if (!ctx.showDimLines || ctx.state.allProgramsOn)
         return;
     ctx.tensors.forEach((group, name) => {
         const p = ctx.state.payloads.get(name);
         if (!p)
             return;
-        ctx.descriptorDimLineGroups.push(...addDescriptorDimensionLines(ctx.scene, group, p.highlights));
+        const spec = ctx.state.tensorViews.get(name) || null;
+        ctx.descriptorDimLineGroups.push(...addDescriptorDimensionLines(ctx.scene, group, p.highlights, spec));
     });
 }
 // --- Interaction Handlers ---
@@ -698,7 +1140,9 @@ function onMouseMove(event, ctx) {
         if (key !== state.lastHoverKey) {
             state.lastHoverKey = key;
         }
-        const coords = (mesh.userData.coords?.[instanceId] ?? [0, 0, 0]);
+        const coords3 = (mesh.userData.coords?.[instanceId] ?? [0, 0, 0]);
+        const coordsFull = getMeshFullCoords(mesh, instanceId);
+        const coordsDisplay = getMeshDisplayCoords(mesh, instanceId);
         if (state.activeHoverOutline) {
             const matrix = new THREE.Matrix4();
             mesh.getMatrixAt(instanceId, matrix);
@@ -709,19 +1153,19 @@ function onMouseMove(event, ctx) {
             state.activeHoverOutline.visible = true;
         }
         const cacheEntry = state.payloads.get(tensorName);
-        const val = cacheEntry ? sampleValueFromCache(cacheEntry, coords) : 'Loading...';
+        const val = cacheEntry ? sampleValueFromCache(cacheEntry, coordsFull) : 'Loading...';
         const currentShape = mesh.userData.shape_raw;
         let extraHtml = '';
-        if (tensorName === 'Global') {
+        if (tensorName === 'Global' && ctx.supportsAllPrograms) {
             if (!state.programSubsets && !state.programCounts) {
                 ctx.ensureProgramDataForHover?.();
             }
-            const key = `${coords[0]},${coords[1]},${coords[2]}`;
+            const key = coordKey(coordsFull);
             if (state.programSubsets) {
                 const subsetKey = state.programSubsets.subsetMap.get(key);
                 const subset = subsetKey ? state.programSubsets.subsets?.[subsetKey] || [] : [];
                 const label = subset.length
-                    ? subset.map(([x, y, z]) => `(${x},${y},${z})`).join(' ')
+                    ? subset.map((pid) => `(${(pid || []).join(',')})`).join(' ')
                     : 'none';
                 extraHtml = `<p>Programs: ${label}</p>`;
             }
@@ -733,16 +1177,10 @@ function onMouseMove(event, ctx) {
                 extraHtml = '<p>Programs: loading...</p>';
             }
         }
-        let displayCoords = (ctx.type === 'Dot' && tensorName !== 'Global' && Array.isArray(coords))
-            ? [coords[1], coords[0], coords[2]]
-            : coords;
-        if (Array.isArray(displayCoords) && Array.isArray(currentShape) && currentShape.length === 2) {
-            displayCoords = displayCoords.slice(0, 2);
-        }
-        updateSideMenu(sideMenu, tensorName, displayCoords, val, currentShape || null, extraHtml);
+        updateSideMenu(sideMenu, tensorName, coordsFull, val, currentShape || null, extraHtml);
         if (ctx.type === 'Dot' && tensorName === 'C') {
-            const row = coords[1];
-            const col = coords[0];
+            const row = Number(coordsDisplay[0] ?? 0);
+            const col = Number(coordsDisplay[1] ?? 0);
             const hoverKey = `${row},${col}`;
             if (state.dotHoverKey !== hoverKey) {
                 state.dotHoverKey = hoverKey;
@@ -779,12 +1217,13 @@ function onMouseUp(ctx) { ctx.state.isDragging = false; if (ctx.stage)
 // --- Main Exports ---
 export function createTensorVisualization(containerElement, op, options = {}) {
     const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null, layoutBounds = null, fitToTensors = true, cameraPadding = 1.15 } = options;
-    const supportsAllPrograms = type === 'Load' || type === 'Store';
     const API_BASE = getApiBase();
     const initialToggles = getState().toggles;
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape || [], color: colors.GLOBAL || '#333', position: [0, 0, 0], endpoint: 'getLoadTensor' }
     ];
+    const supportsAllPrograms = type === 'Load' || type === 'Store';
+    const configByNameMap = new Map(configs.map((cfg) => [cfg.name, cfg]));
     let cache = VIZ_CACHE.get(containerElement);
     const shapeKey = JSON.stringify({ shapes: configs.map(c => c.shape), layoutBounds });
     const isSameContext = cache && cache.type === type && cache.shapeKey === shapeKey;
@@ -811,7 +1250,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         let camera;
         let renderer;
         try {
-            ({ scene, camera, renderer } = setupScene(stage, 0x000000));
+            ({ scene, camera, renderer } = setupScene(stage, 0x2f343d));
         }
         catch (err) {
             // webgl can still fail even after a feature test.
@@ -819,10 +1258,26 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         }
         const disposer = createDisposer();
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
+        const initialTensorViews = new Map();
+        configs.forEach((cfg) => {
+            const snapshot = viewState?.tensorViews?.[cfg.name];
+            initialTensorViews.set(cfg.name, buildTensorViewSpec(normalizeViewShape(cfg.shape || []), snapshot?.visible || '', snapshot?.hiddenIndices || []));
+        });
         const tensors = new Map();
         configs.forEach(cfg => {
-            const group = createTensor(cfg.shape, null, cfg.color, cfg.name, cubeGeometry, edgesGeometry, lineMaterial);
-            group.position.set(...(cfg.position || [0, 0, 0]));
+            const shape = normalizeViewShape(cfg.shape || []);
+            const spec = initialTensorViews.get(cfg.name) || buildTensorViewSpec(shape);
+            const useFullLayoutPosition = shouldUseFullLayoutPosition(spec, shape);
+            const group = createTensor(spec.displayShape, null, cfg.color, cfg.name, cubeGeometry, edgesGeometry, lineMaterial, {
+                mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec),
+                ...(useFullLayoutPosition ? {
+                    mapDisplayCoordToPosition: (coord) => mapDisplayToFullCoords(coord, spec),
+                    positionShape: shape,
+                } : {}),
+            });
+            const [bx = 0, by = 0, bz = 0] = cfg.position || [0, 0, 0];
+            const [ox, oy, oz] = computeViewPlacementOffset(spec, shape);
+            group.position.set(bx + ox, by + oy, bz + oz);
             if (cfg.endpoint) {
                 group.userData.endpoint = cfg.endpoint;
             }
@@ -832,13 +1287,6 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             scene.add(group);
             tensors.set(cfg.name, group);
         });
-        if (layoutBounds) {
-            const depth = layoutBounds.depth ?? CUBE_SIZE;
-            const layoutBox = new THREE.Mesh(new THREE.BoxGeometry(layoutBounds.width, layoutBounds.height, depth), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }));
-            const center = layoutBounds.center ?? [0, 0, 0];
-            layoutBox.position.set(center[0], center[1], center[2] ?? 0);
-            scene.add(layoutBox);
-        }
         const hoverOutline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(CUBE_SIZE * 1.05, CUBE_SIZE * 1.05, CUBE_SIZE * 1.05)), new THREE.LineBasicMaterial({ color: COLOR_HOVER }));
         hoverOutline.visible = false;
         scene.add(hoverOutline);
@@ -848,6 +1296,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
             });
         }
+        const sliceOutlineGroups = buildSliceReferenceOutlines(scene, tensors, configByNameMap);
         let cameraCenter = new THREE.Vector3(0, 0, 0);
         let fitRadius = 0;
         const bounds = new THREE.Box3();
@@ -862,6 +1311,10 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         if (showDimLines) {
             dimLineGroups.forEach((group) => bounds.union(new THREE.Box3().setFromObject(group)));
             bounds.expandByScalar(1.0);
+            hasBounds = true;
+        }
+        if (sliceOutlineGroups.length > 0) {
+            sliceOutlineGroups.forEach((group) => bounds.union(new THREE.Box3().setFromObject(group)));
             hasBounds = true;
         }
         if (layoutBounds) {
@@ -894,6 +1347,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         };
         const state = {
             colorizeOn: !!initialToggles.colorize,
+            editTensorViewOn: !!initialToggles.editTensorView,
             payloads: new Map(),
             rafId: null,
             renderPending: false,
@@ -906,6 +1360,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             programSubsets: null,
             programSubsetHues: null,
             programDataLoading: false,
+            tensorViews: new Map(initialTensorViews),
         };
         const highlightColor = (colors.HIGHLIGHT instanceof THREE.Color) ? colors.HIGHLIGHT : new THREE.Color(colors.HIGHLIGHT || 0x00b3ff);
         const ctx = {
@@ -917,6 +1372,9 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             stage,
             API_BASE,
             op,
+            configByName: configByNameMap,
+            cubeGeometry,
+            edgesGeometry,
             scene,
             camera,
             renderer,
@@ -929,9 +1387,12 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             mouse: new THREE.Vector2(),
             legendContainer: null,
             dimLineGroups,
+            sliceOutlineGroups,
             descriptorDimLineGroups: [],
             showDimLines,
+            supportsAllPrograms,
             highlightColor,
+            tensorViewControls: null,
             requestRender: () => { },
             applyBackgroundTheme: () => { },
             destroyLegends: () => { },
@@ -947,6 +1408,9 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 ctx.requestRender();
             } });
         };
+        const handleTextSync = () => { ctx.requestRender(); };
+        window.addEventListener('triton-viz-text-sync', handleTextSync);
+        disposer.add(() => window.removeEventListener('triton-viz-text-sync', handleTextSync));
         let lastWidth = 0;
         let lastHeight = 0;
         const resizeRenderer = () => {
@@ -1023,6 +1487,16 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             }
             ctx.legendContainer = wrapper;
         };
+        const serializeTensorViews = () => {
+            const out = {};
+            state.tensorViews.forEach((spec, name) => {
+                out[name] = {
+                    visible: spec.visibleText,
+                    hiddenIndices: spec.hiddenIndices.slice(),
+                };
+            });
+            return out;
+        };
         const applyViewState = (nextState) => {
             if (!nextState)
                 return;
@@ -1040,7 +1514,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             }
             orbitControls.update();
             state.colorizeOn = !!nextState.colorizeOn;
-            state.allProgramsOn = !!nextState.allProgramsOn;
+            state.allProgramsOn = supportsAllPrograms ? !!nextState.allProgramsOn : false;
             applyHistogramState(histogramUI, nextState);
             if (window.setOpControlState) {
                 window.setOpControlState({
@@ -1059,6 +1533,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 target: [orbitControls.target.x, orbitControls.target.y, orbitControls.target.z],
                 colorizeOn: state.colorizeOn,
                 allProgramsOn: state.allProgramsOn,
+                tensorViews: serializeTensorViews(),
                 ...captureHistogramState(histogramUI),
             };
         };
@@ -1079,11 +1554,14 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             ctx.destroyLegends();
             ctx.dimLineGroups.forEach((group) => scene.remove(group));
             ctx.dimLineGroups = [];
+            clearSliceReferenceOutlines(ctx);
             clearDescriptorDimensionLines(ctx);
             if (stage.parentElement)
                 stage.parentElement.removeChild(stage);
             if (sideMenu.parentElement)
                 sideMenu.parentElement.removeChild(sideMenu);
+            if (ctx.tensorViewControls?.parentElement)
+                ctx.tensorViewControls.parentElement.removeChild(ctx.tensorViewControls);
             histogramUI.destroy?.();
             if (histogramUI.overlay?.parentElement)
                 histogramUI.overlay.parentElement.removeChild(histogramUI.overlay);
@@ -1109,7 +1587,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
     if (!cache)
         return;
     const vizCache = cache;
-    const { state, tensors, sideMenu, requestRender, applyBackgroundTheme, createLegends, destroyLegends } = vizCache;
+    const { state, tensors, sideMenu, requestRender, applyBackgroundTheme, createLegends, destroyLegends, configByName, cubeGeometry, edgesGeometry, scene, stage, } = vizCache;
     const syncOpControlState = () => {
         if (!window.setOpControlState)
             return;
@@ -1117,6 +1595,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             colorize: state.colorizeOn,
             histogram: vizCache.histogramUI.overlay.style.display === 'block',
             allPrograms: state.allProgramsOn,
+            editTensorView: state.editTensorViewOn,
         });
     };
     state.payloads.clear();
@@ -1135,19 +1614,23 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 color: '#' + group.userData.mesh.userData.color_base.getHexString(),
             };
             const shape = group.userData.mesh.userData.shape_raw;
-            if (shape)
+            if (shape) {
                 entry.shape = shape;
+                entry.dimColors = defaultDimColorsForShape(shape.length);
+            }
             const dimColor = dimColors?.[name];
             if (dimColor)
                 entry.dimColors = dimColor;
-            const descriptor = parseDescriptorHighlight(state.payloads.get(name)?.highlights);
+            const spec = state.tensorViews.get(name) || null;
+            const descriptorRaw = parseDescriptorHighlight(state.payloads.get(name)?.highlights);
+            const descriptor = descriptorRaw && spec ? projectDescriptorForView(descriptorRaw, spec) : descriptorRaw;
             if (descriptor && shape && shape.length > 0) {
                 const selectionColor = vizCache.highlightColor instanceof THREE.Color
                     ? `#${vizCache.highlightColor.getHexString()}`
                     : String(vizCache.highlightColor || '#00b3ff');
-                const selectionDimColors = reorderDescriptorForTensor([DESCRIPTOR_AXIS_COLORS.x, DESCRIPTOR_AXIS_COLORS.y, DESCRIPTOR_AXIS_COLORS.z], shape.length, selectionColor);
+                const selectionDimColors = reorderDescriptorForTensor([DESCRIPTOR_AXIS_COLORS.x, DESCRIPTOR_AXIS_COLORS.y, DESCRIPTOR_AXIS_COLORS.z], descriptor.shape.length, selectionColor);
                 entry.descriptor = {
-                    shape: reorderDescriptorForTensor(descriptor.shape, shape.length, 1),
+                    shape: descriptor.shape.slice(),
                     color: selectionColor,
                     dimColors: selectionDimColors,
                 };
@@ -1155,6 +1638,199 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             return entry;
         }));
     };
+    const rebuildDimensionLines = () => {
+        vizCache.dimLineGroups.forEach((group) => scene.remove(group));
+        vizCache.dimLineGroups = [];
+        if (!vizCache.showDimLines)
+            return;
+        tensors.forEach((group, name) => {
+            vizCache.dimLineGroups.push(...addDimensionLines(scene, group, dimColors[name]));
+        });
+    };
+    const rebuildSliceReferenceOutlines = () => {
+        clearSliceReferenceOutlines(vizCache);
+        vizCache.sliceOutlineGroups.push(...buildSliceReferenceOutlines(scene, tensors, configByName));
+    };
+    const rebuildTensorFromView = (name) => {
+        const cfg = configByName.get(name);
+        const oldGroup = tensors.get(name);
+        if (!cfg || !oldGroup)
+            return;
+        const shape = normalizeViewShape(cfg.shape || []);
+        const spec = state.tensorViews.get(name) || buildTensorViewSpec(shape);
+        const useFullLayoutPosition = shouldUseFullLayoutPosition(spec, shape);
+        const nextGroup = createTensor(spec.displayShape, null, oldGroup.userData.mesh.userData.color_base || cfg.color, name, cubeGeometry, edgesGeometry, vizCache.lineMaterial, {
+            mapDisplayCoordToFull: (coord) => mapDisplayToFullCoords(coord, spec),
+            ...(useFullLayoutPosition ? {
+                mapDisplayCoordToPosition: (coord) => mapDisplayToFullCoords(coord, spec),
+                positionShape: shape,
+            } : {}),
+        });
+        const [bx = 0, by = 0, bz = 0] = cfg.position || [0, 0, 0];
+        const [ox, oy, oz] = computeViewPlacementOffset(spec, shape);
+        nextGroup.position.set(bx + ox, by + oy, bz + oz);
+        const endpoint = oldGroup.userData.endpoint || cfg.endpoint;
+        if (endpoint)
+            nextGroup.userData.endpoint = endpoint;
+        else if (nextGroup.userData.endpoint)
+            delete nextGroup.userData.endpoint;
+        scene.remove(oldGroup);
+        const oldMaterial = oldGroup.userData.mesh?.material;
+        if (oldMaterial && typeof oldMaterial.dispose === 'function')
+            oldMaterial.dispose();
+        scene.add(nextGroup);
+        tensors.set(name, nextGroup);
+    };
+    const rebuildAllTensorsFromView = () => {
+        Array.from(tensors.keys()).forEach((name) => rebuildTensorFromView(name));
+        rebuildSliceReferenceOutlines();
+        rebuildDimensionLines();
+        renderShapeLegend();
+        restoreTensorColors(vizCache);
+        refreshDescriptorDimensionLines(vizCache);
+        requestRender();
+    };
+    const ensureTensorViewsInitialized = () => {
+        configByName.forEach((cfg, name) => {
+            if (state.tensorViews.has(name))
+                return;
+            state.tensorViews.set(name, buildTensorViewSpec(normalizeViewShape(cfg.shape || [])));
+        });
+    };
+    const applyTensorViewState = (snapshots) => {
+        ensureTensorViewsInitialized();
+        if (!snapshots)
+            return;
+        let changed = false;
+        configByName.forEach((cfg, name) => {
+            const snapshot = snapshots[name];
+            if (!snapshot)
+                return;
+            const shape = normalizeViewShape(cfg.shape || []);
+            const nextSpec = buildTensorViewSpec(shape, snapshot.visible, snapshot.hiddenIndices || []);
+            const prevSpec = state.tensorViews.get(name);
+            if (!prevSpec
+                || prevSpec.visibleText !== nextSpec.visibleText
+                || !arraysEqual(prevSpec.hiddenIndices, nextSpec.hiddenIndices)) {
+                state.tensorViews.set(name, nextSpec);
+                changed = true;
+            }
+        });
+        if (changed)
+            rebuildAllTensorsFromView();
+    };
+    const renderTensorViewControls = () => {
+        if (configByName.size === 0) {
+            if (vizCache.tensorViewControls) {
+                vizCache.tensorViewControls.remove();
+                vizCache.tensorViewControls = null;
+            }
+            return;
+        }
+        if (!vizCache.tensorViewControls) {
+            const panel = document.createElement('div');
+            panel.className = 'viz-ndim-controls';
+            stage.appendChild(panel);
+            vizCache.tensorViewControls = panel;
+        }
+        const root = vizCache.tensorViewControls;
+        if (!state.editTensorViewOn) {
+            root.style.display = 'none';
+            return;
+        }
+        root.style.display = '';
+        root.innerHTML = '';
+        Array.from(configByName.keys()).sort().forEach((name) => {
+            const cfg = configByName.get(name);
+            if (!cfg)
+                return;
+            const shape = normalizeViewShape(cfg.shape || []);
+            const spec = state.tensorViews.get(name) || buildTensorViewSpec(shape);
+            state.tensorViews.set(name, spec);
+            const section = document.createElement('div');
+            section.className = 'viz-ndim-section';
+            const title = document.createElement('div');
+            title.className = 'viz-ndim-title';
+            title.textContent = `${name} tensor`;
+            section.appendChild(title);
+            const visibleRow = document.createElement('div');
+            visibleRow.className = 'viz-ndim-row';
+            const visibleLabel = document.createElement('label');
+            visibleLabel.textContent = 'Visible dimensions:';
+            visibleLabel.className = 'viz-ndim-label';
+            const visibleInput = document.createElement('input');
+            visibleInput.type = 'text';
+            visibleInput.value = spec.visibleText;
+            visibleInput.className = 'viz-ndim-visible';
+            visibleInput.spellcheck = false;
+            const applyVisible = () => {
+                const nextSpec = buildTensorViewSpec(shape, visibleInput.value, state.tensorViews.get(name)?.hiddenIndices || []);
+                state.tensorViews.set(name, nextSpec);
+                visibleInput.value = nextSpec.visibleText;
+                renderTensorViewControls();
+                rebuildAllTensorsFromView();
+            };
+            visibleInput.addEventListener('change', applyVisible);
+            visibleRow.appendChild(visibleLabel);
+            visibleRow.appendChild(visibleInput);
+            section.appendChild(visibleRow);
+            const preview = document.createElement('div');
+            preview.className = 'viz-ndim-preview';
+            preview.textContent = buildTensorViewPreview(spec);
+            section.appendChild(preview);
+            if (spec.hiddenAxes.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'viz-ndim-hint';
+                empty.textContent = 'all dimensions are visible.';
+                section.appendChild(empty);
+                root.appendChild(section);
+                return;
+            }
+            spec.hiddenAxes.forEach((axis) => {
+                const row = document.createElement('div');
+                row.className = 'viz-ndim-row';
+                const label = document.createElement('label');
+                label.className = 'viz-ndim-label';
+                label.textContent = `${spec.axisLabels[axis]}:`;
+                const slider = document.createElement('input');
+                slider.type = 'range';
+                slider.min = '0';
+                slider.max = String(Math.max(0, (shape[axis] ?? 1) - 1));
+                slider.value = String(spec.hiddenIndices[axis] ?? 0);
+                slider.className = 'viz-ndim-slider';
+                const value = document.createElement('input');
+                value.type = 'number';
+                value.min = '0';
+                value.max = String(Math.max(0, (shape[axis] ?? 1) - 1));
+                value.value = String(spec.hiddenIndices[axis] ?? 0);
+                value.className = 'viz-ndim-index';
+                const applyAxisValue = (raw) => {
+                    const currentSpec = state.tensorViews.get(name) || spec;
+                    const max = Math.max(0, (shape[axis] ?? 1) - 1);
+                    const parsed = Number(raw);
+                    const nextValue = Math.min(max, Math.max(0, Number.isFinite(parsed) ? Math.round(parsed) : 0));
+                    const hiddenIndices = currentSpec.hiddenIndices.slice();
+                    hiddenIndices[axis] = nextValue;
+                    const nextSpec = buildTensorViewSpec(shape, currentSpec.visibleText, hiddenIndices);
+                    state.tensorViews.set(name, nextSpec);
+                    slider.value = String(nextValue);
+                    value.value = String(nextValue);
+                    preview.textContent = buildTensorViewPreview(nextSpec);
+                    rebuildAllTensorsFromView();
+                };
+                slider.addEventListener('input', () => applyAxisValue(slider.value));
+                value.addEventListener('input', () => applyAxisValue(value.value));
+                value.addEventListener('change', () => applyAxisValue(value.value));
+                row.appendChild(label);
+                row.appendChild(slider);
+                row.appendChild(value);
+                section.appendChild(row);
+            });
+            root.appendChild(section);
+        });
+    };
+    applyTensorViewState(viewState?.tensorViews);
+    renderTensorViewControls();
     const getValueLegendItems = () => {
         const items = [];
         if (!state.colorizeOn)
@@ -1336,6 +2012,12 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 }
                 return ensureProgramData();
             } : null,
+            toggleEditTensorView: () => {
+                state.editTensorViewOn = !state.editTensorViewOn;
+                renderTensorViewControls();
+                requestRender();
+                return state.editTensorViewOn;
+            },
         });
     }
     syncOpControlState();

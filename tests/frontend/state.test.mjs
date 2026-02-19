@@ -23,6 +23,7 @@ test('state initializes with defaults', () => {
     assert.equal(state.toggles.colorize, false);
     assert.equal(state.toggles.histogram, false);
     assert.equal(state.toggles.allPrograms, false);
+    assert.equal(state.toggles.editTensorView, false);
 });
 
 test('setActiveProgram updates state', () => {
@@ -38,6 +39,7 @@ test('setToggles merges partial updates', () => {
     assert.equal(toggles.colorize, true);
     assert.equal(toggles.histogram, false);
     assert.equal(toggles.allPrograms, false);
+    assert.equal(toggles.editTensorView, false);
 });
 
 test('subscribe receives updates', () => {
