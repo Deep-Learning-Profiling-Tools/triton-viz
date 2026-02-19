@@ -21,10 +21,18 @@ npm run test:frontend            # test JS (if working on the visualizer)
 
 ## Project Structure
 
-- `frontend/` - TypeScript frontend source code
-- `examples/` - Entry points for new users to try out triton-viz functionality
-- `docs/` - triton-viz website
-- `triton_viz/frontends/` - Where to put DSL-specific code to attach to triton-viz
-- `triton_viz/transformers/` - AST rewriters
-- `triton_viz/visualizer/` - Python interface for the visualizer
-- `triton_viz/utils/` - Miscellaneous utility functions
+```
+frontend/             # TypeScript frontend source code
+examples/             # Entry points for new users to try out triton-viz functionality
+docs/                 # triton-viz website
+triton_viz/
+  frontends/          # Where to put DSL-specific code to attach to triton-viz
+  transformers/       # AST rewriters
+  visualizer/         # Python interface for the visualizer
+  utils/              # Miscellaneous utility functions
+tests/
+  unit/               # Unit tests
+  end_to_end/         # End-to-end tests
+  frontend/           # Frontend tests
+  nki/                # NKI-related tests
+```
