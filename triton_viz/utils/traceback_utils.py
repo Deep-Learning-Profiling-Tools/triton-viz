@@ -1,25 +1,13 @@
+import functools
 import linecache
 import os
 import sys
-import traceback
 from dataclasses import dataclass
-from pathlib import Path
+from types import FrameType
+from typing import Callable
 
-
-# Unified superset of framework path fragments used to filter out non-user frames.
-FRAMEWORK_PATHS: list[str] = [
-    "triton_viz/core/",
-    "triton_viz/clients/",
-    "triton_viz/utils/",
-    "triton_viz/wrapper",
-    "triton/runtime/",
-    "triton/language/",
-    "site-packages/triton/",
-    "runpy",
-    "IPython",
-]
-
-_BIN_DIR = os.path.normcase(os.path.dirname(sys.executable))
+# IDs all triton_viz-traced functions to display its code within clients
+CODE_KEYS: set[tuple[str, str]] = set()
 
 
 @dataclass
@@ -31,49 +19,111 @@ class TracebackInfo:
 
 
 # ---------------------------------------------------------------------------
+# Path resolution cache (avoids repeated stat/readlink syscalls)
+# ---------------------------------------------------------------------------
+
+_realpath = functools.lru_cache(maxsize=256)(os.path.realpath)
+
+
+# ---------------------------------------------------------------------------
+# Framework-frame detection (lazy-initialized to avoid circular imports)
+# ---------------------------------------------------------------------------
+
+_FRAMEWORK_ROOTS: tuple[str, ...] | None = None
+
+
+def _get_framework_roots() -> tuple[str, ...]:
+    global _FRAMEWORK_ROOTS
+    if _FRAMEWORK_ROOTS is None:
+        import triton as _triton
+        import triton_viz as _triton_viz
+
+        _FRAMEWORK_ROOTS = tuple(
+            {
+                _realpath(os.path.dirname(_triton.__file__)),
+                _realpath(os.path.dirname(_triton_viz.__file__)),
+            }
+        )
+    return _FRAMEWORK_ROOTS
+
+
+def _is_framework_frame(frame: FrameType) -> bool:
+    fn = frame.f_code.co_filename
+    if fn.startswith("<"):
+        return True
+    resolved = _realpath(fn)
+    return any(resolved.startswith(root) for root in _get_framework_roots())
+
+
+# ---------------------------------------------------------------------------
 # Frame extraction
 # ---------------------------------------------------------------------------
 
 
-def extract_user_frames(skip_tail: int = 0) -> list[traceback.FrameSummary]:
-    """Return user-code frames from the current call stack.
-
-    Framework frames (matching any entry in ``FRAMEWORK_PATHS``) are removed.
-    ``skip_tail`` additional frames are stripped from the *end* of the raw stack
-    before filtering (useful to exclude the caller itself).
+def get_code_key(obj: FrameType | Callable) -> tuple[str, str]:
     """
-    stack: list[traceback.FrameSummary] = list(traceback.extract_stack())
-    if skip_tail > 0:
-        stack = stack[:-skip_tail]
+    Given an object that points to a function (a call frame/function itself),
+    inspect the function's code and create a key that tells triton-viz to display
+    the code for displaying in clients (i.e. Code View in visualizer).
+    """
+    code = obj.f_code if isinstance(obj, FrameType) else obj.__code__
+    return (_realpath(code.co_filename), code.co_qualname)
 
-    cleaned: list[traceback.FrameSummary] = []
-    for f in stack:
-        fn = f.filename.replace("\\", "/")
-        if any(s in fn for s in FRAMEWORK_PATHS):
+
+def extract_user_frames(num_frames: int = 0) -> list[TracebackInfo]:
+    """
+    Walk the call stack from inner frame outward, collecting non-framework
+    frames until hitting a CODE_KEYS boundary (the @trace-decorated kernel).
+
+    The boundary frame itself is included. Framework frames (triton, triton_viz
+    internals) are skipped. ``num_frames`` trims to the innermost *N* frames
+    after collection (0 = return all).
+    """
+    collected: list[TracebackInfo] = []
+    frame: FrameType | None = sys._getframe(1)
+    while frame:
+        if _is_framework_frame(frame):
+            frame = frame.f_back
             continue
-        # Skip console_scripts entry points (e.g. triton-sanitizer, triton-profiler)
-        if os.path.normcase(os.path.dirname(os.path.abspath(f.filename))) == _BIN_DIR:
+
+        code = frame.f_code
+        resolved = _realpath(code.co_filename)
+        code_key = (resolved, code.co_qualname)
+        is_boundary = code_key in CODE_KEYS
+
+        # For num_frames=1 we only need the innermost frame: skip until
+        # we are about to hit the boundary, then grab just the previous one.
+        if num_frames == 1 and not is_boundary:
+            # Keep only the latest non-boundary frame (overwrite previous)
+            collected = [
+                TracebackInfo(
+                    resolved,
+                    frame.f_lineno,
+                    code.co_qualname,
+                    linecache.getline(resolved, frame.f_lineno).rstrip(),
+                )
+            ]
+            frame = frame.f_back
             continue
-        cleaned.append(f)
 
-    if cleaned:
-        return cleaned
+        lineno = frame.f_lineno
+        line_of_code = linecache.getline(resolved, lineno).rstrip()
+        collected.append(
+            TracebackInfo(resolved, lineno, code.co_qualname, line_of_code)
+        )
 
-    # fallback: last non-"<...>" frame
-    for f in reversed(stack):
-        if not f.filename.startswith("<"):
-            return [f]
-    return stack[-1:] if stack else []
+        if is_boundary:
+            break
 
+        frame = frame.f_back
 
-def frame_to_traceback_info(frame: traceback.FrameSummary) -> "TracebackInfo":
-    """Convert a ``FrameSummary`` to a ``TracebackInfo``."""
-    return TracebackInfo(
-        filename=frame.filename,
-        lineno=frame.lineno or 0,
-        func_name=frame.name,
-        line_of_code=frame.line or "",
-    )
+    # collected is inner-first; reverse to outer-first (kernel → helper → op)
+    collected.reverse()
+
+    if num_frames and len(collected) > num_frames:
+        collected = collected[-num_frames:]
+
+    return collected
 
 
 # ---------------------------------------------------------------------------
@@ -81,41 +131,9 @@ def frame_to_traceback_info(frame: traceback.FrameSummary) -> "TracebackInfo":
 # ---------------------------------------------------------------------------
 
 
-def locate_user_frame() -> tuple[str, int, str] | None:
-    """Walk the live call stack and return the first user-code location.
-
-    Returns ``(filename, lineno, func_name)`` or ``None``.
-    """
-    from types import FrameType
-
-    frame: FrameType | None = sys._getframe()
-
-    while frame is not None:
-        filename = Path(frame.f_code.co_filename).as_posix()
-
-        # Skip Python internals
-        if filename.startswith("<"):
-            frame = frame.f_back
-            continue
-
-        is_framework = any(path in filename for path in FRAMEWORK_PATHS)
-
-        # User code: not in framework paths, OR in examples directory
-        if not is_framework or "examples/" in filename:
-            return (
-                frame.f_code.co_filename,
-                frame.f_lineno,
-                frame.f_code.co_name,
-            )
-
-        frame = frame.f_back
-
-    return None
-
-
 def location_to_traceback_info(
     source_location: tuple[str, int, str],
-) -> "TracebackInfo":
+) -> TracebackInfo:
     """Convert a ``(filename, lineno, func_name)`` tuple to ``TracebackInfo``."""
     filename, lineno, func_name = source_location
     line_of_code = linecache.getline(filename, lineno).rstrip()
@@ -143,7 +161,7 @@ def read_source_segment(
     ``highlight``, and ``lines`` keys, or ``None`` on failure.
     """
     try:
-        path = os.path.realpath(filename)
+        path = _realpath(filename)
         start = max(1, lineno - context)
         end = lineno + context
         lines: list[dict] = []
