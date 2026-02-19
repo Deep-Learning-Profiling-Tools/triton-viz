@@ -1,3 +1,4 @@
+import functools
 import linecache
 import os
 import sys
@@ -18,6 +19,13 @@ class TracebackInfo:
 
 
 # ---------------------------------------------------------------------------
+# Path resolution cache (avoids repeated stat/readlink syscalls)
+# ---------------------------------------------------------------------------
+
+_realpath = functools.lru_cache(maxsize=256)(os.path.realpath)
+
+
+# ---------------------------------------------------------------------------
 # Framework-frame detection (lazy-initialized to avoid circular imports)
 # ---------------------------------------------------------------------------
 
@@ -32,8 +40,8 @@ def _get_framework_roots() -> tuple[str, ...]:
 
         _FRAMEWORK_ROOTS = tuple(
             {
-                os.path.realpath(os.path.dirname(_triton.__file__)),
-                os.path.realpath(os.path.dirname(_triton_viz.__file__)),
+                _realpath(os.path.dirname(_triton.__file__)),
+                _realpath(os.path.dirname(_triton_viz.__file__)),
             }
         )
     return _FRAMEWORK_ROOTS
@@ -43,7 +51,8 @@ def _is_framework_frame(frame: FrameType) -> bool:
     fn = frame.f_code.co_filename
     if fn.startswith("<"):
         return True
-    return any(os.path.realpath(fn).startswith(root) for root in _get_framework_roots())
+    resolved = _realpath(fn)
+    return any(resolved.startswith(root) for root in _get_framework_roots())
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +67,7 @@ def get_code_key(obj: FrameType | Callable) -> tuple[str, str]:
     the code for displaying in clients (i.e. Code View in visualizer).
     """
     code = obj.f_code if isinstance(obj, FrameType) else obj.__code__
-    return (os.path.realpath(code.co_filename), code.co_qualname)
+    return (_realpath(code.co_filename), code.co_qualname)
 
 
 def extract_user_frames(num_frames: int = 0) -> list[TracebackInfo]:
@@ -77,15 +86,33 @@ def extract_user_frames(num_frames: int = 0) -> list[TracebackInfo]:
             frame = frame.f_back
             continue
 
-        code_key = get_code_key(frame)
-        filename = os.path.realpath(frame.f_code.co_filename)
-        func_name = frame.f_code.co_qualname
-        lineno = frame.f_lineno
-        line_of_code = linecache.getline(filename, lineno).rstrip()
-        collected.append(TracebackInfo(filename, lineno, func_name, line_of_code))
+        code = frame.f_code
+        resolved = _realpath(code.co_filename)
+        code_key = (resolved, code.co_qualname)
+        is_boundary = code_key in CODE_KEYS
 
-        # Stop once we reach a frame registered via @trace (the kernel boundary)
-        if code_key in CODE_KEYS:
+        # For num_frames=1 we only need the innermost frame: skip until
+        # we are about to hit the boundary, then grab just the previous one.
+        if num_frames == 1 and not is_boundary:
+            # Keep only the latest non-boundary frame (overwrite previous)
+            collected = [
+                TracebackInfo(
+                    resolved,
+                    frame.f_lineno,
+                    code.co_qualname,
+                    linecache.getline(resolved, frame.f_lineno).rstrip(),
+                )
+            ]
+            frame = frame.f_back
+            continue
+
+        lineno = frame.f_lineno
+        line_of_code = linecache.getline(resolved, lineno).rstrip()
+        collected.append(
+            TracebackInfo(resolved, lineno, code.co_qualname, line_of_code)
+        )
+
+        if is_boundary:
             break
 
         frame = frame.f_back
@@ -134,7 +161,7 @@ def read_source_segment(
     ``highlight``, and ``lines`` keys, or ``None`` on failure.
     """
     try:
-        path = os.path.realpath(filename)
+        path = _realpath(filename)
         start = max(1, lineno - context)
         end = lineno + context
         lines: list[dict] = []
