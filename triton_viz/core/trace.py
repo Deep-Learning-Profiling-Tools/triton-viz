@@ -1,4 +1,5 @@
 from copy import deepcopy
+from ..utils.traceback_utils import CODE_KEYS, get_code_key
 from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.autotuner import Heuristics
 from triton.runtime.interpreter import InterpretedFunction
@@ -10,6 +11,7 @@ from .client import ClientManager, Client
 from .data import Launch
 from . import patch
 from typing import Callable, Optional, Union
+import types
 
 
 launches: list[Launch] = []
@@ -231,6 +233,21 @@ class NKITrace(KernelInterface, TraceInterface):
             return ret
 
 
+def trace_source(kernel):
+    """
+    Add the kernel code to be traceable within stack traces for clients
+    (e.g. to capture source code to display with visualizer/client).
+    You can also use this to decorate other functions that a kernel calls.
+    """
+    base_fn = kernel
+    while not isinstance(base_fn, types.FunctionType):
+        # base_fn may be a raw function but also a JITFunction, Autotuner, InterpretedFunction, ...
+        # we want to strip away the wrappers until we get to the python function
+        base_fn = base_fn.fn
+    CODE_KEYS.add(get_code_key(base_fn))
+    return kernel
+
+
 def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
     """
     Create a trace object that can be used to run a kernel with instrumentation client(s).
@@ -260,6 +277,8 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
             trace = kernel
             trace.add_client(client)
             return trace
+
+        trace_source(kernel)
 
         # First-time wrapping
         # Triton backend need JIT/Interpreter/Autotuner；
