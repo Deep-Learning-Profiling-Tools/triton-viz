@@ -1,3 +1,4 @@
+from triton_viz.utils.traceback_utils import CODE_KEYS, get_code_key
 import numpy as np
 
 try:
@@ -503,6 +504,7 @@ class NKIInterpretedFunction:
             code_obj = compile(transformed_code, filename=filename, mode="exec")
             exec(code_obj, exec_globals)
             self.fn = exec_globals[self.fn.__name__]
+            CODE_KEYS.add(get_code_key(self.fn))  # trace rewritten function for clients
 
         # convert args to NDArray if they are not already
         args = [arg if isinstance(arg, NDArray) else NDArray(value=arg) for arg in args]
