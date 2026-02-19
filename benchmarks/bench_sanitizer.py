@@ -906,7 +906,7 @@ BENCHMARKS["flaggems_layernorm"] = {
 
 def run_benchmarks(
     warmup: int = 1,
-    iterations: int = 5,
+    iterations: int = 20,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1105,7 +1105,9 @@ def main():
     parser = argparse.ArgumentParser(description="Sanitizer performance benchmark")
     parser.add_argument("--output", "-o", help="Output JSON file path")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations")
-    parser.add_argument("--iterations", type=int, default=5, help="Measured iterations")
+    parser.add_argument(
+        "--iterations", type=int, default=20, help="Measured iterations"
+    )
     parser.add_argument(
         "--compare",
         nargs=2,
