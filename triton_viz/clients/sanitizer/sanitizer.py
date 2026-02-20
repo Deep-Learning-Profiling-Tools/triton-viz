@@ -435,9 +435,10 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.tensor_addrs.extend(tensor_physical_addresses)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
+        grid = tuple(int(g) for g in grid)
         self.cache_grid = grid
         self.last_grid = (grid[0] - 1, grid[1] - 1, grid[2] - 1)
-        self.grid = tuple(int(g) for g in grid)
+        self.grid = grid
         addr = Int("addr")
 
         addr_ok_expr = (
