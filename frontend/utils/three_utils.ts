@@ -1,4 +1,3 @@
-import { createCadDimension, createVectorText } from './dimension_utils.js';
 import * as THREE from 'https://esm.sh/three@0.155.0';
 import type { TensorHighlights } from '../types/types.js';
 
@@ -14,6 +13,14 @@ type ThreeMaterial = any;
 type ThreeGroup = any;
 type ThreeVector3 = any;
 type ThreeBox3 = any;
+type TensorCoordNd = number[];
+type Extent3 = { x: number; y: number; z: number };
+type TensorCreateOptions = {
+    mapDisplayCoordToFull?: (coord: TensorCoordNd) => TensorCoordNd;
+    mapDisplayCoordToPosition?: (coord: TensorCoordNd) => TensorCoordNd;
+    positionShape?: TensorShape;
+};
+const OUTER_LEVEL_GAP_SCALE = 5;
 
 export const CUBE_SIZE = 0.2;
 export const GAP = 0.05;
@@ -106,29 +113,24 @@ export function createTensor(
     cubeGeometry: ThreeGeometry,
     _edgesGeometry: ThreeGeometry | null = null,
     _lineMaterial: ThreeMaterial | null = null,
+    options: TensorCreateOptions = {},
 ): ThreeGroup {
     console.log(`Creating ${tensorName} tensor:`, shape, coords);
     const tensor = new THREE.Group();
-    let depth = 1, height = 1, width = 1;
-    if (shape.length === 1) { width = shape[0] ?? 1; }
-    else if (shape.length === 2) { height = shape[0] ?? 1; width = shape[1] ?? 1; }
-    else { depth = shape[0] ?? 1; height = shape[1] ?? 1; width = shape[2] ?? 1; }
-
-    const spacing = CUBE_SIZE + GAP;
-    const centerX = (width - 1) * spacing / 2;
-    const centerY = -((height - 1) * spacing / 2);
-    const centerZ = -((depth - 1) * spacing / 2);
+    const normalizedShape = normalizeTensorShape(shape);
+    const normalizedPositionShape = normalizeTensorShape(options.positionShape || normalizedShape);
+    const { depth, height, width } = shapeDepthHeightWidth(normalizedShape);
 
     const isGlobal = tensorName === 'Global';
     const isDense = isGlobal || !coords; // Treat as dense if named Global or no coords provided
-    const instanceCount = isDense ? width * height * depth : coords.length;
+    const instanceCount = isDense ? productOfShape(normalizedShape) : coords.length;
 
     const mesh = new THREE.InstancedMesh(cubeGeometry, new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true }), instanceCount);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(instanceCount * 3), 3);
     const baseColor = color instanceof THREE.Color ? color.clone() : new THREE.Color(color);
     mesh.userData.color_base = baseColor;
-    mesh.userData.shape_raw = shape;
+    mesh.userData.shape_raw = normalizedShape;
     mesh.userData.tensorName = tensorName;
     mesh.userData.shape = { depth, height, width };
 
@@ -169,25 +171,46 @@ export function createTensor(
             coords.forEach((c: TensorCoords) => { const [x,y,z]=remap(c); if(x>=0&&x<width&&y>=0&&y<height&&z>=0&&z<depth) highlightedIndices.add(z*(width*height)+y*width+x); });
         }
         const coordList: TensorCoords[] = [];
-        let idx = 0;
-        for (let z=0; z<depth; z++) {
-            for (let y=0; y<height; y++) {
-                for (let x=0; x<width; x++) {
-                    matrix.setPosition(x*spacing-centerX, -y*spacing-centerY, -z*spacing-centerZ);
-                    mesh.setMatrixAt(idx, matrix);
-                    mesh.setColorAt(idx, highlightedIndices.has(idx) ? COLOR_SLICE : baseColor);
-                    idx++; coordList.push([x,y,z]);
-                }
-            }
+        const displayCoords: TensorCoordNd[] = [];
+        const fullCoords: TensorCoordNd[] = [];
+        for (let idx = 0; idx < instanceCount; idx += 1) {
+            const displayCoord = unravelIndex(idx, normalizedShape);
+            const fullCoord = options.mapDisplayCoordToFull
+                ? options.mapDisplayCoordToFull(displayCoord.slice())
+                : displayCoord.slice();
+            const legacyCoord = legacyCoordFromDisplay(displayCoord);
+            const positionCoord = options.mapDisplayCoordToPosition
+                ? options.mapDisplayCoordToPosition(displayCoord.slice())
+                : displayCoord.slice();
+            const position = positionForDisplayCoord(positionCoord, normalizedPositionShape);
+            matrix.setPosition(position.x, position.y, position.z);
+            mesh.setMatrixAt(idx, matrix);
+            mesh.setColorAt(idx, highlightedIndices.has(idx) ? COLOR_SLICE : baseColor);
+            coordList.push(legacyCoord);
+            displayCoords.push(displayCoord);
+            fullCoords.push(fullCoord);
         }
         mesh.userData.coords = coordList;
+        mesh.userData.coords_display = displayCoords;
+        mesh.userData.coords_full = fullCoords;
     } else {
         const cArr = coords || [];
+        const displayCoords: TensorCoordNd[] = [];
+        const fullCoords: TensorCoordNd[] = [];
+        const spacing = CUBE_SIZE + GAP;
+        const centerX = (width - 1) * spacing / 2;
+        const centerY = -((height - 1) * spacing / 2);
+        const centerZ = -((depth - 1) * spacing / 2);
         cArr.forEach(([x, y, z]: TensorCoords, idx: number) => {
             matrix.setPosition(x*spacing-centerX, -y*spacing-centerY, -z*spacing-centerZ);
             mesh.setMatrixAt(idx, matrix); mesh.setColorAt(idx, baseColor);
+            const displayCoord = [z, y, x];
+            displayCoords.push(displayCoord);
+            fullCoords.push(options.mapDisplayCoordToFull ? options.mapDisplayCoordToFull(displayCoord.slice()) : displayCoord);
         });
         mesh.userData.coords = cArr;
+        mesh.userData.coords_display = displayCoords;
+        mesh.userData.coords_full = fullCoords;
     }
 
     mesh.instanceMatrix.needsUpdate = true;
@@ -209,47 +232,183 @@ export function updateTensorHighlights(
 ): void {
     if (!tensor || !tensor.userData.mesh) return;
     const mesh = tensor.userData.mesh;
-    const coordsList: TensorCoords[] | undefined = mesh.userData.coords;
-    if (!coordsList) return;
+    const coordsLegacy: TensorCoords[] | undefined = mesh.userData.coords;
+    const coordsFull: TensorCoordNd[] | undefined = mesh.userData.coords_full || mesh.userData.coords_display || coordsLegacy;
+    if (!coordsFull) return;
     const count = mesh.count;
     const hl = (highlightColor instanceof THREE.Color) ? highlightColor : new THREE.Color(highlightColor);
     const base = (baseColor instanceof THREE.Color) ? baseColor : new THREE.Color(baseColor);
-    let isHighlighted: HighlightPredicate = (_x, _y, _z) => false;
+    let isHighlighted = (_coord: TensorCoordNd, _legacy: TensorCoords): boolean => false;
     if (data && data.type === 'descriptor') {
         const { start, shape, stride } = data;
-        const sx = start?.[0] ?? 0;
-        const sy = start?.[1] ?? 0;
-        const sz = start?.[2] ?? 0;
-        const dx = shape?.[0] ?? 0;
-        const dy = shape?.[1] ?? 0;
-        const dz = shape?.[2] ?? 0;
-        const tx = Math.max(1, Math.abs(stride?.[0] ?? 1));
-        const ty = Math.max(1, Math.abs(stride?.[1] ?? 1));
-        const tz = Math.max(1, Math.abs(stride?.[2] ?? 1));
+        const rank = Math.max(
+            start?.length || 0,
+            shape?.length || 0,
+            stride?.length || 0,
+            coordsFull[0]?.length || 0,
+        );
+        const starts = Array.from({ length: rank }, (_, axis) => Number(start?.[axis] ?? 0));
+        const shapes = Array.from({ length: rank }, (_, axis) => Number(shape?.[axis] ?? 0));
+        const strides = Array.from({ length: rank }, (_, axis) => Math.max(1, Math.abs(Number(stride?.[axis] ?? 1))));
         const inAxis = (coord: number, axisStart: number, axisShape: number, axisStride: number): boolean => {
             if (axisShape <= 0) return false;
             const delta = coord - axisStart;
             if (delta < 0 || delta % axisStride !== 0) return false;
             return (delta / axisStride) < axisShape;
         };
-        isHighlighted = (x, y, z) => (
-            inAxis(x, sx, dx, tx)
-            && inAxis(y, sy, dy, ty)
-            && inAxis(z, sz, dz, tz)
-        );
+        isHighlighted = (coord) => {
+            for (let axis = 0; axis < rank; axis += 1) {
+                if (
+                    !inAxis(
+                        coord[axis] ?? 0,
+                        starts[axis] ?? 0,
+                        shapes[axis] ?? 0,
+                        strides[axis] ?? 1,
+                    )
+                ) return false;
+            }
+            return true;
+        };
     } else if (data && Array.isArray(data.data)) {
-        const set = new Set<string>(); data.data.forEach((c: number[]) => { const [x=0,y=0,z=0]=c; set.add(`${x},${y},${z}`); });
-        isHighlighted = (x,y,z) => set.has(`${x},${y},${z}`);
+        const set = new Set<string>();
+        data.data.forEach((c: number[]) => set.add(c.join(',')));
+        isHighlighted = (coord) => set.has(coord.join(','));
     } else if (typeof matchCoords === 'function') {
-        isHighlighted = matchCoords;
+        isHighlighted = (_coord, legacy) => matchCoords(legacy[0], legacy[1], legacy[2]);
     }
-    const highlightSet = new Set();
-    for (let i=0; i<count; i++) {
-        const c = coordsList[i];
-        if (c && isHighlighted(c[0],c[1],c[2])) { mesh.setColorAt(i, hl); highlightSet.add(i); }
-        else { mesh.setColorAt(i, base); }
+    for (let i = 0; i < count; i += 1) {
+        const coord = coordsFull[i] || [];
+        const legacy = coordsLegacy?.[i] || [0, 0, 0];
+        if (isHighlighted(coord, legacy)) mesh.setColorAt(i, hl);
+        else mesh.setColorAt(i, base);
     }
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+}
+
+function normalizeTensorShape(shape: TensorShape): TensorShape {
+    if (!Array.isArray(shape) || shape.length === 0) return [1];
+    return shape.map((dim) => Math.max(1, Number(dim) || 1));
+}
+
+function shapeDepthHeightWidth(shape: TensorShape): { depth: number; height: number; width: number } {
+    const rank = shape.length;
+    const width = shape[rank - 1] ?? 1;
+    const height = rank >= 2 ? (shape[rank - 2] ?? 1) : 1;
+    const depth = rank >= 3 ? (shape[rank - 3] ?? 1) : 1;
+    return { depth, height, width };
+}
+
+function productOfShape(shape: TensorShape): number {
+    let count = 1;
+    shape.forEach((dim) => {
+        count *= Math.max(1, Number(dim) || 1);
+    });
+    return count;
+}
+
+function unravelIndex(index: number, shape: TensorShape): TensorCoordNd {
+    const coord = new Array(shape.length).fill(0);
+    let remainder = index;
+    for (let axis = shape.length - 1; axis >= 0; axis -= 1) {
+        const dim = Math.max(1, shape[axis] ?? 1);
+        coord[axis] = remainder % dim;
+        remainder = Math.floor(remainder / dim);
+    }
+    return coord;
+}
+
+function legacyCoordFromDisplay(coord: TensorCoordNd): TensorCoords {
+    const rank = coord.length;
+    if (rank === 1) return [coord[0] ?? 0, 0, 0];
+    if (rank === 2) return [coord[1] ?? 0, coord[0] ?? 0, 0];
+    return [coord[rank - 1] ?? 0, coord[rank - 2] ?? 0, coord[rank - 3] ?? 0];
+}
+
+function positionForDisplayCoord(coord: TensorCoordNd, shape: TensorShape): ThreeVector3 {
+    const baseCell: Extent3 = { x: CUBE_SIZE, y: CUBE_SIZE, z: CUBE_SIZE };
+    return recursivePosition(coord, shape, baseCell, 0);
+}
+
+export function positionForTensorCoord(coord: TensorCoordNd, shape: TensorShape): ThreeVector3 {
+    return positionForDisplayCoord(coord, normalizeTensorShape(shape));
+}
+
+function recursivePosition(
+    coord: TensorCoordNd,
+    shape: TensorShape,
+    cellExtent: Extent3,
+    level: number,
+): ThreeVector3 {
+    if (shape.length <= 3) return baseGridPosition(coord, shape, cellExtent, level);
+    const split = shape.length - 3;
+    const outerShape = shape.slice(0, split);
+    const innerShape = shape.slice(split);
+    const outerCoord = coord.slice(0, split);
+    const innerCoord = coord.slice(split);
+    const innerExtent = recursiveExtent(innerShape, cellExtent, level);
+    const outerPos = recursivePosition(outerCoord, outerShape, innerExtent, level + 1);
+    const innerPos = recursivePosition(innerCoord, innerShape, cellExtent, level);
+    return new THREE.Vector3(
+        outerPos.x + innerPos.x,
+        outerPos.y + innerPos.y,
+        outerPos.z + innerPos.z,
+    );
+}
+
+function recursiveExtent(shape: TensorShape, cellExtent: Extent3, level: number): Extent3 {
+    if (shape.length <= 3) return baseGridExtent(shape, cellExtent, level);
+    const split = shape.length - 3;
+    const outerShape = shape.slice(0, split);
+    const innerShape = shape.slice(split);
+    const innerExtent = recursiveExtent(innerShape, cellExtent, level);
+    return recursiveExtent(outerShape, innerExtent, level + 1);
+}
+
+export function tensorBoundsSizeForShape(shape: TensorShape): ThreeVector3 {
+    const normalizedShape = normalizeTensorShape(shape);
+    const extent = recursiveExtent(normalizedShape, { x: CUBE_SIZE, y: CUBE_SIZE, z: CUBE_SIZE }, 0);
+    return new THREE.Vector3(extent.x, extent.y, extent.z);
+}
+
+function levelGap(level: number): number {
+    return GAP * Math.pow(OUTER_LEVEL_GAP_SCALE, Math.max(0, level));
+}
+
+function baseGridExtent(shape: TensorShape, cellExtent: Extent3, level: number): Extent3 {
+    const { depth, height, width } = shapeDepthHeightWidth(shape);
+    const gap = levelGap(level);
+    const stepX = cellExtent.x + gap;
+    const stepY = cellExtent.y + gap;
+    const stepZ = cellExtent.z + gap;
+    return {
+        x: (width - 1) * stepX + cellExtent.x,
+        y: (height - 1) * stepY + cellExtent.y,
+        z: (depth - 1) * stepZ + cellExtent.z,
+    };
+}
+
+function baseGridPosition(
+    coord: TensorCoordNd,
+    shape: TensorShape,
+    cellExtent: Extent3,
+    level: number,
+): ThreeVector3 {
+    const { depth, height, width } = shapeDepthHeightWidth(shape);
+    const gap = levelGap(level);
+    const stepX = cellExtent.x + gap;
+    const stepY = cellExtent.y + gap;
+    const stepZ = cellExtent.z + gap;
+    const centerX = (width - 1) * stepX / 2;
+    const centerY = (height - 1) * stepY / 2;
+    const centerZ = (depth - 1) * stepZ / 2;
+    const xAxis = coord[shape.length - 1] ?? 0;
+    const yAxis = shape.length >= 2 ? (coord[shape.length - 2] ?? 0) : 0;
+    const zAxis = shape.length >= 3 ? (coord[shape.length - 3] ?? 0) : 0;
+    return new THREE.Vector3(
+        xAxis * stepX - centerX,
+        -yAxis * stepY + centerY,
+        -zAxis * stepZ + centerZ,
+    );
 }
 
 export function calculateTensorSize(shape: TensorShape): ThreeVector3 {
@@ -309,54 +468,5 @@ export function setupEventListeners(
 }
 
 export function cameraControls(camera: ThreeCamera, cameraRotation: any): (e: KeyboardEvent) => void {
-    const PAN = 0.1, TILT = 0.02, ZOOM = 0.5;
-    return function(e: KeyboardEvent): void {
-        switch (e.key.toLowerCase()) {
-            case 'w': camera.position.y += PAN; break; case 's': camera.position.y -= PAN; break;
-            case 'a': camera.position.x -= PAN; break; case 'd': camera.position.x += PAN; break;
-            case 'arrowup': cameraRotation.x -= TILT; break; case 'arrowdown': cameraRotation.x += TILT; break;
-            case 'arrowleft': cameraRotation.y -= TILT; break; case 'arrowright': cameraRotation.y += TILT; break;
-            case 'o': camera.position.z += ZOOM; break; case 'p': camera.position.z -= ZOOM; break;
-        }
-        camera.setRotationFromEuler(cameraRotation); camera.updateProjectionMatrix();
-    };
-}
-
-export function addLabels(
-    scene: ThreeScene,
-    globalTensor: ThreeGroup,
-    sliceTensor: ThreeGroup,
-    colorOrBg: ColorInput = '#ffffff',
-): any[] {
-    const sprites = [];
-    sprites.push(addLabel(scene, "Global Tensor", globalTensor.position, colorOrBg));
-    sprites.push(...addAxisLabels(scene, globalTensor, colorOrBg, globalTensor.userData.color));
-    return sprites;
-}
-
-function addAxisLabels(
-    scene: ThreeScene,
-    tensor: ThreeGroup,
-    colorOrBg: ColorInput,
-    overrideColor: ColorInput,
-): any[] {
-    const groups: any[] = []; const shape = tensor?.userData?.mesh?.userData?.shape; if (!shape) return groups;
-    const bbox = new THREE.Box3().setFromObject(tensor);
-    const offsetBase = (CUBE_SIZE + GAP) * 1.5;
-    const AXIS_COLORS = { x: '#f87171', y: '#4ade80', z: '#60a5fa' };
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z), `${shape.width}`, 'x', AXIS_COLORS.x, { offset: offsetBase }));
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z), `${shape.height}`, 'y', AXIS_COLORS.y, { offset: offsetBase }));
-    groups.push(createCadDimension(scene, new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z), new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z), `${shape.depth}`, 'z', AXIS_COLORS.z, { offset: offsetBase }));
-    return groups;
-}
-
-function computeLabelPalette(colorOrBg: ColorInput): { fill: string; stroke: string } {
-    let l = 0; try { const c = (colorOrBg instanceof THREE.Color) ? colorOrBg : new THREE.Color(colorOrBg || 0x000000); l = 0.2126*c.r + 0.7152*c.g + 0.0722*c.b; } catch(e){}
-    return l > 0.55 ? { fill: '#111111', stroke: '#f8fafc' } : { fill: '#ffffff', stroke: '#0f172a' };
-}
-
-function addLabel(scene: ThreeScene, text: string, position: ThreeVector3, colorOrBg: ColorInput): any {
-    const { fill, stroke } = computeLabelPalette(colorOrBg);
-    const vectorText = createVectorText(text, fill, { fontSize: 0.8, depthTest: false, strokeWidth: 0.03, strokeColor: stroke });
-    vectorText.position.set(position.x, position.y + 2, position.z); scene.add(vectorText); return vectorText;
+    return function(_e: KeyboardEvent): void {};
 }

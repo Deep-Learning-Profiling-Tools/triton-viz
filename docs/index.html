@@ -617,17 +617,18 @@
                     <div class="feature-display" style="min-height: auto;">
                         <!-- Visualizer Client (Merged Features) -->
                         <div class="client-content active" id="client-viz">
-                            <p class="visualizer-note">The visualizer currently supports a detailed look into load, store, and matmul operations for 1/2/3D tensors (more operations and dimensions coming soon).</p>
+                            <p class="visualizer-note">The visualizer currently supports a detailed look into load, store, and matmul operations for N-dimensional tensors (more operations coming soon).</p>
                             <!-- Visualizer Sub-Tabs -->
                             <div class="features-tabs" style="border: none; padding-bottom: 1rem; justify-content: flex-start;">
-                                <button class="tab-btn active" onclick="switchFeature(event, 'feat-3d')">3D View</button>
+                                <button class="tab-btn active" onclick="switchFeature(event, 'feat-3d')">3D Rendering</button>
+                                <button class="tab-btn" onclick="switchFeature(event, 'feat-ndim')">Edit Tensor View</button>
                                 <button class="tab-btn" onclick="switchFeature(event, 'feat-pid')">Program IDs</button>
                                 <button class="tab-btn" onclick="switchFeature(event, 'feat-code')">Code Mapping</button>
                                 <button class="tab-btn" onclick="switchFeature(event, 'feat-heatmap')">Heatmaps</button>
                             <button class="tab-btn" onclick="switchFeature(event, 'feat-histogram')">Histograms</button>
                         </div>
                         <!-- Visualizer Content -->
-                        <!-- 3D View (Uses 3dims.py) -->
+                        <!-- 3D Rendering (Uses 3dims.py) -->
                         <div class="feature-content active" id="feat-3d">
                             <div class="client-grid">
                                 <div class="client-col-left">
@@ -700,6 +701,53 @@ if __name__ == "__main__":
                                         </video>
                                     </div>
                                     <p class="feature-description" style="margin-top: 1rem; text-align: left;">Interactive 3D rendering allows you to inspect tensor layouts and memory access patterns from any perspective. Left-click and drag to change camera angle. Scroll to zoom. Right-click and drag to pan.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Edit Tensor View (Uses 9dims_copy.py) -->
+                        <div class="feature-content" id="feat-ndim">
+                            <div class="client-grid">
+                                <div class="client-col-left">
+                                    <div class="code-container">
+                                        <div class="code-header">examples/visualizer/9dims_copy.py</div>
+                                        <pre><code class="language-python">import torch
+import triton
+import triton.language as tl
+import triton_viz
+
+
+BLOCK = 1024
+SHAPE = (2, 3, 4, 3, 4, 2, 4, 2, 3)
+
+
+@triton_viz.trace("tracer")
+@triton.jit
+def copy_9d_kernel(x_ptr, y_ptr, n_elements, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets &lt; n_elements
+    values = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    tl.store(y_ptr + offsets, values, mask=mask)
+
+
+if __name__ == "__main__":
+    x = torch.randn(SHAPE, device="cpu")
+    y = torch.empty_like(x)
+    n_elements = x.numel()
+    grid = (triton.cdiv(n_elements, BLOCK),)
+    copy_9d_kernel[grid](x, y, n_elements, BLOCK=BLOCK)
+    triton_viz.launch(share=False, port=5001)
+</code></pre>
+                                    </div>
+                                </div>
+                                <div class="client-col-right">
+                                    <div class="video-frame">
+                                        <div class="video-hint">Fullscreen for full detail</div>
+                                        <video autoplay loop muted playsinline controls>
+                                            <source src="vids/ndim.mp4" type="video/mp4">
+                                        </video>
+                                    </div>
+                                    <p class="feature-description" style="margin-top: 1rem; text-align: left;">Slice, permute, and inspect every value in N-dimensional tensors just as easily as 1D, 2D, or 3D tensors.</p>
                                 </div>
                             </div>
                         </div>

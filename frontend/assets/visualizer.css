@@ -386,6 +386,94 @@ body {
     line-height: 1.4;
 }
 
+.viz-ndim-controls {
+    position: absolute;
+    left: 16px;
+    top: 16px;
+    z-index: 12;
+    min-width: 260px;
+    max-width: 360px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(148, 163, 184, 0.45);
+    background: rgba(2, 6, 23, 0.72);
+    color: #fff;
+    display: grid;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.viz-ndim-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 8px;
+}
+
+.viz-ndim-section {
+    display: grid;
+    gap: 8px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.viz-ndim-section:first-child {
+    border-top: none;
+    padding-top: 0;
+}
+
+.viz-ndim-title {
+    color: #e2e8f0;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 11px;
+}
+
+.viz-ndim-label {
+    color: rgba(226, 232, 240, 0.95);
+    font-weight: 600;
+}
+
+.viz-ndim-visible,
+.viz-ndim-index {
+    border: 1px solid rgba(148, 163, 184, 0.55);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.65);
+    color: #f8fafc;
+    font-size: 12px;
+    padding: 4px 6px;
+}
+
+.viz-ndim-visible {
+    width: 100%;
+}
+
+.viz-ndim-index {
+    width: 56px;
+}
+
+.viz-ndim-slider {
+    width: 100%;
+}
+
+.viz-ndim-hint {
+    color: rgba(148, 163, 184, 0.95);
+    font-style: italic;
+}
+
+.viz-ndim-preview {
+    color: rgba(226, 232, 240, 0.95);
+    background: rgba(15, 23, 42, 0.5);
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
 .detail-overlay {
     position: absolute;
     inset: 0;
