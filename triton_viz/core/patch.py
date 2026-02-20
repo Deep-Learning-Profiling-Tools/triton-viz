@@ -173,16 +173,34 @@ class PatchOp:
             ):
                 raise NotImplementedError("Patching math ops not yet supported")
             elif self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl].values():
-                # see triton.runtime.interpreter:ReduceOps.sum
-                # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
-                # Then, convert return value from TensorHandle to tl.tensor
-                ret = tl.core.tensor(
-                    self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
-                    args[0].dtype,
-                )
-                fn = cast(Any, ret.handle)
-                if fn is not None:
-                    fn.concrete_fn = self.op
+                # When return_indices=True, tl.max/tl.min return a tuple (val, idx).
+                # The overrider wraps the result into a single tl.core.tensor,
+                # which breaks tuple unpacking. Instead, concretize the symbolic
+                # input and call the original op to get a proper (val, idx) tuple.
+                if kwargs.get("return_indices", False):
+                    input_tensor = args[0]
+                    handle = input_tensor.handle
+                    if hasattr(handle, "concretize"):
+                        concrete_handle = handle.concretize()
+                        concrete_input = tl.core.tensor(
+                            concrete_handle, input_tensor.type
+                        )
+                        ret = self.op(concrete_input, *args[1:], **kwargs)
+                    else:
+                        ret = self.op(*args, **kwargs)
+                else:
+                    # see triton.runtime.interpreter:ReduceOps.sum
+                    # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
+                    # Then, convert return value from TensorHandle to tl.tensor
+                    ret = tl.core.tensor(
+                        self.callbacks.op_overrider(
+                            args[0].handle, *args[1:], **kwargs
+                        ),
+                        args[0].dtype,
+                    )
+                    fn = cast(Any, ret.handle)
+                    if fn is not None:
+                        fn.concrete_fn = self.op
             else:  # interpreter_builder
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 if ret is not None:
