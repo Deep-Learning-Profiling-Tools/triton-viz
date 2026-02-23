@@ -391,7 +391,7 @@ async function fetchTensorPayload(apiBase, uuid, endpoint = 'getLoadTensor') {
         return null;
     }
 }
-async function fetchProgramCounts(apiBase, op, countOnly = false) {
+async function fetchProgramCounts(apiBase, op) {
     if (!op || !op.overall_key || op.time_idx === undefined)
         return null;
     // fetch a sparse list of coords -> program count for this op
@@ -401,7 +401,6 @@ async function fetchProgramCounts(apiBase, op, countOnly = false) {
             overall_key: op.overall_key,
             time_idx: op.time_idx,
             op_index: op.op_index,
-            count_only: countOnly,
         }, { base: apiBase });
     }
     catch (e) {
@@ -2108,21 +2107,14 @@ export function createTensorVisualization(containerElement, op, options = {}) {
         if (!supportsAllPrograms || !state.allProgramsOn)
             return false;
         if (!state.programSubsets && !state.programCounts) {
-            const summaryPayload = await fetchProgramCounts(API_BASE, op, true);
-            if (!summaryPayload) {
+            const payload = await fetchProgramCounts(API_BASE, op);
+            if (!payload) {
                 state.allProgramsOn = false;
                 if (window.setOpControlState)
                     window.setOpControlState({ allPrograms: false });
                 return false;
             }
-            const subsetCount = Number(summaryPayload?.subset_count) || 0;
-            if (subsetCount > PROGRAM_SUBSET_LIMIT) {
-                applyProgramPayload(summaryPayload);
-            }
-            else {
-                const fullPayload = await fetchProgramCounts(API_BASE, op, false);
-                applyProgramPayload(fullPayload || summaryPayload);
-            }
+            applyProgramPayload(payload);
         }
         if (state.allProgramsMode === 'subset' && state.programSubsets) {
             renderProgramSubsets();
@@ -2137,23 +2129,12 @@ export function createTensorVisualization(containerElement, op, options = {}) {
     const ensureProgramDataForHover = () => {
         if (!supportsAllPrograms)
             return;
-        if (!state.allProgramsOn)
-            return;
         if (state.programSubsets || state.programCounts || state.programDataLoading)
             return;
         state.programDataLoading = true;
-        fetchProgramCounts(API_BASE, op, true).then((payload) => {
+        fetchProgramCounts(API_BASE, op).then((payload) => {
             if (payload) {
-                const subsetCount = Number(payload?.subset_count) || 0;
-                if (subsetCount > PROGRAM_SUBSET_LIMIT) {
-                    applyProgramPayload(payload);
-                }
-                else {
-                    state.allProgramsMode = 'count';
-                    state.programCounts = normalizeProgramCounts(payload);
-                    state.programSubsets = null;
-                    state.programSubsetHues = null;
-                }
+                applyProgramPayload(payload);
                 if (state.allProgramsOn) {
                     if (state.allProgramsMode === 'subset' && state.programSubsets) {
                         renderProgramSubsets();

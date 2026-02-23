@@ -29,8 +29,6 @@ last_launch_snapshot = None
 sbuf_events = []
 load_overall_maps = {}
 store_overall_maps = {}
-all_programs_payload_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
-ALL_PROGRAMS_CACHE_LIMIT = 16
 DEVICE_LIMITS = {
     "TRN1_NC_V2": 24 * 1024 * 1024,
     "TRN1_CHIP": 48 * 1024 * 1024,
@@ -143,7 +141,6 @@ def update_global_data(force: bool = False):
     global sbuf_events
     global load_overall_maps
     global store_overall_maps
-    global all_programs_payload_cache
     global last_launch_snapshot
 
     # Collect all records from launches
@@ -186,7 +183,6 @@ def update_global_data(force: bool = False):
     sbuf_events = raw_tensor_data.pop("__sbuf_events__", [])
     load_overall_maps = viz_data.get("load_overall", {})
     store_overall_maps = viz_data.get("store_overall", {})
-    all_programs_payload_cache = {}
 
     # Precompute C values for each Dot operation
     precomputed_c_values = {}
@@ -766,35 +762,7 @@ def _parse_grid_key(raw_key: str) -> tuple[int, int, int] | None:
         return None
 
 
-def _to_bool(value: Any) -> bool:
-    """Convert common wire values to boolean."""
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        text = value.strip().lower()
-        return text in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def _remember_all_programs_payload(cache_key: tuple, payload: dict) -> None:
-    """Store a computed all-programs payload in a small FIFO cache."""
-    all_programs_payload_cache[cache_key] = payload
-    while len(all_programs_payload_cache) > ALL_PROGRAMS_CACHE_LIMIT:
-        oldest = next(iter(all_programs_payload_cache.keys()))
-        all_programs_payload_cache.pop(oldest, None)
-
-
-def _collect_load_store_program_subsets(
-    op_type,
-    overall_key,
-    op_index,
-    time_idx,
-    count_only: bool = False,
-):
+def _collect_load_store_program_subsets(op_type, overall_key, op_index, time_idx):
     if not global_data or "ops" not in global_data:
         return {
             "coords": [],
@@ -857,29 +825,23 @@ def _collect_load_store_program_subsets(
             coord_subsets.setdefault(coord, set()).add(pid)
 
     subsets: dict[str, list[list[int]]] = {}
-    subset_index_by_pid_set: dict[tuple[tuple[int, int, int], ...], int] = {}
     coords_list = []
     counts_list = []
     max_count = 0
     for coord, pid_set in coord_subsets.items():
         pid_list = sorted(pid_set)
-        pid_key = tuple(pid_list)
-        subset_id = subset_index_by_pid_set.get(pid_key)
-        if subset_id is None:
-            subset_id = len(subset_index_by_pid_set)
-            subset_index_by_pid_set[pid_key] = subset_id
-            if not count_only:
-                subsets[str(subset_id)] = [[px, py, pz] for px, py, pz in pid_list]
+        subset_key = "|".join([f"{px},{py},{pz}" for px, py, pz in pid_list])
+        if subset_key not in subsets:
+            subsets[subset_key] = [[px, py, pz] for px, py, pz in pid_list]
         count = len(pid_list)
         max_count = max(max_count, count)
-        if not count_only:
-            coords_list.append([*coord, subset_id])
+        coords_list.append([*coord, subset_key])
         counts_list.append([*coord, count])
 
     return {
         "coords": coords_list,
         "subsets": subsets,
-        "subset_count": len(subset_index_by_pid_set),
+        "subset_count": len(subsets),
         "counts": counts_list,
         "max_count": max_count,
         "shape": shape,
@@ -895,7 +857,6 @@ def get_load_store_all_programs():
     overall_key = data.get("overall_key")
     time_idx = data.get("time_idx")
     op_index = data.get("op_index")
-    count_only = _to_bool(data.get("count_only"))
     if not op_type or not overall_key or time_idx is None:
         return jsonify({"error": "Missing type, overall_key, or time_idx"}), 400
     op_type = str(op_type).strip().capitalize()
@@ -909,14 +870,9 @@ def get_load_store_all_programs():
         op_index = int(op_index) if op_index is not None else None
     except (TypeError, ValueError):
         op_index = None
-    cache_key = (op_type, str(overall_key), op_index, time_idx, count_only)
-    cached = all_programs_payload_cache.get(cache_key)
-    if cached is not None:
-        return jsonify(cached)
     payload = _collect_load_store_program_subsets(
-        op_type, overall_key, op_index, time_idx, count_only=count_only
+        op_type, overall_key, op_index, time_idx
     )
-    _remember_all_programs_payload(cache_key, payload)
     return jsonify(payload)
 
 
