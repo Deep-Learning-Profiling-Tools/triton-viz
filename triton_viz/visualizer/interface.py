@@ -931,6 +931,7 @@ def run_flask_with_cloudflared(port: int = 8000, tunnel_port: int | None = None)
     tunnel_url = _run_cloudflared(cloudflared_port, tunnel_port)
     _server_state.set_public_url(tunnel_url)
     _server_state.set_local_port(cloudflared_port)
+    print(f"Cloudflare tunnel URL: {tunnel_url}")
     app.run(host="0.0.0.0", port=cloudflared_port, debug=False, use_reloader=False)
 
 
