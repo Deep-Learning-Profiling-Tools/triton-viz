@@ -1276,6 +1276,7 @@ function addAxisDimensionLines(
         colorOverride?: string;
         labelPrefix?: string;
         shapeOverride?: number[];
+        axisLabelTokens?: string[];
     } = {},
 ): any[] {
     const mesh = tensorGroup?.userData?.mesh;
@@ -1364,7 +1365,8 @@ function addAxisDimensionLines(
         const familyPos = Math.max(0, family.indexOf(axis));
         const familyColor = colorForAxisFamily(targetWorldKey, familyPos, family.length);
         const color = colorOverride || dimColors[axis] || familyColor || defaultDimColorForAxis(shapeRaw.length, axis);
-        const labelCore = `${getAxisLabel(axis)}: ${size}`;
+        const axisToken = (options.axisLabelTokens?.[axis] || getAxisLabel(axis)).toUpperCase();
+        const labelCore = `${axisToken}: ${size}`;
         entries.push({
             axis,
             axisWorld,
@@ -1433,6 +1435,11 @@ function addDimensionLines(
     const mesh = tensorGroup?.userData?.mesh;
     if (!mesh) return [];
     const shapeRaw = normalizeViewShape(spec?.outlineShape || mesh.userData.shape_raw || []);
+    const axisLabelTokens = spec?.outlineSlots?.map((slot, axis) => {
+        if (slot === null) return '1';
+        if (slot.length === 0) return getAxisLabel(axis).toUpperCase();
+        return slot.map((sourceAxis) => getAxisLabel(sourceAxis).toUpperCase()).join('');
+    }) || shapeRaw.map((_dim, axis) => getAxisLabel(axis).toUpperCase());
     return addAxisDimensionLines(
         scene,
         tensorGroup,
@@ -1440,7 +1447,7 @@ function addDimensionLines(
         new Array(shapeRaw.length).fill(0),
         new Array(shapeRaw.length).fill(1),
         dimColors,
-        { shapeOverride: shapeRaw },
+        { shapeOverride: shapeRaw, axisLabelTokens },
     );
 }
 
@@ -2113,19 +2120,36 @@ export function createTensorVisualization(
                 color: string;
                 shape?: number[];
                 dimColors?: string[];
+                shapeLabels?: string[];
+                shapeExprs?: string[];
                 descriptor?: { shape: number[]; stride?: number[]; color: string; dimColors?: string[] };
             } = {
                 name: name === 'Global' ? type : `Matrix ${name}`,
                 color: '#' + group.userData.mesh.userData.color_base.getHexString(),
             };
+            const spec = state.tensorViews.get(name) || null;
             const shape = group.userData.mesh.userData.shape_raw;
-            if (shape) {
+            if (spec) {
+                entry.shape = spec.outlineShape.slice();
+                entry.dimColors = defaultDimColorsForShape(spec.outlineShape.length);
+                entry.shapeLabels = spec.outlineSlots.map((slot, axis) => {
+                    if (slot === null) return '1';
+                    if (slot.length === 0) return spec.axisLabels[axis] || `D${axis}`;
+                    return slot.map((sourceAxis) => spec.axisLabels[sourceAxis] || `D${sourceAxis}`).join('');
+                });
+                entry.shapeExprs = spec.outlineSlots.map((slot) => {
+                    if (slot === null) return '1';
+                    if (slot.length === 0) return '1';
+                    return slot.map((sourceAxis) => String(Math.max(1, spec.axisShape[sourceAxis] ?? 1))).join('*');
+                });
+            } else if (shape) {
                 entry.shape = shape;
                 entry.dimColors = defaultDimColorsForShape(shape.length);
             }
             const dimColor = dimColors?.[name];
-            if (dimColor) entry.dimColors = dimColor;
-            const spec = state.tensorViews.get(name) || null;
+            if (dimColor && (!entry.shape || dimColor.length === entry.shape.length)) {
+                entry.dimColors = dimColor;
+            }
             const descriptorRaw = parseDescriptorHighlight(state.payloads.get(name)?.highlights);
             const descriptor = descriptorRaw && spec ? projectDescriptorForView(descriptorRaw, spec) : descriptorRaw;
             if (descriptor && shape && shape.length > 0) {
@@ -2308,7 +2332,7 @@ export function createTensorVisualization(
                 row.className = 'viz-ndim-row';
                 const label = document.createElement('label');
                 label.className = 'viz-ndim-label';
-                label.textContent = `${group.token}:`;
+                label.textContent = `${group.token.toUpperCase()}:`;
                 const slider = document.createElement('input');
                 slider.type = 'range';
                 slider.min = '0';
