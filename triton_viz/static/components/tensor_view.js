@@ -812,6 +812,25 @@ function createLegendItem(label, min, max) {
     item.appendChild(labels);
     return item;
 }
+function comparePidTuple(a = [], b = []) {
+    const limit = Math.max(a.length, b.length);
+    for (let i = 0; i < limit; i += 1) {
+        const av = Number(a[i] ?? -1);
+        const bv = Number(b[i] ?? -1);
+        if (av !== bv)
+            return av - bv;
+    }
+    return a.length - b.length;
+}
+function comparePidList(a = [], b = []) {
+    const limit = Math.max(a.length, b.length);
+    for (let i = 0; i < limit; i += 1) {
+        const cmp = comparePidTuple(a[i] || [], b[i] || []);
+        if (cmp !== 0)
+            return cmp;
+    }
+    return a.length - b.length;
+}
 function createProgramCountLegendItem(baseColor, maxCount, palette = PROGRAM_COUNT_PALETTE) {
     const item = document.createElement('div');
     Object.assign(item.style, { display: 'grid', gap: '6px', fontFamily: 'monospace', fontSize: '12px' });
@@ -894,7 +913,10 @@ function createProgramSubsetLegendItem(baseColor, subsets, hues) {
         rows.appendChild(row);
     };
     addRow('none', base);
-    Object.keys(subsets || {}).forEach((key) => {
+    const subsetKeys = Object.keys(subsets || {}).sort((aKey, bKey) => {
+        return comparePidList(subsets[aKey] || [], subsets[bKey] || []);
+    });
+    subsetKeys.forEach((key) => {
         const pids = subsets[key] || [];
         const label = pids.length
             ? pids.map((pid) => `(${(pid || []).join(',')})`).join(' ')
@@ -908,6 +930,12 @@ function createProgramSubsetLegendItem(baseColor, subsets, hues) {
         }
         addRow(label, color);
     });
+    if (subsetKeys.length + 1 > 10) {
+        rows.style.maxHeight = '240px';
+        rows.style.overflowY = 'auto';
+        rows.style.overflowX = 'hidden';
+        rows.style.paddingRight = '4px';
+    }
     item.appendChild(rows);
     return item;
 }

@@ -1041,6 +1041,25 @@ function createLegendItem(label: string, min: number, max: number): HTMLDivEleme
     return item;
 }
 
+function comparePidTuple(a: number[] = [], b: number[] = []): number {
+    const limit = Math.max(a.length, b.length);
+    for (let i = 0; i < limit; i += 1) {
+        const av = Number(a[i] ?? -1);
+        const bv = Number(b[i] ?? -1);
+        if (av !== bv) return av - bv;
+    }
+    return a.length - b.length;
+}
+
+function comparePidList(a: number[][] = [], b: number[][] = []): number {
+    const limit = Math.max(a.length, b.length);
+    for (let i = 0; i < limit; i += 1) {
+        const cmp = comparePidTuple(a[i] || [], b[i] || []);
+        if (cmp !== 0) return cmp;
+    }
+    return a.length - b.length;
+}
+
 function createProgramCountLegendItem(
     baseColor: ColorInput,
     maxCount: number,
@@ -1132,7 +1151,10 @@ function createProgramSubsetLegendItem(
         rows.appendChild(row);
     };
     addRow('none', base);
-    Object.keys(subsets || {}).forEach((key) => {
+    const subsetKeys = Object.keys(subsets || {}).sort((aKey, bKey) => {
+        return comparePidList(subsets[aKey] || [], subsets[bKey] || []);
+    });
+    subsetKeys.forEach((key) => {
         const pids = subsets[key] || [];
         const label = pids.length
             ? pids.map((pid) => `(${(pid || []).join(',')})`).join(' ')
@@ -1145,6 +1167,12 @@ function createProgramSubsetLegendItem(
         }
         addRow(label, color);
     });
+    if (subsetKeys.length + 1 > 10) {
+        rows.style.maxHeight = '240px';
+        rows.style.overflowY = 'auto';
+        rows.style.overflowX = 'hidden';
+        rows.style.paddingRight = '4px';
+    }
     item.appendChild(rows);
     return item;
 }
