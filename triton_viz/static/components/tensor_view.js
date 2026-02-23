@@ -279,22 +279,39 @@ function computeViewPlacementOffset(spec, fullShape) {
     ];
 }
 function buildTensorViewPreview(spec) {
-    const rank = spec.axisLabels.length;
-    const hiddenSet = new Set(spec.hiddenAxes);
-    const slices = Array.from({ length: rank }, (_, axis) => (hiddenSet.has(axis) ? String(spec.hiddenIndices[axis] ?? 0) : ':'));
-    let expr = `tensor[${slices.join(', ')}]`;
-    const keptAxes = Array.from({ length: rank }, (_, axis) => axis).filter((axis) => !hiddenSet.has(axis));
-    const desiredAxes = spec.displaySlots
-        .filter((axes) => axes !== null)
-        .flat();
-    if (desiredAxes.length > 1) {
-        const permute = desiredAxes.map((axis) => keptAxes.indexOf(axis));
-        const isIdentity = permute.every((idx, i) => idx === i);
-        if (!isIdentity)
-            expr += `.permute(${permute.join(', ')})`;
+    const outlineSlots = spec.outlineSlots || [];
+    const flatAxes = [];
+    const reshapeDims = [];
+    let needsReshape = false;
+    outlineSlots.forEach((slot) => {
+        if (slot === null) {
+            reshapeDims.push('1');
+            needsReshape = true;
+            return;
+        }
+        flatAxes.push(...slot);
+        if (slot.length === 1) {
+            const axis = slot[0] ?? 0;
+            reshapeDims.push(String(Math.max(1, spec.axisShape[axis] ?? 1)));
+            return;
+        }
+        needsReshape = true;
+        reshapeDims.push(slot.map((axis) => String(Math.max(1, spec.axisShape[axis] ?? 1))).join('*'));
+    });
+    let expr = 'tensor';
+    const isIdentityPermute = flatAxes.length === spec.axisShape.length
+        && flatAxes.every((axis, index) => axis === index);
+    if (!isIdentityPermute && flatAxes.length > 0) {
+        expr += `.permute(${flatAxes.join(', ')})`;
     }
-    if (spec.displaySlots.some((axes) => axes === null || axes.length !== 1)) {
-        expr += `.reshape(${spec.displayShape.join(', ')})`;
+    if (needsReshape) {
+        expr += `.reshape(${reshapeDims.join(', ')})`;
+    }
+    if (spec.hiddenGroups.length > 0) {
+        const hiddenByOutlineAxis = new Map();
+        spec.hiddenGroups.forEach((group) => hiddenByOutlineAxis.set(group.outlineAxis, group.value));
+        const slices = outlineSlots.map((_slot, outlineAxis) => (hiddenByOutlineAxis.has(outlineAxis) ? String(hiddenByOutlineAxis.get(outlineAxis)) : ':'));
+        expr += `[${slices.join(', ')}]`;
     }
     return expr;
 }
