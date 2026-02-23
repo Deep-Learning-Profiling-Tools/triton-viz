@@ -2295,7 +2295,7 @@ export function createTensorVisualization(
             const visibleRow = document.createElement('div');
             visibleRow.className = 'viz-ndim-row';
             const visibleLabel = document.createElement('label');
-            visibleLabel.textContent = 'Visible dimensions:';
+            visibleLabel.textContent = 'Tensor view:';
             visibleLabel.className = 'viz-ndim-label';
             const visibleInput = document.createElement('input');
             visibleInput.type = 'text';
