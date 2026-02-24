@@ -264,9 +264,13 @@ export function createShapeLegend(container, tensors) {
         let shapeHtml = `${t.name}: [`;
         const shape = t.shape || [];
         const dimColors = t.dimColors || [];
+        const shapeLabels = t.shapeLabels || [];
+        const shapeExprs = t.shapeExprs || [];
         shapeHtml += shape.map((dim, axis) => {
             const color = dimColors[axis] || defaultAxisColor(axis);
-            return `<span style="color:${color}">${dim}</span>`;
+            const label = shapeLabels[axis] || '';
+            const valueExpr = shapeExprs[axis] || String(dim);
+            return `<span style="color:${color}">${label ? `${label}=${valueExpr}` : valueExpr}</span>`;
         }).join(', ');
         shapeHtml += ']';
         label.innerHTML = shapeHtml;
