@@ -164,14 +164,6 @@ def update_global_data(force: bool = False):
     # Pass the records to analyze_records
     analysis_data = analyze_records(all_records)
     viz_data = get_visualization_data()
-    try:
-        keys = list(viz_data.get("visualization_data", {}).keys())
-        print(f"[viz] grids: {keys}")
-        for k in keys:
-            ops = viz_data["visualization_data"].get(k, [])
-            print(f"[viz] grid {k} ops: {[op.get('type') for op in ops]}")
-    except Exception as e:
-        print("[viz] debug logging failed:", e)
     global_data = {
         "ops": {
             "visualization_data": viz_data["visualization_data"],
@@ -448,7 +440,6 @@ def get_value_histogram():
 @app.route("/api/getValue", methods=["POST"])
 def get_value():
     global raw_tensor_data, precomputed_c_values, current_fullscreen_op
-    print(current_fullscreen_op)
     data = request.json
     uuid = data.get("uuid")
     matrix_name = data.get("matrixName")
@@ -497,7 +488,6 @@ def get_load_value():
     x = data.get("x")
     y = data.get("y")
     z = data.get("z")
-    print(x, y, z)
     if uuid is None or uuid not in raw_tensor_data:
         return jsonify({"error": "Operation not found"}), 404
 
@@ -960,14 +950,12 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
     :param block: Whether to block the caller when share=True. Defaults to
                   True outside interactive sessions.
     """
-    print("Launching Triton viz tool")
     default_port = 8000 if share else 5001
     actual_port = port or int(os.getenv("TRITON_VIZ_PORT", default_port))
     if block is None:
         block = share and not _is_interactive()
 
     if share:
-        print("--------")
         flask_thread = threading.Thread(
             target=run_flask_with_cloudflared,
             args=(actual_port, None),
@@ -985,15 +973,8 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
         try:
             # touch local server to ensure it's up
             _ = requests.get(local_url)
-            print(f"Running on local URL:  {local_url}")
-            if public_url:
-                print(f"Running on public URL: {public_url}")
-            print(
-                "\nThis share link expires in 72 hours. For free permanent hosting and GPU upgrades, check out Spaces: https://huggingface.co/spaces"
-            )
-            print("--------")
         except requests.exceptions.RequestException:
-            print("Setting up public URL... Please wait.")
+            pass
 
         if block:
             try:
@@ -1003,10 +984,7 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
 
         return local_url, public_url
     else:
-        print("--------")
         local_url = f"http://localhost:{actual_port}"
-        print(f"Running on local URL:  {local_url}")
-        print("--------")
         _server_state.set_local_port(actual_port)
 
         # For share=False, we want to block and keep the server running

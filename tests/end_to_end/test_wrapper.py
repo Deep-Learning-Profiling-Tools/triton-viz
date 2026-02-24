@@ -209,3 +209,42 @@ def test_cli_invocation():
         assert (
             trace_count == 1
         ), "triton_viz.trace should be invoked exactly once via CLI path"
+
+
+def test_cli_rejects_trace_decorator(tmp_path: Path):
+    """
+    When a user script contains @triton_viz.trace() and is run via triton-sanitizer,
+    the process should exit with a non-zero code and report a RuntimeError.
+    """
+    # 1) Write a script that has both @triton_viz.trace and @triton.jit
+    my_program = tmp_path / "my_program.py"
+    my_program.write_text(
+        load_template("kernel_with_trace_decorator.py.template"),
+        encoding="utf-8",
+    )
+
+    # 2) Find triton-sanitizer executable
+    exe = shutil.which(SANITIZER_COMMAND)
+    assert exe is not None, (
+        f"{SANITIZER_COMMAND} command not found. "
+        "Please ensure the package is properly installed."
+    )
+
+    # 3) Run subprocess
+    env = os.environ.copy()
+    proc = subprocess.run(
+        [exe, str(my_program)],
+        cwd=str(tmp_path),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    # 4) Assertion: should fail with RuntimeError about CLI wrapper conflict
+    assert (
+        proc.returncode != 0
+    ), "Expected non-zero exit code when @triton_viz.trace() is used with CLI wrapper"
+    assert (
+        "CLI wrapper" in proc.stderr
+    ), f"Expected error message about CLI wrapper conflict in stderr, got:\n{proc.stderr}"
