@@ -37,6 +37,7 @@ class Config:
     """
 
     def __init__(self) -> None:
+        self.cli_active: bool = False
         self.reset()
 
     def reset(self) -> None:
