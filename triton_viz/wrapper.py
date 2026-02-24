@@ -65,8 +65,7 @@ def _apply_wrapper(wrapper_func, command_name, usage_msg):
     """
     Generic function to apply a wrapper to triton.jit and run the user script.
     """
-    os.environ["TRITON_VIZ_CLI_ACTIVE"] = "1"
-    cfg.reset()
+    cfg.cli_active = True
 
     # Create patched functions with the specific wrapper
     _patched_jit = create_patched_jit(wrapper_func)
