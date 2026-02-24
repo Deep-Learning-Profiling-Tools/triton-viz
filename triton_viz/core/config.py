@@ -59,6 +59,7 @@ class Config:
         self.profiler_disable_buffer_load_check: bool = _is_one(
             "PROFILER_DISABLE_BUFFER_LOAD_CHECK"
         )
+        self.cli_active: bool = _is_one("TRITON_VIZ_CLI_ACTIVE")
 
 
 config = Config()

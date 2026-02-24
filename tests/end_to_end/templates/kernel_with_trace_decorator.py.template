@@ -1,0 +1,13 @@
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("tracer")
+@triton.jit
+def k1(X, n: tl.constexpr):
+    return
+
+
+if __name__ == "__main__":
+    pass

@@ -1,5 +1,9 @@
+import pytest
 from unittest.mock import MagicMock, patch
 
+import triton_viz
+from triton_viz.core.config import config as cfg
+from triton_viz.core.trace import TraceInterface
 from triton_viz.wrapper import (
     create_patched_jit,
     create_patched_autotune,
@@ -121,3 +125,55 @@ def test_create_patched_autotune_direct_decorator():
         mock_original_autotune.assert_called_once_with(mock_fn)
         mock_wrapper.assert_called_once_with("autotune_kernel")
         assert result == "final_kernel"
+
+
+# ======== CLI Active Guard Tests ===========
+
+
+def test_trace_decorator_raises_when_cli_active():
+    """trace() should raise RuntimeError on an already-wrapped kernel when CLI is active."""
+    original = cfg.cli_active
+    try:
+        cfg.cli_active = True
+        mock_kernel = MagicMock(spec=TraceInterface)
+        decorator = triton_viz.trace("tracer")
+        with pytest.raises(RuntimeError, match="CLI wrapper"):
+            decorator(mock_kernel)
+    finally:
+        cfg.cli_active = original
+
+
+def test_trace_decorator_allows_cli_own_wrapping():
+    """trace() called by the CLI on a raw kernel should NOT raise, even when cli_active."""
+    from triton.runtime.interpreter import InterpretedFunction
+
+    original = cfg.cli_active
+    try:
+        cfg.cli_active = True
+        # Simulate a raw kernel (not already wrapped by TraceInterface)
+        mock_kernel = MagicMock(spec=InterpretedFunction)
+        mock_kernel.fn = lambda: None
+        mock_kernel.arg_names = []
+        decorator = triton_viz.trace("sanitizer")
+        # Should not raise — this is the CLI's own first-time wrapping
+        result = decorator(mock_kernel)
+        assert isinstance(result, TraceInterface)
+    finally:
+        cfg.cli_active = original
+
+
+def test_trace_decorator_works_when_cli_inactive():
+    """trace() should work normally when CLI is not active."""
+    from triton.runtime.interpreter import InterpretedFunction
+
+    original = cfg.cli_active
+    try:
+        cfg.cli_active = False
+        mock_kernel = MagicMock(spec=InterpretedFunction)
+        mock_kernel.fn = lambda: None
+        mock_kernel.arg_names = []
+        decorator = triton_viz.trace("tracer")
+        result = decorator(mock_kernel)
+        assert isinstance(result, TraceInterface)
+    finally:
+        cfg.cli_active = original
