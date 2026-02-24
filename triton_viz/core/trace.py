@@ -267,6 +267,14 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
         return isinstance(selected, Sanitizer)
 
     def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
+        if cfg.cli_active and isinstance(kernel, TraceInterface):
+            raise RuntimeError(
+                "@triton_viz.trace() decorator cannot be used together with "
+                "CLI wrapper (e.g., triton-sanitizer / triton-profiler). "
+                "Please remove the @triton_viz.trace() decorator from your code "
+                "when using CLI tools."
+            )
+
         if _is_sanitizer_client(client) and not cfg.enable_sanitizer:
             # when dry-running triton-sanitizer CLI (i.e. wrap kernels with sanitizer
             # tracing but don't actually sanitize), don't actually trace the kernel
