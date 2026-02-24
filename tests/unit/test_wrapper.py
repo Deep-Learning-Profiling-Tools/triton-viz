@@ -9,6 +9,8 @@ from triton_viz.wrapper import (
     create_patched_autotune,
     sanitizer_wrapper,
     profiler_wrapper,
+    apply_sanitizer,
+    apply_profiler,
 )
 
 
@@ -177,3 +179,11 @@ def test_trace_decorator_works_when_cli_inactive():
         assert isinstance(result, TraceInterface)
     finally:
         cfg.cli_active = original
+
+
+def test_apply_wrapper_rejects_non_cli_invocation():
+    """apply_sanitizer/apply_profiler should raise when called from Python, not CLI."""
+    with pytest.raises(RuntimeError, match="must be used as a CLI tool"):
+        apply_sanitizer()
+    with pytest.raises(RuntimeError, match="must be used as a CLI tool"):
+        apply_profiler()
