@@ -7,13 +7,7 @@ import triton.language as tl
 
 import triton_viz
 from triton_viz.core.data import Load, RawLoad
-from triton_viz.clients.symbolic_engine import (
-    SymbolicExpr,
-    Z3Expr,
-    RangeWrapper,
-    ConstSymbolicExpr,
-    ReduceSymbolicExpr,
-)
+from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr, RangeWrapper
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     _range_to_iterator_constraint,
@@ -851,74 +845,3 @@ def test_reduce_broadcast():
     assert (
         len(reduce_broadcast_sanitizer.records) == 0
     ), f"Expected no OOB records, got {len(reduce_broadcast_sanitizer.records)}"
-
-
-# ======== ReduceSymbolicExpr Shape Unit Tests ===========
-
-
-def _make_block_expr(scalar_ty, shape):
-    """Helper: create a ConstSymbolicExpr with the given block dtype."""
-    return ConstSymbolicExpr("const", value=0, dtype=tl.block_type(scalar_ty, shape))
-
-
-def test_reduce_shape_2d_axis1():
-    """tl.sum(x, axis=1) on [4, 8] -> [4]."""
-    inp = _make_block_expr(tl.float32, [4, 8])
-    assert inp.shape == (4, 8)
-
-    reduced = ReduceSymbolicExpr("sum", inp, axis=1)
-    assert reduced.shape == (4,)
-
-
-def test_reduce_shape_2d_axis0():
-    """tl.sum(x, axis=0) on [4, 8] -> [8]."""
-    inp = _make_block_expr(tl.float32, [4, 8])
-    reduced = ReduceSymbolicExpr("sum", inp, axis=0)
-    assert reduced.shape == (8,)
-
-
-def test_reduce_shape_2d_axis1_keepdims():
-    """tl.sum(x, axis=1, keepdims=True) on [4, 8] -> [4, 1]."""
-    inp = _make_block_expr(tl.float32, [4, 8])
-    reduced = ReduceSymbolicExpr("sum", inp, axis=1, keepdims=True)
-    assert reduced.shape == (4, 1)
-
-
-def test_reduce_shape_2d_axis0_keepdims():
-    """tl.sum(x, axis=0, keepdims=True) on [4, 8] -> [1, 8]."""
-    inp = _make_block_expr(tl.float32, [4, 8])
-    reduced = ReduceSymbolicExpr("sum", inp, axis=0, keepdims=True)
-    assert reduced.shape == (1, 8)
-
-
-def test_reduce_shape_1d_to_scalar():
-    """tl.sum(x, axis=0) on [8] -> scalar ()."""
-    inp = _make_block_expr(tl.float32, [8])
-    assert inp.shape == (8,)
-
-    reduced = ReduceSymbolicExpr("sum", inp, axis=0)
-    assert reduced.shape == ()
-
-
-def test_reduce_shape_all_axes():
-    """tl.sum(x) with axis=None on [4, 8] -> scalar ()."""
-    inp = _make_block_expr(tl.float32, [4, 8])
-    reduced = ReduceSymbolicExpr("sum", inp, axis=None)
-    assert reduced.shape == ()
-
-
-def test_reduce_shape_preserves_scalar_type():
-    """Reduced dtype keeps the original scalar type (e.g. float16)."""
-    inp = _make_block_expr(tl.float16, [4, 8])
-    reduced = ReduceSymbolicExpr("sum", inp, axis=1)
-    assert reduced.shape == (4,)
-    assert reduced.dtype.scalar == tl.float16
-
-
-def test_reduce_shape_max_min():
-    """tl.max and tl.min compute the same output shape as tl.sum."""
-    inp = _make_block_expr(tl.float32, [4, 8])
-
-    for op in ("max", "min"):
-        reduced = ReduceSymbolicExpr(op, inp, axis=1)
-        assert reduced.shape == (4,), f"op={op}: expected (4,), got {reduced.shape}"

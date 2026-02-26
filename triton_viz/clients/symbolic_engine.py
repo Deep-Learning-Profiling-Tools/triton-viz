@@ -1119,7 +1119,7 @@ class ReduceSymbolicExpr(SymbolicExpr):
 
         # Compute output dtype from input dtype, axis, and keepdims
         input_dtype = self.input.dtype
-        if input_dtype is not None and isinstance(input_dtype, tl.block_type):
+        if isinstance(input_dtype, tl.block_type):
             input_shape = list(input_dtype.shape)
             # Resolve axis value
             if isinstance(axis, int):
