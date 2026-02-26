@@ -416,47 +416,10 @@ def unpatch_for_loop():
     _loop_patcher.unpatch()
 
 
-def _patch_libdevice(fn, scope: _LangPatchScope) -> None:
-    """Replace libdevice stubs with interpreter-patched tl.math equivalents.
-
-    After `triton_patch_lang` has run, `tl.math` builtins are patched to work
-    in interpreter mode.  However, inductor-generated kernels often import
-    `triton.language.extra.libdevice` directly (via
-    `torch._inductor.runtime.triton_helpers`).  The libdevice functions are
-    empty stubs and return ``None``.
-
-    For every libdevice function that has a same-named `tl.math` builtin we
-    swap it with the already-patched version so the kernel executes correctly.
-    """
-    libdevice_mod = None
-    for value in fn.__globals__.values():
-        if (
-            inspect.ismodule(value)
-            and getattr(value, "__name__", None) == "triton.language.extra.libdevice"
-        ):
-            libdevice_mod = value
-            break
-
-    if libdevice_mod is None:
-        return
-
-    for name in dir(libdevice_mod):
-        if name.startswith("_"):
-            continue
-        math_fn = getattr(tl.math, name, None)
-        if math_fn is None:
-            continue
-        # Only patch if the tl.math version is callable (it should be after
-        # triton_patch_lang has run).
-        if callable(math_fn):
-            scope.set_attr(libdevice_mod, name, math_fn)
-
-
 def patch_lang(fn, backend):
     if backend == "triton":
         scope = _triton_snapshot_scope(fn)
         triton_patch_lang(fn)
-        _patch_libdevice(fn, scope)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
