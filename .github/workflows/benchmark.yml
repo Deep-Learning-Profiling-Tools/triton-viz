@@ -50,25 +50,38 @@ jobs:
         cd pr-branch
         uv sync --extra test
 
-    - name: Run main benchmarks (first to warm up the VM)
-      id: main-bench
-      continue-on-error: true
+    - name: Run interleaved A/B benchmarks
       run: |
-        cd main-branch
-        if [ -f benchmarks/bench_sanitizer.py ]; then
-          uv run python benchmarks/bench_sanitizer.py --output /tmp/bench-main.json
-        else
-          echo "skip=true" >> "$GITHUB_OUTPUT"
+        # Run main and PR in alternating rounds so environment drift
+        # (thermal throttling, background processes) affects both equally.
+        #   main PR main PR main PR ...  (8 rounds x 5 iters = 40 total)
+        ROUNDS=8
+        ITERS=5
+        MAIN_HAS_BENCH=false
+        if [ -f main-branch/benchmarks/bench_sanitizer.py ]; then
+          MAIN_HAS_BENCH=true
         fi
+        for i in $(seq 1 $ROUNDS); do
+          echo "=== Round $i/$ROUNDS ==="
+          if [ "$MAIN_HAS_BENCH" = true ]; then
+            (cd main-branch && uv run python benchmarks/bench_sanitizer.py \
+              --iterations $ITERS --output /tmp/bench-main-$i.json) || true
+          fi
+          (cd pr-branch && uv run python benchmarks/bench_sanitizer.py \
+            --iterations $ITERS --output /tmp/bench-pr-$i.json)
+        done
 
-    - name: Run PR benchmarks
+    - name: Merge rounds and generate comparison
       run: |
         cd pr-branch
-        uv run python benchmarks/bench_sanitizer.py --output /tmp/bench-pr.json
-
-    - name: Generate comparison
-      run: |
-        cd pr-branch
+        # Merge per-round results into single files
+        if ls /tmp/bench-main-*.json 1>/dev/null 2>&1; then
+          uv run python benchmarks/bench_sanitizer.py \
+            --merge /tmp/bench-main-*.json -o /tmp/bench-main.json
+        fi
+        uv run python benchmarks/bench_sanitizer.py \
+          --merge /tmp/bench-pr-*.json -o /tmp/bench-pr.json
+        # Generate comparison markdown
         if [ -f /tmp/bench-main.json ]; then
           uv run python benchmarks/bench_sanitizer.py \
             --compare /tmp/bench-main.json /tmp/bench-pr.json > /tmp/bench-comment.md

@@ -904,18 +904,14 @@ BENCHMARKS["flaggems_layernorm"] = {
 # ---------------------------------------------------------------------------
 
 
-MIN_ITERATIONS = 5
-MAX_ITERATIONS = 2000
-
-
 def run_benchmarks(
     warmup: int = 1,
-    target_time: float = 10.0,
+    iterations: int = 40,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "python_version": platform.python_version(),
-        "target_time": target_time,
+        "iterations": iterations,
         "warmup_iterations": warmup,
         "benchmarks": {},
     }
@@ -939,20 +935,10 @@ def run_benchmarks(
             signal.alarm(BENCH_TIMEOUT)
 
         try:
-            # Warmup and calibration: use the last warmup run to estimate
-            # per-iteration time, then compute iterations to fill target_time.
-            warmup_elapsed = 0.0
+            # Warmup
             for _ in range(warmup):
                 _reset_all()
-                t0 = time.perf_counter()
                 bench["run"](data)
-                warmup_elapsed = time.perf_counter() - t0
-
-            if warmup_elapsed > 0:
-                iterations = int(target_time / warmup_elapsed)
-            else:
-                iterations = MAX_ITERATIONS
-            iterations = max(MIN_ITERATIONS, min(iterations, MAX_ITERATIONS))
 
             # Measured iterations
             times: list[float] = []
@@ -965,20 +951,18 @@ def run_benchmarks(
 
             results["benchmarks"][name] = {
                 "times": times,
-                "iterations": iterations,
                 "mean": statistics.mean(times),
                 "median": statistics.median(times),
                 "min": min(times),
                 "stddev": statistics.stdev(times) if len(times) > 1 else 0.0,
             }
             min_str = f"{min(times):.3f}s"
-            print(f"{min_str} ({iterations} iters)")
+            print(f"{min_str}")
 
         except BenchmarkTimeout:
             print(f"TIMEOUT (>{BENCH_TIMEOUT}s)")
             results["benchmarks"][name] = {
                 "times": [],
-                "iterations": 0,
                 "mean": None,
                 "median": None,
                 "min": None,
@@ -990,7 +974,6 @@ def run_benchmarks(
             print(f"ERROR: {e}")
             results["benchmarks"][name] = {
                 "times": [],
-                "iterations": 0,
                 "mean": None,
                 "median": None,
                 "min": None,
@@ -1076,10 +1059,8 @@ def generate_comparison(base: dict, pr: dict) -> str:
     lines.append(
         f"_Threshold: >{REGRESSION_THRESHOLD:.0%} regression flagged with :warning:_"
     )
-    target = pr.get("target_time", "?")
     lines.append(
-        f"_Target time per benchmark: {target}s "
-        f"(iterations auto-calibrated, {pr.get('warmup_iterations', '?')} warmup)_"
+        f"_Iterations: {pr.get('warmup_iterations', '?')} warmup + {pr.get('iterations', '?')} measured_"
     )
     return "\n".join(lines)
 
@@ -1109,12 +1090,44 @@ def generate_single(pr: dict) -> str:
     lines.append(f"| **Total** | **{_fmt_time(pt)}** |")
 
     lines.append("")
-    target = pr.get("target_time", "?")
     lines.append(
-        f"_Target time per benchmark: {target}s "
-        f"(iterations auto-calibrated, {pr.get('warmup_iterations', '?')} warmup)_"
+        f"_Iterations: {pr.get('warmup_iterations', '?')} warmup + {pr.get('iterations', '?')} measured_"
     )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Merge
+# ---------------------------------------------------------------------------
+
+
+def merge_results(file_paths: list[str]) -> dict[str, Any]:
+    """Merge multiple benchmark JSON files by concatenating times arrays."""
+    with open(file_paths[0]) as f:
+        merged = json.load(f)
+
+    for path in file_paths[1:]:
+        with open(path) as f:
+            data = json.load(f)
+        for name, bench in data.get("benchmarks", {}).items():
+            if name in merged.get("benchmarks", {}):
+                merged["benchmarks"][name]["times"].extend(bench.get("times", []))
+            else:
+                merged["benchmarks"][name] = bench
+
+    # Recompute stats from merged times
+    total_iters = 0
+    for bench in merged["benchmarks"].values():
+        times = bench.get("times", [])
+        if times:
+            bench["mean"] = statistics.mean(times)
+            bench["median"] = statistics.median(times)
+            bench["min"] = min(times)
+            bench["stddev"] = statistics.stdev(times) if len(times) > 1 else 0.0
+            total_iters = max(total_iters, len(times))
+
+    merged["iterations"] = total_iters
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -1127,10 +1140,7 @@ def main():
     parser.add_argument("--output", "-o", help="Output JSON file path")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations")
     parser.add_argument(
-        "--target-time",
-        type=float,
-        default=10.0,
-        help="Target wall-clock time per benchmark in seconds (default: 10)",
+        "--iterations", type=int, default=40, help="Measured iterations"
     )
     parser.add_argument(
         "--compare",
@@ -1142,6 +1152,12 @@ def main():
         "--compare-single",
         metavar="PR_JSON",
         help="Print markdown table from a single result file (no baseline)",
+    )
+    parser.add_argument(
+        "--merge",
+        nargs="+",
+        metavar="JSON_FILE",
+        help="Merge multiple result JSON files into one (use with --output)",
     )
 
     args = parser.parse_args()
@@ -1162,9 +1178,20 @@ def main():
         print(generate_single(pr))
         return
 
+    # Merge mode
+    if args.merge:
+        result = merge_results(args.merge)
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(result, f, indent=2)
+            print(f"Merged {len(args.merge)} files → {args.output}")
+        else:
+            print(json.dumps(result, indent=2))
+        return
+
     # Run mode
     print("Running sanitizer benchmarks...")
-    results = run_benchmarks(warmup=args.warmup, target_time=args.target_time)
+    results = run_benchmarks(warmup=args.warmup, iterations=args.iterations)
 
     if args.output:
         with open(args.output, "w") as f:
