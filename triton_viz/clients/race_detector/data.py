@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
 from enum import Enum, auto
-import traceback
 from typing import Any
+
 import numpy as np
 import numpy.typing as npt
+
+from ...utils.traceback_utils import TracebackInfo
 
 
 class AccessType(Enum):
@@ -27,7 +29,7 @@ class MemoryAccess:
     offsets: npt.NDArray[np.int_]
     masks: npt.NDArray[np.bool_]
     grid_idx: tuple[int, ...]
-    call_path: list[traceback.FrameSummary] = field(default_factory=list)
+    call_path: list[TracebackInfo] = field(default_factory=list)
     epoch: int = 0
     event_id: int = 0
     atomic_op: str | None = None
@@ -41,7 +43,7 @@ class SymbolicMemoryAccess:
     ptr_expr: Any  # SymbolicExpr for the pointer
     mask_expr: Any  # Optional SymbolicExpr for the mask
     is_data_dependent: bool
-    call_path: list[traceback.FrameSummary] = field(default_factory=list)
+    call_path: list[TracebackInfo] = field(default_factory=list)
     epoch: int = 0
     event_id: int = 0
     atomic_op: str | None = None
