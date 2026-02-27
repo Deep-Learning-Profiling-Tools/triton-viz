@@ -1119,30 +1119,32 @@ class ReduceSymbolicExpr(SymbolicExpr):
 
         # Compute output dtype from input dtype, axis, and keepdims
         input_dtype = self.input.dtype
-        if isinstance(input_dtype, tl.block_type):
-            input_shape = list(input_dtype.shape)
-            # Resolve axis value
-            if isinstance(axis, int):
-                axis_val = axis
-            elif isinstance(axis, SymbolicExpr) and hasattr(axis, "to_py"):
-                axis_val = axis.to_py()
+        assert isinstance(
+            input_dtype, tl.block_type
+        ), f"ReduceSymbolicExpr expects block_type input, got {type(input_dtype)}"
+        input_shape = list(input_dtype.shape)
+        # Resolve axis value
+        if isinstance(axis, int):
+            axis_val = axis
+        elif isinstance(axis, SymbolicExpr) and hasattr(axis, "to_py"):
+            axis_val = axis.to_py()
+        else:
+            axis_val = None
+        # Resolve keepdims value
+        keepdims_val = keepdims if isinstance(keepdims, bool) else bool(keepdims)
+        if axis_val is not None:
+            if keepdims_val:
+                output_shape = (
+                    input_shape[:axis_val] + [1] + input_shape[axis_val + 1 :]
+                )
             else:
-                axis_val = None
-            # Resolve keepdims value
-            keepdims_val = keepdims if isinstance(keepdims, bool) else bool(keepdims)
-            if axis_val is not None:
-                if keepdims_val:
-                    output_shape = (
-                        input_shape[:axis_val] + [1] + input_shape[axis_val + 1 :]
-                    )
-                else:
-                    output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
-            else:
-                output_shape = [1] * len(input_shape) if keepdims_val else []
-            scalar_ty = input_dtype.scalar
-            self.dtype = (
-                tl.block_type(scalar_ty, output_shape) if output_shape else scalar_ty
-            )
+                output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
+        else:
+            output_shape = [1] * len(input_shape) if keepdims_val else []
+        scalar_ty = input_dtype.scalar
+        self.dtype = (
+            tl.block_type(scalar_ty, output_shape) if output_shape else scalar_ty
+        )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         handler = self._Z3_BUILDERS.get(self.op)
