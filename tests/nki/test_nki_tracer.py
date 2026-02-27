@@ -8,7 +8,7 @@ from triton_viz.core.trace import launches
 import math
 
 try:
-    import neuronxcc.nki.language as nl
+    import nki.language as nl
     from triton_viz.core.nki import NDArray
 except ModuleNotFoundError:
     pytest.skip(

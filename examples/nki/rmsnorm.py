@@ -1,3 +1,4 @@
+# CODEX NOTE: IGNORE THIS FILE, IT IS THE DEPRECATED NKI INTERPRETER
 import neuronxcc.nki as nki
 import neuronxcc.nki.language as nl
 from triton_viz.clients import Tracer

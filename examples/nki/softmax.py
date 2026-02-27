@@ -1,3 +1,4 @@
+# CODEX NOTE: IGNORE THIS FILE, IT IS THE DEPRECATED NKI INTERPRETER
 from neuronxcc import nki
 import neuronxcc.nki.language as nl
 

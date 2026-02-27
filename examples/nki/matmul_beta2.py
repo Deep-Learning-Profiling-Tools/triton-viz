@@ -64,7 +64,7 @@ def matmul_kernel(lhsT, rhs, result):
 
             # Copy the result from PSUM back to SBUF, and cast to expected output data-type
             res_sb = nl.ndarray(res_psum.shape, dtype=result.dtype, buffer=nl.sbuf)
-            nisa.tensor_copy(dst=res_sb, src=res_psum, dtype=result.dtype)
+            nisa.tensor_copy(dst=res_sb, src=res_psum)
 
             # Copy the result from SBUF to HBM.
             nisa.dma_copy(
