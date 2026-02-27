@@ -9,6 +9,7 @@ from triton_viz.clients.symbolic_engine import (
     SymbolicExpr,
     ConstSymbolicExpr,
     LoadSymbolicExpr,
+    StoreSymbolicExpr,
 )
 from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
@@ -453,3 +454,19 @@ def test_load_dtype_block_of_pointers():
     ), f"Expected block_type, got {type(load.dtype)}: {load.dtype}"
     assert load.dtype.shape == (1, 16)
     assert load.dtype.scalar == tl.float32
+
+
+def test_store_dtype_block_of_pointers():
+    """tl.store on a block of pointers should not derive a dtype (store returns None).
+
+    ptr dtype: block_type(pointer<fp32>, [1, 16])
+    expected store dtype: None
+    """
+    ptr = ConstSymbolicExpr(
+        "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
+    )
+    value = ConstSymbolicExpr(
+        "const", value=0, dtype=tl.block_type(tl.float32, [1, 16])
+    )
+    store = StoreSymbolicExpr("store", ptr, value)
+    assert store.dtype is None, f"Expected None, got {store.dtype}"
