@@ -906,7 +906,7 @@ BENCHMARKS["flaggems_layernorm"] = {
 
 def run_benchmarks(
     warmup: int = 1,
-    iterations: int = 20,
+    iterations: int = 40,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1017,8 +1017,8 @@ def generate_comparison(base: dict, pr: dict) -> str:
     lines = [
         "## Sanitizer Performance Benchmark",
         "",
-        "| Benchmark | main (median) | PR (median) | Change |",
-        "|-----------|---------------|-------------|--------|",
+        "| Benchmark | main (min) | PR (min) | Change |",
+        "|-----------|------------|----------|--------|",
     ]
 
     all_names = list(pr.get("benchmarks", {}).keys())
@@ -1030,21 +1030,21 @@ def generate_comparison(base: dict, pr: dict) -> str:
     for name in all_names:
         pr_bench = pr["benchmarks"].get(name, {})
         base_bench = base.get("benchmarks", {}).get(name, {})
-        pr_med = pr_bench.get("median")
-        base_med = base_bench.get("median")
+        pr_val = pr_bench.get("min")
+        base_val = base_bench.get("min")
 
-        if pr_med is not None:
-            pr_total += pr_med
+        if pr_val is not None:
+            pr_total += pr_val
         else:
             pr_total_valid = False
-        if base_med is not None:
-            base_total += base_med
+        if base_val is not None:
+            base_total += base_val
         else:
             base_total_valid = False
 
         lines.append(
-            f"| {name} | {_fmt_time(base_med)} | {_fmt_time(pr_med)} "
-            f"| {_fmt_change(base_med, pr_med)} |"
+            f"| {name} | {_fmt_time(base_val)} | {_fmt_time(pr_val)} "
+            f"| {_fmt_change(base_val, pr_val)} |"
         )
 
     # Total row
@@ -1071,20 +1071,20 @@ def generate_single(pr: dict) -> str:
         "",
         "_No baseline available (benchmark script not present on main)._",
         "",
-        "| Benchmark | PR (median) |",
-        "|-----------|-------------|",
+        "| Benchmark | PR (min) |",
+        "|-----------|----------|",
     ]
 
     pr_total = 0.0
     pr_total_valid = True
 
     for name, bench in pr.get("benchmarks", {}).items():
-        med = bench.get("median")
-        if med is not None:
-            pr_total += med
+        val = bench.get("min")
+        if val is not None:
+            pr_total += val
         else:
             pr_total_valid = False
-        lines.append(f"| {name} | {_fmt_time(med)} |")
+        lines.append(f"| {name} | {_fmt_time(val)} |")
 
     pt = pr_total if pr_total_valid else None
     lines.append(f"| **Total** | **{_fmt_time(pt)}** |")
