@@ -786,7 +786,11 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("ptr", ptr)
         self.add_child("mask", mask)
         self.add_child("other", other)
-        self.dtype = self.ptr.dtype.element_ty  # type: ignore
+        ptr_dtype = self.ptr.dtype
+        if isinstance(ptr_dtype, tl.block_type):
+            self.dtype = tl.block_type(ptr_dtype.element_ty.element_ty, ptr_dtype.shape)
+        else:
+            self.dtype = ptr_dtype.element_ty  # type: ignore[union-attr]
 
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
