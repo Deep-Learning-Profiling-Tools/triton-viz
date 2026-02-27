@@ -443,7 +443,6 @@ def test_load_dtype_block_of_pointers():
 
     ptr dtype: block_type(pointer<fp32>, [1, 16])
     expected load dtype: block_type(fp32, [1, 16])
-    actual (bug): pointer<fp32>
     """
     ptr = ConstSymbolicExpr(
         "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
