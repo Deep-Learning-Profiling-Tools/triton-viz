@@ -9,6 +9,8 @@ from triton_viz.clients.symbolic_engine import (
     SymbolicExpr,
     ConstSymbolicExpr,
     ReduceSymbolicExpr,
+    LoadSymbolicExpr,
+    StoreSymbolicExpr,
 )
 from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
@@ -503,3 +505,39 @@ def test_reduce_shape_max_min():
     for op in ("max", "min"):
         reduced = ReduceSymbolicExpr(op, inp, axis=1)
         assert reduced.shape == (4,), f"op={op}: expected (4,), got {reduced.shape}"
+
+
+# ======== LoadSymbolicExpr dtype Tests ===========
+
+
+def test_load_dtype_block_of_pointers():
+    """tl.load on a block of pointers should produce a block of the pointed-to type.
+
+    ptr dtype: block_type(pointer<fp32>, [1, 16])
+    expected load dtype: block_type(fp32, [1, 16])
+    """
+    ptr = ConstSymbolicExpr(
+        "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
+    )
+    load = LoadSymbolicExpr("load", ptr)
+    assert isinstance(
+        load.dtype, tl.block_type
+    ), f"Expected block_type, got {type(load.dtype)}: {load.dtype}"
+    assert load.dtype.shape == (1, 16)
+    assert load.dtype.scalar == tl.float32
+
+
+def test_store_dtype_block_of_pointers():
+    """tl.store on a block of pointers should not derive a dtype (store returns None).
+
+    ptr dtype: block_type(pointer<fp32>, [1, 16])
+    expected store dtype: None
+    """
+    ptr = ConstSymbolicExpr(
+        "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
+    )
+    value = ConstSymbolicExpr(
+        "const", value=0, dtype=tl.block_type(tl.float32, [1, 16])
+    )
+    store = StoreSymbolicExpr("store", ptr, value)
+    assert store.dtype is None, f"Expected None, got {store.dtype}"
