@@ -26,8 +26,13 @@ class NDArray:
             dtype = kwargs.pop("dtype")
             val = np.ndarray(shape, dtype=dtype)
         if "value" in kwargs:
-            assert val is None or val.shape == kwargs["value"].shape
-            val = kwargs["value"]
+            # Normalize scalars to 0-d numpy arrays so downstream code (e.g. visualizer)
+            # can rely on ndarray attributes like `.ctypes`, `.shape`, `.dtype`, `.strides`.
+            v = kwargs["value"]
+            if not isinstance(v, np.ndarray):
+                v = np.asarray(v)
+            assert val is None or val.shape == v.shape
+            val = v
         self._data_ptr = None
         self.data = val
 
