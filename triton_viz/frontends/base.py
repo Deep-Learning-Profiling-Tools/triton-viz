@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from triton_viz.core.data import Op
 
 

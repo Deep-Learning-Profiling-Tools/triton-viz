@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import Op, Load, Store, AddPtr, Dot
@@ -10,12 +12,11 @@ from ...utils.traceback_utils import (
 from triton.runtime.interpreter import _get_np_dtype, TensorHandle
 import numpy as np
 from dataclasses import dataclass, replace
-from typing import Callable, Optional, List
 
 
 @dataclass(frozen=False)
 class LoopInfo:
-    length: Optional[int] = None
+    length: int | None = None
     range_type: str = "unknown"
 
 
@@ -74,7 +75,7 @@ class Profiler(Client):
             0  # Total number of False elements in all store masks
         )
         # Per-operation statistics for detailed analysis
-        self.mask_op_stats: List[MaskOpStats] = []
+        self.mask_op_stats: list[MaskOpStats] = []
 
         # Case 4: Buffer Load Check
         self.has_buffer_load = False
@@ -84,8 +85,8 @@ class Profiler(Client):
         # Block sampling
         self.block_sampling = cfg.profiler_enable_block_sampling
         self.k = k
-        self.sampled_blocks: Optional[set[tuple[int, ...]]] = None
-        self.current_grid_idx: Optional[tuple[int, ...]] = None
+        self.sampled_blocks: set[tuple[int, ...]] | None = None
+        self.current_grid_idx: tuple[int, ...] | None = None
 
         # Load & Store Skipping
         # Config has enable_load_store_skipping, but profiler uses disable_load_store_skipping
@@ -125,11 +126,11 @@ class Profiler(Client):
         self.current_grid_idx = grid_idx
 
     @property
-    def current_grid_idx(self) -> Optional[tuple[int, ...]]:
+    def current_grid_idx(self) -> tuple[int, ...] | None:
         return self._get_thread_local("current_grid_idx", None)
 
     @current_grid_idx.setter
-    def current_grid_idx(self, grid_idx: Optional[tuple[int, ...]]) -> None:
+    def current_grid_idx(self, grid_idx: tuple[int, ...] | None) -> None:
         self._set_thread_local("current_grid_idx", grid_idx)
 
     def grid_callback(self, grid: tuple[int, ...]):

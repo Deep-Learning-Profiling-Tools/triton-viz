@@ -1,7 +1,7 @@
 from contextlib import contextmanager, nullcontext
 
 from abc import ABC, abstractmethod
-from typing import ClassVar, Optional, Any
+from typing import ClassVar, Any
 from collections.abc import Callable
 import threading
 
@@ -26,7 +26,7 @@ class Client(ABC):
         # Whether this client needs ASM information from kernel warmup
         self.collect_asm: bool = False
         # Storage for ASM information if collected
-        self.asm_info: Optional[dict] = None
+        self.asm_info: dict | None = None
         # Thread-local scratch space for per-thread callback state
         self._thread_local = threading.local()
         # Lock for serializing shared state where needed
@@ -105,16 +105,16 @@ class Client(ABC):
         return getattr(self._thread_local, key, default)
 
     @property
-    def grid_idx(self) -> Optional[tuple[int, ...]]:
+    def grid_idx(self) -> tuple[int, ...] | None:
         return self._get_thread_local("grid_idx", None)
 
     @grid_idx.setter
-    def grid_idx(self, value: Optional[tuple[int, ...]]) -> None:
+    def grid_idx(self, value: tuple[int, ...] | None) -> None:
         self._set_thread_local("grid_idx", value)
 
 
 class ClientManager:
-    def __init__(self, clients: Optional[list[Client]] = None):
+    def __init__(self, clients: list[Client] | None = None):
         self.clients: dict[str, Client] = {}
         if clients:
             self.add_clients(clients)
@@ -126,7 +126,7 @@ class ClientManager:
             return self._lock
         return nullcontext()
 
-    def get_client(self, name: str) -> Optional[Client]:
+    def get_client(self, name: str) -> Client | None:
         return self.clients.get(name)
 
     def add_clients(self, new_clients_list: list[Client]) -> None:

@@ -2,7 +2,7 @@ from ...core.data import Store, Load
 import numpy as np
 from numpy.typing import NDArray
 from dataclasses import dataclass
-from typing import Union, Any, Optional
+from typing import Any
 import torch
 import z3
 
@@ -11,7 +11,7 @@ from ...utils.traceback_utils import TracebackInfo
 
 @dataclass
 class OutOfBoundsRecord:
-    op_type: type[Union[Store, Load]]
+    op_type: type[Store | Load]
     tensor: torch.Tensor
     user_code_tracebacks: list[TracebackInfo]
 
@@ -29,7 +29,7 @@ class OutOfBoundsRecordBruteForce(OutOfBoundsRecord):
 class OutOfBoundsRecordZ3(OutOfBoundsRecord):
     """
     Attributes:
-        constraints (Optional[z3.z3.BoolRef]):
+        constraints (z3.z3.BoolRef | None):
             A conjunction of Z3 constraint expressions defining valid ranges
             for memory access. Any address falling outside these ranges is considered invalid.
 
@@ -46,11 +46,11 @@ class OutOfBoundsRecordZ3(OutOfBoundsRecord):
             In this scenario, 200 is an out-of-bounds address because it
             falls outside the valid ranges described by these constraints.
 
-        symbolic_expr (Optional[Any]):
+        symbolic_expr (Any | None):
             The symbolic expression tree that led to the OOB access, if available.
     """
 
-    constraints: Optional[z3.z3.BoolRef]
+    constraints: z3.z3.BoolRef | None
     violation_address: int
-    symbolic_expr: "Any" = None  # Optional symbolic expression tree
-    tensor_name: Optional[str] = None
+    symbolic_expr: Any = None  # Optional symbolic expression tree
+    tensor_name: str | None = None
