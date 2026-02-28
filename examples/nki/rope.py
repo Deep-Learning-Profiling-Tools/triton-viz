@@ -1,5 +1,4 @@
 import os
-from typing import Tuple
 
 import neuronxcc.nki.language as nl
 import torch
@@ -16,7 +15,7 @@ os.environ["NEURON_CC_FLAGS"] = " --disable-dge "
 
 def generate_pos_embedding(
     head_dim: int, position_ids: torch.Tensor, base: int = 10000
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generate positional embeddings for rotary position encoding (Llama style).
     """

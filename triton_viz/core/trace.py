@@ -1,4 +1,5 @@
 from copy import deepcopy
+from collections.abc import Callable
 from ..utils.traceback_utils import CODE_KEYS, get_code_key
 from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.autotuner import Heuristics
@@ -10,7 +11,6 @@ from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
 from . import patch
-from typing import Callable, Optional, Union
 import types
 
 
@@ -18,12 +18,12 @@ launches: list[Launch] = []
 
 
 class TraceInterface:
-    def __init__(self, client: Union[str, Client]) -> None:
+    def __init__(self, client: str | Client) -> None:
         self.client_manager = ClientManager()
         self.add_client(client)
 
     @staticmethod
-    def _normalize_client(client: Union[str, Client]) -> Client:
+    def _normalize_client(client: str | Client) -> Client:
         if isinstance(client, str):
             name = client.lower()
             if name == "sanitizer":
@@ -38,7 +38,7 @@ class TraceInterface:
         else:
             raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def add_client(self, new_client: Union[str, Client]) -> None:
+    def add_client(self, new_client: str | Client) -> None:
         self.client_manager.add_clients([self._normalize_client(new_client)])
 
     def finalize(self):
@@ -49,18 +49,16 @@ class TraceInterface:
 class TritonTrace(KernelInterface, TraceInterface):
     def __init__(
         self,
-        runner: Union[JITFunction, InterpretedFunction, Autotuner, Heuristics],
-        client: Union[str, Client],
+        runner: JITFunction | InterpretedFunction | Autotuner | Heuristics,
+        client: str | Client,
     ) -> None:
-        self.jit_fn: Optional[JITFunction] = None
-        self.base_fn: Optional[Callable] = None
-        self.interpreted_fn: Optional[InterpretedFunction] = None
+        self.jit_fn: JITFunction | None = None
+        self.base_fn: Callable | None = None
+        self.interpreted_fn: InterpretedFunction | None = None
 
         def unpack_kernel(
-            source: Union["TritonTrace", JITFunction, InterpretedFunction, Heuristics],
-        ) -> tuple[
-            Optional[JITFunction], Optional[Callable], Optional[InterpretedFunction]
-        ]:
+            source: TritonTrace | JITFunction | InterpretedFunction | Heuristics,
+        ) -> tuple[JITFunction | None, Callable | None, InterpretedFunction | None]:
             if isinstance(source, TritonTrace):
                 return source.jit_fn, source.base_fn, source.interpreted_fn
             if isinstance(source, JITFunction):
@@ -248,7 +246,7 @@ def trace_source(kernel):
     return kernel
 
 
-def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
+def trace(client: str | Client | None = None, backend: str = "triton"):
     """
     Create a trace object that can be used to run a kernel with instrumentation client(s).
 
@@ -261,7 +259,7 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
     if not isinstance(client, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def _is_sanitizer_client(selected: Union[str, Client]) -> bool:
+    def _is_sanitizer_client(selected: str | Client) -> bool:
         if isinstance(selected, str):
             return selected.lower() == "sanitizer"
         return isinstance(selected, Sanitizer)

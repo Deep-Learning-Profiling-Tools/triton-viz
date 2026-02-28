@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from typing import Optional
 
 import triton
 import triton.language as tl
@@ -121,15 +120,15 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self.after_loop_pending: list[int] = []
-        self.check_inside_loop: list[tuple[Z3Expr, Optional[BoolRef]]] = []
+        self.check_inside_loop: list[tuple[Z3Expr, BoolRef | None]] = []
         self.iterator_constraints: list[BoolRef] = []
 
     def _check_range_satisfiable(
         self,
         access_addr: Z3Expr,
-        expr_constraints: Optional[BoolRef],
+        expr_constraints: BoolRef | None,
         symbolic_expr: SymbolicExpr,
-        source_location: Optional[tuple[str, int, str]] = None,
+        source_location: tuple[str, int, str] | None = None,
     ) -> None:
         self.check_inside_loop.append((access_addr, expr_constraints))
         super()._check_range_satisfiable(
