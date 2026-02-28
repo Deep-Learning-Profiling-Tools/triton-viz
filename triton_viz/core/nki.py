@@ -1,3 +1,4 @@
+# CODEX NOTE: IGNORE THIS FILE, IT IS THE DEPRECATED NKI INTERPRETER
 from triton_viz.utils.traceback_utils import CODE_KEYS, get_code_key
 import numpy as np
 

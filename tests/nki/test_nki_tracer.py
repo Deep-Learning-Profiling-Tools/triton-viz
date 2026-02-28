@@ -7,6 +7,10 @@ from triton_viz.core.data import Grid, Load, Store, ReduceSum, Dot
 from triton_viz.core.trace import launches
 import math
 
+pytest.skip(
+    "This test file is only for legacy NeuronX but this PR is for NKI Beta 2",
+    allow_module_level=True,
+)
 try:
     import neuronxcc.nki.language as nl
     from triton_viz.core.nki import NDArray

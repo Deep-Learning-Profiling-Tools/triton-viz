@@ -217,7 +217,7 @@ class ClientManager:
             for client in self.clients.values():
                 client.arg_callback(name, arg, arg_cvt)
 
-    def grid_callback(self, grid: tuple[int]):
+    def grid_callback(self, grid: tuple[int, ...]):
         with self._lock_context():
             self.launch.grid = grid
             for client in self.clients.values():

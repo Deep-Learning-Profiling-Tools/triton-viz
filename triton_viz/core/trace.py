@@ -175,13 +175,9 @@ class TritonTrace(KernelInterface, TraceInterface):
 
 class NKITrace(KernelInterface, TraceInterface):
     def __init__(self, kernel, client: str | Client) -> None:
-        from neuronxcc.nki.compile import GenericKernel
-        from .nki import NKIInterpretedFunction
+        from .nki_beta2 import NKIInterpretedFunction
 
-        if isinstance(kernel, GenericKernel):
-            self.interpreter_fn = NKIInterpretedFunction(kernel.func)
-            self.func = kernel.func
-        elif isinstance(kernel, NKIInterpretedFunction):
+        if isinstance(kernel, NKIInterpretedFunction):
             self.interpreter_fn = kernel
             self.func = kernel.fn
         else:

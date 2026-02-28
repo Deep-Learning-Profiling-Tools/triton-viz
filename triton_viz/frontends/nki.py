@@ -1,3 +1,4 @@
+# CODEX NOTE: IGNORE THIS FILE, IT IS THE DEPRECATED NKI INTERPRETER
 from collections.abc import Callable
 from typing import Any, Optional
 
