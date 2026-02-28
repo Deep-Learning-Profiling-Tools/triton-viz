@@ -24,6 +24,7 @@ class _PatchScope:
     """Track and restore monkeypatched attributes."""
 
     def __init__(self):
+        """Initialize patch history stack."""
         self._changes = []
 
     def set_attr(self, obj, name, value):

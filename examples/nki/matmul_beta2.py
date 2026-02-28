@@ -9,7 +9,13 @@ TRITON_VIZ_ENABLED = True
 
 
 def matmul_kernel(lhsT, rhs, result):
-    """NKI kernel to compute a matrix multiplication operation in a tiled manner"""
+    """Compute tiled matrix multiplication ``result = lhsT.T @ rhs``.
+
+    Args:
+        lhsT: Input matrix with shape ``[K, M]``.
+        rhs: Input matrix with shape ``[K, N]``.
+        result: Output matrix with shape ``[M, N]`` written in place.
+    """
 
     # Verify that the lhsT and rhs have the same contraction dimension.
     K, M = lhsT.shape
@@ -75,29 +81,43 @@ def matmul_kernel(lhsT, rhs, result):
             )
 
 
+def _run_with_xla(kernel, kernel_grid, *arrays):
+    """Run one beta2 kernel invocation on an XLA device."""
+    import torch
+    from torch_xla.core import xla_model as xm
+
+    device = xm.xla_device()
+    tensors = [torch.as_tensor(array, device=device) for array in arrays]
+    compiled_kernel = nki.jit(kernel, kernel_return=False)
+    compiled_kernel[kernel_grid](*tensors)
+    xm.mark_step()
+    return [tensor.cpu().numpy() for tensor in tensors]
+
+
 def _run_demo():
+    """Run the matmul example with lhsT ``[128, 128]`` and rhs ``[128, 512]``."""
     kernel_grid = (1, 1, 1)
-    m_dim = 4
-    k_dim = 8
-    n_dim = 16
+    m_dim = 128
+    k_dim = 128
+    n_dim = 512
     lhs_small = np.arange(k_dim * m_dim, dtype=np.float32).reshape(k_dim, m_dim)
     rhs_small = np.arange(k_dim * n_dim, dtype=np.float32).reshape(k_dim, n_dim)
     kernel = matmul_kernel
 
     result = np.empty((m_dim, n_dim), dtype=lhs_small.dtype)
     kernel_args = (lhs_small, rhs_small, result)
+    expected = lhs_small.T @ rhs_small
 
     if TRITON_VIZ_ENABLED:
         traced_kernel = triton_viz.trace("tracer", backend="nki")(kernel)
         traced_kernel[kernel_grid](*kernel_args)
+        assert np.allclose(expected, result)
+        print("actual equals expected")
         triton_viz.launch(share=False)
     else:
-        compiled_kernel = nki.jit(kernel, kernel_return=False)
-        nki.simulate_kernel(compiled_kernel[kernel_grid], *kernel_args)
-
-    # lhs_small = lhs_small.T
-    # expected = lhs_small @ rhs_small
-    # assert np.allclose(expected, result)
+        _, _, result = _run_with_xla(kernel, kernel_grid, *kernel_args)
+        assert np.allclose(expected, result)
+        print("actual equals expected")
 
 
 if __name__ == "__main__":
