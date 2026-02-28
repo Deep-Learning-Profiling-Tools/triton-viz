@@ -84,7 +84,7 @@ def test_non_numpy_logical_dtypes_have_storage():
 
 
 def test_patch_surface_and_signatures(patched_scope):
-    """Patched surface should match the new beta2 dialect."""
+    """Patched surface should match the new beta2 dialect. Ignoring function signatures of NKIOps like nl.add since they are trivial (only one/two tensor arg)."""
     del patched_scope
     nl_dtype_constants = (
         "bool_",
@@ -111,35 +111,6 @@ def test_patch_surface_and_signatures(patched_scope):
         "ds",
         "sequential_range",
         "static_range",
-        "tile_size",
-        "abs",
-        "add",
-        "bitwise_and",
-        "bitwise_or",
-        "bitwise_xor",
-        "divide",
-        "equal",
-        "gelu_apprx_sigmoid",
-        "gelu_apprx_sigmoid_dx",
-        "greater",
-        "greater_equal",
-        "invert",
-        "left_shift",
-        "less",
-        "less_equal",
-        "logical_and",
-        "logical_not",
-        "logical_or",
-        "logical_xor",
-        "maximum",
-        "minimum",
-        "multiply",
-        "not_equal",
-        "power",
-        "reciprocal",
-        "right_shift",
-        "rsqrt",
-        "subtract",
         "device_print",
         "num_programs",
         "program_id",
@@ -217,11 +188,9 @@ def test_patch_surface_and_signatures(patched_scope):
     assert nl.float8_e5m2 == "float8_e5m2"
     assert nl.float8_e4m3fn == "float8_e4m3fn"
 
-    nl_fn_map = {name: name for name in nl_names if name != "tile_size"}
-    nl_fn_map["reciprocal"] = "nl_reciprocal"
-    for name, impl_name in nl_fn_map.items():
+    for name in nl_names:
         assert str(inspect.signature(getattr(nl, name))) == str(
-            inspect.signature(getattr(b2, impl_name))
+            inspect.signature(getattr(b2, name))
         )
 
     for name in nisa_names:
