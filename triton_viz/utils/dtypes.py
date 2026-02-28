@@ -1,3 +1,5 @@
+"""Dtype aliases and canonical storage dtypes for custom interpreters."""
+
 from typing import TypeAlias
 
 import ml_dtypes

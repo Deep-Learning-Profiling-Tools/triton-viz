@@ -1,3 +1,5 @@
+"""Unit tests for dtype aliasing and low-precision cast behavior."""
+
 import numpy as np
 import pytest
 from triton_viz.utils.dtypes import STORAGE_DTYPES
@@ -6,6 +8,7 @@ pytest.importorskip("ml_dtypes")
 
 
 def test_storage_dtypes_has_expected_aliases():
+    """Validate that all user-facing aliases resolve to expected dtypes."""
     assert STORAGE_DTYPES[None] is None
     assert STORAGE_DTYPES[int] == np.dtype(np.int64)
     assert STORAGE_DTYPES[float] == np.dtype(np.float64)
@@ -32,6 +35,7 @@ def test_storage_dtypes_has_expected_aliases():
 
 
 def test_storage_dtypes_round_trips_dtype_objects():
+    """Validate that dtype objects map back to themselves."""
     for alias, dtype in STORAGE_DTYPES.items():
         if alias is None:
             continue
@@ -55,6 +59,7 @@ def test_storage_dtypes_round_trips_dtype_objects():
     ],
 )
 def test_ml_dtypes_cast_matches_expected_quantization(dtype_name: str, expected):
+    """Validate cast output matches expected values for low-precision formats."""
     values = np.array([[0.1, 0.9, 1.24], [1.51, 2.9, -5.2]], dtype=np.float64)
     casted = values.astype(STORAGE_DTYPES[dtype_name])
     assert casted.dtype == STORAGE_DTYPES[dtype_name]
