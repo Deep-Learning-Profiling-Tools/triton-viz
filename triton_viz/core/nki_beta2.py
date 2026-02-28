@@ -8,7 +8,7 @@ from typing import Any, Callable, Sequence, TypeAlias, cast
 from triton_viz.core.client import ClientManager
 from triton_viz.core.patch import _LangPatchScope
 
-from triton_viz.utils.quantize import STORAGE_DTYPES, quantize_float
+from triton_viz.utils.quantize import STORAGE_DTYPES, DTypeLike
 
 import nki.isa as nisa
 import nki.language as nl
@@ -20,9 +20,6 @@ TensorInput: TypeAlias = "NDArray | np.ndarray | ScalarLike | Sequence[ScalarLik
 BufferLike: TypeAlias = str | None  # currently, None -> "sbuf"
 ShapeLike: TypeAlias = Sequence[int]
 PatternLike: TypeAlias = Sequence[Sequence[int | np.integer]]
-DTypeLike: TypeAlias = (
-    str | np.dtype | None
-)  # e.g. np.float32, "bfloat16", None (default)
 OpLike: TypeAlias = "NKIOp | Callable[..., np.ndarray] | None"
 UnaryOpLike: TypeAlias = "NKIOp | Callable[..., np.ndarray]"
 BinaryCallable: TypeAlias = Callable[[Any, Any], Any]
@@ -57,28 +54,11 @@ def _compute_ap_indices(pattern: PatternLike, offset: ScalarInput) -> np.ndarray
     return indices + int(_to_scalar(offset, int))
 
 
-def _to_numpy(value: TensorInput) -> np.ndarray:
-    return value.data if isinstance(value, NDArray) else np.asarray(value)
-
-
-def _dtype_spec(dtype: DTypeLike) -> tuple[int, int, bool] | None:
-    if isinstance(dtype, str):
-        return STORAGE_DTYPES.get(dtype)
-    dtype_name = getattr(dtype, "name", None)
-    if isinstance(dtype_name, str):
-        return STORAGE_DTYPES.get(dtype_name)
-    return None
-
-
-def _cast_dtype(value: TensorInput, dtype: DTypeLike) -> np.ndarray:
-    # casts are only needed at the final write boundary to emulate low-precision storage semantics.
-    value = _to_numpy(value)
-    spec = _dtype_spec(dtype)
-    if spec is None:
-        return np.asarray(value, dtype=dtype)
-    exp_bits, mant_bits, finite_only = spec
-    casted = quantize_float(value, exp_bits, mant_bits, finite_only=finite_only)
-    return np.asarray(casted, dtype=np.float64)
+def _to_numpy(value: TensorInput, dtype: DTypeLike = None) -> np.ndarray:
+    data = value.data if isinstance(value, NDArray) else np.asarray(value)
+    if dtype is None:
+        return data
+    return data.astype(STORAGE_DTYPES[dtype])
 
 
 class NDArray:
@@ -92,27 +72,25 @@ class NDArray:
         value: TensorInput | None = None,
     ) -> None:
         self.buffer = buffer
-        self.dtype = dtype
         # normalize user shape into a concrete tuple for storage allocation
         storage_shape = _shape_tuple(shape) if shape is not None else None
-        storage_dtype = (
-            np.float64 if _dtype_spec(dtype) is not None or dtype is None else dtype
-        )
         if value is None:
             assert storage_shape
-            self.data = np.ndarray(storage_shape, dtype=storage_dtype)
+            self.data = np.ndarray(storage_shape, dtype=STORAGE_DTYPES[dtype])
         else:
-            array = _cast_dtype(value, dtype)
+            array = _to_numpy(value, dtype)
             if storage_shape is not None and array.shape != storage_shape:
                 array = array.reshape(storage_shape)
             self.data = array
-        if self.dtype is None:
-            self.dtype = self.data.dtype
         self._data_ptr: int | None = None
 
     @property
     def shape(self: NDArray) -> tuple[int, ...]:
         return self.data.shape
+
+    @property
+    def dtype(self: NDArray) -> DTypeLike:
+        return self.data.dtype
 
     @property
     def address(self: NDArray) -> int:
@@ -178,7 +156,7 @@ class NDArray:
         if not isinstance(keys, tuple):
             keys = (keys,)
         new_keys = [k.data if isinstance(k, NDArray) else k for k in keys]
-        self.data[tuple(new_keys)] = _cast_dtype(value, self.dtype)
+        self.data[tuple(new_keys)] = _to_numpy(value, self.dtype)
         return self
 
     def _binary_op(
@@ -387,7 +365,7 @@ def ndarray(
             if cached.data.shape != tuple(shape):
                 raise ValueError(f"shared_hbm shape mismatch for {shared_name}")
             if value is not None:
-                cached.data[...] = _cast_dtype(value, cached.dtype)
+                cached.data[...] = _to_numpy(value, cached.dtype)
             return cached
         created = NDArray(
             buffer=resolved_buffer.buffer,
@@ -433,7 +411,7 @@ def _to_scalar(
 
 
 def _write_dst(dst: NDArray, value: TensorInput) -> NDArray:
-    dst.data[...] = _cast_dtype(value, dst.dtype)
+    dst.data[...] = _to_numpy(value, dst.dtype)
     return dst
 
 
@@ -492,7 +470,7 @@ def shared_constant(constant: TensorInput, dtype: DTypeLike = None) -> NDArray:
     if dtype is None:
         raise ValueError("dtype must be specified")
     array = _to_numpy(constant)
-    return NDArray(value=_cast_dtype(array, dtype), dtype=dtype, buffer=hbm.buffer)
+    return NDArray(value=_to_numpy(array, dtype), dtype=dtype, buffer=hbm.buffer)
 
 
 def shared_identity_matrix(n: int | np.integer, dtype: DTypeLike = "uint8") -> NDArray:

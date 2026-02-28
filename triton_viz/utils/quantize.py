@@ -1,59 +1,31 @@
+from typing import TypeAlias
+import ml_dtypes
 import numpy as np
 
-STORAGE_DTYPES = {
-    "bfloat16": (8, 7, False),
-    "tfloat32": (8, 10, False),
-    "float8_e4m3": (4, 3, False),
-    "float8_e5m2": (5, 2, False),
-    "float8_e4m3fn": (4, 3, True),
-    "float8_e5m2fn": (5, 2, True),
-    "float4_e2m1fn": (2, 1, True),
+DTypeLike: TypeAlias = (
+    str | type | np.dtype | None
+)  # e.g. np.float32, "bfloat16", None (default)
+
+STORAGE_DTYPES: dict[DTypeLike, np.dtype | None] = {
+    None: None,
+    int: np.dtype(np.int64),
+    float: np.dtype(np.float64),
+    "int8": np.dtype(np.int8),
+    "int16": np.dtype(np.int16),
+    "int32": np.dtype(np.int32),
+    "uint8": np.dtype(np.uint8),
+    "uint16": np.dtype(np.uint16),
+    "uint32": np.dtype(np.uint32),
+    "float16": np.dtype(np.float16),
+    "half": np.dtype(np.float16),
+    "float32": np.dtype(np.float32),
+    "float": np.dtype(np.float32),
+    "float64": np.dtype(np.float64),
+    "double": np.dtype(np.float64),
+    "bfloat16": np.dtype(ml_dtypes.bfloat16),
+    "float8_e4m3": np.dtype(ml_dtypes.float8_e4m3),
+    "float8_e5m2": np.dtype(ml_dtypes.float8_e5m2),
+    "float8_e4m3fn": np.dtype(ml_dtypes.float8_e4m3fn),
+    "float4_e2m1fn": np.dtype(ml_dtypes.float4_e2m1fn),
 }
-
-
-def quantize_float(value, exp_bits, mant_bits, finite_only=False):
-    """Given a float, quantize it as if it only had the float format specified in args. Still returns a float."""
-    ax = np.abs(value)
-
-    bias = (1 << (exp_bits - 1)) - 1
-    emin = 1 - bias
-    if finite_only:  # no inf; reserve top mantissa at max exp for NaN (FN)
-        emax = (1 << exp_bits) - 1 - bias
-        max_sig = 2.0 - 2.0 ** (1 - mant_bits)
-        has_inf = False
-    else:  # IEEE-like: all-ones exp reserved for inf/nan
-        emax = (1 << exp_bits) - 2 - bias
-        max_sig = 2.0 - 2.0 ** (-mant_bits)
-        has_inf = True
-
-    min_norm = np.ldexp(1.0, emin)
-    sub_step = np.ldexp(1.0, emin - mant_bits)
-    max_fin = np.ldexp(max_sig, emax)
-
-    out = ax.copy()
-    fin = np.isfinite(value)
-    nz = fin & (ax != 0)
-
-    # quantize finite nonzeros
-    sub = nz & (ax < min_norm)
-    if np.any(sub):
-        out[sub] = np.rint(ax[sub] / sub_step) * sub_step
-
-    nor = nz & ~sub
-    if np.any(nor):
-        _, e = np.frexp(ax[nor])  # ax = m*2**e, m in [0.5,1)
-        step_exp = (e - 1) - mant_bits
-        out[nor] = np.ldexp(np.rint(np.ldexp(ax[nor], -step_exp)), step_exp)
-
-    # special inputs
-    out[np.isinf(value)] = np.inf if has_inf else max_fin
-    # NaNs propagate automatically via abs/copy; keep explicit for clarity:
-    out[np.isnan(value)] = np.nan
-
-    # overflow policy after rounding
-    if has_inf:
-        out[fin & (out > max_fin)] = np.inf
-    else:
-        out = np.minimum(out, max_fin)
-
-    return np.copysign(out, value)
+STORAGE_DTYPES |= {dtype: dtype for dtype in STORAGE_DTYPES.values()}

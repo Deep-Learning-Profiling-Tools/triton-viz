@@ -8,6 +8,7 @@ try:
     import nki.isa as nisa
     import nki.language as nl
     import triton_viz.core.nki_beta2 as b2
+    from triton_viz.utils.quantize import STORAGE_DTYPES
 except ModuleNotFoundError:
     pytest.skip(
         "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
@@ -62,26 +63,54 @@ def _zeros(shape, dtype=None, buffer="sbuf"):
     return b2.NDArray(value=array, buffer=buffer)
 
 
-def test_non_numpy_logical_dtypes_have_storage():
-    """Logical low-precision dtypes should be backed by float64 storage."""
-    logical = np.array([[0.1, 0.9, 1.24], [1.51, 2.9, -5.2]])
-    for dtype_name in (
+def _assert_low_precision_dma_copy(dtype_name, expected):
+    """Assert dma_copy quantizes source values into dtype-specific storage."""
+    logical = np.array([[0.1, 0.9, 1.24], [1.51, 2.9, -5.2]], dtype=np.float64)
+    dtype = getattr(nl, dtype_name, dtype_name)
+    dst = b2.NDArray(shape=logical.shape, dtype=dtype, buffer="sbuf")
+    b2.dma_copy(dst=dst, src=_nd(logical))
+    assert dst.data.dtype == STORAGE_DTYPES[dtype_name]
+    assert np.array_equal(dst.data, np.array(expected, dtype=dst.data.dtype))
+
+
+def test_dma_copy_bfloat16_quantization():
+    """dma_copy should quantize values to bfloat16 precision."""
+    _assert_low_precision_dma_copy(
         "bfloat16",
-        "tfloat32",
+        [[0.10009765625, 0.8984375, 1.2421875], [1.5078125, 2.90625, -5.1875]],
+    )
+
+
+def test_dma_copy_float8_e4m3_quantization():
+    """dma_copy should quantize values to float8_e4m3 precision."""
+    _assert_low_precision_dma_copy(
         "float8_e4m3",
+        [[0.1015625, 0.875, 1.25], [1.5, 3.0, -5.0]],
+    )
+
+
+def test_dma_copy_float8_e5m2_quantization():
+    """dma_copy should quantize values to float8_e5m2 precision."""
+    _assert_low_precision_dma_copy(
         "float8_e5m2",
+        [[0.09375, 0.875, 1.25], [1.5, 3.0, -5.0]],
+    )
+
+
+def test_dma_copy_float8_e4m3fn_quantization():
+    """dma_copy should quantize values to float8_e4m3fn precision."""
+    _assert_low_precision_dma_copy(
         "float8_e4m3fn",
-        "float8_e5m2fn",
+        [[0.1015625, 0.875, 1.25], [1.5, 3.0, -5.0]],
+    )
+
+
+def test_dma_copy_float4_e2m1fn_quantization():
+    """dma_copy should quantize values to float4_e2m1fn precision."""
+    _assert_low_precision_dma_copy(
         "float4_e2m1fn",
-    ):
-        dtype = getattr(nl, dtype_name, None)
-        created = b2.NDArray(
-            shape=logical.shape, dtype=dtype, value=logical, buffer="sbuf"
-        )
-        assert created.data.dtype == np.float64
-        dst = b2.NDArray(shape=logical.shape, dtype=dtype, buffer="sbuf")
-        b2.dma_copy(dst=dst, src=_nd(logical))
-        assert dst.data.dtype == np.float64
+        [[0.0, 1.0, 1.0], [1.5, 3.0, -6.0]],
+    )
 
 
 def test_ndarray_has_no_name_attr():
