@@ -4,8 +4,9 @@ import inspect
 import itertools
 
 import numpy as np
-from typing import Any, Callable, Protocol, Sequence, TypeAlias, cast
+from typing import Any, Callable, Sequence, TypeAlias, cast
 from triton_viz.core.client import ClientManager
+from triton_viz.core.patch import _LangPatchScope
 
 from triton_viz.utils.quantize import STORAGE_DTYPES, quantize_float
 
@@ -14,9 +15,10 @@ import nki.language as nl
 
 
 ScalarLike: TypeAlias = bool | int | float | np.integer | np.floating | np.bool_
+ScalarInput: TypeAlias = "NDArray | np.ndarray | ScalarLike"
 TensorInput: TypeAlias = "NDArray | np.ndarray | ScalarLike | Sequence[ScalarLike]"
-BufferLike: TypeAlias = "Buffer | str"
-ShapeLike: TypeAlias = Sequence[int] | tuple[int, ...]
+BufferLike: TypeAlias = str | None  # currently, None -> "sbuf"
+ShapeLike: TypeAlias = Sequence[int]
 PatternLike: TypeAlias = Sequence[Sequence[int | np.integer]]
 DTypeLike: TypeAlias = (
     str | np.dtype | None
@@ -25,22 +27,6 @@ OpLike: TypeAlias = "NKIOp | Callable[..., np.ndarray] | None"
 UnaryOpLike: TypeAlias = "NKIOp | Callable[..., np.ndarray]"
 BinaryCallable: TypeAlias = Callable[[Any, Any], Any]
 IndexKey: TypeAlias = "int | slice | np.ndarray | NDArray"
-
-
-class PatchScope(Protocol):
-    def set_attr(self, obj: object, name: str, value: object) -> None:
-        ...
-
-    def restore(self) -> None:
-        ...
-
-
-def _as_scalar(value: TensorInput) -> int:
-    # unwrap NDArray scalar inputs before validating scalar shape
-    array = _to_numpy(value)
-    if array.size != 1:
-        raise ValueError("Expected scalar value")
-    return int(array.reshape(-1)[0])
 
 
 def _shape_tuple(shape: ShapeLike) -> tuple[int, ...]:
@@ -60,7 +46,7 @@ def _normalize_pattern(pattern: PatternLike) -> list[tuple[int, int]]:
     return normalized
 
 
-def _compute_ap_indices(pattern: PatternLike, offset: TensorInput) -> np.ndarray:
+def _compute_ap_indices(pattern: PatternLike, offset: ScalarInput) -> np.ndarray:
     pattern_pairs = _normalize_pattern(pattern)
     shape = [count for _, count in pattern_pairs]
     indices = np.zeros(shape, dtype=np.int64)
@@ -68,7 +54,7 @@ def _compute_ap_indices(pattern: PatternLike, offset: TensorInput) -> np.ndarray
         axis_shape = [1] * len(pattern_pairs)
         axis_shape[axis] = count
         indices += step * np.arange(count, dtype=np.int64).reshape(axis_shape)
-    return indices + _as_scalar(offset)
+    return indices + int(_to_scalar(offset, int))
 
 
 def _to_numpy(value: TensorInput) -> np.ndarray:
@@ -100,14 +86,12 @@ class NDArray:
 
     def __init__(
         self: NDArray,
-        buffer: BufferLike | None = None,
-        name: str | None = "",
+        buffer: BufferLike = None,
         shape: ShapeLike | None = None,
         dtype: DTypeLike = None,
         value: TensorInput | None = None,
     ) -> None:
         self.buffer = buffer
-        self.name = name
         self.dtype = dtype
         # normalize user shape into a concrete tuple for storage allocation
         storage_shape = _shape_tuple(shape) if shape is not None else None
@@ -175,10 +159,10 @@ class NDArray:
         offsets = 0
         for dim_size, stride in zip(self.shape, self.stride()):
             offsets = np.expand_dims(offsets, -1) + np.arange(dim_size) * stride
-        return NDArray(value=offsets, name=self.name)
+        return NDArray(value=offsets)
 
     def __repr__(self: NDArray) -> str:
-        return f"NDArray(shape={self.shape}, dtype={self.dtype}, name={self.name})"
+        return f"NDArray(shape={self.shape}, dtype={self.dtype})"
 
     def __getitem__(self: NDArray, keys: IndexKey | tuple[IndexKey, ...]) -> NDArray:
         """Implement slicing operations for NDArray"""
@@ -186,9 +170,7 @@ class NDArray:
             keys = (keys,)
         new_keys = [k.data if isinstance(k, NDArray) else k for k in keys]
         sliced_value = self.data[tuple(new_keys)]
-        return NDArray(
-            value=sliced_value, name=f"{self.name}_slice", buffer=self.buffer
-        )
+        return NDArray(value=sliced_value, buffer=self.buffer)
 
     def __setitem__(
         self: NDArray, keys: IndexKey | tuple[IndexKey, ...], value: TensorInput
@@ -203,66 +185,42 @@ class NDArray:
         self: NDArray,
         other: TensorInput,
         op_func: BinaryCallable,
-        op_name: str,
         op_symbol: str,
     ) -> NDArray:
         if isinstance(other, NDArray):
-            return NDArray(
-                value=op_func(self.data, other.data),
-                name=f"{self.name}_{op_name}_{other.name}",
-            )
+            return NDArray(value=op_func(self.data, other.data))
         if np.isscalar(other):
-            return NDArray(
-                value=op_func(self.data, other), name=f"{self.name}_{op_name}_scalar"
-            )
-        return NDArray(
-            value=op_func(self.data, _to_numpy(other)),
-            name=f"{self.name}_{op_name}_tensor",
-        )
+            return NDArray(value=op_func(self.data, other))
+        return NDArray(value=op_func(self.data, _to_numpy(other)))
 
     def _rbinary_op(
         self: NDArray,
         other: TensorInput,
         op_func: BinaryCallable,
-        op_name: str,
         op_symbol: str,
     ) -> NDArray:
         if isinstance(other, NDArray):
-            return NDArray(
-                value=op_func(other.data, self.data),
-                name=f"{other.name}_{op_name}_{self.name}",
-            )
+            return NDArray(value=op_func(other.data, self.data))
         if np.isscalar(other):
-            return NDArray(
-                value=op_func(other, self.data), name=f"scalar_{op_name}_{self.name}"
-            )
-        return NDArray(
-            value=op_func(_to_numpy(other), self.data),
-            name=f"tensor_{op_name}_{self.name}",
-        )
+            return NDArray(value=op_func(other, self.data))
+        return NDArray(value=op_func(_to_numpy(other), self.data))
 
     def reshape(self: NDArray, *args, **kwargs) -> NDArray:
         """Return a reshaped view backed by the same NumPy data when possible."""
-        return NDArray(
-            value=self.data.reshape(*args, **kwargs),
-            name=f"{self.name}_reshape",
-            buffer=self.buffer,
-        )
+        return NDArray(value=self.data.reshape(*args, **kwargs), buffer=self.buffer)
 
     def broadcast_to(self: NDArray, *args, **kwargs) -> NDArray:
         """Return a broadcasted view of this tensor."""
         return NDArray(
-            value=np.broadcast_to(self.data, *args, **kwargs),
-            name=f"{self.name}_broadcast_to",
-            buffer=self.buffer,
+            value=np.broadcast_to(self.data, *args, **kwargs), buffer=self.buffer
         )
 
     def ap(
         self: NDArray,
         *pattern: Sequence[int | np.integer] | ScalarLike,
-        offset: TensorInput = 0,
+        offset: ScalarInput = 0,
         dtype: DTypeLike = None,
-        scalar_offset: TensorInput | None = None,
+        scalar_offset: ScalarInput | None = None,
         vector_offset: TensorInput | None = None,
         indirect_dim: int = 0,
         **kwargs,
@@ -277,15 +235,23 @@ class NDArray:
             pattern = tuple(cast(PatternLike, kwargs.pop("pattern")))
         if kwargs:
             raise TypeError(f"Unsupported kwargs for ap: {tuple(kwargs)}")
+        if len(pattern) == 1:
+            only_pattern = pattern[0]
+            if (
+                isinstance(only_pattern, Sequence)
+                and len(only_pattern) > 0
+                and isinstance(only_pattern[0], Sequence)
+            ):
+                pattern = tuple(cast(PatternLike, only_pattern))
         if len(pattern) == 2:
             first_pattern, second_pattern = pattern
             if np.isscalar(second_pattern) and not np.isscalar(first_pattern):
                 pattern = (first_pattern,)
-                offset = cast(TensorInput, second_pattern)
+                offset = cast(ScalarInput, second_pattern)
         pattern_pairs = _normalize_pattern(cast(PatternLike, pattern))
         indices = _compute_ap_indices(pattern_pairs, offset)
         if scalar_offset is not None:
-            indices += _as_scalar(scalar_offset)
+            indices += int(_to_scalar(scalar_offset, int))
         if vector_offset is not None:
             # unwrap NDArray vector offsets before computing indirect AP addressing
             vector_source = (
@@ -309,29 +275,27 @@ class NDArray:
             indices += step * vector.reshape(vector_shape)
         base = self.data if dtype is None else self.data.view(dtype)
         values = base.reshape(-1)[indices]
-        return NDArray(value=values, buffer=self.buffer, name=f"{self.name}_ap")
+        return NDArray(value=values, buffer=self.buffer)
 
 
-for method, op_name, symbol, op_func, reverse_operands in (
-    ("__add__", "add", "+", np.add, False),
-    ("__radd__", "add", "+", np.add, True),
-    ("__sub__", "sub", "-", np.subtract, False),
-    ("__rsub__", "sub", "-", np.subtract, True),
-    ("__mul__", "mul", "*", np.multiply, False),
-    ("__rmul__", "mul", "*", np.multiply, True),
-    ("__truediv__", "div", "/", np.divide, False),
-    ("__rtruediv__", "div", "/", np.divide, True),
-    ("__lt__", "lt", "<", np.less, False),
-    ("__gt__", "gt", ">", np.greater, False),
-    ("__le__", "le", "<=", np.less_equal, False),
-    ("__ge__", "ge", ">=", np.greater_equal, False),
-    ("__and__", "and", "&", np.bitwise_and, False),
-    ("__or__", "or", "|", np.bitwise_or, False),
+for method, symbol, op_func, reverse_operands in (
+    ("__add__", "+", np.add, False),
+    ("__radd__", "+", np.add, True),
+    ("__sub__", "-", np.subtract, False),
+    ("__rsub__", "-", np.subtract, True),
+    ("__mul__", "*", np.multiply, False),
+    ("__rmul__", "*", np.multiply, True),
+    ("__truediv__", "/", np.divide, False),
+    ("__rtruediv__", "/", np.divide, True),
+    ("__lt__", "<", np.less, False),
+    ("__gt__", ">", np.greater, False),
+    ("__le__", "<=", np.less_equal, False),
+    ("__ge__", ">=", np.greater_equal, False),
+    ("__and__", "&", np.bitwise_and, False),
+    ("__or__", "|", np.bitwise_or, False),
 ):
     op_method_name = "_rbinary_op" if reverse_operands else "_binary_op"
-    bi_op = lambda self, other: getattr(self, op_method_name)(
-        other, op_func, op_name, symbol
-    )
+    bi_op = lambda self, other: getattr(self, op_method_name)(other, op_func, symbol)
     setattr(NDArray, method, bi_op)
 
 
@@ -395,44 +359,26 @@ def _default_shared_hbm_name() -> str:
     return f"{caller.f_code.co_filename}_{caller.f_code.co_name}_{caller.f_lineno}"
 
 
-def _buffer_name(buffer: BufferLike | object | None) -> str:
-    if isinstance(buffer, Buffer):
-        return buffer.buffer
-    if isinstance(buffer, str):
-        return buffer
-    return getattr(buffer, "name", "")
-
-
-def _resolve_buffer(buffer: BufferLike | object | None) -> tuple[Buffer, bool]:
-    if isinstance(buffer, Buffer):
-        return buffer, False
-    if buffer is None:
-        return sbuf, False
-
-    name = _buffer_name(buffer)
-    aliases = {
-        "shared_hbm": (hbm, True),
-        "private_hbm": (hbm, False),
-        "hbm": (hbm, False),
-        "sbuf": (sbuf, False),
-        "psum": (psum, False),
-    }
-    if name in aliases:
-        return aliases[name]
-    raise TypeError(f"Unsupported buffer type: {type(buffer).__name__}")
-
-
 def ndarray(
     shape: ShapeLike,
     dtype: DTypeLike,
     *,
-    buffer: BufferLike | None = None,
+    buffer: BufferLike = None,
     name: str | None = None,
     value: TensorInput | None = None,
     **kwargs: object,
 ) -> NDArray:
     """Create an NDArray on a requested NKI buffer."""
-    resolved_buffer, is_shared_hbm = _resolve_buffer(buffer)
+
+    resolved_buffer = {
+        None: sbuf,
+        "shared_hbm": hbm,
+        "private_hbm": hbm,
+        "hbm": hbm,
+        "sbuf": sbuf,
+        "psum": psum,
+    }[buffer]
+    is_shared_hbm = buffer == "shared_hbm"
     if is_shared_hbm:
         shared_name = name or _default_shared_hbm_name()
         cached = nki_builder.shared_hbm_arrays.get(shared_name)
@@ -445,7 +391,6 @@ def ndarray(
             return cached
         created = NDArray(
             buffer=resolved_buffer.buffer,
-            name=shared_name,
             shape=_shape_tuple(shape),
             dtype=dtype,
             value=value,
@@ -456,13 +401,11 @@ def ndarray(
     if value is not None:
         return NDArray(
             buffer=resolved_buffer.buffer,
-            name=name,
             shape=_shape_tuple(shape),
             dtype=dtype,
             value=value,
         )
     ret = resolved_buffer.view(dtype, shape)
-    ret.name = name
     return ret
 
 
@@ -470,7 +413,7 @@ def zeros(
     shape: ShapeLike,
     dtype: DTypeLike,
     *,
-    buffer: BufferLike | None = None,
+    buffer: BufferLike = None,
     name: str | None = None,
     **kwargs,
 ) -> NDArray:
@@ -481,7 +424,7 @@ def zeros(
 
 
 def _to_scalar(
-    value: TensorInput, cast: Callable[[Any], int | float] = float
+    value: ScalarInput, cast: Callable[[Any], int | float] = float
 ) -> int | float:
     array = _to_numpy(value)
     if array.size != 1:
@@ -534,7 +477,7 @@ def _free_axes(value: TensorInput) -> tuple[int, ...]:
 
 
 def _range_args(
-    start: TensorInput, stop: TensorInput | None = None, step: TensorInput = 1
+    start: ScalarInput, stop: ScalarInput | None = None, step: ScalarInput = 1
 ) -> range:
     start_v = int(_to_scalar(start, int))
     if stop is None:
@@ -558,13 +501,13 @@ def shared_identity_matrix(n: int | np.integer, dtype: DTypeLike = "uint8") -> N
 
 
 def affine_range(
-    start: TensorInput, stop: TensorInput | None = None, step: TensorInput = 1
+    start: ScalarInput, stop: ScalarInput | None = None, step: ScalarInput = 1
 ) -> range:
     """Create a parallel iterator range."""
     return _range_args(start, stop, step)
 
 
-def ds(start: TensorInput, size: int | ShapeLike) -> slice:
+def ds(start: ScalarInput, size: ScalarInput) -> slice:
     """Build a dynamic slice object."""
     start_v = _to_scalar(start, int)
     size_v = _to_scalar(size, int)
@@ -572,14 +515,14 @@ def ds(start: TensorInput, size: int | ShapeLike) -> slice:
 
 
 def sequential_range(
-    start: TensorInput, stop: TensorInput | None, step: TensorInput
+    start: ScalarInput, stop: ScalarInput | None, step: ScalarInput
 ) -> range:
     """Create a sequential iterator range."""
     return _range_args(start, stop, step)
 
 
 def static_range(
-    start: TensorInput, stop: TensorInput | None = None, step: TensorInput = 1
+    start: ScalarInput, stop: ScalarInput | None = None, step: ScalarInput = 1
 ) -> range:
     """Create a fully unrolled iterator range for tracing."""
     return _range_args(start, stop, step)
@@ -625,26 +568,6 @@ def program_ndim() -> int:
     return len(nki_builder.grid_dims)
 
 
-_REDUCE_CMD = getattr(nisa, "reduce_cmd", None)
-_REDUCE_IDLE = getattr(_REDUCE_CMD, "idle", None)
-_REDUCE_RESET = getattr(_REDUCE_CMD, "reset", None)
-_REDUCE_REDUCE = getattr(_REDUCE_CMD, "reduce", None)
-_REDUCE_RESET_REDUCE = getattr(_REDUCE_CMD, "reset_reduce", None)
-_REDUCE_LOAD_REDUCE = getattr(_REDUCE_CMD, "load_reduce", None)
-
-_ENGINE = getattr(nisa, "engine", None)
-_ENGINE_UNKNOWN = getattr(_ENGINE, "unknown", None)
-
-_DGE_MODE = getattr(nisa, "dge_mode", None)
-_DGE_UNKNOWN = getattr(_DGE_MODE, "unknown", None)
-
-_OOB_MODE = getattr(nisa, "oob_mode", None)
-_OOB_ERROR = getattr(_OOB_MODE, "error", None)
-
-_MATMUL_PERF_MODE = getattr(nisa, "matmul_perf_mode", None)
-_MATMUL_PERF_NONE = getattr(_MATMUL_PERF_MODE, "none", None)
-
-
 def _cmd_name(cmd: object | None) -> str:
     if cmd is None:
         return "none"
@@ -675,7 +598,7 @@ def _ensure_regs(attr: str, size: int, init_value: ScalarLike) -> np.ndarray:
 def nc_transpose(
     dst: NDArray,
     data: TensorInput,
-    engine: object | None = _ENGINE_UNKNOWN,
+    engine: object | None = nisa.engine.unknown,
     name: str | None = None,
 ) -> NDArray:
     """Compute a transpose between partition and flattened free axes."""
@@ -694,7 +617,7 @@ def nc_matmul(
     is_transpose: bool = False,
     tile_position: Sequence[int] | None = (),
     tile_size: Sequence[int] | None = (),
-    perf_mode: object | None = _MATMUL_PERF_NONE,
+    perf_mode: object | None = nisa.matmul_perf_mode.none,
     name: str | None = None,
 ) -> NDArray:
     """Compute `dst = stationary.T @ moving`."""
@@ -746,44 +669,44 @@ def reciprocal(dst: NDArray, data: TensorInput, name: str | None = None) -> NDAr
     return _write_dst(dst, result)
 
 
-def register_alloc(x: TensorInput | None = None) -> int | NDArray:
+def register_alloc(x: ScalarInput | None = None) -> int | NDArray:
     """Allocate a register value for scalar loop/control flow."""
     if x is None:
         return 0
     if isinstance(x, int):
         return x
-    return NDArray("register", value=np.array(_as_scalar(x), dtype=np.int32))
+    return NDArray("register", value=np.array(_to_scalar(x, int), dtype=np.int32))
 
 
-def register_move(dst: NDArray, imm: TensorInput) -> int | NDArray:
+def register_move(dst: NDArray, imm: ScalarInput) -> int | NDArray:
     """Move an immediate integer value into a register."""
-    value = _as_scalar(imm)
+    value = int(_to_scalar(imm, int))
     if isinstance(dst, NDArray):
         dst.data[...] = value
         return dst
     return value
 
 
-def register_load(dst: NDArray, src: TensorInput) -> int | NDArray:
+def register_load(dst: NDArray, src: ScalarInput) -> int | NDArray:
     """Load a scalar tensor value into a register."""
-    value = _as_scalar(src)
+    value = int(_to_scalar(src, int))
     if isinstance(dst, NDArray):
         dst.data[...] = value
         return dst
     return value
 
 
-def register_store(dst: NDArray, src: TensorInput) -> NDArray:
+def register_store(dst: NDArray, src: ScalarInput) -> NDArray:
     """Store a register value into a scalar tensor."""
-    return _write_dst(dst, _as_scalar(src))
+    return _write_dst(dst, int(_to_scalar(src, int)))
 
 
 def dma_copy(
     dst: NDArray,
     src: TensorInput,
     dst_rmw_op: OpLike | None = None,
-    oob_mode: object | None = _OOB_ERROR,
-    dge_mode: object | None = _DGE_UNKNOWN,
+    oob_mode: object | None = nisa.oob_mode.error,
+    dge_mode: object | None = nisa.dge_mode.unknown,
     unique_indices: bool = True,
     name: str | None = None,
 ) -> NDArray:
@@ -799,7 +722,7 @@ def dma_copy(
 def tensor_copy(
     dst: NDArray,
     src: TensorInput,
-    engine: object | None = _ENGINE_UNKNOWN,
+    engine: object | None = nisa.engine.unknown,
     name: str | None = None,
 ) -> NDArray:
     """Copy tensor data within on-chip memory."""
@@ -812,12 +735,12 @@ def tensor_tensor(
     data1: TensorInput,
     data2: TensorInput,
     op: OpLike,
-    engine: object | None = _ENGINE_UNKNOWN,
+    engine: object | None = nisa.engine.unknown,
     name: str | None = None,
 ) -> NDArray:
     """Apply a binary tensor op and store the result in `dst`."""
     del engine, name
-    return _write_dst(dst, _apply_binary(op, _to_numpy(data1), _to_numpy(data2)))
+    return _write_dst(dst, _apply_binary(op, data1, data2))
 
 
 def quantize_mx(
@@ -840,7 +763,7 @@ def quantize_mx(
 def memset(
     dst: NDArray,
     value: TensorInput,
-    engine: object | None = _ENGINE_UNKNOWN,
+    engine: object | None = nisa.engine.unknown,
     name: str | None = None,
 ) -> NDArray:
     """Fill destination tensor with a constant value."""
@@ -851,8 +774,8 @@ def memset(
 def iota(
     dst: NDArray,
     pattern: PatternLike,
-    offset: TensorInput,
-    channel_multiplier: TensorInput = 0,
+    offset: ScalarInput,
+    channel_multiplier: ScalarInput = 0,
     name: str | None = None,
 ) -> NDArray:
     """Generate index pattern values into destination tensor."""
@@ -861,7 +784,7 @@ def iota(
     counts = [count for _, count in pattern_pairs]
     base_indices = _compute_ap_indices(pattern_pairs, offset)
     partition_count = dst.shape[0]
-    channel_multiplier_v = _as_scalar(channel_multiplier)
+    channel_multiplier_v = int(_to_scalar(channel_multiplier, int))
     out = np.empty((partition_count, *counts), dtype=np.int64)
     for channel_id in range(partition_count):
         out[channel_id] = base_indices + channel_id * channel_multiplier_v
@@ -876,7 +799,7 @@ def activation(
     scale: TensorInput = 1.0,
     reduce_op: OpLike | None = None,
     reduce_res: NDArray | None = None,
-    reduce_cmd: object | None = _REDUCE_IDLE,
+    reduce_cmd: object | None = nisa.reduce_cmd.idle,
     name: str | None = None,
 ) -> NDArray:
     """Apply activation with optional scale, bias, and reduction registers."""
@@ -923,7 +846,7 @@ def activation_reduce(
         scale=scale,
         reduce_op=reduce_op,
         reduce_res=reduce_res,
-        reduce_cmd=_REDUCE_RESET_REDUCE,
+        reduce_cmd=nisa.reduce_cmd.reset_reduce,
         name=name,
     )
 
@@ -931,8 +854,8 @@ def activation_reduce(
 def affine_select(
     dst: NDArray,
     pattern: PatternLike,
-    offset: TensorInput,
-    channel_multiplier: TensorInput,
+    offset: ScalarInput,
+    channel_multiplier: ScalarInput,
     on_true_tile: TensorInput,
     on_false_value: TensorInput,
     cmp_op: OpLike = np.equal,
@@ -945,12 +868,12 @@ def affine_select(
     affine = _compute_ap_indices(pattern_pairs, offset)
     out = np.empty((dst.shape[0], *counts))
     on_true_value = _to_numpy(on_true_tile)
-    channel_multiplier_v = _as_scalar(channel_multiplier)
+    on_false = _to_numpy(on_false_value)
+    channel_multiplier_v = int(_to_scalar(channel_multiplier, int))
     for channel in range(dst.shape[0]):
         affine_value = affine + channel * channel_multiplier_v
         pred = cast(np.ndarray, _apply_binary(cmp_op, affine_value, 0, reverse=False))
-        on_false_value = _to_numpy(on_false_value)
-        out[channel] = np.where(pred, on_true_value[channel], on_false_value)
+        out[channel] = np.where(pred, on_true_value[channel], on_false)
     return _write_dst(dst, out.reshape(dst.shape))
 
 
@@ -1023,7 +946,7 @@ def bn_aggr(dst: NDArray, data: NDArray, name: str | None = None) -> NDArray:
 def core_barrier(
     data: TensorInput,
     cores: TensorInput,
-    engine: object | None = _ENGINE_UNKNOWN,
+    engine: object | None = nisa.engine.unknown,
     name: str | None = None,
 ) -> None:
     """Synchronize cores in interpreter mode as a no-op."""
@@ -1056,8 +979,8 @@ def dma_transpose(
     dst: NDArray,
     src: TensorInput,
     axes: int | Sequence[int] | None = None,
-    dge_mode: object | None = _DGE_UNKNOWN,
-    oob_mode: object | None = _OOB_ERROR,
+    dge_mode: object | None = nisa.dge_mode.unknown,
+    oob_mode: object | None = nisa.oob_mode.error,
     name: str | None = None,
 ) -> NDArray:
     """Transpose input tensor with supported default axis permutations."""
@@ -1096,7 +1019,7 @@ def dropout(
     else:
         shape = [data_value.shape[0]] + [1] * (data_value.ndim - 1)
         prob_broadcast = prob_value.reshape(shape)
-    mask = _get_rng(_ENGINE_UNKNOWN).random(data_value.shape) >= prob_broadcast
+    mask = _get_rng(nisa.engine.unknown).random(data_value.shape) >= prob_broadcast
     return _write_dst(dst, np.where(mask, data_value, 0))
 
 
@@ -1104,8 +1027,8 @@ def local_gather(
     dst: NDArray,
     src_buffer: NDArray,
     index: NDArray,
-    num_elem_per_idx: TensorInput = 1,
-    num_valid_indices: TensorInput | None = None,
+    num_elem_per_idx: ScalarInput = 1,
+    num_valid_indices: ScalarInput | None = None,
     name: str | None = None,
 ) -> NDArray:
     """Gather within 16-partition groups using flattened indices."""
@@ -1114,9 +1037,11 @@ def local_gather(
     index_flat = np.asarray(_to_numpy(index), dtype=np.int64).reshape(
         index.shape[0], -1
     )
-    num_elem_per_idx_v = _as_scalar(num_elem_per_idx)
+    num_elem_per_idx_v = int(_to_scalar(num_elem_per_idx, int))
     num_valid_indices_v = (
-        _as_scalar(num_valid_indices) if num_valid_indices is not None else None
+        int(_to_scalar(num_valid_indices, int))
+        if num_valid_indices is not None
+        else None
     )
     out = np.zeros_like(_to_numpy(dst).reshape(dst.shape[0], -1))
     for start in range(0, src_flat.shape[0], 16):
@@ -1163,7 +1088,7 @@ def nc_match_replace8(
     dst: NDArray,
     data: NDArray,
     vals: NDArray,
-    imm: TensorInput,
+    imm: ScalarInput,
     dst_idx: NDArray | None = None,
     name: str | None = None,
 ) -> NDArray:
@@ -1208,25 +1133,28 @@ def nc_stream_shuffle(
     del name
     src_value = _to_numpy(src)
     out = _to_numpy(dst).copy()
-    for start in range(0, src_value.shape[0], 32):
-        for i, src_idx in enumerate(shuffle_mask[:32]):
+    for start in range(0, out.shape[0], 32):
+        cur_block = min(32, out.shape[0] - start)
+        for i, src_idx in enumerate(shuffle_mask[:cur_block]):
             if src_idx == 255:
                 continue
-            out[start + i] = src_value[start + int(src_idx)]
+            src_pos = start + int(src_idx)
+            if 0 <= src_pos < src_value.shape[0]:
+                out[start + i] = src_value[src_pos]
     return _write_dst(dst, out)
 
 
 def nonzero_with_count(
     dst: NDArray,
     src: NDArray,
-    index_offset: TensorInput = 0,
-    padding_val: TensorInput = -1,
+    index_offset: ScalarInput = 0,
+    padding_val: ScalarInput = -1,
 ) -> NDArray:
     """Write nonzero indices, padding, and count to destination tile."""
     src_flat = _to_numpy(src).reshape(src.shape[0], -1)
     dst_flat = _to_numpy(dst).reshape(dst.shape[0], -1)
-    index_offset_v = _as_scalar(index_offset)
-    padding_val_v = _as_scalar(padding_val)
+    index_offset_v = int(_to_scalar(index_offset, int))
+    padding_val_v = int(_to_scalar(padding_val, int))
     for p in range(0, src_flat.shape[0], 16):
         nz = np.nonzero(src_flat[p] != 0)[0] + index_offset_v
         out = np.full(src_flat.shape[1] + 1, padding_val_v, dtype=np.int32)
@@ -1244,12 +1172,12 @@ def rand2(
     del name
     min_value = _to_numpy(min)
     max_value = _to_numpy(max)
-    random = _get_rng(_ENGINE_UNKNOWN).random(dst.shape)
+    random = _get_rng(nisa.engine.unknown).random(dst.shape)
     return _write_dst(dst, min_value + random * (max_value - min_value))
 
 
 def rand_get_state(
-    dst: NDArray, engine: object | None = _ENGINE_UNKNOWN, name: str | None = None
+    dst: NDArray, engine: object | None = nisa.engine.unknown, name: str | None = None
 ) -> NDArray:
     """Write cached RNG state seeds for the requested engine."""
     del name
@@ -1261,7 +1189,7 @@ def rand_get_state(
 
 
 def _seed_from_values(values: TensorInput) -> int:
-    flat = np.asarray(values, dtype=np.uint64).reshape(-1)
+    flat = np.asarray(_to_numpy(values), dtype=np.uint64).reshape(-1)
     if flat.size == 0:
         return 0
     weights = np.arange(1, flat.size + 1, dtype=np.uint64)
@@ -1271,7 +1199,7 @@ def _seed_from_values(values: TensorInput) -> int:
 
 def rand_set_state(
     src_seeds: TensorInput,
-    engine: object | None = _ENGINE_UNKNOWN,
+    engine: object | None = nisa.engine.unknown,
     name: str | None = None,
 ) -> None:
     """Set RNG state seeds for the requested engine."""
@@ -1290,10 +1218,10 @@ def range_select(
     comp_op1: OpLike,
     bound0: TensorInput,
     bound1: TensorInput,
-    reduce_cmd: object | None = _REDUCE_RESET_REDUCE,
+    reduce_cmd: object | None = nisa.reduce_cmd.reset_reduce,
     reduce_res: NDArray | None = None,
     reduce_op: OpLike | None = np.maximum,
-    range_start: TensorInput = 0.0,
+    range_start: ScalarInput = 0.0,
     on_false_value: TensorInput = -3.4028235e38,
     name: str | None = None,
 ) -> NDArray:
@@ -1319,7 +1247,7 @@ def range_select(
 
 
 def rng(
-    dst: NDArray, engine: object | None = _ENGINE_UNKNOWN, name: str | None = None
+    dst: NDArray, engine: object | None = nisa.engine.unknown, name: str | None = None
 ) -> NDArray:
     """Generate random integer bits into destination tensor."""
     del name
@@ -1351,7 +1279,7 @@ def select_reduce(
     on_true: TensorInput,
     on_false: TensorInput,
     reduce_res: NDArray | None = None,
-    reduce_cmd: object | None = _REDUCE_IDLE,
+    reduce_cmd: object | None = nisa.reduce_cmd.idle,
     reduce_op: OpLike | None = np.maximum,
     reverse_pred: bool = False,
     name: str | None = None,
@@ -1377,9 +1305,9 @@ def select_reduce(
 def sendrecv(
     src: TensorInput,
     dst: NDArray,
-    send_to_rank: TensorInput,
-    recv_from_rank: TensorInput,
-    pipe_id: TensorInput,
+    send_to_rank: ScalarInput,
+    recv_from_rank: ScalarInput,
+    pipe_id: ScalarInput,
     name: str | None = None,
 ) -> NDArray:
     """Simulate point-to-point send/recv as local copy."""
@@ -1413,7 +1341,7 @@ def sequence_bounds(
 def set_rng_seed(src_seeds: TensorInput, name: str | None = None) -> None:
     """Set vector-engine RNG seed state."""
     del name
-    return rand_set_state(src_seeds, engine=_ENGINE_UNKNOWN)
+    return rand_set_state(src_seeds, engine=nisa.engine.unknown)
 
 
 def tensor_copy_predicated(
@@ -1438,7 +1366,7 @@ def tensor_partition_reduce(
 ) -> NDArray:
     """Reduce tensor across partition axis."""
     del name
-    reduced = _apply_reduce(op, _to_numpy(data), axis=0, keepdims=True)
+    reduced = _apply_reduce(op, data, axis=0, keepdims=True)
     return _write_dst(dst, np.asarray(reduced).reshape(dst.shape))
 
 
@@ -1453,8 +1381,27 @@ def tensor_reduce(
 ) -> NDArray:
     """Reduce tensor across selected free axes."""
     del name
+    value = _to_numpy(data)
     axes = (axis,) if isinstance(axis, int) else tuple(axis)
-    reduced = _apply_reduce(op, _to_numpy(data), axis=axes, keepdims=keepdims)
+
+    def _map_axis(a: int | np.integer) -> int:
+        axis_v = int(a)
+        ndim = value.ndim
+        if ndim == 0:
+            return 0
+        if axis_v < 0:
+            mapped = axis_v + ndim
+        elif axis_v == 0:
+            mapped = 0
+        else:
+            # nki axis 1 is the most-minor free axis (last numpy axis).
+            mapped = ndim - axis_v
+        if not 0 <= mapped < ndim:
+            raise ValueError(f"Invalid axis {axis_v} for tensor with ndim={ndim}")
+        return mapped
+
+    mapped_axes = tuple(_map_axis(a) for a in axes)
+    reduced = _apply_reduce(op, value, axis=mapped_axes, keepdims=keepdims)
     if negate:
         reduced = -np.asarray(reduced)
     return _write_dst(dst, np.asarray(reduced).reshape(dst.shape))
@@ -1469,7 +1416,7 @@ def tensor_scalar(
     op1: OpLike | None = None,
     operand1: TensorInput | None = None,
     reverse1: bool = False,
-    engine: object | None = _ENGINE_UNKNOWN,
+    engine: object | None = nisa.engine.unknown,
     name: str | None = None,
 ) -> NDArray:
     """Apply one or two tensor-scalar operators."""
@@ -1487,7 +1434,7 @@ def tensor_scalar_cumulative(
     op1: OpLike | None,
     imm0: TensorInput,
     imm1: TensorInput | None = None,
-    reduce_cmd: object | None = _REDUCE_RESET_REDUCE,
+    reduce_cmd: object | None = nisa.reduce_cmd.reset_reduce,
 ) -> NDArray:
     """Apply scalar op then cumulative reduction along free dimension."""
     src_flat = _to_numpy(src).reshape(src.shape[0], -1)
@@ -1595,125 +1542,115 @@ class NKIOp:
         )
         buffer = None  # infer memory buffer based on inputs
         for value in values:
-            if isinstance(result, NDArray):
-                buffer = result.buffer
+            if isinstance(value, NDArray):
+                buffer = value.buffer
                 break
         return NDArray(value=result, buffer=buffer)
 
 
-def nki_patch_lang(scope: PatchScope | None = None) -> None:
+def gelu_apprx_sigmoid_dx(x: np.ndarray) -> np.ndarray:
+    x_value = _to_numpy(x)
+    sig = 1.0 / (1.0 + np.exp(-1.702 * x_value))
+    return sig + x_value * (1.702 * sig * (1.0 - sig))
+
+
+def nki_patch_lang(scope: _LangPatchScope | None = None) -> None:
     """Patch `nl` and `nisa` APIs to point at beta2 interpreter implementations."""
 
-    def gelu_apprx_sigmoid_dx(x: TensorInput) -> np.ndarray:
-        x_value = _to_numpy(x)
-        sig = 1.0 / (1.0 + np.exp(-1.702 * x_value))
-        return sig + x_value * (1.702 * sig * (1.0 - sig))
-
-    nl_bindings = {
-        "ndarray": ndarray,
-        "zeros": zeros,
-        "shared_constant": shared_constant,
-        "shared_identity_matrix": shared_identity_matrix,
-        "affine_range": affine_range,
-        "ds": ds,
-        "sequential_range": sequential_range,
-        "static_range": static_range,
-        "tile_size": tile_size,
-        "abs": NKIOp(np.abs),
-        "add": NKIOp(np.add),
-        "bitwise_and": NKIOp(np.bitwise_and),
-        "bitwise_or": NKIOp(np.bitwise_or),
-        "bitwise_xor": NKIOp(np.bitwise_xor),
-        "divide": NKIOp(np.divide),
-        "equal": NKIOp(np.equal),
-        "gelu_apprx_sigmoid": NKIOp(lambda x: x / (1 + np.exp(-1.702 * x))),
-        "gelu_apprx_sigmoid_dx": NKIOp(gelu_apprx_sigmoid_dx),
-        "greater": NKIOp(np.greater),
-        "greater_equal": NKIOp(np.greater_equal),
-        "invert": NKIOp(np.invert),
-        "left_shift": NKIOp(np.left_shift),
-        "less": NKIOp(np.less),
-        "less_equal": NKIOp(np.less_equal),
-        "logical_and": NKIOp(np.logical_and),
-        "logical_not": NKIOp(np.logical_not),
-        "logical_or": NKIOp(np.logical_or),
-        "logical_xor": NKIOp(np.logical_xor),
-        "maximum": NKIOp(np.maximum),
-        "minimum": NKIOp(np.minimum),
-        "multiply": NKIOp(np.multiply),
-        "not_equal": NKIOp(np.not_equal),
-        "power": NKIOp(np.power),
-        "reciprocal": NKIOp(np.reciprocal),
-        "right_shift": NKIOp(np.right_shift),
-        "rsqrt": NKIOp(lambda x: 1 / np.sqrt(x)),
-        "subtract": NKIOp(np.subtract),
-        "device_print": device_print,
-        "num_programs": num_programs,
-        "program_id": program_id,
-        "program_ndim": program_ndim,
-    }
-    nisa_bindings = {
-        "activation": activation,
-        "activation_reduce": activation_reduce,
-        "affine_select": affine_select,
-        "bn_aggr": bn_aggr,
-        "bn_stats": bn_stats,
-        "core_barrier": core_barrier,
-        "dma_compute": dma_compute,
-        "dma_copy": dma_copy,
-        "dma_transpose": dma_transpose,
-        "dropout": dropout,
-        "iota": iota,
-        "local_gather": local_gather,
-        "max8": max8,
-        "memset": memset,
-        "nc_find_index8": nc_find_index8,
-        "nc_match_replace8": nc_match_replace8,
-        "nc_matmul": nc_matmul,
-        "nc_matmul_mx": nc_matmul_mx,
-        "nc_n_gather": nc_n_gather,
-        "nc_stream_shuffle": nc_stream_shuffle,
-        "nc_transpose": nc_transpose,
-        "nonzero_with_count": nonzero_with_count,
-        "quantize_mx": quantize_mx,
-        "rand2": rand2,
-        "rand_get_state": rand_get_state,
-        "rand_set_state": rand_set_state,
-        "range_select": range_select,
-        "reciprocal": reciprocal,
-        "register_alloc": register_alloc,
-        "register_move": register_move,
-        "register_load": register_load,
-        "register_store": register_store,
-        "rng": rng,
-        "scalar_tensor_tensor": scalar_tensor_tensor,
-        "select_reduce": select_reduce,
-        "sendrecv": sendrecv,
-        "sequence_bounds": sequence_bounds,
-        "set_rng_seed": set_rng_seed,
-        "tensor_copy": tensor_copy,
-        "tensor_copy_predicated": tensor_copy_predicated,
-        "tensor_partition_reduce": tensor_partition_reduce,
-        "tensor_reduce": tensor_reduce,
-        "tensor_scalar": tensor_scalar,
-        "tensor_scalar_cumulative": tensor_scalar_cumulative,
-        "tensor_scalar_reduce": tensor_scalar_reduce,
-        "tensor_tensor": tensor_tensor,
-        "tensor_tensor_scan": tensor_tensor_scan,
-    }
     set_attr = setattr if scope is None else scope.set_attr
-    for name, fn in nl_bindings.items():
-        set_attr(nl, name, fn)
-    for name, fn in nisa_bindings.items():
-        set_attr(nisa, name, fn)
+    set_attr(nl, "ndarray", ndarray)
+    set_attr(nl, "zeros", zeros)
+    set_attr(nl, "shared_constant", shared_constant)
+    set_attr(nl, "shared_identity_matrix", shared_identity_matrix)
+    set_attr(nl, "affine_range", affine_range)
+    set_attr(nl, "ds", ds)
+    set_attr(nl, "sequential_range", sequential_range)
+    set_attr(nl, "static_range", static_range)
+    set_attr(nl, "tile_size", tile_size)
+    set_attr(nl, "abs", NKIOp(np.abs))
+    set_attr(nl, "add", NKIOp(np.add))
+    set_attr(nl, "bitwise_and", NKIOp(np.bitwise_and))
+    set_attr(nl, "bitwise_or", NKIOp(np.bitwise_or))
+    set_attr(nl, "bitwise_xor", NKIOp(np.bitwise_xor))
+    set_attr(nl, "divide", NKIOp(np.divide))
+    set_attr(nl, "equal", NKIOp(np.equal))
+    set_attr(nl, "gelu_apprx_sigmoid", NKIOp(lambda x: x / (1 + np.exp(-1.702 * x))))
+    set_attr(nl, "gelu_apprx_sigmoid_dx", NKIOp(gelu_apprx_sigmoid_dx))
+    set_attr(nl, "greater", NKIOp(np.greater))
+    set_attr(nl, "greater_equal", NKIOp(np.greater_equal))
+    set_attr(nl, "invert", NKIOp(np.invert))
+    set_attr(nl, "left_shift", NKIOp(np.left_shift))
+    set_attr(nl, "less", NKIOp(np.less))
+    set_attr(nl, "less_equal", NKIOp(np.less_equal))
+    set_attr(nl, "logical_and", NKIOp(np.logical_and))
+    set_attr(nl, "logical_not", NKIOp(np.logical_not))
+    set_attr(nl, "logical_or", NKIOp(np.logical_or))
+    set_attr(nl, "logical_xor", NKIOp(np.logical_xor))
+    set_attr(nl, "maximum", NKIOp(np.maximum))
+    set_attr(nl, "minimum", NKIOp(np.minimum))
+    set_attr(nl, "multiply", NKIOp(np.multiply))
+    set_attr(nl, "not_equal", NKIOp(np.not_equal))
+    set_attr(nl, "power", NKIOp(np.power))
+    set_attr(nl, "reciprocal", NKIOp(np.reciprocal))
+    set_attr(nl, "right_shift", NKIOp(np.right_shift))
+    set_attr(nl, "rsqrt", NKIOp(lambda x: 1 / np.sqrt(x)))
+    set_attr(nl, "subtract", NKIOp(np.subtract))
+    set_attr(nl, "device_print", device_print)
+    set_attr(nl, "num_programs", num_programs)
+    set_attr(nl, "program_id", program_id)
+    set_attr(nl, "program_ndim", program_ndim)
+    set_attr(nisa, "activation", activation)
+    set_attr(nisa, "activation_reduce", activation_reduce)
+    set_attr(nisa, "affine_select", affine_select)
+    set_attr(nisa, "bn_aggr", bn_aggr)
+    set_attr(nisa, "bn_stats", bn_stats)
+    set_attr(nisa, "core_barrier", core_barrier)
+    set_attr(nisa, "dma_compute", dma_compute)
+    set_attr(nisa, "dma_copy", dma_copy)
+    set_attr(nisa, "dma_transpose", dma_transpose)
+    set_attr(nisa, "dropout", dropout)
+    set_attr(nisa, "iota", iota)
+    set_attr(nisa, "local_gather", local_gather)
+    set_attr(nisa, "max8", max8)
+    set_attr(nisa, "memset", memset)
+    set_attr(nisa, "nc_find_index8", nc_find_index8)
+    set_attr(nisa, "nc_match_replace8", nc_match_replace8)
+    set_attr(nisa, "nc_matmul", nc_matmul)
+    set_attr(nisa, "nc_matmul_mx", nc_matmul_mx)
+    set_attr(nisa, "nc_n_gather", nc_n_gather)
+    set_attr(nisa, "nc_stream_shuffle", nc_stream_shuffle)
+    set_attr(nisa, "nc_transpose", nc_transpose)
+    set_attr(nisa, "nonzero_with_count", nonzero_with_count)
+    set_attr(nisa, "quantize_mx", quantize_mx)
+    set_attr(nisa, "rand2", rand2)
+    set_attr(nisa, "rand_get_state", rand_get_state)
+    set_attr(nisa, "rand_set_state", rand_set_state)
+    set_attr(nisa, "range_select", range_select)
+    set_attr(nisa, "reciprocal", reciprocal)
+    set_attr(nisa, "register_alloc", register_alloc)
+    set_attr(nisa, "register_move", register_move)
+    set_attr(nisa, "register_load", register_load)
+    set_attr(nisa, "register_store", register_store)
+    set_attr(nisa, "rng", rng)
+    set_attr(nisa, "scalar_tensor_tensor", scalar_tensor_tensor)
+    set_attr(nisa, "select_reduce", select_reduce)
+    set_attr(nisa, "sendrecv", sendrecv)
+    set_attr(nisa, "sequence_bounds", sequence_bounds)
+    set_attr(nisa, "set_rng_seed", set_rng_seed)
+    set_attr(nisa, "tensor_copy", tensor_copy)
+    set_attr(nisa, "tensor_copy_predicated", tensor_copy_predicated)
+    set_attr(nisa, "tensor_partition_reduce", tensor_partition_reduce)
+    set_attr(nisa, "tensor_reduce", tensor_reduce)
+    set_attr(nisa, "tensor_scalar", tensor_scalar)
+    set_attr(nisa, "tensor_scalar_cumulative", tensor_scalar_cumulative)
+    set_attr(nisa, "tensor_scalar_reduce", tensor_scalar_reduce)
+    set_attr(nisa, "tensor_tensor", tensor_tensor)
+    set_attr(nisa, "tensor_tensor_scan", tensor_tensor_scan)
 
 
-# restore any patch scope used for nki_patch_lang
-nki_unpatch_lang = (
-    lambda scope=None: scope.restore()
-    if scope is not None and hasattr(scope, "restore")
-    else None
-)
+def nki_unpatch_lang(scope: _LangPatchScope | None = None):
+    if scope is not None:
+        scope.restore()
 
 
 class NKIInterpretedFunction:
