@@ -21,8 +21,8 @@ PatternLike: TypeAlias = Sequence[Sequence[int | np.integer]]
 DTypeLike: TypeAlias = (
     str | np.dtype | None
 )  # e.g. np.float32, "bfloat16", None (default)
-OpLike: TypeAlias = "NKIOp | Callable[..., object] | None"
-UnaryOpLike: TypeAlias = "NKIOp | Callable[..., object]"
+OpLike: TypeAlias = "NKIOp | Callable[..., np.ndarray] | None"
+UnaryOpLike: TypeAlias = "NKIOp | Callable[..., np.ndarray]"
 BinaryCallable: TypeAlias = Callable[[Any, Any], Any]
 IndexKey: TypeAlias = "int | slice | np.ndarray | NDArray"
 
@@ -241,7 +241,7 @@ class NDArray:
             name=f"tensor_{op_name}_{self.name}",
         )
 
-    def reshape(self: NDArray, *args: object, **kwargs: object) -> NDArray:
+    def reshape(self: NDArray, *args, **kwargs) -> NDArray:
         """Return a reshaped view backed by the same NumPy data when possible."""
         return NDArray(
             value=self.data.reshape(*args, **kwargs),
@@ -249,7 +249,7 @@ class NDArray:
             buffer=self.buffer,
         )
 
-    def broadcast_to(self: NDArray, *args: object, **kwargs: object) -> NDArray:
+    def broadcast_to(self: NDArray, *args, **kwargs) -> NDArray:
         """Return a broadcasted view of this tensor."""
         return NDArray(
             value=np.broadcast_to(self.data, *args, **kwargs),
@@ -265,7 +265,7 @@ class NDArray:
         scalar_offset: TensorInput | None = None,
         vector_offset: TensorInput | None = None,
         indirect_dim: int = 0,
-        **kwargs: object,
+        **kwargs,
     ) -> NDArray:
         """
         Materialize an address-pattern access from this tensor.
@@ -282,10 +282,6 @@ class NDArray:
             if np.isscalar(second_pattern) and not np.isscalar(first_pattern):
                 pattern = (first_pattern,)
                 offset = cast(TensorInput, second_pattern)
-        if len(pattern) == 1 and isinstance(pattern[0], (list, tuple)) and pattern[0]:
-            first = pattern[0][0]
-            if isinstance(first, (list, tuple)):
-                pattern = tuple(pattern[0])
         pattern_pairs = _normalize_pattern(cast(PatternLike, pattern))
         indices = _compute_ap_indices(pattern_pairs, offset)
         if scalar_offset is not None:
@@ -332,23 +328,11 @@ for method, op_name, symbol, op_func, reverse_operands in (
     ("__and__", "and", "&", np.bitwise_and, False),
     ("__or__", "or", "|", np.bitwise_or, False),
 ):
-    if reverse_operands:
-        b_func = (
-            lambda self,
-            other,
-            _op=op_func,
-            _name=op_name,
-            _symbol=symbol: self._rbinary_op(other, _op, _name, _symbol)
-        )
-    else:
-        b_func = (
-            lambda self,
-            other,
-            _op=op_func,
-            _name=op_name,
-            _symbol=symbol: self._binary_op(other, _op, _name, _symbol)
-        )
-    setattr(NDArray, method, b_func)
+    op_method_name = "_rbinary_op" if reverse_operands else "_binary_op"
+    bi_op = lambda self, other: getattr(self, op_method_name)(
+        other, op_func, op_name, symbol
+    )
+    setattr(NDArray, method, bi_op)
 
 
 class Buffer:
@@ -444,6 +428,7 @@ def ndarray(
     *,
     buffer: BufferLike | None = None,
     name: str | None = None,
+    value: TensorInput | None = None,
     **kwargs: object,
 ) -> NDArray:
     """Create an NDArray on a requested NKI buffer."""
@@ -455,26 +440,26 @@ def ndarray(
             # validate shared_hbm tensor reuses the same logical shape
             if cached.data.shape != tuple(shape):
                 raise ValueError(f"shared_hbm shape mismatch for {shared_name}")
-            if "value" in kwargs:
-                cached.data[...] = _cast_dtype(kwargs["value"], cached.dtype)
+            if value is not None:
+                cached.data[...] = _cast_dtype(value, cached.dtype)
             return cached
         created = NDArray(
             buffer=resolved_buffer.buffer,
             name=shared_name,
             shape=_shape_tuple(shape),
             dtype=dtype,
-            value=kwargs.get("value"),
+            value=value,
         )
         nki_builder.shared_hbm_arrays[shared_name] = created
         return created
 
-    if "value" in kwargs:
+    if value is not None:
         return NDArray(
             buffer=resolved_buffer.buffer,
             name=name,
             shape=_shape_tuple(shape),
             dtype=dtype,
-            value=kwargs["value"],
+            value=value,
         )
     ret = resolved_buffer.view(dtype, shape)
     ret.name = name
@@ -487,7 +472,7 @@ def zeros(
     *,
     buffer: BufferLike | None = None,
     name: str | None = None,
-    **kwargs: object,
+    **kwargs,
 ) -> NDArray:
     """Create a zero-initialized tensor."""
     ret = ndarray(shape, dtype, buffer=buffer, name=name, **kwargs)
@@ -517,107 +502,30 @@ def _op_key(op: OpLike) -> str:
 
 
 def _apply_binary(
-    op: OpLike, lhs: TensorInput, rhs: TensorInput, reverse: bool = False
+    op: OpLike, lhs: TensorInput, rhs: TensorInput | None, reverse: bool = False
 ) -> TensorInput:
     lhs_value = _to_numpy(lhs)
-    rhs_value = _to_numpy(rhs)
-    left, right = (rhs_value, lhs_value) if reverse else (lhs_value, rhs_value)
-    np_op = op.op if isinstance(op, NKIOp) else op
+    np_op: Callable[..., np.ndarray] | None = op.op if isinstance(op, NKIOp) else op
     if np_op is None:
         return lhs_value
-    # if isinstance(op, str):
-    #    op_name = op.lower().lstrip(".")
-    #    op_map: dict[str, BinaryCallable] = {
-    #        "add": np.add,
-    #        "subtract": np.subtract,
-    #        "sub": np.subtract,
-    #        "multiply": np.multiply,
-    #        "mul": np.multiply,
-    #        "divide": np.divide,
-    #        "maximum": np.maximum,
-    #        "max": np.maximum,
-    #        "minimum": np.minimum,
-    #        "min": np.minimum,
-    #        "bitwise_and": np.bitwise_and,
-    #        "bitwise_or": np.bitwise_or,
-    #        "bitwise_xor": np.bitwise_xor,
-    #        "equal": np.equal,
-    #        "not_equal": np.not_equal,
-    #        "greater": np.greater,
-    #        "greater_equal": np.greater_equal,
-    #        "less": np.less,
-    #        "less_equal": np.less_equal,
-    #        "logical_and": np.logical_and,
-    #        "logical_or": np.logical_or,
-    #        "logical_xor": np.logical_xor,
-    #        "power": np.power,
-    #    }
-    #    if op_name not in op_map:
-    #        raise KeyError(f"Unsupported binary op: {op}")
-    #    return _to_numpy(op_map[op_name](left, right))
-    # try:
-    #    return _to_numpy(op(left, right))
-    # except TypeError:
-    #    return _to_numpy(op(left, y=right))
+    assert rhs is not None
+    rhs_value = _to_numpy(rhs)
+    left, right = (rhs_value, lhs_value) if reverse else (lhs_value, rhs_value)
     return np_op(left, right)
 
 
 def _apply_unary(op: UnaryOpLike, value: TensorInput) -> TensorInput:
     array = _to_numpy(value)
     np_op = op.op if isinstance(op, NKIOp) else op
-    # if isinstance(op, str):
-    #    op_name = op.lower().lstrip(".")
-    #    op_map: dict[str, Callable[[Any], Any]] = {
-    #        "abs": np.abs,
-    #        "invert": np.invert,
-    #        "logical_not": np.logical_not,
-    #        "reciprocal": np.reciprocal,
-    #        "rsqrt": lambda x: 1 / np.sqrt(x),
-    #        "gelu_apprx_sigmoid": lambda x: x / (1 + np.exp(-1.702 * x)),
-    #    }
-    #    if op_name not in op_map:
-    #        raise KeyError(f"Unsupported unary op: {op}")
-    #    return np.asarray(op_map[op_name](array))
-    # try:
-    #    return np.asarray(op(array))
-    # except Exception:
-    #    return np.asarray(op(NDArray(value=array)))
     return np_op(array)
 
 
 def _apply_reduce(
     op: OpLike, value: TensorInput, axis: int | Sequence[int], keepdims: bool
 ) -> np.ndarray:
-    # reducers = {
-    #    "add": np.sum,
-    #    "subtract": np.subtract.reduce,
-    #    ".sub": np.subtract.reduce,
-    #    "multiply": np.prod,
-    #    "mul": np.prod,
-    #    "maximum": np.max,
-    #    ".max": np.max,
-    #    "minimum": np.min,
-    #    ".min": np.min,
-    #    "bitwise_or": np.bitwise_or.reduce,
-    #    "bitwise_and": np.bitwise_and.reduce,
-    #    "bitwise_xor": np.bitwise_xor.reduce,
-    # }
     value_array = _to_numpy(value)
-    # key = _op_key(op).lstrip(".")
     np_op = op.op if isinstance(op, NKIOp) else op
     assert isinstance(np_op, np.ufunc)
-    # if key == "":
-    #    return np.sum(value_array, axis=axis, keepdims=keepdims)
-    # if key in reducers:
-    #    return np.asarray(reducers[key](value_array, axis=axis, keepdims=keepdims))
-    # if callable(np_op):
-    #    try:
-    #        return np.asarray(np_op(value_array, axis=axis, keepdims=keepdims))
-    #    except TypeError:
-    #        reducer = getattr(np_op, "reduce", None)
-    #        if callable(reducer):
-    #            return np.asarray(reducer(value_array, axis=axis, keepdims=keepdims))
-    # raise TypeError(f"Unsupported reduce op: {op!r}")
     return np.asarray(np_op.reduce(value_array, axis=axis, keepdims=keepdims))
 
 
@@ -700,7 +608,7 @@ def num_programs(axes: int | Sequence[int] | None = None) -> int | tuple[int, ..
     if axes is None:
         return int(np.prod(nki_builder.grid_dims))
     if isinstance(axes, Sequence):
-        return tuple(nki_builder.grid_dims[int(axis)] for axis in axes)
+        return tuple(nki_builder.grid_dims[cast(int, axis)] for axis in axes)
     return nki_builder.grid_dims[int(axes)]
 
 
@@ -1040,7 +948,8 @@ def affine_select(
     channel_multiplier_v = _as_scalar(channel_multiplier)
     for channel in range(dst.shape[0]):
         affine_value = affine + channel * channel_multiplier_v
-        pred = _apply_binary(cmp_op, affine_value, 0, reverse=False)
+        pred = cast(np.ndarray, _apply_binary(cmp_op, affine_value, 0, reverse=False))
+        on_false_value = _to_numpy(on_false_value)
         out[channel] = np.where(pred, on_true_value[channel], on_false_value)
     return _write_dst(dst, out.reshape(dst.shape))
 
@@ -1586,6 +1495,7 @@ def tensor_scalar_cumulative(
     imm1_value = 0.0 if imm1 is None else _to_numpy(imm1)
     op_key = _op_key(op1)
     if _is_cmd(reduce_cmd, "load_reduce"):
+        imm1_value = cast(np.ndarray, imm1_value)
         reg = np.broadcast_to(imm1_value.reshape(-1, 1), (src.shape[0], 1)).reshape(-1)
     elif "mul" in op_key:
         reg = np.ones(src.shape[0])
@@ -1627,7 +1537,6 @@ def tensor_tensor_scan(
     dst: NDArray,
     data0: NDArray,
     data1: NDArray,
-    # initial: TensorInput,
     initial: NDArray,
     op0: OpLike,
     op1: OpLike | None,
@@ -1793,9 +1702,6 @@ def nki_patch_lang(scope: PatchScope | None = None) -> None:
         "tensor_tensor_scan": tensor_tensor_scan,
     }
     set_attr = setattr if scope is None else scope.set_attr
-    # for name, fn in nl_bindings.items():
-    #    #export_name = "nl_reciprocal" if name == "reciprocal" else name
-    #    globals()[name] = fn
     for name, fn in nl_bindings.items():
         set_attr(nl, name, fn)
     for name, fn in nisa_bindings.items():
