@@ -835,7 +835,7 @@ def min_return_indices_kernel(inp_ptr, out_val_ptr, out_idx_ptr, N: tl.constexpr
 
 
 def test_tl_max_return_indices():
-    """tl.max with return_indices=True should not crash the sanitizer (issue #167)."""
+    """tl.max with return_indices=True should stay on the symbolic path."""
     reduce_indices_sanitizer.records.clear()
 
     N = 32
@@ -843,12 +843,15 @@ def test_tl_max_return_indices():
     out_val = torch.empty(1, dtype=torch.float32)
     out_idx = torch.empty(1, dtype=torch.int32)
 
-    # Should complete without TypeError: 'int' object is not iterable
     max_return_indices_kernel[(1,)](inp, out_val, out_idx, N=N)
+
+    assert (
+        len(reduce_indices_sanitizer.records) == 0
+    ), f"Sanitizer reported {len(reduce_indices_sanitizer.records)} error(s)"
 
 
 def test_tl_min_return_indices():
-    """tl.min with return_indices=True should not crash the sanitizer (issue #167)."""
+    """tl.min with return_indices=True should stay on the symbolic path."""
     reduce_indices_sanitizer.records.clear()
 
     N = 32
@@ -856,8 +859,11 @@ def test_tl_min_return_indices():
     out_val = torch.empty(1, dtype=torch.float32)
     out_idx = torch.empty(1, dtype=torch.int32)
 
-    # Should complete without TypeError: 'int' object is not iterable
     min_return_indices_kernel[(1,)](inp, out_val, out_idx, N=N)
+
+    assert (
+        len(reduce_indices_sanitizer.records) == 0
+    ), f"Sanitizer reported {len(reduce_indices_sanitizer.records)} error(s)"
 
 
 # ======== Reduce + Broadcast Tests ===========

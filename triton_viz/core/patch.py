@@ -173,28 +173,20 @@ class PatchOp:
             ):
                 raise NotImplementedError("Patching math ops not yet supported")
             elif self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl].values():
-                # When return_indices=True, tl.max/tl.min return a tuple (val, idx).
-                # The overrider wraps the result into a single tl.core.tensor,
-                # which breaks tuple unpacking. Instead, concretize the symbolic
-                # input and call the original op to get a proper (val, idx) tuple.
-                if kwargs.get("return_indices", False):
-                    input_tensor = args[0]
-                    handle = input_tensor.handle
-                    if hasattr(handle, "concretize"):
-                        concrete_handle = handle.concretize()
-                        concrete_input = tl.core.tensor(
-                            concrete_handle, input_tensor.type
-                        )
-                        ret = self.op(concrete_input, *args[1:], **kwargs)
-                    else:
-                        ret = self.op(*args, **kwargs)
+                # see triton.runtime.interpreter:ReduceOps.sum
+                # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
+                # Then, convert return value from TensorHandle to tl.tensor
+                symbolic_ret = self.callbacks.op_overrider(
+                    args[0].handle, *args[1:], **kwargs
+                )
+                if isinstance(symbolic_ret, tuple):
+                    ret_parts = []
+                    for sym_elem in symbolic_ret:
+                        elem_dtype = getattr(sym_elem, "dtype", None) or args[0].dtype
+                        elem_tensor = tl.core.tensor(sym_elem, elem_dtype)
+                        ret_parts.append(elem_tensor)
+                    ret = tuple(ret_parts)
                 else:
-                    # see triton.runtime.interpreter:ReduceOps.sum
-                    # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
-                    # Then, convert return value from TensorHandle to tl.tensor
-                    symbolic_ret = self.callbacks.op_overrider(
-                        args[0].handle, *args[1:], **kwargs
-                    )
                     ret_dtype = getattr(symbolic_ret, "dtype", None) or args[0].dtype
                     ret = tl.core.tensor(symbolic_ret, ret_dtype)
                     fn = cast(Any, ret.handle)

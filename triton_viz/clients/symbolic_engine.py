@@ -253,7 +253,14 @@ class SymbolicExpr:
     }
     BINARY_OPS: ClassVar[tuple[str, ...]] = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS: ClassVar[tuple[str, ...]] = ("where",)
-    REDUCE_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min", "dot")
+    REDUCE_OPS: ClassVar[tuple[str, ...]] = (
+        "sum",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+        "dot",
+    )
     SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum",)
     POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
@@ -1106,7 +1113,13 @@ class WhereSymbolicExpr(SymbolicExpr):
 
 
 class ReduceSymbolicExpr(SymbolicExpr):
-    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min")
+    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = (
+        "sum",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+    )
     input: SymbolicExpr
     keepdims: SymbolicExpr
     axis: SymbolicExpr | None
@@ -1143,7 +1156,10 @@ class ReduceSymbolicExpr(SymbolicExpr):
                 output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
         else:
             output_shape = [1] * len(input_shape) if keepdims_val else []
-        scalar_ty = input_dtype.scalar
+        if op in ("argmax", "argmin"):
+            scalar_ty = tl.int32
+        else:
+            scalar_ty = input_dtype.scalar
         self.dtype = (
             tl.block_type(scalar_ty, output_shape) if output_shape else scalar_ty
         )
@@ -1166,12 +1182,49 @@ class ReduceSymbolicExpr(SymbolicExpr):
         arr, constraints = self.input._to_z3()
         return reduce(lambda a, b: If(a <= b, a, b), arr), constraints
 
+    def _reduce_argmax(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        concrete = self.concretize()
+        return IntVal(int(concrete.data.flat[0])), None
+
+    def _reduce_argmin(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        concrete = self.concretize()
+        return IntVal(int(concrete.data.flat[0])), None
+
+    _NUMPY_REDUCE_OPS: ClassVar[dict[str, Any]] = {
+        "sum": np.sum,
+        "max": np.max,
+        "min": np.min,
+        "argmax": np.argmax,
+        "argmin": np.argmin,
+    }
+
+    def concretize(self) -> Any:
+        input_concrete = self.input.concretize()
+        np_op = self._NUMPY_REDUCE_OPS[self.op]
+        axis_val = self.axis.to_py() if self.axis is not None else None
+        keepdims_val = (
+            bool(self.keepdims.to_py())
+            if hasattr(self.keepdims, "to_py")
+            else bool(self.keepdims)
+        )
+        if self.op in ("argmax", "argmin"):
+            result = np_op(input_concrete.data, axis=axis_val)
+            if keepdims_val:
+                result = np.expand_dims(
+                    result, axis=axis_val if axis_val is not None else 0
+                )
+        else:
+            result = np_op(input_concrete.data, axis=axis_val, keepdims=keepdims_val)
+        return TensorHandle(np.atleast_1d(result), self.dtype)
+
     _Z3_BUILDERS: ClassVar[
         dict[str, Callable[[ReduceSymbolicExpr], tuple[Z3Expr, ConstraintConjunction]]]
     ] = {
         "sum": _reduce_sum,
         "max": _reduce_max,
         "min": _reduce_min,
+        "argmax": _reduce_argmax,
+        "argmin": _reduce_argmin,
     }
 
 
@@ -1604,7 +1657,9 @@ SymbolicExpr.register_op_class(StoreSymbolicExpr, ("store",))
 SymbolicExpr.register_op_class(UnarySymbolicExpr, SymbolicExpr.UNARY_OPS)
 SymbolicExpr.register_op_class(BinarySymbolicExpr, SymbolicExpr.BINARY_OPS)
 SymbolicExpr.register_op_class(WhereSymbolicExpr, ("where",))
-SymbolicExpr.register_op_class(ReduceSymbolicExpr, ("sum", "max", "min"))
+SymbolicExpr.register_op_class(
+    ReduceSymbolicExpr, ("sum", "max", "min", "argmax", "argmin")
+)
 SymbolicExpr.register_op_class(DotSymbolicExpr, ("dot",))
 SymbolicExpr.register_op_class(CumsumSymbolicExpr, ("cumsum",))
 SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
@@ -1753,14 +1808,20 @@ class SymbolicClient(Client):
         )
 
     def _op_reduce_max_overrider(self, input, axis=None, keep_dims=False, **kwargs):
-        return SymbolicExpr.create(
-            "max", SymbolicExpr.from_value(input), axis, keep_dims
-        )
+        input_sym = SymbolicExpr.from_value(input)
+        val = SymbolicExpr.create("max", input_sym, axis, keep_dims)
+        if kwargs.get("return_indices", False):
+            idx = SymbolicExpr.create("argmax", input_sym, axis, keep_dims)
+            return (val, idx)
+        return val
 
     def _op_reduce_min_overrider(self, input, axis=None, keep_dims=False, **kwargs):
-        return SymbolicExpr.create(
-            "min", SymbolicExpr.from_value(input), axis, keep_dims
-        )
+        input_sym = SymbolicExpr.from_value(input)
+        val = SymbolicExpr.create("min", input_sym, axis, keep_dims)
+        if kwargs.get("return_indices", False):
+            idx = SymbolicExpr.create("argmin", input_sym, axis, keep_dims)
+            return (val, idx)
+        return val
 
     def _op_splat_overrider(self, shape, arg):
         return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))
