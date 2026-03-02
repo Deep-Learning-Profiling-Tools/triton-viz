@@ -271,9 +271,12 @@ class _LoopIter:
 class _CombinedLoopHooks:
     """
     Combine for_loop callbacks from all clients.
+
+    Built once from the full list of ForLoopCallbacks collected by
+    ClientManager, rather than being mutated incrementally.
     """
 
-    def __init__(self):
+    def __init__(self, callbacks_list: list[ForLoopCallbacks]):
         self._range_type: list[Callable] = []
         self._before: list[Callable] = []
         self._iter_listeners: list[Callable] = []
@@ -281,30 +284,24 @@ class _CombinedLoopHooks:
         self._range_wrapper_factory: Callable | None = None
         self._after: list[Callable] = []
 
-    # Register hooks
-    def add_range_type_callback(self, hook: Callable) -> None:
-        self._range_type.append(hook)
+        for cb in callbacks_list:
+            if cb.range_type_callback is not None:
+                self._range_type.append(cb.range_type_callback)
+            if cb.before_loop_callback is not None:
+                self._before.append(cb.before_loop_callback)
+            if cb.loop_iter_listener is not None:
+                self._iter_listeners.append(cb.loop_iter_listener)
+            if cb.loop_iter_overrider is not None:
+                if self._iter_overrider is not None:
+                    raise RuntimeError("Only one loop_iter overrider allowed")
+                self._iter_overrider = cb.loop_iter_overrider
+            if cb.range_wrapper_factory is not None:
+                if self._range_wrapper_factory is not None:
+                    raise RuntimeError("Only one range_wrapper_factory allowed")
+                self._range_wrapper_factory = cb.range_wrapper_factory
+            if cb.after_loop_callback is not None:
+                self._after.append(cb.after_loop_callback)
 
-    def add_before(self, hook: Callable) -> None:
-        self._before.append(hook)
-
-    def add_iter_listener(self, hook: Callable) -> None:
-        self._iter_listeners.append(hook)
-
-    def set_iter_overrider(self, hook: Callable) -> None:
-        if self._iter_overrider is not None:
-            raise RuntimeError("Only one loop_iter overrider allowed")
-        self._iter_overrider = hook
-
-    def set_range_wrapper_factory(self, hook: Callable) -> None:
-        if self._range_wrapper_factory is not None:
-            raise RuntimeError("Only one range_wrapper_factory allowed")
-        self._range_wrapper_factory = hook
-
-    def add_after(self, hook: Callable) -> None:
-        self._after.append(hook)
-
-    # Call combined hooks
     def range_type(self, lineno: int, range_type: str) -> None:
         for hook in self._range_type:
             hook(lineno, range_type)
@@ -353,29 +350,22 @@ class _CombinedLoopHooks:
             iterable = iterable_callable(*args, **kwargs)
         return _LoopIter(self, iterable, lineno, range_type)
 
-    def clear(self) -> None:
-        self._range_type.clear()
-        self._before.clear()
-        self._iter_listeners.clear()
-        self._iter_overrider = None
-        self._range_wrapper_factory = None
-        self._after.clear()
-
 
 class _LoopPatcher:
     """Manages loop patching state and hooks."""
 
     def __init__(self):
-        self.hooks = _CombinedLoopHooks()
+        self.hooks: _CombinedLoopHooks = _CombinedLoopHooks([])
         self._orig_visit_for: Callable | None = None
         self._patched: bool = False
 
-    def patch(self) -> None:
-        """Apply loop patching."""
+    def patch(self, all_loop_callbacks: list[ForLoopCallbacks]) -> None:
+        """Apply loop patching with combined hooks from all clients."""
         if not self._patched:
             self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
             _OrigASTTransformer.visit_For = triton_viz_visit_For  # type: ignore[assignment]
             self._patched = True
+        self.hooks = _CombinedLoopHooks(all_loop_callbacks)
 
     def unpatch(self) -> None:
         """Remove loop patching."""
@@ -385,31 +375,16 @@ class _LoopPatcher:
         if self._orig_visit_for is not None:
             _OrigASTTransformer.visit_For = self._orig_visit_for
 
-        self.hooks.clear()
+        self.hooks = _CombinedLoopHooks([])
         self._patched = False
 
 
 _loop_patcher = _LoopPatcher()
 
 
-def patch_for_loop(loop_callbacks: ForLoopCallbacks):
-    _loop_patcher.patch()
-
-    # Registering hooks
-    if loop_callbacks.range_type_callback is not None:
-        _loop_patcher.hooks.add_range_type_callback(loop_callbacks.range_type_callback)
-    if loop_callbacks.range_wrapper_factory is not None:
-        _loop_patcher.hooks.set_range_wrapper_factory(
-            loop_callbacks.range_wrapper_factory
-        )
-    if loop_callbacks.before_loop_callback is not None:
-        _loop_patcher.hooks.add_before(loop_callbacks.before_loop_callback)
-    if loop_callbacks.loop_iter_overrider is not None:
-        _loop_patcher.hooks.set_iter_overrider(loop_callbacks.loop_iter_overrider)
-    if loop_callbacks.loop_iter_listener is not None:
-        _loop_patcher.hooks.add_iter_listener(loop_callbacks.loop_iter_listener)
-    if loop_callbacks.after_loop_callback is not None:
-        _loop_patcher.hooks.add_after(loop_callbacks.after_loop_callback)
+def patch_for_loop(all_loop_callbacks: list[ForLoopCallbacks]):
+    """Patch for-loops with combined hooks from all clients."""
+    _loop_patcher.patch(all_loop_callbacks)
 
 
 def unpatch_for_loop():

@@ -170,15 +170,17 @@ class ClientManager:
     def patch_run(self, fn, backend: str):
         namespaces = OPERATION_REGISTRY[backend].namespaces
         with patch_calls(backend):
+            # Collect all for-loop callbacks from clients
+            all_loop_callbacks = []
             for client in self.clients.values():
                 for namespace, attrs in namespaces.items():  # patch ops
                     for attr, op in attrs.items():
                         callbacks = client.register_op_callback(op)
                         patch_op(namespace, attr, callbacks, backend=backend)
+                all_loop_callbacks.append(client.register_for_loop_callback())
 
-                # patch for loops
-                loop_callbacks = client.register_for_loop_callback()
-                patch_for_loop(loop_callbacks)
+            # Patch for-loops once with all collected callbacks
+            patch_for_loop(all_loop_callbacks)
             # Remaps core language functions to interpreted ones
             patch_lang(fn, backend)
             try:
