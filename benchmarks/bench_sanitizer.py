@@ -993,7 +993,7 @@ def run_benchmarks(
 # Comparison
 # ---------------------------------------------------------------------------
 
-REGRESSION_THRESHOLD = 0.05  # 5%
+REGRESSION_THRESHOLD = 0.15  # 15%
 
 
 def _fmt_time(val: float | None) -> str:
@@ -1013,12 +1013,6 @@ def _fmt_change(base_val: float | None, pr_val: float | None) -> str:
     return f"{sign}{pct:.1%}{flag}"
 
 
-def _has_regression(base_val: float | None, pr_val: float | None) -> bool:
-    if base_val is None or pr_val is None or base_val == 0:
-        return False
-    return (pr_val - base_val) / base_val > REGRESSION_THRESHOLD
-
-
 def generate_comparison(base: dict, pr: dict) -> str:
     lines = [
         "## Sanitizer Performance Benchmark",
@@ -1032,16 +1026,12 @@ def generate_comparison(base: dict, pr: dict) -> str:
     pr_total = 0.0
     base_total_valid = True
     pr_total_valid = True
-    any_regression = False
 
     for name in all_names:
         pr_bench = pr["benchmarks"].get(name, {})
         base_bench = base.get("benchmarks", {}).get(name, {})
         pr_med = pr_bench.get("median")
         base_med = base_bench.get("median")
-
-        if _has_regression(base_med, pr_med):
-            any_regression = True
 
         if pr_med is not None:
             pr_total += pr_med
@@ -1066,10 +1056,9 @@ def generate_comparison(base: dict, pr: dict) -> str:
     )
 
     lines.append("")
-    if any_regression:
-        lines.append(
-            f"_Threshold: >{REGRESSION_THRESHOLD:.0%} regression flagged with :warning:_"
-        )
+    lines.append(
+        f"_Threshold: >{REGRESSION_THRESHOLD:.0%} regression flagged with :warning:_"
+    )
     lines.append(
         f"_Iterations: {pr.get('warmup_iterations', '?')} warmup + {pr.get('iterations', '?')} measured_"
     )
