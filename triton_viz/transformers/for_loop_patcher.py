@@ -6,9 +6,9 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     for i in R:
         ...
     ==>
-    for i in _triton_viz_loop_patcher.hooks.loop_iter_wrapper(iter_callable, args, kwargs, lineno, range_type):
+    for i in _triton_viz_loop_patcher.loop_iter_wrapper(iter_callable, args, kwargs, lineno, range_type):
         ...
-    where _triton_viz_loop_patcher.hooks.loop_iter_wrapper returns a _LoopIter object.
+    where _triton_viz_loop_patcher.loop_iter_wrapper returns a _LoopIter object.
     """
     self.generic_visit(node)
 
@@ -51,11 +51,7 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
 
     new_iter = ast.Call(
         func=ast.Attribute(
-            value=ast.Attribute(
-                value=ast.Name(id="_triton_viz_loop_patcher", ctx=ast.Load()),
-                attr="hooks",
-                ctx=ast.Load(),
-            ),
+            value=ast.Name(id="_triton_viz_loop_patcher", ctx=ast.Load()),
             attr="loop_iter_wrapper",
             ctx=ast.Load(),
         ),

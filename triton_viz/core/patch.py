@@ -268,25 +268,27 @@ class _LoopIter:
         return idx
 
 
-class _CombinedLoopHooks:
-    """
-    Combine for_loop callbacks from all clients.
+class _LoopPatcher:
+    """Manages loop patching state, hooks, and combined callbacks."""
 
-    Built once from the full list of ForLoopCallbacks collected by
-    ClientManager, rather than being mutated incrementally.
-    """
+    def __init__(self):
+        self._orig_visit_for: Callable | None = None
+        self._patched: bool = False
+        self._clear()
 
-    def __init__(self, callbacks_list: list[ForLoopCallbacks]):
-        self._range_type: list[Callable] = []
+    def _clear(self) -> None:
+        self._range_type_hooks: list[Callable] = []
         self._before: list[Callable] = []
         self._iter_listeners: list[Callable] = []
         self._iter_overrider: Callable | None = None
         self._range_wrapper_factory: Callable | None = None
         self._after: list[Callable] = []
 
+    def _populate(self, callbacks_list: list[ForLoopCallbacks]) -> None:
+        self._clear()
         for cb in callbacks_list:
             if cb.range_type_callback is not None:
-                self._range_type.append(cb.range_type_callback)
+                self._range_type_hooks.append(cb.range_type_callback)
             if cb.before_loop_callback is not None:
                 self._before.append(cb.before_loop_callback)
             if cb.loop_iter_listener is not None:
@@ -303,7 +305,7 @@ class _CombinedLoopHooks:
                 self._after.append(cb.after_loop_callback)
 
     def range_type(self, lineno: int, range_type: str) -> None:
-        for hook in self._range_type:
+        for hook in self._range_type_hooks:
             hook(lineno, range_type)
 
     def before_loop(self, lineno: int, iterable: Any) -> None:
@@ -311,13 +313,11 @@ class _CombinedLoopHooks:
             hook(lineno, iterable)
 
     def loop_iter(self, lineno: int, idx: Any) -> Any:
-        # override iteration index
         if self._iter_overrider is not None:
             new_idx = self._iter_overrider(lineno, idx)
             if new_idx is not None:
                 idx = new_idx
 
-        # call all iteration listeners
         for hook in self._iter_listeners:
             hook(lineno, idx)
 
@@ -350,22 +350,13 @@ class _CombinedLoopHooks:
             iterable = iterable_callable(*args, **kwargs)
         return _LoopIter(self, iterable, lineno, range_type)
 
-
-class _LoopPatcher:
-    """Manages loop patching state and hooks."""
-
-    def __init__(self):
-        self.hooks: _CombinedLoopHooks = _CombinedLoopHooks([])
-        self._orig_visit_for: Callable | None = None
-        self._patched: bool = False
-
     def patch(self, all_loop_callbacks: list[ForLoopCallbacks]) -> None:
         """Apply loop patching with combined hooks from all clients."""
         if not self._patched:
             self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
             _OrigASTTransformer.visit_For = triton_viz_visit_For  # type: ignore[assignment]
             self._patched = True
-        self.hooks = _CombinedLoopHooks(all_loop_callbacks)
+        self._populate(all_loop_callbacks)
 
     def unpatch(self) -> None:
         """Remove loop patching."""
@@ -375,7 +366,7 @@ class _LoopPatcher:
         if self._orig_visit_for is not None:
             _OrigASTTransformer.visit_For = self._orig_visit_for
 
-        self.hooks = _CombinedLoopHooks([])
+        self._clear()
         self._patched = False
 
 
