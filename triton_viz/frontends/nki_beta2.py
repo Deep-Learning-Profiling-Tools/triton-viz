@@ -5,10 +5,17 @@ from triton_viz.core.data import Allocate, Dot, Op, ProgramId
 from triton_viz.frontends.base import AdapterResult, Frontend, OPERATION_REGISTRY
 
 HAS_NKI_BETA2 = False
-nki_beta2 = None
+nisa = None
+nl = None
 NDArray = None
+nki_builder = None
 try:
-    from triton_viz.core.nki_beta2 import NDArray, nki_builder  # type: ignore
+    from triton_viz.core import nki_beta2 as _nki_beta2  # type: ignore
+
+    NDArray = _nki_beta2.NDArray
+    nki_builder = _nki_beta2.nki_builder
+    nisa = _nki_beta2.nisa
+    nl = _nki_beta2.nl
 
     HAS_NKI_BETA2 = True
 except ModuleNotFoundError:
@@ -35,14 +42,17 @@ def _nki_beta2_dot_adapter(
 NKI_BETA2_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
 NKI_BETA2_NAMESPACES: dict[Any, dict[str, type[Op]]] = {}
 if HAS_NKI_BETA2:
-    assert nki_beta2 is not None
+    assert nl is not None
+    assert nisa is not None
 
     NKI_BETA2_NAMESPACES = {
-        nki_beta2: {
+        nl: {
             "program_id": ProgramId,
             "ndarray": Allocate,
+        },
+        nisa: {
             "nc_matmul": Dot,
-        }
+        },
     }
 
     NKI_BETA2_ADAPTERS = {
