@@ -28,11 +28,8 @@ class NDArray:
         if "value" in kwargs:
             # Normalize scalars to 0-d numpy arrays so downstream code (e.g. visualizer)
             # can rely on ndarray attributes like `.ctypes`, `.shape`, `.dtype`, `.strides`.
-            v = kwargs["value"]
-            if not isinstance(v, np.ndarray):
-                v = np.asarray(v)
-            assert val is None or val.shape == v.shape
-            val = v
+            assert val is None or val.shape == kwargs["value"].shape
+            val = kwargs["value"]
         self._data_ptr = None
         self.data = val
 
@@ -512,7 +509,9 @@ class NKIInterpretedFunction:
             CODE_KEYS.add(get_code_key(self.fn))  # trace rewritten function for clients
 
         # convert args to NDArray if they are not already
-        args = [arg if isinstance(arg, NDArray) else NDArray(value=arg) for arg in args]
+        args = [
+            NDArray(value=arg) if isinstance(arg, np.ndarray) else arg for arg in args
+        ]
 
         name_args = inspect.getcallargs(self.fn, *args)
         call_args = {}
