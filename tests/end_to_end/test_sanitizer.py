@@ -862,11 +862,6 @@ def fake_tensor_oob_kernel(x_ptr, out_ptr, N: tl.constexpr):
 
 
 def test_oob_with_fake_tensor():
-    """
-    With virtual_memory (SANITIZER_ENABLE_FAKE_TENSOR) enabled, the sanitizer
-    should detect an out-of-bounds load at offset N=8 for a size-8 tensor and
-    produce a proper OOB report (not crash with AttributeError on FakeTensor).
-    """
     fake_tensor_sanitizer.records.clear()
 
     old_virtual_memory = config.virtual_memory
