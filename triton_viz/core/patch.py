@@ -2,7 +2,7 @@ import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional, cast
+from typing import Any, cast
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
@@ -116,7 +116,7 @@ def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
     return scope
 
 
-def _pop_lang_patch_scope(backend: str) -> Optional[Any]:
+def _pop_lang_patch_scope(backend: str) -> Any | None:
     scopes = _LANG_PATCH_SCOPES.get(backend)
     if not scopes:
         return None
@@ -176,10 +176,11 @@ class PatchOp:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
-                ret = tl.core.tensor(
-                    self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
-                    args[0].dtype,
+                symbolic_ret = self.callbacks.op_overrider(
+                    args[0].handle, *args[1:], **kwargs
                 )
+                ret_dtype = getattr(symbolic_ret, "dtype", None) or args[0].dtype
+                ret = tl.core.tensor(symbolic_ret, ret_dtype)
                 fn = cast(Any, ret.handle)
                 if fn is not None:
                     fn.concrete_fn = self.op
@@ -276,8 +277,8 @@ class _CombinedLoopHooks:
         self._range_type: list[Callable] = []
         self._before: list[Callable] = []
         self._iter_listeners: list[Callable] = []
-        self._iter_overrider: Optional[Callable] = None
-        self._range_wrapper_factory: Optional[Callable] = None
+        self._iter_overrider: Callable | None = None
+        self._range_wrapper_factory: Callable | None = None
         self._after: list[Callable] = []
 
     # Register hooks
@@ -366,7 +367,7 @@ class _LoopPatcher:
 
     def __init__(self):
         self.hooks = _CombinedLoopHooks()
-        self._orig_visit_for: Optional[Callable] = None
+        self._orig_visit_for: Callable | None = None
         self._patched: bool = False
 
     def patch(self) -> None:
