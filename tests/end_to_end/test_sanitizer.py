@@ -844,3 +844,40 @@ def test_reduce_broadcast():
     assert (
         len(reduce_broadcast_sanitizer.records) == 0
     ), f"Expected no OOB records, got {len(reduce_broadcast_sanitizer.records)}"
+
+
+# ======== Libdevice Tests ===========
+
+from triton.language.extra.libdevice import tanh
+
+libdevice_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_tanh_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = tanh(x)
+    tl.store(out_ptr + offs, y)
+
+
+def test_libdevice_tanh():
+    """
+    Verify libdevice.tanh works under the sanitizer without raising
+    TypeError: cannot convert None of type <class 'NoneType'> to tensor.
+
+    Previously, the libdevice stub ``def tanh(arg0): ...`` returned None
+    in interpreter mode because Triton's _patch_lang does not patch the
+    libdevice module.
+    """
+    libdevice_sanitizer.records.clear()
+
+    x = torch.randn(8, dtype=torch.float32)
+    out = torch.empty(8, dtype=torch.float32)
+
+    libdevice_tanh_kernel[(1,)](x, out, N=8)
+
+    assert len(libdevice_sanitizer.records) == 0, (
+        f"Expected no OOB records, got {len(libdevice_sanitizer.records)}"
+    )
