@@ -867,8 +867,8 @@ def test_oob_with_fake_tensor():
     old_virtual_memory = config.virtual_memory
     config.virtual_memory = True
     try:
-        x = torch.randn(8, device="cuda")
-        out = torch.empty(1, device="cuda")
+        x = torch.randn(8)
+        out = torch.empty(1)
         with pytest.raises(SystemExit):
             fake_tensor_oob_kernel[(1,)](x, out, N=8)
     finally:
