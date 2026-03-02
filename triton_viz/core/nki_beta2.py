@@ -87,6 +87,7 @@ class NDArray:
         storage_shape = tuple(shape) if shape is not None else None
         storage_dtype = np.float32 if _dtype_spec(dtype) is not None else dtype
         if value is None:
+            assert storage_shape
             self.data = np.ndarray(storage_shape, dtype=storage_dtype)
         else:
             array = (
@@ -602,8 +603,8 @@ nki_unpatch_lang = (
 )
 
 
-class NKIInterpretedFunction:
-    """Callable wrapper that executes NKI kernels with interpreter semantics."""
+class NKIBeta2InterpretedFunction:
+    """Callable wrapper that executes NKI Beta 2 kernels with interpreter semantics."""
 
     def __init__(self, fn):
         """Store the original kernel function."""
