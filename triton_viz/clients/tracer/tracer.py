@@ -1,5 +1,3 @@
-from collections.abc import Callable
-
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import (
@@ -14,10 +12,11 @@ from ...core.data import (
 )
 from ...utils.traceback_utils import extract_user_frames
 from triton_viz.core.masked_load_store import masked_load
+from typing import Callable, Optional, Union
 import numpy as np
 
 
-def _convert_grid_idx(grid_idx) -> tuple[int, int, int] | None:
+def _convert_grid_idx(grid_idx) -> Optional[tuple[int, int, int]]:
     if grid_idx is None:
         return grid_idx
 
@@ -35,7 +34,7 @@ class Tracer(Client):
     def __init__(
         self,
         callpath: bool = True,
-        grid_idx: tuple[int] | int | None = None,
+        grid_idx: Optional[Union[tuple[int], int]] = None,
     ):
         super().__init__()  # Initialize parent class
         self.callpath = callpath

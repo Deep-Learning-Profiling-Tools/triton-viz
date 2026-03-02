@@ -4,7 +4,7 @@ import os
 import sys
 from dataclasses import dataclass
 from types import FrameType
-from collections.abc import Callable
+from typing import Callable
 
 # IDs all triton_viz-traced functions to display its code within clients
 CODE_KEYS: set[tuple[str, str]] = set()
