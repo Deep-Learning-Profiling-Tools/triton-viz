@@ -54,12 +54,13 @@ class Config:
             "REPORT_GRID_EXECUTION_PROGRESS"
         )
         _fake_env = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR")
+        self.virtual_memory: str
         if _fake_env is None:
-            self.virtual_memory: str = "auto"
+            self.virtual_memory = "auto"
         elif _fake_env == "1":
-            self.virtual_memory: str = "force_fake"
+            self.virtual_memory = "force_fake"
         else:
-            self.virtual_memory: str = "force_real"
+            self.virtual_memory = "force_real"
         self.profiler_enable_load_store_skipping: bool = _is_one(
             "PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1"
         )
