@@ -7,8 +7,6 @@ from functools import reduce
 from typing import (
     Any,
     ClassVar,
-    Optional,
-    Union,
     TypeAlias,
     cast,
 )
@@ -70,9 +68,9 @@ from ..core.data import (
 )
 
 
-Z3Expr: TypeAlias = Union[ExprRef, list[ExprRef], Tactic, Probe]
-ConstraintExpr: TypeAlias = Union[ExprRef, bool, int, float]
-ConstraintConjunction: TypeAlias = Optional[BoolRef]
+Z3Expr: TypeAlias = ExprRef | list[ExprRef] | Tactic | Probe
+ConstraintExpr: TypeAlias = ExprRef | bool | int | float
+ConstraintConjunction: TypeAlias = BoolRef | None
 
 
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
@@ -95,7 +93,7 @@ def _iter_constraints_to_bool(
 
 
 def _and_constraints(
-    *constraints: Optional[ConstraintExpr | Sequence[ConstraintExpr]],
+    *constraints: ConstraintExpr | Sequence[ConstraintExpr] | None,
 ) -> ConstraintConjunction:
     parts: list[BoolRef] = []
     for constraint in constraints:
@@ -120,7 +118,7 @@ class PendingCheck:
     constraints: ConstraintConjunction
     # Lightweight source location: (filename, lineno, func_name)
     # Captured immediately to preserve accurate line info for deferred checks
-    source_location: Optional[tuple[str, int, str]] = None
+    source_location: tuple[str, int, str] | None = None
 
 
 @dataclass
@@ -146,7 +144,7 @@ class SymbolicExprDataWrapper:
     we need to wrap SymbolicExpr with a class that has size attribute, and data.size != 1.
     """
 
-    def __init__(self, symbolic_expr: SymbolicExpr, value: Optional[str] = None):
+    def __init__(self, symbolic_expr: SymbolicExpr, value: str | None = None):
         self._value = value
         self.symbolic_expr = symbolic_expr
 
@@ -313,25 +311,25 @@ class SymbolicExpr:
         self.op = op
         # Tensor handle attributes, including `attr`, `dtype`, and `data`
         self.attr: dict[str, Any] = {}
-        self.dtype: Optional[tl.core.dtype] = None
+        self.dtype: tl.core.dtype | None = None
 
         # Functions and arguments for concretization
-        self.concrete_fn: Optional[Callable[..., Any]] = None
+        self.concrete_fn: Callable[..., Any] | None = None
 
         # deal with args
-        self.children: dict[str, Optional[SymbolicExpr]] = {}
+        self.children: dict[str, SymbolicExpr | None] = {}
 
         # for-loop iterator association
-        self.loop_ctx: Optional[LoopContext] = None
+        self.loop_ctx: LoopContext | None = None
 
         # z3
-        self.z3: Optional[Z3Expr] = None
+        self.z3: Z3Expr | None = None
 
         self.constraints: ConstraintConjunction = None
-        self._simplified_z3: Optional[Z3Expr] = None
-        self._simplified_constraints: Optional[ConstraintConjunction] = None
+        self._simplified_z3: Z3Expr | None = None
+        self._simplified_constraints: ConstraintConjunction | None = None
         self._has_op_cache: dict[str, bool] = {}
-        self._data_wrapper: Optional[SymbolicExprDataWrapper] = None
+        self._data_wrapper: SymbolicExprDataWrapper | None = None
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -458,10 +456,10 @@ class SymbolicExpr:
 
     # Stored on the class and may be accessed through either the class or an instance;
     # therefore the callable must tolerate an extra bound argument (self/cls).
-    loop_ctx_provider: ClassVar[Optional[Callable[..., Optional[LoopContext]]]] = None
+    loop_ctx_provider: ClassVar[Callable[..., LoopContext | None] | None] = None
 
     @classmethod
-    def set_loop_ctx_provider(cls, fn: Callable[..., Optional[LoopContext]]) -> None:
+    def set_loop_ctx_provider(cls, fn: Callable[..., LoopContext | None]) -> None:
         """Register a function that, on each call,
         returns the current active `LoopContext` (or `None` if none exists)."""
         cls.loop_ctx_provider = fn
@@ -530,7 +528,7 @@ class SymbolicExpr:
         """Return a concrete TensorHandle for this expression."""
         raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
 
-    def replace_subtree(self, anchor_op: Optional[str] = None) -> SymbolicExpr:
+    def replace_subtree(self, anchor_op: str | None = None) -> SymbolicExpr:
         """
         Post-order traversal that replaces *all* sub-trees with constant nodes
         produced by `concretize`.
@@ -743,14 +741,14 @@ class ArangeSymbolicExpr(SymbolicExpr):
 
 class IndirectSymbolicExprBase(SymbolicExpr):
     ptr: SymbolicExpr
-    mask: Optional[SymbolicExpr]
-    other: Optional[SymbolicExpr]
+    mask: SymbolicExpr | None
+    other: SymbolicExpr | None
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         ptr_expr = self.ptr
         ptr, constraints_ptr = ptr_expr._to_z3()
         mask_expr = self.mask
-        mask_constraint: Optional[ConstraintExpr | Sequence[ConstraintExpr]] = None
+        mask_constraint: ConstraintExpr | Sequence[ConstraintExpr] | None = None
         if mask_expr is not None:
             mask, _ = mask_expr._to_z3()
             mask_constraint = mask
@@ -786,7 +784,11 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("ptr", ptr)
         self.add_child("mask", mask)
         self.add_child("other", other)
-        self.dtype = self.ptr.dtype.element_ty  # type: ignore
+        ptr_dtype = self.ptr.dtype
+        if isinstance(ptr_dtype, tl.block_type):
+            self.dtype = tl.block_type(ptr_dtype.element_ty.element_ty, ptr_dtype.shape)
+        else:
+            self.dtype = ptr_dtype.element_ty  # type: ignore[union-attr]
 
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
@@ -1107,7 +1109,7 @@ class ReduceSymbolicExpr(SymbolicExpr):
     _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min")
     input: SymbolicExpr
     keepdims: SymbolicExpr
-    axis: Optional[SymbolicExpr]
+    axis: SymbolicExpr | None
 
     def __init__(self, op: str, input: Any, axis: Any = None, keepdims: bool = False):
         if op not in self._SUPPORTED_OPS:
@@ -1116,6 +1118,35 @@ class ReduceSymbolicExpr(SymbolicExpr):
         self.add_child("input", input)
         self.add_child("keepdims", keepdims)
         self.add_child("axis", axis)
+
+        # Compute output dtype from input dtype, axis, and keepdims
+        input_dtype = self.input.dtype
+        assert isinstance(
+            input_dtype, tl.block_type
+        ), f"ReduceSymbolicExpr expects block_type input, got {type(input_dtype)}"
+        input_shape = list(input_dtype.shape)
+        # Resolve axis value
+        if isinstance(axis, int):
+            axis_val = axis
+        elif isinstance(axis, SymbolicExpr) and hasattr(axis, "to_py"):
+            axis_val = axis.to_py()
+        else:
+            axis_val = None
+        # Resolve keepdims value
+        keepdims_val = keepdims if isinstance(keepdims, bool) else bool(keepdims)
+        if axis_val is not None:
+            if keepdims_val:
+                output_shape = (
+                    input_shape[:axis_val] + [1] + input_shape[axis_val + 1 :]
+                )
+            else:
+                output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
+        else:
+            output_shape = [1] * len(input_shape) if keepdims_val else []
+        scalar_ty = input_dtype.scalar
+        self.dtype = (
+            tl.block_type(scalar_ty, output_shape) if output_shape else scalar_ty
+        )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1147,7 +1178,7 @@ class ReduceSymbolicExpr(SymbolicExpr):
 class DotSymbolicExpr(SymbolicExpr):
     a: SymbolicExpr
     b: SymbolicExpr
-    d: Optional[SymbolicExpr]
+    d: SymbolicExpr | None
 
     def __init__(self, op: str, a: Any, b: Any, d: Any = None):
         super().__init__(op)
@@ -1446,7 +1477,7 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
 class AtomicRmwSymbolicExpr(SymbolicExpr):
     ptr: SymbolicExpr
     val: SymbolicExpr
-    mask: Optional[SymbolicExpr]
+    mask: SymbolicExpr | None
 
     def __init__(self, op: str, ptr: Any, val: Any, mask: Any = None):
         super().__init__(op)
@@ -1468,7 +1499,7 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
     @staticmethod
     def _resolve_element_dtype(
         ptr: SymbolicExpr,
-    ) -> Optional[tl.core.dtype]:
+    ) -> tl.core.dtype | None:
         dt = ptr.dtype
         if dt is None:
             return None

@@ -4,7 +4,6 @@ from functools import cached_property
 from typing import (
     Any,
     NoReturn,
-    Optional,
     TypeVar,
     cast,
 )
@@ -187,22 +186,22 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
     def __init__(self, abort_on_error: bool = True):
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[OutOfBoundsRecordZ3] = []
-        self.grid: Optional[tuple[int, ...]] = None
-        self.grid_idx: Optional[tuple[int, ...]] = None
+        self.grid: tuple[int, ...] | None = None
+        self.grid_idx: tuple[int, ...] | None = None
         self.tensors: list[Tensor] = []
         self.tensor_addrs: list[tuple[int, int, Tensor]] = []
         self.tensor_names: dict[int, set[str]] = {}
-        self.need_full_grid: Optional[bool] = None
-        self.last_grid: Optional[tuple[int, int, int]] = None
+        self.need_full_grid: bool | None = None
+        self.last_grid: tuple[int, int, int] | None = None
         self.cache_args: list[Any] = []
-        self.cache_grid: Optional[tuple[int, ...]] = None
-        self.addr_ok: Optional[BoolRef] = None
-        self.pid_ok: Optional[BoolRef] = None
-        self.solver: Optional[Solver] = None
-        self.addr_sym: Optional[ArithRef] = None
+        self.cache_grid: tuple[int, ...] | None = None
+        self.addr_ok: BoolRef | None = None
+        self.pid_ok: BoolRef | None = None
+        self.solver: Solver | None = None
+        self.addr_sym: ArithRef | None = None
 
-    def _collect_tensor_base(self, expr: SymbolicExpr) -> Optional[int]:
-        def walk(node: SymbolicExpr) -> Optional[int]:
+    def _collect_tensor_base(self, expr: SymbolicExpr) -> int | None:
+        def walk(node: SymbolicExpr) -> int | None:
             if node.op == "const" and isinstance(node.dtype, tl.pointer_type):
                 return node.to_py()
             for child in node.children.values():
@@ -253,7 +252,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         names = self.tensor_names.setdefault(id(tensor), set())
         names.add(name)
 
-    def _get_tensor_name(self, tensor: Tensor) -> Optional[str]:
+    def _get_tensor_name(self, tensor: Tensor) -> str | None:
         names = self.tensor_names.get(id(tensor))
         if not names:
             return None
@@ -264,7 +263,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         access_addr: Z3Expr,
         expr_constraints: ConstraintConjunction,
         symbolic_expr: SymbolicExpr,
-        source_location: Optional[tuple[str, int, str]] = None,
+        source_location: tuple[str, int, str] | None = None,
     ) -> None:
         # Use push/pop on persistent solver
         solver = self.solver
@@ -352,8 +351,8 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         op_type: type[Load] | type[Store],
         tensor: Tensor,
         violation_address: int,
-        symbolic_expr: Optional[SymbolicExpr] = None,
-        source_location: Optional[tuple[str, int, str]] = None,
+        symbolic_expr: SymbolicExpr | None = None,
+        source_location: tuple[str, int, str] | None = None,
     ) -> None:
         # Use pre-captured location if available (for deferred checks in loops),
         # otherwise capture it now (for immediate checks outside loops)

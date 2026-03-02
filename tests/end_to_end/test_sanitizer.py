@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from typing import Optional
 
 import triton
 import triton.language as tl
@@ -121,15 +120,15 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
     def __init__(self, *a, **k) -> None:
         super().__init__(*a, **k)
         self.after_loop_pending: list[int] = []
-        self.check_inside_loop: list[tuple[Z3Expr, Optional[BoolRef]]] = []
+        self.check_inside_loop: list[tuple[Z3Expr, BoolRef | None]] = []
         self.iterator_constraints: list[BoolRef] = []
 
     def _check_range_satisfiable(
         self,
         access_addr: Z3Expr,
-        expr_constraints: Optional[BoolRef],
+        expr_constraints: BoolRef | None,
         symbolic_expr: SymbolicExpr,
-        source_location: Optional[tuple[str, int, str]] = None,
+        source_location: tuple[str, int, str] | None = None,
     ) -> None:
         self.check_inside_loop.append((access_addr, expr_constraints))
         super()._check_range_satisfiable(
@@ -859,3 +858,40 @@ def test_tl_min_return_indices():
 
     # Should complete without TypeError: 'int' object is not iterable
     min_return_indices_kernel[(1,)](inp, out_val, out_idx, N=N)
+
+
+# ======== Reduce + Broadcast Tests ===========
+
+reduce_broadcast_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=reduce_broadcast_sanitizer)
+@triton.jit
+def reduce_broadcast_kernel(in_ptr, out_ptr, M: tl.constexpr, N: tl.constexpr):
+    row = tl.program_id(0) * 1 + tl.arange(0, 1)[:, None]
+    cols = tl.arange(0, N)[None, :]
+    x = tl.load(in_ptr + row * N + cols)
+    s = tl.sum(x, axis=1)[:, None]  # reduce axis=1, re-expand
+    result = x - s  # broadcast back to [1, N]
+    tl.store(out_ptr + row * N + cols, result)
+
+
+def test_reduce_broadcast():
+    """
+    Verify the symbolic engine handles reduce + broadcast without raising
+    ValueError: Cannot broadcast, rank mismatch.
+
+    Pattern: 2D load -> tl.sum(axis=1) -> [:, None] -> arithmetic with 2D tensor.
+    """
+    reduce_broadcast_sanitizer.records.clear()
+
+    M, N = 1, 16
+    inp = torch.randn(M, N, dtype=torch.float32)
+    out = torch.empty_like(inp)
+
+    reduce_broadcast_kernel[(M,)](inp, out, M=M, N=N)
+
+    # No OOB expected — the kernel accesses exactly M*N elements
+    assert (
+        len(reduce_broadcast_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(reduce_broadcast_sanitizer.records)}"
