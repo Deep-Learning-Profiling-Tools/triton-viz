@@ -173,13 +173,9 @@ class TritonTrace(KernelInterface, TraceInterface):
 
 class NKITrace(KernelInterface, TraceInterface):
     def __init__(self, kernel, client: str | Client) -> None:
-        from neuronxcc.nki.compile import GenericKernel
         from .nki import NKIInterpretedFunction
 
-        if isinstance(kernel, GenericKernel):
-            self.interpreter_fn = NKIInterpretedFunction(kernel.func)
-            self.func = kernel.func
-        elif isinstance(kernel, NKIInterpretedFunction):
+        if isinstance(kernel, NKIInterpretedFunction):
             self.interpreter_fn = kernel
             self.func = kernel.fn
         else:
@@ -231,6 +227,59 @@ class NKITrace(KernelInterface, TraceInterface):
             return ret
 
 
+class NKIBeta2Trace(KernelInterface, TraceInterface):
+    def __init__(self, kernel, client: str | Client) -> None:
+        from .nki_beta2 import NKIInterpretedFunction
+
+        if isinstance(kernel, NKIInterpretedFunction):
+            self.interpreter_fn = kernel
+            self.func = kernel.fn
+        else:
+            self.interpreter_fn = NKIInterpretedFunction(kernel)
+            self.func = kernel
+
+        TraceInterface.__init__(self, client)
+
+    def __getattr__(self, name):
+        try:
+            fn = object.__getattribute__(self, "fn")
+            if hasattr(fn, name):
+                return getattr(fn, name)
+        except AttributeError:
+            pass
+
+        try:
+            jit_fn = object.__getattribute__(self, "jit_fn")
+            if hasattr(jit_fn, name):
+                return getattr(jit_fn, name)
+        except AttributeError:
+            pass
+
+        try:
+            base_fn = object.__getattribute__(self, "base_fn")
+            if hasattr(base_fn, name):
+                return getattr(base_fn, name)
+        except AttributeError:
+            pass
+
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
+    def __getitem__(self, *grid):
+        return KernelInterface.__getitem__(self, tuple(*grid))
+
+    def __call__(self, *args, **kwargs):
+        return self[(1, 1, 1)](*args, **kwargs)
+
+    def run(self, *args, **kwargs):
+        with self.client_manager.patch_run(self.func, backend="nki_beta2"):
+            kwargs.update({"client_manager": self.client_manager})
+            ret = self.interpreter_fn.run(*args, **kwargs)
+            self.finalize()
+            return ret
+
+
 def trace_source(kernel):
     """
     Add the kernel code to be traceable within stack traces for clients
@@ -264,7 +313,7 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
             return selected.lower() == "sanitizer"
         return isinstance(selected, Sanitizer)
 
-    def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
+    def decorator(kernel) -> TritonTrace | NKITrace | NKIBeta2Trace | KernelInterface:
         if cfg.cli_active and isinstance(kernel, TraceInterface):
             raise RuntimeError(
                 "@triton_viz.trace() decorator cannot be used together with "
@@ -291,6 +340,8 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         # NKI allow Python function（ NKIInterpretedFunction）
         if backend == "nki":
             return NKITrace(kernel, client)
+        if backend == "nki_beta2":
+            return NKIBeta2Trace(kernel, client)
         if isinstance(
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
         ):
