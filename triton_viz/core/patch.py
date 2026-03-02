@@ -176,10 +176,11 @@ class PatchOp:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
-                ret = tl.core.tensor(
-                    self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
-                    args[0].dtype,
+                symbolic_ret = self.callbacks.op_overrider(
+                    args[0].handle, *args[1:], **kwargs
                 )
+                ret_dtype = getattr(symbolic_ret, "dtype", None) or args[0].dtype
+                ret = tl.core.tensor(symbolic_ret, ret_dtype)
                 fn = cast(Any, ret.handle)
                 if fn is not None:
                     fn.concrete_fn = self.op
