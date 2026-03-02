@@ -80,7 +80,9 @@ def test_reduce_expr_eval(op: str, data):
     import numpy as np
     import builtins
 
-    input_arr = SymbolicExpr.create("const", np.array(data), tl.int32)
+    input_arr = SymbolicExpr.create(
+        "const", np.array(data), tl.block_type(tl.int32, [len(data)])
+    )
     reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
 
     result, _ = reduce_expr.eval(simplify_constraints=False)
