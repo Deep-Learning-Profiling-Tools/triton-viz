@@ -4,9 +4,11 @@ Test script to verify NDArray slicing functionality after fixes
 """
 import numpy as np
 import pytest
+from triton_viz.core.patch import _LangPatchScope
 
 try:
-    from triton_viz.core.nki import Builder, NDArray
+    from triton_viz.core.nki import Builder, NDArray, nki_patch_lang, nki_unpatch_lang
+    import neuronxcc.nki.language as nl
 except ModuleNotFoundError:
     pytest.skip(
         "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
@@ -14,6 +16,16 @@ except ModuleNotFoundError:
     )
 
 pytestmark = pytest.mark.nki  # only run at "pytest -m nki"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _patch_nki_language():
+    scope = _LangPatchScope()
+    nki_patch_lang(scope)
+    try:
+        yield
+    finally:
+        nki_unpatch_lang(scope)
 
 
 def test_ndarray_creation():
@@ -112,6 +124,13 @@ def test_arithmetic():
     print(f"Slice of result [:, 0]: {slice_result}")
     print(f"Value: {slice_result.data}")
     print()
+
+
+def test_ndarray_mgrid_indexing_matches_numpy():
+    expected = np.mgrid[0:2, 0:3]
+    result = nl.mgrid[0:2, 0:3]
+
+    assert np.array_equal(result.data, expected)
 
 
 def test_load_transpose2d_matches_masked_load_then_transpose():

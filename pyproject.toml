@@ -31,6 +31,7 @@ dependencies = [
   "flask",
   "flask_cloudflared",
   "tqdm",
+  "ml_dtypes",
 ]
 
 [tool.setuptools.packages.find]
