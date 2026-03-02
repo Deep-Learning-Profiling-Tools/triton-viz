@@ -227,3 +227,9 @@ class ClientManager:
         with self._lock_context():
             for client in self.clients.values():
                 client.grid_idx_callback(grid_idx)
+
+    def reset_for_retry(self) -> None:
+        self.launch = Launch()
+        for client in self.clients.values():
+            if hasattr(client, "reset_for_retry"):
+                client.reset_for_retry()

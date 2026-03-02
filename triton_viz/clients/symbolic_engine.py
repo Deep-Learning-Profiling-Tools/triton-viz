@@ -73,6 +73,18 @@ ConstraintExpr: TypeAlias = ExprRef | bool | int | float
 ConstraintConjunction: TypeAlias = BoolRef | None
 
 
+class NeedRealTensorsError(Exception):
+    """Raised when fake tensors cannot satisfy a concrete memory access."""
+
+
+_using_fake_tensors: bool = False
+
+
+def set_using_fake_tensors(value: bool) -> None:
+    global _using_fake_tensors
+    _using_fake_tensors = value
+
+
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
     if isinstance(expr, BoolRef):
         return expr
@@ -755,6 +767,10 @@ class IndirectSymbolicExprBase(SymbolicExpr):
         return ptr, _and_constraints(constraints_ptr, mask_constraint)
 
     def concretize(self) -> Any:
+        if _using_fake_tensors:
+            raise NeedRealTensorsError(
+                "Cannot concretize load/store with fake tensors; need real tensor data"
+            )
         ptr_concrete = self.ptr.concretize()
         if self.mask is None:
             mask_concrete = TensorHandle(

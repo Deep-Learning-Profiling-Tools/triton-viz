@@ -450,6 +450,7 @@ class FakeTensor:
     _stride: tuple[int, ...] = ()
     _is_contiguous: bool = True
     _element_size: int = 1
+    device: str = "fake_tensor"
 
     def data_ptr(self) -> int:
         return self._data_ptr
@@ -506,6 +507,8 @@ def _init_args_hst(args_dev, kwargs):
 
 
 def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
+    from ..clients.symbolic_engine import NeedRealTensorsError, set_using_fake_tensors
+
     assert backend is not None
     if kwargs.pop("warmup", False):
         return
@@ -526,92 +529,114 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     global _current_client_manager
     _current_client_manager = client_manager
     kwargs.pop("jit_fn")
-    if cfg.virtual_memory:
-        args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs)
-    else:
-        args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
 
-    # Prepare call arguments
-    args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
-    call_args = {}
-    for name, arg in args.items():
-        if name in self.constexprs:
-            call_args[name] = arg
-            ret = arg
+    def _execute(use_fake):
+        set_using_fake_tensors(use_fake)
+        if use_fake:
+            args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs)
         else:
-            ret = _implicit_cvt(arg)
-        client_manager.arg_callback(name, arg, ret)
-        call_args[name] = ret
-    call_args.pop("self", None)
-    # Iterate through grid
-    grid = self.grid(call_args) if callable(self.grid) else self.grid
-    assert len(grid) <= 3
-    grid = grid + (1,) * (3 - len(grid))
+            args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
 
-    builder.set_grid_dim(*grid)
-    client_manager.grid_callback(grid)
-    total_blocks = grid[0] * grid[1] * grid[2]
-    max_workers = min(cfg.num_sms, total_blocks)
+        # Prepare call arguments
+        args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
+        call_args = {}
+        for name, arg in args.items():
+            if name in self.constexprs:
+                call_args[name] = arg
+                ret = arg
+            else:
+                ret = _implicit_cvt(arg)
+            client_manager.arg_callback(name, arg, ret)
+            call_args[name] = ret
+        call_args.pop("self", None)
+        # Iterate through grid
+        grid = self.grid(call_args) if callable(self.grid) else self.grid
+        assert len(grid) <= 3
+        grid = grid + (1,) * (3 - len(grid))
 
-    def run_grid_loops(grid):
-        tasks: SimpleQueue = SimpleQueue()
-        for x in range(grid[0]):
-            for y in range(grid[1]):
-                for z in range(grid[2]):
-                    tasks.put((x, y, z))
+        builder.set_grid_dim(*grid)
+        client_manager.grid_callback(grid)
+        total_blocks = grid[0] * grid[1] * grid[2]
+        max_workers = min(cfg.num_sms, total_blocks)
 
-        stop_event = threading.Event()
+        def run_grid_loops(grid):
+            tasks: SimpleQueue = SimpleQueue()
+            for x in range(grid[0]):
+                for y in range(grid[1]):
+                    for z in range(grid[2]):
+                        tasks.put((x, y, z))
 
-        def _worker():
-            while not stop_event.is_set():
-                try:
-                    x, y, z = tasks.get_nowait()
-                except Empty:
-                    return
-                interpreter_builder.set_grid_idx(x, y, z)
-                client_manager.grid_idx_callback((x, y, z))
-                if not client_manager.pre_run_callback(self.fn):
-                    continue
-                self.fn(**call_args)
-                if not client_manager.post_run_callback(self.fn):
-                    stop_event.set()
-                    return
+            stop_event = threading.Event()
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_worker) for _ in range(max_workers)]
-            for fut in futures:
-                fut.result()
-
-    def run_grid_loops_1thread(grid):
-        for x in range(grid[0]):
-            for y in range(grid[1]):
-                for z in range(grid[2]):
+            def _worker():
+                while not stop_event.is_set():
+                    try:
+                        x, y, z = tasks.get_nowait()
+                    except Empty:
+                        return
                     interpreter_builder.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
                     if not client_manager.pre_run_callback(self.fn):
                         continue
                     self.fn(**call_args)
                     if not client_manager.post_run_callback(self.fn):
+                        stop_event.set()
                         return
 
-    if cfg.enable_timing:
-        import time
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_worker) for _ in range(max_workers)]
+                for fut in futures:
+                    fut.result()
 
-        start_time = time.time()
+        def run_grid_loops_1thread(grid):
+            for x in range(grid[0]):
+                for y in range(grid[1]):
+                    for z in range(grid[2]):
+                        interpreter_builder.set_grid_idx(x, y, z)
+                        client_manager.grid_idx_callback((x, y, z))
+                        if not client_manager.pre_run_callback(self.fn):
+                            continue
+                        self.fn(**call_args)
+                        if not client_manager.post_run_callback(self.fn):
+                            return
 
-    if max_workers == 1:
-        run_grid_loops_1thread(grid)
-    else:
-        run_grid_loops(grid)
+        if cfg.enable_timing:
+            start_time = time.time()
 
-    if cfg.enable_timing:
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        name = self.fn.__name__
-        print(f"Triton-Viz: execution time for {name}: {elapsed_time * 1000:.3f} ms")
-    # Copy arguments back to propagate side-effects
-    if not cfg.virtual_memory:
-        self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
+        if max_workers == 1:
+            run_grid_loops_1thread(grid)
+        else:
+            run_grid_loops(grid)
+
+        if cfg.enable_timing:
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            name = self.fn.__name__
+            print(
+                f"Triton-Viz: execution time for {name}: {elapsed_time * 1000:.3f} ms"
+            )
+        # Copy arguments back to propagate side-effects
+        if not use_fake:
+            self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
+
+    try:
+        if cfg.virtual_memory == "auto":
+            try:
+                _execute(use_fake=True)
+            except NeedRealTensorsError:
+                if cfg.verbose:
+                    print(
+                        "[Triton-Viz] Fake tensor attempt hit indirect load; "
+                        "retrying with real tensors."
+                    )
+                client_manager.reset_for_retry()
+                _execute(use_fake=False)
+        elif cfg.virtual_memory == "force_fake":
+            _execute(use_fake=True)
+        else:
+            _execute(use_fake=False)
+    finally:
+        set_using_fake_tensors(False)
 
 
 def _jit_function_call(self, *args, backend=None, **kwargs):
