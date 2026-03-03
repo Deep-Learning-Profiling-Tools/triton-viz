@@ -239,7 +239,7 @@ def unpatch_op(namespace: Any, attr: str, backend: str):
     setattr(namespace, attr, original_op)
 
 
-class _LoopIter:
+class LoopIter:
     def __init__(self, hooks, iterable, lineno, range_type):
         self._it = iter(iterable)
         self._lineno = lineno

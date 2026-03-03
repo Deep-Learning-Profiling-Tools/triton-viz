@@ -12,7 +12,7 @@ from .patch import (
     patch_for_loop,
     unpatch_for_loop,
     patch_calls,
-    _LoopIter,
+    LoopIter,
 )
 from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -292,7 +292,7 @@ class ClientManager:
         iter_kwargs,
         lineno: int,
         range_type: str,
-    ) -> "_LoopIter":
+    ) -> "LoopIter":
         args = tuple(iter_args) if iter_args is not None else ()
         kwargs = dict(iter_kwargs) if iter_kwargs is not None else {}
 
@@ -306,4 +306,4 @@ class ClientManager:
                 iterable = iterable_callable(*args, **kwargs)
         else:
             iterable = iterable_callable(*args, **kwargs)
-        return _LoopIter(self, iterable, lineno, range_type)
+        return LoopIter(self, iterable, lineno, range_type)

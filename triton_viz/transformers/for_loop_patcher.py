@@ -8,7 +8,7 @@ def _visit_For(self, node: ast.For):  # type: ignore[override]
     ==>
     for i in _triton_viz_loop_patcher.loop_iter_wrapper(iter_callable, args, kwargs, lineno, range_type):
         ...
-    where _triton_viz_loop_patcher.loop_iter_wrapper returns a _LoopIter object.
+    where _triton_viz_loop_patcher.loop_iter_wrapper returns a LoopIter object.
     """
     self.generic_visit(node)
 
