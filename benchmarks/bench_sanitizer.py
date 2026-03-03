@@ -63,6 +63,9 @@ block_ptr_sanitizer = SymbolicSanitizer(abort_on_error=False)
 jsd_sanitizer = SymbolicSanitizer(abort_on_error=False)
 element_mul_sanitizer = SymbolicSanitizer(abort_on_error=False)
 flaggems_sanitizer = SymbolicSanitizer(abort_on_error=False)
+swiglu_fwd_sanitizer = SymbolicSanitizer(abort_on_error=False)
+swiglu_bwd_sanitizer = SymbolicSanitizer(abort_on_error=False)
+cross_entropy_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 # ---------------------------------------------------------------------------
 # Kernels
@@ -172,6 +175,163 @@ def block_pointer_loop_advance_kernel(ptr, N: tl.constexpr, BLOCK: tl.constexpr)
     for _ in range(N // BLOCK):
         tl.load(block_ptr, boundary_check=(0,))
         block_ptr = tl.advance(block_ptr, (BLOCK,))
+
+
+# ---------------------------------------------------------------------------
+# SwiGLU kernels (from Liger-Kernel ops/swiglu.py)
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def silu(x):
+    return x * tl.sigmoid(x)
+
+
+@triton_viz.trace(client=swiglu_fwd_sanitizer)
+@triton.jit
+def swiglu_forward_kernel(
+    a_ptr, b_ptr, c_ptr, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
+):
+    """SwiGLU forward: c = silu(a) * b, one program per row."""
+    program_id = tl.program_id(0).to(tl.int64)
+
+    a_ptr += program_id * stride
+    b_ptr += program_id * stride
+    c_ptr += program_id * stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
+
+    a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
+    b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
+    c_row = silu(a_row) * b_row
+    tl.store(c_ptr + col_offsets, c_row, mask=mask)
+
+
+@triton_viz.trace(client=swiglu_bwd_sanitizer)
+@triton.jit
+def swiglu_backward_kernel(
+    dc_ptr, a_ptr, b_ptr, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
+):
+    """SwiGLU backward: compute da and db in-place, one program per row."""
+    program_id = tl.program_id(0).to(tl.int64)
+
+    dc_ptr += program_id * stride
+    a_ptr += program_id * stride
+    b_ptr += program_id * stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
+
+    dc_row = tl.load(dc_ptr + col_offsets, mask=mask, other=0)
+    a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
+    b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
+
+    # Recomputation to save memory
+    sig_a = tl.sigmoid(a_row)
+    silu_a = a_row * sig_a
+    db_row = dc_row * silu_a
+    da_row = dc_row * (silu_a * (1 - sig_a) + sig_a) * b_row
+
+    tl.store(a_ptr + col_offsets, da_row, mask=mask)
+    tl.store(b_ptr + col_offsets, db_row, mask=mask)
+
+
+# ---------------------------------------------------------------------------
+# Cross Entropy kernel (from Liger-Kernel ops/cross_entropy.py)
+# ---------------------------------------------------------------------------
+
+
+@triton_viz.trace(client=cross_entropy_sanitizer)
+@triton.jit
+def liger_cross_entropy_kernel(
+    X_ptr,
+    X_stride,
+    Y_ptr,
+    Y_stride,
+    loss_ptr,
+    loss_stride,
+    n_cols,
+    n_non_ignore,
+    ignore_index,
+    label_smoothing: tl.constexpr,
+    reduction: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Fused cross entropy: computes loss and stores gradient in-place in X_ptr.
+    Uses online softmax (Algorithm 3, https://arxiv.org/pdf/1805.02867).
+    One program per row (batch * seq_len).
+    """
+    program_id = tl.program_id(0).to(tl.int64)
+
+    # 1. Load target; skip if ignore_index
+    Y_ptr += program_id * Y_stride
+    y = tl.load(Y_ptr)
+
+    X_ptr += program_id * X_stride
+
+    if y == ignore_index:
+        for i in range(0, n_cols, BLOCK_SIZE):
+            X_offsets = i + tl.arange(0, BLOCK_SIZE)
+            tl.store(X_ptr + X_offsets, 0.0, mask=X_offsets < n_cols)
+        return
+
+    loss_ptr += program_id * loss_stride
+
+    # 2. Online softmax first pass: find max + sum
+    m = float("-inf")
+    d = 0.0
+    ori_X_y = tl.load(X_ptr + y)
+
+    scaled_x_sum = 0.0
+    eps = label_smoothing / n_cols
+
+    for i in range(0, n_cols, BLOCK_SIZE):
+        X_offsets = i + tl.arange(0, BLOCK_SIZE)
+        X_block = tl.load(
+            X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")
+        )
+        block_max = tl.max(X_block)
+        if label_smoothing > 0:
+            scaled_x_sum += tl.sum(tl.where(X_offsets < n_cols, -eps * X_block, 0.0))
+        m_new = tl.maximum(m, block_max)
+        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(X_block - m_new))
+        m = m_new
+
+    # 3. Second pass: compute gradients (softmax - label) in-place
+    for i in range(0, n_cols, BLOCK_SIZE):
+        X_offsets = i + tl.arange(0, BLOCK_SIZE)
+        X_block = tl.load(
+            X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")
+        )
+        if reduction == "mean":
+            X_block = (tl.exp(X_block - m) / d - eps) / (n_non_ignore)
+        else:
+            X_block = tl.exp(X_block - m) / d - eps
+        tl.store(X_ptr + X_offsets, X_block, mask=X_offsets < n_cols)
+
+    tl.debug_barrier()
+
+    # 4. Calculate loss
+    loss = -(ori_X_y - m - tl.log(d))
+
+    if label_smoothing > 0:
+        smooth_loss = scaled_x_sum + label_smoothing * (m + tl.log(d))
+        loss = loss * (1 - label_smoothing) + smooth_loss
+
+    if reduction == "mean":
+        loss = loss / n_non_ignore
+
+    # 5. Special handling for the y-th element gradient
+    X_y = tl.load(X_ptr + y)
+    if reduction == "mean":
+        X_y += -(1 - label_smoothing) / (n_non_ignore)
+    else:
+        X_y += -(1 - label_smoothing)
+
+    tl.store(loss_ptr, loss)
+    tl.store(X_ptr + y, X_y)
 
 
 @triton_viz.trace(client=jsd_sanitizer)
@@ -896,6 +1056,138 @@ BENCHMARKS["flaggems_layernorm"] = {
     "setup": _flaggems_layernorm_setup_all,
     "run": _flaggems_layernorm_run_all,
     "sanitizer": flaggems_sanitizer,
+}
+
+# ---------------------------------------------------------------------------
+# SwiGLU benchmarks (from Liger-Kernel test_swiglu)
+# ---------------------------------------------------------------------------
+
+_SWIGLU_N_ROWS = 16  # bsz * seq_len
+_SWIGLU_N_COLS = 64  # intermediate_size
+_SWIGLU_BLOCK_SIZE = triton.next_power_of_2(_SWIGLU_N_COLS)
+
+BENCHMARKS["swiglu_forward"] = {
+    "setup": lambda: {
+        "a": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
+        "b": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
+        "c": torch.empty(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
+    },
+    "run": lambda d: swiglu_forward_kernel[(_SWIGLU_N_ROWS,)](
+        d["a"],
+        d["b"],
+        d["c"],
+        d["c"].stride(0),
+        n_cols=_SWIGLU_N_COLS,
+        BLOCK_SIZE=_SWIGLU_BLOCK_SIZE,
+    ),
+    "sanitizer": swiglu_fwd_sanitizer,
+}
+
+BENCHMARKS["swiglu_backward"] = {
+    "setup": lambda: {
+        "dc": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
+        "a": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
+        "b": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
+    },
+    "run": lambda d: swiglu_backward_kernel[(_SWIGLU_N_ROWS,)](
+        d["dc"],
+        d["a"],
+        d["b"],
+        d["dc"].stride(0),
+        n_cols=_SWIGLU_N_COLS,
+        BLOCK_SIZE=_SWIGLU_BLOCK_SIZE,
+    ),
+    "sanitizer": swiglu_bwd_sanitizer,
+}
+
+# ---------------------------------------------------------------------------
+# Cross Entropy benchmark (from Liger-Kernel test_cross_entropy)
+# ---------------------------------------------------------------------------
+
+_CE_BT = 8  # B * T
+_CE_V = 128  # vocab size
+_CE_BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(_CE_V))
+
+BENCHMARKS["cross_entropy"] = {
+    "setup": lambda: {
+        "X": torch.randn(_CE_BT, _CE_V, dtype=torch.float32).contiguous(),
+        "Y": torch.randint(0, _CE_V, (_CE_BT,), dtype=torch.long),
+        "loss": torch.zeros(_CE_BT, dtype=torch.float32),
+    },
+    "run": lambda d: liger_cross_entropy_kernel[(_CE_BT,)](
+        X_ptr=d["X"],
+        X_stride=d["X"].stride(0),
+        Y_ptr=d["Y"],
+        Y_stride=d["Y"].stride(0),
+        loss_ptr=d["loss"],
+        loss_stride=d["loss"].stride(0),
+        n_cols=_CE_V,
+        n_non_ignore=_CE_BT,
+        ignore_index=-100,
+        label_smoothing=0.0,
+        reduction="mean",
+        BLOCK_SIZE=_CE_BLOCK_SIZE,
+    ),
+    "sanitizer": cross_entropy_sanitizer,
+}
+
+# ---------------------------------------------------------------------------
+# Fused Linear JSD benchmark (from Liger-Kernel test_fused_linear_jsd)
+# Reuses existing jsd_kernel + element_mul_kernel with a simple config
+# ---------------------------------------------------------------------------
+
+_FLJSD_BT = 4  # B * T
+_FLJSD_V = 1600  # vocab size
+_FLJSD_H_STUDENT = 256  # H // 2
+_FLJSD_BLOCK_SIZE_JSD = min(MAX_FUSED_SIZE, triton.next_power_of_2(_FLJSD_V))
+_FLJSD_BLOCK_SIZE_MUL = min(MAX_FUSED_SIZE, triton.next_power_of_2(_FLJSD_H_STUDENT))
+
+
+def _fused_linear_jsd_run(d):
+    jsd_kernel[(_FLJSD_BT,)](
+        X_ptr=d["student_log_probs"],
+        X_stride=d["student_log_probs"].stride(0),
+        Y_ptr=d["teacher_log_probs"],
+        Y_stride=d["teacher_log_probs"].stride(0),
+        loss_ptr=d["loss"],
+        loss_stride=d["loss"].stride(0),
+        dX_ptr=d["dX"],
+        dX_stride=d["dX"].stride(0),
+        label_ptr=d["labels"],
+        beta=0.5,
+        n_non_ignore=_FLJSD_BT,
+        ignore_index=-100,
+        n_cols=_FLJSD_V,
+        BLOCK_SIZE=_FLJSD_BLOCK_SIZE_JSD,
+        HAS_LABEL=True,
+    )
+    element_mul_kernel[(_FLJSD_BT,)](
+        d["grad_input"],
+        d["grad_input"].stride(0),
+        d["grad_output"],
+        _FLJSD_H_STUDENT,
+        BLOCK_SIZE=_FLJSD_BLOCK_SIZE_MUL,
+    )
+
+
+BENCHMARKS["fused_linear_jsd"] = {
+    "setup": lambda: {
+        "student_log_probs": torch.log_softmax(
+            torch.randn(_FLJSD_BT, _FLJSD_V, dtype=torch.float32), dim=-1
+        ).contiguous(),
+        "teacher_log_probs": torch.log_softmax(
+            torch.randn(_FLJSD_BT, _FLJSD_V, dtype=torch.float32), dim=-1
+        ).contiguous(),
+        "loss": torch.zeros(_FLJSD_BT, _FLJSD_V, dtype=torch.float32),
+        "dX": torch.empty(_FLJSD_BT, _FLJSD_V, dtype=torch.float32),
+        "labels": torch.randint(0, _FLJSD_V, (_FLJSD_BT,), dtype=torch.long),
+        "grad_input": torch.randn(
+            _FLJSD_BT, _FLJSD_H_STUDENT, dtype=torch.float32
+        ).contiguous(),
+        "grad_output": torch.tensor(0.5, dtype=torch.float32),
+    },
+    "run": _fused_linear_jsd_run,
+    "sanitizer": [jsd_sanitizer, element_mul_sanitizer],
 }
 
 
