@@ -9,6 +9,22 @@ from triton_viz.clients import Profiler
 from triton_viz.core.config import config as cfg
 
 
+@pytest.fixture(autouse=True)
+def _isolate_profiler_cfg():
+    """Save and restore profiler-related config values around every test."""
+    saved = (
+        cfg.profiler_enable_block_sampling,
+        cfg.profiler_enable_load_store_skipping,
+        cfg.profiler_disable_buffer_load_check,
+    )
+    yield
+    (
+        cfg.profiler_enable_block_sampling,
+        cfg.profiler_enable_load_store_skipping,
+        cfg.profiler_disable_buffer_load_check,
+    ) = saved
+
+
 # ======== Case 2: Check if for loop can be unrolled ========
 @triton.jit
 def for_loop_test_kernel(
