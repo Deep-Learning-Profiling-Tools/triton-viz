@@ -467,6 +467,8 @@ class SymbolicExpr:
     @classmethod
     def from_value(cls, var: Any) -> SymbolicExpr:
         """Create a SymbolicExpr from a Python value."""
+        if isinstance(var, tl.constexpr):  # unwrap constexpr to raw value
+            var = var.value
         if isinstance(var, tl.core.tensor):  # if a triton tensor
             var = var.handle  # get its handle
 
@@ -817,6 +819,7 @@ class UnarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Unsupported unary op: {op}")
         super().__init__(op)
         self.add_child("arg", arg)
+        self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         val, constraints = self.arg._to_z3()
@@ -1432,7 +1435,12 @@ class CastSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
-        self.dtype = self.dst_type.to_py()
+        dst = self.dst_type.to_py()
+        src_dtype = self.src.dtype
+        if isinstance(src_dtype, tl.block_type) and not isinstance(dst, tl.block_type):
+            self.dtype = tl.block_type(dst, src_dtype.shape)
+        else:
+            self.dtype = dst
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.src._to_z3()
@@ -1503,9 +1511,18 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
         dt = ptr.dtype
         if dt is None:
             return None
-        if isinstance(dt, tl.pointer_type):
-            return dt.element_ty
-        return dt
+        scalar_ty = dt.element_ty if isinstance(dt, tl.pointer_type) else dt
+        # Walk the ptr chain to find the MakeBlockPtrSymbolicExpr for block shape
+        block_shape = None
+        cur: SymbolicExpr | None = ptr
+        while cur is not None:
+            if isinstance(cur, MakeBlockPtrSymbolicExpr):
+                block_shape = cur.block_shape_values
+                break
+            cur = getattr(cur, "ptr", None)
+        if block_shape is not None:
+            return tl.block_type(scalar_ty, block_shape)
+        return scalar_ty
 
     def _resolve_block_ptr_components(
         self, ptr: SymbolicExpr
