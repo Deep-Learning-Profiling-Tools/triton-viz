@@ -1059,12 +1059,14 @@ BENCHMARKS["flaggems_layernorm"] = {
 }
 
 # ---------------------------------------------------------------------------
-# SwiGLU benchmarks: 8 parameter combinations (grouped)
-# Matches test_correctness_llamamlp parameter space
+# SwiGLU benchmarks: 8 parameter combinations (grouped, template pattern)
+# Matches test_correctness_llamamlp parameter space.
+# Tensors pre-allocated once; backward tensors cloned per-run (kernel writes
+# gradients in-place into a_ptr/b_ptr).
 # ---------------------------------------------------------------------------
 
 _SWIGLU_SHAPES = [
-    # (bsz, seq_len, hidden_size, intermediate_size) → (N_ROWS=bsz*seq_len, N_COLS=intermediate_size)
+    # (bsz, seq_len, hidden_size, intermediate_size)
     (2, 2048, 4096, 11008),
     (2, 2048, 2048, 4096),
     (9, 41, 341, 4231),
@@ -1073,63 +1075,54 @@ _SWIGLU_SHAPES = [
 _SWIGLU_DTYPES = [torch.float32, torch.bfloat16]
 
 
-def _make_swiglu_setup(bsz, seq_len, hidden_size, intermediate_size, dtype):
-    def setup():
+def _swiglu_setup_all():
+    templates = []
+    for bsz, seq_len, _hidden_size, intermediate_size in _SWIGLU_SHAPES:
         N_ROWS = bsz * seq_len
         N_COLS = intermediate_size
         BLOCK_SIZE = triton.next_power_of_2(N_COLS)
-        return {
-            "N_ROWS": N_ROWS,
-            "N_COLS": N_COLS,
-            "BLOCK_SIZE": BLOCK_SIZE,
-            "a": torch.randn(N_ROWS, N_COLS, dtype=dtype),
-            "b": torch.randn(N_ROWS, N_COLS, dtype=dtype),
-            "c": torch.empty(N_ROWS, N_COLS, dtype=dtype),
-            "dc": torch.randn(N_ROWS, N_COLS, dtype=dtype),
-            "a_bwd": torch.randn(N_ROWS, N_COLS, dtype=dtype),
-            "b_bwd": torch.randn(N_ROWS, N_COLS, dtype=dtype),
-        }
-
-    return setup
-
-
-def _swiglu_run(d):
-    N_ROWS, N_COLS, BLOCK_SIZE = d["N_ROWS"], d["N_COLS"], d["BLOCK_SIZE"]
-    swiglu_forward_kernel[(N_ROWS,)](
-        d["a"],
-        d["b"],
-        d["c"],
-        d["c"].stride(0),
-        n_cols=N_COLS,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
-    swiglu_backward_kernel[(N_ROWS,)](
-        d["dc"],
-        d["a_bwd"],
-        d["b_bwd"],
-        d["dc"].stride(0),
-        n_cols=N_COLS,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
+        for dtype in _SWIGLU_DTYPES:
+            templates.append(
+                {
+                    "N_ROWS": N_ROWS,
+                    "N_COLS": N_COLS,
+                    "BLOCK_SIZE": BLOCK_SIZE,
+                    # Forward: a, b are read-only; c is output
+                    "a": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                    "b": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                    "c": torch.empty(N_ROWS, N_COLS, dtype=dtype),
+                    # Backward templates: dc is read-only; a_bwd/b_bwd are
+                    # overwritten in-place so we clone them per-run
+                    "dc": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                    "a_bwd_template": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                    "b_bwd_template": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                }
+            )
+    return templates
 
 
-_SWIGLU_CONFIGS = [
-    (bsz, seq_len, hidden_size, intermediate_size, dtype)
-    for bsz, seq_len, hidden_size, intermediate_size in _SWIGLU_SHAPES
-    for dtype in _SWIGLU_DTYPES
-]
-
-
-def _swiglu_setup_all():
-    return [
-        _make_swiglu_setup(bsz, seq_len, hidden_size, intermediate_size, dtype)()
-        for bsz, seq_len, hidden_size, intermediate_size, dtype in _SWIGLU_CONFIGS
-    ]
-
-
-def _swiglu_run_all(configs):
-    for d in configs:
-        _swiglu_run(d)
+def _swiglu_run_all(templates):
+    for t in templates:
+        N_ROWS, N_COLS, BLOCK_SIZE = t["N_ROWS"], t["N_COLS"], t["BLOCK_SIZE"]
+        swiglu_forward_kernel[(N_ROWS,)](
+            t["a"],
+            t["b"],
+            t["c"],
+            t["c"].stride(0),
+            n_cols=N_COLS,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+        a_bwd = t["a_bwd_template"].clone()
+        b_bwd = t["b_bwd_template"].clone()
+        swiglu_backward_kernel[(N_ROWS,)](
+            t["dc"],
+            a_bwd,
+            b_bwd,
+            t["dc"].stride(0),
+            n_cols=N_COLS,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+        del a_bwd, b_bwd
 
 
 BENCHMARKS["swiglu"] = {
@@ -1139,83 +1132,63 @@ BENCHMARKS["swiglu"] = {
 }
 
 # ---------------------------------------------------------------------------
-# Cross Entropy benchmarks: 48 parameter combinations (grouped)
-# Matches test_correctness parameter space
+# Cross Entropy benchmarks: 12 parameter combinations (grouped, template pattern)
+# Matches test_correctness shape/reduction/dtype space (scalar dropped — does
+# not affect symbolic analysis).  Tensors are pre-allocated once in setup;
+# run() clones X each time (kernel writes gradients in-place) which is ~10×
+# faster than re-allocating via torch.randn.
 # ---------------------------------------------------------------------------
 
 _CE_SHAPES = [
-    # (B, T, V) → (BT=B*T, V)
-    (2, 4096, 32000),
+    # (B, T, V) → (BT=B*T, V)  — deduplicated
     (2, 4096, 32000),
     (1, 4096, 128256),
     (3, 423, 32000),
 ]
 _CE_REDUCTIONS = ["sum", "mean"]
-_CE_SCALAR_DTYPES = [
-    (0.1, torch.bfloat16),
-    (1.0, torch.bfloat16),
-    (10.0, torch.bfloat16),
-    (0.1, torch.float32),
-    (1.0, torch.float32),
-    (10.0, torch.float32),
-]
-
-
-def _make_ce_setup(B, T, V, reduction, scalar, dtype):
-    def setup():
-        BT = B * T
-        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
-        X = (torch.randn(BT, V, dtype=dtype) * scalar).contiguous()
-        Y = torch.randint(0, V, (BT,), dtype=torch.long)
-        loss = torch.zeros(BT, dtype=torch.float32)
-        return {
-            "BT": BT,
-            "V": V,
-            "BLOCK_SIZE": BLOCK_SIZE,
-            "reduction": reduction,
-            "X": X,
-            "Y": Y,
-            "loss": loss,
-        }
-
-    return setup
-
-
-def _ce_run(d):
-    liger_cross_entropy_kernel[(d["BT"],)](
-        X_ptr=d["X"],
-        X_stride=d["X"].stride(0),
-        Y_ptr=d["Y"],
-        Y_stride=d["Y"].stride(0),
-        loss_ptr=d["loss"],
-        loss_stride=d["loss"].stride(0),
-        n_cols=d["V"],
-        n_non_ignore=d["BT"],
-        ignore_index=-100,
-        label_smoothing=0.0,
-        reduction=d["reduction"],
-        BLOCK_SIZE=d["BLOCK_SIZE"],
-    )
-
-
-_CE_CONFIGS = [
-    (B, T, V, reduction, scalar, dtype)
-    for B, T, V in _CE_SHAPES
-    for reduction in _CE_REDUCTIONS
-    for scalar, dtype in _CE_SCALAR_DTYPES
-]
+_CE_DTYPES = [torch.bfloat16, torch.float32]
 
 
 def _ce_setup_all():
-    return [
-        _make_ce_setup(B, T, V, reduction, scalar, dtype)()
-        for B, T, V, reduction, scalar, dtype in _CE_CONFIGS
-    ]
+    # Pre-allocate one template per unique (BT, V, dtype).
+    # Templates are shared across reductions; X is cloned in run().
+    templates = []
+    for B, T, V in _CE_SHAPES:
+        BT = B * T
+        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+        for dtype in _CE_DTYPES:
+            templates.append(
+                {
+                    "BT": BT,
+                    "V": V,
+                    "BLOCK_SIZE": BLOCK_SIZE,
+                    "X_template": torch.randn(BT, V, dtype=dtype),
+                    "Y": torch.randint(0, V, (BT,), dtype=torch.long),
+                    "loss": torch.zeros(BT, dtype=torch.float32),
+                }
+            )
+    return templates
 
 
-def _ce_run_all(configs):
-    for d in configs:
-        _ce_run(d)
+def _ce_run_all(templates):
+    for tmpl in templates:
+        for reduction in _CE_REDUCTIONS:
+            X = tmpl["X_template"].clone()
+            liger_cross_entropy_kernel[(tmpl["BT"],)](
+                X_ptr=X,
+                X_stride=X.stride(0),
+                Y_ptr=tmpl["Y"],
+                Y_stride=tmpl["Y"].stride(0),
+                loss_ptr=tmpl["loss"],
+                loss_stride=tmpl["loss"].stride(0),
+                n_cols=tmpl["V"],
+                n_non_ignore=tmpl["BT"],
+                ignore_index=-100,
+                label_smoothing=0.0,
+                reduction=reduction,
+                BLOCK_SIZE=tmpl["BLOCK_SIZE"],
+            )
+            del X
 
 
 BENCHMARKS["cross_entropy"] = {
@@ -1225,9 +1198,11 @@ BENCHMARKS["cross_entropy"] = {
 }
 
 # ---------------------------------------------------------------------------
-# Fused Linear JSD benchmarks: 12 parameter combinations (grouped)
-# Matches test_correctness parameter space
-# Reuses existing jsd_kernel + element_mul_kernel
+# Fused Linear JSD benchmarks: 12 parameter combinations (grouped, template pattern)
+# Matches test_correctness parameter space.
+# Reuses existing jsd_kernel + element_mul_kernel.
+# Tensors pre-allocated once; student_log_probs/dX/grad_input cloned per-run
+# (jsd_kernel writes dX in-place; element_mul overwrites grad_input).
 # ---------------------------------------------------------------------------
 
 _FLJSD_SHAPES = [
@@ -1236,103 +1211,85 @@ _FLJSD_SHAPES = [
     (2, 4, 1024, 1600),
     (4, 423, 167, 1423),
 ]
-_FLJSD_SCALAR_DTYPES = [
-    (1.0, torch.bfloat16),
-    (1.0, torch.float32),
-]
+_FLJSD_DTYPES = [torch.bfloat16, torch.float32]
 _FLJSD_PARAMS = [
     (1.0, 0.5),  # (temperature, beta)
     (2.0, 0.1),
 ]
 
 
-def _make_fljsd_setup(B, T, H, V, scalar, dtype, beta):
-    def setup():
+def _fljsd_setup_all():
+    templates = []
+    for B, T, H, V in _FLJSD_SHAPES:
         BT = B * T
         BLOCK_SIZE_JSD = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
         H_student = H // 2
         BLOCK_SIZE_MUL = min(MAX_FUSED_SIZE, triton.next_power_of_2(H_student))
+        for dtype in _FLJSD_DTYPES:
+            student_log_probs = torch.log_softmax(
+                torch.randn(BT, V, dtype=dtype), dim=-1
+            ).contiguous()
+            teacher_log_probs = torch.log_softmax(
+                torch.randn(BT, V, dtype=dtype), dim=-1
+            ).contiguous()
+            labels = torch.randint(0, V, (BT,), dtype=torch.long)
+            labels[: max(1, BT // 2)] = -100
+            n_non_ignore = int((labels != -100).sum().item())
 
-        student_log_probs = torch.log_softmax(
-            torch.randn(BT, V, dtype=dtype) * scalar, dim=-1
-        ).contiguous()
-        teacher_log_probs = torch.log_softmax(
-            torch.randn(BT, V, dtype=dtype) * scalar, dim=-1
-        ).contiguous()
-        loss = torch.zeros(BT, V, dtype=torch.float32)
-        dX = torch.empty(BT, V, dtype=dtype)
-        labels = torch.randint(0, V, (BT,), dtype=torch.long)
-        labels[: max(1, BT // 2)] = -100
-        n_non_ignore = int((labels != -100).sum().item())
-
-        grad_input = torch.randn(BT, H_student, dtype=dtype).contiguous()
-        grad_output = torch.tensor(0.5, dtype=dtype)
-
-        return {
-            "BT": BT,
-            "V": V,
-            "BLOCK_SIZE_JSD": BLOCK_SIZE_JSD,
-            "H_student": H_student,
-            "BLOCK_SIZE_MUL": BLOCK_SIZE_MUL,
-            "student_log_probs": student_log_probs,
-            "teacher_log_probs": teacher_log_probs,
-            "loss": loss,
-            "dX": dX,
-            "labels": labels,
-            "n_non_ignore": n_non_ignore,
-            "beta": beta,
-            "grad_input": grad_input,
-            "grad_output": grad_output,
-        }
-
-    return setup
-
-
-def _fljsd_run(d):
-    jsd_kernel[(d["BT"],)](
-        X_ptr=d["student_log_probs"],
-        X_stride=d["student_log_probs"].stride(0),
-        Y_ptr=d["teacher_log_probs"],
-        Y_stride=d["teacher_log_probs"].stride(0),
-        loss_ptr=d["loss"],
-        loss_stride=d["loss"].stride(0),
-        dX_ptr=d["dX"],
-        dX_stride=d["dX"].stride(0),
-        label_ptr=d["labels"],
-        beta=d["beta"],
-        n_non_ignore=d["n_non_ignore"],
-        ignore_index=-100,
-        n_cols=d["V"],
-        BLOCK_SIZE=d["BLOCK_SIZE_JSD"],
-        HAS_LABEL=True,
-    )
-    element_mul_kernel[(d["BT"],)](
-        d["grad_input"],
-        d["grad_input"].stride(0),
-        d["grad_output"],
-        d["H_student"],
-        BLOCK_SIZE=d["BLOCK_SIZE_MUL"],
-    )
+            for _temperature, beta in _FLJSD_PARAMS:
+                templates.append(
+                    {
+                        "BT": BT,
+                        "V": V,
+                        "BLOCK_SIZE_JSD": BLOCK_SIZE_JSD,
+                        "H_student": H_student,
+                        "BLOCK_SIZE_MUL": BLOCK_SIZE_MUL,
+                        "student_template": student_log_probs,
+                        "teacher_log_probs": teacher_log_probs,
+                        "loss": torch.zeros(BT, V, dtype=torch.float32),
+                        "dX_template": torch.empty(BT, V, dtype=dtype),
+                        "labels": labels,
+                        "n_non_ignore": n_non_ignore,
+                        "beta": beta,
+                        "grad_template": torch.randn(
+                            BT, H_student, dtype=dtype
+                        ).contiguous(),
+                        "grad_output": torch.tensor(0.5, dtype=dtype),
+                    }
+                )
+    return templates
 
 
-_FLJSD_CONFIGS = [
-    (B, T, H, V, scalar, dtype, beta)
-    for B, T, H, V in _FLJSD_SHAPES
-    for scalar, dtype in _FLJSD_SCALAR_DTYPES
-    for _temperature, beta in _FLJSD_PARAMS
-]
-
-
-def _fljsd_setup_all():
-    return [
-        _make_fljsd_setup(B, T, H, V, scalar, dtype, beta)()
-        for B, T, H, V, scalar, dtype, beta in _FLJSD_CONFIGS
-    ]
-
-
-def _fljsd_run_all(configs):
-    for d in configs:
-        _fljsd_run(d)
+def _fljsd_run_all(templates):
+    for t in templates:
+        student = t["student_template"].clone()
+        dX = t["dX_template"].clone()
+        grad_input = t["grad_template"].clone()
+        jsd_kernel[(t["BT"],)](
+            X_ptr=student,
+            X_stride=student.stride(0),
+            Y_ptr=t["teacher_log_probs"],
+            Y_stride=t["teacher_log_probs"].stride(0),
+            loss_ptr=t["loss"],
+            loss_stride=t["loss"].stride(0),
+            dX_ptr=dX,
+            dX_stride=dX.stride(0),
+            label_ptr=t["labels"],
+            beta=t["beta"],
+            n_non_ignore=t["n_non_ignore"],
+            ignore_index=-100,
+            n_cols=t["V"],
+            BLOCK_SIZE=t["BLOCK_SIZE_JSD"],
+            HAS_LABEL=True,
+        )
+        element_mul_kernel[(t["BT"],)](
+            grad_input,
+            grad_input.stride(0),
+            t["grad_output"],
+            t["H_student"],
+            BLOCK_SIZE=t["BLOCK_SIZE_MUL"],
+        )
+        del student, dX, grad_input
 
 
 BENCHMARKS["fused_linear_jsd"] = {
