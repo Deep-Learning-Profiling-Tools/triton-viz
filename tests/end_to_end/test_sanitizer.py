@@ -844,3 +844,125 @@ def test_reduce_broadcast():
     assert (
         len(reduce_broadcast_sanitizer.records) == 0
     ), f"Expected no OOB records, got {len(reduce_broadcast_sanitizer.records)}"
+
+
+# ======== Regression Tests (77be442 -> 8982c15) ===========
+# These tests reproduce errors introduced by the symbolic engine refactor.
+
+regression_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+# ─── Test 1: ReduceSymbolicExpr expects block_type input, got NoneType ────────
+
+
+@triton_viz.trace(client=regression_sanitizer)
+@triton.jit
+def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(input_ptr + row * N + offs, mask=mask, other=-float("inf"))
+    x_max = tl.max(x, 0)
+    exp_x = tl.exp(x - x_max)
+    sum_exp = tl.sum(exp_x, 0)
+    tl.store(output_ptr + row * N + offs, exp_x / sum_exp, mask=mask)
+
+
+def test_reduce_symbolic_nonetype():
+    """tl.max / tl.sum must not crash with NoneType dtype after symbolic refactor."""
+    regression_sanitizer.records.clear()
+    x = torch.randn(4, 64, device="cpu")
+    out = torch.empty_like(x)
+    softmax_kernel[(4,)](out, x, 64, BLOCK=64)
+
+
+# ─── Test 2: NoneType has no attribute 'scalar' (expand_dims after exp) ───────
+
+
+@triton_viz.trace(client=regression_sanitizer)
+@triton.jit
+def exp_expand_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    w = tl.exp(x)
+    m = w[None, :] * tl.load(x_ptr + offs)[:, None]
+    tl.store(out_ptr + offs, tl.sum(m, axis=1))
+
+
+def test_expand_dims_scalar_attr():
+    """tl.exp + expand_dims must not crash with 'NoneType has no attribute scalar'."""
+    regression_sanitizer.records.clear()
+    x = torch.randn(8, device="cpu")
+    out = torch.empty(8, device="cpu")
+    exp_expand_kernel[(1,)](x, out, N=8)
+
+
+# ─── Test 3: 'float' object has no attribute 'to' ────────────────────────────
+
+
+@triton_viz.trace(client=regression_sanitizer)
+@triton.jit
+def cast_scalar_kernel(x_ptr, out_ptr, eps: tl.constexpr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    dtype = x.dtype
+    eps_cast = eps.to(dtype)
+    y = x + eps_cast
+    tl.store(out_ptr + offs, y)
+
+
+def test_float_no_attr_to():
+    """constexpr float .to(dtype) must not crash with 'float has no attribute to'."""
+    regression_sanitizer.records.clear()
+    x = torch.randn(8, device="cpu")
+    out = torch.empty(8, device="cpu")
+    cast_scalar_kernel[(1,)](x, out, eps=1e-6, N=8)
+
+
+# ─── Test 4: numpy int1 bitwidth mismatch ────────────────────────────────────
+
+
+@triton_viz.trace(client=regression_sanitizer)
+@triton.jit
+def bool_store_kernel(out_ptr, val, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    tl.store(out_ptr + offs, val)
+
+
+def test_numpy_int1_bitwidth():
+    """bool arg must not crash with numpy itemsize vs int1 bitwidth mismatch."""
+    regression_sanitizer.records.clear()
+    out = torch.empty(8, device="cpu", dtype=torch.int32)
+    bool_store_kernel[(1,)](out, False, N=8)
+
+
+# ─── Test 5: ReduceSymbolicExpr expects block_type, got core.dtype ────────────
+
+
+@triton_viz.trace(client=regression_sanitizer)
+@triton.jit
+def block_ptr_sum_kernel(
+    s_ptr,
+    z_ptr,
+    T: tl.constexpr,
+    S: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+):
+    o_i = tl.arange(0, BT)
+    m = tl.where(o_i[:, None] <= o_i[None, :], 1.0, 0.0)
+    b_z = tl.zeros([BS], dtype=tl.float32)
+    p_s = tl.make_block_ptr(s_ptr, (T, S), (S, 1), (0, 0), (BT, BS), (1, 0))
+    p_z = tl.make_block_ptr(z_ptr, (T, S), (S, 1), (0, 0), (BT, BS), (1, 0))
+    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_c = b_z[None, :] + tl.dot(m, b_s, allow_tf32=False)
+    tl.store(p_z, b_c.to(p_z.dtype.element_ty), boundary_check=(0, 1))
+    b_z += tl.sum(b_s, 0)
+
+
+def test_reduce_symbolic_core_dtype():
+    """tl.sum on block_ptr data must not crash with 'expects block_type, got core.dtype'."""
+    regression_sanitizer.records.clear()
+    s = torch.randn(16, 16, device="cpu")
+    z = torch.empty_like(s)
+    block_ptr_sum_kernel[(1,)](s, z, T=16, S=16, BT=16, BS=16)
