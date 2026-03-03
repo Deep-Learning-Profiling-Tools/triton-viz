@@ -27,10 +27,8 @@ class Config:
     - report_grid_execution_progress: REPORT_GRID_EXECUTION_PROGRESS, logs per
       program block progress in the interpreter.
     - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, controls tensor materialization
-      strategy. "auto" (default, env unset): start with fake tensors, lazily retry
-      with real tensors if indirect loads require concrete data. "force_fake" (env=1):
-      always use fake tensors (errors on indirect loads). "force_real" (env=0):
-      always copy tensors to CPU.
+      strategy. True (default): use fake tensors with lazy on-demand materialization
+      for indirect loads. False (env=0): always copy tensors to CPU.
     - profiler_enable_load_store_skipping: PROFILER_ENABLE_LOAD_STORE_SKIPPING,
       skips redundant load/store checks to speed profiling.
     - profiler_enable_block_sampling: PROFILER_ENABLE_BLOCK_SAMPLING, samples a
@@ -53,14 +51,7 @@ class Config:
         self.report_grid_execution_progress: bool = _is_one(
             "REPORT_GRID_EXECUTION_PROGRESS"
         )
-        _fake_env = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR")
-        self.virtual_memory: str
-        if _fake_env is None:
-            self.virtual_memory = "auto"
-        elif _fake_env == "1":
-            self.virtual_memory = "force_fake"
-        else:
-            self.virtual_memory = "force_real"
+        self.virtual_memory: bool = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "1") != "0"
         self.profiler_enable_load_store_skipping: bool = _is_one(
             "PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1"
         )

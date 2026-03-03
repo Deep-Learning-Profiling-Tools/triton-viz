@@ -385,26 +385,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.cache_args.clear()
         self.cache_grid = None
 
-    def reset_for_retry(self) -> None:
-        """Reset all mutable state so the sanitizer can re-run with real tensors."""
-        self.tensors.clear()
-        self.tensor_addrs.clear()
-        self.tensor_names.clear()
-        self.records.clear()
-        self.need_full_grid = None
-        self.last_grid = None
-        self.cache_args.clear()
-        self.cache_grid = None
-        self.addr_ok = None
-        self.pid_ok = None
-        self.solver = None
-        self.addr_sym = None
-        self.grid = None
-        self.grid_idx = None
-        self.loop_stack.clear()
-        SymbolicExpr.ARANGE_DICT.clear()
-        _fn_symbolic_cache_set.clear()
-
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
             fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))

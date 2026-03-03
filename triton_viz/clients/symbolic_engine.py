@@ -73,16 +73,12 @@ ConstraintExpr: TypeAlias = ExprRef | bool | int | float
 ConstraintConjunction: TypeAlias = BoolRef | None
 
 
-class NeedRealTensorsError(Exception):
-    """Raised when fake tensors cannot satisfy a concrete memory access."""
+_materializer = None  # set by patch.py before execution
 
 
-_using_fake_tensors: bool = False
-
-
-def set_using_fake_tensors(value: bool) -> None:
-    global _using_fake_tensors
-    _using_fake_tensors = value
+def set_materializer(m):
+    global _materializer
+    _materializer = m
 
 
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
@@ -767,11 +763,12 @@ class IndirectSymbolicExprBase(SymbolicExpr):
         return ptr, _and_constraints(constraints_ptr, mask_constraint)
 
     def concretize(self) -> Any:
-        if _using_fake_tensors:
-            raise NeedRealTensorsError(
-                "Cannot concretize load/store with fake tensors; need real tensor data"
-            )
         ptr_concrete = self.ptr.concretize()
+
+        if _materializer is not None:
+            rebased = _materializer.rebase_pointers(ptr_concrete.data)
+            ptr_concrete = TensorHandle(rebased, ptr_concrete.dtype)
+
         if self.mask is None:
             mask_concrete = TensorHandle(
                 np.ones_like(ptr_concrete.data, dtype=bool), tl.int1

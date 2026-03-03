@@ -442,6 +442,37 @@ def unpatch_lang(backend):
         scope.restore()
 
 
+class TensorMaterializer:
+    """Lazily copies GPU tensor storage to CPU on demand."""
+
+    def __init__(self):
+        self._storages: list[tuple[int, int, Any]] = []   # (base, end, storage)
+        self._cpu_cache: dict[int, Any] = {}               # base → cpu_storage
+
+    def register(self, tensor):
+        if not hasattr(tensor, "untyped_storage"):
+            return
+        storage = tensor.untyped_storage()
+        base = storage.data_ptr()
+        if not any(b == base for b, _, _ in self._storages):
+            self._storages.append((base, base + storage.nbytes(), storage))
+
+    def rebase_pointers(self, ptr_data):
+        sample = int(ptr_data.flat[0])
+        gpu_base = self._find_base(sample)
+        if gpu_base not in self._cpu_cache:
+            _, _, stor = next(s for s in self._storages if s[0] == gpu_base)
+            self._cpu_cache[gpu_base] = stor.cpu()
+        cpu_base = self._cpu_cache[gpu_base].data_ptr()
+        return ptr_data + (cpu_base - gpu_base)
+
+    def _find_base(self, addr):
+        for base, end, _ in self._storages:
+            if base <= addr < end:
+                return base
+        raise RuntimeError(f"No registered storage for address {addr:#x}")
+
+
 @dataclass(frozen=True)
 class FakeTensor:
     _data_ptr: int
@@ -471,7 +502,7 @@ class FakeTensor:
         return self._element_size
 
 
-def _init_args_hst(args_dev, kwargs):
+def _init_args_hst(args_dev, kwargs, materializer=None):
     def _to_cpu(arg):
         if isinstance(arg, tuple):
             return _tuple_create(arg, map(_to_cpu, arg))
@@ -486,6 +517,8 @@ def _init_args_hst(args_dev, kwargs):
             return arg
 
         unwrapped_arg = _unwrap_tensor(arg)
+        if materializer is not None:
+            materializer.register(unwrapped_arg)
         cpu_arg = FakeTensor(
             _data_ptr=unwrapped_arg.data_ptr(),
             dtype=unwrapped_arg.dtype,
@@ -507,7 +540,7 @@ def _init_args_hst(args_dev, kwargs):
 
 
 def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
-    from ..clients.symbolic_engine import NeedRealTensorsError, set_using_fake_tensors
+    from ..clients.symbolic_engine import set_materializer
 
     assert backend is not None
     if kwargs.pop("warmup", False):
@@ -530,10 +563,12 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     _current_client_manager = client_manager
     kwargs.pop("jit_fn")
 
-    def _execute(use_fake):
-        set_using_fake_tensors(use_fake)
-        if use_fake:
-            args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs)
+    materializer = None
+    try:
+        if cfg.virtual_memory:
+            materializer = TensorMaterializer()
+            set_materializer(materializer)
+            args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs, materializer)
         else:
             args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
 
@@ -616,27 +651,10 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
                 f"Triton-Viz: execution time for {name}: {elapsed_time * 1000:.3f} ms"
             )
         # Copy arguments back to propagate side-effects
-        if not use_fake:
+        if not cfg.virtual_memory:
             self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
-
-    try:
-        if cfg.virtual_memory == "auto":
-            try:
-                _execute(use_fake=True)
-            except NeedRealTensorsError:
-                if cfg.verbose:
-                    print(
-                        "[Triton-Viz] Fake tensor attempt hit indirect load; "
-                        "retrying with real tensors."
-                    )
-                client_manager.reset_for_retry()
-                _execute(use_fake=False)
-        elif cfg.virtual_memory == "force_fake":
-            _execute(use_fake=True)
-        else:
-            _execute(use_fake=False)
     finally:
-        set_using_fake_tensors(False)
+        set_materializer(None)
 
 
 def _jit_function_call(self, *args, backend=None, **kwargs):
