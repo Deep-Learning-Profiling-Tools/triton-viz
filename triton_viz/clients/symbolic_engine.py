@@ -1224,7 +1224,7 @@ class ReduceSymbolicExpr(SymbolicExpr):
             else bool(self.keepdims)
         )
         if self.op in ("argmax", "argmin"):
-            result = np_op(input_concrete.data, axis=axis_val)
+            result = np_op(input_concrete.data, axis=axis_val).astype(np.int32)
             if keepdims_val:
                 result = np.expand_dims(
                     result, axis=axis_val if axis_val is not None else 0
