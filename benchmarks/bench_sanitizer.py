@@ -1059,92 +1059,237 @@ BENCHMARKS["flaggems_layernorm"] = {
 }
 
 # ---------------------------------------------------------------------------
-# SwiGLU benchmarks (from Liger-Kernel test_swiglu)
+# SwiGLU benchmarks: 8 parameter combinations (grouped)
+# Matches test_correctness_llamamlp parameter space
 # ---------------------------------------------------------------------------
 
-_SWIGLU_N_ROWS = 16  # bsz * seq_len
-_SWIGLU_N_COLS = 64  # intermediate_size
-_SWIGLU_BLOCK_SIZE = triton.next_power_of_2(_SWIGLU_N_COLS)
+_SWIGLU_SHAPES = [
+    # (bsz, seq_len, hidden_size, intermediate_size) → (N_ROWS=bsz*seq_len, N_COLS=intermediate_size)
+    (2, 2048, 4096, 11008),
+    (2, 2048, 2048, 4096),
+    (9, 41, 341, 4231),
+    (6, 42, 256, 2048),
+]
+_SWIGLU_DTYPES = [torch.float32, torch.bfloat16]
 
-BENCHMARKS["swiglu_forward"] = {
-    "setup": lambda: {
-        "a": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
-        "b": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
-        "c": torch.empty(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
-    },
-    "run": lambda d: swiglu_forward_kernel[(_SWIGLU_N_ROWS,)](
+
+def _make_swiglu_setup(bsz, seq_len, hidden_size, intermediate_size, dtype):
+    def setup():
+        N_ROWS = bsz * seq_len
+        N_COLS = intermediate_size
+        BLOCK_SIZE = triton.next_power_of_2(N_COLS)
+        return {
+            "N_ROWS": N_ROWS,
+            "N_COLS": N_COLS,
+            "BLOCK_SIZE": BLOCK_SIZE,
+            "a": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+            "b": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+            "c": torch.empty(N_ROWS, N_COLS, dtype=dtype),
+            "dc": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+            "a_bwd": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+            "b_bwd": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+        }
+
+    return setup
+
+
+def _swiglu_run(d):
+    N_ROWS, N_COLS, BLOCK_SIZE = d["N_ROWS"], d["N_COLS"], d["BLOCK_SIZE"]
+    swiglu_forward_kernel[(N_ROWS,)](
         d["a"],
         d["b"],
         d["c"],
         d["c"].stride(0),
-        n_cols=_SWIGLU_N_COLS,
-        BLOCK_SIZE=_SWIGLU_BLOCK_SIZE,
-    ),
-    "sanitizer": swiglu_fwd_sanitizer,
-}
-
-BENCHMARKS["swiglu_backward"] = {
-    "setup": lambda: {
-        "dc": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
-        "a": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
-        "b": torch.randn(_SWIGLU_N_ROWS, _SWIGLU_N_COLS, dtype=torch.float32),
-    },
-    "run": lambda d: swiglu_backward_kernel[(_SWIGLU_N_ROWS,)](
+        n_cols=N_COLS,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    swiglu_backward_kernel[(N_ROWS,)](
         d["dc"],
-        d["a"],
-        d["b"],
+        d["a_bwd"],
+        d["b_bwd"],
         d["dc"].stride(0),
-        n_cols=_SWIGLU_N_COLS,
-        BLOCK_SIZE=_SWIGLU_BLOCK_SIZE,
-    ),
-    "sanitizer": swiglu_bwd_sanitizer,
+        n_cols=N_COLS,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+
+_SWIGLU_CONFIGS = [
+    (bsz, seq_len, hidden_size, intermediate_size, dtype)
+    for bsz, seq_len, hidden_size, intermediate_size in _SWIGLU_SHAPES
+    for dtype in _SWIGLU_DTYPES
+]
+
+
+def _swiglu_setup_all():
+    return [
+        _make_swiglu_setup(bsz, seq_len, hidden_size, intermediate_size, dtype)()
+        for bsz, seq_len, hidden_size, intermediate_size, dtype in _SWIGLU_CONFIGS
+    ]
+
+
+def _swiglu_run_all(configs):
+    for d in configs:
+        _swiglu_run(d)
+
+
+BENCHMARKS["swiglu"] = {
+    "setup": _swiglu_setup_all,
+    "run": _swiglu_run_all,
+    "sanitizer": [swiglu_fwd_sanitizer, swiglu_bwd_sanitizer],
 }
 
 # ---------------------------------------------------------------------------
-# Cross Entropy benchmark (from Liger-Kernel test_cross_entropy)
+# Cross Entropy benchmarks: 48 parameter combinations (grouped)
+# Matches test_correctness parameter space
 # ---------------------------------------------------------------------------
 
-_CE_BT = 8  # B * T
-_CE_V = 128  # vocab size
-_CE_BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(_CE_V))
+_CE_SHAPES = [
+    # (B, T, V) → (BT=B*T, V)
+    (2, 4096, 32000),
+    (2, 4096, 32000),
+    (1, 4096, 128256),
+    (3, 423, 32000),
+]
+_CE_REDUCTIONS = ["sum", "mean"]
+_CE_SCALAR_DTYPES = [
+    (0.1, torch.bfloat16),
+    (1.0, torch.bfloat16),
+    (10.0, torch.bfloat16),
+    (0.1, torch.float32),
+    (1.0, torch.float32),
+    (10.0, torch.float32),
+]
 
-BENCHMARKS["cross_entropy"] = {
-    "setup": lambda: {
-        "X": torch.randn(_CE_BT, _CE_V, dtype=torch.float32).contiguous(),
-        "Y": torch.randint(0, _CE_V, (_CE_BT,), dtype=torch.long),
-        "loss": torch.zeros(_CE_BT, dtype=torch.float32),
-    },
-    "run": lambda d: liger_cross_entropy_kernel[(_CE_BT,)](
+
+def _make_ce_setup(B, T, V, reduction, scalar, dtype):
+    def setup():
+        BT = B * T
+        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+        X = (torch.randn(BT, V, dtype=dtype) * scalar).contiguous()
+        Y = torch.randint(0, V, (BT,), dtype=torch.long)
+        loss = torch.zeros(BT, dtype=torch.float32)
+        return {
+            "BT": BT,
+            "V": V,
+            "BLOCK_SIZE": BLOCK_SIZE,
+            "reduction": reduction,
+            "X": X,
+            "Y": Y,
+            "loss": loss,
+        }
+
+    return setup
+
+
+def _ce_run(d):
+    liger_cross_entropy_kernel[(d["BT"],)](
         X_ptr=d["X"],
         X_stride=d["X"].stride(0),
         Y_ptr=d["Y"],
         Y_stride=d["Y"].stride(0),
         loss_ptr=d["loss"],
         loss_stride=d["loss"].stride(0),
-        n_cols=_CE_V,
-        n_non_ignore=_CE_BT,
+        n_cols=d["V"],
+        n_non_ignore=d["BT"],
         ignore_index=-100,
         label_smoothing=0.0,
-        reduction="mean",
-        BLOCK_SIZE=_CE_BLOCK_SIZE,
-    ),
+        reduction=d["reduction"],
+        BLOCK_SIZE=d["BLOCK_SIZE"],
+    )
+
+
+_CE_CONFIGS = [
+    (B, T, V, reduction, scalar, dtype)
+    for B, T, V in _CE_SHAPES
+    for reduction in _CE_REDUCTIONS
+    for scalar, dtype in _CE_SCALAR_DTYPES
+]
+
+
+def _ce_setup_all():
+    return [
+        _make_ce_setup(B, T, V, reduction, scalar, dtype)()
+        for B, T, V, reduction, scalar, dtype in _CE_CONFIGS
+    ]
+
+
+def _ce_run_all(configs):
+    for d in configs:
+        _ce_run(d)
+
+
+BENCHMARKS["cross_entropy"] = {
+    "setup": _ce_setup_all,
+    "run": _ce_run_all,
     "sanitizer": cross_entropy_sanitizer,
 }
 
 # ---------------------------------------------------------------------------
-# Fused Linear JSD benchmark (from Liger-Kernel test_fused_linear_jsd)
-# Reuses existing jsd_kernel + element_mul_kernel with a simple config
+# Fused Linear JSD benchmarks: 12 parameter combinations (grouped)
+# Matches test_correctness parameter space
+# Reuses existing jsd_kernel + element_mul_kernel
 # ---------------------------------------------------------------------------
 
-_FLJSD_BT = 4  # B * T
-_FLJSD_V = 1600  # vocab size
-_FLJSD_H_STUDENT = 256  # H // 2
-_FLJSD_BLOCK_SIZE_JSD = min(MAX_FUSED_SIZE, triton.next_power_of_2(_FLJSD_V))
-_FLJSD_BLOCK_SIZE_MUL = min(MAX_FUSED_SIZE, triton.next_power_of_2(_FLJSD_H_STUDENT))
+_FLJSD_SHAPES = [
+    # (B, T, H, V)
+    (2, 2, 512, 1600),
+    (2, 4, 1024, 1600),
+    (4, 423, 167, 1423),
+]
+_FLJSD_SCALAR_DTYPES = [
+    (1.0, torch.bfloat16),
+    (1.0, torch.float32),
+]
+_FLJSD_PARAMS = [
+    (1.0, 0.5),  # (temperature, beta)
+    (2.0, 0.1),
+]
 
 
-def _fused_linear_jsd_run(d):
-    jsd_kernel[(_FLJSD_BT,)](
+def _make_fljsd_setup(B, T, H, V, scalar, dtype, beta):
+    def setup():
+        BT = B * T
+        BLOCK_SIZE_JSD = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+        H_student = H // 2
+        BLOCK_SIZE_MUL = min(MAX_FUSED_SIZE, triton.next_power_of_2(H_student))
+
+        student_log_probs = torch.log_softmax(
+            torch.randn(BT, V, dtype=dtype) * scalar, dim=-1
+        ).contiguous()
+        teacher_log_probs = torch.log_softmax(
+            torch.randn(BT, V, dtype=dtype) * scalar, dim=-1
+        ).contiguous()
+        loss = torch.zeros(BT, V, dtype=torch.float32)
+        dX = torch.empty(BT, V, dtype=dtype)
+        labels = torch.randint(0, V, (BT,), dtype=torch.long)
+        labels[: max(1, BT // 2)] = -100
+        n_non_ignore = int((labels != -100).sum().item())
+
+        grad_input = torch.randn(BT, H_student, dtype=dtype).contiguous()
+        grad_output = torch.tensor(0.5, dtype=dtype)
+
+        return {
+            "BT": BT,
+            "V": V,
+            "BLOCK_SIZE_JSD": BLOCK_SIZE_JSD,
+            "H_student": H_student,
+            "BLOCK_SIZE_MUL": BLOCK_SIZE_MUL,
+            "student_log_probs": student_log_probs,
+            "teacher_log_probs": teacher_log_probs,
+            "loss": loss,
+            "dX": dX,
+            "labels": labels,
+            "n_non_ignore": n_non_ignore,
+            "beta": beta,
+            "grad_input": grad_input,
+            "grad_output": grad_output,
+        }
+
+    return setup
+
+
+def _fljsd_run(d):
+    jsd_kernel[(d["BT"],)](
         X_ptr=d["student_log_probs"],
         X_stride=d["student_log_probs"].stride(0),
         Y_ptr=d["teacher_log_probs"],
@@ -1154,39 +1299,45 @@ def _fused_linear_jsd_run(d):
         dX_ptr=d["dX"],
         dX_stride=d["dX"].stride(0),
         label_ptr=d["labels"],
-        beta=0.5,
-        n_non_ignore=_FLJSD_BT,
+        beta=d["beta"],
+        n_non_ignore=d["n_non_ignore"],
         ignore_index=-100,
-        n_cols=_FLJSD_V,
-        BLOCK_SIZE=_FLJSD_BLOCK_SIZE_JSD,
+        n_cols=d["V"],
+        BLOCK_SIZE=d["BLOCK_SIZE_JSD"],
         HAS_LABEL=True,
     )
-    element_mul_kernel[(_FLJSD_BT,)](
+    element_mul_kernel[(d["BT"],)](
         d["grad_input"],
         d["grad_input"].stride(0),
         d["grad_output"],
-        _FLJSD_H_STUDENT,
-        BLOCK_SIZE=_FLJSD_BLOCK_SIZE_MUL,
+        d["H_student"],
+        BLOCK_SIZE=d["BLOCK_SIZE_MUL"],
     )
 
 
+_FLJSD_CONFIGS = [
+    (B, T, H, V, scalar, dtype, beta)
+    for B, T, H, V in _FLJSD_SHAPES
+    for scalar, dtype in _FLJSD_SCALAR_DTYPES
+    for _temperature, beta in _FLJSD_PARAMS
+]
+
+
+def _fljsd_setup_all():
+    return [
+        _make_fljsd_setup(B, T, H, V, scalar, dtype, beta)()
+        for B, T, H, V, scalar, dtype, beta in _FLJSD_CONFIGS
+    ]
+
+
+def _fljsd_run_all(configs):
+    for d in configs:
+        _fljsd_run(d)
+
+
 BENCHMARKS["fused_linear_jsd"] = {
-    "setup": lambda: {
-        "student_log_probs": torch.log_softmax(
-            torch.randn(_FLJSD_BT, _FLJSD_V, dtype=torch.float32), dim=-1
-        ).contiguous(),
-        "teacher_log_probs": torch.log_softmax(
-            torch.randn(_FLJSD_BT, _FLJSD_V, dtype=torch.float32), dim=-1
-        ).contiguous(),
-        "loss": torch.zeros(_FLJSD_BT, _FLJSD_V, dtype=torch.float32),
-        "dX": torch.empty(_FLJSD_BT, _FLJSD_V, dtype=torch.float32),
-        "labels": torch.randint(0, _FLJSD_V, (_FLJSD_BT,), dtype=torch.long),
-        "grad_input": torch.randn(
-            _FLJSD_BT, _FLJSD_H_STUDENT, dtype=torch.float32
-        ).contiguous(),
-        "grad_output": torch.tensor(0.5, dtype=torch.float32),
-    },
-    "run": _fused_linear_jsd_run,
+    "setup": _fljsd_setup_all,
+    "run": _fljsd_run_all,
     "sanitizer": [jsd_sanitizer, element_mul_sanitizer],
 }
 
