@@ -1306,6 +1306,7 @@ class AdvanceSymbolicExpr(SymbolicExpr):
             self.add_child(dk, offset_list[i])
             self.delta_keys.append(dk)
         self.dtype = ptr.dtype
+        self.block_shape_values = getattr(ptr, "block_shape_values", None)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(
@@ -1512,14 +1513,7 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
         if dt is None:
             return None
         scalar_ty = dt.element_ty if isinstance(dt, tl.pointer_type) else dt
-        # Walk the ptr chain to find the MakeBlockPtrSymbolicExpr for block shape
-        block_shape = None
-        cur: SymbolicExpr | None = ptr
-        while cur is not None:
-            if isinstance(cur, MakeBlockPtrSymbolicExpr):
-                block_shape = cur.block_shape_values
-                break
-            cur = getattr(cur, "ptr", None)
+        block_shape = getattr(ptr, "block_shape_values", None)
         if block_shape is not None:
             return tl.block_type(scalar_ty, block_shape)
         return scalar_ty
