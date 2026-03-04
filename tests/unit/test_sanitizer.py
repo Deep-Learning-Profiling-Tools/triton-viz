@@ -24,7 +24,7 @@ from z3 import Solver, Int, sat
 # ======== Init Tests ===========
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def _isolate_sanitizer_cfg():
     """Save and restore cfg.enable_sanitizer around every test."""
     saved = cfg.enable_sanitizer
@@ -32,7 +32,7 @@ def _isolate_sanitizer_cfg():
     cfg.enable_sanitizer = saved
 
 
-def test_sanitizer_init():
+def test_sanitizer_init(_isolate_sanitizer_cfg):
     cfg.enable_sanitizer = True
     assert isinstance(Sanitizer(), SymbolicSanitizer)
 
