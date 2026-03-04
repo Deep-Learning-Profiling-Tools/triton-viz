@@ -1072,7 +1072,7 @@ _SWIGLU_SHAPES = [
     (9, 41, 341, 4231),
     (6, 42, 256, 2048),
 ]
-_SWIGLU_DTYPES = [torch.float32, torch.bfloat16]
+_SWIGLU_DTYPES = [torch.float32]
 
 
 def _swiglu_setup_all():
@@ -1142,8 +1142,6 @@ BENCHMARKS["swiglu"] = {
 # the next.  Peak ≈ one template + one clone ≈ 4.2 GB (for V=128256 f32),
 # well within CI's ~7 GB limit.
 #
-# bf16 tensors are generated via f32→to(bf16) which is ~3× faster than
-# direct torch.randn(..., dtype=bfloat16).
 # ---------------------------------------------------------------------------
 
 _CE_SHAPES = [
@@ -1153,7 +1151,7 @@ _CE_SHAPES = [
     (3, 423, 32000),
 ]
 _CE_REDUCTIONS = ["sum", "mean"]
-_CE_DTYPES = [torch.bfloat16, torch.float32]
+_CE_DTYPES = [torch.float32]
 
 
 def _ce_setup_all():
@@ -1175,11 +1173,7 @@ def _ce_run_all(configs):
             cfg["BLOCK_SIZE"],
             cfg["dtype"],
         )
-        # Allocate template for this shape (bf16 via f32 conversion for speed)
-        if dtype == torch.bfloat16:
-            X_template = torch.randn(BT, V, dtype=torch.float32).to(torch.bfloat16)
-        else:
-            X_template = torch.randn(BT, V, dtype=dtype)
+        X_template = torch.randn(BT, V, dtype=dtype)
         Y = torch.randint(0, V, (BT,), dtype=torch.long)
         loss = torch.zeros(BT, dtype=torch.float32)
 
@@ -1223,7 +1217,7 @@ _FLJSD_SHAPES = [
     (2, 4, 1024, 1600),
     (4, 423, 167, 1423),
 ]
-_FLJSD_DTYPES = [torch.bfloat16, torch.float32]
+_FLJSD_DTYPES = [torch.float32]
 _FLJSD_PARAMS = [
     (1.0, 0.5),  # (temperature, beta)
     (2.0, 0.1),
