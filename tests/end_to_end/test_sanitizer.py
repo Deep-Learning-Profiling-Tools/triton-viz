@@ -301,7 +301,7 @@ def test_loop_deferred_checks_simplify():
 
 
 # Dedicated sanitizer for nested loop regression test
-nested_loop_checker = SymbolicSanitizer(abort_on_error=False)
+nested_loop_checker = SymbolicSanitizer()
 
 
 @triton_viz.trace(client=nested_loop_checker)
@@ -329,7 +329,7 @@ def test_nested_loop_no_false_positive():
 
 
 # Create a dedicated sanitizer for line number tests
-line_number_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
+line_number_checker: SymbolicSanitizer = SymbolicSanitizer()
 
 
 @triton_viz.trace(client=line_number_checker)
@@ -452,7 +452,7 @@ def test_gemm_oob_call_stack():
 # ======== Block Tensor (Block Pointer) Tests ===========
 
 
-block_sanitizer = SymbolicSanitizer(abort_on_error=False)
+block_sanitizer = SymbolicSanitizer()
 
 
 @triton_viz.trace(client=block_sanitizer)
@@ -813,7 +813,7 @@ def test_cli_code_context_points_to_kernel():
 
 # ======== Reduce + Broadcast Tests ===========
 
-reduce_broadcast_sanitizer = SymbolicSanitizer(abort_on_error=False)
+reduce_broadcast_sanitizer = SymbolicSanitizer()
 
 
 @triton_viz.trace(client=reduce_broadcast_sanitizer)
@@ -873,3 +873,16 @@ def test_oob_with_fake_tensor():
             fake_tensor_oob_kernel[(1,)](x, out, N=8)
     finally:
         config.virtual_memory = old_virtual_memory
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def bool_store_kernel(out_ptr, val, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    tl.store(out_ptr + offs, val)
+
+
+def test_numpy_int1_bitwidth():
+    """Bool kernel arg must be converted to int before implicit conversion."""
+    out = torch.empty(8, device="cpu", dtype=torch.int32)
+    bool_store_kernel[(1,)](out, False, N=8)
