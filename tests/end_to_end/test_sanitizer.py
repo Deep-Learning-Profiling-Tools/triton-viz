@@ -1,3 +1,4 @@
+import pytest
 import torch
 import numpy as np
 
@@ -12,6 +13,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
     _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
+from triton_viz.core.config import config
 from z3.z3 import BoolRef
 
 
@@ -881,3 +883,30 @@ def test_libdevice_tanh():
     assert len(libdevice_sanitizer.records) == 0, (
         f"Expected no OOB records, got {len(libdevice_sanitizer.records)}"
     )
+
+
+# ======== Fake Tensor (Virtual Memory) OOB Tests ===========
+
+fake_tensor_sanitizer = SymbolicSanitizer(abort_on_error=True)
+
+
+@triton_viz.trace(client=fake_tensor_sanitizer)
+@triton.jit
+def fake_tensor_oob_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    # Intentionally read out-of-bounds: offset N is beyond the valid range [0, N)
+    val = tl.load(x_ptr + N)
+    tl.store(out_ptr, val)
+
+
+def test_oob_with_fake_tensor():
+    fake_tensor_sanitizer.records.clear()
+
+    old_virtual_memory = config.virtual_memory
+    config.virtual_memory = True
+    try:
+        x = torch.randn(8)
+        out = torch.empty(1)
+        with pytest.raises(SystemExit):
+            fake_tensor_oob_kernel[(1,)](x, out, N=8)
+    finally:
+        config.virtual_memory = old_virtual_memory
