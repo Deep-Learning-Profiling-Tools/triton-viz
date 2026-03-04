@@ -14,7 +14,7 @@ from triton_viz.wrapper import (
 )
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def _isolate_cli_active():
     """Save and restore cfg.cli_active around every test."""
     saved = cfg.cli_active
@@ -140,7 +140,7 @@ def test_create_patched_autotune_direct_decorator():
 # ======== CLI Active Guard Tests ===========
 
 
-def test_trace_decorator_raises_when_cli_active():
+def test_trace_decorator_raises_when_cli_active(_isolate_cli_active):
     """trace() should raise RuntimeError on an already-wrapped kernel when CLI is active."""
     cfg.cli_active = True
     mock_kernel = MagicMock(spec=TraceInterface)
@@ -149,7 +149,7 @@ def test_trace_decorator_raises_when_cli_active():
         decorator(mock_kernel)
 
 
-def test_trace_decorator_allows_cli_own_wrapping():
+def test_trace_decorator_allows_cli_own_wrapping(_isolate_cli_active):
     """trace() called by the CLI on a raw kernel should NOT raise, even when cli_active."""
     from triton.runtime.interpreter import InterpretedFunction
 
@@ -164,7 +164,7 @@ def test_trace_decorator_allows_cli_own_wrapping():
     assert isinstance(result, TraceInterface)
 
 
-def test_trace_decorator_works_when_cli_inactive():
+def test_trace_decorator_works_when_cli_inactive(_isolate_cli_active):
     """trace() should work normally when CLI is not active."""
     from triton.runtime.interpreter import InterpretedFunction
 
