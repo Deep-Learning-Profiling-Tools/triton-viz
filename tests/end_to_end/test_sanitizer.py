@@ -873,3 +873,55 @@ def test_oob_with_fake_tensor():
             fake_tensor_oob_kernel[(1,)](x, out, N=8)
     finally:
         config.virtual_memory = old_virtual_memory
+
+
+
+# ======== Regression Tests (77be442 -> 8982c15) ===========
+# These tests reproduce errors introduced by the symbolic engine refactor.
+
+regression_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+# ─── Test 1: ReduceSymbolicExpr expects block_type input, got NoneType ────────────────
+
+
+@triton_viz.trace(client=regression_sanitizer)
+@triton.jit
+def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(input_ptr + row * N + offs, mask=mask, other=-float("inf"))
+    x_max = tl.max(x, 0)
+    exp_x = tl.exp(x - x_max)
+    sum_exp = tl.sum(exp_x, 0)
+    tl.store(output_ptr + row * N + offs, exp_x / sum_exp, mask=mask)
+
+
+def test_reduce_symbolic_nonetype():
+    """tl.max / tl.sum must not crash with NoneType dtype after symbolic refactor."""
+    regression_sanitizer.records.clear()
+    x = torch.randn(4, 64, device="cpu")
+    out = torch.empty_like(x)
+    softmax_kernel[(4,)](out, x, 64, BLOCK=64)
+
+
+# ─── Test 2: NoneType has no attribute 'scalar' (expand_dims after exp) ───────
+
+
+@triton_viz.trace(client=regression_sanitizer)
+@triton.jit
+def exp_expand_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    w = tl.exp(x)
+    m = w[None, :] * tl.load(x_ptr + offs)[:, None]
+    tl.store(out_ptr + offs, tl.sum(m, axis=1))
+
+
+def test_expand_dims_scalar_attr():
+    """tl.exp + expand_dims must not crash with 'NoneType has no attribute scalar'."""
+    regression_sanitizer.records.clear()
+    x = torch.randn(8, device="cpu")
+    out = torch.empty(8, device="cpu")
+    exp_expand_kernel[(1,)](x, out, N=8)
