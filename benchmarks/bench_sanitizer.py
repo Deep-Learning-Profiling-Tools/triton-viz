@@ -1132,11 +1132,18 @@ BENCHMARKS["swiglu"] = {
 }
 
 # ---------------------------------------------------------------------------
-# Cross Entropy benchmarks: 12 parameter combinations (grouped, template pattern)
+# Cross Entropy benchmarks: 12 parameter combinations (grouped, streaming)
 # Matches test_correctness shape/reduction/dtype space (scalar dropped — does
-# not affect symbolic analysis).  Tensors are pre-allocated once in setup;
-# run() clones X each time (kernel writes gradients in-place) which is ~10×
-# faster than re-allocating via torch.randn.
+# not affect symbolic analysis).
+#
+# Memory strategy: setup stores only lightweight metadata.  run() allocates
+# one (BT, V, dtype) template at a time, runs both reductions with cloned X
+# (kernel overwrites X in-place), then frees the template before moving to
+# the next.  Peak ≈ one template + one clone ≈ 4.2 GB (for V=128256 f32),
+# well within CI's ~7 GB limit.
+#
+# bf16 tensors are generated via f32→to(bf16) which is ~3× faster than
+# direct torch.randn(..., dtype=bfloat16).
 # ---------------------------------------------------------------------------
 
 _CE_SHAPES = [
@@ -1150,45 +1157,50 @@ _CE_DTYPES = [torch.bfloat16, torch.float32]
 
 
 def _ce_setup_all():
-    # Pre-allocate one template per unique (BT, V, dtype).
-    # Templates are shared across reductions; X is cloned in run().
-    templates = []
+    # Store only metadata — no large tensors.
+    configs = []
     for B, T, V in _CE_SHAPES:
         BT = B * T
         BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
         for dtype in _CE_DTYPES:
-            templates.append(
-                {
-                    "BT": BT,
-                    "V": V,
-                    "BLOCK_SIZE": BLOCK_SIZE,
-                    "X_template": torch.randn(BT, V, dtype=dtype),
-                    "Y": torch.randint(0, V, (BT,), dtype=torch.long),
-                    "loss": torch.zeros(BT, dtype=torch.float32),
-                }
-            )
-    return templates
+            configs.append({"BT": BT, "V": V, "BLOCK_SIZE": BLOCK_SIZE, "dtype": dtype})
+    return configs
 
 
-def _ce_run_all(templates):
-    for tmpl in templates:
+def _ce_run_all(configs):
+    for cfg in configs:
+        BT, V, BLOCK_SIZE, dtype = (
+            cfg["BT"],
+            cfg["V"],
+            cfg["BLOCK_SIZE"],
+            cfg["dtype"],
+        )
+        # Allocate template for this shape (bf16 via f32 conversion for speed)
+        if dtype == torch.bfloat16:
+            X_template = torch.randn(BT, V, dtype=torch.float32).to(torch.bfloat16)
+        else:
+            X_template = torch.randn(BT, V, dtype=dtype)
+        Y = torch.randint(0, V, (BT,), dtype=torch.long)
+        loss = torch.zeros(BT, dtype=torch.float32)
+
         for reduction in _CE_REDUCTIONS:
-            X = tmpl["X_template"].clone()
-            liger_cross_entropy_kernel[(tmpl["BT"],)](
+            X = X_template.clone()
+            liger_cross_entropy_kernel[(BT,)](
                 X_ptr=X,
                 X_stride=X.stride(0),
-                Y_ptr=tmpl["Y"],
-                Y_stride=tmpl["Y"].stride(0),
-                loss_ptr=tmpl["loss"],
-                loss_stride=tmpl["loss"].stride(0),
-                n_cols=tmpl["V"],
-                n_non_ignore=tmpl["BT"],
+                Y_ptr=Y,
+                Y_stride=Y.stride(0),
+                loss_ptr=loss,
+                loss_stride=loss.stride(0),
+                n_cols=V,
+                n_non_ignore=BT,
                 ignore_index=-100,
                 label_smoothing=0.0,
                 reduction=reduction,
-                BLOCK_SIZE=tmpl["BLOCK_SIZE"],
+                BLOCK_SIZE=BLOCK_SIZE,
             )
             del X
+        del X_template, Y, loss
 
 
 BENCHMARKS["cross_entropy"] = {
