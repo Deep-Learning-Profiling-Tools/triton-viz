@@ -467,6 +467,8 @@ class SymbolicExpr:
     @classmethod
     def from_value(cls, var: Any) -> SymbolicExpr:
         """Create a SymbolicExpr from a Python value."""
+        if isinstance(var, tl.constexpr):  # unwrap constexpr to raw value
+            var = var.value
         if isinstance(var, tl.core.tensor):  # if a triton tensor
             var = var.handle  # get its handle
 
