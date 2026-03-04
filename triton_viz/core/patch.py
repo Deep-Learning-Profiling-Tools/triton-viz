@@ -425,8 +425,6 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
             call_args[name] = arg
             ret = arg
         else:
-            if isinstance(arg, bool):
-                arg = int(arg)
             ret = _implicit_cvt(arg)
         client_manager.arg_callback(name, arg, ret)
         call_args[name] = ret
