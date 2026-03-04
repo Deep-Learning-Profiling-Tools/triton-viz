@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import triton_viz.visualizer.interface as viz_interface
 from triton_viz.visualizer.interface import (
@@ -6,6 +7,22 @@ from triton_viz.visualizer.interface import (
     _collect_load_store_program_subsets,
     _coords_from_offsets,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_viz_interface_state():
+    """Save and restore viz_interface global state around every test."""
+    saved = (
+        viz_interface.global_data,
+        viz_interface.load_overall_maps,
+        viz_interface.store_overall_maps,
+    )
+    yield
+    (
+        viz_interface.global_data,
+        viz_interface.load_overall_maps,
+        viz_interface.store_overall_maps,
+    ) = saved
 
 
 def test_build_highlight_descriptor_strided_grid():
@@ -95,59 +112,49 @@ def test_coords_from_offsets_filters_masked_and_oob():
 
 def test_collect_load_store_program_subsets_supports_nd_coords():
     """Aggregates per-coordinate program sets for N-d global coords."""
-    old_global_data = viz_interface.global_data
-    old_load_maps = viz_interface.load_overall_maps
-    old_store_maps = viz_interface.store_overall_maps
-    try:
-        viz_interface.global_data = {
-            "ops": {
-                "visualization_data": {
-                    "(0,0,0)": [
-                        {
-                            "type": "Load",
-                            "overall_key": "LOAD:ptr",
-                            "time_idx": 0,
-                            "op_index": 0,
-                            "uuid": "u0",
-                        }
-                    ],
-                    "(1,0,0)": [
-                        {
-                            "type": "Load",
-                            "overall_key": "LOAD:ptr",
-                            "time_idx": 0,
-                            "op_index": 0,
-                            "uuid": "u1",
-                        }
-                    ],
-                }
-            }
-        }
-        viz_interface.load_overall_maps = {
-            "LOAD:ptr": {
-                "shape": [2, 2, 2, 2, 2],
-                "tiles": [
+    viz_interface.global_data = {
+        "ops": {
+            "visualization_data": {
+                "(0,0,0)": [
                     {
+                        "type": "Load",
+                        "overall_key": "LOAD:ptr",
+                        "time_idx": 0,
+                        "op_index": 0,
                         "uuid": "u0",
-                        "global_coords": [[0, 1, 0, 1, 0], [1, 1, 0, 1, 0]],
-                    },
+                    }
+                ],
+                "(1,0,0)": [
                     {
+                        "type": "Load",
+                        "overall_key": "LOAD:ptr",
+                        "time_idx": 0,
+                        "op_index": 0,
                         "uuid": "u1",
-                        "global_coords": [[1, 1, 0, 1, 0]],
-                    },
+                    }
                 ],
             }
         }
-        viz_interface.store_overall_maps = {}
-
-        payload = _collect_load_store_program_subsets("Load", "LOAD:ptr", 0, 0)
-        coord_to_count = {
-            tuple(entry[:-1]): int(entry[-1]) for entry in payload["counts"]
+    }
+    viz_interface.load_overall_maps = {
+        "LOAD:ptr": {
+            "shape": [2, 2, 2, 2, 2],
+            "tiles": [
+                {
+                    "uuid": "u0",
+                    "global_coords": [[0, 1, 0, 1, 0], [1, 1, 0, 1, 0]],
+                },
+                {
+                    "uuid": "u1",
+                    "global_coords": [[1, 1, 0, 1, 0]],
+                },
+            ],
         }
-        assert coord_to_count[(0, 1, 0, 1, 0)] == 1
-        assert coord_to_count[(1, 1, 0, 1, 0)] == 2
-        assert payload["subset_count"] == 2
-    finally:
-        viz_interface.global_data = old_global_data
-        viz_interface.load_overall_maps = old_load_maps
-        viz_interface.store_overall_maps = old_store_maps
+    }
+    viz_interface.store_overall_maps = {}
+
+    payload = _collect_load_store_program_subsets("Load", "LOAD:ptr", 0, 0)
+    coord_to_count = {tuple(entry[:-1]): int(entry[-1]) for entry in payload["counts"]}
+    assert coord_to_count[(0, 1, 0, 1, 0)] == 1
+    assert coord_to_count[(1, 1, 0, 1, 0)] == 2
+    assert payload["subset_count"] == 2
