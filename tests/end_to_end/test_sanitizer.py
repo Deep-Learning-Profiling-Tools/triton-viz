@@ -337,7 +337,8 @@ def test_nested_loop_no_false_positive():
 
 
 # Create a dedicated sanitizer for line number tests
-line_number_checker: SymbolicSanitizer = SymbolicSanitizer()
+# abort_on_error=False is on purpose: so OOB violations are recorded
+line_number_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
 @triton_viz.trace(client=line_number_checker)
