@@ -17,6 +17,14 @@ from triton_viz.core.config import config
 from z3.z3 import BoolRef
 
 
+@pytest.fixture
+def _isolate_virtual_memory():
+    """Save and restore config.virtual_memory around a test."""
+    saved = config.virtual_memory
+    yield
+    config.virtual_memory = saved
+
+
 # ======== Helpers ===========
 
 
@@ -374,16 +382,14 @@ def test_loop_oob_reports_correct_line_number():
     )
 
     # Verify the line contains the OOB offset
-    assert "+1000" in tb_info.line_of_code or "1000" in tb_info.line_of_code, (
-        f"Expected line to contain the OOB offset, "
-        f"but got: {tb_info.line_of_code!r}"
-    )
+    assert (
+        "+1000" in tb_info.line_of_code or "1000" in tb_info.line_of_code
+    ), f"Expected line to contain the OOB offset, but got: {tb_info.line_of_code!r}"
 
     # Verify function name
-    assert tb_info.func_name == "oob_in_loop_kernel", (
-        f"Expected func_name to be 'oob_in_loop_kernel', "
-        f"but got: {tb_info.func_name!r}"
-    )
+    assert (
+        tb_info.func_name == "oob_in_loop_kernel"
+    ), f"Expected func_name to be 'oob_in_loop_kernel', but got: {tb_info.func_name!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -861,19 +867,14 @@ def fake_tensor_oob_kernel(x_ptr, out_ptr, N: tl.constexpr):
     tl.store(out_ptr, val)
 
 
-def test_oob_with_fake_tensor():
+def test_oob_with_fake_tensor(_isolate_virtual_memory):
     fake_tensor_sanitizer.records.clear()
 
-    old_virtual_memory = config.virtual_memory
     config.virtual_memory = True
-    try:
-        x = torch.randn(8)
-        out = torch.empty(1)
-        with pytest.raises(SystemExit):
-            fake_tensor_oob_kernel[(1,)](x, out, N=8)
-    finally:
-        config.virtual_memory = old_virtual_memory
-
+    x = torch.randn(8)
+    out = torch.empty(1)
+    with pytest.raises(SystemExit):
+        fake_tensor_oob_kernel[(1,)](x, out, N=8)
 
 
 @triton_viz.trace(client=SymbolicSanitizer())
