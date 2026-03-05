@@ -1824,14 +1824,20 @@ class SymbolicClient(Client):
         )
 
     def _op_reduce_max_overrider(self, input, axis=None, keep_dims=False, **kwargs):
-        return SymbolicExpr.create(
-            "max", SymbolicExpr.from_value(input), axis, keep_dims
-        )
+        input_sym = SymbolicExpr.from_value(input)
+        val = SymbolicExpr.create("max", input_sym, axis, keep_dims)
+        if kwargs.get("return_indices", False):
+            idx = SymbolicExpr.create("argmax", input_sym, axis, keep_dims)
+            return (val, idx)
+        return val
 
     def _op_reduce_min_overrider(self, input, axis=None, keep_dims=False, **kwargs):
-        return SymbolicExpr.create(
-            "min", SymbolicExpr.from_value(input), axis, keep_dims
-        )
+        input_sym = SymbolicExpr.from_value(input)
+        val = SymbolicExpr.create("min", input_sym, axis, keep_dims)
+        if kwargs.get("return_indices", False):
+            idx = SymbolicExpr.create("argmin", input_sym, axis, keep_dims)
+            return (val, idx)
+        return val
 
     def _op_splat_overrider(self, shape, arg):
         return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))

@@ -179,11 +179,19 @@ class PatchOp:
                 symbolic_ret = self.callbacks.op_overrider(
                     args[0].handle, *args[1:], **kwargs
                 )
-                ret_dtype = getattr(symbolic_ret, "dtype", None) or args[0].dtype
-                ret = tl.core.tensor(symbolic_ret, ret_dtype)
-                fn = cast(Any, ret.handle)
-                if fn is not None:
-                    fn.concrete_fn = self.op
+                if isinstance(symbolic_ret, tuple):
+                    ret_parts = []
+                    for sym_elem in symbolic_ret:
+                        elem_dtype = getattr(sym_elem, "dtype", None) or args[0].dtype
+                        elem_tensor = tl.core.tensor(sym_elem, elem_dtype)
+                        ret_parts.append(elem_tensor)
+                    ret = tuple(ret_parts)
+                else:
+                    ret_dtype = getattr(symbolic_ret, "dtype", None) or args[0].dtype
+                    ret = tl.core.tensor(symbolic_ret, ret_dtype)
+                    fn = cast(Any, ret.handle)
+                    if fn is not None:
+                        fn.concrete_fn = self.op
             else:  # interpreter_builder
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 if ret is not None:
