@@ -9,9 +9,9 @@ from triton_viz.visualizer.interface import (
 )
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def _isolate_viz_interface_state():
-    """Save and restore viz_interface global state around every test."""
+    """Save and restore viz_interface global state around a test."""
     saved = (
         viz_interface.global_data,
         viz_interface.load_overall_maps,
@@ -110,7 +110,9 @@ def test_coords_from_offsets_filters_masked_and_oob():
     np.testing.assert_array_equal(result, np.array([[1, 0, 1]], dtype=np.int64))
 
 
-def test_collect_load_store_program_subsets_supports_nd_coords():
+def test_collect_load_store_program_subsets_supports_nd_coords(
+    _isolate_viz_interface_state,
+):
     """Aggregates per-coordinate program sets for N-d global coords."""
     viz_interface.global_data = {
         "ops": {
