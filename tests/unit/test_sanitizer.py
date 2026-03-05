@@ -1,4 +1,5 @@
 import pytest
+import numpy as np
 from typing import cast
 
 import triton.language as tl
@@ -92,6 +93,34 @@ def test_reduce_expr_eval(op: str, data):
     result, _ = reduce_expr.eval(simplify_constraints=False)
     # Use reflection to call the matching Python builtin, e.g. builtins.max([1,5,3,2]) -> 5
     assert cast(IntNumRef, result).as_long() == getattr(builtins, op)(data)
+
+
+@pytest.mark.parametrize("op,np_op", [("argmax", np.argmax), ("argmin", np.argmin)])
+def test_reduce_argmax_argmin_z3_through_where(op: str, np_op):
+    """argmax/argmin should use Z3 symbolic path, not concretize().
+
+    When the input flows through a node that only has _to_z3_impl (like
+    ``where``), the old concretize() fallback would raise
+    NotImplementedError.  The Z3 If-chain implementation avoids this by
+    staying on the symbolic path end-to-end.
+    """
+    n = 4
+    block_ty = tl.block_type(tl.int32, [n])
+
+    mask_vals = SymbolicExpr.create("const", np.array([1, 0, 1, 0]), block_ty)
+    zero = SymbolicExpr.create("const", np.array([0, 0, 0, 0]), block_ty)
+    # "greater" produces BoolRef elements that where() accepts
+    cond = SymbolicExpr.create("greater", mask_vals, zero)
+    lhs = SymbolicExpr.create("const", np.array([10, 20, 30, 40]), block_ty)
+    rhs = SymbolicExpr.create("const", np.array([99, 1, 5, 50]), block_ty)
+    # where(cond, lhs, rhs) => [10, 1, 30, 50]  — has _to_z3 but NO concretize
+    where_expr = SymbolicExpr.create("where", cond, lhs, rhs)
+
+    reduce_expr = SymbolicExpr.create(op, where_expr, None, False)
+
+    result, _ = reduce_expr.eval(simplify_constraints=False)
+    expected = int(np_op(np.where([1, 0, 1, 0], [10, 20, 30, 40], [99, 1, 5, 50])))
+    assert cast(IntNumRef, result).as_long() == expected
 
 
 # ======== Basic Symbolic Expr Operations Tests =========

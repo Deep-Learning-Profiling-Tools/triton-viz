@@ -253,7 +253,14 @@ class SymbolicExpr:
     }
     BINARY_OPS: ClassVar[tuple[str, ...]] = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS: ClassVar[tuple[str, ...]] = ("where",)
-    REDUCE_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min", "dot")
+    REDUCE_OPS: ClassVar[tuple[str, ...]] = (
+        "sum",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+        "dot",
+    )
     SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum",)
     POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
@@ -1106,7 +1113,13 @@ class WhereSymbolicExpr(SymbolicExpr):
 
 
 class ReduceSymbolicExpr(SymbolicExpr):
-    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min")
+    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = (
+        "sum",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+    )
     input: SymbolicExpr
     keepdims: SymbolicExpr
     axis: SymbolicExpr | None
@@ -1143,7 +1156,10 @@ class ReduceSymbolicExpr(SymbolicExpr):
                 output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
         else:
             output_shape = [1] * len(input_shape) if keepdims_val else []
-        scalar_ty = input_dtype.scalar
+        if op in ("argmax", "argmin"):
+            scalar_ty = tl.int32
+        else:
+            scalar_ty = input_dtype.scalar
         self.dtype = (
             tl.block_type(scalar_ty, output_shape) if output_shape else scalar_ty
         )
@@ -1166,12 +1182,38 @@ class ReduceSymbolicExpr(SymbolicExpr):
         arr, constraints = self.input._to_z3()
         return reduce(lambda a, b: If(a <= b, a, b), arr), constraints
 
+    def _reduce_argmax(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        arr, constraints = self.input._to_z3()
+        if not isinstance(arr, (list, tuple)):
+            return IntVal(0), constraints
+        best_val = arr[0]
+        best_idx: Z3Expr = IntVal(0)
+        for i in range(1, len(arr)):
+            is_better = arr[i] > best_val
+            best_idx = If(is_better, IntVal(i), best_idx)
+            best_val = If(is_better, arr[i], best_val)
+        return best_idx, constraints
+
+    def _reduce_argmin(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        arr, constraints = self.input._to_z3()
+        if not isinstance(arr, (list, tuple)):
+            return IntVal(0), constraints
+        best_val = arr[0]
+        best_idx: Z3Expr = IntVal(0)
+        for i in range(1, len(arr)):
+            is_better = arr[i] < best_val
+            best_idx = If(is_better, IntVal(i), best_idx)
+            best_val = If(is_better, arr[i], best_val)
+        return best_idx, constraints
+
     _Z3_BUILDERS: ClassVar[
         dict[str, Callable[[ReduceSymbolicExpr], tuple[Z3Expr, ConstraintConjunction]]]
     ] = {
         "sum": _reduce_sum,
         "max": _reduce_max,
         "min": _reduce_min,
+        "argmax": _reduce_argmax,
+        "argmin": _reduce_argmin,
     }
 
 
@@ -1604,7 +1646,9 @@ SymbolicExpr.register_op_class(StoreSymbolicExpr, ("store",))
 SymbolicExpr.register_op_class(UnarySymbolicExpr, SymbolicExpr.UNARY_OPS)
 SymbolicExpr.register_op_class(BinarySymbolicExpr, SymbolicExpr.BINARY_OPS)
 SymbolicExpr.register_op_class(WhereSymbolicExpr, ("where",))
-SymbolicExpr.register_op_class(ReduceSymbolicExpr, ("sum", "max", "min"))
+SymbolicExpr.register_op_class(
+    ReduceSymbolicExpr, ("sum", "max", "min", "argmax", "argmin")
+)
 SymbolicExpr.register_op_class(DotSymbolicExpr, ("dot",))
 SymbolicExpr.register_op_class(CumsumSymbolicExpr, ("cumsum",))
 SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
