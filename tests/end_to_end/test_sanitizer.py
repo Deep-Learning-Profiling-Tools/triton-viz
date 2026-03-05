@@ -459,7 +459,8 @@ def test_gemm_oob_call_stack():
 # ======== Block Tensor (Block Pointer) Tests ===========
 
 
-block_sanitizer = SymbolicSanitizer()
+# abort_on_error=False is on purpose: so OOB violations are recorded
+block_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
 @triton_viz.trace(client=block_sanitizer)
