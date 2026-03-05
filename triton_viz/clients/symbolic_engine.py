@@ -1206,6 +1206,33 @@ class ReduceSymbolicExpr(SymbolicExpr):
             best_val = If(is_better, arr[i], best_val)
         return best_idx, constraints
 
+    _NUMPY_REDUCE_OPS: ClassVar[dict[str, Any]] = {
+        "sum": np.sum,
+        "max": np.max,
+        "min": np.min,
+        "argmax": np.argmax,
+        "argmin": np.argmin,
+    }
+
+    def concretize(self) -> Any:
+        input_concrete = self.input.concretize()
+        np_op = self._NUMPY_REDUCE_OPS[self.op]
+        axis_val = self.axis.to_py() if self.axis is not None else None
+        keepdims_val = (
+            bool(self.keepdims.to_py())
+            if hasattr(self.keepdims, "to_py")
+            else bool(self.keepdims)
+        )
+        if self.op in ("argmax", "argmin"):
+            result = np_op(input_concrete.data, axis=axis_val).astype(np.int32)
+            if keepdims_val:
+                result = np.expand_dims(
+                    result, axis=axis_val if axis_val is not None else 0
+                )
+        else:
+            result = np_op(input_concrete.data, axis=axis_val, keepdims=keepdims_val)
+        return TensorHandle(np.atleast_1d(result), self.dtype)
+
     _Z3_BUILDERS: ClassVar[
         dict[str, Callable[[ReduceSymbolicExpr], tuple[Z3Expr, ConstraintConjunction]]]
     ] = {
