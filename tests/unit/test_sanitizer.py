@@ -122,6 +122,22 @@ def test_reduce_argmax_argmin_z3_through_where(op: str, np_op):
     assert cast(IntNumRef, result).as_long() == expected
 
 
+@pytest.mark.parametrize("op,np_op", [("argmax", np.argmax), ("argmin", np.argmin)])
+def test_reduce_argmax_argmin_concretize_dtype(op: str, np_op):
+    """concretize() must produce int32 data matching the declared dtype."""
+    from triton.runtime.interpreter import TensorHandle
+
+    data = np.array([3, 1, 4, 1], dtype=np.int32)
+    block_ty = tl.block_type(tl.int32, [len(data)])
+    input_arr = SymbolicExpr.create("const", TensorHandle(data, tl.int32), block_ty)
+    reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
+
+    result = reduce_expr.concretize()
+    assert isinstance(result, TensorHandle)
+    assert result.data.dtype == np.int32
+    assert int(result.data.flat[0]) == int(np_op(data))
+
+
 # ======== Basic Symbolic Expr Operations Tests =========
 
 
