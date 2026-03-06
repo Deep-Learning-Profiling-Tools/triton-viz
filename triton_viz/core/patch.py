@@ -331,8 +331,8 @@ class TensorMaterializer:
     """Lazily copies GPU tensor storage to CPU on demand."""
 
     def __init__(self):
-        self._storages: list[tuple[int, int, Any]] = []   # (base, end, storage)
-        self._cpu_cache: dict[int, Any] = {}               # base → cpu_storage
+        self._storages: list[tuple[int, int, Any]] = []  # (base, end, storage)
+        self._cpu_cache: dict[int, Any] = {}  # base → cpu_storage
 
     def register(self, tensor):
         if not hasattr(tensor, "untyped_storage"):

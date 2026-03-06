@@ -51,7 +51,9 @@ class Config:
         self.report_grid_execution_progress: bool = _is_one(
             "REPORT_GRID_EXECUTION_PROGRESS"
         )
-        self.virtual_memory: bool = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "1") != "0"
+        self.virtual_memory: bool = (
+            os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "1") != "0"
+        )
         self.profiler_enable_load_store_skipping: bool = _is_one(
             "PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1"
         )
