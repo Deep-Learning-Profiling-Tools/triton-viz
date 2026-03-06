@@ -8,6 +8,7 @@ from queue import SimpleQueue, Empty
 import threading
 import time
 from functools import partialmethod
+import numpy as np
 
 from .config import config as cfg
 from .callbacks import OpCallbacks
@@ -300,10 +301,70 @@ def unpatch_for_loop():
     _loop_patcher.unpatch()
 
 
+# ── Libdevice stub patching ─────────────────────────────────────
+# Triton's _patch_lang does NOT patch triton.language.extra.libdevice,
+# so stub functions like ``def tanh(arg0): ...`` return None in
+# interpreter mode.  We replace them with numpy-backed implementations
+# that route through interpreter_builder.unary_op so the symbolic
+# engine can track them.
+
+_LIBDEVICE_NUMPY_MAP: dict[str, Callable] = {
+    "tanh": np.tanh,
+}
+
+
+def _make_libdevice_interpreter_fn(np_func: Callable) -> Callable:
+    """Return a replacement for a libdevice stub that computes via numpy."""
+
+    def _replacement(arg0):
+        handle = interpreter_builder.unary_op(arg0.handle, np_func)
+        return tl.core.tensor(handle, arg0.type)
+
+    return _replacement
+
+
+def _patch_libdevice(fn: Callable, scope: _LangPatchScope) -> None:
+    """Patch libdevice stub functions for interpreter / sanitizer mode."""
+    import triton.language.extra.libdevice as _ld
+
+    # Collect original stubs by identity so we can detect direct imports.
+    stubs: dict[int, Callable] = {}
+    for name, np_func in _LIBDEVICE_NUMPY_MAP.items():
+        stub = getattr(_ld, name, None)
+        if stub is not None:
+            stubs[id(stub)] = np_func
+
+    # Patch module-level attributes (covers ``libdevice.tanh(x)`` usage).
+    for name, np_func in _LIBDEVICE_NUMPY_MAP.items():
+        if hasattr(_ld, name):
+            scope.set_attr(_ld, name, _make_libdevice_interpreter_fn(np_func))
+
+    # Patch fn.__globals__ for direct imports
+    # (covers ``from triton.language.extra.libdevice import tanh``).
+    globals_saved: dict[str, Any] = {}
+    for gname, gvalue in list(fn.__globals__.items()):
+        if callable(gvalue) and id(gvalue) in stubs:
+            globals_saved[gname] = gvalue
+            fn.__globals__[gname] = _make_libdevice_interpreter_fn(
+                stubs[id(gvalue)]
+            )
+
+    if globals_saved:
+        _original_restore = scope.restore
+
+        def _extended_restore() -> None:
+            for gname, original in globals_saved.items():
+                fn.__globals__[gname] = original
+            _original_restore()
+
+        scope.restore = _extended_restore  # type: ignore[assignment]
+
+
 def patch_lang(fn, backend, client_manager=None):
     if backend == "triton":
         scope = _triton_snapshot_scope(fn)
         triton_patch_lang(fn)
+        _patch_libdevice(fn, scope)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
