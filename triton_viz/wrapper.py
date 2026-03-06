@@ -5,13 +5,14 @@ import sys
 import pytest
 import triton
 import triton_viz
-from triton_viz.clients import Sanitizer, Profiler
+from triton_viz.clients import Sanitizer, Profiler, RaceDetector
 from triton_viz.core.config import config as cfg
 
 
 # Command names
 SANITIZER_COMMAND = "triton-sanitizer"
 PROFILER_COMMAND = "triton-profiler"
+RACE_DETECTOR_COMMAND = "triton-race-detector"
 
 # store the original triton.jit
 _original_jit = triton.jit
@@ -26,6 +27,11 @@ def sanitizer_wrapper(kernel):
 
 def profiler_wrapper(kernel):
     tracer = triton_viz.trace(client=Profiler())
+    return tracer(kernel)
+
+
+def race_detector_wrapper(kernel):
+    tracer = triton_viz.trace(client=RaceDetector())
     return tracer(kernel)
 
 
@@ -136,4 +142,15 @@ def apply_profiler():
         profiler_wrapper,
         PROFILER_COMMAND,
         f"Usage: {PROFILER_COMMAND} <script.py> [args...]",
+    )
+
+
+def apply_race_detector():
+    """
+    Apply the race detector wrapper to triton.jit and run the user script.
+    """
+    _apply_wrapper(
+        race_detector_wrapper,
+        RACE_DETECTOR_COMMAND,
+        f"Usage: {RACE_DETECTOR_COMMAND} <script.py> [args...]",
     )
