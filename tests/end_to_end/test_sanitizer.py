@@ -881,6 +881,24 @@ def test_oob_with_fake_tensor(_isolate_virtual_memory):
 
 @triton_viz.trace(client=SymbolicSanitizer())
 @triton.jit
+def cast_scalar_kernel(x_ptr, out_ptr, eps: tl.constexpr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    dtype = x.dtype
+    eps_cast = eps.to(dtype)
+    y = x + eps_cast
+    tl.store(out_ptr + offs, y)
+
+
+def test_float_no_attr_to():
+    """constexpr float .to(dtype) must work in interpreter mode."""
+    x = torch.randn(8, device="cpu")
+    out = torch.empty(8, device="cpu")
+    cast_scalar_kernel[(1,)](x, out, eps=1e-6, N=8)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
 def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     offs = tl.arange(0, BLOCK)

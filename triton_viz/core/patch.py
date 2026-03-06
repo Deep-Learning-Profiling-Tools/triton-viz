@@ -36,6 +36,16 @@ from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 
 _MISSING = object()
 
+# Monkey-patch tl.constexpr to add .to() for interpreter mode.
+# In compiled Triton, constexpr.to(dtype) works via the compiler pipeline,
+# but in interpreter mode constexpr has no .to() method.
+if not hasattr(tl.constexpr, "to"):
+
+    def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
+        return _implicit_cvt(self.value)
+
+    tl.constexpr.to = _constexpr_to
+
 
 class _LangPatchScope:
     """Tracks patched attributes so they can be restored."""
@@ -422,8 +432,10 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     call_args = {}
     for name, arg in args.items():
         if name in self.constexprs:
-            call_args[name] = arg
-            ret = arg
+            call_args[name] = (
+                tl.constexpr(arg) if isinstance(arg, (int, float, bool)) else arg
+            )
+            ret = call_args[name]
         else:
             ret = _implicit_cvt(arg)
         client_manager.arg_callback(name, arg, ret)
