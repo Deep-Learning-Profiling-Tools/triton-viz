@@ -26,8 +26,9 @@ class Config:
     - enable_timing: ENABLE_TIMING, collects timing info during execution.
     - report_grid_execution_progress: REPORT_GRID_EXECUTION_PROGRESS, logs per
       program block progress in the interpreter.
-    - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, uses a fake tensor backend in
-      sanitizer runs to avoid real memory reads.
+    - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, controls tensor materialization
+      strategy. True (default): use fake tensors with lazy on-demand materialization
+      for indirect loads. False (env=0): always copy tensors to CPU.
     - profiler_enable_load_store_skipping: PROFILER_ENABLE_LOAD_STORE_SKIPPING,
       skips redundant load/store checks to speed profiling.
     - profiler_enable_block_sampling: PROFILER_ENABLE_BLOCK_SAMPLING, samples a
@@ -50,7 +51,9 @@ class Config:
         self.report_grid_execution_progress: bool = _is_one(
             "REPORT_GRID_EXECUTION_PROGRESS"
         )
-        self.virtual_memory: bool = _is_one("SANITIZER_ENABLE_FAKE_TENSOR")
+        self.virtual_memory: bool = (
+            os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "1") != "0"
+        )
         self.profiler_enable_load_store_skipping: bool = _is_one(
             "PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1"
         )

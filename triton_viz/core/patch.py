@@ -327,6 +327,37 @@ def unpatch_lang(backend):
         scope.restore()
 
 
+class TensorMaterializer:
+    """Lazily copies GPU tensor storage to CPU on demand."""
+
+    def __init__(self):
+        self._storages: list[tuple[int, int, Any]] = []  # (base, end, storage)
+        self._cpu_cache: dict[int, Any] = {}  # base → cpu_storage
+
+    def register(self, tensor):
+        if not hasattr(tensor, "untyped_storage"):
+            return
+        storage = tensor.untyped_storage()
+        base = storage.data_ptr()
+        if not any(b == base for b, _, _ in self._storages):
+            self._storages.append((base, base + storage.nbytes(), storage))
+
+    def rebase_pointers(self, ptr_data):
+        sample = int(ptr_data.flat[0])
+        gpu_base = self._find_base(sample)
+        if gpu_base not in self._cpu_cache:
+            _, _, stor = next(s for s in self._storages if s[0] == gpu_base)
+            self._cpu_cache[gpu_base] = stor.cpu()
+        cpu_base = self._cpu_cache[gpu_base].data_ptr()
+        return ptr_data + (cpu_base - gpu_base)
+
+    def _find_base(self, addr):
+        for base, end, _ in self._storages:
+            if base <= addr < end:
+                return base
+        raise RuntimeError(f"No registered storage for address {addr:#x}")
+
+
 @dataclass(frozen=True)
 class FakeTensor:
     _data_ptr: int
@@ -356,7 +387,7 @@ class FakeTensor:
         return self._element_size
 
 
-def _init_args_hst(args_dev, kwargs):
+def _init_args_hst(args_dev, kwargs, materializer=None):
     def _to_cpu(arg):
         if isinstance(arg, tuple):
             return _tuple_create(arg, map(_to_cpu, arg))
@@ -371,6 +402,8 @@ def _init_args_hst(args_dev, kwargs):
             return arg
 
         unwrapped_arg = _unwrap_tensor(arg)
+        if materializer is not None:
+            materializer.register(unwrapped_arg)
         cpu_arg = FakeTensor(
             _data_ptr=unwrapped_arg.data_ptr(),
             dtype=unwrapped_arg.dtype,
@@ -392,6 +425,8 @@ def _init_args_hst(args_dev, kwargs):
 
 
 def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
+    from ..clients.symbolic_engine import set_materializer
+
     assert backend is not None
     if kwargs.pop("warmup", False):
         return
@@ -412,92 +447,99 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     global _current_client_manager
     _current_client_manager = client_manager
     kwargs.pop("jit_fn")
-    if cfg.virtual_memory:
-        args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs)
-    else:
-        args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
 
-    # Prepare call arguments
-    args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
-    call_args = {}
-    for name, arg in args.items():
-        if name in self.constexprs:
-            call_args[name] = arg
-            ret = arg
+    materializer = None
+    try:
+        if cfg.virtual_memory:
+            materializer = TensorMaterializer()
+            set_materializer(materializer)
+            args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs, materializer)
         else:
-            ret = _implicit_cvt(arg)
-        client_manager.arg_callback(name, arg, ret)
-        call_args[name] = ret
-    call_args.pop("self", None)
-    # Iterate through grid
-    grid = self.grid(call_args) if callable(self.grid) else self.grid
-    assert len(grid) <= 3
-    grid = grid + (1,) * (3 - len(grid))
+            args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
 
-    builder.set_grid_dim(*grid)
-    client_manager.grid_callback(grid)
-    total_blocks = grid[0] * grid[1] * grid[2]
-    max_workers = min(cfg.num_sms, total_blocks)
+        # Prepare call arguments
+        args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
+        call_args = {}
+        for name, arg in args.items():
+            if name in self.constexprs:
+                call_args[name] = arg
+                ret = arg
+            else:
+                ret = _implicit_cvt(arg)
+            client_manager.arg_callback(name, arg, ret)
+            call_args[name] = ret
+        call_args.pop("self", None)
+        # Iterate through grid
+        grid = self.grid(call_args) if callable(self.grid) else self.grid
+        assert len(grid) <= 3
+        grid = grid + (1,) * (3 - len(grid))
 
-    def run_grid_loops(grid):
-        tasks: SimpleQueue = SimpleQueue()
-        for x in range(grid[0]):
-            for y in range(grid[1]):
-                for z in range(grid[2]):
-                    tasks.put((x, y, z))
+        builder.set_grid_dim(*grid)
+        client_manager.grid_callback(grid)
+        total_blocks = grid[0] * grid[1] * grid[2]
+        max_workers = min(cfg.num_sms, total_blocks)
 
-        stop_event = threading.Event()
+        def run_grid_loops(grid):
+            tasks: SimpleQueue = SimpleQueue()
+            for x in range(grid[0]):
+                for y in range(grid[1]):
+                    for z in range(grid[2]):
+                        tasks.put((x, y, z))
 
-        def _worker():
-            while not stop_event.is_set():
-                try:
-                    x, y, z = tasks.get_nowait()
-                except Empty:
-                    return
-                interpreter_builder.set_grid_idx(x, y, z)
-                client_manager.grid_idx_callback((x, y, z))
-                if not client_manager.pre_run_callback(self.fn):
-                    continue
-                self.fn(**call_args)
-                if not client_manager.post_run_callback(self.fn):
-                    stop_event.set()
-                    return
+            stop_event = threading.Event()
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_worker) for _ in range(max_workers)]
-            for fut in futures:
-                fut.result()
-
-    def run_grid_loops_1thread(grid):
-        for x in range(grid[0]):
-            for y in range(grid[1]):
-                for z in range(grid[2]):
+            def _worker():
+                while not stop_event.is_set():
+                    try:
+                        x, y, z = tasks.get_nowait()
+                    except Empty:
+                        return
                     interpreter_builder.set_grid_idx(x, y, z)
                     client_manager.grid_idx_callback((x, y, z))
                     if not client_manager.pre_run_callback(self.fn):
                         continue
                     self.fn(**call_args)
                     if not client_manager.post_run_callback(self.fn):
+                        stop_event.set()
                         return
 
-    if cfg.enable_timing:
-        import time
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_worker) for _ in range(max_workers)]
+                for fut in futures:
+                    fut.result()
 
-        start_time = time.time()
+        def run_grid_loops_1thread(grid):
+            for x in range(grid[0]):
+                for y in range(grid[1]):
+                    for z in range(grid[2]):
+                        interpreter_builder.set_grid_idx(x, y, z)
+                        client_manager.grid_idx_callback((x, y, z))
+                        if not client_manager.pre_run_callback(self.fn):
+                            continue
+                        self.fn(**call_args)
+                        if not client_manager.post_run_callback(self.fn):
+                            return
 
-    if max_workers == 1:
-        run_grid_loops_1thread(grid)
-    else:
-        run_grid_loops(grid)
+        if cfg.enable_timing:
+            start_time = time.time()
 
-    if cfg.enable_timing:
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        name = self.fn.__name__
-        print(f"Triton-Viz: execution time for {name}: {elapsed_time * 1000:.3f} ms")
-    # Copy arguments back to propagate side-effects
-    if not cfg.virtual_memory:
-        self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
+        if max_workers == 1:
+            run_grid_loops_1thread(grid)
+        else:
+            run_grid_loops(grid)
+
+        if cfg.enable_timing:
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            name = self.fn.__name__
+            print(
+                f"Triton-Viz: execution time for {name}: {elapsed_time * 1000:.3f} ms"
+            )
+        # Copy arguments back to propagate side-effects
+        if not cfg.virtual_memory:
+            self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
+    finally:
+        set_materializer(None)
 
 
 def _jit_function_call(self, *args, backend=None, **kwargs):
