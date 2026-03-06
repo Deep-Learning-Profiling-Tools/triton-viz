@@ -13,7 +13,7 @@ from triton_viz.clients.profiler.profiler import (
 from triton_viz.clients.profiler.data import LoadStoreBytes
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def _isolate_profiler_cfg():
     """Save and restore profiler-related config values around every test."""
     saved = (
@@ -32,7 +32,7 @@ def _isolate_profiler_cfg():
 # ======== Profiler Init Tests =========
 
 
-def test_profiler_init_defaults():
+def test_profiler_init_defaults(_isolate_profiler_cfg):
     """Test Profiler default attribute initialization."""
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_enable_load_store_skipping = False
@@ -67,7 +67,7 @@ def test_profiler_init_defaults():
     assert profiler.callpath is True
 
 
-def test_profiler_init_with_params():
+def test_profiler_init_with_params(_isolate_profiler_cfg):
     """Test Profiler initialization with custom parameters."""
     cfg.profiler_enable_block_sampling = True
     cfg.profiler_enable_load_store_skipping = False
@@ -155,7 +155,7 @@ def test_aggregated_mask_op_stats_dataclass():
 # ======== Block Sampling Grid Callback Tests =========
 
 
-def test_block_sampling_grid_callback():
+def test_block_sampling_grid_callback(_isolate_profiler_cfg):
     """Test grid_callback block sampling logic with mocked random permutation."""
     cfg.profiler_enable_block_sampling = True
     cfg.profiler_enable_load_store_skipping = False
@@ -181,7 +181,7 @@ def test_block_sampling_grid_callback():
         assert (4, 0, 0) in profiler.sampled_blocks
 
 
-def test_block_sampling_grid_callback_2d():
+def test_block_sampling_grid_callback_2d(_isolate_profiler_cfg):
     """Test grid_callback with 2D grid."""
     cfg.profiler_enable_block_sampling = True
     cfg.profiler_enable_load_store_skipping = False
@@ -199,7 +199,7 @@ def test_block_sampling_grid_callback_2d():
         assert len(profiler.sampled_blocks) == 2
 
 
-def test_block_sampling_disabled():
+def test_block_sampling_disabled(_isolate_profiler_cfg):
     """Test grid_callback when block sampling is disabled."""
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_enable_load_store_skipping = False
@@ -216,7 +216,7 @@ def test_block_sampling_disabled():
 # ======== 32-bit Range Check Tests =========
 
 
-def test_check_32bit_range_within_range():
+def test_check_32bit_range_within_range(_isolate_profiler_cfg):
     """Test _check_32bit_range when offsets are within 32-bit range."""
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_enable_load_store_skipping = False
@@ -234,7 +234,7 @@ def test_check_32bit_range_within_range():
     assert profiler.potential_buffer_load_issue_found is False
 
 
-def test_check_32bit_range_outside_range():
+def test_check_32bit_range_outside_range(_isolate_profiler_cfg):
     """Test _check_32bit_range when offsets exceed 32-bit range."""
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_enable_load_store_skipping = False
@@ -254,7 +254,7 @@ def test_check_32bit_range_outside_range():
     assert profiler.potential_buffer_load_issue_found is False
 
 
-def test_check_32bit_range_no_buffer_load():
+def test_check_32bit_range_no_buffer_load(_isolate_profiler_cfg):
     """Test _check_32bit_range when buffer_load is not detected but should be used."""
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_enable_load_store_skipping = False
@@ -275,7 +275,7 @@ def test_check_32bit_range_no_buffer_load():
 # ======== Pre-run Callback Tests =========
 
 
-def test_pre_run_callback_with_sampling():
+def test_pre_run_callback_with_sampling(_isolate_profiler_cfg):
     """Test pre_run_callback behavior when block sampling is enabled."""
     cfg.profiler_enable_block_sampling = True
     cfg.profiler_enable_load_store_skipping = False
@@ -299,7 +299,7 @@ def test_pre_run_callback_with_sampling():
     assert profiler.pre_run_callback(lambda: None) is True
 
 
-def test_pre_run_callback_without_sampling():
+def test_pre_run_callback_without_sampling(_isolate_profiler_cfg):
     """Test pre_run_callback behavior when block sampling is disabled."""
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_enable_load_store_skipping = False
