@@ -4,6 +4,8 @@ from .sanitizer.sanitizer import Sanitizer
 from .sanitizer.data import OutOfBoundsRecord
 from .symbolic_engine import SymbolicExpr, SymbolicClient, RangeWrapper
 from .tracer.tracer import Tracer
+from .race_detector.race_detector import RaceDetector
+from .race_detector.data import RaceType, RaceRecord
 
 __all__ = [
     "Profiler",
@@ -15,4 +17,7 @@ __all__ = [
     "SymbolicClient",
     "RangeWrapper",
     "Tracer",
+    "RaceDetector",
+    "RaceType",
+    "RaceRecord",
 ]
