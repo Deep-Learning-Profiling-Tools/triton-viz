@@ -1,3 +1,4 @@
+import pytest
 import torch
 import numpy as np
 
@@ -12,7 +13,16 @@ from triton_viz.clients.sanitizer.sanitizer import (
     _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
+from triton_viz.core.config import config
 from z3.z3 import BoolRef
+
+
+@pytest.fixture
+def _isolate_virtual_memory():
+    """Save and restore config.virtual_memory around a test."""
+    saved = config.virtual_memory
+    yield
+    config.virtual_memory = saved
 
 
 # ======== Helpers ===========
@@ -299,7 +309,7 @@ def test_loop_deferred_checks_simplify():
 
 
 # Dedicated sanitizer for nested loop regression test
-nested_loop_checker = SymbolicSanitizer(abort_on_error=False)
+nested_loop_checker = SymbolicSanitizer()
 
 
 @triton_viz.trace(client=nested_loop_checker)
@@ -327,6 +337,7 @@ def test_nested_loop_no_false_positive():
 
 
 # Create a dedicated sanitizer for line number tests
+# abort_on_error=False is on purpose: so OOB violations are recorded
 line_number_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
@@ -372,16 +383,14 @@ def test_loop_oob_reports_correct_line_number():
     )
 
     # Verify the line contains the OOB offset
-    assert "+1000" in tb_info.line_of_code or "1000" in tb_info.line_of_code, (
-        f"Expected line to contain the OOB offset, "
-        f"but got: {tb_info.line_of_code!r}"
-    )
+    assert (
+        "+1000" in tb_info.line_of_code or "1000" in tb_info.line_of_code
+    ), f"Expected line to contain the OOB offset, but got: {tb_info.line_of_code!r}"
 
     # Verify function name
-    assert tb_info.func_name == "oob_in_loop_kernel", (
-        f"Expected func_name to be 'oob_in_loop_kernel', "
-        f"but got: {tb_info.func_name!r}"
-    )
+    assert (
+        tb_info.func_name == "oob_in_loop_kernel"
+    ), f"Expected func_name to be 'oob_in_loop_kernel', but got: {tb_info.func_name!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +459,7 @@ def test_gemm_oob_call_stack():
 # ======== Block Tensor (Block Pointer) Tests ===========
 
 
+# abort_on_error=False is on purpose: so OOB violations are recorded
 block_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
@@ -811,7 +821,7 @@ def test_cli_code_context_points_to_kernel():
 
 # ======== Reduce + Broadcast Tests ===========
 
-reduce_broadcast_sanitizer = SymbolicSanitizer(abort_on_error=False)
+reduce_broadcast_sanitizer = SymbolicSanitizer()
 
 
 @triton_viz.trace(client=reduce_broadcast_sanitizer)
@@ -844,3 +854,63 @@ def test_reduce_broadcast():
     assert (
         len(reduce_broadcast_sanitizer.records) == 0
     ), f"Expected no OOB records, got {len(reduce_broadcast_sanitizer.records)}"
+
+
+# ======== Fake Tensor (Virtual Memory) OOB Tests ===========
+
+fake_tensor_sanitizer = SymbolicSanitizer(abort_on_error=True)
+
+
+@triton_viz.trace(client=fake_tensor_sanitizer)
+@triton.jit
+def fake_tensor_oob_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    # Intentionally read out-of-bounds: offset N is beyond the valid range [0, N)
+    val = tl.load(x_ptr + N)
+    tl.store(out_ptr, val)
+
+
+def test_oob_with_fake_tensor(_isolate_virtual_memory):
+    fake_tensor_sanitizer.records.clear()
+
+    config.virtual_memory = True
+    x = torch.randn(8)
+    out = torch.empty(1)
+    with pytest.raises(SystemExit):
+        fake_tensor_oob_kernel[(1,)](x, out, N=8)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(input_ptr + row * N + offs, mask=mask, other=-float("inf"))
+    x_max = tl.max(x, 0)
+    exp_x = tl.exp(x - x_max)
+    sum_exp = tl.sum(exp_x, 0)
+    tl.store(output_ptr + row * N + offs, exp_x / sum_exp, mask=mask)
+
+
+def test_reduce_symbolic_nonetype():
+    """Softmax kernel: tl.exp -> tl.max / tl.sum must propagate dtype correctly."""
+    x = torch.randn(4, 64, device="cpu")
+    out = torch.empty_like(x)
+    softmax_kernel[(4,)](out, x, 64, BLOCK=64)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def exp_expand_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    w = tl.exp(x)
+    m = w[None, :] * tl.load(x_ptr + offs)[:, None]
+    tl.store(out_ptr + offs, tl.sum(m, axis=1))
+
+
+def test_expand_dims_scalar_attr():
+    """tl.exp followed by expand_dims must propagate dtype correctly."""
+    x = torch.randn(8, device="cpu")
+    out = torch.empty(8, device="cpu")
+    exp_expand_kernel[(1,)](x, out, N=8)
