@@ -172,18 +172,18 @@ class TritonTrace(KernelInterface, TraceInterface):
 
 
 class NKITrace(KernelInterface, TraceInterface):
-    def __init__(self, kernel, client: str | Client) -> None:
-        from neuronxcc.nki.compile import GenericKernel
+    def __init__(self, kernel, client: str | Client, beta2: bool = True) -> None:
         from .nki import NKIInterpretedFunction
+        from .nki_beta2 import NKIBeta2InterpretedFunction
 
-        if isinstance(kernel, GenericKernel):
-            self.interpreter_fn = NKIInterpretedFunction(kernel.func)
-            self.func = kernel.func
-        elif isinstance(kernel, NKIInterpretedFunction):
+        nki_fn_cls = NKIBeta2InterpretedFunction if beta2 else NKIInterpretedFunction
+        self.backend = "nki_beta2" if beta2 else "nki"
+        if isinstance(kernel, nki_fn_cls):
+            assert hasattr(kernel, "fn")
             self.interpreter_fn = kernel
             self.func = kernel.fn
         else:
-            self.interpreter_fn = NKIInterpretedFunction(kernel)
+            self.interpreter_fn = nki_fn_cls(kernel)
             self.func = kernel
 
         TraceInterface.__init__(self, client)
@@ -224,7 +224,7 @@ class NKITrace(KernelInterface, TraceInterface):
         return self[(1, 1, 1)](*args, **kwargs)
 
     def run(self, *args, **kwargs):
-        with self.client_manager.patch_run(self.func, backend="nki"):
+        with self.client_manager.patch_run(self.func, backend=self.backend):
             kwargs.update({"client_manager": self.client_manager})
             ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()
@@ -289,8 +289,8 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         # First-time wrapping
         # Triton backend need JIT/Interpreter/Autotuner；
         # NKI allow Python function（ NKIInterpretedFunction）
-        if backend == "nki":
-            return NKITrace(kernel, client)
+        if "nki" in backend:
+            return NKITrace(kernel, client, beta2=("beta2" in backend))
         if isinstance(
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
         ):

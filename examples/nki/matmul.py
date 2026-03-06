@@ -122,7 +122,7 @@ def matmul_kernel_lhsT(lhs, rhs, result):
 
 
 def _run_demo():
-    kernel_grid = (1, 1, 1)
+    kernel_grid = (1,)
     M = 4
     K = 8
     N = 16
