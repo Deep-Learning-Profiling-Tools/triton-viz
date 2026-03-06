@@ -830,6 +830,7 @@ class UnarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Unsupported unary op: {op}")
         super().__init__(op)
         self.add_child("arg", arg)
+        self.dtype = self.arg.dtype
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         val, constraints = self.arg._to_z3()
