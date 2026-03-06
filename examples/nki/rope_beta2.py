@@ -31,85 +31,120 @@ def _rope_tables(seq_len, head_dim, base=10000.0):
     return np.cos(emb).astype(np.float32), np.sin(emb).astype(np.float32)
 
 
-def rope_kernel(q, k, cos, sin, out_q, out_k):
-    """Apply RoPE to q/k tiles.
-
-    Args:
-        q: Query tensor with shape ``[batch, num_heads, seq_len, head_dim]``.
-        k: Key tensor with shape ``[batch, num_heads, seq_len, head_dim]``.
-        cos: Cosine table with shape ``[seq_len, head_dim]``.
-        sin: Sine table with shape ``[seq_len, head_dim]``.
-        out_q: Output query tensor with shape ``[batch, num_heads, seq_len, head_dim]``.
-        out_k: Output key tensor with shape ``[batch, num_heads, seq_len, head_dim]``.
-    """
-    batch, num_heads, seq_len, head_dim = q.shape
-    assert k.shape == q.shape
-    assert out_q.shape == q.shape
-    assert out_k.shape == k.shape
+def rope_kernel_2d(
+    q2, k2, cos, sin, out_q2, out_k2, batch, num_heads, seq_len, head_dim
+):
+    """Apply RoPE using flattened 2D q/k tensors."""
+    assert q2.shape == (batch * num_heads * seq_len, head_dim)
+    assert k2.shape == q2.shape
+    assert out_q2.shape == q2.shape
+    assert out_k2.shape == k2.shape
     assert cos.shape == (seq_len, head_dim)
     assert sin.shape == (seq_len, head_dim)
     assert head_dim % 2 == 0
 
     tile_s = nl.tile_size.pmax
-    assert (
-        seq_len % tile_s == 0
-    ), f"Expected seq_len ({seq_len}) to be a multiple of {tile_s}"
+    assert seq_len % tile_s == 0, f"Expected seq_len ({seq_len}) multiple of {tile_s}"
     half = head_dim // 2
 
     for batch_idx in nl.affine_range(batch):
         for head_idx in nl.affine_range(num_heads):
+            row_base = (batch_idx * num_heads + head_idx) * seq_len
             for seq_tile in nl.affine_range(seq_len // tile_s):
                 seq_start = seq_tile * tile_s
-                q_tile = nl.ndarray((tile_s, head_dim), dtype=q.dtype, buffer=nl.sbuf)
-                k_tile = nl.ndarray((tile_s, head_dim), dtype=k.dtype, buffer=nl.sbuf)
+                row_start = row_base + seq_start
+
+                q_tile = nl.ndarray((tile_s, head_dim), dtype=q2.dtype, buffer=nl.sbuf)
+                k_tile = nl.ndarray((tile_s, head_dim), dtype=k2.dtype, buffer=nl.sbuf)
                 cos_tile = nl.ndarray(
                     (tile_s, head_dim), dtype=cos.dtype, buffer=nl.sbuf
                 )
                 sin_tile = nl.ndarray(
                     (tile_s, head_dim), dtype=sin.dtype, buffer=nl.sbuf
                 )
-                nisa.dma_copy(
-                    dst=q_tile, src=q[batch_idx, head_idx, nl.ds(seq_start, tile_s), :]
-                )
-                nisa.dma_copy(
-                    dst=k_tile, src=k[batch_idx, head_idx, nl.ds(seq_start, tile_s), :]
-                )
+
+                nisa.dma_copy(dst=q_tile, src=q2[nl.ds(row_start, tile_s), :])
+                nisa.dma_copy(dst=k_tile, src=k2[nl.ds(row_start, tile_s), :])
                 nisa.dma_copy(dst=cos_tile, src=cos[nl.ds(seq_start, tile_s), :])
                 nisa.dma_copy(dst=sin_tile, src=sin[nl.ds(seq_start, tile_s), :])
 
-                q_out_tile = nl.ndarray(
-                    (tile_s, head_dim), dtype=out_q.dtype, buffer=nl.sbuf
+                q_out = nl.ndarray(
+                    (tile_s, head_dim), dtype=out_q2.dtype, buffer=nl.sbuf
                 )
-                k_out_tile = nl.ndarray(
-                    (tile_s, head_dim), dtype=out_k.dtype, buffer=nl.sbuf
+                k_out = nl.ndarray(
+                    (tile_s, head_dim), dtype=out_k2.dtype, buffer=nl.sbuf
+                )
+                tmp1 = nl.ndarray((tile_s, half), dtype=out_q2.dtype, buffer=nl.sbuf)
+                tmp2 = nl.ndarray((tile_s, half), dtype=out_q2.dtype, buffer=nl.sbuf)
+
+                nisa.tensor_tensor(
+                    dst=tmp1,
+                    data1=q_tile[:, :half],
+                    data2=cos_tile[:, :half],
+                    op=nl.multiply,
+                )
+                nisa.tensor_tensor(
+                    dst=tmp2,
+                    data1=q_tile[:, half:],
+                    data2=sin_tile[:, :half],
+                    op=nl.multiply,
+                )
+                nisa.tensor_tensor(
+                    dst=q_out[:, :half], data1=tmp1, data2=tmp2, op=nl.subtract
                 )
 
-                q_out_tile[:, :half] = nl.subtract(
-                    nl.multiply(q_tile[:, :half], cos_tile[:, :half]),
-                    nl.multiply(q_tile[:, half:], sin_tile[:, :half]),
+                nisa.tensor_tensor(
+                    dst=tmp1,
+                    data1=q_tile[:, half:],
+                    data2=cos_tile[:, half:],
+                    op=nl.multiply,
                 )
-                q_out_tile[:, half:] = nl.add(
-                    nl.multiply(q_tile[:, half:], cos_tile[:, half:]),
-                    nl.multiply(q_tile[:, :half], sin_tile[:, half:]),
+                nisa.tensor_tensor(
+                    dst=tmp2,
+                    data1=q_tile[:, :half],
+                    data2=sin_tile[:, half:],
+                    op=nl.multiply,
                 )
-                k_out_tile[:, :half] = nl.subtract(
-                    nl.multiply(k_tile[:, :half], cos_tile[:, :half]),
-                    nl.multiply(k_tile[:, half:], sin_tile[:, :half]),
-                )
-                k_out_tile[:, half:] = nl.add(
-                    nl.multiply(k_tile[:, half:], cos_tile[:, half:]),
-                    nl.multiply(k_tile[:, :half], sin_tile[:, half:]),
+                nisa.tensor_tensor(
+                    dst=q_out[:, half:], data1=tmp1, data2=tmp2, op=nl.add
                 )
 
-                nisa.dma_copy(
-                    dst=out_q[batch_idx, head_idx, nl.ds(seq_start, tile_s), :],
-                    src=q_out_tile,
+                nisa.tensor_tensor(
+                    dst=tmp1,
+                    data1=k_tile[:, :half],
+                    data2=cos_tile[:, :half],
+                    op=nl.multiply,
                 )
-                nisa.dma_copy(
-                    dst=out_k[batch_idx, head_idx, nl.ds(seq_start, tile_s), :],
-                    src=k_out_tile,
+                nisa.tensor_tensor(
+                    dst=tmp2,
+                    data1=k_tile[:, half:],
+                    data2=sin_tile[:, :half],
+                    op=nl.multiply,
                 )
-    return out_q, out_k
+                nisa.tensor_tensor(
+                    dst=k_out[:, :half], data1=tmp1, data2=tmp2, op=nl.subtract
+                )
+
+                nisa.tensor_tensor(
+                    dst=tmp1,
+                    data1=k_tile[:, half:],
+                    data2=cos_tile[:, half:],
+                    op=nl.multiply,
+                )
+                nisa.tensor_tensor(
+                    dst=tmp2,
+                    data1=k_tile[:, :half],
+                    data2=sin_tile[:, half:],
+                    op=nl.multiply,
+                )
+                nisa.tensor_tensor(
+                    dst=k_out[:, half:], data1=tmp1, data2=tmp2, op=nl.add
+                )
+
+                nisa.dma_copy(dst=out_q2[nl.ds(row_start, tile_s), :], src=q_out)
+                nisa.dma_copy(dst=out_k2[nl.ds(row_start, tile_s), :], src=k_out)
+
+    return out_q2, out_k2
 
 
 def _run_with_xla(kernel, kernel_grid, *arrays):
@@ -118,7 +153,12 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
     import torch_xla
 
     device = torch_xla.device()
-    tensors = [torch.as_tensor(array, device=device) for array in arrays]
+    tensors = [
+        torch.as_tensor(array, device=device)
+        if isinstance(array, np.ndarray)
+        else array
+        for array in arrays
+    ]
     compiled_kernel = nki.jit(kernel, platform_target="trn2")
     out_q, out_k = compiled_kernel[kernel_grid](*tensors)
     torch_xla.sync()
@@ -126,41 +166,58 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
 
 
 def _run_demo():
-    """Run the RoPE example with q/k ``[1, 4, 128, 64]`` and cos/sin ``[128, 64]``."""
-    kernel_grid = (1, 1, 1)
+    """Run RoPE on 4D inputs and pass flattened views into the kernel."""
+    kernel_grid = (1,)
     batch = 1
     num_heads = 4
     seq_len = 128
     head_dim = 64
-    q = np.linspace(
+
+    q4d = np.linspace(
         -1.0,
         1.0,
         batch * num_heads * seq_len * head_dim,
         dtype=np.float32,
     ).reshape(batch, num_heads, seq_len, head_dim)
-    k = np.linspace(
+    k4d = np.linspace(
         1.0,
         -1.0,
         batch * num_heads * seq_len * head_dim,
         dtype=np.float32,
     ).reshape(batch, num_heads, seq_len, head_dim)
+
     cos, sin = _rope_tables(seq_len, head_dim)
-    out_q = np.empty_like(q)
-    out_k = np.empty_like(k)
-    kernel_args = (q, k, cos, sin, out_q, out_k)
-    expected_q, expected_k = _rope_reference(q, k, cos, sin)
+    expected_q, expected_k = _rope_reference(q4d, k4d, cos, sin)
+
+    q2d = q4d.reshape(-1, head_dim)
+    k2d = k4d.reshape(-1, head_dim)
+    out_q2d = np.empty_like(q2d)
+    out_k2d = np.empty_like(k2d)
+
+    kernel_args = (
+        q2d,
+        k2d,
+        cos,
+        sin,
+        out_q2d,
+        out_k2d,
+        batch,
+        num_heads,
+        seq_len,
+        head_dim,
+    )
 
     if TRITON_VIZ_ENABLED:
-        traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(rope_kernel)
+        traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(rope_kernel_2d)
         traced_kernel[kernel_grid](*kernel_args)
-        assert np.allclose(expected_q, out_q)
-        assert np.allclose(expected_k, out_k)
+        assert np.allclose(expected_q.reshape(-1, head_dim), out_q2d)
+        assert np.allclose(expected_k.reshape(-1, head_dim), out_k2d)
         print("☑️ Actual equals expected!")
         triton_viz.launch(share=False)
     else:
-        out_q, out_k = _run_with_xla(rope_kernel, kernel_grid, *kernel_args)
-        assert np.allclose(expected_q, out_q)
-        assert np.allclose(expected_k, out_k)
+        out_q2d, out_k2d = _run_with_xla(rope_kernel_2d, kernel_grid, *kernel_args)
+        assert np.allclose(expected_q.reshape(-1, head_dim), out_q2d)
+        assert np.allclose(expected_k.reshape(-1, head_dim), out_k2d)
         print("☑️ Actual equals expected!")
 
 

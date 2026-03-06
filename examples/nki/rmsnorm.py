@@ -78,7 +78,7 @@ def torch_rmsnorm_kernel(a_tensor, g_tensor):
 
 def _run_demo():
     triton_viz_enabled = True
-    kernel_grid = (1, 1, 1)
+    kernel_grid = (1,)
     b_dim, d_dim = 32, 32
     a_tensor = torch.arange(b_dim * d_dim).float().view(b_dim, d_dim)
     g_tensor = torch.arange(d_dim).float()

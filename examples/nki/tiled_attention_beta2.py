@@ -1,3 +1,5 @@
+import math
+
 import nki
 import nki.isa as nisa
 import nki.language as nl
@@ -8,57 +10,72 @@ import triton_viz
 TRITON_VIZ_ENABLED = True
 
 
-def tiled_attention_kernel(q, k, v, out):
-    """Compute tiled attention ``softmax((q @ k.T) / sqrt(d)) @ v``.
+def tiled_attention_kernel(
+    q,
+    k,
+    v,
+    out,
+    batch,
+    num_heads,
+    num_heads_k,
+    num_heads_v,
+    m_size,
+    n_size,
+    d_size,
+    dv_size,
+):
+    """Compute tiled attention over flattened 2D inputs.
 
-    Args:
-        q: Query tensor with shape ``[batch, num_heads, m, d]``.
-        k: Key tensor with shape ``[batch, num_heads, n, d]``.
-        v: Value tensor with shape ``[batch, num_heads, n, d_value]``.
-        out: Output tensor with shape ``[batch, num_heads, m, d_value]`` written in place.
+    q shape: ``[batch * num_heads * m_size, d_size]``
+    k shape: ``[batch * num_heads_k * n_size, d_size]``
+    v shape: ``[batch * num_heads_v * n_size, dv_size]``
+    out shape: ``[batch * num_heads * m_size, dv_size]``
     """
-    batch, num_heads, m_size, d_size = q.shape
-    batch_k, num_heads_k, n_size, d_size_k = k.shape
-    batch_v, num_heads_v, n_size_v, dv_size = v.shape
-
-    assert batch_k == batch and batch_v == batch
-    assert num_heads_k == num_heads and num_heads_v == num_heads
-    assert d_size == d_size_k, "q and k contraction dims must match"
-    assert n_size == n_size_v, "k and v sequence dims must match"
-    assert out.shape == (batch, num_heads, m_size, dv_size)
+    assert num_heads % num_heads_k == 0 and num_heads % num_heads_v == 0
+    assert q.shape == (batch * num_heads * m_size, d_size)
+    assert k.shape == (batch * num_heads_k * n_size, d_size)
+    assert v.shape == (batch * num_heads_v * n_size, dv_size)
+    assert out.shape == (batch * num_heads * m_size, dv_size)
 
     tile_m = nl.tile_size.gemm_stationary_fmax
-    tile_d = nl.tile_size.pmax
     tile_n = nl.tile_size.gemm_moving_fmax
-    assert d_size == tile_d, f"Expected d_size ({d_size}) == {tile_d}"
+    tile_p = nl.tile_size.pmax
+
+    assert d_size == tile_p, f"Expected d_size ({d_size}) == {tile_p}"
+    assert n_size <= tile_p, f"Expected n_size ({n_size}) <= {tile_p}"
+    assert n_size <= tile_n, f"Expected n_size ({n_size}) <= {tile_n}"
+    assert dv_size <= tile_n, f"Expected dv_size ({dv_size}) <= {tile_n}"
     assert (
         m_size % tile_m == 0
     ), f"Expected m_size ({m_size}) to be a multiple of {tile_m}"
-    assert n_size <= tile_d, f"Expected n_size ({n_size}) <= {tile_d}"
-    assert n_size <= tile_n, f"Expected n_size ({n_size}) <= {tile_n}"
 
-    inv_sqrt_d = 1.0 / nl.sqrt(float(d_size))
+    inv_sqrt_d = 1.0 / math.sqrt(float(d_size))
 
     for batch_idx in nl.affine_range(batch):
         for head_idx in nl.affine_range(num_heads):
+            head_k = (head_idx * num_heads_k) // num_heads
+            head_v = (head_idx * num_heads_v) // num_heads
+            k_row_start = (batch_idx * num_heads_k + head_k) * n_size
+            v_row_start = (batch_idx * num_heads_v + head_v) * n_size
+
             k_tile = nl.ndarray((n_size, d_size), dtype=k.dtype, buffer=nl.sbuf)
-            k_t = nl.zeros((d_size, n_size), dtype=k.dtype, buffer=nl.psum)
             v_tile = nl.ndarray((n_size, dv_size), dtype=v.dtype, buffer=nl.sbuf)
-            nisa.dma_copy(dst=k_tile, src=k[batch_idx, head_idx, :, :])
-            nisa.dma_copy(dst=v_tile, src=v[batch_idx, head_idx, :, :])
+            nisa.dma_copy(dst=k_tile, src=k[nl.ds(k_row_start, n_size), :])
+            nisa.dma_copy(dst=v_tile, src=v[nl.ds(v_row_start, n_size), :])
+
+            k_t = nl.ndarray((d_size, n_size), dtype=k.dtype, buffer=nl.psum)
             nisa.nc_transpose(dst=k_t, data=k_tile)
 
             for m_tile_idx in nl.affine_range(m_size // tile_m):
                 m_start = m_tile_idx * tile_m
+                q_row_start = (batch_idx * num_heads + head_idx) * m_size + m_start
+
                 q_tile = nl.ndarray((tile_m, d_size), dtype=q.dtype, buffer=nl.sbuf)
-                q_t = nl.zeros((d_size, tile_m), dtype=q.dtype, buffer=nl.psum)
-                nisa.dma_copy(
-                    dst=q_tile,
-                    src=q[batch_idx, head_idx, nl.ds(m_start, tile_m), :],
-                )
+                q_t = nl.ndarray((d_size, tile_m), dtype=q.dtype, buffer=nl.psum)
+                nisa.dma_copy(dst=q_tile, src=q[nl.ds(q_row_start, tile_m), :])
                 nisa.nc_transpose(dst=q_t, data=q_tile)
 
-                scores_psum = nl.zeros(
+                scores_psum = nl.ndarray(
                     (tile_m, n_size), dtype=nl.float32, buffer=nl.psum
                 )
                 nisa.nc_matmul(dst=scores_psum, stationary=q_t, moving=k_t)
@@ -66,7 +83,10 @@ def tiled_attention_kernel(q, k, v, out):
                 scores = nl.ndarray((tile_m, n_size), dtype=nl.float32, buffer=nl.sbuf)
                 nisa.tensor_copy(dst=scores, src=scores_psum)
                 nisa.tensor_scalar(
-                    dst=scores, data=scores, op0=nl.multiply, operand0=inv_sqrt_d
+                    dst=scores,
+                    data=scores,
+                    op0=nl.multiply,
+                    operand0=inv_sqrt_d,
                 )
 
                 row_max = nl.ndarray((tile_m, 1), dtype=nl.float32, buffer=nl.sbuf)
@@ -77,17 +97,17 @@ def tiled_attention_kernel(q, k, v, out):
                 centered = nl.ndarray(
                     (tile_m, n_size), dtype=nl.float32, buffer=nl.sbuf
                 )
-                nisa.tensor_tensor(
+                nisa.tensor_scalar(
                     dst=centered,
-                    data1=scores,
-                    data2=row_max.broadcast_to((tile_m, n_size)),
-                    op=nl.subtract,
+                    data=scores,
+                    op0=nl.subtract,
+                    operand0=row_max,
                 )
 
                 exp_scores = nl.ndarray(
                     (tile_m, n_size), dtype=nl.float32, buffer=nl.sbuf
                 )
-                nisa.activation(dst=exp_scores, op=nl.exp, data=centered)
+                nisa.exponential(dst=exp_scores, src=centered)
 
                 row_sum = nl.ndarray((tile_m, 1), dtype=nl.float32, buffer=nl.sbuf)
                 nisa.tensor_reduce(
@@ -98,27 +118,26 @@ def tiled_attention_kernel(q, k, v, out):
                 nisa.reciprocal(dst=inv_sum, data=row_sum)
 
                 probs = nl.ndarray((tile_m, n_size), dtype=nl.float32, buffer=nl.sbuf)
-                nisa.tensor_tensor(
+                nisa.tensor_scalar(
                     dst=probs,
-                    data1=exp_scores,
-                    data2=inv_sum.broadcast_to((tile_m, n_size)),
-                    op=nl.multiply,
+                    data=exp_scores,
+                    op0=nl.multiply,
+                    operand0=inv_sum,
                 )
 
-                probs_t = nl.zeros((n_size, tile_m), dtype=nl.float32, buffer=nl.psum)
+                probs_t = nl.ndarray((n_size, tile_m), dtype=nl.float32, buffer=nl.psum)
                 nisa.nc_transpose(dst=probs_t, data=probs)
 
-                out_psum = nl.zeros((tile_m, dv_size), dtype=nl.float32, buffer=nl.psum)
+                out_psum = nl.ndarray(
+                    (tile_m, dv_size), dtype=nl.float32, buffer=nl.psum
+                )
                 nisa.nc_matmul(dst=out_psum, stationary=probs_t, moving=v_tile)
 
                 out_tile = nl.ndarray(
                     (tile_m, dv_size), dtype=out.dtype, buffer=nl.sbuf
                 )
                 nisa.tensor_copy(dst=out_tile, src=out_psum)
-                nisa.dma_copy(
-                    dst=out[batch_idx, head_idx, nl.ds(m_start, tile_m), :],
-                    src=out_tile,
-                )
+                nisa.dma_copy(dst=out[nl.ds(q_row_start, tile_m), :], src=out_tile)
     return out
 
 
@@ -136,7 +155,12 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
     import torch_xla
 
     device = torch_xla.device()
-    tensors = [torch.as_tensor(array, device=device) for array in arrays]
+    tensors = [
+        torch.as_tensor(array, device=device)
+        if isinstance(array, np.ndarray)
+        else array
+        for array in arrays
+    ]
     compiled_kernel = nki.jit(kernel, platform_target="trn2")
     result = compiled_kernel[kernel_grid](*tensors)
     torch_xla.sync()
@@ -144,48 +168,68 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
 
 
 def _run_demo():
-    """Run attention with q ``[1, 1, 256, 128]``, k ``[1, 1, 128, 128]``, v ``[1, 1, 128, 64]``."""
-    kernel_grid = (1, 1, 1)
+    """Run attention on 4D inputs and pass flattened views into the kernel."""
+    kernel_grid = (1,)
     batch = 2
     num_heads = 2
+    num_heads_k = 2
+    num_heads_v = 2
     d_size = 128
     m_size = 256
     n_size = 128
     dv_size = 64
 
-    q = np.linspace(
+    q4d = np.linspace(
         -1.0,
         1.0,
         batch * num_heads * m_size * d_size,
         dtype=np.float32,
     ).reshape(batch, num_heads, m_size, d_size)
-    k = np.linspace(
+    k4d = np.linspace(
         1.0,
         -1.0,
-        batch * num_heads * n_size * d_size,
+        batch * num_heads_k * n_size * d_size,
         dtype=np.float32,
-    ).reshape(batch, num_heads, n_size, d_size)
-    v = np.linspace(
+    ).reshape(batch, num_heads_k, n_size, d_size)
+    v4d = np.linspace(
         -0.5,
         0.5,
-        batch * num_heads * n_size * dv_size,
+        batch * num_heads_v * n_size * dv_size,
         dtype=np.float32,
-    ).reshape(batch, num_heads, n_size, dv_size)
-    out = np.empty((batch, num_heads, m_size, dv_size), dtype=np.float32)
-    kernel_args = (q, k, v, out)
-    expected = _numpy_tiled_attention(q, k, v)
+    ).reshape(batch, num_heads_v, n_size, dv_size)
+
+    q2d = q4d.reshape(-1, d_size)
+    k2d = k4d.reshape(-1, d_size)
+    v2d = v4d.reshape(-1, dv_size)
+    out2d = np.empty((batch * num_heads * m_size, dv_size), dtype=np.float32)
+
+    kernel_args = (
+        q2d,
+        k2d,
+        v2d,
+        out2d,
+        batch,
+        num_heads,
+        num_heads_k,
+        num_heads_v,
+        m_size,
+        n_size,
+        d_size,
+        dv_size,
+    )
+    expected2d = _numpy_tiled_attention(q4d, k4d, v4d).reshape(-1, dv_size)
 
     if TRITON_VIZ_ENABLED:
         traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(
             tiled_attention_kernel
         )
         traced_kernel[kernel_grid](*kernel_args)
-        assert np.allclose(expected, out, atol=2e-4, rtol=2e-4)
+        assert np.allclose(expected2d, out2d, atol=2e-4, rtol=2e-4)
         print("☑️ Actual equals expected!")
         triton_viz.launch(share=False)
     else:
-        out = _run_with_xla(tiled_attention_kernel, kernel_grid, *kernel_args)
-        assert np.allclose(expected, out, atol=2e-4, rtol=2e-4)
+        out2d = _run_with_xla(tiled_attention_kernel, kernel_grid, *kernel_args)
+        assert np.allclose(expected2d, out2d, atol=2e-4, rtol=2e-4)
         print("☑️ Actual equals expected!")
 
 

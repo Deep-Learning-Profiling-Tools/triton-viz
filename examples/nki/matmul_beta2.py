@@ -23,12 +23,9 @@ def matmul_kernel(lhsT, rhs, result):
     assert K == K_, "lhsT and rhs must have the same contraction dimension"
 
     # Lookup the device matrix multiply dimensions.
-    # TILE_M = nl.tile_size.gemm_stationary_fmax  # 128
-    # TILE_K = nl.tile_size.pmax  # 128
-    # TILE_N = nl.tile_size.gemm_moving_fmax  # 512
-    TILE_M = 2
-    TILE_K = 4
-    TILE_N = 2
+    TILE_M = nl.tile_size.gemm_stationary_fmax  # 128
+    TILE_K = nl.tile_size.pmax  # 128
+    TILE_N = nl.tile_size.gemm_moving_fmax  # 512
 
     # Verify that the input matrices are a multiple of the tile dimensions.
     assert (
@@ -45,7 +42,7 @@ def matmul_kernel(lhsT, rhs, result):
     for m in nl.affine_range(M // TILE_M):
         for n in nl.affine_range(N // TILE_N):
             # Allocate a tensor in PSUM
-            res_psum = nl.zeros((TILE_M, TILE_N), nl.float32, buffer=nl.psum)
+            res_psum = nl.ndarray((TILE_M, TILE_N), nl.float32, buffer=nl.psum)
 
             for k in nl.affine_range(K // TILE_K):
                 # Declare the tiles on SBUF
@@ -100,13 +97,10 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
 
 def _run_demo():
     """Run the matmul example with lhsT ``[128, 128]`` and rhs ``[128, 512]``."""
-    kernel_grid = (1, 1, 1)
-    # m_dim = 128
-    # k_dim = 128
-    # n_dim = 512
-    m_dim = 4
-    k_dim = 8
-    n_dim = 4
+    kernel_grid = (1,)
+    m_dim = 128
+    k_dim = 128
+    n_dim = 512
     lhs_small = np.arange(k_dim * m_dim, dtype=np.float32).reshape(k_dim, m_dim)
     rhs_small = np.arange(k_dim * n_dim, dtype=np.float32).reshape(k_dim, n_dim)
     kernel = matmul_kernel

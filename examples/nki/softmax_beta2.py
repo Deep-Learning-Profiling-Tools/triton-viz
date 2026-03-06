@@ -24,21 +24,18 @@ def softmax_kernel(x, out):
         x_tile = nl.ndarray((tile_p, dim), dtype=x.dtype, buffer=nl.sbuf)
         nisa.dma_copy(dst=x_tile, src=x[nl.ds(row_start, tile_p), :])
 
-        row_max = nl.ndarray((tile_p, 1), dtype=nl.float32, buffer=nl.sbuf)
+        neg_row_max = nl.ndarray((tile_p, 1), dtype=nl.float32, buffer=nl.sbuf)
         nisa.tensor_reduce(
-            dst=row_max, op=nl.maximum, data=x_tile, axis=1, keepdims=True
-        )
-
-        centered = nl.ndarray((tile_p, dim), dtype=nl.float32, buffer=nl.sbuf)
-        nisa.tensor_tensor(
-            dst=centered,
-            data1=x_tile,
-            data2=row_max.broadcast_to((tile_p, dim)),
-            op=nl.subtract,
+            dst=neg_row_max,
+            op=nl.maximum,
+            data=x_tile,
+            axis=1,
+            negate=True,
+            keepdims=True,
         )
 
         exp_tile = nl.ndarray((tile_p, dim), dtype=nl.float32, buffer=nl.sbuf)
-        nisa.activation(dst=exp_tile, op=np.exp, data=centered)
+        nisa.activation(dst=exp_tile, op=nl.exp, data=x_tile, bias=neg_row_max)
 
         row_sum = nl.ndarray((tile_p, 1), dtype=nl.float32, buffer=nl.sbuf)
         nisa.tensor_reduce(dst=row_sum, op=nl.add, data=exp_tile, axis=1, keepdims=True)
@@ -47,11 +44,11 @@ def softmax_kernel(x, out):
         nisa.reciprocal(dst=inv_sum, data=row_sum)
 
         out_tile = nl.ndarray((tile_p, dim), dtype=out.dtype, buffer=nl.sbuf)
-        nisa.tensor_tensor(
+        nisa.tensor_scalar(
             dst=out_tile,
-            data1=exp_tile,
-            data2=inv_sum.broadcast_to((tile_p, dim)),
-            op=nl.multiply,
+            data=exp_tile,
+            op0=nl.multiply,
+            operand0=inv_sum,
         )
         nisa.dma_copy(dst=out[nl.ds(row_start, tile_p), :], src=out_tile)
     return out
@@ -78,7 +75,7 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
 
 def _run_demo():
     """Run the softmax example with input/output shape ``[256, 64]``."""
-    kernel_grid = (1, 1, 1)
+    kernel_grid = (1,)
     batch = 256
     dim = 64
     x = np.linspace(-3.0, 3.0, batch * dim, dtype=np.float32).reshape(batch, dim)

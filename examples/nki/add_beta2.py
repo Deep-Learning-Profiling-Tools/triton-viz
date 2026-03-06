@@ -23,16 +23,16 @@ def nki_tensor_add_kernel(a_input, b_input, result):
 
     # Allocate space for the input tensors in SBUF and copy the inputs from HBM
     # to SBUF with DMA copy. Note: 'sbuf' is a keyword in NKI.
-    a_tile = sbuf.view(dtype=a_input.dtype, size=a_input.shape)  # noqa: F821
+    a_tile = sbuf.view(dtype=a_input.dtype, shape=a_input.shape)  # noqa: F821
     nisa.dma_copy(dst=a_tile, src=a_input)
 
-    b_tile = sbuf.view(dtype=b_input.dtype, size=b_input.shape)  # noqa: F821
+    b_tile = sbuf.view(dtype=b_input.dtype, shape=b_input.shape)  # noqa: F821
     nisa.dma_copy(dst=b_tile, src=b_input)
 
     # Allocate space for the result and use tensor_tensor to perform
     # element-wise addition. Note: the first argument of 'tensor_tensor'
     # is the destination tensor.
-    c_tile = sbuf.view(dtype=a_input.dtype, size=a_input.shape)  # noqa: F821
+    c_tile = sbuf.view(dtype=a_input.dtype, shape=a_input.shape)  # noqa: F821
     nisa.tensor_tensor(dst=c_tile, data1=a_tile, data2=b_tile, op=nl.add)
 
     # Create a tensor in HBM and copy the result into HBM. Note: Similar to
@@ -55,7 +55,7 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
 
 
 def _run_demo():
-    kernel_grid = (1, 1, 1)
+    kernel_grid = (1,)
     a = torch.ones((4, 3), dtype=torch.float32)
     b = torch.ones((4, 3), dtype=torch.float32)
     result = torch.empty((4, 3), dtype=torch.float32)
