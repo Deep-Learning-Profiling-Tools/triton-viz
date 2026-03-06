@@ -193,31 +193,35 @@ def test_sanitizer_handles_serial_blocks(one_sm):
     assert not trace_state.launches[-1].records, "sanitizer should not report OOB"
 
 
-def _run_profiler_load_store():
+@pytest.fixture
+def _no_profiler_sampling():
+    """Disable profiler block sampling and load/store skipping for the test."""
     prev_block_sampling = cfg.profiler_enable_block_sampling
     prev_skip = cfg.profiler_enable_load_store_skipping
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_enable_load_store_skipping = False
-    try:
-        profiler = Profiler()
-        traced = triton_viz.trace(profiler)(_profiler_load_store)
-        x = torch.ones((16,), dtype=torch.float32)
-        out = torch.zeros_like(x)
-        traced[(2,)](x, out)
-        return profiler.load_mask_total_count, profiler.store_mask_total_count
-    finally:
-        cfg.profiler_enable_block_sampling = prev_block_sampling
-        cfg.profiler_enable_load_store_skipping = prev_skip
+    yield
+    cfg.profiler_enable_block_sampling = prev_block_sampling
+    cfg.profiler_enable_load_store_skipping = prev_skip
 
 
-def test_profiler_counts_serial(one_sm):
+def _run_profiler_load_store():
+    profiler = Profiler()
+    traced = triton_viz.trace(profiler)(_profiler_load_store)
+    x = torch.ones((16,), dtype=torch.float32)
+    out = torch.zeros_like(x)
+    traced[(2,)](x, out)
+    return profiler.load_mask_total_count, profiler.store_mask_total_count
+
+
+def test_profiler_counts_serial(one_sm, _no_profiler_sampling):
     """Profiler load/store mask counts should be stable when blocks run sequentially."""
     load_total, store_total = _run_profiler_load_store()
     assert load_total == 16
     assert store_total == 16
 
 
-def test_profiler_counts_concurrent(two_sms):
+def test_profiler_counts_concurrent(two_sms, _no_profiler_sampling):
     """Profiler load/store mask counts should match concurrent execution."""
     load_total, store_total = _run_profiler_load_store()
     assert load_total == 16
