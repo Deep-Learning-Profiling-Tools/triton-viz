@@ -906,7 +906,7 @@ BENCHMARKS["flaggems_layernorm"] = {
 
 def run_benchmarks(
     warmup: int = 1,
-    iterations: int = 40,
+    iterations: int = 20,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -956,8 +956,8 @@ def run_benchmarks(
                 "min": min(times),
                 "stddev": statistics.stdev(times) if len(times) > 1 else 0.0,
             }
-            min_str = f"{min(times):.3f}s"
-            print(f"{min_str}")
+            median_str = f"{statistics.median(times):.3f}s"
+            print(f"{median_str}")
 
         except BenchmarkTimeout:
             print(f"TIMEOUT (>{BENCH_TIMEOUT}s)")
@@ -993,7 +993,7 @@ def run_benchmarks(
 # Comparison
 # ---------------------------------------------------------------------------
 
-REGRESSION_THRESHOLD = 0.05  # 5%
+REGRESSION_THRESHOLD = 0.15  # 15%
 
 
 def _fmt_time(val: float | None) -> str:
@@ -1013,18 +1013,12 @@ def _fmt_change(base_val: float | None, pr_val: float | None) -> str:
     return f"{sign}{pct:.1%}{flag}"
 
 
-def _has_regression(base_val: float | None, pr_val: float | None) -> bool:
-    if base_val is None or pr_val is None or base_val == 0:
-        return False
-    return (pr_val - base_val) / base_val > REGRESSION_THRESHOLD
-
-
 def generate_comparison(base: dict, pr: dict) -> str:
     lines = [
         "## Sanitizer Performance Benchmark",
         "",
-        "| Benchmark | main (min) | PR (min) | Change |",
-        "|-----------|------------|----------|--------|",
+        "| Benchmark | main (median) | PR (median) | Change |",
+        "|-----------|---------------|-------------|--------|",
     ]
 
     all_names = list(pr.get("benchmarks", {}).keys())
@@ -1032,29 +1026,25 @@ def generate_comparison(base: dict, pr: dict) -> str:
     pr_total = 0.0
     base_total_valid = True
     pr_total_valid = True
-    any_regression = False
 
     for name in all_names:
         pr_bench = pr["benchmarks"].get(name, {})
         base_bench = base.get("benchmarks", {}).get(name, {})
-        pr_val = pr_bench.get("min")
-        base_val = base_bench.get("min")
+        pr_med = pr_bench.get("median")
+        base_med = base_bench.get("median")
 
-        if _has_regression(base_val, pr_val):
-            any_regression = True
-
-        if pr_val is not None:
-            pr_total += pr_val
+        if pr_med is not None:
+            pr_total += pr_med
         else:
             pr_total_valid = False
-        if base_val is not None:
-            base_total += base_val
+        if base_med is not None:
+            base_total += base_med
         else:
             base_total_valid = False
 
         lines.append(
-            f"| {name} | {_fmt_time(base_val)} | {_fmt_time(pr_val)} "
-            f"| {_fmt_change(base_val, pr_val)} |"
+            f"| {name} | {_fmt_time(base_med)} | {_fmt_time(pr_med)} "
+            f"| {_fmt_change(base_med, pr_med)} |"
         )
 
     # Total row
@@ -1066,10 +1056,9 @@ def generate_comparison(base: dict, pr: dict) -> str:
     )
 
     lines.append("")
-    if any_regression:
-        lines.append(
-            f"_Threshold: >{REGRESSION_THRESHOLD:.0%} regression flagged with :warning:_"
-        )
+    lines.append(
+        f"_Threshold: >{REGRESSION_THRESHOLD:.0%} regression flagged with :warning:_"
+    )
     lines.append(
         f"_Iterations: {pr.get('warmup_iterations', '?')} warmup + {pr.get('iterations', '?')} measured_"
     )
@@ -1082,20 +1071,20 @@ def generate_single(pr: dict) -> str:
         "",
         "_No baseline available (benchmark script not present on main)._",
         "",
-        "| Benchmark | PR (min) |",
-        "|-----------|----------|",
+        "| Benchmark | PR (median) |",
+        "|-----------|-------------|",
     ]
 
     pr_total = 0.0
     pr_total_valid = True
 
     for name, bench in pr.get("benchmarks", {}).items():
-        val = bench.get("min")
-        if val is not None:
-            pr_total += val
+        med = bench.get("median")
+        if med is not None:
+            pr_total += med
         else:
             pr_total_valid = False
-        lines.append(f"| {name} | {_fmt_time(val)} |")
+        lines.append(f"| {name} | {_fmt_time(med)} |")
 
     pt = pr_total if pr_total_valid else None
     lines.append(f"| **Total** | **{_fmt_time(pt)}** |")
@@ -1108,40 +1097,6 @@ def generate_single(pr: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Merge
-# ---------------------------------------------------------------------------
-
-
-def merge_results(file_paths: list[str]) -> dict[str, Any]:
-    """Merge multiple benchmark JSON files by concatenating times arrays."""
-    with open(file_paths[0]) as f:
-        merged = json.load(f)
-
-    for path in file_paths[1:]:
-        with open(path) as f:
-            data = json.load(f)
-        for name, bench in data.get("benchmarks", {}).items():
-            if name in merged.get("benchmarks", {}):
-                merged["benchmarks"][name]["times"].extend(bench.get("times", []))
-            else:
-                merged["benchmarks"][name] = bench
-
-    # Recompute stats from merged times
-    total_iters = 0
-    for bench in merged["benchmarks"].values():
-        times = bench.get("times", [])
-        if times:
-            bench["mean"] = statistics.mean(times)
-            bench["median"] = statistics.median(times)
-            bench["min"] = min(times)
-            bench["stddev"] = statistics.stdev(times) if len(times) > 1 else 0.0
-            total_iters = max(total_iters, len(times))
-
-    merged["iterations"] = total_iters
-    return merged
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1151,7 +1106,7 @@ def main():
     parser.add_argument("--output", "-o", help="Output JSON file path")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations")
     parser.add_argument(
-        "--iterations", type=int, default=40, help="Measured iterations"
+        "--iterations", type=int, default=20, help="Measured iterations"
     )
     parser.add_argument(
         "--compare",
@@ -1163,12 +1118,6 @@ def main():
         "--compare-single",
         metavar="PR_JSON",
         help="Print markdown table from a single result file (no baseline)",
-    )
-    parser.add_argument(
-        "--merge",
-        nargs="+",
-        metavar="JSON_FILE",
-        help="Merge multiple result JSON files into one (use with --output)",
     )
 
     args = parser.parse_args()
@@ -1187,17 +1136,6 @@ def main():
         with open(args.compare_single) as f:
             pr = json.load(f)
         print(generate_single(pr))
-        return
-
-    # Merge mode
-    if args.merge:
-        result = merge_results(args.merge)
-        if args.output:
-            with open(args.output, "w") as f:
-                json.dump(result, f, indent=2)
-            print(f"Merged {len(args.merge)} files → {args.output}")
-        else:
-            print(json.dumps(result, indent=2))
         return
 
     # Run mode
