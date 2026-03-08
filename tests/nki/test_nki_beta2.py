@@ -115,11 +115,6 @@ def _typed_ndarray(shape, dtype_name, buffer="sbuf", dist="arange", seed=0):
     )
 
 
-def _identity(x):
-    """Return the input unchanged for activation shape tests."""
-    return x
-
-
 SHAPE_CASES = ((), (1,), (17,), (19, 23), (3, 5, 7, 11, 13))
 NL_DTYPE_CASES = (
     "bool_",
@@ -205,12 +200,6 @@ def test_patch_surface_and_signatures(patched_scope):
     nl_callable_names = (
         "ndarray",
         "zeros",
-        "add",
-        "subtract",
-        "multiply",
-        "maximum",
-        "sqrt",
-        "rsqrt",
         "program_id",
         "affine_range",
         "ds",
@@ -292,9 +281,6 @@ def test_language_helpers_and_ops(patched_scope):
     assert nl.ds(2, 3) == slice(2, 5, None)
     assert nl.tile_size.pmax == 128
 
-    assert nl.add(2, 3) == 5
-    assert np.array_equal(nl.sqrt(_nd([[1.0, 4.0]])).data, np.array([[1.0, 2.0]]))
-    assert np.array_equal(nl.rsqrt(_nd([[4.0, 16.0]])).data, np.array([[0.5, 0.25]]))
     exp_dst = _zeros((1, 2))
     nisa.exponential(exp_dst, _nd([[0.0, 1.0]]))
     assert np.allclose(exp_dst.data, np.exp([[0.0, 1.0]]))
@@ -459,7 +445,7 @@ def test_tensor_copy_gpsimd_rejects_psum_tiles(patched_scope, src_buffer, dst_bu
     del patched_scope
     src = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer=src_buffer)
     dst = b2.NDArray(shape=src.shape, dtype=nl.float32, buffer=dst_buffer)
-    with pytest.raises(ValueError, match="Gpsimd|gpsimd|PSUM|psum"):
+    with pytest.raises(ValueError, match="GpSimd|gpsimd|PSUM|psum"):
         nisa.tensor_copy(dst, src, engine=nisa.gpsimd_engine)
 
 
@@ -581,7 +567,7 @@ def test_activation(patched_scope):
     src = _act_input()
     dst = _zeros((2, 3))
     bias = _nd(np.ones((2, 1), dtype=np.float32))
-    nisa.activation(dst, np.reciprocal, src, bias=bias, scale=1.0)
+    nisa.activation(dst, nl.reciprocal, src, bias=bias, scale=1.0)
     assert dst.data.shape == (2, 3)
 
 
@@ -590,7 +576,7 @@ def test_activation_accepts_scalar_bias(patched_scope):
     del patched_scope
     src = _act_input()
     dst = _zeros((2, 3))
-    nisa.activation(dst, np.reciprocal, src, bias=1.0, scale=1.0)
+    nisa.activation(dst, nl.reciprocal, src, bias=1.0, scale=1.0)
     assert dst.data.shape == (2, 3)
 
 
@@ -786,9 +772,9 @@ def test_nc_matmul_requires_both_tile_position_and_tile_size(
 @pytest.mark.parametrize(
     "op,expected",
     (
-        (nl.add, np.array([[6.0, 8.0], [10.0, 12.0]], dtype=np.float32)),
-        (nl.minimum, np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)),
-        (nl.power, np.array([[1.0, 64.0], [2187.0, 65536.0]], dtype=np.float32)),
+        ("add", np.array([[6.0, 8.0], [10.0, 12.0]], dtype=np.float32)),
+        ("minimum", np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)),
+        ("power", np.array([[1.0, 64.0], [2187.0, 65536.0]], dtype=np.float32)),
     ),
 )
 def test_tensor_tensor_documented_operator_success_cases(patched_scope, op, expected):
@@ -797,16 +783,16 @@ def test_tensor_tensor_documented_operator_success_cases(patched_scope, op, expe
     lhs = _nd(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32), buffer="sbuf")
     rhs = _nd(np.array([[5.0, 6.0], [7.0, 8.0]], dtype=np.float32), buffer="sbuf")
     dst = b2.NDArray(shape=(2, 2), dtype=nl.float32, buffer="sbuf")
-    nisa.tensor_tensor(dst, lhs, rhs, op, engine=nisa.unknown_engine)
+    nisa.tensor_tensor(dst, lhs, rhs, getattr(nl, op), engine=nisa.unknown_engine)
     _assert_tensor_equal(dst.data, expected)
 
 
 @pytest.mark.parametrize(
     "lhs_dtype,rhs_dtype,dst_dtype,op",
     (
-        ("float32", "float32", "float32", nl.bitwise_and),
-        ("float32", "int8", "float32", nl.bitwise_or),
-        ("int32", "float16", "int32", nl.bitwise_xor),
+        ("float32", "float32", "float32", "bitwise_and"),
+        ("float32", "int8", "float32", "bitwise_or"),
+        ("int32", "float16", "int32", "bitwise_xor"),
     ),
 )
 def test_tensor_tensor_rejects_documented_bitvec_dtype_failures(
@@ -818,7 +804,7 @@ def test_tensor_tensor_rejects_documented_bitvec_dtype_failures(
     rhs = _typed_ndarray((2, 4), rhs_dtype, buffer="sbuf", seed=1)
     dst = b2.NDArray(shape=(2, 4), dtype=_dtype_token(dst_dtype), buffer="sbuf")
     with pytest.raises(ValueError, match="integer|dtype|bitvec"):
-        nisa.tensor_tensor(dst, lhs, rhs, op, engine=nisa.vector_engine)
+        nisa.tensor_tensor(dst, lhs, rhs, getattr(nl, op), engine=nisa.vector_engine)
 
 
 def test_tensor_tensor_rejects_documented_gpsimd_psum_case(patched_scope):
@@ -827,7 +813,7 @@ def test_tensor_tensor_rejects_documented_gpsimd_psum_case(patched_scope):
     lhs = _typed_ndarray((2, 4), "float32", buffer="psum")
     rhs = _typed_ndarray((2, 4), "float32", buffer="sbuf", seed=1)
     dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
-    with pytest.raises(ValueError, match="Gpsimd|gpsimd|PSUM|psum"):
+    with pytest.raises(ValueError, match="GpSimd|gpsimd|PSUM|psum"):
         nisa.tensor_tensor(dst, lhs, rhs, nl.power, engine=nisa.gpsimd_engine)
 
 
@@ -837,7 +823,7 @@ def test_tensor_tensor_rejects_documented_psum_power_dst(patched_scope):
     lhs = _typed_ndarray((2, 4), "float32", buffer="sbuf")
     rhs = _typed_ndarray((2, 4), "float32", buffer="sbuf", seed=1)
     dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="psum")
-    with pytest.raises(ValueError, match="Gpsimd|gpsimd|PSUM|psum|power"):
+    with pytest.raises(ValueError, match="GpSimd|gpsimd|PSUM|psum|power"):
         nisa.tensor_tensor(dst, lhs, rhs, nl.power, engine=nisa.gpsimd_engine)
 
 
@@ -867,19 +853,19 @@ def test_tensor_reduce_documented_shape_axis_success_cases(
 @pytest.mark.parametrize(
     "op",
     (
-        nl.invert,
-        nl.left_shift,
-        nl.right_shift,
-        nl.equal,
-        nl.not_equal,
-        nl.greater_equal,
-        nl.greater,
-        nl.less_equal,
-        nl.less,
-        nl.rsqrt,
-        nl.reciprocal,
-        nl.abs,
-        nl.power,
+        "invert",
+        "left_shift",
+        "right_shift",
+        "equal",
+        "not_equal",
+        "greater_equal",
+        "greater",
+        "less_equal",
+        "less",
+        "rsqrt",
+        "reciprocal",
+        "abs",
+        "power",
     ),
 )
 def test_tensor_reduce_rejects_documented_illegal_ops(patched_scope, op):
@@ -890,7 +876,7 @@ def test_tensor_reduce_rejects_documented_illegal_ops(patched_scope, op):
     with pytest.raises(
         (ValueError, RuntimeError), match="legal reduction|Unsupported|op"
     ):
-        nisa.tensor_reduce(dst, op, src, axis=[1])
+        nisa.tensor_reduce(dst, getattr(nl, op), src, axis=[1])
 
 
 @pytest.mark.parametrize(
@@ -918,26 +904,28 @@ def test_tensor_reduce_rejects_documented_axis_and_shape_failures(
 
 
 @pytest.mark.parametrize(
-    "op", (nl.add, nl.subtract, nl.multiply, nl.maximum, nl.minimum)
+    # "op", (nl.add, nl.subtract, nl.multiply, nl.maximum, nl.minimum)
+    "op",
+    ("add", "subtract", "multiply", "maximum", "minimum"),
 )
 def test_tensor_reduce_documented_negate_success_cases(patched_scope, op):
     """tensor_reduce should support negate for documented arithmetic ops."""
     del patched_scope
     src = _typed_ndarray((8, 4), "float32", buffer="sbuf")
     dst = b2.NDArray(shape=(8, 1), dtype=nl.float32, buffer="sbuf")
-    nisa.tensor_reduce(dst, op, src, axis=[1], negate=True)
+    nisa.tensor_reduce(dst, getattr(nl, op), src, axis=[1], negate=True)
     assert dst.data.shape == (8, 1)
 
 
 @pytest.mark.parametrize(
     "op",
     (
-        nl.bitwise_and,
-        nl.bitwise_or,
-        nl.bitwise_xor,
-        nl.logical_and,
-        nl.logical_or,
-        nl.logical_xor,
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+        "logical_and",
+        "logical_or",
+        "logical_xor",
     ),
 )
 def test_tensor_reduce_rejects_documented_negate_failures(patched_scope, op):
@@ -946,7 +934,7 @@ def test_tensor_reduce_rejects_documented_negate_failures(patched_scope, op):
     src = _typed_ndarray((8, 4), "int32", buffer="sbuf")
     dst = b2.NDArray(shape=(8, 1), dtype=nl.int32, buffer="sbuf")
     with pytest.raises(ValueError, match="negate|arithmetic"):
-        nisa.tensor_reduce(dst, op, src, axis=[1], negate=True)
+        nisa.tensor_reduce(dst, getattr(nl, op), src, axis=[1], negate=True)
 
 
 @pytest.mark.parametrize(
@@ -955,19 +943,19 @@ def test_tensor_reduce_rejects_documented_negate_failures(patched_scope, op):
         (True, None, False, np.array([[9.0, 8.0], [7.0, 6.0]], dtype=np.float32)),
         (
             True,
-            nl.subtract,
+            "subtract",
             False,
             np.array([[4.0, 3.0], [2.0, 1.0]], dtype=np.float32),
         ),
         (
             False,
-            nl.subtract,
+            "subtract",
             True,
             np.array([[14.0, 13.0], [12.0, 11.0]], dtype=np.float32),
         ),
         (
             True,
-            nl.subtract,
+            "subtract",
             True,
             np.array([[-4.0, -3.0], [-2.0, -1.0]], dtype=np.float32),
         ),
@@ -986,7 +974,7 @@ def test_tensor_scalar_documented_reverse_cases(
         nl.subtract,
         10.0,
         reverse0=reverse0,
-        op1=op1,
+        op1=getattr(nl, op1) if op1 else None,
         operand1=5.0 if op1 is not None else None,
         reverse1=reverse1,
     )
@@ -995,7 +983,7 @@ def test_tensor_scalar_documented_reverse_cases(
 
 @pytest.mark.parametrize(
     "op0,op1",
-    ((nl.logical_or, nl.add), (nl.multiply, nl.logical_and)),
+    (("logical_or", "add"), ("multiply", "logical_and")),
 )
 def test_tensor_scalar_rejects_documented_mixed_op_types(patched_scope, op0, op1):
     """tensor_scalar should reject mixed bitvec and arithmetic operator chains."""
@@ -1003,15 +991,17 @@ def test_tensor_scalar_rejects_documented_mixed_op_types(patched_scope, op0, op1
     data = _typed_ndarray((2, 4), "int32", buffer="sbuf")
     dst = b2.NDArray(shape=(2, 4), dtype=nl.int32, buffer="sbuf")
     with pytest.raises(ValueError, match="bitvec|arithmetic|mixed"):
-        nisa.tensor_scalar(dst, data, op0, 1, op1=op1, operand1=1)
+        nisa.tensor_scalar(
+            dst, data, getattr(nl, op0), 1, op1=getattr(nl, op1), operand1=1
+        )
 
 
 @pytest.mark.parametrize(
     "op0,engine",
     (
-        (nl.logical_or, nisa.scalar_engine),
-        (nl.logical_or, nisa.gpsimd_engine),
-        (nl.rsqrt, nisa.vector_engine),
+        ("logical_or", "scalar_engine"),
+        ("logical_or", "gpsimd_engine"),
+        ("rsqrt", "vector_engine"),
     ),
 )
 def test_tensor_scalar_rejects_documented_engine_failures(patched_scope, op0, engine):
@@ -1019,15 +1009,17 @@ def test_tensor_scalar_rejects_documented_engine_failures(patched_scope, op0, en
     del patched_scope
     data = _typed_ndarray((2, 4), "float32", buffer="sbuf")
     dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
-    with pytest.raises(ValueError, match="vector|scalar|Gpsimd|gpsimd|bitvec|rsqrt"):
-        nisa.tensor_scalar(dst, data, op0, 1.0, engine=engine)
+    with pytest.raises(ValueError, match="vector|scalar|GpSimd|gpsimd|bitvec|rsqrt"):
+        nisa.tensor_scalar(
+            dst, data, getattr(nl, op0), 1.0, engine=getattr(nisa, engine)
+        )
 
 
 @pytest.mark.parametrize(
     "data_dtype,operand,op0",
     (
-        ("float32", np.array([[1.0], [2.0]], dtype=np.float32), nl.logical_or),
-        ("float32", np.array([[1.0], [2.0]], dtype=np.float16), nl.logical_or),
+        ("float32", np.array([[1.0], [2.0]], dtype=np.float32), "logical_or"),
+        ("float32", np.array([[1.0], [2.0]], dtype=np.float16), "logical_or"),
     ),
 )
 def test_tensor_scalar_rejects_documented_dtype_failures(
@@ -1038,7 +1030,7 @@ def test_tensor_scalar_rejects_documented_dtype_failures(
     data = _typed_ndarray((2, 4), data_dtype, buffer="sbuf")
     dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
     with pytest.raises(ValueError, match="dtype|float32|integer|bitvec"):
-        nisa.tensor_scalar(dst, data, op0, _nd(operand))
+        nisa.tensor_scalar(dst, data, getattr(nl, op0), _nd(operand))
 
 
 def test_activation_documented_scalar_success_case(patched_scope):
@@ -1049,7 +1041,7 @@ def test_activation_documented_scalar_success_case(patched_scope):
     reduce_res = b2.NDArray(shape=(8, 1), dtype=nl.float32, buffer="sbuf")
     nisa.activation(
         dst,
-        _identity,
+        nl.copy,
         data,
         bias=0.0,
         scale=1.0,
@@ -1070,7 +1062,7 @@ def test_activation_documented_vector_success_case(patched_scope):
     reduce_res = b2.NDArray(shape=(3, 1), dtype=nl.float32, buffer="psum")
     nisa.activation(
         dst,
-        _identity,
+        nl.copy,
         data,
         bias=bias,
         scale=scale,
@@ -1420,12 +1412,16 @@ def test_sqrt_rsqrt_match_numpy_with_edge_values(patched_scope, dtype_name):
             [0.0, 1.0, 4.0, 9.0, 256.0, 1e-12, 1e12], dtype=STORAGE_DTYPES[dtype_name]
         )
     values_nd = _nd(values)
-    sqrt_actual = nl.sqrt(values_nd).data
+    dst = _zeros(values.shape)
+    nisa.activation(dst, nl.sqrt, values_nd)
+    sqrt_actual = dst.data
     sqrt_expected = np.sqrt(values)
     _assert_tensor_equal(sqrt_actual, sqrt_expected)
 
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        rsqrt_actual = nl.rsqrt(values_nd).data
+        dst = _zeros(values.shape)
+        nisa.activation(dst, nl.rsqrt, values_nd)
+        rsqrt_actual = dst.data
         rsqrt_expected = 1.0 / np.sqrt(values)
     _assert_tensor_equal(rsqrt_actual, rsqrt_expected)
 

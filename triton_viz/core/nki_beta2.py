@@ -50,6 +50,13 @@ def _mark_defined(value):
         value._defined = True
 
 
+def _store(dst, value):
+    """Write a computed value into a destination tensor."""
+    dst.data[...] = _cast_value(value, dst.dtype)
+    _mark_defined(dst)
+    return dst
+
+
 def _tensor_value(value):
     """Unwrap NDArray inputs and validate they are initialized."""
     if isinstance(value, NDArray):
@@ -121,30 +128,6 @@ def _partition_and_free(shape):
     shape = tuple(shape)
     free = int(np.prod(shape[1:], dtype=np.int64)) if len(shape) > 1 else 1
     return shape[0], free
-
-
-def _op_name(op):
-    """Return the normalized operation name."""
-    return getattr(op, "__name__", str(op))
-
-
-def _is_bitwise_op_name(name):
-    """Return whether an op name is a documented bitvec operator."""
-    prefixes = ("bitwise_", "logical_")
-    return name.startswith(prefixes)
-
-
-def _is_arithmetic_op_name(name):
-    """Return whether an op name is a documented arithmetic operator."""
-    return name in {
-        "add",
-        "subtract",
-        "multiply",
-        "maximum",
-        "minimum",
-        "power",
-        "rsqrt",
-    }
 
 
 def _activation_operand(value, data_shape, label):
@@ -407,9 +390,7 @@ def nc_transpose(dst, data, engine=nisa.engine.unknown, name=None):
         raise ValueError("dst dtype must match data dtype")
     value = np.asarray(_tensor_value(data))
     transposed = value if value.ndim < 2 else value.reshape(value.shape[0], -1).T
-    dst.data[...] = _cast_value(transposed.reshape(dst.shape), dst.dtype)
-    _mark_defined(dst)
-    return dst
+    return _store(dst, transposed.reshape(dst.shape))
 
 
 def nc_matmul(
@@ -477,18 +458,14 @@ def nc_matmul(
         if start_col > 128:
             raise ValueError("start col must not exceed 128")
     result = stationary_value.T @ moving_value
-    dst.data[...] = np.asarray(dst.data) + _cast_value(result, dst.dtype)
-    _mark_defined(dst)
-    return dst
+    return _store(dst, np.asarray(dst.data) + _cast_value(result, dst.dtype))
 
 
 def reciprocal(dst, data, name=None):
     """Compute elementwise reciprocal into destination tensor."""
     del name
     result = np.reciprocal(np.asarray(_tensor_value(data), dtype=np.float32))
-    dst.data[...] = _cast_value(result, dst.dtype)
-    _mark_defined(dst)
-    return dst
+    return _store(dst, result)
 
 
 def exponential(
@@ -511,14 +488,12 @@ def exponential(
         np.asarray(src_value, dtype=np.float32)
         - np.asarray(max_value_data, dtype=np.float32)
     )
-    dst.data[...] = _cast_value(output, dst.dtype)
-    _mark_defined(dst)
+    _store(dst, output)
     if reduce_res is not None:
         reduced = np.sum(
             np.asarray(output).reshape(output.shape[0], -1), axis=1, keepdims=True
         )
-        reduce_res.data[...] = _cast_value(reduced, reduce_res.dtype)
-        _mark_defined(reduce_res)
+        _store(reduce_res, reduced)
     return dst
 
 
@@ -548,11 +523,6 @@ class TileSize:
 
 
 tile_size = TileSize()
-
-
-def _unwrap_operand(value):
-    """Return NumPy/scalar payload from NDArray/scalar inputs."""
-    return _tensor_value(value)
 
 
 def _broadcast_tensor_scalar_operand(data, operand):
@@ -587,105 +557,32 @@ def _wrap_result(result, *operands):
     return result
 
 
-def _raise_direct_tensor_math(x, y):
-    """Reject direct nl binary math on beta2 tensors."""
-    if isinstance(x, NDArray) or isinstance(y, NDArray):
+class SubOp:
+    """
+    Hacky way to allow something like "nl.add" to map to np_op "np.add" while also forbidding "nl.add(x, y)" directly.
+    Only NKI functions that have an "op" arg (e.g. tensor_tensor) should be accessing self._op/using self._run.
+    """
+
+    def __init__(self, np_op, is_bitwise, is_reducible, name=None):
+        self._op = np_op
+        self.is_bitwise = is_bitwise
+        self.is_reducible = is_reducible
+        self.num_args = len(inspect.signature(self._op).parameters)
+        if name is None:
+            self.name = np_op.__name__
+        else:
+            self.name = name
+
+    def _run(self, *args):
+        return self._op(*args[: self.num_args])
+
+    def __call__(self, *args, **kwargs):
         raise TypeError(_ERR_BINARY_TENSOR_OP)
 
+    def __str__(self):
+        return f"SubOp({self.name})"
 
-def _binary_math_op(x, y, op, dtype=None):
-    """Apply a binary math operation with NDArray-aware coercion."""
-    _raise_direct_tensor_math(x, y)
-    x_value = _unwrap_operand(x)
-    y_value = _unwrap_operand(y)
-    result = op(x_value, y_value)
-    if dtype is not None:
-        result = _cast_value(result, dtype)
-    return _wrap_result(result, x, y)
-
-
-def _unary_math_op(x, op, dtype=None):
-    """Apply a unary math operation with NDArray-aware coercion."""
-    x_value = _unwrap_operand(x)
-    result = op(x_value)
-    if dtype is not None:
-        result = _cast_value(result, dtype)
-    return _wrap_result(result, x)
-
-
-def add(x, y, dtype=None):
-    """Compute elementwise addition."""
-    return _binary_math_op(x, y, np.add, dtype=dtype)
-
-
-def subtract(x, y, dtype=None):
-    """Compute elementwise subtraction."""
-    return _binary_math_op(x, y, np.subtract, dtype=dtype)
-
-
-def multiply(x, y, dtype=None):
-    """Compute elementwise multiplication."""
-    return _binary_math_op(x, y, np.multiply, dtype=dtype)
-
-
-def maximum(x, y, dtype=None):
-    """Compute elementwise maximum."""
-    return _binary_math_op(x, y, np.maximum, dtype=dtype)
-
-
-def minimum(x, y, dtype=None):
-    """Compute elementwise minimum."""
-    return _binary_math_op(x, y, np.minimum, dtype=dtype)
-
-
-def power(x, y, dtype=None):
-    """Compute elementwise power."""
-    return _binary_math_op(x, y, np.power, dtype=dtype)
-
-
-def logical_and(x, y, dtype=None):
-    """Compute elementwise logical and."""
-    return _binary_math_op(x, y, np.logical_and, dtype=dtype)
-
-
-def logical_or(x, y, dtype=None):
-    """Compute elementwise logical or."""
-    return _binary_math_op(x, y, np.logical_or, dtype=dtype)
-
-
-def logical_xor(x, y, dtype=None):
-    """Compute elementwise logical xor."""
-    return _binary_math_op(x, y, np.logical_xor, dtype=dtype)
-
-
-def bitwise_and(x, y, dtype=None):
-    """Compute elementwise bitwise and."""
-    return _binary_math_op(x, y, np.bitwise_and, dtype=dtype)
-
-
-def bitwise_or(x, y, dtype=None):
-    """Compute elementwise bitwise or."""
-    return _binary_math_op(x, y, np.bitwise_or, dtype=dtype)
-
-
-def bitwise_xor(x, y, dtype=None):
-    """Compute elementwise bitwise xor."""
-    return _binary_math_op(x, y, np.bitwise_xor, dtype=dtype)
-
-
-def sqrt(x, dtype=None):
-    """Compute elementwise square root."""
-    return _unary_math_op(x, np.sqrt, dtype=dtype)
-
-
-def rsqrt(x, dtype=None):
-    """Compute elementwise reciprocal square root."""
-    return _unary_math_op(x, lambda v: 1.0 / np.sqrt(v), dtype=dtype)
-
-
-def exp(x, dtype=None):
-    """Compute elementwise maximum."""
-    return _unary_math_op(x, np.exp, dtype=dtype)
+    __repr__ = __str__
 
 
 def dma_copy(
@@ -714,19 +611,11 @@ def dma_copy(
         ):
             raise ValueError(_ERR_AP_MISMATCH)
     if dst_rmw_op is None:
-        dst.data[...] = _cast_value(src_value.reshape(dst.shape), dst.dtype)
-        _mark_defined(dst)
-        return dst
-    if _op_name(dst_rmw_op) != "add":
+        return _store(dst, src_value.reshape(dst.shape))
+    if dst_rmw_op != nl.add:
         raise ValueError("only nl.add is supported for dma_copy dst_rmw_op")
-    try:
-        merged = dst_rmw_op(dst.data, src_value)
-    except TypeError:
-        merged = dst_rmw_op(dst.data, y=src_value)
-    merged_value = merged.data if isinstance(merged, NDArray) else merged
-    dst.data[...] = _cast_value(merged_value, dst.dtype)
-    _mark_defined(dst)
-    return dst
+    merged = dst_rmw_op._op(dst.data, src_value)
+    return _store(dst, merged.data if isinstance(merged, NDArray) else merged)
 
 
 def tensor_copy(dst, src, engine=nisa.engine.unknown, name=None):
@@ -745,9 +634,7 @@ def tensor_copy(dst, src, engine=nisa.engine.unknown, name=None):
     src_value = np.asarray(_tensor_value(src))
     if src_value.size != dst.data.size:
         raise ValueError(_ERR_AP_MISMATCH)
-    dst.data[...] = _cast_value(src_value.reshape(dst.shape), dst.dtype)
-    _mark_defined(dst)
-    return dst
+    return _store(dst, src_value.reshape(dst.shape))
 
 
 def tensor_tensor(
@@ -760,21 +647,14 @@ def tensor_tensor(
 ):
     """Apply a binary tensor op and store the result in dst."""
     del name
-    # if isinstance(dst, NDArray) and dst._origin == "tensor":
-    #    raise TypeError(
-    #        "failed to resolve an argument 'dst', expecting tensor access, got 'tensor'"
-    #    )
-    # if isinstance(data2, NDArray) and data2._origin == "tensor":
-    #    raise TypeError(
-    #        "failed to resolve an argument 'data2', expecting tensor access, got 'tensor'"
-    #    )
-    op_name = _op_name(op)
+    if not isinstance(op, SubOp):
+        raise ValueError(f"Unsupported op: {op}")
     dst_buffer = _buffer_name(dst)
     lhs_buffer = _buffer_name(data1)
     rhs_buffer = _buffer_name(data2)
     if lhs_buffer == "psum" and rhs_buffer == "psum":
         raise ValueError("tensor_tensor cannot read both inputs from psum")
-    if op_name == "power" and (
+    if op.name == "power" and (
         engine == nisa.gpsimd_engine
         and "psum" in (dst_buffer, lhs_buffer, rhs_buffer)
         or dst_buffer == "psum"
@@ -811,49 +691,14 @@ def tensor_tensor(
     dst_dtype = getattr(dst, "dtype", dst.data.dtype)
     lhs_dtype = getattr(data1, "dtype", lhs.dtype)
     rhs_dtype = getattr(data2, "dtype", rhs.dtype)
-    if _is_bitwise_op_name(op_name):
+    if op.is_bitwise:
         if not all(
             _is_integer_dtype(dtype) for dtype in (lhs_dtype, rhs_dtype, dst_dtype)
         ):
             raise ValueError("data and dst must be integer dtypes for bitvec operators")
-    try:
-        result = op(lhs, rhs)
-    except TypeError:
-        try:
-            result = op(lhs, y=rhs)
-        except Exception:
-            result = None
-    except Exception:
-        result = None
-    if result is None:
-        fallback_ops = {
-            "add": np.add,
-            "subtract": np.subtract,
-            "sub": np.subtract,
-            "multiply": np.multiply,
-            "mul": np.multiply,
-            "divide": np.divide,
-            "div": np.divide,
-            "maximum": np.maximum,
-            "minimum": np.minimum,
-            "power": np.power,
-            "bitwise_and": np.bitwise_and,
-            "bitwise_or": np.bitwise_or,
-            "bitwise_xor": np.bitwise_xor,
-            "logical_and": np.logical_and,
-            "logical_or": np.logical_or,
-            "logical_xor": np.logical_xor,
-        }
-        matched = next((fn for key, fn in fallback_ops.items() if key in op_name), None)
-        if matched is None:
-            raise RuntimeError(
-                f"Unsupported tensor op outside kernel context: {op_name}"
-            )
-        result = matched(lhs, rhs)
+    result = op._run(lhs, rhs)
     result_value = result.data if isinstance(result, NDArray) else result
-    dst.data[...] = _cast_value(result_value, dst.dtype)
-    _mark_defined(dst)
-    return dst
+    return _store(dst, result_value)
 
 
 def tensor_reduce(
@@ -867,6 +712,8 @@ def tensor_reduce(
 ):
     """Reduce a tensor along axes using add/max/min-like ops."""
     del name
+    if not isinstance(op, SubOp):
+        raise ValueError(f"Unsupported op: {op}")
     source = np.asarray(_tensor_value(data))
     axis = _normalize_axis(axis)
     axis_tuple = (axis,) if isinstance(axis, int) else tuple(axis)
@@ -891,82 +738,35 @@ def tensor_reduce(
         dst_par, dst_free = _partition_and_free(dst.shape)
         if exp_par != dst_par or exp_free != dst_free:
             raise ValueError("cannot reduce free dim of data into free dim of dst")
-    op_name = _op_name(op)
-    reduce_ops = {
-        "add": np.add.reduce,
-        "subtract": np.subtract.reduce,
-        "multiply": np.multiply.reduce,
-        "maximum": np.maximum.reduce,
-        "minimum": np.minimum.reduce,
-        "bitwise_and": np.bitwise_and.reduce,
-        "bitwise_or": np.bitwise_or.reduce,
-        "bitwise_xor": np.bitwise_xor.reduce,
-        "logical_and": np.logical_and.reduce,
-        "logical_or": np.logical_or.reduce,
-        "logical_xor": np.logical_xor.reduce,
-    }
-    reducer = reduce_ops.get(op_name)
-    if reducer is None:
-        raise RuntimeError(f"Unsupported tensor_reduce op: {op_name}")
+    if not op.is_reducible:
+        raise RuntimeError("Op is not a legal reduction op")
     dst_dtype = getattr(dst, "dtype", dst.data.dtype)
     data_dtype = getattr(data, "dtype", source.dtype)
-    if _is_bitwise_op_name(op_name) and not (
+    if op.is_bitwise and not (
         _is_integer_dtype(data_dtype) and _is_integer_dtype(dst_dtype)
     ):
         raise ValueError("data and dst must be integer dtypes for bitvec operators")
-    if negate and _is_bitwise_op_name(op_name):
+    if negate and op.is_bitwise:
         raise ValueError("can only negate when reducing with an arithmetic operator")
-    reduced = reducer(source, axis=axis_tuple, keepdims=keepdims)
+    reduced = op._op.reduce(source, axis=axis_tuple, keepdims=keepdims)
     if negate:
         reduced = -np.asarray(reduced)
     if reduced.shape != dst.shape:
         reduced = np.asarray(reduced).reshape(dst.shape)
-    dst.data[...] = _cast_value(reduced, dst.dtype)
-    _mark_defined(dst)
-    return dst
+    return _store(dst, reduced)
 
 
 def _apply_tensor_scalar_op(data, op, operand, reverse):
     """Apply tensor_scalar op, including unary ops such as nl.rsqrt."""
-    op_name = _op_name(op)
+    if not (op is None or isinstance(op, SubOp)):
+        raise ValueError(f"Unsupported op: {op}")
     param_names = tuple(inspect.signature(op).parameters)
     if param_names == ("x", "dtype"):
         applied = op(operand if reverse else data)
         return applied.data if isinstance(applied, NDArray) else np.asarray(applied)
 
     lhs, rhs = (operand, data) if reverse else (data, operand)
-    try:
-        applied = op(lhs, rhs)
-    except TypeError:
-        try:
-            applied = op(lhs, y=rhs)
-        except Exception:
-            applied = None
-    except Exception:
-        applied = None
-    if applied is None:
-        if "mul" in op_name:
-            applied = np.multiply(lhs, rhs)
-        elif "add" in op_name:
-            applied = np.add(lhs, rhs)
-        elif "sub" in op_name:
-            applied = np.subtract(lhs, rhs)
-        elif "div" in op_name:
-            applied = np.divide(lhs, rhs)
-        elif "logical_and" in op_name:
-            applied = np.logical_and(lhs, rhs)
-        elif "logical_or" in op_name:
-            applied = np.logical_or(lhs, rhs)
-        elif "logical_xor" in op_name:
-            applied = np.logical_xor(lhs, rhs)
-        elif "bitwise_and" in op_name:
-            applied = np.bitwise_and(lhs, rhs)
-        elif "bitwise_or" in op_name:
-            applied = np.bitwise_or(lhs, rhs)
-        elif "bitwise_xor" in op_name:
-            applied = np.bitwise_xor(lhs, rhs)
-        else:
-            raise RuntimeError(f"Unsupported tensor_scalar op: {op_name}")
+    applied = op._run(lhs, rhs)
     return applied.data if isinstance(applied, NDArray) else np.asarray(applied)
 
 
@@ -984,15 +784,17 @@ def tensor_scalar(
 ):
     """Apply one or two tensor-scalar operations and write into dst."""
     del name
-    op0_name = _op_name(op0)
-    op1_name = _op_name(op1) if op1 is not None else None
-    op0_bitwise = _is_bitwise_op_name(op0_name)
-    op1_bitwise = _is_bitwise_op_name(op1_name) if op1_name is not None else op0_bitwise
+    if not isinstance(op0, SubOp):
+        raise ValueError(f"Unsupported op: {op0}")
+    if not (op1 is None or isinstance(op1, SubOp)):
+        raise ValueError(f"Unsupported op: {op1}")
+    op0_bitwise = op0.is_bitwise
+    op1_bitwise = op1.is_bitwise if op1 is not None else op0_bitwise
     if op1 is not None and op0_bitwise != op1_bitwise:
         raise ValueError("bitvec and arithmetic ops can't be mixed")
     if op0_bitwise and engine in (nisa.scalar_engine, nisa.gpsimd_engine):
         raise ValueError("bitvec ops must run on vector engine")
-    if op0_name == "rsqrt" and engine == nisa.vector_engine:
+    if op0.name == "rsqrt" and engine == nisa.vector_engine:
         raise ValueError("rsqrt can only run on GpSimd/Scalar Engine")
     dst_dtype = getattr(dst, "dtype", dst.data.dtype)
     data_dtype = getattr(data, "dtype", np.asarray(_tensor_value(data)).dtype)
@@ -1012,13 +814,9 @@ def tensor_scalar(
             and not _is_integer_dtype(getattr(operand, "dtype", operand.data.dtype))
         ):
             raise ValueError("operand0/1 dtype must match bitvec integer requirements")
-        operand_value = _broadcast_tensor_scalar_operand(
-            result, _unwrap_operand(operand)
-        )
+        operand_value = _broadcast_tensor_scalar_operand(result, _tensor_value(operand))
         result = _apply_tensor_scalar_op(result, op, operand_value, reverse)
-    dst.data[...] = _cast_value(result, dst.dtype)
-    _mark_defined(dst)
-    return dst
+    return _store(dst, result)
 
 
 def activation(
@@ -1034,6 +832,8 @@ def activation(
 ):
     """Apply an activation epilogue into dst."""
     del name
+    if not (op is None or isinstance(op, SubOp)):
+        raise ValueError(f"Unsupported op: {op}")
     if _buffer_name(data) not in ("sbuf", "psum") or _buffer_name(dst) not in (
         "sbuf",
         "psum",
@@ -1048,25 +848,14 @@ def activation(
         raise ValueError("dst/data free dim mismatch")
     if data_par > 128:
         raise ValueError("data partition dim > 128")
-    if reduce_op is not None and _op_name(reduce_op) != "add":
+    if reduce_op is not None and reduce_op.name != "add":
         raise ValueError("activation reduce_op must be None or nl.add")
     scale_value = _activation_operand(scale, data_value.shape, "scale")
     bias_value = _activation_operand(bias, data_value.shape, "bias")
     pre_act = data_value * scale_value + bias_value
-    op_name = _op_name(op)
-    if op_name in {"copy", "_identity"}:
-        output = pre_act
-    else:
-        output = op(pre_act)
+    output = op._run(pre_act)
     output_value = output.data if isinstance(output, NDArray) else output
-    dst.data[...] = _cast_value(np.asarray(output_value).reshape(dst.shape), dst.dtype)
-    _mark_defined(dst)
-    if reduce_res is not None:
-        reduced = np.sum(
-            np.asarray(output_value).reshape(data_par, -1), axis=1, keepdims=True
-        )
-        reduce_res.data[...] = _cast_value(reduced, reduce_res.dtype)
-        _mark_defined(reduce_res)
+    _store(dst, np.asarray(output_value).reshape(dst.shape))
     return dst
 
 
@@ -1105,21 +894,23 @@ def nki_patch_lang(scope=None):
     set_attr = setattr if scope is None else scope.set_attr
     set_attr(nl, "ndarray", ndarray)
     set_attr(nl, "zeros", zeros)
-    set_attr(nl, "add", add)
-    set_attr(nl, "subtract", subtract)
-    set_attr(nl, "multiply", multiply)
-    set_attr(nl, "maximum", maximum)
-    set_attr(nl, "minimum", minimum)
-    set_attr(nl, "power", power)
-    set_attr(nl, "logical_and", logical_and)
-    set_attr(nl, "logical_or", logical_or)
-    set_attr(nl, "logical_xor", logical_xor)
-    set_attr(nl, "bitwise_and", bitwise_and)
-    set_attr(nl, "bitwise_or", bitwise_or)
-    set_attr(nl, "bitwise_xor", bitwise_xor)
-    set_attr(nl, "sqrt", sqrt)
-    set_attr(nl, "rsqrt", rsqrt)
-    set_attr(nl, "exp", exp)
+    set_attr(nl, "copy", SubOp(np.copy, False, False))
+    set_attr(nl, "add", SubOp(np.add, False, True))
+    set_attr(nl, "subtract", SubOp(np.subtract, False, True))
+    set_attr(nl, "multiply", SubOp(np.multiply, False, True))
+    set_attr(nl, "maximum", SubOp(np.maximum, False, True))
+    set_attr(nl, "minimum", SubOp(np.minimum, False, True))
+    set_attr(nl, "power", SubOp(np.power, False, False))
+    set_attr(nl, "logical_and", SubOp(np.logical_and, True, True))
+    set_attr(nl, "logical_or", SubOp(np.logical_or, True, True))
+    set_attr(nl, "logical_xor", SubOp(np.logical_xor, True, True))
+    set_attr(nl, "bitwise_and", SubOp(np.bitwise_and, True, True))
+    set_attr(nl, "bitwise_or", SubOp(np.bitwise_or, True, True))
+    set_attr(nl, "bitwise_xor", SubOp(np.bitwise_xor, True, True))
+    set_attr(nl, "sqrt", SubOp(np.sqrt, False, False))
+    set_attr(nl, "rsqrt", SubOp(lambda v: 1.0 / np.sqrt(v), False, False, name="rsqrt"))
+    set_attr(nl, "exp", SubOp(np.exp, False, False))
+    set_attr(nl, "reciprocal", SubOp(np.reciprocal, False, False))
     set_attr(nl, "tile_size", tile_size)
     set_attr(nl, "sbuf", sbuf)
     set_attr(nl, "hbm", hbm)
