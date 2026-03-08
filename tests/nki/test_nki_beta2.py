@@ -470,6 +470,7 @@ def test_tensor_tensor(patched_scope):
     """tensor_tensor should apply the provided binary op."""
     del patched_scope
     a, b, out = _core_inputs()
+    a.buffer = b.buffer = "sbuf"
     nisa.tensor_tensor(out, a, b, nl.subtract)
     assert np.array_equal(out.data, a.data - b.data)
 
@@ -1216,15 +1217,15 @@ def test_zeros_rejects_buffer_kwarg(patched_scope):
 
 
 @pytest.mark.parametrize(
-    "dst_shape,data_shape",
-    (((4, 8), (8, 4)), ((35, 3), (3, 5, 7))),
+    "dst_shape,data_shape,dst_buffer",
+    (((4, 8), (8, 4), "sbuf"), ((35, 3), (3, 5, 7), "psum")),
 )
 @pytest.mark.parametrize(
     "dst_dtype_name,data_dtype_name",
     (("float32", "float32"), ("bfloat16", "bfloat16"), ("bfloat16", "float32")),
 )
 def test_nc_transpose_shape_dtype_cases(
-    patched_scope, dst_shape, data_shape, dst_dtype_name, data_dtype_name
+    patched_scope, dst_shape, data_shape, dst_buffer, dst_dtype_name, data_dtype_name
 ):
     """nc_transpose should match documented shape and dtype combinations."""
     del patched_scope
@@ -1232,11 +1233,53 @@ def test_nc_transpose_shape_dtype_cases(
         np.arange(np.prod(data_shape), dtype=np.float32).reshape(data_shape) + 0.25
     )
     data = _nd(src_data, dtype=STORAGE_DTYPES[data_dtype_name], buffer="sbuf")
-    dst = b2.NDArray(shape=dst_shape, dtype=_dtype_token(dst_dtype_name), buffer="sbuf")
+    dst = b2.NDArray(
+        shape=dst_shape,
+        dtype=_dtype_token(dst_dtype_name),
+        buffer=dst_buffer,
+    )
     nisa.nc_transpose(dst, data)
     expected = np.asarray(data.data).reshape(data.shape[0], -1).T
     expected = np.asarray(expected, dtype=dst.data.dtype)
     _assert_tensor_equal(dst.data, expected)
+
+
+def test_nc_transpose_infers_vector_engine_for_small_tiles(patched_scope):
+    """nc_transpose should infer vector engine for <= (32, 32) tiles."""
+    del patched_scope
+    src = _typed_ndarray((8, 4), "float32", buffer="psum")
+    dst = b2.NDArray(shape=(4, 8), dtype=nl.float32, buffer="psum")
+    nisa.nc_transpose(dst, src)
+    assert np.array_equal(dst.data, src.data.T)
+
+
+def test_nc_transpose_infers_tensor_engine_for_medium_tiles(patched_scope):
+    """nc_transpose should infer tensor engine for <= (128, 128) tiles."""
+    del patched_scope
+    src = _typed_ndarray((3, 5, 7), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(35, 3), dtype=nl.float32, buffer="psum")
+    nisa.nc_transpose(dst, src)
+    assert np.array_equal(dst.data, src.data.reshape(3, -1).T)
+
+
+def test_nc_transpose_inferred_engine_rejects_psum_to_psum_large_tiles(patched_scope):
+    """nc_transpose should reject psum->psum when inference selects tensor engine."""
+    del patched_scope
+    src = _typed_ndarray((33, 1), "float32", buffer="psum")
+    dst = b2.NDArray(shape=(1, 33), dtype=nl.float32, buffer="psum")
+    with pytest.raises(
+        ValueError, match="Tensor Engine nc_transpose requires SBUF -> PSUM"
+    ):
+        nisa.nc_transpose(dst, src)
+
+
+def test_nc_transpose_rejects_tiles_larger_than_tensor_engine(patched_scope):
+    """nc_transpose should reject tiles that exceed both inferred engine limits."""
+    del patched_scope
+    src = _typed_ndarray((129, 1), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(1, 129), dtype=nl.float32, buffer="psum")
+    with pytest.raises(ValueError, match="tile too large for nc_transpose"):
+        nisa.nc_transpose(dst, src)
 
 
 def test_nc_matmul_matches_numpy_matrix(patched_scope):
