@@ -696,8 +696,9 @@ def _broadcast_tensor_scalar_operand(
 
 class SubOp:
     """
-    Hacky way to allow something like "nl.add" to map to np_op "np.add" while also forbidding "nl.add(x, y)" directly.
-    Only NKI functions that have an "op" arg (e.g. tensor_tensor) should be accessing self._op/using self._run.
+    NKI ISA ops like tensor_tensor have parameters to modify which "sub-operation" each element does (e.g. nl.add).
+    There are a couple of NKI quirks with these ops (e.g. you're not allowed to do nl.add(x, y)) so we use this instead
+    of numpy ops.
     """
 
     def __init__(
@@ -715,7 +716,7 @@ class SubOp:
             is_reducible: Whether the op can be used in ``tensor_reduce``.
             name: Optional stable display name override.
         """
-        self._op = np_op
+        self._op = np_op  # NOTE: Only NKI ISA ops should use self._op/self._run
         self.is_bitwise = is_bitwise
         self.is_reducible = is_reducible
         self.num_args = len(inspect.signature(self._op).parameters)
@@ -836,7 +837,7 @@ def tensor_tensor(
 
     if engine == nisa.gpsimd_engine and "psum" in (dst_buffer, lhs_buffer, rhs_buffer):
         raise ValueError(
-            "attempted to access PSUM with explicit/implicit use of GpSimd Engine"
+            "attempted to access PSUM with explicit (e.g. non-default engine arg)/implicit (e.g. op == nl.power) use of GpSimd Engine"
         )
     _require(
         (lhs_buffer, rhs_buffer)
