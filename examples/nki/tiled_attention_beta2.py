@@ -63,17 +63,21 @@ def tiled_attention_kernel(
             nisa.dma_copy(dst=k_tile, src=k[nl.ds(k_row_start, n_size), :])
             nisa.dma_copy(dst=v_tile, src=v[nl.ds(v_row_start, n_size), :])
 
-            k_t = nl.ndarray((d_size, n_size), dtype=k.dtype, buffer=nl.psum)
-            nisa.nc_transpose(dst=k_t, data=k_tile)
+            k_t_psum = nl.ndarray((d_size, n_size), dtype=k.dtype, buffer=nl.psum)
+            nisa.nc_transpose(dst=k_t_psum, data=k_tile)
+            k_t = nl.ndarray((d_size, n_size), dtype=q.dtype, buffer=nl.sbuf)
+            nisa.tensor_copy(dst=k_t, src=k_t_psum)
 
             for m_tile_idx in nl.affine_range(m_size // tile_m):
                 m_start = m_tile_idx * tile_m
                 q_row_start = (batch_idx * num_heads + head_idx) * m_size + m_start
 
                 q_tile = nl.ndarray((tile_m, d_size), dtype=q.dtype, buffer=nl.sbuf)
-                q_t = nl.ndarray((d_size, tile_m), dtype=q.dtype, buffer=nl.psum)
+                q_t_psum = nl.ndarray((d_size, tile_m), dtype=q.dtype, buffer=nl.psum)
                 nisa.dma_copy(dst=q_tile, src=q[nl.ds(q_row_start, tile_m), :])
-                nisa.nc_transpose(dst=q_t, data=q_tile)
+                nisa.nc_transpose(dst=q_t_psum, data=q_tile)
+                q_t = nl.ndarray((d_size, tile_m), dtype=q.dtype, buffer=nl.sbuf)
+                nisa.tensor_copy(dst=q_t, src=q_t_psum)
 
                 scores_psum = nl.ndarray(
                     (tile_m, n_size), dtype=nl.float32, buffer=nl.psum
@@ -125,8 +129,14 @@ def tiled_attention_kernel(
                     operand0=inv_sum,
                 )
 
-                probs_t = nl.ndarray((n_size, tile_m), dtype=nl.float32, buffer=nl.psum)
-                nisa.nc_transpose(dst=probs_t, data=probs)
+                probs_t_psum = nl.ndarray(
+                    (n_size, tile_m), dtype=probs.dtype, buffer=nl.psum
+                )
+                nisa.nc_transpose(dst=probs_t_psum, data=probs)
+                probs_t = nl.ndarray(
+                    (n_size, tile_m), dtype=probs.dtype, buffer=nl.sbuf
+                )
+                nisa.tensor_copy(dst=probs_t, src=probs_t_psum)
 
                 out_psum = nl.ndarray(
                     (tile_m, dv_size), dtype=nl.float32, buffer=nl.psum

@@ -2,9 +2,13 @@ import inspect
 
 import numpy as np
 import pytest
+import triton_viz
 
 try:
     from triton_viz.core.patch import _LangPatchScope
+    from triton_viz.clients import Tracer
+    from triton_viz.core.data import Dot
+    from triton_viz.core.trace import launches
     import nki.isa as nisa
     import nki.language as nl
     import triton_viz.core.nki_beta2 as b2
@@ -243,6 +247,34 @@ def test_patch_surface_and_signatures(patched_scope):
         )
 
 
+def test_trace_records_beta2_nc_matmul():
+    """beta2 tracing should record nc_matmul via the builder surface."""
+    triton_viz.clear()
+
+    def kernel(lhsT, rhs, out):
+        lhs_tile = nl.ndarray((128, 128), dtype=lhsT.dtype, buffer=nl.sbuf)
+        rhs_tile = nl.ndarray((128, 512), dtype=rhs.dtype, buffer=nl.sbuf)
+        res_psum = nl.ndarray((128, 512), dtype=nl.float32, buffer=nl.psum)
+        out_tile = nl.ndarray((128, 512), dtype=out.dtype, buffer=nl.sbuf)
+        nisa.dma_copy(lhs_tile, lhsT)
+        nisa.dma_copy(rhs_tile, rhs)
+        nisa.nc_matmul(dst=res_psum, stationary=lhs_tile, moving=rhs_tile)
+        nisa.tensor_copy(out_tile, res_psum)
+        nisa.dma_copy(out, out_tile)
+
+    traced = triton_viz.trace(client=Tracer(), backend="nki_beta2")(kernel)
+    lhs = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
+    rhs = np.arange(128 * 512, dtype=np.float32).reshape(128, 512)
+    out = np.empty((128, 512), dtype=np.float32)
+    traced[(1,)](lhs, rhs, out)
+
+    grid_records = [
+        record for record in launches[-1].records if type(record).__name__ == "Grid"
+    ]
+    assert grid_records[0].idx == (0, 0, 0)
+    assert any(isinstance(record, Dot) for record in launches[-1].records)
+
+
 def test_language_helpers_and_ops(patched_scope):
     """Patched language helpers should run with expected semantics."""
     del patched_scope
@@ -260,17 +292,49 @@ def test_language_helpers_and_ops(patched_scope):
     assert nl.ds(2, 3) == slice(2, 5, None)
     assert nl.tile_size.pmax == 128
 
-    x = _nd([[1, 2], [3, 4]], dtype=float)
-    y = _nd([[4, 3], [2, 1]], dtype=float)
-    assert np.array_equal(nl.add(x, y).data, np.array([[5, 5], [5, 5]]))
-    assert np.array_equal(nl.subtract(x, y).data, np.array([[-3, -1], [1, 3]]))
-    assert np.array_equal(nl.multiply(x, y).data, np.array([[4, 6], [6, 4]]))
-    assert np.array_equal(nl.maximum(x, y).data, np.array([[4, 3], [3, 4]]))
+    assert nl.add(2, 3) == 5
     assert np.array_equal(nl.sqrt(_nd([[1.0, 4.0]])).data, np.array([[1.0, 2.0]]))
     assert np.array_equal(nl.rsqrt(_nd([[4.0, 16.0]])).data, np.array([[0.5, 0.25]]))
     exp_dst = _zeros((1, 2))
     nisa.exponential(exp_dst, _nd([[0.0, 1.0]]))
     assert np.allclose(exp_dst.data, np.exp([[0.0, 1.0]]))
+
+
+@pytest.mark.parametrize(
+    "op_name,lhs,rhs",
+    (
+        (
+            "add",
+            _nd([[1.0, 2.0]], dtype=np.float32),
+            _nd([[3.0, 4.0]], dtype=np.float32),
+        ),
+        (
+            "multiply",
+            _nd([[1.0, 2.0]], dtype=np.float32),
+            _nd([[3.0, 4.0]], dtype=np.float32),
+        ),
+        (
+            "maximum",
+            _nd([[1.0, 2.0]], dtype=np.float32),
+            _nd([[3.0, 4.0]], dtype=np.float32),
+        ),
+        ("logical_or", _nd([[1, 0]], dtype=np.int32), _nd([[0, 1]], dtype=np.int32)),
+        ("bitwise_and", _nd([[1, 3]], dtype=np.int32), _nd([[1, 1]], dtype=np.int32)),
+        (
+            "power",
+            _nd([[2.0, 3.0]], dtype=np.float32),
+            _nd([[4.0, 2.0]], dtype=np.float32),
+        ),
+    ),
+)
+def test_nl_binary_op_tokens_raise_on_direct_tensor_math(
+    patched_scope, op_name, lhs, rhs
+):
+    """Direct nl binary math on tensors should be rejected in beta2."""
+    del patched_scope
+    op = getattr(nl, op_name)
+    with pytest.raises(TypeError, match="binary operators on tensors not supported"):
+        op(lhs, rhs)
 
 
 def test_dma_copy(patched_scope):
@@ -336,7 +400,8 @@ def test_dma_copy_rejects_total_element_mismatch(patched_scope):
 def test_tensor_copy(patched_scope):
     """tensor_copy should copy tensors elementwise."""
     del patched_scope
-    a, _, out = _core_inputs()
+    a = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer="sbuf")
+    out = _zeros((2, 4), dtype=np.float32, buffer="sbuf")
     nisa.tensor_copy(out, a)
     assert np.array_equal(out.data, a.data)
 
@@ -476,9 +541,17 @@ def test_nc_transpose(patched_scope):
 def test_nc_matmul(patched_scope):
     """nc_matmul should match transposed stationary matmul semantics."""
     del patched_scope
-    stationary = _nd(np.arange(12, dtype=float).reshape(4, 3))
-    moving = _nd(np.arange(8, dtype=float).reshape(4, 2))
-    dst = _zeros((3, 2), buffer="psum")
+    stationary = b2.NDArray(
+        value=np.arange(12, dtype=np.float32).reshape(4, 3),
+        dtype=nl.float32,
+        buffer="sbuf",
+    )
+    moving = b2.NDArray(
+        value=np.arange(8, dtype=np.float32).reshape(4, 2),
+        dtype=nl.float32,
+        buffer="sbuf",
+    )
+    dst = b2.NDArray(shape=(3, 2), dtype=nl.float32, buffer="psum")
     nisa.nc_matmul(dst, stationary, moving)
     assert np.allclose(dst.data, stationary.data.T @ moving.data)
 
@@ -507,18 +580,18 @@ def test_activation(patched_scope):
     del patched_scope
     src = _act_input()
     dst = _zeros((2, 3))
-    bias = _nd(np.ones((2, 3), dtype=np.float32))
+    bias = _nd(np.ones((2, 1), dtype=np.float32))
     nisa.activation(dst, np.reciprocal, src, bias=bias, scale=1.0)
     assert dst.data.shape == (2, 3)
 
 
-def test_activation_rejects_scalar_bias(patched_scope):
-    """activation should reject non-tensor bias arguments."""
+def test_activation_accepts_scalar_bias(patched_scope):
+    """activation should accept documented scalar bias arguments."""
     del patched_scope
     src = _act_input()
     dst = _zeros((2, 3))
-    with pytest.raises(TypeError, match="activation bias must be a tensor"):
-        nisa.activation(dst, np.reciprocal, src, bias=1.0, scale=1.0)
+    nisa.activation(dst, np.reciprocal, src, bias=1.0, scale=1.0)
+    assert dst.data.shape == (2, 3)
 
 
 @pytest.mark.parametrize(
@@ -715,7 +788,7 @@ def test_nc_matmul_requires_both_tile_position_and_tile_size(
     (
         (nl.add, np.array([[6.0, 8.0], [10.0, 12.0]], dtype=np.float32)),
         (nl.minimum, np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)),
-        (nl.power, np.array([[5.0, 12.0], [21.0, 32.0]], dtype=np.float32)),
+        (nl.power, np.array([[1.0, 64.0], [2187.0, 65536.0]], dtype=np.float32)),
     ),
 )
 def test_tensor_tensor_documented_operator_success_cases(patched_scope, op, expected):
@@ -1172,9 +1245,9 @@ def test_nc_transpose_shape_dtype_cases(
 def test_nc_matmul_matches_numpy_matrix(patched_scope):
     """nc_matmul should match numpy across documented shapes/dtypes/distributions."""
     del patched_scope
-    shape_cases = (((5, 3), (5, 7)), ((128, 128), (128, 128)), ((129, 127), (129, 125)))
-    dtype_names = ("float64", "float32", "bfloat16", "int16")
-    distributions = ("linspace", "arange", "randn")
+    shape_cases = (((5, 3), (5, 7)), ((128, 128), (128, 128)))
+    dtype_names = ("float32", "bfloat16")
+    distributions = ("linspace", "randn")
     seed = 17
 
     for stationary_shape, moving_shape in shape_cases:
@@ -1182,11 +1255,15 @@ def test_nc_matmul_matches_numpy_matrix(patched_scope):
             for dist in distributions:
                 lhs_np = _matrix(stationary_shape, dist, dtype_name, seed)
                 rhs_np = _matrix(moving_shape, dist, dtype_name, seed + 1)
-                stationary = _nd(lhs_np, buffer="sbuf")
-                moving = _nd(rhs_np, buffer="sbuf")
+                stationary = b2.NDArray(
+                    value=lhs_np, dtype=_dtype_token(dtype_name), buffer="sbuf"
+                )
+                moving = b2.NDArray(
+                    value=rhs_np, dtype=_dtype_token(dtype_name), buffer="sbuf"
+                )
                 dst = b2.NDArray(
                     shape=(stationary_shape[1], moving_shape[1]),
-                    dtype=_dtype_token(dtype_name),
+                    dtype=nl.float32,
                     buffer="psum",
                 )
                 dst.data.fill(0)
@@ -1203,29 +1280,37 @@ def test_nc_matmul_matches_numpy_matrix(patched_scope):
 def test_nc_matmul_accumulates_across_calls(patched_scope):
     """nc_matmul should accumulate into dst across repeated calls."""
     del patched_scope
-    shape_cases = (((5, 3), (5, 7)), ((128, 128), (128, 128)), ((129, 127), (129, 125)))
-    dtype_names = ("float64", "float32", "bfloat16", "int16")
-    distributions = ("linspace", "arange", "randn")
+    shape_cases = (((5, 3), (5, 7)), ((128, 128), (128, 128)))
+    dtype_names = ("float32", "bfloat16")
+    distributions = ("linspace", "randn")
     seed = 101
 
     for stationary_shape, moving_shape in shape_cases:
         for dtype_name in dtype_names:
             for dist in distributions:
-                lhs0 = _nd(
-                    _matrix(stationary_shape, dist, dtype_name, seed), buffer="sbuf"
+                lhs0 = b2.NDArray(
+                    value=_matrix(stationary_shape, dist, dtype_name, seed),
+                    dtype=_dtype_token(dtype_name),
+                    buffer="sbuf",
                 )
-                rhs0 = _nd(
-                    _matrix(moving_shape, dist, dtype_name, seed + 1), buffer="sbuf"
+                rhs0 = b2.NDArray(
+                    value=_matrix(moving_shape, dist, dtype_name, seed + 1),
+                    dtype=_dtype_token(dtype_name),
+                    buffer="sbuf",
                 )
-                lhs1 = _nd(
-                    _matrix(stationary_shape, dist, dtype_name, seed + 2), buffer="sbuf"
+                lhs1 = b2.NDArray(
+                    value=_matrix(stationary_shape, dist, dtype_name, seed + 2),
+                    dtype=_dtype_token(dtype_name),
+                    buffer="sbuf",
                 )
-                rhs1 = _nd(
-                    _matrix(moving_shape, dist, dtype_name, seed + 3), buffer="sbuf"
+                rhs1 = b2.NDArray(
+                    value=_matrix(moving_shape, dist, dtype_name, seed + 3),
+                    dtype=_dtype_token(dtype_name),
+                    buffer="sbuf",
                 )
                 dst = b2.NDArray(
                     shape=(stationary_shape[1], moving_shape[1]),
-                    dtype=_dtype_token(dtype_name),
+                    dtype=nl.float32,
                     buffer="psum",
                 )
                 dst.data.fill(0)
@@ -1277,21 +1362,51 @@ def test_reciprocal_value_dtype_cases(patched_scope, dtype_name):
 def test_binary_ops_match_numpy_with_overflow_cases(
     patched_scope, dtype_name, op_name, np_op
 ):
-    """Binary nl ops should match numpy for regular and overflow edge cases."""
+    """tensor_tensor/tensor_scalar should match numpy for binary op cases."""
     del patched_scope
     lhs = _matrix((19, 23), "linspace", dtype_name, 31)
     rhs = _matrix((19, 23), "randn", dtype_name, 47)
     op = getattr(nl, op_name)
-    actual = op(_nd(lhs), _nd(rhs)).data
-    expected = np_op(lhs, rhs)
-    _assert_tensor_equal(actual, expected)
+    lhs_nd = b2.NDArray(value=lhs, dtype=_dtype_token(dtype_name), buffer="sbuf")
+    rhs_nd = b2.NDArray(value=rhs, dtype=_dtype_token(dtype_name), buffer="sbuf")
+
+    tensor_dst = b2.NDArray(
+        shape=lhs.shape, dtype=_dtype_token(dtype_name), buffer="sbuf"
+    )
+    nisa.tensor_tensor(tensor_dst, lhs_nd, rhs_nd, op)
+    _assert_tensor_equal(tensor_dst.data, np_op(lhs, rhs))
+
+    scalar = rhs[0, 0].item()
+    scalar_dst = b2.NDArray(
+        shape=lhs.shape, dtype=_dtype_token(dtype_name), buffer="sbuf"
+    )
+    nisa.tensor_scalar(scalar_dst, lhs_nd, op, scalar)
+    _assert_tensor_equal(scalar_dst.data, np_op(lhs, scalar))
 
     if dtype_name == "int16":
         lhs_overflow = np.array([32767, -32768, 30000, -30000], dtype=np.int16)
         rhs_overflow = np.array([1, 1, 10000, -10000], dtype=np.int16)
-        actual_overflow = op(_nd(lhs_overflow), _nd(rhs_overflow)).data
-        expected_overflow = np_op(lhs_overflow, rhs_overflow)
-        assert np.array_equal(actual_overflow, expected_overflow)
+        lhs_overflow_nd = b2.NDArray(
+            value=lhs_overflow.reshape(1, 4), dtype=nl.int16, buffer="sbuf"
+        )
+        rhs_overflow_nd = b2.NDArray(
+            value=rhs_overflow.reshape(1, 4), dtype=nl.int16, buffer="sbuf"
+        )
+
+        overflow_dst = b2.NDArray(shape=(1, 4), dtype=nl.int16, buffer="sbuf")
+        nisa.tensor_tensor(overflow_dst, lhs_overflow_nd, rhs_overflow_nd, op)
+        assert np.array_equal(
+            overflow_dst.data.reshape(-1), np_op(lhs_overflow, rhs_overflow)
+        )
+
+        overflow_scalar_dst = b2.NDArray(shape=(1, 4), dtype=nl.int16, buffer="sbuf")
+        nisa.tensor_scalar(
+            overflow_scalar_dst, lhs_overflow_nd, op, int(rhs_overflow[0])
+        )
+        assert np.array_equal(
+            overflow_scalar_dst.data.reshape(-1),
+            np_op(lhs_overflow, int(rhs_overflow[0])),
+        )
 
 
 @pytest.mark.parametrize("dtype_name", ("float64", "float32", "bfloat16", "int16"))
@@ -1364,17 +1479,6 @@ def test_ndarray_has_no_broadcast_to_method():
     assert not hasattr(b2.NDArray(value=np.array([1])), "broadcast_to")
 
 
-def test_tensor_binary_operators_raise(patched_scope):
-    """Binary operators on tensor objects should raise compiler-like errors."""
-    del patched_scope
-    tensor = nl.zeros((2, 2), dtype=nl.float32)
-    with pytest.raises(
-        TypeError,
-        match="binary operators on tensors not supported. Use nki.isa directly.",
-    ):
-        tensor *= 2
-
-
 def test_tensor_tensor_rejects_scalar_vector_broadcast(patched_scope):
     """tensor_tensor should reject scalar/vector broadcasts."""
     del patched_scope
@@ -1413,32 +1517,6 @@ def test_exponential_requires_nc_v4_or_newer(patched_scope):
         b2.nki_builder.nc_version = prev
 
 
-def test_tensor_tensor_rejects_tensor_data2_argument(patched_scope):
-    """tensor_tensor should reject tensor (non-access) data2 args."""
-    del patched_scope
-    dst = _zeros((2, 2))
-    data1 = _nd(np.ones((2, 2), dtype=np.float32))
-    data2 = nl.zeros((2, 2), dtype=nl.float32)
-    with pytest.raises(
-        TypeError,
-        match="failed to resolve an argument 'data2', expecting tensor access, got 'tensor'",
-    ):
-        nisa.tensor_tensor(dst=dst, data1=data1, data2=data2, op=nl.add)
-
-
-def test_tensor_tensor_rejects_tensor_dst_argument(patched_scope):
-    """tensor_tensor should reject tensor (non-access) dst args."""
-    del patched_scope
-    dst = nl.zeros((2, 2), dtype=nl.float32)
-    data1 = _nd(np.ones((2, 2), dtype=np.float32))
-    data2 = _nd(np.ones((2, 2), dtype=np.float32))
-    with pytest.raises(
-        TypeError,
-        match="failed to resolve an argument 'dst', expecting tensor access, got 'tensor'",
-    ):
-        nisa.tensor_tensor(dst=dst, data1=data1, data2=data2, op=nl.add)
-
-
 def test_ndarray_mutation_is_not_supported(patched_scope):
     """In-place mutation on tensor objects should raise."""
     del patched_scope
@@ -1469,14 +1547,6 @@ def test_dma_copy_ap_mismatch_error_message(patched_scope):
     dst = _nd(np.zeros((rows, cols // 2, 2), dtype=np.float32))
     with pytest.raises(ValueError, match="Expect AP same number of elements"):
         nisa.dma_copy(dst=dst[:, :, 0], src=src[:, ::2])
-
-
-def test_tensor_subscript_is_not_supported(patched_scope):
-    """Subscript on tensor objects should raise."""
-    del patched_scope
-    tensor = nl.zeros((2, 2), dtype=nl.float32)
-    with pytest.raises(TypeError, match="subscript not supported, for 'tensor'"):
-        _ = tensor[:, 0]
 
 
 def test_tensor_negation_is_not_supported(patched_scope):

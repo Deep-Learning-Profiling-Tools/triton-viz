@@ -42,15 +42,12 @@ def _nki_beta2_dot_adapter(
 NKI_BETA2_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
 NKI_BETA2_NAMESPACES: dict[Any, dict[str, type[Op]]] = {}
 if HAS_NKI_BETA2:
-    assert nl is not None
-    assert nisa is not None
+    assert nki_builder is not None
 
     NKI_BETA2_NAMESPACES = {
-        nl: {
+        _nki_beta2: {
             "program_id": ProgramId,
             "ndarray": Allocate,
-        },
-        nisa: {
             "nc_matmul": Dot,
         },
     }

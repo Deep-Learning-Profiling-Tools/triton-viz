@@ -64,7 +64,7 @@ def _run_demo():
     expected = a + b
 
     if TRITON_VIZ_ENABLED:
-        traced_kernel = triton_viz.trace("tracer", backend="nki")(kernel)
+        traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(kernel)
         traced_kernel[kernel_grid](*kernel_args)
         assert np.allclose(expected, result)
         print("☑️ Actual equals expected!")
