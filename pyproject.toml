@@ -60,7 +60,7 @@ test = [
 ]
 nki = [
   "neuronx-cc==2.22.*; python_version >= '3.10' and python_version <= '3.12'",
-  "nki"
+  "nki==0.2.0"
 ]
 
 [tool.uv]
