@@ -378,10 +378,10 @@ def nc_transpose(dst, data, engine=nisa.engine.unknown, name=None):
     dst_buffer = _buffer_name(dst)
     if engine == nisa.vector_engine:
         if src_buffer not in ("sbuf", "psum") or dst_buffer not in ("sbuf", "psum"):
-            raise ValueError("vector engine nc_transpose only supports sbuf/psum")
+            raise ValueError("Vector Engine nc_transpose only supports SBUF/PSUM")
     elif engine == nisa.tensor_engine:
         if src_buffer != "sbuf" or dst_buffer != "psum":
-            raise ValueError("tensor engine nc_transpose requires sbuf -> psum")
+            raise ValueError("Tensor Engine nc_transpose requires SBUF -> PSUM")
     data_dtype = getattr(data, "dtype", np.asarray(_tensor_value(data)).dtype)
     dst_dtype = getattr(dst, "dtype", dst.data.dtype)
     if _dtype_str(dst_dtype) != _dtype_str(data_dtype) and not (
@@ -414,11 +414,11 @@ def nc_matmul(
         name,
     )
     if getattr(dst, "buffer", None) != "psum":
-        raise ValueError("nc_matmul requires dst in psum")
+        raise ValueError("nc_matmul requires dst in PSUM")
     if getattr(stationary, "buffer", None) != "sbuf":
-        raise ValueError("nc_matmul requires stationary in sbuf")
+        raise ValueError("nc_matmul requires stationary in SBUF")
     if getattr(moving, "buffer", None) != "sbuf":
-        raise ValueError("nc_matmul requires moving in sbuf")
+        raise ValueError("nc_matmul requires moving in SBUF")
     stationary_value = np.asarray(_tensor_value(stationary))
     moving_value = np.asarray(_tensor_value(moving))
     if stationary_value.shape[0] != moving_value.shape[0]:
@@ -599,7 +599,7 @@ def dma_copy(
     dst_buffer = dst.buffer or "sbuf"
     src_buffer = src.buffer or "sbuf"
     if dst_buffer not in ("hbm", "sbuf") or src_buffer not in ("hbm", "sbuf"):
-        raise ValueError("dma_copy only supports hbm/sbuf source and destination")
+        raise ValueError("dma_copy only supports HBM/SBUF source and destination")
     src_value = np.asarray(_tensor_value(src))
     if isinstance(dst, NDArray) and isinstance(src, NDArray):
         if dst.data.size != src.data.size:
@@ -628,9 +628,9 @@ def tensor_copy(dst, src, engine=nisa.engine.unknown, name=None):
     current_nc = getattr(nki_builder.nc_version, "value", nki_builder.nc_version)
     gen2 = getattr(nisa.nc_version.gen2, "value", nisa.nc_version.gen2)
     if engine == nisa.scalar_engine and current_nc <= gen2:
-        raise ValueError("scalar engine tensor_copy is unsupported on nc-v2")
+        raise ValueError("Scalar Engine tensor_copy is unsupported on NeuronCore-v2")
     if engine == nisa.gpsimd_engine and "psum" in (dst_buffer, src_buffer):
-        raise ValueError("gpsimd tensor_copy cannot access psum")
+        raise ValueError("GpSimd tensor_copy cannot access PSUM")
     src_value = np.asarray(_tensor_value(src))
     if src_value.size != dst.data.size:
         raise ValueError(_ERR_AP_MISMATCH)
@@ -653,7 +653,7 @@ def tensor_tensor(
     lhs_buffer = _buffer_name(data1)
     rhs_buffer = _buffer_name(data2)
     if lhs_buffer == "psum" and rhs_buffer == "psum":
-        raise ValueError("tensor_tensor cannot read both inputs from psum")
+        raise ValueError("tensor_tensor cannot read both inputs from PSUM")
     if op.name == "power" and (
         engine == nisa.gpsimd_engine
         and "psum" in (dst_buffer, lhs_buffer, rhs_buffer)
@@ -793,7 +793,7 @@ def tensor_scalar(
     if op1 is not None and op0_bitwise != op1_bitwise:
         raise ValueError("bitvec and arithmetic ops can't be mixed")
     if op0_bitwise and engine in (nisa.scalar_engine, nisa.gpsimd_engine):
-        raise ValueError("bitvec ops must run on vector engine")
+        raise ValueError("bitvec ops must run on Vector Engine")
     if op0.name == "rsqrt" and engine == nisa.vector_engine:
         raise ValueError("rsqrt can only run on GpSimd/Scalar Engine")
     dst_dtype = getattr(dst, "dtype", dst.data.dtype)
@@ -838,7 +838,7 @@ def activation(
         "sbuf",
         "psum",
     ):
-        raise ValueError("activation only supports sbuf/psum")
+        raise ValueError("activation only supports SBUF/PSUM")
     data_value = np.asarray(_tensor_value(data), dtype=np.float32)
     data_par, data_free = _partition_and_free(data_value.shape)
     dst_par, dst_free = _partition_and_free(dst.shape)

@@ -445,7 +445,7 @@ def test_tensor_copy_gpsimd_rejects_psum_tiles(patched_scope, src_buffer, dst_bu
     del patched_scope
     src = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer=src_buffer)
     dst = b2.NDArray(shape=src.shape, dtype=nl.float32, buffer=dst_buffer)
-    with pytest.raises(ValueError, match="GpSimd|gpsimd|PSUM|psum"):
+    with pytest.raises(ValueError, match="GpSimd tensor_copy cannot access PSUM"):
         nisa.tensor_copy(dst, src, engine=nisa.gpsimd_engine)
 
 
@@ -457,7 +457,10 @@ def test_tensor_copy_scalar_engine_requires_nc_v3_or_newer(patched_scope):
     try:
         src = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer="sbuf")
         dst = b2.NDArray(shape=src.shape, dtype=nl.float32, buffer="sbuf")
-        with pytest.raises(ValueError, match="Scalar|scalar|v2|gen2"):
+        with pytest.raises(
+            ValueError,
+            match="Scalar Engine tensor_copy is unsupported on NeuronCore-v2",
+        ):
             nisa.tensor_copy(dst, src, engine=nisa.scalar_engine)
     finally:
         b2.nki_builder.nc_version = prev
@@ -548,16 +551,16 @@ def test_nc_matmul_requires_psum_dst_and_sbuf_inputs(patched_scope):
     stationary = _nd(np.arange(12, dtype=float).reshape(4, 3), buffer="sbuf")
     moving = _nd(np.arange(8, dtype=float).reshape(4, 2), buffer="sbuf")
     bad_dst = _zeros((3, 2), buffer="sbuf")
-    with pytest.raises(ValueError, match="nc_matmul requires dst in psum"):
+    with pytest.raises(ValueError, match="nc_matmul requires dst in PSUM"):
         nisa.nc_matmul(bad_dst, stationary, moving)
 
     dst = _zeros((3, 2), buffer="psum")
     bad_stationary = _nd(np.arange(12, dtype=float).reshape(4, 3), buffer="hbm")
-    with pytest.raises(ValueError, match="nc_matmul requires stationary in sbuf"):
+    with pytest.raises(ValueError, match="nc_matmul requires stationary in SBUF"):
         nisa.nc_matmul(dst, bad_stationary, moving)
 
     bad_moving = _nd(np.arange(8, dtype=float).reshape(4, 2), buffer="hbm")
-    with pytest.raises(ValueError, match="nc_matmul requires moving in sbuf"):
+    with pytest.raises(ValueError, match="nc_matmul requires moving in SBUF"):
         nisa.nc_matmul(dst, stationary, bad_moving)
 
 
@@ -618,7 +621,7 @@ def test_nc_transpose_rejects_documented_engine_buffer_failures(
     del patched_scope
     src = _typed_ndarray((4, 3), "float32", buffer=src_buffer)
     dst = b2.NDArray(shape=(3, 4), dtype=nl.float32, buffer=dst_buffer)
-    with pytest.raises(ValueError, match="buffer|engine|sbuf|psum|hbm"):
+    with pytest.raises(ValueError, match="buffer|Engine|SBUF|PSUM|HBM"):
         nisa.nc_transpose(dst, src, engine=engine)
 
 
@@ -813,7 +816,7 @@ def test_tensor_tensor_rejects_documented_gpsimd_psum_case(patched_scope):
     lhs = _typed_ndarray((2, 4), "float32", buffer="psum")
     rhs = _typed_ndarray((2, 4), "float32", buffer="sbuf", seed=1)
     dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
-    with pytest.raises(ValueError, match="GpSimd|gpsimd|PSUM|psum"):
+    with pytest.raises(ValueError, match="GpSimd|PSUM"):
         nisa.tensor_tensor(dst, lhs, rhs, nl.power, engine=nisa.gpsimd_engine)
 
 
@@ -823,7 +826,7 @@ def test_tensor_tensor_rejects_documented_psum_power_dst(patched_scope):
     lhs = _typed_ndarray((2, 4), "float32", buffer="sbuf")
     rhs = _typed_ndarray((2, 4), "float32", buffer="sbuf", seed=1)
     dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="psum")
-    with pytest.raises(ValueError, match="GpSimd|gpsimd|PSUM|psum|power"):
+    with pytest.raises(ValueError, match="GpSimd|PSUM|power"):
         nisa.tensor_tensor(dst, lhs, rhs, nl.power, engine=nisa.gpsimd_engine)
 
 
@@ -1009,7 +1012,9 @@ def test_tensor_scalar_rejects_documented_engine_failures(patched_scope, op0, en
     del patched_scope
     data = _typed_ndarray((2, 4), "float32", buffer="sbuf")
     dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
-    with pytest.raises(ValueError, match="vector|scalar|GpSimd|gpsimd|bitvec|rsqrt"):
+    with pytest.raises(
+        ValueError, match="Vector Engine|Scalar Engine|GpSimd|bitvec|rsqrt"
+    ):
         nisa.tensor_scalar(
             dst, data, getattr(nl, op0), 1.0, engine=getattr(nisa, engine)
         )
@@ -1463,7 +1468,7 @@ def test_dma_copy_buffer_dtype_rmw_matrix(patched_scope):
                 )
                 _assert_tensor_equal(dst.data, expected_rmw)
 
-    with pytest.raises(ValueError, match="dma_copy only supports hbm/sbuf"):
+    with pytest.raises(ValueError, match="dma_copy only supports HBM/SBUF"):
         nisa.dma_copy(
             b2.NDArray(shape=(4, 4), dtype=_dtype_token("float32"), buffer="sbuf"),
             b2.NDArray(shape=(4, 4), dtype=_dtype_token("float32"), buffer="psum"),
