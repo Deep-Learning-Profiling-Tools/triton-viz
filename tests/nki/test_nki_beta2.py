@@ -1,4 +1,5 @@
 import inspect
+from typing import Any
 
 import numpy as np
 import pytest
@@ -69,6 +70,11 @@ def _act_input():
 def _dtype_token(name):
     """Resolve a dtype name to nl token or raw string fallback."""
     return getattr(nl, name, name)
+
+
+def _buffer_token_name(token: Any) -> str:
+    """Resolve a buffer token to its stable string name."""
+    return getattr(token, "buffer", getattr(token, "name", str(token)))
 
 
 def _is_float_dtype(dtype):
@@ -282,7 +288,7 @@ def test_language_helpers_and_ops(patched_scope):
     assert nl.tile_size.pmax == 128
 
     exp_dst = _zeros((1, 2))
-    nisa.exponential(exp_dst, _nd([[0.0, 1.0]]))
+    getattr(nisa, "exponential")(exp_dst, _nd([[0.0, 1.0]]))
     assert np.allclose(exp_dst.data, np.exp([[0.0, 1.0]]))
 
 
@@ -840,6 +846,8 @@ def test_tensor_tensor_rejects_documented_psum_power_dst(patched_scope):
         ((32, 5), (32, 2, 3, 4, 5), [1, 2, 3], False),
         ((32, 1), (32, 2, 3, 4, 5), [1, 2, 3, 4], False),
         ((32, 1, 1, 1, 1), (32, 2, 3, 4, 5), [1, 2, 3, 4], True),
+        ((32, 2, 3), (32, 5, 6), [1], False),
+        ((32, 1, 2, 3), (32, 5, 6), [1], True),
     ),
 )
 def test_tensor_reduce_documented_shape_axis_success_cases(
@@ -1178,7 +1186,7 @@ def test_ndarray_shape_dtype_buffer_matrix(patched_scope):
                 if dtype in STORAGE_DTYPES:
                     out = nl.ndarray(shape, dtype=dtype, buffer=buffer)
                     assert out.shape == shape
-                    assert out.buffer == buffer.buffer
+                    assert out.buffer == _buffer_token_name(buffer)
                     assert out.data.dtype == STORAGE_DTYPES[dtype]
                 else:
                     with pytest.raises(TypeError, match="Unsupported dtype"):
@@ -1198,7 +1206,7 @@ def test_zeros_shape_dtype_matrix(patched_scope):
             if dtype in STORAGE_DTYPES:
                 out = nl.zeros(shape, dtype=dtype)
                 assert out.shape == shape
-                assert out.buffer == nl.sbuf.buffer
+                assert out.buffer == _buffer_token_name(nl.sbuf)
                 assert out.data.dtype == STORAGE_DTYPES[dtype]
                 assert np.all(out.data == 0)
             else:
@@ -1308,7 +1316,7 @@ def test_nc_matmul_matches_numpy_matrix(patched_scope):
                 )
                 dst.data.fill(0)
                 nisa.nc_matmul(dst, stationary, moving)
-                expected = np.zeros(dst.shape, dtype=dst.data.dtype)
+                expected = np.zeros(dst.data.shape, dtype=dst.data.dtype)
                 expected += np.asarray(
                     np.asarray(stationary.data).T @ np.asarray(moving.data),
                     dtype=dst.data.dtype,
@@ -1356,7 +1364,7 @@ def test_nc_matmul_accumulates_across_calls(patched_scope):
                 dst.data.fill(0)
                 nisa.nc_matmul(dst, lhs0, rhs0)
                 nisa.nc_matmul(dst, lhs1, rhs1)
-                expected = np.zeros(dst.shape, dtype=dst.data.dtype)
+                expected = np.zeros(dst.data.shape, dtype=dst.data.dtype)
                 expected += np.asarray(
                     np.asarray(lhs0.data).T @ np.asarray(rhs0.data),
                     dtype=dst.data.dtype,
@@ -1556,7 +1564,7 @@ def test_exponential_requires_nc_v4_or_newer(patched_scope):
         with pytest.raises(
             RuntimeError, match="exponential only supports neuron-core-v4 or newer"
         ):
-            nisa.exponential(_zeros((1, 2)), _nd([[0.0, 1.0]]))
+            getattr(nisa, "exponential")(_zeros((1, 2)), _nd([[0.0, 1.0]]))
     finally:
         b2.nki_builder.nc_version = prev
 
@@ -1574,6 +1582,15 @@ def test_ndarray_is_zero_initialized(patched_scope):
     del patched_scope
     src = nl.ndarray((2, 2), dtype=nl.float32, buffer=nl.sbuf)
     assert np.array_equal(src.data, np.zeros((2, 2), dtype=src.data.dtype))
+
+
+def test_ndarray_use_before_write_is_rejected(patched_scope):
+    """Using an allocated tensor before a write should raise undefined-use."""
+    del patched_scope
+    src = nl.ndarray((2, 2), dtype=nl.float32, buffer=nl.sbuf)
+    dst = _zeros((2, 2), dtype=np.float32)
+    with pytest.raises(RuntimeError, match="Illegal IR, encountered undefined use"):
+        nisa.tensor_copy(dst, src)
 
 
 def test_ndarray_int_index_keeps_singleton_dim():
@@ -1599,3 +1616,261 @@ def test_tensor_negation_is_not_supported(patched_scope):
     row_max = nl.ndarray((2, 1), dtype=nl.float32, buffer=nl.sbuf)
     with pytest.raises(TypeError, match="cannot negate values of this type"):
         _ = -row_max
+
+
+def test_ndarray_public_surface_and_value_backed_paths(patched_scope):
+    """NDArray surface methods should behave consistently on public allocations."""
+    del patched_scope
+    tensor = b2.ndarray(
+        (2, 2),
+        dtype=nl.float32,
+        buffer=nl.sbuf,
+        value=np.arange(4, dtype=np.float32),
+    )
+    assert tensor.shape == (2, 2)
+    assert tensor.address == tensor.data.ctypes.data
+    assert tensor.data_ptr() == tensor.address
+    assert tensor.stride() == tensor.data.strides
+    assert tensor.element_size() == tensor.data.dtype.itemsize
+    assert tensor.cpu() is tensor
+    assert tensor.detach() is tensor
+    assert tensor.numpy() is tensor.data
+    assert repr(tensor) == "NDArray(shape=(2, 2), dtype=float32)"
+
+    reshaped = tensor.reshape(1, 4)
+    assert reshaped.shape == (1, 4)
+    assert np.array_equal(reshaped.data, np.arange(4, dtype=np.float32).reshape(1, 4))
+
+
+def test_ndarray_index_assignment_and_binary_surface(patched_scope):
+    """NDArray indexing and assignment should preserve beta2 tensor semantics."""
+    del patched_scope
+    tensor = _nd(np.arange(6, dtype=np.float32).reshape(2, 3))
+    index = _nd(np.array(1, dtype=np.int32))
+
+    assert np.array_equal(tensor[index].data, tensor.data[1:2])
+    assert np.array_equal(tensor[-1].data, tensor.data[1:2])
+
+    tensor[:, :] = _nd(np.full((2, 3), 7.0, dtype=np.float32))
+    assert np.array_equal(tensor.data, np.full((2, 3), 7.0, dtype=np.float32))
+
+    tensor[0] = _nd(np.full((1, 3), 5.0, dtype=np.float32))
+    assert np.array_equal(
+        tensor.data,
+        np.array([[5.0, 5.0, 5.0], [7.0, 7.0, 7.0]], dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="Expect AP same number of elements"):
+        tensor[:, :] = _nd(np.arange(6, dtype=np.float32))
+
+    with pytest.raises(TypeError, match="binary operators on tensors not supported"):
+        _ = tensor & tensor
+
+
+def test_buffer_views_and_named_buffer_tokens(patched_scope):
+    """Buffer-backed views should match public buffer token semantics."""
+    del patched_scope
+
+    class _BufferToken:
+        """Minimal buffer token that mimics the NKI public token surface."""
+
+        def __init__(self, name):
+            self.name = name
+
+    raw = b2.Buffer("sbuf", shape=(16,))
+    assert raw.data is not None
+    assert raw.data.shape == (16,)
+    assert raw.data.dtype == np.uint8
+
+    src = np.arange(4, dtype=np.float32).reshape(2, 2)
+    byte_backed = b2.Buffer("sbuf", data=src.view(np.uint8).reshape(-1))
+    byte_view = byte_backed.view(nl.float32, (2, 2))
+    assert np.array_equal(byte_view.data, src)
+
+    typed_backed = b2.Buffer("sbuf", data=src.copy())
+    typed_view = typed_backed.view(nl.float32, (2, 2))
+    assert np.array_equal(typed_view.data, src)
+
+    with pytest.raises(ValueError, match="Buffer shape mismatch"):
+        byte_backed.view(nl.float32, (3, 2))
+
+    for name in ("hbm", "sbuf", "psum"):
+        out = nl.ndarray((1,), dtype=nl.float32, buffer=_BufferToken(name))
+        assert out.buffer == name
+
+
+def test_exponential_reduce_res_records_row_sums(patched_scope):
+    """exponential should optionally write the documented reduction output."""
+    del patched_scope
+    src = _nd(np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32))
+    dst = _zeros((2, 2), dtype=np.float32)
+    reduce_res = _zeros((2, 1), dtype=np.float32)
+    max_value = _nd(np.array([[0.0], [2.0]], dtype=np.float32))
+    getattr(nisa, "exponential")(dst, src, max_value=max_value, reduce_res=reduce_res)
+    expected = np.exp(src.data - max_value.data)
+    assert np.array_equal(dst.data, expected)
+    assert np.array_equal(reduce_res.data, expected.sum(axis=1, keepdims=True))
+
+
+def test_tensor_scalar_and_tensor_tensor_public_validation_edges(patched_scope):
+    """Public tensor ops should cover remaining unsupported and exact-shape cases."""
+    del patched_scope
+    data = _typed_ndarray((2, 4), "int32", buffer="sbuf")
+    dst = b2.NDArray(shape=(2, 4), dtype=nl.int32, buffer="sbuf")
+    operand = _nd(np.full((2, 4), 2, dtype=np.int32))
+    nisa.tensor_scalar(dst, data, nl.add, operand)
+    assert np.array_equal(dst.data, data.data + operand.data)
+
+    with pytest.raises(ValueError, match="operand0/1 dtype must match bitvec integer"):
+        nisa.tensor_scalar(
+            dst,
+            data,
+            nl.logical_or,
+            _nd(np.ones((2, 4), dtype=np.float32)),
+        )
+
+    with pytest.raises(ValueError, match="Unsupported op"):
+        nisa.tensor_scalar(dst, data, np.add, 1)
+
+    with pytest.raises(ValueError, match="Unsupported op"):
+        nisa.tensor_scalar(dst, data, nl.add, 1, op1=np.add, operand1=1)
+
+    logic_data = _typed_ndarray((2, 2), "int32", buffer="sbuf")
+    logic_dst = b2.NDArray(shape=(2, 2), dtype=nl.int32, buffer="sbuf")
+    nisa.tensor_tensor(logic_dst, logic_data, logic_data, nl.logical_or)
+    assert np.array_equal(
+        logic_dst.data,
+        np.logical_or(logic_data.data, logic_data.data),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported op"):
+        nisa.tensor_tensor(logic_dst, logic_data, logic_data, np.add)
+
+    reduce_dst = b2.NDArray(shape=(2, 1), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="integer dtypes for bitvec operators"):
+        nisa.tensor_reduce(
+            reduce_dst,
+            nl.logical_or,
+            _typed_ndarray((2, 4), "float32"),
+            axis=[1],
+        )
+
+
+def test_misc_public_surface_branches(patched_scope):
+    """Public beta2 helpers should expose stable string and unpatch behavior."""
+    del patched_scope
+    assert str(nl.add) == "SubOp(add)"
+    assert b2.nki_unpatch_lang() is None
+
+    data = _typed_ndarray((2, 4), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="Unsupported op"):
+        nisa.activation(dst, np.exp, data)
+
+
+def test_builder_public_setters_update_grid_state():
+    """Builder setters should update grid dimensions and visible program ids."""
+    b2.nki_builder.set_grid_dim(8)
+    assert b2.nki_builder.grid_dims == (8,)
+    assert b2.nki_builder.grid_idx == [
+        0,
+    ]
+
+    b2.nki_builder.set_grid_idx(6)
+    assert b2.nki_builder.grid_idx == [
+        6,
+    ]
+
+    b2.nki_builder.set_grid_idx(3, 2, 7)
+    assert b2.nki_builder.grid_idx == [
+        3,
+    ]
+
+
+def test_interpreted_function_public_grid_edge_cases(patched_scope):
+    """Interpreted kernels should cover the remaining public grid control flow."""
+    del patched_scope
+
+    def copy_kernel(src, dst):
+        """Copy one tile into the destination."""
+        nisa.dma_copy(dst=dst, src=src)
+
+    fn = b2.NKIBeta2InterpretedFunction(copy_kernel)
+    src = np.arange(4, dtype=np.float32).reshape(2, 2)
+    dst = np.zeros_like(src)
+    fn.run(src, dst, grid=2)
+    assert np.array_equal(dst, src)
+
+    with pytest.raises(ValueError, match="Grid must have at least one dimension"):
+        fn.run(src, dst, grid=())
+
+    class _PreStop:
+        """Stop execution before the kernel body runs."""
+
+        def grid_callback(self, grid):
+            self.grid = grid
+
+        def grid_idx_callback(self, idx):
+            self.idx = idx
+
+        def arg_callback(self, name, arg, ret):
+            self.arg = (name, arg, ret)
+
+        def pre_run_callback(self, fn):
+            self.fn = fn
+            return False
+
+        def post_run_callback(self, fn):
+            raise AssertionError(f"post_run_callback should not run for {fn}")
+
+    dst_pre = np.zeros_like(src)
+    fn.run(src, dst_pre, grid=(1,), client_manager=_PreStop())
+    assert np.array_equal(dst_pre, np.zeros_like(src))
+
+    class _PostStop:
+        """Stop execution immediately after the first kernel invocation."""
+
+        def grid_callback(self, grid):
+            self.grid = grid
+
+        def grid_idx_callback(self, idx):
+            self.idx = idx
+
+        def arg_callback(self, name, arg, ret):
+            self.arg = (name, arg, ret)
+
+        def pre_run_callback(self, fn):
+            self.fn = fn
+            return True
+
+        def post_run_callback(self, fn):
+            self.post_fn = fn
+            return False
+
+    dst_post = np.zeros_like(src)
+    fn.run(src, dst_post, grid=(2,), client_manager=_PostStop())
+    assert np.array_equal(dst_post, src)
+
+    class _RankMismatch:
+        """Mutate the tracked grid rank before execution to trigger validation."""
+
+        def grid_callback(self, grid):
+            del grid
+            b2.nki_builder.set_grid_dim(1, 1)
+
+        def grid_idx_callback(self, idx):
+            self.idx = idx
+
+        def arg_callback(self, name, arg, ret):
+            self.arg = (name, arg, ret)
+
+        def pre_run_callback(self, fn):
+            self.fn = fn
+            return True
+
+        def post_run_callback(self, fn):
+            self.post_fn = fn
+            return True
+
+    with pytest.raises(ValueError, match="1D SPMD"):
+        fn.run(src, np.zeros_like(src), grid=(1,), client_manager=_RankMismatch())
