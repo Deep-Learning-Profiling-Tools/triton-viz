@@ -1,5 +1,6 @@
 import inspect
 import itertools
+from typing import Optional
 
 import numpy as np
 
@@ -293,7 +294,7 @@ def zeros(shape, dtype, *, buffer=None, **kwargs):
     return ret
 
 
-def nc_transpose(dst, data, engine=None, name=None):
+def nc_transpose(dst, data, engine=nisa.engine.unknown, name=None):
     """Compute a transpose between partition and flattened free axes."""
     del engine, name
     value = np.asarray(_tensor_value(data))
@@ -307,13 +308,12 @@ def nc_matmul(
     dst,
     stationary,
     moving,
-    is_stationary_onezero=False,
-    is_moving_onezero=False,
-    is_transpose=False,
+    is_stationary_onezero: bool = False,
+    is_moving_onezero: bool = False,
+    is_transpose: bool = False,
     tile_position=(),
     tile_size=(),
-    psum_accumulate_flag=3,
-    perf_mode=None,
+    perf_mode=nisa.matmul_perf_mode.none,
     name=None,
 ):
     """Compute dst += stationary.T @ moving."""
@@ -323,7 +323,6 @@ def nc_matmul(
         is_transpose,
         tile_position,
         tile_size,
-        psum_accumulate_flag,
         perf_mode,
         name,
     )
@@ -444,54 +443,66 @@ def _wrap_result(result, *operands):
     return result
 
 
-def _binary_math_op(lhs, rhs, op):
+def _binary_math_op(x, y, op, dtype=None):
     """Apply a binary math operation with NDArray-aware coercion."""
-    lhs_value = _unwrap_operand(lhs)
-    rhs_value = _unwrap_operand(rhs)
-    result = op(lhs_value, rhs_value)
-    return _wrap_result(result, lhs, rhs)
+    x_value = _unwrap_operand(x)
+    y_value = _unwrap_operand(y)
+    result = op(x_value, y_value)
+    if dtype is not None:
+        result = _cast_value(result, dtype)
+    return _wrap_result(result, x, y)
 
 
-def _unary_math_op(x, op):
+def _unary_math_op(x, op, dtype=None):
     """Apply a unary math operation with NDArray-aware coercion."""
     x_value = _unwrap_operand(x)
     result = op(x_value)
+    if dtype is not None:
+        result = _cast_value(result, dtype)
     return _wrap_result(result, x)
 
 
-def add(lhs, rhs):
+def add(x, y, dtype=None):
     """Compute elementwise addition."""
-    return _binary_math_op(lhs, rhs, np.add)
+    return _binary_math_op(x, y, np.add, dtype=dtype)
 
 
-def subtract(lhs, rhs):
+def subtract(x, y, dtype=None):
     """Compute elementwise subtraction."""
-    return _binary_math_op(lhs, rhs, np.subtract)
+    return _binary_math_op(x, y, np.subtract, dtype=dtype)
 
 
-def multiply(lhs, rhs):
+def multiply(x, y, dtype=None):
     """Compute elementwise multiplication."""
-    return _binary_math_op(lhs, rhs, np.multiply)
+    return _binary_math_op(x, y, np.multiply, dtype=dtype)
 
 
-def maximum(lhs, rhs):
+def maximum(x, y, dtype=None):
     """Compute elementwise maximum."""
-    return _binary_math_op(lhs, rhs, np.maximum)
+    return _binary_math_op(x, y, np.maximum, dtype=dtype)
 
 
-def sqrt(x):
+def sqrt(x, dtype=None):
     """Compute elementwise square root."""
-    return _unary_math_op(x, np.sqrt)
+    return _unary_math_op(x, np.sqrt, dtype=dtype)
 
 
-def rsqrt(x):
+def rsqrt(x, dtype=None):
     """Compute elementwise reciprocal square root."""
-    return _unary_math_op(x, lambda v: 1.0 / np.sqrt(v))
+    return _unary_math_op(x, lambda v: 1.0 / np.sqrt(v), dtype=dtype)
 
 
-def dma_copy(dst, src, dst_rmw_op=None, oob_mode=None, dge_mode=None, name=None):
+def dma_copy(
+    dst,
+    src,
+    dst_rmw_op=None,
+    oob_mode=nisa.oob_mode.error,
+    dge_mode=nisa.dge_mode.unknown,
+    unique_indices=True,
+    name=None,
+) -> None:
     """Copy data from source tensor to destination tensor."""
-    del oob_mode, dge_mode, name
+    del oob_mode, dge_mode, unique_indices, name
     dst_buffer = dst.buffer or "sbuf"
     src_buffer = src.buffer or "sbuf"
     if dst_buffer not in ("hbm", "sbuf") or src_buffer not in ("hbm", "sbuf"):
@@ -531,7 +542,14 @@ def tensor_copy(dst, src, engine=None, name=None):
     return dst
 
 
-def tensor_tensor(dst, data1, data2, op, engine=None, name=None):
+def tensor_tensor(
+    dst,
+    data1,
+    data2,
+    op,
+    engine: Optional[nisa.engine] = nisa.engine.unknown,
+    name=None,
+):
     """Apply a binary tensor op and store the result in dst."""
     del engine, name
     if isinstance(dst, NDArray) and dst._origin == "tensor":
@@ -603,9 +621,17 @@ def tensor_tensor(dst, data1, data2, op, engine=None, name=None):
     return dst
 
 
-def tensor_reduce(dst, op, data, axis=None, keepdims=False, engine=None, name=None):
+def tensor_reduce(
+    dst,
+    op,
+    data,
+    axis,
+    negate: bool = False,
+    keepdims: bool = False,
+    name=None,
+):
     """Reduce a tensor along axes using add/max/min-like ops."""
-    del engine, name
+    del name
     source = np.asarray(_tensor_value(data))
     op_name = getattr(op, "__name__", str(op))
     if "max" in op_name:
@@ -619,9 +645,43 @@ def tensor_reduce(dst, op, data, axis=None, keepdims=False, engine=None, name=No
             reduced = op.reduce(source, axis=axis, keepdims=keepdims)
         except Exception as exc:  # pragma: no cover - defensive fallback
             raise RuntimeError(f"Unsupported tensor_reduce op: {op_name}") from exc
+    if negate:
+        reduced = -np.asarray(reduced)
     dst.data[...] = _cast_value(reduced, dst.dtype)
     _mark_defined(dst)
     return dst
+
+
+def _apply_tensor_scalar_op(data, op, operand, reverse):
+    """Apply tensor_scalar op, including unary ops such as nl.rsqrt."""
+    op_name = getattr(op, "__name__", str(op))
+    param_names = tuple(inspect.signature(op).parameters)
+    if param_names == ("x", "dtype"):
+        applied = op(operand if reverse else data)
+        return applied.data if isinstance(applied, NDArray) else np.asarray(applied)
+
+    lhs, rhs = (operand, data) if reverse else (data, operand)
+    try:
+        applied = op(lhs, rhs)
+    except TypeError:
+        try:
+            applied = op(lhs, y=rhs)
+        except Exception:
+            applied = None
+    except Exception:
+        applied = None
+    if applied is None:
+        if "mul" in op_name:
+            applied = np.multiply(lhs, rhs)
+        elif "add" in op_name:
+            applied = np.add(lhs, rhs)
+        elif "sub" in op_name:
+            applied = np.subtract(lhs, rhs)
+        elif "div" in op_name:
+            applied = np.divide(lhs, rhs)
+        else:
+            raise RuntimeError(f"Unsupported tensor_scalar op: {op_name}")
+    return applied.data if isinstance(applied, NDArray) else np.asarray(applied)
 
 
 def tensor_scalar(
@@ -629,42 +689,26 @@ def tensor_scalar(
     data,
     op0,
     operand0,
+    reverse0: bool = False,
     op1=None,
     operand1=None,
-    engine=None,
+    reverse1: bool = False,
+    engine=nisa.engine.unknown,
     name=None,
 ):
     """Apply one or two tensor-scalar operations and write into dst."""
     del engine, name
     result = np.asarray(_tensor_value(data))
-    for op, operand in ((op0, operand0), (op1, operand1)):
+    for op, operand, reverse in (
+        (op0, operand0, reverse0),
+        (op1, operand1, reverse1),
+    ):
         if op is None:
             continue
         operand_value = _broadcast_tensor_scalar_operand(
             result, _unwrap_operand(operand)
         )
-        op_name = getattr(op, "__name__", str(op))
-        try:
-            applied = op(result, operand_value)
-        except TypeError:
-            try:
-                applied = op(result, y=operand_value)
-            except Exception:
-                applied = None
-        except Exception:
-            applied = None
-        if applied is None:
-            if "mul" in op_name:
-                applied = np.multiply(result, operand_value)
-            elif "add" in op_name:
-                applied = np.add(result, operand_value)
-            elif "sub" in op_name:
-                applied = np.subtract(result, operand_value)
-            elif "div" in op_name:
-                applied = np.divide(result, operand_value)
-            else:
-                raise RuntimeError(f"Unsupported tensor_scalar op: {op_name}")
-        result = applied.data if isinstance(applied, NDArray) else np.asarray(applied)
+        result = _apply_tensor_scalar_op(result, op, operand_value, reverse)
     dst.data[...] = _cast_value(result, dst.dtype)
     _mark_defined(dst)
     return dst
@@ -678,7 +722,7 @@ def activation(
     scale=1.0,
     reduce_op=None,
     reduce_res=None,
-    reduce_cmd=None,
+    reduce_cmd=nisa.reduce_cmd.idle,
     name=None,
 ):
     """Apply an activation epilogue into dst."""

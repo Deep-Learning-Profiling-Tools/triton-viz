@@ -102,6 +102,20 @@ def _matrix(shape, dist, dtype_name, seed):
     return np.asarray(data.reshape(shape), dtype=STORAGE_DTYPES[dtype_name])
 
 
+def _typed_ndarray(shape, dtype_name, buffer="sbuf", dist="arange", seed=0):
+    """Create an NDArray with a documented dtype token and deterministic payload."""
+    return b2.NDArray(
+        value=_matrix(shape, dist, dtype_name, seed),
+        dtype=_dtype_token(dtype_name),
+        buffer=buffer,
+    )
+
+
+def _identity(x):
+    """Return the input unchanged for activation shape tests."""
+    return x
+
+
 SHAPE_CASES = ((), (1,), (17,), (19, 23), (3, 5, 7, 11, 13))
 NL_DTYPE_CASES = (
     "bool_",
@@ -276,12 +290,126 @@ def test_dma_copy_dst_rmw_op(patched_scope):
     assert np.array_equal(out.data, a.data + b.data)
 
 
+@pytest.mark.parametrize(
+    "oob_mode,dge_mode,unique_indices",
+    (
+        (nisa.oob_mode.error, nisa.dge_mode.none, True),
+        (nisa.oob_mode.skip, nisa.dge_mode.none, False),
+    ),
+)
+def test_dma_copy_accepts_doc_kwargs_for_static_copy(
+    patched_scope, oob_mode, dge_mode, unique_indices
+):
+    """dma_copy should accept documented keyword args for static copies."""
+    del patched_scope
+    src = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer="hbm")
+    dst = _zeros((2, 4), dtype=np.float32, buffer="sbuf")
+    nisa.dma_copy(
+        dst,
+        src,
+        dst_rmw_op=nl.add,
+        oob_mode=oob_mode,
+        dge_mode=dge_mode,
+        unique_indices=unique_indices,
+    )
+    assert np.array_equal(dst.data, src.data)
+
+
+def test_dma_copy_rejects_non_add_dst_rmw_op(patched_scope):
+    """dma_copy should only allow nl.add as the documented rmw op."""
+    del patched_scope
+    src = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer="hbm")
+    dst = _zeros((2, 4), dtype=np.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="only .*nl.add"):
+        nisa.dma_copy(dst, src, dst_rmw_op=nl.multiply)
+
+
+def test_dma_copy_rejects_total_element_mismatch(patched_scope):
+    """dma_copy should reject src/dst tensors with different total elements."""
+    del patched_scope
+    src = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer="hbm")
+    dst = _zeros((2, 3), dtype=np.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="same number of elements|must match"):
+        nisa.dma_copy(dst, src)
+
+
 def test_tensor_copy(patched_scope):
     """tensor_copy should copy tensors elementwise."""
     del patched_scope
     a, _, out = _core_inputs()
     nisa.tensor_copy(out, a)
     assert np.array_equal(out.data, a.data)
+
+
+@pytest.mark.parametrize(
+    "src_buffer,dst_buffer",
+    (
+        ("sbuf", "sbuf"),
+        ("sbuf", "psum"),
+        ("psum", "sbuf"),
+        ("psum", "psum"),
+    ),
+)
+def test_tensor_copy_same_dtype_is_bit_accurate(patched_scope, src_buffer, dst_buffer):
+    """tensor_copy should preserve bits when src/dst dtypes match."""
+    del patched_scope
+    src_data = np.array(
+        [[0x12345678, -7, 0, 0x7FFFFFFF], [5, -11, 42, -99]],
+        dtype=np.int32,
+    )
+    src = _nd(src_data, buffer=src_buffer)
+    dst = b2.NDArray(shape=src.shape, dtype=_dtype_token("int32"), buffer=dst_buffer)
+    nisa.tensor_copy(dst, src)
+    assert np.array_equal(dst.data, src_data)
+
+
+@pytest.mark.parametrize(
+    "src_buffer,dst_buffer,engine",
+    (
+        ("sbuf", "sbuf", nisa.unknown_engine),
+        ("sbuf", "psum", nisa.vector_engine),
+        ("psum", "sbuf", nisa.scalar_engine),
+        ("psum", "psum", nisa.unknown_engine),
+    ),
+)
+def test_tensor_copy_uses_fp32_intermediate_cast(
+    patched_scope, src_buffer, dst_buffer, engine
+):
+    """tensor_copy should cast through float32 when src/dst dtypes differ."""
+    del patched_scope
+    src_data = np.array([[0.1, 0.9, 1.24], [1.51, 2.9, -5.2]], dtype=np.float32)
+    src = _nd(src_data, buffer=src_buffer)
+    dst = b2.NDArray(shape=src.shape, dtype=nl.bfloat16, buffer=dst_buffer)
+    nisa.tensor_copy(dst, src, engine=engine)
+    expected = np.asarray(np.asarray(src_data, dtype=np.float32), dtype=dst.data.dtype)
+    _assert_tensor_equal(dst.data, expected)
+
+
+@pytest.mark.parametrize(
+    "src_buffer,dst_buffer",
+    (("sbuf", "psum"), ("psum", "sbuf"), ("psum", "psum")),
+)
+def test_tensor_copy_gpsimd_rejects_psum_tiles(patched_scope, src_buffer, dst_buffer):
+    """tensor_copy should reject gpsimd copies that touch psum."""
+    del patched_scope
+    src = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer=src_buffer)
+    dst = b2.NDArray(shape=src.shape, dtype=nl.float32, buffer=dst_buffer)
+    with pytest.raises(ValueError, match="Gpsimd|gpsimd|PSUM|psum"):
+        nisa.tensor_copy(dst, src, engine=nisa.gpsimd_engine)
+
+
+def test_tensor_copy_scalar_engine_requires_nc_v3_or_newer(patched_scope):
+    """tensor_copy should reject scalar-engine copies on simulated nc-v2."""
+    del patched_scope
+    prev = b2.nki_builder.nc_version
+    b2.nki_builder.nc_version = nisa.nc_version.gen2
+    try:
+        src = _nd(np.arange(8, dtype=np.float32).reshape(2, 4), buffer="sbuf")
+        dst = b2.NDArray(shape=src.shape, dtype=nl.float32, buffer="sbuf")
+        with pytest.raises(ValueError, match="Scalar|scalar|v2|gen2"):
+            nisa.tensor_copy(dst, src, engine=nisa.scalar_engine)
+    finally:
+        b2.nki_builder.nc_version = prev
 
 
 def test_tensor_tensor(patched_scope):
@@ -391,6 +519,525 @@ def test_activation_rejects_scalar_bias(patched_scope):
     dst = _zeros((2, 3))
     with pytest.raises(TypeError, match="activation bias must be a tensor"):
         nisa.activation(dst, np.reciprocal, src, bias=1.0, scale=1.0)
+
+
+@pytest.mark.parametrize(
+    "engine,src_buffer,dst_buffer",
+    (
+        (nisa.vector_engine, "sbuf", "sbuf"),
+        (nisa.vector_engine, "psum", "sbuf"),
+        (nisa.vector_engine, "sbuf", "psum"),
+        (nisa.vector_engine, "psum", "psum"),
+        (nisa.tensor_engine, "sbuf", "psum"),
+    ),
+)
+def test_nc_transpose_documented_engine_buffer_success_cases(
+    patched_scope, engine, src_buffer, dst_buffer
+):
+    """nc_transpose should accept the documented engine/buffer success cases."""
+    del patched_scope
+    src = _typed_ndarray((4, 3), "float32", buffer=src_buffer)
+    dst = b2.NDArray(shape=(3, 4), dtype=nl.float32, buffer=dst_buffer)
+    nisa.nc_transpose(dst, src, engine=engine)
+    assert np.array_equal(dst.data, src.data.T)
+
+
+@pytest.mark.parametrize(
+    "engine,src_buffer,dst_buffer",
+    (
+        (nisa.vector_engine, "hbm", "sbuf"),
+        (nisa.vector_engine, "sbuf", "hbm"),
+        (nisa.tensor_engine, "sbuf", "sbuf"),
+        (nisa.tensor_engine, "psum", "psum"),
+        (nisa.tensor_engine, "psum", "sbuf"),
+    ),
+)
+def test_nc_transpose_rejects_documented_engine_buffer_failures(
+    patched_scope, engine, src_buffer, dst_buffer
+):
+    """nc_transpose should reject engine/buffer combinations outside the docs."""
+    del patched_scope
+    src = _typed_ndarray((4, 3), "float32", buffer=src_buffer)
+    dst = b2.NDArray(shape=(3, 4), dtype=nl.float32, buffer=dst_buffer)
+    with pytest.raises(ValueError, match="buffer|engine|sbuf|psum|hbm"):
+        nisa.nc_transpose(dst, src, engine=engine)
+
+
+def test_nc_transpose_rejects_documented_dtype_mismatch(patched_scope):
+    """nc_transpose should reject documented dst/data dtype mismatches."""
+    del patched_scope
+    src = _typed_ndarray((4, 3), "bfloat16", buffer="sbuf")
+    dst = b2.NDArray(shape=(3, 4), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="dtype"):
+        nisa.nc_transpose(dst, src, engine=nisa.vector_engine)
+
+
+@pytest.mark.parametrize(
+    "stationary_shape,moving_shape",
+    (
+        ((256, 128), (256, 512)),
+        ((128, 256), (128, 512)),
+        ((128, 128), (128, 1024)),
+    ),
+)
+def test_nc_matmul_rejects_documented_shape_limits(
+    patched_scope, stationary_shape, moving_shape
+):
+    """nc_matmul should reject documented stationary/moving tile size violations."""
+    del patched_scope
+    stationary = _typed_ndarray(stationary_shape, "float32", buffer="sbuf")
+    moving = _typed_ndarray(moving_shape, "float32", buffer="sbuf", seed=1)
+    dst = b2.NDArray(
+        shape=(stationary_shape[1], moving_shape[1]),
+        dtype=nl.float32,
+        buffer="psum",
+    )
+    with pytest.raises(ValueError, match="partition|free dim|128|512"):
+        nisa.nc_matmul(dst, stationary, moving)
+
+
+@pytest.mark.parametrize(
+    "dst_dtype,stationary_dtype,moving_dtype",
+    (
+        ("float32", "float32", "float16"),
+        ("float32", "bfloat16", "float32"),
+        ("float16", "float32", "float16"),
+    ),
+)
+def test_nc_matmul_rejects_documented_dtype_rules(
+    patched_scope, dst_dtype, stationary_dtype, moving_dtype
+):
+    """nc_matmul should reject documented dtype combinations."""
+    del patched_scope
+    stationary = _typed_ndarray((32, 16), stationary_dtype, buffer="sbuf")
+    moving = _typed_ndarray((32, 8), moving_dtype, buffer="sbuf", seed=1)
+    dst = b2.NDArray(shape=(16, 8), dtype=_dtype_token(dst_dtype), buffer="psum")
+    with pytest.raises(ValueError, match="float32|dtype|dst"):
+        nisa.nc_matmul(dst, stationary, moving)
+
+
+@pytest.mark.parametrize(
+    "tile_position,tile_size",
+    (
+        ((0, 0), (128, 128)),
+        ((0, 0), (64, 128)),
+        ((64, 0), (64, 128)),
+        ((0, 0), (128, 64)),
+        ((0, 64), (128, 64)),
+        ((0, 0), (64, 64)),
+        ((64, 64), (64, 64)),
+    ),
+)
+def test_nc_matmul_documented_tiling_success_cases(
+    patched_scope, tile_position, tile_size
+):
+    """nc_matmul should accept the documented tiling success cases."""
+    del patched_scope
+    stationary_shape = (
+        tile_size[0] if tile_size[0] != 64 else 32,
+        min(tile_size[1], 128),
+    )
+    moving_shape = (stationary_shape[0], 256)
+    stationary = _typed_ndarray(stationary_shape, "float32", buffer="sbuf")
+    moving = _typed_ndarray(moving_shape, "float32", buffer="sbuf", seed=1)
+    dst = b2.NDArray(
+        shape=(stationary_shape[1], moving_shape[1]),
+        dtype=nl.float32,
+        buffer="psum",
+    )
+    nisa.nc_matmul(
+        dst,
+        stationary,
+        moving,
+        tile_position=tile_position,
+        tile_size=tile_size,
+    )
+    assert dst.data.shape == (stationary_shape[1], moving_shape[1])
+
+
+@pytest.mark.parametrize(
+    "stationary_shape,moving_shape,tile_position,tile_size",
+    (
+        ((128, 128), (128, 256), (0, 0), (256, 256)),
+        ((128, 128), (128, 256), (0, 0), (256, 128)),
+        ((64, 128), (64, 256), (0, 0), (64, 64)),
+        ((128, 64), (128, 256), (0, 0), (64, 64)),
+        ((128, 128), (128, 256), (0, 0), (64, 128)),
+        ((64, 128), (64, 256), (32, 0), (64, 64)),
+        ((64, 128), (64, 256), (0, 32), (64, 64)),
+        ((64, 128), (64, 256), (256, 0), (64, 64)),
+        ((64, 128), (64, 256), (0, 256), (64, 64)),
+    ),
+)
+def test_nc_matmul_rejects_documented_tiling_failures(
+    patched_scope, stationary_shape, moving_shape, tile_position, tile_size
+):
+    """nc_matmul should reject the documented invalid tiling configurations."""
+    del patched_scope
+    stationary = _typed_ndarray(stationary_shape, "float32", buffer="sbuf")
+    moving = _typed_ndarray(moving_shape, "float32", buffer="sbuf", seed=1)
+    dst = b2.NDArray(
+        shape=(stationary_shape[1], moving_shape[1]),
+        dtype=nl.float32,
+        buffer="psum",
+    )
+    with pytest.raises(ValueError, match="tile|row|col|128|both"):
+        nisa.nc_matmul(
+            dst,
+            stationary,
+            moving,
+            tile_position=tile_position,
+            tile_size=tile_size,
+        )
+
+
+@pytest.mark.parametrize("tile_position,tile_size", (((), (64, 64)), ((64, 64), ())))
+def test_nc_matmul_requires_both_tile_position_and_tile_size(
+    patched_scope, tile_position, tile_size
+):
+    """nc_matmul should require tile_position and tile_size together."""
+    del patched_scope
+    stationary = _typed_ndarray((64, 128), "float32", buffer="sbuf")
+    moving = _typed_ndarray((64, 256), "float32", buffer="sbuf", seed=1)
+    dst = b2.NDArray(shape=(128, 256), dtype=nl.float32, buffer="psum")
+    with pytest.raises(ValueError, match="both|tile_position|tile_size"):
+        nisa.nc_matmul(
+            dst,
+            stationary,
+            moving,
+            tile_position=tile_position,
+            tile_size=tile_size,
+        )
+
+
+@pytest.mark.parametrize(
+    "op,expected",
+    (
+        (nl.add, np.array([[6.0, 8.0], [10.0, 12.0]], dtype=np.float32)),
+        (nl.minimum, np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)),
+        (nl.power, np.array([[5.0, 12.0], [21.0, 32.0]], dtype=np.float32)),
+    ),
+)
+def test_tensor_tensor_documented_operator_success_cases(patched_scope, op, expected):
+    """tensor_tensor should cover documented operator categories."""
+    del patched_scope
+    lhs = _nd(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32), buffer="sbuf")
+    rhs = _nd(np.array([[5.0, 6.0], [7.0, 8.0]], dtype=np.float32), buffer="sbuf")
+    dst = b2.NDArray(shape=(2, 2), dtype=nl.float32, buffer="sbuf")
+    nisa.tensor_tensor(dst, lhs, rhs, op, engine=nisa.unknown_engine)
+    _assert_tensor_equal(dst.data, expected)
+
+
+@pytest.mark.parametrize(
+    "lhs_dtype,rhs_dtype,dst_dtype,op",
+    (
+        ("float32", "float32", "float32", nl.bitwise_and),
+        ("float32", "int8", "float32", nl.bitwise_or),
+        ("int32", "float16", "int32", nl.bitwise_xor),
+    ),
+)
+def test_tensor_tensor_rejects_documented_bitvec_dtype_failures(
+    patched_scope, lhs_dtype, rhs_dtype, dst_dtype, op
+):
+    """tensor_tensor should reject documented bitvec dtype mismatches."""
+    del patched_scope
+    lhs = _typed_ndarray((2, 4), lhs_dtype, buffer="sbuf")
+    rhs = _typed_ndarray((2, 4), rhs_dtype, buffer="sbuf", seed=1)
+    dst = b2.NDArray(shape=(2, 4), dtype=_dtype_token(dst_dtype), buffer="sbuf")
+    with pytest.raises(ValueError, match="integer|dtype|bitvec"):
+        nisa.tensor_tensor(dst, lhs, rhs, op, engine=nisa.vector_engine)
+
+
+def test_tensor_tensor_rejects_documented_gpsimd_psum_case(patched_scope):
+    """tensor_tensor should reject gpsimd reads or writes involving psum."""
+    del patched_scope
+    lhs = _typed_ndarray((2, 4), "float32", buffer="psum")
+    rhs = _typed_ndarray((2, 4), "float32", buffer="sbuf", seed=1)
+    dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="Gpsimd|gpsimd|PSUM|psum"):
+        nisa.tensor_tensor(dst, lhs, rhs, nl.power, engine=nisa.gpsimd_engine)
+
+
+def test_tensor_tensor_rejects_documented_psum_power_dst(patched_scope):
+    """tensor_tensor should reject nl.power outputs to psum."""
+    del patched_scope
+    lhs = _typed_ndarray((2, 4), "float32", buffer="sbuf")
+    rhs = _typed_ndarray((2, 4), "float32", buffer="sbuf", seed=1)
+    dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="psum")
+    with pytest.raises(ValueError, match="Gpsimd|gpsimd|PSUM|psum|power"):
+        nisa.tensor_tensor(dst, lhs, rhs, nl.power, engine=nisa.gpsimd_engine)
+
+
+@pytest.mark.parametrize(
+    "dst_shape,data_shape,axis,keepdims",
+    (
+        ((128, 1), (128, 32), [1], False),
+        ((32, 4, 5), (32, 2, 3, 4, 5), [1, 2], False),
+        ((32, 20), (32, 2, 3, 4, 5), [1, 2], False),
+        ((32, 5), (32, 2, 3, 4, 5), [1, 2, 3], False),
+        ((32, 1), (32, 2, 3, 4, 5), [1, 2, 3, 4], False),
+        ((32, 1, 1, 1, 1), (32, 2, 3, 4, 5), [1, 2, 3, 4], True),
+    ),
+)
+def test_tensor_reduce_documented_shape_axis_success_cases(
+    patched_scope, dst_shape, data_shape, axis, keepdims
+):
+    """tensor_reduce should cover the documented legal shape/axis cases."""
+    del patched_scope
+    src = _typed_ndarray(data_shape, "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="sbuf")
+    nisa.tensor_reduce(dst, nl.add, src, axis=axis, keepdims=keepdims)
+    expected = np.sum(src.data, axis=tuple(axis), keepdims=keepdims)
+    _assert_tensor_equal(dst.data, expected.reshape(dst.shape))
+
+
+@pytest.mark.parametrize(
+    "op",
+    (
+        nl.invert,
+        nl.left_shift,
+        nl.right_shift,
+        nl.equal,
+        nl.not_equal,
+        nl.greater_equal,
+        nl.greater,
+        nl.less_equal,
+        nl.less,
+        nl.rsqrt,
+        nl.reciprocal,
+        nl.abs,
+        nl.power,
+    ),
+)
+def test_tensor_reduce_rejects_documented_illegal_ops(patched_scope, op):
+    """tensor_reduce should reject non-reduction operators from the docs."""
+    del patched_scope
+    src = _typed_ndarray((8, 4), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(8, 1), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(
+        (ValueError, RuntimeError), match="legal reduction|Unsupported|op"
+    ):
+        nisa.tensor_reduce(dst, op, src, axis=[1])
+
+
+@pytest.mark.parametrize(
+    "dst_shape,data_shape,axis",
+    (
+        ((128, 32), (128, 32), [0]),
+        ((128, 32), (128, 32), [0, 1]),
+        ((128, 2, 3, 4), (128, 2, 3, 4), [2, 3]),
+        ((128, 2, 3, 4), (128, 2, 3, 4), [1, 3]),
+        ((128, 1), (256, 32), [1]),
+        ((256, 1), (256, 32), [1]),
+        ((128, 2), (128, 32), [1]),
+        ((128, 1), (128, 2, 4), [1]),
+    ),
+)
+def test_tensor_reduce_rejects_documented_axis_and_shape_failures(
+    patched_scope, dst_shape, data_shape, axis
+):
+    """tensor_reduce should reject documented illegal axis/shape combinations."""
+    del patched_scope
+    src = _typed_ndarray(data_shape, "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="axis|partition|reduce|shape|128"):
+        nisa.tensor_reduce(dst, nl.add, src, axis=axis)
+
+
+@pytest.mark.parametrize(
+    "op", (nl.add, nl.subtract, nl.multiply, nl.maximum, nl.minimum)
+)
+def test_tensor_reduce_documented_negate_success_cases(patched_scope, op):
+    """tensor_reduce should support negate for documented arithmetic ops."""
+    del patched_scope
+    src = _typed_ndarray((8, 4), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(8, 1), dtype=nl.float32, buffer="sbuf")
+    nisa.tensor_reduce(dst, op, src, axis=[1], negate=True)
+    assert dst.data.shape == (8, 1)
+
+
+@pytest.mark.parametrize(
+    "op",
+    (
+        nl.bitwise_and,
+        nl.bitwise_or,
+        nl.bitwise_xor,
+        nl.logical_and,
+        nl.logical_or,
+        nl.logical_xor,
+    ),
+)
+def test_tensor_reduce_rejects_documented_negate_failures(patched_scope, op):
+    """tensor_reduce should reject negate for non-arithmetic reduction ops."""
+    del patched_scope
+    src = _typed_ndarray((8, 4), "int32", buffer="sbuf")
+    dst = b2.NDArray(shape=(8, 1), dtype=nl.int32, buffer="sbuf")
+    with pytest.raises(ValueError, match="negate|arithmetic"):
+        nisa.tensor_reduce(dst, op, src, axis=[1], negate=True)
+
+
+@pytest.mark.parametrize(
+    "reverse0,op1,reverse1,expected",
+    (
+        (True, None, False, np.array([[9.0, 8.0], [7.0, 6.0]], dtype=np.float32)),
+        (
+            True,
+            nl.subtract,
+            False,
+            np.array([[4.0, 3.0], [2.0, 1.0]], dtype=np.float32),
+        ),
+        (
+            False,
+            nl.subtract,
+            True,
+            np.array([[14.0, 13.0], [12.0, 11.0]], dtype=np.float32),
+        ),
+        (
+            True,
+            nl.subtract,
+            True,
+            np.array([[-4.0, -3.0], [-2.0, -1.0]], dtype=np.float32),
+        ),
+    ),
+)
+def test_tensor_scalar_documented_reverse_cases(
+    patched_scope, reverse0, op1, reverse1, expected
+):
+    """tensor_scalar should cover the documented reverse ordering cases."""
+    del patched_scope
+    data = _nd(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))
+    dst = b2.NDArray(shape=(2, 2), dtype=nl.float32, buffer="sbuf")
+    nisa.tensor_scalar(
+        dst,
+        data,
+        nl.subtract,
+        10.0,
+        reverse0=reverse0,
+        op1=op1,
+        operand1=5.0 if op1 is not None else None,
+        reverse1=reverse1,
+    )
+    _assert_tensor_equal(dst.data, expected)
+
+
+@pytest.mark.parametrize(
+    "op0,op1",
+    ((nl.logical_or, nl.add), (nl.multiply, nl.logical_and)),
+)
+def test_tensor_scalar_rejects_documented_mixed_op_types(patched_scope, op0, op1):
+    """tensor_scalar should reject mixed bitvec and arithmetic operator chains."""
+    del patched_scope
+    data = _typed_ndarray((2, 4), "int32", buffer="sbuf")
+    dst = b2.NDArray(shape=(2, 4), dtype=nl.int32, buffer="sbuf")
+    with pytest.raises(ValueError, match="bitvec|arithmetic|mixed"):
+        nisa.tensor_scalar(dst, data, op0, 1, op1=op1, operand1=1)
+
+
+@pytest.mark.parametrize(
+    "op0,engine",
+    (
+        (nl.logical_or, nisa.scalar_engine),
+        (nl.logical_or, nisa.gpsimd_engine),
+        (nl.rsqrt, nisa.vector_engine),
+    ),
+)
+def test_tensor_scalar_rejects_documented_engine_failures(patched_scope, op0, engine):
+    """tensor_scalar should reject engine/op combinations outside the docs."""
+    del patched_scope
+    data = _typed_ndarray((2, 4), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="vector|scalar|Gpsimd|gpsimd|bitvec|rsqrt"):
+        nisa.tensor_scalar(dst, data, op0, 1.0, engine=engine)
+
+
+@pytest.mark.parametrize(
+    "data_dtype,operand,op0",
+    (
+        ("float32", np.array([[1.0], [2.0]], dtype=np.float32), nl.logical_or),
+        ("float32", np.array([[1.0], [2.0]], dtype=np.float16), nl.logical_or),
+    ),
+)
+def test_tensor_scalar_rejects_documented_dtype_failures(
+    patched_scope, data_dtype, operand, op0
+):
+    """tensor_scalar should reject the documented dtype failures."""
+    del patched_scope
+    data = _typed_ndarray((2, 4), data_dtype, buffer="sbuf")
+    dst = b2.NDArray(shape=(2, 4), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="dtype|float32|integer|bitvec"):
+        nisa.tensor_scalar(dst, data, op0, _nd(operand))
+
+
+def test_activation_documented_scalar_success_case(patched_scope):
+    """activation should accept documented scalar scale/bias and reduce settings."""
+    del patched_scope
+    data = _typed_ndarray((8, 8), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(8, 8), dtype=nl.float32, buffer="sbuf")
+    reduce_res = b2.NDArray(shape=(8, 1), dtype=nl.float32, buffer="sbuf")
+    nisa.activation(
+        dst,
+        _identity,
+        data,
+        bias=0.0,
+        scale=1.0,
+        reduce_op=None,
+        reduce_res=reduce_res,
+        reduce_cmd=nisa.reduce_cmd.idle,
+    )
+    assert dst.data.shape == (8, 8)
+
+
+def test_activation_documented_vector_success_case(patched_scope):
+    """activation should accept documented vector scale/bias layout."""
+    del patched_scope
+    data = _typed_ndarray((3, 5, 7), "float32", buffer="psum")
+    dst = b2.NDArray(shape=(3, 35), dtype=nl.float32, buffer="psum")
+    scale = _nd(np.ones((3, 1), dtype=np.float32), buffer="psum")
+    bias = _nd(np.zeros((3, 1), dtype=np.float32), buffer="psum")
+    reduce_res = b2.NDArray(shape=(3, 1), dtype=nl.float32, buffer="psum")
+    nisa.activation(
+        dst,
+        _identity,
+        data,
+        bias=bias,
+        scale=scale,
+        reduce_op=nl.add,
+        reduce_res=reduce_res,
+        reduce_cmd=nisa.reduce_cmd.reset_reduce,
+    )
+    assert dst.data.shape == (3, 35)
+
+
+def test_activation_rejects_documented_reduce_op_failure(patched_scope):
+    """activation should reject reduce_op values other than None or nl.add."""
+    del patched_scope
+    data = _typed_ndarray((4, 8), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(4, 8), dtype=nl.float32, buffer="sbuf")
+    reduce_res = b2.NDArray(shape=(4, 1), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="reduce_op|nl.add"):
+        nisa.activation(
+            dst,
+            nl.copy,
+            data,
+            reduce_op=nl.maximum,
+            reduce_res=reduce_res,
+            reduce_cmd=nisa.reduce_cmd.reset_reduce,
+        )
+
+
+@pytest.mark.parametrize(
+    "dst_shape,data_shape",
+    (((4, 128), (2, 256)), ((4, 128), (4, 256)), ((129, 128), (129, 128))),
+)
+def test_activation_rejects_documented_shape_failures(
+    patched_scope, dst_shape, data_shape
+):
+    """activation should reject documented dst/data shape failures."""
+    del patched_scope
+    data = _typed_ndarray(data_shape, "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="partition|free dim|128|shape"):
+        nisa.activation(dst, nl.copy, data)
 
 
 def test_program_id_invalid_axis_raises(patched_scope):
