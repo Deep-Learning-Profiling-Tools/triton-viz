@@ -10,7 +10,7 @@ import time
 from functools import partialmethod
 
 from .config import config as cfg
-from .callbacks import OpCallbacks, ForLoopCallbacks
+from .callbacks import OpCallbacks
 
 from .data import (
     Op,
@@ -239,7 +239,7 @@ def unpatch_op(namespace: Any, attr: str, backend: str):
     setattr(namespace, attr, original_op)
 
 
-class _LoopIter:
+class LoopIter:
     def __init__(self, hooks, iterable, lineno, range_type):
         self._it = iter(iterable)
         self._lineno = lineno
@@ -268,155 +268,39 @@ class _LoopIter:
         return idx
 
 
-class _CombinedLoopHooks:
-    """
-    Combine for_loop callbacks from all clients.
-    """
-
-    def __init__(self):
-        self._range_type: list[Callable] = []
-        self._before: list[Callable] = []
-        self._iter_listeners: list[Callable] = []
-        self._iter_overrider: Callable | None = None
-        self._range_wrapper_factory: Callable | None = None
-        self._after: list[Callable] = []
-
-    # Register hooks
-    def add_range_type_callback(self, hook: Callable) -> None:
-        self._range_type.append(hook)
-
-    def add_before(self, hook: Callable) -> None:
-        self._before.append(hook)
-
-    def add_iter_listener(self, hook: Callable) -> None:
-        self._iter_listeners.append(hook)
-
-    def set_iter_overrider(self, hook: Callable) -> None:
-        if self._iter_overrider is not None:
-            raise RuntimeError("Only one loop_iter overrider allowed")
-        self._iter_overrider = hook
-
-    def set_range_wrapper_factory(self, hook: Callable) -> None:
-        if self._range_wrapper_factory is not None:
-            raise RuntimeError("Only one range_wrapper_factory allowed")
-        self._range_wrapper_factory = hook
-
-    def add_after(self, hook: Callable) -> None:
-        self._after.append(hook)
-
-    # Call combined hooks
-    def range_type(self, lineno: int, range_type: str) -> None:
-        for hook in self._range_type:
-            hook(lineno, range_type)
-
-    def before_loop(self, lineno: int, iterable: Any) -> None:
-        for hook in self._before:
-            hook(lineno, iterable)
-
-    def loop_iter(self, lineno: int, idx: Any) -> Any:
-        # override iteration index
-        if self._iter_overrider is not None:
-            new_idx = self._iter_overrider(lineno, idx)
-            if new_idx is not None:
-                idx = new_idx
-
-        # call all iteration listeners
-        for hook in self._iter_listeners:
-            hook(lineno, idx)
-
-        return idx
-
-    def after_loop(self, lineno: int) -> None:
-        for hook in self._after:
-            hook(lineno)
-
-    def loop_iter_wrapper(
-        self,
-        iterable_callable: Callable,
-        iter_args,
-        iter_kwargs,
-        lineno: int,
-        range_type: str,
-    ) -> "_LoopIter":
-        args = tuple(iter_args) if iter_args is not None else ()
-        kwargs = dict(iter_kwargs) if iter_kwargs is not None else {}
-
-        if self._range_wrapper_factory is not None:
-            wrapped = self._range_wrapper_factory(
-                None, lineno, range_type, args, kwargs, iterable_callable
-            )
-            if wrapped is not None:
-                iterable = wrapped
-            else:
-                iterable = iterable_callable(*args, **kwargs)
-        else:
-            iterable = iterable_callable(*args, **kwargs)
-        return _LoopIter(self, iterable, lineno, range_type)
-
-    def clear(self) -> None:
-        self._range_type.clear()
-        self._before.clear()
-        self._iter_listeners.clear()
-        self._iter_overrider = None
-        self._range_wrapper_factory = None
-        self._after.clear()
-
-
 class _LoopPatcher:
-    """Manages loop patching state and hooks."""
+    """Manages AST patching for for-loop interception."""
 
     def __init__(self):
-        self.hooks = _CombinedLoopHooks()
         self._orig_visit_for: Callable | None = None
         self._patched: bool = False
 
     def patch(self) -> None:
-        """Apply loop patching."""
         if not self._patched:
             self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
             _OrigASTTransformer.visit_For = triton_viz_visit_For  # type: ignore[assignment]
             self._patched = True
 
     def unpatch(self) -> None:
-        """Remove loop patching."""
         if not self._patched:
             return
-
         if self._orig_visit_for is not None:
             _OrigASTTransformer.visit_For = self._orig_visit_for
-
-        self.hooks.clear()
         self._patched = False
 
 
 _loop_patcher = _LoopPatcher()
 
 
-def patch_for_loop(loop_callbacks: ForLoopCallbacks):
+def patch_for_loop():
     _loop_patcher.patch()
-
-    # Registering hooks
-    if loop_callbacks.range_type_callback is not None:
-        _loop_patcher.hooks.add_range_type_callback(loop_callbacks.range_type_callback)
-    if loop_callbacks.range_wrapper_factory is not None:
-        _loop_patcher.hooks.set_range_wrapper_factory(
-            loop_callbacks.range_wrapper_factory
-        )
-    if loop_callbacks.before_loop_callback is not None:
-        _loop_patcher.hooks.add_before(loop_callbacks.before_loop_callback)
-    if loop_callbacks.loop_iter_overrider is not None:
-        _loop_patcher.hooks.set_iter_overrider(loop_callbacks.loop_iter_overrider)
-    if loop_callbacks.loop_iter_listener is not None:
-        _loop_patcher.hooks.add_iter_listener(loop_callbacks.loop_iter_listener)
-    if loop_callbacks.after_loop_callback is not None:
-        _loop_patcher.hooks.add_after(loop_callbacks.after_loop_callback)
 
 
 def unpatch_for_loop():
     _loop_patcher.unpatch()
 
 
-def patch_lang(fn, backend):
+def patch_lang(fn, backend, client_manager=None):
     if backend == "triton":
         scope = _triton_snapshot_scope(fn)
         triton_patch_lang(fn)
@@ -437,7 +321,8 @@ def patch_lang(fn, backend):
 
     _push_lang_patch_scope(backend, scope)
 
-    fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
+    if client_manager is not None:
+        fn.__globals__["_triton_viz_loop_patcher"] = client_manager
     patch_flip(scope, lambda: _current_client_manager)
 
 
@@ -455,6 +340,7 @@ class FakeTensor:
     _stride: tuple[int, ...] = ()
     _is_contiguous: bool = True
     _element_size: int = 1
+    device: str = "fake_tensor"
 
     def data_ptr(self) -> int:
         return self._data_ptr
@@ -621,7 +507,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
 def _jit_function_call(self, *args, backend=None, **kwargs):
     assert backend is not None
-    patch_lang(self.fn, backend)
+    patch_lang(self.fn, backend, client_manager=_current_client_manager)
     try:
         return self.fn(*args, **kwargs)
     finally:
