@@ -173,10 +173,16 @@ class TritonTrace(KernelInterface, TraceInterface):
 
 class NKITrace(KernelInterface, TraceInterface):
     def __init__(self, kernel, client: str | Client, beta2: bool = True) -> None:
-        from .nki import NKIInterpretedFunction
-        from .nki_beta2 import NKIBeta2InterpretedFunction
+        nki_fn_cls: object = None
+        if beta2:
+            from .nki_beta2 import NKIBeta2InterpretedFunction
 
-        nki_fn_cls = NKIBeta2InterpretedFunction if beta2 else NKIInterpretedFunction
+            nki_fn_cls = NKIBeta2InterpretedFunction
+        else:
+            from .nki import NKIInterpretedFunction
+
+            nki_fn_cls = NKIInterpretedFunction
+
         self.backend = "nki_beta2" if beta2 else "nki"
         if isinstance(kernel, nki_fn_cls):
             assert hasattr(kernel, "fn")
