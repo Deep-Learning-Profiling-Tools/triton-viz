@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import inspect
 import itertools
-from typing import Optional
+from collections.abc import Callable, Iterable
+from typing import Any, Optional, TypeAlias, cast
 
 import numpy as np
 
@@ -27,8 +30,14 @@ _ERR_TENSOR_MUTATION = "mutation not supported"
 _ERR_UNDEFINED_USE = "Illegal IR, encountered undefined use"
 _ERR_AP_MISMATCH = "Expect AP same number of elements"
 
+ScalarLike: TypeAlias = bool | int | float
+ArrayLike: TypeAlias = np.ndarray[Any, Any]
+TensorLike: TypeAlias = "NDArray | ArrayLike"
+TensorOrScalar: TypeAlias = "NDArray | ArrayLike | ScalarLike"
+BufferLike: TypeAlias = Any
 
-def _storage_dtype(dtype: DTypeLike):
+
+def _storage_dtype(dtype: DTypeLike) -> np.dtype[Any] | None:
     """Resolve a logical dtype to concrete NumPy storage dtype."""
     try:
         return STORAGE_DTYPES[dtype]
@@ -36,28 +45,25 @@ def _storage_dtype(dtype: DTypeLike):
         raise TypeError(f"Unsupported dtype: {dtype}") from exc
 
 
-def _cast_value(value, dtype: DTypeLike):
+def _cast_value(value: TensorOrScalar, dtype: DTypeLike) -> ArrayLike:
     """Cast value to destination dtype storage using shared ml_dtypes mapping."""
-    array = np.asarray(value)
-    if dtype is None:
-        return array
-    return array.astype(_storage_dtype(dtype))
+    return np.asarray(value).astype(_storage_dtype(dtype))
 
 
-def _mark_defined(value):
+def _mark_defined(value: Any) -> None:
     """Mark NDArray values as initialized after writes."""
     if isinstance(value, NDArray):
         value._defined = True
 
 
-def _store(dst, value):
+def _store(dst: "NDArray", value: TensorOrScalar) -> "NDArray":
     """Write a computed value into a destination tensor."""
     dst.data[...] = _cast_value(value, dst.dtype)
     _mark_defined(dst)
     return dst
 
 
-def _tensor_value(value):
+def _tensor_value(value: TensorOrScalar | None) -> TensorOrScalar | None:
     """Unwrap NDArray inputs and validate they are initialized."""
     if isinstance(value, NDArray):
         if not value._defined:
@@ -66,7 +72,7 @@ def _tensor_value(value):
     return value
 
 
-def _as_scalar(value):
+def _as_scalar(value: ScalarLike | NDArray) -> int:
     """Convert scalar-like value into int."""
     array = np.asarray(_tensor_value(value))
     if array.size != 1:
@@ -74,40 +80,50 @@ def _as_scalar(value):
     return int(array.reshape(-1)[0])
 
 
-def _dtype_str(dtype):
+def _dtype_str(dtype: DTypeLike) -> str:
     """Return a stable string name for logical or storage dtypes."""
-    if dtype is None:
-        return "None"
     return np.dtype(_storage_dtype(dtype)).name
 
 
-def _buffer_name(value):
+def _buffer_name(value: BufferLike) -> str:
     """Return the interpreter buffer name for values with storage."""
     return getattr(value, "buffer", None) or "sbuf"
 
 
-def _require(condition, message):
+def _require(condition: bool, message: str) -> None:
     """Raise ValueError with a stable message when condition is false."""
     if not condition:
         raise ValueError(message)
 
 
-def _is_integer_dtype(dtype):
+def _is_integer_dtype(dtype: DTypeLike) -> bool:
     """Return whether dtype is integer/bool-like."""
-    if _dtype_str(dtype) == "bool":
-        return True
     resolved = _storage_dtype(dtype)
     return np.issubdtype(np.dtype(resolved), np.integer)
 
 
-def _partition_and_free(value):
+def _partition_and_free(value: TensorLike) -> tuple[int, int]:
     """Return partition size and flattened free size."""
-    shape = value.shape
+    shape = (
+        cast(tuple[int, ...], value.shape)
+        if isinstance(value, np.ndarray)
+        else cast(tuple[int, ...], value.data.shape)
+    )
     free = int(np.prod(shape[1:], dtype=np.int64)) if len(shape) > 1 else 1
     return shape[0], free
 
 
-def _activation_operand(value, data_shape, label):
+def _nc_version_value(version: Any) -> int:
+    """Normalize NC version tokens into plain integers for comparisons."""
+    raw = getattr(version, "value", version)
+    if isinstance(raw, int):
+        return raw
+    return int(cast(Any, raw))
+
+
+def _activation_operand(
+    value: TensorOrScalar | None, data_shape: tuple[int, ...], label: str
+) -> float | ArrayLike:
     """Normalize activation scale/bias into broadcastable arrays."""
     if value is None:
         return 0.0
@@ -128,13 +144,28 @@ class NDArray:
 
     def __init__(
         self,
-        buffer=None,
-        shape=None,
-        dtype=None,
-        value=None,
-        origin="raw",
-        parent_ndim=None,
-    ):
+        buffer: str | None = None,
+        shape: tuple[int, ...] | None = None,
+        dtype: DTypeLike = None,
+        value: TensorOrScalar | None = None,
+        origin: str = "raw",
+        parent_ndim: int | None = None,
+        defined: bool | None = None,
+    ) -> None:
+        """Initialize an interpreter tensor backed by NumPy storage.
+
+        Args:
+            buffer: Logical buffer name such as ``"sbuf"``, ``"hbm"``, or
+                ``"psum"``.
+            shape: Requested storage shape when allocating a new tensor.
+            dtype: Logical dtype token used to choose storage dtype.
+            value: Optional initial value. When provided, the tensor uses this
+                payload instead of allocating fresh storage.
+            origin: Interpreter provenance tag used for mutation rules.
+            parent_ndim: Rank of the parent tensor when this value is a view.
+            defined: Explicit initialized-state override for undefined-use
+                tracking.
+        """
         self.buffer = buffer
         self.dtype = dtype
         self._origin = origin
@@ -143,7 +174,6 @@ class NDArray:
         if value is None:
             assert storage_shape is not None
             self.data = np.zeros(storage_shape, dtype=storage_dtype)
-            self._defined = True
         else:
             array = (
                 _cast_value(value, dtype) if dtype is not None else np.asarray(value)
@@ -151,57 +181,57 @@ class NDArray:
             if storage_shape is not None and array.shape != storage_shape:
                 array = array.reshape(storage_shape)
             self.data = array
-            self._defined = True
+        self._defined = (
+            value is not None or origin != "tensor" if defined is None else defined
+        )
         self._parent_ndim = self.data.ndim if parent_ndim is None else parent_ndim
         if self.dtype is None:
             self.dtype = self.data.dtype
         self._data_ptr = None
 
     @property
-    def shape(self):
+    def shape(self) -> tuple[int, ...] | None:
         """Return tensor shape."""
         return self.data.shape if self.data is not None else None
 
     @property
-    def address(self):
+    def address(self) -> int:
         """Return host pointer integer for underlying storage."""
         if self._data_ptr is None:
             self._data_ptr = self.data.ctypes.data
-        return self._data_ptr
+        return cast(int, self._data_ptr)
 
-    def data_ptr(self):
+    def data_ptr(self) -> int:
         """Return pointer address alias for frontend compatibility."""
         return self.address
 
-    def stride(self):
+    def stride(self) -> tuple[int, ...]:
         """Return byte strides."""
         return self.data.strides
 
-    def element_size(self):
+    def element_size(self) -> int:
         """Return item size in bytes."""
         return getattr(self.dtype, "itemsize", self.data.dtype.itemsize)
 
-    def cpu(self):
+    def cpu(self) -> "NDArray":
         """Return self to mimic framework tensor api."""
         return self
 
-    def detach(self):
+    def detach(self) -> "NDArray":
         """Return self to mimic framework tensor api."""
         return self
 
-    def numpy(self):
+    def numpy(self) -> ArrayLike:
         """Return underlying NumPy array."""
         return self.data
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"NDArray(shape={self.shape}, dtype={self.dtype})"
 
-    def __getitem__(self, keys):
+    def __getitem__(self, keys: Any) -> "NDArray":
         """Implement slicing operations for NDArray."""
         # if self._origin == "tensor":
         #    raise TypeError(_ERR_TENSOR_SUBSCRIPT)
-        if self.data is None:
-            raise AttributeError("NDArray has no value to slice")
         if not isinstance(keys, tuple):
             keys = (keys,)
         new_keys = []
@@ -222,9 +252,10 @@ class NDArray:
             buffer=self.buffer,
             origin="access",
             parent_ndim=self._parent_ndim,
+            defined=self._defined,
         )
 
-    def __setitem__(self, keys, value):
+    def __setitem__(self, keys: Any, value: TensorOrScalar) -> "NDArray":
         """Assign values into a sliced region."""
         if self._origin == "tensor":
             raise RuntimeError(_ERR_TENSOR_MUTATION)
@@ -239,18 +270,18 @@ class NDArray:
                 or value._parent_ndim != self._parent_ndim
             ):
                 raise ValueError(_ERR_AP_MISMATCH)
-        target[...] = _cast_value(unwrapped, self.dtype)
+        target[...] = _cast_value(cast(TensorOrScalar, unwrapped), self.dtype)
         _mark_defined(self)
         return self
 
-    def reshape(self, *args, **kwargs):
+    def reshape(self, *args: Any, **kwargs: Any) -> "NDArray":
         """Return a reshaped tensor view."""
         return NDArray(value=self.data.reshape(*args), buffer=self.buffer, **kwargs)
 
-    def __neg__(self):
+    def __neg__(self) -> "NDArray":
         raise TypeError("cannot negate values of this type")
 
-    def _raise_binary_op(self, *_args, **_kwargs):
+    def _raise_binary_op(self, *_args: Any, **_kwargs: Any) -> "NDArray":
         raise TypeError(_ERR_BINARY_TENSOR_OP)
 
     __and__ = __or__ = __xor__ = __lshift__ = __rshift__ = _raise_binary_op
@@ -261,15 +292,40 @@ class NDArray:
 class Buffer:
     """NKI memory region abstraction used by sbuf/hbm/psum."""
 
-    def __init__(self, buffer: str, shape=None, data=None):
+    def __init__(
+        self,
+        buffer: str,
+        shape: tuple[int, ...] | None = None,
+        data: ArrayLike | None = None,
+    ) -> None:
+        """Initialize a raw buffer region.
+
+        Args:
+            buffer: Logical buffer name.
+            shape: Optional byte-storage shape used when allocating a raw backing
+                buffer.
+            data: Optional existing raw or typed backing array.
+        """
         self.buffer = buffer
         self.shape = shape
         self.data = data
         if shape is not None and data is None:
             self.data = np.empty(shape=shape, dtype=np.uint8)
 
-    def view(self, dtype, shape, *, origin="raw"):
-        """Materialize a typed NDArray view over this buffer region."""
+    def view(
+        self,
+        dtype: DTypeLike,
+        shape: tuple[int, ...],
+        *,
+        origin: str = "raw",
+    ) -> NDArray:
+        """Materialize a typed tensor view over this buffer region.
+
+        Args:
+            dtype: Logical dtype token for the returned view.
+            shape: Tensor shape for the returned view.
+            origin: Interpreter provenance tag for the returned tensor.
+        """
         probe = NDArray(
             buffer=self.buffer,
             dtype=dtype,
@@ -304,7 +360,7 @@ hbm = Buffer("hbm")
 psum = Buffer("psum")
 
 
-def _resolve_buffer(buffer):
+def _resolve_buffer(buffer: BufferLike) -> Buffer:
     """Resolve a buffer token into one of the interpreter buffers."""
     if isinstance(buffer, Buffer):
         return buffer
@@ -323,8 +379,22 @@ def _resolve_buffer(buffer):
     raise TypeError(f"Unsupported buffer type: {type(buffer).__name__}")
 
 
-def ndarray(shape, dtype, *, buffer=None, **kwargs):
-    """Create an NDArray on a requested NKI buffer."""
+def ndarray(
+    shape: tuple[int, ...],
+    dtype: DTypeLike,
+    *,
+    buffer: BufferLike = None,
+    **kwargs: TensorOrScalar,
+) -> NDArray:
+    """Create an interpreter tensor on the requested NKI buffer.
+
+    Args:
+        shape: Requested tensor shape.
+        dtype: Logical dtype token for the returned tensor.
+        buffer: Buffer token or buffer-like object naming ``sbuf``, ``hbm``, or
+            ``psum``.
+        **kwargs: Optional tensor construction overrides, such as ``value``.
+    """
     resolved_buffer = _resolve_buffer(buffer)
     if "value" in kwargs:
         return NDArray(
@@ -335,11 +405,26 @@ def ndarray(shape, dtype, *, buffer=None, **kwargs):
             origin="tensor",
             parent_ndim=len(tuple(shape)),
         )
-    return resolved_buffer.view(dtype, shape, origin="tensor")
+    ret = resolved_buffer.view(dtype, shape, origin="tensor")
+    ret._defined = False
+    return ret
 
 
-def zeros(shape, dtype, *, buffer=None, **kwargs):
-    """Create a zero-initialized tensor."""
+def zeros(
+    shape: tuple[int, ...],
+    dtype: DTypeLike,
+    *,
+    buffer: BufferLike = None,
+    **kwargs: TensorOrScalar,
+) -> NDArray:
+    """Create a zero-initialized tensor.
+
+    Args:
+        shape: Requested tensor shape.
+        dtype: Logical dtype token for the returned tensor.
+        buffer: Unsupported beta2 argument kept for signature parity.
+        **kwargs: Additional tensor construction overrides.
+    """
     if buffer is not None:
         raise TypeError(
             "unexpected keyword argument 'buffer' in builtinfunction 'builtin_lang_zeros'"
@@ -350,8 +435,20 @@ def zeros(shape, dtype, *, buffer=None, **kwargs):
     return ret
 
 
-def nc_transpose(dst, data, engine=nisa.engine.unknown, name=None):
-    """Compute a transpose between partition and flattened free axes."""
+def nc_transpose(
+    dst: NDArray,
+    data: NDArray,
+    engine: Any = nisa.engine.unknown,
+    name: str | None = None,
+) -> NDArray:
+    """Compute a transpose between partition and flattened free axes.
+
+    Args:
+        dst: Destination tensor receiving the transpose result.
+        data: Source tensor to transpose.
+        engine: Requested execution engine token.
+        name: Optional kernel op name retained for API parity.
+    """
     del name
     value = np.asarray(_tensor_value(data))
     data_par, data_free = _partition_and_free(value)
@@ -386,18 +483,31 @@ def nc_transpose(dst, data, engine=nisa.engine.unknown, name=None):
 
 
 def nc_matmul(
-    dst,
-    stationary,
-    moving,
+    dst: NDArray,
+    stationary: NDArray,
+    moving: NDArray,
     is_stationary_onezero: bool = False,
     is_moving_onezero: bool = False,
     is_transpose: bool = False,
-    tile_position=(),
-    tile_size=(),
-    perf_mode=nisa.matmul_perf_mode.none,
-    name=None,
-):
-    """Compute dst += stationary.T @ moving."""
+    tile_position: tuple[int, int] | tuple[()] = (),
+    tile_size: tuple[int, int] | tuple[()] = (),
+    perf_mode: Any = nisa.matmul_perf_mode.none,
+    name: str | None = None,
+) -> NDArray:
+    """Compute ``dst += stationary.T @ moving``.
+
+    Args:
+        dst: PSUM destination tensor to accumulate into.
+        stationary: Stationary SBUF operand.
+        moving: Moving SBUF operand.
+        is_stationary_onezero: Unused beta2 compatibility flag.
+        is_moving_onezero: Unused beta2 compatibility flag.
+        is_transpose: Unused beta2 compatibility flag.
+        tile_position: Optional tile origin for documented matmul tiling.
+        tile_size: Optional tile shape paired with ``tile_position``.
+        perf_mode: Unused beta2 performance-mode token.
+        name: Optional kernel op name retained for API parity.
+    """
     del (
         is_stationary_onezero,
         is_moving_onezero,
@@ -462,8 +572,14 @@ def nc_matmul(
     return _store(dst, np.asarray(dst.data) + _cast_value(result, dst.dtype))
 
 
-def reciprocal(dst, data, name=None):
-    """Compute elementwise reciprocal into destination tensor."""
+def reciprocal(dst: NDArray, data: NDArray, name: str | None = None) -> NDArray:
+    """Compute elementwise reciprocal into the destination tensor.
+
+    Args:
+        dst: Destination tensor receiving reciprocal values.
+        data: Source tensor providing reciprocal inputs.
+        name: Optional kernel op name retained for API parity.
+    """
     del name
     result = np.reciprocal(np.asarray(_tensor_value(data), dtype=np.float32))
     return _store(dst, result)
@@ -471,16 +587,25 @@ def reciprocal(dst, data, name=None):
 
 def exponential(
     dst,
-    src,
-    max_value=0.0,
-    reduce_res=None,
+    src: NDArray,
+    max_value: TensorOrScalar = 0.0,
+    reduce_res: NDArray | None = None,
     reduce_cmd=nisa.reduce_cmd.idle,
     reduce_init=0.0,
-):
-    """Compute ``exp(src - max_value)`` into destination tensor."""
+) -> NDArray:
+    """Compute ``exp(src - max_value)`` into the destination tensor.
+
+    Args:
+        dst: Destination tensor receiving the exponentiated output.
+        src: Source tensor to exponentiate.
+        max_value: Scalar or tensor broadcast operand subtracted before ``exp``.
+        reduce_res: Optional destination tensor for row-wise output sums.
+        reduce_cmd: Unused beta2 reduction token kept for API parity.
+        reduce_init: Unused beta2 reduction init value kept for API parity.
+    """
     del reduce_cmd, reduce_init
-    current_nc = getattr(nki_builder.nc_version, "value", nki_builder.nc_version)
-    min_nc = getattr(nisa.nc_version.gen4, "value", nisa.nc_version.gen4)
+    current_nc = _nc_version_value(nki_builder.nc_version)
+    min_nc = _nc_version_value(nisa.nc_version.gen4)
     if current_nc < min_nc:
         raise RuntimeError("exponential only supports neuron-core-v4 or newer")
     src_value = _tensor_value(src)
@@ -498,8 +623,16 @@ def exponential(
     return dst
 
 
-def affine_range(start, stop=None, step=1):
-    """Create a Python range from static or register-backed bounds."""
+def affine_range(
+    start: int | NDArray, stop: int | NDArray | None = None, step: int | NDArray = 1
+) -> range:
+    """Create a Python range from static or register-backed bounds.
+
+    Args:
+        start: Range start or stop when ``stop`` is omitted.
+        stop: Optional range stop.
+        step: Optional range step.
+    """
     start_v = _as_scalar(start) if isinstance(start, NDArray) else int(start)
     if stop is None:
         return range(start_v)
@@ -508,8 +641,13 @@ def affine_range(start, stop=None, step=1):
     return range(start_v, stop_v, step_v)
 
 
-def ds(start, size):
-    """Return an NKI-style dynamic slice using start/extent semantics."""
+def ds(start: int | NDArray, size: int | NDArray) -> slice:
+    """Return an NKI-style dynamic slice using start/extent semantics.
+
+    Args:
+        start: Slice start offset.
+        size: Slice extent.
+    """
     begin = _as_scalar(start)
     extent = _as_scalar(size)
     return slice(begin, begin + extent)
@@ -526,7 +664,9 @@ class TileSize:
 tile_size = TileSize()
 
 
-def _broadcast_tensor_scalar_operand(data, operand):
+def _broadcast_tensor_scalar_operand(
+    data: TensorLike, operand: TensorOrScalar
+) -> ArrayLike:
     """Broadcast tensor_scalar operand over free dimensions only."""
     data_arr = np.asarray(data)
     operand_arr = np.asarray(operand)
@@ -554,53 +694,68 @@ def _broadcast_tensor_scalar_operand(data, operand):
     return np.broadcast_to(operand_arr, tuple(target_shape))
 
 
-def _wrap_result(result, *operands):
-    """Wrap NumPy outputs as NDArray when needed."""
-    if isinstance(result, np.ndarray) or any(
-        isinstance(operand, NDArray) for operand in operands
-    ):
-        return NDArray(value=result)
-    return result
-
-
 class SubOp:
     """
     Hacky way to allow something like "nl.add" to map to np_op "np.add" while also forbidding "nl.add(x, y)" directly.
     Only NKI functions that have an "op" arg (e.g. tensor_tensor) should be accessing self._op/using self._run.
     """
 
-    def __init__(self, np_op, is_bitwise, is_reducible, name=None):
+    def __init__(
+        self,
+        np_op: Callable[..., Any],
+        is_bitwise: bool,
+        is_reducible: bool,
+        name: str | None = None,
+    ) -> None:
+        """Initialize a patched NKI operator token.
+
+        Args:
+            np_op: Underlying NumPy callable implementing the op.
+            is_bitwise: Whether the op follows integer bitwise rules.
+            is_reducible: Whether the op can be used in ``tensor_reduce``.
+            name: Optional stable display name override.
+        """
         self._op = np_op
         self.is_bitwise = is_bitwise
         self.is_reducible = is_reducible
         self.num_args = len(inspect.signature(self._op).parameters)
         if name is None:
-            self.name = np_op.__name__
+            self.name = getattr(np_op, "__name__", type(np_op).__name__)
         else:
             self.name = name
 
-    def _run(self, *args):
+    def _run(self, *args: Any) -> Any:
         return self._op(*args[: self.num_args])
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
         raise TypeError(_ERR_BINARY_TENSOR_OP)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"SubOp({self.name})"
 
     __repr__ = __str__
 
 
 def dma_copy(
-    dst,
-    src,
-    dst_rmw_op=None,
-    oob_mode=nisa.oob_mode.error,
-    dge_mode=nisa.dge_mode.unknown,
-    unique_indices=True,
-    name=None,
-) -> None:
-    """Copy data from source tensor to destination tensor."""
+    dst: NDArray,
+    src: NDArray,
+    dst_rmw_op: SubOp | None = None,
+    oob_mode: Any = nisa.oob_mode.error,
+    dge_mode: Any = nisa.dge_mode.unknown,
+    unique_indices: bool = True,
+    name: str | None = None,
+) -> NDArray:
+    """Copy data from a source tensor into a destination tensor.
+
+    Args:
+        dst: Destination tensor in HBM or SBUF.
+        src: Source tensor in HBM or SBUF.
+        dst_rmw_op: Optional read-modify-write op. Only ``nl.add`` is supported.
+        oob_mode: Unused beta2 out-of-bounds mode token kept for API parity.
+        dge_mode: Unused beta2 DMA gather engine token kept for API parity.
+        unique_indices: Unused beta2 uniqueness flag kept for API parity.
+        name: Optional kernel op name retained for API parity.
+    """
     del oob_mode, dge_mode, unique_indices, name
     _require(
         _buffer_name(dst) in ("hbm", "sbuf") and _buffer_name(src) in ("hbm", "sbuf"),
@@ -609,12 +764,6 @@ def dma_copy(
     src_value = np.asarray(_tensor_value(src))
     if isinstance(dst, NDArray) and isinstance(src, NDArray):
         _require(dst.shape == src.shape, _ERR_AP_MISMATCH)
-        if (
-            dst._origin == "access"
-            and src._origin == "access"
-            and dst._parent_ndim != src._parent_ndim
-        ):
-            raise ValueError(_ERR_AP_MISMATCH)
     if dst_rmw_op is None:
         return _store(dst, src_value.reshape(dst.shape))
     _require(dst_rmw_op == nl.add, "only nl.add is supported for dma_copy dst_rmw_op")
@@ -622,8 +771,20 @@ def dma_copy(
     return _store(dst, merged.data if isinstance(merged, NDArray) else merged)
 
 
-def tensor_copy(dst, src, engine=nisa.engine.unknown, name=None):
-    """Copy tensor data within on-chip memory."""
+def tensor_copy(
+    dst: NDArray,
+    src: NDArray,
+    engine: Any = nisa.engine.unknown,
+    name: str | None = None,
+) -> NDArray:
+    """Copy tensor data within on-chip memory.
+
+    Args:
+        dst: Destination tensor in SBUF or PSUM.
+        src: Source tensor in SBUF or PSUM.
+        engine: Requested execution engine token.
+        name: Optional kernel op name retained for API parity.
+    """
     del name
     dst_buffer = _buffer_name(dst)
     src_buffer = _buffer_name(src)
@@ -631,8 +792,8 @@ def tensor_copy(dst, src, engine=nisa.engine.unknown, name=None):
         dst_buffer in ("sbuf", "psum") and src_buffer in ("sbuf", "psum"),
         "tensor_copy is on-chip only",
     )
-    current_nc = getattr(nki_builder.nc_version, "value", nki_builder.nc_version)
-    gen2 = getattr(nisa.nc_version.gen2, "value", nisa.nc_version.gen2)
+    current_nc = _nc_version_value(nki_builder.nc_version)
+    gen2 = _nc_version_value(nisa.nc_version.gen2)
     if engine == nisa.scalar_engine and current_nc <= gen2:
         raise ValueError("Scalar Engine tensor_copy is unsupported on NeuronCore-v2")
     if engine == nisa.gpsimd_engine and "psum" in (dst_buffer, src_buffer):
@@ -643,14 +804,23 @@ def tensor_copy(dst, src, engine=nisa.engine.unknown, name=None):
 
 
 def tensor_tensor(
-    dst,
-    data1,
-    data2,
-    op,
-    engine: Optional[nisa.engine] = nisa.engine.unknown,
-    name=None,
-):
-    """Apply a binary tensor op and store the result in dst."""
+    dst: NDArray,
+    data1: NDArray,
+    data2: NDArray,
+    op: SubOp,
+    engine: Optional[Any] = nisa.engine.unknown,
+    name: str | None = None,
+) -> NDArray:
+    """Apply a binary tensor op and store the result in ``dst``.
+
+    Args:
+        dst: Destination tensor for the computed output.
+        data1: Left-hand tensor operand.
+        data2: Right-hand tensor operand.
+        op: Patched beta2 operator token such as ``nl.add``.
+        engine: Requested execution engine token.
+        name: Optional kernel op name retained for API parity.
+    """
     del name
     if not isinstance(op, SubOp):
         raise ValueError(f"Unsupported op: {op}")
@@ -706,15 +876,25 @@ def tensor_tensor(
 
 
 def tensor_reduce(
-    dst,
-    op,
-    data,
-    axis,
+    dst: NDArray,
+    op: SubOp,
+    data: NDArray,
+    axis: int | list[int] | tuple[int, ...],
     negate: bool = False,
     keepdims: bool = False,
-    name=None,
-):
-    """Reduce a tensor along axes using add/max/min-like ops."""
+    name: str | None = None,
+) -> NDArray:
+    """Reduce a tensor along axes using add/max/min-like ops.
+
+    Args:
+        dst: Destination tensor receiving the reduced output.
+        op: Patched reduction operator token.
+        data: Source tensor to reduce.
+        axis: Reduction axis or axes.
+        negate: Whether to negate the reduced result.
+        keepdims: Whether to preserve reduced dimensions as size-1 axes.
+        name: Optional kernel op name retained for API parity.
+    """
     del name
     if not isinstance(op, SubOp):
         raise ValueError(f"Unsupported op: {op}")
@@ -745,7 +925,7 @@ def tensor_reduce(
         raise ValueError("data and dst must be integer dtypes for bitvec operators")
     if negate and op.is_bitwise:
         raise ValueError("can only negate when reducing with an arithmetic operator")
-    reduced = op._op.reduce(source, axis=axis_tuple, keepdims=keepdims)
+    reduced = cast(Any, op._op).reduce(source, axis=axis_tuple, keepdims=keepdims)
     if negate:
         reduced = -np.asarray(reduced)
     if reduced.shape != dst.shape:
@@ -753,33 +933,41 @@ def tensor_reduce(
     return _store(dst, reduced)
 
 
-def _apply_tensor_scalar_op(data, op, operand, reverse):
-    """Apply tensor_scalar op, including unary ops such as nl.rsqrt."""
-    if not (op is None or isinstance(op, SubOp)):
-        raise ValueError(f"Unsupported op: {op}")
-    param_names = tuple(inspect.signature(op).parameters)
-    if param_names == ("x", "dtype"):
-        applied = op(operand if reverse else data)
-        return applied.data if isinstance(applied, NDArray) else np.asarray(applied)
-
+def _apply_tensor_scalar_op(
+    data: TensorLike, op: SubOp, operand: TensorOrScalar, reverse: bool
+) -> ArrayLike:
+    """Apply tensor_scalar op using SubOp dispatch."""
     lhs, rhs = (operand, data) if reverse else (data, operand)
     applied = op._run(lhs, rhs)
     return applied.data if isinstance(applied, NDArray) else np.asarray(applied)
 
 
 def tensor_scalar(
-    dst,
-    data,
-    op0,
-    operand0,
+    dst: NDArray,
+    data: NDArray,
+    op0: SubOp,
+    operand0: TensorOrScalar,
     reverse0: bool = False,
-    op1=None,
-    operand1=None,
+    op1: SubOp | None = None,
+    operand1: TensorOrScalar | None = None,
     reverse1: bool = False,
-    engine=nisa.engine.unknown,
-    name=None,
-):
-    """Apply one or two tensor-scalar operations and write into dst."""
+    engine: Any = nisa.engine.unknown,
+    name: str | None = None,
+) -> NDArray:
+    """Apply one or two tensor-scalar operations and write into ``dst``.
+
+    Args:
+        dst: Destination tensor for the computed output.
+        data: Source tensor operand.
+        op0: First patched beta2 operator token.
+        operand0: Scalar or tensor operand paired with ``op0``.
+        reverse0: Whether to reverse the argument order for ``op0``.
+        op1: Optional second patched beta2 operator token.
+        operand1: Optional scalar or tensor operand paired with ``op1``.
+        reverse1: Whether to reverse the argument order for ``op1``.
+        engine: Requested execution engine token.
+        name: Optional kernel op name retained for API parity.
+    """
     del name
     if not isinstance(op0, SubOp):
         raise ValueError(f"Unsupported op: {op0}")
@@ -821,25 +1009,41 @@ def tensor_scalar(
             ),
             "operand0/1 dtype must match bitvec integer requirements",
         )
-        operand_value = _broadcast_tensor_scalar_operand(result, _tensor_value(operand))
+        assert operand is not None
+        operand_value = _broadcast_tensor_scalar_operand(
+            result,
+            cast(TensorOrScalar, _tensor_value(operand)),
+        )
         result = _apply_tensor_scalar_op(result, op, operand_value, reverse)
     return _store(dst, result)
 
 
 def activation(
-    dst,
-    op,
-    data,
-    bias=None,
-    scale=1.0,
-    reduce_op=None,
-    reduce_res=None,
-    reduce_cmd=nisa.reduce_cmd.idle,
-    name=None,
-):
-    """Apply an activation epilogue into dst."""
+    dst: NDArray,
+    op: SubOp | None,
+    data: NDArray,
+    bias: TensorOrScalar | None = None,
+    scale: TensorOrScalar = 1.0,
+    reduce_op: SubOp | None = None,
+    reduce_res: NDArray | None = None,
+    reduce_cmd: Any = nisa.reduce_cmd.idle,
+    name: str | None = None,
+) -> NDArray:
+    """Apply an activation epilogue into ``dst``.
+
+    Args:
+        dst: Destination tensor receiving the activation output.
+        op: Patched unary activation operator token.
+        data: Source tensor to transform.
+        bias: Optional scalar or per-partition bias operand.
+        scale: Optional scalar or per-partition scale operand.
+        reduce_op: Optional reduction operator token. Only ``nl.add`` is legal.
+        reduce_res: Optional destination tensor for a companion reduction result.
+        reduce_cmd: Unused beta2 reduction command token kept for API parity.
+        name: Optional kernel op name retained for API parity.
+    """
     del name
-    if not (op is None or isinstance(op, SubOp)):
+    if not isinstance(op, SubOp):
         raise ValueError(f"Unsupported op: {op}")
     _require(
         _buffer_name(dst) in ("sbuf", "psum")
@@ -869,35 +1073,63 @@ def activation(
 class Builder:
     """Tracks grid dimensions/index for the active interpreted kernel."""
 
-    def __init__(self, grid_dims=None):
+    def __init__(self, grid_dims: Iterable[int] | None = None) -> None:
+        """Initialize grid-tracking state for interpreted kernel launches.
+
+        Args:
+            grid_dims: Optional initial launch grid dimensions.
+        """
         self.grid_dims = tuple(grid_dims) if grid_dims is not None else (1,)
         self.grid_idx = [0] * len(self.grid_dims)
         self.nc_version = nisa.nc_version.gen4
-        self.fn = None
+        self.fn: Callable[..., Any] | None = None
 
-    def set_grid_dim(self, *grid_dims):
-        """Update active grid dimensions."""
+    def set_grid_dim(self, *grid_dims: int) -> None:
+        """Update the active launch grid dimensions.
+
+        Args:
+            *grid_dims: New launch grid dimensions.
+        """
+        _require(
+            len(grid_dims) == 1, "NKI Beta 2 currently only supports 1D SPMD grids"
+        )
         self.grid_dims = tuple(grid_dims)
         self.grid_idx = [0] * len(self.grid_dims)
 
-    def set_grid_idx(self, x, y, z):
-        """Update current program id coordinates."""
-        self.grid_idx = [x, y, z][: len(self.grid_dims)]
+    def set_grid_idx(self, x: int, y: int = 0, z: int = 0) -> None:
+        """Update the current program-id coordinates.
+
+        Args:
+            x: Grid index for axis 0.
+            y: Grid index for axis 1.
+            z: Grid index for axis 2.
+        """
+        del y, z
+        self.grid_idx = [x]
 
 
 nki_builder = Builder()
 
 
-def program_id(axis):
-    """Return current program id component for the requested axis."""
+def program_id(axis: int) -> int:
+    """Return the current program-id component for the requested axis.
+
+    Args:
+        axis: Program-id axis to query.
+    """
     axis = int(axis)
     if 0 <= axis < len(nki_builder.grid_idx):
         return nki_builder.grid_idx[axis]
     raise ValueError(f"Invalid axis {axis} for {len(nki_builder.grid_idx)}D grid")
 
 
-def nki_patch_lang(scope=None):
-    """Patch nl/nisa APIs to point at beta2 interpreter implementations."""
+def nki_patch_lang(scope: Any = None) -> None:
+    """Patch ``nl`` and ``nisa`` to use beta2 interpreter implementations.
+
+    Args:
+        scope: Optional patch scope that exposes ``set_attr`` for reversible
+            patching.
+    """
     set_attr = setattr if scope is None else scope.set_attr
     set_attr(nl, "ndarray", ndarray)
     set_attr(nl, "zeros", zeros)
@@ -938,22 +1170,35 @@ def nki_patch_lang(scope=None):
     set_attr(nisa, "tensor_scalar", tensor_scalar)
 
 
-nki_unpatch_lang = (
-    lambda scope=None: scope.restore()
-    if scope is not None and hasattr(scope, "restore")
-    else None
-)
+def nki_unpatch_lang(scope: Any = None) -> None:
+    """Restore beta2 language patches when the scope supports it.
+
+    Args:
+        scope: Optional patch scope that exposes ``restore``.
+    """
+    if scope is not None and hasattr(scope, "restore"):
+        scope.restore()
 
 
 class NKIBeta2InterpretedFunction:
     """Callable wrapper that executes NKI Beta 2 kernels with interpreter semantics."""
 
-    def __init__(self, fn):
-        """Store the original kernel function."""
+    def __init__(self, fn: Callable[..., Any]) -> None:
+        """Store the original kernel function.
+
+        Args:
+            fn: Kernel function to execute under beta2 interpreter semantics.
+        """
         self.fn = fn
 
-    def run(self, *args, **kwargs):
-        """Run the wrapped kernel over a launch grid with tracing callbacks."""
+    def run(self, *args: Any, **kwargs: Any) -> None:
+        """Run the wrapped kernel over a launch grid with tracing callbacks.
+
+        Args:
+            *args: Positional kernel arguments.
+            **kwargs: Kernel keyword arguments, including optional ``grid``,
+                ``warmup``, and ``client_manager`` controls.
+        """
         grid_dims = kwargs.pop("grid", (1,))
         if isinstance(grid_dims, int):
             grid_dims = (grid_dims,)
@@ -971,21 +1216,21 @@ class NKIBeta2InterpretedFunction:
         if client_manager is not None:
             client_manager.grid_callback(grid_dims)
 
-        exec_globals = self.fn.__globals__
+        exec_globals = cast(Any, self.fn).__globals__
         exec_globals["sbuf"] = sbuf
         exec_globals["hbm"] = hbm
         exec_globals["psum"] = psum
         CODE_KEYS.add(get_code_key(self.fn))
 
-        args = [
+        kernel_args = tuple(
             arg
             if isinstance(arg, (NDArray, bool, int, float, str)) or arg is None
             else NDArray(value=arg)
             for arg in args
-        ]
+        )
 
         sig = inspect.signature(self.fn)
-        bound = sig.bind(*args, **kwargs)
+        bound = sig.bind(*kernel_args, **kwargs)
         bound.apply_defaults()
         for name, arg in bound.arguments.items():
             assert arg is None or isinstance(arg, (bool, int, float, str, NDArray))
@@ -1005,7 +1250,7 @@ class NKIBeta2InterpretedFunction:
                 )
                 if not client_manager.pre_run_callback(self.fn):
                     return
-            self.fn(*args, **kwargs)
+            self.fn(*kernel_args, **kwargs)
             if client_manager is not None and not client_manager.post_run_callback(
                 self.fn
             ):
