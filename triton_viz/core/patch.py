@@ -184,6 +184,9 @@ class PatchOp:
                     for sym_elem in symbolic_ret:
                         elem_dtype = getattr(sym_elem, "dtype", None) or args[0].dtype
                         elem_tensor = tl.core.tensor(sym_elem, elem_dtype)
+                        fn = cast(Any, elem_tensor.handle)
+                        if fn is not None:
+                            fn.concrete_fn = self.op
                         ret_parts.append(elem_tensor)
                     ret = tuple(ret_parts)
                 else:
