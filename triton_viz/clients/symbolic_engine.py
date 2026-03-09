@@ -68,15 +68,6 @@ from ..core.data import (
 )
 
 
-def _decompose_dtype(dtype):
-    """Decompose a possibly-block dtype into (scalar_dtype, shape)."""
-    if dtype is None:
-        return None, ()
-    if isinstance(dtype, tl.block_type):
-        return dtype.scalar, tuple(int(x) for x in dtype.shape)
-    return dtype, ()
-
-
 Z3Expr: TypeAlias = ExprRef | list[ExprRef] | Tactic | Probe
 ConstraintExpr: TypeAlias = ExprRef | bool | int | float
 ConstraintConjunction: TypeAlias = BoolRef | None
@@ -341,8 +332,7 @@ class SymbolicExpr:
         self._has_op_cache: dict[str, bool] = {}
         self._data_wrapper: SymbolicExprDataWrapper | None = None
 
-    @property
-    def block_dtype(self) -> tl.core.dtype | None:
+    def _full_dtype(self) -> tl.core.dtype | None:
         """Reconstruct full block_type when shape is non-empty."""
         if self.dtype is None:
             return None
@@ -631,7 +621,10 @@ class ConstSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
         super().__init__(op)
         self.value = value
-        self.dtype, self.shape = _decompose_dtype(dtype)
+        if isinstance(dtype, tl.block_type):
+            self.dtype, self.shape = dtype.scalar, tuple(int(x) for x in dtype.shape)
+        else:
+            self.dtype, self.shape = dtype, ()
 
     def _node_label_core(self) -> str:
         return f"const={self.value}"
@@ -1216,7 +1209,10 @@ class CumsumSymbolicExpr(SymbolicExpr):
         self.add_child("input", input)
         self.add_child("axis", axis)
         self.add_child("reverse", reverse)
-        self.dtype, self.shape = _decompose_dtype(dtype)
+        if isinstance(dtype, tl.block_type):
+            self.dtype, self.shape = dtype.scalar, tuple(int(x) for x in dtype.shape)
+        else:
+            self.dtype, self.shape = dtype, ()
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1449,16 +1445,19 @@ class CastSymbolicExpr(SymbolicExpr):
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
         dst = self.dst_type.to_py()
-        dst_scalar, dst_shape = _decompose_dtype(dst)
-        self.dtype = dst_scalar
-        self.shape = dst_shape if dst_shape else self.src.shape
+        if isinstance(dst, tl.block_type):
+            self.dtype = dst.scalar
+            self.shape = tuple(int(x) for x in dst.shape)
+        else:
+            self.dtype = dst
+            self.shape = self.src.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.src._to_z3()
 
     def concretize(self) -> Any:
         src_concrete = self.src.concretize()
-        return self.concrete_fn(src_concrete, self.block_dtype or self.dtype)  # type: ignore
+        return self.concrete_fn(src_concrete, self._full_dtype())  # type: ignore
 
 
 class FpToFpSymbolicExpr(SymbolicExpr):
@@ -1472,9 +1471,12 @@ class FpToFpSymbolicExpr(SymbolicExpr):
         self.add_child("dst_type", dst_type)
         self.add_child("rounding_mode", rounding_mode)
         dst_dt = self.dst_type.dtype
-        dst_scalar, dst_shape = _decompose_dtype(dst_dt)
-        self.dtype = dst_scalar
-        self.shape = dst_shape if dst_shape else self.src.shape
+        if isinstance(dst_dt, tl.block_type):
+            self.dtype = dst_dt.scalar
+            self.shape = tuple(int(x) for x in dst_dt.shape)
+        else:
+            self.dtype = dst_dt
+            self.shape = self.src.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")

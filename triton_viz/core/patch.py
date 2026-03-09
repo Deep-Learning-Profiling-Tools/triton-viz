@@ -179,8 +179,9 @@ class PatchOp:
                 symbolic_ret = self.callbacks.op_overrider(
                     args[0].handle, *args[1:], **kwargs
                 )
+                _full = getattr(symbolic_ret, "_full_dtype", None)
                 ret_dtype = (
-                    getattr(symbolic_ret, "block_dtype", None)
+                    (_full() if _full else None)
                     or getattr(symbolic_ret, "dtype", None)
                     or args[0].dtype
                 )
