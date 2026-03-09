@@ -309,7 +309,7 @@ def test_loop_deferred_checks_simplify():
 
 
 # Dedicated sanitizer for nested loop regression test
-nested_loop_checker = SymbolicSanitizer(abort_on_error=False)
+nested_loop_checker = SymbolicSanitizer()
 
 
 @triton_viz.trace(client=nested_loop_checker)
@@ -337,6 +337,7 @@ def test_nested_loop_no_false_positive():
 
 
 # Create a dedicated sanitizer for line number tests
+# abort_on_error=False is on purpose: so OOB violations are recorded
 line_number_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
@@ -458,6 +459,7 @@ def test_gemm_oob_call_stack():
 # ======== Block Tensor (Block Pointer) Tests ===========
 
 
+# abort_on_error=False is on purpose: so OOB violations are recorded
 block_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
@@ -876,7 +878,7 @@ def test_tl_min_return_indices():
 
 # ======== Reduce + Broadcast Tests ===========
 
-reduce_broadcast_sanitizer = SymbolicSanitizer(abort_on_error=False)
+reduce_broadcast_sanitizer = SymbolicSanitizer()
 
 
 @triton_viz.trace(client=reduce_broadcast_sanitizer)
@@ -932,3 +934,40 @@ def test_oob_with_fake_tensor(_isolate_virtual_memory):
     out = torch.empty(1)
     with pytest.raises(SystemExit):
         fake_tensor_oob_kernel[(1,)](x, out, N=8)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(input_ptr + row * N + offs, mask=mask, other=-float("inf"))
+    x_max = tl.max(x, 0)
+    exp_x = tl.exp(x - x_max)
+    sum_exp = tl.sum(exp_x, 0)
+    tl.store(output_ptr + row * N + offs, exp_x / sum_exp, mask=mask)
+
+
+def test_reduce_symbolic_nonetype():
+    """Softmax kernel: tl.exp -> tl.max / tl.sum must propagate dtype correctly."""
+    x = torch.randn(4, 64, device="cpu")
+    out = torch.empty_like(x)
+    softmax_kernel[(4,)](out, x, 64, BLOCK=64)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def exp_expand_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    w = tl.exp(x)
+    m = w[None, :] * tl.load(x_ptr + offs)[:, None]
+    tl.store(out_ptr + offs, tl.sum(m, axis=1))
+
+
+def test_expand_dims_scalar_attr():
+    """tl.exp followed by expand_dims must propagate dtype correctly."""
+    x = torch.randn(8, device="cpu")
+    out = torch.empty(8, device="cpu")
+    exp_expand_kernel[(1,)](x, out, N=8)

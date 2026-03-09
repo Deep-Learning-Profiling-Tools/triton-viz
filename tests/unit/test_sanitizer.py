@@ -97,12 +97,11 @@ def test_reduce_expr_eval(op: str, data):
 
 @pytest.mark.parametrize("op,np_op", [("argmax", np.argmax), ("argmin", np.argmin)])
 def test_reduce_argmax_argmin_z3_through_where(op: str, np_op):
-    """argmax/argmin should use Z3 symbolic path, not concretize().
+    """argmax/argmin should stay on the Z3 symbolic path end-to-end.
 
     When the input flows through a node that only has _to_z3_impl (like
-    ``where``), the old concretize() fallback would raise
-    NotImplementedError.  The Z3 If-chain implementation avoids this by
-    staying on the symbolic path end-to-end.
+    ``where``), the Z3 If-chain implementation keeps the entire reduction
+    symbolic without needing to concretize intermediate values.
     """
     n = 4
     block_ty = tl.block_type(tl.int32, [n])
