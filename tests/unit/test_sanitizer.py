@@ -456,7 +456,8 @@ def test_dtype_is_always_scalar():
     assert not isinstance(expr.dtype, tl.block_type)
     assert expr.dtype == tl.float32
     assert expr.shape == (4, 8)
-    assert isinstance(expr._full_dtype(), tl.block_type)
+    full = tl.block_type(expr.dtype, list(expr.shape))
+    assert isinstance(full, tl.block_type)
 
 
 def test_reduce_shape_2d_axis1():

@@ -332,14 +332,6 @@ class SymbolicExpr:
         self._has_op_cache: dict[str, bool] = {}
         self._data_wrapper: SymbolicExprDataWrapper | None = None
 
-    def _full_dtype(self) -> tl.core.dtype | None:
-        """Reconstruct full block_type when shape is non-empty."""
-        if self.dtype is None:
-            return None
-        if self.shape:
-            return tl.block_type(self.dtype, list(self.shape))
-        return self.dtype
-
     def add_child(self, name: str, value: Any) -> None:
         child = SymbolicExpr.from_value(value) if value is not None else None
         self.children[name] = child
@@ -1457,7 +1449,8 @@ class CastSymbolicExpr(SymbolicExpr):
 
     def concretize(self) -> Any:
         src_concrete = self.src.concretize()
-        return self.concrete_fn(src_concrete, self._full_dtype())  # type: ignore
+        dst = tl.block_type(self.dtype, list(self.shape)) if self.shape else self.dtype
+        return self.concrete_fn(src_concrete, dst)  # type: ignore
 
 
 class FpToFpSymbolicExpr(SymbolicExpr):

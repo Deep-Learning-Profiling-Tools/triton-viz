@@ -179,12 +179,12 @@ class PatchOp:
                 symbolic_ret = self.callbacks.op_overrider(
                     args[0].handle, *args[1:], **kwargs
                 )
-                _full = getattr(symbolic_ret, "_full_dtype", None)
-                ret_dtype = (
-                    (_full() if _full else None)
-                    or getattr(symbolic_ret, "dtype", None)
-                    or args[0].dtype
-                )
+                _shape = getattr(symbolic_ret, "shape", ())
+                _dtype = getattr(symbolic_ret, "dtype", None)
+                if _shape and _dtype:
+                    ret_dtype = tl.block_type(_dtype, list(_shape))
+                else:
+                    ret_dtype = _dtype or args[0].dtype
                 ret = tl.core.tensor(symbolic_ret, ret_dtype)
                 fn = cast(Any, ret.handle)
                 if fn is not None:
