@@ -31,14 +31,16 @@ def _rope_tables(seq_len, head_dim, base=10000.0):
     return np.cos(emb).astype(np.float32), np.sin(emb).astype(np.float32)
 
 
-def rope_kernel_2d(
-    q2, k2, cos, sin, out_q2, out_k2, batch, num_heads, seq_len, head_dim
-):
-    """Apply RoPE using flattened 2D q/k tensors."""
-    assert q2.shape == (batch * num_heads * seq_len, head_dim)
-    assert k2.shape == q2.shape
-    assert out_q2.shape == q2.shape
-    assert out_k2.shape == k2.shape
+def rope_kernel(q, k, cos, sin, out_q, out_k, batch, num_heads, seq_len, head_dim):
+    """Apply RoPE to 4D q/k tensors."""
+    assert len(q.shape) == 4
+    assert len(k.shape) == 4
+    assert len(out_q.shape) == 4
+    assert len(out_k.shape) == 4
+    assert q.shape == (batch, num_heads, seq_len, head_dim)
+    assert k.shape == q.shape
+    assert out_q.shape == q.shape
+    assert out_k.shape == k.shape
     assert cos.shape == (seq_len, head_dim)
     assert sin.shape == (seq_len, head_dim)
     assert head_dim % 2 == 0
@@ -49,13 +51,11 @@ def rope_kernel_2d(
 
     for batch_idx in nl.affine_range(batch):
         for head_idx in nl.affine_range(num_heads):
-            row_base = (batch_idx * num_heads + head_idx) * seq_len
             for seq_tile in nl.affine_range(seq_len // tile_s):
                 seq_start = seq_tile * tile_s
-                row_start = row_base + seq_start
 
-                q_tile = nl.ndarray((tile_s, head_dim), dtype=q2.dtype, buffer=nl.sbuf)
-                k_tile = nl.ndarray((tile_s, head_dim), dtype=k2.dtype, buffer=nl.sbuf)
+                q_tile = nl.ndarray((tile_s, head_dim), dtype=q.dtype, buffer=nl.sbuf)
+                k_tile = nl.ndarray((tile_s, head_dim), dtype=k.dtype, buffer=nl.sbuf)
                 cos_tile = nl.ndarray(
                     (tile_s, head_dim), dtype=cos.dtype, buffer=nl.sbuf
                 )
@@ -63,19 +63,25 @@ def rope_kernel_2d(
                     (tile_s, head_dim), dtype=sin.dtype, buffer=nl.sbuf
                 )
 
-                nisa.dma_copy(dst=q_tile, src=q2[nl.ds(row_start, tile_s), :])
-                nisa.dma_copy(dst=k_tile, src=k2[nl.ds(row_start, tile_s), :])
+                nisa.dma_copy(
+                    dst=q_tile,
+                    src=q[batch_idx, head_idx, nl.ds(seq_start, tile_s), :],
+                )
+                nisa.dma_copy(
+                    dst=k_tile,
+                    src=k[batch_idx, head_idx, nl.ds(seq_start, tile_s), :],
+                )
                 nisa.dma_copy(dst=cos_tile, src=cos[nl.ds(seq_start, tile_s), :])
                 nisa.dma_copy(dst=sin_tile, src=sin[nl.ds(seq_start, tile_s), :])
 
                 q_out = nl.ndarray(
-                    (tile_s, head_dim), dtype=out_q2.dtype, buffer=nl.sbuf
+                    (tile_s, head_dim), dtype=out_q.dtype, buffer=nl.sbuf
                 )
                 k_out = nl.ndarray(
-                    (tile_s, head_dim), dtype=out_k2.dtype, buffer=nl.sbuf
+                    (tile_s, head_dim), dtype=out_k.dtype, buffer=nl.sbuf
                 )
-                tmp1 = nl.ndarray((tile_s, half), dtype=out_q2.dtype, buffer=nl.sbuf)
-                tmp2 = nl.ndarray((tile_s, half), dtype=out_q2.dtype, buffer=nl.sbuf)
+                tmp1 = nl.ndarray((tile_s, half), dtype=out_q.dtype, buffer=nl.sbuf)
+                tmp2 = nl.ndarray((tile_s, half), dtype=out_q.dtype, buffer=nl.sbuf)
 
                 nisa.tensor_tensor(
                     dst=tmp1,
@@ -141,10 +147,16 @@ def rope_kernel_2d(
                     dst=k_out[:, half:], data1=tmp1, data2=tmp2, op=nl.add
                 )
 
-                nisa.dma_copy(dst=out_q2[nl.ds(row_start, tile_s), :], src=q_out)
-                nisa.dma_copy(dst=out_k2[nl.ds(row_start, tile_s), :], src=k_out)
+                nisa.dma_copy(
+                    dst=out_q[batch_idx, head_idx, nl.ds(seq_start, tile_s), :],
+                    src=q_out,
+                )
+                nisa.dma_copy(
+                    dst=out_k[batch_idx, head_idx, nl.ds(seq_start, tile_s), :],
+                    src=k_out,
+                )
 
-    return out_q2, out_k2
+    return out_q, out_k
 
 
 def _run_with_xla(kernel, kernel_grid, *arrays):
@@ -166,7 +178,7 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
 
 
 def _run_demo():
-    """Run RoPE on 4D inputs and pass flattened views into the kernel."""
+    """Run RoPE on 4D inputs."""
     kernel_grid = (1,)
     batch = 1
     num_heads = 4
@@ -188,19 +200,16 @@ def _run_demo():
 
     cos, sin = _rope_tables(seq_len, head_dim)
     expected_q, expected_k = _rope_reference(q4d, k4d, cos, sin)
-
-    q2d = q4d.reshape(-1, head_dim)
-    k2d = k4d.reshape(-1, head_dim)
-    out_q2d = np.empty_like(q2d)
-    out_k2d = np.empty_like(k2d)
+    out_q4d = np.empty_like(q4d)
+    out_k4d = np.empty_like(k4d)
 
     kernel_args = (
-        q2d,
-        k2d,
+        q4d,
+        k4d,
         cos,
         sin,
-        out_q2d,
-        out_k2d,
+        out_q4d,
+        out_k4d,
         batch,
         num_heads,
         seq_len,
@@ -210,16 +219,16 @@ def _run_demo():
     if TRITON_VIZ_ENABLED:
         import triton_viz
 
-        traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(rope_kernel_2d)
+        traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(rope_kernel)
         traced_kernel[kernel_grid](*kernel_args, pre_trace=PRE_TRACE)
-        assert np.allclose(expected_q.reshape(-1, head_dim), out_q2d)
-        assert np.allclose(expected_k.reshape(-1, head_dim), out_k2d)
+        assert np.allclose(expected_q, out_q4d)
+        assert np.allclose(expected_k, out_k4d)
         print("☑️ Actual equals expected!")
         triton_viz.launch(share=False)
     else:
-        out_q2d, out_k2d = _run_with_xla(rope_kernel_2d, kernel_grid, *kernel_args)
-        assert np.allclose(expected_q.reshape(-1, head_dim), out_q2d)
-        assert np.allclose(expected_k.reshape(-1, head_dim), out_k2d)
+        out_q4d, out_k4d = _run_with_xla(rope_kernel, kernel_grid, *kernel_args)
+        assert np.allclose(expected_q, out_q4d)
+        assert np.allclose(expected_k, out_k4d)
         print("☑️ Actual equals expected!")
 
 
