@@ -229,7 +229,7 @@ class NKITrace(KernelInterface, TraceInterface):
     def __call__(self, *args, **kwargs):
         return self[(1,)](*args, **kwargs)
 
-    def run(self, *args, pre_trace=True, **kwargs):
+    def run(self, *args, pre_trace=True, platform_target="trn1", **kwargs):
         """
         pre_trace: determines whether to do an initial NKI Beta 2 trace to capture some semantic errors.
             pre_trace=False has fewer guarantees on interpreter parity with NKI compiler but must be set
@@ -241,7 +241,7 @@ class NKITrace(KernelInterface, TraceInterface):
 
             kwargs.pop("warmup", None)
             grid = kwargs.pop("grid", None)
-            nki.trace(self.func, grid=grid, platform_target="trn1").specialize(
+            nki.trace(self.func, grid=grid, platform_target=platform_target).specialize(
                 *args, **kwargs
             )
             kwargs["grid"] = grid
@@ -310,7 +310,7 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         # First-time wrapping
         # Triton backend need JIT/Interpreter/Autotuner；
         # NKI allow Python function（ NKIInterpretedFunction）
-        if "nki" in backend:
+        if backend in ("nki", "nki_beta2"):
             return NKITrace(kernel, client, beta2=("beta2" in backend))
         if isinstance(
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
