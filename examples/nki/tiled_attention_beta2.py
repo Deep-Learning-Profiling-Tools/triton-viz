@@ -247,12 +247,12 @@ def _run_demo():
             tiled_attention_kernel
         )
         traced_kernel[kernel_grid](*kernel_args)
-        assert np.allclose(expected2d, out2d, atol=2e-4, rtol=2e-4)
+        assert np.allclose(expected2d, out2d)
         print("☑️ Actual equals expected!")
         triton_viz.launch(share=False)
     else:
         out2d = _run_with_xla(tiled_attention_kernel, kernel_grid, *kernel_args)
-        assert np.allclose(expected2d, out2d, atol=2e-4, rtol=2e-4)
+        assert np.allclose(expected2d, out2d)
         print("☑️ Actual equals expected!")
 
 
