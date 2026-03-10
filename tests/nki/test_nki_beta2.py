@@ -270,6 +270,34 @@ def test_trace_records_beta2_nc_matmul():
     assert any(isinstance(record, Dot) for record in launches[-1].records)
 
 
+def test_trace_no_grid_needed():
+    """beta2 tracing should not need an SPMD grid to run."""
+    triton_viz.clear()
+
+    def kernel(lhsT, rhs, out):
+        lhs_tile = nl.ndarray((128, 128), dtype=lhsT.dtype, buffer=nl.sbuf)
+        rhs_tile = nl.ndarray((128, 512), dtype=rhs.dtype, buffer=nl.sbuf)
+        res_psum = nl.ndarray((128, 512), dtype=nl.float32, buffer=nl.psum)
+        out_tile = nl.ndarray((128, 512), dtype=out.dtype, buffer=nl.sbuf)
+        nisa.dma_copy(lhs_tile, lhsT)
+        nisa.dma_copy(rhs_tile, rhs)
+        nisa.nc_matmul(dst=res_psum, stationary=lhs_tile, moving=rhs_tile)
+        nisa.tensor_copy(out_tile, res_psum)
+        nisa.dma_copy(out, out_tile)
+
+    traced = triton_viz.trace(client=Tracer(), backend="nki_beta2")(kernel)
+    lhs = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
+    rhs = np.arange(128 * 512, dtype=np.float32).reshape(128, 512)
+    out = np.empty((128, 512), dtype=np.float32)
+    traced(lhs, rhs, out)
+
+    grid_records = [
+        record for record in launches[-1].records if type(record).__name__ == "Grid"
+    ]
+    assert grid_records[0].idx == (0, 0, 0)
+    assert any(isinstance(record, Dot) for record in launches[-1].records)
+
+
 def test_language_helpers_and_ops(patched_scope):
     """Patched language helpers should run with expected semantics."""
     del patched_scope

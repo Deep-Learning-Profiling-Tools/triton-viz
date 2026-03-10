@@ -227,9 +227,18 @@ class NKITrace(KernelInterface, TraceInterface):
         return KernelInterface.__getitem__(self, tuple(*grid))
 
     def __call__(self, *args, **kwargs):
-        return self[(1, 1, 1)](*args, **kwargs)
+        return self[(1,)](*args, **kwargs)
 
     def run(self, *args, **kwargs):
+        if self.backend == "nki_beta2":
+            import nki  # do initial NKI Beta 2 trace to capture some semantic errors
+
+            kwargs.pop("warmup", None)
+            grid = kwargs.pop("grid", None)
+            nki.trace(self.func, grid=grid, platform_target="trn1").specialize(
+                *args, **kwargs
+            )
+            kwargs["grid"] = grid
         with self.client_manager.patch_run(self.func, backend=self.backend):
             kwargs.update({"client_manager": self.client_manager})
             ret = self.interpreter_fn.run(*args, **kwargs)

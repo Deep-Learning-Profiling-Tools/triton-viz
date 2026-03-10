@@ -22,9 +22,6 @@ except (
     ) from exc
 
 
-_ERR_BINARY_TENSOR_OP = (
-    "binary operators on tensors not supported. Use nki.isa directly."
-)
 _ERR_TENSOR_SUBSCRIPT = "subscript not supported, for 'tensor'"
 _ERR_TENSOR_MUTATION = "mutation not supported"
 _ERR_UNDEFINED_USE = "Illegal IR, encountered undefined use"
@@ -280,13 +277,6 @@ class NDArray:
 
     def __neg__(self) -> "NDArray":
         raise TypeError("cannot negate values of this type")
-
-    def _raise_binary_op(self, *_args: Any, **_kwargs: Any) -> "NDArray":
-        raise TypeError(_ERR_BINARY_TENSOR_OP)
-
-    __and__ = __or__ = __xor__ = __lshift__ = __rshift__ = _raise_binary_op
-    __rand__ = __ror__ = __rxor__ = __rlshift__ = __rrshift__ = _raise_binary_op
-    __iand__ = __ior__ = __ixor__ = __ilshift__ = __irshift__ = _raise_binary_op
 
 
 class Buffer:
@@ -697,8 +687,8 @@ def _broadcast_tensor_scalar_operand(
 class SubOp:
     """
     NKI ISA ops like tensor_tensor have parameters to modify which "sub-operation" each element does (e.g. nl.add).
-    There are a couple of NKI quirks with these ops (e.g. you're not allowed to do nl.add(x, y)) so we use this instead
-    of numpy ops.
+    There are a couple of NKI quirks with these ops (e.g. unary ops can be used in nisa ops that pass in two args)
+    so we use this instead of numpy ops.
     """
 
     def __init__(
@@ -728,13 +718,8 @@ class SubOp:
     def _run(self, *args: Any) -> Any:
         return self._op(*args[: self.num_args])
 
-    def __call__(self, *args: Any, **kwargs: Any) -> None:
-        raise TypeError(_ERR_BINARY_TENSOR_OP)
-
-    def __str__(self) -> str:
+    def __repr__(self):
         return f"SubOp({self.name})"
-
-    __repr__ = __str__
 
 
 def dma_copy(
