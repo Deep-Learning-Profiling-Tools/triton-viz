@@ -22,6 +22,9 @@ except (
     ) from exc
 
 
+_ERR_BINARY_TENSOR_OP = (
+    "binary operators on tensors not supported. Use nki.isa directly."
+)
 _ERR_TENSOR_SUBSCRIPT = "subscript not supported, for 'tensor'"
 _ERR_TENSOR_MUTATION = "mutation not supported"
 _ERR_UNDEFINED_USE = "Illegal IR, encountered undefined use"
@@ -277,6 +280,13 @@ class NDArray:
 
     def __neg__(self) -> "NDArray":
         raise TypeError("cannot negate values of this type")
+
+    def _raise_binary_op(self, *_args: Any, **_kwargs: Any) -> "NDArray":
+        raise TypeError(_ERR_BINARY_TENSOR_OP)
+
+    __and__ = __or__ = __xor__ = __lshift__ = __rshift__ = _raise_binary_op
+    __rand__ = __ror__ = __rxor__ = __rlshift__ = __rrshift__ = _raise_binary_op
+    __iand__ = __ior__ = __ixor__ = __ilshift__ = __irshift__ = _raise_binary_op
 
 
 class Buffer:
@@ -596,8 +606,7 @@ def exponential(
     del reduce_cmd, reduce_init
     current_nc = _nc_version_value(nki_builder.nc_version)
     min_nc = _nc_version_value(nisa.nc_version.gen4)
-    if current_nc < min_nc:
-        raise RuntimeError("exponential only supports neuron-core-v4 or newer")
+    _require(current_nc >= min_nc, "exponential only supports >= NeuronCore-v4")
     src_value = _tensor_value(src)
     max_value_data = _tensor_value(max_value)
     output = np.exp(
@@ -717,6 +726,9 @@ class SubOp:
 
     def _run(self, *args: Any) -> Any:
         return self._op(*args[: self.num_args])
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError(_ERR_BINARY_TENSOR_OP)
 
     def __repr__(self):
         return f"SubOp({self.name})"
@@ -1067,7 +1079,7 @@ class Builder:
         """
         self.grid_dims = tuple(grid_dims) if grid_dims is not None else (1,)
         self.grid_idx = [0] * len(self.grid_dims)
-        self.nc_version = nisa.nc_version.gen4
+        self.nc_version = nisa.nc_version.gen2
         self.fn: Callable[..., Any] | None = None
 
     def set_grid_dim(self, *grid_dims: int) -> None:

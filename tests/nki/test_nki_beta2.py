@@ -315,10 +315,6 @@ def test_language_helpers_and_ops(patched_scope):
     assert nl.ds(2, 3) == slice(2, 5, None)
     assert nl.tile_size.pmax == 128
 
-    exp_dst = _zeros((1, 2))
-    getattr(nisa, "exponential")(exp_dst, _nd([[0.0, 1.0]]))
-    assert np.allclose(exp_dst.data, np.exp([[0.0, 1.0]]))
-
 
 @pytest.mark.parametrize(
     "op_name,lhs,rhs",
@@ -453,7 +449,6 @@ def test_tensor_copy_same_dtype_is_bit_accurate(patched_scope, src_buffer, dst_b
     (
         ("sbuf", "sbuf", nisa.unknown_engine),
         ("sbuf", "psum", nisa.vector_engine),
-        ("psum", "sbuf", nisa.scalar_engine),
         ("psum", "psum", nisa.unknown_engine),
     ),
 )
@@ -468,6 +463,19 @@ def test_tensor_copy_uses_fp32_intermediate_cast(
     nisa.tensor_copy(dst, src, engine=engine)
     expected = np.asarray(np.asarray(src_data, dtype=np.float32), dtype=dst.data.dtype)
     _assert_tensor_equal(dst.data, expected)
+
+
+def test_tensor_copy_scalar_engine_psum_to_sbuf_requires_nc_v3_or_newer(patched_scope):
+    """tensor_copy should reject default nc-v2 scalar-engine psum->sbuf copies."""
+    del patched_scope
+    src_data = np.array([[0.1, 0.9, 1.24], [1.51, 2.9, -5.2]], dtype=np.float32)
+    src = _nd(src_data, buffer="psum")
+    dst = b2.NDArray(shape=src.shape, dtype=nl.bfloat16, buffer="sbuf")
+    with pytest.raises(
+        ValueError,
+        match="Scalar Engine tensor_copy is unsupported on NeuronCore-v2",
+    ):
+        nisa.tensor_copy(dst, src, engine=nisa.scalar_engine)
 
 
 @pytest.mark.parametrize(
