@@ -190,6 +190,8 @@ class NDArray:
             if storage_shape is not None and array.shape != storage_shape:
                 array = array.reshape(storage_shape)
             self.data = array
+        if self.buffer in ("sbuf", "psum") and origin != "access":
+            _require(self.data.ndim >= 2, "SBUF/PSUM tensors must have at least 2 dims")
         self._defined = (
             value is not None or origin != "tensor" if defined is None else defined
         )
@@ -248,6 +250,13 @@ class NDArray:
             value = key.data if isinstance(key, NDArray) else key
             if isinstance(value, np.ndarray) and value.size == 1:
                 value = value.reshape(-1)[0]
+            if (
+                axis == 0
+                and self.buffer in ("sbuf", "psum")
+                and not isinstance(value, slice)
+                and value is not Ellipsis
+            ):
+                raise ValueError("SBUF/PSUM indexing must preserve the partition dim")
             new_keys.append(value)
         sliced_value = self.data[tuple(new_keys)]
         return NDArray(
@@ -265,7 +274,17 @@ class NDArray:
             raise RuntimeError(_ERR_TENSOR_MUTATION)
         if not isinstance(keys, tuple):
             keys = (keys,)
-        new_keys = [k.data if isinstance(k, NDArray) else k for k in keys]
+        new_keys = []
+        for axis, key in enumerate(keys):
+            index_value = key.data if isinstance(key, NDArray) else key
+            if (
+                axis == 0
+                and self.buffer in ("sbuf", "psum")
+                and not isinstance(index_value, slice)
+                and index_value is not Ellipsis
+            ):
+                raise ValueError("SBUF/PSUM indexing must preserve the partition dim")
+            new_keys.append(index_value)
         target = self.data[tuple(new_keys)]
         unwrapped = _tensor_value(value)
         if isinstance(value, NDArray):

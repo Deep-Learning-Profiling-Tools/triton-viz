@@ -1257,6 +1257,12 @@ def test_activation_rejects_noncanonical_reduce_res_shapes(patched_scope, reduce
     del patched_scope
     data = _typed_ndarray((8, 4), "float32", buffer="sbuf")
     dst = b2.NDArray(shape=(8, 4), dtype=nl.float32, buffer="sbuf")
+    if len(reduce_shape) < 2:
+        with pytest.raises(
+            ValueError, match="SBUF/PSUM tensors must have at least 2 dims"
+        ):
+            b2.NDArray(shape=reduce_shape, dtype=nl.float32, buffer="sbuf")
+        return
     reduce_res = b2.NDArray(shape=reduce_shape, dtype=nl.float32, buffer="sbuf")
     with pytest.raises(ValueError, match="reduce_res must have shape"):
         nisa.activation(
@@ -1366,10 +1372,20 @@ def test_ndarray_shape_dtype_buffer_matrix(patched_scope):
         for shape in SHAPE_CASES:
             for buffer in (nl.hbm, nl.sbuf, nl.psum):
                 if dtype in STORAGE_DTYPES:
-                    out = nl.ndarray(shape, dtype=dtype, buffer=buffer)
-                    assert out.shape == shape
-                    assert out.buffer == _buffer_token_name(buffer)
-                    assert out.data.dtype == STORAGE_DTYPES[dtype]
+                    if (
+                        _buffer_token_name(buffer) in ("sbuf", "psum")
+                        and len(shape) < 2
+                    ):
+                        with pytest.raises(
+                            ValueError,
+                            match="SBUF/PSUM tensors must have at least 2 dims",
+                        ):
+                            nl.ndarray(shape, dtype=dtype, buffer=buffer)
+                    else:
+                        out = nl.ndarray(shape, dtype=dtype, buffer=buffer)
+                        assert out.shape == shape
+                        assert out.buffer == _buffer_token_name(buffer)
+                        assert out.data.dtype == STORAGE_DTYPES[dtype]
                 else:
                     with pytest.raises(TypeError, match="Unsupported dtype"):
                         nl.ndarray(shape, dtype=dtype, buffer=buffer)
@@ -1386,11 +1402,18 @@ def test_zeros_shape_dtype_matrix(patched_scope):
         dtype = _dtype_token(dtype_name)
         for shape in SHAPE_CASES:
             if dtype in STORAGE_DTYPES:
-                out = nl.zeros(shape, dtype=dtype)
-                assert out.shape == shape
-                assert out.buffer == _buffer_token_name(nl.sbuf)
-                assert out.data.dtype == STORAGE_DTYPES[dtype]
-                assert np.all(out.data == 0)
+                if len(shape) < 2:
+                    with pytest.raises(
+                        ValueError,
+                        match="SBUF/PSUM tensors must have at least 2 dims",
+                    ):
+                        nl.zeros(shape, dtype=dtype)
+                else:
+                    out = nl.zeros(shape, dtype=dtype)
+                    assert out.shape == shape
+                    assert out.buffer == _buffer_token_name(nl.sbuf)
+                    assert out.data.dtype == STORAGE_DTYPES[dtype]
+                    assert np.all(out.data == 0)
             else:
                 with pytest.raises(TypeError, match="Unsupported dtype"):
                     nl.zeros(shape, dtype=dtype)
@@ -1660,17 +1683,17 @@ def test_sqrt_rsqrt_match_numpy_with_edge_values(patched_scope, dtype_name):
         values = np.asarray(
             [0.0, 1.0, 4.0, 9.0, 256.0, 1e-12, 1e12], dtype=STORAGE_DTYPES[dtype_name]
         )
-    values_nd = _nd(values)
-    dst = _zeros(values.shape)
+    values_nd = _nd(values.reshape(1, -1))
+    dst = _zeros((1, values.shape[0]))
     nisa.activation(dst, nl.sqrt, values_nd)
-    sqrt_actual = dst.data
+    sqrt_actual = dst.data.reshape(-1)
     sqrt_expected = np.sqrt(values)
     _assert_tensor_equal(sqrt_actual, sqrt_expected)
 
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        dst = _zeros(values.shape)
+        dst = _zeros((1, values.shape[0]))
         nisa.activation(dst, nl.rsqrt, values_nd)
-        rsqrt_actual = dst.data
+        rsqrt_actual = dst.data.reshape(-1)
         rsqrt_expected = 1.0 / np.sqrt(values)
     _assert_tensor_equal(rsqrt_actual, rsqrt_expected)
 
@@ -1729,7 +1752,7 @@ def test_tensor_tensor_rejects_scalar_vector_broadcast(patched_scope):
     del patched_scope
     dst = _zeros((2, 3))
     lhs = _nd(np.arange(6, dtype=np.float32).reshape(2, 3))
-    rhs_vector = _nd(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    rhs_vector = b2.NDArray(value=np.array([1.0, 2.0, 3.0], dtype=np.float32))
     with pytest.raises(
         ValueError,
         match="tensor_tensor doesn't broadcast scalars/vectors; use tensor_scalar",
@@ -1824,14 +1847,23 @@ def test_slice_writes_mark_parent_tensor_defined(patched_scope):
 
 
 def test_ndarray_int_index_drops_axis():
-    """Integer indexing should match NumPy rank-reducing semantics."""
-    tensor = _nd(np.arange(24, dtype=np.float32).reshape(2, 3, 4))
+    """HBM integer indexing should match NumPy rank-reducing semantics."""
+    tensor = _nd(np.arange(24, dtype=np.float32).reshape(2, 3, 4), buffer="hbm")
     slice0 = tensor[0]
     slice1 = tensor[:, 0]
     assert slice0.shape == (3, 4)
     assert slice1.shape == (2, 4)
     assert np.array_equal(slice0.data, tensor.data[0])
     assert np.array_equal(slice1.data, tensor.data[:, 0])
+
+
+@pytest.mark.parametrize("buffer", ("sbuf", "psum"))
+def test_ndarray_sbuf_psum_partition_index_is_rejected(buffer):
+    """SBUF/PSUM indexing should preserve the partition dimension."""
+    tensor = _nd(np.arange(24, dtype=np.float32).reshape(2, 3, 4), buffer=buffer)
+    with pytest.raises(ValueError, match="preserve the partition dim"):
+        _ = tensor[0]
+    assert np.array_equal(tensor[:, 0].data, tensor.data[:, 0])
 
 
 def test_dma_copy_ap_mismatch_error_message(patched_scope):
@@ -1879,8 +1911,8 @@ def test_ndarray_public_surface_and_value_backed_paths(patched_scope):
 def test_ndarray_index_assignment_and_binary_surface(patched_scope):
     """NDArray indexing and assignment should preserve beta2 tensor semantics."""
     del patched_scope
-    tensor = _nd(np.arange(6, dtype=np.float32).reshape(2, 3))
-    index = _nd(np.array(1, dtype=np.int32))
+    tensor = _nd(np.arange(6, dtype=np.float32).reshape(2, 3), buffer="hbm")
+    index = _nd(np.array(1, dtype=np.int32), buffer="hbm")
 
     assert np.array_equal(tensor[index].data, tensor.data[1])
     assert np.array_equal(tensor[-1].data, tensor.data[1])
@@ -1888,14 +1920,14 @@ def test_ndarray_index_assignment_and_binary_surface(patched_scope):
     tensor[:, :] = _nd(np.full((2, 3), 7.0, dtype=np.float32))
     assert np.array_equal(tensor.data, np.full((2, 3), 7.0, dtype=np.float32))
 
-    tensor[0] = _nd(np.full((1, 3), 5.0, dtype=np.float32))
+    tensor[0] = _nd(np.full((1, 3), 5.0, dtype=np.float32), buffer="hbm")
     assert np.array_equal(
         tensor.data,
         np.array([[5.0, 5.0, 5.0], [7.0, 7.0, 7.0]], dtype=np.float32),
     )
 
     with pytest.raises(ValueError, match="Expect AP same number of elements"):
-        tensor[:, :] = _nd(np.arange(6, dtype=np.float32))
+        tensor[:, :] = _nd(np.arange(6, dtype=np.float32), buffer="hbm")
 
     with pytest.raises(TypeError, match="binary operators on tensors not supported"):
         _ = tensor & tensor
@@ -1929,7 +1961,8 @@ def test_buffer_views_and_named_buffer_tokens(patched_scope):
         byte_backed.view(nl.float32, (3, 2))
 
     for name in ("hbm", "sbuf", "psum"):
-        out = nl.ndarray((1,), dtype=nl.float32, buffer=_BufferToken(name))
+        shape = (1,) if name == "hbm" else (1, 1)
+        out = nl.ndarray(shape, dtype=nl.float32, buffer=_BufferToken(name))
         assert out.buffer == name
 
 
