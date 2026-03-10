@@ -119,17 +119,6 @@ def _is_access_view(value: Any) -> bool:
     return isinstance(value, NDArray) and value._origin == "access"
 
 
-def _can_reshape_view_copy(
-    dst: NDArray, src: TensorOrScalar, src_value: ArrayLike
-) -> bool:
-    """Return whether a copy may reshape an access view with equal elements."""
-    return (
-        int(np.prod(src_value.shape, dtype=np.int64))
-        == int(np.prod(dst.shape, dtype=np.int64))
-        and (_is_access_view(dst) or _is_access_view(src))
-    )
-
-
 def _nc_version_value(version: Any) -> int:
     """Normalize NC version tokens into plain integers for comparisons."""
     raw = getattr(version, "value", version)
@@ -466,6 +455,7 @@ def nc_transpose(
     """
     del name
     value = np.asarray(_tensor_value(data))
+    dst_shape = cast(tuple[int, ...], dst.shape)
     data_par, data_free = _partition_and_free(value)
     _require(max(data_par, data_free) <= 128, "tile too large for nc_transpose")
     src_buffer = _buffer_name(data)
@@ -485,7 +475,7 @@ def nc_transpose(
             "Tensor Engine nc_transpose requires SBUF -> PSUM",
         )
         _require(
-            tuple(dst.shape) == (data_free, data_par),
+            dst_shape == (data_free, data_par),
             "Tensor Engine nc_transpose requires dst shape (free, partition)",
         )
     data_dtype = getattr(data, "dtype", np.asarray(_tensor_value(data)).dtype)
@@ -542,6 +532,7 @@ def nc_matmul(
     _require(_buffer_name(moving) == "sbuf", "nc_matmul requires moving in SBUF")
     stationary_value = np.asarray(_tensor_value(stationary))
     moving_value = np.asarray(_tensor_value(moving))
+    dst_shape = cast(tuple[int, ...], dst.shape)
     _require(stationary_value.ndim == 2, "nc_matmul stationary must be rank-2")
     stationary_par, stationary_free = _partition_and_free(stationary_value)
     moving_par, moving_free = _partition_and_free(moving_value)
@@ -566,7 +557,7 @@ def nc_matmul(
         "dst must be float32 or bfloat16",
     )
     _require(
-        tuple(dst.shape) == (stationary_free, *moving_value.shape[1:]),
+        dst_shape == (stationary_free, *moving_value.shape[1:]),
         "nc_matmul dst must preserve stationary free dim and moving free dims",
     )
     has_tile_pos = bool(tile_position)

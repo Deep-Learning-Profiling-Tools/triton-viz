@@ -566,7 +566,9 @@ def test_tensor_scalar_accepts_mismatch3_row_broadcast_reshapes(
     )
     dst = _zeros(dst_shape)
     nisa.tensor_scalar(dst, data, nl.multiply, operand)
-    expected = data.data * operand.data.reshape((data_shape[0],) + (1,) * (len(data_shape) - 1))
+    expected = data.data * operand.data.reshape(
+        (data_shape[0],) + (1,) * (len(data_shape) - 1)
+    )
     assert np.array_equal(dst.data, expected.reshape(dst_shape))
 
 
@@ -1250,9 +1252,7 @@ def test_activation_accepts_mismatch3_reduce_res_p_1(patched_scope):
 
 
 @pytest.mark.parametrize("reduce_shape", ((8,), (8, 1, 1)))
-def test_activation_rejects_noncanonical_reduce_res_shapes(
-    patched_scope, reduce_shape
-):
+def test_activation_rejects_noncanonical_reduce_res_shapes(patched_scope, reduce_shape):
     """activation should reject reduce_res shapes outside the canonical `(P, 1)`."""
     del patched_scope
     data = _typed_ndarray((8, 4), "float32", buffer="sbuf")
@@ -1762,14 +1762,10 @@ def test_tensor_tensor_accepts_mismatch3_ap_compatible_reshapes(
     """tensor_tensor should accept mismatch3 AP-compatible reshape cases."""
     del patched_scope
     lhs = _nd(np.arange(np.prod(lhs_shape), dtype=np.float32).reshape(lhs_shape))
-    rhs = _nd(
-        np.arange(np.prod(rhs_shape), dtype=np.float32).reshape(rhs_shape) + 1.0
-    )
+    rhs = _nd(np.arange(np.prod(rhs_shape), dtype=np.float32).reshape(rhs_shape) + 1.0)
     dst = _zeros(dst_shape)
     nisa.tensor_tensor(dst, lhs, rhs, nl.add)
-    expected = lhs.data.reshape(lhs_shape[0], -1) + rhs.data.reshape(
-        rhs_shape[0], -1
-    )
+    expected = lhs.data.reshape(lhs_shape[0], -1) + rhs.data.reshape(rhs_shape[0], -1)
     assert np.array_equal(dst.data, expected.reshape(dst_shape))
 
 
