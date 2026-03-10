@@ -1912,7 +1912,7 @@ def test_ndarray_index_assignment_and_binary_surface(patched_scope):
     """NDArray indexing and assignment should preserve beta2 tensor semantics."""
     del patched_scope
     tensor = _nd(np.arange(6, dtype=np.float32).reshape(2, 3), buffer="hbm")
-    index = _nd(np.array(1, dtype=np.int32), buffer="hbm")
+    index = 1
 
     assert np.array_equal(tensor[index].data, tensor.data[1])
     assert np.array_equal(tensor[-1].data, tensor.data[1])

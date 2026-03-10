@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import inspect
 import itertools
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any, Optional, TypeAlias, cast
 
 import numpy as np
 
-from triton_viz.utils.dtypes import STORAGE_DTYPES, DTypeLike
+from triton_viz.utils.dtypes import DTypeLike, STORAGE_DTYPES
 from triton_viz.utils.traceback_utils import CODE_KEYS, get_code_key
 
 try:
@@ -57,7 +57,7 @@ def _mark_defined(value: Any) -> None:
         value = value._parent
 
 
-def _store(dst: "NDArray", value: TensorOrScalar) -> "NDArray":
+def _store(dst: NDArray, value: TensorOrScalar) -> NDArray:
     """Write a computed value into a destination tensor."""
     dst.data[...] = _cast_value(value, dst.dtype)
     _mark_defined(dst)
@@ -66,18 +66,19 @@ def _store(dst: "NDArray", value: TensorOrScalar) -> "NDArray":
 
 def _tensor_value(value: TensorOrScalar | None) -> TensorOrScalar | None:
     """Unwrap NDArray inputs and validate they are initialized."""
-    if isinstance(value, NDArray):
-        if not value._defined:
-            raise RuntimeError(_ERR_UNDEFINED_USE)
-        return value.data
-    return value
+    if isinstance(value, NDArray) and not value._defined:
+        raise RuntimeError(_ERR_UNDEFINED_USE)
+    return value.data if isinstance(value, NDArray) else value
+
+
+def _array(value: Any, dtype: Any = None) -> ArrayLike:
+    return np.asarray(_tensor_value(value), dtype=dtype)
 
 
 def _as_scalar(value: ScalarLike | NDArray) -> int:
     """Convert scalar-like value into int."""
-    array = np.asarray(_tensor_value(value))
-    if array.size != 1:
-        raise ValueError("Expected scalar value")
+    array = _array(value)
+    _require(array.size == 1, "Expected scalar value")
     return int(array.reshape(-1)[0])
 
 
@@ -91,7 +92,7 @@ def _buffer_name(value: BufferLike) -> str:
     return getattr(value, "buffer", None) or "sbuf"
 
 
-def _require(condition: bool, message: str) -> None:
+def _require(condition: Any, message: str) -> None:
     """Raise ValueError with a stable message when condition is false."""
     if not condition:
         raise ValueError(message)
@@ -99,8 +100,7 @@ def _require(condition: bool, message: str) -> None:
 
 def _is_integer_dtype(dtype: DTypeLike) -> bool:
     """Return whether dtype is integer/bool-like."""
-    resolved = _storage_dtype(dtype)
-    return np.issubdtype(np.dtype(resolved), np.integer)
+    return np.issubdtype(np.dtype(_storage_dtype(dtype)), np.integer)
 
 
 def _partition_and_free(value: TensorLike) -> tuple[int, int]:
@@ -110,21 +110,13 @@ def _partition_and_free(value: TensorLike) -> tuple[int, int]:
         if isinstance(value, np.ndarray)
         else cast(tuple[int, ...], value.data.shape)
     )
-    free = int(np.prod(shape[1:], dtype=np.int64)) if len(shape) > 1 else 1
-    return shape[0], free
-
-
-def _is_access_view(value: Any) -> bool:
-    """Return whether a tensor is a sliced access view."""
-    return isinstance(value, NDArray) and value._origin == "access"
+    return shape[0], int(np.prod(shape[1:], dtype=np.int64)) if len(shape) > 1 else 1
 
 
 def _nc_version_value(version: Any) -> int:
     """Normalize NC version tokens into plain integers for comparisons."""
     raw = getattr(version, "value", version)
-    if isinstance(raw, int):
-        return raw
-    return int(cast(Any, raw))
+    return raw if isinstance(raw, int) else int(raw)
 
 
 def _activation_operand(
@@ -133,7 +125,7 @@ def _activation_operand(
     """Normalize activation scale/bias into broadcastable arrays."""
     if value is None:
         return 0.0
-    arr = np.asarray(_tensor_value(value), dtype=np.float32)
+    arr = _array(value, dtype=np.float32)
     if arr.size == 1:
         return float(arr.reshape(-1)[0])
     _require(
@@ -153,7 +145,7 @@ class NDArray:
         buffer: str | None = None,
         shape: tuple[int, ...] | None = None,
         dtype: DTypeLike = None,
-        value: TensorOrScalar | None = None,
+        value: Any = None,
         origin: str = "raw",
         parent_ndim: int | None = None,
         defined: bool | None = None,
@@ -175,42 +167,37 @@ class NDArray:
             parent: Parent tensor when this value is a sliced view.
         """
         self.buffer = buffer
-        self.dtype = dtype
         self._origin = origin
         self._parent = parent
         storage_shape = tuple(shape) if shape is not None else None
         storage_dtype = _storage_dtype(dtype)
+        assert value is not None or storage_shape is not None
         if value is None:
             assert storage_shape is not None
             self.data = np.zeros(storage_shape, dtype=storage_dtype)
         else:
-            array = (
+            self.data = (
                 _cast_value(value, dtype) if dtype is not None else np.asarray(value)
             )
-            if storage_shape is not None and array.shape != storage_shape:
-                array = array.reshape(storage_shape)
-            self.data = array
+        if storage_shape is not None and self.data.shape != storage_shape:
+            self.data = self.data.reshape(storage_shape)
         if self.buffer in ("sbuf", "psum") and origin != "access":
             _require(self.data.ndim >= 2, "SBUF/PSUM tensors must have at least 2 dims")
         self._defined = (
             value is not None or origin != "tensor" if defined is None else defined
         )
         self._parent_ndim = self.data.ndim if parent_ndim is None else parent_ndim
-        if self.dtype is None:
-            self.dtype = self.data.dtype
-        self._data_ptr = None
+        self.dtype = self.data.dtype if dtype is None else dtype
 
     @property
-    def shape(self) -> tuple[int, ...] | None:
+    def shape(self) -> tuple[int, ...]:
         """Return tensor shape."""
-        return self.data.shape if self.data is not None else None
+        return self.data.shape
 
     @property
     def address(self) -> int:
         """Return host pointer integer for underlying storage."""
-        if self._data_ptr is None:
-            self._data_ptr = self.data.ctypes.data
-        return cast(int, self._data_ptr)
+        return self.data.ctypes.data
 
     def data_ptr(self) -> int:
         """Return pointer address alias for frontend compatibility."""
@@ -224,11 +211,11 @@ class NDArray:
         """Return item size in bytes."""
         return getattr(self.dtype, "itemsize", self.data.dtype.itemsize)
 
-    def cpu(self) -> "NDArray":
+    def cpu(self) -> NDArray:
         """Return self to mimic framework tensor api."""
         return self
 
-    def detach(self) -> "NDArray":
+    def detach(self) -> NDArray:
         """Return self to mimic framework tensor api."""
         return self
 
@@ -239,26 +226,13 @@ class NDArray:
     def __repr__(self) -> str:
         return f"NDArray(shape={self.shape}, dtype={self.dtype})"
 
-    def __getitem__(self, keys: Any) -> "NDArray":
+    def __getitem__(self, keys: Any) -> NDArray:
         """Implement slicing operations for NDArray."""
-        # if self._origin == "tensor":
-        #    raise TypeError(_ERR_TENSOR_SUBSCRIPT)
         if not isinstance(keys, tuple):
             keys = (keys,)
-        new_keys = []
-        for axis, key in enumerate(keys):
-            value = key.data if isinstance(key, NDArray) else key
-            if isinstance(value, np.ndarray) and value.size == 1:
-                value = value.reshape(-1)[0]
-            if (
-                axis == 0
-                and self.buffer in ("sbuf", "psum")
-                and not isinstance(value, slice)
-                and value is not Ellipsis
-            ):
-                raise ValueError("SBUF/PSUM indexing must preserve the partition dim")
-            new_keys.append(value)
-        sliced_value = self.data[tuple(new_keys)]
+        if isinstance(keys[0], int) and self.buffer in ("sbuf", "psum"):
+            raise ValueError("SBUF/PSUM indexing must preserve the partition dim")
+        sliced_value = self.data[keys]
         return NDArray(
             value=sliced_value,
             buffer=self.buffer,
@@ -268,43 +242,35 @@ class NDArray:
             parent=self,
         )
 
-    def __setitem__(self, keys: Any, value: TensorOrScalar) -> "NDArray":
+    def __setitem__(self, keys: Any, value: Any) -> NDArray:
         """Assign values into a sliced region."""
         if self._origin == "tensor":
             raise RuntimeError(_ERR_TENSOR_MUTATION)
         if not isinstance(keys, tuple):
             keys = (keys,)
-        new_keys = []
-        for axis, key in enumerate(keys):
-            index_value = key.data if isinstance(key, NDArray) else key
-            if (
-                axis == 0
-                and self.buffer in ("sbuf", "psum")
-                and not isinstance(index_value, slice)
-                and index_value is not Ellipsis
-            ):
-                raise ValueError("SBUF/PSUM indexing must preserve the partition dim")
-            new_keys.append(index_value)
-        target = self.data[tuple(new_keys)]
-        unwrapped = _tensor_value(value)
+        if isinstance(keys[0], int) and self.buffer in ("sbuf", "psum"):
+            raise ValueError("SBUF/PSUM indexing must preserve the partition dim")
+        target = self.data[keys]
         if isinstance(value, NDArray):
-            if (
-                value.data.size != target.size
-                or value._parent_ndim != self._parent_ndim
-            ):
-                raise ValueError(_ERR_AP_MISMATCH)
-        target[...] = _cast_value(cast(TensorOrScalar, unwrapped), self.dtype)
+            _require(
+                value.data.size == target.size
+                and value._parent_ndim == self._parent_ndim,
+                _ERR_AP_MISMATCH,
+            )
+        stored_value = _tensor_value(value)
+        assert stored_value is not None
+        target[...] = _cast_value(stored_value, self.dtype)
         _mark_defined(self)
         return self
 
-    def reshape(self, *args: Any, **kwargs: Any) -> "NDArray":
+    def reshape(self, *args: Any, **kwargs: Any) -> NDArray:
         """Return a reshaped tensor view."""
         return NDArray(value=self.data.reshape(*args), buffer=self.buffer, **kwargs)
 
     def __neg__(self) -> "NDArray":
         raise TypeError("cannot negate values of this type")
 
-    def _raise_binary_op(self, *_args: Any, **_kwargs: Any) -> "NDArray":
+    def _raise_binary_op(self, *_args: Any, **_kwargs: Any) -> NDArray:
         raise TypeError(_ERR_BINARY_TENSOR_OP)
 
     __and__ = __or__ = __xor__ = __lshift__ = __rshift__ = _raise_binary_op
@@ -330,17 +296,12 @@ class Buffer:
             data: Optional existing raw or typed backing array.
         """
         self.buffer = buffer
-        self.shape = shape
         self.data = data
         if shape is not None and data is None:
             self.data = np.empty(shape=shape, dtype=np.uint8)
 
     def view(
-        self,
-        dtype: DTypeLike,
-        shape: tuple[int, ...],
-        *,
-        origin: str = "raw",
+        self, dtype: DTypeLike, shape: tuple[int, ...], *, origin: str = "raw"
     ) -> NDArray:
         """Materialize a typed tensor view over this buffer region.
 
@@ -356,50 +317,23 @@ class Buffer:
             origin=origin,
             parent_ndim=len(shape),
         )
-        if self.data is None:
-            return probe
-        if self.data.nbytes != probe.data.nbytes:
-            raise ValueError(
+        if self.data is not None:
+            _require(
+                self.data.nbytes == probe.data.nbytes,
                 "Buffer shape mismatch: have "
-                f"{self.data.nbytes} bytes, expected {probe.data.nbytes}"
+                f"{self.data.nbytes} bytes, expected {probe.data.nbytes}",
             )
-        if self.data.dtype == np.uint8:
-            data = self.data.view(probe.data.dtype).reshape(probe.data.shape)
-        else:
-            data = np.asarray(self.data, dtype=probe.data.dtype).reshape(
-                probe.data.shape
+            probe.data = (
+                self.data.view(probe.data.dtype).reshape(probe.data.shape)
+                if self.data.dtype == np.uint8
+                else np.asarray(self.data, dtype=probe.data.dtype).reshape(
+                    probe.data.shape
+                )
             )
-        return NDArray(
-            buffer=self.buffer,
-            dtype=dtype,
-            value=data,
-            origin=origin,
-            parent_ndim=len(shape),
-        )
+        return probe
 
 
-sbuf = Buffer("sbuf")
-hbm = Buffer("hbm")
-psum = Buffer("psum")
-
-
-def _resolve_buffer(buffer: BufferLike) -> Buffer:
-    """Resolve a buffer token into one of the interpreter buffers."""
-    if isinstance(buffer, Buffer):
-        return buffer
-    if buffer is None:
-        return sbuf
-    if isinstance(buffer, str):
-        name = buffer
-    else:
-        name = getattr(buffer, "name", "")
-    if name == "hbm":
-        return hbm
-    if name == "sbuf":
-        return sbuf
-    if name == "psum":
-        return psum
-    raise TypeError(f"Unsupported buffer type: {type(buffer).__name__}")
+sbuf, hbm, psum = map(Buffer, ("sbuf", "hbm", "psum"))
 
 
 def ndarray(
@@ -407,7 +341,7 @@ def ndarray(
     dtype: DTypeLike,
     *,
     buffer: BufferLike = None,
-    **kwargs: TensorOrScalar,
+    value: Any = None,
 ) -> NDArray:
     """Create an interpreter tensor on the requested NKI buffer.
 
@@ -416,46 +350,37 @@ def ndarray(
         dtype: Logical dtype token for the returned tensor.
         buffer: Buffer token or buffer-like object naming ``sbuf``, ``hbm``, or
             ``psum``.
-        **kwargs: Optional tensor construction overrides, such as ``value``.
+        value: Optional tensor construction override for a preexisting payload.
     """
-    resolved_buffer = _resolve_buffer(buffer)
-    if "value" in kwargs:
+    if not isinstance(buffer, Buffer):
+        buffer = globals().get(getattr(buffer, "name", buffer or "sbuf"))
+        if not isinstance(buffer, Buffer):
+            raise TypeError(f"Unsupported buffer type: {type(buffer).__name__}")
+    if value is not None:
         return NDArray(
-            buffer=resolved_buffer.buffer,
+            buffer=buffer.buffer,
             shape=shape,
             dtype=dtype,
-            value=kwargs["value"],
+            value=value,
             origin="tensor",
-            parent_ndim=len(tuple(shape)),
+            parent_ndim=len(shape),
         )
-    ret = resolved_buffer.view(dtype, shape, origin="tensor")
-    ret._defined = False
-    return ret
+    return buffer.view(dtype, shape, origin="tensor")
 
 
-def zeros(
-    shape: tuple[int, ...],
-    dtype: DTypeLike,
-    *,
-    buffer: BufferLike = None,
-    **kwargs: TensorOrScalar,
-) -> NDArray:
+def zeros(shape: tuple[int, ...], dtype: DTypeLike, *, buffer: Any = None) -> NDArray:
     """Create a zero-initialized tensor.
 
     Args:
         shape: Requested tensor shape.
         dtype: Logical dtype token for the returned tensor.
         buffer: Unsupported beta2 argument kept for signature parity.
-        **kwargs: Additional tensor construction overrides.
     """
     if buffer is not None:
         raise TypeError(
             "unexpected keyword argument 'buffer' in builtinfunction 'builtin_lang_zeros'"
         )
-    ret = ndarray(shape, dtype, **kwargs)
-    ret.data.fill(0)
-    _mark_defined(ret)
-    return ret
+    return _store(ndarray(shape, dtype), 0)
 
 
 def nc_transpose(
@@ -473,12 +398,10 @@ def nc_transpose(
         name: Optional kernel op name retained for API parity.
     """
     del name
-    value = np.asarray(_tensor_value(data))
-    dst_shape = cast(tuple[int, ...], dst.shape)
+    value = _array(data)
     data_par, data_free = _partition_and_free(value)
     _require(max(data_par, data_free) <= 128, "tile too large for nc_transpose")
-    src_buffer = _buffer_name(data)
-    dst_buffer = _buffer_name(dst)
+    src_buffer, dst_buffer = _buffer_name(data), _buffer_name(dst)
     if engine == nisa.engine.unknown:
         engine = (
             nisa.vector_engine if max(data_par, data_free) <= 32 else nisa.tensor_engine
@@ -494,15 +417,13 @@ def nc_transpose(
             "Tensor Engine nc_transpose requires SBUF -> PSUM",
         )
         _require(
-            dst_shape == (data_free, data_par),
+            dst.shape == (data_free, data_par),
             "Tensor Engine nc_transpose requires dst shape (free, partition)",
         )
-    data_dtype = getattr(data, "dtype", np.asarray(_tensor_value(data)).dtype)
-    dst_dtype = getattr(dst, "dtype", dst.data.dtype)
     _require(
-        _dtype_str(dst_dtype) == _dtype_str(data_dtype)
+        _dtype_str(dst.dtype) == _dtype_str(data.dtype)
         or (
-            _dtype_str(dst_dtype) == "bfloat16" and _dtype_str(data_dtype) == "float32"
+            _dtype_str(dst.dtype) == "bfloat16" and _dtype_str(data.dtype) == "float32"
         ),
         "dst dtype must match data dtype",
     )
@@ -549,9 +470,7 @@ def nc_matmul(
         "nc_matmul requires stationary in SBUF",
     )
     _require(_buffer_name(moving) == "sbuf", "nc_matmul requires moving in SBUF")
-    stationary_value = np.asarray(_tensor_value(stationary))
-    moving_value = np.asarray(_tensor_value(moving))
-    dst_shape = cast(tuple[int, ...], dst.shape)
+    stationary_value, moving_value = _array(stationary), _array(moving)
     _require(stationary_value.ndim == 2, "nc_matmul stationary must be rank-2")
     stationary_par, stationary_free = _partition_and_free(stationary_value)
     moving_par, moving_free = _partition_and_free(moving_value)
@@ -562,60 +481,34 @@ def nc_matmul(
     _require(stationary_par <= 128, "partition dim of stationary > 128")
     _require(stationary_free <= 128, "free dim of stationary > 128")
     _require(moving_free <= 512, "free dim of moving > 512")
-    stationary_dtype = getattr(stationary, "dtype", stationary_value.dtype)
-    moving_dtype = getattr(moving, "dtype", moving_value.dtype)
-    dst_dtype = getattr(dst, "dtype", dst.data.dtype)
-    stationary_is_f32 = _dtype_str(stationary_dtype) == "float32"
-    moving_is_f32 = _dtype_str(moving_dtype) == "float32"
     _require(
-        stationary_is_f32 == moving_is_f32,
+        (_dtype_str(stationary.dtype) == "float32")
+        == (_dtype_str(moving.dtype) == "float32"),
         "if one matmul operand is float32, both must be float32",
     )
     _require(
-        _dtype_str(dst_dtype) in {"float32", "bfloat16"},
+        _dtype_str(dst.dtype) in {"float32", "bfloat16"},
         "dst must be float32 or bfloat16",
     )
     _require(
-        dst_shape == (stationary_free, *moving_value.shape[1:]),
+        dst.shape == (stationary_free, *moving_value.shape[1:]),
         "nc_matmul dst must preserve stationary free dim and moving free dims",
     )
-    has_tile_pos = bool(tile_position)
-    has_tile_size = bool(tile_size)
     _require(
-        has_tile_pos == has_tile_size,
+        bool(tile_position) == bool(tile_size),
         "both tile_position and tile_size must be supplied",
     )
-    if has_tile_size:
-        row_size, col_size = map(int, tile_size)
-        start_row, start_col = map(int, tile_position)
+    if tile_size:
+        for size in tile_size:
+            _require(size in (32, 64, 128), "tile_size dims must be 32, 64, or 128")
         _require(
-            row_size in (32, 64, 128) and col_size in (32, 64, 128),
-            "tile_size dims must be 32, 64, or 128",
-        )
-        _require(
-            row_size <= 128 and col_size <= 128, "tile_size larger than (128, 128)"
-        )
-        _require(
-            stationary_par <= row_size and stationary_free <= col_size,
+            stationary_par <= tile_size[0] and stationary_free <= tile_size[1],
             "stationary tile size exceeds tile_size",
         )
-        _require(
-            start_row % row_size == 0, "start row must be a multiple of row tile size"
-        )
-        _require(
-            start_col % col_size == 0, "start col must be a multiple of col tile size"
-        )
-        _require(
-            start_row + row_size <= 128,
-            "matmul tile (row_start + row_size) must not exceed 128",
-        )
-        _require(
-            start_col + col_size <= 128,
-            "matmul tile (col_start + col_size) must not exceed 128",
-        )
-    stationary_matrix = stationary_value.reshape(stationary_par, stationary_free)
-    moving_matrix = moving_value.reshape(moving_par, moving_free)
-    result = stationary_matrix.T @ moving_matrix
+        for start, size in zip(tile_position, tile_size):
+            _require(start % size == 0, "tile start must align to tile size")
+            _require(start + size <= 128, "tile extent must not exceed 128")
+    result = stationary_value.T @ moving_value.reshape(moving_par, moving_free)
     return _store(
         dst,
         np.asarray(dst.data) + _cast_value(result.reshape(dst.shape), dst.dtype),
@@ -631,17 +524,16 @@ def reciprocal(dst: NDArray, data: NDArray, name: str | None = None) -> NDArray:
         name: Optional kernel op name retained for API parity.
     """
     del name
-    result = np.reciprocal(np.asarray(_tensor_value(data), dtype=np.float32))
-    return _store(dst, result)
+    return _store(dst, np.reciprocal(_array(data, dtype=np.float32)))
 
 
 def exponential(
-    dst,
+    dst: NDArray,
     src: NDArray,
     max_value: TensorOrScalar = 0.0,
     reduce_res: NDArray | None = None,
-    reduce_cmd=nisa.reduce_cmd.idle,
-    reduce_init=0.0,
+    reduce_cmd: Any = nisa.reduce_cmd.idle,
+    reduce_init: float = 0.0,
 ) -> NDArray:
     """Compute ``exp(src - max_value)`` into the destination tensor.
 
@@ -654,15 +546,12 @@ def exponential(
         reduce_init: Unused beta2 reduction init value kept for API parity.
     """
     del reduce_cmd, reduce_init
-    current_nc = _nc_version_value(nki_builder.nc_version)
-    min_nc = _nc_version_value(nisa.nc_version.gen4)
-    _require(current_nc >= min_nc, "exponential only supports >= NeuronCore-v4")
-    src_value = _tensor_value(src)
-    max_value_data = _tensor_value(max_value)
-    output = np.exp(
-        np.asarray(src_value, dtype=np.float32)
-        - np.asarray(max_value_data, dtype=np.float32)
+    _require(
+        _nc_version_value(nki_builder.nc_version)
+        >= _nc_version_value(nisa.nc_version.gen4),
+        "exponential only supports >= NeuronCore-v4",
     )
+    output = np.exp(_array(src, dtype=np.float32) - _array(max_value, dtype=np.float32))
     _store(dst, output)
     if reduce_res is not None:
         reduced = np.sum(
@@ -672,9 +561,7 @@ def exponential(
     return dst
 
 
-def affine_range(
-    start: int | NDArray, stop: int | NDArray | None = None, step: int | NDArray = 1
-) -> range:
+def affine_range(start: Any, stop: Any = None, step: Any = 1) -> range:
     """Create a Python range from static or register-backed bounds.
 
     Args:
@@ -682,12 +569,9 @@ def affine_range(
         stop: Optional range stop.
         step: Optional range step.
     """
-    start_v = _as_scalar(start) if isinstance(start, NDArray) else int(start)
-    if stop is None:
-        return range(start_v)
-    stop_v = _as_scalar(stop) if isinstance(stop, NDArray) else int(stop)
-    step_v = _as_scalar(step) if isinstance(step, NDArray) else int(step)
-    return range(start_v, stop_v, step_v)
+    start = _as_scalar(start)
+    args = (start,) if stop is None else (start, _as_scalar(stop), _as_scalar(step))
+    return range(*args)
 
 
 def ds(start: int | NDArray, size: int | NDArray) -> slice:
@@ -698,8 +582,7 @@ def ds(start: int | NDArray, size: int | NDArray) -> slice:
         size: Slice extent.
     """
     begin = _as_scalar(start)
-    extent = _as_scalar(size)
-    return slice(begin, begin + extent)
+    return slice(begin, begin + _as_scalar(size))
 
 
 class TileSize:
@@ -722,11 +605,8 @@ def _broadcast_tensor_scalar_operand(
     if operand_arr.size == 1:
         return operand_arr
     _require(
-        operand_arr.shape[0] == data_arr.shape[0],
-        "tensor_scalar only broadcasts free dimensions",
-    )
-    _require(
-        all(dim == 1 for dim in operand_arr.shape[1:]),
+        operand_arr.shape[0] == data_arr.shape[0]
+        and operand_arr.shape[1:] == (1,) * (operand_arr.ndim - 1),
         "tensor_scalar only broadcasts free dimensions",
     )
     target_shape = (data_arr.shape[0],) + (1,) * (data_arr.ndim - 1)
@@ -743,34 +623,31 @@ class SubOp:
     def __init__(
         self,
         np_op: Callable[..., Any],
-        is_bitwise: bool,
-        is_reducible: bool,
+        bitwise: bool,
+        reducible: bool,
         name: str | None = None,
     ) -> None:
         """Initialize a patched NKI operator token.
 
         Args:
             np_op: Underlying NumPy callable implementing the op.
-            is_bitwise: Whether the op follows integer bitwise rules.
-            is_reducible: Whether the op can be used in ``tensor_reduce``.
+            bitwise: Whether the op follows integer bitwise rules.
+            reducible: Whether the op can be used in ``tensor_reduce``.
             name: Optional stable display name override.
         """
-        self._op = np_op  # NOTE: Only NKI ISA ops should use self._op/self._run
-        self.is_bitwise = is_bitwise
-        self.is_reducible = is_reducible
+        self._op = np_op  # NOTE: Only NKI ISA ops should use self._op/self.run
+        self.bitwise = bitwise
+        self.reducible = reducible
         self.num_args = len(inspect.signature(self._op).parameters)
-        if name is None:
-            self.name = getattr(np_op, "__name__", type(np_op).__name__)
-        else:
-            self.name = name
+        self.name = name or getattr(np_op, "__name__", type(np_op).__name__)
 
-    def _run(self, *args: Any) -> Any:
+    def run(self, *args: Any) -> Any:
         return self._op(*args[: self.num_args])
 
-    def __call__(self, *args: Any, **kwargs: Any) -> None:
+    def __call__(self, *args: Any, **kwargs: Any) -> NDArray:
         raise TypeError(_ERR_BINARY_TENSOR_OP)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"SubOp({self.name})"
 
 
@@ -799,14 +676,12 @@ def dma_copy(
         _buffer_name(dst) in ("hbm", "sbuf") and _buffer_name(src) in ("hbm", "sbuf"),
         "dma_copy only supports HBM/SBUF source and destination",
     )
-    src_value = np.asarray(_tensor_value(src))
-    if isinstance(dst, NDArray) and isinstance(src, NDArray):
-        _require(dst.shape == src.shape, _ERR_AP_MISMATCH)
+    src_value = _array(src)
+    _require(dst.shape == src.shape, _ERR_AP_MISMATCH)
     if dst_rmw_op is None:
         return _store(dst, src_value.reshape(dst.shape))
     _require(dst_rmw_op == nl.add, "only nl.add is supported for dma_copy dst_rmw_op")
-    merged = dst_rmw_op._op(dst.data, src_value)
-    return _store(dst, merged.data if isinstance(merged, NDArray) else merged)
+    return _store(dst, _array(dst_rmw_op.run(dst.data, src_value)))
 
 
 def tensor_copy(
@@ -824,19 +699,18 @@ def tensor_copy(
         name: Optional kernel op name retained for API parity.
     """
     del name
-    dst_buffer = _buffer_name(dst)
-    src_buffer = _buffer_name(src)
+    dst_buffer, src_buffer = _buffer_name(dst), _buffer_name(src)
     _require(
         dst_buffer in ("sbuf", "psum") and src_buffer in ("sbuf", "psum"),
         "tensor_copy is on-chip only",
     )
-    current_nc = _nc_version_value(nki_builder.nc_version)
-    gen2 = _nc_version_value(nisa.nc_version.gen2)
-    if engine == nisa.scalar_engine and current_nc <= gen2:
+    if engine == nisa.scalar_engine and _nc_version_value(
+        nki_builder.nc_version
+    ) <= _nc_version_value(nisa.nc_version.gen2):
         raise ValueError("Scalar Engine tensor_copy is unsupported on NeuronCore-v2")
     if engine == nisa.gpsimd_engine and "psum" in (dst_buffer, src_buffer):
         raise ValueError("GpSimd tensor_copy cannot access PSUM")
-    src_value = np.asarray(_tensor_value(src))
+    src_value = _array(src)
     _require(
         _partition_and_free(src_value) == _partition_and_free(dst),
         _ERR_AP_MISMATCH,
@@ -863,18 +737,14 @@ def tensor_tensor(
         name: Optional kernel op name retained for API parity.
     """
     del name
-    if not isinstance(op, SubOp):
-        raise ValueError(f"Unsupported op: {op}")
-    dst_buffer = _buffer_name(dst)
-    lhs_buffer = _buffer_name(data1)
-    rhs_buffer = _buffer_name(data2)
+    _require(isinstance(op, SubOp), f"Unsupported op: {op}")
+    dst_buffer, lhs_buffer, rhs_buffer = map(_buffer_name, (dst, data1, data2))
     _require(
         not (lhs_buffer == "psum" and rhs_buffer == "psum"),
         "tensor_tensor cannot read both inputs from PSUM",
     )
     if op.name == "power":
         engine = nisa.gpsimd_engine
-
     if engine == nisa.gpsimd_engine and "psum" in (dst_buffer, lhs_buffer, rhs_buffer):
         raise ValueError(
             "attempted to access PSUM with explicit (e.g. non-default engine arg)/implicit (e.g. op == nl.power) use of GpSimd Engine"
@@ -884,34 +754,25 @@ def tensor_tensor(
         in (("sbuf", "sbuf"), ("sbuf", "psum"), ("psum", "sbuf")),
         "buffer combination for data1/data2 must be in sbuf/sbuf, sbuf/psum, or psum/sbuf",
     )
-    lhs = np.asarray(_tensor_value(data1))
-    rhs = np.asarray(_tensor_value(data2))
-    if lhs.ndim < 2 or rhs.ndim < 2:
-        raise ValueError(
-            "tensor_tensor doesn't broadcast scalars/vectors; use tensor_scalar"
-        )
-    lhs_pf_size = _partition_and_free(lhs)
-    rhs_pf_size = _partition_and_free(rhs)
-    dst_pf_size = _partition_and_free(dst)
+    lhs, rhs = _array(data1), _array(data2)
+    _require(
+        lhs.ndim >= 2 and rhs.ndim >= 2,
+        "tensor_tensor doesn't broadcast scalars/vectors; use tensor_scalar",
+    )
+    lhs_pf_size, rhs_pf_size, dst_pf_size = map(_partition_and_free, (lhs, rhs, dst))
     _require(
         lhs_pf_size == rhs_pf_size == dst_pf_size,
         "tensor_tensor doesn't broadcast scalars/vectors; use tensor_scalar",
     )
     lhs = lhs.reshape(*lhs_pf_size)
     rhs = rhs.reshape(*rhs_pf_size)
-    dst_dtype = getattr(dst, "dtype", dst.data.dtype)
-    lhs_dtype = getattr(data1, "dtype", lhs.dtype)
-    rhs_dtype = getattr(data2, "dtype", rhs.dtype)
-    if op.is_bitwise:
+    if op.bitwise:
+        dtypes = (dst.dtype, data1.dtype, data2.dtype)
         _require(
-            all(
-                _is_integer_dtype(dtype) for dtype in (lhs_dtype, rhs_dtype, dst_dtype)
-            ),
+            all(_is_integer_dtype(dtype) for dtype in dtypes),
             "data and dst must be integer dtypes for bitvec operators",
         )
-    result = op._run(lhs, rhs)
-    result_value = result.data if isinstance(result, NDArray) else result
-    return _store(dst, result_value.reshape(dst.shape))
+    return _store(dst, _array(op.run(lhs, rhs)).reshape(dst.shape))
 
 
 def tensor_reduce(
@@ -935,31 +796,26 @@ def tensor_reduce(
         name: Optional kernel op name retained for API parity.
     """
     del name
-    if not isinstance(op, SubOp):
-        raise ValueError(f"Unsupported op: {op}")
-    source = np.asarray(_tensor_value(data))
-    if isinstance(axis, list):
-        axis = tuple(axis)
+    _require(isinstance(op, SubOp), f"Unsupported op: {op}")
+    source = _array(data)
     axis_tuple = (axis,) if isinstance(axis, int) else tuple(axis)
-    if axis_tuple != (1,):
-        raise ValueError("not a valid dim")
+    _require(axis_tuple == (1,), "not a valid dim")
     data_par, _ = _partition_and_free(source)
     dst_par, _ = _partition_and_free(dst)
     _require(data_par == dst_par, "tensor_reduce partition dim mismatch")
     _require(data_par <= 128, "tensor_reduce partition dim > 128")
-    exp_pf_size = _partition_and_free(np.sum(source, axis=axis_tuple))
-    dst_pf_size = _partition_and_free(dst)
-    if exp_pf_size != dst_pf_size:
-        raise ValueError("cannot reduce free dim of data into free dim of dst")
-    if not op.is_reducible:
-        raise RuntimeError("Op is not a legal reduction op")
-    dst_dtype = getattr(dst, "dtype", dst.data.dtype)
-    data_dtype = getattr(data, "dtype", source.dtype)
-    if op.is_bitwise and not (
-        _is_integer_dtype(data_dtype) and _is_integer_dtype(dst_dtype)
-    ):
-        raise ValueError("data and dst must be integer dtypes for bitvec operators")
-    if negate and op.is_bitwise:
+    _require(
+        _partition_and_free(np.sum(source, axis=axis_tuple))
+        == _partition_and_free(dst),
+        "cannot reduce free dim of data into free dim of dst",
+    )
+    _require(op.reducible, "Op is not a legal reduction op")
+    if op.bitwise:
+        _require(
+            _is_integer_dtype(data.dtype) and _is_integer_dtype(dst.dtype),
+            "data and dst must be integer dtypes for bitvec operators",
+        )
+    if negate and op.bitwise:
         raise ValueError("can only negate when reducing with an arithmetic operator")
     reduced = cast(Any, op._op).reduce(source, axis=axis_tuple, keepdims=keepdims)
     if negate:
@@ -972,15 +828,6 @@ def tensor_reduce(
         )
         reduced = reduced.reshape(dst.shape)
     return _store(dst, reduced)
-
-
-def _apply_tensor_scalar_op(
-    data: TensorLike, op: SubOp, operand: TensorOrScalar, reverse: bool
-) -> ArrayLike:
-    """Apply tensor_scalar op using SubOp dispatch."""
-    lhs, rhs = (operand, data) if reverse else (data, operand)
-    applied = op._run(lhs, rhs)
-    return applied.data if isinstance(applied, NDArray) else np.asarray(applied)
 
 
 def tensor_scalar(
@@ -1014,31 +861,26 @@ def tensor_scalar(
         raise ValueError(f"Unsupported op: {op0}")
     if not (op1 is None or isinstance(op1, SubOp)):
         raise ValueError(f"Unsupported op: {op1}")
-    op0_bitwise = op0.is_bitwise
-    op1_bitwise = op1.is_bitwise if op1 is not None else op0_bitwise
     _require(
-        op1 is None or op0_bitwise == op1_bitwise,
+        op1 is None or op0.bitwise == op1.bitwise,
         "bitvec and arithmetic ops can't be mixed",
     )
     _require(
-        not (op0_bitwise and engine in (nisa.scalar_engine, nisa.gpsimd_engine)),
+        not (op0.bitwise and engine in (nisa.scalar_engine, nisa.gpsimd_engine)),
         "bitvec ops must run on Vector Engine",
     )
     _require(
         not (op0.name == "rsqrt" and engine == nisa.vector_engine),
         "rsqrt can only run on GpSimd/Scalar Engine",
     )
-    dst_dtype = getattr(dst, "dtype", dst.data.dtype)
-    data_dtype = getattr(data, "dtype", np.asarray(_tensor_value(data)).dtype)
-    if op0_bitwise:
+    if op0.bitwise:
         _require(
-            _is_integer_dtype(data_dtype) and _is_integer_dtype(dst_dtype),
+            _is_integer_dtype(data.dtype) and _is_integer_dtype(dst.dtype),
             "data must be int dtype for bitvec ops",
         )
-    result = np.asarray(_tensor_value(data))
-    result_pf_size = _partition_and_free(result)
+    result = _array(data)
     _require(
-        result_pf_size == _partition_and_free(dst),
+        _partition_and_free(result) == _partition_and_free(dst),
         "tensor_scalar dst must preserve partition/free shape",
     )
     for idx, (op, operand, reverse) in enumerate(
@@ -1049,35 +891,31 @@ def tensor_scalar(
     ):
         if op is None:
             continue
-        _require(
-            not (
-                op0_bitwise
-                and isinstance(operand, NDArray)
-                and not _is_integer_dtype(getattr(operand, "dtype", operand.data.dtype))
-            ),
-            "operand0/1 dtype must match bitvec integer requirements",
-        )
+        if op0.bitwise and isinstance(operand, NDArray):
+            _require(
+                _is_integer_dtype(operand.dtype),
+                "operand0/1 dtype must match bitvec integer requirements",
+            )
         assert operand is not None
         if isinstance(operand, NDArray):
-            operand_arr = np.asarray(_tensor_value(operand))
-            if operand_arr.ndim > 1 and operand_arr.shape[0] == result.shape[0]:
-                operand_free = int(np.prod(operand_arr.shape[1:], dtype=np.int64))
+            operand = _array(operand)
+            if operand.ndim > 1 and operand.shape[0] == result.shape[0]:
+                operand_free = int(np.prod(operand.shape[1:], dtype=np.int64))
                 idx_str = "1st" if idx == 0 else "2nd"
                 _require(
                     operand_free == 1,
                     f"{idx_str} Immediate pointer's number of elements per partition must be 1",
                 )
-        operand_value = _broadcast_tensor_scalar_operand(
-            result,
-            cast(TensorOrScalar, _tensor_value(operand)),
+        operand_value = _broadcast_tensor_scalar_operand(result, operand)
+        result = _array(
+            op.run(*(operand_value, result) if reverse else (result, operand_value))
         )
-        result = _apply_tensor_scalar_op(result, op, operand_value, reverse)
-    return _store(dst, np.asarray(result).reshape(dst.shape))
+    return _store(dst, result.reshape(dst.shape))
 
 
 def activation(
     dst: NDArray,
-    op: SubOp | None,
+    op: SubOp,
     data: NDArray,
     bias: TensorOrScalar | None = None,
     scale: TensorOrScalar = 1.0,
@@ -1099,18 +937,16 @@ def activation(
         reduce_cmd: Unused beta2 reduction command token kept for API parity.
         name: Optional kernel op name retained for API parity.
     """
-    del name
-    if not isinstance(op, SubOp):
-        raise ValueError(f"Unsupported op: {op}")
+    del reduce_cmd, name
+    _require(isinstance(op, SubOp), f"Unsupported op: {op}")
     _require(
         _buffer_name(dst) in ("sbuf", "psum")
         and _buffer_name(data) in ("sbuf", "psum"),
         "activation only supports SBUF/PSUM",
     )
-    data_value = np.asarray(_tensor_value(data), dtype=np.float32)
-    data_par, _ = _partition_and_free(data_value)
-    dst_par, dst_free = _partition_and_free(dst)
+    data_value = _array(data, dtype=np.float32)
     data_par, data_free = _partition_and_free(data_value)
+    dst_par, dst_free = _partition_and_free(dst)
     _require(dst_par == data_par, "dst/data partition dim mismatch")
     _require(dst_free == data_free, "dst/data free dim mismatch")
     _require(data_par <= 128, "data partition dim > 128")
@@ -1120,10 +956,8 @@ def activation(
     )
     scale_value = _activation_operand(scale, data_value.shape, "scale")
     bias_value = _activation_operand(bias, data_value.shape, "bias")
-    pre_act = data_value * scale_value + bias_value
-    output = op._run(pre_act)
-    output_value = output.data if isinstance(output, NDArray) else output
-    _store(dst, np.asarray(output_value).reshape(dst.shape))
+    output_value = _array(op.run(data_value * scale_value + bias_value))
+    _store(dst, output_value.reshape(dst.shape))
     if reduce_res is not None and reduce_op is not None:
         _require(reduce_res.shape == (data_par, 1), "reduce_res must have shape (P, 1)")
         reduced = np.sum(
@@ -1138,7 +972,7 @@ def activation(
 class Builder:
     """Tracks grid dimensions/index for the active interpreted kernel."""
 
-    def __init__(self, grid_dims: Iterable[int] | None = None) -> None:
+    def __init__(self, grid_dims: tuple[int, ...] | None = None) -> None:
         """Initialize grid-tracking state for interpreted kernel launches.
 
         Args:
@@ -1147,7 +981,7 @@ class Builder:
         self.grid_dims = tuple(grid_dims) if grid_dims is not None else (1,)
         self.grid_idx = [0] * len(self.grid_dims)
         self.nc_version = nisa.nc_version.gen2
-        self.fn: Callable[..., Any] | None = None
+        self.fn = None
 
     def set_grid_dim(self, *grid_dims: int) -> None:
         """Update the active launch grid dimensions.
@@ -1182,7 +1016,7 @@ def program_id(axis: int) -> int:
     Args:
         axis: Program-id axis to query.
     """
-    axis = int(axis)
+    # if 0 <= (axis := int(axis)) < len(nki_builder.grid_idx):
     if 0 <= axis < len(nki_builder.grid_idx):
         return nki_builder.grid_idx[axis]
     raise ValueError(f"Invalid axis {axis} for {len(nki_builder.grid_idx)}D grid")
@@ -1248,7 +1082,7 @@ def nki_unpatch_lang(scope: Any = None) -> None:
 class NKIBeta2InterpretedFunction:
     """Callable wrapper that executes NKI Beta 2 kernels with interpreter semantics."""
 
-    def __init__(self, fn: Callable[..., Any]) -> None:
+    def __init__(self, fn: Any) -> None:
         """Store the original kernel function.
 
         Args:
@@ -1265,44 +1099,31 @@ class NKIBeta2InterpretedFunction:
                 ``warmup``, and ``client_manager`` controls.
         """
         grid_dims = kwargs.pop("grid", (1,))
-        if isinstance(grid_dims, int):
-            grid_dims = (grid_dims,)
-        else:
-            grid_dims = tuple(grid_dims)
-        if not grid_dims:
-            raise ValueError("Grid must have at least one dimension")
-
+        grid_dims = (grid_dims,) if isinstance(grid_dims, int) else tuple(grid_dims)
+        _require(grid_dims, "Grid must have at least one dimension")
         nki_builder.grid_dims = tuple(int(dim) for dim in grid_dims)
         nki_builder.grid_idx = [0] * len(nki_builder.grid_dims)
         nki_builder.fn = self.fn
-
         kwargs.pop("warmup", None)
         client_manager = kwargs.pop("client_manager", None)
         if client_manager is not None:
             client_manager.grid_callback(grid_dims)
-
-        exec_globals = cast(Any, self.fn).__globals__
-        exec_globals["sbuf"] = sbuf
-        exec_globals["hbm"] = hbm
-        exec_globals["psum"] = psum
+        exec_globals = self.fn.__globals__
+        exec_globals.update(sbuf=sbuf, hbm=hbm, psum=psum)
         CODE_KEYS.add(get_code_key(self.fn))
-
         kernel_args = tuple(
             arg
             if isinstance(arg, (NDArray, bool, int, float, str)) or arg is None
             else NDArray(value=arg)
             for arg in args
         )
-
-        sig = inspect.signature(self.fn)
-        bound = sig.bind(*kernel_args, **kwargs)
+        bound = inspect.signature(self.fn).bind(*kernel_args, **kwargs)
         bound.apply_defaults()
         for name, arg in bound.arguments.items():
             assert arg is None or isinstance(arg, (bool, int, float, str, NDArray))
             if client_manager is not None:
                 client_manager.arg_callback(name, arg, arg)
-
-        for grid_idx in itertools.product(*[range(dim) for dim in grid_dims]):
+        for grid_idx in itertools.product(*(range(dim) for dim in grid_dims)):
             if len(grid_idx) != len(nki_builder.grid_dims):
                 raise ValueError(
                     "Grid index rank mismatch: got "
