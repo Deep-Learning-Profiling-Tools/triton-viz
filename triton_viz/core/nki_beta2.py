@@ -52,8 +52,9 @@ def _cast_value(value: TensorOrScalar, dtype: DTypeLike) -> ArrayLike:
 
 def _mark_defined(value: Any) -> None:
     """Mark NDArray values as initialized after writes."""
-    if isinstance(value, NDArray):
+    while isinstance(value, NDArray):
         value._defined = True
+        value = value._parent
 
 
 def _store(dst: "NDArray", value: TensorOrScalar) -> "NDArray":
@@ -151,6 +152,7 @@ class NDArray:
         origin: str = "raw",
         parent_ndim: int | None = None,
         defined: bool | None = None,
+        parent: NDArray | None = None,
     ) -> None:
         """Initialize an interpreter tensor backed by NumPy storage.
 
@@ -165,10 +167,12 @@ class NDArray:
             parent_ndim: Rank of the parent tensor when this value is a view.
             defined: Explicit initialized-state override for undefined-use
                 tracking.
+            parent: Parent tensor when this value is a sliced view.
         """
         self.buffer = buffer
         self.dtype = dtype
         self._origin = origin
+        self._parent = parent
         storage_shape = tuple(shape) if shape is not None else None
         storage_dtype = _storage_dtype(dtype)
         if value is None:
@@ -239,12 +243,6 @@ class NDArray:
             value = key.data if isinstance(key, NDArray) else key
             if isinstance(value, np.ndarray) and value.size == 1:
                 value = value.reshape(-1)[0]
-            if isinstance(value, (int, np.integer)):
-                dim = self.data.shape[axis]
-                index = int(value)
-                if index < 0:
-                    index += dim
-                value = slice(index, index + 1)
             new_keys.append(value)
         sliced_value = self.data[tuple(new_keys)]
         return NDArray(
@@ -253,6 +251,7 @@ class NDArray:
             origin="access",
             parent_ndim=self._parent_ndim,
             defined=self._defined,
+            parent=self,
         )
 
     def __setitem__(self, keys: Any, value: TensorOrScalar) -> "NDArray":
@@ -523,13 +522,15 @@ def nc_matmul(
     _require(_buffer_name(moving) == "sbuf", "nc_matmul requires moving in SBUF")
     stationary_value = np.asarray(_tensor_value(stationary))
     moving_value = np.asarray(_tensor_value(moving))
+    stationary_par, stationary_free = _partition_and_free(stationary_value)
+    moving_par, moving_free = _partition_and_free(moving_value)
     _require(
-        stationary_value.shape[0] == moving_value.shape[0],
+        stationary_par == moving_par,
         "partition dims of stationary and moving must match",
     )
-    _require(stationary_value.shape[0] <= 128, "partition dim of stationary > 128")
-    _require(stationary_value.shape[1] <= 128, "free dim of stationary > 128")
-    _require(moving_value.shape[1] <= 512, "free dim of moving > 512")
+    _require(stationary_par <= 128, "partition dim of stationary > 128")
+    _require(stationary_free <= 128, "free dim of stationary > 128")
+    _require(moving_free <= 512, "free dim of moving > 512")
     stationary_dtype = getattr(stationary, "dtype", stationary_value.dtype)
     moving_dtype = getattr(moving, "dtype", moving_value.dtype)
     dst_dtype = getattr(dst, "dtype", dst.data.dtype)
@@ -556,8 +557,7 @@ def nc_matmul(
             row_size <= 128 and col_size <= 128, "tile_size larger than (128, 128)"
         )
         _require(
-            stationary_value.shape[0] <= row_size
-            and stationary_value.shape[1] <= col_size,
+            stationary_par <= row_size and stationary_free <= col_size,
             "stationary tile size exceeds tile_size",
         )
         _require(
@@ -568,8 +568,13 @@ def nc_matmul(
         )
         _require(start_row <= 128, "start row must not exceed 128")
         _require(start_col <= 128, "start col must not exceed 128")
-    result = stationary_value.T @ moving_value
-    return _store(dst, np.asarray(dst.data) + _cast_value(result, dst.dtype))
+    stationary_matrix = stationary_value.reshape(stationary_par, stationary_free)
+    moving_matrix = moving_value.reshape(moving_par, moving_free)
+    result = stationary_matrix.T @ moving_matrix
+    return _store(
+        dst,
+        np.asarray(dst.data) + _cast_value(result.reshape(dst.shape), dst.dtype),
+    )
 
 
 def reciprocal(dst: NDArray, data: NDArray, name: str | None = None) -> NDArray:
@@ -900,11 +905,8 @@ def tensor_reduce(
     if isinstance(axis, list):
         axis = tuple(axis)
     axis_tuple = (axis,) if isinstance(axis, int) else tuple(axis)
-    if not axis_tuple or axis_tuple[0] != 1:
-        raise ValueError("tensor_reduce must start reducing over axis 1")
-    if any(b - a != 1 for a, b in zip(axis_tuple, axis_tuple[1:])):
-        raise ValueError("tensor_reduce axes must increase consecutively")
-    _require(len(axis_tuple) <= 4, "tensor_reduce must reduce on <= 4 dimensions")
+    if axis_tuple != (1,):
+        raise ValueError("not a valid dim")
     data_par, _ = _partition_and_free(source)
     dst_par, _ = _partition_and_free(dst)
     _require(data_par == dst_par, "tensor_reduce partition dim mismatch")
@@ -993,9 +995,11 @@ def tensor_scalar(
             "data must be int dtype for bitvec ops",
         )
     result = np.asarray(_tensor_value(data))
-    for op, operand, reverse in (
-        (op0, operand0, reverse0),
-        (op1, operand1, reverse1),
+    for idx, (op, operand, reverse) in enumerate(
+        (
+            (op0, operand0, reverse0),
+            (op1, operand1, reverse1),
+        ),
     ):
         if op is None:
             continue
@@ -1008,6 +1012,15 @@ def tensor_scalar(
             "operand0/1 dtype must match bitvec integer requirements",
         )
         assert operand is not None
+        if isinstance(operand, NDArray):
+            operand_arr = np.asarray(_tensor_value(operand))
+            if operand_arr.ndim > 1 and operand_arr.shape[0] == result.shape[0]:
+                operand_free = int(np.prod(operand_arr.shape[1:], dtype=np.int64))
+                idx_str = "1st" if idx == 0 else "2nd"
+                _require(
+                    operand_free == 1,
+                    f"{idx_str} Immediate pointer's number of elements per partition must be 1",
+                )
         operand_value = _broadcast_tensor_scalar_operand(
             result,
             cast(TensorOrScalar, _tensor_value(operand)),

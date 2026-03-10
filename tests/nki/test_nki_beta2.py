@@ -876,12 +876,9 @@ def test_tensor_tensor_rejects_documented_psum_power_dst(patched_scope):
 @pytest.mark.parametrize(
     "dst_shape,data_shape,axis,keepdims",
     (
+        ((128, 1), (128, 32), 1, False),
         ((128, 1), (128, 32), [1], False),
-        ((32, 4, 5), (32, 2, 3, 4, 5), [1, 2], False),
-        ((32, 20), (32, 2, 3, 4, 5), [1, 2], False),
-        ((32, 5), (32, 2, 3, 4, 5), [1, 2, 3], False),
-        ((32, 1), (32, 2, 3, 4, 5), [1, 2, 3, 4], False),
-        ((32, 1, 1, 1, 1), (32, 2, 3, 4, 5), [1, 2, 3, 4], True),
+        ((128, 1), (128, 32), (1,), False),
         ((32, 2, 3), (32, 5, 6), [1], False),
         ((32, 1, 2, 3), (32, 5, 6), [1], True),
     ),
@@ -894,7 +891,8 @@ def test_tensor_reduce_documented_shape_axis_success_cases(
     src = _typed_ndarray(data_shape, "float32", buffer="sbuf")
     dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="sbuf")
     nisa.tensor_reduce(dst, nl.add, src, axis=axis, keepdims=keepdims)
-    expected = np.sum(src.data, axis=tuple(axis), keepdims=keepdims)
+    axis_tuple = (axis,) if isinstance(axis, int) else tuple(axis)
+    expected = np.sum(src.data, axis=axis_tuple, keepdims=keepdims)
     _assert_tensor_equal(dst.data, expected.reshape(dst.shape))
 
 
@@ -928,27 +926,36 @@ def test_tensor_reduce_rejects_documented_illegal_ops(patched_scope, op):
 
 
 @pytest.mark.parametrize(
-    "dst_shape,data_shape,axis",
+    "axis",
+    ([0], [0, 1], [1, 2], [1, 2, 3], [1, 2, 3, 4], [2, 3], [1, 3]),
+)
+def test_tensor_reduce_rejects_compiler_invalid_dims(patched_scope, axis):
+    """tensor_reduce should match compiler parity for invalid reduction dims."""
+    del patched_scope
+    src = _typed_ndarray((128, 2, 3, 4, 5), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(128, 1), dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="not a valid dim"):
+        nisa.tensor_reduce(dst, nl.add, src, axis=axis)
+
+
+@pytest.mark.parametrize(
+    "dst_shape,data_shape",
     (
-        ((128, 32), (128, 32), [0]),
-        ((128, 32), (128, 32), [0, 1]),
-        ((128, 2, 3, 4), (128, 2, 3, 4), [2, 3]),
-        ((128, 2, 3, 4), (128, 2, 3, 4), [1, 3]),
-        ((128, 1), (256, 32), [1]),
-        ((256, 1), (256, 32), [1]),
-        ((128, 2), (128, 32), [1]),
-        ((128, 1), (128, 2, 4), [1]),
+        ((128, 1), (256, 32)),
+        ((256, 1), (256, 32)),
+        ((128, 2), (128, 32)),
+        ((128, 1), (128, 2, 4)),
     ),
 )
 def test_tensor_reduce_rejects_documented_axis_and_shape_failures(
-    patched_scope, dst_shape, data_shape, axis
+    patched_scope, dst_shape, data_shape
 ):
     """tensor_reduce should reject documented illegal axis/shape combinations."""
     del patched_scope
     src = _typed_ndarray(data_shape, "float32", buffer="sbuf")
     dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="sbuf")
-    with pytest.raises(ValueError, match="axis|partition|reduce|shape|128"):
-        nisa.tensor_reduce(dst, nl.add, src, axis=axis)
+    with pytest.raises(ValueError, match="partition|reduce|shape|128"):
+        nisa.tensor_reduce(dst, nl.add, src, axis=[1])
 
 
 @pytest.mark.parametrize(
@@ -1413,6 +1420,17 @@ def test_nc_matmul_accumulates_across_calls(patched_scope):
                 seed += 4
 
 
+def test_nc_matmul_flattens_rank3_moving_operand(patched_scope):
+    """nc_matmul should flatten moving free dims before the matrix multiply."""
+    del patched_scope
+    stationary = _typed_ndarray((128, 32), "float32", buffer="sbuf")
+    moving = _typed_ndarray((128, 2, 16), "float32", buffer="sbuf", seed=1)
+    dst = b2.NDArray(shape=(32, 2, 16), dtype=nl.float32, buffer="psum")
+    nisa.nc_matmul(dst, stationary, moving)
+    expected = stationary.data.reshape(128, 32).T @ moving.data.reshape(128, 32)
+    _assert_tensor_equal(dst.data, expected.reshape(dst.shape))
+
+
 @pytest.mark.parametrize("dtype_name", ("float64", "float32", "bfloat16", "int16"))
 def test_reciprocal_value_dtype_cases(patched_scope, dtype_name):
     """reciprocal should match numpy and overwrite non-zero destination."""
@@ -1598,7 +1616,7 @@ def test_exponential_requires_nc_v4_or_newer(patched_scope):
     b2.nki_builder.nc_version = nisa.nc_version.gen3
     try:
         with pytest.raises(
-            RuntimeError, match="exponential only supports neuron-core-v4 or newer"
+            ValueError, match="exponential only supports >= NeuronCore-v4"
         ):
             getattr(nisa, "exponential")(_zeros((1, 2)), _nd([[0.0, 1.0]]))
     finally:
@@ -1629,11 +1647,31 @@ def test_ndarray_use_before_write_is_rejected(patched_scope):
         nisa.tensor_copy(dst, src)
 
 
-def test_ndarray_int_index_keeps_singleton_dim():
-    """Integer indexing should keep a singleton dimension."""
+def test_slice_writes_mark_parent_tensor_defined(patched_scope):
+    """Slice writes should allow a later full-tensor read from the parent."""
+    del patched_scope
+    src = _nd(np.arange(128 * 32, dtype=np.float32).reshape(128, 32))
+    src_tile = nl.ndarray(src.shape, dtype=nl.float32, buffer=nl.sbuf)
+    assembled = nl.ndarray(src.shape, dtype=nl.float32, buffer=nl.sbuf)
+    out = b2.NDArray(shape=src.shape, dtype=nl.float32, buffer="sbuf")
+
+    nisa.dma_copy(dst=src_tile, src=src)
+    nisa.tensor_copy(dst=assembled[:, :16], src=src_tile[:, :16])
+    nisa.tensor_copy(dst=assembled[:, 16:], src=src_tile[:, 16:])
+    nisa.tensor_copy(dst=out, src=assembled)
+
+    assert np.array_equal(out.data, src.data)
+
+
+def test_ndarray_int_index_drops_axis():
+    """Integer indexing should match NumPy rank-reducing semantics."""
     tensor = _nd(np.arange(24, dtype=np.float32).reshape(2, 3, 4))
     slice0 = tensor[0]
-    assert slice0.shape == (1, 3, 4)
+    slice1 = tensor[:, 0]
+    assert slice0.shape == (3, 4)
+    assert slice1.shape == (2, 4)
+    assert np.array_equal(slice0.data, tensor.data[0])
+    assert np.array_equal(slice1.data, tensor.data[:, 0])
 
 
 def test_dma_copy_ap_mismatch_error_message(patched_scope):
@@ -1684,8 +1722,8 @@ def test_ndarray_index_assignment_and_binary_surface(patched_scope):
     tensor = _nd(np.arange(6, dtype=np.float32).reshape(2, 3))
     index = _nd(np.array(1, dtype=np.int32))
 
-    assert np.array_equal(tensor[index].data, tensor.data[1:2])
-    assert np.array_equal(tensor[-1].data, tensor.data[1:2])
+    assert np.array_equal(tensor[index].data, tensor.data[1])
+    assert np.array_equal(tensor[-1].data, tensor.data[1])
 
     tensor[:, :] = _nd(np.full((2, 3), 7.0, dtype=np.float32))
     assert np.array_equal(tensor.data, np.full((2, 3), 7.0, dtype=np.float32))
@@ -1742,20 +1780,30 @@ def test_exponential_reduce_res_records_row_sums(patched_scope):
     dst = _zeros((2, 2), dtype=np.float32)
     reduce_res = _zeros((2, 1), dtype=np.float32)
     max_value = _nd(np.array([[0.0], [2.0]], dtype=np.float32))
-    getattr(nisa, "exponential")(dst, src, max_value=max_value, reduce_res=reduce_res)
-    expected = np.exp(src.data - max_value.data)
-    assert np.array_equal(dst.data, expected)
-    assert np.array_equal(reduce_res.data, expected.sum(axis=1, keepdims=True))
+    prev = b2.nki_builder.nc_version
+    b2.nki_builder.nc_version = nisa.nc_version.gen4
+    try:
+        getattr(nisa, "exponential")(
+            dst, src, max_value=max_value, reduce_res=reduce_res
+        )
+        expected = np.exp(src.data - max_value.data)
+        assert np.array_equal(dst.data, expected)
+        assert np.array_equal(reduce_res.data, expected.sum(axis=1, keepdims=True))
+    finally:
+        b2.nki_builder.nc_version = prev
 
 
 def test_tensor_scalar_and_tensor_tensor_public_validation_edges(patched_scope):
-    """Public tensor ops should cover remaining unsupported and exact-shape cases."""
+    """Public tensor ops should cover remaining unsupported validation edges."""
     del patched_scope
     data = _typed_ndarray((2, 4), "int32", buffer="sbuf")
     dst = b2.NDArray(shape=(2, 4), dtype=nl.int32, buffer="sbuf")
     operand = _nd(np.full((2, 4), 2, dtype=np.int32))
-    nisa.tensor_scalar(dst, data, nl.add, operand)
-    assert np.array_equal(dst.data, data.data + operand.data)
+    with pytest.raises(
+        ValueError,
+        match="1st Immediate pointer's number of elements per partition must be 1",
+    ):
+        nisa.tensor_scalar(dst, data, nl.add, operand)
 
     with pytest.raises(ValueError, match="operand0/1 dtype must match bitvec integer"):
         nisa.tensor_scalar(
