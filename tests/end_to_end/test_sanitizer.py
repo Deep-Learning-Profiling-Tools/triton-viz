@@ -881,6 +881,34 @@ def test_oob_with_fake_tensor(_isolate_virtual_memory):
 
 @triton_viz.trace(client=SymbolicSanitizer())
 @triton.jit
+def block_ptr_sum_kernel(
+    s_ptr,
+    z_ptr,
+    T: tl.constexpr,
+    S: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+):
+    o_i = tl.arange(0, BT)
+    m = tl.where(o_i[:, None] <= o_i[None, :], 1.0, 0.0)
+    b_z = tl.zeros([BS], dtype=tl.float32)
+    p_s = tl.make_block_ptr(s_ptr, (T, S), (S, 1), (0, 0), (BT, BS), (1, 0))
+    p_z = tl.make_block_ptr(z_ptr, (T, S), (S, 1), (0, 0), (BT, BS), (1, 0))
+    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_c = b_z[None, :] + tl.dot(m, b_s, allow_tf32=False)
+    tl.store(p_z, b_c.to(p_z.dtype.element_ty), boundary_check=(0, 1))
+    b_z += tl.sum(b_s, 0)
+
+
+def test_reduce_symbolic_core_dtype():
+    """tl.sum on cast block_ptr data must preserve block_type dtype."""
+    s = torch.randn(16, 16, device="cpu")
+    z = torch.empty_like(s)
+    block_ptr_sum_kernel[(1,)](s, z, T=16, S=16, BT=16, BS=16)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
 def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     offs = tl.arange(0, BLOCK)
