@@ -32,7 +32,7 @@ def softmax_kernel(in_tensor, out_tensor):
 
 def _run_demo():
     triton_viz_enabled = True
-    kernel_grid = (1,)
+    kernel_grid = (1, 1, 1)
     x_small = np.random.rand(16, 32).astype(np.float32)
     y_small = np.empty(x_small.shape, dtype=x_small.dtype)
     kernel_args = (x_small, y_small)
