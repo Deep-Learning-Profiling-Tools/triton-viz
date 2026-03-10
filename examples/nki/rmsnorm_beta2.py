@@ -54,11 +54,11 @@ def rmsnorm_kernel(x, gamma, out, eps=1e-6):
         )
 
         out_tile = nl.ndarray((tile_p, dim), dtype=out.dtype, buffer=nl.sbuf)
-        nisa.tensor_scalar(
+        nisa.tensor_tensor(
             dst=out_tile,
-            data=norm_tile,
-            op0=nl.multiply,
-            operand0=gamma_tile,
+            data1=norm_tile,
+            data2=gamma_tile,
+            op=nl.multiply,
         )
         nisa.dma_copy(dst=out[nl.ds(row_start, tile_p), :], src=out_tile)
     return out
@@ -76,7 +76,7 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
 
     device = torch_xla.device()
     tensors = [torch.as_tensor(array, device=device) for array in arrays]
-    compiled_kernel = nki.jit(kernel, platform_target="trn2")
+    compiled_kernel = nki.jit(kernel, platform_target="trn1")
     result = compiled_kernel[kernel_grid](*tensors)
     torch_xla.sync()
     return result.cpu().numpy()

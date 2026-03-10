@@ -93,25 +93,22 @@ def tiled_attention_kernel(
                     operand0=inv_sqrt_d,
                 )
 
-                row_max = nl.ndarray((tile_m, 1), dtype=nl.float32, buffer=nl.sbuf)
+                neg_row_max = nl.ndarray((tile_m, 1), dtype=nl.float32, buffer=nl.sbuf)
                 nisa.tensor_reduce(
-                    dst=row_max, op=nl.maximum, data=scores, axis=1, keepdims=True
-                )
-
-                centered = nl.ndarray(
-                    (tile_m, n_size), dtype=nl.float32, buffer=nl.sbuf
-                )
-                nisa.tensor_scalar(
-                    dst=centered,
+                    dst=neg_row_max,
+                    op=nl.maximum,
                     data=scores,
-                    op0=nl.subtract,
-                    operand0=row_max,
+                    axis=1,
+                    negate=True,
+                    keepdims=True,
                 )
 
                 exp_scores = nl.ndarray(
                     (tile_m, n_size), dtype=nl.float32, buffer=nl.sbuf
                 )
-                nisa.exponential(dst=exp_scores, src=centered)
+                nisa.activation(
+                    dst=exp_scores, op=nl.exp, data=scores, bias=neg_row_max
+                )
 
                 row_sum = nl.ndarray((tile_m, 1), dtype=nl.float32, buffer=nl.sbuf)
                 nisa.tensor_reduce(
@@ -160,6 +157,22 @@ def _numpy_tiled_attention(q, k, v):
 
 
 def _run_with_xla(kernel, kernel_grid, *arrays):
+    import torch
+
+    device = "cpu"
+    tensors = [
+        torch.as_tensor(array, device=device)
+        if isinstance(array, np.ndarray)
+        else array
+        for array in arrays
+    ]
+    nki.trace(kernel, platform_target="trn1").specialize(*tensors)
+    raise
+
+    # tensors = [torch.as_tensor(array, device=device) if isinstance(array, np.ndarray) else array for array in arrays]
+    # compiled_kernel = nki.jit(kernel, platform_target="trn1")
+    # result = compiled_kernel[kernel_grid](*tensors)
+
     """Run one beta2 kernel invocation on an XLA device."""
     import torch
     import torch_xla
@@ -171,7 +184,7 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
         else array
         for array in arrays
     ]
-    compiled_kernel = nki.jit(kernel, platform_target="trn2")
+    compiled_kernel = nki.jit(kernel, platform_target="trn1")
     result = compiled_kernel[kernel_grid](*tensors)
     torch_xla.sync()
     return result.cpu().numpy()

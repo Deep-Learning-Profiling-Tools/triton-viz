@@ -159,7 +159,7 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
         else array
         for array in arrays
     ]
-    compiled_kernel = nki.jit(kernel, platform_target="trn2")
+    compiled_kernel = nki.jit(kernel, platform_target="trn1")
     out_q, out_k = compiled_kernel[kernel_grid](*tensors)
     torch_xla.sync()
     return out_q.cpu().numpy(), out_k.cpu().numpy()

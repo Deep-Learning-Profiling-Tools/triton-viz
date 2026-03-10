@@ -67,7 +67,7 @@ def _run_with_xla(kernel, kernel_grid, *arrays):
 
     device = torch_xla.device()
     tensors = [torch.as_tensor(array, device=device) for array in arrays]
-    compiled_kernel = nki.jit(kernel, platform_target="trn2")
+    compiled_kernel = nki.jit(kernel, platform_target="trn1")
     result = compiled_kernel[kernel_grid](*tensors)
     torch_xla.sync()
     return result.cpu().numpy()
