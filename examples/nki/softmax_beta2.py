@@ -6,6 +6,7 @@ import numpy as np
 import triton_viz
 
 TRITON_VIZ_ENABLED = True
+PRE_TRACE = True  # if True, run the NKI Beta 2 tracer before running interpreter. Can be set to false, though has less guarantees with matching NKI compiler behavior.
 
 
 def softmax_kernel(x, out):
@@ -85,7 +86,7 @@ def _run_demo():
 
     if TRITON_VIZ_ENABLED:
         traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(softmax_kernel)
-        traced_kernel[kernel_grid](*kernel_args)
+        traced_kernel[kernel_grid](*kernel_args, pre_trace=PRE_TRACE)
         assert np.allclose(expected, out)
         print("☑️ Actual equals expected!")
         triton_viz.launch(share=False)

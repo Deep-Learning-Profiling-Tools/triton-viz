@@ -229,9 +229,15 @@ class NKITrace(KernelInterface, TraceInterface):
     def __call__(self, *args, **kwargs):
         return self[(1,)](*args, **kwargs)
 
-    def run(self, *args, **kwargs):
-        if self.backend == "nki_beta2":
-            import nki  # do initial NKI Beta 2 trace to capture some semantic errors
+    def run(self, *args, pre_trace=True, **kwargs):
+        """
+        pre_trace: determines whether to do an initial NKI Beta 2 trace to capture some semantic errors.
+            pre_trace=False has fewer guarantees on interpreter parity with NKI compiler but must be set
+            if you want full python flexibility inside kernels (e.g. importing modules inside a kernel).
+            Does nothing if self.backend == 'nki'.
+        """
+        if self.backend == "nki_beta2" and pre_trace:
+            import nki
 
             kwargs.pop("warmup", None)
             grid = kwargs.pop("grid", None)
