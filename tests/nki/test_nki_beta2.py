@@ -542,6 +542,34 @@ def test_tensor_scalar_broadcasts_free_dim_only(patched_scope):
         nisa.tensor_scalar(dst, data, nl.add, operand_partition)
 
 
+@pytest.mark.parametrize(
+    "data_shape,operand_shape,dst_shape",
+    (
+        ((16, 8), (16, 1), (16, 2, 4)),
+        ((16, 8), (16, 1), (16, 4, 2)),
+        ((16, 2, 4), (16, 1), (16, 8)),
+        ((16, 2, 4), (16, 1), (16, 2, 4)),
+        ((16, 2, 4), (16, 1), (16, 4, 2)),
+        ((16, 4), (16, 1, 1), (16, 4)),
+    ),
+)
+def test_tensor_scalar_accepts_mismatch3_row_broadcast_reshapes(
+    patched_scope, data_shape, operand_shape, dst_shape
+):
+    """tensor_scalar should accept mismatch3 row-broadcast reshape cases."""
+    del patched_scope
+    data = _nd(np.arange(np.prod(data_shape), dtype=np.float32).reshape(data_shape))
+    operand = _nd(
+        np.linspace(0.5, 1.5, num=np.prod(operand_shape), dtype=np.float32).reshape(
+            operand_shape
+        )
+    )
+    dst = _zeros(dst_shape)
+    nisa.tensor_scalar(dst, data, nl.multiply, operand)
+    expected = data.data * operand.data.reshape((data_shape[0],) + (1,) * (len(data_shape) - 1))
+    assert np.array_equal(dst.data, expected.reshape(dst_shape))
+
+
 def test_tensor_reduce_shape(patched_scope):
     """tensor_reduce should reduce across the selected axis."""
     del patched_scope
@@ -677,6 +705,21 @@ def test_nc_transpose_rejects_documented_dtype_mismatch(patched_scope):
         nisa.nc_transpose(dst, src, engine=nisa.vector_engine)
 
 
+@pytest.mark.parametrize("dst_shape", ((3, 2, 4), (3, 4, 2)))
+def test_nc_transpose_mismatch3_engine_split(dst_shape, patched_scope):
+    """nc_transpose should allow reshape dst on vector engine but not tensor engine."""
+    del patched_scope
+    src = _typed_ndarray((8, 3), "float32", buffer="sbuf")
+    vec_dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="sbuf")
+    ten_dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="psum")
+    nisa.nc_transpose(vec_dst, src, engine=nisa.vector_engine)
+    assert np.array_equal(vec_dst.data, src.data.T.reshape(dst_shape))
+    with pytest.raises(
+        ValueError, match="Tensor Engine nc_transpose requires dst shape"
+    ):
+        nisa.nc_transpose(ten_dst, src, engine=nisa.tensor_engine)
+
+
 @pytest.mark.parametrize(
     "stationary_shape,moving_shape",
     (
@@ -724,6 +767,7 @@ def test_nc_matmul_rejects_documented_dtype_rules(
 @pytest.mark.parametrize(
     "tile_position,tile_size",
     (
+        ((0, 0), (32, 32)),
         ((0, 0), (128, 128)),
         ((0, 0), (64, 128)),
         ((64, 0), (64, 128)),
@@ -772,6 +816,8 @@ def test_nc_matmul_documented_tiling_success_cases(
         ((64, 128), (64, 256), (0, 32), (64, 64)),
         ((64, 128), (64, 256), (256, 0), (64, 64)),
         ((64, 128), (64, 256), (0, 256), (64, 64)),
+        ((48, 48), (48, 48), (0, 0), (48, 48)),
+        ((96, 96), (96, 128), (96, 96), (96, 96)),
     ),
 )
 def test_nc_matmul_rejects_documented_tiling_failures(
@@ -794,6 +840,31 @@ def test_nc_matmul_rejects_documented_tiling_failures(
             tile_position=tile_position,
             tile_size=tile_size,
         )
+
+
+@pytest.mark.parametrize(
+    "stationary_shape,dst_shape",
+    (
+        ((32, 6), (2, 3, 4, 5)),
+        ((32, 2, 3), (2, 3, 4, 5)),
+        ((32, 2, 3), (6, 4, 5)),
+        ((32, 2, 3), (2, 12, 5)),
+        ((32, 2, 3), (2, 3, 20)),
+        ((32, 2, 3), (2, 60)),
+    ),
+)
+def test_nc_matmul_rejects_mismatch3_unsupported_reshapes(
+    patched_scope, stationary_shape, dst_shape
+):
+    """nc_matmul should reject mismatch3 shape cases that do not compile."""
+    del patched_scope
+    stationary = _typed_ndarray(stationary_shape, "float32", buffer="sbuf")
+    moving = _typed_ndarray((32, 4, 5), "float32", buffer="sbuf", seed=1)
+    dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="psum")
+    with pytest.raises(
+        ValueError, match="rank-2|preserve stationary free dim and moving free dims"
+    ):
+        nisa.nc_matmul(dst, stationary, moving)
 
 
 @pytest.mark.parametrize("tile_position,tile_size", (((), (64, 64)), ((64, 64), ())))
@@ -879,8 +950,8 @@ def test_tensor_tensor_rejects_documented_psum_power_dst(patched_scope):
         ((128, 1), (128, 32), 1, False),
         ((128, 1), (128, 32), [1], False),
         ((128, 1), (128, 32), (1,), False),
-        ((32, 2, 3), (32, 5, 6), [1], False),
-        ((32, 1, 2, 3), (32, 5, 6), [1], True),
+        ((32, 6), (32, 5, 6), [1], False),
+        ((32, 1, 6), (32, 5, 6), [1], True),
     ),
 )
 def test_tensor_reduce_documented_shape_axis_success_cases(
@@ -936,6 +1007,30 @@ def test_tensor_reduce_rejects_compiler_invalid_dims(patched_scope, axis):
     dst = b2.NDArray(shape=(128, 1), dtype=nl.float32, buffer="sbuf")
     with pytest.raises(ValueError, match="not a valid dim"):
         nisa.tensor_reduce(dst, nl.add, src, axis=axis)
+
+
+@pytest.mark.parametrize(
+    "dst_shape,keepdims",
+    (
+        ((16, 4, 2), True),
+        ((16, 4, 2), False),
+        ((16, 2, 4), True),
+        ((16, 2, 4), False),
+        ((16, 1, 2, 4), True),
+        ((16, 1, 2, 4), False),
+    ),
+)
+def test_tensor_reduce_rejects_mismatch3_reshaped_destinations(
+    patched_scope, dst_shape, keepdims
+):
+    """tensor_reduce should reject mismatch3 reshaped destinations."""
+    del patched_scope
+    src = _typed_ndarray((16, 3, 8), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=dst_shape, dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(
+        ValueError, match="cannot reduce free dim of data into free dim of dst"
+    ):
+        nisa.tensor_reduce(dst, nl.add, src, axis=1, keepdims=keepdims)
 
 
 @pytest.mark.parametrize(
@@ -1128,6 +1223,50 @@ def test_activation_documented_vector_success_case(patched_scope):
         reduce_cmd=nisa.reduce_cmd.reset_reduce,
     )
     assert dst.data.shape == (3, 35)
+    assert np.array_equal(
+        reduce_res.data,
+        np.sum(dst.data.reshape(dst.shape[0], -1), axis=1, keepdims=True),
+    )
+
+
+def test_activation_accepts_mismatch3_reduce_res_p_1(patched_scope):
+    """activation should materialize the canonical mismatch3 reduce_res tile."""
+    del patched_scope
+    data = _typed_ndarray((8, 4), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(8, 4), dtype=nl.float32, buffer="sbuf")
+    reduce_res = b2.NDArray(shape=(8, 1), dtype=nl.float32, buffer="sbuf")
+    nisa.activation(
+        dst,
+        nl.copy,
+        data,
+        reduce_op=nl.add,
+        reduce_res=reduce_res,
+        reduce_cmd=nisa.reduce_cmd.reset_reduce,
+    )
+    assert np.array_equal(
+        reduce_res.data,
+        np.sum(dst.data.reshape(dst.shape[0], -1), axis=1, keepdims=True),
+    )
+
+
+@pytest.mark.parametrize("reduce_shape", ((8,), (8, 1, 1)))
+def test_activation_rejects_noncanonical_reduce_res_shapes(
+    patched_scope, reduce_shape
+):
+    """activation should reject reduce_res shapes outside the canonical `(P, 1)`."""
+    del patched_scope
+    data = _typed_ndarray((8, 4), "float32", buffer="sbuf")
+    dst = b2.NDArray(shape=(8, 4), dtype=nl.float32, buffer="sbuf")
+    reduce_res = b2.NDArray(shape=reduce_shape, dtype=nl.float32, buffer="sbuf")
+    with pytest.raises(ValueError, match="reduce_res must have shape"):
+        nisa.activation(
+            dst,
+            nl.copy,
+            data,
+            reduce_op=nl.add,
+            reduce_res=reduce_res,
+            reduce_cmd=nisa.reduce_cmd.reset_reduce,
+        )
 
 
 def test_activation_rejects_documented_reduce_op_failure(patched_scope):
@@ -1609,6 +1748,31 @@ def test_tensor_tensor_views_second_last_dims_to_dst(patched_scope):
     assert np.array_equal(dst.data, expected)
 
 
+@pytest.mark.parametrize(
+    "lhs_shape,rhs_shape,dst_shape",
+    (
+        ((32, 6), (32, 2, 3), (32, 6)),
+        ((32, 6), (32, 2, 3), (32, 3, 2)),
+        ((32, 2, 6), (32, 3, 4), (32, 3, 4)),
+    ),
+)
+def test_tensor_tensor_accepts_mismatch3_ap_compatible_reshapes(
+    patched_scope, lhs_shape, rhs_shape, dst_shape
+):
+    """tensor_tensor should accept mismatch3 AP-compatible reshape cases."""
+    del patched_scope
+    lhs = _nd(np.arange(np.prod(lhs_shape), dtype=np.float32).reshape(lhs_shape))
+    rhs = _nd(
+        np.arange(np.prod(rhs_shape), dtype=np.float32).reshape(rhs_shape) + 1.0
+    )
+    dst = _zeros(dst_shape)
+    nisa.tensor_tensor(dst, lhs, rhs, nl.add)
+    expected = lhs.data.reshape(lhs_shape[0], -1) + rhs.data.reshape(
+        rhs_shape[0], -1
+    )
+    assert np.array_equal(dst.data, expected.reshape(dst_shape))
+
+
 def test_exponential_requires_nc_v4_or_newer(patched_scope):
     """exponential should reject simulated pre-v4 targets."""
     del patched_scope
@@ -1675,13 +1839,13 @@ def test_ndarray_int_index_drops_axis():
 
 
 def test_dma_copy_ap_mismatch_error_message(patched_scope):
-    """AP mismatch copies should raise the expected compiler-like error."""
+    """dma_copy should reject non-view reshapes that hardware does not compile."""
     del patched_scope
     rows, cols = 2, 8
     src = _nd(np.arange(rows * cols, dtype=np.float32).reshape(rows, cols))
     dst = _nd(np.zeros((rows, cols // 2, 2), dtype=np.float32))
     with pytest.raises(ValueError, match="Expect AP same number of elements"):
-        nisa.dma_copy(dst=dst[:, :, 0], src=src[:, ::2])
+        nisa.dma_copy(dst=dst, src=src)
 
 
 def test_tensor_negation_is_not_supported(patched_scope):

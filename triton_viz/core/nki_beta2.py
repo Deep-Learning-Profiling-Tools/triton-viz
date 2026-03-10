@@ -114,6 +114,22 @@ def _partition_and_free(value: TensorLike) -> tuple[int, int]:
     return shape[0], free
 
 
+def _is_access_view(value: Any) -> bool:
+    """Return whether a tensor is a sliced access view."""
+    return isinstance(value, NDArray) and value._origin == "access"
+
+
+def _can_reshape_view_copy(
+    dst: NDArray, src: TensorOrScalar, src_value: ArrayLike
+) -> bool:
+    """Return whether a copy may reshape an access view with equal elements."""
+    return (
+        int(np.prod(src_value.shape, dtype=np.int64))
+        == int(np.prod(dst.shape, dtype=np.int64))
+        and (_is_access_view(dst) or _is_access_view(src))
+    )
+
+
 def _nc_version_value(version: Any) -> int:
     """Normalize NC version tokens into plain integers for comparisons."""
     raw = getattr(version, "value", version)
@@ -468,6 +484,10 @@ def nc_transpose(
             src_buffer == "sbuf" and dst_buffer == "psum",
             "Tensor Engine nc_transpose requires SBUF -> PSUM",
         )
+        _require(
+            tuple(dst.shape) == (data_free, data_par),
+            "Tensor Engine nc_transpose requires dst shape (free, partition)",
+        )
     data_dtype = getattr(data, "dtype", np.asarray(_tensor_value(data)).dtype)
     dst_dtype = getattr(dst, "dtype", dst.data.dtype)
     _require(
@@ -522,6 +542,7 @@ def nc_matmul(
     _require(_buffer_name(moving) == "sbuf", "nc_matmul requires moving in SBUF")
     stationary_value = np.asarray(_tensor_value(stationary))
     moving_value = np.asarray(_tensor_value(moving))
+    _require(stationary_value.ndim == 2, "nc_matmul stationary must be rank-2")
     stationary_par, stationary_free = _partition_and_free(stationary_value)
     moving_par, moving_free = _partition_and_free(moving_value)
     _require(
@@ -544,6 +565,10 @@ def nc_matmul(
         _dtype_str(dst_dtype) in {"float32", "bfloat16"},
         "dst must be float32 or bfloat16",
     )
+    _require(
+        tuple(dst.shape) == (stationary_free, *moving_value.shape[1:]),
+        "nc_matmul dst must preserve stationary free dim and moving free dims",
+    )
     has_tile_pos = bool(tile_position)
     has_tile_size = bool(tile_size)
     _require(
@@ -553,6 +578,10 @@ def nc_matmul(
     if has_tile_size:
         row_size, col_size = map(int, tile_size)
         start_row, start_col = map(int, tile_position)
+        _require(
+            row_size in (32, 64, 128) and col_size in (32, 64, 128),
+            "tile_size dims must be 32, 64, or 128",
+        )
         _require(
             row_size <= 128 and col_size <= 128, "tile_size larger than (128, 128)"
         )
@@ -566,8 +595,14 @@ def nc_matmul(
         _require(
             start_col % col_size == 0, "start col must be a multiple of col tile size"
         )
-        _require(start_row <= 128, "start row must not exceed 128")
-        _require(start_col <= 128, "start col must not exceed 128")
+        _require(
+            start_row + row_size <= 128,
+            "matmul tile (row_start + row_size) must not exceed 128",
+        )
+        _require(
+            start_col + col_size <= 128,
+            "matmul tile (col_start + col_size) must not exceed 128",
+        )
     stationary_matrix = stationary_value.reshape(stationary_par, stationary_free)
     moving_matrix = moving_value.reshape(moving_par, moving_free)
     result = stationary_matrix.T @ moving_matrix
@@ -676,26 +711,16 @@ def _broadcast_tensor_scalar_operand(
     operand_arr = np.asarray(operand)
     if operand_arr.size == 1:
         return operand_arr
-    if operand_arr.shape == data_arr.shape:
-        return operand_arr
-    _require(
-        operand_arr.ndim == data_arr.ndim,
-        "tensor_scalar only broadcasts free dimensions",
-    )
     _require(
         operand_arr.shape[0] == data_arr.shape[0],
         "tensor_scalar only broadcasts free dimensions",
     )
-    target_shape = []
-    for axis, (op_dim, data_dim) in enumerate(zip(operand_arr.shape, data_arr.shape)):
-        if axis == 0:
-            target_shape.append(op_dim)
-            continue
-        _require(
-            op_dim in (1, data_dim), "tensor_scalar only broadcasts free dimensions"
-        )
-        target_shape.append(data_dim)
-    return np.broadcast_to(operand_arr, tuple(target_shape))
+    _require(
+        all(dim == 1 for dim in operand_arr.shape[1:]),
+        "tensor_scalar only broadcasts free dimensions",
+    )
+    target_shape = (data_arr.shape[0],) + (1,) * (data_arr.ndim - 1)
+    return np.broadcast_to(operand_arr.reshape(target_shape), data_arr.shape)
 
 
 class SubOp:
@@ -802,7 +827,10 @@ def tensor_copy(
     if engine == nisa.gpsimd_engine and "psum" in (dst_buffer, src_buffer):
         raise ValueError("GpSimd tensor_copy cannot access PSUM")
     src_value = np.asarray(_tensor_value(src))
-    _require(src_value.shape == dst.shape, _ERR_AP_MISMATCH)
+    _require(
+        _partition_and_free(src_value) == _partition_and_free(dst),
+        _ERR_AP_MISMATCH,
+    )
     return _store(dst, src_value.reshape(dst.shape))
 
 
@@ -852,8 +880,6 @@ def tensor_tensor(
         raise ValueError(
             "tensor_tensor doesn't broadcast scalars/vectors; use tensor_scalar"
         )
-    _require(lhs.shape == rhs.shape, _ERR_AP_MISMATCH)
-
     lhs_pf_size = _partition_and_free(lhs)
     rhs_pf_size = _partition_and_free(rhs)
     dst_pf_size = _partition_and_free(dst)
@@ -928,8 +954,13 @@ def tensor_reduce(
     reduced = cast(Any, op._op).reduce(source, axis=axis_tuple, keepdims=keepdims)
     if negate:
         reduced = -np.asarray(reduced)
+    reduced = np.asarray(reduced)
     if reduced.shape != dst.shape:
-        reduced = np.asarray(reduced).reshape(dst.shape)
+        _require(
+            reduced.ndim == 1 and dst.shape == (reduced.shape[0], 1),
+            "cannot reduce free dim of data into free dim of dst",
+        )
+        reduced = reduced.reshape(dst.shape)
     return _store(dst, reduced)
 
 
@@ -995,6 +1026,11 @@ def tensor_scalar(
             "data must be int dtype for bitvec ops",
         )
     result = np.asarray(_tensor_value(data))
+    result_pf_size = _partition_and_free(result)
+    _require(
+        result_pf_size == _partition_and_free(dst),
+        "tensor_scalar dst must preserve partition/free shape",
+    )
     for idx, (op, operand, reverse) in enumerate(
         (
             (op0, operand0, reverse0),
@@ -1026,7 +1062,7 @@ def tensor_scalar(
             cast(TensorOrScalar, _tensor_value(operand)),
         )
         result = _apply_tensor_scalar_op(result, op, operand_value, reverse)
-    return _store(dst, result)
+    return _store(dst, np.asarray(result).reshape(dst.shape))
 
 
 def activation(
@@ -1078,6 +1114,14 @@ def activation(
     output = op._run(pre_act)
     output_value = output.data if isinstance(output, NDArray) else output
     _store(dst, np.asarray(output_value).reshape(dst.shape))
+    if reduce_res is not None and reduce_op is not None:
+        _require(reduce_res.shape == (data_par, 1), "reduce_res must have shape (P, 1)")
+        reduced = np.sum(
+            np.asarray(output_value, dtype=np.float32).reshape(data_par, -1),
+            axis=1,
+            keepdims=True,
+        )
+        _store(reduce_res, reduced)
     return dst
 
 
