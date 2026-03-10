@@ -450,6 +450,16 @@ def _make_block_expr(scalar_ty, shape):
     return ConstSymbolicExpr("const", value=0, dtype=tl.block_type(scalar_ty, shape))
 
 
+def test_dtype_is_always_scalar():
+    """dtype must always be a scalar type, never a block_type."""
+    expr = _make_block_expr(tl.float32, [4, 8])
+    assert not isinstance(expr.dtype, tl.block_type)
+    assert expr.dtype == tl.float32
+    assert expr.shape == (4, 8)
+    full = tl.block_type(expr.dtype, list(expr.shape))
+    assert isinstance(full, tl.block_type)
+
+
 def test_reduce_shape_2d_axis1():
     """tl.sum(x, axis=1) on [4, 8] -> [4]."""
     inp = _make_block_expr(tl.float32, [4, 8])
@@ -501,7 +511,7 @@ def test_reduce_shape_preserves_scalar_type():
     inp = _make_block_expr(tl.float16, [4, 8])
     reduced = ReduceSymbolicExpr("sum", inp, axis=1)
     assert reduced.shape == (4,)
-    assert reduced.dtype.scalar == tl.float16
+    assert reduced.dtype == tl.float16
 
 
 def test_reduce_shape_max_min():
@@ -526,11 +536,8 @@ def test_load_dtype_block_of_pointers():
         "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
     )
     load = LoadSymbolicExpr("load", ptr)
-    assert isinstance(
-        load.dtype, tl.block_type
-    ), f"Expected block_type, got {type(load.dtype)}: {load.dtype}"
-    assert load.dtype.shape == (1, 16)
-    assert load.dtype.scalar == tl.float32
+    assert load.shape == (1, 16), f"Expected shape (1, 16), got {load.shape}"
+    assert load.dtype == tl.float32, f"Expected tl.float32, got {load.dtype}"
 
 
 def test_store_dtype_block_of_pointers():
