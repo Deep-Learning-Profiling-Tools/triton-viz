@@ -1,3 +1,4 @@
+from .trace_io import save, load
 from .trace import trace, clear
 from .data import (
     Op,
@@ -31,6 +32,8 @@ from .masked_load_store import masked_load, masked_store
 __all__ = [
     "trace",
     "clear",
+    "save",
+    "load",
     "Op",
     "ProgramId",
     "RawStore",

@@ -122,6 +122,36 @@ Analyze kernels across visualization, profiling, and sanitization with a single 
 - Profiler: flags non-unrolled loops, inefficient mask usage, and missing buffer_load optimizations while tracking load/store byte counts with low-overhead sampling.
 - Sanitizer: symbolically checks tensor memory accesses for out-of-bounds errors and emits reports with tensor metadata, call stack, and expression trees; optional fake-memory backend avoids real reads.
 
+### Save and load traces
+
+You can persist collected trace launches and reload them later:
+
+```py
+import triton_viz
+
+triton_viz.save("trace.tvz")
+triton_viz.clear()
+triton_viz.load("trace.tvz")
+triton_viz.launch()
+```
+
+Load it before launching the visualizer:
+
+```py
+import triton_viz
+
+triton_viz.load("trace.tvz")
+triton_viz.launch()
+```
+
+Or from the command line:
+
+```sh
+triton-visualizer trace.tvz
+```
+
+The archive is a single zip file containing a JSON manifest plus an NPZ tensor bundle. `triton_viz.load(...)` restores the global trace state, so existing consumers such as the visualizer, sanitizer reports, and other analysis utilities can operate on the loaded launches without a separate import path.
+
 ### Environment variables
 
 Triton-Viz uses a small set of environment variables to configure runtime behavior. Unless noted, boolean flags are enabled only when set to `1`.

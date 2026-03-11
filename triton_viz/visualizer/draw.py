@@ -50,7 +50,7 @@ def collect_launch(launch):
                 stride=tuple(t.stride()),
                 shape=tuple(t.shape),
                 element_size=t.element_size(),
-                data=t,
+                data=getattr(t, "data", t),
             ),
             i,
         )

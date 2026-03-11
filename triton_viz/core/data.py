@@ -269,6 +269,53 @@ class Tensor:
     data: torch.Tensor
 
 
+@dataclass(frozen=True)
+class TensorSnapshot:
+    """Portable tensor metadata plus CPU data for saved trace archives."""
+
+    ptr: int
+    dtype: str
+    _stride: tuple
+    shape: tuple
+    _element_size: int
+    data: torch.Tensor
+    device: str
+    _contiguous: bool
+
+    @classmethod
+    def from_tensor(cls, tensor) -> "TensorSnapshot":
+        """Capture a tensor-like object into a CPU-backed snapshot."""
+        data = tensor.detach().cpu()
+        device = getattr(tensor, "device", "cpu")
+        contiguous_fn = getattr(tensor, "is_contiguous", None)
+        return cls(
+            ptr=tensor.data_ptr(),
+            dtype=str(tensor.dtype),
+            _stride=tuple(tensor.stride()),
+            shape=tuple(tensor.shape),
+            _element_size=tensor.element_size(),
+            data=torch.as_tensor(data.numpy() if hasattr(data, "numpy") else data),
+            device=str(device),
+            _contiguous=bool(contiguous_fn()) if callable(contiguous_fn) else True,
+        )
+
+    def data_ptr(self) -> int:
+        """Mirror the tensor data_ptr() API used by trace consumers."""
+        return self.ptr
+
+    def stride(self) -> tuple:
+        """Mirror the tensor stride() API used by trace consumers."""
+        return self._stride
+
+    def element_size(self) -> int:
+        """Mirror the tensor element_size() API used by trace consumers."""
+        return self._element_size
+
+    def is_contiguous(self) -> bool:
+        """Mirror the tensor is_contiguous() API used by trace consumers."""
+        return self._contiguous
+
+
 @dataclass
 class Grid:
     idx: tuple

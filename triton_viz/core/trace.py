@@ -1,17 +1,19 @@
 from copy import deepcopy
 from collections.abc import Callable
-from ..utils.traceback_utils import CODE_KEYS, get_code_key
-from triton.runtime import KernelInterface, Autotuner
+import types
+from triton import JITFunction
+from triton.runtime import Autotuner, KernelInterface
 from triton.runtime.autotuner import Heuristics
 from triton.runtime.interpreter import InterpretedFunction
-from triton import JITFunction
 
-from .config import config as cfg
-from ..clients import Sanitizer, Profiler, Tracer
-from .client import ClientManager, Client
-from .data import Launch
+from ..clients.profiler.profiler import Profiler
+from ..clients.sanitizer.sanitizer import Sanitizer
+from ..clients.tracer.tracer import Tracer
+from ..utils.traceback_utils import CODE_KEYS, get_code_key
 from . import patch
-import types
+from .client import Client, ClientManager
+from .config import config as cfg
+from .data import Launch
 
 
 launches: list[Launch] = []
