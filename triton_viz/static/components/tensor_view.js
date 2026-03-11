@@ -55,6 +55,20 @@ function getAxisLabel(axis) {
 function getAxisLabels(rank) {
     return Array.from({ length: rank }, (_, axis) => getAxisLabel(axis));
 }
+function buildDownloadOption(type, config) {
+    const color = config.color instanceof THREE.Color
+        ? `#${config.color.getHexString()}`
+        : (typeof config.color === 'string' ? config.color : undefined);
+    return {
+        value: config.name.toUpperCase(),
+        label: config.name === 'Global' ? `${type} tensor` : `Tensor ${config.name}`,
+        ...(color ? { color } : {}),
+    };
+}
+function getDownloadFilename(header) {
+    const match = /filename="([^"]+)"/i.exec(header || '');
+    return match?.[1] || 'tensor.npy';
+}
 function normalizeViewShape(shapeRaw) {
     if (!Array.isArray(shapeRaw) || shapeRaw.length === 0)
         return [1];
@@ -1398,10 +1412,11 @@ export function createTensorVisualization(containerElement, op, options = {}) {
     const API_BASE = getApiBase();
     const initialToggles = getState().toggles;
     const configs = tensorConfigs.length > 0 ? tensorConfigs : [
-        { name: 'Global', shape: op.global_shape || [], color: colors.GLOBAL || '#333', position: [0, 0, 0], endpoint: 'getLoadTensor' }
+        { name: 'Global', shape: op.global_shape || [], color: colors.GLOBAL || '#333', position: [0, 0, 0], endpoint: 'getLoadTensor' },
     ];
     const supportsAllPrograms = type === 'Load' || type === 'Store';
     const configByNameMap = new Map(configs.map((cfg) => [cfg.name, cfg]));
+    const downloadOptions = configs.map((cfg) => buildDownloadOption(type, cfg));
     let cache = VIZ_CACHE.get(containerElement);
     const shapeKey = JSON.stringify({ shapes: configs.map(c => c.shape), layoutBounds });
     const isSameContext = cache && cache.type === type && cache.shapeKey === shapeKey;
@@ -2223,6 +2238,36 @@ export function createTensorVisualization(containerElement, op, options = {}) {
                 requestRender();
                 return state.editTensorViewOn;
             },
+            download: opUuid ? {
+                trigger: async (sources) => {
+                    const selectedSources = sources.length ? sources : downloadOptions.slice(0, 1).map((option) => option.value);
+                    const response = await fetch(`${API_BASE}/api/download_tensor`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ uuid: opUuid, sources: selectedSources }),
+                    });
+                    if (!response.ok) {
+                        let message = 'Download failed';
+                        try {
+                            const payload = await response.json();
+                            message = payload.error || message;
+                        }
+                        catch (error) { }
+                        throw new Error(message);
+                    }
+                    const blob = await response.blob();
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = getDownloadFilename(response.headers.get('Content-Disposition'));
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    URL.revokeObjectURL(url);
+                },
+                options: downloadOptions,
+                buttonLabel: downloadOptions.length > 1 ? 'Download Tensors' : 'Download Tensor',
+            } : null,
         });
     }
     syncOpControlState();
