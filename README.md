@@ -124,33 +124,17 @@ Analyze kernels across visualization, profiling, and sanitization with a single 
 
 ### Save and load traces
 
-You can persist collected trace launches and reload them later:
-
 ```py
 import triton_viz
 
 triton_viz.save("trace.tvz")
-triton_viz.clear()
-triton_viz.load("trace.tvz")
+triton_viz.load(
+    "trace.tvz"
+)  # automatically clears out existing records, use kwarg "append=True" to prevent this
 triton_viz.launch()
 ```
 
-Load it before launching the visualizer:
-
-```py
-import triton_viz
-
-triton_viz.load("trace.tvz")
-triton_viz.launch()
-```
-
-Or from the command line:
-
-```sh
-triton-visualizer trace.tvz
-```
-
-The archive is a single zip file containing a JSON manifest plus an NPZ tensor bundle. `triton_viz.load(...)` restores the global trace state, so existing consumers such as the visualizer, sanitizer reports, and other analysis utilities can operate on the loaded launches without a separate import path.
+CLI: `triton-visualizer trace.tvz`. The archive is a zip file containing `manifest.json` plus `tensors.npz`, and `triton_viz.load(...)` restores the normal trace state for existing consumers.
 
 ### Environment variables
 

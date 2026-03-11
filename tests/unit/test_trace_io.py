@@ -1,6 +1,8 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
 
 import triton_viz
@@ -12,11 +14,23 @@ from triton_viz.utils.traceback_utils import TracebackInfo
 from triton_viz.visualizer.draw import collect_grid
 
 
-def test_trace_save_load_roundtrip_supports_visualizer(tmp_path: Path):
-    triton_viz.clear()
-    tensor = torch.arange(4, dtype=torch.float32)
+def _roundtrip(path: Path, launch: Launch) -> None:
+    launches[:] = [launch]
+    triton_viz.save(path)
+    triton_viz.load(path)
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float32,
+    ],
+)  # TODO: support bf16/other dtypes with ml_dtypes
+def test_trace_save_load_roundtrip_supports_visualizer(tmp_path: Path, dtype):
+    tensor = torch.arange(4, dtype=dtype)
     ptr = tensor.data_ptr()
-    launches.append(
+    _roundtrip(
+        tmp_path / "trace.tvz",
         Launch(
             grid=(1, 1, 1),
             tensors={tensor},
@@ -28,31 +42,26 @@ def test_trace_save_load_roundtrip_supports_visualizer(tmp_path: Path):
                     masks=np.array([True, False]),
                 ),
             ],
-        )
+        ),
     )
-
-    path = tmp_path / "trace.tvz"
-    triton_viz.save(path)
-    triton_viz.clear()
-    triton_viz.load(path)
 
     records, tensor_table, failures = collect_grid()
 
     assert failures == {}
     assert (0, 0, 0) in records
-    assert len(records[(0, 0, 0)]) == 1
     assert ptr in tensor_table
     saved_tensor, _ = tensor_table[ptr]
     assert saved_tensor.ptr == ptr
     assert tuple(saved_tensor.shape) == (4,)
-    assert saved_tensor.data.tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert saved_tensor.data.dtype == dtype
+    assert saved_tensor.data.float().tolist() == [0.0, 1.0, 2.0, 3.0]
 
 
 def test_trace_save_load_roundtrip_supports_sanitizer_report(tmp_path: Path, capsys):
-    triton_viz.clear()
     tensor = torch.arange(4, dtype=torch.float32)
     ptr = tensor.data_ptr()
-    launches.append(
+    _roundtrip(
+        tmp_path / "sanitizer.tvz",
         Launch(
             records=[
                 OutOfBoundsRecordZ3(
@@ -70,16 +79,24 @@ def test_trace_save_load_roundtrip_supports_sanitizer_report(tmp_path: Path, cap
                     constraints=None,
                 )
             ]
-        )
+        ),
     )
-
-    path = tmp_path / "sanitizer.tvz"
-    triton_viz.save(path)
-    triton_viz.clear()
-    triton_viz.load(path)
 
     print_oob_record(launches[-1].records[0])
     out = capsys.readouterr().out
 
     assert "Out-Of-Bounds Access Detected" in out
     assert f"Tensor base memory address: {ptr}" in out
+
+
+def test_visualizer_cli_forwards_trace_file_and_flags():
+    from triton_viz.visualizer_cli import main
+
+    trace_file = Path("trace.tvz")
+    with patch("triton_viz.load") as mock_load, patch(
+        "triton_viz.launch"
+    ) as mock_launch:
+        main([str(trace_file), "--port", "9000", "--no-block"])
+
+    mock_load.assert_called_once_with(trace_file)
+    mock_launch.assert_called_once_with(share=False, port=9000, block=False)

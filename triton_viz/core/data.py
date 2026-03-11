@@ -271,7 +271,11 @@ class Tensor:
 
 @dataclass(frozen=True)
 class TensorSnapshot:
-    """Portable tensor metadata plus CPU data for saved trace archives."""
+    """
+    Portable tensor metadata plus CPU data for saved trace archives.
+    We can't just use the triton_viz.core.data.Tensor class since some clients (e.g. sanitizer)
+    assumes that the data is stored in a torch.Tensor, not a Tensor instance.
+    """
 
     ptr: int
     dtype: str

@@ -11,9 +11,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("trace_file", type=Path, help="Path to a .tvz trace archive.")
     parser.add_argument("--port", type=int, default=None, help="Port to bind locally.")
     parser.add_argument(
-        "--no-share",
+        "--share",
         action="store_true",
-        help="Disable the Cloudflare share link and serve locally only.",
+        help="Enable the Cloudflare share link and serve through a public URL.",
     )
     parser.add_argument(
         "--no-block",
@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None):
 
     triton_viz.load(args.trace_file)
     return triton_viz.launch(
-        share=not args.no_share,
+        share=args.share,
         port=args.port,
         block=not args.no_block,
     )

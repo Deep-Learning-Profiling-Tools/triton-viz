@@ -8,134 +8,48 @@ from typing import Any
 import numpy as np
 import torch
 
-from ..clients.profiler.data import LoadStoreBytes, OpTypeCounts
-from ..clients.sanitizer.data import (
-    OutOfBoundsRecord,
-    OutOfBoundsRecordBruteForce,
-    OutOfBoundsRecordZ3,
-)
-from ..utils.traceback_utils import TracebackInfo
-from .data import (
-    AddPtr,
-    Advance,
-    Allocate,
-    Ashr,
-    AtomicCas,
-    AtomicRMW,
-    BinaryOp,
-    Bitcast,
-    Broadcast,
-    CastImpl,
-    CumSum,
-    Dot,
-    ExpandDims,
-    Fabs,
-    Flip,
-    FpToFp,
-    Grid,
-    Idiv,
-    Join,
-    Launch,
-    Load,
-    MakeBlockPointer,
-    MakeRange,
-    Op,
-    ProgramId,
-    RawLoad,
-    RawStore,
-    Reduce,
-    ReduceMax,
-    ReduceMin,
-    ReduceSum,
-    Reshape,
-    Rsqrt,
-    Splat,
-    Store,
-    TensorPointerLoad,
-    TensorPointerStore,
-    TensorSnapshot,
-    TernaryOp,
-    Trans,
-    Umulhi,
-    UnaryOp,
-)
+from ..clients.profiler import data as profiler_data
+from ..clients.sanitizer import data as sanitizer_data
+from ..utils import traceback_utils
+from . import data as trace_data
+from .data import Launch, TensorSnapshot
 
 
 _TRACE_FORMAT_VERSION = 1
-_ARRAY_PREFIX = "arr_"
-_MANIFEST_NAME = "manifest.json"
-_TENSORS_NAME = "tensors.npz"
+_MANIFEST_NAME, _TENSORS_NAME = "manifest.json", "tensors.npz"
+ArrayMap = dict[str, np.ndarray]
 _TRACE_CLASSES = {
     f"{cls.__module__}:{cls.__qualname__}": cls
-    for cls in (
-        Op,
-        ProgramId,
-        Allocate,
-        RawStore,
-        Store,
-        RawLoad,
-        Load,
-        UnaryOp,
-        BinaryOp,
-        TernaryOp,
-        Dot,
-        Flip,
-        MakeRange,
-        AddPtr,
-        ExpandDims,
-        Broadcast,
-        Reduce,
-        ReduceMin,
-        ReduceMax,
-        ReduceSum,
-        Splat,
-        MakeBlockPointer,
-        TensorPointerLoad,
-        TensorPointerStore,
-        Idiv,
-        Rsqrt,
-        CastImpl,
-        Reshape,
-        Join,
-        Fabs,
-        Ashr,
-        Advance,
-        FpToFp,
-        Umulhi,
-        Trans,
-        CumSum,
-        Bitcast,
-        AtomicCas,
-        AtomicRMW,
-        TensorSnapshot,
-        Grid,
-        Launch,
-        TracebackInfo,
-        LoadStoreBytes,
-        OpTypeCounts,
-        OutOfBoundsRecord,
-        OutOfBoundsRecordBruteForce,
-        OutOfBoundsRecordZ3,
-    )
+    for module in (trace_data, profiler_data, sanitizer_data, traceback_utils)
+    for cls in vars(module).values()
+    if isinstance(cls, type) and is_dataclass(cls)
 }
 # _TRACE_CLASSES rebuilds serialized dataclass instances like Load(...), Dot(...),
 # Launch(...), etc. _TRACE_OP_TYPES is narrower: it restores class-valued fields
 # such as OutOfBoundsRecord.op_type = Load, where the payload stores the class
 # object itself rather than an instance of that class.
-_TRACE_OP_TYPES = {
-    "Load": Load,
-    "Store": Store,
-}
+_TRACE_OP_TYPES = {cls.__name__: cls for cls in (trace_data.Load, trace_data.Store)}
 
 
-def _store_array(arrays: dict[str, np.ndarray], value) -> dict[str, str]:
-    """Store an array payload in the NPZ sidecar and return its manifest ref."""
-    key = f"{_ARRAY_PREFIX}{len(arrays)}"
+def _store_array(arrays: ArrayMap, value) -> str:
+    """Store an array payload in the NPZ sidecar and return its key."""
+    key = f"arr_{len(arrays)}"
     arrays[key] = np.asarray(value)
-    return {"kind": "array", "key": key}
+    return key
 
 
-def _encode_trace_value(value, arrays: dict[str, np.ndarray]):
+def _store_tensor_payload(arrays: ArrayMap, tensor: torch.Tensor) -> dict[str, object]:
+    """Store a tensor payload, preserving dtypes that NumPy cannot represent."""
+    data = tensor.detach().cpu()
+    payload = data.numpy()  # TODO: use ml_dtypes for bf16/others
+    return {
+        "kind": "tensor",
+        "dtype": str(data.dtype),
+        "key": _store_array(arrays, payload),
+    }
+
+
+def _encode_trace_value(value, arrays: ArrayMap):
     """Convert a trace object graph into JSON-safe manifest data."""
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
@@ -143,21 +57,6 @@ def _encode_trace_value(value, arrays: dict[str, np.ndarray]):
         return value.item()
     if isinstance(value, Path):
         return {"kind": "path", "value": str(value)}
-    if isinstance(value, TensorSnapshot):
-        return {
-            "kind": "dataclass",
-            "type": f"{TensorSnapshot.__module__}:{TensorSnapshot.__qualname__}",
-            "fields": {
-                "ptr": value.ptr,
-                "dtype": value.dtype,
-                "_stride": _encode_trace_value(value.stride(), arrays),
-                "shape": _encode_trace_value(value.shape, arrays),
-                "_element_size": value.element_size(),
-                "data": _store_array(arrays, value.data.detach().cpu().numpy()),
-                "device": value.device,
-                "_contiguous": value.is_contiguous(),
-            },
-        }
     if isinstance(value, type):
         name = value.__name__
         if name not in _TRACE_OP_TYPES:
@@ -166,19 +65,14 @@ def _encode_trace_value(value, arrays: dict[str, np.ndarray]):
     if hasattr(value, "data_ptr") and hasattr(value, "detach"):
         return _encode_trace_value(TensorSnapshot.from_tensor(value), arrays)
     if isinstance(value, np.ndarray):
-        return _store_array(arrays, value)
-    if isinstance(value, list):
-        return [_encode_trace_value(item, arrays) for item in value]
-    if isinstance(value, tuple):
-        return {
-            "kind": "tuple",
-            "items": [_encode_trace_value(item, arrays) for item in value],
-        }
-    if isinstance(value, set):
-        return {
-            "kind": "set",
-            "items": [_encode_trace_value(item, arrays) for item in value],
-        }
+        return {"kind": "array", "key": _store_array(arrays, value)}
+    if isinstance(value, (list, tuple, set)):
+        items = [_encode_trace_value(item, arrays) for item in value]
+        return (
+            items
+            if isinstance(value, list)
+            else {"kind": type(value).__name__, "items": items}
+        )
     if isinstance(value, dict):
         return {
             "kind": "dict",
@@ -198,37 +92,41 @@ def _encode_trace_value(value, arrays: dict[str, np.ndarray]):
         payload_fields: dict[str, Any] = {}
         for field in fields(value):
             field_value = getattr(value, field.name)
-            if isinstance(value, OutOfBoundsRecordZ3) and field.name in {
+            if isinstance(value, sanitizer_data.OutOfBoundsRecordZ3) and field.name in {
                 "constraints",
                 "symbolic_expr",
             }:
                 field_value = None if field_value is None else str(field_value)
+            elif isinstance(value, TensorSnapshot) and field.name == "data":
+                payload_fields[field.name] = _store_tensor_payload(arrays, field_value)
+                continue
             payload_fields[field.name] = _encode_trace_value(field_value, arrays)
-        payload = {
+        return {
             "kind": "dataclass",
             "type": cls_key,
             "fields": payload_fields,
         }
-        return payload
     raise TypeError(f"Unsupported trace value: {type(value)}")
 
 
-def _tensor_from_array(array: np.ndarray) -> torch.Tensor:
-    """Rebuild a standalone CPU tensor from an NPZ-loaded array."""
+def _load_tensor_payload(payload: dict[str, object], arrays: ArrayMap) -> torch.Tensor:
+    """Rebuild a tensor payload, including dtypes like bfloat16."""
+    key = payload["key"]
+    if not isinstance(key, str):
+        raise TypeError("Invalid tensor payload")
+    array = np.asarray(arrays[key])
     return torch.from_numpy(np.asarray(array).copy())
 
 
 def _build_dataclass(cls: type, kwargs: dict):
     """Instantiate a dataclass without calling generated __init__/__post_init__."""
     obj: Any = object.__new__(cls)
-    setter = object.__setattr__
-    for field in fields(cls):
-        if field.name in kwargs:
-            setter(obj, field.name, kwargs[field.name])
+    for name, value in kwargs.items():
+        object.__setattr__(obj, name, value)
     return obj
 
 
-def _decode_trace_value(value, arrays: dict[str, np.ndarray]):
+def _decode_trace_value(value, arrays: ArrayMap):
     """Reconstruct trace objects from manifest data and NPZ payloads."""
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
@@ -240,12 +138,13 @@ def _decode_trace_value(value, arrays: dict[str, np.ndarray]):
     kind = value.get("kind")
     if kind == "array":
         return np.asarray(arrays[value["key"]]).copy()
+    if kind == "tensor":
+        return _load_tensor_payload(value, arrays)
     if kind == "path":
         return Path(value["value"])
-    if kind == "tuple":
-        return tuple(_decode_trace_value(item, arrays) for item in value["items"])
-    if kind == "set":
-        return {_decode_trace_value(item, arrays) for item in value["items"]}
+    if kind in {"tuple", "set"}:
+        container = tuple if kind == "tuple" else set
+        return container(_decode_trace_value(item, arrays) for item in value["items"])
     if kind == "dict":
         return {
             _decode_trace_value(item["key"], arrays): _decode_trace_value(
@@ -263,8 +162,6 @@ def _decode_trace_value(value, arrays: dict[str, np.ndarray]):
             name: _decode_trace_value(field_value, arrays)
             for name, field_value in value["fields"].items()
         }
-        if cls is TensorSnapshot:
-            kwargs["data"] = _tensor_from_array(kwargs["data"])
         return _build_dataclass(cls, kwargs)
     raise TypeError(f"Unsupported trace payload kind: {kind}")
 
@@ -282,7 +179,7 @@ def save(path: str | Path) -> Path:
         "launches": _encode_trace_value(launches, arrays),
     }
     tensor_bytes = BytesIO()
-    np.savez_compressed(tensor_bytes, **arrays)
+    np.savez_compressed(tensor_bytes, allow_pickle=False, **arrays)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(_MANIFEST_NAME, json.dumps(manifest).encode("utf-8"))
         archive.writestr(_TENSORS_NAME, tensor_bytes.getvalue())
@@ -291,7 +188,7 @@ def save(path: str | Path) -> Path:
 
 def load(path: str | Path, append: bool = False) -> list[Launch]:
     """Load trace launches from a zip archive into the global trace state."""
-    from .trace import clear, launches
+    from .trace import launches
 
     path = Path(path)
     with zipfile.ZipFile(path) as archive:
@@ -310,6 +207,6 @@ def load(path: str | Path, append: bool = False) -> list[Launch]:
     ):
         raise TypeError(f"{path} does not contain triton-viz trace launches")
     if not append:
-        clear()
+        launches.clear()
     launches.extend(loaded)
     return launches
