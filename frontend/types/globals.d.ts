@@ -18,6 +18,11 @@ interface Window {
         toggleHistogram?: () => boolean | Promise<boolean>;
         toggleAllPrograms?: (() => boolean | Promise<boolean>) | null;
         toggleEditTensorView?: () => boolean | Promise<boolean>;
+        download?: {
+            trigger: (sources: string[]) => void | Promise<void>;
+            options: Array<{ value: string; label: string; color?: string }>;
+            buttonLabel?: string;
+        } | null;
     } | null) => void;
     setOpControlState?: (state: {
         colorize?: boolean;

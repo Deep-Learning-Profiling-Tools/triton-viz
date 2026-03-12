@@ -1,7 +1,9 @@
 import threading
 from typing import Any
 import sys
-from flask import Flask, render_template, jsonify, request
+from io import BytesIO
+import zipfile
+from flask import Flask, render_template, jsonify, request, send_file
 from .analysis import analyze_records
 from .draw import get_visualization_data
 from ..utils.traceback_utils import read_source_segment
@@ -378,29 +380,9 @@ def get_value_histogram():
     max_samples = max(1000, int(data.get("max_samples", 200000)))
 
     op_payload = raw_tensor_data[uuid]
-    arr = None
-
-    if source in {"GLOBAL", "LOAD_GLOBAL"}:
-        arr = op_payload.get("global_tensor")
-    elif source == "A":
-        arr = op_payload.get("input_data")
-    elif source == "B":
-        arr = op_payload.get("other_data")
-    elif source == "C":
-        arr = op_payload.get("output_data")
-        if arr is None:
-            a = op_payload.get("input_data")
-            b = op_payload.get("other_data")
-            if a is not None and b is not None:
-                try:
-                    arr = np.matmul(_to_numpy_array(a), _to_numpy_array(b))
-                    op_payload["output_data"] = arr
-                except Exception:
-                    arr = None
-    else:
+    arr_np = _get_tensor_source_array(op_payload, source)
+    if arr_np is None:
         return jsonify({"error": f"Unsupported source '{source}'"}), 400
-
-    arr_np = _to_numpy_array(arr)
     if arr_np.size == 0:
         return jsonify(
             {
@@ -434,6 +416,58 @@ def get_value_histogram():
             "n": int(total),
             "sampled": int(sample.size),
         }
+    )
+
+
+@app.route("/api/download_tensor", methods=["POST"])
+def download_tensor():
+    """Return one tensor as .npy or several tensors zipped together."""
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid or not raw_tensor_data or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+
+    op_payload = raw_tensor_data[uuid]
+    requested_sources = data.get("sources")
+    if isinstance(requested_sources, list) and requested_sources:
+        sources = [str(source).upper() for source in requested_sources]
+    else:
+        sources = [str(data.get("source") or "GLOBAL").upper()]
+
+    payloads: list[tuple[str, np.ndarray]] = []
+    for source in sources:
+        arr = _get_tensor_source_array(op_payload, source)
+        if arr is None:
+            return jsonify({"error": f"Unsupported source '{source}'"}), 400
+        payloads.append((source, arr))
+
+    if len(payloads) == 1:
+        source, arr = payloads[0]
+        buffer = BytesIO()
+        np.save(buffer, arr, allow_pickle=False)
+        buffer.seek(0)
+        return send_file(
+            buffer,
+            mimetype="application/octet-stream",
+            as_attachment=True,
+            download_name=_get_download_filename(op_payload, source),
+        )
+
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for source, arr in payloads:
+            tensor_buffer = BytesIO()
+            np.save(tensor_buffer, arr, allow_pickle=False)
+            zf.writestr(
+                _get_download_filename(op_payload, source), tensor_buffer.getvalue()
+            )
+    archive.seek(0)
+    return send_file(
+        archive,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{_get_download_basename(op_payload)}.zip",
     )
 
 
@@ -627,6 +661,51 @@ def _dtype_element_size(dtype: Any) -> int:
         return max(1, int(dtype.element_ty.primitive_bitwidth // 8))
     except Exception:
         return 4
+
+
+def _get_tensor_source_array(
+    op_payload: dict[str, Any], source: str
+) -> np.ndarray | None:
+    """Return the tensor array for a download or histogram source."""
+    source = str(source or "").upper()
+    if source in {"GLOBAL", "LOAD_GLOBAL"}:
+        arr = op_payload.get("global_tensor")
+    elif source == "A":
+        arr = op_payload.get("input_data")
+    elif source == "B":
+        arr = op_payload.get("other_data")
+    elif source == "C":
+        arr = op_payload.get("output_data")
+        if arr is None:
+            a = op_payload.get("input_data")
+            b = op_payload.get("other_data")
+            if a is not None and b is not None:
+                try:
+                    arr = np.matmul(_to_numpy_array(a), _to_numpy_array(b))
+                    op_payload["output_data"] = arr
+                except Exception:
+                    arr = None
+    else:
+        arr = None
+    if arr is None:
+        return None
+    return _to_numpy_array(arr)
+
+
+def _get_download_basename(op_payload: dict[str, Any]) -> str:
+    """Build the common filename prefix for a record download."""
+    op_type = str(op_payload.get("op_type") or "tensor").strip().lower()
+    op_index = int(op_payload.get("op_index", -1)) + 1
+    return f"{op_type}{op_index}" if op_index > 0 else op_type
+
+
+def _get_download_filename(op_payload: dict[str, Any], source: str) -> str:
+    """Build a stable filename for a single tensor download."""
+    stem = _get_download_basename(op_payload)
+    source = str(source or "").strip().lower()
+    if source and source not in {"global", "load_global"}:
+        stem = f"{stem}-{source}"
+    return f"{stem}.npy"
 
 
 def _coords_from_offsets(
