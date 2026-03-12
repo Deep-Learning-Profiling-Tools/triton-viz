@@ -279,6 +279,8 @@ def prepare_visualization_data(program_records, tensor_table):
                 b_np = _np.asarray(record.other_data)
 
             raw_tensor_data[record_uuid] = {
+                "op_type": "Dot",
+                "op_index": current_time,
                 "input_data": a_np,
                 "other_data": b_np,
                 # TEMP: same as above, remember whether demo flagged swizzle
@@ -310,6 +312,8 @@ def prepare_visualization_data(program_records, tensor_table):
             )
 
             raw_tensor_data[record_uuid] = {
+                "op_type": "Flip",
+                "op_index": current_time,
                 "tracebacks": [
                     {
                         "filename": f.filename,
@@ -434,6 +438,8 @@ def prepare_visualization_data(program_records, tensor_table):
             t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
 
             raw_tensor_data[record_uuid] = {
+                "op_type": "Load",
+                "op_index": current_time,
                 "global_tensor": arr,
                 "dims": int(arr.ndim),
                 "shape": list(arr.shape),
@@ -558,6 +564,8 @@ def prepare_visualization_data(program_records, tensor_table):
             t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
 
             raw_tensor_data[record_uuid] = {
+                "op_type": "Store",
+                "op_index": current_time,
                 "global_tensor": arr,
                 "dims": int(arr.ndim),
                 "shape": list(arr.shape),
