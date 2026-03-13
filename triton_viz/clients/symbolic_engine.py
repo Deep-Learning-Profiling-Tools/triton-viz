@@ -1163,10 +1163,8 @@ class ReduceSymbolicExpr(SymbolicExpr):
             scalar_ty = tl.int32
         else:
             assert self.input.dtype is not None
-            scalar_ty = self.input.dtype.scalar
-        self.dtype = (
-            tl.block_type(scalar_ty, output_shape) if output_shape else scalar_ty
-        )
+            scalar_ty = self.input.dtype
+        self.dtype = scalar_ty
         self.shape = tuple(output_shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
