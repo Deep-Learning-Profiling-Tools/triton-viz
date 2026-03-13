@@ -761,6 +761,85 @@ body {
     z-index: 8;
 }
 
+.download-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    display: grid;
+    place-items: center;
+    background: rgba(15, 23, 42, 0.45);
+    backdrop-filter: blur(8px);
+}
+
+.download-modal-overlay[hidden] {
+    display: none;
+}
+
+.download-modal {
+    width: min(420px, calc(100vw - 32px));
+    display: grid;
+    gap: 16px;
+    padding: 20px;
+    border-radius: var(--radius-lg);
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    box-shadow: var(--shadow-soft);
+}
+
+.download-modal-title {
+    margin: 0;
+    font-size: 18px;
+    color: var(--text-primary);
+}
+
+.download-modal-body {
+    display: grid;
+    gap: 12px;
+}
+
+.download-modal-options {
+    display: grid;
+    gap: 10px;
+}
+
+.download-modal-error {
+    color: #dc2626;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.download-modal-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--panel-border);
+    background: rgba(148, 163, 184, 0.08);
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.download-modal-option input {
+    width: 16px;
+    height: 16px;
+}
+
+.download-modal-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(15, 23, 42, 0.18);
+    background: rgba(148, 163, 184, 0.45);
+    flex: 0 0 auto;
+}
+
+.download-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
 .viz-tooltip {
     font-size: 12px;
     color: var(--text-secondary);
