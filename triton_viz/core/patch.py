@@ -310,7 +310,7 @@ def patch_lang(fn, backend, client_manager=None):
         scope = _triton_snapshot_scope(fn)
         triton_patch_lang(fn)
     elif backend == "nki":
-        from triton_viz.core.nki import nki_patch_lang
+        from triton_viz.core.nki_beta2 import nki_patch_lang
 
         scope = _LangPatchScope()
         nki_patch_lang(scope)
