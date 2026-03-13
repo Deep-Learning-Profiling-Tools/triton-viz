@@ -1185,30 +1185,6 @@ class ReduceSymbolicExpr(SymbolicExpr):
         arr, constraints = self.input._to_z3()
         return reduce(lambda a, b: If(a <= b, a, b), arr), constraints
 
-    def _reduce_argmax(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        arr, constraints = self.input._to_z3()
-        if not isinstance(arr, (list, tuple)):
-            return IntVal(0), constraints
-        best_val = arr[0]
-        best_idx: Z3Expr = IntVal(0)
-        for i in range(1, len(arr)):
-            is_better = arr[i] > best_val
-            best_idx = If(is_better, IntVal(i), best_idx)
-            best_val = If(is_better, arr[i], best_val)
-        return best_idx, constraints
-
-    def _reduce_argmin(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        arr, constraints = self.input._to_z3()
-        if not isinstance(arr, (list, tuple)):
-            return IntVal(0), constraints
-        best_val = arr[0]
-        best_idx: Z3Expr = IntVal(0)
-        for i in range(1, len(arr)):
-            is_better = arr[i] < best_val
-            best_idx = If(is_better, IntVal(i), best_idx)
-            best_val = If(is_better, arr[i], best_val)
-        return best_idx, constraints
-
     _NUMPY_REDUCE_OPS: ClassVar[dict[str, Any]] = {
         "sum": np.sum,
         "max": np.max,
@@ -1242,8 +1218,6 @@ class ReduceSymbolicExpr(SymbolicExpr):
         "sum": _reduce_sum,
         "max": _reduce_max,
         "min": _reduce_min,
-        "argmax": _reduce_argmax,
-        "argmin": _reduce_argmin,
     }
 
 

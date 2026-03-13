@@ -96,30 +96,19 @@ def test_reduce_expr_eval(op: str, data):
 
 
 @pytest.mark.parametrize("op,np_op", [("argmax", np.argmax), ("argmin", np.argmin)])
-def test_reduce_argmax_argmin_z3_through_where(op: str, np_op):
-    """argmax/argmin should stay on the Z3 symbolic path end-to-end.
+def test_reduce_argmax_argmin_concretize_fallback(op: str, np_op):
+    """argmax/argmin cannot be computed on the Z3 path (Z3 tracks addresses,
+    not values) so they must fall back to concretize()."""
+    from triton.runtime.interpreter import TensorHandle
 
-    When the input flows through a node that only has _to_z3_impl (like
-    ``where``), the Z3 If-chain implementation keeps the entire reduction
-    symbolic without needing to concretize intermediate values.
-    """
-    n = 4
-    block_ty = tl.block_type(tl.int32, [n])
+    data = np.array([10, 1, 30, 50], dtype=np.int32)
+    block_ty = tl.block_type(tl.int32, [len(data)])
+    input_arr = SymbolicExpr.create("const", TensorHandle(data, tl.int32), block_ty)
+    reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
 
-    mask_vals = SymbolicExpr.create("const", np.array([1, 0, 1, 0]), block_ty)
-    zero = SymbolicExpr.create("const", np.array([0, 0, 0, 0]), block_ty)
-    # "greater" produces BoolRef elements that where() accepts
-    cond = SymbolicExpr.create("greater", mask_vals, zero)
-    lhs = SymbolicExpr.create("const", np.array([10, 20, 30, 40]), block_ty)
-    rhs = SymbolicExpr.create("const", np.array([99, 1, 5, 50]), block_ty)
-    # where(cond, lhs, rhs) => [10, 1, 30, 50]  — has _to_z3 but NO concretize
-    where_expr = SymbolicExpr.create("where", cond, lhs, rhs)
-
-    reduce_expr = SymbolicExpr.create(op, where_expr, None, False)
-
-    result, _ = reduce_expr.eval(simplify_constraints=False)
-    expected = int(np_op(np.where([1, 0, 1, 0], [10, 20, 30, 40], [99, 1, 5, 50])))
-    assert cast(IntNumRef, result).as_long() == expected
+    result = reduce_expr.concretize()
+    assert isinstance(result, TensorHandle)
+    assert int(result.data.flat[0]) == int(np_op(data))
 
 
 @pytest.mark.parametrize("op,np_op", [("argmax", np.argmax), ("argmin", np.argmin)])
