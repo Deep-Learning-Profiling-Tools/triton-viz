@@ -942,3 +942,35 @@ def test_expand_dims_scalar_attr():
     x = torch.randn(8, device="cpu")
     out = torch.empty(8, device="cpu")
     exp_expand_kernel[(1,)](x, out, N=8)
+
+
+# ======== tl.max / tl.min with return_indices Tests ===========
+
+argmax_sanitizer = SymbolicSanitizer()
+
+
+@triton_viz.trace(client=argmax_sanitizer)
+@triton.jit
+def argmax_kernel(inp, out_val, out_idx, N, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(inp + offs, mask=mask, other=-float("inf"))
+    val, idx = tl.max(x, axis=0, return_indices=True)
+    tl.store(out_val, val)
+    tl.store(out_idx, idx)
+
+
+def test_tl_max_return_indices():
+    """tl.max with return_indices=True must not crash under triton-sanitizer."""
+    argmax_sanitizer.records.clear()
+
+    N = 64
+    inp = torch.randn(N, device="cpu")
+    out_val = torch.empty(1, device="cpu")
+    out_idx = torch.empty(1, dtype=torch.int32, device="cpu")
+
+    argmax_kernel[(1,)](inp, out_val, out_idx, N, BLOCK=64)
+
+    assert (
+        len(argmax_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(argmax_sanitizer.records)}"
