@@ -1,3 +1,4 @@
+import pytest
 import torch
 import numpy as np
 
@@ -5,6 +6,7 @@ import triton
 import triton.language as tl
 
 import triton_viz
+from triton_viz.core import config
 from triton_viz.core.data import Load, RawLoad
 from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr, RangeWrapper
 from triton_viz.clients.sanitizer.sanitizer import (
@@ -844,3 +846,91 @@ def test_reduce_broadcast():
     assert (
         len(reduce_broadcast_sanitizer.records) == 0
     ), f"Expected no OOB records, got {len(reduce_broadcast_sanitizer.records)}"
+
+
+# ======== Fake Tensor (Virtual Memory) OOB Tests ===========
+
+fake_tensor_sanitizer = SymbolicSanitizer(abort_on_error=True)
+
+
+@triton_viz.trace(client=fake_tensor_sanitizer)
+@triton.jit
+def fake_tensor_oob_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    # Intentionally read out-of-bounds: offset N is beyond the valid range [0, N)
+    val = tl.load(x_ptr + N)
+    tl.store(out_ptr, val)
+
+
+def test_oob_with_fake_tensor(_isolate_virtual_memory):
+    fake_tensor_sanitizer.records.clear()
+
+    config.virtual_memory = True
+    x = torch.randn(8)
+    out = torch.empty(1)
+    with pytest.raises(SystemExit):
+        fake_tensor_oob_kernel[(1,)](x, out, N=8)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def block_ptr_sum_kernel(
+    s_ptr,
+    z_ptr,
+    T: tl.constexpr,
+    S: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+):
+    o_i = tl.arange(0, BT)
+    m = tl.where(o_i[:, None] <= o_i[None, :], 1.0, 0.0)
+    b_z = tl.zeros([BS], dtype=tl.float32)
+    p_s = tl.make_block_ptr(s_ptr, (T, S), (S, 1), (0, 0), (BT, BS), (1, 0))
+    p_z = tl.make_block_ptr(z_ptr, (T, S), (S, 1), (0, 0), (BT, BS), (1, 0))
+    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_c = b_z[None, :] + tl.dot(m, b_s, allow_tf32=False)
+    tl.store(p_z, b_c.to(p_z.dtype.element_ty), boundary_check=(0, 1))
+    b_z += tl.sum(b_s, 0)
+
+
+def test_reduce_symbolic_core_dtype():
+    """tl.sum on cast block_ptr data must preserve block_type dtype."""
+    s = torch.randn(16, 16, device="cpu")
+    z = torch.empty_like(s)
+    block_ptr_sum_kernel[(1,)](s, z, T=16, S=16, BT=16, BS=16)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(input_ptr + row * N + offs, mask=mask, other=-float("inf"))
+    x_max = tl.max(x, 0)
+    exp_x = tl.exp(x - x_max)
+    sum_exp = tl.sum(exp_x, 0)
+    tl.store(output_ptr + row * N + offs, exp_x / sum_exp, mask=mask)
+
+
+def test_reduce_symbolic_nonetype():
+    """Softmax kernel: tl.exp -> tl.max / tl.sum must propagate dtype correctly."""
+    x = torch.randn(4, 64, device="cpu")
+    out = torch.empty_like(x)
+    softmax_kernel[(4,)](out, x, 64, BLOCK=64)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def exp_expand_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    w = tl.exp(x)
+    m = w[None, :] * tl.load(x_ptr + offs)[:, None]
+    tl.store(out_ptr + offs, tl.sum(m, axis=1))
+
+
+def test_expand_dims_scalar_attr():
+    """tl.exp followed by expand_dims must propagate dtype correctly."""
+    x = torch.randn(8, device="cpu")
+    out = torch.empty(8, device="cpu")
+    exp_expand_kernel[(1,)](x, out, N=8)
