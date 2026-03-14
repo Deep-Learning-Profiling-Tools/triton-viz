@@ -999,3 +999,44 @@ def test_expand_dims_scalar_attr():
     x = torch.randn(8, device="cpu")
     out = torch.empty(8, device="cpu")
     exp_expand_kernel[(1,)](x, out, N=8)
+
+
+# ======== Non-contiguous / TensorWrapper Regression Tests ===========
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def read_expanded_kernel(inp, out, stride_row, stride_col, M, N, BLOCK_N: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_N)
+    mask = offs < N
+    ptrs = inp + row * stride_row + offs * stride_col
+    x = tl.load(ptrs, mask=mask, other=0)
+    tl.store(out + row * N + offs, x, mask=mask)
+
+
+def test_non_contiguous_expanded_tensor():
+    """expand()-ed tensors (stride-0, non-contiguous) must not crash the sanitizer."""
+    M, N = 4, 8
+    row = torch.arange(N, device="cpu", dtype=torch.float32)
+    x = row.unsqueeze(0).expand(M, N)  # shape (4,8), strides (0, 1)
+    assert not x.is_contiguous()
+    out = torch.empty(M, N, device="cpu")
+    read_expanded_kernel[(M,)](x, out, x.stride(0), x.stride(1), M, N, BLOCK_N=8)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def copy_kernel(src, dst, N, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(src + offs, mask=mask)
+    tl.store(dst + offs, x, mask=mask)
+
+
+def test_reinterpret_tensor_wrapper():
+    """triton.reinterpret() produces a TensorWrapper; sanitizer must handle it."""
+    N = 64
+    x = torch.ones(N, dtype=torch.float16, device="cpu")
+    y = torch.empty(N, dtype=torch.float16, device="cpu")
+    copy_kernel[(1,)](triton.reinterpret(x, tl.float16), y, N, BLOCK=64)
