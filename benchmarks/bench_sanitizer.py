@@ -1069,9 +1069,17 @@ BENCHMARKS["flaggems_layernorm"] = {
 _SWIGLU_SHAPES = [
     # (bsz, seq_len, hidden_size, intermediate_size)
     # Grid = bsz * seq_len; keep moderate to avoid sanitizer timeout.
-    (2, 64, 256, 1024),
-    (1, 128, 128, 512),
-    (1, 128, 64, 256),
+    (1, 4, 256, 512),
+    (1, 4, 256, 1024),
+    (1, 4, 256, 2048),
+    (1, 4, 256, 4096),
+    (1, 4, 256, 8192),
+    (1, 4, 128, 768),
+    (1, 4, 128, 1536),
+    (1, 4, 128, 3072),
+    (1, 4, 128, 6144),
+    (1, 4, 64, 256),
+    (1, 4, 64, 640),
 ]
 _SWIGLU_DTYPES = [torch.float32]
 
@@ -1148,11 +1156,16 @@ BENCHMARKS["swiglu"] = {
 _CE_SHAPES = [
     # (B, T, V) → (BT=B*T, V)  — deduplicated
     # Grid = BT; keep moderate to avoid sanitizer timeout.
-    (1, 128, 2048),
-    (1, 64, 4096),
-    (1, 128, 1024),
+    (1, 4, 512),
+    (1, 4, 1024),
+    (1, 4, 2048),
+    (1, 4, 4096),
+    (1, 4, 8192),
+    (1, 4, 16384),
+    (1, 4, 32000),
 ]
 _CE_REDUCTIONS = ["sum", "mean"]
+_CE_LABEL_SMOOTHINGS = [0.0, 0.1]
 _CE_DTYPES = [torch.float32]
 
 
@@ -1180,22 +1193,23 @@ def _ce_run_all(configs):
         loss = torch.zeros(BT, dtype=torch.float32)
 
         for reduction in _CE_REDUCTIONS:
-            X = X_template.clone()
-            liger_cross_entropy_kernel[(BT,)](
-                X_ptr=X,
-                X_stride=X.stride(0),
-                Y_ptr=Y,
-                Y_stride=Y.stride(0),
-                loss_ptr=loss,
-                loss_stride=loss.stride(0),
-                n_cols=V,
-                n_non_ignore=BT,
-                ignore_index=-100,
-                label_smoothing=0.0,
-                reduction=reduction,
-                BLOCK_SIZE=BLOCK_SIZE,
-            )
-            del X
+            for label_smoothing in _CE_LABEL_SMOOTHINGS:
+                X = X_template.clone()
+                liger_cross_entropy_kernel[(BT,)](
+                    X_ptr=X,
+                    X_stride=X.stride(0),
+                    Y_ptr=Y,
+                    Y_stride=Y.stride(0),
+                    loss_ptr=loss,
+                    loss_stride=loss.stride(0),
+                    n_cols=V,
+                    n_non_ignore=BT,
+                    ignore_index=-100,
+                    label_smoothing=label_smoothing,
+                    reduction=reduction,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                )
+                del X
         del X_template, Y, loss
 
 
@@ -1216,9 +1230,15 @@ BENCHMARKS["cross_entropy"] = {
 _FLJSD_SHAPES = [
     # (B, T, H, V)
     # Grid = B * T; keep moderate to avoid sanitizer timeout.
-    (2, 64, 512, 1600),
-    (2, 64, 256, 1024),
-    (1, 128, 128, 512),
+    (1, 4, 512, 800),
+    (1, 4, 512, 1600),
+    (1, 4, 512, 3200),
+    (1, 4, 256, 1024),
+    (1, 4, 256, 2048),
+    (1, 4, 256, 4096),
+    (1, 4, 128, 512),
+    (1, 4, 128, 1024),
+    (1, 4, 128, 2048),
 ]
 _FLJSD_DTYPES = [torch.float32]
 _FLJSD_PARAMS = [
