@@ -227,6 +227,7 @@ class SymbolicExpr:
         "sqrt",
         "sin",
         "rsqrt",
+        "tanh",
     )
     BINARY_OP_SYMBOL_TABLE: ClassVar[dict[str, str]] = {
         "add": "+",
@@ -1669,6 +1670,7 @@ _UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
     np.log2: "log2",
     np.sqrt: "sqrt",
     np.sin: "sin",
+    np.tanh: "tanh",
 }
 
 _BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
