@@ -202,7 +202,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
     def _collect_tensor_base(self, expr: SymbolicExpr) -> int | None:
         def walk(node: SymbolicExpr) -> int | None:
-            if node.op == "const" and isinstance(node.dtype, tl.pointer_type):
+            if (
+                node.op == "const"
+                and isinstance(node.dtype, tl.pointer_type)
+                and not node.shape
+            ):
                 return node.to_py()
             for child in node.children.values():
                 if child is not None:

@@ -9,7 +9,7 @@ from triton_viz.clients import Profiler
 from triton_viz.core.config import config as cfg
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def _isolate_profiler_cfg():
     """Save and restore profiler-related config values around every test."""
     saved = (
@@ -71,7 +71,7 @@ def for_loop_test_kernel(
     tl.store(out_ptr + offsets, result, mask=mask)
 
 
-def test_for_loop_statistics():
+def test_for_loop_statistics(_isolate_profiler_cfg):
     """
     Test that the profiler correctly tracks for-loop statistics.
     """
@@ -122,14 +122,14 @@ def test_for_loop_statistics():
 
         assert (
             loop_info.length == expected_steps
-        ), f"Loop #{idx+1}: Expected {expected_steps} steps, got {loop_info.length}"
+        ), f"Loop #{idx + 1}: Expected {expected_steps} steps, got {loop_info.length}"
         assert (
             loop_info.range_type == expected_type
-        ), f"Loop #{idx+1}: Expected type {expected_type}, got {loop_info.range_type}"
+        ), f"Loop #{idx + 1}: Expected type {expected_type}, got {loop_info.range_type}"
         assert isinstance(
             lineno, int
-        ), f"Loop #{idx+1}: lineno should be int, got {type(lineno)}"
-        assert lineno > 0, f"Loop #{idx+1}: lineno should be positive, got {lineno}"
+        ), f"Loop #{idx + 1}: lineno should be int, got {type(lineno)}"
+        assert lineno > 0, f"Loop #{idx + 1}: lineno should be positive, got {lineno}"
 
 
 # ======== Case 3: Check masked element percentage for tuning BLOCK_SIZE ========
@@ -175,7 +175,7 @@ def mask_percentage_test_kernel(
     tl.store(out_ptr + tl.arange(0, BLOCK_SIZE), result)  # No mask - this is RawStore
 
 
-def test_mask_percentage():
+def test_mask_percentage(_isolate_profiler_cfg):
     """
     Test that the profiler correctly reports the mask element statistics.
 
@@ -298,7 +298,9 @@ def block_sampling_test_kernel(
     ],
     ids=lambda x: x if isinstance(x, str) else str(x),
 )
-def test_block_sampling(test_name, enable_sampling, k_value, expected_executions):
+def test_block_sampling(
+    test_name, enable_sampling, k_value, expected_executions, _isolate_profiler_cfg
+):
     """
     Test that the block sampling feature correctly samples k blocks from the grid.
 
@@ -363,7 +365,7 @@ def simple_kernel(in_ptr, out_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     tl.store(out_ptr + offsets, result, mask=mask)
 
 
-def test_load_store_skip_disabled():
+def test_load_store_skip_disabled(_isolate_profiler_cfg):
     """Test that load/store operations work normally when skipping is disabled."""
     N = 128
     BLOCK_SIZE = 32
@@ -392,7 +394,7 @@ def test_load_store_skip_disabled():
     ), f"Normal execution should produce 6.0, got {y[:10]}"
 
 
-def test_load_store_skip_enabled():
+def test_load_store_skip_enabled(_isolate_profiler_cfg):
     """Test that load/store operations are skipped when skipping is enabled."""
     N = 128
     BLOCK_SIZE = 32
