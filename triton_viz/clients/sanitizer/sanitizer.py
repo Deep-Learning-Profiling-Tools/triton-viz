@@ -419,6 +419,10 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
                 self.cache_args.append(arg)
             return
+        from triton.runtime.jit import TensorWrapper
+
+        if isinstance(arg, TensorWrapper):
+            arg = arg.base
         if arg.is_contiguous() or check_storage_contiguous(arg):
             start = arg.data_ptr()
             end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
