@@ -6,6 +6,7 @@ import triton
 import triton.language as tl
 
 import triton_viz
+from triton_viz.core import config
 from triton_viz.core.data import Load, RawLoad
 from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr, RangeWrapper
 from triton_viz.clients.sanitizer.sanitizer import (
@@ -13,16 +14,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
     _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
-from triton_viz.core.config import config
 from z3.z3 import BoolRef
-
-
-@pytest.fixture
-def _isolate_virtual_memory():
-    """Save and restore config.virtual_memory around a test."""
-    saved = config.virtual_memory
-    yield
-    config.virtual_memory = saved
 
 
 # ======== Helpers ===========
@@ -309,7 +301,7 @@ def test_loop_deferred_checks_simplify():
 
 
 # Dedicated sanitizer for nested loop regression test
-nested_loop_checker = SymbolicSanitizer()
+nested_loop_checker = SymbolicSanitizer(abort_on_error=False)
 
 
 @triton_viz.trace(client=nested_loop_checker)
@@ -337,7 +329,6 @@ def test_nested_loop_no_false_positive():
 
 
 # Create a dedicated sanitizer for line number tests
-# abort_on_error=False is on purpose: so OOB violations are recorded
 line_number_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
@@ -383,14 +374,16 @@ def test_loop_oob_reports_correct_line_number():
     )
 
     # Verify the line contains the OOB offset
-    assert (
-        "+1000" in tb_info.line_of_code or "1000" in tb_info.line_of_code
-    ), f"Expected line to contain the OOB offset, but got: {tb_info.line_of_code!r}"
+    assert "+1000" in tb_info.line_of_code or "1000" in tb_info.line_of_code, (
+        f"Expected line to contain the OOB offset, "
+        f"but got: {tb_info.line_of_code!r}"
+    )
 
     # Verify function name
-    assert (
-        tb_info.func_name == "oob_in_loop_kernel"
-    ), f"Expected func_name to be 'oob_in_loop_kernel', but got: {tb_info.func_name!r}"
+    assert tb_info.func_name == "oob_in_loop_kernel", (
+        f"Expected func_name to be 'oob_in_loop_kernel', "
+        f"but got: {tb_info.func_name!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +452,6 @@ def test_gemm_oob_call_stack():
 # ======== Block Tensor (Block Pointer) Tests ===========
 
 
-# abort_on_error=False is on purpose: so OOB violations are recorded
 block_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
@@ -821,7 +813,7 @@ def test_cli_code_context_points_to_kernel():
 
 # ======== Reduce + Broadcast Tests ===========
 
-reduce_broadcast_sanitizer = SymbolicSanitizer()
+reduce_broadcast_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
 @triton_viz.trace(client=reduce_broadcast_sanitizer)
