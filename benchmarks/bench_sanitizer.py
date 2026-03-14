@@ -772,9 +772,10 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 
 _LIGER_SHAPES = [
-    (2, 4, 2048, 3200),  # small
-    (2, 2048, 4096, 32000),  # llama2/mistral
-    (4, 423, 8192, 32000),  # random shape
+    # Grid = B * T; keep moderate to avoid sanitizer timeout.
+    (2, 256, 512, 1600),
+    (1, 512, 256, 2048),
+    (1, 512, 128, 1024),
 ]
 _LIGER_DTYPES = [
     (0.5, torch.bfloat16),
@@ -888,11 +889,13 @@ BENCHMARKS["liger_jsd"] = {
 # ---------------------------------------------------------------------------
 
 _FLAGGEMS_LN_SHAPES = [
-    (200, 36),
-    (4096, 100),
+    # M determines grid size; keep moderate to avoid sanitizer timeout.
+    # N values chosen to cover all three kernel variants (multiline/persistent/loop).
+    (512, 36),
+    (512, 100),
     (1, 40999),
-    (100, 40499),
-    (4096, 256),
+    (128, 40499),
+    (512, 256),
 ]
 _FLAGGEMS_LN_DTYPES = [torch.float16, torch.float32, torch.bfloat16]
 _FLAGGEMS_LN_WB = [True]  # wb_none=True only (with weight/bias errors)
@@ -1067,10 +1070,10 @@ BENCHMARKS["flaggems_layernorm"] = {
 
 _SWIGLU_SHAPES = [
     # (bsz, seq_len, hidden_size, intermediate_size)
-    (2, 2048, 4096, 11008),
-    (2, 2048, 2048, 4096),
-    (9, 41, 341, 4231),
-    (6, 42, 256, 2048),
+    # Grid = bsz * seq_len; keep moderate to avoid sanitizer timeout.
+    (2, 256, 256, 1024),
+    (1, 512, 128, 512),
+    (1, 512, 64, 256),
 ]
 _SWIGLU_DTYPES = [torch.float32]
 
@@ -1146,9 +1149,10 @@ BENCHMARKS["swiglu"] = {
 
 _CE_SHAPES = [
     # (B, T, V) → (BT=B*T, V)  — deduplicated
-    (2, 4096, 32000),
-    (1, 4096, 128256),
-    (3, 423, 32000),
+    # Grid = BT; keep moderate to avoid sanitizer timeout.
+    (1, 512, 2048),
+    (1, 256, 4096),
+    (1, 512, 1024),
 ]
 _CE_REDUCTIONS = ["sum", "mean"]
 _CE_DTYPES = [torch.float32]
@@ -1213,9 +1217,10 @@ BENCHMARKS["cross_entropy"] = {
 
 _FLJSD_SHAPES = [
     # (B, T, H, V)
-    (2, 2, 512, 1600),
-    (2, 4, 1024, 1600),
-    (4, 423, 167, 1423),
+    # Grid = B * T; keep moderate to avoid sanitizer timeout.
+    (2, 256, 512, 1600),
+    (2, 256, 256, 1024),
+    (1, 512, 128, 512),
 ]
 _FLJSD_DTYPES = [torch.float32]
 _FLJSD_PARAMS = [
@@ -1312,7 +1317,7 @@ BENCHMARKS["fused_linear_jsd"] = {
 
 def run_benchmarks(
     warmup: int = 1,
-    iterations: int = 40,
+    iterations: int = 20,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1557,7 +1562,7 @@ def main():
     parser.add_argument("--output", "-o", help="Output JSON file path")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations")
     parser.add_argument(
-        "--iterations", type=int, default=40, help="Measured iterations"
+        "--iterations", type=int, default=20, help="Measured iterations"
     )
     parser.add_argument(
         "--compare",
