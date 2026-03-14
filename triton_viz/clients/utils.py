@@ -121,18 +121,27 @@ def check_storage_contiguous(tensor: torch.Tensor):
 
 
 def check_inner_stride_equal_to_one(tensor: torch.Tensor):
-    return sorted(tensor.stride())[0] == 1
+    non_zero = [s for s in tensor.stride() if s != 0]
+    return len(non_zero) > 0 and sorted(non_zero)[0] == 1
 
 
 def get_physical_addr_from_tensor_slice(tensor: torch.Tensor) -> list[tuple[int, int]]:
-    if sorted(tensor.stride())[0] != 1:
+    non_zero = [s for s in tensor.stride() if s != 0]
+    if len(non_zero) == 0 or sorted(non_zero)[0] != 1:
         raise ValueError("inner dim must be contiguous!")
     dims = tensor.dim()
-    inner_dim = min(range(dims), key=lambda d: tensor.stride(d))
+    # Inner dim is the non-zero dim with smallest stride
+    inner_dim = min(
+        (d for d in range(dims) if tensor.stride(d) != 0),
+        key=lambda d: tensor.stride(d),
+    )
+    # Stride-0 dims access the same memory for all indices, so collapse to size 1
     outer_dims = [d for d in range(dims) if d != inner_dim]
 
     segments = []
-    for idxs in itertools.product(*(range(tensor.size(d)) for d in outer_dims)):
+    for idxs in itertools.product(
+        *(range(1 if tensor.stride(d) == 0 else tensor.size(d)) for d in outer_dims)
+    ):
         offset = int(tensor.storage_offset()) + sum(
             idx * int(tensor.stride(d)) for idx, d in zip(idxs, outer_dims)
         )
