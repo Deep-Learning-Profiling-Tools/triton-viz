@@ -332,6 +332,13 @@ class SymbolicExpr:
         self._has_op_cache: dict[str, bool] = {}
         self._data_wrapper: SymbolicExprDataWrapper | None = None
 
+    @staticmethod
+    def _unpack_dtype(dtype, fallback_shape=()):
+        """Split a block_type into (scalar_dtype, shape), passing through scalars."""
+        if isinstance(dtype, tl.block_type):
+            return dtype.scalar, tuple(int(x) for x in dtype.shape)
+        return dtype, fallback_shape
+
     def add_child(self, name: str, value: Any) -> None:
         child = SymbolicExpr.from_value(value) if value is not None else None
         self.children[name] = child
@@ -613,10 +620,7 @@ class ConstSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
         super().__init__(op)
         self.value = value
-        if isinstance(dtype, tl.block_type):
-            self.dtype, self.shape = dtype.scalar, tuple(int(x) for x in dtype.shape)
-        else:
-            self.dtype, self.shape = dtype, ()
+        self.dtype, self.shape = self._unpack_dtype(dtype)
 
     def _node_label_core(self) -> str:
         return f"const={self.value}"
@@ -1201,10 +1205,7 @@ class CumsumSymbolicExpr(SymbolicExpr):
         self.add_child("input", input)
         self.add_child("axis", axis)
         self.add_child("reverse", reverse)
-        if isinstance(dtype, tl.block_type):
-            self.dtype, self.shape = dtype.scalar, tuple(int(x) for x in dtype.shape)
-        else:
-            self.dtype, self.shape = dtype, ()
+        self.dtype, self.shape = self._unpack_dtype(dtype)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1436,13 +1437,9 @@ class CastSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
-        dst = self.dst_type.to_py()
-        if isinstance(dst, tl.block_type):
-            self.dtype = dst.scalar
-            self.shape = tuple(int(x) for x in dst.shape)
-        else:
-            self.dtype = dst
-            self.shape = self.src.shape
+        self.dtype, self.shape = self._unpack_dtype(
+            self.dst_type.to_py(), self.src.shape
+        )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.src._to_z3()
@@ -1463,13 +1460,7 @@ class FpToFpSymbolicExpr(SymbolicExpr):
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
         self.add_child("rounding_mode", rounding_mode)
-        dst_dt = self.dst_type.dtype
-        if isinstance(dst_dt, tl.block_type):
-            self.dtype = dst_dt.scalar
-            self.shape = tuple(int(x) for x in dst_dt.shape)
-        else:
-            self.dtype = dst_dt
-            self.shape = self.src.shape
+        self.dtype, self.shape = self._unpack_dtype(self.dst_type.dtype, self.src.shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
