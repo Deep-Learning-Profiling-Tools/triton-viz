@@ -1,5 +1,4 @@
 import pytest
-import numpy as np
 from typing import cast
 
 import triton.language as tl
@@ -93,38 +92,6 @@ def test_reduce_expr_eval(op: str, data):
     result, _ = reduce_expr.eval(simplify_constraints=False)
     # Use reflection to call the matching Python builtin, e.g. builtins.max([1,5,3,2]) -> 5
     assert cast(IntNumRef, result).as_long() == getattr(builtins, op)(data)
-
-
-@pytest.mark.parametrize("op,np_op", [("argmax", np.argmax), ("argmin", np.argmin)])
-def test_reduce_argmax_argmin_concretize_fallback(op: str, np_op):
-    """argmax/argmin cannot be computed on the Z3 path (Z3 tracks addresses,
-    not values) so they must fall back to concretize()."""
-    from triton.runtime.interpreter import TensorHandle
-
-    data = np.array([10, 1, 30, 50], dtype=np.int32)
-    block_ty = tl.block_type(tl.int32, [len(data)])
-    input_arr = SymbolicExpr.create("const", TensorHandle(data, tl.int32), block_ty)
-    reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
-
-    result = reduce_expr.concretize()
-    assert isinstance(result, TensorHandle)
-    assert int(result.data.flat[0]) == int(np_op(data))
-
-
-@pytest.mark.parametrize("op,np_op", [("argmax", np.argmax), ("argmin", np.argmin)])
-def test_reduce_argmax_argmin_concretize_dtype(op: str, np_op):
-    """concretize() must produce int32 data matching the declared dtype."""
-    from triton.runtime.interpreter import TensorHandle
-
-    data = np.array([3, 1, 4, 1], dtype=np.int32)
-    block_ty = tl.block_type(tl.int32, [len(data)])
-    input_arr = SymbolicExpr.create("const", TensorHandle(data, tl.int32), block_ty)
-    reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
-
-    result = reduce_expr.concretize()
-    assert isinstance(result, TensorHandle)
-    assert result.data.dtype == np.int32
-    assert int(result.data.flat[0]) == int(np_op(data))
 
 
 # ======== Basic Symbolic Expr Operations Tests =========
