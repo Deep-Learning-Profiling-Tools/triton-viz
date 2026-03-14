@@ -54,7 +54,6 @@ def _timeout_handler(signum, frame):
 # Sanitizer instances (one per kernel, following test_sanitizer.py pattern)
 # ---------------------------------------------------------------------------
 
-simple_sanitizer = SymbolicSanitizer(abort_on_error=False)
 gemm_sanitizer = SymbolicSanitizer(abort_on_error=False)
 gemm_oob_sanitizer = SymbolicSanitizer(abort_on_error=False)
 indirect_sanitizer = SymbolicSanitizer(abort_on_error=False)
@@ -70,16 +69,6 @@ cross_entropy_sanitizer = SymbolicSanitizer(abort_on_error=False)
 # ---------------------------------------------------------------------------
 # Kernels
 # ---------------------------------------------------------------------------
-
-
-@triton_viz.trace(client=simple_sanitizer)
-@triton.jit
-def simple_load_store_kernel(in_ptr, out_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < N
-    x = tl.load(in_ptr + offs, mask=mask)
-    tl.store(out_ptr + offs, x, mask=mask)
 
 
 @triton_viz.trace(client=gemm_sanitizer)
@@ -806,16 +795,6 @@ def _nested_run_all(data):
 
 
 BENCHMARKS: dict[str, dict[str, Any]] = {
-    "simple_load_store": {
-        "setup": lambda: {
-            "inp": torch.randn(8192, dtype=torch.float32),
-            "out": torch.empty(8192, dtype=torch.float32),
-        },
-        "run": lambda d: simple_load_store_kernel[(64,)](
-            d["inp"], d["out"], N=8192, BLOCK=128
-        ),
-        "sanitizer": simple_sanitizer,
-    },
     "gemm": {
         "setup": _gemm_setup_all,
         "run": _gemm_run_all,
