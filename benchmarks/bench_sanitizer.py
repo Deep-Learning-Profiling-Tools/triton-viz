@@ -154,10 +154,10 @@ def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK: tl.constexpr):
 
 @triton_viz.trace(client=nested_sanitizer)
 @triton.jit
-def nested_loop_kernel(out_ptr):
-    for i in range(0, 4):
-        for j in range(0, 8):
-            idx = i * 8 + j
+def nested_loop_kernel(out_ptr, OUTER: tl.constexpr, INNER: tl.constexpr):
+    for i in range(0, OUTER):
+        for j in range(0, INNER):
+            idx = i * INNER + j
             tl.store(out_ptr + idx, idx)
 
 
@@ -704,6 +704,107 @@ def _reset_sanitizer(san: SymbolicSanitizer):
     san.records.clear()
 
 
+# ---------------------------------------------------------------------------
+# GEMM benchmarks: multiple (M, N, K, TILE_SIZE) constexpr combos
+# Each unique combo is a separate symbolic cache entry.
+# ---------------------------------------------------------------------------
+
+_GEMM_CONFIGS = [
+    # (M, N, K, TILE_SIZE)
+    (64, 64, 64, 16),
+    (128, 128, 128, 16),
+    (64, 128, 64, 16),
+    (128, 64, 128, 16),
+    (64, 64, 64, 32),
+    (128, 128, 128, 32),
+    (64, 128, 128, 32),
+]
+
+
+def _gemm_setup_all():
+    return [
+        {
+            "A": torch.randn(M, K, dtype=torch.float32),
+            "B": torch.randn(K, N, dtype=torch.float32),
+            "C": torch.empty(M, N, dtype=torch.float32),
+            "M": M,
+            "N": N,
+            "K": K,
+            "TILE": TILE,
+        }
+        for M, N, K, TILE in _GEMM_CONFIGS
+    ]
+
+
+def _gemm_run_all(configs):
+    for d in configs:
+        grid = (d["M"] // d["TILE"], d["N"] // d["TILE"])
+        gemm_kernel[grid](
+            d["A"],
+            d["B"],
+            d["C"],
+            M=d["M"],
+            N=d["N"],
+            K=d["K"],
+            TILE_SIZE=d["TILE"],
+        )
+
+
+def _gemm_oob_setup_all():
+    return [
+        {
+            "A": torch.randn(M, K, dtype=torch.float32),
+            "B": torch.randn(K, N, dtype=torch.float32),
+            "C": torch.empty(M, N, dtype=torch.float32),
+            "M": M,
+            "N": N,
+            "K": K,
+            "TILE": TILE,
+        }
+        for M, N, K, TILE in _GEMM_CONFIGS
+    ]
+
+
+def _gemm_oob_run_all(configs):
+    for d in configs:
+        grid = (d["M"] // d["TILE"], d["N"] // d["TILE"])
+        gemm_oob_kernel[grid](
+            d["A"],
+            d["B"],
+            d["C"],
+            M=d["M"],
+            N=d["N"],
+            K=d["K"],
+            TILE_SIZE=d["TILE"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Nested loop benchmarks: multiple (OUTER, INNER) constexpr combos
+# ---------------------------------------------------------------------------
+
+_NESTED_CONFIGS = [
+    # (OUTER, INNER)
+    (4, 8),
+    (8, 4),
+    (4, 16),
+    (16, 4),
+    (8, 8),
+    (8, 16),
+    (16, 8),
+]
+
+
+def _nested_setup_all():
+    max_elems = max(o * i for o, i in _NESTED_CONFIGS)
+    return {"out": torch.empty(max_elems, dtype=torch.int32)}
+
+
+def _nested_run_all(data):
+    for outer, inner in _NESTED_CONFIGS:
+        nested_loop_kernel[(1,)](data["out"], OUTER=outer, INNER=inner)
+
+
 BENCHMARKS: dict[str, dict[str, Any]] = {
     "simple_load_store": {
         "setup": lambda: {
@@ -716,25 +817,13 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
         "sanitizer": simple_sanitizer,
     },
     "gemm": {
-        "setup": lambda: {
-            "A": torch.randn(128, 128, dtype=torch.float32),
-            "B": torch.randn(128, 128, dtype=torch.float32),
-            "C": torch.empty(128, 128, dtype=torch.float32),
-        },
-        "run": lambda d: gemm_kernel[(16, 16)](
-            d["A"], d["B"], d["C"], M=128, N=128, K=128, TILE_SIZE=16
-        ),
+        "setup": _gemm_setup_all,
+        "run": _gemm_run_all,
         "sanitizer": gemm_sanitizer,
     },
     "gemm_oob": {
-        "setup": lambda: {
-            "A": torch.randn(128, 128, dtype=torch.float32),
-            "B": torch.randn(128, 128, dtype=torch.float32),
-            "C": torch.empty(128, 128, dtype=torch.float32),
-        },
-        "run": lambda d: gemm_oob_kernel[(16, 16)](
-            d["A"], d["B"], d["C"], M=128, N=128, K=128, TILE_SIZE=16
-        ),
+        "setup": _gemm_oob_setup_all,
+        "run": _gemm_oob_run_all,
         "sanitizer": gemm_oob_sanitizer,
     },
     "indirect_load": {
@@ -749,10 +838,8 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
         "sanitizer": indirect_sanitizer,
     },
     "nested_loop": {
-        "setup": lambda: {
-            "out": torch.empty(256, dtype=torch.int32),
-        },
-        "run": lambda d: nested_loop_kernel[(8,)](d["out"]),
+        "setup": _nested_setup_all,
+        "run": _nested_run_all,
         "sanitizer": nested_sanitizer,
     },
     "block_pointer_loop_advance": {
