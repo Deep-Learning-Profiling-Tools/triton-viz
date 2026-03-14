@@ -707,60 +707,60 @@ def _reset_sanitizer(san: SymbolicSanitizer):
 BENCHMARKS: dict[str, dict[str, Any]] = {
     "simple_load_store": {
         "setup": lambda: {
-            "inp": torch.randn(512, dtype=torch.float32),
-            "out": torch.empty(512, dtype=torch.float32),
+            "inp": torch.randn(8192, dtype=torch.float32),
+            "out": torch.empty(8192, dtype=torch.float32),
         },
-        "run": lambda d: simple_load_store_kernel[(4,)](
-            d["inp"], d["out"], N=512, BLOCK=128
+        "run": lambda d: simple_load_store_kernel[(64,)](
+            d["inp"], d["out"], N=8192, BLOCK=128
         ),
         "sanitizer": simple_sanitizer,
     },
     "gemm": {
         "setup": lambda: {
-            "A": torch.randn(64, 64, dtype=torch.float32),
-            "B": torch.randn(64, 64, dtype=torch.float32),
-            "C": torch.empty(64, 64, dtype=torch.float32),
+            "A": torch.randn(128, 128, dtype=torch.float32),
+            "B": torch.randn(128, 128, dtype=torch.float32),
+            "C": torch.empty(128, 128, dtype=torch.float32),
         },
-        "run": lambda d: gemm_kernel[(4, 4)](
-            d["A"], d["B"], d["C"], M=64, N=64, K=64, TILE_SIZE=16
+        "run": lambda d: gemm_kernel[(16, 16)](
+            d["A"], d["B"], d["C"], M=128, N=128, K=128, TILE_SIZE=16
         ),
         "sanitizer": gemm_sanitizer,
     },
     "gemm_oob": {
         "setup": lambda: {
-            "A": torch.randn(64, 64, dtype=torch.float32),
-            "B": torch.randn(64, 64, dtype=torch.float32),
-            "C": torch.empty(64, 64, dtype=torch.float32),
+            "A": torch.randn(128, 128, dtype=torch.float32),
+            "B": torch.randn(128, 128, dtype=torch.float32),
+            "C": torch.empty(128, 128, dtype=torch.float32),
         },
-        "run": lambda d: gemm_oob_kernel[(4, 4)](
-            d["A"], d["B"], d["C"], M=64, N=64, K=64, TILE_SIZE=16
+        "run": lambda d: gemm_oob_kernel[(16, 16)](
+            d["A"], d["B"], d["C"], M=128, N=128, K=128, TILE_SIZE=16
         ),
         "sanitizer": gemm_oob_sanitizer,
     },
     "indirect_load": {
         "setup": lambda: {
-            "idx": torch.arange(256, dtype=torch.int32),
-            "src": torch.randn(256, dtype=torch.float32),
-            "dst": torch.empty(256, dtype=torch.float32),
+            "idx": torch.arange(1024, dtype=torch.int32),
+            "src": torch.randn(1024, dtype=torch.float32),
+            "dst": torch.empty(1024, dtype=torch.float32),
         },
-        "run": lambda d: indirect_load_kernel[(4,)](
+        "run": lambda d: indirect_load_kernel[(16,)](
             d["idx"], d["src"], d["dst"], BLOCK=64
         ),
         "sanitizer": indirect_sanitizer,
     },
     "nested_loop": {
         "setup": lambda: {
-            "out": torch.empty(32, dtype=torch.int32),
+            "out": torch.empty(256, dtype=torch.int32),
         },
-        "run": lambda d: nested_loop_kernel[(1,)](d["out"]),
+        "run": lambda d: nested_loop_kernel[(8,)](d["out"]),
         "sanitizer": nested_sanitizer,
     },
     "block_pointer_loop_advance": {
         "setup": lambda: {
-            "data": torch.randn(256, dtype=torch.float32),
+            "data": torch.randn(4096, dtype=torch.float32),
         },
-        "run": lambda d: block_pointer_loop_advance_kernel[(1,)](
-            d["data"], N=256, BLOCK=64
+        "run": lambda d: block_pointer_loop_advance_kernel[(16,)](
+            d["data"], N=4096, BLOCK=64
         ),
         "sanitizer": block_ptr_sanitizer,
     },
@@ -891,13 +891,11 @@ BENCHMARKS["liger_jsd"] = {
 _FLAGGEMS_LN_SHAPES = [
     # M determines grid size; keep moderate to avoid sanitizer timeout.
     # N values chosen to cover all three kernel variants (multiline/persistent/loop).
-    (512, 36),
-    (512, 100),
+    (64, 36),
     (1, 40999),
-    (128, 40499),
-    (512, 256),
+    (64, 256),
 ]
-_FLAGGEMS_LN_DTYPES = [torch.float16, torch.float32, torch.bfloat16]
+_FLAGGEMS_LN_DTYPES = [torch.float32]
 _FLAGGEMS_LN_WB = [True]  # wb_none=True only (with weight/bias errors)
 
 _LN_BWD_BLOCK_ROW = 4
