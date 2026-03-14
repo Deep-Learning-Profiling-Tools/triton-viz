@@ -1069,9 +1069,9 @@ BENCHMARKS["flaggems_layernorm"] = {
 _SWIGLU_SHAPES = [
     # (bsz, seq_len, hidden_size, intermediate_size)
     # Grid = bsz * seq_len; keep moderate to avoid sanitizer timeout.
-    (2, 256, 256, 1024),
-    (1, 512, 128, 512),
-    (1, 512, 64, 256),
+    (2, 64, 256, 1024),
+    (1, 128, 128, 512),
+    (1, 128, 64, 256),
 ]
 _SWIGLU_DTYPES = [torch.float32]
 
@@ -1148,9 +1148,9 @@ BENCHMARKS["swiglu"] = {
 _CE_SHAPES = [
     # (B, T, V) → (BT=B*T, V)  — deduplicated
     # Grid = BT; keep moderate to avoid sanitizer timeout.
-    (1, 512, 2048),
-    (1, 256, 4096),
-    (1, 512, 1024),
+    (1, 128, 2048),
+    (1, 64, 4096),
+    (1, 128, 1024),
 ]
 _CE_REDUCTIONS = ["sum", "mean"]
 _CE_DTYPES = [torch.float32]
@@ -1216,9 +1216,9 @@ BENCHMARKS["cross_entropy"] = {
 _FLJSD_SHAPES = [
     # (B, T, H, V)
     # Grid = B * T; keep moderate to avoid sanitizer timeout.
-    (2, 256, 512, 1600),
-    (2, 256, 256, 1024),
-    (1, 512, 128, 512),
+    (2, 64, 512, 1600),
+    (2, 64, 256, 1024),
+    (1, 128, 128, 512),
 ]
 _FLJSD_DTYPES = [torch.float32]
 _FLJSD_PARAMS = [
