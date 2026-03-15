@@ -1025,6 +1025,45 @@ def test_non_contiguous_expanded_tensor():
     read_expanded_kernel[(M,)](x, out, x.stride(0), x.stride(1), M, N, BLOCK_N=8)
 
 
+# ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
+
+
+data_dep_div_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=data_dep_div_sanitizer)
+@triton.jit
+def data_dep_loop_div_kernel(Lens, Out, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    seq_len = tl.load(Lens + pid)
+    # integer division of a loaded value produces a SymbolicExpr
+    num_blocks = (seq_len + BLOCK - 1) // BLOCK
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    for i in range(0, num_blocks):
+        acc += 1.0
+    tl.store(Out + pid * BLOCK + tl.arange(0, BLOCK), acc)
+
+
+def test_data_dependent_loop_bound_div():
+    """
+    Data-dependent loop bound via integer division of a loaded value
+    must not crash the symbolic engine (e.g. 'to_py must be implemented
+    by subclasses').
+    """
+    data_dep_div_sanitizer.records.clear()
+
+    N = 4
+    BLOCK = 16
+    lens = torch.tensor([48, 32, 64, 16], dtype=torch.int32)
+    out = torch.empty(N, BLOCK)
+
+    data_dep_loop_div_kernel[(N,)](lens, out, BLOCK=BLOCK)
+
+    assert (
+        len(data_dep_div_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(data_dep_div_sanitizer.records)}"
+
+
 # ======== TensorWrapper Regression Test ===========
 
 

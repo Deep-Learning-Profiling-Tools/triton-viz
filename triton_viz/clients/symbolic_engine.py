@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import operator
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import reduce
@@ -860,6 +861,25 @@ class BinarySymbolicExpr(SymbolicExpr):
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
         self.shape = self.lhs.shape
+
+    _PY_OPS: ClassVar[dict[str, Callable[[Any, Any], Any]]] = {
+        "add": operator.add,
+        "sub": operator.sub,
+        "mul": operator.mul,
+        "idiv": operator.floordiv,
+        "div": operator.truediv,
+        "mod": operator.mod,
+    }
+
+    def to_py(self) -> Any:
+        lhs_val = self.lhs.to_py()
+        rhs_val = self.rhs.to_py()
+        op_fn = self._PY_OPS.get(self.op)
+        if op_fn is None:
+            raise NotImplementedError(
+                f"to_py for binary op {self.op} is not implemented"
+            )
+        return op_fn(lhs_val, rhs_val)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         lhs, constraints_lhs = self.lhs._to_z3()
