@@ -1023,3 +1023,23 @@ def test_non_contiguous_expanded_tensor():
     assert not x.is_contiguous()
     out = torch.empty(M, N, device="cpu")
     read_expanded_kernel[(M,)](x, out, x.stride(0), x.stride(1), M, N, BLOCK_N=8)
+
+
+# ======== TensorWrapper Regression Test ===========
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def copy_kernel(src, dst, N, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(src + offs, mask=mask)
+    tl.store(dst + offs, x, mask=mask)
+
+
+def test_reinterpret_tensor_wrapper():
+    """triton.reinterpret() produces a TensorWrapper; sanitizer must handle it."""
+    N = 64
+    x = torch.ones(N, dtype=torch.float16, device="cpu")
+    y = torch.empty(N, dtype=torch.float16, device="cpu")
+    copy_kernel[(1,)](triton.reinterpret(x, tl.float16), y, N, BLOCK=64)
