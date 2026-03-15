@@ -179,16 +179,32 @@ class PatchOp:
                 symbolic_ret = self.callbacks.op_overrider(
                     args[0].handle, *args[1:], **kwargs
                 )
-                _shape = getattr(symbolic_ret, "shape", ())
-                _dtype = getattr(symbolic_ret, "dtype", None)
-                if _shape and _dtype:
-                    ret_dtype = tl.block_type(_dtype, list(_shape))
+                if isinstance(symbolic_ret, tuple):
+                    ret_parts = []
+                    for sym_elem in symbolic_ret:
+                        _shape = getattr(sym_elem, "shape", ())
+                        _dtype = getattr(sym_elem, "dtype", None)
+                        if _shape and _dtype:
+                            elem_dtype = tl.block_type(_dtype, list(_shape))
+                        else:
+                            elem_dtype = _dtype or args[0].dtype
+                        elem_tensor = tl.core.tensor(sym_elem, elem_dtype)
+                        fn = cast(Any, elem_tensor.handle)
+                        if fn is not None:
+                            fn.concrete_fn = self.op
+                        ret_parts.append(elem_tensor)
+                    ret = tuple(ret_parts)
                 else:
-                    ret_dtype = _dtype or args[0].dtype
-                ret = tl.core.tensor(symbolic_ret, ret_dtype)
-                fn = cast(Any, ret.handle)
-                if fn is not None:
-                    fn.concrete_fn = self.op
+                    _shape = getattr(symbolic_ret, "shape", ())
+                    _dtype = getattr(symbolic_ret, "dtype", None)
+                    if _shape and _dtype:
+                        ret_dtype = tl.block_type(_dtype, list(_shape))
+                    else:
+                        ret_dtype = _dtype or args[0].dtype
+                    ret = tl.core.tensor(symbolic_ret, ret_dtype)
+                    fn = cast(Any, ret.handle)
+                    if fn is not None:
+                        fn.concrete_fn = self.op
             else:  # interpreter_builder
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 if ret is not None:
