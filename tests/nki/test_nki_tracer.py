@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from pathlib import Path
 
 import triton_viz
 from triton_viz.clients import Tracer
@@ -246,3 +247,26 @@ def test_tracer_records_dot_transpose_x_kwarg():
     assert record.input_shape == (3, 2)
     assert record.other_shape == (2, 4)
     assert record.output_shape == (3, 4)
+
+
+def test_nki_trace_save_load_roundtrip(tmp_path: Path):
+    """NKI traces should serialize and reload through the shared .tvz path."""
+    triton_viz.clear()
+
+    traced = triton_viz.trace(client=Tracer(), backend="nki")(copy_kernel)
+
+    n_elements = 6
+    x = NDArray(value=np.arange(n_elements, dtype=np.float32))
+    out = NDArray(value=np.empty_like(x.data))
+
+    traced[(div_ceil(n_elements, 4),)](x, out)
+
+    path = tmp_path / "nki_trace.tvz"
+    triton_viz.save(path)
+    triton_viz.clear()
+    triton_viz.load(path)
+
+    records = launches[-1].records
+    record_types = [type(r) for r in records]
+
+    assert record_types == [Grid, Load, Store] * div_ceil(n_elements, 4)

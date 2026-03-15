@@ -819,6 +819,63 @@ def test_cli_code_context_points_to_kernel():
         os.unlink(tmp_path)
 
 
+# ======== Reduce with return_indices Tests ===========
+
+reduce_indices_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=reduce_indices_sanitizer)
+@triton.jit
+def max_return_indices_kernel(inp_ptr, out_val_ptr, out_idx_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    inp = tl.load(inp_ptr + offs)
+    max_val, max_idx = tl.max(inp, axis=0, return_indices=True)
+    tl.store(out_val_ptr, max_val)
+    tl.store(out_idx_ptr, max_idx)
+
+
+@triton_viz.trace(client=reduce_indices_sanitizer)
+@triton.jit
+def min_return_indices_kernel(inp_ptr, out_val_ptr, out_idx_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    inp = tl.load(inp_ptr + offs)
+    min_val, min_idx = tl.min(inp, axis=0, return_indices=True)
+    tl.store(out_val_ptr, min_val)
+    tl.store(out_idx_ptr, min_idx)
+
+
+def test_tl_max_return_indices():
+    """tl.max with return_indices=True should stay on the symbolic path."""
+    reduce_indices_sanitizer.records.clear()
+
+    N = 32
+    inp = torch.arange(N, dtype=torch.float32)
+    out_val = torch.empty(1, dtype=torch.float32)
+    out_idx = torch.empty(1, dtype=torch.int32)
+
+    max_return_indices_kernel[(1,)](inp, out_val, out_idx, N=N)
+
+    assert (
+        len(reduce_indices_sanitizer.records) == 0
+    ), f"Sanitizer reported {len(reduce_indices_sanitizer.records)} error(s)"
+
+
+def test_tl_min_return_indices():
+    """tl.min with return_indices=True should stay on the symbolic path."""
+    reduce_indices_sanitizer.records.clear()
+
+    N = 32
+    inp = torch.arange(N, dtype=torch.float32)
+    out_val = torch.empty(1, dtype=torch.float32)
+    out_idx = torch.empty(1, dtype=torch.int32)
+
+    min_return_indices_kernel[(1,)](inp, out_val, out_idx, N=N)
+
+    assert (
+        len(reduce_indices_sanitizer.records) == 0
+    ), f"Sanitizer reported {len(reduce_indices_sanitizer.records)} error(s)"
+
+
 # ======== Reduce + Broadcast Tests ===========
 
 reduce_broadcast_sanitizer = SymbolicSanitizer()
@@ -881,6 +938,34 @@ def test_oob_with_fake_tensor(_isolate_virtual_memory):
 
 @triton_viz.trace(client=SymbolicSanitizer())
 @triton.jit
+def block_ptr_sum_kernel(
+    s_ptr,
+    z_ptr,
+    T: tl.constexpr,
+    S: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+):
+    o_i = tl.arange(0, BT)
+    m = tl.where(o_i[:, None] <= o_i[None, :], 1.0, 0.0)
+    b_z = tl.zeros([BS], dtype=tl.float32)
+    p_s = tl.make_block_ptr(s_ptr, (T, S), (S, 1), (0, 0), (BT, BS), (1, 0))
+    p_z = tl.make_block_ptr(z_ptr, (T, S), (S, 1), (0, 0), (BT, BS), (1, 0))
+    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_c = b_z[None, :] + tl.dot(m, b_s, allow_tf32=False)
+    tl.store(p_z, b_c.to(p_z.dtype.element_ty), boundary_check=(0, 1))
+    b_z += tl.sum(b_s, 0)
+
+
+def test_reduce_symbolic_core_dtype():
+    """tl.sum on cast block_ptr data must preserve block_type dtype."""
+    s = torch.randn(16, 16, device="cpu")
+    z = torch.empty_like(s)
+    block_ptr_sum_kernel[(1,)](s, z, T=16, S=16, BT=16, BS=16)
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
 def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     offs = tl.arange(0, BLOCK)
@@ -914,3 +999,47 @@ def test_expand_dims_scalar_attr():
     x = torch.randn(8, device="cpu")
     out = torch.empty(8, device="cpu")
     exp_expand_kernel[(1,)](x, out, N=8)
+
+
+# ======== Non-contiguous Expanded Tensor Regression Test ===========
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def read_expanded_kernel(inp, out, stride_row, stride_col, M, N, BLOCK_N: tl.constexpr):
+    row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_N)
+    mask = offs < N
+    ptrs = inp + row * stride_row + offs * stride_col
+    x = tl.load(ptrs, mask=mask, other=0)
+    tl.store(out + row * N + offs, x, mask=mask)
+
+
+def test_non_contiguous_expanded_tensor():
+    """expand()-ed tensors (stride-0, non-contiguous) must not crash the sanitizer."""
+    M, N = 4, 8
+    row = torch.arange(N, device="cpu", dtype=torch.float32)
+    x = row.unsqueeze(0).expand(M, N)  # shape (4,8), strides (0, 1)
+    assert not x.is_contiguous()
+    out = torch.empty(M, N, device="cpu")
+    read_expanded_kernel[(M,)](x, out, x.stride(0), x.stride(1), M, N, BLOCK_N=8)
+
+
+# ======== TensorWrapper Regression Test ===========
+
+
+@triton_viz.trace(client=SymbolicSanitizer())
+@triton.jit
+def copy_kernel(src, dst, N, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(src + offs, mask=mask)
+    tl.store(dst + offs, x, mask=mask)
+
+
+def test_reinterpret_tensor_wrapper():
+    """triton.reinterpret() produces a TensorWrapper; sanitizer must handle it."""
+    N = 64
+    x = torch.ones(N, dtype=torch.float16, device="cpu")
+    y = torch.empty(N, dtype=torch.float16, device="cpu")
+    copy_kernel[(1,)](triton.reinterpret(x, tl.float16), y, N, BLOCK=64)
