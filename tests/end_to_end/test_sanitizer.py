@@ -1097,6 +1097,81 @@ def test_reduce_on_dot_result():
     ), f"Expected no OOB records, got {len(reduce_dot_sanitizer.records)}"
 
 
+@triton_viz.trace(client=reduce_dot_sanitizer)
+@triton.jit
+def batched_dot_row_max_kernel(
+    A,
+    B,
+    Out,
+    stride_ab,
+    stride_am,
+    stride_ak,
+    stride_bb,
+    stride_bk,
+    stride_bn,
+    stride_ob,
+    stride_om,
+    B_DIM: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+):
+    offs_b = tl.arange(0, B_DIM)
+    offs_m = tl.arange(0, M)
+    offs_n = tl.arange(0, N)
+    offs_k = tl.arange(0, K)
+
+    a = tl.load(
+        A
+        + offs_b[:, None, None] * stride_ab
+        + offs_m[None, :, None] * stride_am
+        + offs_k[None, None, :] * stride_ak
+    )
+    b = tl.load(
+        B
+        + offs_b[:, None, None] * stride_bb
+        + offs_k[None, :, None] * stride_bk
+        + offs_n[None, None, :] * stride_bn
+    )
+
+    c = tl.dot(a, b)  # [B_DIM, M, N]
+    row_max = tl.max(c, axis=2)  # reduce axis=2 -> [B_DIM, M]
+
+    tl.store(Out + offs_b[:, None] * stride_ob + offs_m[None, :] * stride_om, row_max)
+
+
+def test_reduce_on_batched_dot_result():
+    """tl.max on the result of a 3D batched tl.dot must not crash the symbolic engine."""
+    reduce_dot_sanitizer.records.clear()
+
+    B, M, N, K = 2, 16, 16, 16
+    a = torch.randn(B, M, K, dtype=torch.float16)
+    b = torch.randn(B, K, N, dtype=torch.float16)
+    out = torch.empty(B, M, dtype=torch.float32)
+
+    batched_dot_row_max_kernel[(1,)](
+        a,
+        b,
+        out,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        out.stride(0),
+        out.stride(1),
+        B_DIM=B,
+        M=M,
+        N=N,
+        K=K,
+    )
+
+    assert (
+        len(reduce_dot_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(reduce_dot_sanitizer.records)}"
+
+
 def test_reinterpret_tensor_wrapper():
     """triton.reinterpret() produces a TensorWrapper; sanitizer must handle it."""
     N = 64
