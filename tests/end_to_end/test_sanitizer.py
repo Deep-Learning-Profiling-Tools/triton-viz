@@ -1037,6 +1037,141 @@ def copy_kernel(src, dst, N, BLOCK: tl.constexpr):
     tl.store(dst + offs, x, mask=mask)
 
 
+# ======== Reduce on Dot Result Tests ===========
+
+
+reduce_dot_sanitizer = SymbolicSanitizer()
+
+
+@triton_viz.trace(client=reduce_dot_sanitizer)
+@triton.jit
+def dot_row_max_kernel(
+    Q,
+    K,
+    Out,
+    stride_qm,
+    stride_kn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    D: tl.constexpr,
+):
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, D)
+
+    q = tl.load(Q + offs_m[:, None] * stride_qm + offs_d[None, :])
+    k = tl.load(K + offs_d[:, None] + offs_n[None, :] * stride_kn)
+
+    qk = tl.dot(q, k)  # [BLOCK_M, BLOCK_N]
+    row_max = tl.max(qk, axis=1)  # reduce axis=1 -> [BLOCK_M]
+
+    tl.store(Out + offs_m, row_max)
+
+
+def test_reduce_on_dot_result():
+    """tl.max on the result of tl.dot must not crash the symbolic engine.
+
+    Regression: ReduceSymbolicExpr previously raised
+    'expects block input with non-empty shape' when reducing a dot product.
+    """
+    reduce_dot_sanitizer.records.clear()
+
+    M, N, D = 16, 16, 16
+    q = torch.randn(M, D, dtype=torch.float16)
+    k = torch.randn(D, N, dtype=torch.float16)
+    out = torch.empty(M, dtype=torch.float32)
+
+    dot_row_max_kernel[(1,)](
+        q,
+        k,
+        out,
+        q.stride(0),
+        k.stride(1),
+        BLOCK_M=M,
+        BLOCK_N=N,
+        D=D,
+    )
+
+    assert (
+        len(reduce_dot_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(reduce_dot_sanitizer.records)}"
+
+
+@triton_viz.trace(client=reduce_dot_sanitizer)
+@triton.jit
+def batched_dot_row_max_kernel(
+    A,
+    B,
+    Out,
+    stride_ab,
+    stride_am,
+    stride_ak,
+    stride_bb,
+    stride_bk,
+    stride_bn,
+    stride_ob,
+    stride_om,
+    B_DIM: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+):
+    offs_b = tl.arange(0, B_DIM)
+    offs_m = tl.arange(0, M)
+    offs_n = tl.arange(0, N)
+    offs_k = tl.arange(0, K)
+
+    a = tl.load(
+        A
+        + offs_b[:, None, None] * stride_ab
+        + offs_m[None, :, None] * stride_am
+        + offs_k[None, None, :] * stride_ak
+    )
+    b = tl.load(
+        B
+        + offs_b[:, None, None] * stride_bb
+        + offs_k[None, :, None] * stride_bk
+        + offs_n[None, None, :] * stride_bn
+    )
+
+    c = tl.dot(a, b)  # [B_DIM, M, N]
+    row_max = tl.max(c, axis=2)  # reduce axis=2 -> [B_DIM, M]
+
+    tl.store(Out + offs_b[:, None] * stride_ob + offs_m[None, :] * stride_om, row_max)
+
+
+def test_reduce_on_batched_dot_result():
+    """tl.max on the result of a 3D batched tl.dot must not crash the symbolic engine."""
+    reduce_dot_sanitizer.records.clear()
+
+    B, M, N, K = 2, 16, 16, 16
+    a = torch.randn(B, M, K, dtype=torch.float16)
+    b = torch.randn(B, K, N, dtype=torch.float16)
+    out = torch.empty(B, M, dtype=torch.float32)
+
+    batched_dot_row_max_kernel[(1,)](
+        a,
+        b,
+        out,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        out.stride(0),
+        out.stride(1),
+        B_DIM=B,
+        M=M,
+        N=N,
+        K=K,
+    )
+
+    assert (
+        len(reduce_dot_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(reduce_dot_sanitizer.records)}"
+
+
 def test_reinterpret_tensor_wrapper():
     """triton.reinterpret() produces a TensorWrapper; sanitizer must handle it."""
     N = 64
