@@ -875,6 +875,11 @@ class BinarySymbolicExpr(SymbolicExpr):
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
         np_op = self._NUMPY_OPS.get(self.op, None)
+        # Most ops (add, sub, mul, …) have a numpy mapping and are called
+        # with concrete_fn(lhs, rhs, np_op).  Some ops like "idiv" have
+        # their own concrete_fn that handles the computation internally
+        # (e.g. InterpreterBuilder.create_idiv) and only takes (lhs, rhs).
+        # Fall through to the 2-arg call for those.
         if np_op is not None:
             return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
         if self.concrete_fn is None:
