@@ -1209,11 +1209,13 @@ class DotSymbolicExpr(SymbolicExpr):
         self.add_child("b", b)
         self.add_child("d", d)
 
-        # dot(a, b): a is (M, K), b is (K, N) -> result is (M, N)
+        # dot(a, b): 2D (M,K)x(K,N)->(M,N) or 3D batched (B,M,K)x(B,K,N)->(B,M,N)
         a_shape = self.a.shape
         b_shape = self.b.shape
         if len(a_shape) == 2 and len(b_shape) == 2:
             self.shape = (a_shape[0], b_shape[1])
+        elif len(a_shape) == 3 and len(b_shape) == 3:
+            self.shape = (a_shape[0], a_shape[1], b_shape[2])
 
         # Triton dot produces fp32 by default; use d's dtype if accumulator given
         if self.d is not None and hasattr(self.d, "dtype") and self.d.dtype is not None:
