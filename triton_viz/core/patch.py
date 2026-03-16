@@ -447,7 +447,11 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     # reliable annotation info.  The rewritten function's __annotations__
     # can be corrupted (string annotations get double-quoted), making
     # self.constexprs unreliable.
-    constexpr_names = {p.name for p in jit_fn.params if p.is_constexpr}
+    # jit_fn is None for nested JIT calls and some Autotune paths.
+    if jit_fn is not None:
+        constexpr_names = {p.name for p in jit_fn.params if p.is_constexpr}
+    else:
+        constexpr_names = set(self.constexprs)
 
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
