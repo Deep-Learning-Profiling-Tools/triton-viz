@@ -877,6 +877,10 @@ class BinarySymbolicExpr(SymbolicExpr):
         np_op = self._NUMPY_OPS.get(self.op, None)
         if np_op is not None:
             return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+        if self.concrete_fn is None:
+            raise NotImplementedError(
+                f"Concretize for binary op '{self.op}' is not implemented"
+            )
         return self.concrete_fn(lhs_concrete, rhs_concrete)  # type: ignore
 
     @staticmethod
@@ -1981,6 +1985,11 @@ class SymbolicClient(Client):
             elif expr.has_op("load"):
                 self._on_data_dependent_value()
                 expr = expr.replace_subtree("load")
+                # replace_subtree("load") only concretizes load nodes, so the
+                # result may still be a compound op (e.g. div(const, const)).
+                # Calling replace_subtree() with no anchor_op unconditionally
+                # concretizes every node in the tree, collapsing the whole
+                # expression into a single const value.
                 if expr.op != "const":
                     expr = expr.replace_subtree()
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
