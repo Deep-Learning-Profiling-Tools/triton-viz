@@ -115,7 +115,7 @@ def _load_tensor_payload(payload: dict[str, object], arrays: ArrayMap) -> torch.
     if not isinstance(key, str):
         raise TypeError("Invalid tensor payload")
     array = np.asarray(arrays[key])
-    return torch.from_numpy(np.asarray(array).copy())
+    return torch.from_numpy(array.copy())
 
 
 def _build_dataclass(cls: type, kwargs: dict):

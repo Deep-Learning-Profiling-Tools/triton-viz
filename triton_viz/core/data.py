@@ -298,7 +298,9 @@ class TensorSnapshot:
             _stride=tuple(tensor.stride()),
             shape=tuple(tensor.shape),
             _element_size=tensor.element_size(),
-            data=torch.as_tensor(data.numpy() if hasattr(data, "numpy") else data),
+            data=data.clone()
+            if isinstance(data, torch.Tensor)
+            else torch.as_tensor(data.numpy() if hasattr(data, "numpy") else data),
             device=str(device),
             _contiguous=bool(contiguous_fn()) if callable(contiguous_fn) else True,
         )

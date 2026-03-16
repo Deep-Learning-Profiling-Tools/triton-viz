@@ -174,18 +174,24 @@ class TritonTrace(KernelInterface, TraceInterface):
 
 
 class NKITrace(KernelInterface, TraceInterface):
-    def __init__(self, kernel, client: str | Client) -> None:
-        from neuronxcc.nki.compile import GenericKernel
-        from .nki import NKIInterpretedFunction
+    def __init__(self, kernel, client: str | Client, beta2: bool = True) -> None:
+        nki_fn_cls: object = None
+        if beta2:
+            from .nki_beta2 import NKIBeta2InterpretedFunction
 
-        if isinstance(kernel, GenericKernel):
-            self.interpreter_fn = NKIInterpretedFunction(kernel.func)
-            self.func = kernel.func
-        elif isinstance(kernel, NKIInterpretedFunction):
+            nki_fn_cls = NKIBeta2InterpretedFunction
+        else:
+            from .nki import NKIInterpretedFunction
+
+            nki_fn_cls = NKIInterpretedFunction
+
+        self.backend = "nki_beta2" if beta2 else "nki"
+        if isinstance(kernel, nki_fn_cls):
+            assert hasattr(kernel, "fn")
             self.interpreter_fn = kernel
             self.func = kernel.fn
         else:
-            self.interpreter_fn = NKIInterpretedFunction(kernel)
+            self.interpreter_fn = nki_fn_cls(kernel)
             self.func = kernel
 
         TraceInterface.__init__(self, client)
@@ -223,10 +229,25 @@ class NKITrace(KernelInterface, TraceInterface):
         return KernelInterface.__getitem__(self, tuple(*grid))
 
     def __call__(self, *args, **kwargs):
-        return self[(1, 1, 1)](*args, **kwargs)
+        return self[(1,)](*args, **kwargs)
 
-    def run(self, *args, **kwargs):
-        with self.client_manager.patch_run(self.func, backend="nki"):
+    def run(self, *args, pre_trace=True, platform_target="trn1", **kwargs):
+        """
+        pre_trace: determines whether to do an initial NKI Beta 2 trace to capture some semantic errors.
+            pre_trace=False has fewer guarantees on interpreter parity with NKI compiler but must be set
+            if you want full python flexibility inside kernels (e.g. importing modules inside a kernel).
+            Does nothing if self.backend == 'nki'.
+        """
+        if self.backend == "nki_beta2" and pre_trace:
+            import nki
+
+            kwargs.pop("warmup", None)
+            grid = kwargs.pop("grid", None)
+            nki.trace(self.func, grid=grid, platform_target=platform_target).specialize(
+                *args, **kwargs
+            )
+            kwargs["grid"] = grid
+        with self.client_manager.patch_run(self.func, backend=self.backend):
             kwargs.update({"client_manager": self.client_manager})
             ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()
@@ -291,8 +312,8 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         # First-time wrapping
         # Triton backend need JIT/Interpreter/Autotuner；
         # NKI allow Python function（ NKIInterpretedFunction）
-        if backend == "nki":
-            return NKITrace(kernel, client)
+        if backend in ("nki", "nki_beta2"):
+            return NKITrace(kernel, client, beta2=("beta2" in backend))
         if isinstance(
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
         ):
