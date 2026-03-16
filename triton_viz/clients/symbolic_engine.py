@@ -1222,7 +1222,9 @@ class DotSymbolicExpr(SymbolicExpr):
         if self.d is not None and self.d.dtype is not None:
             self.dtype = self.d.dtype
         else:
-            self.dtype = tl.float32
+            raise ValueError(
+                "DotSymbolicExpr requires accumulator (d) with a valid dtype"
+            )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
