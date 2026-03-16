@@ -1043,3 +1043,35 @@ def test_reinterpret_tensor_wrapper():
     x = torch.ones(N, dtype=torch.float16, device="cpu")
     y = torch.empty(N, dtype=torch.float16, device="cpu")
     copy_kernel[(1,)](triton.reinterpret(x, tl.float16), y, N, BLOCK=64)
+
+
+# ======== Constexpr Positional Argument Tests ===========
+
+constexpr_positional_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=constexpr_positional_sanitizer)
+@triton.jit
+def constexpr_positional_kernel(X, Out, N, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
+    x = tl.load(X + offs, mask=mask)
+    tl.store(Out + offs, x + 1.0, mask=mask)
+
+
+def test_constexpr_positional_arg():
+    """Passing a tl.constexpr param as a positional arg must not raise ValueError."""
+    constexpr_positional_sanitizer.records.clear()
+
+    N = 16
+    BLOCK_SIZE = 4
+    x = torch.arange(N, dtype=torch.float32)
+    out = torch.empty_like(x)
+
+    # BLOCK_SIZE passed as positional arg, not keyword → must still be treated as constexpr
+    constexpr_positional_kernel[(N // BLOCK_SIZE,)](x, out, N, BLOCK_SIZE)
+
+    assert (
+        len(constexpr_positional_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(constexpr_positional_sanitizer.records)}"
