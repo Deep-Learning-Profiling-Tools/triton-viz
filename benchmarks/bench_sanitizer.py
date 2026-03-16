@@ -54,7 +54,6 @@ def _timeout_handler(signum, frame):
 # Sanitizer instances (one per kernel, following test_sanitizer.py pattern)
 # ---------------------------------------------------------------------------
 
-simple_sanitizer = SymbolicSanitizer(abort_on_error=False)
 gemm_sanitizer = SymbolicSanitizer(abort_on_error=False)
 gemm_oob_sanitizer = SymbolicSanitizer(abort_on_error=False)
 indirect_sanitizer = SymbolicSanitizer(abort_on_error=False)
@@ -63,20 +62,13 @@ block_ptr_sanitizer = SymbolicSanitizer(abort_on_error=False)
 jsd_sanitizer = SymbolicSanitizer(abort_on_error=False)
 element_mul_sanitizer = SymbolicSanitizer(abort_on_error=False)
 flaggems_sanitizer = SymbolicSanitizer(abort_on_error=False)
+swiglu_fwd_sanitizer = SymbolicSanitizer(abort_on_error=False)
+swiglu_bwd_sanitizer = SymbolicSanitizer(abort_on_error=False)
+cross_entropy_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 # ---------------------------------------------------------------------------
 # Kernels
 # ---------------------------------------------------------------------------
-
-
-@triton_viz.trace(client=simple_sanitizer)
-@triton.jit
-def simple_load_store_kernel(in_ptr, out_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < N
-    x = tl.load(in_ptr + offs, mask=mask)
-    tl.store(out_ptr + offs, x, mask=mask)
 
 
 @triton_viz.trace(client=gemm_sanitizer)
@@ -151,10 +143,10 @@ def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK: tl.constexpr):
 
 @triton_viz.trace(client=nested_sanitizer)
 @triton.jit
-def nested_loop_kernel(out_ptr):
-    for i in range(0, 4):
-        for j in range(0, 8):
-            idx = i * 8 + j
+def nested_loop_kernel(out_ptr, OUTER: tl.constexpr, INNER: tl.constexpr):
+    for i in range(0, OUTER):
+        for j in range(0, INNER):
+            idx = i * INNER + j
             tl.store(out_ptr + idx, idx)
 
 
@@ -172,6 +164,163 @@ def block_pointer_loop_advance_kernel(ptr, N: tl.constexpr, BLOCK: tl.constexpr)
     for _ in range(N // BLOCK):
         tl.load(block_ptr, boundary_check=(0,))
         block_ptr = tl.advance(block_ptr, (BLOCK,))
+
+
+# ---------------------------------------------------------------------------
+# SwiGLU kernels (from Liger-Kernel ops/swiglu.py)
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def silu(x):
+    return x * tl.sigmoid(x)
+
+
+@triton_viz.trace(client=swiglu_fwd_sanitizer)
+@triton.jit
+def swiglu_forward_kernel(
+    a_ptr, b_ptr, c_ptr, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
+):
+    """SwiGLU forward: c = silu(a) * b, one program per row."""
+    program_id = tl.program_id(0).to(tl.int64)
+
+    a_ptr += program_id * stride
+    b_ptr += program_id * stride
+    c_ptr += program_id * stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
+
+    a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
+    b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
+    c_row = silu(a_row) * b_row
+    tl.store(c_ptr + col_offsets, c_row, mask=mask)
+
+
+@triton_viz.trace(client=swiglu_bwd_sanitizer)
+@triton.jit
+def swiglu_backward_kernel(
+    dc_ptr, a_ptr, b_ptr, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
+):
+    """SwiGLU backward: compute da and db in-place, one program per row."""
+    program_id = tl.program_id(0).to(tl.int64)
+
+    dc_ptr += program_id * stride
+    a_ptr += program_id * stride
+    b_ptr += program_id * stride
+
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+    mask = col_offsets < n_cols
+
+    dc_row = tl.load(dc_ptr + col_offsets, mask=mask, other=0)
+    a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
+    b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
+
+    # Recomputation to save memory
+    sig_a = tl.sigmoid(a_row)
+    silu_a = a_row * sig_a
+    db_row = dc_row * silu_a
+    da_row = dc_row * (silu_a * (1 - sig_a) + sig_a) * b_row
+
+    tl.store(a_ptr + col_offsets, da_row, mask=mask)
+    tl.store(b_ptr + col_offsets, db_row, mask=mask)
+
+
+# ---------------------------------------------------------------------------
+# Cross Entropy kernel (from Liger-Kernel ops/cross_entropy.py)
+# ---------------------------------------------------------------------------
+
+
+@triton_viz.trace(client=cross_entropy_sanitizer)
+@triton.jit
+def liger_cross_entropy_kernel(
+    X_ptr,
+    X_stride,
+    Y_ptr,
+    Y_stride,
+    loss_ptr,
+    loss_stride,
+    n_cols,
+    n_non_ignore,
+    ignore_index,
+    label_smoothing: tl.constexpr,
+    reduction: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Fused cross entropy: computes loss and stores gradient in-place in X_ptr.
+    Uses online softmax (Algorithm 3, https://arxiv.org/pdf/1805.02867).
+    One program per row (batch * seq_len).
+    """
+    program_id = tl.program_id(0).to(tl.int64)
+
+    # 1. Load target; skip if ignore_index
+    Y_ptr += program_id * Y_stride
+    y = tl.load(Y_ptr)
+
+    X_ptr += program_id * X_stride
+
+    if y == ignore_index:
+        for i in range(0, n_cols, BLOCK_SIZE):
+            X_offsets = i + tl.arange(0, BLOCK_SIZE)
+            tl.store(X_ptr + X_offsets, 0.0, mask=X_offsets < n_cols)
+        return
+
+    loss_ptr += program_id * loss_stride
+
+    # 2. Online softmax first pass: find max + sum
+    m = float("-inf")
+    d = 0.0
+    ori_X_y = tl.load(X_ptr + y)
+
+    scaled_x_sum = 0.0
+    eps = label_smoothing / n_cols
+
+    for i in range(0, n_cols, BLOCK_SIZE):
+        X_offsets = i + tl.arange(0, BLOCK_SIZE)
+        X_block = tl.load(
+            X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")
+        )
+        block_max = tl.max(X_block)
+        if label_smoothing > 0:
+            scaled_x_sum += tl.sum(tl.where(X_offsets < n_cols, -eps * X_block, 0.0))
+        m_new = tl.maximum(m, block_max)
+        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(X_block - m_new))
+        m = m_new
+
+    # 3. Second pass: compute gradients (softmax - label) in-place
+    for i in range(0, n_cols, BLOCK_SIZE):
+        X_offsets = i + tl.arange(0, BLOCK_SIZE)
+        X_block = tl.load(
+            X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")
+        )
+        if reduction == "mean":
+            X_block = (tl.exp(X_block - m) / d - eps) / (n_non_ignore)
+        else:
+            X_block = tl.exp(X_block - m) / d - eps
+        tl.store(X_ptr + X_offsets, X_block, mask=X_offsets < n_cols)
+
+    tl.debug_barrier()
+
+    # 4. Calculate loss
+    loss = -(ori_X_y - m - tl.log(d))
+
+    if label_smoothing > 0:
+        smooth_loss = scaled_x_sum + label_smoothing * (m + tl.log(d))
+        loss = loss * (1 - label_smoothing) + smooth_loss
+
+    if reduction == "mean":
+        loss = loss / n_non_ignore
+
+    # 5. Special handling for the y-th element gradient
+    X_y = tl.load(X_ptr + y)
+    if reduction == "mean":
+        X_y += -(1 - label_smoothing) / (n_non_ignore)
+    else:
+        X_y += -(1 - label_smoothing)
+
+    tl.store(loss_ptr, loss)
+    tl.store(X_ptr + y, X_y)
 
 
 @triton_viz.trace(client=jsd_sanitizer)
@@ -544,63 +693,140 @@ def _reset_sanitizer(san: SymbolicSanitizer):
     san.records.clear()
 
 
+# ---------------------------------------------------------------------------
+# GEMM benchmarks: multiple (M, N, K, TILE_SIZE) constexpr combos
+# Each unique combo is a separate symbolic cache entry.
+# ---------------------------------------------------------------------------
+
+_GEMM_CONFIGS = [
+    # (M, N, K, TILE_SIZE)
+    (64, 64, 64, 16),
+    (128, 128, 128, 16),
+    (64, 128, 64, 16),
+    (128, 64, 128, 16),
+    (64, 64, 64, 32),
+    (128, 128, 128, 32),
+    (64, 128, 128, 32),
+]
+
+
+def _gemm_setup_all():
+    return [
+        {
+            "A": torch.randn(M, K, dtype=torch.float32),
+            "B": torch.randn(K, N, dtype=torch.float32),
+            "C": torch.empty(M, N, dtype=torch.float32),
+            "M": M,
+            "N": N,
+            "K": K,
+            "TILE": TILE,
+        }
+        for M, N, K, TILE in _GEMM_CONFIGS
+    ]
+
+
+def _gemm_run_all(configs):
+    for d in configs:
+        grid = (d["M"] // d["TILE"], d["N"] // d["TILE"])
+        gemm_kernel[grid](
+            d["A"],
+            d["B"],
+            d["C"],
+            M=d["M"],
+            N=d["N"],
+            K=d["K"],
+            TILE_SIZE=d["TILE"],
+        )
+
+
+def _gemm_oob_setup_all():
+    return [
+        {
+            "A": torch.randn(M, K, dtype=torch.float32),
+            "B": torch.randn(K, N, dtype=torch.float32),
+            "C": torch.empty(M, N, dtype=torch.float32),
+            "M": M,
+            "N": N,
+            "K": K,
+            "TILE": TILE,
+        }
+        for M, N, K, TILE in _GEMM_CONFIGS
+    ]
+
+
+def _gemm_oob_run_all(configs):
+    for d in configs:
+        grid = (d["M"] // d["TILE"], d["N"] // d["TILE"])
+        gemm_oob_kernel[grid](
+            d["A"],
+            d["B"],
+            d["C"],
+            M=d["M"],
+            N=d["N"],
+            K=d["K"],
+            TILE_SIZE=d["TILE"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Nested loop benchmarks: multiple (OUTER, INNER) constexpr combos
+# ---------------------------------------------------------------------------
+
+_NESTED_CONFIGS = [
+    # (OUTER, INNER)
+    (4, 8),
+    (8, 4),
+    (4, 16),
+    (16, 4),
+    (8, 8),
+    (8, 16),
+    (16, 8),
+]
+
+
+def _nested_setup_all():
+    max_elems = max(o * i for o, i in _NESTED_CONFIGS)
+    return {"out": torch.empty(max_elems, dtype=torch.int32)}
+
+
+def _nested_run_all(data):
+    for outer, inner in _NESTED_CONFIGS:
+        nested_loop_kernel[(1,)](data["out"], OUTER=outer, INNER=inner)
+
+
 BENCHMARKS: dict[str, dict[str, Any]] = {
-    "simple_load_store": {
-        "setup": lambda: {
-            "inp": torch.randn(512, dtype=torch.float32),
-            "out": torch.empty(512, dtype=torch.float32),
-        },
-        "run": lambda d: simple_load_store_kernel[(4,)](
-            d["inp"], d["out"], N=512, BLOCK=128
-        ),
-        "sanitizer": simple_sanitizer,
-    },
     "gemm": {
-        "setup": lambda: {
-            "A": torch.randn(64, 64, dtype=torch.float32),
-            "B": torch.randn(64, 64, dtype=torch.float32),
-            "C": torch.empty(64, 64, dtype=torch.float32),
-        },
-        "run": lambda d: gemm_kernel[(4, 4)](
-            d["A"], d["B"], d["C"], M=64, N=64, K=64, TILE_SIZE=16
-        ),
+        "setup": _gemm_setup_all,
+        "run": _gemm_run_all,
         "sanitizer": gemm_sanitizer,
     },
     "gemm_oob": {
-        "setup": lambda: {
-            "A": torch.randn(64, 64, dtype=torch.float32),
-            "B": torch.randn(64, 64, dtype=torch.float32),
-            "C": torch.empty(64, 64, dtype=torch.float32),
-        },
-        "run": lambda d: gemm_oob_kernel[(4, 4)](
-            d["A"], d["B"], d["C"], M=64, N=64, K=64, TILE_SIZE=16
-        ),
+        "setup": _gemm_oob_setup_all,
+        "run": _gemm_oob_run_all,
         "sanitizer": gemm_oob_sanitizer,
     },
     "indirect_load": {
         "setup": lambda: {
-            "idx": torch.arange(256, dtype=torch.int32),
-            "src": torch.randn(256, dtype=torch.float32),
-            "dst": torch.empty(256, dtype=torch.float32),
+            "idx": torch.arange(1024, dtype=torch.int32),
+            "src": torch.randn(1024, dtype=torch.float32),
+            "dst": torch.empty(1024, dtype=torch.float32),
         },
-        "run": lambda d: indirect_load_kernel[(4,)](
+        "run": lambda d: indirect_load_kernel[(16,)](
             d["idx"], d["src"], d["dst"], BLOCK=64
         ),
         "sanitizer": indirect_sanitizer,
     },
     "nested_loop": {
-        "setup": lambda: {
-            "out": torch.empty(32, dtype=torch.int32),
-        },
-        "run": lambda d: nested_loop_kernel[(1,)](d["out"]),
+        "setup": _nested_setup_all,
+        "run": _nested_run_all,
         "sanitizer": nested_sanitizer,
     },
     "block_pointer_loop_advance": {
         "setup": lambda: {
-            "data": torch.randn(256, dtype=torch.float32),
+            "data": torch.randn(4096, dtype=torch.float32),
         },
-        "run": lambda d: block_pointer_loop_advance_kernel[(1,)](
-            d["data"], N=256, BLOCK=64
+        "run": lambda d: block_pointer_loop_advance_kernel[(16,)](
+            d["data"], N=4096, BLOCK=64
         ),
         "sanitizer": block_ptr_sanitizer,
     },
@@ -612,9 +838,10 @@ BENCHMARKS: dict[str, dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 
 _LIGER_SHAPES = [
-    (2, 4, 2048, 3200),  # small
-    (2, 2048, 4096, 32000),  # llama2/mistral
-    (4, 423, 8192, 32000),  # random shape
+    # Grid = B * T; keep moderate to avoid sanitizer timeout.
+    (2, 256, 512, 1600),
+    (1, 512, 256, 2048),
+    (1, 512, 128, 1024),
 ]
 _LIGER_DTYPES = [
     (0.5, torch.bfloat16),
@@ -728,13 +955,13 @@ BENCHMARKS["liger_jsd"] = {
 # ---------------------------------------------------------------------------
 
 _FLAGGEMS_LN_SHAPES = [
-    (200, 36),
-    (4096, 100),
+    # M determines grid size; keep moderate to avoid sanitizer timeout.
+    # N values chosen to cover all three kernel variants (multiline/persistent/loop).
+    (64, 36),
     (1, 40999),
-    (100, 40499),
-    (4096, 256),
+    (64, 256),
 ]
-_FLAGGEMS_LN_DTYPES = [torch.float16, torch.float32, torch.bfloat16]
+_FLAGGEMS_LN_DTYPES = [torch.float32]
 _FLAGGEMS_LN_WB = [True]  # wb_none=True only (with weight/bias errors)
 
 _LN_BWD_BLOCK_ROW = 4
@@ -898,6 +1125,274 @@ BENCHMARKS["flaggems_layernorm"] = {
     "sanitizer": flaggems_sanitizer,
 }
 
+# ---------------------------------------------------------------------------
+# SwiGLU benchmarks: 8 parameter combinations (grouped, template pattern)
+# Matches test_correctness_llamamlp parameter space.
+# Tensors pre-allocated once; backward tensors cloned per-run (kernel writes
+# gradients in-place into a_ptr/b_ptr).
+# ---------------------------------------------------------------------------
+
+_SWIGLU_SHAPES = [
+    # (bsz, seq_len, hidden_size, intermediate_size)
+    # Grid = bsz * seq_len; keep moderate to avoid sanitizer timeout.
+    (1, 4, 256, 512),
+    (1, 4, 256, 1024),
+    (1, 4, 256, 2048),
+    (1, 4, 256, 4096),
+    (1, 4, 256, 8192),
+    (1, 4, 128, 768),
+    (1, 4, 128, 1536),
+    (1, 4, 128, 3072),
+    (1, 4, 128, 6144),
+    (1, 4, 64, 256),
+    (1, 4, 64, 640),
+]
+_SWIGLU_DTYPES = [torch.float32]
+
+
+def _swiglu_setup_all():
+    templates = []
+    for bsz, seq_len, _hidden_size, intermediate_size in _SWIGLU_SHAPES:
+        N_ROWS = bsz * seq_len
+        N_COLS = intermediate_size
+        BLOCK_SIZE = triton.next_power_of_2(N_COLS)
+        for dtype in _SWIGLU_DTYPES:
+            templates.append(
+                {
+                    "N_ROWS": N_ROWS,
+                    "N_COLS": N_COLS,
+                    "BLOCK_SIZE": BLOCK_SIZE,
+                    # Forward: a, b are read-only; c is output
+                    "a": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                    "b": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                    "c": torch.empty(N_ROWS, N_COLS, dtype=dtype),
+                    # Backward templates: dc is read-only; a_bwd/b_bwd are
+                    # overwritten in-place so we clone them per-run
+                    "dc": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                    "a_bwd_template": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                    "b_bwd_template": torch.randn(N_ROWS, N_COLS, dtype=dtype),
+                }
+            )
+    return templates
+
+
+def _swiglu_run_all(templates):
+    for t in templates:
+        N_ROWS, N_COLS, BLOCK_SIZE = t["N_ROWS"], t["N_COLS"], t["BLOCK_SIZE"]
+        swiglu_forward_kernel[(N_ROWS,)](
+            t["a"],
+            t["b"],
+            t["c"],
+            t["c"].stride(0),
+            n_cols=N_COLS,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+        a_bwd = t["a_bwd_template"].clone()
+        b_bwd = t["b_bwd_template"].clone()
+        swiglu_backward_kernel[(N_ROWS,)](
+            t["dc"],
+            a_bwd,
+            b_bwd,
+            t["dc"].stride(0),
+            n_cols=N_COLS,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+        del a_bwd, b_bwd
+
+
+BENCHMARKS["swiglu"] = {
+    "setup": _swiglu_setup_all,
+    "run": _swiglu_run_all,
+    "sanitizer": [swiglu_fwd_sanitizer, swiglu_bwd_sanitizer],
+}
+
+# ---------------------------------------------------------------------------
+# Cross Entropy benchmarks: 12 parameter combinations (grouped, streaming)
+# Matches test_correctness shape/reduction/dtype space (scalar dropped — does
+# not affect symbolic analysis).
+#
+# Memory strategy: setup stores only lightweight metadata.  run() allocates
+# one (BT, V, dtype) template at a time, runs both reductions with cloned X
+# (kernel overwrites X in-place), then frees the template before moving to
+# the next.  Peak ≈ one template + one clone ≈ 4.2 GB (for V=128256 f32),
+# well within CI's ~7 GB limit.
+#
+# ---------------------------------------------------------------------------
+
+_CE_SHAPES = [
+    # (B, T, V) → (BT=B*T, V)  — deduplicated
+    # Grid = BT; keep moderate to avoid sanitizer timeout.
+    (1, 4, 512),
+    (1, 4, 1024),
+    (1, 4, 2048),
+    (1, 4, 4096),
+    (1, 4, 8192),
+    (1, 4, 16384),
+    (1, 4, 32000),
+]
+_CE_REDUCTIONS = ["sum", "mean"]
+_CE_LABEL_SMOOTHINGS = [0.0, 0.1]
+_CE_DTYPES = [torch.float32]
+
+
+def _ce_setup_all():
+    # Store only metadata — no large tensors.
+    configs = []
+    for B, T, V in _CE_SHAPES:
+        BT = B * T
+        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+        for dtype in _CE_DTYPES:
+            configs.append({"BT": BT, "V": V, "BLOCK_SIZE": BLOCK_SIZE, "dtype": dtype})
+    return configs
+
+
+def _ce_run_all(configs):
+    for cfg in configs:
+        BT, V, BLOCK_SIZE, dtype = (
+            cfg["BT"],
+            cfg["V"],
+            cfg["BLOCK_SIZE"],
+            cfg["dtype"],
+        )
+        X_template = torch.randn(BT, V, dtype=dtype)
+        Y = torch.randint(0, V, (BT,), dtype=torch.long)
+        loss = torch.zeros(BT, dtype=torch.float32)
+
+        for reduction in _CE_REDUCTIONS:
+            for label_smoothing in _CE_LABEL_SMOOTHINGS:
+                X = X_template.clone()
+                liger_cross_entropy_kernel[(BT,)](
+                    X_ptr=X,
+                    X_stride=X.stride(0),
+                    Y_ptr=Y,
+                    Y_stride=Y.stride(0),
+                    loss_ptr=loss,
+                    loss_stride=loss.stride(0),
+                    n_cols=V,
+                    n_non_ignore=BT,
+                    ignore_index=-100,
+                    label_smoothing=label_smoothing,
+                    reduction=reduction,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                )
+                del X
+        del X_template, Y, loss
+
+
+BENCHMARKS["cross_entropy"] = {
+    "setup": _ce_setup_all,
+    "run": _ce_run_all,
+    "sanitizer": cross_entropy_sanitizer,
+}
+
+# ---------------------------------------------------------------------------
+# Fused Linear JSD benchmarks: 12 parameter combinations (grouped, template pattern)
+# Matches test_correctness parameter space.
+# Reuses existing jsd_kernel + element_mul_kernel.
+# Tensors pre-allocated once; student_log_probs/dX/grad_input cloned per-run
+# (jsd_kernel writes dX in-place; element_mul overwrites grad_input).
+# ---------------------------------------------------------------------------
+
+_FLJSD_SHAPES = [
+    # (B, T, H, V)
+    # Grid = B * T; keep moderate to avoid sanitizer timeout.
+    (1, 4, 512, 800),
+    (1, 4, 512, 1600),
+    (1, 4, 512, 3200),
+    (1, 4, 256, 1024),
+    (1, 4, 256, 2048),
+    (1, 4, 256, 4096),
+    (1, 4, 128, 512),
+    (1, 4, 128, 1024),
+    (1, 4, 128, 2048),
+]
+_FLJSD_DTYPES = [torch.float32]
+_FLJSD_PARAMS = [
+    (1.0, 0.5),  # (temperature, beta)
+    (2.0, 0.1),
+]
+
+
+def _fljsd_setup_all():
+    templates = []
+    for B, T, H, V in _FLJSD_SHAPES:
+        BT = B * T
+        BLOCK_SIZE_JSD = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+        H_student = H // 2
+        BLOCK_SIZE_MUL = min(MAX_FUSED_SIZE, triton.next_power_of_2(H_student))
+        for dtype in _FLJSD_DTYPES:
+            student_log_probs = torch.log_softmax(
+                torch.randn(BT, V, dtype=dtype), dim=-1
+            ).contiguous()
+            teacher_log_probs = torch.log_softmax(
+                torch.randn(BT, V, dtype=dtype), dim=-1
+            ).contiguous()
+            labels = torch.randint(0, V, (BT,), dtype=torch.long)
+            labels[: max(1, BT // 2)] = -100
+            n_non_ignore = int((labels != -100).sum().item())
+
+            for _temperature, beta in _FLJSD_PARAMS:
+                templates.append(
+                    {
+                        "BT": BT,
+                        "V": V,
+                        "BLOCK_SIZE_JSD": BLOCK_SIZE_JSD,
+                        "H_student": H_student,
+                        "BLOCK_SIZE_MUL": BLOCK_SIZE_MUL,
+                        "student_template": student_log_probs,
+                        "teacher_log_probs": teacher_log_probs,
+                        "loss": torch.zeros(BT, V, dtype=torch.float32),
+                        "dX_template": torch.empty(BT, V, dtype=dtype),
+                        "labels": labels,
+                        "n_non_ignore": n_non_ignore,
+                        "beta": beta,
+                        "grad_template": torch.randn(
+                            BT, H_student, dtype=dtype
+                        ).contiguous(),
+                        "grad_output": torch.tensor(0.5, dtype=dtype),
+                    }
+                )
+    return templates
+
+
+def _fljsd_run_all(templates):
+    for t in templates:
+        student = t["student_template"].clone()
+        dX = t["dX_template"].clone()
+        grad_input = t["grad_template"].clone()
+        jsd_kernel[(t["BT"],)](
+            X_ptr=student,
+            X_stride=student.stride(0),
+            Y_ptr=t["teacher_log_probs"],
+            Y_stride=t["teacher_log_probs"].stride(0),
+            loss_ptr=t["loss"],
+            loss_stride=t["loss"].stride(0),
+            dX_ptr=dX,
+            dX_stride=dX.stride(0),
+            label_ptr=t["labels"],
+            beta=t["beta"],
+            n_non_ignore=t["n_non_ignore"],
+            ignore_index=-100,
+            n_cols=t["V"],
+            BLOCK_SIZE=t["BLOCK_SIZE_JSD"],
+            HAS_LABEL=True,
+        )
+        element_mul_kernel[(t["BT"],)](
+            grad_input,
+            grad_input.stride(0),
+            t["grad_output"],
+            t["H_student"],
+            BLOCK_SIZE=t["BLOCK_SIZE_MUL"],
+        )
+        del student, dX, grad_input
+
+
+BENCHMARKS["fused_linear_jsd"] = {
+    "setup": _fljsd_setup_all,
+    "run": _fljsd_run_all,
+    "sanitizer": [jsd_sanitizer, element_mul_sanitizer],
+}
+
 
 # ---------------------------------------------------------------------------
 # Runner
@@ -906,7 +1401,7 @@ BENCHMARKS["flaggems_layernorm"] = {
 
 def run_benchmarks(
     warmup: int = 1,
-    iterations: int = 40,
+    iterations: int = 20,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1151,7 +1646,7 @@ def main():
     parser.add_argument("--output", "-o", help="Output JSON file path")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup iterations")
     parser.add_argument(
-        "--iterations", type=int, default=40, help="Measured iterations"
+        "--iterations", type=int, default=20, help="Measured iterations"
     )
     parser.add_argument(
         "--compare",
