@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import operator
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import reduce
@@ -862,25 +861,6 @@ class BinarySymbolicExpr(SymbolicExpr):
         self.dtype = self.lhs.dtype
         self.shape = self.lhs.shape
 
-    _PY_OPS: ClassVar[dict[str, Callable[[Any, Any], Any]]] = {
-        "add": operator.add,
-        "sub": operator.sub,
-        "mul": operator.mul,
-        "idiv": operator.floordiv,
-        "div": operator.truediv,
-        "mod": operator.mod,
-    }
-
-    def to_py(self) -> Any:
-        lhs_val = self.lhs.to_py()
-        rhs_val = self.rhs.to_py()
-        op_fn = self._PY_OPS.get(self.op)
-        if op_fn is None:
-            raise NotImplementedError(
-                f"to_py for binary op {self.op} is not implemented"
-            )
-        return op_fn(lhs_val, rhs_val)
-
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         lhs, constraints_lhs = self.lhs._to_z3()
         rhs, constraints_rhs = self.rhs._to_z3()
@@ -895,9 +875,9 @@ class BinarySymbolicExpr(SymbolicExpr):
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
         np_op = self._NUMPY_OPS.get(self.op, None)
-        if np_op is None:
-            raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
-        return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+        if np_op is not None:
+            return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+        return self.concrete_fn(lhs_concrete, rhs_concrete)  # type: ignore
 
     @staticmethod
     def _apply_binop(op_func, left, right):
@@ -2001,6 +1981,8 @@ class SymbolicClient(Client):
             elif expr.has_op("load"):
                 self._on_data_dependent_value()
                 expr = expr.replace_subtree("load")
+                if expr.op != "const":
+                    expr = expr.replace_subtree()
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
             else:
                 z3_expr, _ = expr.eval()
