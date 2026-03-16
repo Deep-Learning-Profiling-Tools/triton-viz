@@ -1986,7 +1986,8 @@ class SymbolicClient(Client):
                 self._on_data_dependent_value()
                 expr = expr.replace_subtree("load")
                 # replace_subtree("load") only concretizes load nodes, so the
-                # result may still be a compound op (e.g. div(const, const)).
+                # result may still be a compound op
+                # (e.g. div(load, load) -> div(const, const)).
                 # Calling replace_subtree() with no anchor_op unconditionally
                 # concretizes every node in the tree, collapsing the whole
                 # expression into a single const value.
