@@ -1209,6 +1209,18 @@ class DotSymbolicExpr(SymbolicExpr):
         self.add_child("b", b)
         self.add_child("d", d)
 
+        # dot(a, b): a is (M, K), b is (K, N) -> result is (M, N)
+        a_shape = self.a.shape
+        b_shape = self.b.shape
+        if len(a_shape) == 2 and len(b_shape) == 2:
+            self.shape = (a_shape[0], b_shape[1])
+
+        # Triton dot produces fp32 by default; use d's dtype if accumulator given
+        if self.d is not None and hasattr(self.d, "dtype") and self.d.dtype is not None:
+            self.dtype = self.d.dtype
+        else:
+            self.dtype = tl.float32
+
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
