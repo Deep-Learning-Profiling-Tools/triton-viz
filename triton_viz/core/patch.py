@@ -437,17 +437,26 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     # Expose client_manager to tl.flip wrapper via a module-global
     global _current_client_manager
     _current_client_manager = client_manager
-    kwargs.pop("jit_fn")
+    jit_fn = kwargs.pop("jit_fn")
     if cfg.virtual_memory:
         args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs)
     else:
         args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
 
+    # Derive constexpr names from the original JIT function, which has
+    # reliable annotation info.  The rewritten function's __annotations__
+    # can be corrupted on Python 3.14+ (string annotations get
+    # double-quoted), making self.constexprs unreliable.
+    if jit_fn is not None and hasattr(jit_fn, "params"):
+        constexpr_names = {p.name for p in jit_fn.params if p.is_constexpr}
+    else:
+        constexpr_names = set(self.constexprs)
+
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
     call_args = {}
     for name, arg in args.items():
-        if name in self.constexprs:
+        if name in constexpr_names:
             call_args[name] = arg
             ret = arg
         else:

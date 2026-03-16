@@ -1047,12 +1047,12 @@ def test_reinterpret_tensor_wrapper():
 
 # ======== Constexpr Positional Argument Tests ===========
 
-constexpr_positional_sanitizer = SymbolicSanitizer(abort_on_error=False)
+constexpr_str_annotation_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=constexpr_positional_sanitizer)
+@triton_viz.trace(client=constexpr_str_annotation_sanitizer)
 @triton.jit
-def constexpr_positional_kernel(X, Out, N, BLOCK_SIZE: tl.constexpr):
+def constexpr_str_annotation_kernel(X, Out, N, BLOCK_SIZE: "tl.constexpr"):
     pid = tl.program_id(0)
     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < N
@@ -1060,18 +1060,24 @@ def constexpr_positional_kernel(X, Out, N, BLOCK_SIZE: tl.constexpr):
     tl.store(Out + offs, x + 1.0, mask=mask)
 
 
-def test_constexpr_positional_arg():
-    """Passing a tl.constexpr param as a positional arg must not raise ValueError."""
-    constexpr_positional_sanitizer.records.clear()
+def test_constexpr_string_annotation_positional_arg():
+    """String-annotated tl.constexpr passed positionally must not raise ValueError.
+
+    On Python 3.14+ the AST rewriter double-quotes string annotations,
+    so the rewritten function's __annotations__ contains "'tl.constexpr'"
+    instead of "tl.constexpr", making GridExecutor.constexprs empty.
+    The fix derives constexpr names from the original JITFunction.params.
+    """
+    constexpr_str_annotation_sanitizer.records.clear()
 
     N = 16
     BLOCK_SIZE = 4
     x = torch.arange(N, dtype=torch.float32)
     out = torch.empty_like(x)
 
-    # BLOCK_SIZE passed as positional arg, not keyword → must still be treated as constexpr
-    constexpr_positional_kernel[(N // BLOCK_SIZE,)](x, out, N, BLOCK_SIZE)
+    # BLOCK_SIZE passed as positional arg with string annotation
+    constexpr_str_annotation_kernel[(N // BLOCK_SIZE,)](x, out, N, BLOCK_SIZE)
 
     assert (
-        len(constexpr_positional_sanitizer.records) == 0
-    ), f"Expected no OOB records, got {len(constexpr_positional_sanitizer.records)}"
+        len(constexpr_str_annotation_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(constexpr_str_annotation_sanitizer.records)}"
