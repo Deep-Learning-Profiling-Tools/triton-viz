@@ -24,16 +24,20 @@ from z3 import Solver, Int, sat
 # ======== Init Tests ===========
 
 
-def test_sanitizer_init():
-    original = cfg.enable_sanitizer
-    try:
-        cfg.enable_sanitizer = True
-        assert isinstance(Sanitizer(), SymbolicSanitizer)
+@pytest.fixture
+def _isolate_sanitizer_cfg():
+    """Save and restore cfg.enable_sanitizer around every test."""
+    saved = cfg.enable_sanitizer
+    yield
+    cfg.enable_sanitizer = saved
 
-        cfg.enable_sanitizer = False
-        assert isinstance(Sanitizer(), NullSanitizer)
-    finally:
-        cfg.enable_sanitizer = original
+
+def test_sanitizer_init(_isolate_sanitizer_cfg):
+    cfg.enable_sanitizer = True
+    assert isinstance(Sanitizer(), SymbolicSanitizer)
+
+    cfg.enable_sanitizer = False
+    assert isinstance(Sanitizer(), NullSanitizer)
 
 
 # ======== Range Constraint Tests ===========

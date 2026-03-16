@@ -56,6 +56,7 @@ triton-visualizer = "triton_viz.visualizer_cli:main"
 [project.optional-dependencies]
 test = [
   "pytest",
+  "pytest-xdist",
   "numpy",
   "torch",
 ]
