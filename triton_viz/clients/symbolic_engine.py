@@ -1217,8 +1217,9 @@ class DotSymbolicExpr(SymbolicExpr):
         elif len(a_shape) == 3 and len(b_shape) == 3:
             self.shape = (a_shape[0], a_shape[1], b_shape[2])
 
-        # Triton dot produces fp32 by default; use d's dtype if accumulator given
-        if self.d is not None and hasattr(self.d, "dtype") and self.d.dtype is not None:
+        # Triton always passes an accumulator d with the correct output dtype
+        # (determined by out_dtype param or input types: int8->int32, fp64->fp64, etc.)
+        if self.d is not None and self.d.dtype is not None:
             self.dtype = self.d.dtype
         else:
             self.dtype = tl.float32
