@@ -445,12 +445,9 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
     # Derive constexpr names from the original JIT function, which has
     # reliable annotation info.  The rewritten function's __annotations__
-    # can be corrupted on Python 3.14+ (string annotations get
-    # double-quoted), making self.constexprs unreliable.
-    if jit_fn is not None and hasattr(jit_fn, "params"):
-        constexpr_names = {p.name for p in jit_fn.params if p.is_constexpr}
-    else:
-        constexpr_names = set(self.constexprs)
+    # can be corrupted (string annotations get double-quoted), making
+    # self.constexprs unreliable.
+    constexpr_names = {p.name for p in jit_fn.params if p.is_constexpr}
 
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
