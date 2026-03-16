@@ -20,11 +20,15 @@ from z3 import (
     Sum,
     And,
     Or,
+    Not,
     simplify,
+    substitute,
     Int2BV,
     BV2Int,
     BitVecRef,
     BoolVal,
+    is_true,
+    is_false,
 )
 from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
 
@@ -32,7 +36,7 @@ import triton.language as tl
 from triton.runtime.interpreter import TensorHandle, _get_np_dtype
 
 from ..core.client import Client
-from ..core.callbacks import OpCallbacks, ForLoopCallbacks
+from ..core.callbacks import OpCallbacks, ForLoopCallbacks, IfElseCallbacks
 from ..core.data import (
     Op,
     UnaryOp,
@@ -130,8 +134,21 @@ class LoopContext:
     start: int = 0
     stop: int = 0
     step: int = 1
+    current_concrete_idx: int | None = None
     signature_cache: dict[int, int] = field(default_factory=dict)
     pending_checks: list[PendingCheck] = field(default_factory=list)
+
+
+@dataclass
+class IfFrame:
+    lineno: int
+    predicate: BoolRef  # The condition Z3 expr (negated for else)
+    support: BoolRef | None  # Supporting constraints from expr.eval()
+    concrete_result: bool  # Concrete evaluation result
+
+    def path_constraint(self) -> ConstraintConjunction:
+        """Return combined predicate + support constraints for this branch."""
+        return _and_constraints(self.support, self.predicate)
 
 
 class SymbolicExprDataWrapper:
@@ -579,6 +596,10 @@ class SymbolicExpr:
                 return True
         self._has_op_cache[op_name] = False
         return False
+
+    def has_op_in(self, op_names: frozenset[str]) -> bool:
+        """Return True when the subtree contains any op in the given set."""
+        return any(self.has_op(name) for name in op_names)
 
     def to_tree_str(self) -> str:
         """
@@ -1746,6 +1767,7 @@ class SymbolicClient(Client):
     def __init__(self):
         super().__init__()
         self.loop_stack: list[LoopContext] = []
+        self.branch_stack: list[IfFrame] = []
         SymbolicExpr.set_loop_ctx_provider(
             lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
         )
@@ -2078,6 +2100,7 @@ class SymbolicClient(Client):
         if self._should_skip_loop_hooks():
             return idx
         if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            self.loop_stack[-1].current_concrete_idx = idx
             return self.loop_stack[-1].idx
         return idx
 
@@ -2094,4 +2117,101 @@ class SymbolicClient(Client):
             before_loop_callback=self.lock_fn(self._loop_hook_before),
             loop_iter_overrider=self.lock_fn(self._loop_hook_iter_overrider),
             after_loop_callback=self.lock_fn(self._loop_hook_after),
+        )
+
+    # ── If/else branch tracking ──────────────────────────────────
+
+    _LOAD_LIKE_OPS: ClassVar[frozenset[str]] = frozenset(
+        {"load", "tensor_pointer_load", "store", "tensor_pointer_store"}
+    )
+
+    def _if_pre_if(self, condition: Any, lineno: int) -> None:
+        # Extract SymbolicExpr from condition
+        sym_expr: SymbolicExpr | None = None
+        if isinstance(condition, SymbolicExpr):
+            sym_expr = condition
+        elif hasattr(condition, "handle") and isinstance(
+            condition.handle, SymbolicExpr
+        ):
+            sym_expr = condition.handle
+
+        # Fallback for unsupported conditions
+        if sym_expr is None or not isinstance(sym_expr, SymbolicExpr):
+            self.branch_stack.append(
+                IfFrame(lineno, BoolVal(bool(condition)), None, bool(condition))
+            )
+            return
+
+        # Check for load-like ops in the expression tree
+        if sym_expr.has_op_in(self._LOAD_LIKE_OPS):
+            self.branch_stack.append(
+                IfFrame(lineno, BoolVal(bool(condition)), None, bool(condition))
+            )
+            return
+
+        try:
+            pred_raw, support_z3 = sym_expr.eval()
+        except Exception:
+            self.branch_stack.append(
+                IfFrame(lineno, BoolVal(bool(condition)), None, bool(condition))
+            )
+            return
+
+        # Non-scalar Z3 expr: fallback
+        if isinstance(pred_raw, list):
+            self.branch_stack.append(
+                IfFrame(lineno, BoolVal(bool(condition)), None, bool(condition))
+            )
+            return
+
+        # Normalize predicate to BoolRef
+        pred_bool = _constraint_to_bool(pred_raw)
+
+        # Concrete materialization: substitute loop idx and PID vars
+        substitutions: list[tuple[ExprRef, ExprRef]] = []
+        for ctx in self.loop_stack:
+            if ctx.current_concrete_idx is not None:
+                substitutions.append((ctx.idx_z3, IntVal(ctx.current_concrete_idx)))
+        if self.grid_idx is not None:
+            substitutions.append((SymbolicExpr.PID0, IntVal(self.grid_idx[0])))
+            substitutions.append((SymbolicExpr.PID1, IntVal(self.grid_idx[1])))
+            substitutions.append((SymbolicExpr.PID2, IntVal(self.grid_idx[2])))
+
+        try:
+            concrete_pred = pred_bool
+            if substitutions:
+                concrete_pred = substitute(pred_bool, substitutions)
+            concrete_pred = simplify(concrete_pred)
+            if is_true(concrete_pred):
+                concrete_bool = True
+            elif is_false(concrete_pred):
+                concrete_bool = False
+            else:
+                # Cannot determine concretely; default to True (current behavior)
+                concrete_bool = True
+        except Exception:
+            concrete_bool = bool(condition)
+
+        self.branch_stack.append(IfFrame(lineno, pred_bool, support_z3, concrete_bool))
+
+    def _if_eval_condition(self, lineno: int) -> bool:
+        assert self.branch_stack and self.branch_stack[-1].lineno == lineno
+        return self.branch_stack[-1].concrete_result
+
+    def _if_flip_condition(self, lineno: int) -> None:
+        assert self.branch_stack and self.branch_stack[-1].lineno == lineno
+        frame = self.branch_stack[-1]
+        frame.predicate = Not(frame.predicate)
+        frame.concrete_result = not frame.concrete_result
+
+    def _if_post_if(self, lineno: int) -> None:
+        assert self.branch_stack and self.branch_stack[-1].lineno == lineno
+        self.branch_stack.pop()
+
+    def register_if_else_callback(self) -> IfElseCallbacks:
+        return IfElseCallbacks(
+            pre_if_callback=self.lock_fn(self._if_pre_if),
+            eval_condition_callback=self.lock_fn(self._if_eval_condition),
+            flip_condition_callback=self.lock_fn(self._if_flip_condition),
+            post_if_callback=self.lock_fn(self._if_post_if),
         )

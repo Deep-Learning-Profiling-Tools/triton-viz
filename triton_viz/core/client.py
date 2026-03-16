@@ -11,11 +11,13 @@ from .patch import (
     unpatch_op,
     patch_for_loop,
     unpatch_for_loop,
+    patch_if_else,
+    unpatch_if_else,
     patch_calls,
     LoopIter,
 )
 from functools import wraps
-from .callbacks import OpCallbacks, ForLoopCallbacks
+from .callbacks import OpCallbacks, ForLoopCallbacks, IfElseCallbacks
 from .patch import patch_lang, unpatch_lang, OPERATION_REGISTRY
 from .config import config as cfg
 
@@ -84,6 +86,9 @@ class Client(ABC):
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         ...
 
+    def register_if_else_callback(self) -> IfElseCallbacks:
+        return IfElseCallbacks()
+
     @abstractmethod
     def finalize(self) -> list:
         ...
@@ -122,6 +127,8 @@ class ClientManager:
         self.launch = Launch()
         self._lock = threading.Lock()
         self._clear_loop_hooks()
+        self._clear_if_hooks()
+        self._if_patching_active: bool = False
 
     def _lock_context(self):
         if cfg.num_sms > 1:
@@ -174,15 +181,26 @@ class ClientManager:
         with patch_calls(backend):
             # Collect all for-loop callbacks from clients
             all_loop_callbacks = []
+            all_if_callbacks = []
             for client in self.clients.values():
                 for namespace, attrs in namespaces.items():  # patch ops
                     for attr, op in attrs.items():
                         callbacks = client.register_op_callback(op)
                         patch_op(namespace, attr, callbacks, backend=backend)
                 all_loop_callbacks.append(client.register_for_loop_callback())
+                all_if_callbacks.append(client.register_if_else_callback())
 
             self._populate_loop_hooks(all_loop_callbacks)
             patch_for_loop()
+
+            # Only enable if/else patching if at least one client provides
+            # an eval_condition_callback. Without a provider, the AST rewrite
+            # would have no way to determine the condition's truth value.
+            self._populate_if_hooks(all_if_callbacks)
+            self._if_patching_active = self._eval_condition_callback is not None
+            if self._if_patching_active:
+                patch_if_else()
+
             patch_lang(fn, backend, client_manager=self)
             try:
                 yield
@@ -192,6 +210,10 @@ class ClientManager:
                         unpatch_op(namespace, attr, backend)
                 unpatch_for_loop()
                 self._clear_loop_hooks()
+                if self._if_patching_active:
+                    unpatch_if_else()
+                    self._if_patching_active = False
+                self._clear_if_hooks()
                 unpatch_lang(backend)
 
     def pre_run_callback(self, fn: Callable) -> bool:
@@ -307,3 +329,42 @@ class ClientManager:
         else:
             iterable = iterable_callable(*args, **kwargs)
         return LoopIter(self, iterable, lineno, range_type)
+
+    # --- If/else callback management ---
+
+    def _clear_if_hooks(self) -> None:
+        self._pre_if_hooks: list[Callable] = []
+        self._eval_condition_callback: Callable | None = None
+        self._flip_condition_hooks: list[Callable] = []
+        self._post_if_hooks: list[Callable] = []
+
+    def _populate_if_hooks(self, callbacks_list: list[IfElseCallbacks]) -> None:
+        self._clear_if_hooks()
+        for cb in callbacks_list:
+            if cb.pre_if_callback is not None:
+                self._pre_if_hooks.append(cb.pre_if_callback)
+            if cb.eval_condition_callback is not None:
+                if self._eval_condition_callback is not None:
+                    raise RuntimeError("Only one eval_condition_callback allowed")
+                self._eval_condition_callback = cb.eval_condition_callback
+            if cb.flip_condition_callback is not None:
+                self._flip_condition_hooks.append(cb.flip_condition_callback)
+            if cb.post_if_callback is not None:
+                self._post_if_hooks.append(cb.post_if_callback)
+
+    def pre_if(self, condition: Any, lineno: int) -> None:
+        for hook in self._pre_if_hooks:
+            hook(condition, lineno)
+
+    def eval_condition(self, lineno: int) -> bool:
+        if self._eval_condition_callback is not None:
+            return self._eval_condition_callback(lineno)
+        return True
+
+    def flip_condition(self, lineno: int) -> None:
+        for hook in self._flip_condition_hooks:
+            hook(lineno)
+
+    def post_if(self, lineno: int) -> None:
+        for hook in self._post_if_hooks:
+            hook(lineno)
