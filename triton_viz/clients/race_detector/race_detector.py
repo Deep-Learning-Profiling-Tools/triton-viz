@@ -24,7 +24,14 @@ from ..symbolic_engine import (
     SymbolicExpr,
     SymbolicClient,
 )
-from .data import AccessType, MemoryAccess, SymbolicMemoryAccess, RaceRecord, RaceType
+from .data import (
+    AccessType,
+    MemoryAccess,
+    SymbolicMemoryAccess,
+    RaceRecord,
+    RaceType,
+    effects_at_addr,
+)
 from ...utils.traceback_utils import extract_user_frames
 
 
@@ -913,6 +920,33 @@ def _apply_epoch_annotations(accesses: list[MemoryAccess]) -> None:
             acc.epoch = globally_completed_rounds
 
 
+def _has_sync_metadata(accesses: list[MemoryAccess], epoch: int) -> bool:
+    """Check if any atomic access in the given epoch has sync metadata."""
+    for acc in accesses:
+        if acc.epoch != epoch:
+            continue
+        if acc.access_type != AccessType.ATOMIC:
+            continue
+        if acc.legacy_atomic:
+            continue
+        if acc.atomic_sem is not None:
+            return True
+    return False
+
+
+def _collect_sync_events(
+    accesses: list[MemoryAccess], epoch: int
+) -> list[MemoryAccess]:
+    """Collect all non-legacy atomic accesses in the given epoch."""
+    return [
+        acc
+        for acc in accesses
+        if acc.epoch == epoch
+        and acc.access_type == AccessType.ATOMIC
+        and not acc.legacy_atomic
+    ]
+
+
 def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
     """Detect data races using an inverted index on byte addresses.
 
@@ -921,6 +955,8 @@ def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
     2. At least one access is a write (Store)
     3. The accesses are not both atomic
     """
+    from .hb_solver import HBSolver
+
     _apply_epoch_annotations(accesses)
 
     addr_to_accesses: dict[int, list[MemoryAccess]] = defaultdict(list)
@@ -929,6 +965,10 @@ def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
         unique_offsets = _active_offsets(access)
         for off in unique_offsets:
             addr_to_accesses[int(off)].append(access)
+
+    # Cache sync metadata check and sync events per epoch
+    _sync_meta_cache: dict[int, bool] = {}
+    _sync_events_cache: dict[int, list[MemoryAccess]] = {}
 
     races: list[RaceRecord] = []
     seen_pairs: set[tuple[tuple[int, ...], tuple[int, ...], RaceType, int, int]] = set()
@@ -956,19 +996,43 @@ def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
                     for acc_b in accesses_b:
                         if acc_a.epoch != acc_b.epoch:
                             continue
+
+                        # Atomic-atomic: suppress (preserved)
                         if (
                             acc_a.access_type == AccessType.ATOMIC
                             and acc_b.access_type == AccessType.ATOMIC
                         ):
                             continue
+
+                        # Load-load: no race
                         if (
                             acc_a.access_type == AccessType.LOAD
                             and acc_b.access_type == AccessType.LOAD
                         ):
                             continue
-                        race_type = _classify_race(acc_a, acc_b)
+
+                        # Effect-based classification
+                        race_type = _classify_race(acc_a, acc_b, addr)
                         if race_type is None:
                             continue
+
+                        # HB check: only if no legacy_atomic involved
+                        if not (acc_a.legacy_atomic or acc_b.legacy_atomic):
+                            epoch = acc_a.epoch
+                            if epoch not in _sync_meta_cache:
+                                _sync_meta_cache[epoch] = _has_sync_metadata(
+                                    accesses, epoch
+                                )
+                            if _sync_meta_cache[epoch]:
+                                if epoch not in _sync_events_cache:
+                                    _sync_events_cache[epoch] = _collect_sync_events(
+                                        accesses, epoch
+                                    )
+                                solver = HBSolver(acc_a, acc_b)
+                                solver.add_sync_events(_sync_events_cache[epoch])
+                                if not solver.check_race_possible():
+                                    continue  # UNSAT → proven ordered, suppress
+
                         dedup_key = (
                             pair_key[0],
                             pair_key[1],
@@ -991,14 +1055,40 @@ def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
     return races
 
 
-def _classify_race(a: MemoryAccess, b: MemoryAccess) -> Optional[RaceType]:
-    """Classify the race type between two accesses from different blocks."""
+def _classify_race(
+    a: MemoryAccess, b: MemoryAccess, addr: int | None = None
+) -> Optional[RaceType]:
+    """Classify the race type between two accesses from different blocks.
+
+    When addr is provided, uses effects_at_addr for precise per-lane
+    classification (e.g., failed CAS = read-only). When addr is None,
+    falls back to AccessType-based classification.
+    """
     ta = a.access_type
     tb = b.access_type
+
+    # Rule 1: Load-Load → no race
     if ta == AccessType.LOAD and tb == AccessType.LOAD:
         return None
+
+    # Rule 2: Atomic-Atomic → suppress (preserved for v1)
     if ta == AccessType.ATOMIC and tb == AccessType.ATOMIC:
         return None
+
+    # Rule 3: Use effects_at_addr for precision when addr is available
+    if addr is not None:
+        a_reads, a_writes = effects_at_addr(a, addr)
+        b_reads, b_writes = effects_at_addr(b, addr)
+
+        if not (a_writes or b_writes):
+            return None  # e.g., failed CAS (read-only) vs load → no race
+        if a_writes and b_writes:
+            return RaceType.WAW
+        if (a_writes and b_reads) or (a_reads and b_writes):
+            return RaceType.RAW
+        return None
+
+    # Fallback: AccessType-based classification
     is_write_a = ta in (AccessType.STORE, AccessType.ATOMIC)
     is_write_b = tb in (AccessType.STORE, AccessType.ATOMIC)
     if is_write_a and is_write_b:
