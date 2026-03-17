@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 
-from .data import MemoryAccess
+from .data import MemoryAccess, SymbolicMemoryAccess, AccessType
 
 
 def _release_like(sem: str | None) -> bool:
@@ -134,3 +134,107 @@ def _reachable(adj: dict[int, set[int]], src: int, dst: int) -> bool:
                 visited.add(neighbor)
                 queue.append(neighbor)
     return False
+
+
+class SymbolicHBSolver:
+    """HB solver for symbolic accesses.
+
+    Models two copies of the program (block A and block B) since the symbolic
+    trace is a template executed by all blocks. po edges are within each copy,
+    sw edges are between copies.
+
+    Uses symbolic ptr signatures to determine address overlap for sw edges.
+    Like HBSolver, uses unconditional sw for qualifying release/acquire pairs.
+    """
+
+    def __init__(
+        self,
+        acc_a: SymbolicMemoryAccess,
+        acc_b: SymbolicMemoryAccess,
+        all_accesses: list[SymbolicMemoryAccess],
+        ptr_signature_fn,
+    ):
+        self._acc_a = acc_a
+        self._acc_b = acc_b
+        self._all_accesses = all_accesses
+        self._ptr_sig = ptr_signature_fn
+
+    def check_race_possible(self) -> bool:
+        """Return True if a race is possible (a and b unordered).
+
+        False means sw+po edges create an hb path between a and b.
+        """
+        a = self._acc_a
+        b = self._acc_b
+
+        # Collect sync accesses in same epoch
+        sync = [
+            acc
+            for acc in self._all_accesses
+            if acc.access_type == AccessType.ATOMIC
+            and acc.epoch == a.epoch
+            and acc.atomic_sem is not None
+        ]
+
+        if not sync:
+            return True  # no sync events → can't prove ordering
+
+        # Build all accesses in the epoch (for po chains)
+        epoch_accesses = sorted(
+            [acc for acc in self._all_accesses if acc.epoch == a.epoch],
+            key=lambda x: x.event_id,
+        )
+
+        # Create two copies: block A nodes (indices 0..n-1), block B nodes (n..2n-1)
+        n = len(epoch_accesses)
+        acc_to_idx = {id(acc): i for i, acc in enumerate(epoch_accesses)}
+
+        adj: dict[int, set[int]] = defaultdict(set)
+
+        # po edges within block A (indices 0..n-1)
+        for k in range(n - 1):
+            adj[k].add(k + 1)
+
+        # po edges within block B (indices n..2n-1)
+        for k in range(n - 1):
+            adj[n + k].add(n + k + 1)
+
+        # sw edges: from block A's release to block B's acquire (and vice versa)
+        sync_sigs = {}
+        for acc in sync:
+            sync_sigs[id(acc)] = self._ptr_sig(acc.ptr_expr)
+
+        for w in sync:
+            if not _release_like(w.atomic_sem):
+                continue
+            w_sig = sync_sigs[id(w)]
+            w_idx_a = acc_to_idx[id(w)]  # block A copy
+            w_idx_b = n + acc_to_idx[id(w)]  # block B copy
+
+            for r in sync:
+                if id(w) == id(r):
+                    continue
+                if not _acquire_like(r.atomic_sem):
+                    continue
+                if not _scope_ok(w.atomic_scope, r.atomic_scope):
+                    continue
+                r_sig = sync_sigs[id(r)]
+                if w_sig != r_sig:
+                    continue
+
+                r_idx_a = acc_to_idx[id(r)]  # block A copy
+                r_idx_b = n + acc_to_idx[id(r)]  # block B copy
+
+                # sw: block A's release → block B's acquire
+                adj[w_idx_a].add(r_idx_b)
+                # sw: block B's release → block A's acquire
+                adj[w_idx_b].add(r_idx_a)
+
+        # acc_a is in block A, acc_b is in block B
+        ai = acc_to_idx[id(a)]
+        bi = n + acc_to_idx[id(b)]
+
+        if _reachable(adj, ai, bi) or _reachable(adj, bi, ai):
+            return False  # ordered → no race
+
+        return True  # unordered → race possible
