@@ -36,11 +36,13 @@ class RaceDetector(SymbolicClient):
         self._symbolic_accesses: list[SymbolicMemoryAccess] = []
         self._concrete_accesses: list[MemoryAccess] = []
         self._need_concrete_fallback: bool = False
+        self._force_concrete: bool = False
         self._grid: tuple[int, ...] = (1, 1, 1)
         self._phase: str = "init"
         # Each entry: (OpCallbacks, original_overrider_fn)
         self._op_callbacks: list[tuple[OpCallbacks, Callable]] = []
         self._races: list[RaceRecord] = []
+        self._symbolic_cas_count: int = 0
         self._event_counter: int = 0
 
     # ── Client interface ─────────────────────────────────────────
@@ -55,8 +57,10 @@ class RaceDetector(SymbolicClient):
             return True
         # End of symbolic phase (block 0 finished)
         if self._need_concrete_fallback:
-            self._concretize_block0()
+            if self._symbolic_accesses:
+                self._concretize_block0()
             self._phase = "concrete"
+            self._force_concrete = True
             self._disable_overriders()
             return True
         else:
@@ -76,6 +80,7 @@ class RaceDetector(SymbolicClient):
     def grid_callback(self, grid: tuple[int, ...]):
         self._grid = tuple(int(g) for g in grid)
         self._need_concrete_fallback = False
+        self._symbolic_cas_count = 0
         self._symbolic_accesses.clear()
         self._concrete_accesses.clear()
         self._races.clear()
@@ -83,10 +88,12 @@ class RaceDetector(SymbolicClient):
         # Re-enable overriders (may have been disabled by a previous concrete fallback)
         for cb, orig_overrider in self._op_callbacks:
             cb.op_overrider = orig_overrider
-        if cfg.num_sms > 1:
-            # Symbolic phase is not thread-safe when multiple blocks execute in parallel.
+        if self._force_concrete or cfg.num_sms > 1:
+            # Skip symbolic phase: either a previous SymbolicBailout forced
+            # concrete mode, or multiple SMs make symbolic execution unsafe.
             self._phase = "concrete"
             self._disable_overriders()
+            self._force_concrete = False
         else:
             self._phase = "symbolic"
         SymbolicExpr.ARANGE_DICT.clear()
@@ -146,6 +153,17 @@ class RaceDetector(SymbolicClient):
         raise NotImplementedError("TensorPointerStore is not supported yet.")
 
     def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
+        if self._phase == "symbolic":
+            self._symbolic_cas_count += 1
+            if self._symbolic_cas_count > 1:
+                # A second CAS during symbolic execution of block 0
+                # indicates a while-loop spin barrier.  Symbolic execution
+                # cannot terminate while loops (tensor comparisons are
+                # always truthy), so bail out and restart in concrete mode.
+                self._need_concrete_fallback = True
+                from ...core.patch import SymbolicBailout
+
+                raise SymbolicBailout()
         ret = super()._op_atomic_cas_overrider(ptr, cmp, val, sem, scope)
         self._record_symbolic_access(
             AccessType.ATOMIC,
@@ -831,6 +849,13 @@ def detect_races(accesses: list[MemoryAccess]) -> list[RaceRecord]:
 
     for addr, access_list in addr_to_accesses.items():
         if len(access_list) < 2:
+            continue
+
+        # Fast path: if every access at this address is ATOMIC, no race is
+        # possible (ATOMIC-ATOMIC pairs are always safe).  This avoids an
+        # O(n²) inner loop when a CAS-spin barrier produces thousands of
+        # ATOMIC accesses at the same sync address.
+        if all(acc.access_type == AccessType.ATOMIC for acc in access_list):
             continue
 
         block_accesses: dict[tuple[int, ...], list[MemoryAccess]] = defaultdict(list)

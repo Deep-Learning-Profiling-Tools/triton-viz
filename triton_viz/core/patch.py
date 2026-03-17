@@ -37,6 +37,16 @@ from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 _MISSING = object()
 
 
+class SymbolicBailout(Exception):
+    """Raised by a client to abort symbolic execution of the current block.
+
+    The grid loop catches this and lets the client decide (via
+    ``post_run_callback``) whether to restart the grid in concrete mode.
+    """
+
+    pass
+
+
 class _LangPatchScope:
     """Tracks patched attributes so they can be restored."""
 
@@ -502,7 +512,15 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
                     client_manager.grid_idx_callback((x, y, z))
                     if not client_manager.pre_run_callback(self.fn):
                         continue
-                    self.fn(**call_args)
+                    try:
+                        self.fn(**call_args)
+                    except SymbolicBailout:
+                        # Client aborted symbolic execution.
+                        # Let post_run_callback handle the fallback,
+                        # then restart the entire grid from (0,0,0).
+                        client_manager.post_run_callback(self.fn)
+                        client_manager.grid_callback(grid)
+                        return run_grid_loops_1thread(grid)
                     if not client_manager.post_run_callback(self.fn):
                         return
 
