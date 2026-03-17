@@ -254,7 +254,14 @@ class SymbolicExpr:
     }
     BINARY_OPS: ClassVar[tuple[str, ...]] = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS: ClassVar[tuple[str, ...]] = ("where",)
-    REDUCE_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min", "dot")
+    REDUCE_OPS: ClassVar[tuple[str, ...]] = (
+        "sum",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+        "dot",
+    )
     SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum",)
     POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
@@ -313,6 +320,7 @@ class SymbolicExpr:
         # Tensor handle attributes, including `attr`, `dtype`, and `data`
         self.attr: dict[str, Any] = {}
         self.dtype: tl.core.dtype | None = None
+        self.shape: tuple[int, ...] = ()
 
         # Functions and arguments for concretization
         self.concrete_fn: Callable[..., Any] | None = None
@@ -332,15 +340,12 @@ class SymbolicExpr:
         self._has_op_cache: dict[str, bool] = {}
         self._data_wrapper: SymbolicExprDataWrapper | None = None
 
-    @property
-    def shape(self) -> tuple[int, ...]:
-        if not self.dtype:
-            return ()
-        if isinstance(self.dtype, tl.block_type):
-            return tuple(int(x) for x in self.dtype.shape)
-        elif isinstance(self.dtype, tl.pointer_type):
-            return tuple(int(x) for x in self.dtype.element_ty.shape)
-        return ()
+    @staticmethod
+    def _unpack_dtype(dtype, fallback_shape=()):
+        """Split a block_type into (scalar_dtype, shape), passing through scalars."""
+        if isinstance(dtype, tl.block_type):
+            return dtype.scalar, tuple(int(x) for x in dtype.shape)
+        return dtype, fallback_shape
 
     def add_child(self, name: str, value: Any) -> None:
         child = SymbolicExpr.from_value(value) if value is not None else None
@@ -401,7 +406,10 @@ class SymbolicExpr:
     def _node_label(self) -> str:
         """Generate a short label for this node."""
         label = self._node_label_core()
-        label = f"{label} [dtype={self.dtype}]"
+        if self.shape:
+            label = f"{label} [dtype={self.dtype}, shape={self.shape}]"
+        else:
+            label = f"{label} [dtype={self.dtype}]"
 
         return label
 
@@ -620,7 +628,7 @@ class ConstSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
         super().__init__(op)
         self.value = value
-        self.dtype = dtype
+        self.dtype, self.shape = self._unpack_dtype(dtype)
 
     def _node_label_core(self) -> str:
         return f"const={self.value}"
@@ -720,7 +728,8 @@ class ArangeSymbolicExpr(SymbolicExpr):
         # Program ID / arange are always int32
         start_const = cast(ConstSymbolicExpr, self.start)
         end_const = cast(ConstSymbolicExpr, self.end)
-        self.dtype = tl.block_type(tl.int32, [end_const.value - start_const.value])
+        self.dtype = tl.int32
+        self.shape = (end_const.value - start_const.value,)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         start = self.start.to_py()
@@ -786,10 +795,12 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("mask", mask)
         self.add_child("other", other)
         ptr_dtype = self.ptr.dtype
-        if isinstance(ptr_dtype, tl.block_type):
-            self.dtype = tl.block_type(ptr_dtype.element_ty.element_ty, ptr_dtype.shape)
-        else:
-            self.dtype = ptr_dtype.element_ty  # type: ignore[union-attr]
+        self.dtype = (
+            ptr_dtype.element_ty
+            if isinstance(ptr_dtype, tl.pointer_type)
+            else ptr_dtype
+        )
+        self.shape = self.ptr.shape
 
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
@@ -818,6 +829,8 @@ class UnarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Unsupported unary op: {op}")
         super().__init__(op)
         self.add_child("arg", arg)
+        self.dtype = self.arg.dtype
+        self.shape = self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         val, constraints = self.arg._to_z3()
@@ -847,6 +860,7 @@ class BinarySymbolicExpr(SymbolicExpr):
         self.add_child("lhs", lhs)
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
+        self.shape = self.lhs.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         lhs, constraints_lhs = self.lhs._to_z3()
@@ -1057,6 +1071,7 @@ class WhereSymbolicExpr(SymbolicExpr):
         self.add_child("lhs", lhs)
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
+        self.shape = self.lhs.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1107,7 +1122,13 @@ class WhereSymbolicExpr(SymbolicExpr):
 
 
 class ReduceSymbolicExpr(SymbolicExpr):
-    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min")
+    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = (
+        "sum",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+    )
     input: SymbolicExpr
     keepdims: SymbolicExpr
     axis: SymbolicExpr | None
@@ -1120,12 +1141,11 @@ class ReduceSymbolicExpr(SymbolicExpr):
         self.add_child("keepdims", keepdims)
         self.add_child("axis", axis)
 
-        # Compute output dtype from input dtype, axis, and keepdims
-        input_dtype = self.input.dtype
-        assert isinstance(
-            input_dtype, tl.block_type
-        ), f"ReduceSymbolicExpr expects block_type input, got {type(input_dtype)}"
-        input_shape = list(input_dtype.shape)
+        # Compute output dtype/shape from input dtype/shape, axis, and keepdims
+        input_shape = list(self.input.shape)
+        assert (
+            input_shape
+        ), "ReduceSymbolicExpr expects block input with non-empty shape"
         # Resolve axis value
         if isinstance(axis, int):
             axis_val = axis
@@ -1144,10 +1164,13 @@ class ReduceSymbolicExpr(SymbolicExpr):
                 output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
         else:
             output_shape = [1] * len(input_shape) if keepdims_val else []
-        scalar_ty = input_dtype.scalar
-        self.dtype = (
-            tl.block_type(scalar_ty, output_shape) if output_shape else scalar_ty
-        )
+        if op in ("argmax", "argmin"):
+            scalar_ty = tl.int32
+        else:
+            assert self.input.dtype is not None
+            scalar_ty = self.input.dtype
+        self.dtype = scalar_ty
+        self.shape = tuple(output_shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1187,6 +1210,23 @@ class DotSymbolicExpr(SymbolicExpr):
         self.add_child("b", b)
         self.add_child("d", d)
 
+        # dot(a, b): 2D (M,K)x(K,N)->(M,N) or 3D batched (B,M,K)x(B,K,N)->(B,M,N)
+        a_shape = self.a.shape
+        b_shape = self.b.shape
+        if len(a_shape) == 2 and len(b_shape) == 2:
+            self.shape = (a_shape[0], b_shape[1])
+        elif len(a_shape) == 3 and len(b_shape) == 3:
+            self.shape = (a_shape[0], a_shape[1], b_shape[2])
+
+        # Triton always passes an accumulator d with the correct output dtype
+        # (determined by out_dtype param or input types: int8->int32, fp64->fp64, etc.)
+        if self.d is not None and self.d.dtype is not None:
+            self.dtype = self.d.dtype
+        else:
+            raise ValueError(
+                "DotSymbolicExpr requires accumulator (d) with a valid dtype"
+            )
+
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
 
@@ -1201,7 +1241,7 @@ class CumsumSymbolicExpr(SymbolicExpr):
         self.add_child("input", input)
         self.add_child("axis", axis)
         self.add_child("reverse", reverse)
-        self.dtype = dtype
+        self.dtype, self.shape = self._unpack_dtype(dtype)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1245,6 +1285,7 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
             self.stride_keys.append(stride_key)
             self.offset_keys.append(offset_key)
         self.dtype = base.dtype
+        self.shape = base.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(
@@ -1262,6 +1303,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         self.add_child("ptr", ptr)
         self.add_child("offset", offset)
         self.dtype = self.ptr.dtype
+        self.shape = self.ptr.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         ptr_expr = self.ptr
@@ -1270,7 +1312,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         offset_z3, constraints_offset = offset_expr._to_z3()
         constraints = _and_constraints(constraints_ptr, constraints_offset)
         ptr_dtype = cast(Any, ptr_expr.dtype)
-        element_bytewidth = max(1, ptr_dtype.scalar.element_ty.primitive_bitwidth // 8)
+        element_bytewidth = max(1, ptr_dtype.element_ty.primitive_bitwidth // 8)
         if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
             z3_expr = ptr_z3 + offset_z3 * element_bytewidth
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
@@ -1304,6 +1346,7 @@ class AdvanceSymbolicExpr(SymbolicExpr):
             self.add_child(dk, offset_list[i])
             self.delta_keys.append(dk)
         self.dtype = ptr.dtype
+        self.shape = ptr.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(
@@ -1320,6 +1363,7 @@ class SplatSymbolicExpr(SymbolicExpr):
         self.add_child("block_type", block_type)
         self.add_child("arg", arg)
         self.dtype = self.block_type.dtype
+        self.shape = self.block_type.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1336,7 +1380,7 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
         self.add_child("axis", axis)
-        # Update dtype to reflect the new shape with an inserted dimension of size 1
+        # Update shape to reflect the new shape with an inserted dimension of size 1
         arg_shape = list(self.arg.shape) if self.arg.shape else []
         axis_val = axis if isinstance(axis, int) else axis.to_py()
         # Handle negative axis
@@ -1344,7 +1388,8 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
             axis_val = len(arg_shape) + 1 + axis_val
         # Insert dimension of size 1 at the specified axis
         new_shape = arg_shape[:axis_val] + [1] + arg_shape[axis_val:]
-        self.dtype = tl.block_type(cast(Any, self.arg.dtype).scalar, new_shape)
+        self.dtype = self.arg.dtype
+        self.shape = tuple(new_shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1364,17 +1409,9 @@ class BroadcastSymbolicExpr(SymbolicExpr):
             self.target_shape = tuple(shape.to_py())
         else:
             self.target_shape = ()
-        # Update dtype to reflect the broadcast shape
-        arg_dtype = self.arg.dtype
-        if arg_dtype is not None and hasattr(arg_dtype, "element_ty"):
-            elem_ty = arg_dtype.element_ty
-        else:
-            elem_ty = arg_dtype if arg_dtype else tl.int32
-        self.dtype = (
-            tl.block_type(elem_ty, list(self.target_shape))
-            if self.target_shape
-            else arg_dtype
-        )
+        # Update dtype/shape to reflect the broadcast shape
+        self.dtype = self.arg.dtype if self.arg.dtype else tl.int32
+        self.shape = tuple(self.target_shape) if self.target_shape else self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1387,6 +1424,7 @@ class ReshapeSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
         self.dtype = self.arg.dtype
+        self.shape = self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1401,6 +1439,7 @@ class TransSymbolicExpr(SymbolicExpr):
         self.add_child("arg", arg)
         self.add_child("permutation", permutation)
         self.dtype = self.arg.dtype
+        self.shape = self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1415,6 +1454,7 @@ class JoinSymbolicExpr(SymbolicExpr):
         self.add_child("lhs", lhs)
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
+        self.shape = self.lhs.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(
@@ -1433,14 +1473,17 @@ class CastSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
-        self.dtype = self.dst_type.to_py()
+        self.dtype, self.shape = self._unpack_dtype(
+            self.dst_type.to_py(), self.src.shape
+        )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.src._to_z3()
 
     def concretize(self) -> Any:
         src_concrete = self.src.concretize()
-        return self.concrete_fn(src_concrete, self.dtype)  # type: ignore
+        dst = tl.block_type(self.dtype, list(self.shape)) if self.shape else self.dtype
+        return self.concrete_fn(src_concrete, dst)  # type: ignore
 
 
 class FpToFpSymbolicExpr(SymbolicExpr):
@@ -1453,7 +1496,7 @@ class FpToFpSymbolicExpr(SymbolicExpr):
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
         self.add_child("rounding_mode", rounding_mode)
-        self.dtype = self.dst_type.dtype
+        self.dtype, self.shape = self._unpack_dtype(self.dst_type.dtype, self.src.shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1470,6 +1513,7 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
         self.add_child("cmp", cmp)
         self.add_child("val", val)
         self.dtype = self.val.dtype
+        self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError("atomic_cas operation is not implemented yet")
@@ -1486,6 +1530,7 @@ class AtomicRmwSymbolicExpr(SymbolicExpr):
         self.add_child("val", val)
         self.add_child("mask", mask)
         self.dtype = self.val.dtype
+        self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1507,6 +1552,15 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
         if isinstance(dt, tl.pointer_type):
             return dt.element_ty
         return dt
+
+    @staticmethod
+    def _resolve_block_shape(ptr: SymbolicExpr) -> tuple[int, ...]:
+        """Walk the block pointer chain to find the block_shape."""
+        if isinstance(ptr, MakeBlockPtrSymbolicExpr):
+            return tuple(ptr.block_shape_values)
+        if isinstance(ptr, AdvanceSymbolicExpr):
+            return TensorPointerSymbolicExpr._resolve_block_shape(ptr.ptr)
+        return ()
 
     def _resolve_block_ptr_components(
         self, ptr: SymbolicExpr
@@ -1584,6 +1638,7 @@ class TensorPointerLoadSymbolicExpr(TensorPointerSymbolicExpr):
         self.add_child("ptr", ptr)
         self.boundary_check = tuple(boundary_check) if boundary_check else ()
         self.dtype = self._resolve_element_dtype(ptr)
+        self.shape = self._resolve_block_shape(ptr)
 
 
 class TensorPointerStoreSymbolicExpr(TensorPointerSymbolicExpr):
@@ -1595,6 +1650,7 @@ class TensorPointerStoreSymbolicExpr(TensorPointerSymbolicExpr):
         self.add_child("value", value)
         self.boundary_check = tuple(boundary_check) if boundary_check else ()
         self.dtype = self._resolve_element_dtype(ptr)
+        self.shape = ()
 
 
 SymbolicExpr.register_op_class(ConstSymbolicExpr, ("const",))
@@ -1605,7 +1661,9 @@ SymbolicExpr.register_op_class(StoreSymbolicExpr, ("store",))
 SymbolicExpr.register_op_class(UnarySymbolicExpr, SymbolicExpr.UNARY_OPS)
 SymbolicExpr.register_op_class(BinarySymbolicExpr, SymbolicExpr.BINARY_OPS)
 SymbolicExpr.register_op_class(WhereSymbolicExpr, ("where",))
-SymbolicExpr.register_op_class(ReduceSymbolicExpr, ("sum", "max", "min"))
+SymbolicExpr.register_op_class(
+    ReduceSymbolicExpr, ("sum", "max", "min", "argmax", "argmin")
+)
 SymbolicExpr.register_op_class(DotSymbolicExpr, ("dot",))
 SymbolicExpr.register_op_class(CumsumSymbolicExpr, ("cumsum",))
 SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
@@ -1755,14 +1813,20 @@ class SymbolicClient(Client):
         )
 
     def _op_reduce_max_overrider(self, input, axis=None, keep_dims=False, **kwargs):
-        return SymbolicExpr.create(
-            "max", SymbolicExpr.from_value(input), axis, keep_dims
-        )
+        input_sym = SymbolicExpr.from_value(input)
+        val = SymbolicExpr.create("max", input_sym, axis, keep_dims)
+        if kwargs.get("return_indices", False):
+            idx = SymbolicExpr.create("argmax", input_sym, axis, keep_dims)
+            return (val, idx)
+        return val
 
     def _op_reduce_min_overrider(self, input, axis=None, keep_dims=False, **kwargs):
-        return SymbolicExpr.create(
-            "min", SymbolicExpr.from_value(input), axis, keep_dims
-        )
+        input_sym = SymbolicExpr.from_value(input)
+        val = SymbolicExpr.create("min", input_sym, axis, keep_dims)
+        if kwargs.get("return_indices", False):
+            idx = SymbolicExpr.create("argmin", input_sym, axis, keep_dims)
+            return (val, idx)
+        return val
 
     def _op_splat_overrider(self, shape, arg):
         return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))

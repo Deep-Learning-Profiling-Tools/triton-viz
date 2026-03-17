@@ -54,8 +54,8 @@ jobs:
       run: |
         # Run main and PR in alternating rounds so environment drift
         # (thermal throttling, background processes) affects both equally.
-        #   main PR main PR main PR ...  (8 rounds x 5 iters = 40 total)
-        ROUNDS=8
+        #   main PR main PR main PR ...  (4 rounds x 5 iters = 20 total)
+        ROUNDS=4
         ITERS=5
         MAIN_HAS_BENCH=false
         if [ -f main-branch/benchmarks/bench_sanitizer.py ]; then

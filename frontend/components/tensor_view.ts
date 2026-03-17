@@ -234,6 +234,26 @@ function getAxisLabels(rank: number): string[] {
     return Array.from({ length: rank }, (_, axis) => getAxisLabel(axis));
 }
 
+function buildDownloadOption(type: string, config: TensorConfig): {
+    value: string;
+    label: string;
+    color?: string;
+} {
+    const color = config.color instanceof THREE.Color
+        ? `#${config.color.getHexString()}`
+        : (typeof config.color === 'string' ? config.color : undefined);
+    return {
+        value: config.name.toUpperCase(),
+        label: config.name === 'Global' ? `${type} tensor` : `Tensor ${config.name}`,
+        ...(color ? { color } : {}),
+    };
+}
+
+function getDownloadFilename(header: string | null): string {
+    const match = /filename="([^"]+)"/i.exec(header || '');
+    return match?.[1] || 'tensor.npy';
+}
+
 function normalizeViewShape(shapeRaw: number[]): number[] {
     if (!Array.isArray(shapeRaw) || shapeRaw.length === 0) return [1];
     return shapeRaw.map((dim) => Math.max(1, Number(dim) || 1));
@@ -1713,11 +1733,12 @@ export function createTensorVisualization(
     const { type = 'Load', colors = {}, tensorConfigs = [], dimColors = {}, showDimLines = true, viewState = null, layoutBounds = null, fitToTensors = true, cameraPadding = 1.15 } = options;
     const API_BASE = getApiBase();
     const initialToggles = getState().toggles;
-    const configs = tensorConfigs.length > 0 ? tensorConfigs : [
-        { name: 'Global', shape: op.global_shape || [], color: colors.GLOBAL || '#333', position: [0,0,0], endpoint: 'getLoadTensor' }
+    const configs: TensorConfig[] = tensorConfigs.length > 0 ? tensorConfigs : [
+        { name: 'Global', shape: op.global_shape || [], color: colors.GLOBAL || '#333', position: [0, 0, 0], endpoint: 'getLoadTensor' },
     ];
     const supportsAllPrograms = type === 'Load' || type === 'Store';
     const configByNameMap = new Map<string, TensorConfig>(configs.map((cfg) => [cfg.name, cfg as TensorConfig]));
+    const downloadOptions = configs.map((cfg) => buildDownloadOption(type, cfg));
 
     let cache = VIZ_CACHE.get(containerElement);
     const shapeKey = JSON.stringify({ shapes: configs.map(c => c.shape), layoutBounds });
@@ -2554,6 +2575,35 @@ export function createTensorVisualization(
                 requestRender();
                 return state.editTensorViewOn;
             },
+            download: opUuid ? {
+                trigger: async (sources: string[]): Promise<void> => {
+                    const selectedSources = sources.length ? sources : downloadOptions.slice(0, 1).map((option) => option.value);
+                    const response = await fetch(`${API_BASE}/api/download_tensor`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ uuid: opUuid, sources: selectedSources }),
+                    });
+                    if (!response.ok) {
+                        let message = 'Download failed';
+                        try {
+                            const payload = await response.json() as { error?: string };
+                            message = payload.error || message;
+                        } catch (error) {}
+                        throw new Error(message);
+                    }
+                    const blob = await response.blob();
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = getDownloadFilename(response.headers.get('Content-Disposition'));
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    URL.revokeObjectURL(url);
+                },
+                options: downloadOptions,
+                buttonLabel: downloadOptions.length > 1 ? 'Download Tensors' : 'Download Tensor',
+            } : null,
         });
     }
     syncOpControlState();

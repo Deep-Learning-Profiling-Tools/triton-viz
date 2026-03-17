@@ -202,7 +202,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
     def _collect_tensor_base(self, expr: SymbolicExpr) -> int | None:
         def walk(node: SymbolicExpr) -> int | None:
-            if node.op == "const" and isinstance(node.dtype, tl.pointer_type):
+            if (
+                node.op == "const"
+                and isinstance(node.dtype, tl.pointer_type)
+                and not node.shape
+            ):
                 return node.to_py()
             for child in node.children.values():
                 if child is not None:
@@ -415,6 +419,10 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
                 self.cache_args.append(arg)
             return
+        from triton.runtime.jit import TensorWrapper
+
+        if isinstance(arg, TensorWrapper):
+            arg = arg.base
         if arg.is_contiguous() or check_storage_contiguous(arg):
             start = arg.data_ptr()
             end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()

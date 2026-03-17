@@ -58,7 +58,7 @@ class _LangPatchScope:
                 setattr(obj, name, original)
 
 
-_LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": []}
+_LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": [], "nki_beta2": []}
 
 
 def _push_lang_patch_scope(backend: str, scope: Any) -> None:
@@ -180,11 +180,32 @@ class PatchOp:
                 symbolic_ret = self.callbacks.op_overrider(
                     args[0].handle, *args[1:], **kwargs
                 )
-                ret_dtype = getattr(symbolic_ret, "dtype", None) or args[0].dtype
-                ret = tl.core.tensor(symbolic_ret, ret_dtype)
-                fn = cast(Any, ret.handle)
-                if fn is not None:
-                    fn.concrete_fn = self.op
+                if isinstance(symbolic_ret, tuple):
+                    ret_parts = []
+                    for sym_elem in symbolic_ret:
+                        _shape = getattr(sym_elem, "shape", ())
+                        _dtype = getattr(sym_elem, "dtype", None)
+                        if _shape and _dtype:
+                            elem_dtype = tl.block_type(_dtype, list(_shape))
+                        else:
+                            elem_dtype = _dtype or args[0].dtype
+                        elem_tensor = tl.core.tensor(sym_elem, elem_dtype)
+                        fn = cast(Any, elem_tensor.handle)
+                        if fn is not None:
+                            fn.concrete_fn = self.op
+                        ret_parts.append(elem_tensor)
+                    ret = tuple(ret_parts)
+                else:
+                    _shape = getattr(symbolic_ret, "shape", ())
+                    _dtype = getattr(symbolic_ret, "dtype", None)
+                    if _shape and _dtype:
+                        ret_dtype = tl.block_type(_dtype, list(_shape))
+                    else:
+                        ret_dtype = _dtype or args[0].dtype
+                    ret = tl.core.tensor(symbolic_ret, ret_dtype)
+                    fn = cast(Any, ret.handle)
+                    if fn is not None:
+                        fn.concrete_fn = self.op
             else:  # interpreter_builder
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 if ret is not None:
@@ -215,7 +236,7 @@ def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, backend: str):
     :param namespace: The namespace object that owns the operator.
     :param attr: The attribute name for the operator on the namespace.
     :param callbacks: The OpCallbacks object containing before_callback, after_callback, and op_overrider.
-    :param backend: The backend to use ('triton', 'nki', or None for current backend).
+    :param backend: The backend to use ('triton', 'nki', 'nki_beta2', or None for current backend).
     """
     if backend not in OPERATION_REGISTRY:
         raise ValueError(f"Unknown backend: {backend}")
@@ -370,9 +391,14 @@ def patch_lang(fn, backend, client_manager=None):
 
         scope = _LangPatchScope()
         nki_patch_lang(scope)
+    elif backend == "nki_beta2":
+        from triton_viz.core.nki_beta2 import nki_patch_lang
+
+        scope = _LangPatchScope()
+        nki_patch_lang(scope)
     else:
         raise ValueError(
-            f"Unsupported backend {backend} received. Triton-viz only supports one of ('triton', 'nki')."
+            f"Unsupported backend {backend} received. Triton-viz only supports one of ('triton', 'nki', 'nki_beta2')."
         )
 
     _push_lang_patch_scope(backend, scope)
