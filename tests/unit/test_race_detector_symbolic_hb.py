@@ -39,12 +39,12 @@ def _ptr_sig_fn(ptr_expr):
     return (ptr_expr._test_sig,)
 
 
-def test_symbolic_release_acquire_no_race():
-    """Release/acquire flag pattern in symbolic mode → no race."""
-    # Block 0 pattern: store data (event 0), release flag (event 1)
-    # Block 1 pattern: acquire flag (event 2), load data (event 3)
-    # (Symbolic path uses event_id ordering as po)
+def test_symbolic_release_acquire_conservative():
+    """Release/acquire flag pattern in symbolic mode → conservatively reports race.
 
+    SymbolicHBSolver cannot prove reads-from or must-alias, so it
+    conservatively returns True and defers to the concrete fallback.
+    """
     store_data = _make_sym_access(AccessType.STORE, event_id=0, ptr_sig="data_ptr")
     release_flag = _make_sym_access(
         AccessType.ATOMIC,
@@ -67,7 +67,7 @@ def test_symbolic_release_acquire_no_race():
     all_accesses = [store_data, release_flag, acquire_flag, load_data]
 
     solver = SymbolicHBSolver(store_data, load_data, all_accesses, _ptr_sig_fn)
-    assert not solver.check_race_possible()  # ordered → no race
+    assert solver.check_race_possible()  # conservative → race reported
 
 
 def test_symbolic_relaxed_still_races():
@@ -113,3 +113,68 @@ def test_symbolic_fallback_on_cas_control_flow():
     all_accesses = [store, load]
     solver = SymbolicHBSolver(store, load, all_accesses, _ptr_sig_fn)
     assert solver.check_race_possible()  # no sync → race possible
+
+
+def test_symbolic_hb_signature_same_no_suppress():
+    """Matching ptr signatures + release/acquire pair → still returns True (no suppress).
+
+    Even though signatures match, symbolic HB cannot prove must-alias or
+    reads-from, so it conservatively reports a race.
+    """
+    store_data = _make_sym_access(AccessType.STORE, event_id=0, ptr_sig="data_ptr")
+    release_flag = _make_sym_access(
+        AccessType.ATOMIC,
+        event_id=1,
+        ptr_sig="flag_ptr",
+        atomic_op="rmw:xchg",
+        atomic_sem="release",
+        atomic_scope="gpu",
+    )
+    acquire_flag = _make_sym_access(
+        AccessType.ATOMIC,
+        event_id=2,
+        ptr_sig="flag_ptr",  # same signature as release
+        atomic_op="cas",
+        atomic_sem="acquire",
+        atomic_scope="gpu",
+    )
+    load_data = _make_sym_access(AccessType.LOAD, event_id=3, ptr_sig="data_ptr")
+
+    all_accesses = [store_data, release_flag, acquire_flag, load_data]
+
+    solver = SymbolicHBSolver(store_data, load_data, all_accesses, _ptr_sig_fn)
+    assert solver.check_race_possible()  # no suppress — conservative
+
+
+def test_symbolic_hb_acquire_unprovable_no_suppress():
+    """Textbook producer-consumer symbolic pattern → returns True.
+
+    The symbolic engine lacks atomic_old to prove reads-from, so
+    even a structurally perfect release/acquire pattern cannot be
+    proven to establish ordering.
+    """
+    # Producer pattern: store + release
+    store = _make_sym_access(AccessType.STORE, event_id=0, ptr_sig="shared_buf")
+    release = _make_sym_access(
+        AccessType.ATOMIC,
+        event_id=1,
+        ptr_sig="ready_flag",
+        atomic_op="rmw:xchg",
+        atomic_sem="release",
+        atomic_scope="sys",
+    )
+    # Consumer pattern: acquire + load
+    acquire = _make_sym_access(
+        AccessType.ATOMIC,
+        event_id=2,
+        ptr_sig="ready_flag",
+        atomic_op="rmw:xchg",
+        atomic_sem="acquire",
+        atomic_scope="sys",
+    )
+    load = _make_sym_access(AccessType.LOAD, event_id=3, ptr_sig="shared_buf")
+
+    all_accesses = [store, release, acquire, load]
+
+    solver = SymbolicHBSolver(store, load, all_accesses, _ptr_sig_fn)
+    assert solver.check_race_possible()  # unprovable → race reported
