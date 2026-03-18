@@ -51,6 +51,7 @@ class Config:
         self.report_grid_execution_progress: bool = _is_one(
             "REPORT_GRID_EXECUTION_PROGRESS"
         )
+        # Boolean: any value other than "0" enables virtual memory (fake tensors)
         self.virtual_memory: bool = (
             os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "1") != "0"
         )

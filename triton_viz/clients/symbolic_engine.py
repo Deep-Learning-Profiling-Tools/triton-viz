@@ -774,16 +774,20 @@ class IndirectSymbolicExprBase(SymbolicExpr):
     def concretize(self) -> Any:
         ptr_concrete = self.ptr.concretize()
 
-        if _materializer is not None:
-            rebased = _materializer.rebase_pointers(ptr_concrete.data)
-            ptr_concrete = TensorHandle(rebased, ptr_concrete.dtype)
-
+        # Compute mask BEFORE rebasing so masked-out garbage addresses
+        # are never passed to _find_base.
         if self.mask is None:
             mask_concrete = TensorHandle(
                 np.ones_like(ptr_concrete.data, dtype=bool), tl.int1
             )
         else:
             mask_concrete = self.mask.concretize()
+
+        if _materializer is not None:
+            rebased = _materializer.rebase_pointers(
+                ptr_concrete.data, mask=mask_concrete.data
+            )
+            ptr_concrete = TensorHandle(rebased, ptr_concrete.dtype)
 
         if self.other is None:
             other_concrete = None

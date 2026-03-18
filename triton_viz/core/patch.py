@@ -18,6 +18,7 @@ from .data import (
     RawStore,
 )
 import inspect
+import numpy as np
 from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
@@ -368,14 +369,48 @@ class TensorMaterializer:
         if not any(b == base for b, _, _ in self._storages):
             self._storages.append((base, base + storage.nbytes(), storage))
 
-    def rebase_pointers(self, ptr_data):
-        sample = int(ptr_data.flat[0])
-        gpu_base = self._find_base(sample)
+    def rebase_pointers(self, ptr_data, mask=None):
+        if mask is not None:
+            valid_indices = np.flatnonzero(np.asarray(mask).flat)
+        else:
+            valid_indices = np.arange(ptr_data.size)
+
+        if len(valid_indices) == 0:
+            return ptr_data.copy()
+
+        flat = ptr_data.flat
+
+        # Fast path: check if all valid pointers share one storage
+        first_base = self._find_base(int(flat[valid_indices[0]]))
+        _, first_end, _ = next(s for s in self._storages if s[0] == first_base)
+        all_same = all(
+            first_base <= int(flat[i]) < first_end for i in valid_indices
+        )
+
+        if all_same:
+            offset = self._cpu_offset(first_base)
+            result = ptr_data.copy()
+            result.flat[valid_indices] += offset
+            return result
+
+        # Slow path: group by storage base
+        result = ptr_data.copy()
+        groups: dict[int, list[int]] = {}
+        for i in valid_indices:
+            base = self._find_base(int(flat[i]))
+            groups.setdefault(base, []).append(i)
+        for base, indices in groups.items():
+            offset = self._cpu_offset(base)
+            for i in indices:
+                result.flat[i] += offset
+        return result
+
+    def _cpu_offset(self, gpu_base):
         if gpu_base not in self._cpu_cache:
             _, _, stor = next(s for s in self._storages if s[0] == gpu_base)
             self._cpu_cache[gpu_base] = stor.cpu()
         cpu_base = self._cpu_cache[gpu_base].data_ptr()
-        return ptr_data + (cpu_base - gpu_base)
+        return cpu_base - gpu_base
 
     def _find_base(self, addr):
         for base, end, _ in self._storages:
