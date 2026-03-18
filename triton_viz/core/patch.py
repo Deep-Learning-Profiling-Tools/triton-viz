@@ -22,6 +22,7 @@ import numpy as np
 from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
+    _get_np_dtype,
     interpreter_builder,
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
@@ -37,20 +38,21 @@ from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 
 _MISSING = object()
 
-_TRITON_DTYPE_TO_NP: dict[tl.core.dtype, type[np.generic]] = {
-    tl.int1: np.bool_,
-    tl.int8: np.int8,
-    tl.int16: np.int16,
-    tl.int32: np.int32,
-    tl.int64: np.int64,
-    tl.uint8: np.uint8,
-    tl.uint16: np.uint16,
-    tl.uint32: np.uint32,
-    tl.uint64: np.uint64,
-    tl.float16: np.float16,
-    tl.float32: np.float32,
-    tl.float64: np.float64,
+_F32_MIN_NORMAL = 2**-126
+_F32_MAX = (2 - 2**-23) * 2**127
+
+_RTZ_STORAGE: dict[np.dtype, type[np.unsignedinteger]] = {
+    np.dtype(np.float16): np.uint16,
+    np.dtype(np.float32): np.uint32,
+    np.dtype(np.float64): np.uint64,
 }
+
+try:
+    import ml_dtypes as _ml_dtypes
+
+    _RTZ_STORAGE[np.dtype(_ml_dtypes.bfloat16)] = np.uint16
+except ImportError:
+    _ml_dtypes = None  # type: ignore[assignment]
 
 
 def _src_np_dtype(value: object) -> np.dtype:
@@ -65,7 +67,56 @@ def _src_np_dtype(value: object) -> np.dtype:
         if -(2**63) <= value < 2**63:
             return np.dtype(np.int64)
         return np.dtype(np.uint64)
+    # Float: match Triton to_tensor() — float32 for representable values
+    assert isinstance(value, float)
+    abs_x: float = abs(value)
+    if (
+        abs_x == 0.0
+        or abs_x != abs_x
+        or abs_x == float("inf")
+        or (_F32_MIN_NORMAL <= abs_x <= _F32_MAX)
+    ):
+        return np.dtype(np.float32)
     return np.dtype(np.float64)
+
+
+def _cast_np_dtype(triton_dtype: tl.core.dtype) -> np.dtype:
+    """Numpy dtype for semantic cast. Raises for exotic types without numpy equivalents."""
+    np_dt = _get_np_dtype(triton_dtype)
+    # _get_np_dtype maps bf16->uint16 and fp8->uint8 (storage types).
+    # For cast we need semantic types; bf16 is available via ml_dtypes.
+    if triton_dtype == tl.bfloat16:
+        if _ml_dtypes is None:
+            raise TypeError("constexpr.to(bfloat16) requires ml_dtypes to be installed")
+        return np.dtype(_ml_dtypes.bfloat16)
+    if np_dt in (np.uint8, np.uint16) and triton_dtype not in (
+        tl.uint8,
+        tl.uint16,
+        tl.int1,
+    ):
+        raise TypeError(
+            f"constexpr.to({triton_dtype}) is not supported in interpreter mode "
+            f"(no numpy-compatible semantic type for {triton_dtype})"
+        )
+    return np.dtype(np_dt)
+
+
+def _fp_downcast_rtz(value: float, dst_np_dtype: np.dtype) -> np.generic:
+    """Round-toward-zero float downcast by correcting rtne when it rounds away from zero."""
+    rtne_result = dst_np_dtype.type(value)
+    if abs(float(rtne_result)) > abs(value):
+        # rtne rounded away from zero -- subtract 1 ULP
+        storage = _RTZ_STORAGE[dst_np_dtype]
+        bits = np.frombuffer(
+            np.array([rtne_result], dtype=dst_np_dtype).tobytes(),
+            dtype=storage,
+        )[0]
+        bits -= np.array(1, dtype=storage)
+        return np.frombuffer(
+            np.array([bits], dtype=storage).tobytes(),
+            dtype=dst_np_dtype,
+        )[0]
+    return rtne_result
 
 
 def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
@@ -84,17 +135,47 @@ def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
     )
     bitcast_val = bitcast.value if isinstance(bitcast, tl.constexpr) else bitcast
 
-    dst_np = np.dtype(_TRITON_DTYPE_TO_NP[dtype])
-
     if bitcast_val:
         src_np = _src_np_dtype(value)
-        raw = np.array([value], dtype=src_np).tobytes()[: dst_np.itemsize]
+        dst_np = np.dtype(_get_np_dtype(dtype))
+        if src_np.itemsize != dst_np.itemsize:
+            raise ValueError(
+                f"Cannot bitcast between types of different sizes: "
+                f"{src_np} ({src_np.itemsize * 8} bits) and "
+                f"{dst_np} ({dst_np.itemsize * 8} bits)"
+            )
+        raw = np.array([value], dtype=src_np).tobytes()
         result = np.frombuffer(raw, dtype=dst_np)[0]
     else:
-        result = dst_np.type(value)
+        dst_np = _cast_np_dtype(dtype)
+        src_np = _src_np_dtype(value)
+
+        if fp_downcast_rounding is not None:
+            src_is_float = src_np.kind == "f"
+            dst_is_float = dst_np.kind == "f" or (
+                _ml_dtypes is not None and dst_np == np.dtype(_ml_dtypes.bfloat16)
+            )
+            if not (
+                dst_is_float and src_is_float and dst_np.itemsize < src_np.itemsize
+            ):
+                raise ValueError(
+                    f"fp_downcast_rounding is only valid for float-to-smaller-float casts, "
+                    f"got {src_np} -> {dst_np}"
+                )
+
+        if fp_downcast_rounding == "rtz":
+            result = _fp_downcast_rtz(value, dst_np)
+        else:
+            result = dst_np.type(value)
 
     py_val = result.item()
-    # bool must become int so _implicit_cvt doesn't hit TensorHandle int1 bug
+    # bool/int1: Triton's TensorHandle.__post_init__ rejects np.array([True], dtype=np.int32)
+    # paired with tl.int1 because itemsize(int32)=32 > primitive_bitwidth(int1)=1.
+    # _implicit_cvt(True) also hits this (bool is subclass of int, mangle_type->"i1").
+    # Workaround: coerce to Python int so _implicit_cvt creates an int32 tensor.
+    # This is value-correct (0/1) though not type-correct (int32, not int1).
+    # The interpreter itself has the same limitation -- to_tensor(True) goes through
+    # a similar path. A proper fix belongs in upstream Triton's TensorHandle.
     if isinstance(py_val, bool):
         py_val = int(py_val)
     return _implicit_cvt(py_val)

@@ -1378,3 +1378,93 @@ def test_reinterpret_tensor_wrapper():
     x = torch.ones(N, dtype=torch.float16, device="cpu")
     y = torch.empty(N, dtype=torch.float16, device="cpu")
     copy_kernel[(1,)](triton.reinterpret(x, tl.float16), y, N, BLOCK=64)
+
+
+# ======== constexpr.to() Regression Tests ===========
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def bitcast_float_to_int_kernel(out_ptr, v: tl.constexpr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    result = v.to(tl.int32, bitcast=True)
+    tl.store(out_ptr + offs, result)
+
+
+def test_constexpr_bitcast_float_src():
+    """bitcast of float constexpr must use float32 source, not float64."""
+    import struct
+
+    out = torch.empty(1, dtype=torch.int32)
+    bitcast_float_to_int_kernel[(1,)](out, v=1.0, N=1)
+    expected = struct.unpack("i", struct.pack("f", 1.0))[0]  # 0x3f800000
+    assert out.item() == expected
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def fp_downcast_kernel(
+    out_ptr, v: tl.constexpr, rounding: tl.constexpr, N: tl.constexpr
+):
+    offs = tl.arange(0, N)
+    result = v.to(tl.float16, fp_downcast_rounding=rounding)
+    tl.store(out_ptr + offs, result)
+
+
+def test_constexpr_fp_downcast_rtz():
+    """fp_downcast_rounding='rtz' must truncate toward zero, not round to nearest."""
+    # 1.00146484375 (fp32) is the exact midpoint between fp16 values
+    # 1.0009765625 and 1.001953125.
+    # rtne rounds UP to 1.001953125; rtz truncates DOWN to 1.0009765625.
+    v = 1.00146484375
+    out_rtz = torch.empty(1, dtype=torch.float16)
+    fp_downcast_kernel[(1,)](out_rtz, v=v, rounding="rtz", N=1)
+    out_rtne = torch.empty(1, dtype=torch.float16)
+    fp_downcast_kernel[(1,)](out_rtne, v=v, rounding="rtne", N=1)
+    assert float(out_rtz.item()) == pytest.approx(1.0009765625)
+    assert float(out_rtne.item()) == pytest.approx(1.001953125)
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def bool_mask_kernel(out_ptr, flag: tl.constexpr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    cond = flag.to(tl.int1)
+    result = tl.where(
+        cond, tl.full((N,), 42, dtype=tl.int32), tl.full((N,), -1, dtype=tl.int32)
+    )
+    tl.store(out_ptr + offs, result)
+
+
+def test_constexpr_bool_as_mask():
+    """bool constexpr .to(tl.int1) must work as a predicate in tl.where."""
+    out = torch.empty(4, dtype=torch.int32)
+    bool_mask_kernel[(1,)](out, flag=True, N=4)
+    assert (out == 42).all()
+    bool_mask_kernel[(1,)](out, flag=False, N=4)
+    assert (out == -1).all()
+
+
+def test_constexpr_bitcast_mismatched_size_raises():
+    """bitcast between types of different sizes must raise ValueError."""
+    from triton_viz.core.patch import _constexpr_to
+    import types
+
+    mock_self = types.SimpleNamespace(value=1.0)
+    # float(1.0) -> float32 (4 bytes), tl.int64 (8 bytes) -> mismatch
+    with pytest.raises(ValueError, match="different sizes"):
+        _constexpr_to(mock_self, tl.int64, bitcast=True)
+
+
+def test_constexpr_to_unsupported_dtype_raises():
+    """Casting constexpr to an exotic dtype without numpy equivalent must raise, not KeyError."""
+    from triton_viz.core.patch import _constexpr_to
+    import types
+
+    mock_self = types.SimpleNamespace(value=1.0)
+    for fp8_name in ["float8e4nv", "float8e5"]:
+        dt = getattr(tl, fp8_name, None)
+        if dt is None:
+            continue
+        with pytest.raises(TypeError, match="not supported"):
+            _constexpr_to(mock_self, dt)
