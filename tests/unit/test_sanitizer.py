@@ -1,6 +1,7 @@
 import pytest
 from typing import cast
 
+import numpy as np
 import triton.language as tl
 
 from triton_viz.core.config import config as cfg
@@ -8,6 +9,7 @@ from triton_viz.clients import Sanitizer
 from triton_viz.clients.symbolic_engine import (
     SymbolicExpr,
     ConstSymbolicExpr,
+    UnarySymbolicExpr,
     ReduceSymbolicExpr,
     LoadSymbolicExpr,
     StoreSymbolicExpr,
@@ -554,3 +556,27 @@ def test_store_dtype_block_of_pointers():
     )
     store = StoreSymbolicExpr("store", ptr, value)
     assert store.dtype is None, f"Expected None, got {store.dtype}"
+
+
+# ======== Unary Concretize Tests ===========
+
+
+@pytest.mark.parametrize(
+    "op_name,np_func",
+    [
+        ("tanh", np.tanh),
+        ("asin", np.arcsin),
+        ("acos", np.arccos),
+    ],
+)
+def test_unary_concretize(op_name, np_func):
+    """UnarySymbolicExpr.concretize() delegates to concrete_fn with the right numpy op."""
+    from triton.runtime.interpreter import interpreter_builder
+
+    arg = ConstSymbolicExpr("const", value=0, dtype=tl.block_type(tl.float32, [4]))
+    expr = UnarySymbolicExpr(op_name, arg)
+    expr.concrete_fn = interpreter_builder.unary_op
+
+    # concretize should not raise
+    result = expr.concretize()
+    assert result is not None

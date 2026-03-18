@@ -3,7 +3,7 @@ import pytest
 import triton.language as tl
 
 from triton_viz.core import patch as patch_mod
-from triton_viz.core.patch import _triton_snapshot_scope
+from triton_viz.core.patch import _LangPatchScope, _triton_snapshot_scope
 
 
 def _dummy_kernel():
@@ -72,3 +72,54 @@ def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
         scope.restore()
 
     assert getattr(descriptor, attr) is original
+
+
+# ======== set_item Tests ===========
+
+
+def test_scope_set_item_restores_original():
+    """set_item on existing key restores original value."""
+    scope = _LangPatchScope()
+    d = {"key": "original"}
+    scope.set_item(d, "key", "patched")
+    assert d["key"] == "patched"
+    scope.restore()
+    assert d["key"] == "original"
+
+
+def test_scope_set_item_removes_new_key():
+    """set_item on non-existent key removes it on restore."""
+    scope = _LangPatchScope()
+    d = {}
+    scope.set_item(d, "new_key", "value")
+    assert d["new_key"] == "value"
+    scope.restore()
+    assert "new_key" not in d
+
+
+def test_scope_interleaved_restore_order():
+    """Interleaved set_attr and set_item restore in LIFO order."""
+    scope = _LangPatchScope()
+
+    class Obj:
+        x = "orig_x"
+
+    d = {"k": "orig_k"}
+
+    scope.set_attr(Obj, "x", "patched_x")  # first
+    scope.set_item(d, "k", "patched_k")  # second
+    scope.set_attr(Obj, "x", "patched_x2")  # third
+
+    assert Obj.x == "patched_x2"
+    assert d["k"] == "patched_k"
+
+    scope.restore()
+
+    assert Obj.x == "orig_x"
+    assert d["k"] == "orig_k"
+
+
+def test_scope_restore_not_monkey_patched():
+    """After _patch_libdevice, scope.restore must be the original method, not a closure."""
+    scope = _LangPatchScope()
+    assert scope.restore.__func__ is _LangPatchScope.restore

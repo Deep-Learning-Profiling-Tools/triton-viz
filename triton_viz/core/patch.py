@@ -39,23 +39,36 @@ _MISSING = object()
 
 
 class _LangPatchScope:
-    """Tracks patched attributes so they can be restored."""
+    """Tracks patched attributes and dict items so they can be restored."""
 
     def __init__(self) -> None:
-        self._changes: list[tuple[object, str, object]] = []
+        self._changes: list[tuple[Any, ...]] = []  # tagged entries
 
     def set_attr(self, obj: object, name: str, value: object) -> None:
         original = getattr(obj, name, _MISSING)
-        self._changes.append((obj, name, original))
+        self._changes.append(("attr", obj, name, original))
         setattr(obj, name, value)
+
+    def set_item(self, mapping: dict, key: str, value: object) -> None:
+        original = mapping.get(key, _MISSING)
+        self._changes.append(("item", mapping, key, original))
+        mapping[key] = value
 
     def restore(self) -> None:
         while self._changes:
-            obj, name, original = self._changes.pop()
-            if original is _MISSING:
-                delattr(obj, name)
-            else:
-                setattr(obj, name, original)
+            entry = self._changes.pop()
+            if entry[0] == "attr":
+                _, obj, name, original = entry
+                if original is _MISSING:
+                    delattr(obj, name)
+                else:
+                    setattr(obj, name, original)
+            elif entry[0] == "item":
+                _, mapping, key, original = entry
+                if original is _MISSING:
+                    mapping.pop(key, None)
+                else:
+                    mapping[key] = original
 
 
 _LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": [], "nki_beta2": []}
@@ -326,59 +339,138 @@ def unpatch_for_loop():
 # Triton's _patch_lang does NOT patch triton.language.extra.libdevice,
 # so stub functions like ``def tanh(arg0): ...`` return None in
 # interpreter mode.  We replace them with numpy-backed implementations
-# that route through interpreter_builder.unary_op so the symbolic
-# engine can track them.
-
-_LIBDEVICE_NUMPY_MAP: dict[str, Callable] = {
-    "tanh": np.tanh,
-}
+# that route through interpreter_builder so the symbolic engine can
+# track them.  Unsupported ops raise NotImplementedError immediately
+# rather than silently returning None.
 
 
-def _make_libdevice_interpreter_fn(np_func: Callable) -> Callable:
-    """Return a replacement for a libdevice stub that computes via numpy."""
+@dataclass(frozen=True)
+class LibdeviceSpec:
+    name: str  # libdevice function name, e.g. "tanh"
+    np_func: Callable  # numpy equivalent, e.g. np.tanh
+    arity: int  # 1, 2, or 3
+    sym_name: str  # symbolic engine op name, e.g. "tanh"
 
-    def _replacement(arg0):
+
+_LIBDEVICE_REGISTRY: list[LibdeviceSpec] = [
+    # Unary ops
+    LibdeviceSpec("abs", np.abs, 1, "abs"),
+    LibdeviceSpec("ceil", np.ceil, 1, "ceil"),
+    LibdeviceSpec("cos", np.cos, 1, "cos"),
+    LibdeviceSpec("exp", np.exp, 1, "exp"),
+    LibdeviceSpec("exp2", np.exp2, 1, "exp2"),
+    LibdeviceSpec("floor", np.floor, 1, "floor"),
+    LibdeviceSpec("log", np.log, 1, "log"),
+    LibdeviceSpec("log2", np.log2, 1, "log2"),
+    LibdeviceSpec("sin", np.sin, 1, "sin"),
+    LibdeviceSpec("sqrt", np.sqrt, 1, "sqrt"),
+    LibdeviceSpec("tanh", np.tanh, 1, "tanh"),
+    LibdeviceSpec("asin", np.arcsin, 1, "asin"),
+    LibdeviceSpec("acos", np.arccos, 1, "acos"),
+]
+
+
+def _make_libdevice_unary(np_func: Callable) -> Callable:
+    def _fn(arg0: Any) -> Any:
         handle = interpreter_builder.unary_op(arg0.handle, np_func)
         return tl.core.tensor(handle, arg0.type)
 
-    return _replacement
+    return _fn
+
+
+def _make_libdevice_binary(np_func: Callable) -> Callable:
+    def _fn(arg0: Any, arg1: Any) -> Any:
+        handle = interpreter_builder.binary_op(arg0.handle, arg1.handle, np_func)
+        return tl.core.tensor(handle, arg0.type)
+
+    return _fn
+
+
+def _make_libdevice_ternary(np_func: Callable) -> Callable:
+    def _fn(arg0: Any, arg1: Any, arg2: Any) -> Any:
+        handle = interpreter_builder.ternary_op(
+            arg0.handle, arg1.handle, arg2.handle, np_func
+        )
+        return tl.core.tensor(handle, arg0.type)
+
+    return _fn
+
+
+_ARITY_FACTORIES: dict[int, Callable[[Callable], Callable]] = {
+    1: _make_libdevice_unary,
+    2: _make_libdevice_binary,
+    3: _make_libdevice_ternary,
+}
+
+
+def _make_libdevice_interpreter_fn(spec: LibdeviceSpec) -> Callable:
+    """Return a replacement for a libdevice stub that computes via numpy."""
+    factory = _ARITY_FACTORIES.get(spec.arity)
+    if factory is None:
+        raise ValueError(f"Unsupported arity {spec.arity} for {spec.name}")
+    return factory(spec.np_func)
+
+
+def _make_unsupported_libdevice_fn(name: str) -> Callable:
+    def _unsupported(*args, **kwargs):
+        raise NotImplementedError(
+            f"libdevice.{name}() is not supported in interpreter/sanitizer mode. "
+            f"Add a LibdeviceSpec to _LIBDEVICE_REGISTRY to enable it."
+        )
+
+    _unsupported.__name__ = name
+    return _unsupported
+
+
+def _patch_libdevice_module(scope: _LangPatchScope) -> None:
+    """Patch the libdevice module itself (covers ``libdevice.tanh(x)``)."""
+    import triton.language.extra.libdevice as _ld
+
+    registered = {s.name: s for s in _LIBDEVICE_REGISTRY}
+
+    # Patch registered ops
+    for name, spec in registered.items():
+        if hasattr(_ld, name):
+            scope.set_attr(_ld, name, _make_libdevice_interpreter_fn(spec))
+
+    # Patch unregistered stubs with unsupported-op errors
+    for name in dir(_ld):
+        if name.startswith("_") or name in registered:
+            continue
+        member = getattr(_ld, name, None)
+        if (
+            inspect.isfunction(member)
+            and getattr(member, "__module__", None) == _ld.__name__
+        ):
+            scope.set_attr(_ld, name, _make_unsupported_libdevice_fn(name))
+
+
+def _patch_libdevice_aliases(fn: Callable, scope: _LangPatchScope) -> None:
+    """Patch fn.__globals__ for direct imports (``from ... import tanh``)."""
+    import triton.language.extra.libdevice as _ld
+
+    registered = {s.name: s for s in _LIBDEVICE_REGISTRY}
+    for gname, gvalue in list(fn.__globals__.items()):
+        if not callable(gvalue):
+            continue
+        if getattr(gvalue, "__module__", None) != _ld.__name__:
+            continue
+        orig_name = getattr(gvalue, "__name__", None)
+        if orig_name is None:
+            continue
+        spec = registered.get(orig_name)
+        if spec is not None:
+            scope.set_item(fn.__globals__, gname, _make_libdevice_interpreter_fn(spec))
+        else:
+            scope.set_item(
+                fn.__globals__, gname, _make_unsupported_libdevice_fn(orig_name)
+            )
 
 
 def _patch_libdevice(fn: Callable, scope: _LangPatchScope) -> None:
     """Patch libdevice stub functions for interpreter / sanitizer mode."""
-    import triton.language.extra.libdevice as _ld
-
-    # Collect original stubs by identity so we can detect direct imports.
-    stubs: dict[int, Callable] = {}
-    for name, np_func in _LIBDEVICE_NUMPY_MAP.items():
-        stub = getattr(_ld, name, None)
-        if stub is not None:
-            stubs[id(stub)] = np_func
-
-    # Patch module-level attributes (covers ``libdevice.tanh(x)`` usage).
-    for name, np_func in _LIBDEVICE_NUMPY_MAP.items():
-        if hasattr(_ld, name):
-            scope.set_attr(_ld, name, _make_libdevice_interpreter_fn(np_func))
-
-    # Patch fn.__globals__ for direct imports
-    # (covers ``from triton.language.extra.libdevice import tanh``).
-    globals_saved: dict[str, Any] = {}
-    for gname, gvalue in list(fn.__globals__.items()):
-        if callable(gvalue) and id(gvalue) in stubs:
-            globals_saved[gname] = gvalue
-            fn.__globals__[gname] = _make_libdevice_interpreter_fn(
-                stubs[id(gvalue)]
-            )
-
-    if globals_saved:
-        _original_restore = scope.restore
-
-        def _extended_restore() -> None:
-            for gname, original in globals_saved.items():
-                fn.__globals__[gname] = original
-            _original_restore()
-
-        scope.restore = _extended_restore  # type: ignore[assignment]
+    _patch_libdevice_module(scope)
+    _patch_libdevice_aliases(fn, scope)
 
 
 def patch_lang(fn, backend, client_manager=None):

@@ -228,6 +228,8 @@ class SymbolicExpr:
         "sin",
         "rsqrt",
         "tanh",
+        "asin",
+        "acos",
     )
     BINARY_OP_SYMBOL_TABLE: ClassVar[dict[str, str]] = {
         "add": "+",
@@ -847,6 +849,32 @@ class UnarySymbolicExpr(SymbolicExpr):
         "abs": _abs,
         "fabs": _abs,
     }
+
+    _NUMPY_OPS: ClassVar[dict[str, Callable]] = {
+        "cos": np.cos,
+        "exp": np.exp,
+        "exp2": np.exp2,
+        "abs": np.abs,
+        "fabs": np.fabs,
+        "floor": np.floor,
+        "ceil": np.ceil,
+        "log": np.log,
+        "log2": np.log2,
+        "sqrt": np.sqrt,
+        "sin": np.sin,
+        "tanh": np.tanh,
+        "asin": np.arcsin,
+        "acos": np.arccos,
+    }
+
+    def concretize(self) -> Any:
+        arg_concrete = self.arg.concretize()
+        np_op = self._NUMPY_OPS.get(self.op)
+        if np_op is None:
+            raise NotImplementedError(
+                f"Concretize for unary op {self.op} is not implemented"
+            )
+        return self.concrete_fn(arg_concrete, np_op)  # type: ignore
 
 
 class BinarySymbolicExpr(SymbolicExpr):
@@ -1708,6 +1736,8 @@ _UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
     np.sqrt: "sqrt",
     np.sin: "sin",
     np.tanh: "tanh",
+    np.arcsin: "asin",
+    np.arccos: "acos",
 }
 
 _BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {

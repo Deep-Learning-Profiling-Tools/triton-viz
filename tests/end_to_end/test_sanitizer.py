@@ -4,6 +4,11 @@ import numpy as np
 
 import triton
 import triton.language as tl
+import triton.language.extra.libdevice as libdevice
+from triton.language.extra.libdevice import acos as _ld_acos
+from triton.language.extra.libdevice import asin as _ld_asin
+from triton.language.extra.libdevice import erf as _ld_erf
+from triton.language.extra.libdevice import tanh as _ld_tanh
 
 import triton_viz
 from triton_viz.core.data import Load, RawLoad
@@ -915,39 +920,122 @@ def test_reduce_broadcast():
 
 # ======== Libdevice Tests ===========
 
-from triton.language.extra.libdevice import tanh
-
 libdevice_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+# -- Direct import kernels --
 
 
 @triton_viz.trace(client=libdevice_sanitizer)
 @triton.jit
-def libdevice_tanh_kernel(x_ptr, out_ptr, N: tl.constexpr):
+def libdevice_tanh_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
     offs = tl.arange(0, N)
     x = tl.load(x_ptr + offs)
-    y = tanh(x)
+    y = _ld_tanh(x)
     tl.store(out_ptr + offs, y)
 
 
-def test_libdevice_tanh():
-    """
-    Verify libdevice.tanh works under the sanitizer without raising
-    TypeError: cannot convert None of type <class 'NoneType'> to tensor.
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_asin_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_asin(x)
+    tl.store(out_ptr + offs, y)
 
-    Previously, the libdevice stub ``def tanh(arg0): ...`` returned None
-    in interpreter mode because Triton's _patch_lang does not patch the
-    libdevice module.
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_acos_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_acos(x)
+    tl.store(out_ptr + offs, y)
+
+
+# -- Module-style import kernels --
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_tanh_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.tanh(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_asin_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.asin(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_acos_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.acos(x)
+    tl.store(out_ptr + offs, y)
+
+
+# -- Unsupported op kernel --
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_erf_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_erf(x)
+    tl.store(out_ptr + offs, y)
+
+
+_LIBDEVICE_KERNELS = {
+    ("tanh", "direct"): libdevice_tanh_direct_kernel,
+    ("tanh", "module"): libdevice_tanh_module_kernel,
+    ("asin", "direct"): libdevice_asin_direct_kernel,
+    ("asin", "module"): libdevice_asin_module_kernel,
+    ("acos", "direct"): libdevice_acos_direct_kernel,
+    ("acos", "module"): libdevice_acos_module_kernel,
+}
+
+
+@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos"])
+@pytest.mark.parametrize("import_style", ["direct", "module"])
+def test_libdevice_op(op_name, import_style):
+    """
+    Verify libdevice ops work under the sanitizer without raising
+    TypeError: cannot convert None of type <class 'NoneType'> to tensor.
     """
     libdevice_sanitizer.records.clear()
 
-    x = torch.randn(8, dtype=torch.float32)
+    # Values valid for asin/acos domain [-1, 1], padded to power-of-2 length
+    x = torch.tensor([0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32)
     out = torch.empty(8, dtype=torch.float32)
 
-    libdevice_tanh_kernel[(1,)](x, out, N=8)
+    kernel = _LIBDEVICE_KERNELS[(op_name, import_style)]
+    kernel[(1,)](x, out, N=8)
 
     assert len(libdevice_sanitizer.records) == 0, (
-        f"Expected no OOB records, got {len(libdevice_sanitizer.records)}"
+        f"Expected no OOB records for {op_name}/{import_style}, "
+        f"got {len(libdevice_sanitizer.records)}"
     )
+
+
+def test_libdevice_unsupported_op_raises():
+    """Unsupported libdevice ops raise NotImplementedError, not silent None."""
+    libdevice_sanitizer.records.clear()
+
+    x = torch.tensor([0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32)
+    out = torch.empty(8, dtype=torch.float32)
+
+    with pytest.raises(NotImplementedError, match=r"libdevice\.erf.*not supported"):
+        libdevice_erf_direct_kernel[(1,)](x, out, N=8)
 
 
 # ======== Fake Tensor (Virtual Memory) OOB Tests ===========
