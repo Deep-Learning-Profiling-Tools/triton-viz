@@ -1062,6 +1062,93 @@ def test_non_contiguous_expanded_tensor():
     read_expanded_kernel[(M,)](x, out, x.stride(0), x.stride(1), M, N, BLOCK_N=8)
 
 
+# ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
+
+
+data_dep_div_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=data_dep_div_sanitizer)
+@triton.jit
+def data_dep_loop_div_kernel(Lens, Out, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    seq_len = tl.load(Lens + pid)
+    # integer division of a loaded value produces a SymbolicExpr
+    num_blocks = (seq_len + BLOCK - 1) // BLOCK
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    for i in range(0, num_blocks):
+        acc += 1.0
+    tl.store(Out + pid * BLOCK + tl.arange(0, BLOCK), acc)
+
+
+def test_data_dependent_loop_bound_div():
+    """
+    Data-dependent loop bound via integer division of a loaded value
+    must not crash the symbolic engine (e.g. 'to_py must be implemented
+    by subclasses').
+    """
+    data_dep_div_sanitizer.records.clear()
+
+    N = 4
+    BLOCK = 16
+    lens = torch.tensor([48, 32, 64, 16], dtype=torch.int32)
+    out = torch.empty(N, BLOCK)
+
+    data_dep_loop_div_kernel[(N,)](lens, out, BLOCK=BLOCK)
+
+    assert (
+        len(data_dep_div_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(data_dep_div_sanitizer.records)}"
+
+
+# ======== Data-Dependent Loop Bound (tl.cdiv) Tests ===========
+
+
+cdiv_loop_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=cdiv_loop_sanitizer)
+@triton.jit
+def cdiv_loop_bound_kernel(
+    X, Out, seqlen, chunk_size, BLOCK_CS: tl.constexpr, BLOCK_N: tl.constexpr
+):
+    pid_m = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    # min of runtime values — produces a symbolic expr involving pid
+    chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
+    # tl.cdiv on that value → idiv in symbolic tree
+    num_iters = tl.cdiv(chunk_size_limit, BLOCK_CS)
+    offs = tl.arange(0, BLOCK_N)
+    acc = tl.zeros([BLOCK_N], dtype=tl.float32)
+    for cs in range(0, num_iters):
+        acc += tl.load(X + offs, mask=offs < BLOCK_N)
+    tl.store(Out + pid_m * BLOCK_N + offs, acc)
+
+
+def test_data_dependent_cdiv_loop_bound():
+    """
+    tl.cdiv on a runtime value used as a loop bound must not crash the
+    symbolic engine with 'NotImplementedError: Concretize for op idiv'.
+    """
+    cdiv_loop_sanitizer.records.clear()
+
+    seqlen = 64
+    chunk_size = 32
+    BLOCK_CS = 16
+    BLOCK_N = 16
+    nchunks = seqlen // chunk_size
+    x = torch.ones(BLOCK_N)
+    out = torch.empty(2, BLOCK_N)
+
+    cdiv_loop_bound_kernel[(2, nchunks)](
+        x, out, seqlen, chunk_size, BLOCK_CS=BLOCK_CS, BLOCK_N=BLOCK_N
+    )
+
+    assert (
+        len(cdiv_loop_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(cdiv_loop_sanitizer.records)}"
+
+
 # ======== TensorWrapper Regression Test ===========
 
 
