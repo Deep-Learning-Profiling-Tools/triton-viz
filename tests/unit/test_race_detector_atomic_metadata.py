@@ -72,6 +72,48 @@ def test_effects_at_addr_rmw():
     assert effects_at_addr(acc, 100) == (True, True)
 
 
+def test_effects_at_addr_multi_lane_mixed_cas():
+    """2 lanes same addr, lane 0 CAS fail (write=False), lane 1 CAS success (write=True) → (True, True)."""
+    acc = MemoryAccess(
+        access_type=AccessType.ATOMIC,
+        ptr=0,
+        offsets=np.array([100, 100], dtype=np.int64),
+        masks=np.array([True, True], dtype=np.bool_),
+        grid_idx=(0, 0, 0),
+        read_mask=np.array([True, True], dtype=np.bool_),
+        write_mask=np.array([False, True], dtype=np.bool_),
+    )
+    assert effects_at_addr(acc, 100) == (True, True)
+
+
+def test_effects_at_addr_multi_lane_all_cas_fail():
+    """3 lanes same addr, all CAS fail → (True, False)."""
+    acc = MemoryAccess(
+        access_type=AccessType.ATOMIC,
+        ptr=0,
+        offsets=np.array([100, 100, 100], dtype=np.int64),
+        masks=np.array([True, True, True], dtype=np.bool_),
+        grid_idx=(0, 0, 0),
+        read_mask=np.array([True, True, True], dtype=np.bool_),
+        write_mask=np.array([False, False, False], dtype=np.bool_),
+    )
+    assert effects_at_addr(acc, 100) == (True, False)
+
+
+def test_effects_at_addr_first_lane_masked_off():
+    """2 lanes same addr, first masked off, second active → (True, True)."""
+    acc = MemoryAccess(
+        access_type=AccessType.ATOMIC,
+        ptr=0,
+        offsets=np.array([100, 100], dtype=np.int64),
+        masks=np.array([False, True], dtype=np.bool_),
+        grid_idx=(0, 0, 0),
+        read_mask=np.array([False, True], dtype=np.bool_),
+        write_mask=np.array([False, True], dtype=np.bool_),
+    )
+    assert effects_at_addr(acc, 100) == (True, True)
+
+
 # ── Metadata round-trip tests ──
 
 

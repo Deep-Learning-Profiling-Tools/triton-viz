@@ -91,7 +91,14 @@ def effects_at_addr(access: MemoryAccess, addr: int) -> tuple[bool, bool]:
     if len(lane_indices) == 0:
         return (False, False)
 
-    lane = lane_indices[0]
-    reads = access.read_mask[lane] if access.read_mask is not None else False
-    writes = access.write_mask[lane] if access.write_mask is not None else False
-    return (bool(reads), bool(writes))
+    if access.read_mask is not None:
+        reads = bool(np.any(access.read_mask[lane_indices]))
+    else:
+        reads = access.access_type in (AccessType.LOAD, AccessType.ATOMIC)
+
+    if access.write_mask is not None:
+        writes = bool(np.any(access.write_mask[lane_indices]))
+    else:
+        writes = access.access_type in (AccessType.STORE, AccessType.ATOMIC)
+
+    return (reads, writes)
