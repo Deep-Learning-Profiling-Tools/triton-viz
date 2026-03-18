@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from typing import Any, Optional
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import numpy as np
 from z3 import Solver, Int, And, Or, sat, substitute, is_bool, is_true
@@ -28,6 +28,22 @@ from .data import AccessType, MemoryAccess, SymbolicMemoryAccess, RaceRecord, Ra
 from ...utils.traceback_utils import extract_user_frames
 
 
+def _sem_to_str(sem) -> str | None:
+    if sem is None:
+        return None
+    if isinstance(sem, str):
+        return sem.lower()
+    return str(sem).rsplit(".", 1)[-1].lower()
+
+
+def _scope_to_str(scope) -> str | None:
+    if scope is None:
+        return None
+    if isinstance(scope, str):
+        return scope.lower()
+    return str(scope).rsplit(".", 1)[-1].lower()
+
+
 class RaceDetector(SymbolicClient):
     NAME = "race_detector"
 
@@ -44,6 +60,7 @@ class RaceDetector(SymbolicClient):
         self._races: list[RaceRecord] = []
         self._symbolic_cas_count: int = 0
         self._event_counter: int = 0
+        self._pending_atomics: dict[tuple[int, ...], deque[int]] = defaultdict(deque)
 
     # ── Client interface ─────────────────────────────────────────
 
@@ -92,6 +109,7 @@ class RaceDetector(SymbolicClient):
         self._concrete_accesses.clear()
         self._races.clear()
         self._event_counter = 0
+        self._pending_atomics.clear()
         # Re-enable overriders (may have been disabled by a previous concrete fallback)
         for cb, orig_overrider in self._op_callbacks:
             cb.op_overrider = orig_overrider
@@ -178,6 +196,10 @@ class RaceDetector(SymbolicClient):
             SymbolicExpr.from_value(ptr),
             None,
             atomic_op="cas",
+            atomic_sem=_sem_to_str(sem),
+            atomic_scope=_scope_to_str(scope),
+            atomic_cmp_expr=SymbolicExpr.from_value(cmp),
+            atomic_val_expr=SymbolicExpr.from_value(val),
         )
         return ret
 
@@ -196,6 +218,9 @@ class RaceDetector(SymbolicClient):
             SymbolicExpr.from_value(ptr),
             mask_expr,
             atomic_op=f"rmw:{str(rmwOp).lower()}",
+            atomic_sem=_sem_to_str(sem),
+            atomic_scope=_scope_to_str(scope),
+            atomic_val_expr=SymbolicExpr.from_value(val),
         )
         return ret
 
@@ -323,6 +348,7 @@ class RaceDetector(SymbolicClient):
                 else np.ones(offsets.shape, dtype=bool)
             )
             event_id = self._next_event_id()
+            idx = len(self._concrete_accesses)
             self._concrete_accesses.append(
                 MemoryAccess(
                     access_type=AccessType.ATOMIC,
@@ -333,8 +359,12 @@ class RaceDetector(SymbolicClient):
                     call_path=extract_user_frames(),
                     event_id=event_id,
                     atomic_op=f"rmw:{str(rmwOp).lower()}",
+                    atomic_sem=_sem_to_str(sem),
+                    atomic_scope=_scope_to_str(scope),
+                    atomic_val=val.data.flatten() if hasattr(val, "data") else None,
                 )
             )
+            self._pending_atomics[grid_idx].append(idx)
 
         @self.lock_fn
         def before_atomic_cas(ptr, cmp, val, sem, scope):
@@ -346,6 +376,7 @@ class RaceDetector(SymbolicClient):
             offsets = ptr.data.flatten().astype(np.int64)
             masks = np.ones(offsets.shape, dtype=bool)
             event_id = self._next_event_id()
+            idx = len(self._concrete_accesses)
             self._concrete_accesses.append(
                 MemoryAccess(
                     access_type=AccessType.ATOMIC,
@@ -356,8 +387,54 @@ class RaceDetector(SymbolicClient):
                     call_path=extract_user_frames(),
                     event_id=event_id,
                     atomic_op="cas",
+                    atomic_sem=_sem_to_str(sem),
+                    atomic_scope=_scope_to_str(scope),
+                    atomic_cmp=cmp.data.flatten() if hasattr(cmp, "data") else None,
+                    atomic_val=val.data.flatten() if hasattr(val, "data") else None,
                 )
             )
+            self._pending_atomics[grid_idx].append(idx)
+
+        @self.lock_fn
+        def after_atomic_rmw(ret, rmwOp, ptr, val, mask, sem, scope):
+            if self._phase != "concrete":
+                return
+            grid_idx = self.grid_idx
+            if grid_idx is None:
+                return
+            pending = self._pending_atomics.get(grid_idx)
+            if not pending:
+                return
+            idx = pending.popleft()
+            acc = self._concrete_accesses[idx]
+            old = ret.data.flatten() if hasattr(ret, "data") else None
+            acc.atomic_old = old
+            # For RMW, active_mask comes from the mask parameter
+            active_mask = acc.masks.copy()
+            acc.read_mask = active_mask
+            acc.write_mask = active_mask
+
+        @self.lock_fn
+        def after_atomic_cas(ret, ptr, cmp, val, sem, scope):
+            if self._phase != "concrete":
+                return
+            grid_idx = self.grid_idx
+            if grid_idx is None:
+                return
+            pending = self._pending_atomics.get(grid_idx)
+            if not pending:
+                return
+            idx = pending.popleft()
+            acc = self._concrete_accesses[idx]
+            old = ret.data.flatten() if hasattr(ret, "data") else None
+            acc.atomic_old = old
+            # CAS has no mask param, active_mask is always all-True
+            active_mask = acc.masks.copy()
+            acc.read_mask = active_mask
+            if old is not None and acc.atomic_cmp is not None:
+                acc.write_mask = active_mask & (old == acc.atomic_cmp)
+            else:
+                acc.write_mask = active_mask
 
         BEFORE_MAP: dict[type[Op], Callable] = {
             Load: before_load,
@@ -368,16 +445,30 @@ class RaceDetector(SymbolicClient):
             AtomicCas: before_atomic_cas,
         }
 
+        AFTER_MAP: dict[type[Op], Callable] = {
+            AtomicRMW: after_atomic_rmw,
+            AtomicCas: after_atomic_cas,
+        }
+
         overrider = overrider_map.get(op_type)
         before = BEFORE_MAP.get(op_type)
+        after = AFTER_MAP.get(op_type)
 
         if overrider is not None:
             locked_overrider = self.lock_fn(overrider)
             callbacks = OpCallbacks(
                 op_overrider=locked_overrider,
                 before_callback=before,
+                after_callback=after,
             )
             self._op_callbacks.append((callbacks, locked_overrider))
+            return callbacks
+
+        if before is not None or after is not None:
+            callbacks = OpCallbacks(
+                before_callback=before,
+                after_callback=after,
+            )
             return callbacks
 
         return OpCallbacks()
@@ -392,6 +483,7 @@ class RaceDetector(SymbolicClient):
         self._symbolic_accesses.clear()
         self._concrete_accesses.clear()
         self._races.clear()
+        self._pending_atomics.clear()
         self._phase = "init"
         self._event_counter = 0
         return races
@@ -404,6 +496,10 @@ class RaceDetector(SymbolicClient):
         ptr_expr: SymbolicExpr,
         mask_expr: Optional[SymbolicExpr],
         atomic_op: Optional[str] = None,
+        atomic_sem: Optional[str] = None,
+        atomic_scope: Optional[str] = None,
+        atomic_cmp_expr: Any = None,
+        atomic_val_expr: Any = None,
     ) -> None:
         is_data_dependent = ptr_expr.has_op("load")
         if mask_expr is not None and mask_expr.has_op("load"):
@@ -420,6 +516,10 @@ class RaceDetector(SymbolicClient):
                 call_path=extract_user_frames(),
                 event_id=event_id,
                 atomic_op=atomic_op,
+                atomic_sem=atomic_sem,
+                atomic_scope=atomic_scope,
+                atomic_cmp_expr=atomic_cmp_expr,
+                atomic_val_expr=atomic_val_expr,
             )
         )
 
@@ -431,6 +531,38 @@ class RaceDetector(SymbolicClient):
         event_id = self._event_counter
         self._event_counter += 1
         return event_id
+
+    def _concretize_block0(self) -> None:
+        for sym_access in self._symbolic_accesses:
+            ptr_expr = sym_access.ptr_expr
+            mask_expr = sym_access.mask_expr
+            if sym_access.is_data_dependent:
+                ptr_expr = ptr_expr.replace_subtree("load")
+                if mask_expr is not None and mask_expr.has_op("load"):
+                    mask_expr = mask_expr.replace_subtree("load")
+            ptr_concrete = ptr_expr.concretize()
+            offsets = ptr_concrete.data.flatten().astype(np.int64)
+            if mask_expr is not None:
+                mask_concrete = mask_expr.concretize()
+                masks = mask_concrete.data.flatten().astype(bool)
+            else:
+                masks = np.ones(offsets.shape, dtype=bool)
+            is_atomic = sym_access.access_type == AccessType.ATOMIC
+            self._concrete_accesses.append(
+                MemoryAccess(
+                    access_type=sym_access.access_type,
+                    ptr=0,
+                    offsets=offsets,
+                    masks=masks,
+                    grid_idx=(0, 0, 0),
+                    call_path=sym_access.call_path,
+                    event_id=sym_access.event_id,
+                    atomic_op=sym_access.atomic_op,
+                    atomic_sem=sym_access.atomic_sem,
+                    atomic_scope=sym_access.atomic_scope,
+                    legacy_atomic=is_atomic,
+                )
+            )
 
     def _bail_to_concrete(self, reason: str = "") -> None:
         self._need_concrete_fallback = True
