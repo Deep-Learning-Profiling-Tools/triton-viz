@@ -888,9 +888,18 @@ class BinarySymbolicExpr(SymbolicExpr):
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
         np_op = self._NUMPY_OPS.get(self.op, None)
-        if np_op is None:
-            raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
-        return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+        # Most ops (add, sub, mul, …) have a numpy mapping and are called
+        # with concrete_fn(lhs, rhs, np_op).  Some ops like "idiv" have
+        # their own concrete_fn that handles the computation internally
+        # (e.g. InterpreterBuilder.create_idiv) and only takes (lhs, rhs).
+        # Fall through to the 2-arg call for those.
+        if np_op is not None:
+            return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+        if self.concrete_fn is None:
+            raise NotImplementedError(
+                f"Concretize for binary op '{self.op}' is not implemented"
+            )
+        return self.concrete_fn(lhs_concrete, rhs_concrete)  # type: ignore
 
     @staticmethod
     def _apply_binop(op_func, left, right):
@@ -1221,6 +1230,23 @@ class DotSymbolicExpr(SymbolicExpr):
         self.add_child("a", a)
         self.add_child("b", b)
         self.add_child("d", d)
+
+        # dot(a, b): 2D (M,K)x(K,N)->(M,N) or 3D batched (B,M,K)x(B,K,N)->(B,M,N)
+        a_shape = self.a.shape
+        b_shape = self.b.shape
+        if len(a_shape) == 2 and len(b_shape) == 2:
+            self.shape = (a_shape[0], b_shape[1])
+        elif len(a_shape) == 3 and len(b_shape) == 3:
+            self.shape = (a_shape[0], a_shape[1], b_shape[2])
+
+        # Triton always passes an accumulator d with the correct output dtype
+        # (determined by out_dtype param or input types: int8->int32, fp64->fp64, etc.)
+        if self.d is not None and self.d.dtype is not None:
+            self.dtype = self.d.dtype
+        else:
+            raise ValueError(
+                "DotSymbolicExpr requires accumulator (d) with a valid dtype"
+            )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1977,6 +2003,14 @@ class SymbolicClient(Client):
             elif expr.has_op("load"):
                 self._on_data_dependent_value()
                 expr = expr.replace_subtree("load")
+                # replace_subtree("load") only concretizes load nodes, so the
+                # result may still be a compound op
+                # (e.g. div(load, load) -> div(const, const)).
+                # Calling replace_subtree() with no anchor_op unconditionally
+                # concretizes every node in the tree, collapsing the whole
+                # expression into a single const value.
+                if expr.op != "const":
+                    expr = expr.replace_subtree()
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
             else:
                 z3_expr, _ = expr.eval()

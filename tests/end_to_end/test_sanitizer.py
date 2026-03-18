@@ -1025,6 +1025,93 @@ def test_non_contiguous_expanded_tensor():
     read_expanded_kernel[(M,)](x, out, x.stride(0), x.stride(1), M, N, BLOCK_N=8)
 
 
+# ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
+
+
+data_dep_div_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=data_dep_div_sanitizer)
+@triton.jit
+def data_dep_loop_div_kernel(Lens, Out, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    seq_len = tl.load(Lens + pid)
+    # integer division of a loaded value produces a SymbolicExpr
+    num_blocks = (seq_len + BLOCK - 1) // BLOCK
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    for i in range(0, num_blocks):
+        acc += 1.0
+    tl.store(Out + pid * BLOCK + tl.arange(0, BLOCK), acc)
+
+
+def test_data_dependent_loop_bound_div():
+    """
+    Data-dependent loop bound via integer division of a loaded value
+    must not crash the symbolic engine (e.g. 'to_py must be implemented
+    by subclasses').
+    """
+    data_dep_div_sanitizer.records.clear()
+
+    N = 4
+    BLOCK = 16
+    lens = torch.tensor([48, 32, 64, 16], dtype=torch.int32)
+    out = torch.empty(N, BLOCK)
+
+    data_dep_loop_div_kernel[(N,)](lens, out, BLOCK=BLOCK)
+
+    assert (
+        len(data_dep_div_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(data_dep_div_sanitizer.records)}"
+
+
+# ======== Data-Dependent Loop Bound (tl.cdiv) Tests ===========
+
+
+cdiv_loop_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=cdiv_loop_sanitizer)
+@triton.jit
+def cdiv_loop_bound_kernel(
+    X, Out, seqlen, chunk_size, BLOCK_CS: tl.constexpr, BLOCK_N: tl.constexpr
+):
+    pid_m = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    # min of runtime values — produces a symbolic expr involving pid
+    chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
+    # tl.cdiv on that value → idiv in symbolic tree
+    num_iters = tl.cdiv(chunk_size_limit, BLOCK_CS)
+    offs = tl.arange(0, BLOCK_N)
+    acc = tl.zeros([BLOCK_N], dtype=tl.float32)
+    for cs in range(0, num_iters):
+        acc += tl.load(X + offs, mask=offs < BLOCK_N)
+    tl.store(Out + pid_m * BLOCK_N + offs, acc)
+
+
+def test_data_dependent_cdiv_loop_bound():
+    """
+    tl.cdiv on a runtime value used as a loop bound must not crash the
+    symbolic engine with 'NotImplementedError: Concretize for op idiv'.
+    """
+    cdiv_loop_sanitizer.records.clear()
+
+    seqlen = 64
+    chunk_size = 32
+    BLOCK_CS = 16
+    BLOCK_N = 16
+    nchunks = seqlen // chunk_size
+    x = torch.ones(BLOCK_N)
+    out = torch.empty(2, BLOCK_N)
+
+    cdiv_loop_bound_kernel[(2, nchunks)](
+        x, out, seqlen, chunk_size, BLOCK_CS=BLOCK_CS, BLOCK_N=BLOCK_N
+    )
+
+    assert (
+        len(cdiv_loop_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(cdiv_loop_sanitizer.records)}"
+
+
 # ======== TensorWrapper Regression Test ===========
 
 
@@ -1035,6 +1122,141 @@ def copy_kernel(src, dst, N, BLOCK: tl.constexpr):
     mask = offs < N
     x = tl.load(src + offs, mask=mask)
     tl.store(dst + offs, x, mask=mask)
+
+
+# ======== Reduce on Dot Result Tests ===========
+
+
+reduce_dot_sanitizer = SymbolicSanitizer()
+
+
+@triton_viz.trace(client=reduce_dot_sanitizer)
+@triton.jit
+def dot_row_max_kernel(
+    Q,
+    K,
+    Out,
+    stride_qm,
+    stride_kn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    D: tl.constexpr,
+):
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, D)
+
+    q = tl.load(Q + offs_m[:, None] * stride_qm + offs_d[None, :])
+    k = tl.load(K + offs_d[:, None] + offs_n[None, :] * stride_kn)
+
+    qk = tl.dot(q, k)  # [BLOCK_M, BLOCK_N]
+    row_max = tl.max(qk, axis=1)  # reduce axis=1 -> [BLOCK_M]
+
+    tl.store(Out + offs_m, row_max)
+
+
+def test_reduce_on_dot_result():
+    """tl.max on the result of tl.dot must not crash the symbolic engine.
+
+    Regression: ReduceSymbolicExpr previously raised
+    'expects block input with non-empty shape' when reducing a dot product.
+    """
+    reduce_dot_sanitizer.records.clear()
+
+    M, N, D = 16, 16, 16
+    q = torch.randn(M, D, dtype=torch.float16)
+    k = torch.randn(D, N, dtype=torch.float16)
+    out = torch.empty(M, dtype=torch.float32)
+
+    dot_row_max_kernel[(1,)](
+        q,
+        k,
+        out,
+        q.stride(0),
+        k.stride(1),
+        BLOCK_M=M,
+        BLOCK_N=N,
+        D=D,
+    )
+
+    assert (
+        len(reduce_dot_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(reduce_dot_sanitizer.records)}"
+
+
+@triton_viz.trace(client=reduce_dot_sanitizer)
+@triton.jit
+def batched_dot_row_max_kernel(
+    A,
+    B,
+    Out,
+    stride_ab,
+    stride_am,
+    stride_ak,
+    stride_bb,
+    stride_bk,
+    stride_bn,
+    stride_ob,
+    stride_om,
+    B_DIM: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+):
+    offs_b = tl.arange(0, B_DIM)
+    offs_m = tl.arange(0, M)
+    offs_n = tl.arange(0, N)
+    offs_k = tl.arange(0, K)
+
+    a = tl.load(
+        A
+        + offs_b[:, None, None] * stride_ab
+        + offs_m[None, :, None] * stride_am
+        + offs_k[None, None, :] * stride_ak
+    )
+    b = tl.load(
+        B
+        + offs_b[:, None, None] * stride_bb
+        + offs_k[None, :, None] * stride_bk
+        + offs_n[None, None, :] * stride_bn
+    )
+
+    c = tl.dot(a, b)  # [B_DIM, M, N]
+    row_max = tl.max(c, axis=2)  # reduce axis=2 -> [B_DIM, M]
+
+    tl.store(Out + offs_b[:, None] * stride_ob + offs_m[None, :] * stride_om, row_max)
+
+
+def test_reduce_on_batched_dot_result():
+    """tl.max on the result of a 3D batched tl.dot must not crash the symbolic engine."""
+    reduce_dot_sanitizer.records.clear()
+
+    B, M, N, K = 2, 16, 16, 16
+    a = torch.randn(B, M, K, dtype=torch.float16)
+    b = torch.randn(B, K, N, dtype=torch.float16)
+    out = torch.empty(B, M, dtype=torch.float32)
+
+    batched_dot_row_max_kernel[(1,)](
+        a,
+        b,
+        out,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        out.stride(0),
+        out.stride(1),
+        B_DIM=B,
+        M=M,
+        N=N,
+        K=K,
+    )
+
+    assert (
+        len(reduce_dot_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(reduce_dot_sanitizer.records)}"
 
 
 def test_reinterpret_tensor_wrapper():
