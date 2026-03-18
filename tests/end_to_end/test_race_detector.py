@@ -324,3 +324,38 @@ def test_witness_address_in_overlap_range():
         assert (
             r.address_offset in range_b
         ), f"witness {r.address_offset} not in block {bb} range"
+
+
+# ======== Tensor pointer fallback records races ========
+
+
+def test_tensor_pointer_fallback_records_races():
+    """Block-pointer ops bail to concrete and overlapping accesses are still detected."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        # Overlap: stride is BLOCK_SIZE-1 instead of BLOCK_SIZE
+        block_ptr = tl.make_block_ptr(
+            base=out_ptr,
+            shape=(N,),
+            strides=(1,),
+            offsets=(pid * (BLOCK_SIZE - 1),),
+            block_shape=(BLOCK_SIZE,),
+            order=(0,),
+        )
+        val = tl.full((BLOCK_SIZE,), value=1.0, dtype=tl.float32)
+        tl.store(block_ptr, val, boundary_check=(0,))
+
+    n, bs = 32, 8
+    out = torch.zeros(n, dtype=torch.float32)
+    kernel[(triton.cdiv(n, bs),)](out, N=n, BLOCK_SIZE=bs)
+
+    assert detector.finalize_phase == "concrete"
+    races = launches[-1].records
+    assert len(races) > 0, (
+        "Tensor pointer ops lowered to concrete but no races detected — "
+        "concrete before-callbacks may not cover TensorPointerStore"
+    )

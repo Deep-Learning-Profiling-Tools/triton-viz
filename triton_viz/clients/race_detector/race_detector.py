@@ -64,6 +64,14 @@ class RaceDetector(SymbolicClient):
             return True
         else:
             self._races = self._check_symbolic_races()
+            if self._need_concrete_fallback:
+                # _check_symbolic_races hit an unhandled mask shape
+                self._symbolic_accesses.clear()
+                self._races.clear()
+                self._phase = "concrete"
+                self._force_concrete = True
+                self._disable_overriders()
+                return True
             self._phase = "z3_done"
             return False
 
@@ -151,10 +159,15 @@ class RaceDetector(SymbolicClient):
         if self._phase == "symbolic":
             self._symbolic_cas_count += 1
             if self._symbolic_cas_count > 1:
-                # A second CAS during symbolic execution of block 0
-                # indicates a while-loop spin barrier.  Symbolic execution
-                # cannot terminate while loops (tensor comparisons are
-                # always truthy), so bail out and restart in concrete mode.
+                # Heuristic: a second CAS during symbolic execution of
+                # block 0 likely indicates a while-loop spin barrier.
+                # Symbolic execution cannot terminate while loops (tensor
+                # comparisons are always truthy), so bail out and restart
+                # in concrete mode.
+                # NOTE: this is intentionally coarse — any kernel with two
+                # CAS ops in block 0 will lose the symbolic path even if
+                # neither is a spin loop.  Tighten if symbolic coverage of
+                # multi-CAS kernels becomes important.
                 self._need_concrete_fallback = True
                 from ...core.patch import SymbolicBailout
 
@@ -170,10 +183,18 @@ class RaceDetector(SymbolicClient):
 
     def _op_atomic_rmw_overrider(self, rmwOp, ptr, val, mask, sem, scope):
         ret = super()._op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope)
+        # The interpreter always supplies a TensorHandle mask (never None),
+        # even when the user omits it. Treat trivially-all-True masks as
+        # None to avoid unnecessary symbolic wrapping.
+        mask_expr = None
+        if mask is not None and not (
+            hasattr(mask, "data") and np.asarray(mask.data).all()
+        ):
+            mask_expr = SymbolicExpr.from_value(mask)
         self._record_symbolic_access(
             AccessType.ATOMIC,
             SymbolicExpr.from_value(ptr),
-            SymbolicExpr.from_value(mask),
+            mask_expr,
             atomic_op=f"rmw:{str(rmwOp).lower()}",
         )
         return ret
@@ -207,8 +228,8 @@ class RaceDetector(SymbolicClient):
             grid_idx = self.grid_idx
             if grid_idx is None:
                 return
-            offsets = ptr.data.flatten().astype(np.int64)
-            masks = mask.data.flatten().astype(bool)
+            offsets = np.asarray(ptr.data).flatten().astype(np.int64)
+            masks = np.asarray(mask.data).flatten().astype(bool)
             event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
@@ -251,8 +272,8 @@ class RaceDetector(SymbolicClient):
             grid_idx = self.grid_idx
             if grid_idx is None:
                 return
-            offsets = ptr.data.flatten().astype(np.int64)
-            masks = mask.data.flatten().astype(bool)
+            offsets = np.asarray(ptr.data).flatten().astype(np.int64)
+            masks = np.asarray(mask.data).flatten().astype(bool)
             event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
@@ -548,18 +569,27 @@ class RaceDetector(SymbolicClient):
             return substitute(expr, *pairs)
 
         def _broadcast_mask(mask_z3, sub_pairs, n_lanes):
-            """Return a list of n_lanes Z3 booleans for the mask."""
+            """Return a list of n_lanes Z3 booleans, or None if unhandled.
+
+            Supported forms:
+              None mask        → [True] * n_lanes  (all active)
+              Scalar z3 bool   → [val] * n_lanes   (uniform mask)
+              List len == n    → per-lane list      (exact match)
+
+            Any other shape returns None → caller should bail to concrete.
+            """
             if mask_z3 is None:
                 return [True] * n_lanes
             val = _apply_sub(mask_z3, sub_pairs)
             if isinstance(val, list):
-                assert (
-                    len(val) == n_lanes
-                ), f"mask length {len(val)} != address length {n_lanes}"
-                return [v if is_bool(v) else True for v in val]
+                if len(val) != n_lanes:
+                    return None  # shape mismatch — bail
+                if not all(is_bool(v) for v in val):
+                    return None  # non-bool lane — bail
+                return val
             if is_bool(val):
                 return [val] * n_lanes
-            return [True] * n_lanes
+            return None  # unrecognised form — bail
 
         races: list[RaceRecord] = []
         accesses = self._symbolic_accesses
@@ -598,7 +628,13 @@ class RaceDetector(SymbolicClient):
 
                 # Broadcast masks to match address lengths
                 masks_a = _broadcast_mask(mask_z3_a, sub_a, len(addrs_a))
+                if masks_a is None:
+                    self._need_concrete_fallback = True
+                    return []
                 masks_b = _broadcast_mask(mask_z3_b, sub_b, len(addrs_b))
+                if masks_b is None:
+                    self._need_concrete_fallback = True
+                    return []
 
                 # Build lane-pair candidate predicates
                 candidate_preds = []
