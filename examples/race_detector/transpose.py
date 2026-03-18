@@ -1,4 +1,4 @@
-"""WAR+WAW race: In-place matrix transpose where blocks read/write overlapping addresses."""
+"""RW+WAW race: In-place matrix transpose where blocks read/write overlapping addresses."""
 
 import torch
 import triton

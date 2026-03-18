@@ -3,7 +3,7 @@ from typing import Any, Optional
 from collections import defaultdict, deque
 
 import numpy as np
-from z3 import Solver, Int, And, Or, sat, substitute, is_bool
+from z3 import Solver, Int, And, Or, sat, substitute, is_bool, is_true
 from z3.z3 import ArithRef
 
 from ...core.callbacks import OpCallbacks
@@ -72,10 +72,9 @@ class RaceDetector(SymbolicClient):
     def post_run_callback(self, fn: Callable) -> bool:
         if self._phase != "symbolic":
             return True
-        # End of symbolic phase (block 0 finished)
+        # End of symbolic phase (block 0 finished or bailed out)
         if self._need_concrete_fallback:
-            if self._symbolic_accesses:
-                self._concretize_block0()
+            self._symbolic_accesses.clear()
             self._phase = "concrete"
             self._force_concrete = True
             self._disable_overriders()
@@ -123,11 +122,9 @@ class RaceDetector(SymbolicClient):
 
     def _op_load_overrider(self, ptr, mask, other, *args):
         if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
-            self._need_concrete_fallback = True
-            ptr = ptr.replace_subtree("load")
+            self._bail_to_concrete("load: data-dependent pointer")
         if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
-            self._need_concrete_fallback = True
-            mask = mask.replace_subtree("load")
+            self._bail_to_concrete("load: data-dependent mask")
         ptr_sym = SymbolicExpr.from_value(ptr)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         other_sym = SymbolicExpr.from_value(other) if other is not None else None
@@ -137,11 +134,9 @@ class RaceDetector(SymbolicClient):
 
     def _op_store_overrider(self, ptr, value, mask, *args):
         if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
-            self._need_concrete_fallback = True
-            ptr = ptr.replace_subtree("load")
+            self._bail_to_concrete("store: data-dependent pointer")
         if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
-            self._need_concrete_fallback = True
-            mask = mask.replace_subtree("load")
+            self._bail_to_concrete("store: data-dependent mask")
         ptr_sym = SymbolicExpr.from_value(ptr)
         value_sym = SymbolicExpr.from_value(value)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
@@ -152,7 +147,7 @@ class RaceDetector(SymbolicClient):
     def _op_make_block_ptr_overrider(
         self, base, shape, strides, offsets, tensor_shape, order
     ):
-        raise NotImplementedError("MakeBlockPtr is not supported yet.")
+        self._bail_to_concrete("MakeBlockPtr not supported")
 
     def _op_tensor_pointer_load_overrider(
         self,
@@ -163,12 +158,12 @@ class RaceDetector(SymbolicClient):
         eviction_policy,
         is_volatile,
     ):
-        raise NotImplementedError("TensorPointerLoad is not supported yet.")
+        self._bail_to_concrete("TensorPointerLoad not supported")
 
     def _op_tensor_pointer_store_overrider(
         self, ptr, value, boundary_check, cache_modifier, eviction_policy
     ):
-        raise NotImplementedError("TensorPointerStore is not supported yet.")
+        self._bail_to_concrete("TensorPointerStore not supported")
 
     def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
         if self._phase == "symbolic":
@@ -211,7 +206,7 @@ class RaceDetector(SymbolicClient):
     # ── For-loop hook overrides ──────────────────────────────────
 
     def _on_data_dependent_value(self) -> None:
-        self._need_concrete_fallback = True
+        self._bail_to_concrete("data-dependent loop value")
 
     def _should_skip_loop_hooks(self) -> bool:
         return self._phase != "symbolic"
@@ -489,7 +484,7 @@ class RaceDetector(SymbolicClient):
         if mask_expr is not None and mask_expr.has_op("load"):
             is_data_dependent = True
         if is_data_dependent:
-            self._need_concrete_fallback = True
+            self._bail_to_concrete("data-dependent access")
         event_id = self._next_event_id()
         self._symbolic_accesses.append(
             SymbolicMemoryAccess(
@@ -547,6 +542,12 @@ class RaceDetector(SymbolicClient):
                     legacy_atomic=is_atomic,
                 )
             )
+
+    def _bail_to_concrete(self, reason: str = "") -> None:
+        self._need_concrete_fallback = True
+        from ...core.patch import SymbolicBailout
+
+        raise SymbolicBailout()
 
     def _symbolic_ptr_signature(self, ptr_expr: SymbolicExpr) -> tuple[str, ...]:
         ptr_z3, _ = ptr_expr.eval()
@@ -678,14 +679,19 @@ class RaceDetector(SymbolicClient):
                 return [substitute(e, *pairs) for e in expr]
             return substitute(expr, *pairs)
 
-        def _add_mask_constraint(solver: Solver, mask_value) -> None:
-            if isinstance(mask_value, list):
-                bool_terms = [term for term in mask_value if is_bool(term)]
-                if bool_terms:
-                    solver.add(Or(*bool_terms))
-                return
-            if is_bool(mask_value):
-                solver.add(mask_value)
+        def _broadcast_mask(mask_z3, sub_pairs, n_lanes):
+            """Return a list of n_lanes Z3 booleans for the mask."""
+            if mask_z3 is None:
+                return [True] * n_lanes
+            val = _apply_sub(mask_z3, sub_pairs)
+            if isinstance(val, list):
+                assert (
+                    len(val) == n_lanes
+                ), f"mask length {len(val)} != address length {n_lanes}"
+                return [v if is_bool(v) else True for v in val]
+            if is_bool(val):
+                return [val] * n_lanes
+            return [True] * n_lanes
 
         races: list[RaceRecord] = []
         accesses = self._symbolic_accesses
@@ -709,15 +715,47 @@ class RaceDetector(SymbolicClient):
                 addr_a = _apply_sub(ptr_z3_a, sub_a)
                 addr_b = _apply_sub(ptr_z3_b, sub_b)
 
-                # Build address overlap constraint
-                if isinstance(addr_a, list) and isinstance(addr_b, list):
-                    overlap = Or(*[a == b for a in addr_a for b in addr_b])
-                elif isinstance(addr_a, list):
-                    overlap = Or(*[a == addr_b for a in addr_a])
-                elif isinstance(addr_b, list):
-                    overlap = Or(*[addr_a == b for b in addr_b])
-                else:
-                    overlap = addr_a == addr_b
+                # Evaluate masks
+                mask_z3_a, mask_constr_a = (None, None)
+                if acc_a.mask_expr is not None:
+                    mask_z3_a, mask_constr_a = acc_a.mask_expr.eval()
+
+                mask_z3_b, mask_constr_b = (None, None)
+                if acc_b.mask_expr is not None:
+                    mask_z3_b, mask_constr_b = acc_b.mask_expr.eval()
+
+                # Normalize addresses to lists
+                addrs_a = addr_a if isinstance(addr_a, list) else [addr_a]
+                addrs_b = addr_b if isinstance(addr_b, list) else [addr_b]
+
+                # Broadcast masks to match address lengths
+                masks_a = _broadcast_mask(mask_z3_a, sub_a, len(addrs_a))
+                masks_b = _broadcast_mask(mask_z3_b, sub_b, len(addrs_b))
+
+                # Build lane-pair candidate predicates
+                candidate_preds = []
+                for ia, a_expr in enumerate(addrs_a):
+                    ma = masks_a[ia]
+                    for ib, b_expr in enumerate(addrs_b):
+                        mb = masks_b[ib]
+                        eq = a_expr == b_expr
+                        terms = [t for t in (ma, mb, eq) if t is not True]
+                        if not terms:
+                            pred = eq
+                        elif len(terms) == 1:
+                            pred = terms[0]
+                        else:
+                            pred = And(*terms)
+                        candidate_preds.append((ia, ib, pred))
+
+                if not candidate_preds:
+                    continue
+
+                overlap = (
+                    candidate_preds[0][2]
+                    if len(candidate_preds) == 1
+                    else Or(*(pred for _, _, pred in candidate_preds))
+                )
 
                 # Build solver
                 solver = Solver()
@@ -734,20 +772,11 @@ class RaceDetector(SymbolicClient):
                 if ptr_constr_b is not None:
                     solver.add(_apply_sub(ptr_constr_b, sub_b))
 
-                # Add mask constraints
-                if acc_a.mask_expr is not None:
-                    mask_z3_a, mask_constr_a = acc_a.mask_expr.eval()
-                    mask_a_sub = _apply_sub(mask_z3_a, sub_a)
-                    _add_mask_constraint(solver, mask_a_sub)
-                    if mask_constr_a is not None:
-                        solver.add(_apply_sub(mask_constr_a, sub_a))
-
-                if acc_b.mask_expr is not None:
-                    mask_z3_b, mask_constr_b = acc_b.mask_expr.eval()
-                    mask_b_sub = _apply_sub(mask_z3_b, sub_b)
-                    _add_mask_constraint(solver, mask_b_sub)
-                    if mask_constr_b is not None:
-                        solver.add(_apply_sub(mask_constr_b, sub_b))
+                # Add mask side constraints (range/shape, not lane-active semantics)
+                if mask_constr_a is not None:
+                    solver.add(_apply_sub(mask_constr_a, sub_a))
+                if mask_constr_b is not None:
+                    solver.add(_apply_sub(mask_constr_b, sub_b))
 
                 # Check for overlap
                 solver.add(overlap)
@@ -761,13 +790,19 @@ class RaceDetector(SymbolicClient):
                         model.evaluate(p, model_completion=True).as_long()
                         for p in pid_b
                     )
-                    if isinstance(addr_a, list):
+
+                    # Find witness from the actual lane pair whose predicate is satisfied
+                    witness_addr = None
+                    for ia, ib, pred in candidate_preds:
+                        val = model.evaluate(pred, model_completion=True)
+                        if is_true(val):
+                            witness_addr = model.evaluate(
+                                addrs_a[ia], model_completion=True
+                            ).as_long()
+                            break
+                    if witness_addr is None:
                         witness_addr = model.evaluate(
-                            addr_a[0], model_completion=True
-                        ).as_long()
-                    else:
-                        witness_addr = model.evaluate(
-                            addr_a, model_completion=True
+                            addrs_a[0], model_completion=True
                         ).as_long()
 
                     mem_a = MemoryAccess(
@@ -813,11 +848,7 @@ def _classify_race_type(
     is_write_b = tb in (AccessType.STORE, AccessType.ATOMIC)
     if is_write_a and is_write_b:
         return RaceType.WAW
-    if is_write_a and tb == AccessType.LOAD:
-        return RaceType.RAW
-    if ta == AccessType.LOAD and is_write_b:
-        return RaceType.RAW
-    return None
+    return RaceType.RW
 
 
 def _active_offsets(access: MemoryAccess) -> np.ndarray:
@@ -1028,8 +1059,4 @@ def _classify_race(a: MemoryAccess, b: MemoryAccess) -> Optional[RaceType]:
     is_write_b = tb in (AccessType.STORE, AccessType.ATOMIC)
     if is_write_a and is_write_b:
         return RaceType.WAW
-    elif is_write_a and tb == AccessType.LOAD:
-        return RaceType.RAW
-    elif ta == AccessType.LOAD and is_write_b:
-        return RaceType.RAW
-    return None
+    return RaceType.RW

@@ -15,8 +15,7 @@ class AccessType(Enum):
 
 
 class RaceType(Enum):
-    RAW = auto()  # Read-After-Write
-    WAR = auto()  # Write-After-Read
+    RW = auto()  # Read-Write (load + store/atomic, or store/atomic + load)
     WAW = auto()  # Write-After-Write
 
 

@@ -43,7 +43,7 @@ def test_waw_overlapping_store():
     assert any(r.race_type == RaceType.WAW for r in races)
 
 
-# ======== RAW+WAW — Non-atomic Histogram ========
+# ======== RW+WAW — Non-atomic Histogram ========
 
 
 def test_raw_waw_histogram():
@@ -69,6 +69,7 @@ def test_raw_waw_histogram():
     assert len(races) > 0
     race_types = {r.race_type for r in races}
     assert RaceType.WAW in race_types
+    assert RaceType.RW in race_types
 
 
 # ======== Correct vector_add (No Race) ========
@@ -220,3 +221,106 @@ def test_two_phase_barrier_concrete_no_race():
     assert detector.finalize_phase == "concrete"
     # Desired behavior with phase-aware modeling: no races.
     assert len(races) == 0
+
+
+# ======== Data-dependent pointer triggers concrete restart ========
+
+
+def test_data_dependent_ptr_concrete_fallback():
+    """Data-dependent pointer must trigger full concrete restart with real side effects."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(input_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        # Load values, then use them as store indices (data-dependent pointer)
+        indices = tl.load(input_ptr + offsets, mask=mask, other=0)
+        tl.store(output_ptr + indices, (offsets + 1).to(tl.float32), mask=mask)
+
+    n, bs = 16, 8
+    inp = torch.arange(n, dtype=torch.int32)  # identity mapping = no overlap
+    out = torch.full((n,), -1.0, dtype=torch.float32)  # sentinel
+    kernel[(triton.cdiv(n, bs),)](inp, out, n, bs)
+
+    assert detector.finalize_phase == "concrete"
+    # Verify block 0's concrete side effects: out[i] == i + 1 for all i
+    expected = torch.arange(1, n + 1, dtype=torch.float32)
+    assert torch.equal(
+        out, expected
+    ), f"Block 0 side effects missing — got {out}, expected {expected}"
+    races = launches[-1].records
+    assert len(races) == 0  # identity mapping means no overlap
+
+
+# ======== Masked non-overlap must not false-positive ========
+
+
+def test_no_false_positive_masked_nonoverlap():
+    """Masked-off lanes aliasing must not produce a false positive.
+
+    Both blocks compute address ranges that overlap in their masked-off
+    lanes, but their active lanes are disjoint. A solver that doesn't
+    bind mask+overlap to the same lane would produce a false positive.
+    """
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, BLOCK_SIZE: tl.constexpr, HALF: tl.constexpr):
+        pid = tl.program_id(0)
+        offsets = tl.arange(0, BLOCK_SIZE)
+        addrs = pid * HALF + offsets
+        mask = offsets < HALF
+        tl.store(out_ptr + addrs, offsets.to(tl.float32), mask=mask)
+
+    out = torch.empty(8, dtype=torch.float32)
+    kernel[(2,)](out, 8, 4)
+
+    assert detector.finalize_phase == "z3_done"
+    races = launches[-1].records
+    assert len(races) == 0
+
+
+# ======== Witness address correctness ========
+
+
+def test_witness_address_in_overlap_range():
+    """The witness address must fall in the actual overlapping region."""
+
+    @triton_viz.trace(RaceDetector())
+    @triton.jit
+    def kernel(out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        block_start = pid * (BLOCK_SIZE - 1)  # BUG: overlap by 1
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        tl.store(out_ptr + offsets, offsets.to(tl.float32), mask=mask)
+
+    n, bs = 32, 8
+    out = torch.empty(n, dtype=torch.float32)
+    kernel[(triton.cdiv(n, bs),)](out, n, bs)
+
+    races = launches[-1].records
+    assert len(races) > 0
+    base = out.data_ptr()
+    elem_size = out.element_size()
+    for r in races:
+        ba = r.access_a.grid_idx[0]
+        bb = r.access_b.grid_idx[0]
+        range_a = set(
+            base + i * elem_size
+            for i in range(ba * (bs - 1), min(ba * (bs - 1) + bs, n))
+        )
+        range_b = set(
+            base + i * elem_size
+            for i in range(bb * (bs - 1), min(bb * (bs - 1) + bs, n))
+        )
+        assert (
+            r.address_offset in range_a
+        ), f"witness {r.address_offset} not in block {ba} range"
+        assert (
+            r.address_offset in range_b
+        ), f"witness {r.address_offset} not in block {bb} range"
