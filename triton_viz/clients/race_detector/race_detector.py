@@ -855,7 +855,7 @@ def _classify_race_type(
     is_write_b = tb in (AccessType.STORE, AccessType.ATOMIC)
     if is_write_a and is_write_b:
         return RaceType.WAW
-    return RaceType.RW
+    return RaceType.RAW
 
 
 def _active_offsets(access: MemoryAccess) -> np.ndarray:
@@ -1149,4 +1149,4 @@ def _classify_race(
     is_write_b = tb in (AccessType.STORE, AccessType.ATOMIC)
     if is_write_a and is_write_b:
         return RaceType.WAW
-    return RaceType.RW
+    return RaceType.RAW

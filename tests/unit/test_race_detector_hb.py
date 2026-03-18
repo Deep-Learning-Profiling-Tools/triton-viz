@@ -62,7 +62,7 @@ def test_release_acquire_flag_handoff_no_race():
     DATA_ADDR = 100
     FLAG_ADDR = 200
 
-    # Block 0 (producer): store data, then release-store flag
+    # Block 0 (producer): store data, then release-store flag (writes 1)
     store_data = _make_access(
         AccessType.STORE, block_idx=0, offset=DATA_ADDR, event_id=0
     )
@@ -74,9 +74,11 @@ def test_release_acquire_flag_handoff_no_race():
         atomic_op="rmw:xchg",
         atomic_sem="release",
         atomic_scope="gpu",
+        atomic_old=np.array([0], dtype=np.int32),
     )
+    release_flag.atomic_val = np.array([1], dtype=np.int32)
 
-    # Block 1 (consumer): acquire-load flag, then load data
+    # Block 1 (consumer): acquire-load flag (reads old=1), then load data
     acquire_flag = _make_access(
         AccessType.ATOMIC,
         block_idx=1,
@@ -85,7 +87,9 @@ def test_release_acquire_flag_handoff_no_race():
         atomic_op="rmw:xchg",
         atomic_sem="acquire",
         atomic_scope="gpu",
+        atomic_old=np.array([1], dtype=np.int32),
     )
+    acquire_flag.atomic_val = np.array([0], dtype=np.int32)
     load_data = _make_access(AccessType.LOAD, block_idx=1, offset=DATA_ADDR, event_id=1)
 
     # Check: store_data vs load_data should be ordered via
@@ -267,3 +271,182 @@ def test_legacy_atomic_skips_hb():
     # Should report race because legacy atomics prevent HB reasoning
     assert len(races) > 0
     assert races[0].race_type == RaceType.RAW
+
+
+# ── Reads-from gated sw edge tests ──
+
+
+def test_sw_xchg_release_cas_acquire_matching_old():
+    """xchg(release) writes 1, CAS(acquire) reads old=1 → sw edge → suppress."""
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    store_data = _make_access(
+        AccessType.STORE, block_idx=0, offset=DATA_ADDR, event_id=0
+    )
+    release_xchg = _make_access(
+        AccessType.ATOMIC,
+        block_idx=0,
+        offset=FLAG_ADDR,
+        event_id=1,
+        atomic_op="rmw:xchg",
+        atomic_sem="release",
+        atomic_scope="gpu",
+        atomic_old=np.array([0], dtype=np.int32),
+    )
+    release_xchg.atomic_val = np.array([1], dtype=np.int32)
+
+    acquire_cas = _make_access(
+        AccessType.ATOMIC,
+        block_idx=1,
+        offset=FLAG_ADDR,
+        event_id=0,
+        atomic_op="cas",
+        atomic_sem="acquire",
+        atomic_scope="gpu",
+        atomic_old=np.array([1], dtype=np.int32),
+        atomic_cmp=np.array([1], dtype=np.int32),
+        read_mask=np.array([True], dtype=np.bool_),
+        write_mask=np.array([True], dtype=np.bool_),
+    )
+    acquire_cas.atomic_val = np.array([0], dtype=np.int32)
+    load_data = _make_access(AccessType.LOAD, block_idx=1, offset=DATA_ADDR, event_id=1)
+
+    solver = HBSolver(store_data, load_data)
+    solver.add_sync_events([release_xchg, acquire_cas])
+    assert not solver.check_race_possible()  # sw edge → no race
+
+
+def test_sw_spinlock_unlock_lock_pattern():
+    """Spinlock: unlock xchg(0) + lock CAS(cmp=0) reads old=0 → suppress."""
+    DATA_ADDR = 100
+    LOCK_ADDR = 200
+
+    store_data = _make_access(
+        AccessType.STORE, block_idx=0, offset=DATA_ADDR, event_id=0
+    )
+    unlock = _make_access(
+        AccessType.ATOMIC,
+        block_idx=0,
+        offset=LOCK_ADDR,
+        event_id=1,
+        atomic_op="rmw:xchg",
+        atomic_sem="release",
+        atomic_scope="gpu",
+        atomic_old=np.array([1], dtype=np.int32),
+    )
+    unlock.atomic_val = np.array([0], dtype=np.int32)
+
+    lock = _make_access(
+        AccessType.ATOMIC,
+        block_idx=1,
+        offset=LOCK_ADDR,
+        event_id=0,
+        atomic_op="cas",
+        atomic_sem="acquire",
+        atomic_scope="gpu",
+        atomic_old=np.array([0], dtype=np.int32),
+        atomic_cmp=np.array([0], dtype=np.int32),
+        read_mask=np.array([True], dtype=np.bool_),
+        write_mask=np.array([True], dtype=np.bool_),
+    )
+    lock.atomic_val = np.array([1], dtype=np.int32)
+    load_data = _make_access(AccessType.LOAD, block_idx=1, offset=DATA_ADDR, event_id=1)
+
+    solver = HBSolver(store_data, load_data)
+    solver.add_sync_events([unlock, lock])
+    assert not solver.check_race_possible()  # sw edge → no race
+
+
+def test_sw_acquire_reads_wrong_value_no_suppress():
+    """CAS reads old=42 (not 1) → no reads-from → no sw → race reported."""
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    store_data = _make_access(
+        AccessType.STORE, block_idx=0, offset=DATA_ADDR, event_id=0
+    )
+    release_xchg = _make_access(
+        AccessType.ATOMIC,
+        block_idx=0,
+        offset=FLAG_ADDR,
+        event_id=1,
+        atomic_op="rmw:xchg",
+        atomic_sem="release",
+        atomic_scope="gpu",
+        atomic_old=np.array([0], dtype=np.int32),
+    )
+    release_xchg.atomic_val = np.array([1], dtype=np.int32)
+
+    acquire_cas = _make_access(
+        AccessType.ATOMIC,
+        block_idx=1,
+        offset=FLAG_ADDR,
+        event_id=0,
+        atomic_op="cas",
+        atomic_sem="acquire",
+        atomic_scope="gpu",
+        atomic_old=np.array([42], dtype=np.int32),  # wrong value
+        atomic_cmp=np.array([1], dtype=np.int32),
+        read_mask=np.array([True], dtype=np.bool_),
+        write_mask=np.array([False], dtype=np.bool_),
+    )
+    acquire_cas.atomic_val = np.array([0], dtype=np.int32)
+    load_data = _make_access(AccessType.LOAD, block_idx=1, offset=DATA_ADDR, event_id=1)
+
+    solver = HBSolver(store_data, load_data)
+    solver.add_sync_events([release_xchg, acquire_cas])
+    assert solver.check_race_possible()  # no sw → race
+
+
+def test_sw_intermediate_write_breaks_chain():
+    """Intermediate relaxed xchg overwrites; acquire reads overwritten value → no sw with original release."""
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    store_data = _make_access(
+        AccessType.STORE, block_idx=0, offset=DATA_ADDR, event_id=0
+    )
+    # Block 0 release writes 1
+    release_xchg = _make_access(
+        AccessType.ATOMIC,
+        block_idx=0,
+        offset=FLAG_ADDR,
+        event_id=1,
+        atomic_op="rmw:xchg",
+        atomic_sem="release",
+        atomic_scope="gpu",
+        atomic_old=np.array([0], dtype=np.int32),
+    )
+    release_xchg.atomic_val = np.array([1], dtype=np.int32)
+
+    # Block 2 (interloper): relaxed xchg overwrites flag to 99
+    interloper = _make_access(
+        AccessType.ATOMIC,
+        block_idx=2,
+        offset=FLAG_ADDR,
+        event_id=0,
+        atomic_op="rmw:xchg",
+        atomic_sem="relaxed",
+        atomic_scope="gpu",
+        atomic_old=np.array([1], dtype=np.int32),
+    )
+    interloper.atomic_val = np.array([99], dtype=np.int32)
+
+    # Block 1 acquire reads old=99 (from interloper, not from release)
+    acquire_xchg = _make_access(
+        AccessType.ATOMIC,
+        block_idx=1,
+        offset=FLAG_ADDR,
+        event_id=0,
+        atomic_op="rmw:xchg",
+        atomic_sem="acquire",
+        atomic_scope="gpu",
+        atomic_old=np.array([99], dtype=np.int32),
+    )
+    acquire_xchg.atomic_val = np.array([0], dtype=np.int32)
+    load_data = _make_access(AccessType.LOAD, block_idx=1, offset=DATA_ADDR, event_id=1)
+
+    solver = HBSolver(store_data, load_data)
+    solver.add_sync_events([release_xchg, interloper, acquire_xchg])
+    assert solver.check_race_possible()  # no sw with release → race

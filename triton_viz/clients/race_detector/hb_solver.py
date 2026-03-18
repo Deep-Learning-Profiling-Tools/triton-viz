@@ -4,17 +4,15 @@ Uses graph reachability over po (program order) and sw (synchronizes-with)
 edges to determine whether a candidate race pair (a, b) must be ordered
 in all valid executions.
 
-v1 uses a conservative model: any structurally valid release/acquire pair
-on the same sync address with compatible scope unconditionally creates a
-sw edge. This is sound in the "fewer false positives" direction — it may
-suppress races that could theoretically occur if the acquire doesn't
-actually read from the release, but in practice synchronization patterns
-are designed so that the acquire does see the release's write.
+sw edges are gated on reads-from: an acquire must observe the value
+written by the release (via atomic_old matching) to establish ordering.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict, deque
+
+import numpy as np
 
 from .data import MemoryAccess
 
@@ -38,6 +36,39 @@ def _scope_ok(w_scope: str | None, r_scope: str | None) -> bool:
 
 def _active_addrs(acc: MemoryAccess) -> set[int]:
     return {int(o) for o, m in zip(acc.offsets, acc.masks) if m}
+
+
+def _written_value_at_addr(acc: MemoryAccess, addr: int) -> object | None:
+    """Return the value written by a sync op at addr, or None if no write."""
+    lane_indices = np.where(acc.masks & (acc.offsets == addr))[0]
+    if len(lane_indices) == 0 or acc.atomic_val is None:
+        return None
+
+    if acc.atomic_op == "cas":
+        # CAS only writes on success (write_mask=True for that lane)
+        for lane in lane_indices:
+            if acc.write_mask is not None and acc.write_mask[lane]:
+                return acc.atomic_val[lane]
+        return None  # all CAS attempts failed
+    else:
+        # xchg / rmw:add etc. always write
+        return acc.atomic_val[lane_indices[0]]
+
+
+def _reads_from(writer: MemoryAccess, reader: MemoryAccess, addr: int) -> bool:
+    """Return True if reader observed the value written by writer at addr."""
+    written = _written_value_at_addr(writer, addr)
+    if written is None:
+        return False
+
+    if reader.atomic_old is None:
+        return False
+
+    lane_indices = np.where(reader.masks & (reader.offsets == addr))[0]
+    for lane in lane_indices:
+        if reader.atomic_old[lane] == written:
+            return True
+    return False
 
 
 class HBSolver:
@@ -88,7 +119,7 @@ class HBSolver:
                 adj[sorted_indices[k]].add(sorted_indices[k + 1])
 
         # ─── Synchronizes-with (sw) edges ───
-        # For v1: unconditional sw for any qualifying release/acquire pair
+        # sw requires reads-from proof: acquire must observe release's write
         sync_indices = [node_ids[id(e)] for e in sync]
 
         for wi in sync_indices:
@@ -107,8 +138,12 @@ class HBSolver:
                 if not _scope_ok(w.atomic_scope, r.atomic_scope):
                     continue
                 r_addrs = _active_addrs(r)
-                if w_addrs & r_addrs:
-                    adj[wi].add(ri)
+                common_addrs = w_addrs & r_addrs
+                if common_addrs:
+                    for addr in common_addrs:
+                        if _reads_from(w, r, addr):
+                            adj[wi].add(ri)
+                            break
 
         # ─── Reachability check ───
         ai = node_ids[id(a)]
