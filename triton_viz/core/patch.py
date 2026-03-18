@@ -18,6 +18,7 @@ from .data import (
     RawStore,
 )
 import inspect
+import numpy as np
 from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
@@ -36,15 +37,72 @@ from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 
 _MISSING = object()
 
-# Monkey-patch tl.constexpr to add .to() for interpreter mode.
-# In compiled Triton, constexpr.to(dtype) works via the compiler pipeline,
-# but in interpreter mode constexpr has no .to() method.
-if not hasattr(tl.constexpr, "to"):
+_TRITON_DTYPE_TO_NP: dict[tl.core.dtype, type[np.generic]] = {
+    tl.int1: np.bool_,
+    tl.int8: np.int8,
+    tl.int16: np.int16,
+    tl.int32: np.int32,
+    tl.int64: np.int64,
+    tl.uint8: np.uint8,
+    tl.uint16: np.uint16,
+    tl.uint32: np.uint32,
+    tl.uint64: np.uint64,
+    tl.float16: np.float16,
+    tl.float32: np.float32,
+    tl.float64: np.float64,
+}
 
-    def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
-        return _implicit_cvt(self.value)
 
-    tl.constexpr.to = _constexpr_to
+def _src_np_dtype(value: object) -> np.dtype:
+    """Infer the numpy dtype for a Python literal, matching Triton's to_tensor logic."""
+    if isinstance(value, bool):
+        return np.dtype(np.bool_)
+    if isinstance(value, int):
+        if -(2**31) <= value < 2**31:
+            return np.dtype(np.int32)
+        if 2**31 <= value < 2**32:
+            return np.dtype(np.uint32)
+        if -(2**63) <= value < 2**63:
+            return np.dtype(np.int64)
+        return np.dtype(np.uint64)
+    return np.dtype(np.float64)
+
+
+def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
+    """Interpreter-mode implementation of constexpr.to(dtype).
+
+    Computes the cast with numpy directly (not via interpreter_semantic)
+    to avoid re-entering patched tl ops when a client like the sanitizer
+    is active.
+    """
+    value = self.value if not isinstance(self.value, tl.constexpr) else self.value.value
+    dtype = dtype.value if isinstance(dtype, tl.constexpr) else dtype
+    fp_downcast_rounding = (
+        fp_downcast_rounding.value
+        if isinstance(fp_downcast_rounding, tl.constexpr)
+        else fp_downcast_rounding
+    )
+    bitcast_val = bitcast.value if isinstance(bitcast, tl.constexpr) else bitcast
+
+    dst_np = np.dtype(_TRITON_DTYPE_TO_NP[dtype])
+
+    if bitcast_val:
+        src_np = _src_np_dtype(value)
+        raw = np.array([value], dtype=src_np).tobytes()[: dst_np.itemsize]
+        result = np.frombuffer(raw, dtype=dst_np)[0]
+    else:
+        result = dst_np.type(value)
+
+    py_val = result.item()
+    # bool must become int so _implicit_cvt doesn't hit TensorHandle int1 bug
+    if isinstance(py_val, bool):
+        py_val = int(py_val)
+    return _implicit_cvt(py_val)
+
+
+def _constexpr_getattr(self, name):
+    """Proxy attribute access to the wrapped value for interpreter mode."""
+    return getattr(self.value, name)
 
 
 class _LangPatchScope:
@@ -65,6 +123,27 @@ class _LangPatchScope:
                 delattr(obj, name)
             else:
                 setattr(obj, name, original)
+
+
+def _patch_constexpr(scope: _LangPatchScope) -> None:
+    """Patch tl.constexpr with .to() and __getattr__ for interpreter mode."""
+    if not hasattr(tl.constexpr, "to"):
+        scope.set_attr(tl.constexpr, "to", _constexpr_to)
+    if not hasattr(tl.constexpr, "__getattr__"):
+        scope.set_attr(tl.constexpr, "__getattr__", _constexpr_getattr)
+
+
+def _normalize_constexpr_arg(arg):
+    """Wrap a kernel argument in tl.constexpr if it isn't already one.
+
+    None is left as-is because Triton APIs accept ``constexpr | None``
+    (e.g. ``reduce(..., dtype=None)``).
+    """
+    if isinstance(arg, tl.constexpr):
+        return arg
+    if arg is None:
+        return None
+    return tl.constexpr(arg)
 
 
 _LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": [], "nki_beta2": []}
@@ -335,6 +414,7 @@ def patch_lang(fn, backend, client_manager=None):
     if backend == "triton":
         scope = _triton_snapshot_scope(fn)
         triton_patch_lang(fn)
+        _patch_constexpr(scope)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
@@ -458,10 +538,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
     call_args = {}
     for name, arg in args.items():
         if name in self.constexprs:
-            call_args[name] = (
-                tl.constexpr(arg) if isinstance(arg, (int, float, bool)) else arg
-            )
-            ret = call_args[name]
+            ret = _normalize_constexpr_arg(arg)
         else:
             ret = _implicit_cvt(arg)
         client_manager.arg_callback(name, arg, ret)

@@ -1190,6 +1190,101 @@ def test_reduce_on_batched_dot_result():
     ), f"Expected no OOB records, got {len(reduce_dot_sanitizer.records)}"
 
 
+@triton_viz.trace(client="tracer")
+@triton.jit
+def cast_truncate_kernel(out_ptr, v: tl.constexpr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    result = v.to(tl.int32)
+    tl.store(out_ptr + offs, result)
+
+
+def test_constexpr_to_real_cast():
+    """constexpr.to(tl.int32) must truncate, not no-op."""
+    out = torch.empty(1, dtype=torch.int32)
+    cast_truncate_kernel[(1,)](out, v=1.9, N=1)
+    assert out.item() == 1
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def cast_bitcast_kernel(out_ptr, v: tl.constexpr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    result = v.to(tl.float32, bitcast=True)
+    tl.store(out_ptr + offs, result)
+
+
+def test_constexpr_to_bitcast():
+    """constexpr.to(tl.float32, bitcast=True) must reinterpret bits."""
+    import struct
+
+    out = torch.empty(1, dtype=torch.float32)
+    cast_bitcast_kernel[(1,)](out, v=42, N=1)
+    expected = struct.unpack("f", struct.pack("i", 42))[0]
+    assert out.item() == pytest.approx(expected)
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def dtype_meta_kernel(out_ptr, DTYPE: tl.constexpr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.full((N,), value=1.0, dtype=DTYPE)
+    tl.store(out_ptr + offs, x)
+
+
+def test_constexpr_dtype_meta_param():
+    """dtype passed as constexpr meta-param must work after universal wrapping."""
+    out = torch.empty(8, dtype=torch.int32)
+    dtype_meta_kernel[(1,)](out, DTYPE=tl.int32, N=8)
+    assert (out == 1).all()
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def tuple_meta_kernel(out_ptr, SHAPE: tl.constexpr):
+    offs = tl.arange(0, SHAPE[0])
+    tl.store(out_ptr + offs, offs)
+
+
+def test_constexpr_tuple_meta_param():
+    """tuple meta-param constexpr must support __getitem__."""
+    out = torch.empty(4, dtype=torch.int32)
+    tuple_meta_kernel[(1,)](out, SHAPE=(4,))
+    assert (out == torch.arange(4, dtype=torch.int32)).all()
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def grid_lambda_kernel(out_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+    tl.store(out_ptr + offs, offs, mask=mask)
+
+
+def test_constexpr_grid_lambda():
+    """Grid lambda with META dict must work with universally-wrapped constexprs."""
+    N = 256
+    out = torch.empty(N, dtype=torch.int32)
+    grid = lambda META: (triton.cdiv(N, META["BLOCK"]),)
+    grid_lambda_kernel[grid](out, N=N, BLOCK=128)
+    assert (out == torch.arange(N, dtype=torch.int32)).all()
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def bool_constexpr_kernel(out_ptr, flag: tl.constexpr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    val = flag.to(tl.int1)
+    tl.store(out_ptr + offs, val)
+
+
+def test_constexpr_bool_cast():
+    """bool constexpr .to(tl.int1) must work."""
+    out = torch.empty(1, dtype=torch.int32)
+    bool_constexpr_kernel[(1,)](out, flag=True, N=1)
+    assert out.item() == 1
+
+
 def test_reinterpret_tensor_wrapper():
     """triton.reinterpret() produces a TensorWrapper; sanitizer must handle it."""
     N = 64
