@@ -38,6 +38,35 @@ def _active_addrs(acc: MemoryAccess) -> set[int]:
     return {int(o) for o, m in zip(acc.offsets, acc.masks) if m}
 
 
+def _rmw_op_suffix(atomic_op: str) -> str:
+    """Extract op suffix from 'rmw:add' or 'rmw:atomic_op.add' format."""
+    for sep in (".", ":"):
+        if sep in atomic_op:
+            atomic_op = atomic_op.rsplit(sep, 1)[-1]
+    return atomic_op
+
+
+def _compute_rmw_written(op_suffix: str, old, val):
+    """Compute value written by an RMW op. Returns None for unknown ops."""
+    if op_suffix == "xchg":
+        return val
+    elif op_suffix in ("add", "fadd"):
+        return old + val
+    elif op_suffix == "sub":
+        return old - val
+    elif op_suffix == "and":
+        return old & val
+    elif op_suffix == "or":
+        return old | val
+    elif op_suffix == "xor":
+        return old ^ val
+    elif op_suffix in ("max", "umax"):
+        return max(old, val)
+    elif op_suffix in ("min", "umin"):
+        return min(old, val)
+    return None
+
+
 def _written_value_at_addr(acc: MemoryAccess, addr: int) -> object | None:
     """Return the value written by a sync op at addr, or None if no write."""
     lane_indices = np.where(acc.masks & (acc.offsets == addr))[0]
@@ -52,7 +81,15 @@ def _written_value_at_addr(acc: MemoryAccess, addr: int) -> object | None:
         return None  # all CAS attempts failed
     else:
         # xchg / rmw:add etc. always write
-        return acc.atomic_val[lane_indices[0]]
+        lane = lane_indices[0]
+        if acc.atomic_op is None:
+            return None
+        op_suffix = _rmw_op_suffix(acc.atomic_op)
+        if op_suffix == "xchg":
+            return acc.atomic_val[lane]
+        if acc.atomic_old is None:
+            return None
+        return _compute_rmw_written(op_suffix, acc.atomic_old[lane], acc.atomic_val[lane])
 
 
 def _reads_from(writer: MemoryAccess, reader: MemoryAccess, addr: int) -> bool:
@@ -141,7 +178,27 @@ class HBSolver:
                 common_addrs = w_addrs & r_addrs
                 if common_addrs:
                     for addr in common_addrs:
-                        if _reads_from(w, r, addr):
+                        written = _written_value_at_addr(w, addr)
+                        if written is None:
+                            continue
+                        # ABA check: verify no other sync node visible to r
+                        # writes the same value (would make reads-from ambiguous)
+                        ambiguous = False
+                        for oi in sync_indices:
+                            if oi == wi:
+                                continue
+                            o = all_nodes[oi]
+                            if addr not in _active_addrs(o):
+                                continue
+                            ov = _written_value_at_addr(o, addr)
+                            if ov != written:
+                                continue
+                            # o writes same value — skip if po-after r (invisible)
+                            if o.grid_idx == r.grid_idx and o.event_id > r.event_id:
+                                continue
+                            ambiguous = True
+                            break
+                        if not ambiguous and _reads_from(w, r, addr):
                             adj[wi].add(ri)
                             break
 
