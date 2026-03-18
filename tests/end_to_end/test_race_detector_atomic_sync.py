@@ -343,6 +343,7 @@ def test_epoch_barrier_still_works():
                 atomic_cmp=np.array([4], dtype=np.int32),
                 atomic_val=np.array([4], dtype=np.int32),
                 atomic_old=np.array([i + 1], dtype=np.int32),
+                write_mask=np.array([i + 1 == 4], dtype=np.bool_),
             )
         )
         # Phase 1: block i writes slot (i+1) % 4
@@ -472,3 +473,94 @@ def test_per_block_private_sync_no_spurious_suppress():
     races = detect_races(accesses)
     assert len(races) > 0  # different flag addrs → no sw → race
     assert any(r.race_type == RaceType.RAW for r in races)
+
+
+def test_aba_same_value_no_spurious_suppress_e2e():
+    """Two writers write same value → ambiguous reads-from → race reported.
+
+    Regression: ABA pattern where value equality is insufficient to identify
+    the writer. sw edge must not be created when written value is not unique.
+    """
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    accesses = [
+        # Block 0: store data, then release xchg writes 1
+        _store(block_idx=0, offset=DATA_ADDR, event_id=0),
+        _atomic(
+            block_idx=0,
+            offset=FLAG_ADDR,
+            event_id=1,
+            atomic_op="rmw:xchg",
+            sem="release",
+            scope="gpu",
+            atomic_val=np.array([1], dtype=np.int32),
+            atomic_old=np.array([0], dtype=np.int32),
+        ),
+        # Block 2: relaxed xchg also writes 1 (same value!)
+        _atomic(
+            block_idx=2,
+            offset=FLAG_ADDR,
+            event_id=0,
+            atomic_op="rmw:xchg",
+            sem="relaxed",
+            scope="gpu",
+            atomic_val=np.array([1], dtype=np.int32),
+            atomic_old=np.array([0], dtype=np.int32),
+        ),
+        # Block 1: acquire reads old=1 → ambiguous (could be from either writer)
+        _atomic(
+            block_idx=1,
+            offset=FLAG_ADDR,
+            event_id=0,
+            atomic_op="rmw:xchg",
+            sem="acquire",
+            scope="gpu",
+            atomic_val=np.array([0], dtype=np.int32),
+            atomic_old=np.array([1], dtype=np.int32),
+        ),
+        _load(block_idx=1, offset=DATA_ADDR, event_id=1),
+    ]
+
+    races = detect_races(accesses)
+    assert len(races) > 0  # ambiguous reads-from → race
+
+
+def test_add_written_value_correctness_e2e():
+    """add(5) with old=10 writes 15; acquire reads old=5 (operand) → no reads-from → race.
+
+    Regression: _written_value_at_addr previously returned atomic_val (operand)
+    instead of computing old+val for add ops.
+    """
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    accesses = [
+        # Block 0: store data, then release add(5) with old=10 → writes 15
+        _store(block_idx=0, offset=DATA_ADDR, event_id=0),
+        _atomic(
+            block_idx=0,
+            offset=FLAG_ADDR,
+            event_id=1,
+            atomic_op="rmw:add",
+            sem="release",
+            scope="gpu",
+            atomic_val=np.array([5], dtype=np.int32),
+            atomic_old=np.array([10], dtype=np.int32),
+        ),
+        # Block 1: acquire reads old=5 (the operand, NOT the written value 15)
+        _atomic(
+            block_idx=1,
+            offset=FLAG_ADDR,
+            event_id=0,
+            atomic_op="rmw:xchg",
+            sem="acquire",
+            scope="gpu",
+            atomic_val=np.array([0], dtype=np.int32),
+            atomic_old=np.array([5], dtype=np.int32),
+        ),
+        _load(block_idx=1, offset=DATA_ADDR, event_id=1),
+    ]
+
+    races = detect_races(accesses)
+    assert len(races) > 0  # no reads-from (5 ≠ 15) → race
