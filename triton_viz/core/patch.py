@@ -347,13 +347,14 @@ def unpatch_for_loop():
 @dataclass(frozen=True)
 class LibdeviceSpec:
     name: str  # libdevice function name, e.g. "tanh"
-    np_func: Callable  # numpy equivalent, e.g. np.tanh
+    np_func: Callable | None  # numpy equivalent (None for builder ops)
     arity: int  # 1, 2, or 3
     sym_name: str  # symbolic engine op name, e.g. "tanh"
+    builder_method: str | None = None  # interpreter_builder method name
 
 
 _LIBDEVICE_REGISTRY: list[LibdeviceSpec] = [
-    # Unary ops
+    # Unary ops (numpy-backed)
     LibdeviceSpec("abs", np.abs, 1, "abs"),
     LibdeviceSpec("ceil", np.ceil, 1, "ceil"),
     LibdeviceSpec("cos", np.cos, 1, "cos"),
@@ -367,6 +368,8 @@ _LIBDEVICE_REGISTRY: list[LibdeviceSpec] = [
     LibdeviceSpec("tanh", np.tanh, 1, "tanh"),
     LibdeviceSpec("asin", np.arcsin, 1, "asin"),
     LibdeviceSpec("acos", np.arccos, 1, "acos"),
+    # Builder-backed ops (use interpreter_builder methods directly)
+    LibdeviceSpec("rsqrt", None, 1, "rsqrt", builder_method="create_rsqrt"),
 ]
 
 
@@ -403,8 +406,24 @@ _ARITY_FACTORIES: dict[int, Callable[[Callable], Callable]] = {
 }
 
 
+def _make_libdevice_builder_fn(method_name: str) -> Callable:
+    """Return a replacement that delegates to an interpreter_builder method."""
+
+    def _fn(arg0: Any) -> Any:
+        handle = getattr(interpreter_builder, method_name)(arg0.handle)
+        return tl.core.tensor(handle, arg0.type)
+
+    return _fn
+
+
 def _make_libdevice_interpreter_fn(spec: LibdeviceSpec) -> Callable:
-    """Return a replacement for a libdevice stub that computes via numpy."""
+    """Return a replacement for a libdevice stub that computes via numpy or builder."""
+    if spec.builder_method is not None:
+        return _make_libdevice_builder_fn(spec.builder_method)
+    if spec.np_func is None:
+        raise ValueError(
+            f"LibdeviceSpec {spec.name!r} has no np_func or builder_method"
+        )
     factory = _ARITY_FACTORIES.get(spec.arity)
     if factory is None:
         raise ValueError(f"Unsupported arity {spec.arity} for {spec.name}")
@@ -414,8 +433,7 @@ def _make_libdevice_interpreter_fn(spec: LibdeviceSpec) -> Callable:
 def _make_unsupported_libdevice_fn(name: str) -> Callable:
     def _unsupported(*args, **kwargs):
         raise NotImplementedError(
-            f"libdevice.{name}() is not supported in interpreter/sanitizer mode. "
-            f"Add a LibdeviceSpec to _LIBDEVICE_REGISTRY to enable it."
+            f"libdevice.{name}() is not supported in interpreter/sanitizer mode."
         )
 
     _unsupported.__name__ = name

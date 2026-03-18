@@ -562,21 +562,63 @@ def test_store_dtype_block_of_pointers():
 
 
 @pytest.mark.parametrize(
-    "op_name,np_func",
+    "op_name,expected_np_func,is_builder",
     [
-        ("tanh", np.tanh),
-        ("asin", np.arcsin),
-        ("acos", np.arccos),
+        ("tanh", np.tanh, False),
+        ("asin", np.arcsin, False),
+        ("acos", np.arccos, False),
+        ("rsqrt", None, True),
     ],
 )
-def test_unary_concretize(op_name, np_func):
-    """UnarySymbolicExpr.concretize() delegates to concrete_fn with the right numpy op."""
-    from triton.runtime.interpreter import interpreter_builder
+def test_unary_concretize(op_name, expected_np_func, is_builder):
+    """concretize() must pass the correct numpy op to concrete_fn."""
+    captured = {}
 
     arg = ConstSymbolicExpr("const", value=0, dtype=tl.block_type(tl.float32, [4]))
     expr = UnarySymbolicExpr(op_name, arg)
-    expr.concrete_fn = interpreter_builder.unary_op
 
-    # concretize should not raise
-    result = expr.concretize()
-    assert result is not None
+    if is_builder:
+
+        def _mock_builder(arg_concrete):
+            captured["called"] = True
+            return arg_concrete
+
+        expr.concrete_fn = _mock_builder
+        expr.concretize()
+        assert captured["called"] is True
+    else:
+
+        def _mock_unary_op(arg_concrete, np_func):
+            captured["np_func"] = np_func
+            return arg_concrete
+
+        expr.concrete_fn = _mock_unary_op
+        expr.concretize()
+        assert captured["np_func"] is expected_np_func
+
+
+def test_libdevice_registry_sym_op_consistency():
+    """Every LibdeviceSpec must have matching entries in the symbolic engine."""
+    from triton_viz.core.patch import _LIBDEVICE_REGISTRY
+    from triton_viz.clients.symbolic_engine import _UNARY_NUMPY_TO_SYM_OP
+    from triton.runtime.interpreter import interpreter_builder
+
+    for spec in _LIBDEVICE_REGISTRY:
+        assert spec.sym_name in SymbolicExpr.UNARY_OPS, (
+            f"LibdeviceSpec {spec.name!r} has sym_name={spec.sym_name!r} "
+            f"not in UNARY_OPS"
+        )
+        if spec.np_func is not None:
+            assert (
+                spec.np_func in _UNARY_NUMPY_TO_SYM_OP
+            ), f"LibdeviceSpec {spec.name!r} np_func not in _UNARY_NUMPY_TO_SYM_OP"
+            assert _UNARY_NUMPY_TO_SYM_OP[spec.np_func] == spec.sym_name, (
+                f"LibdeviceSpec {spec.name!r} sym_name mismatch: "
+                f"registry says {spec.sym_name!r}, "
+                f"_UNARY_NUMPY_TO_SYM_OP says {_UNARY_NUMPY_TO_SYM_OP[spec.np_func]!r}"
+            )
+        if spec.builder_method is not None:
+            assert hasattr(interpreter_builder, spec.builder_method), (
+                f"LibdeviceSpec {spec.name!r} builder_method={spec.builder_method!r} "
+                f"not found on interpreter_builder"
+            )

@@ -33,6 +33,7 @@ from triton.runtime.interpreter import TensorHandle, _get_np_dtype
 
 from ..core.client import Client
 from ..core.callbacks import OpCallbacks, ForLoopCallbacks
+from ..core.patch import _LIBDEVICE_REGISTRY
 from ..core.data import (
     Op,
     UnaryOp,
@@ -214,22 +215,8 @@ class SymbolicExpr:
         "tensor_pointer_load",
         "tensor_pointer_store",
     )
-    UNARY_OPS: ClassVar[tuple[str, ...]] = (
-        "cos",
-        "exp",
-        "exp2",
-        "abs",
-        "fabs",
-        "floor",
-        "ceil",
-        "log",
-        "log2",
-        "sqrt",
-        "sin",
-        "rsqrt",
-        "tanh",
-        "asin",
-        "acos",
+    UNARY_OPS: ClassVar[tuple[str, ...]] = tuple(
+        sorted({spec.sym_name for spec in _LIBDEVICE_REGISTRY} | {"fabs"})
     )
     BINARY_OP_SYMBOL_TABLE: ClassVar[dict[str, str]] = {
         "add": "+",
@@ -851,24 +838,22 @@ class UnarySymbolicExpr(SymbolicExpr):
     }
 
     _NUMPY_OPS: ClassVar[dict[str, Callable]] = {
-        "cos": np.cos,
-        "exp": np.exp,
-        "exp2": np.exp2,
-        "abs": np.abs,
+        **{
+            spec.sym_name: spec.np_func
+            for spec in _LIBDEVICE_REGISTRY
+            if spec.np_func is not None
+        },
         "fabs": np.fabs,
-        "floor": np.floor,
-        "ceil": np.ceil,
-        "log": np.log,
-        "log2": np.log2,
-        "sqrt": np.sqrt,
-        "sin": np.sin,
-        "tanh": np.tanh,
-        "asin": np.arcsin,
-        "acos": np.arccos,
     }
+
+    _BUILDER_OPS: ClassVar[frozenset[str]] = frozenset(
+        spec.sym_name for spec in _LIBDEVICE_REGISTRY if spec.builder_method is not None
+    )
 
     def concretize(self) -> Any:
         arg_concrete = self.arg.concretize()
+        if self.op in self._BUILDER_OPS:
+            return self.concrete_fn(arg_concrete)  # type: ignore
         np_op = self._NUMPY_OPS.get(self.op)
         if np_op is None:
             raise NotImplementedError(
@@ -1725,19 +1710,9 @@ SymbolicExpr.register_op_class(
 # ── Shared constants and utilities for symbolic clients ──────────
 
 _UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
-    np.cos: "cos",
-    np.exp: "exp",
-    np.exp2: "exp2",
-    np.abs: "abs",
-    np.floor: "floor",
-    np.ceil: "ceil",
-    np.log: "log",
-    np.log2: "log2",
-    np.sqrt: "sqrt",
-    np.sin: "sin",
-    np.tanh: "tanh",
-    np.arcsin: "asin",
-    np.arccos: "acos",
+    spec.np_func: spec.sym_name
+    for spec in _LIBDEVICE_REGISTRY
+    if spec.np_func is not None
 }
 
 _BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {

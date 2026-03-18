@@ -8,9 +8,11 @@ import triton.language.extra.libdevice as libdevice
 from triton.language.extra.libdevice import acos as _ld_acos
 from triton.language.extra.libdevice import asin as _ld_asin
 from triton.language.extra.libdevice import erf as _ld_erf
+from triton.language.extra.libdevice import rsqrt as _ld_rsqrt
 from triton.language.extra.libdevice import tanh as _ld_tanh
 
 import triton_viz
+from triton_viz.clients.tracer.tracer import Tracer
 from triton_viz.core.data import Load, RawLoad
 from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr, RangeWrapper
 from triton_viz.clients.sanitizer.sanitizer import (
@@ -983,6 +985,24 @@ def libdevice_acos_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
     tl.store(out_ptr + offs, y)
 
 
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_rsqrt_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_rsqrt(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_rsqrt_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.rsqrt(x)
+    tl.store(out_ptr + offs, y)
+
+
 # -- Unsupported op kernel --
 
 
@@ -1002,10 +1022,34 @@ _LIBDEVICE_KERNELS = {
     ("asin", "module"): libdevice_asin_module_kernel,
     ("acos", "direct"): libdevice_acos_direct_kernel,
     ("acos", "module"): libdevice_acos_module_kernel,
+    ("rsqrt", "direct"): libdevice_rsqrt_direct_kernel,
+    ("rsqrt", "module"): libdevice_rsqrt_module_kernel,
+}
+
+_NUMPY_REFS = {
+    "tanh": np.tanh,
+    "asin": np.arcsin,
+    "acos": np.arccos,
+    "rsqrt": lambda x: 1.0 / np.sqrt(x),
+}
+
+_LIBDEVICE_INPUTS = {
+    "tanh": torch.tensor(
+        [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
+    ),
+    "asin": torch.tensor(
+        [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
+    ),
+    "acos": torch.tensor(
+        [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
+    ),
+    "rsqrt": torch.tensor(
+        [1.0, 4.0, 0.25, 9.0, 16.0, 0.01, 100.0, 0.5], dtype=torch.float32
+    ),
 }
 
 
-@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos"])
+@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos", "rsqrt"])
 @pytest.mark.parametrize("import_style", ["direct", "module"])
 def test_libdevice_op(op_name, import_style):
     """
@@ -1014,8 +1058,7 @@ def test_libdevice_op(op_name, import_style):
     """
     libdevice_sanitizer.records.clear()
 
-    # Values valid for asin/acos domain [-1, 1], padded to power-of-2 length
-    x = torch.tensor([0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32)
+    x = _LIBDEVICE_INPUTS[op_name].clone()
     out = torch.empty(8, dtype=torch.float32)
 
     kernel = _LIBDEVICE_KERNELS[(op_name, import_style)]
@@ -1036,6 +1079,63 @@ def test_libdevice_unsupported_op_raises():
 
     with pytest.raises(NotImplementedError, match=r"libdevice\.erf.*not supported"):
         libdevice_erf_direct_kernel[(1,)](x, out, N=8)
+
+
+# -- Numerical correctness kernels (no sanitizer override) --
+
+_correctness_tracer = Tracer()
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_tanh_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_tanh(x))
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_asin_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_asin(x))
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_acos_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_acos(x))
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_rsqrt_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_rsqrt(x))
+
+
+_CORRECTNESS_KERNELS = {
+    "tanh": _ld_tanh_kernel,
+    "asin": _ld_asin_kernel,
+    "acos": _ld_acos_kernel,
+    "rsqrt": _ld_rsqrt_kernel,
+}
+
+
+@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos", "rsqrt"])
+def test_libdevice_numerical_correctness(op_name):
+    """Libdevice ops produce numerically correct results in interpreter mode."""
+    x = _LIBDEVICE_INPUTS[op_name].clone()
+    out = torch.empty(8, dtype=torch.float32)
+
+    _CORRECTNESS_KERNELS[op_name][(1,)](x, out, N=8)
+
+    expected = _NUMPY_REFS[op_name](x.numpy())
+    np.testing.assert_allclose(out.numpy(), expected, rtol=1e-5, atol=1e-6)
 
 
 # ======== Fake Tensor (Virtual Memory) OOB Tests ===========

@@ -120,6 +120,26 @@ def test_scope_interleaved_restore_order():
 
 
 def test_scope_restore_not_monkey_patched():
-    """After _patch_libdevice, scope.restore must be the original method, not a closure."""
+    """After _patch_libdevice, scope.restore is the original method, not a closure."""
+    from triton_viz.core.patch import _patch_libdevice
+
     scope = _LangPatchScope()
+    _patch_libdevice(_dummy_kernel, scope)
     assert scope.restore.__func__ is _LangPatchScope.restore
+    scope.restore()  # clean up
+
+
+def test_libdevice_patch_and_restore():
+    """_patch_libdevice patches module attrs + aliases; restore undoes both."""
+    import triton.language.extra.libdevice as _ld
+    from triton_viz.core.patch import _patch_libdevice
+
+    original_tanh = _ld.tanh
+    scope = _LangPatchScope()
+    _patch_libdevice(_dummy_kernel, scope)
+
+    # Module attr is now patched
+    assert _ld.tanh is not original_tanh
+    scope.restore()
+    # Module attr is restored
+    assert _ld.tanh is original_tanh
