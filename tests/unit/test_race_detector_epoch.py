@@ -282,3 +282,56 @@ def test_incomplete_second_barrier_does_not_globally_reach_epoch_two():
     ]
     assert phase2_stores
     assert all(acc.epoch == 1 for acc in phase2_stores)
+
+
+def test_byte_range_overlap_different_elem_sizes():
+    """float32 at byte 0 (covers 0-3) vs int8 at byte 2 — overlapping WAW race."""
+    accesses = [
+        MemoryAccess(
+            access_type=AccessType.STORE,
+            ptr=0,
+            offsets=np.array([0], dtype=np.int64),
+            masks=np.array([True], dtype=np.bool_),
+            grid_idx=(0, 0, 0),
+            event_id=0,
+            elem_size=4,
+        ),
+        MemoryAccess(
+            access_type=AccessType.STORE,
+            ptr=0,
+            offsets=np.array([2], dtype=np.int64),
+            masks=np.array([True], dtype=np.bool_),
+            grid_idx=(1, 0, 0),
+            event_id=1,
+            elem_size=1,
+        ),
+    ]
+    races = detect_races(accesses)
+    assert len(races) > 0
+    assert any(r.race_type == RaceType.WAW for r in races)
+
+
+def test_same_elem_size_aligned_no_false_positive():
+    """Two non-overlapping same-size accesses should not race."""
+    accesses = [
+        MemoryAccess(
+            access_type=AccessType.STORE,
+            ptr=0,
+            offsets=np.array([0], dtype=np.int64),
+            masks=np.array([True], dtype=np.bool_),
+            grid_idx=(0, 0, 0),
+            event_id=0,
+            elem_size=4,
+        ),
+        MemoryAccess(
+            access_type=AccessType.STORE,
+            ptr=0,
+            offsets=np.array([4], dtype=np.int64),
+            masks=np.array([True], dtype=np.bool_),
+            grid_idx=(1, 0, 0),
+            event_id=1,
+            elem_size=4,
+        ),
+    ]
+    races = detect_races(accesses)
+    assert len(races) == 0

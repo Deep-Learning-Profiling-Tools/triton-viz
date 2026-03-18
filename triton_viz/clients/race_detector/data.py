@@ -32,6 +32,7 @@ class MemoryAccess:
     epoch: int = 0
     event_id: int = 0
     atomic_op: str | None = None
+    elem_size: int = 1
 
 
 @dataclass
@@ -46,6 +47,7 @@ class SymbolicMemoryAccess:
     epoch: int = 0
     event_id: int = 0
     atomic_op: str | None = None
+    elem_size: int = 1
 
 
 @dataclass

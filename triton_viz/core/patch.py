@@ -514,15 +514,16 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
                         continue
                     try:
                         self.fn(**call_args)
+                        if not client_manager.post_run_callback(self.fn):
+                            return
                     except SymbolicBailout:
-                        # Client aborted symbolic execution.
+                        # Client aborted symbolic execution (during kernel
+                        # or during post_run_callback analysis).
                         # Let post_run_callback handle the fallback,
                         # then restart the entire grid from (0,0,0).
                         client_manager.post_run_callback(self.fn)
                         client_manager.grid_callback(grid)
                         return run_grid_loops_1thread(grid)
-                    if not client_manager.post_run_callback(self.fn):
-                        return
 
     if cfg.enable_timing:
         import time

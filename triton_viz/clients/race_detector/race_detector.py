@@ -3,7 +3,20 @@ from typing import Any, Optional
 from collections import defaultdict
 
 import numpy as np
-from z3 import Solver, Int, And, Or, sat, substitute, is_bool, is_true
+from z3 import (
+    Solver,
+    Int,
+    And,
+    Or,
+    Not,
+    sat,
+    unsat,
+    substitute,
+    is_bool,
+    is_true,
+    is_const,
+    is_int_value,
+)
 from z3.z3 import ArithRef
 
 from ...core.callbacks import OpCallbacks
@@ -28,6 +41,50 @@ from .data import AccessType, MemoryAccess, SymbolicMemoryAccess, RaceRecord, Ra
 from ...utils.traceback_utils import extract_user_frames
 
 
+def _flatten_offsets(ptr) -> np.ndarray:
+    return np.asarray(ptr.data).flatten().astype(np.int64)
+
+
+def _flatten_mask(mask, n: int) -> np.ndarray:
+    if mask is None:
+        return np.ones(n, dtype=bool)
+    return np.asarray(mask.data).flatten().astype(bool)
+
+
+def _z3_free_vars(expr) -> set:
+    """Collect uninterpreted Z3 constants (free variables) from an expression."""
+    seen: set[int] = set()
+    result: set = set()
+
+    def walk(e):
+        eid = id(e)
+        if eid in seen:
+            return
+        seen.add(eid)
+        if is_const(e) and not is_int_value(e):
+            result.add(e)
+        for child in e.children():
+            walk(child)
+
+    if isinstance(expr, list):
+        for e in expr:
+            walk(e)
+    else:
+        walk(expr)
+    return result
+
+
+def _get_elem_size(handle) -> int:
+    """Extract element byte size from a tensor handle or SymbolicExpr."""
+    try:
+        dtype = handle.dtype
+        while hasattr(dtype, "element_ty"):
+            dtype = dtype.element_ty
+        return max(1, dtype.primitive_bitwidth // 8)
+    except (AttributeError, TypeError):
+        return 1
+
+
 class RaceDetector(SymbolicClient):
     NAME = "race_detector"
 
@@ -42,7 +99,7 @@ class RaceDetector(SymbolicClient):
         # Each entry: (OpCallbacks, original_overrider_fn)
         self._op_callbacks: list[tuple[OpCallbacks, Callable]] = []
         self._races: list[RaceRecord] = []
-        self._symbolic_cas_count: int = 0
+        self._symbolic_cas_counts: dict[tuple[str, ...], int] = {}
         self._event_counter: int = 0
 
     # ── Client interface ─────────────────────────────────────────
@@ -71,7 +128,9 @@ class RaceDetector(SymbolicClient):
                 self._phase = "concrete"
                 self._force_concrete = True
                 self._disable_overriders()
-                return True
+                from ...core.patch import SymbolicBailout
+
+                raise SymbolicBailout()
             self._phase = "z3_done"
             return False
 
@@ -87,7 +146,7 @@ class RaceDetector(SymbolicClient):
     def grid_callback(self, grid: tuple[int, ...]):
         self._grid = tuple(int(g) for g in grid)
         self._need_concrete_fallback = False
-        self._symbolic_cas_count = 0
+        self._symbolic_cas_counts.clear()
         self._symbolic_accesses.clear()
         self._concrete_accesses.clear()
         self._races.clear()
@@ -119,7 +178,10 @@ class RaceDetector(SymbolicClient):
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         other_sym = SymbolicExpr.from_value(other) if other is not None else None
         ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
-        self._record_symbolic_access(AccessType.LOAD, ptr_sym, mask_sym)
+        elem_size = _get_elem_size(ptr)
+        self._record_symbolic_access(
+            AccessType.LOAD, ptr_sym, mask_sym, elem_size=elem_size
+        )
         return ret
 
     def _op_store_overrider(self, ptr, value, mask, *args):
@@ -131,7 +193,10 @@ class RaceDetector(SymbolicClient):
         value_sym = SymbolicExpr.from_value(value)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
-        self._record_symbolic_access(AccessType.STORE, ptr_sym, mask_sym)
+        elem_size = _get_elem_size(ptr)
+        self._record_symbolic_access(
+            AccessType.STORE, ptr_sym, mask_sym, elem_size=elem_size
+        )
         return ret
 
     def _op_make_block_ptr_overrider(
@@ -156,28 +221,30 @@ class RaceDetector(SymbolicClient):
         self._bail_to_concrete("TensorPointerStore not supported")
 
     def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
+        ptr_expr = SymbolicExpr.from_value(ptr)
         if self._phase == "symbolic":
-            self._symbolic_cas_count += 1
-            if self._symbolic_cas_count > 1:
-                # Heuristic: a second CAS during symbolic execution of
-                # block 0 likely indicates a while-loop spin barrier.
-                # Symbolic execution cannot terminate while loops (tensor
-                # comparisons are always truthy), so bail out and restart
-                # in concrete mode.
-                # NOTE: this is intentionally coarse — any kernel with two
-                # CAS ops in block 0 will lose the symbolic path even if
-                # neither is a spin loop.  Tighten if symbolic coverage of
-                # multi-CAS kernels becomes important.
+            ptr_key = self._symbolic_ptr_signature(ptr_expr)
+            self._symbolic_cas_counts[ptr_key] = (
+                self._symbolic_cas_counts.get(ptr_key, 0) + 1
+            )
+            if self._symbolic_cas_counts[ptr_key] > 1:
+                # Heuristic: a second CAS to the *same address* during
+                # symbolic execution of block 0 likely indicates a
+                # while-loop spin barrier.  Symbolic execution cannot
+                # terminate while loops (tensor comparisons are always
+                # truthy), so bail out and restart in concrete mode.
                 self._need_concrete_fallback = True
                 from ...core.patch import SymbolicBailout
 
                 raise SymbolicBailout()
         ret = super()._op_atomic_cas_overrider(ptr, cmp, val, sem, scope)
+        elem_size = _get_elem_size(ptr)
         self._record_symbolic_access(
             AccessType.ATOMIC,
-            SymbolicExpr.from_value(ptr),
+            ptr_expr,
             None,
             atomic_op="cas",
+            elem_size=elem_size,
         )
         return ret
 
@@ -185,17 +252,25 @@ class RaceDetector(SymbolicClient):
         ret = super()._op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope)
         # The interpreter always supplies a TensorHandle mask (never None),
         # even when the user omits it. Treat trivially-all-True masks as
-        # None to avoid unnecessary symbolic wrapping.
+        # None to avoid unnecessary symbolic wrapping.  Guard against
+        # object-dtype arrays (containing SymbolicExpr) which are
+        # spuriously truthy for block 0 but may be PID-dependent.
         mask_expr = None
-        if mask is not None and not (
-            hasattr(mask, "data") and np.asarray(mask.data).all()
-        ):
-            mask_expr = SymbolicExpr.from_value(mask)
+        if mask is not None:
+            is_trivially_true = False
+            if hasattr(mask, "data"):
+                data = np.asarray(mask.data)
+                if data.dtype != object and data.all():
+                    is_trivially_true = True
+            if not is_trivially_true:
+                mask_expr = SymbolicExpr.from_value(mask)
+        elem_size = _get_elem_size(ptr)
         self._record_symbolic_access(
             AccessType.ATOMIC,
             SymbolicExpr.from_value(ptr),
             mask_expr,
             atomic_op=f"rmw:{str(rmwOp).lower()}",
+            elem_size=elem_size,
         )
         return ret
 
@@ -228,8 +303,9 @@ class RaceDetector(SymbolicClient):
             grid_idx = self.grid_idx
             if grid_idx is None:
                 return
-            offsets = np.asarray(ptr.data).flatten().astype(np.int64)
-            masks = np.asarray(mask.data).flatten().astype(bool)
+            offsets = _flatten_offsets(ptr)
+            masks = _flatten_mask(mask, len(offsets))
+            elem_size = _get_elem_size(ptr)
             event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
@@ -240,6 +316,7 @@ class RaceDetector(SymbolicClient):
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
                     event_id=event_id,
+                    elem_size=elem_size,
                 )
             )
 
@@ -250,8 +327,9 @@ class RaceDetector(SymbolicClient):
             grid_idx = self.grid_idx
             if grid_idx is None:
                 return
-            offsets = ptr.data.flatten().astype(np.int64)
-            masks = np.ones(offsets.shape, dtype=bool)
+            offsets = _flatten_offsets(ptr)
+            masks = _flatten_mask(None, len(offsets))
+            elem_size = _get_elem_size(ptr)
             event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
@@ -262,6 +340,7 @@ class RaceDetector(SymbolicClient):
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
                     event_id=event_id,
+                    elem_size=elem_size,
                 )
             )
 
@@ -272,8 +351,9 @@ class RaceDetector(SymbolicClient):
             grid_idx = self.grid_idx
             if grid_idx is None:
                 return
-            offsets = np.asarray(ptr.data).flatten().astype(np.int64)
-            masks = np.asarray(mask.data).flatten().astype(bool)
+            offsets = _flatten_offsets(ptr)
+            masks = _flatten_mask(mask, len(offsets))
+            elem_size = _get_elem_size(ptr)
             event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
@@ -284,6 +364,7 @@ class RaceDetector(SymbolicClient):
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
                     event_id=event_id,
+                    elem_size=elem_size,
                 )
             )
 
@@ -294,8 +375,9 @@ class RaceDetector(SymbolicClient):
             grid_idx = self.grid_idx
             if grid_idx is None:
                 return
-            offsets = ptr.data.flatten().astype(np.int64)
-            masks = np.ones(offsets.shape, dtype=bool)
+            offsets = _flatten_offsets(ptr)
+            masks = _flatten_mask(None, len(offsets))
+            elem_size = _get_elem_size(ptr)
             event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
@@ -306,6 +388,7 @@ class RaceDetector(SymbolicClient):
                     grid_idx=grid_idx,
                     call_path=extract_user_frames(),
                     event_id=event_id,
+                    elem_size=elem_size,
                 )
             )
 
@@ -316,12 +399,9 @@ class RaceDetector(SymbolicClient):
             grid_idx = self.grid_idx
             if grid_idx is None:
                 return
-            offsets = ptr.data.flatten().astype(np.int64)
-            masks = (
-                mask.data.flatten().astype(bool)
-                if mask is not None
-                else np.ones(offsets.shape, dtype=bool)
-            )
+            offsets = _flatten_offsets(ptr)
+            masks = _flatten_mask(mask, len(offsets))
+            elem_size = _get_elem_size(ptr)
             event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
@@ -333,6 +413,7 @@ class RaceDetector(SymbolicClient):
                     call_path=extract_user_frames(),
                     event_id=event_id,
                     atomic_op=f"rmw:{str(rmwOp).lower()}",
+                    elem_size=elem_size,
                 )
             )
 
@@ -343,8 +424,9 @@ class RaceDetector(SymbolicClient):
             grid_idx = self.grid_idx
             if grid_idx is None:
                 return
-            offsets = ptr.data.flatten().astype(np.int64)
-            masks = np.ones(offsets.shape, dtype=bool)
+            offsets = _flatten_offsets(ptr)
+            masks = _flatten_mask(None, len(offsets))
+            elem_size = _get_elem_size(ptr)
             event_id = self._next_event_id()
             self._concrete_accesses.append(
                 MemoryAccess(
@@ -356,6 +438,7 @@ class RaceDetector(SymbolicClient):
                     call_path=extract_user_frames(),
                     event_id=event_id,
                     atomic_op="cas",
+                    elem_size=elem_size,
                 )
             )
 
@@ -404,6 +487,7 @@ class RaceDetector(SymbolicClient):
         ptr_expr: SymbolicExpr,
         mask_expr: Optional[SymbolicExpr],
         atomic_op: Optional[str] = None,
+        elem_size: int = 1,
     ) -> None:
         is_data_dependent = ptr_expr.has_op("load")
         if mask_expr is not None and mask_expr.has_op("load"):
@@ -420,6 +504,7 @@ class RaceDetector(SymbolicClient):
                 call_path=extract_user_frames(),
                 event_id=event_id,
                 atomic_op=atomic_op,
+                elem_size=elem_size,
             )
         )
 
@@ -469,6 +554,65 @@ class RaceDetector(SymbolicClient):
             if state["add"] > 0 and state["cas"] > 0
         }
 
+    def _validate_symbolic_barriers(
+        self,
+        candidates: set[tuple[str, ...]],
+        accesses: list[SymbolicMemoryAccess],
+        grid: tuple[int, ...],
+    ) -> set[tuple[str, ...]]:
+        """Prune barrier candidates that fail PID-independence or mask-universality checks."""
+        if not candidates:
+            return candidates
+
+        pid_vars = [SymbolicExpr.PID0, SymbolicExpr.PID1, SymbolicExpr.PID2]
+        validated: set[tuple[str, ...]] = set()
+
+        for ptr_key in candidates:
+            barrier_accesses = [
+                acc
+                for acc in accesses
+                if acc.access_type == AccessType.ATOMIC
+                and self._symbolic_ptr_signature(acc.ptr_expr) == ptr_key
+            ]
+            if not barrier_accesses:
+                continue
+
+            # Check A: PID independence — barrier pointer must not depend on PID
+            sample = barrier_accesses[0]
+            ptr_z3, _ = sample.ptr_expr.eval()
+            free_vars = _z3_free_vars(ptr_z3)
+            has_pid = any(fv.eq(pv) for fv in free_vars for pv in pid_vars)
+            if has_pid:
+                continue
+
+            # Check B: Mask universality — every block must participate
+            mask_invalid = False
+            for acc in barrier_accesses:
+                if acc.mask_expr is None:
+                    continue
+                mask_z3, mask_constr = acc.mask_expr.eval()
+                solver = Solver()
+                solver.set("timeout", 1000)
+                for i, pv in enumerate(pid_vars[: len(grid)]):
+                    solver.add(And(pv >= 0, pv < grid[i]))
+                # Ask: exists PID where ALL mask lanes are False?
+                if isinstance(mask_z3, list):
+                    solver.add(Not(Or(*mask_z3)))
+                else:
+                    solver.add(Not(mask_z3))
+                if mask_constr is not None:
+                    solver.add(mask_constr)
+                result = solver.check()
+                if result != unsat:
+                    # SAT or unknown → not proven universal → remove candidate
+                    mask_invalid = True
+                    break
+
+            if not mask_invalid:
+                validated.add(ptr_key)
+
+        return validated
+
     def _apply_symbolic_epoch_annotations(
         self, accesses: list[SymbolicMemoryAccess]
     ) -> None:
@@ -476,6 +620,9 @@ class RaceDetector(SymbolicClient):
             acc.epoch = 0
 
         barrier_keys = self._detect_symbolic_barrier_keys(accesses)
+        barrier_keys = self._validate_symbolic_barriers(
+            barrier_keys, accesses, self._grid
+        )
         if not barrier_keys:
             return
 
@@ -636,16 +783,26 @@ class RaceDetector(SymbolicClient):
                     self._need_concrete_fallback = True
                     return []
 
+                # Byte-range element sizes
+                elem_size_a = acc_a.elem_size
+                elem_size_b = acc_b.elem_size
+
                 # Build lane-pair candidate predicates
                 candidate_preds = []
                 for ia, a_expr in enumerate(addrs_a):
                     ma = masks_a[ia]
                     for ib, b_expr in enumerate(addrs_b):
                         mb = masks_b[ib]
-                        eq = a_expr == b_expr
-                        terms = [t for t in (ma, mb, eq) if t is not True]
+                        if elem_size_a > 1 or elem_size_b > 1:
+                            addr_overlap = And(
+                                a_expr < b_expr + elem_size_b,
+                                b_expr < a_expr + elem_size_a,
+                            )
+                        else:
+                            addr_overlap = a_expr == b_expr
+                        terms = [t for t in (ma, mb, addr_overlap) if t is not True]
                         if not terms:
-                            pred = eq
+                            pred = addr_overlap
                         elif len(terms) == 1:
                             pred = terms[0]
                         else:
@@ -757,6 +914,9 @@ def _classify_race_type(
 
 def _active_offsets(access: MemoryAccess) -> np.ndarray:
     active = access.offsets[access.masks]
+    if access.elem_size > 1:
+        byte_offsets = np.concatenate([active + b for b in range(access.elem_size)])
+        return np.unique(byte_offsets).astype(np.int64)
     return np.unique(active).astype(np.int64)
 
 

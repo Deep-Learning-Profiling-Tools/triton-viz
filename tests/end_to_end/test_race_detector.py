@@ -359,3 +359,162 @@ def test_tensor_pointer_fallback_records_races():
         "Tensor pointer ops lowered to concrete but no races detected — "
         "concrete before-callbacks may not cover TensorPointerStore"
     )
+
+
+# ======== Analysis-time bailout triggers grid restart (Patch 1) ========
+
+
+class _AnalysisBailDetector(RaceDetector):
+    """Forces analysis-time bailout to test grid restart."""
+
+    def _check_symbolic_races(self):
+        self._need_concrete_fallback = True
+        return []
+
+    def finalize(self):
+        self.finalize_phase = self._phase
+        return super().finalize()
+
+
+def test_analysis_time_bail_restarts_grid():
+    """When _check_symbolic_races triggers bail, block 0 must re-run concretely."""
+    detector = _AnalysisBailDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        tl.store(out_ptr + offsets, (pid + 1).to(tl.float32))
+
+    bs = 4
+    n_blocks = 2
+    out = torch.full((n_blocks * bs,), -1.0, dtype=torch.float32)
+    kernel[(n_blocks,)](out, bs)
+
+    assert detector.finalize_phase == "concrete"
+    # Both blocks must have written: block 0 writes 1.0, block 1 writes 2.0
+    expected = torch.cat([torch.full((bs,), float(pid + 1)) for pid in range(n_blocks)])
+    assert torch.equal(
+        out, expected
+    ), f"Block 0 concrete side effects missing — got {out}, expected {expected}"
+
+
+# ======== Tensor pointer load fallback (Patch 2) ========
+
+
+def test_tensor_pointer_load_fallback():
+    """Block-pointer load bails to concrete; output matches input."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(in_ptr, out_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        block_ptr = tl.make_block_ptr(
+            base=in_ptr,
+            shape=(N,),
+            strides=(1,),
+            offsets=(pid * BLOCK_SIZE,),
+            block_shape=(BLOCK_SIZE,),
+            order=(0,),
+        )
+        vals = tl.load(block_ptr, boundary_check=(0,))
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < N
+        tl.store(out_ptr + offsets, vals, mask=mask)
+
+    n, bs = 16, 8
+    inp = torch.arange(n, dtype=torch.float32)
+    out = torch.full((n,), -1.0, dtype=torch.float32)
+    kernel[(triton.cdiv(n, bs),)](inp, out, N=n, BLOCK_SIZE=bs)
+
+    assert detector.finalize_phase == "concrete"
+    assert torch.equal(out, inp), f"Load path mismatch — got {out}, expected {inp}"
+
+
+# ======== Two distinct CAS sites remain symbolic (Patch 3) ========
+
+
+def test_two_distinct_cas_sites_remain_symbolic():
+    """Two CAS ops on different sync pointers should stay on the symbolic path."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, sync_a_ptr, sync_b_ptr):
+        pid = tl.program_id(0)
+        # One CAS on each of two distinct sync addresses
+        tl.atomic_cas(sync_a_ptr, 0, 0)
+        tl.atomic_cas(sync_b_ptr, 0, 0)
+        tl.store(out_ptr + pid, tl.cast(pid, tl.float32))
+
+    n_blocks = 2
+    out = torch.zeros(n_blocks, dtype=torch.float32)
+    sync_a = torch.zeros(1, dtype=torch.int32)
+    sync_b = torch.zeros(1, dtype=torch.int32)
+    kernel[(n_blocks,)](out, sync_a, sync_b)
+
+    assert (
+        detector.finalize_phase == "z3_done"
+    ), f"Expected symbolic path but got phase={detector.finalize_phase}"
+    races = launches[-1].records
+    assert len(races) == 0
+
+
+# ======== Masked barrier is NOT trusted (Fix 1) ========
+
+
+def test_masked_barrier_not_trusted_symbolic():
+    """Masked atomic_add means not all blocks participate — barrier invalid."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, sync_ptr, N_BLOCKS: tl.constexpr):
+        pid = tl.program_id(0)
+        tl.store(out_ptr + pid, tl.cast(pid, tl.float32))
+        # Barrier add only for pid == 0 — not all blocks participate
+        barrier_mask = pid == 0
+        tl.atomic_add(sync_ptr, 1, mask=barrier_mask)
+        tl.atomic_cas(sync_ptr, 0, 0)
+        dst = (pid + 1) % N_BLOCKS
+        tl.store(out_ptr + dst, tl.cast(pid + 100, tl.float32))
+
+    n_blocks = 4
+    out = torch.zeros(n_blocks, dtype=torch.float32)
+    sync = torch.zeros(1, dtype=torch.int32)
+    kernel[(n_blocks,)](out, sync, n_blocks)
+
+    races = launches[-1].records
+    assert detector.finalize_phase == "z3_done"
+    assert len(races) > 0, "Masked barrier should NOT be trusted — races expected"
+
+
+# ======== PID-dependent barrier pointer NOT trusted (Fix 1) ========
+
+
+def test_pid_dependent_barrier_ptr_not_trusted():
+    """Each block targets a different sync address — not a global barrier."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, sync_ptr, N_BLOCKS: tl.constexpr):
+        pid = tl.program_id(0)
+        tl.store(out_ptr + pid, tl.cast(pid, tl.float32))
+        tl.atomic_add(sync_ptr + pid, 1)
+        tl.atomic_cas(sync_ptr + pid, 0, 0)
+        dst = (pid + 1) % N_BLOCKS
+        tl.store(out_ptr + dst, tl.cast(pid + 100, tl.float32))
+
+    n_blocks = 4
+    out = torch.zeros(n_blocks, dtype=torch.float32)
+    sync = torch.zeros(n_blocks, dtype=torch.int32)
+    kernel[(n_blocks,)](out, sync, n_blocks)
+
+    races = launches[-1].records
+    assert detector.finalize_phase == "z3_done"
+    assert (
+        len(races) > 0
+    ), "PID-dependent barrier ptr should NOT be trusted — races expected"
