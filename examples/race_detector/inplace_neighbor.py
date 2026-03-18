@@ -1,4 +1,4 @@
-"""RAW race: Block N reads x[N+1 region] while Block N+1 writes x[N+1 region]."""
+"""RW race: Block N reads x[N+1 region] while Block N+1 writes x[N+1 region]."""
 
 import torch
 import triton
