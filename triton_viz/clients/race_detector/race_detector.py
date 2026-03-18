@@ -126,13 +126,25 @@ class RaceDetector(SymbolicClient):
         self._record_symbolic_access(AccessType.STORE, ptr_sym, mask_sym)
         return ret
 
-    def _op_make_block_ptr_overrider(self, base, shape, strides, offsets, tensor_shape, order):
+    def _op_make_block_ptr_overrider(
+        self, base, shape, strides, offsets, tensor_shape, order
+    ):
         self._bail_to_concrete("MakeBlockPtr not supported")
 
-    def _op_tensor_pointer_load_overrider(self, ptr, boundary_check, padding_option, cache_modifier, eviction_policy, is_volatile):
+    def _op_tensor_pointer_load_overrider(
+        self,
+        ptr,
+        boundary_check,
+        padding_option,
+        cache_modifier,
+        eviction_policy,
+        is_volatile,
+    ):
         self._bail_to_concrete("TensorPointerLoad not supported")
 
-    def _op_tensor_pointer_store_overrider(self, ptr, value, boundary_check, cache_modifier, eviction_policy):
+    def _op_tensor_pointer_store_overrider(
+        self, ptr, value, boundary_check, cache_modifier, eviction_policy
+    ):
         self._bail_to_concrete("TensorPointerStore not supported")
 
     def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
@@ -402,6 +414,7 @@ class RaceDetector(SymbolicClient):
     def _bail_to_concrete(self, reason: str = "") -> None:
         self._need_concrete_fallback = True
         from ...core.patch import SymbolicBailout
+
         raise SymbolicBailout()
 
     def _symbolic_ptr_signature(self, ptr_expr: SymbolicExpr) -> tuple[str, ...]:
@@ -540,9 +553,9 @@ class RaceDetector(SymbolicClient):
                 return [True] * n_lanes
             val = _apply_sub(mask_z3, sub_pairs)
             if isinstance(val, list):
-                assert len(val) == n_lanes, (
-                    f"mask length {len(val)} != address length {n_lanes}"
-                )
+                assert (
+                    len(val) == n_lanes
+                ), f"mask length {len(val)} != address length {n_lanes}"
                 return [v if is_bool(v) else True for v in val]
             if is_bool(val):
                 return [val] * n_lanes

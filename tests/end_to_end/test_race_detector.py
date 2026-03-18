@@ -248,9 +248,9 @@ def test_data_dependent_ptr_concrete_fallback():
     assert detector.finalize_phase == "concrete"
     # Verify block 0's concrete side effects: out[i] == i + 1 for all i
     expected = torch.arange(1, n + 1, dtype=torch.float32)
-    assert torch.equal(out, expected), (
-        f"Block 0 side effects missing — got {out}, expected {expected}"
-    )
+    assert torch.equal(
+        out, expected
+    ), f"Block 0 side effects missing — got {out}, expected {expected}"
     races = launches[-1].records
     assert len(races) == 0  # identity mapping means no overlap
 
@@ -318,9 +318,9 @@ def test_witness_address_in_overlap_range():
             base + i * elem_size
             for i in range(bb * (bs - 1), min(bb * (bs - 1) + bs, n))
         )
-        assert r.address_offset in range_a, (
-            f"witness {r.address_offset} not in block {ba} range"
-        )
-        assert r.address_offset in range_b, (
-            f"witness {r.address_offset} not in block {bb} range"
-        )
+        assert (
+            r.address_offset in range_a
+        ), f"witness {r.address_offset} not in block {ba} range"
+        assert (
+            r.address_offset in range_b
+        ), f"witness {r.address_offset} not in block {bb} range"
