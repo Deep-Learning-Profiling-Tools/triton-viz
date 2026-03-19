@@ -335,3 +335,88 @@ def test_same_elem_size_aligned_no_false_positive():
     ]
     races = detect_races(accesses)
     assert len(races) == 0
+
+
+def test_cta_scope_atomic_not_global_barrier():
+    """Atomics with CTA scope should not be detected as global barriers."""
+    n = 4
+    barrier_addr = 4096
+    accesses = []
+    for i in range(n):
+        accesses.append(
+            MemoryAccess(
+                access_type=AccessType.ATOMIC,
+                ptr=0,
+                offsets=np.array([barrier_addr], dtype=np.int64),
+                masks=np.array([True], dtype=np.bool_),
+                grid_idx=(i, 0, 0),
+                event_id=10 + i,
+                atomic_op="rmw:add",
+                atomic_scope="cta",
+            )
+        )
+        accesses.append(
+            MemoryAccess(
+                access_type=AccessType.ATOMIC,
+                ptr=0,
+                offsets=np.array([barrier_addr], dtype=np.int64),
+                masks=np.array([True], dtype=np.bool_),
+                grid_idx=(i, 0, 0),
+                event_id=20 + i,
+                atomic_op="cas",
+                atomic_scope="cta",
+            )
+        )
+    assert _detect_global_barrier_addresses(accesses) == set()
+
+
+def _load_access(block_idx: int, offset: int, event_id: int) -> MemoryAccess:
+    return MemoryAccess(
+        access_type=AccessType.LOAD,
+        ptr=0,
+        offsets=np.array([offset], dtype=np.int64),
+        masks=np.array([True], dtype=np.bool_),
+        grid_idx=(block_idx, 0, 0),
+        event_id=event_id,
+    )
+
+
+def test_concrete_epoch_survives_intervening_load_store():
+    """Intervening load/store between add and cas must not break barrier tracking."""
+    n = 4
+    barrier_addr = 4096
+    data_addr = 9999
+    accesses = []
+    for i in range(n):
+        # Phase 0 store
+        accesses.append(_store_access(block_idx=i, offset=i, event_id=i))
+        # Barrier add
+        accesses.append(
+            _atomic_access(i, barrier_addr, event_id=100 + i, atomic_op="rmw:add")
+        )
+        # Intervening load (should not reset barrier tracking)
+        accesses.append(_load_access(block_idx=i, offset=data_addr, event_id=150 + i))
+        # Barrier cas
+        accesses.append(
+            _atomic_access(i, barrier_addr, event_id=200 + i, atomic_op="cas")
+        )
+        # Phase 1 store
+        accesses.append(
+            _store_access(block_idx=i, offset=(i + 1) % n, event_id=300 + i)
+        )
+
+    races = detect_races(accesses)
+    assert len(races) == 0
+
+    phase0_stores = [
+        acc
+        for acc in accesses
+        if acc.access_type == AccessType.STORE and acc.event_id < 100
+    ]
+    phase1_stores = [
+        acc
+        for acc in accesses
+        if acc.access_type == AccessType.STORE and acc.event_id >= 300
+    ]
+    assert all(acc.epoch == 0 for acc in phase0_stores)
+    assert all(acc.epoch == 1 for acc in phase1_stores)

@@ -8,14 +8,10 @@ from z3 import (
     Int,
     And,
     Or,
-    Not,
     sat,
-    unsat,
     substitute,
     is_bool,
     is_true,
-    is_const,
-    is_int_value,
 )
 from z3.z3 import ArithRef
 
@@ -51,27 +47,10 @@ def _flatten_mask(mask, n: int) -> np.ndarray:
     return np.asarray(mask.data).flatten().astype(bool)
 
 
-def _z3_free_vars(expr) -> set:
-    """Collect uninterpreted Z3 constants (free variables) from an expression."""
-    seen: set[int] = set()
-    result: set = set()
-
-    def walk(e):
-        eid = id(e)
-        if eid in seen:
-            return
-        seen.add(eid)
-        if is_const(e) and not is_int_value(e):
-            result.add(e)
-        for child in e.children():
-            walk(child)
-
-    if isinstance(expr, list):
-        for e in expr:
-            walk(e)
-    else:
-        walk(expr)
-    return result
+def _is_inter_block_scope(scope: str | None) -> bool:
+    if scope is None:
+        return True
+    return "cta" not in scope.lower()
 
 
 def _get_elem_size(handle) -> int:
@@ -100,6 +79,9 @@ class RaceDetector(SymbolicClient):
         self._op_callbacks: list[tuple[OpCallbacks, Callable]] = []
         self._races: list[RaceRecord] = []
         self._symbolic_cas_counts: dict[tuple[str, ...], int] = {}
+        self._symbolic_barrier_candidates: dict[
+            tuple[str, ...], set[str]
+        ] = defaultdict(set)
         self._event_counter: int = 0
 
     # ── Client interface ─────────────────────────────────────────
@@ -147,6 +129,7 @@ class RaceDetector(SymbolicClient):
         self._grid = tuple(int(g) for g in grid)
         self._need_concrete_fallback = False
         self._symbolic_cas_counts.clear()
+        self._symbolic_barrier_candidates.clear()
         self._symbolic_accesses.clear()
         self._concrete_accesses.clear()
         self._races.clear()
@@ -237,6 +220,7 @@ class RaceDetector(SymbolicClient):
                 from ...core.patch import SymbolicBailout
 
                 raise SymbolicBailout()
+            self._note_symbolic_atomic(ptr_expr, "cas", scope)
         ret = super()._op_atomic_cas_overrider(ptr, cmp, val, sem, scope)
         elem_size = _get_elem_size(ptr)
         self._record_symbolic_access(
@@ -245,11 +229,15 @@ class RaceDetector(SymbolicClient):
             None,
             atomic_op="cas",
             elem_size=elem_size,
+            atomic_scope=str(scope).lower() if scope else None,
+            atomic_sem=str(sem).lower() if sem else None,
         )
         return ret
 
     def _op_atomic_rmw_overrider(self, rmwOp, ptr, val, mask, sem, scope):
         ret = super()._op_atomic_rmw_overrider(rmwOp, ptr, val, mask, sem, scope)
+        if self._phase == "symbolic" and "add" in str(rmwOp).lower():
+            self._note_symbolic_atomic(SymbolicExpr.from_value(ptr), "add", scope)
         # The interpreter always supplies a TensorHandle mask (never None),
         # even when the user omits it. Treat trivially-all-True masks as
         # None to avoid unnecessary symbolic wrapping.  Guard against
@@ -271,6 +259,8 @@ class RaceDetector(SymbolicClient):
             mask_expr,
             atomic_op=f"rmw:{str(rmwOp).lower()}",
             elem_size=elem_size,
+            atomic_scope=str(scope).lower() if scope else None,
+            atomic_sem=str(sem).lower() if sem else None,
         )
         return ret
 
@@ -414,6 +404,8 @@ class RaceDetector(SymbolicClient):
                     event_id=event_id,
                     atomic_op=f"rmw:{str(rmwOp).lower()}",
                     elem_size=elem_size,
+                    atomic_scope=str(scope).lower() if scope else None,
+                    atomic_sem=str(sem).lower() if sem else None,
                 )
             )
 
@@ -439,6 +431,8 @@ class RaceDetector(SymbolicClient):
                     event_id=event_id,
                     atomic_op="cas",
                     elem_size=elem_size,
+                    atomic_scope=str(scope).lower() if scope else None,
+                    atomic_sem=str(sem).lower() if sem else None,
                 )
             )
 
@@ -488,6 +482,8 @@ class RaceDetector(SymbolicClient):
         mask_expr: Optional[SymbolicExpr],
         atomic_op: Optional[str] = None,
         elem_size: int = 1,
+        atomic_scope: str | None = None,
+        atomic_sem: str | None = None,
     ) -> None:
         is_data_dependent = ptr_expr.has_op("load")
         if mask_expr is not None and mask_expr.has_op("load"):
@@ -505,6 +501,8 @@ class RaceDetector(SymbolicClient):
                 event_id=event_id,
                 atomic_op=atomic_op,
                 elem_size=elem_size,
+                atomic_scope=atomic_scope,
+                atomic_sem=atomic_sem,
             )
         )
 
@@ -529,132 +527,19 @@ class RaceDetector(SymbolicClient):
             return tuple(str(e) for e in ptr_z3)
         return (str(ptr_z3),)
 
-    def _detect_symbolic_barrier_keys(
-        self, accesses: list[SymbolicMemoryAccess]
-    ) -> set[tuple[str, ...]]:
-        stats: dict[tuple[str, ...], dict[str, int]] = defaultdict(
-            lambda: {"add": 0, "cas": 0}
-        )
-        for acc in accesses:
-            if acc.access_type != AccessType.ATOMIC:
-                continue
-            atomic_op = (acc.atomic_op or "").lower()
-            is_add = "add" in atomic_op
-            is_cas = "cas" in atomic_op
-            if not is_add and not is_cas:
-                continue
-            ptr_key = self._symbolic_ptr_signature(acc.ptr_expr)
-            if is_add:
-                stats[ptr_key]["add"] += 1
-            if is_cas:
-                stats[ptr_key]["cas"] += 1
-        return {
-            ptr_key
-            for ptr_key, state in stats.items()
-            if state["add"] > 0 and state["cas"] > 0
-        }
-
-    def _validate_symbolic_barriers(
-        self,
-        candidates: set[tuple[str, ...]],
-        accesses: list[SymbolicMemoryAccess],
-        grid: tuple[int, ...],
-    ) -> set[tuple[str, ...]]:
-        """Prune barrier candidates that fail PID-independence or mask-universality checks."""
-        if not candidates:
-            return candidates
-
-        pid_vars = [SymbolicExpr.PID0, SymbolicExpr.PID1, SymbolicExpr.PID2]
-        validated: set[tuple[str, ...]] = set()
-
-        for ptr_key in candidates:
-            barrier_accesses = [
-                acc
-                for acc in accesses
-                if acc.access_type == AccessType.ATOMIC
-                and self._symbolic_ptr_signature(acc.ptr_expr) == ptr_key
-            ]
-            if not barrier_accesses:
-                continue
-
-            # Check A: PID independence — barrier pointer must not depend on PID
-            sample = barrier_accesses[0]
-            ptr_z3, _ = sample.ptr_expr.eval()
-            free_vars = _z3_free_vars(ptr_z3)
-            has_pid = any(fv.eq(pv) for fv in free_vars for pv in pid_vars)
-            if has_pid:
-                continue
-
-            # Check B: Mask universality — every block must participate
-            mask_invalid = False
-            for acc in barrier_accesses:
-                if acc.mask_expr is None:
-                    continue
-                mask_z3, mask_constr = acc.mask_expr.eval()
-                solver = Solver()
-                solver.set("timeout", 1000)
-                for i, pv in enumerate(pid_vars[: len(grid)]):
-                    solver.add(And(pv >= 0, pv < grid[i]))
-                # Ask: exists PID where ALL mask lanes are False?
-                if isinstance(mask_z3, list):
-                    solver.add(Not(Or(*mask_z3)))
-                else:
-                    solver.add(Not(mask_z3))
-                if mask_constr is not None:
-                    solver.add(mask_constr)
-                result = solver.check()
-                if result != unsat:
-                    # SAT or unknown → not proven universal → remove candidate
-                    mask_invalid = True
-                    break
-
-            if not mask_invalid:
-                validated.add(ptr_key)
-
-        return validated
-
-    def _apply_symbolic_epoch_annotations(
-        self, accesses: list[SymbolicMemoryAccess]
+    def _note_symbolic_atomic(
+        self, ptr_expr: SymbolicExpr, atomic_op: str, scope
     ) -> None:
-        for acc in accesses:
-            acc.epoch = 0
-
-        barrier_keys = self._detect_symbolic_barrier_keys(accesses)
-        barrier_keys = self._validate_symbolic_barriers(
-            barrier_keys, accesses, self._grid
-        )
-        if not barrier_keys:
+        scope_str = str(scope).lower() if scope is not None else None
+        if not _is_inter_block_scope(scope_str):
             return
+        ptr_key = self._symbolic_ptr_signature(ptr_expr)
+        self._symbolic_barrier_candidates[ptr_key].add(atomic_op)
+        if {"add", "cas"} <= self._symbolic_barrier_candidates[ptr_key]:
+            self._need_concrete_fallback = True
+            from ...core.patch import SymbolicBailout
 
-        ordered = sorted(accesses, key=lambda a: a.event_id)
-        epoch = 0
-        in_barrier_candidate = False
-        seen_add = False
-        seen_cas = False
-
-        for acc in ordered:
-            is_barrier_atomic = (
-                acc.access_type == AccessType.ATOMIC
-                and self._symbolic_ptr_signature(acc.ptr_expr) in barrier_keys
-            )
-            if is_barrier_atomic:
-                atomic_op = (acc.atomic_op or "").lower()
-                in_barrier_candidate = True
-                if "add" in atomic_op:
-                    seen_add = True
-                if "cas" in atomic_op:
-                    seen_cas = True
-                acc.epoch = epoch
-                continue
-
-            if in_barrier_candidate:
-                if seen_add and seen_cas:
-                    epoch += 1
-                in_barrier_candidate = False
-                seen_add = False
-                seen_cas = False
-
-            acc.epoch = epoch
+            raise SymbolicBailout()
 
     def _check_symbolic_races(self) -> list[RaceRecord]:
         if not self._symbolic_accesses:
@@ -667,7 +552,6 @@ class RaceDetector(SymbolicClient):
             acc.ptr_expr.eval()
             if acc.mask_expr is not None:
                 acc.mask_expr.eval()
-        self._apply_symbolic_epoch_annotations(self._symbolic_accesses)
 
         # Create block-specific PID variables
         pid_a = [Int(f"pid_a_{i}") for i in range(3)]
@@ -920,20 +804,15 @@ def _active_offsets(access: MemoryAccess) -> np.ndarray:
     return np.unique(active).astype(np.int64)
 
 
-def _touches_address(access: MemoryAccess, addr_set: set[int]) -> bool:
-    for off in _active_offsets(access):
-        if int(off) in addr_set:
-            return True
-    return False
-
-
-def _is_barrier_atomic(access: MemoryAccess, barrier_addrs: set[int]) -> bool:
-    if access.access_type != AccessType.ATOMIC:
-        return False
-    if not _touches_address(access, barrier_addrs):
-        return False
-    atomic_op = (access.atomic_op or "").lower()
-    return "add" in atomic_op or "cas" in atomic_op
+def _matched_barrier_addrs(acc: MemoryAccess, barrier_addrs: set[int]) -> list[int]:
+    if acc.access_type != AccessType.ATOMIC:
+        return []
+    if not _is_inter_block_scope(acc.atomic_scope):
+        return []
+    atomic_op = (acc.atomic_op or "").lower()
+    if "add" not in atomic_op and "cas" not in atomic_op:
+        return []
+    return [int(off) for off in _active_offsets(acc) if int(off) in barrier_addrs]
 
 
 def _detect_global_barrier_addresses(accesses: list[MemoryAccess]) -> set[int]:
@@ -952,6 +831,8 @@ def _detect_global_barrier_addresses(accesses: list[MemoryAccess]) -> set[int]:
         is_add = "add" in atomic_op
         is_cas = "cas" in atomic_op
         if not is_add and not is_cas:
+            continue
+        if not _is_inter_block_scope(acc.atomic_scope):
             continue
         for off in _active_offsets(acc):
             addr = int(off)
@@ -972,27 +853,22 @@ def _annotate_block_epochs(
 ) -> int:
     block_accesses.sort(key=lambda a: a.event_id)
     epoch = 0
-    in_barrier_candidate = False
-    seen_add = False
-    seen_cas = False
+    pending: dict[int, set[str]] = {}  # barrier_addr → {"add", "cas"}
 
     for acc in block_accesses:
-        if _is_barrier_atomic(acc, barrier_addrs):
+        matched = _matched_barrier_addrs(acc, barrier_addrs)
+        if matched:
             atomic_op = (acc.atomic_op or "").lower()
-            in_barrier_candidate = True
-            if "add" in atomic_op:
-                seen_add = True
-            if "cas" in atomic_op:
-                seen_cas = True
+            op_kind = "add" if "add" in atomic_op else "cas"
+            for addr in matched:
+                pending.setdefault(addr, set()).add(op_kind)
             acc.epoch = epoch
             continue
 
-        if in_barrier_candidate:
-            if seen_add and seen_cas:
-                epoch += 1
-            in_barrier_candidate = False
-            seen_add = False
-            seen_cas = False
+        # Non-barrier access: advance epoch if any pending barrier completed
+        if any({"add", "cas"} <= ops for ops in pending.values()):
+            epoch += 1
+            pending.clear()
 
         acc.epoch = epoch
 

@@ -180,7 +180,7 @@ def test_two_phase_barrier_symbolic_no_race():
     kernel[(n_blocks,)](out, sync, n_blocks)
 
     races = launches[-1].records
-    assert detector.finalize_phase == "z3_done"
+    assert detector.finalize_phase == "concrete"
     assert len(races) == 0
 
 
@@ -487,7 +487,7 @@ def test_masked_barrier_not_trusted_symbolic():
     kernel[(n_blocks,)](out, sync, n_blocks)
 
     races = launches[-1].records
-    assert detector.finalize_phase == "z3_done"
+    assert detector.finalize_phase == "concrete"
     assert len(races) > 0, "Masked barrier should NOT be trusted — races expected"
 
 
@@ -514,7 +514,65 @@ def test_pid_dependent_barrier_ptr_not_trusted():
     kernel[(n_blocks,)](out, sync, n_blocks)
 
     races = launches[-1].records
-    assert detector.finalize_phase == "z3_done"
+    assert detector.finalize_phase == "concrete"
     assert (
         len(races) > 0
     ), "PID-dependent barrier ptr should NOT be trusted — races expected"
+
+
+# ======== Symbolic add+cas forces concrete fallback ========
+
+
+def test_symbolic_add_plus_cas_forces_concrete_fallback():
+    """Kernel with atomic_add + atomic_cas (no spin loop) bails to concrete."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, sync_ptr, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        # Non-overlapping stores
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        tl.store(out_ptr + offsets, offsets.to(tl.float32))
+        # Barrier pattern: add + cas on same pointer
+        tl.atomic_add(sync_ptr, 1)
+        tl.atomic_cas(sync_ptr, 0, 0)
+
+    n_blocks = 4
+    bs = 8
+    out = torch.zeros(n_blocks * bs, dtype=torch.float32)
+    sync = torch.zeros(1, dtype=torch.int32)
+    kernel[(n_blocks,)](out, sync, bs)
+
+    assert detector.finalize_phase == "concrete"
+    races = launches[-1].records
+    assert len(races) == 0
+
+
+# ======== Lock/counter pattern not suppressed ========
+
+
+def test_lock_or_counter_pattern_not_suppressed():
+    """add+cas used as counter/lock with overlapping stores still reports races."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, sync_ptr, N_BLOCKS: tl.constexpr):
+        pid = tl.program_id(0)
+        # All blocks write to offset 0 — clear WAW race
+        tl.store(out_ptr, tl.cast(pid, tl.float32))
+        # add+cas that doesn't form a real global barrier
+        # (not all blocks necessarily see both ops at the same address
+        #  in a way that synchronizes)
+        tl.atomic_add(sync_ptr + pid, 1)
+        tl.atomic_cas(sync_ptr + pid, 0, 0)
+
+    n_blocks = 4
+    out = torch.zeros(1, dtype=torch.float32)
+    sync = torch.zeros(n_blocks, dtype=torch.int32)
+    kernel[(n_blocks,)](out, sync, n_blocks)
+
+    assert detector.finalize_phase == "concrete"
+    races = launches[-1].records
+    assert len(races) > 0

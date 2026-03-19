@@ -33,6 +33,8 @@ class MemoryAccess:
     event_id: int = 0
     atomic_op: str | None = None
     elem_size: int = 1
+    atomic_scope: str | None = None
+    atomic_sem: str | None = None
 
 
 @dataclass
@@ -48,6 +50,8 @@ class SymbolicMemoryAccess:
     event_id: int = 0
     atomic_op: str | None = None
     elem_size: int = 1
+    atomic_scope: str | None = None
+    atomic_sem: str | None = None
 
 
 @dataclass
