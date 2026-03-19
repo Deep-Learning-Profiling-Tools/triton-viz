@@ -14,7 +14,7 @@ from collections import defaultdict, deque
 
 import numpy as np
 
-from .data import MemoryAccess
+from .data import MemoryAccess, SymbolicMemoryAccess, AccessType
 
 
 def _release_like(sem: str | None) -> bool:
@@ -234,3 +234,39 @@ def _reachable(adj: dict[int, set[int]], src: int, dst: int) -> bool:
                 visited.add(neighbor)
                 queue.append(neighbor)
     return False
+
+
+class SymbolicHBSolver:
+    """HB solver for symbolic accesses.
+
+    Models two copies of the program (block A and block B) since the symbolic
+    trace is a template executed by all blocks. po edges are within each copy,
+    sw edges are between copies.
+
+    Uses symbolic ptr signatures to determine address overlap for sw edges.
+    Like HBSolver, uses unconditional sw for qualifying release/acquire pairs.
+    """
+
+    def __init__(
+        self,
+        acc_a: SymbolicMemoryAccess,
+        acc_b: SymbolicMemoryAccess,
+        all_accesses: list[SymbolicMemoryAccess],
+        ptr_signature_fn,
+    ):
+        self._acc_a = acc_a
+        self._acc_b = acc_b
+        self._all_accesses = all_accesses
+        self._ptr_sig = ptr_signature_fn
+
+    def check_race_possible(self) -> bool:
+        """Return True -- symbolic HB cannot currently prove ordering.
+
+        Sound suppression requires both:
+        1. Must-alias proof (not just signature equality)
+        2. Reads-from proof (atomic_old unavailable in symbolic accesses)
+
+        Until the symbolic engine provides these, conservatively report all
+        candidate races and let the concrete fallback handle suppression.
+        """
+        return True

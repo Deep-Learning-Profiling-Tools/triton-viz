@@ -716,6 +716,18 @@ class RaceDetector(SymbolicClient):
                 if race_type is None:
                     continue
 
+                # Symbolic HB check for mixed atomic/plain pairs
+                if race_type is not None and _has_symbolic_sync_metadata(
+                    accesses, acc_a.epoch
+                ):
+                    from .hb_solver import SymbolicHBSolver
+
+                    sym_hb = SymbolicHBSolver(
+                        acc_a, acc_b, accesses, self._symbolic_ptr_signature
+                    )
+                    if not sym_hb.check_race_possible():
+                        continue  # UNSAT → proven ordered, suppress
+
                 # Get Z3 expressions for pointers
                 ptr_z3_a, ptr_constr_a = acc_a.ptr_expr.eval()
                 ptr_z3_b, ptr_constr_b = acc_b.ptr_expr.eval()
@@ -842,6 +854,20 @@ class RaceDetector(SymbolicClient):
                     )
 
         return races
+
+
+def _has_symbolic_sync_metadata(
+    accesses: list[SymbolicMemoryAccess], epoch: int
+) -> bool:
+    """Check if any symbolic atomic access in the given epoch has sync metadata."""
+    for acc in accesses:
+        if acc.epoch != epoch:
+            continue
+        if acc.access_type != AccessType.ATOMIC:
+            continue
+        if acc.atomic_sem is not None:
+            return True
+    return False
 
 
 def _classify_race_type(
