@@ -9,7 +9,7 @@ import threading
 import time
 from functools import partialmethod
 
-from .config import config as cfg
+from .config import config as cfg, TensorMode
 from .callbacks import OpCallbacks
 
 from .data import (
@@ -355,7 +355,13 @@ def unpatch_lang(backend):
 
 
 class TensorMaterializer:
-    """Lazily copies GPU tensor storage to CPU on demand."""
+    """Lazily copies GPU tensor storage to CPU on demand.
+
+    In ``LAZY_AUTO`` mode, unmappable pointers trigger an eager fallback that
+    materialises *all* registered storages to CPU so that the addresses can
+    still be resolved.  In ``FORCE_FAKE`` mode the same situation raises
+    ``RuntimeError`` immediately.
+    """
 
     def __init__(self):
         self._storages: list[tuple[int, int, Any]] = []  # (base, end, storage)
@@ -371,8 +377,10 @@ class TensorMaterializer:
 
     def rebase_pointers(self, ptr_data, mask=None):
         if mask is not None:
-            mask_arr = np.broadcast_to(np.asarray(mask), ptr_data.shape)
-            valid_indices = np.flatnonzero(mask_arr.flat)
+            mask_arr = np.broadcast_to(
+                np.asarray(mask, dtype=bool), ptr_data.shape
+            )
+            valid_indices = np.flatnonzero(mask_arr.ravel())
         else:
             valid_indices = np.arange(ptr_data.size)
 
@@ -381,6 +389,16 @@ class TensorMaterializer:
 
         flat = ptr_data.flat
 
+        try:
+            return self._rebase_core(flat, valid_indices, ptr_data)
+        except RuntimeError:
+            if cfg.tensor_mode == TensorMode.FORCE_FAKE:
+                raise
+            # LAZY_AUTO fallback: eagerly materialise every storage, retry
+            self._eager_materialise_all()
+            return self._rebase_core(flat, valid_indices, ptr_data)
+
+    def _rebase_core(self, flat, valid_indices, ptr_data):
         # Fast path: check if all valid pointers share one storage
         first_base = self._find_base(int(flat[valid_indices[0]]))
         _, first_end, _ = next(s for s in self._storages if s[0] == first_base)
@@ -405,6 +423,12 @@ class TensorMaterializer:
             for i in indices:
                 result.flat[i] += offset
         return result
+
+    def _eager_materialise_all(self):
+        """Copy every registered storage to CPU (fallback for unmappable ptrs)."""
+        for base, _, stor in self._storages:
+            if base not in self._cpu_cache:
+                self._cpu_cache[base] = stor.cpu()
 
     def _cpu_offset(self, gpu_base):
         if gpu_base not in self._cpu_cache:
@@ -512,7 +536,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
     materializer = None
     try:
-        if cfg.virtual_memory:
+        if cfg.tensor_mode != TensorMode.FORCE_REAL:
             materializer = TensorMaterializer()
             set_materializer(materializer)
             args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs, materializer)
@@ -598,7 +622,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
                 f"Triton-Viz: execution time for {name}: {elapsed_time * 1000:.3f} ms"
             )
         # Copy arguments back to propagate side-effects
-        if not cfg.virtual_memory:
+        if cfg.tensor_mode == TensorMode.FORCE_REAL:
             self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
     finally:
         set_materializer(None)

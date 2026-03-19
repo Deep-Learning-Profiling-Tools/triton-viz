@@ -1,4 +1,37 @@
 import os
+import warnings
+from enum import Enum
+
+
+class TensorMode(Enum):
+    """Three-state semantics for SANITIZER_ENABLE_FAKE_TENSOR.
+
+    FORCE_REAL  (env="0"):   always copy tensors to CPU upfront.
+    LAZY_AUTO   (env unset or "auto"): fake tensors with lazy materialization;
+                             falls back to eager-real on unmappable pointers.
+    FORCE_FAKE  (env="1"):   fake tensors with lazy materialization;
+                             unmappable pointers raise RuntimeError.
+    """
+
+    FORCE_REAL = "force_real"
+    LAZY_AUTO = "lazy_auto"
+    FORCE_FAKE = "force_fake"
+
+
+def _parse_tensor_mode() -> TensorMode:
+    raw = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR")
+    if raw is None or raw.lower() == "auto":
+        return TensorMode.LAZY_AUTO
+    if raw == "0":
+        return TensorMode.FORCE_REAL
+    if raw == "1":
+        return TensorMode.FORCE_FAKE
+    warnings.warn(
+        f"SANITIZER_ENABLE_FAKE_TENSOR={raw!r} is not recognised "
+        f"(expected '0', '1', 'auto', or unset). Defaulting to lazy_auto.",
+        stacklevel=2,
+    )
+    return TensorMode.LAZY_AUTO
 
 
 def _is_one(env: str, default: str = "0") -> bool:
@@ -26,9 +59,11 @@ class Config:
     - enable_timing: ENABLE_TIMING, collects timing info during execution.
     - report_grid_execution_progress: REPORT_GRID_EXECUTION_PROGRESS, logs per
       program block progress in the interpreter.
-    - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, controls tensor materialization
-      strategy. True (default): use fake tensors with lazy on-demand materialization
-      for indirect loads. False (env=0): always copy tensors to CPU.
+    - tensor_mode: SANITIZER_ENABLE_FAKE_TENSOR, three-state tensor materialization
+      strategy. FORCE_REAL (env=0): always copy tensors to CPU upfront.
+      LAZY_AUTO (env unset/auto, default): fake tensors with lazy materialization,
+      falls back to eager-real on unmappable pointers. FORCE_FAKE (env=1): fake
+      tensors with lazy materialization, errors on unmappable pointers.
     - profiler_enable_load_store_skipping: PROFILER_ENABLE_LOAD_STORE_SKIPPING,
       skips redundant load/store checks to speed profiling.
     - profiler_enable_block_sampling: PROFILER_ENABLE_BLOCK_SAMPLING, samples a
@@ -51,10 +86,7 @@ class Config:
         self.report_grid_execution_progress: bool = _is_one(
             "REPORT_GRID_EXECUTION_PROGRESS"
         )
-        # Boolean: any value other than "0" enables virtual memory (fake tensors)
-        self.virtual_memory: bool = (
-            os.getenv("SANITIZER_ENABLE_FAKE_TENSOR", "1") != "0"
-        )
+        self.tensor_mode: TensorMode = _parse_tensor_mode()
         self.profiler_enable_load_store_skipping: bool = _is_one(
             "PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1"
         )

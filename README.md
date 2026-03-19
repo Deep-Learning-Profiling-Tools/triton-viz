@@ -147,7 +147,7 @@ Triton-Viz uses a small set of environment variables to configure runtime behavi
 - `ENABLE_PROFILER` (default: `1`): enable the profiler pipeline that collects performance data.
 - `ENABLE_TIMING` (default: `0`): collect timing data during execution.
 - `REPORT_GRID_EXECUTION_PROGRESS` (default: `0`): report per-program block execution progress in the interpreter.
-- `SANITIZER_ENABLE_FAKE_TENSOR` (default: `1`): use fake tensors with lazy on-demand materialization. Set to `0` to always copy tensors to CPU upfront.
+- `SANITIZER_ENABLE_FAKE_TENSOR` (default: unset = `auto`): three-state tensor materialization. `0` = force real (always copy tensors to CPU upfront). Unset or `auto` = lazy auto (fake tensors with lazy materialization, eager fallback on unmappable pointers). `1` = force fake (lazy materialization, errors on unmappable pointers).
 - `PROFILER_ENABLE_LOAD_STORE_SKIPPING` (default: `1`): skip redundant load/store checks to reduce profiling overhead.
 - `PROFILER_ENABLE_BLOCK_SAMPLING` (default: `1`): sample a subset of blocks to reduce profiling overhead.
 - `PROFILER_DISABLE_BUFFER_LOAD_CHECK` (default: `0`): disable buffer load checks in the profiler.

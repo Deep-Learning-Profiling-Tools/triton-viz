@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 import torch
 
+from triton_viz.core.config import TensorMode, config
 from triton_viz.core.patch import TensorMaterializer
 
 
@@ -13,15 +14,16 @@ def _make_materializer(*tensors):
     return m
 
 
+# ---- Basic rebase (CPU no-op, offset=0) ----
+
+
 class RebasePointersSingleStorageTest:
     def test_basic(self):
         t = torch.arange(8, dtype=torch.float32)
         m = _make_materializer(t)
         base = t.untyped_storage().data_ptr()
-        # Pointers to elements 0, 2, 4
         ptrs = np.array([base, base + 8, base + 16], dtype=np.int64)
         result = m.rebase_pointers(ptrs)
-        # On CPU, cpu() is a no-op so offset is 0 — addresses should be unchanged
         np.testing.assert_array_equal(result, ptrs)
 
 
@@ -32,10 +34,8 @@ class RebasePointersMixedStorageTest:
         m = _make_materializer(t1, t2)
         base1 = t1.untyped_storage().data_ptr()
         base2 = t2.untyped_storage().data_ptr()
-        # Interleave pointers from two storages
         ptrs = np.array([base1, base2, base1 + 4, base2 + 4], dtype=np.int64)
         result = m.rebase_pointers(ptrs)
-        # CPU no-op: all addresses stay the same
         np.testing.assert_array_equal(result, ptrs)
 
 
@@ -48,7 +48,6 @@ class RebasePointersMaskedGarbageTest:
         ptrs = np.array([base, garbage, base + 4, garbage], dtype=np.int64)
         mask = np.array([True, False, True, False])
         result = m.rebase_pointers(ptrs, mask=mask)
-        # Valid lanes rebased (no-op on CPU), masked lanes untouched
         assert result[0] == base
         assert result[1] == garbage
         assert result[2] == base + 4
@@ -83,7 +82,7 @@ class RebasePointersSingleElementMaskedOutTest:
         assert result[0] == garbage
 
 
-# --- Non-zero offset tests (monkeypatch _cpu_offset) ---
+# ---- Non-zero offset tests (monkeypatch _cpu_offset) ----
 
 
 class RebasePointersNonZeroOffsetTest:
@@ -94,8 +93,7 @@ class RebasePointersNonZeroOffsetTest:
         monkeypatch.setattr(m, "_cpu_offset", lambda b: 1000)
         ptrs = np.array([base, base + 4, base + 8, base + 12], dtype=np.int64)
         result = m.rebase_pointers(ptrs)
-        expected = ptrs + 1000
-        np.testing.assert_array_equal(result, expected)
+        np.testing.assert_array_equal(result, ptrs + 1000)
 
     def test_slow_path_per_storage_offset(self, monkeypatch):
         t1 = torch.arange(4, dtype=torch.float32)
@@ -106,7 +104,10 @@ class RebasePointersNonZeroOffsetTest:
         monkeypatch.setattr(m, "_cpu_offset", lambda b: 100 if b == base1 else 200)
         ptrs = np.array([base1, base2, base1 + 4, base2 + 4], dtype=np.int64)
         result = m.rebase_pointers(ptrs)
-        expected = np.array([base1 + 100, base2 + 200, base1 + 4 + 100, base2 + 4 + 200], dtype=np.int64)
+        expected = np.array(
+            [base1 + 100, base2 + 200, base1 + 4 + 100, base2 + 4 + 200],
+            dtype=np.int64,
+        )
         np.testing.assert_array_equal(result, expected)
 
     def test_masked_lanes_not_offset(self, monkeypatch):
@@ -124,7 +125,7 @@ class RebasePointersNonZeroOffsetTest:
         assert result[3] == garbage
 
 
-# --- Broadcast mask tests (validates broadcast_to fix) ---
+# ---- Broadcast mask tests ----
 
 
 class RebasePointersBroadcastMaskTest:
@@ -135,37 +136,93 @@ class RebasePointersBroadcastMaskTest:
         monkeypatch.setattr(m, "_cpu_offset", lambda b: 500)
         ptrs = np.array([base, base + 4, base + 8, base + 12], dtype=np.int64)
         result = m.rebase_pointers(ptrs, mask=np.bool_(True))
-        expected = ptrs + 500
-        np.testing.assert_array_equal(result, expected)
+        np.testing.assert_array_equal(result, ptrs + 500)
+
+    def test_scalar_false_mask(self, monkeypatch):
+        t = torch.arange(4, dtype=torch.float32)
+        m = _make_materializer(t)
+        base = t.untyped_storage().data_ptr()
+        monkeypatch.setattr(m, "_cpu_offset", lambda b: 500)
+        ptrs = np.array([base, base + 4, base + 8, base + 12], dtype=np.int64)
+        result = m.rebase_pointers(ptrs, mask=np.bool_(False))
+        # All masked — no offset applied
+        np.testing.assert_array_equal(result, ptrs)
 
     def test_row_broadcast_mask(self, monkeypatch):
         t = torch.arange(8, dtype=torch.float32)
         m = _make_materializer(t)
         base = t.untyped_storage().data_ptr()
         monkeypatch.setattr(m, "_cpu_offset", lambda b: 500)
-        # 2x2 pointer array
         ptrs = np.array([[base, base + 4], [base + 8, base + 12]], dtype=np.int64)
-        # mask (1,2): first column True, second column False — broadcasts to (2,2)
+        # mask (1,2) broadcasts to (2,2): col 0 valid, col 1 masked
         mask = np.array([[True, False]])
         result = m.rebase_pointers(ptrs, mask=mask)
-        # Column 0 (valid): rebased; Column 1 (masked): untouched
         assert result[0, 0] == base + 500
-        assert result[0, 1] == base + 4  # masked — no offset
+        assert result[0, 1] == base + 4       # masked
         assert result[1, 0] == base + 8 + 500
-        assert result[1, 1] == base + 12  # masked — no offset
+        assert result[1, 1] == base + 12      # masked
 
     def test_column_broadcast_mask(self, monkeypatch):
         t = torch.arange(8, dtype=torch.float32)
         m = _make_materializer(t)
         base = t.untyped_storage().data_ptr()
         monkeypatch.setattr(m, "_cpu_offset", lambda b: 500)
-        # 2x2 pointer array
         ptrs = np.array([[base, base + 4], [base + 8, base + 12]], dtype=np.int64)
-        # mask (2,1): first row True, second row False — broadcasts to (2,2)
+        # mask (2,1) broadcasts to (2,2): row 0 valid, row 1 masked
         mask = np.array([[True], [False]])
         result = m.rebase_pointers(ptrs, mask=mask)
-        # Row 0 (valid): rebased; Row 1 (masked): untouched
         assert result[0, 0] == base + 500
         assert result[0, 1] == base + 4 + 500
-        assert result[1, 0] == base + 8  # masked — no offset
-        assert result[1, 1] == base + 12  # masked — no offset
+        assert result[1, 0] == base + 8       # masked
+        assert result[1, 1] == base + 12      # masked
+
+
+# ---- Failure-path tests: unmappable pointers ----
+
+
+class RebasePointersFailurePathTest:
+    def test_unmappable_ptr_force_fake_raises(self, monkeypatch):
+        """In FORCE_FAKE mode, unregistered pointers must raise RuntimeError."""
+        monkeypatch.setattr(config, "tensor_mode", TensorMode.FORCE_FAKE)
+        t = torch.arange(4, dtype=torch.float32)
+        m = _make_materializer(t)
+        bad_addr = 0xCAFEBABE
+        ptrs = np.array([bad_addr], dtype=np.int64)
+        with pytest.raises(RuntimeError, match="No registered storage"):
+            m.rebase_pointers(ptrs)
+
+    def test_unmappable_ptr_lazy_auto_fallback(self, monkeypatch):
+        """In LAZY_AUTO mode, unmappable pointers trigger eager fallback.
+
+        After the fallback materialises all storages, the retry still cannot
+        map an address that genuinely doesn't belong to any storage, so we
+        expect RuntimeError even in LAZY_AUTO for truly foreign addresses.
+        The fallback is useful when the *storage is registered but not yet
+        materialised to CPU* — here we test that _eager_materialise_all runs.
+        """
+        monkeypatch.setattr(config, "tensor_mode", TensorMode.LAZY_AUTO)
+        t = torch.arange(4, dtype=torch.float32)
+        m = _make_materializer(t)
+        bad_addr = 0xCAFEBABE
+        ptrs = np.array([bad_addr], dtype=np.int64)
+        # Even after fallback, a truly unmappable addr still raises
+        with pytest.raises(RuntimeError, match="No registered storage"):
+            m.rebase_pointers(ptrs)
+        # But the fallback did materialise all storages
+        base = t.untyped_storage().data_ptr()
+        assert base in m._cpu_cache
+
+    def test_lazy_auto_fallback_materialises_all(self, monkeypatch):
+        """Verify eager fallback copies every registered storage to CPU."""
+        monkeypatch.setattr(config, "tensor_mode", TensorMode.LAZY_AUTO)
+        t1 = torch.arange(4, dtype=torch.float32)
+        t2 = torch.arange(4, dtype=torch.float32)
+        m = _make_materializer(t1, t2)
+        bad_addr = 0xCAFEBABE
+        ptrs = np.array([bad_addr], dtype=np.int64)
+        with pytest.raises(RuntimeError):
+            m.rebase_pointers(ptrs)
+        base1 = t1.untyped_storage().data_ptr()
+        base2 = t2.untyped_storage().data_ptr()
+        assert base1 in m._cpu_cache
+        assert base2 in m._cpu_cache

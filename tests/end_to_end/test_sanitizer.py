@@ -13,16 +13,16 @@ from triton_viz.clients.sanitizer.sanitizer import (
     _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
-from triton_viz.core.config import config
+from triton_viz.core.config import config, TensorMode
 from z3.z3 import BoolRef
 
 
 @pytest.fixture
-def _isolate_virtual_memory():
-    """Save and restore config.virtual_memory around a test."""
-    saved = config.virtual_memory
+def _isolate_tensor_mode():
+    """Save and restore config.tensor_mode around a test."""
+    saved = config.tensor_mode
     yield
-    config.virtual_memory = saved
+    config.tensor_mode = saved
 
 
 # ======== Helpers ===========
@@ -926,10 +926,10 @@ def fake_tensor_oob_kernel(x_ptr, out_ptr, N: tl.constexpr):
     tl.store(out_ptr, val)
 
 
-def test_oob_with_fake_tensor(_isolate_virtual_memory):
+def test_oob_with_fake_tensor(_isolate_tensor_mode):
     fake_tensor_sanitizer.records.clear()
 
-    config.virtual_memory = True
+    config.tensor_mode = TensorMode.LAZY_AUTO
     x = torch.randn(8)
     out = torch.empty(1)
     with pytest.raises(SystemExit):
