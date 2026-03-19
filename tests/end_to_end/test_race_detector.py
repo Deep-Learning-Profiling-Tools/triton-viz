@@ -69,7 +69,7 @@ def test_raw_waw_histogram():
     assert len(races) > 0
     race_types = {r.race_type for r in races}
     assert RaceType.WAW in race_types
-    assert RaceType.RW in race_types
+    assert RaceType.RAW in race_types
 
 
 # ======== Correct vector_add (No Race) ========

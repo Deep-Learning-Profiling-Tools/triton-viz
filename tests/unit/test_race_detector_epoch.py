@@ -20,7 +20,11 @@ def _store_access(block_idx: int, offset: int, event_id: int) -> MemoryAccess:
 
 
 def _atomic_access(
-    block_idx: int, offset: int, event_id: int, atomic_op: str
+    block_idx: int,
+    offset: int,
+    event_id: int,
+    atomic_op: str,
+    atomic_scope: str | None = None,
 ) -> MemoryAccess:
     return MemoryAccess(
         access_type=AccessType.ATOMIC,
@@ -30,6 +34,7 @@ def _atomic_access(
         grid_idx=(block_idx, 0, 0),
         event_id=event_id,
         atomic_op=atomic_op,
+        atomic_scope=atomic_scope,
     )
 
 
@@ -282,3 +287,43 @@ def test_incomplete_second_barrier_does_not_globally_reach_epoch_two():
     ]
     assert phase2_stores
     assert all(acc.epoch == 1 for acc in phase2_stores)
+
+
+def test_cta_scope_atomics_not_detected_as_global_barrier():
+    """CTA-scoped add+cas at same addr from all blocks must NOT be treated as a barrier.
+
+    CTA scope is block-local and cannot synchronize across blocks.
+    Without this filter, the epoch system would split phases incorrectly.
+    """
+    n = 2
+    barrier_addr = 4096
+    accesses = []
+    for i in range(n):
+        # Phase 0 store
+        accesses.append(_store_access(block_idx=i, offset=i, event_id=i))
+        # CTA-scoped add + cas (should NOT be a barrier)
+        accesses.append(
+            _atomic_access(
+                i, barrier_addr, event_id=100 + i,
+                atomic_op="rmw:add", atomic_scope="cta",
+            )
+        )
+        accesses.append(
+            _atomic_access(
+                i, barrier_addr, event_id=200 + i,
+                atomic_op="cas", atomic_scope="cta",
+            )
+        )
+        # Phase 1 store at overlapping address
+        accesses.append(
+            _store_access(block_idx=i, offset=(i + 1) % n, event_id=300 + i)
+        )
+
+    barrier_addrs = _detect_global_barrier_addresses(accesses)
+    assert barrier_addrs == set()  # cta scope → no global barrier
+
+    _apply_epoch_annotations(accesses)
+    assert all(acc.epoch == 0 for acc in accesses)  # no epoch split
+
+    races = detect_races(accesses)
+    assert len(races) > 0  # WAW races reported (no barrier suppression)
