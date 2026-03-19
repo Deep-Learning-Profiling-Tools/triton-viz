@@ -143,3 +143,24 @@ def test_libdevice_patch_and_restore():
     scope.restore()
     # Module attr is restored
     assert _ld.tanh is original_tanh
+
+
+def test_patch_libdevice_alias_restore():
+    """_patch_libdevice patches fn.__globals__ aliases; restore undoes them."""
+    import triton.language.extra.libdevice as _ld
+    from triton_viz.core.patch import _patch_libdevice
+
+    original_tanh = _ld.tanh
+
+    def _kernel_with_alias():
+        pass
+
+    _kernel_with_alias.__globals__["my_tanh"] = original_tanh
+
+    scope = _LangPatchScope()
+    _patch_libdevice(_kernel_with_alias, scope)
+    assert _kernel_with_alias.__globals__["my_tanh"] is not original_tanh
+
+    scope.restore()
+    assert _kernel_with_alias.__globals__["my_tanh"] is original_tanh
+    del _kernel_with_alias.__globals__["my_tanh"]

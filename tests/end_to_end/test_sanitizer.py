@@ -1015,6 +1015,20 @@ def libdevice_erf_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
     tl.store(out_ptr + offs, y)
 
 
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_erf_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.erf(x)
+    tl.store(out_ptr + offs, y)
+
+
+_UNSUPPORTED_KERNELS = {
+    "direct": libdevice_erf_direct_kernel,
+    "module": libdevice_erf_module_kernel,
+}
+
 _LIBDEVICE_KERNELS = {
     ("tanh", "direct"): libdevice_tanh_direct_kernel,
     ("tanh", "module"): libdevice_tanh_module_kernel,
@@ -1070,15 +1084,17 @@ def test_libdevice_op(op_name, import_style):
     )
 
 
-def test_libdevice_unsupported_op_raises():
+@pytest.mark.parametrize("import_style", ["direct", "module"])
+def test_libdevice_unsupported_op_raises(import_style):
     """Unsupported libdevice ops raise NotImplementedError, not silent None."""
     libdevice_sanitizer.records.clear()
 
     x = torch.tensor([0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32)
     out = torch.empty(8, dtype=torch.float32)
 
+    kernel = _UNSUPPORTED_KERNELS[import_style]
     with pytest.raises(NotImplementedError, match=r"libdevice\.erf.*not supported"):
-        libdevice_erf_direct_kernel[(1,)](x, out, N=8)
+        kernel[(1,)](x, out, N=8)
 
 
 # -- Numerical correctness kernels (no sanitizer override) --

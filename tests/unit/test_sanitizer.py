@@ -604,11 +604,17 @@ def test_libdevice_registry_sym_op_consistency():
     from triton.runtime.interpreter import interpreter_builder
 
     for spec in _LIBDEVICE_REGISTRY:
-        assert spec.sym_name in SymbolicExpr.UNARY_OPS, (
-            f"LibdeviceSpec {spec.name!r} has sym_name={spec.sym_name!r} "
-            f"not in UNARY_OPS"
-        )
-        if spec.np_func is not None:
+        if spec.arity == 1:
+            assert spec.sym_name in SymbolicExpr.UNARY_OPS, (
+                f"LibdeviceSpec {spec.name!r} has sym_name={spec.sym_name!r} "
+                f"not in UNARY_OPS"
+            )
+        else:
+            assert spec.sym_name not in SymbolicExpr.UNARY_OPS, (
+                f"LibdeviceSpec {spec.name!r} (arity={spec.arity}) "
+                f"should NOT be in UNARY_OPS"
+            )
+        if spec.np_func is not None and spec.arity == 1:
             assert (
                 spec.np_func in _UNARY_NUMPY_TO_SYM_OP
             ), f"LibdeviceSpec {spec.name!r} np_func not in _UNARY_NUMPY_TO_SYM_OP"
@@ -622,3 +628,16 @@ def test_libdevice_registry_sym_op_consistency():
                 f"LibdeviceSpec {spec.name!r} builder_method={spec.builder_method!r} "
                 f"not found on interpreter_builder"
             )
+
+
+def test_unary_z3_opaque_fallback():
+    """Unary ops without Z3 builders return an opaque symbol, not raise."""
+    arg = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    expr = SymbolicExpr.create("tanh", arg)
+    result, constraints = expr.eval(simplify_constraints=False)
+    # Must return a Z3 expression, not raise
+    assert result is not None
+    assert "unary_tanh_" in str(result)
+    # Arange constraints must propagate through
+    assert constraints is not None
+    assert "arange_0_8" in str(constraints)

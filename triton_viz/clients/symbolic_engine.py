@@ -216,7 +216,10 @@ class SymbolicExpr:
         "tensor_pointer_store",
     )
     UNARY_OPS: ClassVar[tuple[str, ...]] = tuple(
-        sorted({spec.sym_name for spec in _LIBDEVICE_REGISTRY} | {"fabs"})
+        sorted(
+            {spec.sym_name for spec in _LIBDEVICE_REGISTRY if spec.arity == 1}
+            | {"fabs"}
+        )
     )
     BINARY_OP_SYMBOL_TABLE: ClassVar[dict[str, str]] = {
         "add": "+",
@@ -824,9 +827,13 @@ class UnarySymbolicExpr(SymbolicExpr):
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         val, constraints = self.arg._to_z3()
         handler = self._Z3_BUILDERS.get(self.op)
-        if handler is None:
-            raise NotImplementedError(f"Unary op {self.op} is not implemented")
-        return handler(val), constraints
+        if handler is not None:
+            return handler(val), constraints
+        # Conservative fallback: fresh unconstrained symbol.
+        # Transcendental ops have no precise Z3 integer semantics.
+        # Argument constraints are preserved for downstream analysis.
+        opaque = Int(f"unary_{self.op}_{id(self)}")
+        return opaque, constraints
 
     @staticmethod
     def _abs(val) -> Z3Expr:
@@ -841,13 +848,15 @@ class UnarySymbolicExpr(SymbolicExpr):
         **{
             spec.sym_name: spec.np_func
             for spec in _LIBDEVICE_REGISTRY
-            if spec.np_func is not None
+            if spec.np_func is not None and spec.arity == 1
         },
         "fabs": np.fabs,
     }
 
     _BUILDER_OPS: ClassVar[frozenset[str]] = frozenset(
-        spec.sym_name for spec in _LIBDEVICE_REGISTRY if spec.builder_method is not None
+        spec.sym_name
+        for spec in _LIBDEVICE_REGISTRY
+        if spec.builder_method is not None and spec.arity == 1
     )
 
     def concretize(self) -> Any:
@@ -1712,7 +1721,7 @@ SymbolicExpr.register_op_class(
 _UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
     spec.np_func: spec.sym_name
     for spec in _LIBDEVICE_REGISTRY
-    if spec.np_func is not None
+    if spec.np_func is not None and spec.arity == 1
 }
 
 _BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
