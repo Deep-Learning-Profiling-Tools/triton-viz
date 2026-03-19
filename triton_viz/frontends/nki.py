@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any
 
 from triton_viz.core.data import (
     Allocate,
@@ -21,7 +21,7 @@ from triton_viz.frontends.base import (
 HAS_NKI = False
 nki_builder = None
 try:
-    from triton_viz.core.nki import nki_builder  # type: ignore
+    from triton_viz.core.nki import NDArray, nki_builder  # type: ignore
 
     HAS_NKI = True
 except ModuleNotFoundError:
@@ -37,7 +37,7 @@ def _nki_allocate_adapter(*_args: Any, **_kwargs: Any) -> AdapterResult:
 
 
 def _nki_load_adapter(
-    src: Any, keys: Any, *, mask: Optional[Any] = None, **_kwargs: Any
+    src: Any, keys: Any, *, mask: Any | None = None, **_kwargs: Any
 ) -> AdapterResult:
     return AdapterResult(src, mask, keys)
 
@@ -47,13 +47,16 @@ def _nki_store_adapter(
     keys: Any,
     value: Any,
     *,
-    mask: Optional[Any] = None,
+    mask: Any | None = None,
     **_kwargs: Any,
 ) -> AdapterResult:
     return AdapterResult(dst, mask, keys)
 
 
 def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    assert HAS_NKI
+    if _kwargs.get("transpose_x", False):
+        x = NDArray(value=x.data.T, name=x.name)
     return AdapterResult(x, y)
 
 
@@ -74,8 +77,8 @@ if HAS_NKI:
         nki_builder: {
             "program_id": ProgramId,
             "ndarray": Allocate,
-            "masked_load": Load,
-            "masked_store": Store,
+            "load": Load,
+            "store": Store,
             "matmul": Dot,
             "_unary_op": UnaryOp,
             "sum": ReduceSum,

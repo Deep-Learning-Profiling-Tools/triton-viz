@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "setuptools",
-  "triton",
+  "triton>=3.4.0",
   "pyarrow",
   "pre-commit",
   "z3-solver==4.15.3.0",
@@ -31,6 +31,7 @@ dependencies = [
   "flask",
   "flask_cloudflared",
   "tqdm",
+  "ml_dtypes",
 ]
 
 [tool.setuptools.packages.find]
@@ -49,15 +50,18 @@ homepage = "https://github.com/Deep-Learning-Profiling-Tools/triton-viz"
 [project.scripts]
 triton-sanitizer = "triton_viz.wrapper:apply_sanitizer"
 triton-profiler = "triton_viz.wrapper:apply_profiler"
+triton-visualizer = "triton_viz.visualizer_cli:main"
 
 [project.optional-dependencies]
 test = [
   "pytest",
+  "pytest-xdist",
   "numpy",
   "torch",
 ]
 nki = [
-  "neuronx-cc==2.22.*; python_version >= '3.10' and python_version <= '3.12'"
+  "neuronx-cc==2.22.*",
+  "nki==0.2.0"
 ]
 
 [tool.uv]

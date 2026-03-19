@@ -29,11 +29,18 @@ const controls = {
     opColorizeBtn: null,
     opHistogramBtn: null,
     opAllProgramsBtn: null,
+    opEditTensorViewBtn: null,
+    opDownloadBtn: null,
 };
 let controlToastEl = null;
 let controlToastTimer = null;
 const opControls = {
     handlers: null,
+};
+const downloadModal = {
+    overlay: null,
+    options: null,
+    error: null,
 };
 function setOpControlState(nextState = {}) {
     const toggles = {
@@ -53,6 +60,7 @@ function setOpControlHandlers(handlers) {
 }
 function resetOpControls() {
     opControls.handlers = null;
+    closeDownloadModal();
     const nextState = resetToggles();
     try {
         window.__tritonVizOpState = { ...nextState.toggles };
@@ -83,6 +91,14 @@ function updateOpControls(state = null) {
     if (controls.opAllProgramsBtn) {
         controls.opAllProgramsBtn.disabled = !handlers || !handlers.toggleAllPrograms;
         updateToggleLabel(controls.opAllProgramsBtn, 'All Program IDs', !!nextState.allPrograms);
+    }
+    if (controls.opEditTensorViewBtn) {
+        controls.opEditTensorViewBtn.disabled = !handlers || !handlers.toggleEditTensorView;
+        updateToggleLabel(controls.opEditTensorViewBtn, 'Edit Tensor View', !!nextState.editTensorView);
+    }
+    if (controls.opDownloadBtn) {
+        controls.opDownloadBtn.disabled = !handlers?.download;
+        controls.opDownloadBtn.textContent = handlers?.download?.buttonLabel || 'Download Tensor';
     }
 }
 function applyToggleResult(result, key) {
@@ -117,10 +133,13 @@ function initializeApp() {
     controls.opColorizeBtn = document.getElementById('btn-op-colorize');
     controls.opHistogramBtn = document.getElementById('btn-op-histogram');
     controls.opAllProgramsBtn = document.getElementById('btn-op-all-programs');
+    controls.opEditTensorViewBtn = document.getElementById('btn-op-edit-tensor-view');
+    controls.opDownloadBtn = document.getElementById('btn-op-download');
     if (!containerElement) {
         console.error('Essential visualization elements are missing.');
         return;
     }
+    setupDownloadModal();
     setupThemeToggle();
     setupControlEvents();
     setupSidebarResizer();
@@ -258,6 +277,150 @@ function setupControlEvents() {
             applyToggleResult(handler(), 'allPrograms');
         });
     }
+    if (controls.opEditTensorViewBtn) {
+        appDisposer.listen(controls.opEditTensorViewBtn, 'click', () => {
+            const handler = opControls.handlers?.toggleEditTensorView;
+            if (!handler)
+                return;
+            logAction('toggle_edit_tensor_view', { next: !getState().toggles.editTensorView });
+            applyToggleResult(handler(), 'editTensorView');
+        });
+    }
+    if (controls.opDownloadBtn) {
+        appDisposer.listen(controls.opDownloadBtn, 'click', () => {
+            const download = opControls.handlers?.download;
+            if (!download)
+                return;
+            const { options } = download;
+            if (options.length <= 1) {
+                triggerTensorDownload(download, options.slice(0, 1).map((option) => option.value));
+                return;
+            }
+            openDownloadModal(download);
+        });
+    }
+}
+function setupDownloadModal() {
+    const overlay = document.createElement('div');
+    overlay.className = 'download-modal-overlay';
+    overlay.hidden = true;
+    const panel = document.createElement('div');
+    panel.className = 'download-modal';
+    const title = document.createElement('h3');
+    title.className = 'download-modal-title';
+    title.textContent = 'Download Tensors';
+    const body = document.createElement('div');
+    body.className = 'download-modal-body';
+    const options = document.createElement('div');
+    options.className = 'download-modal-options';
+    const error = document.createElement('div');
+    error.className = 'download-modal-error';
+    error.hidden = true;
+    body.appendChild(options);
+    body.appendChild(error);
+    const actions = document.createElement('div');
+    actions.className = 'download-modal-actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'viz-button ghost';
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Cancel';
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'viz-button primary';
+    submitBtn.type = 'button';
+    submitBtn.textContent = 'Download Selected';
+    actions.appendChild(cancelBtn);
+    actions.appendChild(submitBtn);
+    panel.appendChild(title);
+    panel.appendChild(body);
+    panel.appendChild(actions);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    downloadModal.overlay = overlay;
+    downloadModal.options = options;
+    downloadModal.error = error;
+    appDisposer.listen(overlay, 'click', (event) => {
+        if (event.target === overlay)
+            closeDownloadModal();
+    });
+    appDisposer.listen(cancelBtn, 'click', () => closeDownloadModal());
+    appDisposer.listen(options, 'change', () => {
+        if (getSelectedDownloadSources().length > 0)
+            setDownloadModalError('');
+    });
+    appDisposer.listen(submitBtn, 'click', () => {
+        const download = opControls.handlers?.download;
+        if (!download || !downloadModal.options)
+            return;
+        const selected = getSelectedDownloadSources();
+        if (selected.length === 0) {
+            setDownloadModalError('Select at least one tensor');
+            return;
+        }
+        triggerTensorDownload(download, selected, true);
+    });
+    appDisposer.listen(document, 'keydown', (event) => {
+        const keyEvent = event;
+        if (keyEvent.key === 'Escape' && downloadModal.overlay && !downloadModal.overlay.hidden) {
+            closeDownloadModal();
+        }
+    });
+    appDisposer.add(() => overlay.remove());
+}
+function openDownloadModal(download) {
+    if (!downloadModal.overlay || !downloadModal.options)
+        return;
+    downloadModal.options.innerHTML = '';
+    setDownloadModalError('');
+    download.options.forEach((option) => {
+        const label = document.createElement('label');
+        label.className = 'download-modal-option';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = option.value;
+        checkbox.checked = true;
+        const swatch = document.createElement('span');
+        swatch.className = 'download-modal-swatch';
+        if (option.color)
+            swatch.style.background = option.color;
+        const text = document.createElement('span');
+        text.textContent = option.label;
+        label.appendChild(checkbox);
+        label.appendChild(swatch);
+        label.appendChild(text);
+        downloadModal.options?.appendChild(label);
+    });
+    downloadModal.overlay.hidden = false;
+}
+function closeDownloadModal() {
+    if (downloadModal.overlay)
+        downloadModal.overlay.hidden = true;
+    setDownloadModalError('');
+}
+function getSelectedDownloadSources() {
+    if (!downloadModal.options)
+        return [];
+    return Array.from(downloadModal.options.querySelectorAll('input[type="checkbox"]:checked'))
+        .map((node) => node.value);
+}
+function setDownloadModalError(message) {
+    if (!downloadModal.error)
+        return;
+    downloadModal.error.textContent = message;
+    downloadModal.error.hidden = !message;
+}
+function triggerTensorDownload(download, sources, closeModal = false) {
+    const activeOp = getState().activeOp;
+    logAction('download_tensor', {
+        uuid: activeOp?.uuid ?? null,
+        sources,
+    });
+    Promise.resolve(download.trigger(sources)).then(() => {
+        if (closeModal)
+            closeDownloadModal();
+    }).catch((error) => {
+        const message = error instanceof Error ? error.message : 'Download failed';
+        showControlToast(message);
+    });
 }
 function setupSidebarResizer() {
     if (!controls.resizer || !controls.panel)

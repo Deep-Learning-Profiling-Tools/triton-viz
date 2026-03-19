@@ -7,8 +7,6 @@ from functools import reduce
 from typing import (
     Any,
     ClassVar,
-    Optional,
-    Union,
     TypeAlias,
     cast,
 )
@@ -33,10 +31,46 @@ from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle, _get_np_dtype
 
+from ..core.client import Client
+from ..core.callbacks import OpCallbacks, ForLoopCallbacks
+from ..core.data import (
+    Op,
+    UnaryOp,
+    BinaryOp,
+    TernaryOp,
+    ProgramId,
+    Dot,
+    MakeRange,
+    AddPtr,
+    ExpandDims,
+    Broadcast,
+    ReduceSum,
+    ReduceMax,
+    ReduceMin,
+    Splat,
+    Idiv,
+    Rsqrt,
+    CastImpl,
+    Reshape,
+    Trans,
+    Join,
+    Fabs,
+    Ashr,
+    Advance,
+    FpToFp,
+    Umulhi,
+    CumSum,
+    Bitcast,
+    AtomicCas,
+    AtomicRMW,
+    RawLoad,
+    RawStore,
+)
 
-Z3Expr: TypeAlias = Union[ExprRef, list[ExprRef], Tactic, Probe]
-ConstraintExpr: TypeAlias = Union[ExprRef, bool, int, float]
-ConstraintConjunction: TypeAlias = Optional[BoolRef]
+
+Z3Expr: TypeAlias = ExprRef | list[ExprRef] | Tactic | Probe
+ConstraintExpr: TypeAlias = ExprRef | bool | int | float
+ConstraintConjunction: TypeAlias = BoolRef | None
 
 
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
@@ -59,7 +93,7 @@ def _iter_constraints_to_bool(
 
 
 def _and_constraints(
-    *constraints: Optional[ConstraintExpr | Sequence[ConstraintExpr]],
+    *constraints: ConstraintExpr | Sequence[ConstraintExpr] | None,
 ) -> ConstraintConjunction:
     parts: list[BoolRef] = []
     for constraint in constraints:
@@ -84,7 +118,7 @@ class PendingCheck:
     constraints: ConstraintConjunction
     # Lightweight source location: (filename, lineno, func_name)
     # Captured immediately to preserve accurate line info for deferred checks
-    source_location: Optional[tuple[str, int, str]] = None
+    source_location: tuple[str, int, str] | None = None
 
 
 @dataclass
@@ -110,7 +144,7 @@ class SymbolicExprDataWrapper:
     we need to wrap SymbolicExpr with a class that has size attribute, and data.size != 1.
     """
 
-    def __init__(self, symbolic_expr: SymbolicExpr, value: Optional[str] = None):
+    def __init__(self, symbolic_expr: SymbolicExpr, value: str | None = None):
         self._value = value
         self.symbolic_expr = symbolic_expr
 
@@ -174,7 +208,12 @@ class SymbolicExprDataWrapper:
 
 class SymbolicExpr:
     BASIC_OPS: ClassVar[tuple[str, ...]] = ("const", "pid", "arange")
-    INDIRECT_OPS: ClassVar[tuple[str, ...]] = ("load", "store")
+    INDIRECT_OPS: ClassVar[tuple[str, ...]] = (
+        "load",
+        "store",
+        "tensor_pointer_load",
+        "tensor_pointer_store",
+    )
     UNARY_OPS: ClassVar[tuple[str, ...]] = (
         "cos",
         "exp",
@@ -214,7 +253,14 @@ class SymbolicExpr:
     }
     BINARY_OPS: ClassVar[tuple[str, ...]] = tuple(BINARY_OP_SYMBOL_TABLE.keys())
     TERNARY_OPS: ClassVar[tuple[str, ...]] = ("where",)
-    REDUCE_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min", "dot")
+    REDUCE_OPS: ClassVar[tuple[str, ...]] = (
+        "sum",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+        "dot",
+    )
     SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum",)
     POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
@@ -272,35 +318,33 @@ class SymbolicExpr:
         self.op = op
         # Tensor handle attributes, including `attr`, `dtype`, and `data`
         self.attr: dict[str, Any] = {}
-        self.dtype: Optional[tl.core.dtype] = None
+        self.dtype: tl.core.dtype | None = None
+        self.shape: tuple[int, ...] = ()
 
         # Functions and arguments for concretization
-        self.concrete_fn: Optional[Callable[..., Any]] = None
+        self.concrete_fn: Callable[..., Any] | None = None
 
         # deal with args
-        self.children: dict[str, Optional[SymbolicExpr]] = {}
+        self.children: dict[str, SymbolicExpr | None] = {}
 
         # for-loop iterator association
-        self.loop_ctx: Optional[LoopContext] = None
+        self.loop_ctx: LoopContext | None = None
 
         # z3
-        self.z3: Optional[Z3Expr] = None
+        self.z3: Z3Expr | None = None
 
         self.constraints: ConstraintConjunction = None
-        self._simplified_z3: Optional[Z3Expr] = None
-        self._simplified_constraints: Optional[ConstraintConjunction] = None
+        self._simplified_z3: Z3Expr | None = None
+        self._simplified_constraints: ConstraintConjunction | None = None
         self._has_op_cache: dict[str, bool] = {}
-        self._data_wrapper: Optional[SymbolicExprDataWrapper] = None
+        self._data_wrapper: SymbolicExprDataWrapper | None = None
 
-    @property
-    def shape(self) -> tuple[int, ...]:
-        if not self.dtype:
-            return ()
-        if isinstance(self.dtype, tl.block_type):
-            return tuple(int(x) for x in self.dtype.shape)
-        elif isinstance(self.dtype, tl.pointer_type):
-            return tuple(int(x) for x in self.dtype.element_ty.shape)
-        return ()
+    @staticmethod
+    def _unpack_dtype(dtype, fallback_shape=()):
+        """Split a block_type into (scalar_dtype, shape), passing through scalars."""
+        if isinstance(dtype, tl.block_type):
+            return dtype.scalar, tuple(int(x) for x in dtype.shape)
+        return dtype, fallback_shape
 
     def add_child(self, name: str, value: Any) -> None:
         child = SymbolicExpr.from_value(value) if value is not None else None
@@ -361,7 +405,10 @@ class SymbolicExpr:
     def _node_label(self) -> str:
         """Generate a short label for this node."""
         label = self._node_label_core()
-        label = f"{label} [dtype={self.dtype}]"
+        if self.shape:
+            label = f"{label} [dtype={self.dtype}, shape={self.shape}]"
+        else:
+            label = f"{label} [dtype={self.dtype}]"
 
         return label
 
@@ -417,10 +464,10 @@ class SymbolicExpr:
 
     # Stored on the class and may be accessed through either the class or an instance;
     # therefore the callable must tolerate an extra bound argument (self/cls).
-    loop_ctx_provider: ClassVar[Optional[Callable[..., Optional[LoopContext]]]] = None
+    loop_ctx_provider: ClassVar[Callable[..., LoopContext | None] | None] = None
 
     @classmethod
-    def set_loop_ctx_provider(cls, fn: Callable[..., Optional[LoopContext]]) -> None:
+    def set_loop_ctx_provider(cls, fn: Callable[..., LoopContext | None]) -> None:
         """Register a function that, on each call,
         returns the current active `LoopContext` (or `None` if none exists)."""
         cls.loop_ctx_provider = fn
@@ -489,7 +536,7 @@ class SymbolicExpr:
         """Return a concrete TensorHandle for this expression."""
         raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
 
-    def replace_subtree(self, anchor_op: Optional[str] = None) -> SymbolicExpr:
+    def replace_subtree(self, anchor_op: str | None = None) -> SymbolicExpr:
         """
         Post-order traversal that replaces *all* sub-trees with constant nodes
         produced by `concretize`.
@@ -580,7 +627,7 @@ class ConstSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
         super().__init__(op)
         self.value = value
-        self.dtype = dtype
+        self.dtype, self.shape = self._unpack_dtype(dtype)
 
     def _node_label_core(self) -> str:
         return f"const={self.value}"
@@ -638,8 +685,6 @@ class ConstSymbolicExpr(SymbolicExpr):
             np_array = np.array(seq, dtype=_get_np_dtype(dtype))
             return TensorHandle(np_array, dtype)
         elif isinstance(self.value, TensorHandle):
-            if self.value.data.size != 1:
-                raise RuntimeError("Only scalar TensorHandle is supported in const!")
             return self.value
 
         raise RuntimeError(f"Unsupported const value type: {type(self.value)}")
@@ -682,7 +727,8 @@ class ArangeSymbolicExpr(SymbolicExpr):
         # Program ID / arange are always int32
         start_const = cast(ConstSymbolicExpr, self.start)
         end_const = cast(ConstSymbolicExpr, self.end)
-        self.dtype = tl.block_type(tl.int32, [end_const.value - start_const.value])
+        self.dtype = tl.int32
+        self.shape = (end_const.value - start_const.value,)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         start = self.start.to_py()
@@ -704,14 +750,14 @@ class ArangeSymbolicExpr(SymbolicExpr):
 
 class IndirectSymbolicExprBase(SymbolicExpr):
     ptr: SymbolicExpr
-    mask: Optional[SymbolicExpr]
-    other: Optional[SymbolicExpr]
+    mask: SymbolicExpr | None
+    other: SymbolicExpr | None
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         ptr_expr = self.ptr
         ptr, constraints_ptr = ptr_expr._to_z3()
         mask_expr = self.mask
-        mask_constraint: Optional[ConstraintExpr | Sequence[ConstraintExpr]] = None
+        mask_constraint: ConstraintExpr | Sequence[ConstraintExpr] | None = None
         if mask_expr is not None:
             mask, _ = mask_expr._to_z3()
             mask_constraint = mask
@@ -747,7 +793,13 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("ptr", ptr)
         self.add_child("mask", mask)
         self.add_child("other", other)
-        self.dtype = self.ptr.dtype.element_ty  # type: ignore
+        ptr_dtype = self.ptr.dtype
+        self.dtype = (
+            ptr_dtype.element_ty
+            if isinstance(ptr_dtype, tl.pointer_type)
+            else ptr_dtype
+        )
+        self.shape = self.ptr.shape
 
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
@@ -776,6 +828,8 @@ class UnarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Unsupported unary op: {op}")
         super().__init__(op)
         self.add_child("arg", arg)
+        self.dtype = self.arg.dtype
+        self.shape = self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         val, constraints = self.arg._to_z3()
@@ -805,6 +859,7 @@ class BinarySymbolicExpr(SymbolicExpr):
         self.add_child("lhs", lhs)
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
+        self.shape = self.lhs.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         lhs, constraints_lhs = self.lhs._to_z3()
@@ -820,9 +875,18 @@ class BinarySymbolicExpr(SymbolicExpr):
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
         np_op = self._NUMPY_OPS.get(self.op, None)
-        if np_op is None:
-            raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
-        return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+        # Most ops (add, sub, mul, …) have a numpy mapping and are called
+        # with concrete_fn(lhs, rhs, np_op).  Some ops like "idiv" have
+        # their own concrete_fn that handles the computation internally
+        # (e.g. InterpreterBuilder.create_idiv) and only takes (lhs, rhs).
+        # Fall through to the 2-arg call for those.
+        if np_op is not None:
+            return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+        if self.concrete_fn is None:
+            raise NotImplementedError(
+                f"Concretize for binary op '{self.op}' is not implemented"
+            )
+        return self.concrete_fn(lhs_concrete, rhs_concrete)  # type: ignore
 
     @staticmethod
     def _apply_binop(op_func, left, right):
@@ -1015,6 +1079,7 @@ class WhereSymbolicExpr(SymbolicExpr):
         self.add_child("lhs", lhs)
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
+        self.shape = self.lhs.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1065,10 +1130,16 @@ class WhereSymbolicExpr(SymbolicExpr):
 
 
 class ReduceSymbolicExpr(SymbolicExpr):
-    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("sum", "max", "min")
+    _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = (
+        "sum",
+        "max",
+        "min",
+        "argmax",
+        "argmin",
+    )
     input: SymbolicExpr
     keepdims: SymbolicExpr
-    axis: Optional[SymbolicExpr]
+    axis: SymbolicExpr | None
 
     def __init__(self, op: str, input: Any, axis: Any = None, keepdims: bool = False):
         if op not in self._SUPPORTED_OPS:
@@ -1077,6 +1148,37 @@ class ReduceSymbolicExpr(SymbolicExpr):
         self.add_child("input", input)
         self.add_child("keepdims", keepdims)
         self.add_child("axis", axis)
+
+        # Compute output dtype/shape from input dtype/shape, axis, and keepdims
+        input_shape = list(self.input.shape)
+        assert (
+            input_shape
+        ), "ReduceSymbolicExpr expects block input with non-empty shape"
+        # Resolve axis value
+        if isinstance(axis, int):
+            axis_val = axis
+        elif isinstance(axis, SymbolicExpr) and hasattr(axis, "to_py"):
+            axis_val = axis.to_py()
+        else:
+            axis_val = None
+        # Resolve keepdims value
+        keepdims_val = keepdims if isinstance(keepdims, bool) else bool(keepdims)
+        if axis_val is not None:
+            if keepdims_val:
+                output_shape = (
+                    input_shape[:axis_val] + [1] + input_shape[axis_val + 1 :]
+                )
+            else:
+                output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
+        else:
+            output_shape = [1] * len(input_shape) if keepdims_val else []
+        if op in ("argmax", "argmin"):
+            scalar_ty = tl.int32
+        else:
+            assert self.input.dtype is not None
+            scalar_ty = self.input.dtype
+        self.dtype = scalar_ty
+        self.shape = tuple(output_shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         handler = self._Z3_BUILDERS.get(self.op)
@@ -1108,13 +1210,30 @@ class ReduceSymbolicExpr(SymbolicExpr):
 class DotSymbolicExpr(SymbolicExpr):
     a: SymbolicExpr
     b: SymbolicExpr
-    d: Optional[SymbolicExpr]
+    d: SymbolicExpr | None
 
     def __init__(self, op: str, a: Any, b: Any, d: Any = None):
         super().__init__(op)
         self.add_child("a", a)
         self.add_child("b", b)
         self.add_child("d", d)
+
+        # dot(a, b): 2D (M,K)x(K,N)->(M,N) or 3D batched (B,M,K)x(B,K,N)->(B,M,N)
+        a_shape = self.a.shape
+        b_shape = self.b.shape
+        if len(a_shape) == 2 and len(b_shape) == 2:
+            self.shape = (a_shape[0], b_shape[1])
+        elif len(a_shape) == 3 and len(b_shape) == 3:
+            self.shape = (a_shape[0], a_shape[1], b_shape[2])
+
+        # Triton always passes an accumulator d with the correct output dtype
+        # (determined by out_dtype param or input types: int8->int32, fp64->fp64, etc.)
+        if self.d is not None and self.d.dtype is not None:
+            self.dtype = self.d.dtype
+        else:
+            raise ValueError(
+                "DotSymbolicExpr requires accumulator (d) with a valid dtype"
+            )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1130,7 +1249,7 @@ class CumsumSymbolicExpr(SymbolicExpr):
         self.add_child("input", input)
         self.add_child("axis", axis)
         self.add_child("reverse", reverse)
-        self.dtype = dtype
+        self.dtype, self.shape = self._unpack_dtype(dtype)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1138,32 +1257,48 @@ class CumsumSymbolicExpr(SymbolicExpr):
 
 class MakeBlockPtrSymbolicExpr(SymbolicExpr):
     base: SymbolicExpr
-    strides: SymbolicExpr
-    offsets: SymbolicExpr
-    block_shape: SymbolicExpr
-    order: SymbolicExpr
+    ndim: int
+    block_shape_values: list[int]
+    order_values: list[int]
+    shape_keys: list[str]
+    stride_keys: list[str]
+    offset_keys: list[str]
 
     def __init__(
         self,
         op: str,
         base: Any,
-        shape: Any,
-        strides: Any,
-        offsets: Any,
-        block_shape: Any,
-        order: Any,
+        shape_list: Sequence[Any],
+        stride_list: Sequence[Any],
+        offset_list: Sequence[Any],
+        block_shape_vals: Sequence[int],
+        order_vals: Sequence[int],
     ):
         super().__init__(op)
         self.add_child("base", base)
-        self.add_child("shape", shape)
-        self.add_child("strides", strides)
-        self.add_child("offsets", offsets)
-        self.add_child("block_shape", block_shape)
-        self.add_child("order", order)
+        self.ndim = len(block_shape_vals)
+        self.block_shape_values = list(block_shape_vals)
+        self.order_values = list(order_vals)
+        self.shape_keys: list[str] = []
+        self.stride_keys: list[str] = []
+        self.offset_keys: list[str] = []
+        for i in range(self.ndim):
+            shape_key = f"shape_{i}"
+            stride_key = f"stride_{i}"
+            offset_key = f"offset_{i}"
+            self.add_child(shape_key, shape_list[i])
+            self.add_child(stride_key, stride_list[i])
+            self.add_child(offset_key, offset_list[i])
+            self.shape_keys.append(shape_key)
+            self.stride_keys.append(stride_key)
+            self.offset_keys.append(offset_key)
         self.dtype = base.dtype
+        self.shape = base.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+        raise NotImplementedError(
+            "Use TensorPointerLoad/Store to access block pointers"
+        )
 
 
 class AddPtrSymbolicExpr(SymbolicExpr):
@@ -1176,6 +1311,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         self.add_child("ptr", ptr)
         self.add_child("offset", offset)
         self.dtype = self.ptr.dtype
+        self.shape = self.ptr.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         ptr_expr = self.ptr
@@ -1184,7 +1320,7 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         offset_z3, constraints_offset = offset_expr._to_z3()
         constraints = _and_constraints(constraints_ptr, constraints_offset)
         ptr_dtype = cast(Any, ptr_expr.dtype)
-        element_bytewidth = max(1, ptr_dtype.scalar.element_ty.primitive_bitwidth // 8)
+        element_bytewidth = max(1, ptr_dtype.element_ty.primitive_bitwidth // 8)
         if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
             z3_expr = ptr_z3 + offset_z3 * element_bytewidth
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
@@ -1205,15 +1341,25 @@ class AddPtrSymbolicExpr(SymbolicExpr):
 
 class AdvanceSymbolicExpr(SymbolicExpr):
     ptr: SymbolicExpr
-    offsets: SymbolicExpr
+    ndim: int
+    delta_keys: list[str]
 
-    def __init__(self, op: str, ptr: Any, offsets: Any):
+    def __init__(self, op: str, ptr: Any, offset_list: Sequence[Any]):
         super().__init__(op)
         self.add_child("ptr", ptr)
-        self.add_child("offsets", offsets)
+        self.ndim = len(offset_list)
+        self.delta_keys: list[str] = []
+        for i in range(self.ndim):
+            dk = f"delta_{i}"
+            self.add_child(dk, offset_list[i])
+            self.delta_keys.append(dk)
+        self.dtype = ptr.dtype
+        self.shape = ptr.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError("Advance operation is not implemented yet")
+        raise NotImplementedError(
+            "Use TensorPointerLoad/Store to access block pointers"
+        )
 
 
 class SplatSymbolicExpr(SymbolicExpr):
@@ -1225,6 +1371,7 @@ class SplatSymbolicExpr(SymbolicExpr):
         self.add_child("block_type", block_type)
         self.add_child("arg", arg)
         self.dtype = self.block_type.dtype
+        self.shape = self.block_type.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1241,7 +1388,7 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
         self.add_child("axis", axis)
-        # Update dtype to reflect the new shape with an inserted dimension of size 1
+        # Update shape to reflect the new shape with an inserted dimension of size 1
         arg_shape = list(self.arg.shape) if self.arg.shape else []
         axis_val = axis if isinstance(axis, int) else axis.to_py()
         # Handle negative axis
@@ -1249,7 +1396,8 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
             axis_val = len(arg_shape) + 1 + axis_val
         # Insert dimension of size 1 at the specified axis
         new_shape = arg_shape[:axis_val] + [1] + arg_shape[axis_val:]
-        self.dtype = tl.block_type(cast(Any, self.arg.dtype).scalar, new_shape)
+        self.dtype = self.arg.dtype
+        self.shape = tuple(new_shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1269,17 +1417,9 @@ class BroadcastSymbolicExpr(SymbolicExpr):
             self.target_shape = tuple(shape.to_py())
         else:
             self.target_shape = ()
-        # Update dtype to reflect the broadcast shape
-        arg_dtype = self.arg.dtype
-        if arg_dtype is not None and hasattr(arg_dtype, "element_ty"):
-            elem_ty = arg_dtype.element_ty
-        else:
-            elem_ty = arg_dtype if arg_dtype else tl.int32
-        self.dtype = (
-            tl.block_type(elem_ty, list(self.target_shape))
-            if self.target_shape
-            else arg_dtype
-        )
+        # Update dtype/shape to reflect the broadcast shape
+        self.dtype = self.arg.dtype if self.arg.dtype else tl.int32
+        self.shape = tuple(self.target_shape) if self.target_shape else self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1292,6 +1432,7 @@ class ReshapeSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
         self.dtype = self.arg.dtype
+        self.shape = self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1306,6 +1447,7 @@ class TransSymbolicExpr(SymbolicExpr):
         self.add_child("arg", arg)
         self.add_child("permutation", permutation)
         self.dtype = self.arg.dtype
+        self.shape = self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
@@ -1320,6 +1462,7 @@ class JoinSymbolicExpr(SymbolicExpr):
         self.add_child("lhs", lhs)
         self.add_child("rhs", rhs)
         self.dtype = self.lhs.dtype
+        self.shape = self.lhs.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(
@@ -1338,14 +1481,17 @@ class CastSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
-        self.dtype = self.dst_type.to_py()
+        self.dtype, self.shape = self._unpack_dtype(
+            self.dst_type.to_py(), self.src.shape
+        )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.src._to_z3()
 
     def concretize(self) -> Any:
         src_concrete = self.src.concretize()
-        return self.concrete_fn(src_concrete, self.dtype)  # type: ignore
+        dst = tl.block_type(self.dtype, list(self.shape)) if self.shape else self.dtype
+        return self.concrete_fn(src_concrete, dst)  # type: ignore
 
 
 class FpToFpSymbolicExpr(SymbolicExpr):
@@ -1358,7 +1504,7 @@ class FpToFpSymbolicExpr(SymbolicExpr):
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
         self.add_child("rounding_mode", rounding_mode)
-        self.dtype = self.dst_type.dtype
+        self.dtype, self.shape = self._unpack_dtype(self.dst_type.dtype, self.src.shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -1375,6 +1521,7 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
         self.add_child("cmp", cmp)
         self.add_child("val", val)
         self.dtype = self.val.dtype
+        self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError("atomic_cas operation is not implemented yet")
@@ -1383,7 +1530,7 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
 class AtomicRmwSymbolicExpr(SymbolicExpr):
     ptr: SymbolicExpr
     val: SymbolicExpr
-    mask: Optional[SymbolicExpr]
+    mask: SymbolicExpr | None
 
     def __init__(self, op: str, ptr: Any, val: Any, mask: Any = None):
         super().__init__(op)
@@ -1391,9 +1538,127 @@ class AtomicRmwSymbolicExpr(SymbolicExpr):
         self.add_child("val", val)
         self.add_child("mask", mask)
         self.dtype = self.val.dtype
+        self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+
+
+class TensorPointerSymbolicExpr(SymbolicExpr):
+    """Common base for block-pointer load/store expressions."""
+
+    ptr: SymbolicExpr
+    boundary_check: tuple[int, ...]
+
+    @staticmethod
+    def _resolve_element_dtype(
+        ptr: SymbolicExpr,
+    ) -> tl.core.dtype | None:
+        dt = ptr.dtype
+        if dt is None:
+            return None
+        if isinstance(dt, tl.pointer_type):
+            return dt.element_ty
+        return dt
+
+    @staticmethod
+    def _resolve_block_shape(ptr: SymbolicExpr) -> tuple[int, ...]:
+        """Walk the block pointer chain to find the block_shape."""
+        if isinstance(ptr, MakeBlockPtrSymbolicExpr):
+            return tuple(ptr.block_shape_values)
+        if isinstance(ptr, AdvanceSymbolicExpr):
+            return TensorPointerSymbolicExpr._resolve_block_shape(ptr.ptr)
+        return ()
+
+    def _resolve_block_ptr_components(
+        self, ptr: SymbolicExpr
+    ) -> tuple[
+        SymbolicExpr,
+        list[SymbolicExpr],
+        list[SymbolicExpr],
+        list[SymbolicExpr],
+        list[int],
+    ]:
+        """Walk advance chain -> (base, shapes[], strides[], offsets[], block_shape[])"""
+        if isinstance(ptr, MakeBlockPtrSymbolicExpr):
+            shapes = [getattr(ptr, k) for k in ptr.shape_keys]
+            strides = [getattr(ptr, k) for k in ptr.stride_keys]
+            offsets = [getattr(ptr, k) for k in ptr.offset_keys]
+            return ptr.base, shapes, strides, offsets, ptr.block_shape_values
+        elif isinstance(ptr, AdvanceSymbolicExpr):
+            base, shapes, strides, offsets, bs = self._resolve_block_ptr_components(
+                ptr.ptr
+            )
+            deltas = [getattr(ptr, k) for k in ptr.delta_keys]
+            new_offsets = [
+                SymbolicExpr.create("add", off, d) for off, d in zip(offsets, deltas)
+            ]
+            return base, shapes, strides, new_offsets, bs
+        raise TypeError(f"Expected block pointer, got {type(ptr)}")
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        (
+            base,
+            shapes,
+            strides,
+            offsets,
+            block_shape,
+        ) = self._resolve_block_ptr_components(self.ptr)
+
+        base_dtype = base.dtype
+        if isinstance(base_dtype, tl.pointer_type) and hasattr(
+            base_dtype.element_ty, "primitive_bitwidth"
+        ):
+            elem_size = max(1, base_dtype.element_ty.primitive_bitwidth // 8)
+        else:
+            elem_size = 1
+
+        base_z3, c_base = base._to_z3()
+        addr = base_z3
+        parts: list[ConstraintExpr | Sequence[ConstraintExpr]] = []
+        if c_base:
+            parts.append(c_base)
+
+        for d in range(len(block_shape)):
+            k_d = Int(f"blk_k_{d}")
+            off_z3, c_off = offsets[d]._to_z3()
+            stride_z3, c_stride = strides[d]._to_z3()
+
+            addr = addr + (off_z3 + k_d) * stride_z3 * elem_size
+            parts.append(And(k_d >= 0, k_d < block_shape[d]))
+            if c_off:
+                parts.append(c_off)
+            if c_stride:
+                parts.append(c_stride)
+
+            if d in self.boundary_check:
+                shape_z3, c_shape = shapes[d]._to_z3()
+                parts.append(And(off_z3 + k_d >= 0, off_z3 + k_d < shape_z3))
+                if c_shape:
+                    parts.append(c_shape)
+
+        return addr, _and_constraints(*parts)
+
+
+class TensorPointerLoadSymbolicExpr(TensorPointerSymbolicExpr):
+    def __init__(self, op: str, ptr: Any, boundary_check: Any):
+        super().__init__(op)
+        self.add_child("ptr", ptr)
+        self.boundary_check = tuple(boundary_check) if boundary_check else ()
+        self.dtype = self._resolve_element_dtype(ptr)
+        self.shape = self._resolve_block_shape(ptr)
+
+
+class TensorPointerStoreSymbolicExpr(TensorPointerSymbolicExpr):
+    value: SymbolicExpr
+
+    def __init__(self, op: str, ptr: Any, value: Any, boundary_check: Any):
+        super().__init__(op)
+        self.add_child("ptr", ptr)
+        self.add_child("value", value)
+        self.boundary_check = tuple(boundary_check) if boundary_check else ()
+        self.dtype = self._resolve_element_dtype(ptr)
+        self.shape = ()
 
 
 SymbolicExpr.register_op_class(ConstSymbolicExpr, ("const",))
@@ -1404,7 +1669,9 @@ SymbolicExpr.register_op_class(StoreSymbolicExpr, ("store",))
 SymbolicExpr.register_op_class(UnarySymbolicExpr, SymbolicExpr.UNARY_OPS)
 SymbolicExpr.register_op_class(BinarySymbolicExpr, SymbolicExpr.BINARY_OPS)
 SymbolicExpr.register_op_class(WhereSymbolicExpr, ("where",))
-SymbolicExpr.register_op_class(ReduceSymbolicExpr, ("sum", "max", "min"))
+SymbolicExpr.register_op_class(
+    ReduceSymbolicExpr, ("sum", "max", "min", "argmax", "argmin")
+)
 SymbolicExpr.register_op_class(DotSymbolicExpr, ("dot",))
 SymbolicExpr.register_op_class(CumsumSymbolicExpr, ("cumsum",))
 SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
@@ -1420,3 +1687,428 @@ SymbolicExpr.register_op_class(CastSymbolicExpr, ("cast_impl", "bitcast"))
 SymbolicExpr.register_op_class(FpToFpSymbolicExpr, ("fp_to_fp",))
 SymbolicExpr.register_op_class(AtomicCasSymbolicExpr, ("atomic_cas",))
 SymbolicExpr.register_op_class(AtomicRmwSymbolicExpr, ("atomic_rmw",))
+SymbolicExpr.register_op_class(TensorPointerLoadSymbolicExpr, ("tensor_pointer_load",))
+SymbolicExpr.register_op_class(
+    TensorPointerStoreSymbolicExpr, ("tensor_pointer_store",)
+)
+
+
+# ── Shared constants and utilities for symbolic clients ──────────
+
+_UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
+    np.cos: "cos",
+    np.exp: "exp",
+    np.exp2: "exp2",
+    np.abs: "abs",
+    np.floor: "floor",
+    np.ceil: "ceil",
+    np.log: "log",
+    np.log2: "log2",
+    np.sqrt: "sqrt",
+    np.sin: "sin",
+}
+
+_BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
+    np.add: "add",
+    np.subtract: "sub",
+    np.multiply: "mul",
+    np.divide: "div",
+    np.less: "less",
+    np.less_equal: "less_equal",
+    np.greater: "greater",
+    np.greater_equal: "greater_equal",
+    np.not_equal: "not_equal",
+    np.equal: "equal",
+    np.fmod: "mod",
+    np.maximum: "maximum",
+    np.minimum: "minimum",
+    np.bitwise_and: "bitwise_and",
+    np.bitwise_or: "bitwise_or",
+    np.bitwise_xor: "bitwise_xor",
+    np.right_shift: "right_shift",
+    np.left_shift: "left_shift",
+}
+
+
+@dataclass
+class RangeWrapper:
+    iterable: Any
+    length: int
+    start: int
+    stop: int
+    step: int
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self.iterable)
+
+    def __len__(self) -> int:
+        return self.length
+
+
+class SymbolicClient(Client):
+    """Base class for clients that use the symbolic engine.
+
+    Provides shared operation overriders and for-loop infrastructure.
+    Subclasses must implement domain-specific memory operation handlers.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.loop_stack: list[LoopContext] = []
+        SymbolicExpr.set_loop_ctx_provider(
+            lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
+        )
+
+    # ── Shared operation overriders ───────────────────────────────
+
+    def _op_program_id_overrider(self, axis):
+        return SymbolicExpr.create("pid", axis)
+
+    def _op_unary_op_overrider(self, arg, op):
+        arg_sym = SymbolicExpr.from_value(arg)
+        name = _UNARY_NUMPY_TO_SYM_OP.get(op)
+        if name is None:
+            raise NotImplementedError(f"Unsupported unary operation: {op}")
+        return SymbolicExpr.create(name, arg_sym)
+
+    def _op_binary_op_overrider(self, lhs, rhs, op):
+        lhs_sym = SymbolicExpr.from_value(lhs)
+        rhs_sym = SymbolicExpr.from_value(rhs)
+        op_name = _BINARY_NUMPY_TO_SYM_OP.get(op)
+        if op_name is None:
+            raise NotImplementedError(f"Unsupported binary operation: {op}")
+        return SymbolicExpr.create(op_name, lhs_sym, rhs_sym)
+
+    def _op_ternary_op_overrider(self, lhs, rhs, other, op):
+        lhs_sym = SymbolicExpr.from_value(lhs)
+        rhs_sym = SymbolicExpr.from_value(rhs)
+        other_sym = SymbolicExpr.from_value(other)
+        if op is np.where:
+            return SymbolicExpr.create("where", lhs_sym, rhs_sym, other_sym)
+        raise NotImplementedError(f"Unsupported ternary operation: {op}")
+
+    def _op_addptr_overrider(self, ptr, offset):
+        return SymbolicExpr.create(
+            "addptr",
+            SymbolicExpr.from_value(ptr),
+            SymbolicExpr.from_value(offset),
+        )
+
+    def _op_dot_overrider(self, a, b, d, input_precision, max_num_imprecise_acc):
+        a_sym = SymbolicExpr.from_value(a)
+        b_sym = SymbolicExpr.from_value(b)
+        d_sym = SymbolicExpr.from_value(d) if d is not None else None
+        return SymbolicExpr.create("dot", a_sym, b_sym, d_sym)
+
+    def _op_make_range_overrider(self, ret_ty, start, end):
+        return SymbolicExpr.create(
+            "arange",
+            SymbolicExpr.from_value(ret_ty),
+            SymbolicExpr.from_value(start),
+            SymbolicExpr.from_value(end),
+        )
+
+    def _op_expand_dims_overrider(self, arg, axis):
+        return SymbolicExpr.create("expand_dims", SymbolicExpr.from_value(arg), axis)
+
+    def _op_broadcast_overrider(self, arg, shape):
+        return SymbolicExpr.create("broadcast", SymbolicExpr.from_value(arg), shape)
+
+    def _op_reduce_sum_overrider(self, input, axis=None, keep_dims=False, **kwargs):
+        return SymbolicExpr.create(
+            "sum", SymbolicExpr.from_value(input), axis, keep_dims
+        )
+
+    def _op_reduce_max_overrider(self, input, axis=None, keep_dims=False, **kwargs):
+        input_sym = SymbolicExpr.from_value(input)
+        val = SymbolicExpr.create("max", input_sym, axis, keep_dims)
+        if kwargs.get("return_indices", False):
+            idx = SymbolicExpr.create("argmax", input_sym, axis, keep_dims)
+            return (val, idx)
+        return val
+
+    def _op_reduce_min_overrider(self, input, axis=None, keep_dims=False, **kwargs):
+        input_sym = SymbolicExpr.from_value(input)
+        val = SymbolicExpr.create("min", input_sym, axis, keep_dims)
+        if kwargs.get("return_indices", False):
+            idx = SymbolicExpr.create("argmin", input_sym, axis, keep_dims)
+            return (val, idx)
+        return val
+
+    def _op_splat_overrider(self, shape, arg):
+        return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))
+
+    def _op_idiv_overrider(self, lhs, rhs):
+        return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
+
+    def _op_rsqrt_overrider(self, arg):
+        return SymbolicExpr.create("rsqrt", SymbolicExpr.from_value(arg))
+
+    def _op_cast_impl_overrider(self, src, dst_type):
+        return SymbolicExpr.create("cast_impl", src, dst_type)
+
+    def _op_reshape_overrider(self, arg, shape, allow_reorder):
+        return SymbolicExpr.create(
+            "reshape",
+            SymbolicExpr.from_value(arg),
+            SymbolicExpr.from_value(shape),
+        )
+
+    def _op_trans_overrider(self, arg, perm=[1, 0]):
+        return SymbolicExpr.create("trans", SymbolicExpr.from_value(arg), perm)
+
+    def _op_join_overrider(self, lhs, rhs):
+        return SymbolicExpr.create(
+            "join",
+            SymbolicExpr.from_value(lhs),
+            SymbolicExpr.from_value(rhs),
+        )
+
+    def _op_fabs_overrider(self, arg):
+        return SymbolicExpr.create("fabs", SymbolicExpr.from_value(arg))
+
+    def _op_ashr_overrider(self, lhs, rhs):
+        return SymbolicExpr.create(
+            "ashr",
+            SymbolicExpr.from_value(lhs),
+            SymbolicExpr.from_value(rhs),
+        )
+
+    def _op_advance_overrider(self, ptr, offsets):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        offset_syms = [SymbolicExpr.from_value(o) for o in offsets]
+        return SymbolicExpr.create("advance", ptr_sym, offset_syms)
+
+    def _op_fp_to_fp_overrider(self, src, dst_type, rounding_mode):
+        return SymbolicExpr.create(
+            "fp_to_fp",
+            SymbolicExpr.from_value(src),
+            dst_type,
+            rounding_mode,
+        )
+
+    def _op_umulhi_overrider(self, lhs, rhs):
+        return SymbolicExpr.create(
+            "umulhi",
+            SymbolicExpr.from_value(lhs),
+            SymbolicExpr.from_value(rhs),
+        )
+
+    def _op_cumsum_overrider(self, input, axis, reverse=False, dtype=None):
+        return SymbolicExpr.create(
+            "cumsum",
+            SymbolicExpr.from_value(input),
+            axis,
+            reverse,
+            dtype,
+        )
+
+    def _op_bitcast_overrider(self, src, dst_type):
+        return SymbolicExpr.create("bitcast", SymbolicExpr.from_value(src), dst_type)
+
+    def _op_raw_load_overrider(self, ptr, cache_modifier, eviction_policy, is_volatile):
+        return self._op_load_overrider(
+            ptr, None, None, cache_modifier, eviction_policy, is_volatile
+        )
+
+    def _op_raw_store_overrider(self, ptr, value, cache_modifier, eviction_policy):
+        return self._op_store_overrider(
+            ptr, value, None, cache_modifier, eviction_policy
+        )
+
+    def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        cmp_sym = SymbolicExpr.from_value(cmp)
+        val_sym = SymbolicExpr.from_value(val)
+        return SymbolicExpr.create("atomic_cas", ptr_sym, cmp_sym, val_sym)
+
+    def _op_atomic_rmw_overrider(self, rmwOp, ptr, val, mask, sem, scope):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        val_sym = SymbolicExpr.from_value(val)
+        mask_sym = SymbolicExpr.from_value(mask)
+        return SymbolicExpr.create("atomic_rmw", ptr_sym, val_sym, mask_sym)
+
+    def _build_op_overrider_map(self) -> dict[type[Op], Callable]:
+        """Return a mapping of shared Op types to their overrider methods."""
+        return {
+            ProgramId: self._op_program_id_overrider,
+            UnaryOp: self._op_unary_op_overrider,
+            BinaryOp: self._op_binary_op_overrider,
+            TernaryOp: self._op_ternary_op_overrider,
+            AddPtr: self._op_addptr_overrider,
+            Dot: self._op_dot_overrider,
+            MakeRange: self._op_make_range_overrider,
+            ExpandDims: self._op_expand_dims_overrider,
+            Broadcast: self._op_broadcast_overrider,
+            ReduceSum: self._op_reduce_sum_overrider,
+            ReduceMax: self._op_reduce_max_overrider,
+            ReduceMin: self._op_reduce_min_overrider,
+            Splat: self._op_splat_overrider,
+            Idiv: self._op_idiv_overrider,
+            Rsqrt: self._op_rsqrt_overrider,
+            CastImpl: self._op_cast_impl_overrider,
+            Reshape: self._op_reshape_overrider,
+            Trans: self._op_trans_overrider,
+            Join: self._op_join_overrider,
+            Fabs: self._op_fabs_overrider,
+            Ashr: self._op_ashr_overrider,
+            Advance: self._op_advance_overrider,
+            FpToFp: self._op_fp_to_fp_overrider,
+            Umulhi: self._op_umulhi_overrider,
+            CumSum: self._op_cumsum_overrider,
+            Bitcast: self._op_bitcast_overrider,
+            AtomicCas: self._op_atomic_cas_overrider,
+            AtomicRMW: self._op_atomic_rmw_overrider,
+            RawLoad: self._op_raw_load_overrider,
+            RawStore: self._op_raw_store_overrider,
+        }
+
+    def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
+        overrider_map = self._build_op_overrider_map()
+        overrider = overrider_map.get(op_type)
+        if overrider is not None:
+            return OpCallbacks(op_overrider=self.lock_fn(overrider))
+        return OpCallbacks()
+
+    # ── For-loop infrastructure ───────────────────────────────────
+
+    def _on_data_dependent_value(self) -> None:
+        """Hook called when a data-dependent value forces concretization.
+
+        Subclasses must override to set their fallback flag.
+        """
+        raise NotImplementedError
+
+    def _should_skip_loop_hooks(self) -> bool:
+        """Return True to skip loop hook processing."""
+        return False
+
+    def _materialize_loop_value(self, expr: Any) -> int:
+        if isinstance(expr, SymbolicExpr):
+            if expr.op == "const":
+                return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+            elif expr.has_op("load"):
+                self._on_data_dependent_value()
+                expr = expr.replace_subtree("load")
+                # replace_subtree("load") only concretizes load nodes, so the
+                # result may still be a compound op
+                # (e.g. div(load, load) -> div(const, const)).
+                # Calling replace_subtree() with no anchor_op unconditionally
+                # concretizes every node in the tree, collapsing the whole
+                # expression into a single const value.
+                if expr.op != "const":
+                    expr = expr.replace_subtree()
+                return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+            else:
+                z3_expr, _ = expr.eval()
+                if isinstance(z3_expr, IntNumRef):
+                    return z3_expr.as_long()
+                self._on_data_dependent_value()
+                expr = expr.replace_subtree()
+                return SymbolicExprDataWrapper.coerce_int(expr.to_py())
+        return int(expr)
+
+    def _wrap_range(
+        self,
+        iterable,
+        _lineno,
+        _range_type,
+        iter_args=None,
+        iter_kwargs=None,
+        _iter_callable=None,
+    ):
+        if self._should_skip_loop_hooks():
+            return None
+        iter_args = tuple(iter_args or ())
+        iter_kwargs = iter_kwargs or {}
+
+        if isinstance(iterable, RangeWrapper):
+            return iterable
+
+        args = tuple(SymbolicExpr.from_value(v) for v in iter_args)
+        if not args and iter_kwargs:
+            start_expr = SymbolicExpr.from_value(iter_kwargs.get("start", 0))
+            stop_expr = SymbolicExpr.from_value(
+                iter_kwargs.get("stop", iter_kwargs.get("end"))
+            )
+            step_expr = SymbolicExpr.from_value(iter_kwargs.get("step", 1))
+            if stop_expr is not None:
+                args = (start_expr, stop_expr, step_expr)
+
+        if not args and (
+            isinstance(iterable, range)
+            or (
+                hasattr(iterable, "start")
+                and hasattr(iterable, "stop")
+                and hasattr(iterable, "step")
+            )
+        ):
+            args = tuple(
+                SymbolicExpr.from_value(getattr(iterable, attr, default))
+                for attr, default in (("start", 0), ("stop", 0), ("step", 1))
+            )
+
+        if not args:
+            return None
+
+        start_expr, stop_expr, step_expr = 0, None, 1
+        if len(args) == 1:
+            stop_expr = args[0]
+        elif len(args) == 2:
+            start_expr, stop_expr = args[0], args[1]
+        else:
+            start_expr, stop_expr, step_expr = args[0], args[1], args[2]
+
+        step = self._materialize_loop_value(step_expr)
+        start = self._materialize_loop_value(start_expr)
+        stop = self._materialize_loop_value(stop_expr)
+
+        concrete_range = range(start, stop, step)
+        length = len(concrete_range)
+
+        return RangeWrapper(
+            concrete_range, length=length, start=start, stop=stop, step=step
+        )
+
+    def _loop_hook_before(self, lineno, iterable):
+        if self._should_skip_loop_hooks():
+            return
+        if not isinstance(iterable, RangeWrapper):
+            return
+
+        idx_z3 = Int(f"loop_i_{lineno}")
+        sym = SymbolicExpr.create("const", idx_z3, tl.int32)
+        idx = tl.tensor(sym, tl.int32)
+        ctx = LoopContext(
+            lineno,
+            iterable.length,
+            idx,
+            idx_z3,
+            start=iterable.start,
+            stop=iterable.stop,
+            step=iterable.step,
+        )
+        sym.loop_ctx = ctx
+        self.loop_stack.append(ctx)
+
+    def _loop_hook_iter_overrider(self, lineno, idx):
+        if self._should_skip_loop_hooks():
+            return idx
+        if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            return self.loop_stack[-1].idx
+        return idx
+
+    def _loop_hook_after(self, lineno: int) -> None:
+        if self._should_skip_loop_hooks():
+            return
+        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
+            return
+        self.loop_stack.pop()
+
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        return ForLoopCallbacks(
+            range_wrapper_factory=self.lock_fn(self._wrap_range),
+            before_loop_callback=self.lock_fn(self._loop_hook_before),
+            loop_iter_overrider=self.lock_fn(self._loop_hook_iter_overrider),
+            after_loop_callback=self.lock_fn(self._loop_hook_after),
+        )

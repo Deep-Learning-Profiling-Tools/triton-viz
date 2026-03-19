@@ -2,7 +2,7 @@ import triton.language as tl
 from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional, cast
+from typing import Any, cast
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
@@ -10,7 +10,7 @@ import time
 from functools import partialmethod
 
 from .config import config as cfg
-from .callbacks import OpCallbacks, ForLoopCallbacks
+from .callbacks import OpCallbacks
 
 from .data import (
     Op,
@@ -57,14 +57,66 @@ class _LangPatchScope:
                 setattr(obj, name, original)
 
 
-_LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": []}
+_LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": [], "nki_beta2": []}
 
 
 def _push_lang_patch_scope(backend: str, scope: Any) -> None:
     _LANG_PATCH_SCOPES.setdefault(backend, []).append(scope)
 
 
-def _pop_lang_patch_scope(backend: str) -> Optional[Any]:
+def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
+    """
+    Stores Triton attributes into a LangPatchScope for later unpatching.
+    This is to be run before patching with the interpreter.
+    This is equivalent to what triton>=3.6.0 does natively
+    but also works for triton<3.6.0.
+    """
+
+    def _capture_builtin_attrs(scope: _LangPatchScope, obj: Any) -> None:
+        for name, member in inspect.getmembers(obj):
+            if tl.core.is_builtin(member):
+                scope.set_attr(obj, name, member)
+
+    scope = _LangPatchScope()
+    tensor_attrs = ("__index__", "__bool__", "__repr__", "__str__", "T")
+    lang_attrs = (
+        "range",
+        "static_range",
+        "static_assert",
+        "static_print",
+        "multiple_of",
+        "max_contiguous",
+        "max_constancy",
+        "reduce",
+        "associative_scan",
+    )
+    langs = [
+        value
+        for value in fn.__globals__.values()
+        if inspect.ismodule(value) and value in [tl, tl.core]
+    ]
+    for lang in langs:
+        _capture_builtin_attrs(scope, lang)
+        _capture_builtin_attrs(scope, lang.tensor)
+        if lang == tl:
+            _capture_builtin_attrs(scope, lang.math)
+
+        for attr in tensor_attrs:
+            if hasattr(lang.tensor, attr):
+                scope.set_attr(lang.tensor, attr, getattr(lang.tensor, attr))
+
+        for attr in lang_attrs:
+            if hasattr(lang, attr):
+                scope.set_attr(lang, attr, getattr(lang, attr))
+        scope.set_attr(lang.dtype, "to_ir", lang.dtype.to_ir)
+
+    if hasattr(tl.core, "tensor_descriptor_base"):
+        _capture_builtin_attrs(scope, tl.core.tensor_descriptor_base)
+
+    return scope
+
+
+def _pop_lang_patch_scope(backend: str) -> Any | None:
     scopes = _LANG_PATCH_SCOPES.get(backend)
     if not scopes:
         return None
@@ -124,13 +176,35 @@ class PatchOp:
                 # see triton.runtime.interpreter:ReduceOps.sum
                 # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
                 # Then, convert return value from TensorHandle to tl.tensor
-                ret = tl.core.tensor(
-                    self.callbacks.op_overrider(args[0].handle, *args[1:], **kwargs),
-                    args[0].dtype,
+                symbolic_ret = self.callbacks.op_overrider(
+                    args[0].handle, *args[1:], **kwargs
                 )
-                fn = cast(Any, ret.handle)
-                if fn is not None:
-                    fn.concrete_fn = self.op
+                if isinstance(symbolic_ret, tuple):
+                    ret_parts = []
+                    for sym_elem in symbolic_ret:
+                        _shape = getattr(sym_elem, "shape", ())
+                        _dtype = getattr(sym_elem, "dtype", None)
+                        if _shape and _dtype:
+                            elem_dtype = tl.block_type(_dtype, list(_shape))
+                        else:
+                            elem_dtype = _dtype or args[0].dtype
+                        elem_tensor = tl.core.tensor(sym_elem, elem_dtype)
+                        fn = cast(Any, elem_tensor.handle)
+                        if fn is not None:
+                            fn.concrete_fn = self.op
+                        ret_parts.append(elem_tensor)
+                    ret = tuple(ret_parts)
+                else:
+                    _shape = getattr(symbolic_ret, "shape", ())
+                    _dtype = getattr(symbolic_ret, "dtype", None)
+                    if _shape and _dtype:
+                        ret_dtype = tl.block_type(_dtype, list(_shape))
+                    else:
+                        ret_dtype = _dtype or args[0].dtype
+                    ret = tl.core.tensor(symbolic_ret, ret_dtype)
+                    fn = cast(Any, ret.handle)
+                    if fn is not None:
+                        fn.concrete_fn = self.op
             else:  # interpreter_builder
                 ret = self.callbacks.op_overrider(*args, **kwargs)
                 if ret is not None:
@@ -161,7 +235,7 @@ def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, backend: str):
     :param namespace: The namespace object that owns the operator.
     :param attr: The attribute name for the operator on the namespace.
     :param callbacks: The OpCallbacks object containing before_callback, after_callback, and op_overrider.
-    :param backend: The backend to use ('triton', 'nki', or None for current backend).
+    :param backend: The backend to use ('triton', 'nki', 'nki_beta2', or None for current backend).
     """
     if backend not in OPERATION_REGISTRY:
         raise ValueError(f"Unknown backend: {backend}")
@@ -186,7 +260,7 @@ def unpatch_op(namespace: Any, attr: str, backend: str):
     setattr(namespace, attr, original_op)
 
 
-class _LoopIter:
+class LoopIter:
     def __init__(self, hooks, iterable, lineno, range_type):
         self._it = iter(iterable)
         self._lineno = lineno
@@ -215,170 +289,61 @@ class _LoopIter:
         return idx
 
 
-class _CombinedLoopHooks:
-    """
-    Combine for_loop callbacks from all clients.
-    """
-
-    def __init__(self):
-        self._range_type: list[Callable] = []
-        self._before: list[Callable] = []
-        self._iter_listeners: list[Callable] = []
-        self._iter_overrider: Optional[Callable] = None
-        self._range_wrapper_factory: Optional[Callable] = None
-        self._after: list[Callable] = []
-
-    # Register hooks
-    def add_range_type_callback(self, hook: Callable) -> None:
-        self._range_type.append(hook)
-
-    def add_before(self, hook: Callable) -> None:
-        self._before.append(hook)
-
-    def add_iter_listener(self, hook: Callable) -> None:
-        self._iter_listeners.append(hook)
-
-    def set_iter_overrider(self, hook: Callable) -> None:
-        if self._iter_overrider is not None:
-            raise RuntimeError("Only one loop_iter overrider allowed")
-        self._iter_overrider = hook
-
-    def set_range_wrapper_factory(self, hook: Callable) -> None:
-        if self._range_wrapper_factory is not None:
-            raise RuntimeError("Only one range_wrapper_factory allowed")
-        self._range_wrapper_factory = hook
-
-    def add_after(self, hook: Callable) -> None:
-        self._after.append(hook)
-
-    # Call combined hooks
-    def range_type(self, lineno: int, range_type: str) -> None:
-        for hook in self._range_type:
-            hook(lineno, range_type)
-
-    def before_loop(self, lineno: int, iterable: Any) -> None:
-        for hook in self._before:
-            hook(lineno, iterable)
-
-    def loop_iter(self, lineno: int, idx: Any) -> Any:
-        # override iteration index
-        if self._iter_overrider is not None:
-            new_idx = self._iter_overrider(lineno, idx)
-            if new_idx is not None:
-                idx = new_idx
-
-        # call all iteration listeners
-        for hook in self._iter_listeners:
-            hook(lineno, idx)
-
-        return idx
-
-    def after_loop(self, lineno: int) -> None:
-        for hook in self._after:
-            hook(lineno)
-
-    def loop_iter_wrapper(
-        self,
-        iterable_callable: Callable,
-        iter_args,
-        iter_kwargs,
-        lineno: int,
-        range_type: str,
-    ) -> "_LoopIter":
-        args = tuple(iter_args) if iter_args is not None else ()
-        kwargs = dict(iter_kwargs) if iter_kwargs is not None else {}
-
-        if self._range_wrapper_factory is not None:
-            wrapped = self._range_wrapper_factory(
-                None, lineno, range_type, args, kwargs, iterable_callable
-            )
-            if wrapped is not None:
-                iterable = wrapped
-            else:
-                iterable = iterable_callable(*args, **kwargs)
-        else:
-            iterable = iterable_callable(*args, **kwargs)
-        return _LoopIter(self, iterable, lineno, range_type)
-
-    def clear(self) -> None:
-        self._range_type.clear()
-        self._before.clear()
-        self._iter_listeners.clear()
-        self._iter_overrider = None
-        self._range_wrapper_factory = None
-        self._after.clear()
-
-
 class _LoopPatcher:
-    """Manages loop patching state and hooks."""
+    """Manages AST patching for for-loop interception."""
 
     def __init__(self):
-        self.hooks = _CombinedLoopHooks()
-        self._orig_visit_for: Optional[Callable] = None
+        self._orig_visit_for: Callable | None = None
         self._patched: bool = False
 
     def patch(self) -> None:
-        """Apply loop patching."""
         if not self._patched:
             self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
             _OrigASTTransformer.visit_For = triton_viz_visit_For  # type: ignore[assignment]
             self._patched = True
 
     def unpatch(self) -> None:
-        """Remove loop patching."""
         if not self._patched:
             return
-
         if self._orig_visit_for is not None:
             _OrigASTTransformer.visit_For = self._orig_visit_for
-
-        self.hooks.clear()
         self._patched = False
 
 
 _loop_patcher = _LoopPatcher()
 
 
-def patch_for_loop(loop_callbacks: ForLoopCallbacks):
+def patch_for_loop():
     _loop_patcher.patch()
-
-    # Registering hooks
-    if loop_callbacks.range_type_callback is not None:
-        _loop_patcher.hooks.add_range_type_callback(loop_callbacks.range_type_callback)
-    if loop_callbacks.range_wrapper_factory is not None:
-        _loop_patcher.hooks.set_range_wrapper_factory(
-            loop_callbacks.range_wrapper_factory
-        )
-    if loop_callbacks.before_loop_callback is not None:
-        _loop_patcher.hooks.add_before(loop_callbacks.before_loop_callback)
-    if loop_callbacks.loop_iter_overrider is not None:
-        _loop_patcher.hooks.set_iter_overrider(loop_callbacks.loop_iter_overrider)
-    if loop_callbacks.loop_iter_listener is not None:
-        _loop_patcher.hooks.add_iter_listener(loop_callbacks.loop_iter_listener)
-    if loop_callbacks.after_loop_callback is not None:
-        _loop_patcher.hooks.add_after(loop_callbacks.after_loop_callback)
 
 
 def unpatch_for_loop():
     _loop_patcher.unpatch()
 
 
-def patch_lang(fn, backend):
+def patch_lang(fn, backend, client_manager=None):
     if backend == "triton":
-        scope = triton_patch_lang(fn)
+        scope = _triton_snapshot_scope(fn)
+        triton_patch_lang(fn)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
         scope = _LangPatchScope()
         nki_patch_lang(scope)
+    elif backend == "nki_beta2":
+        from triton_viz.core.nki_beta2 import nki_patch_lang
+
+        scope = _LangPatchScope()
+        nki_patch_lang(scope)
     else:
         raise ValueError(
-            f"Unsupported backend {backend} received. Triton-viz only supports one of ('triton', 'nki')."
+            f"Unsupported backend {backend} received. Triton-viz only supports one of ('triton', 'nki', 'nki_beta2')."
         )
 
     _push_lang_patch_scope(backend, scope)
 
-    fn.__globals__["_triton_viz_loop_patcher"] = _loop_patcher
+    if client_manager is not None:
+        fn.__globals__["_triton_viz_loop_patcher"] = client_manager
     patch_flip(scope, lambda: _current_client_manager)
 
 
@@ -396,6 +361,7 @@ class FakeTensor:
     _stride: tuple[int, ...] = ()
     _is_contiguous: bool = True
     _element_size: int = 1
+    device: str = "fake_tensor"
 
     def data_ptr(self) -> int:
         return self._data_ptr
@@ -562,7 +528,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
 def _jit_function_call(self, *args, backend=None, **kwargs):
     assert backend is not None
-    patch_lang(self.fn, backend)
+    patch_lang(self.fn, backend, client_manager=_current_client_manager)
     try:
         return self.fn(*args, **kwargs)
     finally:

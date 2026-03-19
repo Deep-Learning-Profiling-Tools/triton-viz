@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import ClassVar, Optional
+from typing import ClassVar
 import traceback
 import numpy.typing as npt
 import numpy as np
@@ -14,7 +14,7 @@ class Op:
     call_path: list[traceback.FrameSummary] = field(init=False, default_factory=list)
 
     def __post_init__(self):
-        self.call_path = extract_user_frames(skip_tail=2)
+        self.call_path = extract_user_frames(num_frames=1)
 
 
 @dataclass
@@ -269,6 +269,59 @@ class Tensor:
     data: torch.Tensor
 
 
+@dataclass(frozen=True)
+class TensorSnapshot:
+    """
+    Portable tensor metadata plus CPU data for saved trace archives.
+    We can't just use the triton_viz.core.data.Tensor class since some clients (e.g. sanitizer)
+    assumes that the data is stored in a torch.Tensor, not a Tensor instance.
+    """
+
+    ptr: int
+    dtype: str
+    _stride: tuple
+    shape: tuple
+    _element_size: int
+    data: torch.Tensor
+    device: str
+    _contiguous: bool
+
+    @classmethod
+    def from_tensor(cls, tensor) -> "TensorSnapshot":
+        """Capture a tensor-like object into a CPU-backed snapshot."""
+        data = tensor.detach().cpu()
+        device = getattr(tensor, "device", "cpu")
+        contiguous_fn = getattr(tensor, "is_contiguous", None)
+        return cls(
+            ptr=tensor.data_ptr(),
+            dtype=str(tensor.dtype),
+            _stride=tuple(tensor.stride()),
+            shape=tuple(tensor.shape),
+            _element_size=tensor.element_size(),
+            data=data.clone()
+            if isinstance(data, torch.Tensor)
+            else torch.as_tensor(data.numpy() if hasattr(data, "numpy") else data),
+            device=str(device),
+            _contiguous=bool(contiguous_fn()) if callable(contiguous_fn) else True,
+        )
+
+    def data_ptr(self) -> int:
+        """Mirror the tensor data_ptr() API used by trace consumers."""
+        return self.ptr
+
+    def stride(self) -> tuple:
+        """Mirror the tensor stride() API used by trace consumers."""
+        return self._stride
+
+    def element_size(self) -> int:
+        """Mirror the tensor element_size() API used by trace consumers."""
+        return self._element_size
+
+    def is_contiguous(self) -> bool:
+        """Mirror the tensor is_contiguous() API used by trace consumers."""
+        return self._contiguous
+
+
 @dataclass
 class Grid:
     idx: tuple
@@ -276,6 +329,6 @@ class Grid:
 
 @dataclass
 class Launch:
-    grid: Optional[tuple] = None
+    grid: tuple | None = None
     tensors: set[Tensor] = field(default_factory=set)
     records: list = field(default_factory=list)

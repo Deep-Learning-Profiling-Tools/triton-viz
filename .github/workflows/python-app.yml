@@ -21,8 +21,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      TRITON_INTERPRET: "1"
 
     steps:
     - uses: actions/checkout@v3
@@ -50,6 +48,11 @@ jobs:
         cd triton_viz
         uv sync --extra test
 
+    - name: Upgrade Triton to latest from main
+      run: |
+        cd triton_viz
+        uv pip install --pre -U triton
+
     - name: Run frontend tests
       run: |
         cd triton_viz
@@ -59,17 +62,22 @@ jobs:
     - name: Test with pytest
       run: |
         cd triton_viz
-        uv run pytest tests
+        uv run pytest tests -n auto
 
     - name: Install Triton-Viz with NKI extras
       run: |
         cd triton_viz
         uv sync --extra test --extra nki
 
+    - name: Upgrade Triton to latest from main (NKI)
+      run: |
+        cd triton_viz
+        uv pip install --pre -U triton
+
     - name: Run full (Triton + NKI) pytest suite
       run: |
         cd triton_viz
-        uv run pytest tests -m ""
+        uv run pytest tests -m "" -n auto
 
   test-pip-install:
     runs-on: ubuntu-latest

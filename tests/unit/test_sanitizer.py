@@ -5,7 +5,13 @@ import triton.language as tl
 
 from triton_viz.core.config import config as cfg
 from triton_viz.clients import Sanitizer
-from triton_viz.clients.symbolic_engine import SymbolicExpr
+from triton_viz.clients.symbolic_engine import (
+    SymbolicExpr,
+    ConstSymbolicExpr,
+    ReduceSymbolicExpr,
+    LoadSymbolicExpr,
+    StoreSymbolicExpr,
+)
 from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
     SymbolicSanitizer,
@@ -18,16 +24,20 @@ from z3 import Solver, Int, sat
 # ======== Init Tests ===========
 
 
-def test_sanitizer_init():
-    original = cfg.enable_sanitizer
-    try:
-        cfg.enable_sanitizer = True
-        assert isinstance(Sanitizer(), SymbolicSanitizer)
+@pytest.fixture
+def _isolate_sanitizer_cfg():
+    """Save and restore cfg.enable_sanitizer around every test."""
+    saved = cfg.enable_sanitizer
+    yield
+    cfg.enable_sanitizer = saved
 
-        cfg.enable_sanitizer = False
-        assert isinstance(Sanitizer(), NullSanitizer)
-    finally:
-        cfg.enable_sanitizer = original
+
+def test_sanitizer_init(_isolate_sanitizer_cfg):
+    cfg.enable_sanitizer = True
+    assert isinstance(Sanitizer(), SymbolicSanitizer)
+
+    cfg.enable_sanitizer = False
+    assert isinstance(Sanitizer(), NullSanitizer)
 
 
 # ======== Range Constraint Tests ===========
@@ -74,7 +84,9 @@ def test_reduce_expr_eval(op: str, data):
     import numpy as np
     import builtins
 
-    input_arr = SymbolicExpr.create("const", np.array(data), tl.int32)
+    input_arr = SymbolicExpr.create(
+        "const", np.array(data), tl.block_type(tl.int32, [len(data)])
+    )
     reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
 
     result, _ = reduce_expr.eval(simplify_constraints=False)
@@ -293,3 +305,252 @@ def test_broadcast_updates_shape():
     # broadcast to shape (4,)
     expr = SymbolicExpr.create("broadcast", arg, (4,))
     assert expr.shape == (4,), f"Expected shape (4,), got {expr.shape}"
+
+
+# ======== Block Pointer Symbolic Expr Tests =========
+
+
+def test_make_block_ptr_symbolic_expr_creation():
+    """Create MakeBlockPtrSymbolicExpr with concrete values, verify children and attributes."""
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
+    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
+    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
+    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+    block_shape_vals = [32]
+    order_vals = [0]
+
+    expr = SymbolicExpr.create(
+        "make_block_ptr",
+        base,
+        shape_list,
+        stride_list,
+        offset_list,
+        block_shape_vals,
+        order_vals,
+    )
+    assert expr.op == "make_block_ptr"
+    assert expr.ndim == 1
+    assert expr.block_shape_values == [32]
+    assert expr.order_values == [0]
+    assert expr.base is base
+    assert expr.shape_keys == ["shape_0"]
+    assert expr.stride_keys == ["stride_0"]
+    assert expr.offset_keys == ["offset_0"]
+    assert getattr(expr, "shape_0") is not None
+    assert getattr(expr, "stride_0") is not None
+    assert getattr(expr, "offset_0") is not None
+
+
+def test_advance_symbolic_expr_creation():
+    """Create Advance wrapping MakeBlockPtr, verify children."""
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
+    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
+    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
+    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+
+    mbp = SymbolicExpr.create(
+        "make_block_ptr",
+        base,
+        shape_list,
+        stride_list,
+        offset_list,
+        [32],
+        [0],
+    )
+
+    delta = SymbolicExpr.create("const", 32, tl.int32)
+    adv = SymbolicExpr.create("advance", mbp, [delta])
+    assert adv.op == "advance"
+    assert adv.ndim == 1
+    assert adv.delta_keys == ["delta_0"]
+    assert adv.ptr is mbp
+    assert getattr(adv, "delta_0") is delta
+
+
+def test_tensor_pointer_load_z3_eval():
+    """Create make_block_ptr -> tensor_pointer_load, call .eval(), verify Z3 expression."""
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
+    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
+    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
+    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+
+    mbp = SymbolicExpr.create(
+        "make_block_ptr",
+        base,
+        shape_list,
+        stride_list,
+        offset_list,
+        [32],
+        [0],
+    )
+
+    load_expr = SymbolicExpr.create("tensor_pointer_load", mbp, (0,))
+    z3_expr, constraints = load_expr.eval()
+
+    # Should have Z3 expression with base address (1000) and block index variable
+    z3_str = str(z3_expr)
+    assert "1000" in z3_str, f"Expected base address in Z3 expr, got: {z3_str}"
+    assert "blk_k_0" in z3_str, f"Expected block index variable, got: {z3_str}"
+
+    # Constraints should include block index bounds and boundary check
+    assert constraints is not None
+    constr_str = str(constraints)
+    assert "blk_k_0" in constr_str
+
+
+def test_resolve_block_ptr_through_advance_chain():
+    """Create make_block_ptr -> advance -> advance, verify accumulated offsets."""
+    from triton_viz.clients.symbolic_engine import TensorPointerLoadSymbolicExpr
+
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
+    shape_list = [SymbolicExpr.create("const", 128, tl.int32)]
+    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
+    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+
+    mbp = SymbolicExpr.create(
+        "make_block_ptr",
+        base,
+        shape_list,
+        stride_list,
+        offset_list,
+        [32],
+        [0],
+    )
+
+    delta1 = SymbolicExpr.create("const", 32, tl.int32)
+    adv1 = SymbolicExpr.create("advance", mbp, [delta1])
+
+    delta2 = SymbolicExpr.create("const", 32, tl.int32)
+    adv2 = SymbolicExpr.create("advance", adv1, [delta2])
+
+    # Create a load to use its _resolve_block_ptr_components
+    load_expr = SymbolicExpr.create("tensor_pointer_load", adv2, ())
+    assert isinstance(load_expr, TensorPointerLoadSymbolicExpr)
+
+    (
+        resolved_base,
+        shapes,
+        strides,
+        offsets,
+        bs,
+    ) = load_expr._resolve_block_ptr_components(adv2)
+    assert resolved_base is base
+    assert bs == [32]
+
+    # Offsets should be accumulated: 0 + 32 + 32 = 64
+    off_z3, _ = offsets[0].eval()
+    assert cast(IntNumRef, off_z3).as_long() == 64
+
+
+# ======== ReduceSymbolicExpr Shape Tests ===========
+
+
+def _make_block_expr(scalar_ty, shape):
+    """Helper: create a ConstSymbolicExpr with the given block dtype."""
+    return ConstSymbolicExpr("const", value=0, dtype=tl.block_type(scalar_ty, shape))
+
+
+def test_dtype_is_always_scalar():
+    """dtype must always be a scalar type, never a block_type."""
+    expr = _make_block_expr(tl.float32, [4, 8])
+    assert not isinstance(expr.dtype, tl.block_type)
+    assert expr.dtype == tl.float32
+    assert expr.shape == (4, 8)
+    full = tl.block_type(expr.dtype, list(expr.shape))
+    assert isinstance(full, tl.block_type)
+
+
+def test_reduce_shape_2d_axis1():
+    """tl.sum(x, axis=1) on [4, 8] -> [4]."""
+    inp = _make_block_expr(tl.float32, [4, 8])
+    assert inp.shape == (4, 8)
+
+    reduced = ReduceSymbolicExpr("sum", inp, axis=1)
+    assert reduced.shape == (4,)
+
+
+def test_reduce_shape_2d_axis0():
+    """tl.sum(x, axis=0) on [4, 8] -> [8]."""
+    inp = _make_block_expr(tl.float32, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=0)
+    assert reduced.shape == (8,)
+
+
+def test_reduce_shape_2d_axis1_keepdims():
+    """tl.sum(x, axis=1, keepdims=True) on [4, 8] -> [4, 1]."""
+    inp = _make_block_expr(tl.float32, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=1, keepdims=True)
+    assert reduced.shape == (4, 1)
+
+
+def test_reduce_shape_2d_axis0_keepdims():
+    """tl.sum(x, axis=0, keepdims=True) on [4, 8] -> [1, 8]."""
+    inp = _make_block_expr(tl.float32, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=0, keepdims=True)
+    assert reduced.shape == (1, 8)
+
+
+def test_reduce_shape_1d_to_scalar():
+    """tl.sum(x, axis=0) on [8] -> scalar ()."""
+    inp = _make_block_expr(tl.float32, [8])
+    assert inp.shape == (8,)
+
+    reduced = ReduceSymbolicExpr("sum", inp, axis=0)
+    assert reduced.shape == ()
+
+
+def test_reduce_shape_all_axes():
+    """tl.sum(x) with axis=None on [4, 8] -> scalar ()."""
+    inp = _make_block_expr(tl.float32, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=None)
+    assert reduced.shape == ()
+
+
+def test_reduce_shape_preserves_scalar_type():
+    """Reduced dtype keeps the original scalar type (e.g. float16)."""
+    inp = _make_block_expr(tl.float16, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=1)
+    assert reduced.shape == (4,)
+    assert reduced.dtype == tl.float16
+
+
+def test_reduce_shape_max_min():
+    """tl.max and tl.min compute the same output shape as tl.sum."""
+    inp = _make_block_expr(tl.float32, [4, 8])
+
+    for op in ("max", "min"):
+        reduced = ReduceSymbolicExpr(op, inp, axis=1)
+        assert reduced.shape == (4,), f"op={op}: expected (4,), got {reduced.shape}"
+
+
+# ======== LoadSymbolicExpr dtype Tests ===========
+
+
+def test_load_dtype_block_of_pointers():
+    """tl.load on a block of pointers should produce a block of the pointed-to type.
+
+    ptr dtype: block_type(pointer<fp32>, [1, 16])
+    expected load dtype: block_type(fp32, [1, 16])
+    """
+    ptr = ConstSymbolicExpr(
+        "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
+    )
+    load = LoadSymbolicExpr("load", ptr)
+    assert load.shape == (1, 16), f"Expected shape (1, 16), got {load.shape}"
+    assert load.dtype == tl.float32, f"Expected tl.float32, got {load.dtype}"
+
+
+def test_store_dtype_block_of_pointers():
+    """tl.store on a block of pointers should not derive a dtype (store returns None).
+
+    ptr dtype: block_type(pointer<fp32>, [1, 16])
+    expected store dtype: None
+    """
+    ptr = ConstSymbolicExpr(
+        "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
+    )
+    value = ConstSymbolicExpr(
+        "const", value=0, dtype=tl.block_type(tl.float32, [1, 16])
+    )
+    store = StoreSymbolicExpr("store", ptr, value)
+    assert store.dtype is None, f"Expected None, got {store.dtype}"

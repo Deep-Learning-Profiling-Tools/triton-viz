@@ -6,6 +6,7 @@ const DEFAULT_STATE = {
         histogram: false,
         allPrograms: false,
         showCode: false,
+        editTensorView: false,
     },
 };
 let currentState = {

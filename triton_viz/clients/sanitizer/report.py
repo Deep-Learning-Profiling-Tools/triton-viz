@@ -129,31 +129,25 @@ def print_oob_record_pdb_style(
     if oob_record.user_code_tracebacks:
         print(f"{bold}{cyan}━━━ Code Context ━━━{reset_color}")
 
-        for tb_info in oob_record.user_code_tracebacks:
-            seg = read_source_segment(tb_info.filename, tb_info.lineno, context=3)
-            if seg is not None:
-                print(f"  {magenta}File:{reset_color} {tb_info.filename}")
-                print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
-                print(f"  {magenta}Line {tb_info.lineno}:{reset_color}")
+        tb_info = oob_record.user_code_tracebacks[-1]  # Innermost user frame
+        seg = read_source_segment(tb_info.filename, tb_info.lineno, context=3)
+        if seg is not None:
+            print(f"  {magenta}File:{reset_color} {tb_info.filename}")
+            print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
+            print(f"  {magenta}Line {tb_info.lineno}:{reset_color}")
 
-                for line in seg["lines"]:
-                    line_num = line["no"]
-                    line_content = line["text"]
-                    if line_num == tb_info.lineno:
-                        print(
-                            f"{op_color}→ {line_num:4d} │ {line_content}{reset_color}"
-                        )
-                    else:
-                        print(f"  {line_num:4d} │ {line_content}")
-            else:
-                # Fallback if we can't read the file
-                print(
-                    f"  {magenta}File:{reset_color} {tb_info.filename}:{tb_info.lineno}"
-                )
-                print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
-                print(f"  {magenta}Code:{reset_color} {tb_info.line_of_code}")
-
-            break  # Only show the first traceback for brevity
+            for line in seg["lines"]:
+                line_num = line["no"]
+                line_content = line["text"]
+                if line_num == tb_info.lineno:
+                    print(f"{op_color}→ {line_num:4d} │ {line_content}{reset_color}")
+                else:
+                    print(f"  {line_num:4d} │ {line_content}")
+        else:
+            # Fallback if we can't read the file
+            print(f"  {magenta}File:{reset_color} {tb_info.filename}:{tb_info.lineno}")
+            print(f"  {magenta}Function:{reset_color} {tb_info.func_name}")
+            print(f"  {magenta}Code:{reset_color} {tb_info.line_of_code}")
 
     # ===================== Tensor Information =====================
     print(f"{bold}{cyan}━━━ Tensor Information ━━━{reset_color}")

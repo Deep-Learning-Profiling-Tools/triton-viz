@@ -1,4 +1,6 @@
 from copy import deepcopy
+from collections.abc import Callable
+from ..utils.traceback_utils import CODE_KEYS, get_code_key
 from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.autotuner import Heuristics
 from triton.runtime.interpreter import InterpretedFunction
@@ -8,19 +10,20 @@ from .config import config as cfg
 from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
-from typing import Callable, Optional, Union
+from . import patch
+import types
 
 
 launches: list[Launch] = []
 
 
 class TraceInterface:
-    def __init__(self, client: Union[str, Client]) -> None:
+    def __init__(self, client: str | Client) -> None:
         self.client_manager = ClientManager()
         self.add_client(client)
 
     @staticmethod
-    def _normalize_client(client: Union[str, Client]) -> Client:
+    def _normalize_client(client: str | Client) -> Client:
         if isinstance(client, str):
             name = client.lower()
             if name == "sanitizer":
@@ -35,7 +38,7 @@ class TraceInterface:
         else:
             raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def add_client(self, new_client: Union[str, Client]) -> None:
+    def add_client(self, new_client: str | Client) -> None:
         self.client_manager.add_clients([self._normalize_client(new_client)])
 
     def finalize(self):
@@ -46,18 +49,16 @@ class TraceInterface:
 class TritonTrace(KernelInterface, TraceInterface):
     def __init__(
         self,
-        runner: Union[JITFunction, InterpretedFunction, Autotuner, Heuristics],
-        client: Union[str, Client],
+        runner: JITFunction | InterpretedFunction | Autotuner | Heuristics,
+        client: str | Client,
     ) -> None:
-        self.jit_fn: Optional[JITFunction] = None
-        self.base_fn: Optional[Callable] = None
-        self.interpreted_fn: Optional[InterpretedFunction] = None
+        self.jit_fn: JITFunction | None = None
+        self.base_fn: Callable | None = None
+        self.interpreted_fn: InterpretedFunction | None = None
 
         def unpack_kernel(
-            source: Union["TritonTrace", JITFunction, InterpretedFunction, Heuristics],
-        ) -> tuple[
-            Optional[JITFunction], Optional[Callable], Optional[InterpretedFunction]
-        ]:
+            source: TritonTrace | JITFunction | InterpretedFunction | Heuristics,
+        ) -> tuple[JITFunction | None, Callable | None, InterpretedFunction | None]:
             if isinstance(source, TritonTrace):
                 return source.jit_fn, source.base_fn, source.interpreted_fn
             if isinstance(source, JITFunction):
@@ -150,6 +151,18 @@ class TritonTrace(KernelInterface, TraceInterface):
     def __call__(self, *args, **kwargs):
         # When a traced JIT function is called from within another JIT function,
         # we need to execute the underlying function directly
+
+        # check that client sets match for calling and called functions
+        outer_client_manager = getattr(patch, "_current_client_manager", None)
+        if outer_client_manager is not None:
+            outer_clients = set(outer_client_manager.clients)
+            inner_clients = set(self.client_manager.clients)
+            if outer_clients != inner_clients:
+                raise RuntimeError(
+                    "nested traced calls require matching clients; "
+                    f"outer={outer_clients}, inner={inner_clients}"
+                )
+
         return self.interpreted_fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
@@ -159,19 +172,24 @@ class TritonTrace(KernelInterface, TraceInterface):
 
 
 class NKITrace(KernelInterface, TraceInterface):
-    def __init__(self, kernel, client: str | Client) -> None:
-        from neuronxcc.nki.compile import GenericKernel
-        from .nki import NKIInterpretedFunction
+    def __init__(self, kernel, client: str | Client, beta2: bool = True) -> None:
+        nki_fn_cls: object = None
+        if beta2:
+            from .nki_beta2 import NKIBeta2InterpretedFunction
 
-        if isinstance(kernel, GenericKernel):
-            # This is wrong
-            self.interpreter_fn = NKIInterpretedFunction(kernel.func)
-            self.func = kernel.func
-        elif isinstance(kernel, NKIInterpretedFunction):
+            nki_fn_cls = NKIBeta2InterpretedFunction
+        else:
+            from .nki import NKIInterpretedFunction
+
+            nki_fn_cls = NKIInterpretedFunction
+
+        self.backend = "nki_beta2" if beta2 else "nki"
+        if isinstance(kernel, nki_fn_cls):
+            assert hasattr(kernel, "fn")
             self.interpreter_fn = kernel
             self.func = kernel.fn
         else:
-            self.interpreter_fn = NKIInterpretedFunction(kernel)
+            self.interpreter_fn = nki_fn_cls(kernel)
             self.func = kernel
 
         TraceInterface.__init__(self, client)
@@ -209,17 +227,47 @@ class NKITrace(KernelInterface, TraceInterface):
         return KernelInterface.__getitem__(self, tuple(*grid))
 
     def __call__(self, *args, **kwargs):
-        return self[(1, 1, 1)](*args, **kwargs)
+        return self[(1,)](*args, **kwargs)
 
-    def run(self, *args, **kwargs):
-        with self.client_manager.patch_run(self.func, backend="nki"):
+    def run(self, *args, pre_trace=True, platform_target="trn1", **kwargs):
+        """
+        pre_trace: determines whether to do an initial NKI Beta 2 trace to capture some semantic errors.
+            pre_trace=False has fewer guarantees on interpreter parity with NKI compiler but must be set
+            if you want full python flexibility inside kernels (e.g. importing modules inside a kernel).
+            Does nothing if self.backend == 'nki'.
+        """
+        if self.backend == "nki_beta2" and pre_trace:
+            import nki
+
+            kwargs.pop("warmup", None)
+            grid = kwargs.pop("grid", None)
+            nki.trace(self.func, grid=grid, platform_target=platform_target).specialize(
+                *args, **kwargs
+            )
+            kwargs["grid"] = grid
+        with self.client_manager.patch_run(self.func, backend=self.backend):
             kwargs.update({"client_manager": self.client_manager})
             ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()
             return ret
 
 
-def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
+def trace_source(kernel):
+    """
+    Add the kernel code to be traceable within stack traces for clients
+    (e.g. to capture source code to display with visualizer/client).
+    You can also use this to decorate other functions that a kernel calls.
+    """
+    base_fn = kernel
+    while not isinstance(base_fn, types.FunctionType):
+        # base_fn may be a raw function but also a JITFunction, Autotuner, InterpretedFunction, ...
+        # we want to strip away the wrappers until we get to the python function
+        base_fn = base_fn.fn
+    CODE_KEYS.add(get_code_key(base_fn))
+    return kernel
+
+
+def trace(client: str | Client | None = None, backend: str = "triton"):
     """
     Create a trace object that can be used to run a kernel with instrumentation client(s).
 
@@ -232,12 +280,20 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
     if not isinstance(client, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def _is_sanitizer_client(selected: Union[str, Client]) -> bool:
+    def _is_sanitizer_client(selected: str | Client) -> bool:
         if isinstance(selected, str):
             return selected.lower() == "sanitizer"
         return isinstance(selected, Sanitizer)
 
     def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
+        if cfg.cli_active and isinstance(kernel, TraceInterface):
+            raise RuntimeError(
+                "@triton_viz.trace() decorator cannot be used together with "
+                "CLI wrapper (e.g., triton-sanitizer / triton-profiler). "
+                "Please remove the @triton_viz.trace() decorator from your code "
+                "when using CLI tools."
+            )
+
         if _is_sanitizer_client(client) and not cfg.enable_sanitizer:
             # when dry-running triton-sanitizer CLI (i.e. wrap kernels with sanitizer
             # tracing but don't actually sanitize), don't actually trace the kernel
@@ -249,11 +305,13 @@ def trace(client: Union[str, Client, None] = None, backend: str = "triton"):
             trace.add_client(client)
             return trace
 
+        trace_source(kernel)
+
         # First-time wrapping
         # Triton backend need JIT/Interpreter/Autotuner；
         # NKI allow Python function（ NKIInterpretedFunction）
-        if backend == "nki":
-            return NKITrace(kernel, client)
+        if backend in ("nki", "nki_beta2"):
+            return NKITrace(kernel, client, beta2=("beta2" in backend))
         if isinstance(
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
         ):
@@ -273,5 +331,4 @@ def clear() -> None:
     """
     Clear all traces.
     """
-    global launches
     launches.clear()
