@@ -371,7 +371,8 @@ class TensorMaterializer:
 
     def rebase_pointers(self, ptr_data, mask=None):
         if mask is not None:
-            valid_indices = np.flatnonzero(np.asarray(mask).flat)
+            mask_arr = np.broadcast_to(np.asarray(mask), ptr_data.shape)
+            valid_indices = np.flatnonzero(mask_arr.flat)
         else:
             valid_indices = np.arange(ptr_data.size)
 
