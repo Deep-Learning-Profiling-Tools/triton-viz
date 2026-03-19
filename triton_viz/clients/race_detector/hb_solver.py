@@ -108,6 +108,27 @@ def _reads_from(writer: MemoryAccess, reader: MemoryAccess, addr: int) -> bool:
     return False
 
 
+def _has_ambiguous_writer(
+    all_nodes, sync_indices, wi, ri, addr, written,
+):
+    """Check if another sync node visible to reader writes the same value."""
+    r = all_nodes[ri]
+    for oi in sync_indices:
+        if oi == wi or oi == ri:          # skip candidate writer AND reader itself
+            continue
+        o = all_nodes[oi]
+        if addr not in _active_addrs(o):
+            continue
+        ov = _written_value_at_addr(o, addr)
+        if ov != written:
+            continue
+        # o writes same value — skip if po-after r (invisible)
+        if o.grid_idx == r.grid_idx and o.event_id > r.event_id:
+            continue
+        return True
+    return False
+
+
 class HBSolver:
     """Local happens-before solver for a candidate race pair.
 
@@ -181,24 +202,11 @@ class HBSolver:
                         written = _written_value_at_addr(w, addr)
                         if written is None:
                             continue
-                        # ABA check: verify no other sync node visible to r
-                        # writes the same value (would make reads-from ambiguous)
-                        ambiguous = False
-                        for oi in sync_indices:
-                            if oi == wi:
-                                continue
-                            o = all_nodes[oi]
-                            if addr not in _active_addrs(o):
-                                continue
-                            ov = _written_value_at_addr(o, addr)
-                            if ov != written:
-                                continue
-                            # o writes same value — skip if po-after r (invisible)
-                            if o.grid_idx == r.grid_idx and o.event_id > r.event_id:
-                                continue
-                            ambiguous = True
-                            break
-                        if not ambiguous and _reads_from(w, r, addr):
+                        if not _reads_from(w, r, addr):
+                            continue
+                        if not _has_ambiguous_writer(
+                            all_nodes, sync_indices, wi, ri, addr, written,
+                        ):
                             adj[wi].add(ri)
                             break
 

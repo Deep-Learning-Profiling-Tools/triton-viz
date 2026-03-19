@@ -547,6 +547,105 @@ def test_add_written_value_not_operand():
     assert not solver.check_race_possible()  # sw edge → no race
 
 
+def test_hb_solver_ignores_reader_self_writeback_for_same_value_cas():
+    """CAS(1,1) reader writes back 1 — must not count as ambiguous third-party writer."""
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    store_data = _make_access(
+        AccessType.STORE, block_idx=0, offset=DATA_ADDR, event_id=0
+    )
+    # Block 0 release xchg writes 1
+    release_xchg = _make_access(
+        AccessType.ATOMIC,
+        block_idx=0,
+        offset=FLAG_ADDR,
+        event_id=1,
+        atomic_op="rmw:xchg",
+        atomic_sem="release",
+        atomic_scope="gpu",
+        atomic_old=np.array([0], dtype=np.int32),
+    )
+    release_xchg.atomic_val = np.array([1], dtype=np.int32)
+
+    # Block 1 acquire cas(1,1): reads old=1, writes back 1
+    acquire_cas = _make_access(
+        AccessType.ATOMIC,
+        block_idx=1,
+        offset=FLAG_ADDR,
+        event_id=0,
+        atomic_op="cas",
+        atomic_sem="acquire",
+        atomic_scope="gpu",
+        atomic_old=np.array([1], dtype=np.int32),
+        atomic_cmp=np.array([1], dtype=np.int32),
+        read_mask=np.array([True], dtype=np.bool_),
+        write_mask=np.array([True], dtype=np.bool_),
+    )
+    acquire_cas.atomic_val = np.array([1], dtype=np.int32)
+    load_data = _make_access(AccessType.LOAD, block_idx=1, offset=DATA_ADDR, event_id=1)
+
+    solver = HBSolver(store_data, load_data)
+    solver.add_sync_events([release_xchg, acquire_cas])
+    assert not solver.check_race_possible()  # reader's writeback excluded → sw edge → no race
+
+
+def test_hb_solver_still_flags_third_party_same_value_writer_as_ambiguous():
+    """Third-party writer of same value 1 → ambiguous reads-from → race."""
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    store_data = _make_access(
+        AccessType.STORE, block_idx=0, offset=DATA_ADDR, event_id=0
+    )
+    # Block 0 release xchg writes 1
+    release_xchg = _make_access(
+        AccessType.ATOMIC,
+        block_idx=0,
+        offset=FLAG_ADDR,
+        event_id=1,
+        atomic_op="rmw:xchg",
+        atomic_sem="release",
+        atomic_scope="gpu",
+        atomic_old=np.array([0], dtype=np.int32),
+    )
+    release_xchg.atomic_val = np.array([1], dtype=np.int32)
+
+    # Block 2 relaxed xchg also writes 1 (genuine third-party)
+    interloper = _make_access(
+        AccessType.ATOMIC,
+        block_idx=2,
+        offset=FLAG_ADDR,
+        event_id=0,
+        atomic_op="rmw:xchg",
+        atomic_sem="relaxed",
+        atomic_scope="gpu",
+        atomic_old=np.array([0], dtype=np.int32),
+    )
+    interloper.atomic_val = np.array([1], dtype=np.int32)
+
+    # Block 1 acquire cas(1,1): reads old=1, writes back 1
+    acquire_cas = _make_access(
+        AccessType.ATOMIC,
+        block_idx=1,
+        offset=FLAG_ADDR,
+        event_id=0,
+        atomic_op="cas",
+        atomic_sem="acquire",
+        atomic_scope="gpu",
+        atomic_old=np.array([1], dtype=np.int32),
+        atomic_cmp=np.array([1], dtype=np.int32),
+        read_mask=np.array([True], dtype=np.bool_),
+        write_mask=np.array([True], dtype=np.bool_),
+    )
+    acquire_cas.atomic_val = np.array([1], dtype=np.int32)
+    load_data = _make_access(AccessType.LOAD, block_idx=1, offset=DATA_ADDR, event_id=1)
+
+    solver = HBSolver(store_data, load_data)
+    solver.add_sync_events([release_xchg, interloper, acquire_cas])
+    assert solver.check_race_possible()  # third-party same-value → ambiguous → race
+
+
 def test_add_operand_vs_written_value_mismatch():
     """add(5) with old=10 writes 15; acquire reads old=5 (operand) → no sw → race."""
     DATA_ADDR = 100
