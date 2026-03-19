@@ -7,11 +7,15 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
 import time
-from functools import partialmethod
-import numpy as np
+from functools import cache, partialmethod
 
 from .config import config as cfg
 from .callbacks import OpCallbacks
+from .libdevice_registry import (
+    LibdeviceSpec,
+    _LIBDEVICE_REGISTRY,
+    _REGISTERED_SPECS,
+)
 
 from .data import (
     Op,
@@ -344,35 +348,6 @@ def unpatch_for_loop():
 # rather than silently returning None.
 
 
-@dataclass(frozen=True)
-class LibdeviceSpec:
-    name: str  # libdevice function name, e.g. "tanh"
-    np_func: Callable | None  # numpy equivalent (None for builder ops)
-    arity: int  # 1, 2, or 3
-    sym_name: str  # symbolic engine op name, e.g. "tanh"
-    builder_method: str | None = None  # interpreter_builder method name
-
-
-_LIBDEVICE_REGISTRY: list[LibdeviceSpec] = [
-    # Unary ops (numpy-backed)
-    LibdeviceSpec("abs", np.abs, 1, "abs"),
-    LibdeviceSpec("ceil", np.ceil, 1, "ceil"),
-    LibdeviceSpec("cos", np.cos, 1, "cos"),
-    LibdeviceSpec("exp", np.exp, 1, "exp"),
-    LibdeviceSpec("exp2", np.exp2, 1, "exp2"),
-    LibdeviceSpec("floor", np.floor, 1, "floor"),
-    LibdeviceSpec("log", np.log, 1, "log"),
-    LibdeviceSpec("log2", np.log2, 1, "log2"),
-    LibdeviceSpec("sin", np.sin, 1, "sin"),
-    LibdeviceSpec("sqrt", np.sqrt, 1, "sqrt"),
-    LibdeviceSpec("tanh", np.tanh, 1, "tanh"),
-    LibdeviceSpec("asin", np.arcsin, 1, "asin"),
-    LibdeviceSpec("acos", np.arccos, 1, "acos"),
-    # Builder-backed ops (use interpreter_builder methods directly)
-    LibdeviceSpec("rsqrt", None, 1, "rsqrt", builder_method="create_rsqrt"),
-]
-
-
 def _make_libdevice_unary(np_func: Callable) -> Callable:
     def _fn(arg0: Any) -> Any:
         handle = interpreter_builder.unary_op(arg0.handle, np_func)
@@ -430,6 +405,7 @@ def _make_libdevice_interpreter_fn(spec: LibdeviceSpec) -> Callable:
     return factory(spec.np_func)
 
 
+@cache
 def _make_unsupported_libdevice_fn(name: str) -> Callable:
     def _unsupported(*args, **kwargs):
         raise NotImplementedError(
@@ -440,20 +416,24 @@ def _make_unsupported_libdevice_fn(name: str) -> Callable:
     return _unsupported
 
 
+# Pre-built interpreter wrappers: reused across patch calls.
+_INTERPRETER_FNS: dict[str, Callable] = {
+    spec.name: _make_libdevice_interpreter_fn(spec) for spec in _LIBDEVICE_REGISTRY
+}
+
+
 def _patch_libdevice_module(scope: _LangPatchScope) -> None:
     """Patch the libdevice module itself (covers ``libdevice.tanh(x)``)."""
     import triton.language.extra.libdevice as _ld
 
-    registered = {s.name: s for s in _LIBDEVICE_REGISTRY}
-
     # Patch registered ops
-    for name, spec in registered.items():
+    for name, fn in _INTERPRETER_FNS.items():
         if hasattr(_ld, name):
-            scope.set_attr(_ld, name, _make_libdevice_interpreter_fn(spec))
+            scope.set_attr(_ld, name, fn)
 
     # Patch unregistered stubs with unsupported-op errors
     for name in dir(_ld):
-        if name.startswith("_") or name in registered:
+        if name.startswith("_") or name in _REGISTERED_SPECS:
             continue
         member = getattr(_ld, name, None)
         if (
@@ -467,7 +447,6 @@ def _patch_libdevice_aliases(fn: Callable, scope: _LangPatchScope) -> None:
     """Patch fn.__globals__ for direct imports (``from ... import tanh``)."""
     import triton.language.extra.libdevice as _ld
 
-    registered = {s.name: s for s in _LIBDEVICE_REGISTRY}
     for gname, gvalue in list(fn.__globals__.items()):
         if not callable(gvalue):
             continue
@@ -476,17 +455,31 @@ def _patch_libdevice_aliases(fn: Callable, scope: _LangPatchScope) -> None:
         orig_name = getattr(gvalue, "__name__", None)
         if orig_name is None:
             continue
-        spec = registered.get(orig_name)
-        if spec is not None:
-            scope.set_item(fn.__globals__, gname, _make_libdevice_interpreter_fn(spec))
+        interp_fn = _INTERPRETER_FNS.get(orig_name)
+        if interp_fn is not None:
+            scope.set_item(fn.__globals__, gname, interp_fn)
         else:
             scope.set_item(
                 fn.__globals__, gname, _make_unsupported_libdevice_fn(orig_name)
             )
 
 
+def _kernel_references_libdevice(fn: Callable) -> bool:
+    """Check if the kernel's globals reference the libdevice module or its functions."""
+    import triton.language.extra.libdevice as _ld
+
+    for gvalue in fn.__globals__.values():
+        if gvalue is _ld:
+            return True
+        if callable(gvalue) and getattr(gvalue, "__module__", None) == _ld.__name__:
+            return True
+    return False
+
+
 def _patch_libdevice(fn: Callable, scope: _LangPatchScope) -> None:
     """Patch libdevice stub functions for interpreter / sanitizer mode."""
+    if not _kernel_references_libdevice(fn):
+        return
     _patch_libdevice_module(scope)
     _patch_libdevice_aliases(fn, scope)
 
@@ -494,8 +487,12 @@ def _patch_libdevice(fn: Callable, scope: _LangPatchScope) -> None:
 def patch_lang(fn, backend, client_manager=None):
     if backend == "triton":
         scope = _triton_snapshot_scope(fn)
-        triton_patch_lang(fn)
-        _patch_libdevice(fn, scope)
+        try:
+            triton_patch_lang(fn)
+            _patch_libdevice(fn, scope)
+        except Exception:
+            scope.restore()
+            raise
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 

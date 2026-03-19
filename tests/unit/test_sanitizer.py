@@ -599,7 +599,7 @@ def test_unary_concretize(op_name, expected_np_func, is_builder):
 
 def test_libdevice_registry_sym_op_consistency():
     """Every LibdeviceSpec must have matching entries in the symbolic engine."""
-    from triton_viz.core.patch import _LIBDEVICE_REGISTRY
+    from triton_viz.core.libdevice_registry import _LIBDEVICE_REGISTRY
     from triton_viz.clients.symbolic_engine import _UNARY_NUMPY_TO_SYM_OP
     from triton.runtime.interpreter import interpreter_builder
 
@@ -641,3 +641,61 @@ def test_unary_z3_opaque_fallback():
     # Arange constraints must propagate through
     assert constraints is not None
     assert "arange_0_8" in str(constraints)
+
+
+def test_unary_z3_opaque_range_constraints():
+    """Opaque symbols for bounded ops carry range constraints."""
+    # tanh: bounded to [-1, 1]
+    arg = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    expr = SymbolicExpr.create("tanh", arg)
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    s = Solver()
+    s.add(constraints)
+    s.add(result > 1)
+    assert s.check() != sat, "tanh result > 1 should be unsat"
+
+    s2 = Solver()
+    s2.add(constraints)
+    s2.add(result < -1)
+    assert s2.check() != sat, "tanh result < -1 should be unsat"
+
+    # exp: bounded to >= 0
+    arg2 = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    expr2 = SymbolicExpr.create("exp", arg2)
+    result2, constraints2 = expr2.eval(simplify_constraints=False)
+
+    s3 = Solver()
+    s3.add(constraints2)
+    s3.add(result2 < 0)
+    assert s3.check() != sat, "exp result < 0 should be unsat"
+
+    # value within range must be satisfiable
+    s4 = Solver()
+    s4.add(constraints)
+    s4.add(result == 0)
+    assert s4.check() == sat, "tanh result == 0 should be sat"
+
+
+def test_addptr_through_bounded_unary():
+    """addptr with a tanh-bounded offset produces tighter pointer bounds."""
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.int32))
+    idx = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    tanh_idx = SymbolicExpr.create("tanh", idx)
+    ptr = SymbolicExpr.create("addptr", base, tanh_idx)
+    result, constraints = ptr.eval(simplify_constraints=False)
+
+    assert result is not None
+    assert constraints is not None
+
+    # ptr = 1000 + tanh * 4  (int32 is 4 bytes)
+    # tanh in [-1, 1] => ptr in [996, 1004]
+    s = Solver()
+    s.add(constraints)
+    s.add(result < 996)
+    assert s.check() != sat, "ptr < 996 should be unsat with tanh bounds"
+
+    s2 = Solver()
+    s2.add(constraints)
+    s2.add(result > 1004)
+    assert s2.check() != sat, "ptr > 1004 should be unsat with tanh bounds"

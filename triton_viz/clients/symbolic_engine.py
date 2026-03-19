@@ -33,7 +33,7 @@ from triton.runtime.interpreter import TensorHandle, _get_np_dtype
 
 from ..core.client import Client
 from ..core.callbacks import OpCallbacks, ForLoopCallbacks
-from ..core.patch import _LIBDEVICE_REGISTRY
+from ..core.libdevice_registry import _LIBDEVICE_REGISTRY
 from ..core.data import (
     Op,
     UnaryOp,
@@ -824,15 +824,37 @@ class UnarySymbolicExpr(SymbolicExpr):
         self.dtype = self.arg.dtype
         self.shape = self.arg.shape
 
+    # Range bounds for opaque Z3 fallback: (lower, upper) where None means unbounded.
+    _Z3_RANGE_BOUNDS: ClassVar[dict[str, tuple[int | None, int | None]]] = {
+        "tanh": (-1, 1),
+        "sin": (-1, 1),
+        "cos": (-1, 1),
+        "asin": (-2, 2),
+        "acos": (0, 4),
+        "exp": (0, None),
+        "exp2": (0, None),
+        "sqrt": (0, None),
+        "rsqrt": (0, None),
+    }
+
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         val, constraints = self.arg._to_z3()
         handler = self._Z3_BUILDERS.get(self.op)
         if handler is not None:
             return handler(val), constraints
-        # Conservative fallback: fresh unconstrained symbol.
-        # Transcendental ops have no precise Z3 integer semantics.
+        # Conservative fallback: fresh symbol with range bounds where known.
         # Argument constraints are preserved for downstream analysis.
         opaque = Int(f"unary_{self.op}_{id(self)}")
+        bounds = self._Z3_RANGE_BOUNDS.get(self.op)
+        if bounds is not None:
+            lo, hi = bounds
+            parts: list = []
+            if lo is not None:
+                parts.append(opaque >= lo)
+            if hi is not None:
+                parts.append(opaque <= hi)
+            if parts:
+                constraints = _and_constraints(constraints, *parts)
         return opaque, constraints
 
     @staticmethod

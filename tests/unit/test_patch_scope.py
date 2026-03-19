@@ -1,6 +1,7 @@
 import pytest
 
 import triton.language as tl
+import triton.language.extra.libdevice as _ld_ref  # noqa: F401
 
 from triton_viz.core import patch as patch_mod
 from triton_viz.core.patch import _LangPatchScope, _triton_snapshot_scope
@@ -164,3 +165,71 @@ def test_patch_libdevice_alias_restore():
     scope.restore()
     assert _kernel_with_alias.__globals__["my_tanh"] is original_tanh
     del _kernel_with_alias.__globals__["my_tanh"]
+
+
+def test_patch_libdevice_multiple_aliases():
+    """Multiple globals aliasing different libdevice fns are all patched and restored."""
+    import triton.language.extra.libdevice as _ld
+    from triton_viz.core.patch import _patch_libdevice
+
+    original_tanh = _ld.tanh
+    original_asin = _ld.asin
+
+    def _kernel():
+        pass
+
+    _kernel.__globals__["my_tanh"] = original_tanh
+    _kernel.__globals__["my_asin"] = original_asin
+
+    scope = _LangPatchScope()
+    _patch_libdevice(_kernel, scope)
+    assert _kernel.__globals__["my_tanh"] is not original_tanh
+    assert _kernel.__globals__["my_asin"] is not original_asin
+
+    scope.restore()
+    assert _kernel.__globals__["my_tanh"] is original_tanh
+    assert _kernel.__globals__["my_asin"] is original_asin
+    del _kernel.__globals__["my_tanh"]
+    del _kernel.__globals__["my_asin"]
+
+
+def test_patch_libdevice_unsupported_alias():
+    """A global aliasing an unregistered libdevice fn gets the unsupported stub."""
+    import triton.language.extra.libdevice as _ld
+    from triton_viz.core.patch import _patch_libdevice
+
+    original_erf = _ld.erf
+
+    def _kernel():
+        pass
+
+    _kernel.__globals__["my_erf"] = original_erf
+
+    scope = _LangPatchScope()
+    _patch_libdevice(_kernel, scope)
+    with pytest.raises(NotImplementedError, match="libdevice.erf"):
+        _kernel.__globals__["my_erf"](None)
+
+    scope.restore()
+    assert _kernel.__globals__["my_erf"] is original_erf
+    del _kernel.__globals__["my_erf"]
+
+
+def test_patch_lang_rollback_on_libdevice_failure(monkeypatch):
+    """If _patch_libdevice throws, all triton lang state must be restored."""
+    from triton_viz.core import patch as patch_mod
+
+    original_arange = tl.arange
+
+    def _exploding_patch(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(patch_mod, "_patch_libdevice", _exploding_patch)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        patch_mod.patch_lang(_dummy_kernel, "triton")
+
+    # tl.arange must be restored to its original (not leaked as interpreter version)
+    assert tl.arange is original_arange
+    # scope must not have been pushed
+    assert len(patch_mod._LANG_PATCH_SCOPES["triton"]) == 0
