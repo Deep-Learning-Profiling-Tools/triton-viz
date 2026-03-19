@@ -526,6 +526,99 @@ def test_aba_same_value_no_spurious_suppress_e2e():
     assert len(races) > 0  # ambiguous reads-from → race
 
 
+def test_producer_consumer_release_xchg_acquire_cas_same_value_poll_no_race():
+    """Acquire CAS polling with same-value writeback must not block sw edge.
+
+    B0 stores data + release xchg(1); B1 acquire cas(1,1) reads old=1 + writes back 1.
+    Reader's own writeback must be excluded from the ambiguity scan.
+    """
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    accesses = [
+        # Block 0 (producer): store data, then release xchg writes 1
+        _store(block_idx=0, offset=DATA_ADDR, event_id=0),
+        _atomic(
+            block_idx=0,
+            offset=FLAG_ADDR,
+            event_id=1,
+            atomic_op="rmw:xchg",
+            sem="release",
+            scope="gpu",
+            atomic_val=np.array([1], dtype=np.int32),
+            atomic_old=np.array([0], dtype=np.int32),
+        ),
+        # Block 1 (consumer): acquire cas(1,1) reads old=1, writes back 1
+        _atomic(
+            block_idx=1,
+            offset=FLAG_ADDR,
+            event_id=0,
+            atomic_op="cas",
+            sem="acquire",
+            scope="gpu",
+            atomic_cmp=np.array([1], dtype=np.int32),
+            atomic_val=np.array([1], dtype=np.int32),
+            atomic_old=np.array([1], dtype=np.int32),
+        ),
+        _load(block_idx=1, offset=DATA_ADDR, event_id=1),
+    ]
+
+    races = detect_races(accesses)
+    assert len(races) == 0
+
+
+def test_acquire_cas_same_value_poll_still_races_with_third_party_same_value_writer():
+    """Third-party same-value writer makes reads-from ambiguous despite CAS polling.
+
+    B0 release xchg(1), B2 relaxed xchg(1), B1 acquire cas(1,1) reads old=1.
+    Third-party writer means we can't tell who wrote the 1 → ambiguous → race.
+    """
+    DATA_ADDR = 100
+    FLAG_ADDR = 200
+
+    accesses = [
+        # Block 0 (producer): store data, then release xchg writes 1
+        _store(block_idx=0, offset=DATA_ADDR, event_id=0),
+        _atomic(
+            block_idx=0,
+            offset=FLAG_ADDR,
+            event_id=1,
+            atomic_op="rmw:xchg",
+            sem="release",
+            scope="gpu",
+            atomic_val=np.array([1], dtype=np.int32),
+            atomic_old=np.array([0], dtype=np.int32),
+        ),
+        # Block 2 (interloper): relaxed xchg also writes 1
+        _atomic(
+            block_idx=2,
+            offset=FLAG_ADDR,
+            event_id=0,
+            atomic_op="rmw:xchg",
+            sem="relaxed",
+            scope="gpu",
+            atomic_val=np.array([1], dtype=np.int32),
+            atomic_old=np.array([0], dtype=np.int32),
+        ),
+        # Block 1 (consumer): acquire cas(1,1) reads old=1, writes back 1
+        _atomic(
+            block_idx=1,
+            offset=FLAG_ADDR,
+            event_id=0,
+            atomic_op="cas",
+            sem="acquire",
+            scope="gpu",
+            atomic_cmp=np.array([1], dtype=np.int32),
+            atomic_val=np.array([1], dtype=np.int32),
+            atomic_old=np.array([1], dtype=np.int32),
+        ),
+        _load(block_idx=1, offset=DATA_ADDR, event_id=1),
+    ]
+
+    races = detect_races(accesses)
+    assert len(races) > 0
+
+
 def test_add_written_value_correctness_e2e():
     """add(5) with old=10 writes 15; acquire reads old=5 (operand) → no reads-from → race.
 
