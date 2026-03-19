@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from pathlib import Path
 
 import triton_viz
 from triton_viz.clients import Tracer
@@ -223,3 +224,49 @@ def test_tracer_records_dot():
         assert record.input_shape == (TILE_M, TILE_K)
         assert record.other_shape == (TILE_K, TILE_N)
         assert record.output_shape == (TILE_M, TILE_N)
+
+
+def test_tracer_records_dot_transpose_x_kwarg():
+    triton_viz.clear()
+
+    @triton_viz.trace(client=Tracer(), backend="nki")
+    def dot_kernel(lhs, rhs, out):
+        out[...] = nl.matmul(lhs, rhs, transpose_x=True)
+
+    lhs = NDArray(value=np.arange(6, dtype=np.float32).reshape(2, 3))
+    rhs = NDArray(value=np.arange(8, dtype=np.float32).reshape(2, 4))
+    out = NDArray(value=np.empty((3, 4), dtype=np.float32))
+
+    dot_kernel[(1,)](lhs, rhs, out)
+
+    assert np.allclose(out.data, lhs.data.T @ rhs.data)
+
+    dot_records = [r for r in launches[-1].records if isinstance(r, Dot)]
+    assert len(dot_records) == 1
+    record = dot_records[0]
+    assert record.input_shape == (3, 2)
+    assert record.other_shape == (2, 4)
+    assert record.output_shape == (3, 4)
+
+
+def test_nki_trace_save_load_roundtrip(tmp_path: Path):
+    """NKI traces should serialize and reload through the shared .tvz path."""
+    triton_viz.clear()
+
+    traced = triton_viz.trace(client=Tracer(), backend="nki")(copy_kernel)
+
+    n_elements = 6
+    x = NDArray(value=np.arange(n_elements, dtype=np.float32))
+    out = NDArray(value=np.empty_like(x.data))
+
+    traced[(div_ceil(n_elements, 4),)](x, out)
+
+    path = tmp_path / "nki_trace.tvz"
+    triton_viz.save(path)
+    triton_viz.clear()
+    triton_viz.load(path)
+
+    records = launches[-1].records
+    record_types = [type(r) for r in records]
+
+    assert record_types == [Grid, Load, Store] * div_ceil(n_elements, 4)

@@ -1,5 +1,11 @@
 type ProgramCoords = { x: number; y: number; z: number };
-type Toggles = { colorize: boolean; histogram: boolean; allPrograms: boolean; showCode: boolean };
+type Toggles = {
+    colorize: boolean;
+    histogram: boolean;
+    allPrograms: boolean;
+    showCode: boolean;
+    editTensorView: boolean;
+};
 export type State = { activeProgram: ProgramCoords; activeOp: unknown | null; toggles: Toggles };
 type StatePatch = Omit<Partial<State>, 'activeProgram' | 'toggles'> & {
     activeProgram?: Partial<ProgramCoords>;
@@ -15,6 +21,7 @@ const DEFAULT_STATE: State = {
         histogram: false,
         allPrograms: false,
         showCode: false,
+        editTensorView: false,
     },
 };
 

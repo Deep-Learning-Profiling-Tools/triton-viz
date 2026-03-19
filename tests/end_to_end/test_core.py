@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import Sanitizer
+from triton_viz.clients import Profiler, Sanitizer
 
 
 # ======== Trace Decorator Tests =========
@@ -74,6 +74,12 @@ def trace_nested_inner_kernel(x):
     return x * 2
 
 
+@triton_viz.trace(client=Profiler())
+@triton.jit
+def trace_nested_inner_profiler_kernel(x):
+    return x * 2
+
+
 def test_trace_nested_jit_calls():
     """
     Test that Trace class properly handles nested JIT function calls via __call__ method.
@@ -95,6 +101,21 @@ def test_trace_nested_jit_calls():
     # Test execution
     data = torch.ones(8)
     trace_nested_call_kernel[(1,)](data, 8)
+
+
+def test_trace_nested_jit_calls_mismatched_clients():
+    @triton_viz.trace(client=Sanitizer(abort_on_error=True))
+    @triton.jit
+    def trace_nested_call_kernel(ptr, n: tl.constexpr):
+        x = tl.load(ptr + tl.arange(0, n))
+        y = trace_nested_inner_profiler_kernel(x)
+        tl.store(ptr + tl.arange(0, n), y)
+
+    data = torch.ones(8)
+    with pytest.raises(
+        RuntimeError, match="nested traced calls require matching clients"
+    ):
+        trace_nested_call_kernel[(1,)](data, 8)
 
 
 # ======== Autotuner Compatibility =========

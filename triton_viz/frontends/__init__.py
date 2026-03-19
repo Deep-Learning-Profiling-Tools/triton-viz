@@ -1,1 +1,1 @@
-from . import nki, triton  # noqa: F401
+from . import nki, nki_beta2, triton  # noqa: F401

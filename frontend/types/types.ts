@@ -27,13 +27,14 @@ export interface TensorHighlights {
     type?: string;
     start?: number[];
     shape?: number[];
+    stride?: number[];
     data?: number[][];
 }
 
 export interface TensorPayload {
     min?: number;
     max?: number;
-    values?: number[] | number[][] | number[][][];
+    values?: unknown[];
     shape?: number[];
     dims?: number;
     highlights?: TensorHighlights | null;

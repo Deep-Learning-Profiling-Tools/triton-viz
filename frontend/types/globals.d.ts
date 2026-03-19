@@ -5,6 +5,7 @@ interface Window {
         histogram?: boolean;
         allPrograms?: boolean;
         showCode?: boolean;
+        editTensorView?: boolean;
     };
     __tritonVizCodeToggle?: (force?: boolean) => boolean | Promise<boolean>;
     __tritonVizCodeHide?: () => boolean;
@@ -16,12 +17,19 @@ interface Window {
         toggleShowCode?: () => boolean | Promise<boolean> | void;
         toggleHistogram?: () => boolean | Promise<boolean>;
         toggleAllPrograms?: (() => boolean | Promise<boolean>) | null;
+        toggleEditTensorView?: () => boolean | Promise<boolean>;
+        download?: {
+            trigger: (sources: string[]) => void | Promise<void>;
+            options: Array<{ value: string; label: string; color?: string }>;
+            buttonLabel?: string;
+        } | null;
     } | null) => void;
     setOpControlState?: (state: {
         colorize?: boolean;
         histogram?: boolean;
         allPrograms?: boolean;
         showCode?: boolean;
+        editTensorView?: boolean;
     }) => void;
     resetOpControls?: () => void;
     current_op_uuid?: string | null;

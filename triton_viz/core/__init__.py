@@ -27,7 +27,6 @@ from .data import (
     CastImpl,
 )
 from .masked_load_store import masked_load, masked_store
-from ..transformers.nki_extract_slice import StoreCallTransformer, transform_code
 
 __all__ = [
     "trace",
@@ -59,6 +58,4 @@ __all__ = [
     "CastImpl",
     "masked_load",
     "masked_store",
-    "StoreCallTransformer",
-    "transform_code",
 ]

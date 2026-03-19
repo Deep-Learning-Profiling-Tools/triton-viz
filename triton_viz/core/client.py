@@ -1,7 +1,7 @@
 from contextlib import contextmanager, nullcontext
 
 from abc import ABC, abstractmethod
-from typing import ClassVar, Optional, Any
+from typing import ClassVar, Any
 from collections.abc import Callable
 import threading
 
@@ -12,6 +12,7 @@ from .patch import (
     patch_for_loop,
     unpatch_for_loop,
     patch_calls,
+    LoopIter,
 )
 from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -26,7 +27,7 @@ class Client(ABC):
         # Whether this client needs ASM information from kernel warmup
         self.collect_asm: bool = False
         # Storage for ASM information if collected
-        self.asm_info: Optional[dict] = None
+        self.asm_info: dict | None = None
         # Thread-local scratch space for per-thread callback state
         self._thread_local = threading.local()
         # Lock for serializing shared state where needed
@@ -105,28 +106,29 @@ class Client(ABC):
         return getattr(self._thread_local, key, default)
 
     @property
-    def grid_idx(self) -> Optional[tuple[int, ...]]:
+    def grid_idx(self) -> tuple[int, ...] | None:
         return self._get_thread_local("grid_idx", None)
 
     @grid_idx.setter
-    def grid_idx(self, value: Optional[tuple[int, ...]]) -> None:
+    def grid_idx(self, value: tuple[int, ...] | None) -> None:
         self._set_thread_local("grid_idx", value)
 
 
 class ClientManager:
-    def __init__(self, clients: Optional[list[Client]] = None):
+    def __init__(self, clients: list[Client] | None = None):
         self.clients: dict[str, Client] = {}
         if clients:
             self.add_clients(clients)
         self.launch = Launch()
         self._lock = threading.Lock()
+        self._clear_loop_hooks()
 
     def _lock_context(self):
         if cfg.num_sms > 1:
             return self._lock
         return nullcontext()
 
-    def get_client(self, name: str) -> Optional[Client]:
+    def get_client(self, name: str) -> Client | None:
         return self.clients.get(name)
 
     def add_clients(self, new_clients_list: list[Client]) -> None:
@@ -170,17 +172,18 @@ class ClientManager:
     def patch_run(self, fn, backend: str):
         namespaces = OPERATION_REGISTRY[backend].namespaces
         with patch_calls(backend):
+            # Collect all for-loop callbacks from clients
+            all_loop_callbacks = []
             for client in self.clients.values():
                 for namespace, attrs in namespaces.items():  # patch ops
                     for attr, op in attrs.items():
                         callbacks = client.register_op_callback(op)
                         patch_op(namespace, attr, callbacks, backend=backend)
+                all_loop_callbacks.append(client.register_for_loop_callback())
 
-                # patch for loops
-                loop_callbacks = client.register_for_loop_callback()
-                patch_for_loop(loop_callbacks)
-            # Remaps core language functions to interpreted ones
-            patch_lang(fn, backend)
+            self._populate_loop_hooks(all_loop_callbacks)
+            patch_for_loop()
+            patch_lang(fn, backend, client_manager=self)
             try:
                 yield
             finally:
@@ -188,6 +191,7 @@ class ClientManager:
                     for attr, op in attrs.items():
                         unpatch_op(namespace, attr, backend)
                 unpatch_for_loop()
+                self._clear_loop_hooks()
                 unpatch_lang(backend)
 
     def pre_run_callback(self, fn: Callable) -> bool:
@@ -227,3 +231,79 @@ class ClientManager:
         with self._lock_context():
             for client in self.clients.values():
                 client.grid_idx_callback(grid_idx)
+
+    # --- For-loop callback management ---
+
+    def _clear_loop_hooks(self) -> None:
+        self._range_type_hooks: list[Callable] = []
+        self._before: list[Callable] = []
+        self._iter_listeners: list[Callable] = []
+        self._iter_overrider: Callable | None = None
+        self._range_wrapper_factory: Callable | None = None
+        self._after: list[Callable] = []
+
+    def _populate_loop_hooks(self, callbacks_list: list[ForLoopCallbacks]) -> None:
+        self._clear_loop_hooks()
+        for cb in callbacks_list:
+            if cb.range_type_callback is not None:
+                self._range_type_hooks.append(cb.range_type_callback)
+            if cb.before_loop_callback is not None:
+                self._before.append(cb.before_loop_callback)
+            if cb.loop_iter_listener is not None:
+                self._iter_listeners.append(cb.loop_iter_listener)
+            if cb.loop_iter_overrider is not None:
+                if self._iter_overrider is not None:
+                    raise RuntimeError("Only one loop_iter overrider allowed")
+                self._iter_overrider = cb.loop_iter_overrider
+            if cb.range_wrapper_factory is not None:
+                if self._range_wrapper_factory is not None:
+                    raise RuntimeError("Only one range_wrapper_factory allowed")
+                self._range_wrapper_factory = cb.range_wrapper_factory
+            if cb.after_loop_callback is not None:
+                self._after.append(cb.after_loop_callback)
+
+    def range_type(self, lineno: int, range_type: str) -> None:
+        for hook in self._range_type_hooks:
+            hook(lineno, range_type)
+
+    def before_loop(self, lineno: int, iterable: Any) -> None:
+        for hook in self._before:
+            hook(lineno, iterable)
+
+    def loop_iter(self, lineno: int, idx: Any) -> Any:
+        if self._iter_overrider is not None:
+            new_idx = self._iter_overrider(lineno, idx)
+            if new_idx is not None:
+                idx = new_idx
+
+        for hook in self._iter_listeners:
+            hook(lineno, idx)
+
+        return idx
+
+    def after_loop(self, lineno: int) -> None:
+        for hook in self._after:
+            hook(lineno)
+
+    def loop_iter_wrapper(
+        self,
+        iterable_callable: Callable,
+        iter_args,
+        iter_kwargs,
+        lineno: int,
+        range_type: str,
+    ) -> "LoopIter":
+        args = tuple(iter_args) if iter_args is not None else ()
+        kwargs = dict(iter_kwargs) if iter_kwargs is not None else {}
+
+        if self._range_wrapper_factory is not None:
+            wrapped = self._range_wrapper_factory(
+                None, lineno, range_type, args, kwargs, iterable_callable
+            )
+            if wrapped is not None:
+                iterable = wrapped
+            else:
+                iterable = iterable_callable(*args, **kwargs)
+        else:
+            iterable = iterable_callable(*args, **kwargs)
+        return LoopIter(self, iterable, lineno, range_type)

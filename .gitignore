@@ -165,6 +165,9 @@ cython_debug/
 
 uv.lock
 
+# Benchmark output
+benchmarks/*.json
+
 # Auto-generated version file
 triton_viz/version.py
 .subagents/

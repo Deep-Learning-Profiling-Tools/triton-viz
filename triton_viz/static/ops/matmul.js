@@ -27,11 +27,6 @@ export function createMatMulVisualization(containerElement, op, viewState = null
     const posC = [0, 0, 0];
     const posA = [-(sizeC.width / 2 + dimExtension + sizeA.width / 2 + gapX), 0, 0];
     const posB = [0, sizeC.height / 2 + dimExtension + sizeB.height / 2 + gapY, 0];
-    const AXIS_COLORS = {
-        x: '#f87171', // Red -> K
-        y: '#4ade80', // Green -> M
-        z: '#60a5fa' // Blue -> N
-    };
     const dimLinePos = (CUBE_SIZE + GAP) * 1.5 + 0.1;
     const boundsWidth = sizeC.width + dimLinePos + sizeA.width + gapX;
     const boundsHeight = sizeC.height + dimLinePos + sizeB.height + gapY;
@@ -45,11 +40,6 @@ export function createMatMulVisualization(containerElement, op, viewState = null
             { name: 'C', shape: shapeC, color: '#adfca9', position: posC, endpoint: 'getMatmulC' }
         ],
         showDimLines: true,
-        dimColors: {
-            A: [AXIS_COLORS.y, AXIS_COLORS.x], // M, K
-            B: [AXIS_COLORS.x, AXIS_COLORS.z], // K, N
-            C: [AXIS_COLORS.y, AXIS_COLORS.z] // M, N
-        },
         layoutBounds: { width: boundsWidth, height: boundsHeight, depth: CUBE_SIZE, center: [boundsCenterX, boundsCenterY, 0] },
         fitToTensors: true,
         cameraPadding: 0.75,

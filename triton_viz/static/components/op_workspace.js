@@ -18,8 +18,8 @@ export class OpWorkspace {
         this.activeTab = null;
         this.activeTabIndex = 0;
         this.lastOpType = null;
-        this.activeOpUuid = null;
-        this.viewStateByUuid = new Map();
+        this.activeTabKey = null;
+        this.viewStateByTabKey = new Map();
         this.viewStateByType = new Map();
         this.titleEl = null;
         this.badgeEl = null;
@@ -224,32 +224,38 @@ export class OpWorkspace {
             opType,
         });
     }
+    buildViewStateTabKey(op) {
+        const shape = (op.global_shape || []).join('x');
+        const key = typeof op.overall_key === 'string' ? op.overall_key : '';
+        const opIndex = typeof op.op_index === 'number' ? String(op.op_index) : '';
+        return [op.type, shape, key, opIndex].join('|');
+    }
     displayOpVisualization(op, options = {}) {
         if (!this.contentArea) {
             console.error('Content area is not initialized');
             return;
         }
-        const prevUuid = this.activeOpUuid ?? window.current_op_uuid ?? null;
+        const prevTabKey = this.activeTabKey;
         // cache the current view state before swapping tabs
-        if (prevUuid && this.contentArea.__vizGetState) {
+        if (prevTabKey && this.contentArea.__vizGetState) {
             const prevState = this.contentArea.__vizGetState?.();
             if (prevState) {
-                this.viewStateByUuid.set(prevUuid, prevState);
+                this.viewStateByTabKey.set(prevTabKey, prevState);
                 if (this.lastOpType)
                     this.viewStateByType.set(this.lastOpType, prevState);
             }
         }
-        const nextUuid = op.uuid ?? null;
+        const nextTabKey = this.buildViewStateTabKey(op);
         let viewState = options.viewState || null;
-        // restore per-op view state when revisiting a tab
-        if (!viewState && nextUuid && this.viewStateByUuid.has(nextUuid)) {
-            viewState = this.viewStateByUuid.get(nextUuid) ?? null;
+        // restore per-tab view state when revisiting a tab across programs
+        if (!viewState && this.viewStateByTabKey.has(nextTabKey)) {
+            viewState = this.viewStateByTabKey.get(nextTabKey) ?? null;
         }
         if (!viewState && options.preserveViewState && this.viewStateByType.has(op.type)) {
             viewState = this.viewStateByType.get(op.type) ?? null;
         }
-        const isSameOp = !!prevUuid && !!nextUuid && prevUuid === nextUuid;
-        const canReuseViz = !!options.preserveViewState && isSameOp && !!this.contentArea.__vizGetState;
+        const isSameTab = !!prevTabKey && prevTabKey === nextTabKey;
+        const canReuseViz = !!options.preserveViewState && isSameTab && !!this.contentArea.__vizGetState;
         const preserveCodePanel = options.refreshCodePanel === false;
         if (preserveCodePanel) {
             try {
@@ -306,7 +312,7 @@ export class OpWorkspace {
             this.visualizationCleanupFunction = null;
         }
         this.lastOpType = op.type;
-        this.activeOpUuid = nextUuid;
+        this.activeTabKey = nextTabKey;
         setActiveOp({ type: op.type, uuid: op.uuid });
         if (options.logTabChange) {
             this.logTabChange(op.type);

@@ -6,6 +6,7 @@ import pytest
 import triton
 import triton_viz
 from triton_viz.clients import Sanitizer, Profiler
+from triton_viz.core.config import config as cfg
 
 
 # Command names
@@ -64,6 +65,14 @@ def _apply_wrapper(wrapper_func, command_name, usage_msg):
     """
     Generic function to apply a wrapper to triton.jit and run the user script.
     """
+    if os.path.basename(sys.argv[0]) != command_name:
+        raise RuntimeError(
+            f"{command_name} must be used as a CLI tool, not called from Python. "
+            f"Usage: {usage_msg}"
+        )
+
+    cfg.cli_active = True
+
     # Create patched functions with the specific wrapper
     _patched_jit = create_patched_jit(wrapper_func)
     _patched_autotune = create_patched_autotune(wrapper_func)

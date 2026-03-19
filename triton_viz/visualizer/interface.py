@@ -1,9 +1,11 @@
 import threading
 from typing import Any
 import sys
-from flask import Flask, render_template, jsonify, request
+from io import BytesIO
+import zipfile
+from flask import Flask, render_template, jsonify, request, send_file
 from .analysis import analyze_records
-from .draw import get_visualization_data, delinearized, make_3d
+from .draw import get_visualization_data
 from ..utils.traceback_utils import read_source_segment
 import os
 import torch
@@ -164,14 +166,6 @@ def update_global_data(force: bool = False):
     # Pass the records to analyze_records
     analysis_data = analyze_records(all_records)
     viz_data = get_visualization_data()
-    try:
-        keys = list(viz_data.get("visualization_data", {}).keys())
-        print(f"[viz] grids: {keys}")
-        for k in keys:
-            ops = viz_data["visualization_data"].get(k, [])
-            print(f"[viz] grid {k} ops: {[op.get('type') for op in ops]}")
-    except Exception as e:
-        print("[viz] debug logging failed:", e)
     global_data = {
         "ops": {
             "visualization_data": viz_data["visualization_data"],
@@ -267,12 +261,7 @@ def get_op_code():
     filename = tb.get("filename")
     lineno = int(tb.get("lineno", 0))
     line_of_code = tb.get("line")
-    # Only allow reading files under cwd (prevent path traversal via HTTP API)
-    cwd = os.path.realpath(os.getcwd())
-    path = os.path.realpath(filename) if filename else ""
-    seg = (
-        read_source_segment(filename, lineno, context) if path.startswith(cwd) else None
-    )
+    seg = read_source_segment(filename, lineno, context) if filename else None
     if seg is None:
         # fallback with single line
         seg = {
@@ -391,29 +380,9 @@ def get_value_histogram():
     max_samples = max(1000, int(data.get("max_samples", 200000)))
 
     op_payload = raw_tensor_data[uuid]
-    arr = None
-
-    if source in {"GLOBAL", "LOAD_GLOBAL"}:
-        arr = op_payload.get("global_tensor")
-    elif source == "A":
-        arr = op_payload.get("input_data")
-    elif source == "B":
-        arr = op_payload.get("other_data")
-    elif source == "C":
-        arr = op_payload.get("output_data")
-        if arr is None:
-            a = op_payload.get("input_data")
-            b = op_payload.get("other_data")
-            if a is not None and b is not None:
-                try:
-                    arr = np.matmul(_to_numpy_array(a), _to_numpy_array(b))
-                    op_payload["output_data"] = arr
-                except Exception:
-                    arr = None
-    else:
+    arr_np = _get_tensor_source_array(op_payload, source)
+    if arr_np is None:
         return jsonify({"error": f"Unsupported source '{source}'"}), 400
-
-    arr_np = _to_numpy_array(arr)
     if arr_np.size == 0:
         return jsonify(
             {
@@ -450,10 +419,61 @@ def get_value_histogram():
     )
 
 
+@app.route("/api/download_tensor", methods=["POST"])
+def download_tensor():
+    """Return one tensor as .npy or several tensors zipped together."""
+    global raw_tensor_data
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid or not raw_tensor_data or uuid not in raw_tensor_data:
+        return jsonify({"error": "Operation not found"}), 404
+
+    op_payload = raw_tensor_data[uuid]
+    requested_sources = data.get("sources")
+    if isinstance(requested_sources, list) and requested_sources:
+        sources = [str(source).upper() for source in requested_sources]
+    else:
+        sources = [str(data.get("source") or "GLOBAL").upper()]
+
+    payloads: list[tuple[str, np.ndarray]] = []
+    for source in sources:
+        arr = _get_tensor_source_array(op_payload, source)
+        if arr is None:
+            return jsonify({"error": f"Unsupported source '{source}'"}), 400
+        payloads.append((source, arr))
+
+    if len(payloads) == 1:
+        source, arr = payloads[0]
+        buffer = BytesIO()
+        np.save(buffer, arr, allow_pickle=False)
+        buffer.seek(0)
+        return send_file(
+            buffer,
+            mimetype="application/octet-stream",
+            as_attachment=True,
+            download_name=_get_download_filename(op_payload, source),
+        )
+
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for source, arr in payloads:
+            tensor_buffer = BytesIO()
+            np.save(tensor_buffer, arr, allow_pickle=False)
+            zf.writestr(
+                _get_download_filename(op_payload, source), tensor_buffer.getvalue()
+            )
+    archive.seek(0)
+    return send_file(
+        archive,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{_get_download_basename(op_payload)}.zip",
+    )
+
+
 @app.route("/api/getValue", methods=["POST"])
 def get_value():
     global raw_tensor_data, precomputed_c_values, current_fullscreen_op
-    print(current_fullscreen_op)
     data = request.json
     uuid = data.get("uuid")
     matrix_name = data.get("matrixName")
@@ -502,7 +522,6 @@ def get_load_value():
     x = data.get("x")
     y = data.get("y")
     z = data.get("z")
-    print(x, y, z)
     if uuid is None or uuid not in raw_tensor_data:
         return jsonify({"error": "Operation not found"}), 404
 
@@ -566,6 +585,155 @@ def get_flip_value():
             return jsonify({"value": flat[idx].item()})
     except Exception as e:
         return jsonify({"error": f"Flip get value failed: {e}"}), 200
+
+
+def _build_highlight_descriptor(coords: np.ndarray) -> dict[str, list[int]] | None:
+    """Infer a shape+stride descriptor from highlighted coordinates.
+
+    Returns:
+        `{"start": [...], "shape": [...], "stride": [...]}`
+        when `coords` forms a dense Cartesian grid along each axis.
+
+    Notes:
+        - `start` is the minimum coordinate per axis.
+        - `shape` is the number of positions per axis.
+        - `stride` is the uniform step per axis (defaults to 1 for singleton axes).
+        - Supports arbitrary rank for input shaped `(n_points, rank)`.
+        - Returns `None` for sparse/irregular coordinate sets that cannot be
+          represented by a single descriptor.
+    """
+    coords = np.asarray(coords, dtype=np.int64)
+    if coords.ndim != 2 or coords.size == 0:
+        return None
+
+    unique_coords = np.unique(coords, axis=0)
+    rank = int(unique_coords.shape[1])
+    axis_vals = [np.unique(unique_coords[:, axis]) for axis in range(rank)]
+    if any(vals.size == 0 for vals in axis_vals):
+        return None
+
+    starts = [int(vals[0]) for vals in axis_vals]
+    shape = [int(vals.size) for vals in axis_vals]
+    stride = [1] * rank
+    for axis, vals in enumerate(axis_vals):
+        if vals.size <= 1:
+            continue
+        steps = np.diff(vals)
+        step = int(steps[0])
+        if step <= 0 or not np.all(steps == step):
+            return None
+        stride[axis] = step
+
+    expected = np.stack(np.meshgrid(*axis_vals, indexing="ij"), axis=-1).reshape(
+        -1, rank
+    )
+    if not np.array_equal(unique_coords, expected):
+        return None
+
+    return {"start": starts, "shape": shape, "stride": stride}
+
+
+def _dtype_element_size(dtype: Any) -> int:
+    """Best-effort dtype element size in bytes."""
+    if isinstance(dtype, str):
+        sizes = {
+            "torch.float32": 4,
+            "float32": 4,
+            "torch.float64": 8,
+            "float64": 8,
+            "torch.int32": 4,
+            "int32": 4,
+            "torch.int64": 8,
+            "int64": 8,
+            "torch.float16": 2,
+            "float16": 2,
+            "torch.bfloat16": 2,
+            "bfloat16": 2,
+            "torch.int8": 1,
+            "int8": 1,
+            "torch.uint8": 1,
+            "uint8": 1,
+            "torch.bool": 1,
+            "bool": 1,
+        }
+        return max(1, int(sizes.get(dtype, 4)))
+    try:
+        return max(1, int(dtype.element_ty.primitive_bitwidth // 8))
+    except Exception:
+        return 4
+
+
+def _get_tensor_source_array(
+    op_payload: dict[str, Any], source: str
+) -> np.ndarray | None:
+    """Return the tensor array for a download or histogram source."""
+    source = str(source or "").upper()
+    if source in {"GLOBAL", "LOAD_GLOBAL"}:
+        arr = op_payload.get("global_tensor")
+    elif source == "A":
+        arr = op_payload.get("input_data")
+    elif source == "B":
+        arr = op_payload.get("other_data")
+    elif source == "C":
+        arr = op_payload.get("output_data")
+        if arr is None:
+            a = op_payload.get("input_data")
+            b = op_payload.get("other_data")
+            if a is not None and b is not None:
+                try:
+                    arr = np.matmul(_to_numpy_array(a), _to_numpy_array(b))
+                    op_payload["output_data"] = arr
+                except Exception:
+                    arr = None
+    else:
+        arr = None
+    if arr is None:
+        return None
+    return _to_numpy_array(arr)
+
+
+def _get_download_basename(op_payload: dict[str, Any]) -> str:
+    """Build the common filename prefix for a record download."""
+    op_type = str(op_payload.get("op_type") or "tensor").strip().lower()
+    op_index = int(op_payload.get("op_index", -1)) + 1
+    return f"{op_type}{op_index}" if op_index > 0 else op_type
+
+
+def _get_download_filename(op_payload: dict[str, Any], source: str) -> str:
+    """Build a stable filename for a single tensor download."""
+    stem = _get_download_basename(op_payload)
+    source = str(source or "").strip().lower()
+    if source and source not in {"global", "load_global"}:
+        stem = f"{stem}-{source}"
+    return f"{stem}.npy"
+
+
+def _coords_from_offsets(
+    shape: tuple[int, ...],
+    offsets: np.ndarray,
+    masks: np.ndarray,
+    dtype: Any,
+) -> np.ndarray:
+    """Convert byte offsets + mask into dense N-d coordinates."""
+    shape = tuple(max(1, int(dim)) for dim in shape)
+    if len(shape) == 0:
+        return np.empty((0, 0), dtype=np.int64)
+    mask_arr = np.asarray(masks, dtype=bool)
+    offset_arr = np.asarray(offsets, dtype=np.int64)
+    if offset_arr.shape != mask_arr.shape:
+        offset_arr = np.broadcast_to(offset_arr, mask_arr.shape)
+
+    element_size = _dtype_element_size(dtype)
+    linear_indices = offset_arr // element_size
+    flat_mask = mask_arr.reshape(-1)
+    flat_linear = linear_indices.reshape(-1)
+    total = int(np.prod(shape))
+    valid = flat_mask & (flat_linear >= 0) & (flat_linear < total)
+    if not np.any(valid):
+        return np.empty((0, len(shape)), dtype=np.int64)
+    valid_linear = flat_linear[valid]
+    unravel = np.column_stack(np.unravel_index(valid_linear, shape))
+    return np.asarray(unravel, dtype=np.int64)
 
 
 @app.route("/api/getLoadTensor", methods=["POST"])
@@ -637,56 +805,14 @@ def get_load_tensor():
             masks = np.asarray(op_data["masks"])
             shape = tuple(op_data["global_shape"])
             dtype = op_data["global_dtype"]
-
-            shape_3d = make_3d(shape)
-            gz, gy, gx = delinearized(shape_3d, offsets, dtype, masks)
-
-            # Filter invalid
-            valid = (gx != -1) & (gy != -1) & (gz != -1)
-            if valid.any():
-                gx = gx[valid]
-                gy = gy[valid]
-                gz = gz[valid]
-                coords = np.stack([gx, gy, gz], axis=1)
-
-                min_c = coords.min(axis=0)
-                max_c = coords.max(axis=0)
-                dims = max_c - min_c + 1
-                volume = np.prod(dims)
-                unique_coords = np.unique(coords, axis=0)
-
-                if len(unique_coords) == volume:
-                    # Robust check: all coordinates in the box [min_c, max_c] must be present
-                    # We already know the count matches volume, so we just need to verify they are all distinct
-                    # and within bounds (which unique + bounding box logic already implies).
-                    # However, to be absolutely sure it's not a sparse set that happens to have 'volume' points:
-                    # Generate the dense set and compare.
-                    is_dense = True
-                    # Optimization: if it's really dense, every integer in the range [0, volume)
-                    # of linear indices relative to min_c must be present.
-                    # Linear index = (z-sz)*dx*dy + (y-sy)*dx + (x-sx)
-                    offsets_rel = unique_coords - min_c
-                    lin_indices = (
-                        offsets_rel[:, 2] * dims[1] * dims[0]
-                        + offsets_rel[:, 1] * dims[0]
-                        + offsets_rel[:, 0]
-                    )
-                    if not (np.sort(lin_indices) == np.arange(volume)).all():
-                        is_dense = False
-
-                    if is_dense:
-                        payload["highlights"] = {
-                            "type": "descriptor",
-                            "start": min_c.tolist(),
-                            "shape": dims.tolist(),
-                        }
-                    else:
-                        payload["highlights"] = {
-                            "type": "array",
-                            "data": coords.tolist(),
-                        }
-                else:
-                    payload["highlights"] = {"type": "array", "data": coords.tolist()}
+            coords = _coords_from_offsets(shape, offsets, masks, dtype)
+            if coords.size > 0:
+                descriptor = _build_highlight_descriptor(coords)
+                payload["highlights"] = (
+                    {"type": "descriptor", **descriptor}
+                    if descriptor is not None
+                    else {"type": "array", "data": coords.tolist()}
+                )
 
         return jsonify(payload)
     except Exception as e:
@@ -754,12 +880,16 @@ def _collect_load_store_program_subsets(op_type, overall_key, op_index, time_idx
         if tile.get("uuid") in uuid_to_pid
     }
 
-    coord_subsets: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+    coord_subsets: dict[tuple[int, ...], set[tuple[int, int, int]]] = {}
     for uuid, pid in uuid_to_pid.items():
         coords = uuid_to_coords.get(uuid) or []
         if not coords:
             continue
-        unique_coords = {(int(x), int(y), int(z)) for x, y, z in coords}
+        unique_coords = {
+            tuple(int(v) for v in coord)
+            for coord in coords
+            if isinstance(coord, (list, tuple)) and len(coord) > 0
+        }
         for coord in unique_coords:
             coord_subsets.setdefault(coord, set()).add(pid)
 
@@ -767,15 +897,15 @@ def _collect_load_store_program_subsets(op_type, overall_key, op_index, time_idx
     coords_list = []
     counts_list = []
     max_count = 0
-    for (x, y, z), pid_set in coord_subsets.items():
+    for coord, pid_set in coord_subsets.items():
         pid_list = sorted(pid_set)
         subset_key = "|".join([f"{px},{py},{pz}" for px, py, pz in pid_list])
         if subset_key not in subsets:
             subsets[subset_key] = [[px, py, pz] for px, py, pz in pid_list]
         count = len(pid_list)
         max_count = max(max_count, count)
-        coords_list.append([x, y, z, subset_key])
-        counts_list.append([x, y, z, count])
+        coords_list.append([*coord, subset_key])
+        counts_list.append([*coord, count])
 
     return {
         "coords": coords_list,
@@ -899,14 +1029,12 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
     :param block: Whether to block the caller when share=True. Defaults to
                   True outside interactive sessions.
     """
-    print("Launching Triton viz tool")
     default_port = 8000 if share else 5001
     actual_port = port or int(os.getenv("TRITON_VIZ_PORT", default_port))
     if block is None:
         block = share and not _is_interactive()
 
     if share:
-        print("--------")
         flask_thread = threading.Thread(
             target=run_flask_with_cloudflared,
             args=(actual_port, None),
@@ -924,15 +1052,8 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
         try:
             # touch local server to ensure it's up
             _ = requests.get(local_url)
-            print(f"Running on local URL:  {local_url}")
-            if public_url:
-                print(f"Running on public URL: {public_url}")
-            print(
-                "\nThis share link expires in 72 hours. For free permanent hosting and GPU upgrades, check out Spaces: https://huggingface.co/spaces"
-            )
-            print("--------")
         except requests.exceptions.RequestException:
-            print("Setting up public URL... Please wait.")
+            pass
 
         if block:
             try:
@@ -942,10 +1063,7 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
 
         return local_url, public_url
     else:
-        print("--------")
         local_url = f"http://localhost:{actual_port}"
-        print(f"Running on local URL:  {local_url}")
-        print("--------")
         _server_state.set_local_port(actual_port)
 
         # For share=False, we want to block and keep the server running
