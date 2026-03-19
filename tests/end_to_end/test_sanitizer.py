@@ -1468,3 +1468,21 @@ def test_constexpr_to_unsupported_dtype_raises():
             continue
         with pytest.raises(TypeError, match="not supported"):
             _constexpr_to(mock_self, dt)
+
+
+# ======== Unsigned Division Regression Test ===========
+
+
+@triton_viz.trace(client="tracer")
+@triton.jit
+def unsigned_div_kernel(out_ptr, DENOM: tl.constexpr):
+    numerator = tl.full((1,), 8, tl.uint32)
+    denom = DENOM.to(tl.uint32)
+    out = numerator // denom
+    tl.store(out_ptr, out)
+
+
+def test_constexpr_unsigned_div():
+    out = torch.empty(1, dtype=torch.int32)
+    unsigned_div_kernel[(1,)](out, DENOM=1)
+    assert out.item() == 8
