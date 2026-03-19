@@ -571,6 +571,8 @@ class RaceDetector(SymbolicClient):
         for acc in accesses:
             if acc.access_type != AccessType.ATOMIC:
                 continue
+            if acc.atomic_scope not in ("gpu", "sys", None):
+                continue  # cta scope cannot synchronize across blocks
             atomic_op = (acc.atomic_op or "").lower()
             is_add = "add" in atomic_op
             is_cas = "cas" in atomic_op
@@ -873,6 +875,8 @@ def _touches_address(access: MemoryAccess, addr_set: set[int]) -> bool:
 def _is_barrier_atomic(access: MemoryAccess, barrier_addrs: set[int]) -> bool:
     if access.access_type != AccessType.ATOMIC:
         return False
+    if access.atomic_scope not in ("gpu", "sys", None):
+        return False  # cta scope cannot form cross-block barriers
     if not _touches_address(access, barrier_addrs):
         return False
     atomic_op = (access.atomic_op or "").lower()
@@ -891,6 +895,8 @@ def _detect_global_barrier_addresses(accesses: list[MemoryAccess]) -> set[int]:
     for acc in accesses:
         if acc.access_type != AccessType.ATOMIC:
             continue
+        if acc.atomic_scope not in ("gpu", "sys", None):
+            continue  # cta scope cannot synchronize across blocks
         atomic_op = (acc.atomic_op or "").lower()
         is_add = "add" in atomic_op
         is_cas = "cas" in atomic_op
