@@ -21,6 +21,7 @@ import inspect
 import numpy as np
 from triton.runtime.interpreter import (
     GridExecutor,
+    TensorHandle,
     _implicit_cvt,
     _get_np_dtype,
     interpreter_builder,
@@ -119,6 +120,16 @@ def _fp_downcast_rtz(value: float, dst_np_dtype: np.dtype) -> np.generic:
     return rtne_result
 
 
+def _typed_scalar_tensor(result: np.generic, dtype: tl.core.dtype) -> tl.core.tensor:
+    """Wrap a numpy scalar as a Triton interpreter tensor with an exact dtype."""
+    storage_np = _get_np_dtype(dtype)
+    arr = np.array([result])
+    if arr.dtype != storage_np:
+        # Semantic/storage dtype differ (e.g. ml_dtypes.bfloat16 -> uint16)
+        arr = arr.view(storage_np)
+    return tl.core.tensor(TensorHandle(arr, dtype), dtype)
+
+
 def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
     """Interpreter-mode implementation of constexpr.to(dtype).
 
@@ -168,17 +179,7 @@ def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
         else:
             result = dst_np.type(value)
 
-    py_val = result.item()
-    # bool/int1: Triton's TensorHandle.__post_init__ rejects np.array([True], dtype=np.int32)
-    # paired with tl.int1 because itemsize(int32)=32 > primitive_bitwidth(int1)=1.
-    # _implicit_cvt(True) also hits this (bool is subclass of int, mangle_type->"i1").
-    # Workaround: coerce to Python int so _implicit_cvt creates an int32 tensor.
-    # This is value-correct (0/1) though not type-correct (int32, not int1).
-    # The interpreter itself has the same limitation -- to_tensor(True) goes through
-    # a similar path. A proper fix belongs in upstream Triton's TensorHandle.
-    if isinstance(py_val, bool):
-        py_val = int(py_val)
-    return _implicit_cvt(py_val)
+    return _typed_scalar_tensor(result, dtype)
 
 
 def _constexpr_getattr(self, name):

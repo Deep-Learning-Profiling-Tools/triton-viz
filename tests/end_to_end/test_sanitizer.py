@@ -1479,7 +1479,7 @@ def unsigned_div_kernel(out_ptr, DENOM: tl.constexpr):
     numerator = tl.full((1,), 8, tl.uint32)
     denom = DENOM.to(tl.uint32)
     out = numerator // denom
-    tl.store(out_ptr, out)
+    tl.store(out_ptr + tl.arange(0, 1), out)
 
 
 def test_constexpr_unsigned_div():
