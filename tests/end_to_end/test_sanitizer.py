@@ -1349,10 +1349,18 @@ def grid_lambda_kernel(out_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
 
 
 def test_constexpr_grid_lambda():
-    """Grid lambda with META dict must work with universally-wrapped constexprs."""
+    """Grid lambda receives raw host values, not tl.constexpr wrappers."""
     N = 256
     out = torch.empty(N, dtype=torch.int32)
-    grid = lambda META: (triton.cdiv(N, META["BLOCK"]),)
+
+    def grid(META):
+        # Upstream Triton feeds raw Python values to grid lambdas;
+        # verify isinstance checks work as they would in real Triton.
+        assert isinstance(
+            META["BLOCK"], int
+        ), f"grid lambda should see raw int, got {type(META['BLOCK'])}"
+        return (triton.cdiv(N, META["BLOCK"]),)
+
     grid_lambda_kernel[grid](out, N=N, BLOCK=128)
     assert (out == torch.arange(N, dtype=torch.int32)).all()
 

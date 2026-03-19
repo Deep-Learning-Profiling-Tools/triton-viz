@@ -4,7 +4,7 @@ import pytest
 import numpy as np
 import triton.language as tl
 
-from triton_viz.core.patch import _constexpr_to
+from triton_viz.core.patch import _constexpr_to, _src_np_dtype
 
 
 @pytest.mark.parametrize(
@@ -30,3 +30,23 @@ def test_constexpr_bitcast_preserves_dtype():
     ret = _constexpr_to(mock_self, tl.float32, bitcast=True)
     assert isinstance(ret, tl.core.tensor)
     assert ret.dtype == tl.float32
+
+
+@pytest.mark.parametrize("bad_mode", ["RTZ", "foo", ""])
+def test_constexpr_to_invalid_rounding_mode_raises(bad_mode):
+    """Invalid fp_downcast_rounding values must raise ValueError, not silently fall back."""
+    mock_self = types.SimpleNamespace(value=1.0)
+    with pytest.raises(ValueError, match="fp_downcast_rounding must be one of"):
+        _constexpr_to(mock_self, tl.float16, fp_downcast_rounding=bad_mode)
+
+
+def test_constexpr_to_overflow_raises():
+    """Integer literals outside [-2**63, 2**64) must raise OverflowError."""
+    mock_self = types.SimpleNamespace(value=-(2**63) - 1)
+    with pytest.raises(OverflowError, match="outside the representable range"):
+        _constexpr_to(mock_self, tl.int64)
+
+
+def test_src_np_dtype_max_uint64():
+    """Values in [2**63, 2**64) must map to uint64, not overflow."""
+    assert _src_np_dtype(2**64 - 1) == np.dtype(np.uint64)

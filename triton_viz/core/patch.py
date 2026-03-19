@@ -67,7 +67,12 @@ def _src_np_dtype(value: object) -> np.dtype:
             return np.dtype(np.uint32)
         if -(2**63) <= value < 2**63:
             return np.dtype(np.int64)
-        return np.dtype(np.uint64)
+        if 0 <= value < 2**64:
+            return np.dtype(np.uint64)
+        raise OverflowError(
+            f"Integer literal {value} is outside the representable range "
+            f"[-2**63, 2**64) for Triton integer types"
+        )
     # Float: match Triton to_tensor() — float32 for representable values
     assert isinstance(value, float)
     abs_x: float = abs(value)
@@ -162,6 +167,12 @@ def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
         src_np = _src_np_dtype(value)
 
         if fp_downcast_rounding is not None:
+            _VALID_ROUNDING_MODES = ("rtne", "rtz")
+            if fp_downcast_rounding not in _VALID_ROUNDING_MODES:
+                raise ValueError(
+                    f"fp_downcast_rounding must be one of {_VALID_ROUNDING_MODES}, "
+                    f"got {fp_downcast_rounding!r}"
+                )
             src_is_float = src_np.kind == "f"
             dst_is_float = dst_np.kind == "f" or (
                 _ml_dtypes is not None and dst_np == np.dtype(_ml_dtypes.bfloat16)
@@ -617,6 +628,13 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
+    # grid_args keeps constexprs as raw host values (matching upstream Triton)
+    # so that grid lambdas see plain Python types, not tl.constexpr wrappers.
+    grid_args = {
+        name: (arg if name in self.constexprs else _implicit_cvt(arg))
+        for name, arg in args.items()
+    }
+    grid_args.pop("self", None)
     call_args = {}
     for name, arg in args.items():
         if name in self.constexprs:
@@ -627,7 +645,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
         call_args[name] = ret
     call_args.pop("self", None)
     # Iterate through grid
-    grid = self.grid(call_args) if callable(self.grid) else self.grid
+    grid = self.grid(grid_args) if callable(self.grid) else self.grid
     assert len(grid) <= 3
     grid = grid + (1,) * (3 - len(grid))
 
