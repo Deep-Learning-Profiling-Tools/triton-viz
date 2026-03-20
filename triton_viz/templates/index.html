@@ -276,21 +276,21 @@
         <div id="llm-chat-header">
             <span id="llm-title">AI Kernel Debug Assistant</span>
             <div id="llm-chat-actions">
-                <button id="llm-analyze" class="llm-btn" type="button">开始分析</button>
+                <button id="llm-analyze" class="llm-btn" type="button">Start analysis</button>
                 <button id="llm-close" class="llm-btn" type="button" aria-label="Close chat">✕</button>
             </div>
         </div>
         <div id="llm-messages">
             <div class="llm-row system">
                 <div class="llm-bubble">
-                    <div class="llm-role">系统</div>
-                    你好，先点击“开始分析”让我先读一遍 Trace，随后你再继续追问。
+                    <div class="llm-role">System</div>
+                    Hi — click &quot;Start analysis&quot; first so I can read the trace; then you can ask follow-ups.
                 </div>
             </div>
         </div>
         <div id="llm-input-wrap">
-            <input id="llm-input" type="text" placeholder="问点什么，比如：这个 kernel 哪一段可能有索引 bug？">
-            <button id="llm-send" type="button">发送</button>
+            <input id="llm-input" type="text" placeholder="Ask something, e.g. which part of this kernel might have an indexing bug?">
+            <button id="llm-send" type="button">Send</button>
         </div>
     </div>
 
@@ -330,7 +330,7 @@
                 bubble.className = 'llm-bubble';
                 const roleTag = document.createElement('div');
                 roleTag.className = 'llm-role';
-                roleTag.textContent = role === 'user' ? '你' : 'AI';
+                roleTag.textContent = role === 'user' ? 'You' : 'AI';
                 const content = document.createElement('div');
                 content.textContent = String(text || '');
                 bubble.appendChild(roleTag);
@@ -358,7 +358,7 @@
                         spinner.className = 'llm-spinner';
                         const textNode = document.createElement('span');
                         textNode.className = 'llm-loading-text';
-                        textNode.textContent = '处理中';
+                        textNode.textContent = 'Processing';
                         loading.appendChild(spinner);
                         loading.appendChild(textNode);
                         bubble.appendChild(roleTag);
@@ -368,7 +368,7 @@
                     }
                     const content = loadingNode.querySelector('.llm-loading-text');
                     if (content) {
-                        content.textContent = String(text || '处理中');
+                        content.textContent = String(text || 'Processing');
                     }
                     msgs.scrollTop = msgs.scrollHeight;
                     return;
@@ -407,12 +407,12 @@
                 const text = input.value.trim();
                 if (!text) return;
                 if (!analysisReady) {
-                    addMsg('assistant', '请先点击“开始分析”，我需要先完成一次 Trace 总结。');
+                    addMsg('assistant', 'Please click \"Start analysis\" first — I need to summarize the trace once.');
                     return;
                 }
                 input.value = '';
                 addMsg('user', text);
-                setLoading(true, '正在思考，请稍候...');
+                setLoading(true, 'Thinking, please wait...');
                 try {
                     const currentUuid = window.__tritonVizCurrentOp || null;
                     const resp = await fetch('/api/llm/chat', {
@@ -422,19 +422,19 @@
                     });
                     const data = await resp.json();
                     if (!resp.ok) {
-                        addMsg('assistant', data.error || '请求失败');
+                        addMsg('assistant', data.error || 'Request failed');
                     } else {
-                        addMsg('assistant', data.answer || '(空回复)');
+                        addMsg('assistant', data.answer || '(empty reply)');
                     }
                 } catch (err) {
-                    addMsg('assistant', '网络错误: ' + err);
+                    addMsg('assistant', 'Network error: ' + err);
                 } finally {
                     setLoading(false);
                 }
             }
 
             async function runAnalyze() {
-                setLoading(true, '正在分析 Trace，这可能需要几秒...');
+                setLoading(true, 'Analyzing trace — this may take a few seconds...');
                 try {
                     const resp = await fetch('/api/llm/analyze', {
                         method: 'POST',
@@ -444,15 +444,15 @@
                     const data = await resp.json();
                     if (!resp.ok) {
                         analysisReady = false;
-                        addMsg('assistant', data.error || '初步分析失败');
+                        addMsg('assistant', data.error || 'Initial analysis failed');
                         return;
                     }
                     analysisReady = !!data.analysis_ready;
-                    addMsg('assistant', data.summary || '初步分析完成，但没有可展示内容。');
-                    addMsg('assistant', '初步分析已完成。你可以继续给我下达排查指令。');
+                    addMsg('assistant', data.summary || 'Initial analysis finished, but there is nothing to show.');
+                    addMsg('assistant', 'Initial analysis is done. You can continue with debugging questions.');
                 } catch (err) {
                     analysisReady = false;
-                    addMsg('assistant', '网络错误: ' + err);
+                    addMsg('assistant', 'Network error: ' + err);
                 } finally {
                     setLoading(false);
                 }
