@@ -48,7 +48,9 @@ def clear_llm_setup() -> None:
         _llm_setup_patch = {}
 
 
-def setup_llm(*, config_path: Any = _MISSING, clear: bool = False, **kwargs: Any) -> None:
+def setup_llm(
+    *, config_path: Any = _MISSING, clear: bool = False, **kwargs: Any
+) -> None:
     """
     Configure the visualizer LLM client (in-process). Call **before** ``launch()``, or use
     ``POST /api/llm/config`` for the same fields (HTTP API does **not** accept ``config_path``
@@ -210,7 +212,9 @@ def _build_llm_merged_dict() -> dict[str, Any]:
         "max_tokens": 2048,
         "extra_headers": {},
         "debug_log_enabled": False,
-        "debug_log_path": os.path.join(os.path.dirname(__file__), DEFAULT_DEBUG_LOG_NAME),
+        "debug_log_path": os.path.join(
+            os.path.dirname(__file__), DEFAULT_DEBUG_LOG_NAME
+        ),
     }
     for layer in (local_cfg, file_cfg, env_layer, patch):
         _apply_llm_config_layer(merged, layer)
@@ -303,7 +307,9 @@ class OpenAICompatibleConfig:
     max_tokens: int = 2048
     extra_headers: dict[str, str] = field(default_factory=dict)
     debug_log_enabled: bool = False
-    debug_log_path: str = os.path.join(os.path.dirname(__file__), DEFAULT_DEBUG_LOG_NAME)
+    debug_log_path: str = os.path.join(
+        os.path.dirname(__file__), DEFAULT_DEBUG_LOG_NAME
+    )
 
     @classmethod
     def from_env(cls) -> "OpenAICompatibleConfig":
@@ -508,9 +514,7 @@ class OpenAICompatibleClient:
 
         if not response.ok:
             message = response.text
-            raise LLMAPIError(
-                f"LLM request returned {response.status_code}: {message}"
-            )
+            raise LLMAPIError(f"LLM request returned {response.status_code}: {message}")
 
         try:
             return response.json()
