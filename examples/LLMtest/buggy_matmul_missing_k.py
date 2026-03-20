@@ -6,10 +6,9 @@ import triton_viz
 from triton_viz.clients import Tracer
 
 
-# Simple matmul kernel producing a C = A @ B (fp32, small sizes for demo)
 @triton_viz.trace(client=Tracer())
 @triton.jit
-def matmul_kernel(
+def matmul_missing_k_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -35,15 +34,15 @@ def matmul_kernel(
 
     a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
     b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
-
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    for k in range(0, K, BLOCK_K):
+    # Bug: skip the last K tile on purpose (range ends at K - BLOCK_K).
+    for _k in range(0, K - BLOCK_K, BLOCK_K):
         a = tl.load(
-            a_ptrs, mask=(offs_m[:, None] < M) & (k + offs_k[None, :] < K), other=0.0
+            a_ptrs, mask=(offs_m[:, None] < M) & (_k + offs_k[None, :] < K), other=0.0
         )
         b = tl.load(
-            b_ptrs, mask=(k + offs_k[:, None] < K) & (offs_n[None, :] < N), other=0.0
+            b_ptrs, mask=(_k + offs_k[:, None] < K) & (offs_n[None, :] < N), other=0.0
         )
         acc += tl.dot(a, b)
         a_ptrs += BLOCK_K * stride_ak
@@ -60,10 +59,9 @@ def run_demo():
     b = torch.randn((K, N), dtype=torch.float32)
     c = torch.empty((M, N), dtype=torch.float32)
 
-    BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 32
+    BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 16
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
-
-    matmul_kernel[grid](
+    matmul_missing_k_kernel[grid](
         a,
         b,
         c,
@@ -81,32 +79,12 @@ def run_demo():
         BLOCK_K=BLOCK_K,
     )
 
-    # Verify correctness
     ref = a @ b
-    assert torch.allclose(c, ref, atol=1e-3), "matmul result mismatch"
+    max_diff = (c - ref).abs().max().item()
+    print(f"[buggy_matmul_missing_k] max diff: {max_diff:.6f}")
 
-    # Launch viz UI in blocking (share=True) mode
     triton_viz.launch(share=True)
 
 
 if __name__ == "__main__":
     run_demo()
-
-
-import triton
-import triton.language as tl
-
-
-@triton.jit  # <-- Annotation A
-def add_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    # Parallel index of the current block
-    pid = tl.program_id(axis=0)  # <-- Annotation B
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)  # <-- Annotation C
-    mask = offsets < N
-
-    # Load, compute, store (block-wise)
-    x = tl.load(x_ptr + offsets, mask=mask)  # <-- Annotation D
-    y = tl.load(y_ptr + offsets, mask=mask)
-    output = x + y
-    tl.store(out_ptr + offsets, output, mask=mask)
