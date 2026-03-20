@@ -1,24 +1,26 @@
 # LLM test
 
-This folder contains intentionally buggy Triton kernels for evaluating
-LLM-based trace analysis in Triton-Viz.
+Intentionally buggy Triton kernels for trying the visualizer’s LLM assistant.
 
-## How to run
+## Run
 
 From repo root:
 
-- `python "examples/LLM test/buggy_vector_add_shift.py"`
-- `python "examples/LLM test/buggy_matmul_missing_k.py"`
-- `python "examples/LLM test/buggy_softmax_no_stability.py"`
+```bash
+python examples/LLMtest/buggy_vector_add_shift.py
+python examples/LLMtest/buggy_matmul_missing_k.py
+python examples/LLMtest/buggy_softmax_no_stability.py
+```
 
-Each script:
+Each script has two optional constants at the top:
 
-- runs a buggy kernel with `@triton_viz.trace(client=Tracer())`
-- prints a quick numerical mismatch signal
-- launches Triton-Viz (`triton_viz.launch(share=True)`)
+- `_LL_CONFIG_PATH` — path to a JSON file (same keys as `triton_viz/visualizer/llm_config.example.json`)
+- `_LL_API_KEY` — API key string if it is not in that file
 
-## Intended bug patterns
+Fill either or both, then run. If both are empty, LLM still follows `llm_config.local.json` / env vars / defaults like the rest of the app.
+
+## Bug patterns
 
 - `buggy_vector_add_shift.py`: wrong load index for `y` (`offset + 1`)
 - `buggy_matmul_missing_k.py`: missing last K tile accumulation
-- `buggy_softmax_no_stability.py`: skips max-subtraction, prone to overflow
+- `buggy_softmax_no_stability.py`: no max-subtraction, prone to overflow

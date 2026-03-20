@@ -9,10 +9,14 @@ from .analysis import analyze_records
 from .draw import get_visualization_data, delinearized, make_3d
 from .llm_records import LLMRecordStore
 from .llm_utils import (
+    LLM_SETUP_KEYS,
+    _get_llm_setup_snapshot,
     load_prompt_template,
     DEFAULT_PROMPT_NAME,
     OpenAICompatibleClient,
+    OpenAICompatibleConfig,
     LLMAPIError,
+    setup_llm,
 )
 from ..utils.traceback_utils import read_source_segment
 import os
@@ -484,6 +488,68 @@ def get_llm_prompt():
     except FileNotFoundError:
         return jsonify({"error": "Prompt template not found"}), 404
     return jsonify({"name": name, "content": content})
+
+
+@app.route("/api/llm/config", methods=["GET"])
+def get_llm_config_status():
+    """Return effective LLM settings (never echo the API key)."""
+    cfg = OpenAICompatibleConfig.from_env()
+    setup_path, _patch = _get_llm_setup_snapshot()
+    setup_basename = os.path.basename(setup_path) if setup_path else None
+    return jsonify(
+        {
+            "has_api_key": bool(cfg.api_key),
+            "base_url": cfg.base_url,
+            "model": cfg.model,
+            "timeout_sec": cfg.timeout_sec,
+            "max_tokens": cfg.max_tokens,
+            "debug_log_enabled": cfg.debug_log_enabled,
+            "llm_setup_file": setup_basename,
+            "allowed_keys": sorted(LLM_SETUP_KEYS),
+        }
+    )
+
+
+@app.route("/api/llm/config", methods=["POST"])
+def post_llm_config():
+    """
+    Merge JSON fields into the in-memory LLM setup (same as ``triton_viz.setup_llm``).
+
+    Allowed keys: same as ``LLM_SETUP_KEYS`` (see GET response). Does **not** accept
+    ``config_path`` (use ``setup_llm(config_path=...)`` in Python before ``launch``).
+
+    Pass ``null`` or ``\"\"`` for string fields to clear that patch entry.
+    """
+    data = request.json or {}
+    payload = {k: data[k] for k in data if k in LLM_SETUP_KEYS}
+    if not payload:
+        return (
+            jsonify(
+                {
+                    "error": f"Provide at least one of: {sorted(LLM_SETUP_KEYS)}",
+                    "allowed_keys": sorted(LLM_SETUP_KEYS),
+                }
+            ),
+            400,
+        )
+    try:
+        setup_llm(**payload)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    cfg = OpenAICompatibleConfig.from_env()
+    setup_path, _ = _get_llm_setup_snapshot()
+    return jsonify(
+        {
+            "ok": True,
+            "has_api_key": bool(cfg.api_key),
+            "base_url": cfg.base_url,
+            "model": cfg.model,
+            "timeout_sec": cfg.timeout_sec,
+            "max_tokens": cfg.max_tokens,
+            "debug_log_enabled": cfg.debug_log_enabled,
+            "llm_setup_file": os.path.basename(setup_path) if setup_path else None,
+        }
+    )
 
 
 @app.route("/api/llm/chat", methods=["POST"])
@@ -1513,6 +1579,10 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
 
     :param block: Whether to block the caller when share=True. Defaults to
                   True outside interactive sessions.
+
+    For the in-app LLM assistant, call ``triton_viz.setup_llm(...)`` **before**
+    ``launch`` (optionally ``setup_llm(config_path=...)`` to load a JSON file), or
+    use ``POST /api/llm/config`` after the server is up.
     """
     default_port = 8000 if share else 5001
     actual_port = port or int(os.getenv("TRITON_VIZ_PORT", default_port))

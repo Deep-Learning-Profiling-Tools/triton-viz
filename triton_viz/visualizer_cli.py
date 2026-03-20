@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from typing import Any
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +21,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Return immediately instead of blocking on the visualizer server.",
     )
+    parser.add_argument(
+        "--llm-api-key",
+        default=None,
+        help="Optional API key for the visualizer LLM assistant (calls setup_llm).",
+    )
+    parser.add_argument(
+        "--llm-base-url",
+        default=None,
+        help="Optional OpenAI-compatible API base URL override.",
+    )
     return parser
 
 
@@ -29,6 +40,13 @@ def main(argv: list[str] | None = None):
     import triton_viz
 
     triton_viz.load(args.trace_file)
+    llm_kw: dict[str, Any] = {}
+    if args.llm_api_key is not None:
+        llm_kw["api_key"] = args.llm_api_key
+    if args.llm_base_url is not None:
+        llm_kw["base_url"] = args.llm_base_url
+    if llm_kw:
+        triton_viz.setup_llm(**llm_kw)
     return triton_viz.launch(
         share=args.share,
         port=args.port,

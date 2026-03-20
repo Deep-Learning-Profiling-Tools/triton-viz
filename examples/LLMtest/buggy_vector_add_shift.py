@@ -5,6 +5,10 @@ import triton.language as tl
 import triton_viz
 from triton_viz.clients import Tracer
 
+# Optional: visualizer LLM — set one or both before running.
+_LL_CONFIG_PATH = "/home/jgu7/work/triton-viz/triton_viz/visualizer/llm_config.local.json"  # e.g. "/path/to/llm.json" (same shape as llm_config.example.json)
+_LL_API_KEY = ""  # e.g. "sk-..." if the key is not in that file
+
 
 @triton_viz.trace(client=Tracer())
 @triton.jit
@@ -36,6 +40,10 @@ def run_demo():
     max_diff = (out - ref).abs().max().item()
     print(f"[buggy_vector_add_shift] max diff: {max_diff:.6f}")
 
+    if _LL_CONFIG_PATH:
+        triton_viz.setup_llm(config_path=_LL_CONFIG_PATH)
+    if _LL_API_KEY:
+        triton_viz.setup_llm(api_key=_LL_API_KEY)
     triton_viz.launch(share=True)
 
 
