@@ -11,7 +11,7 @@ BLOCK_M = 8
 BLOCK_N = 16  # rectangular tile (BLOCK_M < BLOCK_N)
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def causal_access_buggy_rect(
     scores_ptr,

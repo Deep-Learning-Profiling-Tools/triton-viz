@@ -13,7 +13,7 @@ NUM_WARPS = 2
 NUM_STAGES = 1
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def matmul_kernel(
     a_ptr,
