@@ -313,8 +313,19 @@
                 root.style.display = visible ? 'flex' : 'none';
             }
 
+            function isChatPanelOpen() {
+                return window.getComputedStyle(root).display !== 'none';
+            }
+
+            function selectedOpUuidForLlm() {
+                const block = window.__tritonVizActiveBlock;
+                const fromBlock =
+                    block && block.blockData && block.blockData[0] && block.blockData[0].uuid;
+                return window.current_op_uuid || window.__tritonVizCurrentOp || fromBlock || null;
+            }
+
             toggle.addEventListener('click', function () {
-                const isOpen = root.style.display !== 'none';
+                const isOpen = isChatPanelOpen();
                 setChatVisible(!isOpen);
                 if (!isOpen) input.focus();
             });
@@ -414,7 +425,7 @@
                 addMsg('user', text);
                 setLoading(true, 'Thinking, please wait...');
                 try {
-                    const currentUuid = window.__tritonVizCurrentOp || null;
+                    const currentUuid = selectedOpUuidForLlm();
                     const resp = await fetch('/api/llm/chat', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -470,10 +481,8 @@
                 const opTab = el.closest('.detail-tab');
                 if (opTab) {
                     try {
-                        const active = window.__tritonVizActiveBlock;
-                        if (active && active.activeOpUuid) {
-                            window.__tritonVizCurrentOp = active.activeOpUuid;
-                        }
+                        const uuid = selectedOpUuidForLlm();
+                        if (uuid) window.__tritonVizCurrentOp = uuid;
                     } catch (_) {}
                 }
             });
