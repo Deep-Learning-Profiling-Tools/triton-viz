@@ -5,6 +5,10 @@ import triton.language as tl
 import triton_viz
 from triton_viz.clients import Tracer
 
+# Optional: visualizer LLM — set one or both before running.
+_LL_CONFIG_PATH = ""
+_LL_API_KEY = ""
+
 
 @triton_viz.trace(client=Tracer())
 @triton.jit
@@ -61,6 +65,10 @@ def run_demo():
         f"[buggy_softmax_no_stability] finite ratio: {finite_ratio:.3f}, max diff: {max_diff:.6f}"
     )
 
+    if _LL_CONFIG_PATH:
+        triton_viz.setup_llm(config_path=_LL_CONFIG_PATH)
+    if _LL_API_KEY:
+        triton_viz.setup_llm(api_key=_LL_API_KEY)
     triton_viz.launch(share=True)
 
 
