@@ -10,7 +10,7 @@ BLOCK_SIZE = 16
 WRAP_START = 8  # treat idx >= 8 as the "overflow" window
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def buggy_dequant_kernel(
     x_ptr, y_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr, WRAP_START: tl.constexpr

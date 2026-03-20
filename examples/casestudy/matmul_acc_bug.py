@@ -8,7 +8,7 @@ from triton_viz.core.data import Dot
 from triton_viz.core.trace import launches
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def matmul_acc_kernel(
     a_ptr,

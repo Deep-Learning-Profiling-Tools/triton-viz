@@ -9,7 +9,7 @@ N = 16
 BLOCK_SIZE = 16
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def correct_dequant_kernel(x_ptr, y_ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)

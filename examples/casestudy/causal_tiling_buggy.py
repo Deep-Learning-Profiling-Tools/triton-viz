@@ -13,7 +13,7 @@ BLOCK_N = SUB_TILE * 4  # 16
 START_M = 1  # block row that exhibits the bug
 
 
-@triton_viz.trace(clients=Tracer())
+@triton_viz.trace(client=Tracer())
 @triton.jit
 def causal_access_buggy(
     scores_ptr,
