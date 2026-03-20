@@ -6,7 +6,7 @@ import zipfile
 import json
 from flask import Flask, render_template, jsonify, request, send_file
 from .analysis import analyze_records
-from .draw import get_visualization_data, delinearized, make_3d
+from .draw import get_visualization_data
 from .llm_records import LLMRecordStore
 from .llm_utils import (
     LLM_SETUP_KEYS,
@@ -129,9 +129,7 @@ def _build_llm_system_records_prompt() -> str:
     text = json.dumps(payload, ensure_ascii=False)
     if len(text) > LLM_SYS_CONTEXT_MAX_CHARS:
         text = text[:LLM_SYS_CONTEXT_MAX_CHARS]
-        return (
-            "Kernel run records summary (JSON, truncated due to size limit): " + text
-        )
+        return "Kernel run records summary (JSON, truncated due to size limit): " + text
     return "Kernel run records summary (JSON): " + text
 
 
@@ -243,7 +241,11 @@ def _build_llm_compute_trace_prompt() -> str:
         item: dict[str, Any] = {
             "trace_index": idx,
             "op_type": rec_type,
-            "grid_idx": [int(current_grid[0]), int(current_grid[1]), int(current_grid[2])],
+            "grid_idx": [
+                int(current_grid[0]),
+                int(current_grid[1]),
+                int(current_grid[2]),
+            ],
         }
         for attr in (
             "op",

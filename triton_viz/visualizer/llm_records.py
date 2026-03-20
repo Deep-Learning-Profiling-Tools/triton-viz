@@ -104,7 +104,9 @@ class LLMRecordStore:
                 return asdict(record)
         return None
 
-    def _code_from_tracebacks(self, tracebacks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def _code_from_tracebacks(
+        self, tracebacks: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
         if not tracebacks:
             return None
         frame = tracebacks[-1] or {}
