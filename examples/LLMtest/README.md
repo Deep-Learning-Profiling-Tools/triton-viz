@@ -1,6 +1,6 @@
 # LLM test
 
-Intentionally buggy Triton kernels for trying the visualizer’s LLM assistant.
+Intentionally buggy Triton kernels for trying the visualizer's LLM assistant.
 
 ## Run
 
