@@ -1,5 +1,5 @@
-import os
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..utils.traceback_utils import read_source_segment
@@ -115,11 +115,14 @@ class LLMRecordStore:
         if not filename or lineno is None:
             return None
 
-        cwd = os.path.realpath(os.getcwd())
-        path = os.path.realpath(filename)
-        if not path.startswith(cwd):
+        cwd = Path.cwd().resolve()
+        try:
+            resolved = Path(filename).resolve()
+            # Reject path-boundary tricks (e.g. cwd /foo vs /foo-secret) vs naive startswith.
+            resolved.relative_to(cwd)
+        except (ValueError, OSError):
             return None
-        return read_source_segment(filename, lineno, self._code_context)
+        return read_source_segment(str(resolved), lineno, self._code_context)
 
     @staticmethod
     def _safe_int(value: Any) -> int | None:
