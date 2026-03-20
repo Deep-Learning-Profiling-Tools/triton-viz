@@ -172,3 +172,5 @@ benchmarks/*.json
 triton_viz/version.py
 .subagents/
 subagent*.txt
+triton_viz/visualizer/llm_config.local.json
+triton_viz/visualizer/llm_chat_debug.jsonl

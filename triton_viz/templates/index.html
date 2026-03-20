@@ -5,6 +5,226 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Triton Kernel Visualization</title>
     <link rel="stylesheet" href="/static/visualizer.css">
+    <style>
+        #llm-chat {
+            position: fixed;
+            right: 24px;
+            bottom: 24px;
+            z-index: 4000;
+            width: 400px;
+            height: 480px;
+            min-width: 320px;
+            min-height: 340px;
+            max-width: min(92vw, 760px);
+            max-height: 82vh;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+            resize: both;
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: linear-gradient(180deg, rgba(18, 20, 30, 0.97), rgba(16, 18, 28, 0.97));
+            color: #edf1ff;
+            box-shadow: 0 20px 48px rgba(0, 0, 0, 0.42);
+            backdrop-filter: blur(8px);
+            font-family: Inter, "SF Pro Text", "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+
+        #llm-chat-header {
+            padding: 10px 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.04);
+            cursor: move;
+            user-select: none;
+        }
+
+        #llm-title {
+            font-size: 13px;
+            font-weight: 650;
+            letter-spacing: 0.2px;
+            color: #e9eeff;
+        }
+
+        #llm-chat-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .llm-btn {
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.06);
+            color: #e8ecff;
+            cursor: pointer;
+            font-size: 12px;
+            line-height: 1;
+            transition: all 0.15s ease;
+        }
+
+        .llm-btn:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.14);
+            border-color: rgba(255, 255, 255, 0.28);
+        }
+
+        .llm-btn:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
+        #llm-analyze {
+            padding: 6px 10px;
+            background: linear-gradient(180deg, rgba(66, 103, 237, 0.45), rgba(41, 80, 221, 0.35));
+            border-color: rgba(112, 145, 255, 0.45);
+        }
+
+        #llm-close {
+            width: 28px;
+            height: 28px;
+            padding: 0;
+            font-size: 15px;
+            background: transparent;
+            border-color: transparent;
+        }
+
+        #llm-messages {
+            flex: 1;
+            overflow: auto;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .llm-row {
+            display: flex;
+        }
+
+        .llm-row.user {
+            justify-content: flex-end;
+        }
+
+        .llm-row.assistant,
+        .llm-row.system {
+            justify-content: flex-start;
+        }
+
+        .llm-bubble {
+            max-width: 92%;
+            padding: 8px 10px;
+            border-radius: 10px;
+            border: 1px solid transparent;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .llm-row.user .llm-bubble {
+            background: linear-gradient(180deg, rgba(67, 113, 255, 0.9), rgba(54, 95, 236, 0.84));
+            color: #f8faff;
+            border-color: rgba(137, 167, 255, 0.38);
+        }
+
+        .llm-row.assistant .llm-bubble {
+            background: rgba(255, 255, 255, 0.08);
+            color: #e8ecff;
+            border-color: rgba(255, 255, 255, 0.12);
+        }
+
+        .llm-row.system .llm-bubble {
+            background: rgba(255, 255, 255, 0.04);
+            color: #c9d3ff;
+            border-style: dashed;
+            border-color: rgba(255, 255, 255, 0.16);
+        }
+
+        .llm-role {
+            opacity: 0.72;
+            font-size: 11px;
+            margin-bottom: 2px;
+        }
+
+        #llm-input-wrap {
+            display: flex;
+            gap: 8px;
+            padding: 10px 12px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        #llm-input {
+            flex: 1;
+            min-width: 0;
+            padding: 8px 10px;
+            border-radius: 9px;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            background: rgba(7, 9, 15, 0.68);
+            color: #f2f5ff;
+            outline: none;
+            font-size: 12px;
+        }
+
+        #llm-input:focus {
+            border-color: rgba(126, 154, 255, 0.9);
+            box-shadow: 0 0 0 2px rgba(107, 141, 255, 0.22);
+        }
+
+        #llm-send {
+            padding: 8px 14px;
+            border: 1px solid rgba(137, 167, 255, 0.5);
+            border-radius: 9px;
+            background: linear-gradient(180deg, rgba(73, 122, 255, 0.95), rgba(62, 104, 236, 0.95));
+            color: #fff;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.15s ease;
+        }
+
+        #llm-send:hover:not(:disabled) {
+            filter: brightness(1.06);
+        }
+
+        #llm-send:disabled {
+            opacity: 0.58;
+            cursor: not-allowed;
+        }
+
+        .llm-loading {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 20px;
+        }
+
+        .llm-spinner {
+            width: 12px;
+            height: 12px;
+            border-radius: 999px;
+            border: 2px solid rgba(160, 180, 255, 0.35);
+            border-top-color: rgba(160, 180, 255, 0.95);
+            animation: llm-spin 0.9s linear infinite;
+            flex: 0 0 auto;
+        }
+
+        .llm-loading-text {
+            white-space: nowrap;
+        }
+
+        @keyframes llm-spin {
+            from {
+                transform: rotate(0deg);
+            }
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
 </head>
 <body>
     <div class="viz-app" data-component="app">
@@ -39,6 +259,7 @@
                     <button id="btn-op-histogram" class="viz-button ghost" type="button" disabled>Value Histogram</button>
                     <button id="btn-op-download" class="viz-button ghost" type="button" disabled>Download Tensor</button>
                     <button id="btn-op-edit-tensor-view" class="viz-button ghost" type="button" disabled>Edit Tensor View: OFF</button>
+                    <button id="llm-toggle" class="viz-button ghost" type="button">AI Assistant</button>
                 </div>
             </section>
 
@@ -51,6 +272,212 @@
         </main>
     </div>
 
+    <div id="llm-chat">
+        <div id="llm-chat-header">
+            <span id="llm-title">AI Kernel Debug Assistant</span>
+            <div id="llm-chat-actions">
+                <button id="llm-analyze" class="llm-btn" type="button">开始分析</button>
+                <button id="llm-close" class="llm-btn" type="button" aria-label="Close chat">✕</button>
+            </div>
+        </div>
+        <div id="llm-messages">
+            <div class="llm-row system">
+                <div class="llm-bubble">
+                    <div class="llm-role">系统</div>
+                    你好，先点击“开始分析”让我先读一遍 Trace，随后你再继续追问。
+                </div>
+            </div>
+        </div>
+        <div id="llm-input-wrap">
+            <input id="llm-input" type="text" placeholder="问点什么，比如：这个 kernel 哪一段可能有索引 bug？">
+            <button id="llm-send" type="button">发送</button>
+        </div>
+    </div>
+
     <script type="module" src="/static/main.js"></script>
+    <script>
+        (function () {
+            const root = document.getElementById('llm-chat');
+            const header = document.getElementById('llm-chat-header');
+            const msgs = document.getElementById('llm-messages');
+            const input = document.getElementById('llm-input');
+            const send = document.getElementById('llm-send');
+            const toggle = document.getElementById('llm-toggle');
+            const close = document.getElementById('llm-close');
+            const analyze = document.getElementById('llm-analyze');
+            if (!root || !header || !msgs || !input || !send || !toggle || !close || !analyze) return;
+            let analysisReady = false;
+            let loadingNode = null;
+
+            function setChatVisible(visible) {
+                root.style.display = visible ? 'flex' : 'none';
+            }
+
+            toggle.addEventListener('click', function () {
+                const isOpen = root.style.display !== 'none';
+                setChatVisible(!isOpen);
+                if (!isOpen) input.focus();
+            });
+
+            close.addEventListener('click', function () {
+                setChatVisible(false);
+            });
+
+            function addMsg(role, text) {
+                const row = document.createElement('div');
+                row.className = 'llm-row ' + (role === 'user' ? 'user' : 'assistant');
+                const bubble = document.createElement('div');
+                bubble.className = 'llm-bubble';
+                const roleTag = document.createElement('div');
+                roleTag.className = 'llm-role';
+                roleTag.textContent = role === 'user' ? '你' : 'AI';
+                const content = document.createElement('div');
+                content.textContent = String(text || '');
+                bubble.appendChild(roleTag);
+                bubble.appendChild(content);
+                row.appendChild(bubble);
+                msgs.appendChild(row);
+                msgs.scrollTop = msgs.scrollHeight;
+            }
+
+            function setLoading(loading, text) {
+                send.disabled = !!loading;
+                analyze.disabled = !!loading;
+                if (loading) {
+                    if (!loadingNode) {
+                        loadingNode = document.createElement('div');
+                        loadingNode.className = 'llm-row assistant';
+                        const bubble = document.createElement('div');
+                        bubble.className = 'llm-bubble';
+                        const roleTag = document.createElement('div');
+                        roleTag.className = 'llm-role';
+                        roleTag.textContent = 'AI';
+                        const loading = document.createElement('div');
+                        loading.className = 'llm-loading';
+                        const spinner = document.createElement('span');
+                        spinner.className = 'llm-spinner';
+                        const textNode = document.createElement('span');
+                        textNode.className = 'llm-loading-text';
+                        textNode.textContent = '处理中';
+                        loading.appendChild(spinner);
+                        loading.appendChild(textNode);
+                        bubble.appendChild(roleTag);
+                        bubble.appendChild(loading);
+                        loadingNode.appendChild(bubble);
+                        msgs.appendChild(loadingNode);
+                    }
+                    const content = loadingNode.querySelector('.llm-loading-text');
+                    if (content) {
+                        content.textContent = String(text || '处理中');
+                    }
+                    msgs.scrollTop = msgs.scrollHeight;
+                    return;
+                }
+                if (loadingNode && loadingNode.parentNode) {
+                    loadingNode.parentNode.removeChild(loadingNode);
+                }
+                loadingNode = null;
+            }
+
+            let dragging = false;
+            let dragOffsetX = 0;
+            let dragOffsetY = 0;
+
+            header.addEventListener('mousedown', function (e) {
+                dragging = true;
+                const rect = root.getBoundingClientRect();
+                dragOffsetX = e.clientX - rect.left;
+                dragOffsetY = e.clientY - rect.top;
+                root.style.right = 'auto';
+                root.style.bottom = 'auto';
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', function (e) {
+                if (!dragging) return;
+                root.style.left = Math.max(8, e.clientX - dragOffsetX) + 'px';
+                root.style.top = Math.max(8, e.clientY - dragOffsetY) + 'px';
+            });
+
+            document.addEventListener('mouseup', function () {
+                dragging = false;
+            });
+
+            async function sendMsg() {
+                const text = input.value.trim();
+                if (!text) return;
+                if (!analysisReady) {
+                    addMsg('assistant', '请先点击“开始分析”，我需要先完成一次 Trace 总结。');
+                    return;
+                }
+                input.value = '';
+                addMsg('user', text);
+                setLoading(true, '正在思考，请稍候...');
+                try {
+                    const currentUuid = window.__tritonVizCurrentOp || null;
+                    const resp = await fetch('/api/llm/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: text, uuid: currentUuid }),
+                    });
+                    const data = await resp.json();
+                    if (!resp.ok) {
+                        addMsg('assistant', data.error || '请求失败');
+                    } else {
+                        addMsg('assistant', data.answer || '(空回复)');
+                    }
+                } catch (err) {
+                    addMsg('assistant', '网络错误: ' + err);
+                } finally {
+                    setLoading(false);
+                }
+            }
+
+            async function runAnalyze() {
+                setLoading(true, '正在分析 Trace，这可能需要几秒...');
+                try {
+                    const resp = await fetch('/api/llm/analyze', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({}),
+                    });
+                    const data = await resp.json();
+                    if (!resp.ok) {
+                        analysisReady = false;
+                        addMsg('assistant', data.error || '初步分析失败');
+                        return;
+                    }
+                    analysisReady = !!data.analysis_ready;
+                    addMsg('assistant', data.summary || '初步分析完成，但没有可展示内容。');
+                    addMsg('assistant', '初步分析已完成。你可以继续给我下达排查指令。');
+                } catch (err) {
+                    analysisReady = false;
+                    addMsg('assistant', '网络错误: ' + err);
+                } finally {
+                    setLoading(false);
+                }
+            }
+
+            send.addEventListener('click', sendMsg);
+            analyze.addEventListener('click', runAnalyze);
+            input.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') sendMsg();
+            });
+
+            document.addEventListener('click', function (e) {
+                const el = e.target;
+                if (!el || !el.closest) return;
+                const opTab = el.closest('.detail-tab');
+                if (opTab) {
+                    try {
+                        const active = window.__tritonVizActiveBlock;
+                        if (active && active.activeOpUuid) {
+                            window.__tritonVizCurrentOp = active.activeOpUuid;
+                        }
+                    } catch (_) {}
+                }
+            });
+        })();
+    </script>
 </body>
 </html>
