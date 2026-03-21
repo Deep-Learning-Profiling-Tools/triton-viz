@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
+import threading
 import torch
 
 from triton_viz.core.config import TensorMode, config
-from triton_viz.core.patch import TensorMaterializer
+from triton_viz.core.patch import TensorMaterializer, UnmappablePointerError
 
 
 def _make_materializer(*tensors):
@@ -145,7 +146,6 @@ class RebasePointersBroadcastMaskTest:
         monkeypatch.setattr(m, "_cpu_offset", lambda b: 500)
         ptrs = np.array([base, base + 4, base + 8, base + 12], dtype=np.int64)
         result = m.rebase_pointers(ptrs, mask=np.bool_(False))
-        # All masked — no offset applied
         np.testing.assert_array_equal(result, ptrs)
 
     def test_row_broadcast_mask(self, monkeypatch):
@@ -154,13 +154,12 @@ class RebasePointersBroadcastMaskTest:
         base = t.untyped_storage().data_ptr()
         monkeypatch.setattr(m, "_cpu_offset", lambda b: 500)
         ptrs = np.array([[base, base + 4], [base + 8, base + 12]], dtype=np.int64)
-        # mask (1,2) broadcasts to (2,2): col 0 valid, col 1 masked
         mask = np.array([[True, False]])
         result = m.rebase_pointers(ptrs, mask=mask)
         assert result[0, 0] == base + 500
-        assert result[0, 1] == base + 4       # masked
+        assert result[0, 1] == base + 4
         assert result[1, 0] == base + 8 + 500
-        assert result[1, 1] == base + 12      # masked
+        assert result[1, 1] == base + 12
 
     def test_column_broadcast_mask(self, monkeypatch):
         t = torch.arange(8, dtype=torch.float32)
@@ -168,13 +167,12 @@ class RebasePointersBroadcastMaskTest:
         base = t.untyped_storage().data_ptr()
         monkeypatch.setattr(m, "_cpu_offset", lambda b: 500)
         ptrs = np.array([[base, base + 4], [base + 8, base + 12]], dtype=np.int64)
-        # mask (2,1) broadcasts to (2,2): row 0 valid, row 1 masked
         mask = np.array([[True], [False]])
         result = m.rebase_pointers(ptrs, mask=mask)
         assert result[0, 0] == base + 500
         assert result[0, 1] == base + 4 + 500
-        assert result[1, 0] == base + 8       # masked
-        assert result[1, 1] == base + 12      # masked
+        assert result[1, 0] == base + 8
+        assert result[1, 1] == base + 12
 
 
 # ---- Failure-path tests: unmappable pointers ----
@@ -182,47 +180,100 @@ class RebasePointersBroadcastMaskTest:
 
 class RebasePointersFailurePathTest:
     def test_unmappable_ptr_force_fake_raises(self, monkeypatch):
-        """In FORCE_FAKE mode, unregistered pointers must raise RuntimeError."""
+        """In FORCE_FAKE mode, unregistered pointers raise UnmappablePointerError."""
         monkeypatch.setattr(config, "tensor_mode", TensorMode.FORCE_FAKE)
         t = torch.arange(4, dtype=torch.float32)
         m = _make_materializer(t)
         bad_addr = 0xCAFEBABE
         ptrs = np.array([bad_addr], dtype=np.int64)
-        with pytest.raises(RuntimeError, match="No registered storage"):
+        with pytest.raises(UnmappablePointerError, match="No registered storage"):
             m.rebase_pointers(ptrs)
 
-    def test_unmappable_ptr_lazy_auto_fallback(self, monkeypatch):
-        """In LAZY_AUTO mode, unmappable pointers trigger eager fallback.
+    def test_unmappable_ptr_lazy_auto_prematerialises(self, monkeypatch):
+        """LAZY_AUTO pre-materialises all storages before retrying.
 
-        After the fallback materialises all storages, the retry still cannot
-        map an address that genuinely doesn't belong to any storage, so we
-        expect RuntimeError even in LAZY_AUTO for truly foreign addresses.
-        The fallback is useful when the *storage is registered but not yet
-        materialised to CPU* — here we test that _eager_materialise_all runs.
+        A truly foreign address still raises after the retry, but the
+        pre-materialisation has populated the CPU cache.
         """
         monkeypatch.setattr(config, "tensor_mode", TensorMode.LAZY_AUTO)
         t = torch.arange(4, dtype=torch.float32)
         m = _make_materializer(t)
         bad_addr = 0xCAFEBABE
         ptrs = np.array([bad_addr], dtype=np.int64)
-        # Even after fallback, a truly unmappable addr still raises
-        with pytest.raises(RuntimeError, match="No registered storage"):
+        with pytest.raises(UnmappablePointerError, match="No registered storage"):
             m.rebase_pointers(ptrs)
-        # But the fallback did materialise all storages
         base = t.untyped_storage().data_ptr()
         assert base in m._cpu_cache
 
-    def test_lazy_auto_fallback_materialises_all(self, monkeypatch):
-        """Verify eager fallback copies every registered storage to CPU."""
+    def test_lazy_auto_prematerialises_all_storages(self, monkeypatch):
+        """Verify pre-materialisation covers every registered storage."""
         monkeypatch.setattr(config, "tensor_mode", TensorMode.LAZY_AUTO)
         t1 = torch.arange(4, dtype=torch.float32)
         t2 = torch.arange(4, dtype=torch.float32)
         m = _make_materializer(t1, t2)
         bad_addr = 0xCAFEBABE
         ptrs = np.array([bad_addr], dtype=np.int64)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(UnmappablePointerError):
             m.rebase_pointers(ptrs)
         base1 = t1.untyped_storage().data_ptr()
         base2 = t2.untyped_storage().data_ptr()
         assert base1 in m._cpu_cache
         assert base2 in m._cpu_cache
+
+
+# ---- Thread-safety tests ----
+
+
+class CpuCacheThreadSafetyTest:
+    def test_concurrent_materialise_same_storage(self):
+        """Two threads hitting _cpu_offset for the same storage must see the
+        same CPU copy — i.e. the same data_ptr."""
+        t = torch.arange(16, dtype=torch.float32)
+        m = _make_materializer(t)
+        base = t.untyped_storage().data_ptr()
+
+        results: dict[int, int] = {}
+        barrier = threading.Barrier(2)
+
+        def worker(tid):
+            barrier.wait()
+            offset = m._cpu_offset(base)
+            results[tid] = offset
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        assert results[0] == results[1], (
+            "Concurrent _cpu_offset calls returned different offsets — "
+            "two CPU copies were created for the same GPU storage"
+        )
+
+    def test_concurrent_rebase_returns_consistent_offsets(self):
+        """Multiple threads calling rebase_pointers concurrently must all
+        apply the same offset."""
+        t = torch.arange(8, dtype=torch.float32)
+        m = _make_materializer(t)
+        base = t.untyped_storage().data_ptr()
+        ptrs = np.array([base, base + 4], dtype=np.int64)
+
+        results: dict[int, np.ndarray] = {}
+        barrier = threading.Barrier(4)
+
+        def worker(tid):
+            barrier.wait()
+            results[tid] = m.rebase_pointers(ptrs.copy())
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        for tid in range(1, 4):
+            np.testing.assert_array_equal(
+                results[0], results[tid],
+                err_msg=f"Thread 0 and thread {tid} got different rebase results",
+            )

@@ -354,18 +354,28 @@ def unpatch_lang(backend):
         scope.restore()
 
 
+class UnmappablePointerError(RuntimeError):
+    """A pointer address does not belong to any registered storage."""
+
+
 class TensorMaterializer:
     """Lazily copies GPU tensor storage to CPU on demand.
 
-    In ``LAZY_AUTO`` mode, unmappable pointers trigger an eager fallback that
-    materialises *all* registered storages to CPU so that the addresses can
-    still be resolved.  In ``FORCE_FAKE`` mode the same situation raises
-    ``RuntimeError`` immediately.
+    Thread safety: ``_cpu_cache`` is populated under ``_lock`` using
+    double-checked locking so that concurrent workers in a multi-SM grid
+    never materialise the same storage twice (which would yield divergent
+    CPU base addresses).
+
+    In ``LAZY_AUTO`` mode, an ``UnmappablePointerError`` triggers
+    ``_eager_materialise_all`` (pre-populates the CPU cache for every
+    registered storage) and retries.  In ``FORCE_FAKE`` mode the error
+    propagates immediately.
     """
 
     def __init__(self):
         self._storages: list[tuple[int, int, Any]] = []  # (base, end, storage)
         self._cpu_cache: dict[int, Any] = {}  # base → cpu_storage
+        self._lock = threading.Lock()
 
     def register(self, tensor):
         if not hasattr(tensor, "untyped_storage"):
@@ -391,10 +401,10 @@ class TensorMaterializer:
 
         try:
             return self._rebase_core(flat, valid_indices, ptr_data)
-        except RuntimeError:
+        except UnmappablePointerError:
             if cfg.tensor_mode == TensorMode.FORCE_FAKE:
                 raise
-            # LAZY_AUTO fallback: eagerly materialise every storage, retry
+            # LAZY_AUTO: pre-materialise every storage, then retry
             self._eager_materialise_all()
             return self._rebase_core(flat, valid_indices, ptr_data)
 
@@ -425,15 +435,22 @@ class TensorMaterializer:
         return result
 
     def _eager_materialise_all(self):
-        """Copy every registered storage to CPU (fallback for unmappable ptrs)."""
-        for base, _, stor in self._storages:
-            if base not in self._cpu_cache:
-                self._cpu_cache[base] = stor.cpu()
+        """Copy every registered storage to CPU under the lock."""
+        with self._lock:
+            for base, _, stor in self._storages:
+                if base not in self._cpu_cache:
+                    self._cpu_cache[base] = stor.cpu()
 
     def _cpu_offset(self, gpu_base):
-        if gpu_base not in self._cpu_cache:
-            _, _, stor = next(s for s in self._storages if s[0] == gpu_base)
-            self._cpu_cache[gpu_base] = stor.cpu()
+        # Fast path (no lock): already cached
+        if gpu_base in self._cpu_cache:
+            cpu_base = self._cpu_cache[gpu_base].data_ptr()
+            return cpu_base - gpu_base
+        # Slow path: materialise under lock (double-checked)
+        with self._lock:
+            if gpu_base not in self._cpu_cache:
+                _, _, stor = next(s for s in self._storages if s[0] == gpu_base)
+                self._cpu_cache[gpu_base] = stor.cpu()
         cpu_base = self._cpu_cache[gpu_base].data_ptr()
         return cpu_base - gpu_base
 
@@ -441,7 +458,9 @@ class TensorMaterializer:
         for base, end, _ in self._storages:
             if base <= addr < end:
                 return base
-        raise RuntimeError(f"No registered storage for address {addr:#x}")
+        raise UnmappablePointerError(
+            f"No registered storage for address {addr:#x}"
+        )
 
 
 @dataclass(frozen=True)
