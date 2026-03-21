@@ -291,7 +291,7 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         if cfg.cli_active and isinstance(kernel, TraceInterface):
             raise RuntimeError(
                 "@triton_viz.trace() decorator cannot be used together with "
-                "CLI wrapper (e.g., triton-sanitizer / triton-profiler). "
+                "CLI wrapper (e.g., triton-sanitizer / triton-profiler / triton-race-detector). "
                 "Please remove the @triton_viz.trace() decorator from your code "
                 "when using CLI tools."
             )

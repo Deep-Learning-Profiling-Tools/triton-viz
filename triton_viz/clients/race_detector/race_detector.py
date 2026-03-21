@@ -82,6 +82,7 @@ class RaceDetector(SymbolicClient):
         self._symbolic_barrier_candidates: dict[
             tuple[str, ...], set[str]
         ] = defaultdict(set)
+        self._symbolic_race_results: list[RaceRecord] | None = None
         self._event_counter: int = 0
 
     # ── Client interface ─────────────────────────────────────────
@@ -113,8 +114,14 @@ class RaceDetector(SymbolicClient):
                 from ...core.patch import SymbolicBailout
 
                 raise SymbolicBailout()
-            self._phase = "z3_done"
-            return False
+            # Symbolic analysis succeeded — replay grid concretely for side effects
+            self._symbolic_race_results = list(self._races)
+            self._need_concrete_fallback = True
+            self._force_concrete = True
+            self._disable_overriders()
+            from ...core.patch import SymbolicBailout
+
+            raise SymbolicBailout()
 
     def pre_warmup_callback(self, jit_fn: Callable, *args, **kwargs) -> bool:
         return False
@@ -130,6 +137,9 @@ class RaceDetector(SymbolicClient):
         self._need_concrete_fallback = False
         self._symbolic_cas_counts.clear()
         self._symbolic_barrier_candidates.clear()
+        # Preserve symbolic results across replay restart; clear on fresh invocation
+        if not self._force_concrete:
+            self._symbolic_race_results = None
         self._symbolic_accesses.clear()
         self._concrete_accesses.clear()
         self._races.clear()
@@ -460,8 +470,9 @@ class RaceDetector(SymbolicClient):
         return OpCallbacks()
 
     def finalize(self) -> list:
-        if self._phase == "z3_done":
-            races = list(self._races)
+        if self._symbolic_race_results is not None:
+            races = self._symbolic_race_results
+            self._symbolic_race_results = None
         elif self._phase == "concrete":
             races = detect_races(self._concrete_accesses)
         else:
@@ -736,19 +747,28 @@ class RaceDetector(SymbolicClient):
                         for p in pid_b
                     )
 
-                    # Find witness from the actual lane pair whose predicate is satisfied
+                    # Find witness from the actual lane pair whose predicate is satisfied.
+                    # Use max(a, b) so the witness falls in the actual overlap region.
                     witness_addr = None
                     for ia, ib, pred in candidate_preds:
                         val = model.evaluate(pred, model_completion=True)
                         if is_true(val):
-                            witness_addr = model.evaluate(
+                            a_val = model.evaluate(
                                 addrs_a[ia], model_completion=True
                             ).as_long()
+                            b_val = model.evaluate(
+                                addrs_b[ib], model_completion=True
+                            ).as_long()
+                            witness_addr = max(a_val, b_val)
                             break
                     if witness_addr is None:
-                        witness_addr = model.evaluate(
+                        a_val = model.evaluate(
                             addrs_a[0], model_completion=True
                         ).as_long()
+                        b_val = model.evaluate(
+                            addrs_b[0], model_completion=True
+                        ).as_long()
+                        witness_addr = max(a_val, b_val)
 
                     mem_a = MemoryAccess(
                         access_type=acc_a.access_type,

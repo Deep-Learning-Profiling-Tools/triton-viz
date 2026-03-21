@@ -15,7 +15,10 @@ class _ModeTrackingRaceDetector(RaceDetector):
         self.finalize_phase = None
 
     def finalize(self) -> list:
-        self.finalize_phase = self._phase
+        if self._symbolic_race_results is not None:
+            self.finalize_phase = "z3_done"
+        else:
+            self.finalize_phase = self._phase
         return super().finalize()
 
 
@@ -282,6 +285,35 @@ def test_no_false_positive_masked_nonoverlap():
     assert detector.finalize_phase == "z3_done"
     races = launches[-1].records
     assert len(races) == 0
+
+
+# ======== Symbolic success still populates output (concrete replay) ========
+
+
+def test_symbolic_success_replays_concretely():
+    """Symbolic success must still execute blocks concretely for side effects."""
+    detector = _ModeTrackingRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, n, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n
+        tl.store(out_ptr + offsets, (pid + 1).to(tl.float32), mask=mask)
+
+    n, bs = 16, 8
+    out = torch.full((n,), -1.0, dtype=torch.float32)
+    kernel[(triton.cdiv(n, bs),)](out, n, bs)
+
+    assert detector.finalize_phase == "z3_done"
+    races = launches[-1].records
+    assert len(races) == 0
+    # Both blocks must have written: block 0 writes 1.0, block 1 writes 2.0
+    expected = torch.cat([torch.full((bs,), float(pid + 1)) for pid in range(2)])
+    assert torch.equal(
+        out, expected
+    ), f"Output tensor not populated after symbolic analysis — got {out}"
 
 
 # ======== Witness address correctness ========
