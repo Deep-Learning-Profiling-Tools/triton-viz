@@ -1459,8 +1459,8 @@ def test_constexpr_bitcast_mismatched_size_raises():
     import types
 
     mock_self = types.SimpleNamespace(value=1.0)
-    # float(1.0) -> float32 (4 bytes), tl.int64 (8 bytes) -> mismatch
-    with pytest.raises(ValueError, match="different sizes"):
+    # float(1.0) -> float32 (32 bits), tl.int64 (64 bits) -> mismatch
+    with pytest.raises(ValueError, match="Cannot bitcast"):
         _constexpr_to(mock_self, tl.int64, bitcast=True)
 
 

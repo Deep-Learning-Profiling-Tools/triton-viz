@@ -10,10 +10,15 @@ from triton_viz.core.patch import _constexpr_to, _src_np_dtype
 @pytest.mark.parametrize(
     "value,triton_dtype,expected_np,expected_val",
     [
-        (1.0, tl.float64, np.float64, 1.0),  # float64 demoted to float32
-        (1, tl.uint8, np.uint8, 1),  # uint8 demoted to int32
-        (-7, tl.int16, np.int16, -7),  # int16 demoted to int32
-        (1, tl.uint32, np.uint32, 1),  # uint32 demoted to int32
+        (1.0, tl.float64, np.float64, 1.0),
+        (1, tl.uint8, np.uint8, 1),
+        (-7, tl.int16, np.int16, -7),
+        (1, tl.uint32, np.uint32, 1),
+        # Narrowing / signedness-change casts — must wrap, not reject
+        (300, tl.uint8, np.uint8, 300 % 256),  # 44
+        (-1, tl.uint32, np.uint32, 2**32 - 1),  # 4294967295
+        (2**31, tl.int32, np.int32, -(2**31)),  # signed wrap
+        (255, tl.int8, np.int8, -1),  # unsigned → signed wrap
     ],
 )
 def test_constexpr_to_preserves_dtype(value, triton_dtype, expected_np, expected_val):
@@ -45,6 +50,13 @@ def test_constexpr_to_overflow_raises():
     mock_self = types.SimpleNamespace(value=-(2**63) - 1)
     with pytest.raises(OverflowError, match="outside the representable range"):
         _constexpr_to(mock_self, tl.int64)
+
+
+def test_constexpr_bitcast_bool_to_int8_raises():
+    """Bitcast bool(int1) -> int8 must raise: primitive_bitwidth 1 != 8."""
+    mock_self = types.SimpleNamespace(value=True)
+    with pytest.raises(ValueError, match="Cannot bitcast"):
+        _constexpr_to(mock_self, tl.int8, bitcast=True)
 
 
 def test_src_np_dtype_max_uint64():

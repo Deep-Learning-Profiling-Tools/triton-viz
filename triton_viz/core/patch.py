@@ -56,24 +56,23 @@ except ImportError:
     _ml_dtypes = None  # type: ignore[assignment]
 
 
-def _src_np_dtype(value: object) -> np.dtype:
-    """Infer the numpy dtype for a Python literal, matching Triton's to_tensor logic."""
+def _src_triton_dtype(value: object) -> tl.core.dtype:
+    """Infer the Triton dtype for a Python literal, mirroring upstream to_tensor."""
     if isinstance(value, bool):
-        return np.dtype(np.bool_)
+        return tl.int1
     if isinstance(value, int):
         if -(2**31) <= value < 2**31:
-            return np.dtype(np.int32)
+            return tl.int32
         if 2**31 <= value < 2**32:
-            return np.dtype(np.uint32)
+            return tl.uint32
         if -(2**63) <= value < 2**63:
-            return np.dtype(np.int64)
+            return tl.int64
         if 0 <= value < 2**64:
-            return np.dtype(np.uint64)
+            return tl.uint64
         raise OverflowError(
             f"Integer literal {value} is outside the representable range "
             f"[-2**63, 2**64) for Triton integer types"
         )
-    # Float: match Triton to_tensor() — float32 for representable values
     assert isinstance(value, float)
     abs_x: float = abs(value)
     if (
@@ -82,8 +81,13 @@ def _src_np_dtype(value: object) -> np.dtype:
         or abs_x == float("inf")
         or (_F32_MIN_NORMAL <= abs_x <= _F32_MAX)
     ):
-        return np.dtype(np.float32)
-    return np.dtype(np.float64)
+        return tl.float32
+    return tl.float64
+
+
+def _src_np_dtype(value: object) -> np.dtype:
+    """Infer the numpy dtype for a Python literal, matching Triton's to_tensor logic."""
+    return np.dtype(_get_np_dtype(_src_triton_dtype(value)))
 
 
 def _cast_np_dtype(triton_dtype: tl.core.dtype) -> np.dtype:
@@ -152,14 +156,16 @@ def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
     bitcast_val = bitcast.value if isinstance(bitcast, tl.constexpr) else bitcast
 
     if bitcast_val:
+        src_triton = _src_triton_dtype(value)
+        src_bits = src_triton.primitive_bitwidth
+        dst_bits = dtype.primitive_bitwidth
+        if src_bits != dst_bits:
+            raise ValueError(
+                f"Cannot bitcast data-type of size {src_bits} to "
+                f"data-type of size {dst_bits}"
+            )
         src_np = _src_np_dtype(value)
         dst_np = np.dtype(_get_np_dtype(dtype))
-        if src_np.itemsize != dst_np.itemsize:
-            raise ValueError(
-                f"Cannot bitcast between types of different sizes: "
-                f"{src_np} ({src_np.itemsize * 8} bits) and "
-                f"{dst_np} ({dst_np.itemsize * 8} bits)"
-            )
         raw = np.array([value], dtype=src_np).tobytes()
         result = np.frombuffer(raw, dtype=dst_np)[0]
     else:
@@ -188,7 +194,7 @@ def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
         if fp_downcast_rounding == "rtz":
             result = _fp_downcast_rtz(value, dst_np)
         else:
-            result = dst_np.type(value)
+            result = np.array([value], dtype=src_np).astype(dst_np)[0]
 
     return _typed_scalar_tensor(result, dtype)
 
