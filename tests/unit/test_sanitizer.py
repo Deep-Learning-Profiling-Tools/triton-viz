@@ -14,6 +14,7 @@ from triton_viz.clients.symbolic_engine import (
     LoadSymbolicExpr,
     StoreSymbolicExpr,
 )
+from triton_viz.core.libdevice_registry import _np_erf
 from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
     SymbolicSanitizer,
@@ -567,6 +568,7 @@ def test_store_dtype_block_of_pointers():
         ("tanh", np.tanh, False),
         ("asin", np.arcsin, False),
         ("acos", np.arccos, False),
+        ("erf", _np_erf, False),
         ("rsqrt", None, True),
     ],
 )

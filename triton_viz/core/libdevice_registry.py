@@ -6,10 +6,18 @@ Centralizes ``LibdeviceSpec`` definitions so that both ``core.patch`` and
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+
+_vectorized_erf = np.vectorize(math.erf)
+
+
+def _np_erf(x: np.ndarray) -> np.ndarray:
+    """Vectorized erf that preserves input dtype."""
+    return _vectorized_erf(x).astype(x.dtype, copy=False)
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,7 @@ _LIBDEVICE_REGISTRY: list[LibdeviceSpec] = [
     LibdeviceSpec("tanh", np.tanh, 1, "tanh"),
     LibdeviceSpec("asin", np.arcsin, 1, "asin"),
     LibdeviceSpec("acos", np.arccos, 1, "acos"),
+    LibdeviceSpec("erf", _np_erf, 1, "erf"),
     # Builder-backed ops (use interpreter_builder methods directly)
     LibdeviceSpec("rsqrt", None, 1, "rsqrt", builder_method="create_rsqrt"),
 ]

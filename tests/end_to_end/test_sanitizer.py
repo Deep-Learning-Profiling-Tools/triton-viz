@@ -15,6 +15,7 @@ import triton_viz
 from triton_viz.clients.tracer.tracer import Tracer
 from triton_viz.core.data import Load, RawLoad
 from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr, RangeWrapper
+from triton_viz.core.libdevice_registry import _np_erf
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     _range_to_iterator_constraint,
@@ -1003,9 +1004,6 @@ def libdevice_rsqrt_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
     tl.store(out_ptr + offs, y)
 
 
-# -- Unsupported op kernel --
-
-
 @triton_viz.trace(client=libdevice_sanitizer)
 @triton.jit
 def libdevice_erf_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
@@ -1024,11 +1022,6 @@ def libdevice_erf_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
     tl.store(out_ptr + offs, y)
 
 
-_UNSUPPORTED_KERNELS = {
-    "direct": libdevice_erf_direct_kernel,
-    "module": libdevice_erf_module_kernel,
-}
-
 _LIBDEVICE_KERNELS = {
     ("tanh", "direct"): libdevice_tanh_direct_kernel,
     ("tanh", "module"): libdevice_tanh_module_kernel,
@@ -1036,6 +1029,8 @@ _LIBDEVICE_KERNELS = {
     ("asin", "module"): libdevice_asin_module_kernel,
     ("acos", "direct"): libdevice_acos_direct_kernel,
     ("acos", "module"): libdevice_acos_module_kernel,
+    ("erf", "direct"): libdevice_erf_direct_kernel,
+    ("erf", "module"): libdevice_erf_module_kernel,
     ("rsqrt", "direct"): libdevice_rsqrt_direct_kernel,
     ("rsqrt", "module"): libdevice_rsqrt_module_kernel,
 }
@@ -1044,6 +1039,7 @@ _NUMPY_REFS = {
     "tanh": np.tanh,
     "asin": np.arcsin,
     "acos": np.arccos,
+    "erf": _np_erf,
     "rsqrt": lambda x: 1.0 / np.sqrt(x),
 }
 
@@ -1057,13 +1053,16 @@ _LIBDEVICE_INPUTS = {
     "acos": torch.tensor(
         [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
     ),
+    "erf": torch.tensor(
+        [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
+    ),
     "rsqrt": torch.tensor(
         [1.0, 4.0, 0.25, 9.0, 16.0, 0.01, 100.0, 0.5], dtype=torch.float32
     ),
 }
 
 
-@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos", "rsqrt"])
+@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos", "erf", "rsqrt"])
 @pytest.mark.parametrize("import_style", ["direct", "module"])
 def test_libdevice_op(op_name, import_style):
     """
@@ -1082,19 +1081,6 @@ def test_libdevice_op(op_name, import_style):
         f"Expected no OOB records for {op_name}/{import_style}, "
         f"got {len(libdevice_sanitizer.records)}"
     )
-
-
-@pytest.mark.parametrize("import_style", ["direct", "module"])
-def test_libdevice_unsupported_op_raises(import_style):
-    """Unsupported libdevice ops raise NotImplementedError, not silent None."""
-    libdevice_sanitizer.records.clear()
-
-    x = torch.tensor([0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32)
-    out = torch.empty(8, dtype=torch.float32)
-
-    kernel = _UNSUPPORTED_KERNELS[import_style]
-    with pytest.raises(NotImplementedError, match=r"libdevice\.erf.*not supported"):
-        kernel[(1,)](x, out, N=8)
 
 
 # -- Numerical correctness kernels (no sanitizer override) --
@@ -1128,6 +1114,14 @@ def _ld_acos_kernel(x_ptr, out_ptr, N: tl.constexpr):
 
 @triton_viz.trace(client=_correctness_tracer)
 @triton.jit
+def _ld_erf_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_erf(x))
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
 def _ld_rsqrt_kernel(x_ptr, out_ptr, N: tl.constexpr):
     offs = tl.arange(0, N)
     x = tl.load(x_ptr + offs)
@@ -1138,11 +1132,12 @@ _CORRECTNESS_KERNELS = {
     "tanh": _ld_tanh_kernel,
     "asin": _ld_asin_kernel,
     "acos": _ld_acos_kernel,
+    "erf": _ld_erf_kernel,
     "rsqrt": _ld_rsqrt_kernel,
 }
 
 
-@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos", "rsqrt"])
+@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos", "erf", "rsqrt"])
 def test_libdevice_numerical_correctness(op_name):
     """Libdevice ops produce numerically correct results in interpreter mode."""
     x = _LIBDEVICE_INPUTS[op_name].clone()

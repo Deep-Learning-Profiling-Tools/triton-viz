@@ -193,26 +193,91 @@ def test_patch_libdevice_multiple_aliases():
     del _kernel.__globals__["my_asin"]
 
 
-def test_patch_libdevice_unsupported_alias():
-    """A global aliasing an unregistered libdevice fn gets the unsupported stub."""
+def test_patch_libdevice_unregistered_alias_unchanged():
+    """Unregistered libdevice aliases are left as-is (not blanket-replaced)."""
     import triton.language.extra.libdevice as _ld
     from triton_viz.core.patch import _patch_libdevice
+    from triton_viz.core.libdevice_registry import _REGISTERED_SPECS
 
-    original_erf = _ld.erf
+    # Find an unregistered public function on the libdevice module
+    import inspect
+
+    unregistered_name = None
+    for name in dir(_ld):
+        if name.startswith("_") or name in _REGISTERED_SPECS:
+            continue
+        member = getattr(_ld, name, None)
+        if (
+            inspect.isfunction(member)
+            and getattr(member, "__module__", None) == _ld.__name__
+        ):
+            unregistered_name = name
+            break
+    if unregistered_name is None:
+        pytest.skip("No unregistered libdevice functions found")
+
+    original = getattr(_ld, unregistered_name)
 
     def _kernel():
         pass
 
-    _kernel.__globals__["my_erf"] = original_erf
+    _kernel.__globals__["_unreg_alias"] = original
 
     scope = _LangPatchScope()
     _patch_libdevice(_kernel, scope)
-    with pytest.raises(NotImplementedError, match="libdevice.erf"):
-        _kernel.__globals__["my_erf"](None)
+    # Unregistered alias must NOT be modified
+    assert _kernel.__globals__["_unreg_alias"] is original
 
     scope.restore()
-    assert _kernel.__globals__["my_erf"] is original_erf
-    del _kernel.__globals__["my_erf"]
+    del _kernel.__globals__["_unreg_alias"]
+
+
+def test_patch_libdevice_helper_same_module_alias():
+    """Direct-import alias in a same-module helper is patched via shared globals."""
+    import triton.language.extra.libdevice as _ld
+    from triton_viz.core.patch import _patch_libdevice
+
+    original_tanh = _ld.tanh
+
+    # Simulate: from triton.language.extra.libdevice import tanh as _tanh
+    # Both kernel and helper share __globals__ when in the same module.
+    def _kernel():
+        pass
+
+    _kernel.__globals__["_tanh"] = original_tanh
+
+    scope = _LangPatchScope()
+    _patch_libdevice(_kernel, scope)
+    # Alias must be patched (same-module helpers share the kernel's globals)
+    assert _kernel.__globals__["_tanh"] is not original_tanh
+
+    scope.restore()
+    assert _kernel.__globals__["_tanh"] is original_tanh
+    del _kernel.__globals__["_tanh"]
+
+
+def test_patch_libdevice_default_arg_not_patched():
+    """Default args capturing a libdevice fn are NOT patched (known limitation)."""
+    import triton.language.extra.libdevice as _ld
+    from triton_viz.core.patch import _patch_libdevice
+
+    original_tanh = _ld.tanh
+
+    def helper(x, op=original_tanh):
+        return op(x)
+
+    def _kernel():
+        pass
+
+    _kernel.__globals__["helper"] = helper
+
+    scope = _LangPatchScope()
+    _patch_libdevice(_kernel, scope)
+    # The default arg is captured at definition time and NOT rewritten.
+    assert helper.__defaults__[0] is original_tanh
+
+    scope.restore()
+    del _kernel.__globals__["helper"]
 
 
 def test_patch_lang_rollback_on_libdevice_failure(monkeypatch):

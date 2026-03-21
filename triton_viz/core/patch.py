@@ -7,14 +7,13 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
 import time
-from functools import cache, partialmethod
+from functools import partialmethod
 
 from .config import config as cfg
 from .callbacks import OpCallbacks
 from .libdevice_registry import (
     LibdeviceSpec,
     _LIBDEVICE_REGISTRY,
-    _REGISTERED_SPECS,
 )
 
 from .data import (
@@ -342,10 +341,10 @@ def unpatch_for_loop():
 # ── Libdevice stub patching ─────────────────────────────────────
 # Triton's _patch_lang does NOT patch triton.language.extra.libdevice,
 # so stub functions like ``def tanh(arg0): ...`` return None in
-# interpreter mode.  We replace them with numpy-backed implementations
-# that route through interpreter_builder so the symbolic engine can
-# track them.  Unsupported ops raise NotImplementedError immediately
-# rather than silently returning None.
+# interpreter mode.  We replace registered stubs with numpy-backed or
+# builder-backed implementations that route through interpreter_builder
+# so the symbolic engine can track them.  Unregistered stubs are left
+# as-is — only the symbols the kernel actually uses are patched.
 
 
 def _make_libdevice_unary(np_func: Callable) -> Callable:
@@ -405,17 +404,6 @@ def _make_libdevice_interpreter_fn(spec: LibdeviceSpec) -> Callable:
     return factory(spec.np_func)
 
 
-@cache
-def _make_unsupported_libdevice_fn(name: str) -> Callable:
-    def _unsupported(*args, **kwargs):
-        raise NotImplementedError(
-            f"libdevice.{name}() is not supported in interpreter/sanitizer mode."
-        )
-
-    _unsupported.__name__ = name
-    return _unsupported
-
-
 # Pre-built interpreter wrappers: reused across patch calls.
 _INTERPRETER_FNS: dict[str, Callable] = {
     spec.name: _make_libdevice_interpreter_fn(spec) for spec in _LIBDEVICE_REGISTRY
@@ -426,21 +414,9 @@ def _patch_libdevice_module(scope: _LangPatchScope) -> None:
     """Patch the libdevice module itself (covers ``libdevice.tanh(x)``)."""
     import triton.language.extra.libdevice as _ld
 
-    # Patch registered ops
     for name, fn in _INTERPRETER_FNS.items():
         if hasattr(_ld, name):
             scope.set_attr(_ld, name, fn)
-
-    # Patch unregistered stubs with unsupported-op errors
-    for name in dir(_ld):
-        if name.startswith("_") or name in _REGISTERED_SPECS:
-            continue
-        member = getattr(_ld, name, None)
-        if (
-            inspect.isfunction(member)
-            and getattr(member, "__module__", None) == _ld.__name__
-        ):
-            scope.set_attr(_ld, name, _make_unsupported_libdevice_fn(name))
 
 
 def _patch_libdevice_aliases(fn: Callable, scope: _LangPatchScope) -> None:
@@ -458,10 +434,6 @@ def _patch_libdevice_aliases(fn: Callable, scope: _LangPatchScope) -> None:
         interp_fn = _INTERPRETER_FNS.get(orig_name)
         if interp_fn is not None:
             scope.set_item(fn.__globals__, gname, interp_fn)
-        else:
-            scope.set_item(
-                fn.__globals__, gname, _make_unsupported_libdevice_fn(orig_name)
-            )
 
 
 def _kernel_references_libdevice(fn: Callable) -> bool:
