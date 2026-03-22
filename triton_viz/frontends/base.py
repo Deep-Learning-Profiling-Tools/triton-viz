@@ -20,6 +20,19 @@ class AdapterResult:
         self.kwargs = kwargs
 
 
+def _missing_op_stub(attr: str, namespace: Any) -> Callable:
+    """Create a placeholder for a missing op that raises at runtime."""
+
+    def stub(*args: Any, **kwargs: Any) -> Any:
+        raise AttributeError(
+            f"triton-viz failed to intercept '{attr}': "
+            f"'{type(namespace).__name__}' has no attribute '{attr}'. "
+            f"This operation is not supported by your Triton version."
+        )
+
+    return stub
+
+
 def passthrough_adapter(*args: Any, **kwargs: Any) -> AdapterResult:
     """Return arguments unchanged for clients that expect the original signature."""
     return AdapterResult(*args, **kwargs)
@@ -77,7 +90,10 @@ class Frontend:
         }
         for namespace, attrs in namespaces.items():
             for attr, op in attrs.items():
-                original_ops[namespace][attr] = getattr(namespace, attr)
+                if hasattr(namespace, attr):
+                    original_ops[namespace][attr] = getattr(namespace, attr)
+                else:
+                    original_ops[namespace][attr] = _missing_op_stub(attr, namespace)
 
         # set adapter to passthrough for each op in each namespace if not otherwise specified
         for namespace, attrs in namespaces.items():
