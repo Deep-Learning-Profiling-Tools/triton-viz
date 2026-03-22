@@ -3,9 +3,21 @@ from typing import Any
 import sys
 from io import BytesIO
 import zipfile
+import json
 from flask import Flask, render_template, jsonify, request, send_file
 from .analysis import analyze_records
 from .draw import get_visualization_data
+from .llm_records import LLMRecordStore
+from .llm_utils import (
+    LLM_SETUP_KEYS,
+    _get_llm_setup_snapshot,
+    load_prompt_template,
+    DEFAULT_PROMPT_NAME,
+    OpenAICompatibleClient,
+    OpenAICompatibleConfig,
+    LLMAPIError,
+    setup_llm,
+)
 from ..utils.traceback_utils import read_source_segment
 import os
 import torch
@@ -31,6 +43,10 @@ last_launch_snapshot = None
 sbuf_events = []
 load_overall_maps = {}
 store_overall_maps = {}
+llm_record_store = LLMRecordStore()
+llm_trace_summary: str | None = None
+llm_trace_summary_meta: dict[str, Any] = {}
+llm_analysis_lock = threading.Lock()
 DEVICE_LIMITS = {
     "TRN1_NC_V2": 24 * 1024 * 1024,
     "TRN1_CHIP": 48 * 1024 * 1024,
@@ -40,6 +56,251 @@ DEVICE_LIMITS = {
     "TRN2_CHIP": 224 * 1024 * 1024,
     "TRN2_48XL": 3584 * 1024 * 1024,
 }
+
+
+def _safe_int_env(name: str, default: int, min_value: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(min_value, value)
+
+
+LLM_SYS_CONTEXT_MAX_CHARS = _safe_int_env(
+    "TRITON_VIZ_LLM_SYS_CONTEXT_MAX_CHARS", 8000, min_value=512
+)
+LLM_SYS_CONTEXT_MAX_RECORDS = _safe_int_env(
+    "TRITON_VIZ_LLM_SYS_CONTEXT_MAX_RECORDS", 200, min_value=1
+)
+LLM_CODE_CONTEXT_MAX_CHARS = _safe_int_env(
+    "TRITON_VIZ_LLM_CODE_CONTEXT_MAX_CHARS", 6000, min_value=512
+)
+LLM_CODE_CONTEXT_MAX_RECORDS = _safe_int_env(
+    "TRITON_VIZ_LLM_CODE_CONTEXT_MAX_RECORDS", 12, min_value=1
+)
+LLM_COMPUTE_CONTEXT_MAX_CHARS = _safe_int_env(
+    "TRITON_VIZ_LLM_COMPUTE_CONTEXT_MAX_CHARS", 8000, min_value=512
+)
+LLM_COMPUTE_CONTEXT_MAX_OPS = _safe_int_env(
+    "TRITON_VIZ_LLM_COMPUTE_CONTEXT_MAX_OPS", 120, min_value=1
+)
+
+
+def _build_llm_system_records_prompt() -> str:
+    """
+    Build a compact run-level op snapshot for system prompt injection.
+    This gives the assistant global kernel/op awareness on every chat turn.
+    """
+    snapshot = llm_record_store.get_snapshot() or {}
+    records = list(snapshot.get("records") or [])
+    compact_records = []
+    max_records = min(len(records), LLM_SYS_CONTEXT_MAX_RECORDS)
+    for record in records[:max_records]:
+        compact_records.append(
+            {
+                "uuid": record.get("uuid"),
+                "op_type": record.get("op_type"),
+                "grid_idx": record.get("grid_idx"),
+                "op_index": record.get("op_index"),
+                "time_idx": record.get("time_idx"),
+                "overall_key": record.get("overall_key"),
+                "mem_src": record.get("mem_src"),
+                "mem_dst": record.get("mem_dst"),
+                "bytes": record.get("bytes"),
+                "input_shape": record.get("input_shape"),
+                "other_shape": record.get("other_shape"),
+                "output_shape": record.get("output_shape"),
+                "global_shape": record.get("global_shape"),
+                "slice_shape": record.get("slice_shape"),
+            }
+        )
+
+    payload = {
+        "total_ops": snapshot.get("total_ops", 0),
+        "grids": snapshot.get("grids", []),
+        "record_count": len(records),
+        "included_records": compact_records,
+        "included_record_count": len(compact_records),
+        "truncated": len(compact_records) < len(records),
+    }
+    text = json.dumps(payload, ensure_ascii=False)
+    if len(text) > LLM_SYS_CONTEXT_MAX_CHARS:
+        text = text[:LLM_SYS_CONTEXT_MAX_CHARS]
+        return "Kernel run records summary (JSON, truncated due to size limit): " + text
+    return "Kernel run records summary (JSON): " + text
+
+
+def _format_code_lines(code: dict[str, Any]) -> str:
+    lines = list(code.get("lines") or [])
+    highlight = code.get("highlight")
+    out: list[str] = []
+    for item in lines:
+        no = item.get("no")
+        text = item.get("text") or ""
+        marker = ">" if no == highlight else " "
+        out.append(f"{marker}{str(no).rjust(6)} | {text}")
+    return "\n".join(out)
+
+
+def _build_llm_code_context_prompt(selected_uuid: str | None = None) -> str:
+    """
+    Build a code-centric context block from traceback source segments.
+    Prioritizes selected op code when available.
+    """
+    snapshot = llm_record_store.get_snapshot() or {}
+    records = list(snapshot.get("records") or [])
+    if not records:
+        return "User kernel code context: unavailable"
+
+    selected = str(selected_uuid) if selected_uuid else None
+    ordered: list[dict[str, Any]] = []
+    if selected:
+        chosen = [r for r in records if str(r.get("uuid")) == selected]
+        ordered.extend(chosen)
+    ordered.extend([r for r in records if str(r.get("uuid")) != selected])
+
+    snippets: list[dict[str, Any]] = []
+    for record in ordered:
+        code = record.get("code")
+        if not isinstance(code, dict):
+            continue
+        filename = code.get("filename")
+        if not filename:
+            continue
+        snippets.append(
+            {
+                "uuid": record.get("uuid"),
+                "op_type": record.get("op_type"),
+                "grid_idx": record.get("grid_idx"),
+                "filename": filename,
+                "highlight_lineno": code.get("highlight"),
+                "snippet": _format_code_lines(code),
+            }
+        )
+        if len(snippets) >= LLM_CODE_CONTEXT_MAX_RECORDS:
+            break
+
+    if not snippets:
+        return "User kernel code context: no readable source snippets captured"
+
+    payload = {
+        "selected_uuid": selected,
+        "snippet_count": len(snippets),
+        "snippets": snippets,
+    }
+    text = json.dumps(payload, ensure_ascii=False)
+    if len(text) > LLM_CODE_CONTEXT_MAX_CHARS:
+        text = text[:LLM_CODE_CONTEXT_MAX_CHARS]
+        return "User kernel code context (JSON, truncated): " + text
+    return "User kernel code context (JSON): " + text
+
+
+def _shape_like(value: Any) -> list[int] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    out: list[int] = []
+    for item in value:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            return None
+    return out
+
+
+def _build_llm_compute_trace_prompt() -> str:
+    """
+    Build a compact summary of non-Load/Store ops from raw launch records.
+    This reduces the "only load/store seen" issue from visualization-level data.
+    """
+    from ..core.trace import launches
+
+    if not launches:
+        return "Kernel compute trace context: unavailable"
+
+    launch = launches[-1]
+    records = list(getattr(launch, "records", []) or [])
+    if not records:
+        return "Kernel compute trace context: empty records"
+
+    compute_ops: list[dict[str, Any]] = []
+    current_grid = (0, 0, 0)
+    skip_names = {"Grid", "Load", "Store", "RawLoad", "RawStore", "ProgramId"}
+    for idx, rec in enumerate(records):
+        rec_type = type(rec).__name__
+        if rec_type == "Grid":
+            grid_val = getattr(rec, "idx", None)
+            if isinstance(grid_val, tuple) and len(grid_val) == 3:
+                current_grid = grid_val
+            continue
+        if rec_type in skip_names:
+            continue
+
+        item: dict[str, Any] = {
+            "trace_index": idx,
+            "op_type": rec_type,
+            "grid_idx": [
+                int(current_grid[0]),
+                int(current_grid[1]),
+                int(current_grid[2]),
+            ],
+        }
+        for attr in (
+            "op",
+            "index",
+            "keep_dims",
+            "mem_src",
+            "mem_dst",
+            "bytes",
+            "time_idx",
+            "dim",
+        ):
+            val = getattr(rec, attr, None)
+            if isinstance(val, (str, int, float, bool)) and val != "":
+                item[attr] = val
+        for shape_attr in ("input_shape", "other_shape", "output_shape"):
+            shape_val = _shape_like(getattr(rec, shape_attr, None))
+            if shape_val:
+                item[shape_attr] = shape_val
+
+        call_path = getattr(rec, "call_path", None) or []
+        if call_path:
+            frame = call_path[-1]
+            item["code_ref"] = {
+                "filename": getattr(frame, "filename", None),
+                "lineno": int(getattr(frame, "lineno", 0) or 0),
+                "name": getattr(frame, "name", None),
+                "line": getattr(frame, "line", None),
+            }
+        compute_ops.append(item)
+        if len(compute_ops) >= LLM_COMPUTE_CONTEXT_MAX_OPS:
+            break
+
+    payload = {
+        "compute_op_count": len(compute_ops),
+        "compute_ops": compute_ops,
+        "truncated": len(compute_ops) >= LLM_COMPUTE_CONTEXT_MAX_OPS,
+    }
+    text = json.dumps(payload, ensure_ascii=False)
+    if len(text) > LLM_COMPUTE_CONTEXT_MAX_CHARS:
+        text = text[:LLM_COMPUTE_CONTEXT_MAX_CHARS]
+        return "Kernel compute trace context (JSON, truncated): " + text
+    return "Kernel compute trace context (JSON): " + text
+
+
+def _reset_llm_trace_summary() -> None:
+    global llm_trace_summary
+    global llm_trace_summary_meta
+    with llm_analysis_lock:
+        llm_trace_summary = None
+        llm_trace_summary_meta = {}
+
+
+def _get_llm_trace_summary() -> tuple[str | None, dict[str, Any]]:
+    with llm_analysis_lock:
+        return llm_trace_summary, dict(llm_trace_summary_meta)
 
 
 def _compute_sbuf_timeline(events: list[dict]) -> tuple[list[dict], int]:
@@ -143,6 +404,9 @@ def update_global_data(force: bool = False):
     global sbuf_events
     global load_overall_maps
     global store_overall_maps
+    global llm_record_store
+    global llm_trace_summary
+    global llm_trace_summary_meta
     global last_launch_snapshot
 
     # Collect all records from launches
@@ -177,6 +441,8 @@ def update_global_data(force: bool = False):
     sbuf_events = raw_tensor_data.pop("__sbuf_events__", [])
     load_overall_maps = viz_data.get("load_overall", {})
     store_overall_maps = viz_data.get("store_overall", {})
+    llm_record_store.update(viz_data.get("visualization_data", {}), raw_tensor_data)
+    _reset_llm_trace_summary()
 
     # Precompute C values for each Dot operation
     precomputed_c_values = {}
@@ -193,6 +459,293 @@ def update_global_data(force: bool = False):
             df_dict["Value"].append(value)
 
     global_data["analysis"] = df_dict
+
+
+@app.route("/api/llm/records")
+def get_llm_records():
+    if global_data is None or raw_tensor_data is None:
+        update_global_data()
+    return jsonify(llm_record_store.get_snapshot())
+
+
+@app.route("/api/llm/record", methods=["POST"])
+def get_llm_record():
+    data = request.json or {}
+    uuid = data.get("uuid")
+    if not uuid:
+        return jsonify({"error": "Missing uuid"}), 400
+    if global_data is None or raw_tensor_data is None:
+        update_global_data()
+    payload = llm_record_store.get_record(str(uuid))
+    if payload is None:
+        return jsonify({"error": "Record not found"}), 404
+    return jsonify(payload)
+
+
+@app.route("/api/llm/prompt")
+def get_llm_prompt():
+    name = request.args.get("name") or DEFAULT_PROMPT_NAME
+    try:
+        content = load_prompt_template(name)
+    except FileNotFoundError:
+        return jsonify({"error": "Prompt template not found"}), 404
+    return jsonify({"name": name, "content": content})
+
+
+@app.route("/api/llm/config", methods=["GET"])
+def get_llm_config_status():
+    """Return effective LLM settings (never echo the API key)."""
+    cfg = OpenAICompatibleConfig.from_env()
+    setup_path, _patch = _get_llm_setup_snapshot()
+    setup_basename = os.path.basename(setup_path) if setup_path else None
+    return jsonify(
+        {
+            "has_api_key": bool(cfg.api_key),
+            "base_url": cfg.base_url,
+            "model": cfg.model,
+            "timeout_sec": cfg.timeout_sec,
+            "max_tokens": cfg.max_tokens,
+            "debug_log_enabled": cfg.debug_log_enabled,
+            "llm_setup_file": setup_basename,
+            "allowed_keys": sorted(LLM_SETUP_KEYS),
+        }
+    )
+
+
+@app.route("/api/llm/config", methods=["POST"])
+def post_llm_config():
+    """
+    Merge JSON fields into the in-memory LLM setup (same as ``triton_viz.setup_llm``).
+
+    Allowed keys: same as ``LLM_SETUP_KEYS`` (see GET response). Does **not** accept
+    ``config_path`` (use ``setup_llm(config_path=...)`` in Python before ``launch``).
+
+    Pass ``null`` or ``\"\"`` for string fields to clear that patch entry.
+    """
+    data = request.json or {}
+    payload = {k: data[k] for k in data if k in LLM_SETUP_KEYS}
+    if not payload:
+        return (
+            jsonify(
+                {
+                    "error": f"Provide at least one of: {sorted(LLM_SETUP_KEYS)}",
+                    "allowed_keys": sorted(LLM_SETUP_KEYS),
+                }
+            ),
+            400,
+        )
+    try:
+        setup_llm(**payload)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    cfg = OpenAICompatibleConfig.from_env()
+    setup_path, _ = _get_llm_setup_snapshot()
+    return jsonify(
+        {
+            "ok": True,
+            "has_api_key": bool(cfg.api_key),
+            "base_url": cfg.base_url,
+            "model": cfg.model,
+            "timeout_sec": cfg.timeout_sec,
+            "max_tokens": cfg.max_tokens,
+            "debug_log_enabled": cfg.debug_log_enabled,
+            "llm_setup_file": os.path.basename(setup_path) if setup_path else None,
+        }
+    )
+
+
+@app.route("/api/llm/chat", methods=["POST"])
+def llm_chat():
+    data = request.json or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "Missing message"}), 400
+
+    if global_data is None or raw_tensor_data is None:
+        update_global_data()
+
+    prompt_name = data.get("prompt_name") or DEFAULT_PROMPT_NAME
+    try:
+        system_prompt = load_prompt_template(prompt_name)
+    except FileNotFoundError:
+        return jsonify({"error": "Prompt template not found"}), 404
+
+    uuid = data.get("uuid")
+    summary_text, summary_meta = _get_llm_trace_summary()
+    if not summary_text:
+        return (
+            jsonify(
+                {
+                    "error": "Trace analysis is not ready. Please run /api/llm/analyze first."
+                }
+            ),
+            400,
+        )
+
+    code_context_prompt = _build_llm_code_context_prompt(str(uuid) if uuid else None)
+    compute_context_prompt = _build_llm_compute_trace_prompt()
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "Pre-analyzed trace summary (use this as the only trace context):\n"
+                + summary_text
+            ),
+        }
+    )
+    messages.append({"role": "system", "content": code_context_prompt})
+    messages.append({"role": "system", "content": compute_context_prompt})
+    messages.append(
+        {
+            "role": "system",
+            "content": (
+                "You are a kernel-debug assistant for users. "
+                "Response policy: prioritize likely bug analysis in user kernel code. "
+                "Do not focus on trace-quality complaints unless they directly block "
+                "a concrete code-level conclusion. Always give likely root causes, "
+                "evidence, and next fix/check actions."
+            ),
+        }
+    )
+    if uuid:
+        messages.append(
+            {"role": "system", "content": f"Current selected op uuid: {str(uuid)}"}
+        )
+    messages.append({"role": "user", "content": message})
+
+    client = OpenAICompatibleClient()
+    selected_model = data.get("model") or client.config.model
+    req_max_tokens = int(data.get("max_tokens", client.config.max_tokens))
+    try:
+        raw_response = client.chat_completions(
+            messages,
+            model=data.get("model"),
+            temperature=float(data["temperature"]) if "temperature" in data else None,
+            max_tokens=req_max_tokens,
+        )
+        answer, llm_debug = client.extract_answer_and_debug(raw_response)
+
+        client.append_debug_log(
+            {
+                "event": "llm_chat",
+                "ok": True,
+                "model": selected_model,
+                "prompt_name": prompt_name,
+                "uuid": uuid,
+                "user_message": message,
+                "answer": answer,
+                "answer_len": len(answer or ""),
+                "llm_debug": llm_debug,
+                "initial_max_tokens": req_max_tokens,
+                "trace_summary_ready": bool(summary_text),
+                "trace_summary_generated_at": summary_meta.get("generated_at"),
+            }
+        )
+    except (LLMAPIError, ValueError) as exc:
+        client.append_debug_log(
+            {
+                "event": "llm_chat",
+                "ok": False,
+                "model": selected_model,
+                "prompt_name": prompt_name,
+                "uuid": uuid,
+                "user_message": message,
+                "error": str(exc),
+            }
+        )
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify({"answer": answer, "uuid": uuid})
+
+
+@app.route("/api/llm/analyze", methods=["POST"])
+def llm_analyze():
+    data = request.json or {}
+    if global_data is None or raw_tensor_data is None:
+        update_global_data()
+
+    prompt_name = data.get("prompt_name") or DEFAULT_PROMPT_NAME
+    try:
+        system_prompt = load_prompt_template(prompt_name)
+    except FileNotFoundError:
+        return jsonify({"error": "Prompt template not found"}), 404
+
+    run_records_prompt = _build_llm_system_records_prompt()
+    code_context_prompt = _build_llm_code_context_prompt()
+    compute_context_prompt = _build_llm_compute_trace_prompt()
+    user_instruction = (
+        "You are a kernel-debug assistant. "
+        "Please perform an initial bug-oriented analysis for this Triton kernel run. "
+        "Prioritize likely code-level bug hypotheses based on source snippets and op flow. "
+        "Return concise structured output with: "
+        "(1) likely bug candidates (ranked, each with why + related uuid/line), "
+        "(2) expected symptom in output values, "
+        "(3) concrete checks/fixes the user should try next. "
+        "Only mention missing trace fields briefly when they block a specific conclusion."
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": run_records_prompt},
+        {"role": "system", "content": code_context_prompt},
+        {"role": "system", "content": compute_context_prompt},
+        {"role": "user", "content": user_instruction},
+    ]
+
+    client = OpenAICompatibleClient()
+    selected_model = data.get("model") or client.config.model
+    req_max_tokens = int(data.get("max_tokens", client.config.max_tokens))
+    try:
+        raw_response = client.chat_completions(
+            messages,
+            model=data.get("model"),
+            temperature=float(data["temperature"]) if "temperature" in data else None,
+            max_tokens=req_max_tokens,
+        )
+        summary, llm_debug = client.extract_answer_and_debug(raw_response)
+        if not summary.strip():
+            raise ValueError("LLM returned an empty analysis summary")
+
+        with llm_analysis_lock:
+            global llm_trace_summary
+            global llm_trace_summary_meta
+            llm_trace_summary = summary
+            llm_trace_summary_meta = {
+                "model": selected_model,
+                "prompt_name": prompt_name,
+                "generated_at": int(time.time()),
+            }
+
+        client.append_debug_log(
+            {
+                "event": "llm_analyze",
+                "ok": True,
+                "model": selected_model,
+                "prompt_name": prompt_name,
+                "summary_len": len(summary or ""),
+                "llm_debug": llm_debug,
+                "initial_max_tokens": req_max_tokens,
+            }
+        )
+    except (LLMAPIError, ValueError) as exc:
+        client.append_debug_log(
+            {
+                "event": "llm_analyze",
+                "ok": False,
+                "model": selected_model,
+                "prompt_name": prompt_name,
+                "error": str(exc),
+            }
+        )
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(
+        {
+            "summary": summary,
+            "analysis_ready": True,
+            "meta": _get_llm_trace_summary()[1],
+        }
+    )
 
 
 @app.route("/")
@@ -1028,6 +1581,10 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
 
     :param block: Whether to block the caller when share=True. Defaults to
                   True outside interactive sessions.
+
+    For the in-app LLM assistant, call ``triton_viz.setup_llm(...)`` **before**
+    ``launch`` (optionally ``setup_llm(config_path=...)`` to load a JSON file), or
+    use ``POST /api/llm/config`` after the server is up.
     """
     default_port = 8000 if share else 5001
     actual_port = port or int(os.getenv("TRITON_VIZ_PORT", default_port))

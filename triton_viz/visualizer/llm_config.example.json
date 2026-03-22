@@ -1,0 +1,10 @@
+{
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "sk-your-key-here",
+  "model": "gpt-5-mini",
+  "timeout_sec": 60,
+  "max_tokens": 2048,
+  "debug_log_enabled": false,
+  "debug_log_path": "llm_chat_debug.jsonl",
+  "extra_headers": {}
+}
