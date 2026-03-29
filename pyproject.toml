@@ -42,7 +42,14 @@ exclude=["tasks"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-"triton_viz" = ["templates/*.html", "static/*.js", "static/**/*.js", "static/**"]
+"triton_viz" = [
+  "templates/*.html",
+  "static/*.js",
+  "static/**/*.js",
+  "static/**",
+  "visualizer/prompts/*.md",
+  "visualizer/llm_config.example.json",
+]
 
 [project.urls]
 homepage = "https://github.com/Deep-Learning-Profiling-Tools/triton-viz"
