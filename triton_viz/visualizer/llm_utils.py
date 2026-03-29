@@ -304,7 +304,7 @@ class OpenAICompatibleConfig:
     api_key: str | None = None
     model: str = DEFAULT_MODEL
     timeout_sec: float = 60.0
-    max_tokens: int = 2048
+    max_tokens: int = 40960
     extra_headers: dict[str, str] = field(default_factory=dict)
     debug_log_enabled: bool = False
     debug_log_path: str = os.path.join(
