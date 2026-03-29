@@ -12,6 +12,7 @@ import requests
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-5-mini"
+DEFAULT_MAX_TOKENS = 40960
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 DEFAULT_PROMPT_NAME = "system_default.md"
 LOCAL_CONFIG_NAME = "llm_config.local.json"
@@ -209,7 +210,7 @@ def _build_llm_merged_dict() -> dict[str, Any]:
         "api_key": None,
         "model": DEFAULT_MODEL,
         "timeout_sec": 60.0,
-        "max_tokens": 2048,
+        "max_tokens": DEFAULT_MAX_TOKENS,
         "extra_headers": {},
         "debug_log_enabled": False,
         "debug_log_path": os.path.join(
@@ -304,7 +305,7 @@ class OpenAICompatibleConfig:
     api_key: str | None = None
     model: str = DEFAULT_MODEL
     timeout_sec: float = 60.0
-    max_tokens: int = 40960
+    max_tokens: int = DEFAULT_MAX_TOKENS
     extra_headers: dict[str, str] = field(default_factory=dict)
     debug_log_enabled: bool = False
     debug_log_path: str = os.path.join(
@@ -326,9 +327,9 @@ class OpenAICompatibleConfig:
             timeout_sec = 60.0
 
         try:
-            max_tokens = max(1, int(merged.get("max_tokens", 2048)))
+            max_tokens = max(1, int(merged.get("max_tokens", DEFAULT_MAX_TOKENS)))
         except (TypeError, ValueError):
-            max_tokens = 2048
+            max_tokens = DEFAULT_MAX_TOKENS
 
         extra = merged.get("extra_headers") or {}
         extra_headers: dict[str, str] = {}

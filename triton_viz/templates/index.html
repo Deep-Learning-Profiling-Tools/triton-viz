@@ -309,8 +309,30 @@
             let analysisReady = false;
             let loadingNode = null;
 
+            function clampChatToViewport() {
+                const margin = 8;
+                const rect = root.getBoundingClientRect();
+                const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+                const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+                if (root.style.left) {
+                    const left = Math.min(maxLeft, Math.max(margin, parseFloat(root.style.left) || 0));
+                    root.style.left = left + 'px';
+                    root.style.right = 'auto';
+                }
+                if (root.style.top) {
+                    const top = Math.min(maxTop, Math.max(margin, parseFloat(root.style.top) || 0));
+                    root.style.top = top + 'px';
+                    root.style.bottom = 'auto';
+                }
+            }
+
             function setChatVisible(visible) {
                 root.style.display = visible ? 'flex' : 'none';
+                if (visible) {
+                    requestAnimationFrame(function () {
+                        clampChatToViewport();
+                    });
+                }
             }
 
             function isChatPanelOpen() {
@@ -329,6 +351,15 @@
                 setChatVisible(!isOpen);
                 if (!isOpen) input.focus();
             });
+
+            function stopHeaderDrag(e) {
+                e.stopPropagation();
+            }
+
+            analyze.addEventListener('mousedown', stopHeaderDrag);
+            analyze.addEventListener('click', stopHeaderDrag);
+            close.addEventListener('mousedown', stopHeaderDrag);
+            close.addEventListener('click', stopHeaderDrag);
 
             close.addEventListener('click', function () {
                 setChatVisible(false);
@@ -395,10 +426,13 @@
             let dragOffsetY = 0;
 
             header.addEventListener('mousedown', function (e) {
+                if (e.button !== 0) return;
                 dragging = true;
                 const rect = root.getBoundingClientRect();
                 dragOffsetX = e.clientX - rect.left;
                 dragOffsetY = e.clientY - rect.top;
+                root.style.left = rect.left + 'px';
+                root.style.top = rect.top + 'px';
                 root.style.right = 'auto';
                 root.style.bottom = 'auto';
                 e.preventDefault();
@@ -406,12 +440,21 @@
 
             document.addEventListener('mousemove', function (e) {
                 if (!dragging) return;
-                root.style.left = Math.max(8, e.clientX - dragOffsetX) + 'px';
-                root.style.top = Math.max(8, e.clientY - dragOffsetY) + 'px';
+                const rect = root.getBoundingClientRect();
+                const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+                const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+                const nextLeft = Math.min(maxLeft, Math.max(8, e.clientX - dragOffsetX));
+                const nextTop = Math.min(maxTop, Math.max(8, e.clientY - dragOffsetY));
+                root.style.left = nextLeft + 'px';
+                root.style.top = nextTop + 'px';
             });
 
             document.addEventListener('mouseup', function () {
                 dragging = false;
+            });
+
+            window.addEventListener('resize', function () {
+                if (isChatPanelOpen()) clampChatToViewport();
             });
 
             async function sendMsg() {
