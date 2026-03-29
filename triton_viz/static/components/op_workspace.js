@@ -3,7 +3,7 @@ import { enableDrag } from '../utils/ui_helpers.js';
 import { postJson } from '../core/api.js';
 import { logAction, logInfo } from '../core/logger.js';
 import { setActiveOp } from '../core/state.js';
-import { getVisualizer } from '../ops/registry.js';
+import { getVisualizer, hasVisualizer } from '../ops/registry.js';
 import '../ops/defaults.js';
 export class OpWorkspace {
     constructor(containerElement, { getBlockData = null, maxValues = { x: 0, y: 0, z: 0 } } = {}) {
@@ -61,7 +61,7 @@ export class OpWorkspace {
             return;
         this.gridPosition = { x: nx, y: ny, z: nz };
         if (this.getBlockData) {
-            this.blockData = this.getBlockData(nx, ny, nz);
+            this.blockData = this.getBlockData(nx, ny, nz).filter((op) => hasVisualizer(op.type));
         }
         else {
             this.blockData = [];
