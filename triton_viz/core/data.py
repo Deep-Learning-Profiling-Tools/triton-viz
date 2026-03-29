@@ -101,6 +101,53 @@ class Dot(Op):
 
 
 @dataclass
+class NkiDmaCopy(Op):
+    name: ClassVar[str] = "nki_dma_copy"
+    input_shape: tuple
+    output_shape: tuple
+    mem_src: str = ""
+    mem_dst: str = ""
+    bytes: int = 0
+    time_idx: int = 0
+
+
+@dataclass
+class NkiTensorCopy(Op):
+    name: ClassVar[str] = "nki_tensor_copy"
+    input_shape: tuple
+    output_shape: tuple
+    mem_src: str = ""
+    mem_dst: str = ""
+    bytes: int = 0
+    time_idx: int = 0
+
+
+@dataclass
+class NkiTensorScalar(Op):
+    name: ClassVar[str] = "nki_tensor_scalar"
+    input_shape: tuple
+    output_shape: tuple
+    op: str = ""
+    mem_src: str = ""
+    mem_dst: str = ""
+    bytes: int = 0
+    time_idx: int = 0
+
+
+@dataclass
+class NkiTensorTensor(Op):
+    name: ClassVar[str] = "nki_tensor_tensor"
+    input_shape: tuple
+    other_shape: tuple
+    output_shape: tuple
+    op: str = ""
+    mem_src: str = ""
+    mem_dst: str = ""
+    bytes: int = 0
+    time_idx: int = 0
+
+
+@dataclass
 class Flip(Op):
     name: ClassVar[str] = "flip"
     input_shape: tuple

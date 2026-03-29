@@ -1,4 +1,23 @@
 import { renderSbufPanel } from '../components/sbuf_panel.js';
+function normalizeFlowType(event) {
+    const type = (event.type || '').toLowerCase();
+    if ((type === 'store' || type === 'nkitensorcopy') && event.src === 'PSUM' && event.dst === 'SBUF') {
+        return 'Copy';
+    }
+    if ((type === 'load' || type === 'nkidmacopy') && event.src === 'HBM' && event.dst === 'SBUF') {
+        return 'Load';
+    }
+    if ((type === 'store' || type === 'nkidmacopy') && event.src === 'SBUF' && event.dst === 'HBM') {
+        return 'Store';
+    }
+    if (type === 'dot') {
+        return 'Dot';
+    }
+    if (type === 'nkitensorscalar' || type === 'nkitensortensor' || (event.src === 'SBUF' && event.dst === 'SBUF')) {
+        return 'Compute';
+    }
+    return event.type || 'Op';
+}
 export function createFlowDiagram(containerElement, opsByProgram) {
     // Minimal NKI flow view: three lanes (HBM, SBUF, PSUM) and arrows per op time_idx
     // opsByProgram: array of op objects for a grid block (Load/Store/Dot/Copy) with mem_* fields
@@ -43,11 +62,8 @@ export function createFlowDiagram(containerElement, opsByProgram) {
     }
     const tMin = firstEvent.t;
     const tMax = lastEvent.t || (tMin + 1);
-    // classify copy operations (PSUM -> SBUF)
     events.forEach(e => {
-        if ((e.type || '').toLowerCase() === 'store' && e.src === 'PSUM' && e.dst === 'SBUF') {
-            e.type = 'Copy';
-        }
+        e.type = normalizeFlowType(e);
     });
     const baseSpacing = 100;
     const dynamicWidth = Math.max(containerWidth, 120 + baseSpacing * events.length);
@@ -73,6 +89,7 @@ export function createFlowDiagram(containerElement, opsByProgram) {
             case 'store': return '#ff9800';
             case 'dot': return '#8bc34a';
             case 'copy': return '#b0bec5';
+            case 'compute': return '#ba68c8';
             default: return '#9e9e9e';
         }
     };
@@ -114,7 +131,7 @@ export function createFlowDiagram(containerElement, opsByProgram) {
     legend.style.marginTop = '6px';
     legend.style.color = '#ddd';
     legend.style.font = '12px Arial';
-    legend.innerHTML = `<b>Flow Diagram</b> &nbsp; <span style="color:#00bcd4">■ Load</span>&nbsp;&nbsp;<span style="color:#8bc34a">■ Dot(PSUM)</span>&nbsp;&nbsp;<span style="color:#b0bec5">■ Copy (PSUM→SBUF)</span>&nbsp;&nbsp;<span style="color:#ff9800">■ Store</span>`;
+    legend.innerHTML = `<b>Flow Diagram</b> &nbsp; <span style="color:#00bcd4">■ Load</span>&nbsp;&nbsp;<span style="color:#8bc34a">■ Dot(PSUM)</span>&nbsp;&nbsp;<span style="color:#ba68c8">■ Compute</span>&nbsp;&nbsp;<span style="color:#b0bec5">■ Copy (PSUM→SBUF)</span>&nbsp;&nbsp;<span style="color:#ff9800">■ Store</span>`;
     containerElement.appendChild(legend);
     const sbufButton = renderSbufPanel();
     if (sbufButton) {

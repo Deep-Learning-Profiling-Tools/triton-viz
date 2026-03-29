@@ -5,6 +5,10 @@ from triton_viz.core.data import (
     Load,
     Store,
     Flip,
+    NkiDmaCopy,
+    NkiTensorCopy,
+    NkiTensorScalar,
+    NkiTensorTensor,
 )
 from triton_viz.clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import numpy as np
@@ -221,6 +225,49 @@ def prepare_visualization_data(program_records, tensor_table):
     sbuf_events = []
     load_overall = {}
     store_overall = {}
+
+    def _tracebacks(record):
+        return [
+            {
+                "filename": f.filename,
+                "lineno": f.lineno,
+                "line": f.line_of_code,
+                "name": f.func_name,
+            }
+            for f in getattr(record, "call_path", [])
+        ]
+
+    def _record_bytes(record) -> int:
+        return int(getattr(record, "bytes", 0) or 0)
+
+    def _record_time(record, fallback: int) -> int:
+        return int(getattr(record, "time_idx", fallback) or fallback)
+
+    def _add_sbuf_event_if_needed(record, uuid_value, current_time):
+        mem_src = str(getattr(record, "mem_src", "") or "").upper()
+        mem_dst = str(getattr(record, "mem_dst", "") or "").upper()
+        bytes_val = _record_bytes(record)
+        if bytes_val <= 0:
+            return
+        if mem_dst == "SBUF" and mem_src != "SBUF":
+            sbuf_events.append(
+                {
+                    "time_idx": _record_time(record, current_time),
+                    "delta": bytes_val,
+                    "label": (type(record).__name__).lower(),
+                    "uuid": uuid_value,
+                }
+            )
+        elif mem_src == "SBUF" and mem_dst != "SBUF":
+            sbuf_events.append(
+                {
+                    "time_idx": _record_time(record, current_time),
+                    "delta": -bytes_val,
+                    "label": (type(record).__name__).lower(),
+                    "uuid": uuid_value,
+                }
+            )
+
     for record in program_records:
         record_uuid = str(uuid.uuid4())[:8]
         # Use the current length of visualization_data as the default time_idx
@@ -286,17 +333,173 @@ def prepare_visualization_data(program_records, tensor_table):
                 # TEMP: same as above, remember whether demo flagged swizzle
                 "b_swizzle": bool(getattr(record, "b_swizzle", False)),
                 "intermediate_results": record.intermediate_results,
-                "tracebacks": [
-                    {
-                        "filename": f.filename,
-                        "lineno": f.lineno,
-                        "line": f.line_of_code,
-                        "name": f.func_name,
-                    }
-                    for f in getattr(record, "call_path", [])
-                ],
+                "tracebacks": _tracebacks(record),
                 # prepare C values after kernel (if available from intermediate or recompute best-effort)
             }
+
+        elif isinstance(record, NkiDmaCopy):
+            time_idx = _record_time(record, current_time)
+            mem_src = str(getattr(record, "mem_src", "") or "").upper()
+            mem_dst = str(getattr(record, "mem_dst", "") or "").upper()
+            op_type = "Load" if mem_src == "HBM" and mem_dst == "SBUF" else "Store"
+            global_tensor = (
+                np.asarray(getattr(record, "input_data", np.asarray([])))
+                if op_type == "Load"
+                else np.asarray(getattr(record, "output_data", np.asarray([])))
+            )
+            slice_tensor = (
+                np.asarray(getattr(record, "output_data", np.asarray([])))
+                if op_type == "Load"
+                else np.asarray(getattr(record, "input_data", np.asarray([])))
+            )
+            visualization_data.append(
+                {
+                    "type": op_type,
+                    "global_shape": list(global_tensor.shape),
+                    "slice_shape": list(slice_tensor.shape),
+                    "uuid": record_uuid,
+                    "op_index": current_time,
+                    "mem_src": mem_src,
+                    "mem_dst": mem_dst,
+                    "bytes": _record_bytes(record),
+                    "time_idx": time_idx,
+                }
+            )
+            t_min = float(np.min(global_tensor)) if getattr(global_tensor, "size", 0) else 0.0
+            t_max = float(np.max(global_tensor)) if getattr(global_tensor, "size", 0) else 0.0
+            raw_tensor_data[record_uuid] = {
+                "op_type": op_type,
+                "op_index": current_time,
+                "global_tensor": global_tensor,
+                "dims": int(global_tensor.ndim),
+                "shape": list(global_tensor.shape),
+                "min": t_min,
+                "max": t_max,
+                "slice_tensor": slice_tensor,
+                "slice_shape": list(slice_tensor.shape),
+                "slice_dims": int(slice_tensor.ndim),
+                "slice_min": float(np.min(slice_tensor)) if getattr(slice_tensor, "size", 0) else 0.0,
+                "slice_max": float(np.max(slice_tensor)) if getattr(slice_tensor, "size", 0) else 0.0,
+                "global_shape": list(global_tensor.shape),
+                "global_dtype": str(getattr(global_tensor, "dtype", "float32")),
+                "mem_src": mem_src,
+                "mem_dst": mem_dst,
+                "bytes": _record_bytes(record),
+                "tracebacks": _tracebacks(record),
+            }
+            _add_sbuf_event_if_needed(record, record_uuid, current_time)
+
+        elif isinstance(record, NkiTensorCopy):
+            time_idx = _record_time(record, current_time)
+            mem_src = str(getattr(record, "mem_src", "") or "").upper()
+            mem_dst = str(getattr(record, "mem_dst", "") or "").upper()
+            op_type = "Load" if mem_src == "HBM" and mem_dst == "SBUF" else "Store"
+            global_tensor = (
+                np.asarray(getattr(record, "input_data", np.asarray([])))
+                if op_type == "Load"
+                else np.asarray(getattr(record, "output_data", np.asarray([])))
+            )
+            slice_tensor = (
+                np.asarray(getattr(record, "output_data", np.asarray([])))
+                if op_type == "Load"
+                else np.asarray(getattr(record, "input_data", np.asarray([])))
+            )
+            visualization_data.append(
+                {
+                    "type": op_type,
+                    "global_shape": list(global_tensor.shape),
+                    "slice_shape": list(slice_tensor.shape),
+                    "uuid": record_uuid,
+                    "op_index": current_time,
+                    "mem_src": mem_src,
+                    "mem_dst": mem_dst,
+                    "bytes": _record_bytes(record),
+                    "time_idx": time_idx,
+                }
+            )
+            t_min = float(np.min(global_tensor)) if getattr(global_tensor, "size", 0) else 0.0
+            t_max = float(np.max(global_tensor)) if getattr(global_tensor, "size", 0) else 0.0
+            raw_tensor_data[record_uuid] = {
+                "op_type": op_type,
+                "op_index": current_time,
+                "global_tensor": global_tensor,
+                "dims": int(global_tensor.ndim),
+                "shape": list(global_tensor.shape),
+                "min": t_min,
+                "max": t_max,
+                "slice_tensor": slice_tensor,
+                "slice_shape": list(slice_tensor.shape),
+                "slice_dims": int(slice_tensor.ndim),
+                "slice_min": float(np.min(slice_tensor)) if getattr(slice_tensor, "size", 0) else 0.0,
+                "slice_max": float(np.max(slice_tensor)) if getattr(slice_tensor, "size", 0) else 0.0,
+                "global_shape": list(global_tensor.shape),
+                "global_dtype": str(getattr(global_tensor, "dtype", "float32")),
+                "mem_src": mem_src,
+                "mem_dst": mem_dst,
+                "bytes": _record_bytes(record),
+                "tracebacks": _tracebacks(record),
+            }
+            _add_sbuf_event_if_needed(record, record_uuid, current_time)
+
+        elif isinstance(record, NkiTensorScalar):
+            time_idx = _record_time(record, current_time)
+            visualization_data.append(
+                {
+                    "type": "NkiTensorScalar",
+                    "input_shape": list(record.input_shape),
+                    "output_shape": list(record.output_shape),
+                    "uuid": record_uuid,
+                    "op_index": current_time,
+                    "op": getattr(record, "op", ""),
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "bytes": _record_bytes(record),
+                    "time_idx": time_idx,
+                }
+            )
+            raw_tensor_data[record_uuid] = {
+                "op_type": "NkiTensorScalar",
+                "op_index": current_time,
+                "input_shape": list(record.input_shape),
+                "output_shape": list(record.output_shape),
+                "op": getattr(record, "op", ""),
+                "mem_src": getattr(record, "mem_src", None),
+                "mem_dst": getattr(record, "mem_dst", None),
+                "bytes": _record_bytes(record),
+                "tracebacks": _tracebacks(record),
+            }
+            _add_sbuf_event_if_needed(record, record_uuid, current_time)
+
+        elif isinstance(record, NkiTensorTensor):
+            time_idx = _record_time(record, current_time)
+            visualization_data.append(
+                {
+                    "type": "NkiTensorTensor",
+                    "input_shape": list(record.input_shape),
+                    "other_shape": list(record.other_shape),
+                    "output_shape": list(record.output_shape),
+                    "uuid": record_uuid,
+                    "op_index": current_time,
+                    "op": getattr(record, "op", ""),
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "bytes": _record_bytes(record),
+                    "time_idx": time_idx,
+                }
+            )
+            raw_tensor_data[record_uuid] = {
+                "op_type": "NkiTensorTensor",
+                "op_index": current_time,
+                "input_shape": list(record.input_shape),
+                "other_shape": list(record.other_shape),
+                "output_shape": list(record.output_shape),
+                "op": getattr(record, "op", ""),
+                "mem_src": getattr(record, "mem_src", None),
+                "mem_dst": getattr(record, "mem_dst", None),
+                "bytes": _record_bytes(record),
+                "tracebacks": _tracebacks(record),
+            }
+            _add_sbuf_event_if_needed(record, record_uuid, current_time)
 
         elif isinstance(record, Flip):
             visualization_data.append(
@@ -314,15 +517,7 @@ def prepare_visualization_data(program_records, tensor_table):
             raw_tensor_data[record_uuid] = {
                 "op_type": "Flip",
                 "op_index": current_time,
-                "tracebacks": [
-                    {
-                        "filename": f.filename,
-                        "lineno": f.lineno,
-                        "line": f.line_of_code,
-                        "name": f.func_name,
-                    }
-                    for f in getattr(record, "call_path", [])
-                ],
+                "tracebacks": _tracebacks(record),
                 # best-effort payload for potential future value viz
                 "input_shape": list(record.input_shape),
                 "output_shape": list(record.output_shape),
@@ -445,15 +640,7 @@ def prepare_visualization_data(program_records, tensor_table):
                 "shape": list(arr.shape),
                 "min": t_min,
                 "max": t_max,
-                "tracebacks": [
-                    {
-                        "filename": f.filename,
-                        "lineno": f.lineno,
-                        "line": f.line_of_code,
-                        "name": f.func_name,
-                    }
-                    for f in getattr(record, "call_path", [])
-                ],
+                "tracebacks": _tracebacks(record),
                 # Lazy load metadata
                 "global_shape": list(global_tensor.shape),
                 "global_dtype": str(global_tensor.dtype),
@@ -571,15 +758,7 @@ def prepare_visualization_data(program_records, tensor_table):
                 "shape": list(arr.shape),
                 "min": t_min,
                 "max": t_max,
-                "tracebacks": [
-                    {
-                        "filename": f.filename,
-                        "lineno": f.lineno,
-                        "line": f.line_of_code,
-                        "name": f.func_name,
-                    }
-                    for f in getattr(record, "call_path", [])
-                ],
+                "tracebacks": _tracebacks(record),
                 # Lazy load metadata
                 "global_shape": list(global_tensor.shape),
                 "global_dtype": str(global_tensor.dtype),

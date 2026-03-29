@@ -11,6 +11,10 @@ from ...core.data import (
     Grid,
     Allocate,
     Flip,
+    NkiDmaCopy,
+    NkiTensorCopy,
+    NkiTensorScalar,
+    NkiTensorTensor,
 )
 from ...utils.traceback_utils import extract_user_frames
 from triton_viz.core.masked_load_store import masked_load
@@ -54,6 +58,31 @@ class Tracer(Client):
             ret_idx = i
         return self.tensors[ret_idx]
 
+    def _next_time_idx(self) -> int:
+        time_idx = int(self._get_thread_local("time_idx", 0) or 0)
+        self._set_thread_local("time_idx", time_idx + 1)
+        return time_idx
+
+    @staticmethod
+    def _shape_tuple(value) -> tuple:
+        data = getattr(value, "data", value)
+        shape = getattr(data, "shape", ())
+        return tuple(shape) if shape is not None else ()
+
+    @staticmethod
+    def _buffer_name(value) -> str:
+        return str(getattr(value, "buffer", "") or "").upper()
+
+    @staticmethod
+    def _nbytes(value) -> int:
+        data = getattr(value, "data", value)
+        return int(getattr(data, "nbytes", 0) or 0)
+
+    @staticmethod
+    def _op_name(*ops) -> str:
+        names = [getattr(op, "name", "") for op in ops if op is not None]
+        return " -> ".join(name for name in names if name)
+
     def pre_run_callback(self, fn: Callable) -> bool:
         return True
 
@@ -75,6 +104,7 @@ class Tracer(Client):
             self.sample = False
         else:
             self.sample = True
+        self._set_thread_local("time_idx", 0)
 
         # Create a Grid record for this grid index
         with self._lock_context():
@@ -162,6 +192,84 @@ class Tracer(Client):
             ret_shape = ret.data.shape
             # Pass input/other raw arrays so draw.py can render MatMul
             rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            rec.mem_src = "SBUF"
+            rec.mem_dst = "PSUM"
+            rec.bytes = self._nbytes(input) + self._nbytes(other)
+            rec.time_idx = self._next_time_idx()
+            rec.call_path = extract_user_frames(num_frames=1)
+            self.records.append(rec)
+
+        @self.lock_fn
+        def post_nki_dma_copy_callback(ret, dst, src, dst_rmw_op=None):
+            del ret, dst_rmw_op
+            if not self.sample:
+                return
+            rec = NkiDmaCopy(
+                self._shape_tuple(src),
+                self._shape_tuple(dst),
+                mem_src=self._buffer_name(src),
+                mem_dst=self._buffer_name(dst),
+                bytes=max(self._nbytes(src), self._nbytes(dst)),
+                time_idx=self._next_time_idx(),
+            )
+            rec.input_data = np.asarray(getattr(src, "data", src)).copy()
+            rec.output_data = np.asarray(getattr(dst, "data", dst)).copy()
+            rec.call_path = extract_user_frames(num_frames=1)
+            self.records.append(rec)
+
+        @self.lock_fn
+        def post_nki_tensor_copy_callback(ret, dst, src):
+            del ret
+            if not self.sample:
+                return
+            rec = NkiTensorCopy(
+                self._shape_tuple(src),
+                self._shape_tuple(dst),
+                mem_src=self._buffer_name(src),
+                mem_dst=self._buffer_name(dst),
+                bytes=max(self._nbytes(src), self._nbytes(dst)),
+                time_idx=self._next_time_idx(),
+            )
+            rec.input_data = np.asarray(getattr(src, "data", src)).copy()
+            rec.output_data = np.asarray(getattr(dst, "data", dst)).copy()
+            rec.call_path = extract_user_frames(num_frames=1)
+            self.records.append(rec)
+
+        @self.lock_fn
+        def post_nki_tensor_scalar_callback(ret, dst, data, op0=None, op1=None):
+            del ret
+            if not self.sample:
+                return
+            rec = NkiTensorScalar(
+                self._shape_tuple(data),
+                self._shape_tuple(dst),
+                op=self._op_name(op0, op1),
+                mem_src=self._buffer_name(data),
+                mem_dst=self._buffer_name(dst),
+                bytes=max(self._nbytes(data), self._nbytes(dst)),
+                time_idx=self._next_time_idx(),
+            )
+            rec.call_path = extract_user_frames(num_frames=1)
+            self.records.append(rec)
+
+        @self.lock_fn
+        def post_nki_tensor_tensor_callback(ret, dst, data1, data2, op=None):
+            del ret
+            if not self.sample:
+                return
+            lhs_buffer = self._buffer_name(data1)
+            rhs_buffer = self._buffer_name(data2)
+            mem_src = lhs_buffer if lhs_buffer == rhs_buffer else ("PSUM" if "PSUM" in (lhs_buffer, rhs_buffer) else lhs_buffer or rhs_buffer)
+            rec = NkiTensorTensor(
+                self._shape_tuple(data1),
+                self._shape_tuple(data2),
+                self._shape_tuple(dst),
+                op=self._op_name(op),
+                mem_src=mem_src,
+                mem_dst=self._buffer_name(dst),
+                bytes=self._nbytes(data1) + self._nbytes(data2),
+                time_idx=self._next_time_idx(),
+            )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
@@ -196,6 +304,14 @@ class Tracer(Client):
             return OpCallbacks(after_callback=post_reduce_sum_callback)
         elif op_type is Dot:
             return OpCallbacks(after_callback=post_dot_callback)
+        elif op_type is NkiDmaCopy:
+            return OpCallbacks(after_callback=post_nki_dma_copy_callback)
+        elif op_type is NkiTensorCopy:
+            return OpCallbacks(after_callback=post_nki_tensor_copy_callback)
+        elif op_type is NkiTensorScalar:
+            return OpCallbacks(after_callback=post_nki_tensor_scalar_callback)
+        elif op_type is NkiTensorTensor:
+            return OpCallbacks(after_callback=post_nki_tensor_tensor_callback)
         # Flip is wrapped at tl.flip; we don't have an interpreter op to hook here.
         # The wrapper in patch_lang will append Flip records directly to tracer.
 
