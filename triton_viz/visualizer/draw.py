@@ -167,6 +167,18 @@ def _full_tensor_coords(shape: tuple[int, ...] | list[int] | np.ndarray) -> list
     return []
 
 
+def _display_coords(coords: list[tuple[float, ...]] | tuple[tuple[float, ...], ...]) -> list[tuple[float, ...]]:
+    out: list[tuple[float, ...]] = []
+    for coord in coords or []:
+        if len(coord) == 1:
+            out.append((float(coord[0]), 0.0, 0.0))
+        elif len(coord) == 2:
+            out.append((float(coord[1]), float(coord[0]), 0.0))
+        else:
+            out.append(tuple(float(v) for v in coord[:3]))
+    return out
+
+
 def _classify_nki_copy(mem_src: str, mem_dst: str) -> str:
     route = (str(mem_src or "").upper(), str(mem_dst or "").upper())
     if route in {("HBM", "SBUF"), ("SBUF", "PSUM")}:
@@ -378,16 +390,20 @@ def prepare_visualization_data(program_records, tensor_table):
             mem_dst = str(getattr(record, "mem_dst", "") or "").upper()
             op_type = _classify_nki_copy(mem_src, mem_dst)
             global_tensor = (
-                np.asarray(getattr(record, "input_data", np.asarray([])))
+                np.asarray(getattr(record, "src_root_data", getattr(record, "input_data", np.asarray([]))))
                 if op_type == "Load"
-                else np.asarray(getattr(record, "output_data", np.asarray([])))
+                else np.asarray(getattr(record, "dst_root_data", getattr(record, "output_data", np.asarray([]))))
             )
             slice_tensor = (
                 np.asarray(getattr(record, "output_data", np.asarray([])))
                 if op_type == "Load"
                 else np.asarray(getattr(record, "input_data", np.asarray([])))
             )
-            global_coords = _full_tensor_coords(global_tensor.shape)
+            global_coords = _display_coords(
+                getattr(record, "src_view_coords", ())
+                if op_type == "Load"
+                else getattr(record, "dst_view_coords", ())
+            ) or _full_tensor_coords(slice_tensor.shape)
             slice_coords = _full_tensor_coords(slice_tensor.shape)
             visualization_data.append(
                 {
@@ -436,16 +452,20 @@ def prepare_visualization_data(program_records, tensor_table):
             mem_dst = str(getattr(record, "mem_dst", "") or "").upper()
             op_type = _classify_nki_copy(mem_src, mem_dst)
             global_tensor = (
-                np.asarray(getattr(record, "input_data", np.asarray([])))
+                np.asarray(getattr(record, "src_root_data", getattr(record, "input_data", np.asarray([]))))
                 if op_type == "Load"
-                else np.asarray(getattr(record, "output_data", np.asarray([])))
+                else np.asarray(getattr(record, "dst_root_data", getattr(record, "output_data", np.asarray([]))))
             )
             slice_tensor = (
                 np.asarray(getattr(record, "output_data", np.asarray([])))
                 if op_type == "Load"
                 else np.asarray(getattr(record, "input_data", np.asarray([])))
             )
-            global_coords = _full_tensor_coords(global_tensor.shape)
+            global_coords = _display_coords(
+                getattr(record, "src_view_coords", ())
+                if op_type == "Load"
+                else getattr(record, "dst_view_coords", ())
+            ) or _full_tensor_coords(slice_tensor.shape)
             slice_coords = _full_tensor_coords(slice_tensor.shape)
             visualization_data.append(
                 {

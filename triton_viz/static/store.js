@@ -288,7 +288,8 @@ export function createStoreVisualization(containerElement, op) {
         const COLOR_COOL = new THREE.Color(0.2, 0.4, 1.0);
         const COLOR_HOT = new THREE.Color(1.0, 0.3, 0.1);
         const TEMP_COLOR = new THREE.Color();
-        const highlightedGlobalSet = new Set((op.global_coords || []).map(([x, y, z]) => `${x},${y},${z}`));
+        const initialGlobalCoords = op.disable_static_highlight ? [] : (op.global_coords || []);
+        const highlightedGlobalSet = new Set(initialGlobalCoords.map(([x, y, z]) => `${x},${y},${z}`));
 
         const baseGlobalDark = COLOR_GLOBAL.clone();
         const baseSliceDark = COLOR_LEFT_SLICE.clone();
@@ -316,7 +317,7 @@ export function createStoreVisualization(containerElement, op) {
         const { scene, camera, renderer } = setupScene(stage, currentBackground);
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
 
-        const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
+        const globalTensor = createTensor(op.global_shape, initialGlobalCoords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
         const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
 
         // Position slice tensor

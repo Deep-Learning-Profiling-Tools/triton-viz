@@ -231,7 +231,8 @@ function getTextColor(bgColor) {
         let { scene, camera, renderer } = sceneBundle;
         const { cubeGeometry, edgesGeometry, lineMaterial } = setupGeometries();
 
-        const globalTensor = createTensor(op.global_shape, op.global_coords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
+        const initialGlobalCoords = op.disable_static_highlight ? [] : op.global_coords;
+        const globalTensor = createTensor(op.global_shape, initialGlobalCoords, COLOR_GLOBAL, 'Global', cubeGeometry, edgesGeometry, lineMaterial);
         const sliceTensor = createTensor(op.slice_shape, op.slice_coords, COLOR_LEFT_SLICE, 'Slice', cubeGeometry, edgesGeometry, lineMaterial);
 
         // Position slice tensor
@@ -295,7 +296,7 @@ function getTextColor(bgColor) {
 
         // Precompute highlighted coords in Global tensor for quick reset
         const highlightedGlobalSet = new Set(
-            op.global_coords.map(([x, y, z]) => `${x},${y},${z}`)
+            (initialGlobalCoords || []).map(([x, y, z]) => `${x},${y},${z}`)
         );
 
         // Theme-aware base colors for Global / Slice;会随着背景切换而更新

@@ -71,12 +71,60 @@ class Tracer(Client):
 
     @staticmethod
     def _buffer_name(value) -> str:
-        return str(getattr(value, "buffer", "") or "").upper()
+        buffer = str(getattr(value, "buffer", "") or "").upper()
+        if buffer:
+            return buffer
+        return "HBM" if hasattr(getattr(value, "data", value), "shape") else ""
 
     @staticmethod
     def _nbytes(value) -> int:
         data = getattr(value, "data", value)
         return int(getattr(data, "nbytes", 0) or 0)
+
+    @staticmethod
+    def _root_view(value):
+        root = value
+        seen: set[int] = set()
+        while getattr(root, "_parent", None) is not None and id(root) not in seen:
+            seen.add(id(root))
+            root = root._parent
+        return root
+
+    @staticmethod
+    def _copy_numpy(value):
+        data = getattr(value, "data", value)
+        return np.asarray(data).copy()
+
+    @classmethod
+    def _view_metadata(cls, value):
+        root = cls._root_view(value)
+        view_data = getattr(value, "data", value)
+        root_data = getattr(root, "data", root)
+        view_arr = np.asarray(view_data)
+        root_arr = np.asarray(root_data)
+        root_copy = root_arr.copy()
+        if view_arr.ndim == 0 or root_arr.ndim == 0:
+            return root_copy, tuple(root_arr.shape), []
+        if view_arr.shape == root_arr.shape and view_arr.ctypes.data == root_arr.ctypes.data:
+            return root_copy, tuple(root_arr.shape), cls._full_tensor_coords(root_arr.shape)
+
+        itemsize = max(int(root_arr.dtype.itemsize), 1)
+        base_linear = int((view_arr.ctypes.data - root_arr.ctypes.data) // itemsize)
+        stride_elems = tuple(int(stride // itemsize) for stride in view_arr.strides)
+        coords: list[tuple[float, ...]] = []
+        for idx in np.ndindex(view_arr.shape):
+            linear = base_linear + sum(i * s for i, s in zip(idx, stride_elems))
+            coord = np.unravel_index(linear, root_arr.shape)
+            coords.append(tuple(float(v) for v in coord))
+        return root_copy, tuple(root_arr.shape), coords
+
+    @staticmethod
+    def _full_tensor_coords(shape: tuple[int, ...]) -> list[tuple[float, ...]]:
+        if not shape:
+            return []
+        if len(shape) == 1:
+            return [(float(x),) for x in range(shape[0])]
+        return [tuple(float(v) for v in idx) for idx in np.ndindex(shape)]
 
     @staticmethod
     def _op_name(*ops) -> str:
@@ -204,6 +252,8 @@ class Tracer(Client):
             del ret, dst_rmw_op
             if not self.sample:
                 return
+            src_root_data, src_root_shape, src_view_coords = self._view_metadata(src)
+            dst_root_data, dst_root_shape, dst_view_coords = self._view_metadata(dst)
             rec = NkiDmaCopy(
                 self._shape_tuple(src),
                 self._shape_tuple(dst),
@@ -212,8 +262,14 @@ class Tracer(Client):
                 bytes=max(self._nbytes(src), self._nbytes(dst)),
                 time_idx=self._next_time_idx(),
             )
-            rec.input_data = np.asarray(getattr(src, "data", src)).copy()
-            rec.output_data = np.asarray(getattr(dst, "data", dst)).copy()
+            rec.input_data = self._copy_numpy(src)
+            rec.output_data = self._copy_numpy(dst)
+            rec.src_root_data = src_root_data
+            rec.src_root_shape = src_root_shape
+            rec.src_view_coords = src_view_coords
+            rec.dst_root_data = dst_root_data
+            rec.dst_root_shape = dst_root_shape
+            rec.dst_view_coords = dst_view_coords
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
@@ -222,6 +278,8 @@ class Tracer(Client):
             del ret
             if not self.sample:
                 return
+            src_root_data, src_root_shape, src_view_coords = self._view_metadata(src)
+            dst_root_data, dst_root_shape, dst_view_coords = self._view_metadata(dst)
             rec = NkiTensorCopy(
                 self._shape_tuple(src),
                 self._shape_tuple(dst),
@@ -230,8 +288,14 @@ class Tracer(Client):
                 bytes=max(self._nbytes(src), self._nbytes(dst)),
                 time_idx=self._next_time_idx(),
             )
-            rec.input_data = np.asarray(getattr(src, "data", src)).copy()
-            rec.output_data = np.asarray(getattr(dst, "data", dst)).copy()
+            rec.input_data = self._copy_numpy(src)
+            rec.output_data = self._copy_numpy(dst)
+            rec.src_root_data = src_root_data
+            rec.src_root_shape = src_root_shape
+            rec.src_view_coords = src_view_coords
+            rec.dst_root_data = dst_root_data
+            rec.dst_root_shape = dst_root_shape
+            rec.dst_view_coords = dst_view_coords
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
