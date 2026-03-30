@@ -390,15 +390,16 @@ function updateSideMenu(el, name, coords, val, shape, extraHtml = '') {
     const valueLine = indexExpr ? `tensor${indexExpr} = ${val}` : `tensor = ${val}`;
     el.innerHTML = `<h3>${name} Tensor</h3><p>${valueLine}</p><p>Shape: ${shapeStr}</p>${extraHtml}`;
 }
-async function fetchTensorPayload(apiBase, uuid, endpoint = 'getLoadTensor') {
+async function fetchTensorPayload(apiBase, uuid, endpoint = 'getLoadTensor', source = 'GLOBAL') {
     try {
         const data = await postJson(`/api/${endpoint}`, { uuid }, { base: apiBase });
         if (!data)
             return null;
+        const payload = String(source || 'GLOBAL').toUpperCase() === 'SLICE' && data.slice ? data.slice : data;
         return {
-            scaleMin: data.min ?? 0, scaleMax: data.max ?? 0,
-            values: data.values, shape: data.shape, dims: data.dims,
-            highlights: data.highlights,
+            scaleMin: payload.min ?? 0, scaleMax: payload.max ?? 0,
+            values: payload.values, shape: payload.shape, dims: payload.dims,
+            highlights: payload.highlights,
         };
     }
     catch (e) {
@@ -1477,6 +1478,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
             else if (group.userData.endpoint) {
                 delete group.userData.endpoint;
             }
+            group.userData.source = cfg.source || cfg.name.toUpperCase();
             scene.add(group);
             tensors.set(cfg.name, group);
         });
@@ -2272,7 +2274,7 @@ export function createTensorVisualization(containerElement, op, options = {}) {
     }
     syncOpControlState();
     const fetchers = opUuid ? Array.from(tensors.entries()).map(([name, group]) => {
-        return fetchTensorPayload(API_BASE, opUuid, group.userData.endpoint || 'getLoadTensor').then(p => {
+        return fetchTensorPayload(API_BASE, opUuid, group.userData.endpoint || 'getLoadTensor', group.userData.source || name.toUpperCase()).then(p => {
             if (p) {
                 state.payloads.set(name, p);
                 refreshDescriptorDimensionLines(vizCache);

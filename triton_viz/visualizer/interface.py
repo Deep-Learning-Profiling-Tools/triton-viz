@@ -1223,6 +1223,8 @@ def _get_tensor_source_array(
     source = str(source or "").upper()
     if source in {"GLOBAL", "LOAD_GLOBAL"}:
         arr = op_payload.get("global_tensor")
+    elif source in {"SLICE", "LOAD_SLICE"}:
+        arr = op_payload.get("slice_tensor")
     elif source == "A":
         arr = op_payload.get("input_data")
     elif source == "B":
@@ -1366,6 +1368,10 @@ def get_load_tensor():
                     if descriptor is not None
                     else {"type": "array", "data": coords.tolist()}
                 )
+        elif "global_coords" in op_data:
+            coords = np.asarray(op_data["global_coords"], dtype=np.int64)
+            if coords.size > 0:
+                payload["highlights"] = {"type": "array", "data": coords.tolist()}
 
         return jsonify(payload)
     except Exception as e:

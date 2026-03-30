@@ -38,6 +38,7 @@ export interface TensorPayload {
     shape?: number[];
     dims?: number;
     highlights?: TensorHighlights | null;
+    slice?: TensorPayload;
 }
 
 export interface ProgramCountsPayload {
