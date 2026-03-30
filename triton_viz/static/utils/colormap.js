@@ -1,6 +1,7 @@
 export const HUES = {
     Load: 200,
     Store: 45,
+    Transfer: 200,
     A: 200,
     B: 45,
     C: 140,

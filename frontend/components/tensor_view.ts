@@ -1736,7 +1736,7 @@ export function createTensorVisualization(
     const configs: TensorConfig[] = tensorConfigs.length > 0 ? tensorConfigs : [
         { name: 'Global', shape: op.global_shape || [], color: colors.GLOBAL || '#333', position: [0, 0, 0], endpoint: 'getLoadTensor' },
     ];
-    const supportsAllPrograms = type === 'Load' || type === 'Store';
+    const supportsAllPrograms = type === 'Load' || type === 'Store' || type === 'Transfer';
     const configByNameMap = new Map<string, TensorConfig>(configs.map((cfg) => [cfg.name, cfg as TensorConfig]));
     const downloadOptions = configs.map((cfg) => buildDownloadOption(type, cfg));
 
