@@ -1,13 +1,10 @@
 import { renderSbufPanel } from '../components/sbuf_panel.js';
 function normalizeFlowType(event) {
     const type = (event.type || '').toLowerCase();
-    if ((type === 'store' || type === 'nkitensorcopy') && event.src === 'PSUM' && event.dst === 'SBUF') {
-        return 'Copy';
-    }
-    if ((type === 'load' || type === 'nkidmacopy') && event.src === 'HBM' && event.dst === 'SBUF') {
+    if ((event.src === 'HBM' && event.dst === 'SBUF') || (event.src === 'SBUF' && event.dst === 'PSUM')) {
         return 'Load';
     }
-    if ((type === 'store' || type === 'nkidmacopy') && event.src === 'SBUF' && event.dst === 'HBM') {
+    if ((event.src === 'PSUM' && event.dst === 'SBUF') || (event.src === 'SBUF' && event.dst === 'HBM')) {
         return 'Store';
     }
     if (type === 'dot') {

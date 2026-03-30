@@ -145,6 +145,41 @@ def make_3d(shape: tuple[int, ...]):
     return shape
 
 
+def _full_tensor_coords(shape: tuple[int, ...] | list[int] | np.ndarray) -> list[tuple[float, ...]]:
+    shape = tuple(int(dim) for dim in shape)
+    if not shape:
+        return []
+    if len(shape) == 1:
+        return [(float(x), 0.0, 0.0) for x in range(shape[0])]
+    if len(shape) == 2:
+        return [
+            (float(col), float(row), 0.0)
+            for row in range(shape[0])
+            for col in range(shape[1])
+        ]
+    if len(shape) == 3:
+        return [
+            (float(x), float(y), float(z))
+            for z in range(shape[2])
+            for y in range(shape[1])
+            for x in range(shape[0])
+        ]
+    return []
+
+
+def _classify_nki_copy(mem_src: str, mem_dst: str) -> str:
+    route = (str(mem_src or "").upper(), str(mem_dst or "").upper())
+    if route in {("HBM", "SBUF"), ("SBUF", "PSUM")}:
+        return "Load"
+    if route in {("PSUM", "SBUF"), ("SBUF", "HBM")}:
+        return "Store"
+    if route[1] == "PSUM":
+        return "Load"
+    if route[0] == "PSUM" or route[1] == "HBM":
+        return "Store"
+    return "Load"
+
+
 def build_slice_tensor(record, tensor: Tensor, global_arr: np.ndarray):
     """Reconstruct slice-tensor values by sampling the global tensor via recorded offsets."""
     try:
@@ -341,7 +376,7 @@ def prepare_visualization_data(program_records, tensor_table):
             time_idx = _record_time(record, current_time)
             mem_src = str(getattr(record, "mem_src", "") or "").upper()
             mem_dst = str(getattr(record, "mem_dst", "") or "").upper()
-            op_type = "Load" if mem_src == "HBM" and mem_dst == "SBUF" else "Store"
+            op_type = _classify_nki_copy(mem_src, mem_dst)
             global_tensor = (
                 np.asarray(getattr(record, "input_data", np.asarray([])))
                 if op_type == "Load"
@@ -352,11 +387,15 @@ def prepare_visualization_data(program_records, tensor_table):
                 if op_type == "Load"
                 else np.asarray(getattr(record, "input_data", np.asarray([])))
             )
+            global_coords = _full_tensor_coords(global_tensor.shape)
+            slice_coords = _full_tensor_coords(slice_tensor.shape)
             visualization_data.append(
                 {
                     "type": op_type,
                     "global_shape": list(global_tensor.shape),
                     "slice_shape": list(slice_tensor.shape),
+                    "global_coords": global_coords,
+                    "slice_coords": slice_coords,
                     "uuid": record_uuid,
                     "op_index": current_time,
                     "mem_src": mem_src,
@@ -382,6 +421,8 @@ def prepare_visualization_data(program_records, tensor_table):
                 "slice_max": float(np.max(slice_tensor)) if getattr(slice_tensor, "size", 0) else 0.0,
                 "global_shape": list(global_tensor.shape),
                 "global_dtype": str(getattr(global_tensor, "dtype", "float32")),
+                "global_coords": global_coords,
+                "slice_coords": slice_coords,
                 "mem_src": mem_src,
                 "mem_dst": mem_dst,
                 "bytes": _record_bytes(record),
@@ -393,7 +434,7 @@ def prepare_visualization_data(program_records, tensor_table):
             time_idx = _record_time(record, current_time)
             mem_src = str(getattr(record, "mem_src", "") or "").upper()
             mem_dst = str(getattr(record, "mem_dst", "") or "").upper()
-            op_type = "Load" if mem_src == "HBM" and mem_dst == "SBUF" else "Store"
+            op_type = _classify_nki_copy(mem_src, mem_dst)
             global_tensor = (
                 np.asarray(getattr(record, "input_data", np.asarray([])))
                 if op_type == "Load"
@@ -404,11 +445,15 @@ def prepare_visualization_data(program_records, tensor_table):
                 if op_type == "Load"
                 else np.asarray(getattr(record, "input_data", np.asarray([])))
             )
+            global_coords = _full_tensor_coords(global_tensor.shape)
+            slice_coords = _full_tensor_coords(slice_tensor.shape)
             visualization_data.append(
                 {
                     "type": op_type,
                     "global_shape": list(global_tensor.shape),
                     "slice_shape": list(slice_tensor.shape),
+                    "global_coords": global_coords,
+                    "slice_coords": slice_coords,
                     "uuid": record_uuid,
                     "op_index": current_time,
                     "mem_src": mem_src,
@@ -434,6 +479,8 @@ def prepare_visualization_data(program_records, tensor_table):
                 "slice_max": float(np.max(slice_tensor)) if getattr(slice_tensor, "size", 0) else 0.0,
                 "global_shape": list(global_tensor.shape),
                 "global_dtype": str(getattr(global_tensor, "dtype", "float32")),
+                "global_coords": global_coords,
+                "slice_coords": slice_coords,
                 "mem_src": mem_src,
                 "mem_dst": mem_dst,
                 "bytes": _record_bytes(record),
