@@ -11,6 +11,7 @@ from ..clients import Sanitizer, Profiler, Tracer
 from .client import ClientManager, Client
 from .data import Launch
 from . import patch
+import os
 import types
 
 
@@ -241,9 +242,14 @@ class NKITrace(KernelInterface, TraceInterface):
 
             kwargs.pop("warmup", None)
             grid = kwargs.pop("grid", None)
-            nki.trace(self.func, grid=grid, platform_target=platform_target).specialize(
-                *args, **kwargs
-            )
+            prior_target = os.environ.get("NEURON_PLATFORM_TARGET_OVERRIDE")
+            try:
+                if platform_target and not prior_target:
+                    os.environ["NEURON_PLATFORM_TARGET_OVERRIDE"] = platform_target
+                nki.trace(self.func, grid=grid).specialize(*args, **kwargs)
+            finally:
+                if platform_target and not prior_target:
+                    os.environ.pop("NEURON_PLATFORM_TARGET_OVERRIDE", None)
             kwargs["grid"] = grid
         with self.client_manager.patch_run(self.func, backend=self.backend):
             kwargs.update({"client_manager": self.client_manager})
