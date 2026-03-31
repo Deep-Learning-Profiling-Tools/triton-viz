@@ -4,6 +4,7 @@ from triton_viz.core.data import (
     Dot,
     Load,
     Store,
+    Transfer,
     Flip,
 )
 from triton_viz.clients.sanitizer.data import OutOfBoundsRecordBruteForce
@@ -84,7 +85,7 @@ def extract_load_coords(record, global_tensor: Tensor) -> list[tuple[float, ...]
         return []
 
     offsets = np.asarray(record.offsets, dtype=np.int64)
-    masks = np.asarray(record.masks, dtype=bool)
+    masks = _record_masks(record, offsets)
     if offsets.shape != masks.shape:
         offsets = np.broadcast_to(offsets, masks.shape)
 
@@ -144,8 +145,8 @@ def make_3d(shape: tuple[int, ...]):
 def build_slice_tensor(record, tensor: Tensor, global_arr: np.ndarray):
     """Reconstruct slice-tensor values by sampling the global tensor via recorded offsets."""
     try:
-        mask = np.asarray(record.masks, dtype=bool)
         offsets = np.asarray(record.offsets, dtype=np.int64)
+        mask = _record_masks(record, offsets)
         if offsets.shape != mask.shape:
             offsets = np.broadcast_to(offsets, mask.shape)
         elem_size = getattr(tensor, "element_size", None)
@@ -173,8 +174,27 @@ def build_slice_tensor(record, tensor: Tensor, global_arr: np.ndarray):
 
         return slice_flat.reshape(mask.shape), slice_min, slice_max
     except Exception:
-        shape = np.asarray(record.masks).shape
+        shape = _record_masks(record).shape
         return np.zeros(shape, dtype=float), 0.0, 0.0
+
+
+def _transfer_focus(record: Transfer) -> tuple[str, int, np.ndarray]:
+    mem_src = getattr(record, "mem_src", "").upper()
+    mem_dst = getattr(record, "mem_dst", "").upper()
+    if mem_src == "HBM":
+        return "load", int(record.src_ptr), np.asarray(record.src_offsets)
+    if mem_dst == "HBM":
+        return "store", int(record.dst_ptr), np.asarray(record.dst_offsets)
+    return "transfer", int(record.src_ptr), np.asarray(record.src_offsets)
+
+
+def _record_masks(record, offsets=None) -> np.ndarray:
+    """Return explicit masks or infer a dense one from offsets."""
+    masks = getattr(record, "masks", None)
+    if masks is not None:
+        return np.asarray(masks, dtype=bool)
+    inferred = getattr(record, "offsets", None) if offsets is None else offsets
+    return np.ones(np.asarray(inferred).shape, dtype=bool)
 
 
 def delinearized(
@@ -221,6 +241,7 @@ def prepare_visualization_data(program_records, tensor_table):
     sbuf_events = []
     load_overall = {}
     store_overall = {}
+    transfer_overall = {}
     for record in program_records:
         record_uuid = str(uuid.uuid4())[:8]
         # Use the current length of visualization_data as the default time_idx
@@ -595,8 +616,141 @@ def prepare_visualization_data(program_records, tensor_table):
                 }
             )
 
+        # TODO: codex says that this can be refactored to share most logic with Load/Store, do in another PR
+        elif isinstance(record, Transfer):
+            focus_kind, focus_ptr, offsets = _transfer_focus(record)
+            global_tensor, _ = tensor_table[focus_ptr]
+            masks = _record_masks(record, offsets)
+            view_record = type(
+                "TransferView",
+                (),
+                {"offsets": offsets, "masks": masks},
+            )()
+            global_coords = extract_load_coords(view_record, global_tensor)
+
+            ptr_key = f"TRANSFER:{focus_ptr}"
+            time_idx = int(getattr(record, "time_idx", current_time))
+
+            visualization_data.append(
+                {
+                    "type": "Transfer",
+                    "global_shape": global_tensor.shape,
+                    "slice_shape": masks.shape,
+                    "uuid": record_uuid,
+                    "op_index": current_time,
+                    "overall_key": ptr_key,
+                    "time_idx": time_idx,
+                    "mem_src": getattr(record, "mem_src", None),
+                    "mem_dst": getattr(record, "mem_dst", None),
+                    "bytes": int(getattr(record, "bytes", 0)),
+                    "transfer_kind": focus_kind,
+                }
+            )
+
+            entry = transfer_overall.setdefault(
+                ptr_key,
+                {
+                    "shape": list(global_tensor.shape),
+                    "dims": len(global_tensor.shape),
+                    "slice_shape": list(masks.shape),
+                    "tiles": [],
+                },
+            )
+            entry["tiles"].append(
+                {
+                    "uuid": record_uuid,
+                    "global_coords": global_coords,
+                    "ptr_key": ptr_key,
+                    "time_idx": time_idx,
+                }
+            )
+
+            try:
+                import numpy as _np
+
+                gt = global_tensor.data
+                if hasattr(gt, "cpu") and callable(getattr(gt, "cpu", None)):
+                    try:
+                        arr = gt.detach().cpu().numpy()
+                    except Exception:
+                        arr = _np.asarray(gt)
+                elif hasattr(gt, "data"):
+                    arr = _np.asarray(getattr(gt, "data"))
+                elif hasattr(gt, "_value"):
+                    arr = _np.asarray(getattr(gt, "_value"))
+                else:
+                    arr = _np.asarray(gt)
+            except Exception:
+                import numpy as _np
+
+                arr = _np.asarray([])
+
+            try:
+                import numpy as _np
+
+                def _unwrap(v):
+                    vv = getattr(v, "data", v)
+                    return _unwrap(vv) if hasattr(vv, "data") else vv
+
+                arr = _unwrap(arr)
+                arr = _np.asarray(arr)
+                if arr.dtype == object:
+                    flat = [_unwrap(x) for x in arr.ravel()]
+                    try:
+                        arr = _np.asarray(flat, dtype=float).reshape(arr.shape)
+                    except Exception:
+                        try:
+                            scalars = []
+                            for x in flat:
+                                xx = _np.asarray(_unwrap(x))
+                                if xx.size == 0:
+                                    scalars.append(0.0)
+                                else:
+                                    scalars.append(float(xx.astype(float).ravel()[0]))
+                            arr = _np.asarray(scalars, dtype=float).reshape(arr.shape)
+                        except Exception:
+                            arr = _np.zeros(arr.shape, dtype=float)
+            except Exception:
+                pass
+
+            t_min = float(np.min(arr)) if getattr(arr, "size", 0) else 0.0
+            t_max = float(np.max(arr)) if getattr(arr, "size", 0) else 0.0
+
+            raw_tensor_data[record_uuid] = {
+                "op_type": "Transfer",
+                "op_index": current_time,
+                "global_tensor": arr,
+                "dims": int(arr.ndim),
+                "shape": list(arr.shape),
+                "min": t_min,
+                "max": t_max,
+                "tracebacks": [
+                    {
+                        "filename": f.filename,
+                        "lineno": f.lineno,
+                        "line": f.line_of_code,
+                        "name": f.func_name,
+                    }
+                    for f in getattr(record, "call_path", [])
+                ],
+                "global_shape": list(global_tensor.shape),
+                "global_dtype": str(global_tensor.dtype),
+                "offsets": serialize_for_json(offsets),
+                "masks": serialize_for_json(masks),
+                "mem_src": getattr(record, "mem_src", None),
+                "mem_dst": getattr(record, "mem_dst", None),
+                "transfer_kind": focus_kind,
+            }
+
     raw_tensor_data["__sbuf_events__"] = sbuf_events
-    return visualization_data, raw_tensor_data, "", load_overall, store_overall
+    return (
+        visualization_data,
+        raw_tensor_data,
+        "",
+        load_overall,
+        store_overall,
+        transfer_overall,
+    )
 
 
 def get_visualization_data():
@@ -607,6 +761,7 @@ def get_visualization_data():
     kernel_src = ""
     load_overall_maps = {}
     store_overall_maps = {}
+    transfer_overall_maps = {}
 
     for grid_idx, program_records in records.items():
         (
@@ -615,19 +770,20 @@ def get_visualization_data():
             kernel_src,
             load_overall,
             store_overall,
+            transfer_overall,
         ) = prepare_visualization_data(program_records, tensor_table)
         visualization_data[str(grid_idx)] = viz_data
         raw_tensor_data.update(raw_data)
-        for key, val in load_overall.items():
-            if key in load_overall_maps:
-                load_overall_maps[key]["tiles"].extend(val.get("tiles", []))
-            else:
-                load_overall_maps[key] = val
-        for key, val in store_overall.items():
-            if key in store_overall_maps:
-                store_overall_maps[key]["tiles"].extend(val.get("tiles", []))
-            else:
-                store_overall_maps[key] = val
+        for overall_map, target in (
+            (load_overall, load_overall_maps),
+            (store_overall, store_overall_maps),
+            (transfer_overall, transfer_overall_maps),
+        ):
+            for key, val in overall_map.items():
+                if key in target:
+                    target[key]["tiles"].extend(val.get("tiles", []))
+                else:
+                    target[key] = val
 
     # Ensure failures dict has JSON-serializable keys
     safe_failures = {str(k): v for k, v in failures.items()}
@@ -639,6 +795,7 @@ def get_visualization_data():
         "kernel_src": kernel_src,
         "load_overall": load_overall_maps,
         "store_overall": store_overall_maps,
+        "transfer_overall": transfer_overall_maps,
     }
 
 

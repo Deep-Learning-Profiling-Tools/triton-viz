@@ -232,8 +232,9 @@ class NDArray:
         return self.address
 
     def stride(self) -> tuple[int, ...]:
-        """Return byte strides."""
-        return self.data.strides
+        """Return element strides."""
+        itemsize = self.element_size()
+        return tuple(int(stride // itemsize) for stride in self.data.strides)
 
     def element_size(self) -> int:
         """Return item size in bytes."""
@@ -1227,7 +1228,7 @@ class NKIBeta2InterpretedFunction:
         kernel_args = tuple(
             arg
             if isinstance(arg, (NDArray, bool, int, float, str)) or arg is None
-            else NDArray(value=arg)
+            else NDArray(value=arg, buffer="hbm")
             for arg in args
         )
         bound = inspect.signature(self.fn).bind(*kernel_args, **kwargs)

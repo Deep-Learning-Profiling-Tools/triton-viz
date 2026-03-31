@@ -66,6 +66,19 @@ class Load(Op):
 
 
 @dataclass
+class Transfer(Op):
+    name: ClassVar[str] = "transfer"
+    src_ptr: int
+    dst_ptr: int
+    src_offsets: npt.NDArray[np.int_]
+    dst_offsets: npt.NDArray[np.int_]
+    mem_src: str
+    mem_dst: str
+    bytes: int = 0
+    time_idx: int = 0
+
+
+@dataclass
 class UnaryOp(Op):
     name: ClassVar[str] = "unary_op"
 

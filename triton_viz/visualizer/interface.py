@@ -31,6 +31,7 @@ last_launch_snapshot = None
 sbuf_events = []
 load_overall_maps = {}
 store_overall_maps = {}
+transfer_overall_maps = {}
 DEVICE_LIMITS = {
     "TRN1_NC_V2": 24 * 1024 * 1024,
     "TRN1_CHIP": 48 * 1024 * 1024,
@@ -143,6 +144,7 @@ def update_global_data(force: bool = False):
     global sbuf_events
     global load_overall_maps
     global store_overall_maps
+    global transfer_overall_maps
     global last_launch_snapshot
 
     # Collect all records from launches
@@ -177,6 +179,7 @@ def update_global_data(force: bool = False):
     sbuf_events = raw_tensor_data.pop("__sbuf_events__", [])
     load_overall_maps = viz_data.get("load_overall", {})
     store_overall_maps = viz_data.get("store_overall", {})
+    transfer_overall_maps = viz_data.get("transfer_overall", {})
 
     # Precompute C values for each Dot operation
     precomputed_c_values = {}
@@ -802,7 +805,10 @@ def get_load_tensor():
         # Calculate highlights
         if "offsets" in op_data:
             offsets = np.asarray(op_data["offsets"])
-            masks = np.asarray(op_data["masks"])
+            masks = op_data.get("masks")
+            if masks is None:
+                masks = np.ones(offsets.shape, dtype=bool)
+            masks = np.asarray(masks)
             shape = tuple(op_data["global_shape"])
             dtype = op_data["global_dtype"]
             coords = _coords_from_offsets(shape, offsets, masks, dtype)
@@ -862,7 +868,11 @@ def _collect_load_store_program_subsets(op_type, overall_key, op_index, time_idx
                 if uuid:
                     uuid_to_pid[uuid] = pid
 
-    overall_maps = load_overall_maps if op_type == "Load" else store_overall_maps
+    overall_maps = {
+        "Load": load_overall_maps,
+        "Store": store_overall_maps,
+        "Transfer": transfer_overall_maps,
+    }[op_type]
     entry = overall_maps.get(overall_key)
     if not entry or not uuid_to_pid:
         return {
@@ -929,7 +939,7 @@ def get_load_store_all_programs():
     if not op_type or not overall_key or time_idx is None:
         return jsonify({"error": "Missing type, overall_key, or time_idx"}), 400
     op_type = str(op_type).strip().capitalize()
-    if op_type not in {"Load", "Store"}:
+    if op_type not in {"Load", "Store", "Transfer"}:
         return jsonify({"error": "Unsupported type"}), 400
     try:
         time_idx = int(time_idx)

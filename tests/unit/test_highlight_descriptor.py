@@ -14,14 +14,18 @@ def _isolate_viz_interface_state():
     """Save and restore viz_interface global state around a test."""
     saved = (
         viz_interface.global_data,
+        viz_interface.raw_tensor_data,
         viz_interface.load_overall_maps,
         viz_interface.store_overall_maps,
+        viz_interface.transfer_overall_maps,
     )
     yield
     (
         viz_interface.global_data,
+        viz_interface.raw_tensor_data,
         viz_interface.load_overall_maps,
         viz_interface.store_overall_maps,
+        viz_interface.transfer_overall_maps,
     ) = saved
 
 
@@ -154,9 +158,98 @@ def test_collect_load_store_program_subsets_supports_nd_coords(
         }
     }
     viz_interface.store_overall_maps = {}
+    viz_interface.transfer_overall_maps = {}
 
     payload = _collect_load_store_program_subsets("Load", "LOAD:ptr", 0, 0)
     coord_to_count = {tuple(entry[:-1]): int(entry[-1]) for entry in payload["counts"]}
     assert coord_to_count[(0, 1, 0, 1, 0)] == 1
     assert coord_to_count[(1, 1, 0, 1, 0)] == 2
     assert payload["subset_count"] == 2
+
+
+def test_collect_transfer_program_subsets(
+    _isolate_viz_interface_state,
+):
+    """Aggregates Transfer subsets through the same endpoint path."""
+    viz_interface.global_data = {
+        "ops": {
+            "visualization_data": {
+                "(0,0,0)": [
+                    {
+                        "type": "Transfer",
+                        "overall_key": "TRANSFER:ptr",
+                        "time_idx": 0,
+                        "op_index": 0,
+                        "uuid": "u0",
+                    }
+                ],
+                "(1,0,0)": [
+                    {
+                        "type": "Transfer",
+                        "overall_key": "TRANSFER:ptr",
+                        "time_idx": 0,
+                        "op_index": 0,
+                        "uuid": "u1",
+                    }
+                ],
+            }
+        }
+    }
+    viz_interface.load_overall_maps = {}
+    viz_interface.store_overall_maps = {}
+    viz_interface.transfer_overall_maps = {
+        "TRANSFER:ptr": {
+            "shape": [4, 4],
+            "tiles": [
+                {"uuid": "u0", "global_coords": [[0, 0], [0, 1]]},
+                {"uuid": "u1", "global_coords": [[0, 1], [1, 1]]},
+            ],
+        }
+    }
+
+    payload = _collect_load_store_program_subsets("Transfer", "TRANSFER:ptr", 0, 0)
+    coord_to_count = {tuple(entry[:-1]): int(entry[-1]) for entry in payload["counts"]}
+    assert coord_to_count[(0, 0)] == 1
+    assert coord_to_count[(0, 1)] == 2
+    assert coord_to_count[(1, 1)] == 1
+
+
+def test_get_load_store_all_programs_accepts_transfer(
+    _isolate_viz_interface_state,
+):
+    viz_interface.global_data = {
+        "ops": {
+            "visualization_data": {
+                "(0,0,0)": [
+                    {
+                        "type": "Transfer",
+                        "overall_key": "TRANSFER:ptr",
+                        "time_idx": 0,
+                        "op_index": 0,
+                        "uuid": "u0",
+                    }
+                ]
+            }
+        }
+    }
+    viz_interface.raw_tensor_data = {}
+    viz_interface.load_overall_maps = {}
+    viz_interface.store_overall_maps = {}
+    viz_interface.transfer_overall_maps = {
+        "TRANSFER:ptr": {
+            "shape": [2, 2],
+            "tiles": [{"uuid": "u0", "global_coords": [[0, 0], [1, 1]]}],
+        }
+    }
+
+    with viz_interface.app.test_client() as client:
+        response = client.post(
+            "/api/getLoadStoreAllPrograms",
+            json={"type": "Transfer", "overall_key": "TRANSFER:ptr", "time_idx": 0},
+        )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    coord_to_count = {tuple(entry[:-1]): int(entry[-1]) for entry in payload["counts"]}
+    assert coord_to_count[(0, 0)] == 1
+    assert coord_to_count[(1, 1)] == 1
