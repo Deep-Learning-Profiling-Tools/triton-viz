@@ -7,7 +7,7 @@ from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
 from .config import config as cfg
-from ..clients import Sanitizer, Profiler, Tracer
+from ..clients import Sanitizer, Profiler, Tracer, RaceDetector
 from .client import ClientManager, Client
 from .data import Launch
 from . import patch
@@ -32,6 +32,8 @@ class TraceInterface:
                 return Profiler()
             if name == "tracer":
                 return Tracer()
+            if name == "race_detector":
+                return RaceDetector()
             raise ValueError(f"Unknown client: {client}")
         elif isinstance(client, Client):
             return client
@@ -289,7 +291,7 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         if cfg.cli_active and isinstance(kernel, TraceInterface):
             raise RuntimeError(
                 "@triton_viz.trace() decorator cannot be used together with "
-                "CLI wrapper (e.g., triton-sanitizer / triton-profiler). "
+                "CLI wrapper (e.g., triton-sanitizer / triton-profiler / triton-race-detector). "
                 "Please remove the @triton_viz.trace() decorator from your code "
                 "when using CLI tools."
             )
