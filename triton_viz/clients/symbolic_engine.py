@@ -33,6 +33,7 @@ from triton.runtime.interpreter import TensorHandle, _get_np_dtype
 
 from ..core.client import Client
 from ..core.callbacks import OpCallbacks, ForLoopCallbacks
+from ..core.libdevice_registry import _LIBDEVICE_REGISTRY
 from ..core.data import (
     Op,
     UnaryOp,
@@ -214,19 +215,11 @@ class SymbolicExpr:
         "tensor_pointer_load",
         "tensor_pointer_store",
     )
-    UNARY_OPS: ClassVar[tuple[str, ...]] = (
-        "cos",
-        "exp",
-        "exp2",
-        "abs",
-        "fabs",
-        "floor",
-        "ceil",
-        "log",
-        "log2",
-        "sqrt",
-        "sin",
-        "rsqrt",
+    UNARY_OPS: ClassVar[tuple[str, ...]] = tuple(
+        sorted(
+            {spec.sym_name for spec in _LIBDEVICE_REGISTRY if spec.arity == 1}
+            | {"fabs"}
+        )
     )
     BINARY_OP_SYMBOL_TABLE: ClassVar[dict[str, str]] = {
         "add": "+",
@@ -831,12 +824,38 @@ class UnarySymbolicExpr(SymbolicExpr):
         self.dtype = self.arg.dtype
         self.shape = self.arg.shape
 
+    # Range bounds for opaque Z3 fallback: (lower, upper) where None means unbounded.
+    _Z3_RANGE_BOUNDS: ClassVar[dict[str, tuple[int | None, int | None]]] = {
+        "tanh": (-1, 1),
+        "sin": (-1, 1),
+        "cos": (-1, 1),
+        "asin": (-2, 2),
+        "acos": (0, 4),
+        "exp": (0, None),
+        "exp2": (0, None),
+        "sqrt": (0, None),
+        "rsqrt": (0, None),
+    }
+
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         val, constraints = self.arg._to_z3()
         handler = self._Z3_BUILDERS.get(self.op)
-        if handler is None:
-            raise NotImplementedError(f"Unary op {self.op} is not implemented")
-        return handler(val), constraints
+        if handler is not None:
+            return handler(val), constraints
+        # Conservative fallback: fresh symbol with range bounds where known.
+        # Argument constraints are preserved for downstream analysis.
+        opaque = Int(f"unary_{self.op}_{id(self)}")
+        bounds = self._Z3_RANGE_BOUNDS.get(self.op)
+        if bounds is not None:
+            lo, hi = bounds
+            parts: list = []
+            if lo is not None:
+                parts.append(opaque >= lo)
+            if hi is not None:
+                parts.append(opaque <= hi)
+            if parts:
+                constraints = _and_constraints(constraints, *parts)
+        return opaque, constraints
 
     @staticmethod
     def _abs(val) -> Z3Expr:
@@ -846,6 +865,32 @@ class UnarySymbolicExpr(SymbolicExpr):
         "abs": _abs,
         "fabs": _abs,
     }
+
+    _NUMPY_OPS: ClassVar[dict[str, Callable]] = {
+        **{
+            spec.sym_name: spec.np_func
+            for spec in _LIBDEVICE_REGISTRY
+            if spec.np_func is not None and spec.arity == 1
+        },
+        "fabs": np.fabs,
+    }
+
+    _BUILDER_OPS: ClassVar[frozenset[str]] = frozenset(
+        spec.sym_name
+        for spec in _LIBDEVICE_REGISTRY
+        if spec.builder_method is not None and spec.arity == 1
+    )
+
+    def concretize(self) -> Any:
+        arg_concrete = self.arg.concretize()
+        if self.op in self._BUILDER_OPS:
+            return self.concrete_fn(arg_concrete)  # type: ignore
+        np_op = self._NUMPY_OPS.get(self.op)
+        if np_op is None:
+            raise NotImplementedError(
+                f"Concretize for unary op {self.op} is not implemented"
+            )
+        return self.concrete_fn(arg_concrete, np_op)  # type: ignore
 
 
 class BinarySymbolicExpr(SymbolicExpr):
@@ -1696,16 +1741,9 @@ SymbolicExpr.register_op_class(
 # ── Shared constants and utilities for symbolic clients ──────────
 
 _UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
-    np.cos: "cos",
-    np.exp: "exp",
-    np.exp2: "exp2",
-    np.abs: "abs",
-    np.floor: "floor",
-    np.ceil: "ceil",
-    np.log: "log",
-    np.log2: "log2",
-    np.sqrt: "sqrt",
-    np.sin: "sin",
+    spec.np_func: spec.sym_name
+    for spec in _LIBDEVICE_REGISTRY
+    if spec.np_func is not None and spec.arity == 1
 }
 
 _BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
