@@ -1,0 +1,197 @@
+import pytest
+import torch
+
+import triton
+import triton.language as tl
+
+import triton_viz
+from triton_viz.clients import RaceDetector
+from triton_viz.clients.race_detector.race_detector import (
+    SymbolicRaceDetector,
+    NullRaceDetector,
+)
+from triton_viz.clients.race_detector.data import AccessEventRecord
+from triton_viz.core.config import config as cfg
+from triton_viz.core.data import Load, Store
+
+
+# ======== Config Isolation ========
+#
+# Kernels are wrapped with @triton_viz.trace inside each test body so the
+# flag-on escape hatch in trace.py (returns the raw kernel when
+# ENABLE_RACE_DETECTOR is off) doesn't strip tracing at import time.
+
+
+@pytest.fixture
+def _isolate_race_detector_cfg():
+    saved = cfg.enable_race_detector
+    cfg.enable_race_detector = True
+    yield
+    cfg.enable_race_detector = saved
+
+
+# ======== Factory Test ========
+
+
+def test_race_detector_factory_toggle():
+    saved = cfg.enable_race_detector
+    try:
+        cfg.enable_race_detector = True
+        assert isinstance(RaceDetector(), SymbolicRaceDetector)
+
+        cfg.enable_race_detector = False
+        assert isinstance(RaceDetector(), NullRaceDetector)
+    finally:
+        cfg.enable_race_detector = saved
+
+
+# ======== Raw kernel templates (re-decorated per test) ========
+
+
+@triton.jit
+def _basic_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + offs)
+    tl.store(x_ptr + offs, v + 1)
+
+
+@triton.jit
+def _load_store_loop_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    for _i in tl.range(0, 4):
+        v = tl.load(x_ptr + offs)
+        tl.store(x_ptr + offs, v + 1)
+
+
+@triton.jit
+def _loop_dedup_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    acc = tl.zeros((BLOCK,), dtype=tl.float32)
+    for _i in tl.range(0, 4):
+        acc += tl.load(x_ptr + offs)
+    tl.store(x_ptr + offs, acc)
+
+
+@triton.jit
+def _loop_premises_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    for _i in tl.range(0, 4):
+        v = tl.load(x_ptr + offs)
+        tl.store(x_ptr + offs, v)
+
+
+@triton.jit
+def _dispatch_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    tl.store(x_ptr + offs, tl.load(x_ptr + offs))
+
+
+# ======== Basic Capture ========
+
+
+def test_basic_capture(_isolate_race_detector_cfg):
+    detector = SymbolicRaceDetector()
+    traced = triton_viz.trace(client=detector)(_basic_kernel)
+
+    x = torch.zeros(16, dtype=torch.float32)
+    traced[(1,)](x, BLOCK=16)
+
+    modes = [r.access_mode for r in detector.records]
+    op_types = [r.op_type for r in detector.records]
+    assert modes == ["read", "write"], f"expected [read, write], got {modes}"
+    assert op_types == [Load, Store], f"expected [Load, Store], got {op_types}"
+
+    for record in detector.records:
+        assert record.premises, "premises must include addr_ok + pid_ok at minimum"
+        assert record.tensor is not None, "base tensor should be resolvable"
+        assert record.tensor_name == "x_ptr"
+        assert isinstance(record, AccessEventRecord)
+
+
+# ======== Loop: load+store at same address are NOT merged ========
+
+
+def test_loop_load_and_store_same_addr_not_merged(_isolate_race_detector_cfg):
+    detector = SymbolicRaceDetector()
+    traced = triton_viz.trace(client=detector)(_load_store_loop_kernel)
+
+    x = torch.zeros(16, dtype=torch.float32)
+    traced[(1,)](x, BLOCK=16)
+
+    modes = sorted(r.access_mode for r in detector.records)
+    # exactly one read event and one write event (deduped across 4 iterations,
+    # but access_mode splits them so they stay distinct).
+    assert modes == [
+        "read",
+        "write",
+    ], f"load+store at same addr should stay as two events; got {modes}"
+
+
+# ======== Loop: repeated access at same site is deduped ========
+
+
+def test_loop_repeated_access_deduped(_isolate_race_detector_cfg):
+    detector = SymbolicRaceDetector()
+    traced = triton_viz.trace(client=detector)(_loop_dedup_kernel)
+
+    x = torch.zeros(16, dtype=torch.float32)
+    traced[(1,)](x, BLOCK=16)
+
+    reads = [r for r in detector.records if r.access_mode == "read"]
+    assert (
+        len(reads) == 1
+    ), f"loop-body load should dedupe to a single event, got {len(reads)}"
+
+
+# ======== Loop: event carries iterator constraint in its premises ========
+
+
+def test_loop_event_premises_include_iterator(_isolate_race_detector_cfg):
+    detector = SymbolicRaceDetector()
+    traced = triton_viz.trace(client=detector)(_loop_premises_kernel)
+
+    x = torch.zeros(16, dtype=torch.float32)
+    traced[(1,)](x, BLOCK=16)
+
+    assert detector.records
+    for record in detector.records:
+        premise_strs = " ".join(str(p) for p in record.premises)
+        assert "loop_i_" in premise_strs, (
+            f"in-loop event premises must carry a loop iterator constraint; "
+            f"got premises: {premise_strs}"
+        )
+
+
+# ======== String dispatch + ClientManager lookup ========
+
+
+def test_string_dispatch_and_manager_lookup(_isolate_race_detector_cfg):
+    traced = triton_viz.trace("race_detector")(_dispatch_kernel)
+
+    x = torch.zeros(8, dtype=torch.float32)
+    traced[(1,)](x, BLOCK=8)
+
+    rd = traced.client_manager.clients["race_detector"]
+    assert isinstance(rd, SymbolicRaceDetector)
+    assert len(rd.records) == 2
+
+
+# ======== Flag-off escape hatch ========
+
+
+def test_flag_off_returns_raw_kernel():
+    """With ENABLE_RACE_DETECTOR=0 a string-dispatched trace decorator must
+    leave the kernel uninstrumented so opting in has literally zero impact
+    when the flag is off."""
+    saved = cfg.enable_race_detector
+    try:
+        cfg.enable_race_detector = False
+        traced = triton_viz.trace("race_detector")(_dispatch_kernel)
+
+        # Should be the raw JIT kernel, not a TritonTrace wrapper.
+        from triton_viz.core.trace import TritonTrace
+
+        assert not isinstance(traced, TritonTrace)
+        assert traced is _dispatch_kernel
+    finally:
+        cfg.enable_race_detector = saved
