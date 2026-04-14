@@ -24,7 +24,7 @@ class Config:
     - enable_sanitizer: ENABLE_SANITIZER, toggles the sanitizer pipeline.
     - enable_profiler: ENABLE_PROFILER, toggles the profiler pipeline.
     - enable_race_detector: ENABLE_RACE_DETECTOR, toggles the data-race
-      detector pipeline (defaults off).
+      detector pipeline.
     - enable_timing: ENABLE_TIMING, collects timing info during execution.
     - report_grid_execution_progress: REPORT_GRID_EXECUTION_PROGRESS, logs per
       program block progress in the interpreter.
@@ -48,7 +48,7 @@ class Config:
         self.num_sms: int = _get_int_env("TRITON_VIZ_NUM_SMS", 1, minimum=1)
         self.enable_sanitizer: bool = _is_one("ENABLE_SANITIZER", "1")
         self.enable_profiler: bool = _is_one("ENABLE_PROFILER", "1")
-        self.enable_race_detector: bool = _is_one("ENABLE_RACE_DETECTOR", "0")
+        self.enable_race_detector: bool = _is_one("ENABLE_RACE_DETECTOR", "1")
         self.enable_timing: bool = _is_one("ENABLE_TIMING")
         self.report_grid_execution_progress: bool = _is_one(
             "REPORT_GRID_EXECUTION_PROGRESS"
