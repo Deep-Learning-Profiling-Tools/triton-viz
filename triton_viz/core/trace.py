@@ -288,9 +288,11 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         return isinstance(selected, Sanitizer)
 
     def _is_race_detector_client(selected: str | Client) -> bool:
-        if isinstance(selected, str):
-            return selected.lower() == "race_detector"
-        return isinstance(selected, RaceDetector)
+        # String-dispatch only: explicit RaceDetector instances reflect a
+        # deliberate user choice and must not be silently disabled by the
+        # global feature flag. The env flag controls the "opt in by name"
+        # path, not already-constructed detector objects.
+        return isinstance(selected, str) and selected.lower() == "race_detector"
 
     def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
         if cfg.cli_active and isinstance(kernel, TraceInterface):

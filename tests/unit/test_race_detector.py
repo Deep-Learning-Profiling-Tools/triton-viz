@@ -195,3 +195,57 @@ def test_flag_off_returns_raw_kernel():
         assert traced is _dispatch_kernel
     finally:
         cfg.enable_race_detector = saved
+
+
+def test_flag_off_does_not_swallow_explicit_instance():
+    """An explicitly constructed detector instance reflects a deliberate user
+    choice and must keep tracing regardless of the global flag."""
+    saved = cfg.enable_race_detector
+    try:
+        cfg.enable_race_detector = False
+        detector = SymbolicRaceDetector()
+        traced = triton_viz.trace(client=detector)(_dispatch_kernel)
+
+        from triton_viz.core.trace import TritonTrace
+
+        assert isinstance(
+            traced, TritonTrace
+        ), "explicit instance must be traced even when the env flag is off"
+
+        x = torch.zeros(8, dtype=torch.float32)
+        traced[(1,)](x, BLOCK=8)
+        assert len(detector.records) == 2
+    finally:
+        cfg.enable_race_detector = saved
+
+
+# ======== Repeat launches stay consistent (no partial-grid cache) ========
+
+
+def test_repeat_launches_are_consistent(_isolate_race_detector_cfg):
+    """Launching the same traced kernel twice must produce deterministic,
+    identical block-execution counts. The previous grid-enumeration cache
+    could skip block 0 on a cache hit and then run block 1 instead —
+    different blocks run, different side effects, events captured from a
+    non-deterministic representative. This regression asserts every launch
+    behaves the same."""
+    detector = SymbolicRaceDetector()
+    traced = triton_viz.trace(client=detector)(_dispatch_kernel)
+
+    x1 = torch.zeros(8, dtype=torch.float32)
+    traced[(2,)](x1, BLOCK=8)
+    after_first = list(detector.records)
+
+    detector.records.clear()
+    x2 = torch.zeros(8, dtype=torch.float32)
+    traced[(2,)](x2, BLOCK=8)
+    after_second = list(detector.records)
+
+    assert len(after_first) == len(after_second), (
+        f"repeat launches must capture the same number of events; "
+        f"got {len(after_first)} then {len(after_second)}"
+    )
+    assert [r.access_mode for r in after_first] == [r.access_mode for r in after_second]
+    assert [r.source_location for r in after_first] == [
+        r.source_location for r in after_second
+    ]

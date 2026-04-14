@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import cached_property
 from typing import (
     Any,
     Literal,
@@ -110,25 +109,6 @@ class PendingEvent(PendingCheck):
     op_type: type[Op] = Load
 
 
-@dataclass(frozen=True)
-class _FnSymbolicCache:
-    fn: Callable
-    grid: tuple[int, ...]
-    args: tuple
-
-    @cached_property
-    def hash_value(self) -> int:
-        return hash((self.fn, self.grid, self.args))
-
-    def __hash__(self) -> int:
-        return self.hash_value
-
-
-# Independent from sanitizer's equivalent set so the two detectors don't
-# pollute each other's grid-enumeration cache.
-_fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
-
-
 class RaceDetector(Client):
     """Factory class that returns the concrete race-detector implementation
     based on the value of ``cfg.enable_race_detector``.
@@ -195,8 +175,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.tensor_names: dict[int, set[str]] = {}
         self.need_full_grid: bool | None = None
         self.last_grid: tuple[int, int, int] | None = None
-        self.cache_args: list[Any] = []
-        self.cache_grid: tuple[int, ...] | None = None
         self.addr_ok: BoolRef | None = None
         self.pid_ok: BoolRef | None = None
         self.solver: Solver | None = None
@@ -347,20 +325,15 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             if cfg.verbose:
                 print("[RaceDetector]  ↪ skip duplicated addr in loop")
 
-    def _clear_cache(self) -> None:
-        self.cache_args.clear()
-        self.cache_grid = None
-
     # ── Client callbacks ──────────────────────────────────────────────────
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        if self.cache_grid:
-            fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
-            self._clear_cache()
-            if fn_cache not in _fn_symbolic_cache_set:
-                _fn_symbolic_cache_set.add(fn_cache)
-                return True
-            return False
+        # No cross-launch dedup cache: skipping individual blocks via a cache
+        # hit would leave the kernel in a partial-grid state (patch.py uses
+        # `continue` on False and bypasses post_run_callback, so it can't
+        # abort the whole launch). Instead, we run a single representative
+        # block and abort via post_run_callback — same number of blocks on
+        # every launch, no non-deterministic side effects.
         if self.need_full_grid is None:
             return True
         return self.need_full_grid
@@ -369,7 +342,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         if self.need_full_grid is None:
             self.need_full_grid = False
         if self.grid_idx == self.last_grid or not self.need_full_grid:
-            self._clear_cache()
             self.tensors.clear()
             self.tensor_addrs.clear()
             self.tensor_names.clear()
@@ -379,8 +351,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
 
     def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
         if not hasattr(arg, "data_ptr"):
-            if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
-                self.cache_args.append(arg)
             return
         from triton.runtime.jit import TensorWrapper
 
@@ -399,14 +369,12 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             raise ValueError(
                 "The race detector only supports contiguously stored tensors for now!"
             )
-        self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
         self._record_tensor_name(arg, name)
         self.tensors.append(arg)
         self.tensor_addrs.extend(tensor_physical_addresses)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         grid = tuple(int(g) for g in grid)
-        self.cache_grid = grid
         self.last_grid = (grid[0] - 1, grid[1] - 1, grid[2] - 1)
         self.grid = grid
         addr = Int("addr")
