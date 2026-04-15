@@ -18,7 +18,7 @@ from ...core.data import (
 )
 from ..symbolic_engine import (
     SymbolicExpr,
-    SymbolicMemoryClient,
+    SymbolicClient,
     PendingCheck,
     LoopContext,
     Z3Expr,
@@ -126,38 +126,38 @@ class RaceDetector(Client):
         raise NotImplementedError
 
 
-class SymbolicRaceDetector(RaceDetector, SymbolicMemoryClient):
+class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     def __init__(self, abort_on_error: bool = False):
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[AccessEventRecord] = []
 
-    # Explicit forwarders to SymbolicMemoryClient: the RaceDetector factory
+    # Explicit forwarders to SymbolicClient: the RaceDetector factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
     # satisfy Client's @abstractmethod contract, and those stubs would
-    # otherwise shadow SymbolicMemoryClient's impls in the subclass MRO.
+    # otherwise shadow SymbolicClient's impls in the subclass MRO.
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
-        SymbolicMemoryClient.grid_idx_callback(self, grid_idx)
+        SymbolicClient.grid_idx_callback(self, grid_idx)
 
     def finalize(self) -> list:
-        return SymbolicMemoryClient.finalize(self)
+        return SymbolicClient.finalize(self)
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
-        return SymbolicMemoryClient.register_for_loop_callback(self)
+        return SymbolicClient.register_for_loop_callback(self)
 
     def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
-        SymbolicMemoryClient.arg_callback(self, name, arg, arg_cvt)
+        SymbolicClient.arg_callback(self, name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
-        SymbolicMemoryClient.grid_callback(self, grid)
+        SymbolicClient.grid_callback(self, grid)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        return SymbolicMemoryClient.register_op_callback(self, op_type)
+        return SymbolicClient.register_op_callback(self, op_type)
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        return SymbolicMemoryClient.pre_run_callback(self, fn)
+        return SymbolicClient.pre_run_callback(self, fn)
 
     def post_run_callback(self, fn: Callable) -> bool:
-        return SymbolicMemoryClient.post_run_callback(self, fn)
+        return SymbolicClient.post_run_callback(self, fn)
 
     # ── Event recording ───────────────────────────────────────────────────
 
@@ -255,7 +255,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicMemoryClient):
             if cfg.verbose:
                 print(f"[{self.LOG_TAG}]  ↪ skip duplicated addr in loop")
 
-    # ── Per-pending handler invoked from SymbolicMemoryClient's loop template
+    # ── Per-pending handler invoked from SymbolicClient's loop template
 
     def _process_pending_check(
         self,

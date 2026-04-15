@@ -559,8 +559,8 @@ def test_store_dtype_block_of_pointers():
 
 # ======== Launch-lifecycle regression tests ===========
 #
-# These guard the two spots that break most easily when SymbolicMemoryClient
-# is reshuffled:
+# These guard the two spots that break most easily when SymbolicClient's
+# launch-lifecycle machinery is reshuffled:
 #   1. the cross-launch fn cache (sanitizer's pre_run_callback short-circuit)
 #   2. the post_run_callback guard that must NOT wipe launch state mid-
 #      full-grid enumeration.

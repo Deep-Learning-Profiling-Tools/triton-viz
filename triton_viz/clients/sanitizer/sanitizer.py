@@ -23,7 +23,7 @@ from ...core.data import (
 )
 from ..symbolic_engine import (
     SymbolicExpr,
-    SymbolicMemoryClient,
+    SymbolicClient,
     PendingCheck,
     LoopContext,
     Z3Expr,
@@ -141,34 +141,34 @@ class _FnSymbolicCache:
 _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
 
 
-class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
+class SymbolicSanitizer(Sanitizer, SymbolicClient):
     def __init__(self, abort_on_error: bool = True):
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[OutOfBoundsRecordZ3] = []
         self.cache_args: list[Any] = []
         self.cache_grid: tuple[int, ...] | None = None
 
-    # Explicit forwarders to SymbolicMemoryClient: the Sanitizer factory
+    # Explicit forwarders to SymbolicClient: the Sanitizer factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
     # satisfy Client's @abstractmethod contract, and those stubs would
-    # otherwise shadow SymbolicMemoryClient's impls in the subclass MRO.
+    # otherwise shadow SymbolicClient's impls in the subclass MRO.
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
-        SymbolicMemoryClient.grid_idx_callback(self, grid_idx)
+        SymbolicClient.grid_idx_callback(self, grid_idx)
 
     def finalize(self) -> list:
-        return SymbolicMemoryClient.finalize(self)
+        return SymbolicClient.finalize(self)
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
-        return SymbolicMemoryClient.register_for_loop_callback(self)
+        return SymbolicClient.register_for_loop_callback(self)
 
     def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
-        SymbolicMemoryClient.arg_callback(self, name, arg, arg_cvt)
+        SymbolicClient.arg_callback(self, name, arg, arg_cvt)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        return SymbolicMemoryClient.register_op_callback(self, op_type)
+        return SymbolicClient.register_op_callback(self, op_type)
 
     def post_run_callback(self, fn: Callable) -> bool:
-        return SymbolicMemoryClient.post_run_callback(self, fn)
+        return SymbolicClient.post_run_callback(self, fn)
 
     # ── Sanitizer-specific hook overrides ─────────────────────────
 
@@ -194,7 +194,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
         # ``pre_run_callback`` can consult it before deciding whether to skip
         # the launch.
         self.cache_grid = tuple(int(g) for g in grid)
-        SymbolicMemoryClient.grid_callback(self, grid)
+        SymbolicClient.grid_callback(self, grid)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
@@ -204,7 +204,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
                 _fn_symbolic_cache_set.add(fn_cache)
                 return True
             return False
-        return SymbolicMemoryClient.pre_run_callback(self, fn)
+        return SymbolicClient.pre_run_callback(self, fn)
 
     def _find_tensor_for_expr(
         self, symbolic_expr: SymbolicExpr, violation_addr: int
