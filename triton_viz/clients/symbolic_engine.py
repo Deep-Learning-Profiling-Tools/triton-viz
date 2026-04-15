@@ -429,7 +429,7 @@ class SymbolicExpr:
         tl.float32,
         tl.float64,
     )
-    builtin_scala_types: ClassVar[tuple[type, ...]] = (int, float)
+    builtin_scala_types: ClassVar[tuple[type, ...]] = (bool, int, float)
     tuple_types: ClassVar[tuple[type, ...]] = (tl.core.tuple, tuple, list)
 
     @staticmethod
@@ -458,8 +458,12 @@ class SymbolicExpr:
                         f"All elements in the tuple must have the same dtype, but found {first_dtype} and {SymbolicExpr.from_value(v).dtype}"
                     )
             return first_dtype
-        if isinstance(var, SymbolicExpr.builtin_scala_types):
-            return tl.int32 if isinstance(var, int) else tl.float32
+        if isinstance(var, bool):
+            return tl.int1
+        if isinstance(var, int):
+            return tl.int32
+        if isinstance(var, float):
+            return tl.float32
         raise ValueError(f"Unsupported type: {type(var)}")
 
     # Stored on the class and may be accessed through either the class or an instance;
@@ -475,6 +479,8 @@ class SymbolicExpr:
     @classmethod
     def from_value(cls, var: Any) -> SymbolicExpr:
         """Create a SymbolicExpr from a Python value."""
+        if isinstance(var, tl.constexpr):  # unwrap constexpr to raw value
+            var = var.value
         if isinstance(var, tl.core.tensor):  # if a triton tensor
             var = var.handle  # get its handle
 
