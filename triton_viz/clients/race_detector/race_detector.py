@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import (
     Any,
     ClassVar,
-    NoReturn,
     TypeVar,
     cast,
 )
@@ -19,6 +18,7 @@ from ...core.data import (
 from ..symbolic_engine import (
     SymbolicExpr,
     SymbolicClient,
+    NullSymbolicClient,
     PendingCheck,
     LoopContext,
     Z3Expr,
@@ -26,7 +26,7 @@ from ..symbolic_engine import (
     AccessMode,
 )
 from .data import AccessEventRecord
-from ...utils.traceback_utils import extract_user_frames
+from ...utils.traceback_utils import capture_current_source_location
 from ...core.config import config as cfg
 
 RaceDetectorT = TypeVar("RaceDetectorT", bound="RaceDetector")
@@ -77,6 +77,7 @@ class RaceDetector(Client):
 
     NAME = "race_detector"
     LOG_TAG: ClassVar[str] = "RaceDetector"
+    LOG_VERB: ClassVar[str] = "recording"
 
     def __new__(cls: type[RaceDetectorT], *args: Any, **kwargs: Any) -> RaceDetectorT:
         if cls is RaceDetector:
@@ -217,11 +218,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         dedupe events that repeat across iterations of the same loop.
         """
         z3_addr, z3_constraints = expr.eval()
-        frames = extract_user_frames(num_frames=1)
-        frame = frames[-1] if frames else None
-        source_location = (
-            (frame.filename, frame.lineno, frame.func_name) if frame else None
-        )
+        source_location = capture_current_source_location()
 
         if not self.loop_stack:
             self._record_access_event(
@@ -263,17 +260,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         pending: PendingCheck,
         iter_constraints: list[BoolRef],
     ) -> None:
+        del ctx, iter_constraints  # verbose logging is handled by the base
         # Items enqueued by _handle_access_check are PendingEvent instances
         # (subclass of PendingCheck) — narrow so attribute accesses are
         # type-safe under Literal["read", "write"].
         assert isinstance(pending, PendingEvent)
-        if cfg.verbose:
-            print(
-                f"[{self.LOG_TAG}] ▶ recording:",
-                pending.addr_expr,
-                f" with iterator constraints: {iter_constraints} ",
-                f" and expression-related constraints: {pending.constraints} ",
-            )
         self._record_access_event(
             pending.access_mode,
             pending.op_type,
@@ -284,39 +275,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         )
 
 
-class NullRaceDetector(RaceDetector):
+class NullRaceDetector(NullSymbolicClient, RaceDetector):
     """A do-nothing object returned when the race-detector backend is 'off'.
-    Any attribute access raises an explicit error so misuse is obvious.
+    Every callback raises via ``NullSymbolicClient`` so misuse is obvious.
     """
 
     def __init__(self, abort_on_error: bool = False, *args: Any, **kwargs: Any):
         super().__init__(abort_on_error=abort_on_error)
-
-    def _disabled(self, method: str) -> NoReturn:
-        raise RuntimeError(
-            f"[NullRaceDetector] '{method}' was called, "
-            "but race-detector backend is off; no functionality is available."
-        )
-
-    def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
-        self._disabled("arg_callback")
-
-    def finalize(self) -> list:
-        self._disabled("finalize")
-
-    def grid_callback(self, grid: tuple[int, ...]) -> None:
-        self._disabled("grid_callback")
-
-    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
-        self._disabled("grid_idx_callback")
-
-    def register_op_callback(
-        self, op_type: type[Op], *args: Any, **kwargs: Any
-    ) -> OpCallbacks:
-        self._disabled("register_op_callback")
-
-    def register_for_loop_callback(self) -> ForLoopCallbacks:
-        self._disabled("register_for_loop_callback")
-
-    def __getattr__(self, name: str) -> Any:
-        self._disabled(name)

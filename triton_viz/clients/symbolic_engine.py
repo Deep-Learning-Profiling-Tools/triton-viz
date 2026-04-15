@@ -8,6 +8,7 @@ from typing import (
     Any,
     ClassVar,
     Literal,
+    NoReturn,
     TypeAlias,
     cast,
 )
@@ -1796,6 +1797,10 @@ class SymbolicClient(Client):
     """
 
     LOG_TAG: ClassVar[str] = "SymbolicClient"
+    # Verb printed inside ``_loop_hook_after`` when each pending check is
+    # flushed. Subclasses override (e.g. "recording" for race detector,
+    # "checking" for sanitizer) so the verbose log reads correctly.
+    LOG_VERB: ClassVar[str] = "processing"
 
     def __init__(self) -> None:
         super().__init__()
@@ -2193,6 +2198,13 @@ class SymbolicClient(Client):
                 all_iterator_constraints.append(outer_constraint)
 
         for pending in ctx.pending_checks:
+            if cfg.verbose:
+                print(
+                    f"[{self.LOG_TAG}] ▶ {self.LOG_VERB}:",
+                    pending.addr_expr,
+                    f" with iterator constraints: {all_iterator_constraints} ",
+                    f" and expression-related constraints: {pending.constraints} ",
+                )
             self._process_pending_check(ctx, pending, all_iterator_constraints)
 
         if ctx.pending_checks:
@@ -2469,3 +2481,46 @@ class SymbolicClient(Client):
         ret = self.need_full_grid
         self.need_full_grid = None
         return ret
+
+
+class NullSymbolicClient:
+    """Shared no-op body for ``Null*`` variants of symbolic clients.
+
+    Used by ``NullRaceDetector`` / ``NullSanitizer`` (mixed in ahead of the
+    factory class) to satisfy Client's ``@abstractmethod`` contract without
+    providing any real behavior. Every callback raises loudly so misuse is
+    obvious; ``__getattr__`` catches anything we forget to list explicitly.
+
+    Not a ``Client`` subclass on its own — always combined with a factory
+    (``NullRaceDetector(NullSymbolicClient, RaceDetector)``), so the MRO
+    puts the no-op impls ahead of the factory's abstract stubs.
+    """
+
+    def _disabled(self, method: str) -> NoReturn:
+        raise RuntimeError(
+            f"[{type(self).__name__}] '{method}' was called, "
+            "but the backend is off; no functionality is available."
+        )
+
+    def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
+        self._disabled("arg_callback")
+
+    def finalize(self) -> list:
+        self._disabled("finalize")
+
+    def grid_callback(self, grid: tuple[int, ...]) -> None:
+        self._disabled("grid_callback")
+
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
+        self._disabled("grid_idx_callback")
+
+    def register_op_callback(
+        self, op_type: type[Op], *args: Any, **kwargs: Any
+    ) -> OpCallbacks:
+        self._disabled("register_op_callback")
+
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        self._disabled("register_for_loop_callback")
+
+    def __getattr__(self, name: str) -> Any:
+        self._disabled(name)

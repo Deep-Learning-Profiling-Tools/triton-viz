@@ -4,7 +4,6 @@ from functools import cached_property
 from typing import (
     Any,
     ClassVar,
-    NoReturn,
     TypeVar,
     cast,
 )
@@ -24,6 +23,7 @@ from ...core.data import (
 from ..symbolic_engine import (
     SymbolicExpr,
     SymbolicClient,
+    NullSymbolicClient,
     PendingCheck,
     LoopContext,
     Z3Expr,
@@ -33,6 +33,7 @@ from ..symbolic_engine import (
 from .data import OutOfBoundsRecordZ3
 from ...utils.traceback_utils import (
     extract_user_frames,
+    capture_current_source_location,
     location_to_traceback_info,
 )
 from .report import (
@@ -52,6 +53,7 @@ class Sanitizer(Client):
 
     NAME = "sanitizer"
     LOG_TAG: ClassVar[str] = "Sanitizer"
+    LOG_VERB: ClassVar[str] = "checking"
 
     def __new__(cls: type[SanitizerT], *args: Any, **kwargs: Any) -> SanitizerT:
         if cls is Sanitizer:
@@ -310,11 +312,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             # Capture source location now while we're still in the user's tl.load/tl.store call.
             # This is a lightweight operation that only traverses frame objects.
             # The actual source line will be read later only if an error is detected.
-            frames = extract_user_frames(num_frames=1)
-            frame = frames[-1] if frames else None
-            source_location = (
-                (frame.filename, frame.lineno, frame.func_name) if frame else None
-            )
+            source_location = capture_current_source_location()
             ctx.signature_cache[signature] = len(ctx.pending_checks)
             pending_check = PendingCheck(
                 symbolic_expr=expr,
@@ -333,14 +331,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         pending: PendingCheck,
         iter_constraints: list[BoolRef],
     ) -> None:
-        del ctx  # reserved for future loop-aware diagnostics
-        if cfg.verbose:
-            print(
-                f"[{self.LOG_TAG}] ▶ checking:",
-                pending.addr_expr,
-                f" with iterator constraints: {iter_constraints} ",
-                f" and expression-related constraints: {pending.constraints} ",
-            )
+        del ctx, iter_constraints  # verbose logging is handled by the base
         self._check_range_satisfiable(
             pending.addr_expr,
             pending.constraints,
@@ -384,40 +375,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             self.records.append(oob_record)
 
 
-class NullSanitizer(Sanitizer):
+class NullSanitizer(NullSymbolicClient, Sanitizer):
     """
     A do-nothing object returned when the sanitizer backend is 'off'.
-    Any attribute access raises an explicit error so misuse is obvious.
+    Every callback raises via ``NullSymbolicClient`` so misuse is obvious.
     """
 
     def __init__(self, abort_on_error: bool = True, *args: Any, **kwargs: Any):
         super().__init__(abort_on_error=abort_on_error)
-
-    def _disabled(self, method: str) -> NoReturn:
-        raise RuntimeError(
-            f"[NullSanitizer] '{method}' was called, "
-            "but sanitizer backend is off; no functionality is available."
-        )
-
-    def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
-        self._disabled("arg_callback")
-
-    def finalize(self) -> list:
-        self._disabled("finalize")
-
-    def grid_callback(self, grid: tuple[int, ...]) -> None:
-        self._disabled("grid_callback")
-
-    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
-        self._disabled("grid_idx_callback")
-
-    def register_op_callback(
-        self, op_type: type[Op], *args: Any, **kwargs: Any
-    ) -> OpCallbacks:
-        self._disabled("register_op_callback")
-
-    def register_for_loop_callback(self) -> ForLoopCallbacks:
-        self._disabled("register_for_loop_callback")
-
-    def __getattr__(self, name: str) -> Any:
-        self._disabled(name)
