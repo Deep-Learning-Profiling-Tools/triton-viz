@@ -7,6 +7,7 @@ from functools import reduce
 from typing import (
     Any,
     ClassVar,
+    Literal,
     TypeAlias,
     cast,
 )
@@ -35,6 +36,7 @@ from triton.runtime.interpreter import TensorHandle, _get_np_dtype
 
 from ..core.client import Client
 from ..core.callbacks import OpCallbacks, ForLoopCallbacks
+from ..core.config import config as cfg
 from ..core.data import (
     Op,
     UnaryOp,
@@ -67,7 +69,20 @@ from ..core.data import (
     AtomicRMW,
     RawLoad,
     RawStore,
+    Load,
+    Store,
+    MakeBlockPointer,
+    TensorPointerLoad,
+    TensorPointerStore,
 )
+from .utils import (
+    check_storage_contiguous,
+    get_physical_addr_from_tensor_slice,
+    check_inner_stride_equal_to_one,
+)
+
+
+AccessMode: TypeAlias = Literal["read", "write"]
 
 
 Z3Expr: TypeAlias = ExprRef | list[ExprRef] | Tactic | Probe
@@ -2147,6 +2162,8 @@ class SymbolicMemoryClient(SymbolicClient):
     subclasses only carry their domain-specific logic.
     """
 
+    LOG_TAG: ClassVar[str] = "SymbolicMemoryClient"
+
     def __init__(self) -> None:
         super().__init__()
         self.grid: tuple[int, ...] | None = None
@@ -2230,6 +2247,132 @@ class SymbolicMemoryClient(SymbolicClient):
             order_vals,
         )
 
+    # ── Abstract hooks subclasses MUST implement ──────────────────────
+
+    def _handle_access_check(
+        self, expr: SymbolicExpr, op_type: type[Op], access_mode: AccessMode
+    ) -> None:
+        """Per-access domain logic: invoked from each memory-op overrider.
+
+        Typical impls either record the access (race detector) or run a Z3
+        satisfiability check (sanitizer). Inside a loop the impl usually
+        defers via the ``pending_checks`` queue and lets ``_loop_hook_after``
+        call ``_process_pending_check`` at the flush point.
+        """
+        raise NotImplementedError
+
+    def _process_pending_check(
+        self,
+        ctx: LoopContext,
+        pending: PendingCheck,
+        iter_constraints: list[BoolRef],
+    ) -> None:
+        """Handle a single pending check when a loop is flushed.
+
+        ``ctx`` is passed in even though the two current consumers don't need
+        it — reserving it keeps the base signature stable for Step 2
+        loop-aware reasoning (outer-loop introspection, nested-loop
+        diagnostics, etc.).
+        """
+        raise NotImplementedError
+
+    # ── Overridable hooks with safe defaults ──────────────────────────
+
+    def _addr_ok_premise(self, addr_ok: BoolRef) -> BoolRef:
+        """Constraint added to the solver under ``addr_ok``.
+
+        Race detector keeps the positive premise (every captured access sits
+        inside a registered tensor). Sanitizer overrides with ``Not(addr_ok)``
+        so unsatisfiability proves every access is in-bounds.
+        """
+        return addr_ok
+
+    def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
+        """Called from ``arg_callback`` for args without a ``data_ptr``."""
+        pass
+
+    def _cache_tensor_arg(self, arg: Tensor) -> None:
+        """Called from ``arg_callback`` after a tensor is registered."""
+        pass
+
+    def _clear_cache(self) -> None:
+        """Extra cache state to clear inside ``post_run_callback``."""
+        pass
+
+    def _clear_symbolic_launch_state(self) -> None:
+        """Launch-scoped state cleared under the shared guard."""
+        self.tensors.clear()
+        self.tensor_addrs.clear()
+        self.tensor_names.clear()
+
+    # ── Shared memory-op overriders ───────────────────────────────────
+
+    def _op_load_overrider(self, ptr, mask, other, *args):
+        if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
+            self.need_full_grid = True
+            ptr = ptr.replace_subtree("load")
+        if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
+            self.need_full_grid = True
+            mask = mask.replace_subtree("load")
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
+        other_sym = SymbolicExpr.from_value(other) if other is not None else None
+        ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
+        self._handle_access_check(ret, Load, "read")
+        return ret
+
+    def _op_store_overrider(self, ptr, value, mask, *args):
+        if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
+            self.need_full_grid = True
+            ptr = ptr.replace_subtree("load")
+        if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
+            self.need_full_grid = True
+            mask = mask.replace_subtree("load")
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        value_sym = SymbolicExpr.from_value(value)
+        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
+        ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
+        self._handle_access_check(ret, Store, "write")
+        return ret
+
+    def _op_tensor_pointer_load_overrider(
+        self,
+        ptr,
+        boundary_check,
+        padding_option,
+        cache_modifier,
+        eviction_policy,
+        is_volatile,
+    ):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        ret = SymbolicExpr.create("tensor_pointer_load", ptr_sym, boundary_check)
+        self._handle_access_check(ret, TensorPointerLoad, "read")
+        return ret
+
+    def _op_tensor_pointer_store_overrider(
+        self, ptr, value, boundary_check, cache_modifier, eviction_policy
+    ):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        value_sym = SymbolicExpr.from_value(value)
+        ret = SymbolicExpr.create(
+            "tensor_pointer_store", ptr_sym, value_sym, boundary_check
+        )
+        self._handle_access_check(ret, TensorPointerStore, "write")
+        return ret
+
+    def _build_op_overrider_map(self) -> dict[type[Op], Callable]:
+        overrider_map = super()._build_op_overrider_map()
+        overrider_map.update(
+            {
+                Load: self._op_load_overrider,
+                Store: self._op_store_overrider,
+                MakeBlockPointer: self._op_make_block_ptr_overrider,
+                TensorPointerLoad: self._op_tensor_pointer_load_overrider,
+                TensorPointerStore: self._op_tensor_pointer_store_overrider,
+            }
+        )
+        return overrider_map
+
     # ── Client callbacks with shared defaults ─────────────────────────
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
@@ -2243,3 +2386,125 @@ class SymbolicMemoryClient(SymbolicClient):
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return SymbolicClient.register_for_loop_callback(self)
+
+    def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
+        if not hasattr(arg, "data_ptr"):
+            self._cache_non_tensor_arg(name, arg)
+            return
+        from triton.runtime.jit import TensorWrapper
+
+        if isinstance(arg, TensorWrapper):
+            arg = arg.base
+        if arg.is_contiguous() or check_storage_contiguous(arg):
+            start = arg.data_ptr()
+            end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
+            tensor_physical_addresses = [(start, end, arg)]
+        elif check_inner_stride_equal_to_one(arg):
+            tensor_physical_addresses = [
+                (start, end, arg)
+                for start, end in get_physical_addr_from_tensor_slice(arg)
+            ]
+        else:
+            raise ValueError(
+                "This symbolic client only supports contiguously stored tensors for now!"
+            )
+        self._record_tensor_name(arg, name)
+        self._cache_tensor_arg(arg)
+        self.tensors.append(arg)
+        self.tensor_addrs.extend(tensor_physical_addresses)
+
+    def grid_callback(self, grid: tuple[int, ...]) -> None:
+        grid = tuple(int(g) for g in grid)
+        self.last_grid = (grid[0] - 1, grid[1] - 1, grid[2] - 1)
+        self.grid = grid
+        addr = Int("addr")
+
+        addr_ok_expr = (
+            Or(*[And(addr >= s, addr <= e) for s, e, _ in self.tensor_addrs])
+            if self.tensor_addrs
+            else BoolVal(False)
+        )
+        self.addr_ok = cast(BoolRef, addr_ok_expr)
+
+        pid_ok_expr = And(
+            SymbolicExpr.PID0 < self.grid[0],
+            SymbolicExpr.PID1 < self.grid[1],
+            SymbolicExpr.PID2 < self.grid[2],
+            SymbolicExpr.PID0 >= 0,
+            SymbolicExpr.PID1 >= 0,
+            SymbolicExpr.PID2 >= 0,
+        )
+        self.pid_ok = cast(BoolRef, pid_ok_expr)
+
+        self.solver = Solver()
+        self.solver.add(self._addr_ok_premise(self.addr_ok))
+        self.solver.add(self.pid_ok)
+        self.addr_sym = addr
+
+    def pre_run_callback(self, fn: Callable) -> bool:
+        if self.need_full_grid is None:
+            return True
+        return self.need_full_grid
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        if self.need_full_grid is None:
+            self.need_full_grid = False
+        if self.grid_idx == self.last_grid or not self.need_full_grid:
+            self._clear_cache()
+            self._clear_symbolic_launch_state()
+        ret = self.need_full_grid
+        self.need_full_grid = None
+        return ret
+
+    # ── For-loop hooks ────────────────────────────────────────────────
+
+    def _loop_hook_before(self, lineno, iterable):
+        if not isinstance(iterable, RangeWrapper):
+            if cfg.verbose:
+                print("not a range wrapper, skipping for-loop iterator association.")
+            return
+        super()._loop_hook_before(lineno, iterable)
+        if cfg.verbose:
+            print(f"[{self.LOG_TAG}] ▶ enter loop@{lineno}, len={iterable.length}")
+
+    def _loop_hook_after(self, lineno: int) -> None:
+        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
+            return
+        ctx = self.loop_stack.pop()
+
+        solver = self.solver
+        addr_sym = self.addr_sym
+        assert solver is not None
+        assert addr_sym is not None
+
+        all_iterator_constraints: list[BoolRef] = []
+        if ctx.pending_checks:
+            solver.push()
+            iterator_constraint = _range_to_iterator_constraint(
+                ctx.idx_z3, start=ctx.start, stop=ctx.stop, step=ctx.step
+            )
+            solver.add(iterator_constraint)
+            all_iterator_constraints.append(iterator_constraint)
+
+            # Also add constraints for all outer loops that are still active.
+            for outer_ctx in self.loop_stack:
+                outer_constraint = _range_to_iterator_constraint(
+                    outer_ctx.idx_z3,
+                    start=outer_ctx.start,
+                    stop=outer_ctx.stop,
+                    step=outer_ctx.step,
+                )
+                solver.add(outer_constraint)
+                all_iterator_constraints.append(outer_constraint)
+
+        for pending in ctx.pending_checks:
+            self._process_pending_check(ctx, pending, all_iterator_constraints)
+
+        if ctx.pending_checks:
+            solver.pop()
+
+        if cfg.verbose:
+            print(
+                f"[{self.LOG_TAG}] ▶ leave loop@{lineno} end. "
+                f"(processed {len(ctx.pending_checks)} unique addr patterns)"
+            )

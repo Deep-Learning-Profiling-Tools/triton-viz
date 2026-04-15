@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import (
     Any,
+    ClassVar,
     NoReturn,
     TypeVar,
     cast,
@@ -10,15 +11,7 @@ from typing import (
 import sys
 
 from torch import Tensor
-from z3 import (
-    Solver,
-    Int,
-    And,
-    Or,
-    Not,
-    sat,
-    BoolVal,
-)
+from z3 import Not, sat
 from z3.z3 import BoolRef, IntNumRef
 
 from ...core.client import Client
@@ -27,23 +20,15 @@ from ...core.data import (
     Op,
     Load,
     Store,
-    MakeBlockPointer,
-    TensorPointerLoad,
-    TensorPointerStore,
-)
-from ..utils import (
-    check_storage_contiguous,
-    get_physical_addr_from_tensor_slice,
-    check_inner_stride_equal_to_one,
 )
 from ..symbolic_engine import (
     SymbolicExpr,
     SymbolicMemoryClient,
-    RangeWrapper,
     PendingCheck,
+    LoopContext,
     Z3Expr,
     ConstraintConjunction,
-    _range_to_iterator_constraint,
+    AccessMode,
 )
 from .data import OutOfBoundsRecordZ3
 from ...utils.traceback_utils import (
@@ -66,6 +51,7 @@ class Sanitizer(Client):
     """
 
     NAME = "sanitizer"
+    LOG_TAG: ClassVar[str] = "Sanitizer"
 
     def __new__(cls: type[SanitizerT], *args: Any, **kwargs: Any) -> SanitizerT:
         if cls is Sanitizer:
@@ -162,9 +148,10 @@ class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
         self.cache_args: list[Any] = []
         self.cache_grid: tuple[int, ...] | None = None
 
-    # Explicit forwarders to SymbolicMemoryClient: the factory class has
-    # NotImplementedError stubs (for Client's @abstractmethod contract) that
-    # would otherwise shadow SymbolicMemoryClient's impls in MRO lookup.
+    # Explicit forwarders to SymbolicMemoryClient: the Sanitizer factory
+    # carries concrete stubs (NotImplementedError or ``return True``) to
+    # satisfy Client's @abstractmethod contract, and those stubs would
+    # otherwise shadow SymbolicMemoryClient's impls in the subclass MRO.
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         SymbolicMemoryClient.grid_idx_callback(self, grid_idx)
 
@@ -173,6 +160,51 @@ class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return SymbolicMemoryClient.register_for_loop_callback(self)
+
+    def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
+        SymbolicMemoryClient.arg_callback(self, name, arg, arg_cvt)
+
+    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        return SymbolicMemoryClient.register_op_callback(self, op_type)
+
+    def post_run_callback(self, fn: Callable) -> bool:
+        return SymbolicMemoryClient.post_run_callback(self, fn)
+
+    # ── Sanitizer-specific hook overrides ─────────────────────────
+
+    def _addr_ok_premise(self, addr_ok: BoolRef) -> BoolRef:
+        # Sanitizer proves in-bounds by asking Z3 whether addr_ok can be
+        # violated — so the premise added to the solver is its negation.
+        return Not(addr_ok)
+
+    def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
+        # TODO: init a reserved_args field per backend to filter out these args
+        if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
+            self.cache_args.append(arg)
+
+    def _cache_tensor_arg(self, arg: Tensor) -> None:
+        self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
+
+    def _clear_cache(self) -> None:
+        self.cache_args.clear()
+        self.cache_grid = None
+
+    def grid_callback(self, grid: tuple[int, ...]) -> None:
+        # Sanitizer needs ``cache_grid`` tracked alongside the shared setup so
+        # ``pre_run_callback`` can consult it before deciding whether to skip
+        # the launch.
+        self.cache_grid = tuple(int(g) for g in grid)
+        SymbolicMemoryClient.grid_callback(self, grid)
+
+    def pre_run_callback(self, fn: Callable) -> bool:
+        if self.cache_grid:
+            fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
+            self._clear_cache()
+            if fn_cache not in _fn_symbolic_cache_set:
+                _fn_symbolic_cache_set.add(fn_cache)
+                return True
+            return False
+        return SymbolicMemoryClient.pre_run_callback(self, fn)
 
     def _find_tensor_for_expr(
         self, symbolic_expr: SymbolicExpr, violation_addr: int
@@ -252,14 +284,20 @@ class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
 
         _check_single_addr(access_addr)
 
-    def _handle_access_check(self, expr: SymbolicExpr) -> None:
-        """
-        Evaluate a memory access expression and either defer it (inside a loop)
-        or check it immediately (outside a loop).
+    def _handle_access_check(
+        self,
+        expr: SymbolicExpr,
+        op_type: type[Op],
+        access_mode: AccessMode,
+    ) -> None:
+        """Evaluate a memory access and either check now or defer inside a loop.
 
-        Returns nothing; duplicate addresses inside a loop are skipped.
+        ``op_type`` and ``access_mode`` are accepted to match the base-class
+        signature; sanitizer derives op_type from ``expr.op`` inside
+        ``_check_range_satisfiable`` for historical compatibility, and it
+        doesn't distinguish reads vs writes at the Z3 level.
         """
-        # check memory access using z3
+        del op_type, access_mode  # unused by sanitizer
         z3_addr, z3_constraints = expr.eval()
         if not self.loop_stack:
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)
@@ -287,7 +325,28 @@ class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
             ctx.pending_checks.append(pending_check)
         else:
             if cfg.verbose:
-                print("[Sanitizer]  ↪ skip duplicated addr in loop")
+                print(f"[{self.LOG_TAG}]  ↪ skip duplicated addr in loop")
+
+    def _process_pending_check(
+        self,
+        ctx: LoopContext,
+        pending: PendingCheck,
+        iter_constraints: list[BoolRef],
+    ) -> None:
+        del ctx  # reserved for future loop-aware diagnostics
+        if cfg.verbose:
+            print(
+                f"[{self.LOG_TAG}] ▶ checking:",
+                pending.addr_expr,
+                f" with iterator constraints: {iter_constraints} ",
+                f" and expression-related constraints: {pending.constraints} ",
+            )
+        self._check_range_satisfiable(
+            pending.addr_expr,
+            pending.constraints,
+            pending.symbolic_expr,
+            pending.source_location,
+        )
 
     def _report(
         self,
@@ -323,236 +382,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
             sys.exit(1)
         else:
             self.records.append(oob_record)
-
-    def _clear_cache(self) -> None:
-        self.cache_args.clear()
-        self.cache_grid = None
-
-    def pre_run_callback(self, fn: Callable) -> bool:
-        if self.cache_grid:
-            fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
-            self._clear_cache()
-            if fn_cache not in _fn_symbolic_cache_set:
-                _fn_symbolic_cache_set.add(fn_cache)
-                return True
-            return False
-        if self.need_full_grid is None:
-            return True
-        return self.need_full_grid
-
-    def post_run_callback(self, fn: Callable) -> bool:
-        if self.need_full_grid is None:
-            self.need_full_grid = False
-        if self.grid_idx == self.last_grid or not self.need_full_grid:
-            self._clear_cache()
-            self.tensors.clear()
-            self.tensor_addrs.clear()
-            self.tensor_names.clear()
-        ret = self.need_full_grid
-        self.need_full_grid = None
-        return ret
-
-    def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
-        if not hasattr(arg, "data_ptr"):
-            # TODO: We should init a reserved_args field per backend to filter out these args
-            if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
-                self.cache_args.append(arg)
-            return
-        from triton.runtime.jit import TensorWrapper
-
-        if isinstance(arg, TensorWrapper):
-            arg = arg.base
-        if arg.is_contiguous() or check_storage_contiguous(arg):
-            start = arg.data_ptr()
-            end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
-            tensor_physical_addresses = [(start, end, arg)]
-        elif check_inner_stride_equal_to_one(arg):
-            tensor_physical_addresses = [
-                (start, end, arg)
-                for start, end in get_physical_addr_from_tensor_slice(arg)
-            ]
-        else:
-            raise ValueError(
-                "The address sanitizer only supports contiguously stored tensors for now!"
-            )
-        self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
-        self._record_tensor_name(arg, name)
-        self.tensors.append(arg)
-        self.tensor_addrs.extend(tensor_physical_addresses)
-
-    def grid_callback(self, grid: tuple[int, ...]) -> None:
-        grid = tuple(int(g) for g in grid)
-        self.cache_grid = grid
-        self.last_grid = (grid[0] - 1, grid[1] - 1, grid[2] - 1)
-        self.grid = grid
-        addr = Int("addr")
-
-        addr_ok_expr = (
-            Or(*[And(addr >= s, addr <= e) for s, e, _ in self.tensor_addrs])
-            if self.tensor_addrs
-            else BoolVal(False)
-        )
-        self.addr_ok = cast(BoolRef, addr_ok_expr)
-
-        pid_ok_expr = And(
-            SymbolicExpr.PID0 < self.grid[0],
-            SymbolicExpr.PID1 < self.grid[1],
-            SymbolicExpr.PID2 < self.grid[2],
-            SymbolicExpr.PID0 >= 0,
-            SymbolicExpr.PID1 >= 0,
-            SymbolicExpr.PID2 >= 0,
-        )
-        self.pid_ok = cast(BoolRef, pid_ok_expr)
-
-        self.solver = Solver()
-        self.solver.add(Not(self.addr_ok))
-        self.solver.add(self.pid_ok)
-        self.addr_sym = addr
-
-    # ── Sanitizer-specific operation overriders ─────────────────
-
-    def _op_load_overrider(self, ptr, mask, other, *args):
-        if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
-            self.need_full_grid = True
-            ptr = ptr.replace_subtree("load")
-        if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
-            self.need_full_grid = True
-            mask = mask.replace_subtree("load")
-        ptr_sym = SymbolicExpr.from_value(ptr)
-        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
-        other_sym = SymbolicExpr.from_value(other) if other is not None else None
-        ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
-        self._handle_access_check(ret)
-        return ret
-
-    def _op_store_overrider(self, ptr, value, mask, *args):
-        if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
-            self.need_full_grid = True
-            ptr = ptr.replace_subtree("load")
-        if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
-            self.need_full_grid = True
-            mask = mask.replace_subtree("load")
-        ptr_sym = SymbolicExpr.from_value(ptr)
-        value_sym = SymbolicExpr.from_value(value)
-        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
-        ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
-        self._handle_access_check(ret)
-        return ret
-
-    def _op_tensor_pointer_load_overrider(
-        self,
-        ptr,
-        boundary_check,
-        padding_option,
-        cache_modifier,
-        eviction_policy,
-        is_volatile,
-    ):
-        ptr_sym = SymbolicExpr.from_value(ptr)
-        ret = SymbolicExpr.create("tensor_pointer_load", ptr_sym, boundary_check)
-        self._handle_access_check(ret)
-        return ret
-
-    def _op_tensor_pointer_store_overrider(
-        self, ptr, value, boundary_check, cache_modifier, eviction_policy
-    ):
-        ptr_sym = SymbolicExpr.from_value(ptr)
-        value_sym = SymbolicExpr.from_value(value)
-        ret = SymbolicExpr.create(
-            "tensor_pointer_store", ptr_sym, value_sym, boundary_check
-        )
-        self._handle_access_check(ret)
-        return ret
-
-    def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        overrider_map = self._build_op_overrider_map()
-        overrider_map.update(
-            {
-                Load: self._op_load_overrider,
-                Store: self._op_store_overrider,
-                MakeBlockPointer: self._op_make_block_ptr_overrider,
-                TensorPointerLoad: self._op_tensor_pointer_load_overrider,
-                TensorPointerStore: self._op_tensor_pointer_store_overrider,
-            }
-        )
-        overrider = overrider_map.get(op_type)
-        if overrider is not None:
-            return OpCallbacks(op_overrider=self.lock_fn(overrider))
-        return OpCallbacks()
-
-    # ── For-loop hook overrides ──────────────────────────────────
-
-    def _loop_hook_before(self, lineno, iterable):
-        if not isinstance(iterable, RangeWrapper):
-            if cfg.verbose:
-                print("not a range wrapper, skipping for-loop iterator association.")
-            return
-        super()._loop_hook_before(lineno, iterable)
-        if cfg.verbose:
-            print(f"[Sanitizer] ▶ enter loop@{lineno}, len={iterable.length}")
-
-    def _loop_hook_after(self, lineno: int) -> None:
-        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
-            return
-        ctx = self.loop_stack.pop()
-        # Execute pending checks that were deferred during loop execution
-        solver = self.solver
-        addr_sym = self.addr_sym
-        assert solver is not None
-        assert addr_sym is not None
-        all_iterator_constraints: list[BoolRef] = []
-        if ctx.pending_checks:
-            solver.push()
-            # Add constraint for the current (innermost) loop
-            iterator_constraint = _range_to_iterator_constraint(
-                ctx.idx_z3, start=ctx.start, stop=ctx.stop, step=ctx.step
-            )
-            solver.add(iterator_constraint)
-            all_iterator_constraints.append(iterator_constraint)
-
-            # Also add constraints for all outer loops that are still active.
-            # This is critical for nested loops where the address expression
-            # depends on outer loop variables.
-            for outer_ctx in self.loop_stack:
-                outer_constraint = _range_to_iterator_constraint(
-                    outer_ctx.idx_z3,
-                    start=outer_ctx.start,
-                    stop=outer_ctx.stop,
-                    step=outer_ctx.step,
-                )
-                solver.add(outer_constraint)
-                all_iterator_constraints.append(outer_constraint)
-
-        for pending_check in ctx.pending_checks:
-            addr_expr = pending_check.addr_expr
-            expr_constraints = pending_check.constraints
-            symbolic_expr = pending_check.symbolic_expr
-            # Use the source location captured when the check was created,
-            # not the current location (which would be the loop exit point)
-            source_location = pending_check.source_location
-
-            if cfg.verbose:
-                print(
-                    "[Sanitizer] ▶ checking:",
-                    addr_expr,
-                    f" with iterator constraints: {all_iterator_constraints} ",
-                    f" and expression-related constraints: {expr_constraints} ",
-                )
-
-            self._check_range_satisfiable(
-                addr_expr,
-                expr_constraints,
-                symbolic_expr,
-                source_location,
-            )
-        if ctx.pending_checks:
-            solver.pop()
-
-        if cfg.verbose:
-            print(
-                f"[Sanitizer] ▶ leave loop@{lineno} end. "
-                f"(checked {len(ctx.pending_checks)} unique addr patterns)"
-            )
 
 
 class NullSanitizer(Sanitizer):

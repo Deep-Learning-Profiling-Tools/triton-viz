@@ -68,7 +68,7 @@ def _capture_sanitizer_traceback(
 
     @decorate_oob
     def oob():
-        sanitizer._handle_access_check(expr)
+        sanitizer._handle_access_check(expr, Load, "read")
 
     @decorate_gemm
     def gemm_kernel():
