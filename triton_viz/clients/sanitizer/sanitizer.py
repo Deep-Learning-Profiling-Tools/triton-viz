@@ -45,6 +45,7 @@ from ..symbolic_engine import (
     PendingCheck,
     Z3Expr,
     ConstraintConjunction,
+    _and_constraints,
 )
 from .data import OutOfBoundsRecordZ3
 from ...utils.traceback_utils import (
@@ -322,6 +323,12 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         """
         # check memory access using z3
         z3_addr, z3_constraints = expr.eval()
+
+        # Merge current branch path constraints into z3_constraints
+        if self.branch_stack:
+            path_parts = [f.path_constraint() for f in self.branch_stack]
+            z3_constraints = _and_constraints(z3_constraints, *path_parts)
+
         if not self.loop_stack:
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)
             return
@@ -642,6 +649,9 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return SymbolicClient.register_for_loop_callback(self)
+
+    def register_if_else_callback(self):
+        return SymbolicClient.register_if_else_callback(self)
 
     def finalize(self) -> list:
         return []

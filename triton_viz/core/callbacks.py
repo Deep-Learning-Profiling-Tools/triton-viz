@@ -19,3 +19,11 @@ class ForLoopCallbacks:
     loop_iter_overrider: Callable | None = None
     loop_iter_listener: Callable | None = None
     after_loop_callback: Callable | None = None
+
+
+@dataclass
+class IfElseCallbacks:
+    pre_if_callback: Callable | None = None  # (condition, lineno)
+    eval_condition_callback: Callable | None = None  # (lineno) -> bool
+    flip_condition_callback: Callable | None = None  # (lineno)
+    post_if_callback: Callable | None = None  # (lineno)
