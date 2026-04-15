@@ -13,6 +13,7 @@ from typing import (
 
 import numpy as np
 from anytree import Node, RenderTree
+from torch import Tensor
 from z3 import (
     Int,
     IntVal,
@@ -20,6 +21,7 @@ from z3 import (
     Sum,
     And,
     Or,
+    Solver,
     simplify,
     Int2BV,
     BV2Int,
@@ -109,6 +111,28 @@ def _and_constraints(
     if len(parts) == 1:
         return parts[0]
     return And(*parts)
+
+
+def _range_to_iterator_constraint(
+    var: ArithRef, *, start: int, stop: int, step: int
+) -> BoolRef:
+    """Return a Z3 constraint describing values produced by ``range(start, stop, step)``."""
+    if step == 0:
+        raise ValueError("range() step cannot be 0")
+
+    if step > 0:
+        bounds = And(var >= start, var < stop)
+    else:
+        # Python range with negative step iterates while value > stop.
+        bounds = And(var <= start, var > stop)
+
+    abs_step = abs(step)
+    if abs_step == 1:
+        return bounds
+
+    # `i in range(start, stop, step)` iff bounds hold and (i-start) is a multiple
+    # of abs(step). Use a positive modulus to avoid negative-divisor semantics.
+    return And(bounds, (var - start) % abs_step == 0)
 
 
 @dataclass
@@ -2112,3 +2136,110 @@ class SymbolicClient(Client):
             loop_iter_overrider=self.lock_fn(self._loop_hook_iter_overrider),
             after_loop_callback=self.lock_fn(self._loop_hook_after),
         )
+
+
+class SymbolicMemoryClient(SymbolicClient):
+    """Shared infrastructure for symbolic clients that reason about tensor memory
+    accesses (e.g. sanitizer, race detector).
+
+    Holds the common launch-scoped state (tensor registry, Z3 solver, address
+    and pid premises) and helpers (tensor-base resolution, name tracking) so
+    subclasses only carry their domain-specific logic.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.grid: tuple[int, ...] | None = None
+        self.tensors: list[Tensor] = []
+        self.tensor_addrs: list[tuple[int, int, Tensor]] = []
+        self.tensor_names: dict[int, set[str]] = {}
+        self.need_full_grid: bool | None = None
+        self.last_grid: tuple[int, int, int] | None = None
+        self.addr_ok: BoolRef | None = None
+        self.pid_ok: BoolRef | None = None
+        self.solver: Solver | None = None
+        self.addr_sym: ArithRef | None = None
+
+    # ── Tensor resolution helpers ─────────────────────────────────────
+
+    def _collect_tensor_base(self, expr: SymbolicExpr) -> int | None:
+        def walk(node: SymbolicExpr) -> int | None:
+            if (
+                node.op == "const"
+                and isinstance(node.dtype, tl.pointer_type)
+                and not node.shape
+            ):
+                return node.to_py()
+            for child in node.children.values():
+                if child is not None:
+                    base = walk(child)
+                    if base is not None:
+                        return base
+            return None
+
+        return walk(expr)
+
+    def _record_tensor_name(self, tensor: Tensor, name: str) -> None:
+        if not name:
+            return
+        names = self.tensor_names.setdefault(id(tensor), set())
+        names.add(name)
+
+    def _get_tensor_name(self, tensor: Tensor) -> str | None:
+        names = self.tensor_names.get(id(tensor))
+        if not names:
+            return None
+        return ", ".join(sorted(names))
+
+    def _resolve_tensor(self, symbolic_expr: SymbolicExpr) -> Tensor | None:
+        """Best-effort base-tensor lookup. Returns None on failure.
+
+        Deliberately does NOT use a nearest-segment fallback (that's only
+        meaningful with a concrete witness address from the Z3 model, which
+        doesn't exist at access-capture time).
+        """
+        base = self._collect_tensor_base(symbolic_expr)
+        if base is None:
+            return None
+        for tensor in self.tensors:
+            if tensor.data_ptr() == base:
+                return tensor
+        for start, end, tensor in self.tensor_addrs:
+            if start <= base <= end:
+                return tensor
+        return None
+
+    # ── Shared memory-op overrider ────────────────────────────────────
+
+    def _op_make_block_ptr_overrider(
+        self, base, shape, strides, offsets, tensor_shape, order
+    ):
+        base_sym = SymbolicExpr.from_value(base)
+        shape_syms = [SymbolicExpr.from_value(s) for s in shape]
+        stride_syms = [SymbolicExpr.from_value(s) for s in strides]
+        offset_syms = [SymbolicExpr.from_value(o) for o in offsets]
+        block_shape_vals = [int(b) for b in tensor_shape]
+        order_vals = [int(o) for o in order]
+        return SymbolicExpr.create(
+            "make_block_ptr",
+            base_sym,
+            shape_syms,
+            stride_syms,
+            offset_syms,
+            block_shape_vals,
+            order_vals,
+        )
+
+    # ── Client callbacks with shared defaults ─────────────────────────
+
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
+        self.grid_idx = grid_idx
+
+    def _on_data_dependent_value(self) -> None:
+        self.need_full_grid = True
+
+    def finalize(self) -> list:
+        return []
+
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        return SymbolicClient.register_for_loop_callback(self)

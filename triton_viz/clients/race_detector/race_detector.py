@@ -8,7 +8,6 @@ from typing import (
     cast,
 )
 
-from torch import Tensor
 from z3 import (
     Solver,
     Int,
@@ -16,9 +15,7 @@ from z3 import (
     Or,
     BoolVal,
 )
-from z3.z3 import BoolRef, ArithRef
-
-import triton.language as tl
+from z3.z3 import BoolRef
 
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
@@ -37,11 +34,12 @@ from ..utils import (
 )
 from ..symbolic_engine import (
     SymbolicExpr,
-    SymbolicClient,
+    SymbolicMemoryClient,
     RangeWrapper,
     PendingCheck,
     Z3Expr,
     ConstraintConjunction,
+    _range_to_iterator_constraint,
 )
 from .data import AccessEventRecord
 from ...utils.traceback_utils import extract_user_frames
@@ -50,25 +48,6 @@ from ...core.config import config as cfg
 RaceDetectorT = TypeVar("RaceDetectorT", bound="RaceDetector")
 
 AccessMode = Literal["read", "write"]
-
-
-def _range_to_iterator_constraint(
-    var: ArithRef, *, start: int, stop: int, step: int
-) -> BoolRef:
-    """Return a Z3 constraint describing values produced by ``range(start, stop, step)``."""
-    if step == 0:
-        raise ValueError("range() step cannot be 0")
-
-    if step > 0:
-        bounds = And(var >= start, var < stop)
-    else:
-        bounds = And(var <= start, var > stop)
-
-    abs_step = abs(step)
-    if abs_step == 1:
-        return bounds
-
-    return And(bounds, (var - start) % abs_step == 0)
 
 
 def _make_event_signature(
@@ -164,70 +143,22 @@ class RaceDetector(Client):
         raise NotImplementedError
 
 
-class SymbolicRaceDetector(RaceDetector, SymbolicClient):
+class SymbolicRaceDetector(RaceDetector, SymbolicMemoryClient):
     def __init__(self, abort_on_error: bool = False):
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[AccessEventRecord] = []
-        self.grid: tuple[int, ...] | None = None
-        self.grid_idx = None
-        self.tensors: list[Tensor] = []
-        self.tensor_addrs: list[tuple[int, int, Tensor]] = []
-        self.tensor_names: dict[int, set[str]] = {}
-        self.need_full_grid: bool | None = None
-        self.last_grid: tuple[int, int, int] | None = None
-        self.addr_ok: BoolRef | None = None
-        self.pid_ok: BoolRef | None = None
-        self.solver: Solver | None = None
-        self.addr_sym: ArithRef | None = None
 
-    # ── Tensor resolution helpers (copied from SymbolicSanitizer) ─────────
+    # Explicit forwarders to SymbolicMemoryClient: the factory class has
+    # NotImplementedError stubs (for Client's @abstractmethod contract) that
+    # would otherwise shadow SymbolicMemoryClient's impls in MRO lookup.
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
+        SymbolicMemoryClient.grid_idx_callback(self, grid_idx)
 
-    def _collect_tensor_base(self, expr: SymbolicExpr) -> int | None:
-        def walk(node: SymbolicExpr) -> int | None:
-            if (
-                node.op == "const"
-                and isinstance(node.dtype, tl.pointer_type)
-                and not node.shape
-            ):
-                return node.to_py()
-            for child in node.children.values():
-                if child is not None:
-                    base = walk(child)
-                    if base is not None:
-                        return base
-            return None
+    def finalize(self) -> list:
+        return SymbolicMemoryClient.finalize(self)
 
-        return walk(expr)
-
-    def _record_tensor_name(self, tensor: Tensor, name: str) -> None:
-        if not name:
-            return
-        names = self.tensor_names.setdefault(id(tensor), set())
-        names.add(name)
-
-    def _get_tensor_name(self, tensor: Tensor) -> str | None:
-        names = self.tensor_names.get(id(tensor))
-        if not names:
-            return None
-        return ", ".join(sorted(names))
-
-    def _resolve_tensor(self, symbolic_expr: SymbolicExpr) -> Tensor | None:
-        """Best-effort base-tensor lookup. Returns None on failure.
-
-        Deliberately does NOT use a nearest-segment fallback (that's only
-        meaningful with a concrete witness address from the Z3 model, which
-        doesn't exist at access-capture time).
-        """
-        base = self._collect_tensor_base(symbolic_expr)
-        if base is None:
-            return None
-        for tensor in self.tensors:
-            if tensor.data_ptr() == base:
-                return tensor
-        for start, end, tensor in self.tensor_addrs:
-            if start <= base <= end:
-                return tensor
-        return None
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        return SymbolicMemoryClient.register_for_loop_callback(self)
 
     # ── Event recording ───────────────────────────────────────────────────
 
@@ -404,12 +335,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.solver.add(self.pid_ok)
         self.addr_sym = addr
 
-    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
-        self.grid_idx = grid_idx
-
-    def _on_data_dependent_value(self) -> None:
-        self.need_full_grid = True
-
     # ── Op overriders ─────────────────────────────────────────────────────
 
     def _op_load_overrider(self, ptr, mask, other, *args):
@@ -439,25 +364,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
         self._handle_access_check(ret, Store, "write")
         return ret
-
-    def _op_make_block_ptr_overrider(
-        self, base, shape, strides, offsets, tensor_shape, order
-    ):
-        base_sym = SymbolicExpr.from_value(base)
-        shape_syms = [SymbolicExpr.from_value(s) for s in shape]
-        stride_syms = [SymbolicExpr.from_value(s) for s in strides]
-        offset_syms = [SymbolicExpr.from_value(o) for o in offsets]
-        block_shape_vals = [int(b) for b in tensor_shape]
-        order_vals = [int(o) for o in order]
-        return SymbolicExpr.create(
-            "make_block_ptr",
-            base_sym,
-            shape_syms,
-            stride_syms,
-            offset_syms,
-            block_shape_vals,
-            order_vals,
-        )
 
     def _op_tensor_pointer_load_overrider(
         self,
@@ -570,12 +476,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 f"[RaceDetector] ▶ leave loop@{lineno} end. "
                 f"(recorded {len(ctx.pending_checks)} unique addr patterns)"
             )
-
-    def register_for_loop_callback(self) -> ForLoopCallbacks:
-        return SymbolicClient.register_for_loop_callback(self)
-
-    def finalize(self) -> list:
-        return []
 
 
 class NullRaceDetector(RaceDetector):

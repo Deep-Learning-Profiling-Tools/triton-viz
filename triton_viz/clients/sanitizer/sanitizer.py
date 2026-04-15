@@ -19,9 +19,7 @@ from z3 import (
     sat,
     BoolVal,
 )
-from z3.z3 import BoolRef, ArithRef, IntNumRef
-
-import triton.language as tl
+from z3.z3 import BoolRef, IntNumRef
 
 from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
@@ -40,11 +38,12 @@ from ..utils import (
 )
 from ..symbolic_engine import (
     SymbolicExpr,
-    SymbolicClient,
+    SymbolicMemoryClient,
     RangeWrapper,
     PendingCheck,
     Z3Expr,
     ConstraintConjunction,
+    _range_to_iterator_constraint,
 )
 from .data import OutOfBoundsRecordZ3
 from ...utils.traceback_utils import (
@@ -58,32 +57,6 @@ from .report import (
 from ...core.config import config as cfg
 
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
-
-
-def _range_to_iterator_constraint(
-    var: ArithRef, *, start: int, stop: int, step: int
-) -> BoolRef:
-    """
-    Return a constraint describing values produced by `range(start, stop, step)`.
-
-    This is used to bound a loop iterator Z3 variable for satisfiability checks.
-    """
-    if step == 0:
-        raise ValueError("range() step cannot be 0")
-
-    if step > 0:
-        bounds = And(var >= start, var < stop)
-    else:
-        # Python range with negative step iterates while value > stop.
-        bounds = And(var <= start, var > stop)
-
-    abs_step = abs(step)
-    if abs_step == 1:
-        return bounds
-
-    # `i in range(start, stop, step)` iff bounds hold and (i-start) is a multiple
-    # of abs(step). Use a positive modulus to avoid negative-divisor semantics.
-    return And(bounds, (var - start) % abs_step == 0)
 
 
 class Sanitizer(Client):
@@ -182,54 +155,32 @@ class _FnSymbolicCache:
 _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
 
 
-class SymbolicSanitizer(Sanitizer, SymbolicClient):
+class SymbolicSanitizer(Sanitizer, SymbolicMemoryClient):
     def __init__(self, abort_on_error: bool = True):
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[OutOfBoundsRecordZ3] = []
-        self.grid: tuple[int, ...] | None = None
-        self.grid_idx: tuple[int, ...] | None = None
-        self.tensors: list[Tensor] = []
-        self.tensor_addrs: list[tuple[int, int, Tensor]] = []
-        self.tensor_names: dict[int, set[str]] = {}
-        self.need_full_grid: bool | None = None
-        self.last_grid: tuple[int, int, int] | None = None
         self.cache_args: list[Any] = []
         self.cache_grid: tuple[int, ...] | None = None
-        self.addr_ok: BoolRef | None = None
-        self.pid_ok: BoolRef | None = None
-        self.solver: Solver | None = None
-        self.addr_sym: ArithRef | None = None
 
-    def _collect_tensor_base(self, expr: SymbolicExpr) -> int | None:
-        def walk(node: SymbolicExpr) -> int | None:
-            if (
-                node.op == "const"
-                and isinstance(node.dtype, tl.pointer_type)
-                and not node.shape
-            ):
-                return node.to_py()
-            for child in node.children.values():
-                if child is not None:
-                    base = walk(child)
-                    if base is not None:
-                        return base
-            return None
+    # Explicit forwarders to SymbolicMemoryClient: the factory class has
+    # NotImplementedError stubs (for Client's @abstractmethod contract) that
+    # would otherwise shadow SymbolicMemoryClient's impls in MRO lookup.
+    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
+        SymbolicMemoryClient.grid_idx_callback(self, grid_idx)
 
-        return walk(expr)
+    def finalize(self) -> list:
+        return SymbolicMemoryClient.finalize(self)
+
+    def register_for_loop_callback(self) -> ForLoopCallbacks:
+        return SymbolicMemoryClient.register_for_loop_callback(self)
 
     def _find_tensor_for_expr(
         self, symbolic_expr: SymbolicExpr, violation_addr: int
     ) -> Tensor:
         # Prefer mapping from pointer base addresses present in the expression.
-        base_candidate = self._collect_tensor_base(symbolic_expr)
-        if base_candidate is not None:
-            base = base_candidate
-            for tensor in self.tensors:
-                if tensor.data_ptr() == base:
-                    return tensor
-            for start, end, tensor in self.tensor_addrs:
-                if start <= base <= end:
-                    return tensor
+        resolved = self._resolve_tensor(symbolic_expr)
+        if resolved is not None:
+            return resolved
 
         # Fall back to the closest registered segment.
         if self.tensor_addrs:
@@ -249,18 +200,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             return self.tensors[0]
 
         raise RuntimeError("No tensor registered in SymbolicSanitizer!")
-
-    def _record_tensor_name(self, tensor: Tensor, name: str) -> None:
-        if not name:
-            return
-        names = self.tensor_names.setdefault(id(tensor), set())
-        names.add(name)
-
-    def _get_tensor_name(self, tensor: Tensor) -> str | None:
-        names = self.tensor_names.get(id(tensor))
-        if not names:
-            return None
-        return ", ".join(sorted(names))
 
     def _check_range_satisfiable(
         self,
@@ -470,9 +409,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.solver.add(self.pid_ok)
         self.addr_sym = addr
 
-    def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
-        self.grid_idx = grid_idx
-
     # ── Sanitizer-specific operation overriders ─────────────────
 
     def _op_load_overrider(self, ptr, mask, other, *args):
@@ -502,25 +438,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
         self._handle_access_check(ret)
         return ret
-
-    def _op_make_block_ptr_overrider(
-        self, base, shape, strides, offsets, tensor_shape, order
-    ):
-        base_sym = SymbolicExpr.from_value(base)
-        shape_syms = [SymbolicExpr.from_value(s) for s in shape]
-        stride_syms = [SymbolicExpr.from_value(s) for s in strides]
-        offset_syms = [SymbolicExpr.from_value(o) for o in offsets]
-        block_shape_vals = [int(b) for b in tensor_shape]
-        order_vals = [int(o) for o in order]
-        return SymbolicExpr.create(
-            "make_block_ptr",
-            base_sym,
-            shape_syms,
-            stride_syms,
-            offset_syms,
-            block_shape_vals,
-            order_vals,
-        )
 
     def _op_tensor_pointer_load_overrider(
         self,
@@ -564,9 +481,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         return OpCallbacks()
 
     # ── For-loop hook overrides ──────────────────────────────────
-
-    def _on_data_dependent_value(self) -> None:
-        self.need_full_grid = True
 
     def _loop_hook_before(self, lineno, iterable):
         if not isinstance(iterable, RangeWrapper):
@@ -639,12 +553,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
                 f"[Sanitizer] ▶ leave loop@{lineno} end. "
                 f"(checked {len(ctx.pending_checks)} unique addr patterns)"
             )
-
-    def register_for_loop_callback(self) -> ForLoopCallbacks:
-        return SymbolicClient.register_for_loop_callback(self)
-
-    def finalize(self) -> list:
-        return []
 
 
 class NullSanitizer(Sanitizer):
