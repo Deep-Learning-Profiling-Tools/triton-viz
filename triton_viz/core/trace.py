@@ -7,7 +7,8 @@ from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
 
 from .config import config as cfg
-from ..clients import Sanitizer, Profiler, Tracer
+from ..clients import Sanitizer, Profiler, RaceDetector, Tracer
+from ..clients.race_detector.race_detector import NullRaceDetector
 from .client import ClientManager, Client
 from .data import Launch
 from . import patch
@@ -30,6 +31,8 @@ class TraceInterface:
                 return Sanitizer()
             if name == "profiler":
                 return Profiler()
+            if name == "race_detector":
+                return RaceDetector()
             if name == "tracer":
                 return Tracer()
             raise ValueError(f"Unknown client: {client}")
@@ -285,6 +288,18 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
             return selected.lower() == "sanitizer"
         return isinstance(selected, Sanitizer)
 
+    def _is_race_detector_client(selected: str | Client) -> bool:
+        if isinstance(selected, str):
+            return selected.lower() == "race_detector"
+        # A NullRaceDetector instance means the public RaceDetector(...) factory
+        # was called while the flag was off — equivalent to the string-dispatch
+        # flag-off case, so take the same fast path. Explicit SymbolicRaceDetector()
+        # instances bypass the factory's __new__ and reflect a deliberate opt-in;
+        # they are intentionally NOT matched here, preserving the "explicit
+        # detector wins over flag" semantic guarded by
+        # test_flag_off_does_not_swallow_explicit_instance.
+        return isinstance(selected, NullRaceDetector)
+
     def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
         if cfg.cli_active and isinstance(kernel, TraceInterface):
             raise RuntimeError(
@@ -297,6 +312,11 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         if _is_sanitizer_client(client) and not cfg.enable_sanitizer:
             # when dry-running triton-sanitizer CLI (i.e. wrap kernels with sanitizer
             # tracing but don't actually sanitize), don't actually trace the kernel
+            return kernel
+
+        if _is_race_detector_client(client) and not cfg.enable_race_detector:
+            # Flag-off escape hatch: leave the kernel untraced so ENABLE_RACE_DETECTOR=0
+            # truly has zero runtime impact on code that opts into race_detector tracing.
             return kernel
 
         # If the object is already initialized as a TraceInterface, just append the new client(s)

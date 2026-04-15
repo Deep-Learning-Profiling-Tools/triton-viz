@@ -131,6 +131,20 @@ def extract_user_frames(num_frames: int = 0) -> list[TracebackInfo]:
 # ---------------------------------------------------------------------------
 
 
+def capture_current_source_location() -> tuple[str, int, str] | None:
+    """Return ``(filename, lineno, func_name)`` of the innermost user frame.
+
+    Shared helper for symbolic clients that need to pin a deferred check /
+    recorded event back to its user-code origin. Returns ``None`` if no
+    non-framework frame is available.
+    """
+    frames = extract_user_frames(num_frames=1)
+    frame = frames[-1] if frames else None
+    if frame is None:
+        return None
+    return (frame.filename, frame.lineno, frame.func_name)
+
+
 def location_to_traceback_info(
     source_location: tuple[str, int, str],
 ) -> TracebackInfo:
