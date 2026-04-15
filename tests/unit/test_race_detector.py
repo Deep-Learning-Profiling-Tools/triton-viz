@@ -219,6 +219,32 @@ def test_flag_off_does_not_swallow_explicit_instance():
         cfg.enable_race_detector = saved
 
 
+def test_flag_off_returns_raw_kernel_for_factory_instance():
+    """ENABLE_RACE_DETECTOR=0 + trace(client=RaceDetector()) must take the
+    flag-off fast path. The factory's ``__new__`` already returned a
+    NullRaceDetector; the trace decorator must recognize that and leave the
+    kernel untraced, otherwise it would wrap the kernel and then crash at
+    callback-registration time with NullSymbolicClient's raising methods.
+
+    Identity-check alone is sufficient to prove the fix: without it, the
+    predicate would miss the factory-returned instance and ``traced`` would
+    be a ``TritonTrace`` wrapper.
+    """
+    saved = cfg.enable_race_detector
+    try:
+        cfg.enable_race_detector = False
+        # The factory call happens after the flag flip, so __new__ dispatches
+        # to NullRaceDetector.
+        traced = triton_viz.trace(client=RaceDetector())(_dispatch_kernel)
+
+        from triton_viz.core.trace import TritonTrace
+
+        assert not isinstance(traced, TritonTrace)
+        assert traced is _dispatch_kernel
+    finally:
+        cfg.enable_race_detector = saved
+
+
 # ======== Repeat launches stay consistent (no partial-grid cache) ========
 
 

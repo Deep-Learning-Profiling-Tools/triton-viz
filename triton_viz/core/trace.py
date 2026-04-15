@@ -8,6 +8,7 @@ from triton import JITFunction
 
 from .config import config as cfg
 from ..clients import Sanitizer, Profiler, RaceDetector, Tracer
+from ..clients.race_detector.race_detector import NullRaceDetector
 from .client import ClientManager, Client
 from .data import Launch
 from . import patch
@@ -288,11 +289,16 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         return isinstance(selected, Sanitizer)
 
     def _is_race_detector_client(selected: str | Client) -> bool:
-        # String-dispatch only: explicit RaceDetector instances reflect a
-        # deliberate user choice and must not be silently disabled by the
-        # global feature flag. The env flag controls the "opt in by name"
-        # path, not already-constructed detector objects.
-        return isinstance(selected, str) and selected.lower() == "race_detector"
+        if isinstance(selected, str):
+            return selected.lower() == "race_detector"
+        # A NullRaceDetector instance means the public RaceDetector(...) factory
+        # was called while the flag was off — equivalent to the string-dispatch
+        # flag-off case, so take the same fast path. Explicit SymbolicRaceDetector()
+        # instances bypass the factory's __new__ and reflect a deliberate opt-in;
+        # they are intentionally NOT matched here, preserving the "explicit
+        # detector wins over flag" semantic guarded by
+        # test_flag_off_does_not_swallow_explicit_instance.
+        return isinstance(selected, NullRaceDetector)
 
     def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
         if cfg.cli_active and isinstance(kernel, TraceInterface):
