@@ -224,14 +224,25 @@ def _is_barrier_atomic(event: AccessEventRecord) -> bool:
     return True
 
 
+_PHASE_ADVANCE_WRITER_SEMS: frozenset[str] = frozenset({"release", "acq_rel"})
+
+
 def _is_phase_advancing_write(event: AccessEventRecord, elem_base: int) -> bool:
-    """Did ``event`` change the value at ``elem_base``? Failed CAS
-    (``old != cmp`` path → written_value == old), ``cas(1, 1)`` polling,
-    and ``atomic_add(0)`` all return False — they touch the barrier
-    address but do not advance the phase, so they must not split epochs
-    (upstream #350 same-value ambiguity, consistent with the HB solver's
-    ``_has_ambiguous_writer``).
+    """Did ``event`` move the barrier forward? Must satisfy three things:
+
+    1. ``event.atomic_sem`` is ``release`` or ``acq_rel`` — an acquire-
+       only write that happens to change the value is consumption, not
+       phase advancement; counting it would split epochs even when the
+       producer's release never synchronized.
+    2. ``event`` actually writes the element (``write_mask`` has True
+       on a lane covering ``elem_base``).
+    3. ``written_value != atomic_old`` — failed CAS, ``cas(1, 1)``
+       polling, ``atomic_add(0)`` all have written == old, and must NOT
+       split epochs (upstream #350 same-value ambiguity, mirrored in
+       ``_has_ambiguous_writer``).
     """
+    if event.atomic_sem not in _PHASE_ADVANCE_WRITER_SEMS:
+        return False
     if event.lane_addrs is None:
         return False
     active = (
@@ -242,7 +253,6 @@ def _is_phase_advancing_write(event: AccessEventRecord, elem_base: int) -> bool:
     hit_mask = active & (event.lane_addrs == elem_base)
     if not np.any(hit_mask):
         return False
-    # Must actually write this element's byte range.
     if event.write_mask is None:
         return False
     if not np.any(event.write_mask[hit_mask]):
