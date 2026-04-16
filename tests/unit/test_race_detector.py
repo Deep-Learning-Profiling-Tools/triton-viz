@@ -612,6 +612,47 @@ def test_concrete_events_carry_program_seq_and_launch_id(_isolate_race_detector_
     assert launch_ids == {detector._launch_id}
 
 
+def test_release_acquire_reads_from_suppresses_crossblock_plain_race(
+    _isolate_race_detector_cfg,
+):
+    """Producer-consumer handshake: block 0 writes a plain flag then
+    releases a barrier atomic; block 1 acquires on the same barrier and
+    then reads the plain flag. With reads-from (acquire reads exactly
+    what release wrote), the HBSolver orders the plain accesses via
+    ``po | sw`` so the cross-block race on the plain flag goes away."""
+    detector = SymbolicRaceDetector(abort_on_error=False)
+
+    @triton.jit
+    def _producer_consumer(flag_ptr, sync_ptr):
+        pid = tl.program_id(axis=0)
+        # Producer (pid==0): plain store then release-xchg.
+        tl.store(flag_ptr, 42, mask=(pid == 0))
+        tl.atomic_xchg(sync_ptr, 1, mask=(pid == 0), sem="release", scope="gpu")
+        # Consumer (pid==1): acquire-xchg (reads what producer released),
+        # then plain load.
+        _obtained = tl.atomic_xchg(
+            sync_ptr, 2, mask=(pid == 1), sem="acquire", scope="gpu"
+        )
+        tl.load(flag_ptr, mask=(pid == 1))
+
+    traced = triton_viz.trace(client=detector)(_producer_consumer)
+    flag = torch.zeros(1, dtype=torch.int32)
+    sync = torch.zeros(1, dtype=torch.int32)
+    traced[(2,)](flag, sync)
+
+    reports = detector.finalize()
+    flag_addr = flag.data_ptr()
+    flag_reports = [
+        r
+        for r in reports
+        if flag_addr <= r.witness_addr < flag_addr + flag.element_size()
+    ]
+    assert not flag_reports, (
+        f"release/acquire+reads-from should suppress the cross-block race "
+        f"on flag_ptr; got {flag_reports}"
+    )
+
+
 def test_finalize_emits_report_for_crossblock_plain_store_load(
     _isolate_race_detector_cfg,
 ):

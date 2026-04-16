@@ -50,6 +50,7 @@ from .data import (
     normalize_sem_scope,
     resolve_tensor_from_pointer,
 )
+from .hb_solver import HBSolver
 from ...utils.traceback_utils import capture_current_source_location
 from ...core.config import config as cfg
 
@@ -172,6 +173,85 @@ def _canonical_pair(
         )
 
     return (a, b) if _key(a) <= _key(b) else (b, a)
+
+
+_BARRIER_ATOMIC_OPS: frozenset[str] = frozenset({"add", "cas", "xchg"})
+_BARRIER_VALID_SCOPES: frozenset[str | None] = frozenset({"gpu", "sys", None})
+
+
+def _iter_element_bases(event: AccessEventRecord):
+    """Per-active-lane element base addresses — mirrors ``hb_solver._iter_element_bases``.
+
+    Duplicated here (rather than imported) to keep module layering simple:
+    race_detector.py already imports HBSolver, but this helper is used by
+    the barrier/epoch driver which shouldn't cross-depend on the solver
+    module's internals.
+    """
+    if event.lane_addrs is None:
+        return
+    active = (
+        event.active_mask
+        if event.active_mask is not None
+        else np.ones_like(event.lane_addrs, dtype=bool)
+    )
+    for idx, hit in enumerate(active):
+        if not hit:
+            continue
+        yield int(event.lane_addrs[idx])
+
+
+def _is_barrier_atomic(event: AccessEventRecord) -> bool:
+    """Identifies *candidate* barrier atomics — addresses to consider as a
+    global phase counter / flag. Not a phase-advance check; don't exclude
+    ``relaxed`` here. The phase-advance gate is ``_is_phase_advancing_write``.
+    """
+    if event.atomic_op not in _BARRIER_ATOMIC_OPS:
+        return False
+    if event.atomic_scope not in _BARRIER_VALID_SCOPES:
+        return False
+    # Needs at least one active lane that reads or writes.
+    active = (
+        event.active_mask
+        if event.active_mask is not None
+        else (
+            np.ones_like(event.lane_addrs, dtype=bool)
+            if event.lane_addrs is not None
+            else None
+        )
+    )
+    if active is None or not np.any(active):
+        return False
+    return True
+
+
+def _is_phase_advancing_write(event: AccessEventRecord, elem_base: int) -> bool:
+    """Did ``event`` change the value at ``elem_base``? Failed CAS
+    (``old != cmp`` path → written_value == old), ``cas(1, 1)`` polling,
+    and ``atomic_add(0)`` all return False — they touch the barrier
+    address but do not advance the phase, so they must not split epochs
+    (upstream #350 same-value ambiguity, consistent with the HB solver's
+    ``_has_ambiguous_writer``).
+    """
+    if event.lane_addrs is None:
+        return False
+    active = (
+        event.active_mask
+        if event.active_mask is not None
+        else np.ones_like(event.lane_addrs, dtype=bool)
+    )
+    hit_mask = active & (event.lane_addrs == elem_base)
+    if not np.any(hit_mask):
+        return False
+    # Must actually write this element's byte range.
+    if event.write_mask is None:
+        return False
+    if not np.any(event.write_mask[hit_mask]):
+        return False
+    if event.atomic_old is None or event.written_value is None:
+        return False
+    old = event.atomic_old[hit_mask]
+    new = event.written_value[hit_mask]
+    return bool(np.any(new != old))
 
 
 def _classify_candidate(
@@ -343,16 +423,41 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         if not launch_events:
             self._last_candidates = []
             self._last_reports = []
+            self._last_barrier_addrs = set()
             return []
 
+        # Step 6: coarse epoch partitioning on phase-advancing barrier writes.
+        total_blocks = 1
+        if self.grid is not None:
+            total_blocks = int(self.grid[0]) * int(self.grid[1]) * int(self.grid[2])
+        barrier_addrs = self._detect_global_barrier_addresses(
+            launch_events, total_blocks
+        )
+        self._assign_concrete_epochs(launch_events, barrier_addrs)
+
+        # Step 4: byte-bucket candidate pairing (now respects per-event epoch).
         candidates = self._find_race_candidates(launch_events)
-        # Step 5 (HBSolver) lands in the next commit. Until then emit every
-        # candidate as an unsuppressed report so the candidate pipeline is
-        # observable end-to-end.
-        reports = [self._candidate_to_report(c) for c in candidates]
+
+        # Step 5: one HBSolver per epoch; drop candidates that po | sw orders.
+        epochs: dict[int, list[AccessEventRecord]] = {}
+        for ev in launch_events:
+            epochs.setdefault(ev.epoch, []).append(ev)
+        solvers = {epoch: HBSolver(evs) for epoch, evs in epochs.items()}
+
+        reports: list[RaceReport] = []
+        for cand in candidates:
+            solver = solvers.get(cand.epoch)
+            if solver is None:
+                reports.append(self._candidate_to_report(cand))
+                continue
+            hb = solver.check_candidate(cand)
+            if hb.ordered:
+                continue
+            reports.append(self._candidate_to_report(cand, hb_reason=hb.reason))
 
         self._last_candidates = candidates
         self._last_reports = reports
+        self._last_barrier_addrs = barrier_addrs
         return reports
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
@@ -836,6 +941,79 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                         )
                     )
         return candidates
+
+    # ── Barrier detection & epoch partitioning (Step 6) ───────────────────
+
+    def _detect_global_barrier_addresses(
+        self, events: list[AccessEventRecord], total_blocks: int
+    ) -> set[int]:
+        """Return element base addresses that qualify as global barrier keys.
+
+        Conservative — an address qualifies only when:
+          * every event on it passes ``_is_barrier_atomic``;
+          * the set of distinct ``grid_idx`` hitting it equals
+            ``total_blocks`` (every block participates);
+          * ``total_blocks >= 2``.
+
+        Over-identifying barrier keys splits phases wrongly and drops real
+        races, so the bar is high — a single non-barrier atomic on the
+        same address disqualifies it.
+        """
+        if total_blocks < 2:
+            return set()
+        # atomic_events_by_addr[addr] = (grids, all_barrier)
+        by_addr: dict[int, tuple[set, bool]] = {}
+        for ev in events:
+            if ev.atomic_op is None or ev.grid_idx is None:
+                continue
+            is_barrier = _is_barrier_atomic(ev)
+            for base in _iter_element_bases(ev):
+                grids, all_barrier = by_addr.get(base, (set(), True))
+                grids.add(ev.grid_idx)
+                all_barrier = all_barrier and is_barrier
+                by_addr[base] = (grids, all_barrier)
+        result: set[int] = set()
+        for addr, (grids, all_barrier) in by_addr.items():
+            if all_barrier and len(grids) == total_blocks:
+                result.add(addr)
+        return result
+
+    def _assign_concrete_epochs(
+        self, events: list[AccessEventRecord], barrier_addrs: set[int]
+    ) -> None:
+        """Walk each grid_idx in program_seq order, bumping the epoch when
+        the current event is a phase-advancing write on a barrier address.
+
+        The barrier event itself stays in the pre-barrier epoch;
+        subsequent events in the same grid get the next epoch. If no
+        barrier addresses were identified, every event stays in epoch 0.
+        """
+        if not barrier_addrs:
+            for ev in events:
+                ev.epoch = 0
+            return
+
+        by_grid: dict[Any, list[AccessEventRecord]] = {}
+        for ev in events:
+            by_grid.setdefault(ev.grid_idx, []).append(ev)
+
+        for grid_events in by_grid.values():
+            grid_events.sort(
+                key=lambda e: (
+                    e.program_seq if e.program_seq is not None else -1,
+                    e.event_id,
+                )
+            )
+            epoch = 0
+            for ev in grid_events:
+                ev.epoch = epoch
+                # Check every active element base of this event.
+                for base in _iter_element_bases(ev):
+                    if base not in barrier_addrs:
+                        continue
+                    if _is_phase_advancing_write(ev, base):
+                        epoch += 1
+                        break
 
     def _candidate_to_report(
         self, cand: RaceCandidate, hb_reason: str | None = None
