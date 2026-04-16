@@ -1,3 +1,5 @@
+import threading
+from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import (
@@ -7,6 +9,7 @@ from typing import (
     cast,
 )
 
+import numpy as np
 from z3.z3 import BoolRef
 
 from ...core.client import Client
@@ -14,6 +17,8 @@ from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import (
     Op,
     Load,
+    AtomicCas,
+    AtomicRMW,
 )
 from ..symbolic_engine import (
     SymbolicExpr,
@@ -25,9 +30,41 @@ from ..symbolic_engine import (
     ConstraintConjunction,
     AccessMode,
 )
-from .data import AccessEventRecord
+from .data import (
+    AccessEventRecord,
+    PendingAtomicEvent,
+    VALID_RMW_OPS,
+    active_mask_for,
+    apply_rmw,
+    broadcast_lane_operand,
+    flatten_np,
+    infer_elem_size,
+    normalize_sem_scope,
+    resolve_tensor_from_pointer,
+)
 from ...utils.traceback_utils import capture_current_source_location
 from ...core.config import config as cfg
+
+
+def _normalize_rmw_op(rmw_op: Any) -> str:
+    """Map a Triton RMWOp (enum or string) into the PR2 vocabulary.
+
+    Collapses ``FADD`` → ``"add"``, ``UMAX`` → ``"max"``, ``UMIN`` → ``"min"``
+    since the type signage is carried separately by the operand dtype.
+    Raises ``NotImplementedError`` for anything outside ``VALID_RMW_OPS``
+    after normalization.
+    """
+    name = getattr(rmw_op, "name", None)
+    if name is None:
+        name = str(rmw_op)
+    if "." in name:
+        name = name.rsplit(".", 1)[1]
+    low = name.lower()
+    low = {"fadd": "add", "umax": "max", "umin": "min"}.get(low, low)
+    if low not in VALID_RMW_OPS:
+        raise NotImplementedError(f"Unsupported atomic_rmw op: {rmw_op!r}")
+    return low
+
 
 RaceDetectorT = TypeVar("RaceDetectorT", bound="RaceDetector")
 
@@ -139,6 +176,20 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.records = self.symbolic_events
         self._next_event_id = 0
 
+        # PR2 concrete atomic path
+        self.concrete_events: list[AccessEventRecord] = []
+        self._pending_atomic_by_grid: defaultdict[
+            tuple[int, ...], deque[PendingAtomicEvent]
+        ] = defaultdict(deque)
+        self._pending_atomic_lock = threading.Lock()
+
+        # Tripped by any atomic capture. Step 4/5 consumers must fall back
+        # to concrete-only reasoning (or conservatively not suppress) when
+        # True. Reset at the START of the next launch (grid_callback), not
+        # at finalize — a consumer inspecting the detector immediately
+        # after the launch completes must still see True.
+        self.atomic_symbolic_escape: bool = False
+
     def _new_event_id(self) -> int:
         """Client-lifetime monotonic unique ID. NOT an execution-order
         indicator under multi-SM concurrency — blocks race to append, so
@@ -156,6 +207,18 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         SymbolicClient.grid_idx_callback(self, grid_idx)
 
     def finalize(self) -> list:
+        # NOTE: atomic_symbolic_escape is intentionally NOT reset here —
+        # Step 4/5 consumers inspect the detector right after the launch
+        # completes and must still see True. The flag is reset at the
+        # next launch's grid_callback.
+        with self._pending_atomic_lock:
+            dangling = {k: len(v) for k, v in self._pending_atomic_by_grid.items() if v}
+            self._pending_atomic_by_grid.clear()
+        if dangling:
+            raise RuntimeError(
+                f"Dangling pending atomic events at finalize: {dangling}. "
+                "A before_atomic_* callback enqueued without a matching after_*."
+            )
         return SymbolicClient.finalize(self)
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
@@ -165,9 +228,27 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         SymbolicClient.arg_callback(self, name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
+        # Per-launch reset BEFORE the base sets up its solver/premises.
+        # Defensive clear in case a prior launch errored out of finalize()
+        # mid-assertion.
+        self.atomic_symbolic_escape = False
+        with self._pending_atomic_lock:
+            self._pending_atomic_by_grid.clear()
         SymbolicClient.grid_callback(self, grid)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        if op_type is AtomicCas:
+            return OpCallbacks(
+                before_callback=self.lock_fn(self._before_atomic_cas),
+                after_callback=self.lock_fn(self._after_atomic_cas),
+                op_overrider=None,  # required — PatchOp feeds overrider ret to after
+            )
+        if op_type is AtomicRMW:
+            return OpCallbacks(
+                before_callback=self.lock_fn(self._before_atomic_rmw),
+                after_callback=self.lock_fn(self._after_atomic_rmw),
+                op_overrider=None,
+            )
         return SymbolicClient.register_op_callback(self, op_type)
 
     def pre_run_callback(self, fn: Callable) -> bool:
@@ -289,6 +370,189 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             pending.constraints,
             pending.symbolic_expr,
             pending.source_location,
+        )
+
+    # ── Concrete atomic capture (before/after callback pairs) ────────────
+    #
+    # PatchOp.__call__ runs before_callback → (overrider | original op) →
+    # after_callback. We register op_overrider=None so the original hardware
+    # atomic runs; after_callback then sees the real ``old`` value from the
+    # op's return. An overrider here would feed its (symbolic) return into
+    # after_callback, and we'd lose the hardware old.
+    #
+    # Side effect: the symbolic overrider for atomic_cas/atomic_rmw (defined
+    # on SymbolicClient) is bypassed for race_detector, so any post-atomic
+    # code that uses the atomic's return value to compute addresses/masks/
+    # control flow loses symbolic fidelity past that point. We track this
+    # via ``atomic_symbolic_escape`` — Step 4/5 consumers must gate on it.
+
+    def _before_atomic_cas(
+        self,
+        ptr,
+        cmp,
+        val,
+        sem=None,
+        scope=None,
+        mask=None,
+        **_kwargs,
+    ) -> None:
+        self.atomic_symbolic_escape = True
+        grid_idx = self.grid_idx
+        assert grid_idx is not None, "atomic callback fired before grid_idx_callback"
+        lane_addrs = flatten_np(ptr).astype(np.int64, copy=False)
+        nlanes = lane_addrs.shape[0]
+        cmp_np = broadcast_lane_operand(cmp, nlanes)
+        val_np = broadcast_lane_operand(val, nlanes)
+        active = active_mask_for(mask, nlanes)
+        sem_norm, scope_norm = normalize_sem_scope(sem, scope)
+        elem_size = infer_elem_size(val, ptr)
+        tensor = resolve_tensor_from_pointer(ptr, active, elem_size, self.tensor_addrs)
+        pending = PendingAtomicEvent(
+            event_id=self._new_event_id(),
+            op_type=AtomicCas,
+            atomic_op="cas",
+            grid_idx=grid_idx,
+            source_location=capture_current_source_location(),
+            tensor=tensor,
+            tensor_name=(self._get_tensor_name(tensor) if tensor is not None else None),
+            lane_addrs=lane_addrs,
+            active_mask=active,
+            elem_size=elem_size,
+            atomic_sem=sem_norm,
+            atomic_scope=scope_norm,
+            atomic_cmp=cmp_np,
+            atomic_val=val_np,
+        )
+        with self._pending_atomic_lock:
+            self._pending_atomic_by_grid[grid_idx].append(pending)
+
+    def _after_atomic_cas(
+        self,
+        ret,
+        ptr,
+        cmp,
+        val,
+        sem=None,
+        scope=None,
+        mask=None,
+        **_kwargs,
+    ) -> None:
+        del ptr, cmp, val, sem, scope, mask  # all already snapshotted in pending
+        grid_idx = self.grid_idx
+        assert grid_idx is not None, "atomic callback fired before grid_idx_callback"
+        with self._pending_atomic_lock:
+            pending = self._pending_atomic_by_grid[grid_idx].popleft()
+        old_np = flatten_np(ret)
+        success = pending.active_mask & np.equal(old_np, pending.atomic_cmp)
+        read_mask = pending.active_mask.copy()
+        write_mask = success
+        written_value = np.where(success, pending.atomic_val, old_np).astype(
+            old_np.dtype, copy=False
+        )
+        self.concrete_events.append(
+            AccessEventRecord(
+                event_id=pending.event_id,
+                op_type=pending.op_type,
+                source_location=pending.source_location,
+                grid_idx=pending.grid_idx,
+                tensor=pending.tensor,
+                tensor_name=pending.tensor_name,
+                lane_addrs=pending.lane_addrs,
+                active_mask=pending.active_mask,
+                elem_size=pending.elem_size,
+                read_mask=read_mask,
+                write_mask=write_mask,
+                atomic_op="cas",
+                atomic_sem=pending.atomic_sem,
+                atomic_scope=pending.atomic_scope,
+                atomic_cmp=pending.atomic_cmp,
+                atomic_val=pending.atomic_val,
+                atomic_old=old_np,
+                written_value=written_value,
+            )
+        )
+
+    def _before_atomic_rmw(
+        self,
+        rmwOp,
+        ptr,
+        val,
+        mask=None,
+        sem=None,
+        scope=None,
+        **_kwargs,
+    ) -> None:
+        self.atomic_symbolic_escape = True
+        grid_idx = self.grid_idx
+        assert grid_idx is not None, "atomic callback fired before grid_idx_callback"
+        atomic_op = _normalize_rmw_op(rmwOp)
+        lane_addrs = flatten_np(ptr).astype(np.int64, copy=False)
+        nlanes = lane_addrs.shape[0]
+        val_np = broadcast_lane_operand(val, nlanes)
+        active = active_mask_for(mask, nlanes)
+        sem_norm, scope_norm = normalize_sem_scope(sem, scope)
+        elem_size = infer_elem_size(val, ptr)
+        tensor = resolve_tensor_from_pointer(ptr, active, elem_size, self.tensor_addrs)
+        pending = PendingAtomicEvent(
+            event_id=self._new_event_id(),
+            op_type=AtomicRMW,
+            atomic_op=atomic_op,
+            grid_idx=grid_idx,
+            source_location=capture_current_source_location(),
+            tensor=tensor,
+            tensor_name=(self._get_tensor_name(tensor) if tensor is not None else None),
+            lane_addrs=lane_addrs,
+            active_mask=active,
+            elem_size=elem_size,
+            atomic_sem=sem_norm,
+            atomic_scope=scope_norm,
+            atomic_cmp=None,
+            atomic_val=val_np,
+        )
+        with self._pending_atomic_lock:
+            self._pending_atomic_by_grid[grid_idx].append(pending)
+
+    def _after_atomic_rmw(
+        self,
+        ret,
+        rmwOp,
+        ptr,
+        val,
+        mask=None,
+        sem=None,
+        scope=None,
+        **_kwargs,
+    ) -> None:
+        del rmwOp, ptr, val, mask, sem, scope  # already snapshotted in pending
+        grid_idx = self.grid_idx
+        assert grid_idx is not None, "atomic callback fired before grid_idx_callback"
+        with self._pending_atomic_lock:
+            pending = self._pending_atomic_by_grid[grid_idx].popleft()
+        old_np = flatten_np(ret)
+        read_mask = pending.active_mask.copy()
+        write_mask = pending.active_mask.copy()
+        written_value = apply_rmw(pending.atomic_op, old_np, pending.atomic_val)
+        self.concrete_events.append(
+            AccessEventRecord(
+                event_id=pending.event_id,
+                op_type=pending.op_type,
+                source_location=pending.source_location,
+                grid_idx=pending.grid_idx,
+                tensor=pending.tensor,
+                tensor_name=pending.tensor_name,
+                lane_addrs=pending.lane_addrs,
+                active_mask=pending.active_mask,
+                elem_size=pending.elem_size,
+                read_mask=read_mask,
+                write_mask=write_mask,
+                atomic_op=pending.atomic_op,
+                atomic_sem=pending.atomic_sem,
+                atomic_scope=pending.atomic_scope,
+                atomic_cmp=None,
+                atomic_val=pending.atomic_val,
+                atomic_old=old_np,
+                written_value=written_value,
+            )
         )
 
 
