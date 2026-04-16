@@ -542,12 +542,14 @@ def test_repeat_launches_are_deterministic_for_atomics(_isolate_race_detector_cf
         traced[(1,)](x, val)
 
     _launch(10, 5)
-    assert len(detector.concrete_events) == 1
+    atomic_events = [e for e in detector.concrete_events if e.atomic_op is not None]
+    assert len(atomic_events) == 1
     detector.concrete_events.clear()
 
     _launch(10, 5)
-    assert len(detector.concrete_events) == 1
-    assert detector.concrete_events[0].atomic_op == "add"
+    atomic_events = [e for e in detector.concrete_events if e.atomic_op is not None]
+    assert len(atomic_events) == 1
+    assert atomic_events[0].atomic_op == "add"
 
 
 def test_concurrent_blocks_capture_atomics_cleanly():
@@ -576,6 +578,36 @@ def test_concurrent_blocks_capture_atomics_cleanly():
     finally:
         cfg.num_sms = saved_num_sms
         cfg.enable_race_detector = saved_flag
+
+
+def test_concrete_events_carry_program_seq_and_launch_id(_isolate_race_detector_cfg):
+    """Both plain load/store events and atomic events must be tagged with a
+    per-grid ``program_seq`` and the current ``launch_id`` — po / epoch
+    partitioning / same-value ambiguity all depend on this sequencing."""
+    detector = SymbolicRaceDetector(abort_on_error=False)
+
+    @triton.jit
+    def _mixed_kernel(x_ptr, flag_ptr, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(x_ptr + offs)
+        tl.store(x_ptr + offs, v + 1)
+        tl.atomic_add(flag_ptr, 1)
+
+    traced = triton_viz.trace(client=detector)(_mixed_kernel)
+    x = torch.zeros(4, dtype=torch.int32)
+    flag = torch.zeros(1, dtype=torch.int32)
+    traced[(1,)](x, flag, BLOCK=4)
+
+    # Three concrete events expected: load, store, atomic_add.
+    assert len(detector.concrete_events) == 3
+    seqs = [e.program_seq for e in detector.concrete_events]
+    # Within a single grid_idx the program_seq values are 0, 1, 2 in issue
+    # order — NOT event_id order under multi-SM (unused here but locks
+    # the invariant that per-grid sequencing is contiguous).
+    assert seqs == [0, 1, 2], f"expected [0,1,2] program_seq, got {seqs}"
+
+    launch_ids = {e.launch_id for e in detector.concrete_events}
+    assert launch_ids == {detector._launch_id}
 
 
 def test_atomic_cas_return_is_consumable_downstream(_isolate_race_detector_cfg):

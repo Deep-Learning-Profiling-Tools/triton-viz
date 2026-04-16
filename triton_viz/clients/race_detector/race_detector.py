@@ -1,3 +1,4 @@
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import (
@@ -16,6 +17,9 @@ from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import (
     Op,
     Load,
+    RawLoad,
+    Store,
+    RawStore,
     AtomicCas,
     AtomicRMW,
 )
@@ -199,6 +203,23 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # after the launch completes must still see True.
         self.atomic_symbolic_escape: bool = False
 
+        # Per-launch state. ``concrete_events`` / ``symbolic_events`` stay
+        # client-lifetime accumulations (preserves pre-PR3 test style); race
+        # detection slices from these ``*_start`` indices each launch.
+        self._launch_symbolic_start: int = 0
+        self._launch_concrete_start: int = 0
+        self._launch_id: int = 0
+
+        # Per-grid_idx program-order counter. event_id is a unique monotonic
+        # id, but under ``num_sms > 1`` blocks race to append so append order
+        # is not program order — ``po`` must key on ``(grid_idx, program_seq)``.
+        self._program_seq_by_grid: defaultdict[tuple[int, ...], int] = defaultdict(int)
+
+        # Stubs populated by the Step 4/5/6 pipeline (wired in commits 3–4).
+        self._last_candidates: list = []
+        self._last_reports: list = []
+        self._last_barrier_addrs: set[int] = set()
+
         # Cache the un-patched atomic ops so the overrider below can execute
         # the real hardware atomic on concrete inputs without re-entering
         # ``PatchOp`` (which would loop back into ourselves).
@@ -209,6 +230,16 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._original_atomic_rmw = triton_frontend.original_ops[interpreter_builder][
             "create_atomic_rmw"
         ]
+
+    def _next_program_seq(self, grid_idx: tuple[int, ...]) -> int:
+        """Allocate the next program-order index for ``grid_idx`` within
+        the current launch. Both the atomic overriders and the plain
+        load/store before-callbacks MUST call this when emitting concrete
+        events — po, epoch partitioning, and same-value-ambiguity checks
+        all depend on it."""
+        n = self._program_seq_by_grid[grid_idx]
+        self._program_seq_by_grid[grid_idx] = n + 1
+        return n
 
     def _new_event_id(self) -> int:
         """Client-lifetime monotonic unique ID. NOT an execution-order
@@ -240,7 +271,19 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         SymbolicClient.arg_callback(self, name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
+        # Per-launch reset. ``symbolic_events`` / ``concrete_events`` stay
+        # client-lifetime; the race pipeline slices from these start
+        # indices. ``atomic_symbolic_escape`` is reset HERE, not in
+        # ``finalize()``, so consumers inspecting the detector immediately
+        # after a launch ends still see True.
         self.atomic_symbolic_escape = False
+        self._launch_id += 1
+        self._launch_symbolic_start = len(self.symbolic_events)
+        self._launch_concrete_start = len(self.concrete_events)
+        self._program_seq_by_grid.clear()
+        self._last_candidates = []
+        self._last_reports = []
+        self._last_barrier_addrs = set()
         SymbolicClient.grid_callback(self, grid)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
@@ -251,6 +294,39 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         if op_type is AtomicRMW:
             return OpCallbacks(
                 op_overrider=self.lock_fn(self._op_atomic_rmw_overrider),
+            )
+        # Plain load/store: stack a concrete before-callback on top of the
+        # symbolic overrider SymbolicClient provides. The before-callback
+        # records a concrete event (lane addresses, active mask, read/write
+        # effect) alongside the symbolic path that keeps producing
+        # SymbolicExpr nodes for downstream analysis.
+        if op_type is Load:
+            base = SymbolicClient.register_op_callback(self, op_type)
+            return OpCallbacks(
+                before_callback=self.lock_fn(self._before_load_concrete),
+                after_callback=base.after_callback,
+                op_overrider=base.op_overrider,
+            )
+        if op_type is RawLoad:
+            base = SymbolicClient.register_op_callback(self, op_type)
+            return OpCallbacks(
+                before_callback=self.lock_fn(self._before_raw_load_concrete),
+                after_callback=base.after_callback,
+                op_overrider=base.op_overrider,
+            )
+        if op_type is Store:
+            base = SymbolicClient.register_op_callback(self, op_type)
+            return OpCallbacks(
+                before_callback=self.lock_fn(self._before_store_concrete),
+                after_callback=base.after_callback,
+                op_overrider=base.op_overrider,
+            )
+        if op_type is RawStore:
+            base = SymbolicClient.register_op_callback(self, op_type)
+            return OpCallbacks(
+                before_callback=self.lock_fn(self._before_raw_store_concrete),
+                after_callback=base.after_callback,
+                op_overrider=base.op_overrider,
             )
         return SymbolicClient.register_op_callback(self, op_type)
 
@@ -446,6 +522,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 atomic_val=val_np,
                 atomic_old=old_np,
                 written_value=written_value,
+                program_seq=self._next_program_seq(grid_idx),
+                launch_id=self._launch_id,
             )
         )
 
@@ -500,10 +578,129 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 atomic_val=val_np,
                 atomic_old=old_np,
                 written_value=written_value,
+                program_seq=self._next_program_seq(grid_idx),
+                launch_id=self._launch_id,
             )
         )
 
         return _wrap_atomic_old_as_symbolic(ret_handle)
+
+    # ── Concrete plain load / store capture ───────────────────────────────
+    #
+    # Stacked on top of SymbolicClient's symbolic overrider, so the
+    # symbolic pipeline keeps producing SymbolicExpr nodes for Step 1
+    # analysis while the race pipeline gets the concrete lane geometry it
+    # needs. Order in PatchOp.__call__: before → overrider → after.
+    # TensorPointerLoad / TensorPointerStore are NOT captured here — block
+    # pointer element-address extraction is deferred.
+
+    def _before_load_concrete(
+        self,
+        ptr,
+        mask=None,
+        other=None,
+        cache_modifier=None,
+        eviction_policy=None,
+        is_volatile=None,
+    ) -> None:
+        del other, cache_modifier, eviction_policy, is_volatile
+        self._emit_concrete_plain_event(Load, "read", ptr, mask=mask, value=None)
+
+    def _before_raw_load_concrete(
+        self,
+        ptr,
+        cache_modifier=None,
+        eviction_policy=None,
+        is_volatile=None,
+    ) -> None:
+        del cache_modifier, eviction_policy, is_volatile
+        self._emit_concrete_plain_event(RawLoad, "read", ptr, mask=None, value=None)
+
+    def _before_store_concrete(
+        self,
+        ptr,
+        value,
+        mask=None,
+        cache_modifier=None,
+        eviction_policy=None,
+    ) -> None:
+        del cache_modifier, eviction_policy
+        self._emit_concrete_plain_event(Store, "write", ptr, mask=mask, value=value)
+
+    def _before_raw_store_concrete(
+        self,
+        ptr,
+        value,
+        cache_modifier=None,
+        eviction_policy=None,
+    ) -> None:
+        del cache_modifier, eviction_policy
+        self._emit_concrete_plain_event(RawStore, "write", ptr, mask=None, value=value)
+
+    def _emit_concrete_plain_event(
+        self,
+        op_type: type[Op],
+        access_mode: str,  # "read" | "write"
+        ptr: Any,
+        mask: Any = None,
+        value: Any = None,
+    ) -> None:
+        grid_idx = self.grid_idx
+        if grid_idx is None:
+            # Defensive: a plain load/store firing before grid_idx_callback
+            # would mean a client dispatch happened outside the normal
+            # launch lifecycle. Skip rather than crash.
+            return
+
+        c_ptr = maybe_concretize(ptr)
+        c_mask = maybe_concretize(mask)
+        c_value = maybe_concretize(value) if value is not None else None
+
+        try:
+            lane_addrs = flatten_np(c_ptr).astype(np.int64, copy=False)
+        except Exception:
+            # Non-pointer shapes the interpreter handles via symbolic-only
+            # paths — skip concrete capture rather than raise.
+            return
+        nlanes = lane_addrs.shape[0]
+        if nlanes == 0:
+            return
+
+        active = active_mask_for(c_mask, nlanes)
+        try:
+            elem_size = infer_elem_size(c_value, c_ptr)
+        except ValueError:
+            return
+        tensor = resolve_tensor_from_pointer(
+            c_ptr, active, elem_size, self.tensor_addrs
+        )
+
+        if access_mode == "read":
+            read_mask = active.copy()
+            write_mask = np.zeros_like(active)
+        else:
+            read_mask = np.zeros_like(active)
+            write_mask = active.copy()
+
+        self.concrete_events.append(
+            AccessEventRecord(
+                event_id=self._new_event_id(),
+                op_type=op_type,
+                source_location=capture_current_source_location(),
+                grid_idx=grid_idx,
+                tensor=tensor,
+                tensor_name=(
+                    self._get_tensor_name(tensor) if tensor is not None else None
+                ),
+                lane_addrs=lane_addrs,
+                active_mask=active,
+                elem_size=elem_size,
+                read_mask=read_mask,
+                write_mask=write_mask,
+                program_seq=self._next_program_seq(grid_idx),
+                launch_id=self._launch_id,
+            )
+        )
 
 
 class NullRaceDetector(NullSymbolicClient, RaceDetector):

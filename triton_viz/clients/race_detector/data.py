@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, Literal
 
 import numpy as np
@@ -75,8 +76,66 @@ class AccessEventRecord:
     atomic_old: np.ndarray | None = None
     written_value: np.ndarray | None = None
 
+    # Per-launch ordering / partitioning metadata (populated by the detector
+    # at capture time for concrete events — event_id is a client-lifetime
+    # unique id and NOT program order under multi-SM concurrency).
+    program_seq: int | None = None  # per-grid_idx program order index
+    epoch: int = 0  # assigned by Step 6 barrier partitioning
+    launch_id: int | None = None  # debug / cross-launch disambiguation
+
     # Reserved for Step 4/5 HB-exclusion; inert this PR.
     legacy_atomic: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Race classification / report schema
+# ---------------------------------------------------------------------------
+
+
+class RaceType(Enum):
+    """Category of a candidate data race.
+
+    Directional: ``first`` / ``second`` are ordered canonically by
+    ``(grid_idx, program_seq, event_id)`` so RAW and WAR are distinct
+    outcomes of classification — unlike upstream's dead WAR enum (#351).
+    """
+
+    RAW = auto()
+    WAR = auto()
+    WAW = auto()
+
+
+@dataclass
+class RaceCandidate:
+    """A pair of concrete events conflicting at a byte address before HB
+    suppression. Produced by the Step 4 candidate finder and fed into the
+    Step 5 HBSolver; `first` precedes `second` in the canonical ordering
+    so RAW / WAR / WAW reflect the direction of the flow."""
+
+    first: AccessEventRecord
+    second: AccessEventRecord
+    race_type: RaceType
+    witness_addr: int  # byte address
+    epoch: int
+
+
+@dataclass
+class RaceReport:
+    """Public race report emitted by `SymbolicRaceDetector.finalize()`
+    once HB suppression has run. Kept deliberately flat so consumers
+    downstream of `ClientManager.finalize()` (which appends per-client
+    finalize output to `launch.records`) can render it without walking
+    back into detector state."""
+
+    race_type: RaceType
+    witness_addr: int
+    epoch: int
+    tensor_name: str | None = None
+    grid_a: tuple[int, ...] | None = None
+    grid_b: tuple[int, ...] | None = None
+    source_a: tuple[str, int, str] | None = None
+    source_b: tuple[str, int, str] | None = None
+    hb_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -221,27 +280,26 @@ def broadcast_lane_operand(x: Any, nlanes: int) -> np.ndarray:
 def _pointer_elem_size(ptr: Any) -> int | None:
     """Best-effort: pull the element byte-size out of a pointer value.
 
-    Looks for the usual interpreter pointer-element-type chains without
-    over-fitting to one runtime shape. Returns ``None`` if nothing authoritative
-    is reachable.
+    Tries the usual interpreter pointer-element-type chains:
+      * ``ptr.type.element_ty`` (tl.core.tensor carrying a pointer dtype)
+      * ``ptr.dtype.element_ty`` (TensorHandle / SymbolicExpr with
+        ``dtype == tl.pointer_type(...)``)
+
+    Returns ``None`` if nothing authoritative is reachable — callers that
+    then lack a concrete ``val`` can raise ``ValueError`` from
+    :func:`infer_elem_size`.
     """
-    ptr = maybe_concretize(ptr)
-    candidate: Any = ptr
-    for attr in ("handle", "data"):
-        while hasattr(candidate, attr):
-            nxt = getattr(candidate, attr)
-            if nxt is candidate:
-                break
-            candidate = nxt
-
-    type_obj = getattr(ptr, "type", None)
-    element_ty = getattr(type_obj, "element_ty", None) if type_obj is not None else None
-    if element_ty is not None:
-        bitwidth = getattr(element_ty, "primitive_bitwidth", None)
-        if isinstance(bitwidth, int) and bitwidth > 0 and bitwidth % 8 == 0:
-            return bitwidth // 8
-
-    # numpy / torch pointer arrays don't carry element_ty; bail out.
+    for candidate in (ptr, maybe_concretize(ptr)):
+        if candidate is None:
+            continue
+        for attr_name in ("type", "dtype"):
+            type_obj = getattr(candidate, attr_name, None)
+            element_ty = getattr(type_obj, "element_ty", None)
+            if element_ty is None:
+                continue
+            bitwidth = getattr(element_ty, "primitive_bitwidth", None)
+            if isinstance(bitwidth, int) and bitwidth > 0 and bitwidth % 8 == 0:
+                return bitwidth // 8
     return None
 
 
