@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import deque  # noqa: F401  (re-exported for race_detector.py)
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, Literal
 
 import numpy as np
@@ -21,16 +21,24 @@ VALID_RMW_OPS: frozenset[str] = frozenset(
 )
 
 
+_MEM_SEM_ENUM_NAMES: dict[str, str] = {
+    "ACQUIRE": "acquire",
+    "RELEASE": "release",
+    "RELAXED": "relaxed",
+    "ACQUIRE_RELEASE": "acq_rel",
+}
+
+
 @dataclass
 class AccessEventRecord:
     """Effect-aware memory access event.
 
-    The same dataclass serves Step 1's symbolic load/store path and PR2's
-    concrete atomic path. Symbolic events populate ``symbolic_expr`` /
-    ``addr_expr`` / ``premises`` / ``local_constraints`` / ``access_mode``;
-    concrete atomic events populate ``lane_addrs`` / ``active_mask`` /
-    ``elem_size`` / ``read_mask`` / ``write_mask`` / ``atomic_*`` /
-    ``written_value``.
+    The same dataclass serves Step 1's symbolic load/store path and the
+    concrete atomic / plain load-store path. Symbolic events populate
+    ``symbolic_expr`` / ``addr_expr`` / ``premises`` / ``local_constraints``
+    / ``access_mode``; concrete events populate ``lane_addrs`` /
+    ``active_mask`` / ``elem_size`` / ``read_mask`` / ``write_mask`` /
+    ``atomic_*`` / ``written_value``.
     """
 
     # identity / source
@@ -50,7 +58,7 @@ class AccessEventRecord:
     premises: tuple[Any, ...] = field(default_factory=tuple)
     local_constraints: tuple[Any, ...] = field(default_factory=tuple)
 
-    # Concrete lane-level fields (populated for atomics)
+    # Concrete lane-level fields (populated for atomics + plain concrete events)
     lane_addrs: np.ndarray | None = None
     active_mask: np.ndarray | None = None
     elem_size: int | None = None
@@ -68,37 +76,66 @@ class AccessEventRecord:
     atomic_old: np.ndarray | None = None
     written_value: np.ndarray | None = None
 
+    # Per-launch ordering / partitioning metadata (populated by the detector
+    # at capture time for concrete events — event_id is a client-lifetime
+    # unique id and NOT program order under multi-SM concurrency).
+    program_seq: int | None = None  # per-grid_idx program order index
+    epoch: int = 0  # assigned by Step 6 barrier partitioning
+    launch_id: int | None = None  # debug / cross-launch disambiguation
+
     # Reserved for Step 4/5 HB-exclusion; inert this PR.
     legacy_atomic: bool = False
 
 
-@dataclass
-class PendingAtomicEvent:
-    """Snapshot captured in ``_before_atomic_*``, consumed in ``_after_atomic_*``.
+# ---------------------------------------------------------------------------
+# Race classification / report schema
+# ---------------------------------------------------------------------------
 
-    Keyed by ``grid_idx`` in a ``defaultdict(deque)``; within one block the
-    same grid_idx never collides with another worker (each block runs on one
-    worker thread), and multiple atomics inside one block pop FIFO.
+
+class RaceType(Enum):
+    """Category of a candidate data race.
+
+    Directional: ``first`` / ``second`` are ordered canonically by
+    ``(grid_idx, program_seq, event_id)`` so RAW and WAR are distinct
+    outcomes of classification — unlike upstream's dead WAR enum (#351).
     """
 
-    event_id: int
-    op_type: type[Op]
-    atomic_op: str
-    grid_idx: tuple[int, ...]
-    source_location: tuple[str, int, str] | None
+    RAW = auto()
+    WAR = auto()
+    WAW = auto()
 
-    tensor: torch.Tensor | None
-    tensor_name: str | None
 
-    lane_addrs: np.ndarray
-    active_mask: np.ndarray
-    elem_size: int
+@dataclass
+class RaceCandidate:
+    """A pair of concrete events conflicting at a byte address before HB
+    suppression. Produced by the Step 4 candidate finder and fed into the
+    Step 5 HBSolver; `first` precedes `second` in the canonical ordering
+    so RAW / WAR / WAW reflect the direction of the flow."""
 
-    atomic_sem: str
-    atomic_scope: str
+    first: AccessEventRecord
+    second: AccessEventRecord
+    race_type: RaceType
+    witness_addr: int  # byte address
+    epoch: int
 
-    atomic_cmp: np.ndarray | None = None
-    atomic_val: np.ndarray | None = None
+
+@dataclass
+class RaceReport:
+    """Public race report emitted by `SymbolicRaceDetector.finalize()`
+    once HB suppression has run. Kept deliberately flat so consumers
+    downstream of `ClientManager.finalize()` (which appends per-client
+    finalize output to `launch.records`) can render it without walking
+    back into detector state."""
+
+    race_type: RaceType
+    witness_addr: int
+    epoch: int
+    tensor_name: str | None = None
+    grid_a: tuple[int, ...] | None = None
+    grid_b: tuple[int, ...] | None = None
+    source_a: tuple[str, int, str] | None = None
+    source_b: tuple[str, int, str] | None = None
+    hb_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -106,18 +143,67 @@ class PendingAtomicEvent:
 # ---------------------------------------------------------------------------
 
 
-def normalize_sem_scope(sem: str | None, scope: str | None) -> tuple[str, str]:
-    """Triton defaults: ``sem='acq_rel'``, ``scope='gpu'``. Other values are
-    lowercased and passed through verbatim."""
-    sem_norm = "acq_rel" if sem is None else str(sem).lower()
-    scope_norm = "gpu" if scope is None else str(scope).lower()
-    return sem_norm, scope_norm
+def maybe_concretize(x: Any) -> Any:
+    """Best-effort reduce a possibly-symbolic value to its concrete form.
+
+    Handles two input shapes this package actually sees:
+      * ``SymbolicExpr`` (and its subclasses) — exposes ``concretize()`` that
+        walks the expression tree, runs the original ops, and returns a
+        ``TensorHandle`` (or scalar/tuple for const nodes).
+      * ``tl.core.tensor`` whose ``.handle`` is a ``SymbolicExpr`` — the
+        race detector's atomic overrider sees these when an upstream
+        symbolic overrider ran first, wrapping its result in ``tl.core.tensor``.
+
+    Anything already concrete (``TensorHandle``, numpy array, torch tensor,
+    Python scalar) passes through unchanged.
+    """
+    if x is None:
+        return None
+    handle = getattr(x, "handle", None)
+    if handle is not None and hasattr(handle, "concretize"):
+        # tl.core.tensor wrapping a SymbolicExpr
+        return handle.concretize()
+    if hasattr(x, "concretize"):
+        return x.concretize()
+    return x
+
+
+def normalize_sem_scope(sem: Any, scope: Any) -> tuple[str, str]:
+    """Triton defaults: ``sem='acq_rel'``, ``scope='gpu'``.
+
+    Accepts both string inputs (``"acquire"``, ``"cta"``) and interpreter
+    enum values (``MEM_SEMANTIC.ACQUIRE``). Enum names are mapped to the
+    short vocabulary used by the HB solver (``"acquire"``, ``"release"``,
+    ``"acq_rel"``, ``"relaxed"``); unknown enum names fall back to the
+    enum's lowercased name.
+    """
+    return _canonical_sem(sem), _canonical_scope(scope)
+
+
+def _canonical_sem(sem: Any) -> str:
+    if sem is None:
+        return "acq_rel"
+    name = getattr(sem, "name", None)
+    if isinstance(name, str):
+        return _MEM_SEM_ENUM_NAMES.get(name, name.lower())
+    return str(sem).lower()
+
+
+def _canonical_scope(scope: Any) -> str:
+    if scope is None:
+        return "gpu"
+    name = getattr(scope, "name", None)
+    if isinstance(name, str):
+        return name.lower()
+    return str(scope).lower()
 
 
 def flatten_np(x: Any) -> np.ndarray:
     """Coerce ``x`` (tl.tensor / TensorHandle / ndarray / torch.Tensor /
-    python scalar) into a 1-D ndarray."""
-    # tl.tensor wraps a .handle.data; interpreter TensorHandle exposes .data.
+    python scalar / SymbolicExpr / SymbolicExpr-wrapped tl.tensor) into a
+    1-D ndarray. Symbolic inputs are concretized first via
+    :func:`maybe_concretize`."""
+    x = maybe_concretize(x)
     inner: Any = x
     for attr in ("handle", "data"):
         while hasattr(inner, attr):
@@ -140,7 +226,10 @@ def active_mask_for(mask: Any, nlanes: int) -> np.ndarray:
       - scalar bool  → ``np.full(nlanes, bool(mask), dtype=bool)``
       - block/tensor → ``flatten_np(mask).astype(bool)``; length MUST
                        equal ``nlanes`` or ``ValueError`` (no silent broadcast).
+
+    Symbolic inputs are concretized first via :func:`maybe_concretize`.
     """
+    mask = maybe_concretize(mask)
     if mask is None:
         return np.ones(nlanes, dtype=bool)
 
@@ -168,7 +257,10 @@ def broadcast_lane_operand(x: Any, nlanes: int) -> np.ndarray:
       - python scalar / 0-d array → broadcast to ``nlanes``
       - 1-D array of length ``nlanes`` → pass through
       - anything else → ``ValueError`` with the offending shape
+
+    Symbolic inputs are concretized first via :func:`maybe_concretize`.
     """
+    x = maybe_concretize(x)
     if isinstance(x, (int, float, bool, np.integer, np.floating, np.bool_)):
         scalar = np.asarray(x)
         return np.full(nlanes, scalar, dtype=scalar.dtype)
@@ -188,26 +280,26 @@ def broadcast_lane_operand(x: Any, nlanes: int) -> np.ndarray:
 def _pointer_elem_size(ptr: Any) -> int | None:
     """Best-effort: pull the element byte-size out of a pointer value.
 
-    Looks for the usual interpreter pointer-element-type chains without
-    over-fitting to one runtime shape. Returns ``None`` if nothing authoritative
-    is reachable.
+    Tries the usual interpreter pointer-element-type chains:
+      * ``ptr.type.element_ty`` (tl.core.tensor carrying a pointer dtype)
+      * ``ptr.dtype.element_ty`` (TensorHandle / SymbolicExpr with
+        ``dtype == tl.pointer_type(...)``)
+
+    Returns ``None`` if nothing authoritative is reachable — callers that
+    then lack a concrete ``val`` can raise ``ValueError`` from
+    :func:`infer_elem_size`.
     """
-    candidate: Any = ptr
-    for attr in ("handle", "data"):
-        while hasattr(candidate, attr):
-            nxt = getattr(candidate, attr)
-            if nxt is candidate:
-                break
-            candidate = nxt
-
-    type_obj = getattr(ptr, "type", None)
-    element_ty = getattr(type_obj, "element_ty", None) if type_obj is not None else None
-    if element_ty is not None:
-        bitwidth = getattr(element_ty, "primitive_bitwidth", None)
-        if isinstance(bitwidth, int) and bitwidth > 0 and bitwidth % 8 == 0:
-            return bitwidth // 8
-
-    # numpy / torch pointer arrays don't carry element_ty; bail out.
+    for candidate in (ptr, maybe_concretize(ptr)):
+        if candidate is None:
+            continue
+        for attr_name in ("type", "dtype"):
+            type_obj = getattr(candidate, attr_name, None)
+            element_ty = getattr(type_obj, "element_ty", None)
+            if element_ty is None:
+                continue
+            bitwidth = getattr(element_ty, "primitive_bitwidth", None)
+            if isinstance(bitwidth, int) and bitwidth > 0 and bitwidth % 8 == 0:
+                return bitwidth // 8
     return None
 
 
@@ -220,15 +312,20 @@ def infer_elem_size(val: Any, ptr: Any) -> int:
          — only taken if the value isn't a bare Python int/float/bool (those
          get boxed to int64/float64 and would mis-classify int32 atomics).
       3. else ``ValueError``.
+
+    Symbolic inputs are concretized first via :func:`maybe_concretize`.
     """
+    val = maybe_concretize(val)
+    ptr = maybe_concretize(ptr)
+
     ptr_size = _pointer_elem_size(ptr)
     if ptr_size is not None:
         return ptr_size
 
-    if isinstance(val, (int, float, bool)):
+    if val is None or isinstance(val, (int, float, bool)):
         raise ValueError(
             "infer_elem_size: pointer has no element type and value is a bare "
-            "Python scalar; refusing to guess element size."
+            "Python scalar or absent; refusing to guess element size."
         )
 
     flat = flatten_np(val)
@@ -253,6 +350,8 @@ def resolve_tensor_from_pointer(
     3. ``lo = min(active_addrs)``, ``hi = max(active_addrs) + elem_size - 1``.
     4. Find registered tensor intervals that fully cover ``[lo, hi]``.
     5. Exactly one match → return it; zero or >1 → ``None``.
+
+    Symbolic pointers are concretized first via :func:`maybe_concretize`.
     """
     lane_addrs = flatten_np(ptr).astype(np.int64, copy=False)
     if lane_addrs.shape[0] != active_mask.shape[0]:

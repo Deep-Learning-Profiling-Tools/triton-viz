@@ -13,7 +13,8 @@ from triton_viz.clients.race_detector.race_detector import (
 )
 from triton_viz.clients.race_detector.data import (
     AccessEventRecord,
-    PendingAtomicEvent,
+    RaceReport,
+    RaceType,
     active_mask_for,
     apply_rmw,
     effects_at_addr,
@@ -22,7 +23,7 @@ from triton_viz.clients.race_detector.data import (
     resolve_tensor_from_pointer,
 )
 from triton_viz.core.config import config as cfg
-from triton_viz.core.data import AtomicCas, AtomicRMW, Load, Store
+from triton_viz.core.data import AtomicCas, Load, Store
 
 
 # ======== Config Isolation ========
@@ -436,176 +437,11 @@ def test_apply_rmw_unsupported_raises():
         apply_rmw("nope", np.array([0]), np.array([0]))
 
 
-# ======== Callback logic: hand-built PendingAtomicEvent ========
-
-
-def _prime_detector_for_callback(
-    grid_idx: tuple[int, int, int] = (0, 0, 0),
-) -> SymbolicRaceDetector:
-    """Construct a SymbolicRaceDetector with just enough state for a
-    before/after atomic callback to run. Skips the real grid_callback
-    path because these tests hand-build PendingAtomicEvent instances."""
-    detector = SymbolicRaceDetector(abort_on_error=False)
-    detector.grid_idx_callback(grid_idx)
-    return detector
-
-
-def test_atomic_cas_success_and_failure_compute_masks_correctly():
-    detector = _prime_detector_for_callback()
-    pending = PendingAtomicEvent(
-        event_id=42,
-        op_type=AtomicCas,
-        atomic_op="cas",
-        grid_idx=(0, 0, 0),
-        source_location=None,
-        tensor=None,
-        tensor_name=None,
-        lane_addrs=np.array([100, 104], dtype=np.int64),
-        active_mask=np.array([True, True]),
-        elem_size=4,
-        atomic_sem="acq_rel",
-        atomic_scope="gpu",
-        atomic_cmp=np.array([0, 99], dtype=np.int32),  # lane1 cmp won't match
-        atomic_val=np.array([7, 8], dtype=np.int32),
-    )
-    detector._pending_atomic_by_grid[(0, 0, 0)].append(pending)
-
-    # lane0 old=0 matches cmp=0 → success; lane1 old=5 != 99 → fail.
-    ret = np.array([0, 5], dtype=np.int32)
-    detector._after_atomic_cas(ret, ptr=None, cmp=None, val=None)
-
-    assert len(detector.concrete_events) == 1
-    event = detector.concrete_events[0]
-    np.testing.assert_array_equal(event.read_mask, [True, True])
-    np.testing.assert_array_equal(event.write_mask, [True, False])
-    np.testing.assert_array_equal(event.written_value, [7, 5])
-    np.testing.assert_array_equal(event.atomic_old, [0, 5])
-    assert event.atomic_op == "cas"
-
-
-def test_atomic_cas_after_pops_matching_grid_queue():
-    detector = _prime_detector_for_callback(grid_idx=(0, 0, 0))
-
-    def _mk_pending(gidx: tuple[int, int, int]) -> PendingAtomicEvent:
-        return PendingAtomicEvent(
-            event_id=gidx[0],
-            op_type=AtomicCas,
-            atomic_op="cas",
-            grid_idx=gidx,
-            source_location=None,
-            tensor=None,
-            tensor_name=None,
-            lane_addrs=np.array([100], dtype=np.int64),
-            active_mask=np.array([True]),
-            elem_size=4,
-            atomic_sem="acq_rel",
-            atomic_scope="gpu",
-            atomic_cmp=np.array([0], dtype=np.int32),
-            atomic_val=np.array([1], dtype=np.int32),
-        )
-
-    detector._pending_atomic_by_grid[(0, 0, 0)].append(_mk_pending((0, 0, 0)))
-    detector._pending_atomic_by_grid[(1, 0, 0)].append(_mk_pending((1, 0, 0)))
-
-    # detector.grid_idx is currently (0, 0, 0) from priming.
-    ret = np.array([0], dtype=np.int32)
-    detector._after_atomic_cas(ret, ptr=None, cmp=None, val=None)
-
-    # (0,0,0) popped; (1,0,0) untouched.
-    assert len(detector._pending_atomic_by_grid[(0, 0, 0)]) == 0
-    assert len(detector._pending_atomic_by_grid[(1, 0, 0)]) == 1
-
-
-def test_atomic_rmw_add_written_value_uses_old_plus_val():
-    detector = _prime_detector_for_callback()
-    pending = PendingAtomicEvent(
-        event_id=7,
-        op_type=AtomicRMW,
-        atomic_op="add",
-        grid_idx=(0, 0, 0),
-        source_location=None,
-        tensor=None,
-        tensor_name=None,
-        lane_addrs=np.array([100, 104], dtype=np.int64),
-        active_mask=np.array([True, True]),
-        elem_size=4,
-        atomic_sem="acq_rel",
-        atomic_scope="gpu",
-        atomic_cmp=None,
-        atomic_val=np.array([5, 7], dtype=np.int32),
-    )
-    detector._pending_atomic_by_grid[(0, 0, 0)].append(pending)
-
-    ret = np.array([10, 20], dtype=np.int32)
-    detector._after_atomic_rmw(ret, rmwOp=None, ptr=None, val=None)
-    event = detector.concrete_events[0]
-    np.testing.assert_array_equal(event.written_value, [15, 27])
-
-
-def test_atomic_rmw_xchg_written_value_equals_val():
-    detector = _prime_detector_for_callback()
-    pending = PendingAtomicEvent(
-        event_id=7,
-        op_type=AtomicRMW,
-        atomic_op="xchg",
-        grid_idx=(0, 0, 0),
-        source_location=None,
-        tensor=None,
-        tensor_name=None,
-        lane_addrs=np.array([100], dtype=np.int64),
-        active_mask=np.array([True]),
-        elem_size=4,
-        atomic_sem="acq_rel",
-        atomic_scope="gpu",
-        atomic_cmp=None,
-        atomic_val=np.array([99], dtype=np.int32),
-    )
-    detector._pending_atomic_by_grid[(0, 0, 0)].append(pending)
-
-    ret = np.array([7], dtype=np.int32)
-    detector._after_atomic_rmw(ret, rmwOp=None, ptr=None, val=None)
-    event = detector.concrete_events[0]
-    np.testing.assert_array_equal(event.written_value, [99])
-
-
 # ======== atomic_symbolic_escape lifecycle ========
 
 
-def test_atomic_symbolic_escape_flag_set_after_atomic():
-    # Unit-level: hand-call _before_atomic_cas with mock args so the test
-    # has no coupling with kernel-launch lifecycle.
-    detector = _prime_detector_for_callback()
-    assert detector.atomic_symbolic_escape is False
-
-    class _ElemTy:
-        primitive_bitwidth = 32
-
-    class _PtrTy:
-        element_ty = _ElemTy()
-
-    class _Ptr:
-        type = _PtrTy()
-
-        def __init__(self, addrs: np.ndarray):
-            self.addrs = addrs
-
-    # flatten_np walks .handle/.data; expose .data → address array.
-    ptr = _Ptr(np.array([100], dtype=np.int64))
-    ptr.data = ptr.addrs  # type: ignore[attr-defined]
-
-    detector._before_atomic_cas(
-        ptr,
-        cmp=np.array([0], dtype=np.int32),
-        val=np.array([1], dtype=np.int32),
-        mask=None,
-        sem=None,
-        scope=None,
-    )
-    assert detector.atomic_symbolic_escape is True
-
-
 def test_atomic_symbolic_escape_survives_finalize_and_resets_on_next_grid_callback():
-    detector = _prime_detector_for_callback()
+    detector = SymbolicRaceDetector(abort_on_error=False)
     # Forcibly set the flag as if an atomic had been captured.
     detector.atomic_symbolic_escape = True
 
@@ -620,59 +456,13 @@ def test_atomic_symbolic_escape_survives_finalize_and_resets_on_next_grid_callba
     assert detector.atomic_symbolic_escape is False
 
 
-# ======== finalize: dangling-pending assertion ========
-
-
-def test_finalize_raises_on_dangling_pending():
-    detector = _prime_detector_for_callback()
-    detector._pending_atomic_by_grid[(9, 9, 9)].append(
-        PendingAtomicEvent(
-            event_id=0,
-            op_type=AtomicCas,
-            atomic_op="cas",
-            grid_idx=(9, 9, 9),
-            source_location=None,
-            tensor=None,
-            tensor_name=None,
-            lane_addrs=np.array([100], dtype=np.int64),
-            active_mask=np.array([True]),
-            elem_size=4,
-            atomic_sem="acq_rel",
-            atomic_scope="gpu",
-            atomic_cmp=np.array([0], dtype=np.int32),
-            atomic_val=np.array([1], dtype=np.int32),
-        )
-    )
-    with pytest.raises(RuntimeError, match="Dangling pending atomic events"):
-        detector.finalize()
-
-
-# ======== End-to-end tests (xfail) ========
+# ======== End-to-end tests ========
 #
-# These exercise the full path: traced kernel → SymbolicClient → atomic
-# before/after callbacks → concrete_events. They're marked xfail because
-# the race detector currently inherits SymbolicClient's symbolic
-# overriders for Load/AddPtr/Splat/etc., which rewrite every expression
-# along the way into a SymbolicExpr. By the time ``tl.atomic_cas(ptr,
-# cmp, val)`` fires, its inputs are SymbolicExpr values that can't be
-# fed to the real interpreter-builder ``create_atomic_cas`` (no
-# op_overrider is registered for atomics on race_detector, so the
-# original op is expected to run — but only on concrete inputs).
-#
-# The fix is an adapter-level concretize-on-entry for atomic ops
-# (probably a race-detector-specific op_overrider that pulls out numpy
-# values, simulates the CAS/RMW, records the effect event, and returns
-# a SymbolicExpr const wrapping the resulting old value). That's a
-# separate scope from this PR's data-model + callback skeleton. The
-# callback *logic* is validated by the hand-built-pending tests above.
-
-
-ATOMIC_E2E_XFAIL_REASON = (
-    "Symbolic overriders upstream of tl.atomic_* turn the atomic's args "
-    "into SymbolicExpr; race_detector's op_overrider=None requires real "
-    "hardware execution on concrete inputs. Needs adapter-level "
-    "concretize-on-entry scaffolding — follow-up PR."
-)
+# Exercise the full path: traced kernel → race_detector atomic overrider →
+# concrete_events. The overrider concretizes ``SymbolicExpr`` inputs, runs
+# the real ``interpreter_builder.create_atomic_*`` on the concrete values,
+# records the effect, and returns a ``const`` SymbolicExpr wrapping the
+# hardware ``old`` so downstream symbolic consumers keep working.
 
 
 @triton.jit
@@ -687,7 +477,15 @@ def _atomic_add_kernel(x_ptr, val_ptr):
     tl.store(val_ptr + 1, old)
 
 
-@pytest.mark.xfail(reason=ATOMIC_E2E_XFAIL_REASON, strict=True)
+@triton.jit
+def _atomic_cas_downstream_kernel(x_ptr, out_ptr):
+    # Consume the atomic return value via a downstream symbolic op so the
+    # Step-0c return-type decision (``const`` SymbolicExpr carrying the
+    # concrete ``old``) stays honest end-to-end.
+    old = tl.atomic_cas(x_ptr, 0, 1)
+    tl.store(out_ptr, old + 1)
+
+
 def test_traced_kernel_emits_concrete_cas_event(_isolate_race_detector_cfg):
     detector = SymbolicRaceDetector(abort_on_error=False)
     traced = triton_viz.trace(client=detector)(_atomic_cas_kernel)
@@ -706,7 +504,6 @@ def test_traced_kernel_emits_concrete_cas_event(_isolate_race_detector_cfg):
     assert e.write_mask is not None and bool(e.write_mask.all())
 
 
-@pytest.mark.xfail(reason=ATOMIC_E2E_XFAIL_REASON, strict=True)
 def test_traced_kernel_emits_concrete_atomic_add_event(_isolate_race_detector_cfg):
     detector = SymbolicRaceDetector(abort_on_error=False)
     traced = triton_viz.trace(client=detector)(_atomic_add_kernel)
@@ -726,7 +523,6 @@ def test_traced_kernel_emits_concrete_atomic_add_event(_isolate_race_detector_cf
     np.testing.assert_array_equal(e.written_value, np.array([15], dtype=np.int32))
 
 
-@pytest.mark.xfail(reason=ATOMIC_E2E_XFAIL_REASON, strict=True)
 def test_finalize_still_returns_empty(_isolate_race_detector_cfg):
     detector = SymbolicRaceDetector(abort_on_error=False)
     traced = triton_viz.trace(client=detector)(_atomic_add_kernel)
@@ -734,10 +530,10 @@ def test_finalize_still_returns_empty(_isolate_race_detector_cfg):
     val = torch.tensor([1, 0], dtype=torch.int32)
     traced[(1,)](x, val)
 
+    # Step 0 (this commit) does not yet emit RaceReports from finalize().
     assert detector.finalize() == []
 
 
-@pytest.mark.xfail(reason=ATOMIC_E2E_XFAIL_REASON, strict=True)
 def test_repeat_launches_are_deterministic_for_atomics(_isolate_race_detector_cfg):
     detector = SymbolicRaceDetector(abort_on_error=False)
     traced = triton_viz.trace(client=detector)(_atomic_add_kernel)
@@ -748,25 +544,21 @@ def test_repeat_launches_are_deterministic_for_atomics(_isolate_race_detector_cf
         traced[(1,)](x, val)
 
     _launch(10, 5)
-    assert len(detector.concrete_events) == 1
+    atomic_events = [e for e in detector.concrete_events if e.atomic_op is not None]
+    assert len(atomic_events) == 1
     detector.concrete_events.clear()
 
     _launch(10, 5)
-    assert len(detector.concrete_events) == 1
-    assert detector.concrete_events[0].atomic_op == "add"
-
-    # Pending queue must have drained between launches.
-    assert all(len(q) == 0 for q in detector._pending_atomic_by_grid.values())
+    atomic_events = [e for e in detector.concrete_events if e.atomic_op is not None]
+    assert len(atomic_events) == 1
+    assert atomic_events[0].atomic_op == "add"
 
 
-@pytest.mark.xfail(reason=ATOMIC_E2E_XFAIL_REASON, strict=True)
-def test_concurrent_blocks_drain_pending_queue_cleanly():
+def test_concurrent_blocks_capture_atomics_cleanly():
     """cfg.num_sms = 2 with a 2-block kernel, each block issues one atomic
-    add. Let the ThreadPoolExecutor interleave as it wants. The dangling-
-    queue assertion lives in finalize() (which runs once, post-launch),
-    NOT in per-block post_run_callback — so natural scheduling must not
-    trigger a false RuntimeError, and the queue must be empty after the
-    launch ends."""
+    add. Let the ThreadPoolExecutor interleave as it wants — overrider-based
+    capture is single-shot per op (no cross-callback pending state) so the
+    expected count is exactly one event per block regardless of ordering."""
     saved_num_sms = cfg.num_sms
     saved_flag = cfg.enable_race_detector
     try:
@@ -785,7 +577,136 @@ def test_concurrent_blocks_drain_pending_queue_cleanly():
 
         assert detector.finalize() == []
         assert len(detector.concrete_events) == 2
-        assert all(len(q) == 0 for q in detector._pending_atomic_by_grid.values())
     finally:
         cfg.num_sms = saved_num_sms
         cfg.enable_race_detector = saved_flag
+
+
+def test_concrete_events_carry_program_seq_and_launch_id(_isolate_race_detector_cfg):
+    """Both plain load/store events and atomic events must be tagged with a
+    per-grid ``program_seq`` and the current ``launch_id`` — po / epoch
+    partitioning / same-value ambiguity all depend on this sequencing."""
+    detector = SymbolicRaceDetector(abort_on_error=False)
+
+    @triton.jit
+    def _mixed_kernel(x_ptr, flag_ptr, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(x_ptr + offs)
+        tl.store(x_ptr + offs, v + 1)
+        tl.atomic_add(flag_ptr, 1)
+
+    traced = triton_viz.trace(client=detector)(_mixed_kernel)
+    x = torch.zeros(4, dtype=torch.int32)
+    flag = torch.zeros(1, dtype=torch.int32)
+    traced[(1,)](x, flag, BLOCK=4)
+
+    # Three concrete events expected: load, store, atomic_add.
+    assert len(detector.concrete_events) == 3
+    seqs = [e.program_seq for e in detector.concrete_events]
+    # Within a single grid_idx the program_seq values are 0, 1, 2 in issue
+    # order — NOT event_id order under multi-SM (unused here but locks
+    # the invariant that per-grid sequencing is contiguous).
+    assert seqs == [0, 1, 2], f"expected [0,1,2] program_seq, got {seqs}"
+
+    launch_ids = {e.launch_id for e in detector.concrete_events}
+    assert launch_ids == {detector._launch_id}
+
+
+def test_release_acquire_reads_from_suppresses_crossblock_plain_race(
+    _isolate_race_detector_cfg,
+):
+    """Producer-consumer handshake: block 0 writes a plain flag then
+    releases a barrier atomic; block 1 acquires on the same barrier and
+    then reads the plain flag. With reads-from (acquire reads exactly
+    what release wrote), the HBSolver orders the plain accesses via
+    ``po | sw`` so the cross-block race on the plain flag goes away."""
+    detector = SymbolicRaceDetector(abort_on_error=False)
+
+    @triton.jit
+    def _producer_consumer(flag_ptr, sync_ptr):
+        pid = tl.program_id(axis=0)
+        # Producer (pid==0): plain store then release-xchg.
+        tl.store(flag_ptr, 42, mask=(pid == 0))
+        tl.atomic_xchg(sync_ptr, 1, mask=(pid == 0), sem="release", scope="gpu")
+        # Consumer (pid==1): acquire-xchg (reads what producer released),
+        # then plain load.
+        _obtained = tl.atomic_xchg(
+            sync_ptr, 2, mask=(pid == 1), sem="acquire", scope="gpu"
+        )
+        tl.load(flag_ptr, mask=(pid == 1))
+
+    traced = triton_viz.trace(client=detector)(_producer_consumer)
+    flag = torch.zeros(1, dtype=torch.int32)
+    sync = torch.zeros(1, dtype=torch.int32)
+    traced[(2,)](flag, sync)
+
+    reports = detector.finalize()
+    flag_addr = flag.data_ptr()
+    flag_reports = [
+        r
+        for r in reports
+        if flag_addr <= r.witness_addr < flag_addr + flag.element_size()
+    ]
+    assert not flag_reports, (
+        f"release/acquire+reads-from should suppress the cross-block race "
+        f"on flag_ptr; got {flag_reports}"
+    )
+
+
+def test_finalize_emits_report_for_crossblock_plain_store_load(
+    _isolate_race_detector_cfg,
+):
+    """Smoke test for the Step 4 candidate pipeline.
+
+    Block 0 stores to ``x_ptr``; block 1 loads from ``x_ptr``. Without
+    HB suppression (Step 5 lands in the next commit), this emits one
+    RAW RaceReport — canonical ordering places block 0's store first,
+    so the flow is write-then-read.
+    """
+    detector = SymbolicRaceDetector(abort_on_error=False)
+
+    @triton.jit
+    def _crossblock_rw(x_ptr, out_ptr):
+        pid = tl.program_id(axis=0)
+        tl.store(x_ptr, 1, mask=(pid == 0))
+        v = tl.load(x_ptr, mask=(pid == 1))
+        tl.store(out_ptr + pid, v, mask=(pid == 1))
+
+    traced = triton_viz.trace(client=detector)(_crossblock_rw)
+    x = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(2, dtype=torch.int32)
+    traced[(2,)](x, out)
+
+    reports = detector.finalize()
+    # At least one RAW report on x_ptr between block 0 and block 1.
+    raw_reports = [
+        r
+        for r in reports
+        if isinstance(r, RaceReport)
+        and r.race_type is RaceType.RAW
+        and r.grid_a == (0, 0, 0)
+        and r.grid_b == (1, 0, 0)
+    ]
+    assert raw_reports, f"expected a RAW cross-block report, got {reports}"
+
+
+def test_atomic_cas_return_is_consumable_downstream(_isolate_race_detector_cfg):
+    """Locks the Step-0c return-type decision: the overrider returns a
+    ``const`` SymbolicExpr wrapping the concrete ``old`` TensorHandle, so
+    (a) the launch doesn't raise when downstream ops consume the result
+    and (b) a CAS concrete event is still captured."""
+    detector = SymbolicRaceDetector(abort_on_error=False)
+    traced = triton_viz.trace(client=detector)(_atomic_cas_downstream_kernel)
+
+    x = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(1, dtype=torch.int32)
+
+    traced[(1,)](x, out)  # must not raise
+
+    cas_events = [e for e in detector.concrete_events if e.atomic_op == "cas"]
+    assert len(cas_events) == 1
+    event = cas_events[0]
+    assert event.atomic_old is not None
+    assert int(event.atomic_old[0]) == 0
+    # detector.atomic_symbolic_escape flips on first atomic capture.
+    assert detector.atomic_symbolic_escape is True
