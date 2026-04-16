@@ -13,6 +13,8 @@ from triton_viz.clients.race_detector.race_detector import (
 )
 from triton_viz.clients.race_detector.data import (
     AccessEventRecord,
+    RaceReport,
+    RaceType,
     active_mask_for,
     apply_rmw,
     effects_at_addr,
@@ -608,6 +610,43 @@ def test_concrete_events_carry_program_seq_and_launch_id(_isolate_race_detector_
 
     launch_ids = {e.launch_id for e in detector.concrete_events}
     assert launch_ids == {detector._launch_id}
+
+
+def test_finalize_emits_report_for_crossblock_plain_store_load(
+    _isolate_race_detector_cfg,
+):
+    """Smoke test for the Step 4 candidate pipeline.
+
+    Block 0 stores to ``x_ptr``; block 1 loads from ``x_ptr``. Without
+    HB suppression (Step 5 lands in the next commit), this emits one
+    RAW RaceReport — canonical ordering places block 0's store first,
+    so the flow is write-then-read.
+    """
+    detector = SymbolicRaceDetector(abort_on_error=False)
+
+    @triton.jit
+    def _crossblock_rw(x_ptr, out_ptr):
+        pid = tl.program_id(axis=0)
+        tl.store(x_ptr, 1, mask=(pid == 0))
+        v = tl.load(x_ptr, mask=(pid == 1))
+        tl.store(out_ptr + pid, v, mask=(pid == 1))
+
+    traced = triton_viz.trace(client=detector)(_crossblock_rw)
+    x = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(2, dtype=torch.int32)
+    traced[(2,)](x, out)
+
+    reports = detector.finalize()
+    # At least one RAW report on x_ptr between block 0 and block 1.
+    raw_reports = [
+        r
+        for r in reports
+        if isinstance(r, RaceReport)
+        and r.race_type is RaceType.RAW
+        and r.grid_a == (0, 0, 0)
+        and r.grid_b == (1, 0, 0)
+    ]
+    assert raw_reports, f"expected a RAW cross-block report, got {reports}"
 
 
 def test_atomic_cas_return_is_consumable_downstream(_isolate_race_detector_cfg):

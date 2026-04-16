@@ -36,10 +36,14 @@ from ..symbolic_engine import (
 )
 from .data import (
     AccessEventRecord,
+    RaceCandidate,
+    RaceReport,
+    RaceType,
     VALID_RMW_OPS,
     active_mask_for,
     apply_rmw,
     broadcast_lane_operand,
+    effects_at_addr,
     flatten_np,
     infer_elem_size,
     maybe_concretize,
@@ -124,6 +128,73 @@ def _wrap_atomic_old_as_symbolic(old_handle: TensorHandle) -> SymbolicExpr:
     branch's contract with no extra wrapping.
     """
     return SymbolicExpr.create("const", old_handle, old_handle.dtype)
+
+
+def _iter_event_bytes(event: AccessEventRecord):
+    """Yield every byte address covered by an active lane of ``event``.
+
+    Byte granularity matches ``effects_at_addr`` (upstream #344 fix):
+    single-lane-only would miss multi-lane writes to the same element.
+    Iteration is per-active-lane because hits are aggregated via
+    ``np.any`` over every lane covering a given byte.
+    """
+    if event.lane_addrs is None or event.elem_size is None:
+        return
+    active = (
+        event.active_mask
+        if event.active_mask is not None
+        else np.ones_like(event.lane_addrs, dtype=bool)
+    )
+    elem_size = int(event.elem_size)
+    for idx, hit in enumerate(active):
+        if not hit:
+            continue
+        base = int(event.lane_addrs[idx])
+        for k in range(elem_size):
+            yield base + k
+
+
+def _canonical_pair(
+    a: AccessEventRecord, b: AccessEventRecord
+) -> tuple[AccessEventRecord, AccessEventRecord]:
+    """Order two conflicting events by ``(grid_idx, program_seq, event_id)``.
+
+    Fixing the direction here (a -> first, b -> second) is what lets Step 4
+    emit *directional* RAW vs. WAR — without a canonical order, upstream's
+    WAR enum stays dead code (#351).
+    """
+
+    def _key(e: AccessEventRecord) -> tuple:
+        return (
+            e.grid_idx if e.grid_idx is not None else (),
+            e.program_seq if e.program_seq is not None else -1,
+            e.event_id,
+        )
+
+    return (a, b) if _key(a) <= _key(b) else (b, a)
+
+
+def _classify_candidate(
+    first: AccessEventRecord,
+    second: AccessEventRecord,
+    byte_addr: int,
+) -> RaceType | None:
+    """Classify a concrete-event pair at ``byte_addr`` via the effect model.
+
+    The classification goes through ``effects_at_addr`` (not op-type
+    hardcoding) so plain load/store, CAS success/failure lanes, and RMW
+    events are all treated uniformly. Upstream #345 explicitly flagged
+    the op-type hardcoding as a correctness bug.
+    """
+    r1, w1 = effects_at_addr(first, byte_addr)
+    r2, w2 = effects_at_addr(second, byte_addr)
+    if w1 and w2:
+        return RaceType.WAW
+    if w1 and r2:
+        return RaceType.RAW
+    if r1 and w2:
+        return RaceType.WAR
+    return None
 
 
 class RaceDetector(Client):
@@ -262,7 +333,27 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # Step 4/5 consumers inspect the detector right after the launch
         # completes and must still see True. The flag is reset at the
         # next launch's grid_callback.
-        return SymbolicClient.finalize(self)
+        SymbolicClient.finalize(self)
+
+        launch_events = [
+            ev
+            for ev in self.concrete_events[self._launch_concrete_start :]
+            if not ev.legacy_atomic
+        ]
+        if not launch_events:
+            self._last_candidates = []
+            self._last_reports = []
+            return []
+
+        candidates = self._find_race_candidates(launch_events)
+        # Step 5 (HBSolver) lands in the next commit. Until then emit every
+        # candidate as an unsuppressed report so the candidate pipeline is
+        # observable end-to-end.
+        reports = [self._candidate_to_report(c) for c in candidates]
+
+        self._last_candidates = candidates
+        self._last_reports = reports
+        return reports
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return SymbolicClient.register_for_loop_callback(self)
@@ -331,10 +422,21 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         return SymbolicClient.register_op_callback(self, op_type)
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        return SymbolicClient.pre_run_callback(self, fn)
+        # Race detection fundamentally needs full-grid coverage — cross-block
+        # conflicts can't be reasoned about if blocks get skipped. Force
+        # every block to run; let SymbolicClient's pre_run still do its
+        # per-block setup.
+        SymbolicClient.pre_run_callback(self, fn)
+        return True
 
     def post_run_callback(self, fn: Callable) -> bool:
-        return SymbolicClient.post_run_callback(self, fn)
+        # Same reasoning — PatchOp terminates the grid iteration when any
+        # client's post_run returns False (see ``core/patch.py:L488-507``).
+        # SymbolicClient returns False for non-data-dependent launches to
+        # skip redundant blocks; for the race detector every block is
+        # meaningful, so force True and let the base still clean caches.
+        SymbolicClient.post_run_callback(self, fn)
+        return True
 
     # ── Event recording (symbolic) ────────────────────────────────────────
 
@@ -594,47 +696,27 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     # TensorPointerLoad / TensorPointerStore are NOT captured here — block
     # pointer element-address extraction is deferred.
 
-    def _before_load_concrete(
-        self,
-        ptr,
-        mask=None,
-        other=None,
-        cache_modifier=None,
-        eviction_policy=None,
-        is_volatile=None,
-    ) -> None:
-        del other, cache_modifier, eviction_policy, is_volatile
+    # Adapter-driven signatures (see ``frontends/triton.py``):
+    #   * ``_triton_load_adapter``      -> ``(ptr, mask, keys)``
+    #   * ``_triton_raw_load_adapter``  -> ``(ptr,)``
+    #   * ``_triton_store_adapter``     -> ``(ptr, mask, keys)`` — ``value`` is
+    #                                     stripped by design; elem_size falls
+    #                                     through ``ptr.dtype.element_ty`` in
+    #                                     ``_pointer_elem_size``.
+    #   * ``_triton_raw_store_adapter`` -> ``(ptr, value)``
+
+    def _before_load_concrete(self, ptr, mask=None, keys=None) -> None:
+        del keys
         self._emit_concrete_plain_event(Load, "read", ptr, mask=mask, value=None)
 
-    def _before_raw_load_concrete(
-        self,
-        ptr,
-        cache_modifier=None,
-        eviction_policy=None,
-        is_volatile=None,
-    ) -> None:
-        del cache_modifier, eviction_policy, is_volatile
+    def _before_raw_load_concrete(self, ptr) -> None:
         self._emit_concrete_plain_event(RawLoad, "read", ptr, mask=None, value=None)
 
-    def _before_store_concrete(
-        self,
-        ptr,
-        value,
-        mask=None,
-        cache_modifier=None,
-        eviction_policy=None,
-    ) -> None:
-        del cache_modifier, eviction_policy
-        self._emit_concrete_plain_event(Store, "write", ptr, mask=mask, value=value)
+    def _before_store_concrete(self, ptr, mask=None, keys=None) -> None:
+        del keys
+        self._emit_concrete_plain_event(Store, "write", ptr, mask=mask, value=None)
 
-    def _before_raw_store_concrete(
-        self,
-        ptr,
-        value,
-        cache_modifier=None,
-        eviction_policy=None,
-    ) -> None:
-        del cache_modifier, eviction_policy
+    def _before_raw_store_concrete(self, ptr, value) -> None:
         self._emit_concrete_plain_event(RawStore, "write", ptr, mask=None, value=value)
 
     def _emit_concrete_plain_event(
@@ -700,6 +782,77 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 program_seq=self._next_program_seq(grid_idx),
                 launch_id=self._launch_id,
             )
+        )
+
+    # ── Candidate finder (Step 4) ─────────────────────────────────────────
+    #
+    # Bucket concrete events by ``(epoch, byte_addr)`` and pair everything
+    # in each bucket. Skip same-grid_idx pairs (intra-block is po-ordered,
+    # not PR3's target) and dedupe on ``(min(event_id), max(event_id))``
+    # so a multi-byte conflict between the same two events emits a single
+    # candidate, not ``elem_size`` copies.
+
+    def _find_race_candidates(
+        self, events: list[AccessEventRecord]
+    ) -> list[RaceCandidate]:
+        addr_buckets: dict[tuple[int, int], list[AccessEventRecord]] = {}
+        for ev in events:
+            for byte_addr in _iter_event_bytes(ev):
+                addr_buckets.setdefault((ev.epoch, byte_addr), []).append(ev)
+
+        candidates: list[RaceCandidate] = []
+        seen_pairs: set[tuple[int, int, int]] = set()
+
+        for (epoch, byte_addr), bucket in addr_buckets.items():
+            n = len(bucket)
+            for i in range(n):
+                ev_a = bucket[i]
+                for j in range(i + 1, n):
+                    ev_b = bucket[j]
+                    if ev_a is ev_b:
+                        continue
+                    if ev_a.grid_idx == ev_b.grid_idx:
+                        # Intra-block is po-ordered — not a race.
+                        continue
+                    key = (
+                        epoch,
+                        min(ev_a.event_id, ev_b.event_id),
+                        max(ev_a.event_id, ev_b.event_id),
+                    )
+                    if key in seen_pairs:
+                        continue
+                    first, second = _canonical_pair(ev_a, ev_b)
+                    race_type = _classify_candidate(first, second, byte_addr)
+                    if race_type is None:
+                        continue
+                    seen_pairs.add(key)
+                    candidates.append(
+                        RaceCandidate(
+                            first=first,
+                            second=second,
+                            race_type=race_type,
+                            witness_addr=byte_addr,
+                            epoch=epoch,
+                        )
+                    )
+        return candidates
+
+    def _candidate_to_report(
+        self, cand: RaceCandidate, hb_reason: str | None = None
+    ) -> RaceReport:
+        """Flatten a RaceCandidate into the public RaceReport shape. HB
+        reason is None until Step 5 (HBSolver) is wired in the next commit."""
+        tensor_name = cand.first.tensor_name or cand.second.tensor_name
+        return RaceReport(
+            race_type=cand.race_type,
+            witness_addr=cand.witness_addr,
+            epoch=cand.epoch,
+            tensor_name=tensor_name,
+            grid_a=cand.first.grid_idx,
+            grid_b=cand.second.grid_idx,
+            source_a=cand.first.source_location,
+            source_b=cand.second.source_location,
+            hb_reason=hb_reason,
         )
 
 
