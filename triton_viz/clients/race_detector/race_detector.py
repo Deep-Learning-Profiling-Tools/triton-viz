@@ -130,7 +130,23 @@ class RaceDetector(Client):
 class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     def __init__(self, abort_on_error: bool = False):
         super().__init__(abort_on_error=abort_on_error)
-        self.records: list[AccessEventRecord] = []
+        # Step 1 symbolic path
+        self.symbolic_events: list[AccessEventRecord] = []
+        # ``records`` is Step 1's historical name — kept as an alias for the
+        # symbolic path so pre-existing tests (test_race_detector.py) keep
+        # working. Commit 2 adds the sibling ``concrete_events`` list for
+        # the atomic path.
+        self.records = self.symbolic_events
+        self._next_event_id = 0
+
+    def _new_event_id(self) -> int:
+        """Client-lifetime monotonic unique ID. NOT an execution-order
+        indicator under multi-SM concurrency — blocks race to append, so
+        append order != execution order. Consumers that need execution
+        order must key on grid_idx + queue position, not event_id."""
+        eid = self._next_event_id
+        self._next_event_id += 1
+        return eid
 
     # Explicit forwarders to SymbolicClient: the RaceDetector factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
@@ -162,7 +178,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
 
     # ── Event recording ───────────────────────────────────────────────────
 
-    def _record_access_event(
+    def _emit_symbolic_event(
         self,
         access_mode: AccessMode,
         op_type: type[Op],
@@ -190,8 +206,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         else:
             local = (expr_constraints,)
 
-        self.records.append(
+        self.symbolic_events.append(
             AccessEventRecord(
+                event_id=self._new_event_id(),
                 op_type=op_type,
                 access_mode=access_mode,
                 tensor=tensor,
@@ -221,7 +238,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         source_location = capture_current_source_location()
 
         if not self.loop_stack:
-            self._record_access_event(
+            self._emit_symbolic_event(
                 access_mode,
                 op_type,
                 z3_addr,
@@ -265,7 +282,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # (subclass of PendingCheck) — narrow so attribute accesses are
         # type-safe under Literal["read", "write"].
         assert isinstance(pending, PendingEvent)
-        self._record_access_event(
+        self._emit_symbolic_event(
             pending.access_mode,
             pending.op_type,
             pending.addr_expr,
