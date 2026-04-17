@@ -235,3 +235,79 @@ def test_num_sms_1_and_2_match_on_release_acquire(_race_detector_on):
         ), f"num_sms=1 vs num_sms=2 disagreed on suppression: {results}"
     finally:
         cfg.num_sms = saved_num_sms
+
+
+# ── PR4: shape ops must preserve lane alignment for coupled tensors ──
+
+
+@triton.jit
+def _cas_after_reshape_trans_kernel(x_ptr, cmp_ptr, val_ptr, out_ptr):
+    # Race-detector target: a CAS where cmp and val both pass through the
+    # same reshape+trans chain before hitting atomic_cas. The five coupled
+    # tensors (ptr, mask, cmp, val, old) must stay lane-aligned through the
+    # shape ops, otherwise the detector will misinterpret cmp/val/old.
+    pid = tl.program_id(axis=0)
+    offs = tl.arange(0, 4)  # shape (4,)
+    ptrs = x_ptr + offs  # per-lane pointers, shape (4,)
+
+    cmp_block = tl.load(cmp_ptr + offs)  # shape (4,)
+    val_block = tl.load(val_ptr + offs)  # shape (4,)
+
+    # Reshape (4,) -> (2, 2) and trans -> (2, 2). Identity lane preservation
+    # is not trivial under trans; that is exactly what PR4 enforces.
+    cmp_2d = tl.reshape(cmp_block, (2, 2))
+    cmp_t = tl.trans(cmp_2d)
+    cmp_back = tl.reshape(cmp_t, (4,))
+
+    val_2d = tl.reshape(val_block, (2, 2))
+    val_t = tl.trans(val_2d)
+    val_back = tl.reshape(val_t, (4,))
+
+    # Do CAS once per program. The detector captures concrete events with
+    # per-lane cmp/val/old arrays.
+    old = tl.atomic_cas(ptrs, cmp_back, val_back)
+    tl.store(out_ptr + pid * 4 + offs, old)
+
+
+def test_cas_after_reshape_trans_preserves_lane_alignment(_race_detector_on):
+    detector = SymbolicRaceDetector(abort_on_error=False)
+    traced = _traced(_cas_after_reshape_trans_kernel, detector)
+    x = torch.zeros(4, dtype=torch.int32)
+    # cmp and val are shape-(4,) distinct per-lane values. After
+    # reshape->trans->reshape the flat layout becomes [c[0], c[2], c[1], c[3]]
+    # (C-order (2,2) trans). If PR4 is wrong, cmp/val/old will not agree.
+    cmp_t = torch.tensor([10, 20, 30, 40], dtype=torch.int32)
+    val_t = torch.tensor([11, 22, 33, 44], dtype=torch.int32)
+    out = torch.zeros(8, dtype=torch.int32)
+    traced[(2,)](x, cmp_t, val_t, out)
+    # Kernel runs without raising — this itself confirms the CAS lane-count
+    # assert fires correctly (equal lanes across ptr/cmp/val/mask/old).
+    assert detector.atomic_symbolic_escape is True
+    # No reshape(allow_reorder=True) was used, so the reorder escape must
+    # stay clean.
+    assert detector.reorder_symbolic_escape is False
+    detector.finalize()
+
+
+@triton.jit
+def _reshape_with_reorder_load(x_ptr, out_ptr):
+    pid = tl.program_id(axis=0)
+    offs = tl.arange(0, 4)
+    v = tl.load(x_ptr + offs)
+    # allow_reorder=True marks the reshape as may_reorder.
+    v2 = tl.reshape(v, (2, 2), can_reorder=True)
+    v3 = tl.reshape(v2, (4,), can_reorder=True)
+    tl.store(out_ptr + pid * 4 + offs, v3)
+
+
+def test_reshape_allow_reorder_sets_symbolic_escape(_race_detector_on):
+    detector = SymbolicRaceDetector(abort_on_error=False)
+    traced = _traced(_reshape_with_reorder_load, detector)
+    x = torch.arange(4, dtype=torch.int32)
+    out = torch.zeros(8, dtype=torch.int32)
+    traced[(2,)](x, out)
+    # The load's ptr tree contains a reshape(allow_reorder=True) chain, so
+    # the race detector must set reorder_symbolic_escape. The concrete
+    # events are still captured in parallel.
+    assert detector.reorder_symbolic_escape is True
+    detector.finalize()

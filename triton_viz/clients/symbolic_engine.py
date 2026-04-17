@@ -377,6 +377,7 @@ class SymbolicExpr:
         self._simplified_z3: Z3Expr | None = None
         self._simplified_constraints: ConstraintConjunction | None = None
         self._has_op_cache: dict[str, bool] = {}
+        self._has_unknown_reorder_cache: bool | None = None
         self._data_wrapper: SymbolicExprDataWrapper | None = None
 
     @staticmethod
@@ -387,10 +388,13 @@ class SymbolicExpr:
         return dtype, fallback_shape
 
     def add_child(self, name: str, value: Any) -> None:
+        # All subtree mutations must clear both _has_op_cache and
+        # _has_unknown_reorder_cache; add_child is the single choke point.
         child = SymbolicExpr.from_value(value) if value is not None else None
         self.children[name] = child
         setattr(self, name, child)
         self._has_op_cache.clear()
+        self._has_unknown_reorder_cache = None
         self._simplified_z3 = None
         self._simplified_constraints = None
         if self._data_wrapper is not None:
@@ -618,6 +622,30 @@ class SymbolicExpr:
                 self._has_op_cache[op_name] = True
                 return True
         self._has_op_cache[op_name] = False
+        return False
+
+    def _set_may_reorder(self, reason: str) -> None:
+        """Mark this node as potentially reordering lanes. Set at construction
+        only; do not flip post-hoc (ancestor caches cannot be walked — DAG)."""
+        self.attr["may_reorder"] = True
+        self.attr["reorder_reason"] = reason
+        self._has_unknown_reorder_cache = None
+
+    def has_unknown_reorder(self) -> bool:
+        """Return True when this node or any descendant may have reordered its
+        lanes (e.g. reshape(allow_reorder=True))."""
+        if self._has_unknown_reorder_cache is not None:
+            return self._has_unknown_reorder_cache
+        if self.attr.get("may_reorder", False):
+            self._has_unknown_reorder_cache = True
+            return True
+        for child in self.children.values():
+            if child is None:
+                continue
+            if child.has_unknown_reorder():
+                self._has_unknown_reorder_cache = True
+                return True
+        self._has_unknown_reorder_cache = False
         return False
 
     def to_tree_str(self) -> str:
@@ -1402,6 +1430,189 @@ class AdvanceSymbolicExpr(SymbolicExpr):
         )
 
 
+# ---------------------------------------------------------------------------
+# Lane helpers for shape ops.
+#
+# Convention for _to_z3() values across the symbolic engine:
+#   shape == ()   -> single ExprRef (scalar)
+#   shape != ()   -> list[ExprRef] of length numel(shape), C-order (row-major),
+#                    matching np.ndarray.flat used for constants.
+# Shape ops only transform (flat_lanes, shape); they do not mutate lane
+# identity unless may_reorder is set.
+# ---------------------------------------------------------------------------
+
+
+def _numel(shape: tuple[int, ...]) -> int:
+    if len(shape) == 0:
+        return 1
+    n = 1
+    for d in shape:
+        n *= int(d)
+    return n
+
+
+def _as_lanes(val: Any, shape: tuple[int, ...]) -> list[ExprRef]:
+    """Coerce a _to_z3() value into a flat lane list of the expected length.
+
+    A scalar input is auto-splat to `numel(shape)`: the symbolic engine today
+    may collapse a block-shape node to a single ExprRef when every lane is
+    provably the same (e.g. a binary op where both operands evaluated to
+    scalars). Treating that as a uniform block keeps downstream shape-op lane
+    arithmetic well-defined without forcing upstream ops to materialize
+    identical lanes.
+    """
+    n = _numel(shape)
+    if isinstance(val, list):
+        if len(val) != n:
+            raise ValueError(
+                f"lane count mismatch: list has {len(val)} lanes, shape {shape} needs {n}"
+            )
+        return val
+    return [cast(ExprRef, val)] * n
+
+
+def _from_lanes(lanes: list[ExprRef], shape: tuple[int, ...]) -> Z3Expr:
+    """Pack a flat lane list back into the convention for the given shape."""
+    if len(shape) == 0:
+        if len(lanes) != 1:
+            raise ValueError(f"scalar shape requires exactly 1 lane, got {len(lanes)}")
+        return lanes[0]
+    expected = _numel(shape)
+    if len(lanes) != expected:
+        raise ValueError(
+            f"lane count mismatch: got {len(lanes)} lanes for shape {shape} "
+            f"(expected {expected})"
+        )
+    return lanes
+
+
+def _normalize_axis(axis: int, out_rank: int) -> int:
+    if axis < 0:
+        axis = out_rank + axis
+    if axis < 0 or axis >= out_rank:
+        raise ValueError(f"axis {axis} out of range for rank {out_rank}")
+    return axis
+
+
+def _normalize_perm(perm: Sequence[int] | None, rank: int) -> tuple[int, ...]:
+    """Normalize a trans permutation.
+
+    - None or empty perm: default to swapping the last two axes. This requires
+      rank >= 2; lower ranks raise (Triton's tt.trans semantics only define
+      the default for rank >= 2).
+    - Otherwise validate that perm is a permutation of 0..rank-1.
+    """
+    if perm is None or len(perm) == 0:
+        if rank < 2:
+            raise ValueError(
+                f"trans default (swap last two axes) requires rank >= 2, got rank {rank}"
+            )
+        default = list(range(rank))
+        default[-1], default[-2] = default[-2], default[-1]
+        return tuple(default)
+    perm_t = tuple(int(p) for p in perm)
+    if len(perm_t) != rank:
+        raise ValueError(f"perm length {len(perm_t)} does not match input rank {rank}")
+    if sorted(perm_t) != list(range(rank)):
+        raise ValueError(f"perm {perm_t} is not a permutation of 0..{rank - 1}")
+    return perm_t
+
+
+def _ravel_index(multi_idx: Sequence[int], shape: tuple[int, ...]) -> int:
+    """C-order (row-major) flatten of a multi-dimensional index."""
+    flat = 0
+    for i, dim in zip(multi_idx, shape):
+        flat = flat * int(dim) + int(i)
+    return flat
+
+
+def _unravel_index(flat: int, shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Inverse of _ravel_index — C-order."""
+    if len(shape) == 0:
+        return ()
+    idx = [0] * len(shape)
+    for i in range(len(shape) - 1, -1, -1):
+        dim = int(shape[i])
+        idx[i] = flat % dim
+        flat //= dim
+    return tuple(idx)
+
+
+def _broadcast_shape(
+    shape_a: tuple[int, ...], shape_b: tuple[int, ...]
+) -> tuple[int, ...]:
+    """NumPy-style broadcast shape inference."""
+    ra, rb = len(shape_a), len(shape_b)
+    rank = max(ra, rb)
+    pa = (1,) * (rank - ra) + tuple(int(d) for d in shape_a)
+    pb = (1,) * (rank - rb) + tuple(int(d) for d in shape_b)
+    out = []
+    for da, db in zip(pa, pb):
+        if da == db:
+            out.append(da)
+        elif da == 1:
+            out.append(db)
+        elif db == 1:
+            out.append(da)
+        else:
+            raise ValueError(
+                f"shapes {shape_a} and {shape_b} are not broadcast-compatible"
+            )
+    return tuple(out)
+
+
+def _broadcast_lanes(
+    in_lanes: list[ExprRef] | ExprRef,
+    in_shape: tuple[int, ...],
+    out_shape: tuple[int, ...],
+) -> list[ExprRef]:
+    """Duplicate lanes according to broadcast rules. Handles scalar input as
+    a special case (shape ()). Rejects non-unit expansion."""
+    if len(in_shape) == 0:
+        # scalar -> fill out_shape with the same ExprRef
+        scalar = cast(
+            ExprRef, in_lanes if not isinstance(in_lanes, list) else in_lanes[0]
+        )
+        return [scalar] * _numel(out_shape)
+    lanes = _as_lanes(in_lanes, in_shape)
+    rank = len(out_shape)
+    padded = (1,) * (rank - len(in_shape)) + tuple(int(d) for d in in_shape)
+    if len(padded) != rank:
+        raise ValueError(
+            f"cannot broadcast shape {in_shape} to {out_shape}: rank mismatch"
+        )
+    for in_dim, out_dim in zip(padded, out_shape):
+        if in_dim != out_dim and in_dim != 1:
+            raise ValueError(
+                f"cannot broadcast dim {in_dim} to {out_dim} (only size-1 dims expand)"
+            )
+    out = []
+    for out_flat in range(_numel(out_shape)):
+        out_idx = _unravel_index(out_flat, out_shape)
+        in_idx = tuple(0 if padded[i] == 1 else out_idx[i] for i in range(rank))
+        out.append(lanes[_ravel_index(in_idx, padded)])
+    return out
+
+
+def _transpose_lanes(
+    in_lanes: list[ExprRef],
+    in_shape: tuple[int, ...],
+    perm: tuple[int, ...],
+) -> list[ExprRef]:
+    """Permute lanes by axes. Convention: output axis k comes from input axis
+    perm[k] (np.transpose-style). So out[i0,i1,...] = in[i_perm[k]]."""
+    out_shape = tuple(in_shape[p] for p in perm)
+    lanes = _as_lanes(in_lanes, in_shape)
+    out = []
+    for out_flat in range(_numel(out_shape)):
+        out_idx = _unravel_index(out_flat, out_shape)
+        in_idx = [0] * len(in_shape)
+        for out_axis, in_axis in enumerate(perm):
+            in_idx[in_axis] = out_idx[out_axis]
+        out.append(lanes[_ravel_index(tuple(in_idx), in_shape)])
+    return out
+
+
 class SplatSymbolicExpr(SymbolicExpr):
     block_type: SymbolicExpr
     arg: SymbolicExpr
@@ -1414,7 +1625,19 @@ class SplatSymbolicExpr(SymbolicExpr):
         self.shape = self.block_type.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        return self.arg._to_z3()
+        arg_val, constraints = self.arg._to_z3()
+        n = _numel(self.shape)
+        if isinstance(arg_val, list):
+            if len(arg_val) == 1:
+                return [arg_val[0]] * n, constraints
+            if len(arg_val) == n:
+                return arg_val, constraints
+            raise ValueError(
+                f"splat: input has {len(arg_val)} lanes, cannot splat to shape {self.shape}"
+            )
+        if not isinstance(arg_val, ExprRef):
+            raise TypeError(f"splat: unexpected input type {type(arg_val).__name__}")
+        return [arg_val] * n, constraints
 
     def concretize(self) -> Any:
         return self.concrete_fn(self.block_type.to_py(), self.arg.concretize())  # type: ignore
@@ -1428,19 +1651,26 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
         self.add_child("axis", axis)
-        # Update shape to reflect the new shape with an inserted dimension of size 1
         arg_shape = list(self.arg.shape) if self.arg.shape else []
         axis_val = axis if isinstance(axis, int) else axis.to_py()
-        # Handle negative axis
-        if axis_val < 0:
-            axis_val = len(arg_shape) + 1 + axis_val
-        # Insert dimension of size 1 at the specified axis
+        final_rank = len(arg_shape) + 1
+        axis_val = _normalize_axis(int(axis_val), final_rank)
         new_shape = arg_shape[:axis_val] + [1] + arg_shape[axis_val:]
+        self.axis_val = axis_val
         self.dtype = self.arg.dtype
         self.shape = tuple(new_shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        return self.arg._to_z3()
+        arg_val, constraints = self.arg._to_z3()
+        lanes = _as_lanes(arg_val, self.arg.shape)
+        if len(lanes) != _numel(self.shape):
+            raise ValueError(
+                f"expand_dims: lane count {len(lanes)} does not match output shape {self.shape}"
+            )
+        return _from_lanes(lanes, self.shape), constraints
+
+    def concretize(self) -> Any:
+        return self.concrete_fn(self.arg.concretize(), self.axis_val)  # type: ignore
 
 
 class BroadcastSymbolicExpr(SymbolicExpr):
@@ -1450,64 +1680,145 @@ class BroadcastSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, arg: Any, shape: Any):
         super().__init__(op)
         self.add_child("arg", arg)
-        # Store the target shape for broadcasting
         if isinstance(shape, (list, tuple)):
-            self.target_shape = tuple(shape)
+            self.target_shape = tuple(int(d) for d in shape)
         elif hasattr(shape, "to_py"):
-            self.target_shape = tuple(shape.to_py())
+            self.target_shape = tuple(int(d) for d in shape.to_py())
         else:
             self.target_shape = ()
-        # Update dtype/shape to reflect the broadcast shape
         self.dtype = self.arg.dtype if self.arg.dtype else tl.int32
-        self.shape = tuple(self.target_shape) if self.target_shape else self.arg.shape
+        self.shape = self.target_shape if self.target_shape else self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        return self.arg._to_z3()
+        arg_val, constraints = self.arg._to_z3()
+        in_shape = self.arg.shape
+        out_shape = self.shape
+        if in_shape == out_shape:
+            return arg_val, constraints
+        out_lanes = _broadcast_lanes(arg_val, in_shape, out_shape)
+        return _from_lanes(out_lanes, out_shape), constraints
+
+    def concretize(self) -> Any:
+        return self.concrete_fn(self.arg.concretize(), self.target_shape)  # type: ignore
 
 
 class ReshapeSymbolicExpr(SymbolicExpr):
     arg: SymbolicExpr
+    target_shape: tuple[int, ...]
+    allow_reorder: bool
 
-    def __init__(self, op: str, arg: Any, shape: Any):
+    def __init__(self, op: str, arg: Any, shape: Any, allow_reorder: bool = False):
         super().__init__(op)
         self.add_child("arg", arg)
+        self.add_child("target_shape", shape)
+        if isinstance(shape, (list, tuple)):
+            target = tuple(int(d) for d in shape)
+        elif hasattr(shape, "to_py"):
+            target = tuple(int(d) for d in shape.to_py())
+        else:
+            raise ValueError(
+                f"reshape: cannot parse target shape from {type(shape).__name__}"
+            )
+        in_numel = _numel(self.arg.shape)
+        out_numel = _numel(target)
+        if in_numel != out_numel:
+            raise ValueError(
+                f"reshape: input shape {self.arg.shape} has {in_numel} elements, "
+                f"cannot reshape to {target} with {out_numel} elements"
+            )
+        self.target_shape = target
+        self.allow_reorder = bool(allow_reorder)
         self.dtype = self.arg.dtype
-        self.shape = self.arg.shape
+        self.shape = target
+        if self.allow_reorder:
+            self._set_may_reorder("reshape_allow_reorder")
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        return self.arg._to_z3()
+        arg_val, constraints = self.arg._to_z3()
+        # Identity on flat lanes. When allow_reorder=True, the backend may
+        # reorder, but we still emit the lane-preserving layout — the
+        # race_detector guard enforces fallback based on has_unknown_reorder().
+        lanes = _as_lanes(arg_val, self.arg.shape)
+        if len(lanes) != _numel(self.shape):
+            raise ValueError(
+                f"reshape: lane count {len(lanes)} does not match output shape {self.shape}"
+            )
+        return _from_lanes(lanes, self.shape), constraints
+
+    def concretize(self) -> Any:
+        return self.concrete_fn(  # type: ignore
+            self.arg.concretize(),
+            self.target_shape,
+            self.allow_reorder,
+        )
 
 
 class TransSymbolicExpr(SymbolicExpr):
     arg: SymbolicExpr
-    permutation: SymbolicExpr
+    perm: tuple[int, ...]
 
-    def __init__(self, op: str, arg: Any, permutation: Any):
+    def __init__(self, op: str, arg: Any, perm: Any):
         super().__init__(op)
         self.add_child("arg", arg)
-        self.add_child("permutation", permutation)
+        if perm is None:
+            raw_perm: Sequence[int] | None = None
+        elif hasattr(perm, "to_py"):
+            raw_perm = perm.to_py()
+        else:
+            raw_perm = perm
+        self.perm = _normalize_perm(raw_perm, len(self.arg.shape))
         self.dtype = self.arg.dtype
-        self.shape = self.arg.shape
+        self.shape = tuple(self.arg.shape[p] for p in self.perm)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        return self.arg._to_z3()
+        arg_val, constraints = self.arg._to_z3()
+        lanes = _as_lanes(arg_val, self.arg.shape)
+        out_lanes = _transpose_lanes(lanes, self.arg.shape, self.perm)
+        return _from_lanes(out_lanes, self.shape), constraints
+
+    def concretize(self) -> Any:
+        # trans is registered in the tl namespace (not interpreter_builder),
+        # so self.concrete_fn is the top-level tl.trans wrapper — it requires
+        # a _semantic kwarg that only exists inside JIT. Bypass it by doing
+        # the permutation with numpy directly.
+        arg_concrete = self.arg.concretize()
+        arr = arg_concrete.data
+        out_arr = np.transpose(arr, axes=self.perm)
+        return TensorHandle(out_arr, arg_concrete.dtype)
 
 
 class JoinSymbolicExpr(SymbolicExpr):
     lhs: SymbolicExpr
     rhs: SymbolicExpr
+    common_shape: tuple[int, ...]
 
     def __init__(self, op: str, lhs: Any, rhs: Any):
         super().__init__(op)
         self.add_child("lhs", lhs)
         self.add_child("rhs", rhs)
+        # Match the Python tl.join(a, b) API: broadcast inputs to a common
+        # shape first, then stack along a new trailing minor axis. (MLIR
+        # tt.join itself requires same-shape inputs; the symbolic engine
+        # intercepts at the Python front-end layer, so broadcast-first is
+        # the correct model.)
+        self.common_shape = _broadcast_shape(self.lhs.shape, self.rhs.shape)
         self.dtype = self.lhs.dtype
-        self.shape = self.lhs.shape
+        self.shape = self.common_shape + (2,)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError(
-            "Join operation is not implemented in Z3 evaluation yet"
-        )
+        lhs_val, lhs_c = self.lhs._to_z3()
+        rhs_val, rhs_c = self.rhs._to_z3()
+        constraints = _and_constraints(lhs_c, rhs_c)
+        lhs_b = _broadcast_lanes(lhs_val, self.lhs.shape, self.common_shape)
+        rhs_b = _broadcast_lanes(rhs_val, self.rhs.shape, self.common_shape)
+        out: list[ExprRef] = []
+        for i in range(_numel(self.common_shape)):
+            out.append(lhs_b[i])
+            out.append(rhs_b[i])
+        return _from_lanes(out, self.shape), constraints
+
+    def concretize(self) -> Any:
+        return self.concrete_fn(self.lhs.concretize(), self.rhs.concretize())  # type: ignore
 
 
 class CastSymbolicExpr(SymbolicExpr):
@@ -1869,7 +2180,32 @@ class SymbolicClient(Client):
         )
 
     def _op_expand_dims_overrider(self, arg, axis):
-        return SymbolicExpr.create("expand_dims", SymbolicExpr.from_value(arg), axis)
+        arg_sym = SymbolicExpr.from_value(arg)
+        # Triton documents expand_dims axis as relative to the *result* tensor.
+        # Multi-axis: normalize against final rank, reject duplicates / out of
+        # range, sort ascending, then lower to a chain of single-axis nodes.
+        if isinstance(axis, (tuple, list)):
+            axes = list(axis)
+            k = len(axes)
+            final_rank = len(arg_sym.shape) + k
+            normalized = []
+            for a in axes:
+                a_int = int(a)
+                if a_int < 0:
+                    a_int = final_rank + a_int
+                if a_int < 0 or a_int >= final_rank:
+                    raise ValueError(
+                        f"expand_dims axis {a} out of range for final rank {final_rank}"
+                    )
+                normalized.append(a_int)
+            if len(set(normalized)) != len(normalized):
+                raise ValueError(f"expand_dims duplicate axes in {axis}")
+            normalized.sort()
+            result = arg_sym
+            for a in normalized:
+                result = SymbolicExpr.create("expand_dims", result, a)
+            return result
+        return SymbolicExpr.create("expand_dims", arg_sym, axis)
 
     def _op_broadcast_overrider(self, arg, shape):
         return SymbolicExpr.create("broadcast", SymbolicExpr.from_value(arg), shape)
@@ -1912,9 +2248,10 @@ class SymbolicClient(Client):
             "reshape",
             SymbolicExpr.from_value(arg),
             SymbolicExpr.from_value(shape),
+            bool(allow_reorder),
         )
 
-    def _op_trans_overrider(self, arg, perm=[1, 0]):
+    def _op_trans_overrider(self, arg, perm=None):
         return SymbolicExpr.create("trans", SymbolicExpr.from_value(arg), perm)
 
     def _op_join_overrider(self, lhs, rhs):

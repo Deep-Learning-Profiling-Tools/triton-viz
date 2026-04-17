@@ -364,6 +364,12 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # after the launch completes must still see True.
         self.atomic_symbolic_escape: bool = False
 
+        # Tripped when any access expression's subtree carries a may_reorder
+        # flag (currently: reshape(..., allow_reorder=True)). The symbolic
+        # event for that access is suppressed — the parallel concrete path
+        # still captures it. Reset each launch in grid_callback.
+        self.reorder_symbolic_escape: bool = False
+
         # Per-launch state. ``concrete_events`` / ``symbolic_events`` stay
         # client-lifetime accumulations (preserves pre-PR3 test style); race
         # detection slices from these ``*_start`` indices each launch.
@@ -483,6 +489,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # ``finalize()``, so consumers inspecting the detector immediately
         # after a launch ends still see True.
         self.atomic_symbolic_escape = False
+        self.reorder_symbolic_escape = False
         self._launch_id += 1
         self._launch_symbolic_start = len(self.symbolic_events)
         self._launch_concrete_start = len(self.concrete_events)
@@ -611,6 +618,17 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         enclosing loop's flush point, with ``_make_event_signature`` used to
         dedupe events that repeat across iterations of the same loop.
         """
+        # Unknown-reorder guard: if any node in the access subtree carries
+        # ``may_reorder`` (e.g. reshape(..., allow_reorder=True)), lane
+        # identity is not recoverable symbolically. Skip the symbolic emit
+        # only — concrete capture via _before_load_concrete /
+        # _before_store_concrete, atomic before/after callbacks, and loop
+        # pending bookkeeping all enter through separate callback sites and
+        # run independently of this guard.
+        if expr.has_unknown_reorder():
+            self.reorder_symbolic_escape = True
+            return
+
         z3_addr, z3_constraints = expr.eval()
         source_location = capture_current_source_location()
 
@@ -701,6 +719,16 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         cmp_np = broadcast_lane_operand(c_cmp, nlanes)
         val_np = broadcast_lane_operand(c_val, nlanes)
         active = active_mask_for(None, nlanes)  # CAS has no mask parameter
+        if not (
+            cmp_np.shape[0] == nlanes
+            and val_np.shape[0] == nlanes
+            and active.shape[0] == nlanes
+        ):
+            raise RuntimeError(
+                f"atomic_cas lane-count mismatch: ptr={nlanes}, "
+                f"cmp={cmp_np.shape[0]}, val={val_np.shape[0]}, "
+                f"mask={active.shape[0]}"
+            )
         sem_norm, scope_norm = normalize_sem_scope(sem, scope)
         elem_size = infer_elem_size(c_val, c_ptr)
         tensor = resolve_tensor_from_pointer(
@@ -709,6 +737,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
 
         ret_handle = self._original_atomic_cas(c_ptr, c_cmp, c_val, sem, scope)
         old_np = flatten_np(ret_handle)
+        if old_np.shape[0] != nlanes:
+            raise RuntimeError(
+                f"atomic_cas lane-count mismatch after execution: "
+                f"ptr={nlanes}, old={old_np.shape[0]}"
+            )
 
         success = active & np.equal(old_np, cmp_np)
         read_mask = active.copy()
@@ -760,6 +793,12 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         nlanes = lane_addrs.shape[0]
         val_np = broadcast_lane_operand(c_val, nlanes)
         active = active_mask_for(c_mask, nlanes)
+        # RMW has no cmp; check only ptr/val/mask.
+        if not (val_np.shape[0] == nlanes and active.shape[0] == nlanes):
+            raise RuntimeError(
+                f"atomic_rmw lane-count mismatch: ptr={nlanes}, "
+                f"val={val_np.shape[0]}, mask={active.shape[0]}"
+            )
         sem_norm, scope_norm = normalize_sem_scope(sem, scope)
         elem_size = infer_elem_size(c_val, c_ptr)
         tensor = resolve_tensor_from_pointer(
@@ -768,6 +807,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
 
         ret_handle = self._original_atomic_rmw(rmwOp, c_ptr, c_val, c_mask, sem, scope)
         old_np = flatten_np(ret_handle)
+        if old_np.shape[0] != nlanes:
+            raise RuntimeError(
+                f"atomic_rmw lane-count mismatch after execution: "
+                f"ptr={nlanes}, old={old_np.shape[0]}"
+            )
 
         read_mask = active.copy()
         write_mask = active.copy()
