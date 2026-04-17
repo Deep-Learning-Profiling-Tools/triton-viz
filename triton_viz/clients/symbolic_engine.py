@@ -1777,7 +1777,14 @@ class TransSymbolicExpr(SymbolicExpr):
         return _from_lanes(out_lanes, self.shape), constraints
 
     def concretize(self) -> Any:
-        return self.concrete_fn(self.arg.concretize(), self.perm)  # type: ignore
+        # trans is registered in the tl namespace (not interpreter_builder),
+        # so self.concrete_fn is the top-level tl.trans wrapper — it requires
+        # a _semantic kwarg that only exists inside JIT. Bypass it by doing
+        # the permutation with numpy directly.
+        arg_concrete = self.arg.concretize()
+        arr = arg_concrete.data
+        out_arr = np.transpose(arr, axes=self.perm)
+        return TensorHandle(out_arr, arg_concrete.dtype)
 
 
 class JoinSymbolicExpr(SymbolicExpr):
