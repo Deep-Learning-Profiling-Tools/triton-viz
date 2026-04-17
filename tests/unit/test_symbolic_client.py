@@ -234,24 +234,24 @@ def test_pointer_expr_addptr_eval():
 
 
 @pytest.mark.parametrize(
-    "op,extra",
+    "op,extra,expected_lanes",
     [
-        ("splat", tl.block_type(tl.int32, [2])),
-        ("expand_dims", 0),
-        ("broadcast", (2,)),
-        ("reshape", (2,)),
-        ("trans", (0,)),
+        ("splat", tl.block_type(tl.int32, [2]), [5, 5]),
+        ("expand_dims", 0, [5]),
+        ("broadcast", (2,), [5, 5]),
     ],
 )
-def test_reshape_expr_eval(op: str, extra):
-    # Test that reshape ops (splat, expand_dims, broadcast, reshape, trans) preserve scalar value.
+def test_reshape_expr_eval(op: str, extra, expected_lanes):
+    # Ops that extend a scalar into a 1-D block: each output lane carries the
+    # same scalar value after real lane-semantics are in place.
     arg = SymbolicExpr.create("const", 5, tl.int32)
     if op == "splat":
         expr = SymbolicExpr.create(op, extra, arg)
     else:
         expr = SymbolicExpr.create(op, arg, extra)
     result, constraints = expr.eval(simplify_constraints=False)
-    assert cast(IntNumRef, result).as_long() == 5
+    assert isinstance(result, list)
+    assert [cast(IntNumRef, r).as_long() for r in result] == expected_lanes
     assert constraints is None
 
 
