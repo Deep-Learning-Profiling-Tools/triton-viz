@@ -13,16 +13,16 @@ from triton_viz.clients.sanitizer.sanitizer import (
     _range_to_iterator_constraint,
 )
 from triton_viz.core.callbacks import ForLoopCallbacks
-from triton_viz.core.config import config
+from triton_viz.core.config import config, TensorMode
 from z3.z3 import BoolRef
 
 
 @pytest.fixture
-def _isolate_virtual_memory():
-    """Save and restore config.virtual_memory around a test."""
-    saved = config.virtual_memory
+def _isolate_tensor_mode():
+    """Save and restore config.tensor_mode around a test."""
+    saved = config.tensor_mode
     yield
-    config.virtual_memory = saved
+    config.tensor_mode = saved
 
 
 # ======== Helpers ===========
@@ -926,10 +926,10 @@ def fake_tensor_oob_kernel(x_ptr, out_ptr, N: tl.constexpr):
     tl.store(out_ptr, val)
 
 
-def test_oob_with_fake_tensor(_isolate_virtual_memory):
+def test_oob_with_fake_tensor(_isolate_tensor_mode):
     fake_tensor_sanitizer.records.clear()
 
-    config.virtual_memory = True
+    config.tensor_mode = TensorMode.LAZY_AUTO
     x = torch.randn(8)
     out = torch.empty(1)
     with pytest.raises(SystemExit):
@@ -1265,3 +1265,141 @@ def test_reinterpret_tensor_wrapper():
     x = torch.ones(N, dtype=torch.float16, device="cpu")
     y = torch.empty(N, dtype=torch.float16, device="cpu")
     copy_kernel[(1,)](triton.reinterpret(x, tl.float16), y, N, BLOCK=64)
+
+
+# ======== Lazy Materializer E2E Tests ===========
+
+_lazy_e2e_sanitizer = SymbolicSanitizer(abort_on_error=True)
+
+
+@triton_viz.trace(client=_lazy_e2e_sanitizer)
+@triton.jit
+def _indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+    indices = tl.load(idx_ptr + offs, mask=mask)
+    vals = tl.load(src_ptr + indices, mask=mask)
+    tl.store(dst_ptr + offs, vals, mask=mask)
+
+
+@triton_viz.trace(client=_lazy_e2e_sanitizer)
+@triton.jit
+def _indirect_store_kernel(idx_ptr, val_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+    indices = tl.load(idx_ptr + offs, mask=mask)
+    vals = tl.load(val_ptr + offs, mask=mask)
+    tl.store(dst_ptr + indices, vals, mask=mask)
+
+
+def test_lazy_auto_indirect_load_no_false_oob(_isolate_tensor_mode):
+    """LAZY_AUTO: in-bounds indirect load completes without OOB reports."""
+    _lazy_e2e_sanitizer.records.clear()
+    config.tensor_mode = TensorMode.LAZY_AUTO
+
+    N = 32
+    idx = torch.arange(N, dtype=torch.int32)
+    src = torch.arange(N, dtype=torch.float32)
+    dst = torch.empty(N, dtype=torch.float32)
+
+    grid = (triton.cdiv(N, 32),)
+    _indirect_load_kernel[grid](idx, src, dst, N=N, BLOCK=32)
+
+    assert len(_lazy_e2e_sanitizer.records) == 0
+
+
+def test_force_fake_indirect_load_no_false_oob(_isolate_tensor_mode):
+    """FORCE_FAKE: in-bounds indirect load completes without OOB reports."""
+    _lazy_e2e_sanitizer.records.clear()
+    config.tensor_mode = TensorMode.FORCE_FAKE
+
+    N = 32
+    idx = torch.arange(N, dtype=torch.int32)
+    src = torch.arange(N, dtype=torch.float32)
+    dst = torch.empty(N, dtype=torch.float32)
+
+    grid = (triton.cdiv(N, 32),)
+    _indirect_load_kernel[grid](idx, src, dst, N=N, BLOCK=32)
+
+    assert len(_lazy_e2e_sanitizer.records) == 0
+
+
+def test_lazy_auto_indirect_store_no_false_oob(_isolate_tensor_mode):
+    """LAZY_AUTO: in-bounds indirect store completes without OOB reports."""
+    _lazy_e2e_sanitizer.records.clear()
+    config.tensor_mode = TensorMode.LAZY_AUTO
+
+    N = 16
+    idx = torch.arange(N - 1, -1, -1, dtype=torch.int32)
+    vals = torch.arange(N, dtype=torch.float32)
+    dst = torch.zeros(N, dtype=torch.float32)
+
+    _indirect_store_kernel[(1,)](idx, vals, dst, N=N, BLOCK=16)
+
+    assert len(_lazy_e2e_sanitizer.records) == 0
+
+
+_multi_sm_sanitizer = SymbolicSanitizer(abort_on_error=True)
+
+
+@triton_viz.trace(client=_multi_sm_sanitizer)
+@triton.jit
+def _multi_block_load_kernel(src_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < N
+    vals = tl.load(src_ptr + offs, mask=mask)
+    tl.store(dst_ptr + offs, vals, mask=mask)
+
+
+def test_lazy_auto_multi_sm_concurrent(_isolate_tensor_mode):
+    """LAZY_AUTO with num_sms=2: multiple workers concurrently materialise
+    without crashing or producing false OOB reports."""
+    _multi_sm_sanitizer.records.clear()
+    config.tensor_mode = TensorMode.LAZY_AUTO
+    saved_sms = config.num_sms
+    config.num_sms = 2
+
+    try:
+        N = 64
+        src = torch.arange(N, dtype=torch.float32)
+        dst = torch.empty(N, dtype=torch.float32)
+
+        grid = (triton.cdiv(N, 16),)  # 4 blocks → 2 workers
+        _multi_block_load_kernel[grid](src, dst, N=N, BLOCK=16)
+
+        assert len(_multi_sm_sanitizer.records) == 0
+    finally:
+        config.num_sms = saved_sms
+
+
+_oob_lazy_sanitizer = SymbolicSanitizer(abort_on_error=True)
+
+
+@triton_viz.trace(client=_oob_lazy_sanitizer)
+@triton.jit
+def _oob_indirect_kernel(idx_ptr, src_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    # No mask — intentional OOB for offsets >= N
+    indices = tl.load(idx_ptr + offs)
+    vals = tl.load(src_ptr + indices)
+    tl.store(dst_ptr + offs, vals)
+
+
+def test_lazy_auto_oob_indirect_is_detected(_isolate_tensor_mode):
+    """LAZY_AUTO: OOB indirect load is still caught by the sanitizer."""
+    _oob_lazy_sanitizer.records.clear()
+    config.tensor_mode = TensorMode.LAZY_AUTO
+
+    N = 8
+    # Index 8 is OOB for src of size 8
+    idx = torch.arange(N + 1, dtype=torch.int32)[:N]
+    idx[-1] = N  # OOB index
+    src = torch.arange(N, dtype=torch.float32)
+    dst = torch.empty(N, dtype=torch.float32)
+
+    with pytest.raises(SystemExit):
+        _oob_indirect_kernel[(1,)](idx, src, dst, N=N, BLOCK=8)

@@ -1,4 +1,39 @@
 import os
+import warnings
+from enum import Enum
+
+
+class TensorMode(Enum):
+    """Three-state semantics for SANITIZER_ENABLE_FAKE_TENSOR.
+
+    FORCE_REAL  (env="0" or unset): always copy tensors to CPU upfront.
+    LAZY_AUTO   (env="auto"):       fake tensors with lazy materialization;
+                                    pre-materialises all storages on
+                                    UnmappablePointerError before retrying.
+    FORCE_FAKE  (env="1"):          fake tensors with lazy materialization;
+                                    unmappable pointers raise
+                                    UnmappablePointerError.
+    """
+
+    FORCE_REAL = "force_real"
+    LAZY_AUTO = "lazy_auto"
+    FORCE_FAKE = "force_fake"
+
+
+def _parse_tensor_mode() -> TensorMode:
+    raw = os.getenv("SANITIZER_ENABLE_FAKE_TENSOR")
+    if raw is None or raw == "0":
+        return TensorMode.FORCE_REAL
+    if raw.lower() == "auto":
+        return TensorMode.LAZY_AUTO
+    if raw == "1":
+        return TensorMode.FORCE_FAKE
+    warnings.warn(
+        f"SANITIZER_ENABLE_FAKE_TENSOR={raw!r} is not recognised "
+        f"(expected '0', '1', 'auto', or unset). Defaulting to force_real.",
+        stacklevel=2,
+    )
+    return TensorMode.FORCE_REAL
 
 
 def _is_one(env: str, default: str = "0") -> bool:
@@ -26,8 +61,12 @@ class Config:
     - enable_timing: ENABLE_TIMING, collects timing info during execution.
     - report_grid_execution_progress: REPORT_GRID_EXECUTION_PROGRESS, logs per
       program block progress in the interpreter.
-    - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, uses a fake tensor backend in
-      sanitizer runs to avoid real memory reads.
+    - tensor_mode: SANITIZER_ENABLE_FAKE_TENSOR, three-state tensor materialization
+      strategy. FORCE_REAL (env=0 or unset, default): always copy tensors to CPU
+      upfront. LAZY_AUTO (env=auto): fake tensors with lazy materialization,
+      pre-materialises all storages on unmappable pointers before retrying.
+      FORCE_FAKE (env=1): fake tensors with lazy materialization, errors on
+      unmappable pointers.
     - profiler_enable_load_store_skipping: PROFILER_ENABLE_LOAD_STORE_SKIPPING,
       skips redundant load/store checks to speed profiling.
     - profiler_enable_block_sampling: PROFILER_ENABLE_BLOCK_SAMPLING, samples a
@@ -36,9 +75,29 @@ class Config:
       disables buffer load checks in the profiler.
     """
 
+    _VIRTUAL_MEMORY_DEPRECATION = (
+        "config.virtual_memory is deprecated; use config.tensor_mode instead."
+    )
+
     def __init__(self) -> None:
         self.cli_active: bool = False
         self.reset()
+
+    def __getattr__(self, name: str) -> object:
+        if name == "virtual_memory":
+            warnings.warn(self._VIRTUAL_MEMORY_DEPRECATION, DeprecationWarning, stacklevel=2)
+            return self.tensor_mode != TensorMode.FORCE_REAL
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "virtual_memory":
+            warnings.warn(self._VIRTUAL_MEMORY_DEPRECATION, DeprecationWarning, stacklevel=2)
+            super().__setattr__(
+                "tensor_mode",
+                TensorMode.FORCE_REAL if not value else TensorMode.LAZY_AUTO,
+            )
+            return
+        super().__setattr__(name, value)
 
     def reset(self) -> None:
         """Reload configuration from environment variables and apply defaults."""
@@ -50,7 +109,10 @@ class Config:
         self.report_grid_execution_progress: bool = _is_one(
             "REPORT_GRID_EXECUTION_PROGRESS"
         )
-        self.virtual_memory: bool = _is_one("SANITIZER_ENABLE_FAKE_TENSOR")
+        self.tensor_mode: TensorMode = _parse_tensor_mode()
+        # Deprecation shim: external code may still read/write virtual_memory.
+        # Reads map FORCE_REAL → False, else True.
+        # Writes map False → FORCE_REAL, True → LAZY_AUTO.
         self.profiler_enable_load_store_skipping: bool = _is_one(
             "PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1"
         )

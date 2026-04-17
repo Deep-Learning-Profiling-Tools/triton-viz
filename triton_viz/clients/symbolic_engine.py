@@ -73,6 +73,14 @@ ConstraintExpr: TypeAlias = ExprRef | bool | int | float
 ConstraintConjunction: TypeAlias = BoolRef | None
 
 
+_materializer = None  # set by patch.py before execution
+
+
+def set_materializer(m):
+    global _materializer
+    _materializer = m
+
+
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
     if isinstance(expr, BoolRef):
         return expr
@@ -765,12 +773,21 @@ class IndirectSymbolicExprBase(SymbolicExpr):
 
     def concretize(self) -> Any:
         ptr_concrete = self.ptr.concretize()
+
+        # Compute mask BEFORE rebasing so masked-out garbage addresses
+        # are never passed to _find_base.
         if self.mask is None:
             mask_concrete = TensorHandle(
                 np.ones_like(ptr_concrete.data, dtype=bool), tl.int1
             )
         else:
             mask_concrete = self.mask.concretize()
+
+        if _materializer is not None:
+            rebased = _materializer.rebase_pointers(
+                ptr_concrete.data, mask=mask_concrete.data
+            )
+            ptr_concrete = TensorHandle(rebased, ptr_concrete.dtype)
 
         if self.other is None:
             other_concrete = None
