@@ -377,6 +377,7 @@ class SymbolicExpr:
         self._simplified_z3: Z3Expr | None = None
         self._simplified_constraints: ConstraintConjunction | None = None
         self._has_op_cache: dict[str, bool] = {}
+        self._has_unknown_reorder_cache: bool | None = None
         self._data_wrapper: SymbolicExprDataWrapper | None = None
 
     @staticmethod
@@ -387,10 +388,13 @@ class SymbolicExpr:
         return dtype, fallback_shape
 
     def add_child(self, name: str, value: Any) -> None:
+        # All subtree mutations must clear both _has_op_cache and
+        # _has_unknown_reorder_cache; add_child is the single choke point.
         child = SymbolicExpr.from_value(value) if value is not None else None
         self.children[name] = child
         setattr(self, name, child)
         self._has_op_cache.clear()
+        self._has_unknown_reorder_cache = None
         self._simplified_z3 = None
         self._simplified_constraints = None
         if self._data_wrapper is not None:
@@ -618,6 +622,30 @@ class SymbolicExpr:
                 self._has_op_cache[op_name] = True
                 return True
         self._has_op_cache[op_name] = False
+        return False
+
+    def _set_may_reorder(self, reason: str) -> None:
+        """Mark this node as potentially reordering lanes. Set at construction
+        only; do not flip post-hoc (ancestor caches cannot be walked — DAG)."""
+        self.attr["may_reorder"] = True
+        self.attr["reorder_reason"] = reason
+        self._has_unknown_reorder_cache = None
+
+    def has_unknown_reorder(self) -> bool:
+        """Return True when this node or any descendant may have reordered its
+        lanes (e.g. reshape(allow_reorder=True))."""
+        if self._has_unknown_reorder_cache is not None:
+            return self._has_unknown_reorder_cache
+        if self.attr.get("may_reorder", False):
+            self._has_unknown_reorder_cache = True
+            return True
+        for child in self.children.values():
+            if child is None:
+                continue
+            if child.has_unknown_reorder():
+                self._has_unknown_reorder_cache = True
+                return True
+        self._has_unknown_reorder_cache = False
         return False
 
     def to_tree_str(self) -> str:
@@ -1400,6 +1428,183 @@ class AdvanceSymbolicExpr(SymbolicExpr):
         raise NotImplementedError(
             "Use TensorPointerLoad/Store to access block pointers"
         )
+
+
+# ---------------------------------------------------------------------------
+# Lane helpers for shape ops.
+#
+# Convention for _to_z3() values across the symbolic engine:
+#   shape == ()   -> single ExprRef (scalar)
+#   shape != ()   -> list[ExprRef] of length numel(shape), C-order (row-major),
+#                    matching np.ndarray.flat used for constants.
+# Shape ops only transform (flat_lanes, shape); they do not mutate lane
+# identity unless may_reorder is set.
+# ---------------------------------------------------------------------------
+
+
+def _numel(shape: tuple[int, ...]) -> int:
+    if len(shape) == 0:
+        return 1
+    n = 1
+    for d in shape:
+        n *= int(d)
+    return n
+
+
+def _as_lanes(val: Any, shape: tuple[int, ...]) -> list[ExprRef]:
+    """Coerce a _to_z3() value into a flat lane list of the expected length."""
+    n = _numel(shape)
+    if isinstance(val, list):
+        if len(val) != n:
+            raise ValueError(
+                f"lane count mismatch: list has {len(val)} lanes, shape {shape} needs {n}"
+            )
+        return val
+    if n == 1:
+        return [cast(ExprRef, val)]
+    raise ValueError(f"expected {n} lanes for shape {shape}, got scalar")
+
+
+def _from_lanes(lanes: list[ExprRef], shape: tuple[int, ...]) -> Z3Expr:
+    """Pack a flat lane list back into the convention for the given shape."""
+    if len(shape) == 0:
+        if len(lanes) != 1:
+            raise ValueError(f"scalar shape requires exactly 1 lane, got {len(lanes)}")
+        return lanes[0]
+    expected = _numel(shape)
+    if len(lanes) != expected:
+        raise ValueError(
+            f"lane count mismatch: got {len(lanes)} lanes for shape {shape} "
+            f"(expected {expected})"
+        )
+    return lanes
+
+
+def _normalize_axis(axis: int, out_rank: int) -> int:
+    if axis < 0:
+        axis = out_rank + axis
+    if axis < 0 or axis >= out_rank:
+        raise ValueError(f"axis {axis} out of range for rank {out_rank}")
+    return axis
+
+
+def _normalize_perm(perm: Sequence[int] | None, rank: int) -> tuple[int, ...]:
+    """Normalize a trans permutation.
+
+    - None or empty perm: default to swapping the last two axes. This requires
+      rank >= 2; lower ranks raise (Triton's tt.trans semantics only define
+      the default for rank >= 2).
+    - Otherwise validate that perm is a permutation of 0..rank-1.
+    """
+    if perm is None or len(perm) == 0:
+        if rank < 2:
+            raise ValueError(
+                f"trans default (swap last two axes) requires rank >= 2, got rank {rank}"
+            )
+        default = list(range(rank))
+        default[-1], default[-2] = default[-2], default[-1]
+        return tuple(default)
+    perm_t = tuple(int(p) for p in perm)
+    if len(perm_t) != rank:
+        raise ValueError(f"perm length {len(perm_t)} does not match input rank {rank}")
+    if sorted(perm_t) != list(range(rank)):
+        raise ValueError(f"perm {perm_t} is not a permutation of 0..{rank - 1}")
+    return perm_t
+
+
+def _ravel_index(multi_idx: Sequence[int], shape: tuple[int, ...]) -> int:
+    """C-order (row-major) flatten of a multi-dimensional index."""
+    flat = 0
+    for i, dim in zip(multi_idx, shape):
+        flat = flat * int(dim) + int(i)
+    return flat
+
+
+def _unravel_index(flat: int, shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Inverse of _ravel_index — C-order."""
+    if len(shape) == 0:
+        return ()
+    idx = [0] * len(shape)
+    for i in range(len(shape) - 1, -1, -1):
+        dim = int(shape[i])
+        idx[i] = flat % dim
+        flat //= dim
+    return tuple(idx)
+
+
+def _broadcast_shape(
+    shape_a: tuple[int, ...], shape_b: tuple[int, ...]
+) -> tuple[int, ...]:
+    """NumPy-style broadcast shape inference."""
+    ra, rb = len(shape_a), len(shape_b)
+    rank = max(ra, rb)
+    pa = (1,) * (rank - ra) + tuple(int(d) for d in shape_a)
+    pb = (1,) * (rank - rb) + tuple(int(d) for d in shape_b)
+    out = []
+    for da, db in zip(pa, pb):
+        if da == db:
+            out.append(da)
+        elif da == 1:
+            out.append(db)
+        elif db == 1:
+            out.append(da)
+        else:
+            raise ValueError(
+                f"shapes {shape_a} and {shape_b} are not broadcast-compatible"
+            )
+    return tuple(out)
+
+
+def _broadcast_lanes(
+    in_lanes: list[ExprRef] | ExprRef,
+    in_shape: tuple[int, ...],
+    out_shape: tuple[int, ...],
+) -> list[ExprRef]:
+    """Duplicate lanes according to broadcast rules. Handles scalar input as
+    a special case (shape ()). Rejects non-unit expansion."""
+    if len(in_shape) == 0:
+        # scalar -> fill out_shape with the same ExprRef
+        scalar = cast(
+            ExprRef, in_lanes if not isinstance(in_lanes, list) else in_lanes[0]
+        )
+        return [scalar] * _numel(out_shape)
+    lanes = _as_lanes(in_lanes, in_shape)
+    rank = len(out_shape)
+    padded = (1,) * (rank - len(in_shape)) + tuple(int(d) for d in in_shape)
+    if len(padded) != rank:
+        raise ValueError(
+            f"cannot broadcast shape {in_shape} to {out_shape}: rank mismatch"
+        )
+    for in_dim, out_dim in zip(padded, out_shape):
+        if in_dim != out_dim and in_dim != 1:
+            raise ValueError(
+                f"cannot broadcast dim {in_dim} to {out_dim} (only size-1 dims expand)"
+            )
+    out = []
+    for out_flat in range(_numel(out_shape)):
+        out_idx = _unravel_index(out_flat, out_shape)
+        in_idx = tuple(0 if padded[i] == 1 else out_idx[i] for i in range(rank))
+        out.append(lanes[_ravel_index(in_idx, padded)])
+    return out
+
+
+def _transpose_lanes(
+    in_lanes: list[ExprRef],
+    in_shape: tuple[int, ...],
+    perm: tuple[int, ...],
+) -> list[ExprRef]:
+    """Permute lanes by axes. Convention: output axis k comes from input axis
+    perm[k] (np.transpose-style). So out[i0,i1,...] = in[i_perm[k]]."""
+    out_shape = tuple(in_shape[p] for p in perm)
+    lanes = _as_lanes(in_lanes, in_shape)
+    out = []
+    for out_flat in range(_numel(out_shape)):
+        out_idx = _unravel_index(out_flat, out_shape)
+        in_idx = [0] * len(in_shape)
+        for out_axis, in_axis in enumerate(perm):
+            in_idx[in_axis] = out_idx[out_axis]
+        out.append(lanes[_ravel_index(tuple(in_idx), in_shape)])
+    return out
 
 
 class SplatSymbolicExpr(SymbolicExpr):
