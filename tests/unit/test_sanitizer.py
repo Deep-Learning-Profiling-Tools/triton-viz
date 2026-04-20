@@ -1,6 +1,7 @@
 import pytest
 from typing import cast
 
+import numpy as np
 import triton.language as tl
 
 from triton_viz.core.config import config as cfg
@@ -8,10 +9,12 @@ from triton_viz.clients import Sanitizer
 from triton_viz.clients.symbolic_engine import (
     SymbolicExpr,
     ConstSymbolicExpr,
+    UnarySymbolicExpr,
     ReduceSymbolicExpr,
     LoadSymbolicExpr,
     StoreSymbolicExpr,
 )
+from triton_viz.core.libdevice_registry import _np_erf
 from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
     SymbolicSanitizer,
@@ -554,3 +557,147 @@ def test_store_dtype_block_of_pointers():
     )
     store = StoreSymbolicExpr("store", ptr, value)
     assert store.dtype is None, f"Expected None, got {store.dtype}"
+
+
+# ======== Unary Concretize Tests ===========
+
+
+@pytest.mark.parametrize(
+    "op_name,expected_np_func,is_builder",
+    [
+        ("tanh", np.tanh, False),
+        ("asin", np.arcsin, False),
+        ("acos", np.arccos, False),
+        ("erf", _np_erf, False),
+        ("rsqrt", None, True),
+    ],
+)
+def test_unary_concretize(op_name, expected_np_func, is_builder):
+    """concretize() must pass the correct numpy op to concrete_fn."""
+    captured = {}
+
+    arg = ConstSymbolicExpr("const", value=0, dtype=tl.block_type(tl.float32, [4]))
+    expr = UnarySymbolicExpr(op_name, arg)
+
+    if is_builder:
+
+        def _mock_builder(arg_concrete):
+            captured["called"] = True
+            return arg_concrete
+
+        expr.concrete_fn = _mock_builder
+        expr.concretize()
+        assert captured["called"] is True
+    else:
+
+        def _mock_unary_op(arg_concrete, np_func):
+            captured["np_func"] = np_func
+            return arg_concrete
+
+        expr.concrete_fn = _mock_unary_op
+        expr.concretize()
+        assert captured["np_func"] is expected_np_func
+
+
+def test_libdevice_registry_sym_op_consistency():
+    """Every LibdeviceSpec must have matching entries in the symbolic engine."""
+    from triton_viz.core.libdevice_registry import _LIBDEVICE_REGISTRY
+    from triton_viz.clients.symbolic_engine import _UNARY_NUMPY_TO_SYM_OP
+    from triton.runtime.interpreter import interpreter_builder
+
+    for spec in _LIBDEVICE_REGISTRY:
+        if spec.arity == 1:
+            assert spec.sym_name in SymbolicExpr.UNARY_OPS, (
+                f"LibdeviceSpec {spec.name!r} has sym_name={spec.sym_name!r} "
+                f"not in UNARY_OPS"
+            )
+        else:
+            assert spec.sym_name not in SymbolicExpr.UNARY_OPS, (
+                f"LibdeviceSpec {spec.name!r} (arity={spec.arity}) "
+                f"should NOT be in UNARY_OPS"
+            )
+        if spec.np_func is not None and spec.arity == 1:
+            assert (
+                spec.np_func in _UNARY_NUMPY_TO_SYM_OP
+            ), f"LibdeviceSpec {spec.name!r} np_func not in _UNARY_NUMPY_TO_SYM_OP"
+            assert _UNARY_NUMPY_TO_SYM_OP[spec.np_func] == spec.sym_name, (
+                f"LibdeviceSpec {spec.name!r} sym_name mismatch: "
+                f"registry says {spec.sym_name!r}, "
+                f"_UNARY_NUMPY_TO_SYM_OP says {_UNARY_NUMPY_TO_SYM_OP[spec.np_func]!r}"
+            )
+        if spec.builder_method is not None:
+            assert hasattr(interpreter_builder, spec.builder_method), (
+                f"LibdeviceSpec {spec.name!r} builder_method={spec.builder_method!r} "
+                f"not found on interpreter_builder"
+            )
+
+
+def test_unary_z3_opaque_fallback():
+    """Unary ops without Z3 builders return an opaque symbol, not raise."""
+    arg = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    expr = SymbolicExpr.create("tanh", arg)
+    result, constraints = expr.eval(simplify_constraints=False)
+    # Must return a Z3 expression, not raise
+    assert result is not None
+    assert "unary_tanh_" in str(result)
+    # Arange constraints must propagate through
+    assert constraints is not None
+    assert "arange_0_8" in str(constraints)
+
+
+def test_unary_z3_opaque_range_constraints():
+    """Opaque symbols for bounded ops carry range constraints."""
+    # tanh: bounded to [-1, 1]
+    arg = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    expr = SymbolicExpr.create("tanh", arg)
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    s = Solver()
+    s.add(constraints)
+    s.add(result > 1)
+    assert s.check() != sat, "tanh result > 1 should be unsat"
+
+    s2 = Solver()
+    s2.add(constraints)
+    s2.add(result < -1)
+    assert s2.check() != sat, "tanh result < -1 should be unsat"
+
+    # exp: bounded to >= 0
+    arg2 = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    expr2 = SymbolicExpr.create("exp", arg2)
+    result2, constraints2 = expr2.eval(simplify_constraints=False)
+
+    s3 = Solver()
+    s3.add(constraints2)
+    s3.add(result2 < 0)
+    assert s3.check() != sat, "exp result < 0 should be unsat"
+
+    # value within range must be satisfiable
+    s4 = Solver()
+    s4.add(constraints)
+    s4.add(result == 0)
+    assert s4.check() == sat, "tanh result == 0 should be sat"
+
+
+def test_addptr_through_bounded_unary():
+    """addptr with a tanh-bounded offset produces tighter pointer bounds."""
+    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.int32))
+    idx = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    tanh_idx = SymbolicExpr.create("tanh", idx)
+    ptr = SymbolicExpr.create("addptr", base, tanh_idx)
+    result, constraints = ptr.eval(simplify_constraints=False)
+
+    assert result is not None
+    assert constraints is not None
+
+    # ptr = 1000 + tanh * 4  (int32 is 4 bytes)
+    # tanh in [-1, 1] => ptr in [996, 1004]
+    s = Solver()
+    s.add(constraints)
+    s.add(result < 996)
+    assert s.check() != sat, "ptr < 996 should be unsat with tanh bounds"
+
+    s2 = Solver()
+    s2.add(constraints)
+    s2.add(result > 1004)
+    assert s2.check() != sat, "ptr > 1004 should be unsat with tanh bounds"

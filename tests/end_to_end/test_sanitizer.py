@@ -4,10 +4,18 @@ import numpy as np
 
 import triton
 import triton.language as tl
+import triton.language.extra.libdevice as libdevice
+from triton.language.extra.libdevice import acos as _ld_acos
+from triton.language.extra.libdevice import asin as _ld_asin
+from triton.language.extra.libdevice import erf as _ld_erf
+from triton.language.extra.libdevice import rsqrt as _ld_rsqrt
+from triton.language.extra.libdevice import tanh as _ld_tanh
 
 import triton_viz
+from triton_viz.clients.tracer.tracer import Tracer
 from triton_viz.core.data import Load, RawLoad
 from triton_viz.clients.symbolic_engine import SymbolicExpr, Z3Expr, RangeWrapper
+from triton_viz.core.libdevice_registry import _np_erf
 from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     _range_to_iterator_constraint,
@@ -911,6 +919,234 @@ def test_reduce_broadcast():
     assert (
         len(reduce_broadcast_sanitizer.records) == 0
     ), f"Expected no OOB records, got {len(reduce_broadcast_sanitizer.records)}"
+
+
+# ======== Libdevice Tests ===========
+
+libdevice_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+# -- Direct import kernels --
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_tanh_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_tanh(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_asin_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_asin(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_acos_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_acos(x)
+    tl.store(out_ptr + offs, y)
+
+
+# -- Module-style import kernels --
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_tanh_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.tanh(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_asin_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.asin(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_acos_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.acos(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_rsqrt_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_rsqrt(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_rsqrt_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.rsqrt(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_erf_direct_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = _ld_erf(x)
+    tl.store(out_ptr + offs, y)
+
+
+@triton_viz.trace(client=libdevice_sanitizer)
+@triton.jit
+def libdevice_erf_module_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    y = libdevice.erf(x)
+    tl.store(out_ptr + offs, y)
+
+
+_LIBDEVICE_KERNELS = {
+    ("tanh", "direct"): libdevice_tanh_direct_kernel,
+    ("tanh", "module"): libdevice_tanh_module_kernel,
+    ("asin", "direct"): libdevice_asin_direct_kernel,
+    ("asin", "module"): libdevice_asin_module_kernel,
+    ("acos", "direct"): libdevice_acos_direct_kernel,
+    ("acos", "module"): libdevice_acos_module_kernel,
+    ("erf", "direct"): libdevice_erf_direct_kernel,
+    ("erf", "module"): libdevice_erf_module_kernel,
+    ("rsqrt", "direct"): libdevice_rsqrt_direct_kernel,
+    ("rsqrt", "module"): libdevice_rsqrt_module_kernel,
+}
+
+_NUMPY_REFS = {
+    "tanh": np.tanh,
+    "asin": np.arcsin,
+    "acos": np.arccos,
+    "erf": _np_erf,
+    "rsqrt": lambda x: 1.0 / np.sqrt(x),
+}
+
+_LIBDEVICE_INPUTS = {
+    "tanh": torch.tensor(
+        [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
+    ),
+    "asin": torch.tensor(
+        [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
+    ),
+    "acos": torch.tensor(
+        [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
+    ),
+    "erf": torch.tensor(
+        [0.0, 0.5, -0.5, 0.9, -0.9, 0.1, -0.1, 0.0], dtype=torch.float32
+    ),
+    "rsqrt": torch.tensor(
+        [1.0, 4.0, 0.25, 9.0, 16.0, 0.01, 100.0, 0.5], dtype=torch.float32
+    ),
+}
+
+
+@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos", "erf", "rsqrt"])
+@pytest.mark.parametrize("import_style", ["direct", "module"])
+def test_libdevice_op(op_name, import_style):
+    """
+    Verify libdevice ops work under the sanitizer without raising
+    TypeError: cannot convert None of type <class 'NoneType'> to tensor.
+    """
+    libdevice_sanitizer.records.clear()
+
+    x = _LIBDEVICE_INPUTS[op_name].clone()
+    out = torch.empty(8, dtype=torch.float32)
+
+    kernel = _LIBDEVICE_KERNELS[(op_name, import_style)]
+    kernel[(1,)](x, out, N=8)
+
+    assert len(libdevice_sanitizer.records) == 0, (
+        f"Expected no OOB records for {op_name}/{import_style}, "
+        f"got {len(libdevice_sanitizer.records)}"
+    )
+
+
+# -- Numerical correctness kernels (no sanitizer override) --
+
+_correctness_tracer = Tracer()
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_tanh_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_tanh(x))
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_asin_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_asin(x))
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_acos_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_acos(x))
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_erf_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_erf(x))
+
+
+@triton_viz.trace(client=_correctness_tracer)
+@triton.jit
+def _ld_rsqrt_kernel(x_ptr, out_ptr, N: tl.constexpr):
+    offs = tl.arange(0, N)
+    x = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, _ld_rsqrt(x))
+
+
+_CORRECTNESS_KERNELS = {
+    "tanh": _ld_tanh_kernel,
+    "asin": _ld_asin_kernel,
+    "acos": _ld_acos_kernel,
+    "erf": _ld_erf_kernel,
+    "rsqrt": _ld_rsqrt_kernel,
+}
+
+
+@pytest.mark.parametrize("op_name", ["tanh", "asin", "acos", "erf", "rsqrt"])
+def test_libdevice_numerical_correctness(op_name):
+    """Libdevice ops produce numerically correct results in interpreter mode."""
+    x = _LIBDEVICE_INPUTS[op_name].clone()
+    out = torch.empty(8, dtype=torch.float32)
+
+    _CORRECTNESS_KERNELS[op_name][(1,)](x, out, N=8)
+
+    expected = _NUMPY_REFS[op_name](x.numpy())
+    np.testing.assert_allclose(out.numpy(), expected, rtol=1e-5, atol=1e-6)
 
 
 # ======== Fake Tensor (Virtual Memory) OOB Tests ===========
