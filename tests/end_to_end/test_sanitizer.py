@@ -308,6 +308,84 @@ def test_loop_deferred_checks_simplify():
     assert load_index_checker.observed_offsets == []
 
 
+# ======== Branch Condition Tracking Tests ===========
+
+
+branch_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=branch_checker)
+@triton.jit
+def branch_false_positive_kernel(y_ptr, N: tl.constexpr):
+    """Load inside if branch that guards against OOB.
+
+    Without branch tracking, sanitizer would report OOB because
+    the symbolic loop var t could be 0, making (t - 1) = -1 which is OOB.
+    With branch tracking, the constraint t > 0 restricts t to [1], so
+    (t - 1) = 0 which is in bounds for a length-1 scalar tensor.
+    """
+    for t in tl.static_range(0, 2):
+        if t > 0:
+            tl.load(y_ptr + t - 1)  # t=1 → offset 0, safe for scalar
+
+
+def test_branch_false_positive_elimination():
+    """Sanitizer should NOT report OOB for loads guarded by branch conditions."""
+    branch_checker.records.clear()
+    y = torch.ones(1, dtype=torch.float32)
+    branch_false_positive_kernel[(1,)](y, N=1)
+    assert len(branch_checker.records) == 0, (
+        f"Expected 0 OOB records (branch should prevent false alarm), "
+        f"got {len(branch_checker.records)}"
+    )
+
+
+@triton_viz.trace(client=branch_checker)
+@triton.jit
+def branch_different_signatures_kernel(ptr, N: tl.constexpr):
+    """Same addr expr under different branches should get distinct signatures.
+
+    With t > 0 (t=1): load ptr + t = ptr + 1, OOB for length-1 tensor
+    With t == 0 (t=0): load ptr + t = ptr + 0, safe for length-1 tensor
+    """
+    for t in tl.static_range(0, 2):
+        if t > 0:
+            tl.load(ptr + t)  # t=1 → OOB for scalar
+        else:
+            tl.load(ptr + t)  # t=0 → safe for scalar
+
+
+def test_branch_different_signatures():
+    """Same addr expr under different branch conditions should not dedup."""
+    branch_checker.records.clear()
+    x = torch.ones(1, dtype=torch.float32)
+    branch_different_signatures_kernel[(1,)](x, N=1)
+    # The load at t=1 with offset 1 exceeds length-1 tensor
+    assert (
+        len(branch_checker.records) > 0
+    ), "Expected OOB for t=1 branch (offset exceeds tensor)"
+
+
+@triton_viz.trace(client=branch_checker)
+@triton.jit
+def branch_pid_immediate_kernel(ptr):
+    """Load guarded by pid == 0, tested with grid > 1."""
+    pid = tl.program_id(0)
+    if pid == 0:
+        tl.load(ptr + pid)
+
+
+def test_branch_pid_immediate():
+    """Sanitizer should NOT report OOB for pid-guarded immediate check."""
+    branch_checker.records.clear()
+    x = torch.ones(1, dtype=torch.float32)
+    # grid=2 means pid=0 and pid=1; load only happens for pid=0
+    branch_pid_immediate_kernel[(2,)](x)
+    assert (
+        len(branch_checker.records) == 0
+    ), f"Expected 0 OOB records (pid==0 guard), got {len(branch_checker.records)}"
+
+
 # Dedicated sanitizer for nested loop regression test
 nested_loop_checker = SymbolicSanitizer()
 

@@ -29,6 +29,7 @@ from triton.runtime.interpreter import _tuple_create, _unwrap_tensor, _rewrap_te
 from triton.tools.tensor_descriptor import TensorDescriptor
 from triton.runtime import JITFunction
 from ..transformers.for_loop_patcher import _visit_For as triton_viz_visit_For
+from ..transformers.if_else_patcher import _visit_If as triton_viz_visit_If
 
 from .flip_patch import patch_flip
 from ..frontends.base import AdapterResult, OPERATION_REGISTRY
@@ -294,19 +295,25 @@ class _LoopPatcher:
 
     def __init__(self):
         self._orig_visit_for: Callable | None = None
+        self._had_original: bool = False
         self._patched: bool = False
 
     def patch(self) -> None:
         if not self._patched:
-            self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
+            orig = getattr(_OrigASTTransformer, "visit_For", None)
+            self._orig_visit_for = orig
+            self._had_original = orig is not None
             _OrigASTTransformer.visit_For = triton_viz_visit_For  # type: ignore[assignment]
             self._patched = True
 
     def unpatch(self) -> None:
         if not self._patched:
             return
-        if self._orig_visit_for is not None:
+        if self._had_original:
             _OrigASTTransformer.visit_For = self._orig_visit_for
+        else:
+            if hasattr(_OrigASTTransformer, "visit_For"):
+                delattr(_OrigASTTransformer, "visit_For")
         self._patched = False
 
 
@@ -319,6 +326,44 @@ def patch_for_loop():
 
 def unpatch_for_loop():
     _loop_patcher.unpatch()
+
+
+class _IfElsePatcher:
+    """Manages AST patching for if/else branch interception."""
+
+    def __init__(self):
+        self._orig_visit_if: Callable | None = None
+        self._had_original: bool = False
+        self._patched: bool = False
+
+    def patch(self) -> None:
+        if not self._patched:
+            orig = getattr(_OrigASTTransformer, "visit_If", None)
+            self._orig_visit_if = orig
+            self._had_original = orig is not None
+            _OrigASTTransformer.visit_If = triton_viz_visit_If  # type: ignore[assignment]
+            self._patched = True
+
+    def unpatch(self) -> None:
+        if not self._patched:
+            return
+        if self._had_original:
+            _OrigASTTransformer.visit_If = self._orig_visit_if
+        else:
+            if hasattr(_OrigASTTransformer, "visit_If"):
+                delattr(_OrigASTTransformer, "visit_If")
+        self._patched = False
+
+
+_if_else_patcher = _IfElsePatcher()
+
+
+def patch_if_else():
+    _if_else_patcher.patch()
+
+
+def unpatch_if_else():
+    _if_else_patcher.unpatch()
 
 
 def patch_lang(fn, backend, client_manager=None):
@@ -344,6 +389,8 @@ def patch_lang(fn, backend, client_manager=None):
 
     if client_manager is not None:
         fn.__globals__["_triton_viz_loop_patcher"] = client_manager
+        if getattr(client_manager, "_if_patching_active", False):
+            fn.__globals__["_triton_viz_if_patcher"] = client_manager
     patch_flip(scope, lambda: _current_client_manager)
 
 

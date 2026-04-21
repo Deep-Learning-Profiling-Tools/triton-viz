@@ -540,6 +540,41 @@ def test_load_dtype_block_of_pointers():
     assert load.dtype == tl.float32, f"Expected tl.float32, got {load.dtype}"
 
 
+def test_if_else_ast_transformer_structure():
+    """Verify the AST transformer produces the expected try/finally structure."""
+    import ast
+    from triton_viz.transformers.if_else_patcher import _visit_If
+
+    source = "if cond:\n    x = 1\nelse:\n    x = 2\n"
+    tree = ast.parse(source)
+    if_node = tree.body[0]
+
+    class FakeTransformer:
+        def generic_visit(self, node):
+            return node
+
+    transformer = FakeTransformer()
+    result = _visit_If(transformer, if_node)
+
+    # Should return a list of [pre_if Expr, Try node]
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert isinstance(result[0], ast.Expr)  # pre_if call
+    assert isinstance(result[1], ast.Try)  # try/finally
+
+    try_node = result[1]
+    assert len(try_node.finalbody) == 1  # post_if in finally
+    assert isinstance(try_node.finalbody[0], ast.Expr)
+
+    # The try body should be a single If node
+    assert len(try_node.body) == 1
+    assert isinstance(try_node.body[0], ast.If)
+
+    inner_if = try_node.body[0]
+    # The else branch should start with flip_condition
+    assert len(inner_if.orelse) >= 2  # flip_condition + original else body
+
+
 def test_store_dtype_block_of_pointers():
     """tl.store on a block of pointers should not derive a dtype (store returns None).
 
