@@ -263,7 +263,7 @@ export class OpWorkspace {
             }
             catch (error) { }
         }
-        const isTensorOp = op.type === 'Dot' || op.type === 'Load' || op.type === 'Store';
+        const isTensorOp = op.type === 'Dot' || op.type === 'Load' || op.type === 'Store' || op.type === 'Transfer';
         const reuseTensorView = canReuseViz && isTensorOp && this.lastOpType === op.type;
         try {
             if (!reuseTensorView && this.visualizationCleanupFunction) {

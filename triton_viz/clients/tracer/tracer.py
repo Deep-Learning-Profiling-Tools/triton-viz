@@ -6,6 +6,7 @@ from ...core.data import (
     Op,
     Load,
     Store,
+    Transfer,
     ReduceSum,
     Dot,
     Grid,
@@ -92,10 +93,7 @@ class Tracer(Client):
             """Convert any NDArrays in keys to numpy arrays."""
             if isinstance(keys, (tuple, list)):
                 return tuple(_convert_keys_to_numpy(k) for k in keys)
-            elif hasattr(keys, "data"):
-                return keys.data
-            else:
-                return keys
+            return keys.data if hasattr(keys, "data") else keys
 
         @self.lock_fn
         def pre_load_callback(ptr, mask, keys):
@@ -136,6 +134,50 @@ class Tracer(Client):
                 tensor = ptr
 
             rec = Store(tensor.data_ptr(), offsets, mask_data)
+            rec.call_path = extract_user_frames(num_frames=1)
+            self.records.append(rec)
+
+        @self.lock_fn
+        def pre_transfer_callback(src, dst, mem_src, mem_dst):
+            # TODO: currently only works with NKI Beta 2. Make DSL-agnostic by
+            # making tensor interface so we can safely call data_ptr/data/...
+            if not self.sample:
+                return
+
+            def _get_offsets(ptr):
+                strides = tuple(
+                    int(stride) * int(ptr.element_size()) for stride in ptr.stride()
+                )
+                offsets = np.int64(0)
+                for dim_size, stride in zip(ptr.shape, strides):
+                    offsets = np.expand_dims(offsets, -1) + (
+                        np.arange(dim_size, dtype=np.int64) * stride
+                    )
+                return offsets
+
+            def _base_tensor(ptr):
+                base = ptr
+                while getattr(base, "_parent", None) is not None:
+                    base = base._parent
+                return (
+                    base
+                    if hasattr(base, "data_ptr")
+                    else self._get_tensor(ptr.data_ptr())
+                )
+
+            src_tensor = _base_tensor(src)
+            dst_tensor = _base_tensor(dst)
+            src_offsets = _get_offsets(src) + (src.data_ptr() - src_tensor.data_ptr())
+            dst_offsets = _get_offsets(dst) + (dst.data_ptr() - dst_tensor.data_ptr())
+            rec = Transfer(
+                src_ptr=src_tensor.data_ptr(),
+                dst_ptr=dst_tensor.data_ptr(),
+                src_offsets=src_offsets,
+                dst_offsets=dst_offsets,
+                mem_src=mem_src,
+                mem_dst=mem_dst,
+                bytes=np.prod(dst.shape) * dst.element_size(),
+            )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
@@ -186,20 +228,17 @@ class Tracer(Client):
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
-        if op_type is Allocate:
-            return OpCallbacks(after_callback=post_allocate_callback)
-        elif op_type is Load:
-            return OpCallbacks(before_callback=pre_load_callback)
-        elif op_type is Store:
-            return OpCallbacks(before_callback=pre_store_callback)
-        elif op_type is ReduceSum:
-            return OpCallbacks(after_callback=post_reduce_sum_callback)
-        elif op_type is Dot:
-            return OpCallbacks(after_callback=post_dot_callback)
+        callbacks = {
+            Allocate: OpCallbacks(after_callback=post_allocate_callback),
+            Load: OpCallbacks(before_callback=pre_load_callback),
+            Store: OpCallbacks(before_callback=pre_store_callback),
+            Transfer: OpCallbacks(before_callback=pre_transfer_callback),
+            ReduceSum: OpCallbacks(after_callback=post_reduce_sum_callback),
+            Dot: OpCallbacks(after_callback=post_dot_callback),
+        }
         # Flip is wrapped at tl.flip; we don't have an interpreter op to hook here.
         # The wrapper in patch_lang will append Flip records directly to tracer.
-
-        return OpCallbacks()
+        return callbacks.get(op_type, OpCallbacks())
 
     def register_for_loop_callback(self):
         return ForLoopCallbacks()

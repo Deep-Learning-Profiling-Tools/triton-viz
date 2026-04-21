@@ -1,6 +1,10 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
+
 from triton_viz.clients.tracer.tracer import Tracer, _convert_grid_idx
+from triton_viz.core.data import Transfer
 
 
 # ======== _convert_grid_idx Tests ===========
@@ -120,3 +124,37 @@ def test_tracer_get_tensor():
     assert tracer._get_tensor(2000) == mock_tensor2
     assert tracer._get_tensor(2500) == mock_tensor2
     assert tracer._get_tensor(3500) == mock_tensor3
+
+
+def test_tracer_transfer_records_element_strides_as_bytes():
+    """Test that transfer tracing converts element strides into byte offsets."""
+    tracer = Tracer()
+    callback = tracer.register_op_callback(Transfer).before_callback
+    src_data = np.zeros((2, 3), dtype=np.float32)
+    dst_data = np.zeros((2, 3), dtype=np.float16)
+    src = SimpleNamespace(
+        shape=src_data.shape,
+        data=src_data,
+        buffer="hbm",
+        _parent=None,
+        data_ptr=lambda: 1000,
+        stride=lambda: (3, 1),
+        element_size=lambda: 4,
+    )
+    dst = SimpleNamespace(
+        shape=dst_data.shape,
+        data=dst_data,
+        buffer="sbuf",
+        _parent=None,
+        data_ptr=lambda: 2000,
+        stride=lambda: (3, 1),
+        element_size=lambda: 2,
+    )
+
+    callback(src, dst, src.buffer, dst.buffer)
+
+    record = tracer.records[-1]
+    linear = np.arange(6, dtype=np.int64).reshape(2, 3)
+    assert np.array_equal(record.src_offsets, linear * 4)
+    assert np.array_equal(record.dst_offsets, linear * 2)
+    assert record.bytes == dst_data.nbytes
