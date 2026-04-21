@@ -8,7 +8,7 @@ import triton_viz
 try:
     from triton_viz.core.patch import _LangPatchScope
     from triton_viz.clients import Tracer
-    from triton_viz.core.data import Dot
+    from triton_viz.core.data import Dot, Transfer
     from triton_viz.core.trace import launches
     import nki.isa as nisa
     import nki.language as nl
@@ -268,6 +268,74 @@ def test_trace_records_beta2_nc_matmul():
     ]
     assert grid_records[0].idx == (0, 0, 0)
     assert any(isinstance(record, Dot) for record in launches[-1].records)
+
+
+def test_trace_records_beta2_transfers():
+    """beta2 tracing should record dma_copy/tensor_copy as Transfer ops."""
+    triton_viz.clear()
+
+    # check tracer records Transfer ops
+    def kernel(src, out):
+        src_tile = nl.ndarray((128, 128), dtype=src.dtype, buffer=nl.sbuf)
+        psum_tile = nl.ndarray((128, 128), dtype=nl.float32, buffer=nl.psum)
+        out_tile = nl.ndarray((128, 128), dtype=out.dtype, buffer=nl.sbuf)
+        nisa.dma_copy(src_tile, src)
+        nisa.tensor_copy(psum_tile, src_tile)
+        nisa.tensor_copy(out_tile, psum_tile)
+        nisa.dma_copy(out, out_tile)
+
+    traced = triton_viz.trace(client=Tracer(), backend="nki_beta2")(kernel)
+    src = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
+    out = np.empty((128, 128), dtype=np.float32)
+    traced[(1,)](src, out)
+
+    transfers = [
+        record for record in launches[-1].records if isinstance(record, Transfer)
+    ]
+    assert [(record.mem_src, record.mem_dst) for record in transfers] == [
+        ("hbm", "sbuf"),
+        ("sbuf", "psum"),
+        ("psum", "sbuf"),
+        ("sbuf", "hbm"),
+    ]
+
+    # check the visualizer interface can handle tracer-produced Transfer records
+    from triton_viz.visualizer.draw import get_visualization_data
+
+    viz_data = get_visualization_data()
+    ops = viz_data["visualization_data"]["(0, 0, 0)"]
+    transfer_ops = [op for op in ops if op["type"] == "Transfer"]
+    assert transfer_ops
+    assert all(tuple(op["global_shape"]) == (128, 128) for op in transfer_ops)
+
+
+def test_trace_records_beta2_transfer_bytes_for_mixed_dtypes():
+    """beta2 tracing should size transfer bytes from the destination dtype."""
+    triton_viz.clear()
+
+    def kernel(src, out):
+        src_tile = nl.ndarray((128, 128), dtype=src.dtype, buffer=nl.sbuf)
+        psum_tile = nl.ndarray((128, 128), dtype=nl.float32, buffer=nl.psum)
+        out_tile = nl.ndarray((128, 128), dtype=out.dtype, buffer=nl.sbuf)
+        nisa.dma_copy(src_tile, src)
+        nisa.tensor_copy(psum_tile, src_tile)
+        nisa.tensor_copy(out_tile, psum_tile)
+        nisa.dma_copy(out, out_tile)
+
+    traced = triton_viz.trace(client=Tracer(), backend="nki_beta2")(kernel)
+    src = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
+    out = np.empty((128, 128), dtype=np.float16)
+    traced[(1,)](src, out)
+
+    transfers = [
+        record for record in launches[-1].records if isinstance(record, Transfer)
+    ]
+    assert [record.bytes for record in transfers] == [
+        src.nbytes,
+        src.nbytes,
+        out.nbytes,
+        out.nbytes,
+    ]
 
 
 def test_trace_no_grid_needed():
@@ -1896,7 +1964,7 @@ def test_ndarray_public_surface_and_value_backed_paths(patched_scope):
     assert tensor.shape == (2, 2)
     assert tensor.address == tensor.data.ctypes.data
     assert tensor.data_ptr() == tensor.address
-    assert tensor.stride() == tensor.data.strides
+    assert tensor.stride() == (2, 1)
     assert tensor.element_size() == tensor.data.dtype.itemsize
     assert tensor.cpu() is tensor
     assert tensor.detach() is tensor

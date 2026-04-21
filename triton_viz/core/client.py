@@ -196,22 +196,20 @@ class ClientManager:
 
     def pre_run_callback(self, fn: Callable) -> bool:
         with self._lock_context():
-            rets = []
-            for client in self.clients.values():
-                rets.append(client.pre_run_callback(fn))
+            rets = [client.pre_run_callback(fn) for client in self.clients.values()]
             return all(rets) if rets else True
 
     def post_run_callback(self, fn: Callable) -> bool:
         with self._lock_context():
-            rets = []
-            for client in self.clients.values():
-                rets.append(client.post_run_callback(fn))
+            rets = [client.post_run_callback(fn) for client in self.clients.values()]
             return any(rets)
 
     def finalize(self) -> None:
         with self._lock_context():
             self.launch.records = []
             for client in self.clients.values():
+                # client may introduce tensors not declared in kernel args (e.g. tracer recording a tensor allocation)
+                self.launch.tensors.update(getattr(client, "tensors", []) or [])
                 self.launch.records += client.finalize()
 
     def arg_callback(self, name, arg, arg_cvt):
