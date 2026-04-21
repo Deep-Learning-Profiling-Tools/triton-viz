@@ -274,6 +274,7 @@ class CpuCacheThreadSafetyTest:
 
         for tid in range(1, 4):
             np.testing.assert_array_equal(
-                results[0], results[tid],
+                results[0],
+                results[tid],
                 err_msg=f"Thread 0 and thread {tid} got different rebase results",
             )

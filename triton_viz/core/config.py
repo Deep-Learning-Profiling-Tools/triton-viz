@@ -87,13 +87,17 @@ class Config:
 
     def __getattr__(self, name: str) -> object:
         if name == "virtual_memory":
-            warnings.warn(self._VIRTUAL_MEMORY_DEPRECATION, DeprecationWarning, stacklevel=2)
+            warnings.warn(
+                self._VIRTUAL_MEMORY_DEPRECATION, DeprecationWarning, stacklevel=2
+            )
             return self.tensor_mode != TensorMode.FORCE_REAL
         raise AttributeError(name)
 
     def __setattr__(self, name: str, value: object) -> None:
         if name == "virtual_memory":
-            warnings.warn(self._VIRTUAL_MEMORY_DEPRECATION, DeprecationWarning, stacklevel=2)
+            warnings.warn(
+                self._VIRTUAL_MEMORY_DEPRECATION, DeprecationWarning, stacklevel=2
+            )
             super().__setattr__(
                 "tensor_mode",
                 TensorMode.FORCE_REAL if not value else TensorMode.LAZY_AUTO,

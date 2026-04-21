@@ -1276,7 +1276,9 @@ _lazy_e2e_sanitizer = SymbolicSanitizer(abort_on_error=True)
 
 @triton_viz.trace(client=_lazy_e2e_sanitizer)
 @triton.jit
-def _indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
+def _indirect_load_kernel(
+    idx_ptr, src_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr
+):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < N
@@ -1287,7 +1289,9 @@ def _indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.
 
 @triton_viz.trace(client=_lazy_e2e_sanitizer)
 @triton.jit
-def _indirect_store_kernel(idx_ptr, val_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
+def _indirect_store_kernel(
+    idx_ptr, val_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr
+):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < N
@@ -1382,7 +1386,9 @@ _oob_lazy_sanitizer = SymbolicSanitizer(abort_on_error=True)
 
 @triton_viz.trace(client=_oob_lazy_sanitizer)
 @triton.jit
-def _oob_indirect_kernel(idx_ptr, src_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr):
+def _oob_indirect_kernel(
+    idx_ptr, src_ptr, dst_ptr, N: tl.constexpr, BLOCK: tl.constexpr
+):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     # No mask — intentional OOB for offsets >= N

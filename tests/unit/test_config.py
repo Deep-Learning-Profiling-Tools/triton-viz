@@ -1,6 +1,5 @@
 import warnings
 
-import pytest
 
 from triton_viz.core.config import Config, TensorMode
 

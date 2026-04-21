@@ -387,9 +387,7 @@ class TensorMaterializer:
 
     def rebase_pointers(self, ptr_data, mask=None):
         if mask is not None:
-            mask_arr = np.broadcast_to(
-                np.asarray(mask, dtype=bool), ptr_data.shape
-            )
+            mask_arr = np.broadcast_to(np.asarray(mask, dtype=bool), ptr_data.shape)
             valid_indices = np.flatnonzero(mask_arr.ravel())
         else:
             valid_indices = np.arange(ptr_data.size)
@@ -412,9 +410,7 @@ class TensorMaterializer:
         # Fast path: check if all valid pointers share one storage
         first_base = self._find_base(int(flat[valid_indices[0]]))
         _, first_end, _ = next(s for s in self._storages if s[0] == first_base)
-        all_same = all(
-            first_base <= int(flat[i]) < first_end for i in valid_indices
-        )
+        all_same = all(first_base <= int(flat[i]) < first_end for i in valid_indices)
 
         if all_same:
             offset = self._cpu_offset(first_base)
@@ -458,9 +454,7 @@ class TensorMaterializer:
         for base, end, _ in self._storages:
             if base <= addr < end:
                 return base
-        raise UnmappablePointerError(
-            f"No registered storage for address {addr:#x}"
-        )
+        raise UnmappablePointerError(f"No registered storage for address {addr:#x}")
 
 
 @dataclass(frozen=True)
