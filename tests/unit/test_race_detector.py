@@ -216,6 +216,57 @@ def test_flag_off_returns_raw_kernel_for_factory_instance():
         cfg.enable_race_detector = saved
 
 
+# ======== HB solver demos ========
+
+
+def test_plain_program_order_suppresses_same_grid_conflict():
+    records = [
+        _store_record(
+            name="P0_store_data",
+            grid_idx=(0,),
+            program_seq=0,
+            addr=DATA,
+            value=1,
+        ),
+        _load_record(
+            name="P0_load_data",
+            grid_idx=(0,),
+            program_seq=1,
+            addr=DATA,
+        ),
+    ]
+
+    reports = HBSolver(records).find_races()
+
+    assert reports == []
+
+
+def test_cross_grid_plain_store_load_is_racy():
+    records = [
+        _store_record(
+            name="P0_store_data",
+            grid_idx=(0,),
+            program_seq=0,
+            addr=DATA,
+            value=1,
+        ),
+        _load_record(
+            name="P1_load_data",
+            grid_idx=(1,),
+            program_seq=0,
+            addr=DATA,
+        ),
+    ]
+
+    reports = HBSolver(records).find_races()
+
+    assert len(reports) == 1
+    assert {reports[0].first.name, reports[0].second.name} == {
+        "P0_store_data",
+        "P1_load_data",
+    }
+
+
 def test_cas_release_acquire_unconditional_load_is_racy():
     records = _build_cas_records(load_guarded_by_cas_success=False)
 
@@ -237,3 +288,42 @@ def test_cas_release_acquire_guarded_load_is_not_racy():
     reports = HBSolver(records).find_races()
 
     assert reports == []
+
+
+def test_relaxed_cas_does_not_synchronize_even_when_guarded_load_succeeds():
+    records = _build_cas_records(load_guarded_by_cas_success=True)
+    p0_store_data, p0_release_cas, p1_acquire_cas, p1_load_data = records
+    del p0_store_data, p1_acquire_cas, p1_load_data
+
+    p0_release_cas.sem = "relaxed"
+
+    reports = HBSolver(records).find_races()
+
+    assert len(reports) == 1
+
+    report = reports[0]
+    assert {report.first.name, report.second.name} == {
+        "P0_store_data",
+        "P1_load_data",
+    }
+    assert report.model.get("P1_acquire_cas_old") == "1"
+
+
+def test_cta_scope_does_not_synchronize_across_different_grids():
+    records = _build_cas_records(load_guarded_by_cas_success=True)
+    p0_store_data, p0_release_cas, p1_acquire_cas, p1_load_data = records
+    del p0_store_data, p1_load_data
+
+    p0_release_cas.scope = "cta"
+    p1_acquire_cas.scope = "cta"
+
+    reports = HBSolver(records).find_races()
+
+    assert len(reports) == 1
+
+    report = reports[0]
+    assert {report.first.name, report.second.name} == {
+        "P0_store_data",
+        "P1_load_data",
+    }
+    assert report.model.get("P1_acquire_cas_old") == "1"
