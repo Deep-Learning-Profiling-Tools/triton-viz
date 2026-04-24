@@ -1995,7 +1995,6 @@ class SymbolicClient(Client):
     def _op_atomic_cas_overrider(
         self, ptr, cmp, val, sem=None, scope=None, *args, **kwargs
     ):
-        del args, kwargs
         ptr_sym = SymbolicExpr.from_value(ptr)
         cmp_sym = SymbolicExpr.from_value(cmp)
         val_sym = SymbolicExpr.from_value(val)

@@ -173,13 +173,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         return SymbolicClient.register_op_callback(self, op_type)
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        del fn
         # v1 guarantees standalone race-detector semantics only: always run the
         # full launch grid instead of relying on SymbolicClient's lazy sampling.
         return True
 
     def post_run_callback(self, fn: Callable) -> bool:
-        del fn
         self._completed_blocks += 1
         return True
 
@@ -507,7 +505,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         *args: Any,
         **kwargs: Any,
     ) -> SymbolicExpr:
-        del args, kwargs
         ptr_sym = SymbolicExpr.from_value(ptr)
         cmp_sym = SymbolicExpr.from_value(cmp)
         val_sym = SymbolicExpr.from_value(val)
