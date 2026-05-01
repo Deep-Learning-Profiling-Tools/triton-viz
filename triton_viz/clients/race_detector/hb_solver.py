@@ -7,7 +7,7 @@ from typing import Any, Iterable
 from z3 import And, BoolVal, IntVal, Not, Or, Solver, sat
 from z3.z3 import BoolRef, IntNumRef, ModelRef
 
-from .data import AccessEventRecord
+from .data import AccessEventRecord, RaceType
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,16 @@ class RaceReport:
     @property
     def second_record(self) -> AccessEventRecord:
         return self.second.record
+
+    @property
+    def race_type(self) -> RaceType:
+        first_writes = self.first.record.access_mode == "write"
+        second_writes = self.second.record.access_mode == "write"
+        if first_writes and second_writes:
+            return RaceType.WAW
+        if first_writes:
+            return RaceType.RAW
+        return RaceType.WAR
 
 
 class HBSolver:

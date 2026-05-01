@@ -1,5 +1,6 @@
 from .profiler.profiler import Profiler
 from .profiler.data import LoadStoreBytes, OpTypeCounts
+from .race_detector.data import RaceType
 from .race_detector.race_detector import RaceDetector
 from .sanitizer.sanitizer import Sanitizer
 from .sanitizer.data import OutOfBoundsRecord
@@ -9,6 +10,7 @@ from .tracer.tracer import Tracer
 __all__ = [
     "Profiler",
     "RaceDetector",
+    "RaceType",
     "Sanitizer",
     "LoadStoreBytes",
     "OpTypeCounts",

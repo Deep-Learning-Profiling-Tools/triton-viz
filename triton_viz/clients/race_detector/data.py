@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, Literal
 
 import torch
@@ -10,6 +11,12 @@ from ...core.data import Op
 
 MemorySem = Literal["plain", "relaxed", "acquire", "release", "acq_rel"]
 AtomicKind = Literal["none", "cas", "rmw"]
+
+
+class RaceType(Enum):
+    RAW = auto()  # Read-After-Write
+    WAR = auto()  # Write-After-Read
+    WAW = auto()  # Write-After-Write
 
 
 @dataclass
