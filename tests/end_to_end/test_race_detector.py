@@ -491,3 +491,201 @@ def test_atomic_only_competing_updates_is_not_racy(_isolate_race_detector_atomic
     assert detector.last_reports == []
     _assert_launch_reports(detector)
     _assert_atomic_records(detector, sem="acq_rel", scope="gpu")
+
+
+# ======== Atomic mask gating (Issue 1) ========
+
+
+@triton.jit
+def _masked_rmw_no_race_kernel(p_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+    # Producer's atomic_add is masked off; consumer reads p without contention.
+    tl.atomic_add(p_ptr, 1, mask=is_prod & False)
+    x = tl.load(p_ptr, mask=is_cons, other=0)
+    tl.store(out_ptr + pid, x, mask=is_cons)
+
+
+def test_masked_atomic_rmw_no_race_with_unmasked_load(
+    _isolate_race_detector_atomic_cfg,
+):
+    p = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(2, dtype=torch.int32)
+    detector = _run_detector(_masked_rmw_no_race_kernel, (2,), p, out)
+    # Masked-off atomic_add should not race with the unmasked load.
+    assert detector.last_reports == []
+
+
+@triton.jit
+def _pid_guarded_rmw_vs_store_kernel(p_ptr):
+    pid = tl.program_id(0)
+    is_a = pid == 0
+    is_b = pid == 1
+    tl.atomic_add(p_ptr, 1, mask=is_a)
+    tl.store(p_ptr, 7, mask=is_b)
+
+
+def test_masked_atomic_rmw_pid_guard_reports_race(
+    _isolate_race_detector_atomic_cfg,
+):
+    p = torch.zeros(1, dtype=torch.int32)
+    detector = _run_detector(_pid_guarded_rmw_vs_store_kernel, (2,), p)
+    # atomic-vs-non-atomic at the same address; both active in their own pid.
+    # Cross-block, the two events conflict → exactly one race expected.
+    assert len(detector.last_reports) == 1
+
+
+# ======== Atomic-in-loop unsupported (Issue 3) ========
+
+
+@triton.jit
+def _cas_in_loop_kernel(flag_ptr, out_ptr, N: tl.constexpr):
+    pid = tl.program_id(0)
+    for i in tl.range(0, N):
+        old = tl.atomic_cas(flag_ptr, 0, 1, sem="acq_rel", scope="gpu")
+        tl.store(out_ptr + pid, old)
+
+
+def test_atomic_cas_inside_for_loop_is_unsupported(
+    _isolate_race_detector_atomic_cfg,
+):
+    flag = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(2, dtype=torch.int32)
+    detector = _run_detector(_cas_in_loop_kernel, (2,), flag, out, 3)
+    assert detector.records == []
+    assert detector.last_reports == []
+    assert detector.unsupported_reason is not None
+    assert "loop" in detector.unsupported_reason
+
+
+@triton.jit
+def _rmw_in_loop_kernel(p_ptr, N: tl.constexpr):
+    for i in tl.range(0, N):
+        tl.atomic_add(p_ptr, 1)
+
+
+def test_atomic_rmw_inside_for_loop_is_unsupported(
+    _isolate_race_detector_atomic_cfg,
+):
+    p = torch.zeros(1, dtype=torch.int32)
+    detector = _run_detector(_rmw_in_loop_kernel, (2,), p, 3)
+    assert detector.records == []
+    assert detector.last_reports == []
+    assert detector.unsupported_reason is not None
+    assert "loop" in detector.unsupported_reason
+
+
+def test_atomic_in_loop_with_abort_on_error_raises(
+    _isolate_race_detector_atomic_cfg,
+):
+    from triton_viz.clients.race_detector.hb_common import (
+        UnsupportedSymbolicRaceQuery,
+    )
+
+    triton_viz.clear()
+    detector = SymbolicRaceDetector(abort_on_error=True)
+    p = torch.zeros(1, dtype=torch.int32)
+    traced = triton_viz.trace(client=detector)(_rmw_in_loop_kernel)
+    with pytest.raises(UnsupportedSymbolicRaceQuery):
+        traced[(2,)](p, 3)
+
+
+# ======== AtomicRMW return-value downstream is unsupported (Issue 5) ========
+
+
+@triton.jit
+def _rmw_return_used_downstream_kernel(p_ptr, q_ptr, out_ptr):
+    pid = tl.program_id(0)
+    old = tl.atomic_add(p_ptr, 1)
+    val = tl.load(q_ptr, mask=old == 0, other=0)
+    tl.store(out_ptr + pid, val)
+
+
+def test_atomic_rmw_return_used_downstream_is_unsupported(
+    _isolate_race_detector_atomic_cfg,
+):
+    p = torch.zeros(1, dtype=torch.int32)
+    q = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(2, dtype=torch.int32)
+    detector = _run_detector(_rmw_return_used_downstream_kernel, (2,), p, q, out)
+    assert detector.last_reports == []
+    assert detector.unsupported_reason is not None
+    # Reason mentions either "rmw" or "return"
+    reason = detector.unsupported_reason.lower()
+    assert "rmw" in reason or "return" in reason
+
+
+@triton.jit
+def _rmw_return_unused_kernel(p_ptr):
+    tl.atomic_add(p_ptr, 1)
+
+
+def test_atomic_rmw_return_unused_is_supported(
+    _isolate_race_detector_atomic_cfg,
+):
+    p = torch.zeros(1, dtype=torch.int32)
+    detector = _run_detector(_rmw_return_unused_kernel, (2,), p)
+    # Discarded RMW return: no unsupported, one RMW event captured per launch.
+    assert detector.unsupported_reason is None
+    rmw_records = [r for r in detector.records if r.atomic_kind == "rmw"]
+    assert len(rmw_records) >= 1
+
+
+# ======== Closed-world / scalar-flag boundary (Issue 4) ========
+
+
+@triton.jit
+def _flag_array_cas_acq_rel_guarded_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+
+    tl.store(data_ptr, 1, mask=is_prod)
+    cmp = tl.where(is_prod, 0, 1)
+    # flag_ptr is the START of an 8-element array (numel != 1) — _initial_atomic_source
+    # cannot identify the scalar initial value, so the closed-world model
+    # falls back to rf_unknown which does NOT enable synchronizes-with.
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="multi-element flag arrays are not modeled by _initial_atomic_source; "
+    "the closed-world source model conservatively reports races for guarded "
+    "acq/rel CAS over flag arrays. Track in a follow-up issue.",
+)
+def test_flag_array_cas_acq_rel_guarded_is_not_racy_xfail(
+    _isolate_race_detector_atomic_cfg,
+):
+    flag = torch.zeros(8, dtype=torch.int32)
+    data = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(2, dtype=torch.int32)
+    detector = _run_detector(
+        _flag_array_cas_acq_rel_guarded_kernel, (2,), flag, data, out
+    )
+    assert detector.last_reports == []
+
+
+# ======== Unsupported visibility (Acceptance #14) ========
+
+
+def test_unsupported_reason_is_reachable_via_client_manager(
+    _isolate_race_detector_atomic_cfg,
+):
+    """Users running with default abort_on_error=False can still distinguish
+    'no race' from 'unsupported' by reading detector.unsupported_reason.
+    """
+    p = torch.zeros(1, dtype=torch.int32)
+    triton_viz.clear()
+    detector = SymbolicRaceDetector()
+    traced = triton_viz.trace(client=detector)(_rmw_in_loop_kernel)
+    traced[(2,)](p, 2)
+    # Reachable via the original detector reference (typical use).
+    assert detector.unsupported_reason is not None
+    # And via the client manager attached to the traced kernel.
+    cm_detector = traced.client_manager.clients["race_detector"]
+    assert cm_detector.unsupported_reason is not None

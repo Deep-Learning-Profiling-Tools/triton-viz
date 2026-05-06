@@ -19,6 +19,25 @@ Address-domain invariant:
   ``tensor.data_ptr()``. ``byte_overlap`` and ``initial_atomic_source`` rely on
   this. Capture-side normalisation must convert element / tensor-relative
   offsets to byte addresses BEFORE the records reach the solver.
+
+Limitations (current):
+  - **Initial atomic source is identifiable only for scalar tensors** —
+    ``_initial_atomic_source`` requires ``tensor.numel() == 1``. Multi-element
+    flag arrays and pointer-arithmetic flag indexing fall through to
+    ``rf_unknown_R``, which deliberately does NOT enable synchronizes-with;
+    guarded acq/rel CAS over flag arrays will be reported as races
+    conservatively. See ``test_flag_array_cas_acq_rel_guarded_is_not_racy_xfail``
+    for the documented gap.
+  - **Two program instances only** — synchronization that travels through a
+    third block (writer-via-third-block CAS chains) is not modeled directly.
+  - **AtomicRMW value semantics not modeled** — the RMW return is wrapped in
+    a sentinel that triggers ``UnsupportedSymbolicRaceQuery`` if used
+    downstream (e.g. ``mask = old == 0``). The launch is marked unsupported
+    via ``SymbolicRaceDetector._mark_unsupported`` rather than racing.
+  - **Atomic CAS/RMW inside loops are unsupported** — they are eagerly
+    captured today (no integration with the loop-pending path), so the
+    handlers mark the launch unsupported instead of recording phantom
+    events.
 """
 
 from __future__ import annotations

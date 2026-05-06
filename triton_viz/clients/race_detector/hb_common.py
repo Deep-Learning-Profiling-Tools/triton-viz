@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Iterator
 
-from z3 import And, BoolVal, Or, substitute
-from z3.z3 import BoolRef
+from z3 import And, BoolSort, BoolVal, Or, substitute
+from z3.z3 import BoolRef, IntNumRef
 
 
 class UnsupportedSymbolicRaceQuery(Exception):
@@ -23,8 +23,22 @@ class UnsupportedSymbolicRaceQuery(Exception):
 
 
 def as_bool(value: Any) -> BoolRef:
+    """Coerce ``value`` to a Z3 ``BoolRef``.
+
+    Accepts Python bool/int/float, Z3 ``IntNumRef``, and non-Bool-sort Z3
+    expressions (returning ``value != 0``). ``None`` is intentionally NOT
+    handled — passing ``None`` indicates a caller-side bug and should
+    surface as a Z3 type error rather than silently inactivating the
+    event.
+    """
     if isinstance(value, bool):
         return BoolVal(value)
+    if isinstance(value, IntNumRef):
+        return BoolVal(value.as_long() != 0)
+    if isinstance(value, (int, float)):
+        return BoolVal(value != 0)
+    if hasattr(value, "sort") and value.sort() != BoolSort():
+        return value != 0
     return value
 
 

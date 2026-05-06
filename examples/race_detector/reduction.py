@@ -30,4 +30,7 @@ if __name__ == "__main__":
     races = launches[-1].records
     print(f"Detected {len(races)} race(s)")
     for r in races:
-        print(f"  {r.race_type.name} at address offset {r.address_offset}")
+        print(
+            f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
+            f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
+        )
