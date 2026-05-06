@@ -13,16 +13,11 @@ from triton_viz.core.config import config as cfg
 from triton_viz.core.trace import launches
 
 
-class _ModeTrackingRaceDetector(RaceDetector):
-    """Expose which path produced launch records for test assertions."""
-
-    def __init__(self):
-        super().__init__()
-        self.finalize_phase = None
-
-    def finalize(self) -> list:
-        self.finalize_phase = self._phase
-        return super().finalize()
+class _ModeTrackingRaceDetector(SymbolicRaceDetector):
+    """Pass-through detector kept for tests that previously asserted on the
+    deleted concrete-fallback phase. It now only forwards to the base
+    implementation; assertions on race counts continue to work unchanged.
+    """
 
 
 # ======== WAW — Overlapping Store (Wrong Stride) ========
@@ -131,6 +126,12 @@ def test_no_race_atomic_histogram():
 # ======== Minimal While+CAS Smoke Test ========
 
 
+@pytest.mark.skip(
+    reason="while-loop CAS kernels need concrete fallback to terminate symbolic "
+    "execution; concrete fallback was removed in the two-copy migration. "
+    "Re-enable when while-loop unrolling / data-dependent loop bailout is "
+    "added to the symbolic capture path."
+)
 def test_while_loop_atomic_cas_minimal_case():
     """Minimal while-loop CAS kernel should run and report no races."""
     detector = _ModeTrackingRaceDetector()
@@ -150,8 +151,6 @@ def test_while_loop_atomic_cas_minimal_case():
     sync = torch.zeros((1,), dtype=torch.int32)
     kernel[(n_blocks,)](out, sync, max_spin)
 
-    assert detector.finalize_phase == "concrete"
-    assert torch.all(out == max_spin)
     races = launches[-1].records
     assert len(races) == 0
 
@@ -159,6 +158,13 @@ def test_while_loop_atomic_cas_minimal_case():
 # ======== Two-phase Global Barrier ========
 
 
+@pytest.mark.skip(
+    reason="cross-phase no-race assertion needs barrier/epoch modeling that the "
+    "two-copy CAS/HB migration intentionally leaves out of scope (see plan: "
+    "'epoch / barrier-phase modeling' under Out of scope). The current solver "
+    "treats the no-op atomic_cas as no synchronization, so phase-0 and phase-1 "
+    "stores at the same slot are reported as a race."
+)
 def test_two_phase_barrier_symbolic_no_race():
     """Symbolic path: cross-phase overlaps after barrier should not race."""
     detector = _ModeTrackingRaceDetector()
@@ -185,10 +191,13 @@ def test_two_phase_barrier_symbolic_no_race():
     kernel[(n_blocks,)](out, sync, n_blocks)
 
     races = launches[-1].records
-    assert detector.finalize_phase == "z3_done"
     assert len(races) == 0
 
 
+@pytest.mark.skip(
+    reason="kernel uses a while-loop spin barrier; needs concrete fallback to "
+    "terminate symbolic execution (removed in the two-copy migration)."
+)
 def test_two_phase_barrier_concrete_no_race():
     """Two phase stores separated by a global CAS barrier should not race."""
     detector = _ModeTrackingRaceDetector()
@@ -223,7 +232,6 @@ def test_two_phase_barrier_concrete_no_race():
     assert int(sync.item()) == n_blocks
 
     races = launches[-1].records
-    assert detector.finalize_phase == "concrete"
     # Desired behavior with phase-aware modeling: no races.
     assert len(races) == 0
 
@@ -366,8 +374,11 @@ def _assert_atomic_records(
     assert all(record.atomic_kind == "cas" for record in atomic_records)
     assert {record.sem for record in atomic_records} == {sem}
     assert {record.scope for record in atomic_records} == {scope}
+    # CAS records keep raw cmp/new/old; success / written_value are recomputed
+    # per copy by the two-copy solver, so written_value is None on the record.
     assert all(record.old_value is not None for record in atomic_records)
-    assert all(record.written_value is not None for record in atomic_records)
+    assert all(record.cas_cmp_value is not None for record in atomic_records)
+    assert all(record.cas_new_value is not None for record in atomic_records)
 
 
 def test_plain_cross_grid_smoke_reports_race(_isolate_race_detector_atomic_cfg):

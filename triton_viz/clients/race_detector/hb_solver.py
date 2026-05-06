@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import combinations
-from typing import Any, Iterable
+from typing import Any
 
 from z3 import And, BoolVal, IntVal, Not, Or, Solver, sat
 from z3.z3 import BoolRef, IntNumRef, ModelRef
 
-from .data import AccessEventRecord, RaceType
+from .data import AccessEventRecord, RaceReport
+from .hb_common import (
+    as_bool,
+    build_transitive_hb,
+    conflicting_access_modes,
+    is_acquire_sem,
+    is_release_sem,
+    iter_constraints,
+    lane_value,
+    minimal_atomic_read_from,
+)
 
 
 @dataclass(frozen=True)
@@ -36,38 +46,12 @@ class RaceCheckResult:
     model: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class RaceReport:
-    first: ScalarMemoryEvent
-    second: ScalarMemoryEvent
-    model: dict[str, str] = field(default_factory=dict)
-    reason: str = ""
-
-    @property
-    def first_record(self) -> AccessEventRecord:
-        return self.first.record
-
-    @property
-    def second_record(self) -> AccessEventRecord:
-        return self.second.record
-
-    @property
-    def race_type(self) -> RaceType:
-        first_writes = self.first.record.access_mode == "write"
-        second_writes = self.second.record.access_mode == "write"
-        if first_writes and second_writes:
-            return RaceType.WAW
-        if first_writes:
-            return RaceType.RAW
-        return RaceType.WAR
-
-
 class HBSolver:
     """Small event-graph happens-before solver for the PR-A demo.
 
-    This solver is intentionally isolated from the current Triton race-detector
-    capture path. It consumes synthetic ``AccessEventRecord`` inputs and checks
-    whether conflicting accesses can remain unordered after program-order and
+    This solver is intentionally isolated from the production capture path. It
+    consumes synthetic ``AccessEventRecord`` inputs and checks whether
+    conflicting accesses can remain unordered after program-order and
     release/acquire synchronization edges are applied.
     """
 
@@ -79,7 +63,7 @@ class HBSolver:
         self.records = list(records)
         self.extra_assumptions = tuple(extra_assumptions)
         self.events = self._lower_records()
-        self.hb = self._build_hb()
+        self.hb = build_transitive_hb(self.events, self._edge)
 
     def find_races(self) -> list[RaceReport]:
         reports: list[RaceReport] = []
@@ -122,33 +106,29 @@ class HBSolver:
 
         for record in self.records:
             addrs = self._iter_addrs(record.addr_expr)
+            n_lanes = len(addrs)
 
             for lane, addr in enumerate(addrs):
                 active_terms = [
-                    self._as_bool(self._lane_value(record.active, lane)),
-                    *(
-                        self._as_bool(constraint)
-                        for constraint in self._iter_constraints(
-                            record.local_constraints
-                        )
-                    ),
+                    as_bool(lane_value(record.active, lane, n_lanes)),
+                    *(as_bool(c) for c in iter_constraints(record.local_constraints)),
                 ]
                 active = And(*active_terms)
 
-                raw_reads = self._lane_value(record.reads, lane)
+                raw_reads = lane_value(record.reads, lane, n_lanes)
                 if raw_reads is None:
                     reads = active if record.access_mode == "read" else BoolVal(False)
                 else:
-                    reads = And(active, self._as_bool(raw_reads))
+                    reads = And(active, as_bool(raw_reads))
 
-                raw_writes = self._lane_value(record.writes, lane)
+                raw_writes = lane_value(record.writes, lane, n_lanes)
                 if raw_writes is None:
                     writes = active if record.access_mode == "write" else BoolVal(False)
                 else:
-                    writes = And(active, self._as_bool(raw_writes))
+                    writes = And(active, as_bool(raw_writes))
 
                 name = record.debug_name or f"e{len(events)}"
-                if len(addrs) > 1:
+                if n_lanes > 1:
                     name = f"{name}.lane{lane}"
 
                 events.append(
@@ -168,10 +148,10 @@ class HBSolver:
                         sem=record.sem,
                         scope=record.scope,
                         old_value=self._as_z3_value(
-                            self._lane_value(record.old_value, lane)
+                            lane_value(record.old_value, lane, n_lanes)
                         ),
                         written_value=self._as_z3_value(
-                            self._lane_value(record.written_value, lane)
+                            lane_value(record.written_value, lane, n_lanes)
                         ),
                     )
                 )
@@ -186,24 +166,10 @@ class HBSolver:
             return list(addr_expr)
         return [addr_expr]
 
-    @staticmethod
-    def _lane_value(value: Any, lane: int) -> Any:
-        if isinstance(value, (list, tuple)):
-            return value[lane]
-        return value
-
     def _same_addr(
         self, first: ScalarMemoryEvent, second: ScalarMemoryEvent
     ) -> BoolRef:
         return self._as_z3_value(first.addr) == self._as_z3_value(second.addr)
-
-    @staticmethod
-    def _is_release(event: ScalarMemoryEvent) -> bool:
-        return event.sem in ("release", "acq_rel")
-
-    @staticmethod
-    def _is_acquire(event: ScalarMemoryEvent) -> bool:
-        return event.sem in ("acquire", "acq_rel")
 
     @staticmethod
     def _scope_ok(first: ScalarMemoryEvent, second: ScalarMemoryEvent) -> BoolRef:
@@ -225,43 +191,18 @@ class HBSolver:
             return BoolVal(False)
         return BoolVal(first.program_seq < second.program_seq)
 
-    def _minimal_atomic_read_from(
-        self,
-        writer: ScalarMemoryEvent,
-        reader: ScalarMemoryEvent,
-    ) -> BoolRef:
-        """PR-A synthetic relation only.
-
-        This is intentionally *not* a full coherence/read-from model. It does
-        not prove unique writers, coherence order, same-value disambiguation,
-        ABA exclusion, or must-alias properties. It only models the minimal
-        event fact needed for the solver-only CAS demo:
-
-            writer.written_value == reader.old_value
-        """
-
-        if writer.written_value is None or reader.old_value is None:
-            return BoolVal(False)
-
-        return And(
-            BoolVal(writer.is_atomic),
-            BoolVal(reader.is_atomic),
-            writer.writes,
-            reader.reads,
-            self._same_addr(writer, reader),
-            writer.written_value == reader.old_value,
-        )
-
     def _synchronizes_with(
         self,
         writer: ScalarMemoryEvent,
         reader: ScalarMemoryEvent,
     ) -> BoolRef:
         return And(
-            BoolVal(self._is_release(writer)),
-            BoolVal(self._is_acquire(reader)),
+            BoolVal(is_release_sem(writer.sem)),
+            BoolVal(is_acquire_sem(reader.sem)),
             self._scope_ok(writer, reader),
-            self._minimal_atomic_read_from(writer, reader),
+            minimal_atomic_read_from(
+                writer, reader, same_atomic_addr_fn=self._same_addr
+            ),
         )
 
     def _initial_atomic_value(self, event: ScalarMemoryEvent) -> Any:
@@ -289,7 +230,9 @@ class HBSolver:
             return BoolVal(True)
 
         candidate_sources = [
-            self._minimal_atomic_read_from(writer, reader)
+            minimal_atomic_read_from(
+                writer, reader, same_atomic_addr_fn=self._same_addr
+            )
             for writer in self.events
             if writer.idx != reader.idx
         ]
@@ -300,44 +243,17 @@ class HBSolver:
     def _edge(self, first: ScalarMemoryEvent, second: ScalarMemoryEvent) -> BoolRef:
         if first.idx == second.idx:
             return BoolVal(False)
-
         return Or(
             self._program_order(first, second),
             self._synchronizes_with(first, second),
         )
 
-    def _build_hb(self) -> list[list[BoolRef]]:
-        n_events = len(self.events)
-        reach: list[list[BoolRef]] = [
-            [self._edge(self.events[i], self.events[j]) for j in range(n_events)]
-            for i in range(n_events)
-        ]
-
-        for k in range(n_events):
-            reach = [
-                [
-                    Or(reach[i][j], And(reach[i][k], reach[k][j]))
-                    for j in range(n_events)
-                ]
-                for i in range(n_events)
-            ]
-
-        return reach
-
     def _conflict(self, first: ScalarMemoryEvent, second: ScalarMemoryEvent) -> BoolRef:
-        at_least_one_non_atomic = BoolVal(
-            (not first.is_atomic) or (not second.is_atomic)
-        )
-
         return And(
             first.active,
             second.active,
             self._same_addr(first, second),
-            Or(
-                And(first.writes, Or(second.reads, second.writes)),
-                And(second.writes, Or(first.reads, first.writes)),
-            ),
-            at_least_one_non_atomic,
+            conflicting_access_modes(first, second),
         )
 
     def _race_expr(
@@ -352,33 +268,17 @@ class HBSolver:
     def _new_solver(self) -> Solver:
         solver = Solver()
 
-        for constraint in self._iter_constraints(self.extra_assumptions):
-            solver.add(self._as_bool(constraint))
+        for c in iter_constraints(self.extra_assumptions):
+            solver.add(as_bool(c))
 
         for record in self.records:
-            for constraint in self._iter_constraints(record.premises):
-                solver.add(self._as_bool(constraint))
+            for c in iter_constraints(record.premises):
+                solver.add(as_bool(c))
 
         for event in self.events:
             solver.add(self._atomic_old_value_has_source(event))
 
         return solver
-
-    @classmethod
-    def _iter_constraints(cls, value: Any) -> Iterable[Any]:
-        if value is None:
-            return
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                yield from cls._iter_constraints(item)
-            return
-        yield value
-
-    @staticmethod
-    def _as_bool(value: Any) -> BoolRef:
-        if isinstance(value, bool):
-            return BoolVal(value)
-        return value
 
     @staticmethod
     def _as_z3_value(value: Any) -> Any:
@@ -395,6 +295,8 @@ class HBSolver:
         return {decl.name(): str(model[decl]) for decl in model.decls()}
 
 
+# Backwards-compat: a few existing imports still reach for RaceReport from this
+# module. RaceReport's canonical home is now data.py.
 __all__ = [
     "HBSolver",
     "RaceCheckResult",

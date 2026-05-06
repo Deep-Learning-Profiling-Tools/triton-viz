@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from math import prod
 from typing import (
     Any,
     ClassVar,
@@ -8,7 +7,6 @@ from typing import (
     cast,
 )
 
-from z3 import If, IntVal, substitute
 from z3.z3 import BoolRef
 
 from ...core.client import Client
@@ -16,11 +14,13 @@ from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import (
     Op,
     AtomicCas,
+    AtomicRMW,
     Load,
 )
 from ..symbolic_engine import (
     SymbolicExpr,
     AtomicCasSymbolicExpr,
+    AtomicRmwSymbolicExpr,
     SymbolicClient,
     NullSymbolicClient,
     PendingCheck,
@@ -30,7 +30,11 @@ from ..symbolic_engine import (
     AccessMode,
 )
 from .data import AccessEventRecord, MemorySem
-from .hb_solver import HBSolver
+from .hb_common import (
+    UnsupportedSymbolicRaceQuery,
+    normalize_copy_local_vars,
+)
+from .two_copy_symbolic_hb_solver import TwoCopySymbolicHBSolver
 from ...utils.traceback_utils import capture_current_source_location
 from ...core.config import config as cfg
 
@@ -138,8 +142,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.records: list[AccessEventRecord] = []
         self.last_reports: list[Any] = []
         self._program_seq: int = 0
-        self._expected_blocks: int = 0
-        self._completed_blocks: int = 0
+        self._event_seq: int = 0
+        self._launch_grid: tuple[int, int, int] = (1, 1, 1)
+        self._captured_symbolic_template: bool = False
+        self._unsupported_capture: bool = False
+        self._arange_dict_snapshot: dict[Any, Any] = {}
 
     # Explicit forwarders to SymbolicClient: the RaceDetector factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
@@ -147,10 +154,24 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     # otherwise shadow SymbolicClient's impls in the subclass MRO.
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         SymbolicClient.grid_idx_callback(self, grid_idx)
-        self._program_seq = 0
+        # Capture is one-shot: program_seq spans a single symbolic pass over
+        # all records, so we only reset it on grid_callback, not per block.
 
     def finalize(self) -> list:
-        reports = HBSolver(self.records).find_races()
+        if not self._captured_symbolic_template or self._unsupported_capture:
+            self.last_reports = []
+            self._clear_launch_runtime()
+            return []
+        try:
+            reports = TwoCopySymbolicHBSolver(
+                self.records,
+                grid=self._launch_grid,
+                arange_dict=self._arange_dict_snapshot,
+            ).find_races()
+        except UnsupportedSymbolicRaceQuery:
+            if self.abort_on_error:
+                raise
+            reports = []  # NO concrete fallback
         self.last_reports = reports
         self._clear_launch_runtime()
         return reports
@@ -165,21 +186,39 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.records = []
         self.last_reports = []
         self._program_seq = 0
-        self._expected_blocks = prod(int(dim) for dim in grid)
-        self._completed_blocks = 0
+        self._event_seq = 0
+        normalized = tuple(int(dim) for dim in grid)
+        while len(normalized) < 3:
+            normalized = normalized + (1,)
+        self._launch_grid = cast(tuple[int, int, int], normalized[:3])
+        self._captured_symbolic_template = False
+        self._unsupported_capture = False
+        self._arange_dict_snapshot = {}
+        SymbolicExpr.ARANGE_DICT.clear()
         SymbolicClient.grid_callback(self, grid)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         return SymbolicClient.register_op_callback(self, op_type)
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        # v1 guarantees standalone race-detector semantics only: always run the
-        # full launch grid instead of relying on SymbolicClient's lazy sampling.
-        return True
+        # One-shot capture: capture symbolic templates from a single
+        # representative block; the two-copy solver reasons over all blocks.
+        return not self._captured_symbolic_template
 
     def post_run_callback(self, fn: Callable) -> bool:
-        self._completed_blocks += 1
-        return True
+        self._unsupported_capture = False
+        try:
+            self._force_eval_record_templates()
+        except UnsupportedSymbolicRaceQuery:
+            if self.abort_on_error:
+                raise
+            self._unsupported_capture = True
+            self.records = []  # do not feed half-baked records to solver
+        # Snapshot ARANGE_DICT after templates are evaluated so the two-copy
+        # solver's arange substitutions are independent of subsequent launches.
+        self._arange_dict_snapshot = dict(SymbolicExpr.ARANGE_DICT)
+        self._captured_symbolic_template = True
+        return False
 
     # ── Event recording ───────────────────────────────────────────────────
 
@@ -195,8 +234,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.grid_idx = None
         self.last_grid = None
         self._program_seq = 0
-        self._expected_blocks = 0
-        self._completed_blocks = 0
+        self._event_seq = 0
 
     @staticmethod
     def _normalize_constraints(
@@ -207,28 +245,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         if isinstance(constraints, (list, tuple)):
             return tuple(constraints)
         return (constraints,)
-
-    def _pid_substitutions(self) -> tuple[tuple[Any, Any], ...]:
-        if self.grid_idx is None:
-            return ()
-        return (
-            (SymbolicExpr.PID0, IntVal(int(self.grid_idx[0]))),
-            (SymbolicExpr.PID1, IntVal(int(self.grid_idx[1]))),
-            (SymbolicExpr.PID2, IntVal(int(self.grid_idx[2]))),
-        )
-
-    def _concretize_value(self, value: Any) -> Any:
-        if value is None or isinstance(value, (bool, int, float, str)):
-            return value
-        if isinstance(value, list):
-            return [self._concretize_value(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(self._concretize_value(item) for item in value)
-
-        substitutions = self._pid_substitutions()
-        if not substitutions:
-            return value
-        return substitute(value, *substitutions)
 
     @staticmethod
     def _debug_name(
@@ -248,38 +264,77 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._program_seq += 1
         return seq
 
-    @staticmethod
-    def _zip_lanes(*values: Any) -> list[tuple[Any, ...]] | None:
-        lane_values = [value for value in values if isinstance(value, (list, tuple))]
-        if not lane_values:
-            return None
-        lane_count = len(lane_values[0])
-        if any(len(value) != lane_count for value in lane_values):
-            raise ValueError("Lane-wise atomic_cas values must have matching lengths")
+    def _next_event_id(self) -> int:
+        seq = self._event_seq
+        self._event_seq += 1
+        return seq
 
-        def lane_value(value: Any, lane: int) -> Any:
-            if isinstance(value, (list, tuple)):
-                return value[lane]
+    @staticmethod
+    def _infer_elem_size(expr: SymbolicExpr | None) -> int:
+        """Best-effort byte-width of an access's element type.
+
+        Falls back to 1 when the dtype isn't introspectable; the solver's
+        byte-overlap predicate then degenerates to ``addr ==``, which is the
+        same conservative behaviour as the previous single-copy solver.
+        """
+        if expr is None:
+            return 1
+        try:
+            dtype = getattr(expr, "dtype", None)
+            if dtype is None:
+                return 1
+            elem_ty = getattr(dtype, "element_ty", dtype)
+            bw = getattr(elem_ty, "primitive_bitwidth", None)
+            if bw is None:
+                return 1
+            return max(1, int(bw) // 8)
+        except Exception:
+            return 1
+
+    def _current_loop_iter_vars(self) -> tuple[Any, ...]:
+        return tuple(c.idx_z3 for c in self.loop_stack)
+
+    def _force_eval_record_templates(self) -> None:
+        """Ensure record template fields are Z3-ish, not unevaluated SymbolicExpr.
+
+        Triggers ``.eval()`` on captured ``SymbolicExpr`` fields so the
+        snapshotted ``ARANGE_DICT`` is complete before the solver consumes
+        the records. Does NOT re-eval ``record.old_value`` /
+        ``record.symbolic_expr`` themselves: re-evaluating an
+        ``AtomicCasSymbolicExpr`` would not change anything thanks to caching,
+        but we keep the rule explicit so downstream maintainers don't
+        accidentally invalidate launch-level CAS-return identity.
+        """
+
+        def force(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, (bool, int, str)):
+                return value
+            if isinstance(value, list):
+                return [force(v) for v in value]
+            if isinstance(value, tuple):
+                return tuple(force(v) for v in value)
+            if isinstance(value, SymbolicExpr):
+                z3_value, _ = value.eval(simplify_constraints=False)
+                return z3_value
             return value
 
-        return [
-            tuple(lane_value(value, lane) for value in values)
-            for lane in range(lane_count)
-        ]
-
-    @classmethod
-    def _eq_by_lane(cls, lhs: Any, rhs: Any) -> Any:
-        lanes = cls._zip_lanes(lhs, rhs)
-        if lanes is None:
-            return lhs == rhs
-        return [left == right for left, right in lanes]
-
-    @classmethod
-    def _if_by_lane(cls, cond: Any, on_true: Any, on_false: Any) -> Any:
-        lanes = cls._zip_lanes(cond, on_true, on_false)
-        if lanes is None:
-            return If(cond, on_true, on_false)
-        return [If(c, t, f) for c, t, f in lanes]
+        for record in self.records:
+            try:
+                record.addr_expr = force(record.addr_expr)
+                record.local_constraints = self._normalize_constraints(
+                    force(record.local_constraints)
+                )
+                record.premises = self._normalize_constraints(force(record.premises))
+                if record.cas_cmp_value is not None:
+                    record.cas_cmp_value = force(record.cas_cmp_value)
+                if record.cas_new_value is not None:
+                    record.cas_new_value = force(record.cas_new_value)
+            except Exception as exc:  # pragma: no cover - defensive
+                raise UnsupportedSymbolicRaceQuery(
+                    f"failed to normalize record templates: {exc}"
+                ) from exc
 
     def _record_access_event(
         self,
@@ -289,25 +344,19 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         expr_constraints: ConstraintConjunction,
         symbolic_expr: SymbolicExpr,
         source_location: tuple[str, int, str] | None = None,
+        *,
+        semantic_constraints: tuple[Any, ...] = (),
+        copy_local_vars: tuple[Any, ...] = (),
     ) -> None:
         tensor = self._resolve_tensor(symbolic_expr)
         tensor_name = self._get_tensor_name(tensor) if tensor is not None else None
 
-        # Full solver-assertion snapshot at the moment this event is recorded.
-        # When called from _loop_hook_after it runs between solver.push() and
-        # solver.pop(), so the snapshot captures:
-        #   addr_ok, pid_ok, innermost loop iterator, all outer loop iterators.
-        # plus the expression's own local constraints — giving Step 2 enough
-        # context to run alias queries without replaying callbacks.
-        solver_snapshot: tuple[Any, ...] = (
-            tuple(self.solver.assertions()) if self.solver is not None else ()
-        )
+        # Two-copy capture: keep raw symbolic templates (PID0/1/2 preserved)
+        # rather than snapshotting solver assertions, which can carry sampled
+        # PID equalities that pin pid_a == pid_b == sampled_pid after alpha-
+        # renaming and break the two-copy alias query.
         local = self._normalize_constraints(expr_constraints)
-        access_addr = self._concretize_value(access_addr)
-        solver_snapshot = tuple(
-            self._concretize_value(item) for item in solver_snapshot
-        )
-        local = tuple(self._concretize_value(item) for item in local)
+        premises = self._normalize_constraints(semantic_constraints)
 
         self.records.append(
             AccessEventRecord(
@@ -317,15 +366,18 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 tensor_name=tensor_name,
                 symbolic_expr=symbolic_expr,
                 addr_expr=access_addr,
-                premises=solver_snapshot,
+                premises=premises,
                 local_constraints=local,
                 source_location=source_location,
-                grid_idx=self.grid_idx,
+                grid_idx=None,
                 program_seq=self._next_program_seq(),
                 debug_name=self._debug_name(op_type, source_location),
                 active=True,
                 reads=access_mode == "read",
                 writes=access_mode == "write",
+                event_id=self._next_event_id(),
+                elem_size=self._infer_elem_size(symbolic_expr),
+                copy_local_vars=normalize_copy_local_vars(copy_local_vars),
             )
         )
 
@@ -371,26 +423,20 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         sem: str | None,
         scope: str | None,
         source_location: tuple[str, int, str] | None = None,
+        *,
+        semantic_constraints: tuple[Any, ...] = (),
     ) -> None:
         tensor = self._resolve_tensor(symbolic_expr)
         tensor_name = self._get_tensor_name(tensor) if tensor is not None else None
-        solver_snapshot: tuple[Any, ...] = (
-            tuple(self.solver.assertions()) if self.solver is not None else ()
-        )
+
         local = self._normalize_constraints(expr_constraints)
+        premises = self._normalize_constraints(semantic_constraints)
+        loop_vars = self._current_loop_iter_vars()
 
-        addr_expr = self._concretize_value(addr_expr)
-        cmp_value = self._concretize_value(cmp_value)
-        value = self._concretize_value(value)
-        old_value = self._concretize_value(old_value)
-        solver_snapshot = tuple(
-            self._concretize_value(item) for item in solver_snapshot
-        )
-        local = tuple(self._concretize_value(item) for item in local)
-
-        success = self._eq_by_lane(old_value, cmp_value)
-        written_value = self._if_by_lane(success, value, old_value)
-
+        # Raw symbolic templates: writes / written_value are recomputed by the
+        # two-copy solver per copy from cas_cmp_value / cas_new_value /
+        # old_value. Storing them here as None keeps the per-copy CAS return
+        # rename in lockstep with the substitution applied to old_value.
         self.records.append(
             AccessEventRecord(
                 op_type=AtomicCas,
@@ -399,21 +445,75 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 tensor_name=tensor_name,
                 symbolic_expr=symbolic_expr,
                 addr_expr=addr_expr,
-                premises=solver_snapshot,
+                premises=premises,
                 local_constraints=local,
                 source_location=source_location,
-                grid_idx=self.grid_idx,
+                grid_idx=None,
                 program_seq=self._next_program_seq(),
                 debug_name=self._debug_name(AtomicCas, source_location),
                 active=True,
                 reads=True,
-                writes=success,
+                writes=None,
                 is_atomic=True,
                 atomic_kind="cas",
                 sem=self._normalize_sem(sem),
                 scope=self._normalize_scope(scope),
                 old_value=old_value,
-                written_value=written_value,
+                written_value=None,
+                event_id=self._next_event_id(),
+                elem_size=self._infer_elem_size(symbolic_expr),
+                cas_cmp_value=cmp_value,
+                cas_new_value=value,
+                copy_local_vars=normalize_copy_local_vars((old_value,) + loop_vars),
+            )
+        )
+
+    def _record_atomic_rmw_event(
+        self,
+        symbolic_expr: SymbolicExpr,
+        addr_expr: Z3Expr,
+        expr_constraints: ConstraintConjunction,
+        sem: str | None,
+        scope: str | None,
+        source_location: tuple[str, int, str] | None = None,
+        *,
+        semantic_constraints: tuple[Any, ...] = (),
+    ) -> None:
+        tensor = self._resolve_tensor(symbolic_expr)
+        tensor_name = self._get_tensor_name(tensor) if tensor is not None else None
+
+        local = self._normalize_constraints(expr_constraints)
+        premises = self._normalize_constraints(semantic_constraints)
+        loop_vars = self._current_loop_iter_vars()
+
+        self.records.append(
+            AccessEventRecord(
+                op_type=AtomicRMW,
+                access_mode="read",
+                tensor=tensor,
+                tensor_name=tensor_name,
+                symbolic_expr=symbolic_expr,
+                addr_expr=addr_expr,
+                premises=premises,
+                local_constraints=local,
+                source_location=source_location,
+                grid_idx=None,
+                program_seq=self._next_program_seq(),
+                debug_name=self._debug_name(AtomicRMW, source_location),
+                active=True,
+                reads=True,
+                writes=True,  # RMW always writes when active
+                is_atomic=True,
+                atomic_kind="rmw",
+                sem=self._normalize_sem(sem),
+                scope=self._normalize_scope(scope),
+                old_value=None,
+                written_value=None,
+                event_id=self._next_event_id(),
+                elem_size=self._infer_elem_size(symbolic_expr),
+                cas_cmp_value=None,
+                cas_new_value=None,
+                copy_local_vars=normalize_copy_local_vars(loop_vars),
             )
         )
 
@@ -512,6 +612,52 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._handle_atomic_cas_check(ret, sem=sem, scope=scope)
         return ret
 
+    def _handle_atomic_rmw_check(
+        self,
+        expr: SymbolicExpr,
+        sem: str | None,
+        scope: str | None,
+    ) -> None:
+        expr_rmw = cast(AtomicRmwSymbolicExpr, expr)
+        addr_expr, addr_constraints = expr_rmw.ptr.eval()
+        # AtomicRmw doesn't define its own _to_z3_impl; we don't need a Z3
+        # value for the access itself, only its address and any pointer-side
+        # constraints. The RMW captures reads=True / writes=True regardless.
+        source_location = capture_current_source_location()
+
+        if self.loop_stack and cfg.verbose:
+            print(
+                f"[{self.LOG_TAG}] atomic_rmw inside loops is recorded eagerly; "
+                "loop dedupe is not supported yet"
+            )
+
+        self._record_atomic_rmw_event(
+            symbolic_expr=expr,
+            addr_expr=addr_expr,
+            expr_constraints=addr_constraints,
+            sem=sem,
+            scope=scope,
+            source_location=source_location,
+        )
+
+    def _op_atomic_rmw_overrider(
+        self,
+        rmwOp: Any,
+        ptr: Any,
+        val: Any,
+        mask: Any,
+        sem: str | None = None,
+        scope: str | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> SymbolicExpr:
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        val_sym = SymbolicExpr.from_value(val)
+        mask_sym = SymbolicExpr.from_value(mask)
+        ret = SymbolicExpr.create("atomic_rmw", ptr_sym, val_sym, mask_sym)
+        self._handle_atomic_rmw_check(ret, sem=sem, scope=scope)
+        return ret
+
     # ── Per-pending handler invoked from SymbolicClient's loop template
 
     def _process_pending_check(
@@ -520,7 +666,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         pending: PendingCheck,
         iter_constraints: list[BoolRef],
     ) -> None:
-        del ctx, iter_constraints  # verbose logging is handled by the base
+        del ctx
         # Items enqueued by _handle_access_check are PendingEvent instances
         # (subclass of PendingCheck) — narrow so attribute accesses are
         # type-safe under Literal["read", "write"].
@@ -532,6 +678,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             pending.constraints,
             pending.symbolic_expr,
             pending.source_location,
+            semantic_constraints=tuple(iter_constraints),
+            copy_local_vars=self._current_loop_iter_vars(),
         )
 
 
