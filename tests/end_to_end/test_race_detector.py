@@ -555,6 +555,7 @@ def test_atomic_cas_inside_for_loop_is_unsupported(
     detector = _run_detector(_cas_in_loop_kernel, (2,), flag, out, 3)
     assert detector.records == []
     assert detector.last_reports == []
+    assert detector.last_status == "unsupported"
     assert detector.unsupported_reason is not None
     assert "loop" in detector.unsupported_reason
 
@@ -572,6 +573,7 @@ def test_atomic_rmw_inside_for_loop_is_unsupported(
     detector = _run_detector(_rmw_in_loop_kernel, (2,), p, 3)
     assert detector.records == []
     assert detector.last_reports == []
+    assert detector.last_status == "unsupported"
     assert detector.unsupported_reason is not None
     assert "loop" in detector.unsupported_reason
 
@@ -610,6 +612,7 @@ def test_atomic_rmw_return_used_downstream_is_unsupported(
     out = torch.zeros(2, dtype=torch.int32)
     detector = _run_detector(_rmw_return_used_downstream_kernel, (2,), p, q, out)
     assert detector.last_reports == []
+    assert detector.last_status == "unsupported"
     assert detector.unsupported_reason is not None
     # Reason mentions either "rmw" or "return"
     reason = detector.unsupported_reason.lower()
@@ -627,6 +630,7 @@ def test_atomic_rmw_return_unused_is_supported(
     p = torch.zeros(1, dtype=torch.int32)
     detector = _run_detector(_rmw_return_unused_kernel, (2,), p)
     # Discarded RMW return: no unsupported, one RMW event captured per launch.
+    assert detector.last_status == "ok"
     assert detector.unsupported_reason is None
     rmw_records = [r for r in detector.records if r.atomic_kind == "rmw"]
     assert len(rmw_records) >= 1
@@ -652,21 +656,20 @@ def _flag_array_cas_acq_rel_guarded_kernel(flag_ptr, data_ptr, out_ptr):
     tl.store(out_ptr + pid, x, mask=cons_mask)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="multi-element flag arrays are not modeled by _initial_atomic_source; "
-    "the closed-world source model conservatively reports races for guarded "
-    "acq/rel CAS over flag arrays. Track in a follow-up issue.",
-)
-def test_flag_array_cas_acq_rel_guarded_is_not_racy_xfail(
+def test_flag_array_cas_acq_rel_guarded_is_not_racy(
     _isolate_race_detector_atomic_cfg,
 ):
+    """After Patch 2: _initial_atomic_source covers contiguous arrays up to
+    1024 elements, so a guarded acq/rel CAS over a small flag array is now
+    correctly modeled and reports no race.
+    """
     flag = torch.zeros(8, dtype=torch.int32)
     data = torch.zeros(1, dtype=torch.int32)
     out = torch.zeros(2, dtype=torch.int32)
     detector = _run_detector(
         _flag_array_cas_acq_rel_guarded_kernel, (2,), flag, data, out
     )
+    assert detector.last_status == "ok"
     assert detector.last_reports == []
 
 
@@ -689,3 +692,108 @@ def test_unsupported_reason_is_reachable_via_client_manager(
     # And via the client manager attached to the traced kernel.
     cm_detector = traced.client_manager.clients["race_detector"]
     assert cm_detector.unsupported_reason is not None
+
+
+# ======== CAS coherence — try-lock single winner (Patch 1) ========
+
+
+@triton.jit
+def _cas_trylock_single_writer_kernel(flag_ptr, data_ptr):
+    old = tl.atomic_cas(flag_ptr, 0, 1, sem="acq_rel", scope="gpu")
+    tl.store(data_ptr, tl.program_id(0), mask=(old == 0))
+
+
+def test_cas_trylock_single_writer_is_not_racy(_isolate_race_detector_atomic_cfg):
+    """At most one of two competing CAS(0 -> 1) operations can succeed.
+
+    Without per-location atomic-order coherence, the two-copy solver could
+    set old_a == 0 and old_b == 0, activate both guarded stores, and report
+    a false WAW. Patch 1 introduces atomic_order vars so two CAS reads of
+    the initial value cannot coexist with both guarded writes.
+    """
+    flag = torch.zeros(1, dtype=torch.int32)
+    data = torch.zeros(1, dtype=torch.int32)
+    detector = _run_detector(_cas_trylock_single_writer_kernel, (2,), flag, data)
+    assert detector.last_status == "ok"
+    assert detector.unsupported_reason is None
+    assert detector.last_reports == []
+
+
+# ======== Store elem_size precision (Patch 4) ========
+
+
+@triton.jit
+def _float32_store_kernel(out_ptr, BS: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BS + tl.arange(0, BS)
+    tl.store(out_ptr + offsets, offsets.to(tl.float32))
+
+
+def test_store_elem_size_is_four_for_float32_store(
+    _isolate_race_detector_atomic_cfg,
+):
+    """Patch 4 sets dtype/shape on StoreSymbolicExpr so _infer_elem_size
+    reads the byte width directly. Without it, the store would silently
+    degrade to elem_size=1 and the byte-overlap predicate would collapse to
+    addr ==.
+    """
+    out = torch.zeros(32, dtype=torch.float32)
+    detector = _run_detector(_float32_store_kernel, (4,), out, 8)
+    store_records = [r for r in detector.records if r.access_mode == "write"]
+    assert store_records
+    assert all(r.elem_size == 4 for r in store_records), (
+        f"Expected elem_size=4 for float32 stores; got "
+        f"{[r.elem_size for r in store_records]}"
+    )
+
+
+# ======== Data-dependent address unsupported (Patch 5) ========
+
+
+@triton.jit
+def _data_dependent_atomic_addr_kernel(idx_ptr, flag_ptr):
+    pid = tl.program_id(0)
+    idx = tl.load(idx_ptr + pid)
+    # Atomic CAS at a data-dependent address — the symbolic engine retains
+    # the load in the pointer expression, so _expr_contains_load fires.
+    tl.atomic_cas(flag_ptr + idx, 0, 1, sem="acq_rel", scope="gpu")
+
+
+def test_data_dependent_atomic_address_is_unsupported(
+    _isolate_race_detector_atomic_cfg,
+):
+    idx = torch.zeros(2, dtype=torch.int32)
+    flag = torch.zeros(4, dtype=torch.int32)
+    detector = _run_detector(_data_dependent_atomic_addr_kernel, (2,), idx, flag)
+    # The atomic CAS handler runs before the load result gets concretized,
+    # so _reject_data_dependent_address fires and marks unsupported.
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "data-dependent" in detector.unsupported_reason
+    assert detector.last_reports == []
+
+
+# ======== last_status sanity for an ordinary launch (Patch 3) ========
+
+
+def test_no_race_kernel_reports_ok_status(_isolate_race_detector_atomic_cfg):
+    """A clean launch yields last_status == 'ok' and no unsupported reason."""
+
+    @triton_viz.trace(RaceDetector())
+    @triton.jit
+    def kernel(x_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n
+        x = tl.load(x_ptr + offsets, mask=mask)
+        tl.store(out_ptr + offsets, x, mask=mask)
+
+    n, bs = 64, 8
+    x = torch.randn(n)
+    out = torch.empty(n)
+    triton_viz.clear()
+    kernel[(triton.cdiv(n, bs),)](x, out, n, bs)
+    detector = kernel.client_manager.clients["race_detector"]
+    assert detector.last_status == "ok"
+    assert detector.unsupported_reason is None
+    assert detector.last_reports == []

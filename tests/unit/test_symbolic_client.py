@@ -526,10 +526,13 @@ def test_load_dtype_block_of_pointers():
 
 
 def test_store_dtype_block_of_pointers():
-    """tl.store on a block of pointers should not derive a dtype (store returns None).
+    """tl.store on a block of pointers should derive its element dtype from
+    the value (or from the pointer's element type when ptr is a scalar
+    pointer). The race detector relies on this to size byte-overlap
+    predicates correctly. See StoreSymbolicExpr.__init__.
 
     ptr dtype: block_type(pointer<fp32>, [1, 16])
-    expected store dtype: None
+    expected store dtype: fp32 (unpacked from the value's block_type)
     """
     ptr = ConstSymbolicExpr(
         "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
@@ -538,4 +541,5 @@ def test_store_dtype_block_of_pointers():
         "const", value=0, dtype=tl.block_type(tl.float32, [1, 16])
     )
     store = StoreSymbolicExpr("store", ptr, value)
-    assert store.dtype is None, f"Expected None, got {store.dtype}"
+    assert store.dtype == tl.float32, f"Expected tl.float32, got {store.dtype}"
+    assert store.shape == (1, 16), f"Expected shape (1, 16), got {store.shape}"

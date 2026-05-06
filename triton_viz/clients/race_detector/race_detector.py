@@ -166,6 +166,12 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[AccessEventRecord] = []
         self.last_reports: list[Any] = []
+        # Status of the most recent finalize(): "ok" means the solver ran;
+        # "unsupported" means the launch hit a feature the solver doesn't
+        # model (atomic-in-loop, RMW return downstream, data-dependent
+        # address, etc.). last_reports being empty does NOT imply "no race"
+        # unless last_status == "ok".
+        self.last_status: str = "ok"
         self._program_seq: int = 0
         self._event_seq: int = 0
         self._launch_grid: tuple[int, int, int] = (1, 1, 1)
@@ -187,6 +193,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         """
         self._unsupported_capture = True
         self._unsupported_reason = reason
+        self.last_status = "unsupported"
         self.records = []
 
     @property
@@ -213,6 +220,38 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         """
         return tuple(c for c in constraints if c is not None)
 
+    @staticmethod
+    def _expr_contains_load(expr: SymbolicExpr | None) -> bool:
+        """True when ``expr`` (typically a pointer expression) embeds
+        ``tl.load``. Such expressions encode data-dependent addressing —
+        scatter/histogram patterns where the destination index comes from a
+        loaded value — which the current symbolic model conflates with the
+        load's pointer rather than its loaded value. Flag these as
+        unsupported until value semantics are properly modeled.
+        """
+        if expr is None:
+            return False
+        try:
+            return bool(expr.has_op("load"))
+        except Exception:
+            return False
+
+    def _reject_data_dependent_address(self, ptr_expr: SymbolicExpr | None) -> bool:
+        """If ``ptr_expr`` depends on a loaded value, mark the launch
+        unsupported (or raise under abort_on_error) and return True; callers
+        should ``return`` immediately on True.
+        """
+        if not self._expr_contains_load(ptr_expr):
+            return False
+        reason = (
+            "data-dependent memory address through tl.load is unsupported "
+            "by the current symbolic race detector"
+        )
+        if self.abort_on_error:
+            raise UnsupportedSymbolicRaceQuery(reason)
+        self._mark_unsupported(reason)
+        return True
+
     # Explicit forwarders to SymbolicClient: the RaceDetector factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
     # satisfy Client's @abstractmethod contract, and those stubs would
@@ -231,9 +270,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         "unsupported" should read :attr:`unsupported_reason`.
 
         Limitations carried by the underlying ``TwoCopySymbolicHBSolver``:
-          - Initial atomic source identifiable only for scalar tensors
-            (``numel() == 1``); multi-element flag arrays / pointer-arithmetic
-            flag indexing are conservatively reported as races.
+          - Initial atomic source covers scalar tensors and small contiguous
+            flag arrays (``numel <= 1024``); larger or non-contiguous
+            tensors are conservatively reported as races.
           - Synchronization through a third program instance is not modeled.
           - AtomicRMW return value semantics are not modeled — downstream
             use of the return marks the launch unsupported.
@@ -247,6 +286,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     f"{self._unsupported_reason}"
                 )
             self.last_reports = []
+            self.last_status = "unsupported" if self._unsupported_capture else "ok"
             self._clear_launch_runtime()
             return []
         try:
@@ -255,6 +295,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 grid=self._launch_grid,
                 arange_dict=self._arange_dict_snapshot,
             ).find_races()
+            self.last_status = "ok"
         except UnsupportedSymbolicRaceQuery as exc:
             if self.abort_on_error:
                 raise
@@ -273,6 +314,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         self.records = []
         self.last_reports = []
+        self.last_status = "ok"
         self._program_seq = 0
         self._event_seq = 0
         normalized = tuple(int(dim) for dim in grid)
@@ -367,23 +409,42 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     def _infer_elem_size(expr: SymbolicExpr | None) -> int:
         """Best-effort byte-width of an access's element type.
 
-        Falls back to 1 when the dtype isn't introspectable; the solver's
-        byte-overlap predicate then degenerates to ``addr ==``, which is the
-        same conservative behaviour as the previous single-copy solver.
+        Prefer the pointer element type — store expressions historically
+        didn't set their own dtype, so reading from the access dtype could
+        silently degrade ``elem_size`` to 1 and degrade the solver's
+        byte-overlap predicate to ``addr ==``. Fallback chain:
+        ``expr.ptr.dtype`` → ``expr.dtype`` → ``expr.value.dtype`` → 1.
         """
         if expr is None:
             return 1
-        try:
-            dtype = getattr(expr, "dtype", None)
+
+        def dtype_to_size(dtype: Any) -> int | None:
             if dtype is None:
-                return 1
+                return None
             elem_ty = getattr(dtype, "element_ty", dtype)
             bw = getattr(elem_ty, "primitive_bitwidth", None)
             if bw is None:
-                return 1
-            return max(1, int(bw) // 8)
+                return None
+            try:
+                return max(1, int(bw) // 8)
+            except Exception:
+                return None
+
+        try:
+            ptr = getattr(expr, "ptr", None)
+            size = dtype_to_size(getattr(ptr, "dtype", None))
+            if size is not None:
+                return size
+            size = dtype_to_size(getattr(expr, "dtype", None))
+            if size is not None:
+                return size
+            value = getattr(expr, "value", None)
+            size = dtype_to_size(getattr(value, "dtype", None))
+            if size is not None:
+                return size
         except Exception:
-            return 1
+            pass
+        return 1
 
     def _current_loop_iter_vars(self) -> tuple[Any, ...]:
         return tuple(c.idx_z3 for c in self.loop_stack)
@@ -632,6 +693,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         """
         if self._unsupported_capture:
             return
+        # Reject scatter/histogram-style addressing where the pointer itself
+        # depends on a loaded value — the current model conflates the load's
+        # pointer with its loaded value.
+        if self._reject_data_dependent_address(getattr(expr, "ptr", None)):
+            return
         eval_result = self._safe_eval(expr, "load/store eval")
         if eval_result is None:
             return
@@ -691,6 +757,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             return
 
         expr_atomic = cast(AtomicCasSymbolicExpr, expr)
+        if self._reject_data_dependent_address(expr_atomic.ptr):
+            return
         result = self._safe_eval(expr, "atomic_cas eval")
         if result is None:
             return
@@ -758,6 +826,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             return
 
         expr_rmw = cast(AtomicRmwSymbolicExpr, expr)
+        if self._reject_data_dependent_address(expr_rmw.ptr):
+            return
         ptr_result = self._safe_eval(expr_rmw.ptr, "atomic_rmw ptr eval")
         if ptr_result is None:
             return

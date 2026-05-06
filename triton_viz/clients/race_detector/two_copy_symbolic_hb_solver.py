@@ -21,13 +21,11 @@ Address-domain invariant:
   offsets to byte addresses BEFORE the records reach the solver.
 
 Limitations (current):
-  - **Initial atomic source is identifiable only for scalar tensors** —
-    ``_initial_atomic_source`` requires ``tensor.numel() == 1``. Multi-element
-    flag arrays and pointer-arithmetic flag indexing fall through to
-    ``rf_unknown_R``, which deliberately does NOT enable synchronizes-with;
-    guarded acq/rel CAS over flag arrays will be reported as races
-    conservatively. See ``test_flag_array_cas_acq_rel_guarded_is_not_racy_xfail``
-    for the documented gap.
+  - **Initial atomic source covers scalar tensors and small contiguous flag
+    arrays** (``numel <= _MAX_INITIAL_ATOMIC_ELEMENTS = 1024``). Larger or
+    non-contiguous tensors fall through to ``rf_unknown_R``, which
+    deliberately does NOT enable synchronizes-with; guarded acq/rel CAS over
+    them is reported as races conservatively.
   - **Two program instances only** — synchronization that travels through a
     third block (writer-via-third-block CAS chains) is not modeled directly.
   - **AtomicRMW value semantics not modeled** — the RMW return is wrapped in
@@ -184,10 +182,17 @@ class TwoCopySymbolicHBSolver:
         # 6. Lower every record under both contexts.
         self.events: list[SymbolicMemoryEvent] = self._lower_two_copies()
 
-        # 7. Allocate RF source booleans BEFORE building HB closure.
+        # 7. Atomic-order vars + RF source booleans, BEFORE building the HB
+        # closure. HB uses rf_source for synchronizes_with; coherence
+        # constraints are added per query in _new_solver.
+        self.atomic_order: dict[int, Any] = self._make_atomic_order_vars()
         self.rf_source: dict[tuple[int, int], BoolRef] = {}
+        self.rf_init_source: dict[int, BoolRef] = {}
+        self.rf_unknown_source: dict[int, BoolRef] = {}
         self.rf_constraints: list[BoolRef] = []
+        self.atomic_coherence_constraints: list[BoolRef] = []
         self._build_read_from_choices()
+        self._build_atomic_coherence_constraints()
 
         # 8. Build HB transitive closure (synchronizes_with reads rf_source).
         self.hb = build_transitive_hb(self.events, self._edge)
@@ -459,20 +464,60 @@ class TwoCopySymbolicHBSolver:
             return False
         return True
 
-    @staticmethod
-    def _initial_atomic_source(r: SymbolicMemoryEvent) -> Any:
+    # Cap on initial-source disjunction size. Above this, the solver falls
+    # back to rf_unknown (no synchronizes-with) — keeps formulas tractable.
+    _MAX_INITIAL_ATOMIC_ELEMENTS: int = 1024
+
+    @classmethod
+    def _initial_atomic_source(cls, r: SymbolicMemoryEvent) -> Any:
+        """Predicate that ``r`` reads the launch-time initial value.
+
+        Supports scalar tensors and small contiguous flag arrays. For large or
+        non-contiguous tensors, returns ``None`` so the solver falls back to
+        ``rf_unknown`` without synchronizes-with.
+        """
         t = r.record.tensor
         if t is None or r.old_value is None:
             return None
         try:
-            if t.numel() != 1:
+            numel = int(t.numel())
+            if numel <= 0 or numel > cls._MAX_INITIAL_ATOMIC_ELEMENTS:
                 return None
-            ptr = int(t.data_ptr())
-            item = t.detach().cpu().item() if hasattr(t, "detach") else t.item()
-            init = int(item)
+            if hasattr(t, "is_contiguous") and not bool(t.is_contiguous()):
+                return None
+            base = int(t.data_ptr())
+            elem_size = (
+                int(t.element_size()) if hasattr(t, "element_size") else r.elem_size
+            )
+            elem_size = max(1, elem_size)
+            tensor_for_read = t.detach() if hasattr(t, "detach") else t
+            tensor_for_read = (
+                tensor_for_read.cpu()
+                if hasattr(tensor_for_read, "cpu")
+                else tensor_for_read
+            )
+            values = tensor_for_read.reshape(-1).tolist()
         except Exception:
             return None
-        return And(r.addr == IntVal(ptr), r.old_value == IntVal(init))
+
+        clauses = []
+        for i, value in enumerate(values):
+            try:
+                init_value = int(value)
+            except Exception:
+                return None
+            clauses.append(
+                And(
+                    r.addr == IntVal(base + i * elem_size),
+                    r.old_value == IntVal(init_value),
+                )
+            )
+
+        if not clauses:
+            return None
+        if len(clauses) == 1:
+            return clauses[0]
+        return Or(*clauses)
 
     def _build_read_from_choices(self) -> None:
         # Closed-world atomic source model.
@@ -491,10 +536,12 @@ class TwoCopySymbolicHBSolver:
 
             if init_pred is not None:
                 rf_init = Bool(f"rf_init_{r.idx}")
+                self.rf_init_source[r.idx] = rf_init
                 choices.append(rf_init)
                 self.rf_constraints.append(Implies(rf_init, And(r.reads, init_pred)))
             else:
                 rf_unknown = Bool(f"rf_unknown_{r.idx}")
+                self.rf_unknown_source[r.idx] = rf_unknown
                 choices.append(rf_unknown)
                 self.rf_constraints.append(Implies(rf_unknown, r.reads))
 
@@ -547,6 +594,114 @@ class TwoCopySymbolicHBSolver:
             Not(self.hb[b.idx][a.idx]),
         )
 
+    # ──────────────────────── CAS coherence ────────────────────────
+
+    def _cas_events(self) -> list[SymbolicMemoryEvent]:
+        return [e for e in self.events if e.atomic_kind == "cas"]
+
+    def _make_atomic_order_vars(self) -> dict[int, Any]:
+        """One symbolic atomic-order position per CAS action.
+
+        The variable denotes the position of the whole CAS operation in the
+        per-location atomic order. Same-address active CAS actions are
+        constrained distinct; same-copy program order is preserved.
+        """
+        return {
+            e.idx: Int(f"atomic_order_{e.idx}")
+            for e in self.events
+            if e.atomic_kind == "cas"
+        }
+
+    def _build_atomic_coherence_constraints(self) -> None:
+        """Closed-world CAS coherence for the two modeled program copies.
+
+        Without these constraints, two CAS try-locks at the same flag could
+        both read the initial value and both succeed — producing a false WAW
+        on guarded stores. The coherence model:
+
+          * Active CAS actions get bounded atomic-order positions.
+          * Same-address active CAS actions are distinct in the per-location
+            order.
+          * Same-copy program order is preserved for same-address CAS.
+          * If a CAS reads the initial source, no modeled successful CAS
+            writer at the same address may precede it.
+          * If r reads from modeled writer w, w must be before r in the order
+            and no modeled same-address successful writer may sit between
+            them.
+
+        This is not a full GPU memory model, but it suffices to suppress the
+        most obvious unsoundness around CAS try-lock patterns.
+        """
+        cas_events = self._cas_events()
+        if not cas_events:
+            return
+
+        n_orders = max(1, len(cas_events))
+        cons = self.atomic_coherence_constraints
+
+        for e in cas_events:
+            ord_e = self.atomic_order[e.idx]
+            cons.append(Implies(e.reads, And(ord_e >= 0, ord_e < n_orders)))
+
+        for i, e in enumerate(cas_events):
+            for f in cas_events[i + 1 :]:
+                same_addr = self._exact_atomic_addr(e, f)
+                both_active_same_addr = And(e.reads, f.reads, same_addr)
+                ord_e = self.atomic_order[e.idx]
+                ord_f = self.atomic_order[f.idx]
+
+                cons.append(Implies(both_active_same_addr, ord_e != ord_f))
+
+                if e.copy == f.copy and e.program_seq >= 0 and f.program_seq >= 0:
+                    if e.program_seq < f.program_seq:
+                        cons.append(Implies(both_active_same_addr, ord_e < ord_f))
+                    elif f.program_seq < e.program_seq:
+                        cons.append(Implies(both_active_same_addr, ord_f < ord_e))
+
+        # rf_init: no modeled successful CAS writer at the same address may
+        # precede the reader in the per-location order.
+        for r in cas_events:
+            rf_init = self.rf_init_source.get(r.idx)
+            if rf_init is None:
+                continue
+            ord_r = self.atomic_order[r.idx]
+            for w in cas_events:
+                if w.idx == r.idx:
+                    continue
+                ord_w = self.atomic_order[w.idx]
+                cons.append(
+                    Implies(
+                        And(rf_init, w.writes, self._exact_atomic_addr(w, r)),
+                        ord_r < ord_w,
+                    )
+                )
+
+        # rf from modeled writer w to reader r: w precedes r and no modeled
+        # same-address successful writer sits strictly between w and r.
+        for r in cas_events:
+            ord_r = self.atomic_order[r.idx]
+            for w in cas_events:
+                rf = self.rf_source.get((w.idx, r.idx))
+                if rf is None:
+                    continue
+                ord_w = self.atomic_order[w.idx]
+                cons.append(Implies(rf, ord_w < ord_r))
+
+                for v in cas_events:
+                    if v.idx in (w.idx, r.idx):
+                        continue
+                    ord_v = self.atomic_order[v.idx]
+                    cons.append(
+                        Implies(
+                            And(
+                                rf,
+                                v.writes,
+                                self._exact_atomic_addr(v, r),
+                            ),
+                            Or(ord_v < ord_w, ord_r < ord_v),
+                        )
+                    )
+
     def _new_solver(self) -> Solver:
         solver = Solver()
         solver.add(self.grid_constraints)
@@ -556,6 +711,8 @@ class TwoCopySymbolicHBSolver:
         for c in self.arange_constraints_b:
             solver.add(c)
         for c in self.rf_constraints:
+            solver.add(c)
+        for c in self.atomic_coherence_constraints:
             solver.add(c)
         for c in self.extra_assumptions:
             solver.add(as_bool(c))

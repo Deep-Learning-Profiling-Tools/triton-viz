@@ -858,6 +858,14 @@ class StoreSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("value", value)
         self.add_child("mask", mask)
         self.add_child("other", other)
+        # Set dtype/shape so consumers (e.g. race-detector elem_size inference)
+        # can introspect the access width without walking back to ptr.
+        ptr_dtype = self.ptr.dtype
+        if isinstance(ptr_dtype, tl.pointer_type):
+            self.dtype = ptr_dtype.element_ty
+        else:
+            self.dtype = getattr(self.value, "dtype", ptr_dtype)
+        self.shape = self.ptr.shape
 
 
 class UnarySymbolicExpr(SymbolicExpr):

@@ -632,3 +632,41 @@ def test_program_seq_zero_records_get_only_initial_source():
     assert (a.idx, b.idx) in solver.rf_source
     assert (b.idx, a.idx) in solver.rf_source
     assert len(solver.rf_source) == 2
+
+
+def test_cas_trylock_single_winner_suppresses_guarded_waw():
+    """Two CAS(0 -> 1) operations on the same scalar flag cannot both read 0.
+
+    Without per-location atomic order (Patch 1), the two-copy solver can pick
+    old_a == 0 and old_b == 0 simultaneously, activate both guarded stores,
+    and report a false WAW between them. With atomic_order coherence at
+    most one modeled CAS can read the initial 0 and successfully write 1.
+    """
+    flag = torch.zeros(1, dtype=torch.int32)
+    flag_addr = IntVal(int(flag.data_ptr()))
+    data_addr = IntVal(9_900_000)
+
+    old = Int("trylock_old_z3")
+    cas = _cas_record(
+        flag_addr,
+        IntVal(0),
+        IntVal(1),
+        old,
+        event_id=0,
+        program_seq=0,
+        sem="acq_rel",
+        scope="gpu",
+        tensor=flag,
+    )
+    # Guarded scalar store at the same data slot: race candidate is the
+    # cross-copy WAW between the two guarded stores.
+    guarded_store = _scalar_store(
+        data_addr,
+        event_id=1,
+        program_seq=1,
+        elem_size=4,
+        mask=(old == 0),
+    )
+
+    reports = _solve([cas, guarded_store], grid=(2, 1, 1)).find_races()
+    assert reports == []
