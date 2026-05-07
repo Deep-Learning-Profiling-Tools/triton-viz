@@ -99,6 +99,15 @@ class RaceDetector(Client):
             return cast(RaceDetectorT, obj)
         return cast(RaceDetectorT, object.__new__(cls))
 
+    # Surface the public detector interface as class-level annotations so
+    # callers (e.g. example scripts) and static type-checkers can read these
+    # off the factory base without downcasting to a concrete subclass.
+    # Concrete subclasses populate them at runtime; ``unsupported_reason``
+    # is implemented as a @property on SymbolicRaceDetector.
+    last_reports: list[Any]
+    last_status: str
+    unsupported_reason: str | None
+
     def __init__(self, abort_on_error: bool = False, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.abort_on_error: bool = abort_on_error
@@ -177,7 +186,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._launch_grid: tuple[int, int, int] = (1, 1, 1)
         self._captured_symbolic_template: bool = False
         self._unsupported_capture: bool = False
-        self._unsupported_reason: str | None = None
+        self.unsupported_reason: str | None = None
         self._arange_dict_snapshot: dict[Any, Any] = {}
 
     # ── Unsupported-launch plumbing ──────────────────────────────────────
@@ -192,13 +201,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         leaking back into ``self.records``.
         """
         self._unsupported_capture = True
-        self._unsupported_reason = reason
+        self.unsupported_reason = reason
         self.last_status = "unsupported"
         self.records = []
-
-    @property
-    def unsupported_reason(self) -> str | None:
-        return self._unsupported_reason
 
     def _safe_eval(self, expr: "SymbolicExpr", reason: str) -> tuple[Any, Any] | None:
         """Eval a SymbolicExpr, marking the launch unsupported on
@@ -283,7 +288,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             if self._unsupported_capture and cfg.verbose:
                 print(
                     f"[{self.LOG_TAG}] launch unsupported by two-copy solver: "
-                    f"{self._unsupported_reason}"
+                    f"{self.unsupported_reason}"
                 )
             self.last_reports = []
             self.last_status = "unsupported" if self._unsupported_capture else "ok"
@@ -325,7 +330,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # Reset of unsupported state lives ONLY in grid_callback. post_run_callback
         # must NOT zero these — handlers within the same launch may have set them.
         self._unsupported_capture = False
-        self._unsupported_reason = None
+        self.unsupported_reason = None
         self._arange_dict_snapshot = {}
         SymbolicExpr.ARANGE_DICT.clear()
         SymbolicClient.grid_callback(self, grid)
@@ -922,3 +927,8 @@ class NullRaceDetector(NullSymbolicClient, RaceDetector):
 
     def __init__(self, abort_on_error: bool = False, *args: Any, **kwargs: Any):
         super().__init__(abort_on_error=abort_on_error)
+        # Static type-checker friendly defaults so callers reading the
+        # factory base's attributes never see AttributeError.
+        self.last_reports = []
+        self.last_status = "ok"
+        self.unsupported_reason = None

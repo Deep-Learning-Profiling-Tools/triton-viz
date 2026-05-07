@@ -8,7 +8,10 @@ import triton_viz
 from triton_viz.clients import RaceDetector
 
 
-@triton_viz.trace(RaceDetector())
+_detector = RaceDetector()
+
+
+@triton_viz.trace(_detector)
 @triton.jit
 def transpose_kernel(matrix_ptr, N, BLOCK: tl.constexpr):
     # Each block handles one row: reads row pid, writes column pid
@@ -24,16 +27,17 @@ def transpose_kernel(matrix_ptr, N, BLOCK: tl.constexpr):
 
 
 if __name__ == "__main__":
-    from triton_viz.core.trace import launches
-
     N, block = 8, 8
     mat = torch.randn(N, N, dtype=torch.float32)
     transpose_kernel[(N,)](mat, N, block)
 
-    races = launches[-1].records
-    print(f"Detected {len(races)} race(s)")
-    for r in races:
-        print(
-            f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
-            f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
-        )
+    if _detector.last_status == "unsupported":
+        print(f"Race analysis unsupported: {_detector.unsupported_reason}")
+    else:
+        races = _detector.last_reports
+        print(f"Detected {len(races)} race(s)")
+        for r in races:
+            print(
+                f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
+                f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
+            )

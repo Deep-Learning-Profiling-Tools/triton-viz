@@ -8,7 +8,10 @@ import triton_viz
 from triton_viz.clients import RaceDetector
 
 
-@triton_viz.trace(RaceDetector())
+_detector = RaceDetector()
+
+
+@triton_viz.trace(_detector)
 @triton.jit
 def reduction_kernel(input_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -20,17 +23,18 @@ def reduction_kernel(input_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr
 
 
 if __name__ == "__main__":
-    from triton_viz.core.trace import launches
-
     n, bs = 64, 8
     inp = torch.randn(n, dtype=torch.float32)
     out = torch.zeros(1, dtype=torch.float32)
     reduction_kernel[(triton.cdiv(n, bs),)](inp, out, n, bs)
 
-    races = launches[-1].records
-    print(f"Detected {len(races)} race(s)")
-    for r in races:
-        print(
-            f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
-            f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
-        )
+    if _detector.last_status == "unsupported":
+        print(f"Race analysis unsupported: {_detector.unsupported_reason}")
+    else:
+        races = _detector.last_reports
+        print(f"Detected {len(races)} race(s)")
+        for r in races:
+            print(
+                f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
+                f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
+            )

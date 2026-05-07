@@ -8,7 +8,10 @@ import triton_viz
 from triton_viz.clients import RaceDetector
 
 
-@triton_viz.trace(RaceDetector())
+_detector = RaceDetector()
+
+
+@triton_viz.trace(_detector)
 @triton.jit
 def inplace_neighbor_kernel(x_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -24,16 +27,17 @@ def inplace_neighbor_kernel(x_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 
 
 if __name__ == "__main__":
-    from triton_viz.core.trace import launches
-
     n, bs = 32, 8
     x = torch.randn(n, dtype=torch.float32)
     inplace_neighbor_kernel[(triton.cdiv(n, bs),)](x, n, bs)
 
-    races = launches[-1].records
-    print(f"Detected {len(races)} race(s)")
-    for r in races:
-        print(
-            f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
-            f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
-        )
+    if _detector.last_status == "unsupported":
+        print(f"Race analysis unsupported: {_detector.unsupported_reason}")
+    else:
+        races = _detector.last_reports
+        print(f"Detected {len(races)} race(s)")
+        for r in races:
+            print(
+                f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
+                f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
+            )

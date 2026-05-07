@@ -647,9 +647,10 @@ def _flag_array_cas_acq_rel_guarded_kernel(flag_ptr, data_ptr, out_ptr):
 
     tl.store(data_ptr, 1, mask=is_prod)
     cmp = tl.where(is_prod, 0, 1)
-    # flag_ptr is the START of an 8-element array (numel != 1) — _initial_atomic_source
-    # cannot identify the scalar initial value, so the closed-world model
-    # falls back to rf_unknown which does NOT enable synchronizes-with.
+    # flag_ptr is the START of an 8-element contiguous array. After Patch 2,
+    # _initial_atomic_source enumerates per-element initial values up to
+    # _MAX_INITIAL_ATOMIC_ELEMENTS (=1024), so this CAS uses rf_init and the
+    # closed-world model can build a synchronizes-with edge.
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
@@ -771,6 +772,37 @@ def test_data_dependent_atomic_address_is_unsupported(
     assert detector.unsupported_reason is not None
     assert "data-dependent" in detector.unsupported_reason
     assert detector.last_reports == []
+
+
+def test_reject_data_dependent_address_marks_unsupported(
+    _isolate_race_detector_atomic_cfg,
+):
+    """Direct unit test for ``SymbolicRaceDetector._reject_data_dependent_address``.
+
+    The atomic-CAS path (``test_data_dependent_atomic_address_is_unsupported``)
+    exercises this branch end-to-end. The equivalent plain-store path is hard
+    to drive end-to-end because Triton's interpreter concretizes loaded
+    offsets before they reach ``_handle_access_check``; this synthetic test
+    confirms the rejection helper itself works on any pointer expression
+    that embeds ``tl.load``, regardless of the access kind that wraps it.
+    """
+    from triton_viz.clients.symbolic_engine import SymbolicExpr
+
+    triton_viz.clear()
+    detector = SymbolicRaceDetector()
+    # Initialize launch state without running a kernel.
+    detector.grid_callback((2, 1, 1))
+
+    # Build a synthetic load expression (op == "load") whose mere presence
+    # in any outer pointer expression must trigger rejection.
+    const = SymbolicExpr.from_value(0)
+    load_expr = SymbolicExpr.create("load", const, None, None)
+
+    rejected = detector._reject_data_dependent_address(load_expr)
+    assert rejected is True
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "data-dependent" in detector.unsupported_reason
 
 
 # ======== last_status sanity for an ordinary launch (Patch 3) ========

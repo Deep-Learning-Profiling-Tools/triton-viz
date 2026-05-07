@@ -302,11 +302,15 @@ def test_cas_read_from_uses_exact_addr_not_byte_overlap():
 
 
 def test_unknown_initial_value_does_not_fabricate_sync():
-    """Multi-element tensor: initial source is unknown → solver must not invent
-    a sync edge that suppresses the data race.
+    """Tensor above _MAX_INITIAL_ATOMIC_ELEMENTS: initial source falls back to
+    rf_unknown → solver must not invent a sync edge that suppresses the data
+    race. Patch 2 lifted the supported size to ``_MAX_INITIAL_ATOMIC_ELEMENTS``
+    contiguous elements; this test stays meaningful by sitting strictly above
+    that bound.
     """
-    multi = torch.zeros(8, dtype=torch.int32)
-    cas_old = Int("cas_old_multi")
+    big_numel = TwoCopySymbolicHBSolver._MAX_INITIAL_ATOMIC_ELEMENTS + 1
+    multi = torch.zeros(big_numel, dtype=torch.int32)
+    cas_old = Int("cas_old_unknown_initial")
     cas = _cas_record(
         IntVal(int(multi.data_ptr())),
         IntVal(0),
@@ -316,15 +320,30 @@ def test_unknown_initial_value_does_not_fabricate_sync():
         program_seq=1,
         tensor=multi,
     )
+    # Place store/load on a slot well past every modeled flag offset so they
+    # cannot be confused with the CAS address itself.
+    data_offset = (big_numel + 1) * 4
     store_data = _scalar_store(
-        IntVal(int(multi.data_ptr()) + 32), event_id=11, program_seq=0, elem_size=4
+        IntVal(int(multi.data_ptr()) + data_offset),
+        event_id=11,
+        program_seq=0,
+        elem_size=4,
     )
     load_data = _scalar_load(
-        IntVal(int(multi.data_ptr()) + 32), event_id=12, program_seq=2, elem_size=4
+        IntVal(int(multi.data_ptr()) + data_offset),
+        event_id=12,
+        program_seq=2,
+        elem_size=4,
     )
 
     records = [store_data, cas, load_data]
-    reports = _solve(records, grid=(2, 1, 1)).find_races()
+    solver = _solve(records, grid=(2, 1, 1))
+    # Sanity: this CAS reader must hit the unknown-source branch.
+    cas_reader_a = next(e for e in solver.events if e.copy == "a" and e.record is cas)
+    assert cas_reader_a.idx in solver.rf_unknown_source
+    assert cas_reader_a.idx not in solver.rf_init_source
+
+    reports = solver.find_races()
     pairs = {(r.first.event_id, r.second.event_id) for r in reports}
     assert any(
         11 in p and 12 in p for p in pairs

@@ -8,7 +8,10 @@ import triton_viz
 from triton_viz.clients import RaceDetector
 
 
-@triton_viz.trace(RaceDetector())
+_detector = RaceDetector()
+
+
+@triton_viz.trace(_detector)
 @triton.jit
 def scatter_kernel(src_ptr, idx_ptr, dst_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -20,8 +23,6 @@ def scatter_kernel(src_ptr, idx_ptr, dst_ptr, n_elements, BLOCK_SIZE: tl.constex
 
 
 if __name__ == "__main__":
-    from triton_viz.core.trace import launches
-
     n, bs = 32, 8
     src = torch.randn(n, dtype=torch.float32)
     # Create conflicts: all indices point to [0, 3]
@@ -29,10 +30,13 @@ if __name__ == "__main__":
     dst = torch.zeros(4, dtype=torch.float32)
     scatter_kernel[(triton.cdiv(n, bs),)](src, idx, dst, n, bs)
 
-    races = launches[-1].records
-    print(f"Detected {len(races)} race(s)")
-    for r in races:
-        print(
-            f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
-            f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
-        )
+    if _detector.last_status == "unsupported":
+        print(f"Race analysis unsupported: {_detector.unsupported_reason}")
+    else:
+        races = _detector.last_reports
+        print(f"Detected {len(races)} race(s)")
+        for r in races:
+            print(
+                f"  {r.race_type.name} witness_addr=0x{r.witness_addr:x} "
+                f"grid_a={r.witness_grid_a} grid_b={r.witness_grid_b}"
+            )
