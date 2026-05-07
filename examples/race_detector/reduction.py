@@ -28,8 +28,8 @@ if __name__ == "__main__":
     out = torch.zeros(1, dtype=torch.float32)
     reduction_kernel[(triton.cdiv(n, bs),)](inp, out, n, bs)
 
-    if _detector.last_status == "unsupported":
-        print(f"Race analysis unsupported: {_detector.unsupported_reason}")
+    if _detector.last_status != "ok":
+        print(f"Race analysis {_detector.last_status}: {_detector.unsupported_reason}")
     else:
         races = _detector.last_reports
         print(f"Detected {len(races)} race(s)")

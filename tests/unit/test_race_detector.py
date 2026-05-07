@@ -327,3 +327,14 @@ def test_cta_scope_does_not_synchronize_across_different_grids():
         "P1_load_data",
     }
     assert report.model.get("P1_acquire_cas_old") == "1"
+
+
+def test_null_race_detector_reports_disabled_status():
+    """NullRaceDetector signals disabled state via the public attributes so
+    callers don't read ``last_reports == []`` as a clean pass when the
+    backend is off.
+    """
+    detector = NullRaceDetector()
+    assert detector.last_status == "disabled"
+    assert detector.last_reports == []
+    assert detector.unsupported_reason == "race detector disabled"

@@ -30,8 +30,8 @@ if __name__ == "__main__":
     dst = torch.zeros(4, dtype=torch.float32)
     scatter_kernel[(triton.cdiv(n, bs),)](src, idx, dst, n, bs)
 
-    if _detector.last_status == "unsupported":
-        print(f"Race analysis unsupported: {_detector.unsupported_reason}")
+    if _detector.last_status != "ok":
+        print(f"Race analysis {_detector.last_status}: {_detector.unsupported_reason}")
     else:
         races = _detector.last_reports
         print(f"Detected {len(races)} race(s)")

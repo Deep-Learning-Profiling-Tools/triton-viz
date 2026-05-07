@@ -31,8 +31,8 @@ if __name__ == "__main__":
     x = torch.randn(n, dtype=torch.float32)
     inplace_neighbor_kernel[(triton.cdiv(n, bs),)](x, n, bs)
 
-    if _detector.last_status == "unsupported":
-        print(f"Race analysis unsupported: {_detector.unsupported_reason}")
+    if _detector.last_status != "ok":
+        print(f"Race analysis {_detector.last_status}: {_detector.unsupported_reason}")
     else:
         races = _detector.last_reports
         print(f"Detected {len(races)} race(s)")

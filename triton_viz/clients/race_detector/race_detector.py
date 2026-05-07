@@ -102,8 +102,14 @@ class RaceDetector(Client):
     # Surface the public detector interface as class-level annotations so
     # callers (e.g. example scripts) and static type-checkers can read these
     # off the factory base without downcasting to a concrete subclass.
-    # Concrete subclasses populate them at runtime; ``unsupported_reason``
-    # is implemented as a @property on SymbolicRaceDetector.
+    # Concrete subclasses populate these public attributes at runtime.
+    #
+    # ``last_status`` values:
+    #   "ok"          — solver ran (last_reports holds the verdict)
+    #   "unsupported" — a feature the solver doesn't model fired during
+    #                   capture (atomic-in-loop, RMW return downstream,
+    #                   data-dependent address, etc.); see unsupported_reason
+    #   "disabled"    — race detector backend is off (NullRaceDetector)
     last_reports: list[Any]
     last_status: str
     unsupported_reason: str | None
@@ -272,7 +278,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         Returns an empty list when the launch was marked unsupported during
         tracing (e.g. atomic CAS/RMW inside a loop, AtomicRMW return used
         downstream). Callers that need to distinguish "no race" from
-        "unsupported" should read :attr:`unsupported_reason`.
+        "unsupported" / "disabled" should read :attr:`last_status` and
+        :attr:`unsupported_reason`. ``last_status == "disabled"`` is set by
+        :class:`NullRaceDetector` when the backend is off.
 
         Limitations carried by the underlying ``TwoCopySymbolicHBSolver``:
           - Initial atomic source covers scalar tensors and small contiguous
@@ -927,8 +935,9 @@ class NullRaceDetector(NullSymbolicClient, RaceDetector):
 
     def __init__(self, abort_on_error: bool = False, *args: Any, **kwargs: Any):
         super().__init__(abort_on_error=abort_on_error)
-        # Static type-checker friendly defaults so callers reading the
-        # factory base's attributes never see AttributeError.
+        # Distinguish "no race" from "race detector wasn't running": a Null
+        # detector reports last_status == "disabled" so callers don't read
+        # last_reports == [] as a clean pass.
         self.last_reports = []
-        self.last_status = "ok"
-        self.unsupported_reason = None
+        self.last_status = "disabled"
+        self.unsupported_reason = "race detector disabled"
