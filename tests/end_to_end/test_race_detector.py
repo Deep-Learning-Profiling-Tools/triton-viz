@@ -48,9 +48,17 @@ def test_waw_overlapping_store():
 
 
 def test_raw_waw_histogram():
-    """Non-atomic load-modify-store to bins_ptr."""
+    """Non-atomic load-modify-store on ``bins_ptr + bin_indices`` — the
+    target address itself depends on a loaded value (``bin_indices``). The
+    symbolic race detector marks this scatter pattern as unsupported rather
+    than detecting races by first-block concretisation, which was the prior
+    behaviour but unsound (the first block's concrete indices were taken as
+    a template for every symbolic PID).
+    """
 
-    @triton_viz.trace(RaceDetector())
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
     @triton.jit
     def kernel(input_ptr, bins_ptr, n_elements, n_bins, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
@@ -66,10 +74,10 @@ def test_raw_waw_histogram():
     bins = torch.zeros(n_bins, dtype=torch.int32)
     kernel[(triton.cdiv(n, bs),)](inp, bins, n, n_bins, bs)
 
-    races = launches[-1].records
-    assert len(races) > 0
-    race_types = {r.race_type for r in races}
-    assert RaceType.WAW in race_types
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "data-dependent" in detector.unsupported_reason
+    assert detector.last_reports == []
 
 
 # ======== Correct vector_add (No Race) ========
@@ -888,12 +896,208 @@ def test_load_dependent_mask_must_not_be_generalized_from_first_block(
     assert detector.unsupported_reason is None
 
     # Sound analyzer behavior: at least one race report, and at least one
-    # of them must be a WAW (pid=1 vs pid=2 both writing out[0]).
+    # of them must be a WAW (pid=1 vs pid=2 both writing out[0]) with the
+    # witness address equal to the scalar ``out`` pointer.
     assert len(detector.last_reports) >= 1, (
         "expected at least one race report between pid=1 and pid=2 "
         "writing the same scalar out[0]"
     )
-    assert any(r.race_type == RaceType.WAW for r in detector.last_reports), (
-        "expected a WAW race; got race types: "
-        f"{[r.race_type for r in detector.last_reports]}"
+    assert any(
+        r.race_type == RaceType.WAW
+        and {r.witness_grid_a[0], r.witness_grid_b[0]} == {1, 2}
+        and r.witness_addr == out.data_ptr()
+        for r in detector.last_reports
+    ), (
+        "expected a WAW race with pids {1, 2} writing out[0]; "
+        f"got reports: {[(r.race_type, r.witness_grid_a, r.witness_grid_b, r.witness_addr) for r in detector.last_reports]}"
     )
+
+
+# ======== Load-value semantics regression coverage ========
+
+
+def test_masked_load_other_value_drives_store_mask(
+    _isolate_race_detector_atomic_cfg,
+):
+    """Exercises masked tl.load with explicit ``other``.
+
+    For ``flag = [99, 99, 99]`` over ``grid = (3,)``:
+      pid=0: load active, v = flag[0] = 99 -> store mask = (99 == 42) -> inactive
+      pid=1: load masked out, v = other = 42 -> store mask = (42 == 42) -> active
+      pid=2: load masked out, v = other = 42 -> store mask = (42 == 42) -> active
+
+    Soundly detects a WAW between pid=1 and pid=2 writing out[0]. Tests that
+    the load-value provider builds ``If(mask, Select(arr, addr), other)`` and
+    that the domain constraint is conditional (``Implies(mask, ...)``) so
+    masked-out lanes do not over-constrain the model.
+
+    Uses ``other=42`` rather than ``other=0`` because Triton's semantic
+    layer drops zero-valued ``other`` via a ``bool(constexpr)`` check
+    before the override is invoked — we need a value that passes that
+    truthy check so ``other`` actually reaches the provider.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(flag_ptr, out_ptr):
+        pid = tl.program_id(0)
+        v = tl.load(flag_ptr + pid, mask=(pid == 0), other=42)
+        tl.store(out_ptr, pid, mask=(v == 42))
+
+    flag = torch.tensor([99, 99, 99], dtype=torch.int32)
+    out = torch.full((1,), -1, dtype=torch.int32)
+    kernel[(3,)](flag, out)
+
+    assert detector.last_status == "ok", (
+        f"unexpected status {detector.last_status!r}; "
+        f"reason={detector.unsupported_reason!r}"
+    )
+    assert any(
+        r.race_type == RaceType.WAW
+        and {r.witness_grid_a[0], r.witness_grid_b[0]} == {1, 2}
+        and r.witness_addr == out.data_ptr()
+        for r in detector.last_reports
+    ), "expected a WAW race with pids {1, 2} writing out[0] under masked-load"
+
+
+def test_float_load_source_is_unsupported(_isolate_race_detector_atomic_cfg):
+    """Float input tensor used as a load value source is unsupported in v1.
+
+    The provider rejects non-integer dtypes since the Z3 model is integer-
+    only — silently truncating would mask real value-dependent behaviour.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(flag_ptr, out_ptr):
+        pid = tl.program_id(0)
+        v = tl.load(flag_ptr + pid)
+        tl.store(out_ptr, pid, mask=(v == 0.0))
+
+    flag = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+    out = torch.full((1,), -1, dtype=torch.int32)
+    kernel[(3,)](flag, out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "dtype" in detector.unsupported_reason
+    assert detector.last_reports == []
+
+
+def test_non_contiguous_load_source_is_unsupported(
+    _isolate_race_detector_atomic_cfg,
+):
+    """Non-contiguous input tensor is unsupported in v1 — directly exercises
+    the provider's snapshot helper.
+
+    End-to-end tracing rejects most non-contiguous arg tensors earlier in
+    ``arg_callback``, so this unit-style test drives the snapshot helper
+    with a hand-rolled view to confirm the provider itself raises
+    :class:`UnsupportedSymbolicRaceQuery` with a ``contiguous`` reason.
+    """
+    from triton_viz.clients.race_detector.hb_common import (
+        UnsupportedSymbolicRaceQuery,
+    )
+
+    detector = SymbolicRaceDetector()
+    base = torch.tensor([[1, 9], [0, 9], [0, 9]], dtype=torch.int32)
+    view = base[:, 0]
+    assert not view.is_contiguous()
+
+    with pytest.raises(UnsupportedSymbolicRaceQuery, match="contiguous"):
+        detector._snapshot_array_for_tensor(view)
+
+
+def test_oversized_load_source_is_unsupported(_isolate_race_detector_atomic_cfg):
+    """Source tensor exceeding ``_MAX_LOAD_SOURCE_ELEMENTS`` is unsupported.
+
+    The Z3 array snapshot unrolls element-by-element via ``Store``; capping
+    keeps the per-launch snapshot from blowing up.
+    """
+
+    detector = SymbolicRaceDetector()
+    cap = detector._MAX_LOAD_SOURCE_ELEMENTS
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(flag_ptr, out_ptr):
+        pid = tl.program_id(0)
+        v = tl.load(flag_ptr + pid)
+        tl.store(out_ptr, pid, mask=(v == 0))
+
+    flag = torch.zeros(cap + 1, dtype=torch.int32)
+    flag[0] = 1  # force at least one PID to deactivate to expose the path
+    out = torch.full((1,), -1, dtype=torch.int32)
+    kernel[(3,)](flag, out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert (
+        "size cap" in detector.unsupported_reason
+        or "exceeds" in detector.unsupported_reason
+    )
+    assert detector.last_reports == []
+
+
+def test_self_write_then_load_is_unsupported(_isolate_race_detector_atomic_cfg):
+    """Write-then-load order: kernel writes ``buf`` before reading from it.
+
+    The write-side region tracking registers the buffer; the subsequent
+    load-value provider sees the overlap and raises unsupported.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(buf_ptr, out_ptr):
+        pid = tl.program_id(0)
+        tl.store(buf_ptr + pid, 0)
+        v = tl.load(buf_ptr + pid)
+        tl.store(out_ptr, pid, mask=(v == 0))
+
+    buf = torch.zeros(3, dtype=torch.int32)
+    out = torch.full((1,), -1, dtype=torch.int32)
+    kernel[(3,)](buf, out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "written by this kernel" in detector.unsupported_reason
+    assert detector.last_reports == []
+
+
+def test_load_then_self_write_is_unsupported(_isolate_race_detector_atomic_cfg):
+    """Load-then-write order: kernel reads ``buf`` as a load value source,
+    then writes back to the same region.
+
+    The load-value provider registers ``buf`` as a load source first; the
+    subsequent store's write-side check sees the overlap and raises
+    unsupported (or the post-capture sweep catches it).
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(buf_ptr, out_ptr):
+        pid = tl.program_id(0)
+        v = tl.load(buf_ptr + pid)
+        tl.store(out_ptr, pid, mask=(v == 0))
+        tl.store(buf_ptr + pid, 0)
+
+    buf = torch.tensor([1, 0, 0], dtype=torch.int32)
+    out = torch.full((1,), -1, dtype=torch.int32)
+    kernel[(3,)](buf, out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert (
+        "written by this kernel" in detector.unsupported_reason
+        or "previously read" in detector.unsupported_reason
+        or "overlaps" in detector.unsupported_reason
+    )
+    assert detector.last_reports == []

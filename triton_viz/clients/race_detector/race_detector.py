@@ -7,6 +7,17 @@ from typing import (
     cast,
 )
 
+import torch
+from z3 import (
+    If,
+    Implies,
+    IntSort,
+    IntVal,
+    K,
+    Or,
+    Select,
+    Store as Z3ArrayStore,
+)
 from z3.z3 import BoolRef
 
 from ...core.client import Client
@@ -16,9 +27,11 @@ from ...core.data import (
     AtomicCas,
     AtomicRMW,
     Load,
+    Store,
 )
 from ..symbolic_engine import (
     SymbolicExpr,
+    LoadSymbolicExpr,
     AtomicCasSymbolicExpr,
     AtomicRmwSymbolicExpr,
     SymbolicClient,
@@ -28,6 +41,8 @@ from ..symbolic_engine import (
     Z3Expr,
     ConstraintConjunction,
     AccessMode,
+    _and_constraints,
+    _constraint_to_bool,
 )
 from .data import AccessEventRecord, MemorySem
 from .hb_common import (
@@ -46,24 +61,38 @@ def _make_event_signature(
     source_location: tuple[str, int, str] | None,
     addr_expr: Z3Expr,
     local_constraints: ConstraintConjunction,
+    active_expr: Any = True,
 ) -> int:
     """Signature used to dedupe repeated access events within a single loop.
 
     Distinct from sanitizer's ``_make_signature``: ``access_mode`` and
     ``source_location`` are part of the key so a ``load`` and a ``store`` at
     the same address inside the same loop stay as separate events (different
-    program-order nodes for future HB analysis).
+    program-order nodes for future HB analysis). ``active_expr`` is part of
+    the key because mask conditions now flow into ``record.active`` instead
+    of ``local_constraints``; without it, two iterations with the same
+    address but different masks would collide.
     """
-    if isinstance(addr_expr, list):
-        if len(addr_expr) == 1:
-            addr_hash = hash(addr_expr[0])
-        else:
-            addr_hash = hash(tuple(hash(e) for e in addr_expr))
-    else:
-        addr_hash = hash(addr_expr)
 
-    constr_hash = 0 if local_constraints is None else hash(local_constraints)
-    return hash((access_mode, source_location, addr_hash, constr_hash))
+    def h(x: Any) -> int:
+        if isinstance(x, (list, tuple)):
+            return hash(tuple(h(v) for v in x))
+        if x is None:
+            return 0
+        try:
+            return hash(x)
+        except TypeError:
+            return hash(repr(x))
+
+    return hash(
+        (
+            access_mode,
+            source_location,
+            h(addr_expr),
+            h(local_constraints),
+            h(active_expr),
+        )
+    )
 
 
 @dataclass
@@ -77,6 +106,7 @@ class PendingEvent(PendingCheck):
 
     access_mode: AccessMode = "read"
     op_type: type[Op] = Load
+    active: Any = True
 
 
 class RaceDetector(Client):
@@ -177,6 +207,12 @@ class _UnsupportedRMWReturn(SymbolicExpr):
 
 
 class SymbolicRaceDetector(RaceDetector, SymbolicClient):
+    # Upper bound on numel for an input tensor used as a tl.load value source.
+    # Mirrors _MAX_INITIAL_ATOMIC_ELEMENTS in two_copy_symbolic_hb_solver.py;
+    # larger sources are marked unsupported rather than blowing up the Z3
+    # array snapshot.
+    _MAX_LOAD_SOURCE_ELEMENTS: ClassVar[int] = 1024
+
     def __init__(self, abort_on_error: bool = False):
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[AccessEventRecord] = []
@@ -194,6 +230,18 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._unsupported_capture: bool = False
         self.unsupported_reason: str | None = None
         self._arange_dict_snapshot: dict[Any, Any] = {}
+        # Load-value modelling: per-launch Z3 array cache and bidirectional
+        # region tracking. Keys are (base, elem_size, numel, str(dtype));
+        # values are (z3_array_const, [IntVal(base+i*es) for i in range(n)]).
+        self._load_array_cache: dict[
+            tuple[int, int, int, str], tuple[Any, list[Any]]
+        ] = {}
+        self._load_value_regions: list[tuple[int, int, Any]] = []
+        self._written_regions: list[tuple[int, int, Any]] = []
+        # Set when a write event's target tensor cannot be resolved; the
+        # load-value provider raises unsupported on subsequent loads because
+        # the unknown write may alias a snapshotted load source.
+        self._unknown_written_region_seen: bool = False
 
     # ── Unsupported-launch plumbing ──────────────────────────────────────
 
@@ -262,6 +310,252 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             raise UnsupportedSymbolicRaceQuery(reason)
         self._mark_unsupported(reason)
         return True
+
+    @staticmethod
+    def _tensor_region(tensor: Any) -> tuple[int, int, Any]:
+        """Byte-region (base, end_exclusive, tensor). ``end`` is exclusive.
+
+        Using regions instead of ``data_ptr()`` equality so views/slices that
+        share storage but differ in offset are still detected as overlapping.
+        """
+        base = int(tensor.data_ptr())
+        elem_size = int(tensor.element_size()) if hasattr(tensor, "element_size") else 1
+        end = base + int(tensor.numel()) * elem_size
+        return (base, end, tensor)
+
+    @staticmethod
+    def _regions_overlap(a: tuple[int, int, Any], b: tuple[int, int, Any]) -> bool:
+        return max(a[0], b[0]) < min(a[1], b[1])
+
+    def _raise_or_mark(self, reason: str) -> None:
+        if self.abort_on_error:
+            raise UnsupportedSymbolicRaceQuery(reason)
+        self._mark_unsupported(reason)
+
+    def _note_written_tensor(self, tensor: Any) -> bool:
+        """Register a write target. Returns True if the caller may proceed
+        with recording the event, False if the launch was marked unsupported.
+
+        - Unknown target: set ``_unknown_written_region_seen``. If a load
+          snapshot already exists, also mark unsupported (the unknown write
+          may alias it). Otherwise allow the event through; the flag gates
+          any *subsequent* load via the provider's first check.
+        - Known target overlapping an existing load source: mark unsupported.
+        """
+        if tensor is None:
+            self._unknown_written_region_seen = True
+            if self._load_value_regions:
+                self._raise_or_mark(
+                    "write to unknown region after tl.load value snapshot "
+                    "is unsupported"
+                )
+                return False
+            return True
+
+        region = self._tensor_region(tensor)
+        for snap in self._load_value_regions:
+            if self._regions_overlap(region, snap):
+                self._raise_or_mark(
+                    "tl.store/atomic into a tensor previously read as a "
+                    "tl.load value source is unsupported"
+                )
+                return False
+        # Dedup writes to the same region — no need to track multiple
+        # equal entries.
+        for existing in self._written_regions:
+            if existing[0] == region[0] and existing[1] == region[1]:
+                return True
+        self._written_regions.append(region)
+        return True
+
+    def _note_load_source_or_raise(self, tensor: Any) -> None:
+        """Register a tensor as a load-value source. Raises
+        :class:`UnsupportedSymbolicRaceQuery` when the source overlaps a
+        region this kernel has already written to.
+        """
+        region = self._tensor_region(tensor)
+        for written in self._written_regions:
+            if self._regions_overlap(region, written):
+                raise UnsupportedSymbolicRaceQuery(
+                    "tl.load value from a tensor written by this kernel is "
+                    "unsupported"
+                )
+        for existing in self._load_value_regions:
+            if existing[0] == region[0] and existing[1] == region[1]:
+                return
+        self._load_value_regions.append(region)
+
+    # ── Load-value provider (tl.load value semantics in Z3) ────────────────
+
+    @staticmethod
+    def _is_modelable_dtype(dtype: Any) -> bool:
+        """v1 only models integer-valued or bool input tensors. Floats and
+        complex dtypes raise unsupported because the Z3 model is integer-
+        only and silently downcasting would mask real value-dependent
+        behaviour.
+        """
+        if dtype is None:
+            return False
+        try:
+            if dtype == torch.bool:
+                return True
+            if hasattr(dtype, "is_floating_point") and dtype.is_floating_point:
+                return False
+            if hasattr(dtype, "is_complex") and dtype.is_complex:
+                return False
+            # Treat anything else with a finite integer representation as
+            # modelable. Triton's int8/int16/int32/int64/uint8 all qualify.
+            return getattr(dtype, "is_signed", None) is not None or hasattr(
+                dtype, "itemsize"
+            )
+        except Exception:
+            return False
+
+    def _snapshot_array_for_tensor(self, tensor: Any) -> tuple[Any, list[Any]]:
+        """Build (or fetch from cache) a Z3 Array representing the tensor's
+        current contents, plus the list of known IntVal addresses for every
+        element. Raises :class:`UnsupportedSymbolicRaceQuery` on any input
+        the v1 model can't faithfully represent.
+        """
+        if not hasattr(tensor, "numel") or not hasattr(tensor, "data_ptr"):
+            raise UnsupportedSymbolicRaceQuery(
+                "tl.load value modelling requires a torch tensor source"
+            )
+        if hasattr(tensor, "is_contiguous") and not bool(tensor.is_contiguous()):
+            raise UnsupportedSymbolicRaceQuery(
+                "tl.load value from a non-contiguous tensor is unsupported"
+            )
+        numel = int(tensor.numel())
+        if numel <= 0:
+            raise UnsupportedSymbolicRaceQuery(
+                "tl.load value from an empty tensor is unsupported"
+            )
+        if numel > self._MAX_LOAD_SOURCE_ELEMENTS:
+            raise UnsupportedSymbolicRaceQuery(
+                f"tl.load value source tensor exceeds size cap "
+                f"({numel} > {self._MAX_LOAD_SOURCE_ELEMENTS})"
+            )
+        if not self._is_modelable_dtype(getattr(tensor, "dtype", None)):
+            raise UnsupportedSymbolicRaceQuery(
+                f"tl.load value with dtype {getattr(tensor, 'dtype', '?')} "
+                "is unsupported (v1 models integer/bool only)"
+            )
+
+        base = int(tensor.data_ptr())
+        elem_size = int(tensor.element_size()) if hasattr(tensor, "element_size") else 1
+        elem_size = max(1, elem_size)
+        cache_key = (base, elem_size, numel, str(tensor.dtype))
+        cached = self._load_array_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            host = tensor.detach() if hasattr(tensor, "detach") else tensor
+            host = host.cpu() if hasattr(host, "cpu") else host
+            flat = host.reshape(-1).tolist()
+            int_values = [int(v) for v in flat]
+        except Exception as exc:
+            raise UnsupportedSymbolicRaceQuery(
+                f"tl.load value tensor snapshot failed: {exc}"
+            ) from exc
+
+        arr = K(IntSort(), IntVal(0))
+        known_addrs: list[Any] = []
+        for i, value in enumerate(int_values):
+            addr_i = IntVal(base + i * elem_size)
+            arr = Z3ArrayStore(arr, addr_i, IntVal(value))
+            known_addrs.append(addr_i)
+
+        self._load_array_cache[cache_key] = (arr, known_addrs)
+        return arr, known_addrs
+
+    @staticmethod
+    def _to_lane_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return list(value)
+        return [value]
+
+    @staticmethod
+    def _broadcast_lanes(lanes: list[Any], n: int) -> list[Any]:
+        if len(lanes) == n:
+            return lanes
+        if len(lanes) == 1:
+            return [lanes[0]] * n
+        raise UnsupportedSymbolicRaceQuery(
+            f"tl.load lane count mismatch (expected {n}, got {len(lanes)})"
+        )
+
+    def _load_value_provider_impl(
+        self, load_expr: LoadSymbolicExpr
+    ) -> tuple[Z3Expr, ConstraintConjunction]:
+        """Compute Z3 value semantics for ``tl.load``.
+
+        Address-of-event recording stays with ``expr.ptr._to_z3()`` (see
+        ``_handle_access_check``); this provider only kicks in when the
+        loaded value is consumed as part of a downstream expression (e.g.
+        ``(v == 0)`` in a store mask). The returned Z3 expression evaluates
+        to the actual loaded value via ``Select(arr, addr)`` over a
+        per-launch tensor snapshot.
+
+        Boundaries that raise :class:`UnsupportedSymbolicRaceQuery`:
+          - launch has already seen a write to an unresolved tensor region;
+          - source pointer cannot be resolved to a known tensor;
+          - source overlaps a tensor this kernel writes to;
+          - source is non-contiguous, too large, or has unsupported dtype;
+          - masked load without an explicit ``other`` (no sound default for
+            inactive lanes in v1).
+        """
+        if self._unknown_written_region_seen:
+            raise UnsupportedSymbolicRaceQuery(
+                "tl.load value snapshot is unsupported after a write to an "
+                "unknown kernel region"
+            )
+
+        ptr_z3, ptr_constraints = load_expr.ptr._to_z3()
+
+        tensor = self._resolve_tensor(load_expr.ptr)
+        if tensor is None:
+            raise UnsupportedSymbolicRaceQuery(
+                "tl.load value from unknown tensor is unsupported"
+            )
+
+        self._note_load_source_or_raise(tensor)
+        arr, known_addrs = self._snapshot_array_for_tensor(tensor)
+
+        addr_lanes = self._to_lane_list(ptr_z3)
+        lane_count = len(addr_lanes)
+
+        if load_expr.mask is None:
+            values = [Select(arr, a) for a in addr_lanes]
+            domain_terms = [Or(*(a == k for k in known_addrs)) for a in addr_lanes]
+            extra_constraints: tuple[Any, ...] = (_and_constraints(*domain_terms),)
+        else:
+            if load_expr.other is None:
+                raise UnsupportedSymbolicRaceQuery(
+                    "masked tl.load without explicit `other` is unsupported"
+                )
+            mask_z3, mask_constraints = load_expr.mask._to_z3()
+            other_z3, other_constraints = load_expr.other._to_z3()
+            mask_lanes = self._broadcast_lanes(self._to_lane_list(mask_z3), lane_count)
+            other_lanes = self._broadcast_lanes(
+                self._to_lane_list(other_z3), lane_count
+            )
+
+            values = []
+            domain_terms = []
+            for a, m, o in zip(addr_lanes, mask_lanes, other_lanes):
+                m_bool = _constraint_to_bool(m)
+                values.append(If(m_bool, Select(arr, a), o))
+                domain_terms.append(Implies(m_bool, Or(*(a == k for k in known_addrs))))
+            extra_constraints = (
+                mask_constraints,
+                other_constraints,
+                _and_constraints(*domain_terms),
+            )
+
+        result: Z3Expr = values[0] if lane_count == 1 else values
+        constraints = _and_constraints(ptr_constraints, *extra_constraints)
+        return result, constraints
 
     # Explicit forwarders to SymbolicClient: the RaceDetector factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
@@ -340,11 +634,48 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._unsupported_capture = False
         self.unsupported_reason = None
         self._arange_dict_snapshot = {}
+        self._load_array_cache = {}
+        self._load_value_regions = []
+        self._written_regions = []
+        self._unknown_written_region_seen = False
         SymbolicExpr.ARANGE_DICT.clear()
         SymbolicClient.grid_callback(self, grid)
+        # Install the load-value provider with an owner token so a stale
+        # provider from a crashed peer detector instance never leaks across
+        # launches. _clear_launch_runtime only uninstalls when we still own
+        # the slot.
+        SymbolicExpr._load_value_provider = self._load_value_provider_impl
+        SymbolicExpr._load_value_provider_owner = id(self)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         return SymbolicClient.register_op_callback(self, op_type)
+
+    # ── Race-detector-only overrides for load/store overriders ────────────
+    # The shared SymbolicClient versions concretise nested loads in ``ptr``
+    # and ``mask`` via ``replace_subtree("load")`` and flip
+    # ``need_full_grid``. Under one-shot symbolic capture that turns the
+    # first block's concrete mask value into a template for every PID — the
+    # source of the load-dependent-mask false negative. The race detector
+    # has its own ``LoadSymbolicExpr`` value semantics (per-PID Z3
+    # ``Select(arr, addr)``) plus a pointer-side ``_reject_data_dependent_
+    # address`` gate, so it doesn't need (and must not use) the
+    # concretisation path. Sanitizer keeps the shared behaviour.
+
+    def _op_load_overrider(self, ptr, mask=None, other=None, *args, **kwargs):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
+        other_sym = SymbolicExpr.from_value(other) if other is not None else None
+        ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
+        self._handle_access_check(ret, Load, "read")
+        return ret
+
+    def _op_store_overrider(self, ptr, value, mask=None, *args, **kwargs):
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        value_sym = SymbolicExpr.from_value(value)
+        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
+        ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
+        self._handle_access_check(ret, Store, "write")
+        return ret
 
     def pre_run_callback(self, fn: Callable) -> bool:
         # One-shot capture: capture symbolic templates from a single
@@ -363,6 +694,21 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             if self.abort_on_error:
                 raise
             self._mark_unsupported(str(exc))
+        # Defensive sweep: load-side / write-side checks at record time
+        # should already catch overlaps, but loop-deferred events can
+        # re-order tensors through `_process_pending_check`. Cross-product
+        # check the two region lists once before sealing the launch.
+        if not self._unsupported_capture:
+            for src in self._load_value_regions:
+                for dst in self._written_regions:
+                    if self._regions_overlap(src, dst):
+                        self._raise_or_mark(
+                            "tl.load value source overlaps a tensor written "
+                            "by this kernel"
+                        )
+                        break
+                if self._unsupported_capture:
+                    break
         # Snapshot ARANGE_DICT after templates are evaluated so the two-copy
         # solver's arange substitutions are independent of subsequent launches.
         self._arange_dict_snapshot = dict(SymbolicExpr.ARANGE_DICT)
@@ -384,6 +730,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.last_grid = None
         self._program_seq = 0
         self._event_seq = 0
+        self._load_array_cache = {}
+        self._load_value_regions = []
+        self._written_regions = []
+        self._unknown_written_region_seen = False
+        if SymbolicExpr._load_value_provider_owner == id(self):
+            SymbolicExpr._load_value_provider = None
+            SymbolicExpr._load_value_provider_owner = None
 
     @staticmethod
     def _normalize_constraints(
@@ -515,11 +868,22 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         *,
         semantic_constraints: tuple[Any, ...] = (),
         copy_local_vars: tuple[Any, ...] = (),
+        active: Any = True,
     ) -> None:
         if self._unsupported_capture:
             return
         tensor = self._resolve_tensor(symbolic_expr)
         tensor_name = self._get_tensor_name(tensor) if tensor is not None else None
+
+        # Bidirectional self-write guard. For writes (and atomics), the
+        # target region must not overlap a tensor we've already snapshotted
+        # as a load-value source — that would mean the snapshot represents
+        # stale memory. Likewise, an unresolved write target may alias an
+        # existing snapshot, so we set a flag the load-value provider checks
+        # before snapshotting any further tensors.
+        if access_mode == "write" or op_type in (AtomicCas, AtomicRMW):
+            if not self._note_written_tensor(tensor):
+                return
 
         # Two-copy capture: keep raw symbolic templates (PID0/1/2 preserved)
         # rather than snapshotting solver assertions, which can carry sampled
@@ -542,7 +906,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 grid_idx=None,
                 program_seq=self._next_program_seq(),
                 debug_name=self._debug_name(op_type, source_location),
-                active=True,
+                active=active,
                 reads=access_mode == "read",
                 writes=access_mode == "write",
                 event_id=self._next_event_id(),
@@ -600,6 +964,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             return
         tensor = self._resolve_tensor(symbolic_expr)
         tensor_name = self._get_tensor_name(tensor) if tensor is not None else None
+        if not self._note_written_tensor(tensor):
+            return
 
         local = self._normalize_constraints(expr_constraints)
         premises = self._normalize_constraints(semantic_constraints)
@@ -656,6 +1022,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             return
         tensor = self._resolve_tensor(symbolic_expr)
         tensor_name = self._get_tensor_name(tensor) if tensor is not None else None
+        if not self._note_written_tensor(tensor):
+            return
 
         local = self._normalize_constraints(expr_constraints)
         premises = self._normalize_constraints(semantic_constraints)
@@ -703,18 +1071,39 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         Outside any loop: recorded immediately. Inside a loop: deferred to the
         enclosing loop's flush point, with ``_make_event_signature`` used to
         dedupe events that repeat across iterations of the same loop.
+
+        The pointer and mask expressions are evaluated separately: the
+        address-of-the-event is ``expr.ptr._to_z3()`` (independent of any
+        load-value provider that may give ``LoadSymbolicExpr`` value
+        semantics), and the mask becomes the event's ``active`` condition so
+        ``_lower_record`` can take per-lane lane-values rather than ``And``-
+        collapsing a vector mask into a scalar local constraint.
         """
         if self._unsupported_capture:
             return
         # Reject scatter/histogram-style addressing where the pointer itself
         # depends on a loaded value — the current model conflates the load's
         # pointer with its loaded value.
-        if self._reject_data_dependent_address(getattr(expr, "ptr", None)):
+        ptr_attr = getattr(expr, "ptr", None)
+        if self._reject_data_dependent_address(ptr_attr):
             return
-        eval_result = self._safe_eval(expr, "load/store eval")
-        if eval_result is None:
+        if ptr_attr is None:
             return
-        z3_addr, z3_constraints = eval_result
+        ptr_result = self._safe_eval(ptr_attr, f"{op_type.__name__} ptr eval")
+        if ptr_result is None:
+            return
+        z3_addr, ptr_constraints = ptr_result
+
+        active_expr: Any = True
+        mask_constraints: ConstraintConjunction = None
+        mask_attr = getattr(expr, "mask", None)
+        if mask_attr is not None:
+            mask_result = self._safe_eval(mask_attr, f"{op_type.__name__} mask eval")
+            if mask_result is None:
+                return
+            active_expr, mask_constraints = mask_result
+
+        z3_constraints = _and_constraints(ptr_constraints, mask_constraints)
         source_location = capture_current_source_location()
 
         if not self.loop_stack:
@@ -725,12 +1114,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 z3_constraints,
                 expr,
                 source_location,
+                active=active_expr,
             )
             return
 
         ctx = self.loop_stack[-1]
         signature = _make_event_signature(
-            access_mode, source_location, z3_addr, z3_constraints
+            access_mode, source_location, z3_addr, z3_constraints, active_expr
         )
         pending_idx = ctx.signature_cache.get(signature)
         if pending_idx is None:
@@ -743,6 +1133,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     source_location=source_location,
                     access_mode=access_mode,
                     op_type=op_type,
+                    active=active_expr,
                 )
             )
         else:
@@ -925,6 +1316,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             pending.source_location,
             semantic_constraints=tuple(iter_constraints),
             copy_local_vars=self._current_loop_iter_vars(),
+            active=pending.active,
         )
 
 

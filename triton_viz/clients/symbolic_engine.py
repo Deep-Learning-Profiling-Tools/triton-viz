@@ -336,6 +336,18 @@ class SymbolicExpr:
     ] = {}
     _OP_CLASS_MAP: ClassVar[dict[str, type[SymbolicExpr]]] = {}
 
+    # Narrow extension hook: a client (currently SymbolicRaceDetector) can
+    # install a load-value provider to give tl.load value semantics in Z3
+    # (e.g. Select(arr, addr) over a per-launch snapshot). When the slot is
+    # None, LoadSymbolicExpr falls back to the legacy pointer-as-value
+    # behaviour from IndirectSymbolicExprBase, which preserves sanitizer
+    # semantics. The provider owns ALL policy (mask/other handling, dtype
+    # guards, unsupported boundaries) — this module just dispatches.
+    _load_value_provider: ClassVar[
+        Callable[["LoadSymbolicExpr"], tuple[Z3Expr, ConstraintConjunction]] | None
+    ] = None
+    _load_value_provider_owner: ClassVar[int | None] = None
+
     @classmethod
     def register_op_class(
         cls, op_cls: type[SymbolicExpr], op_types: tuple[str, ...]
@@ -840,6 +852,12 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
             else ptr_dtype
         )
         self.shape = self.ptr.shape
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        provider = SymbolicExpr._load_value_provider
+        if provider is None:
+            return super()._to_z3_impl()
+        return provider(self)
 
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
