@@ -5,7 +5,7 @@ from itertools import combinations
 from typing import Any, Iterable
 
 from z3 import And, BoolVal, IntVal, Not, Or, Solver, sat
-from z3.z3 import BoolRef, ModelRef
+from z3.z3 import BoolRef, IntNumRef, ModelRef
 
 from .data import AccessEventRecord
 
@@ -114,7 +114,16 @@ class HBSolver:
             addrs = self._iter_addrs(record.addr_expr)
 
             for lane, addr in enumerate(addrs):
-                active = self._as_bool(self._lane_value(record.active, lane))
+                active_terms = [
+                    self._as_bool(self._lane_value(record.active, lane)),
+                    *(
+                        self._as_bool(constraint)
+                        for constraint in self._iter_constraints(
+                            record.local_constraints
+                        )
+                    ),
+                ]
+                active = And(*active_terms)
 
                 raw_reads = self._lane_value(record.reads, lane)
                 if raw_reads is None:
@@ -245,6 +254,39 @@ class HBSolver:
             self._minimal_atomic_read_from(writer, reader),
         )
 
+    def _initial_atomic_value(self, event: ScalarMemoryEvent) -> Any:
+        tensor = event.record.tensor
+        if tensor is None or event.old_value is None:
+            return None
+        try:
+            if tensor.numel() != 1:
+                return None
+            addr = event.addr
+            if isinstance(addr, IntNumRef):
+                addr = addr.as_long()
+            if not isinstance(addr, int) or addr != tensor.data_ptr():
+                return None
+            return IntVal(int(tensor.item()))
+        except Exception:
+            return None
+
+    def _atomic_old_value_has_source(self, reader: ScalarMemoryEvent) -> BoolRef:
+        if not reader.is_atomic or reader.old_value is None:
+            return BoolVal(True)
+
+        initial_value = self._initial_atomic_value(reader)
+        if initial_value is None:
+            return BoolVal(True)
+
+        candidate_sources = [
+            self._minimal_atomic_read_from(writer, reader)
+            for writer in self.events
+            if writer.idx != reader.idx
+        ]
+        if candidate_sources:
+            return Or(reader.old_value == initial_value, *candidate_sources)
+        return reader.old_value == initial_value
+
     def _edge(self, first: ScalarMemoryEvent, second: ScalarMemoryEvent) -> BoolRef:
         if first.idx == second.idx:
             return BoolVal(False)
@@ -306,8 +348,9 @@ class HBSolver:
         for record in self.records:
             for constraint in self._iter_constraints(record.premises):
                 solver.add(self._as_bool(constraint))
-            for constraint in self._iter_constraints(record.local_constraints):
-                solver.add(self._as_bool(constraint))
+
+        for event in self.events:
+            solver.add(self._atomic_old_value_has_source(event))
 
         return solver
 

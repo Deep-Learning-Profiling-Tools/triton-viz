@@ -1564,7 +1564,23 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
         self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError("atomic_cas operation is not implemented yet")
+        ptr_z3, constraints_ptr = self.ptr._to_z3()
+        cmp_z3, constraints_cmp = self.cmp._to_z3()
+        val_z3, constraints_val = self.val._to_z3()
+        constraints = _and_constraints(
+            constraints_ptr, constraints_cmp, constraints_val
+        )
+
+        del cmp_z3, val_z3
+
+        if isinstance(ptr_z3, list):
+            z3_expr = [
+                Int(f"atomic_cas_old_{id(self)}_{idx}") for idx in range(len(ptr_z3))
+            ]
+        else:
+            z3_expr = Int(f"atomic_cas_old_{id(self)}")
+
+        return z3_expr, constraints
 
 
 class AtomicRmwSymbolicExpr(SymbolicExpr):
@@ -1976,7 +1992,9 @@ class SymbolicClient(Client):
             ptr, value, None, cache_modifier, eviction_policy
         )
 
-    def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
+    def _op_atomic_cas_overrider(
+        self, ptr, cmp, val, sem=None, scope=None, *args, **kwargs
+    ):
         ptr_sym = SymbolicExpr.from_value(ptr)
         cmp_sym = SymbolicExpr.from_value(cmp)
         val_sym = SymbolicExpr.from_value(val)
