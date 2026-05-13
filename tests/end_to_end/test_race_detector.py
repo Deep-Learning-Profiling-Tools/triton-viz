@@ -1101,3 +1101,76 @@ def test_load_then_self_write_is_unsupported(_isolate_race_detector_atomic_cfg):
         or "overlaps" in detector.unsupported_reason
     )
     assert detector.last_reports == []
+
+
+# ======== External reproducer: ROCm/aiter#3091 ========
+
+
+def test_aiter_3091_redundant_histogram_writes(
+    _isolate_race_detector_atomic_cfg,
+):
+    """Minimal reproducer for ROCm/aiter#3091.
+
+    Bug pattern: ``_combined_routing_fused`` calls ``_sum_bitmatrix_rows_fused``
+    on every program instance with no ``tl.program_id``-based partitioning of
+    the output buffer (``ExpertHist``). Every pid concurrently stores the
+    same values to the same global addresses — a non-atomic WAW race even
+    when the written values agree. Subsequent ``tl.load(ExpertHist + pid)``
+    reads then race against those in-flight writes (RAW).
+
+    This reproducer collapses both phases into a single kernel:
+      - Phase 1: every pid writes the full histogram unconditionally
+        (mimics ``_sum_bitmatrix_rows_fused``).
+      - Phase 2: each pid reads back its own slot (mimics the
+        ``n_tokens = tl.load(ExpertHist + pid)`` check in the caller).
+
+    Expected: detector reports both a WAW (between phase-1 writes of two
+    distinct pids) and a RAW (between a phase-1 write and a phase-2 load
+    from a different pid).
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(hist_ptr, out_ptr, N: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = tl.arange(0, N)
+        # Phase 1: redundant cross-PID write to the full histogram.
+        tl.store(hist_ptr + offs, offs)
+        # Phase 2: read this pid's slot; phase-1 writes from other pids
+        # touch the same address.
+        n = tl.load(hist_ptr + pid)
+        tl.store(out_ptr + pid, n)
+
+    N = 8
+    hist = torch.zeros(N, dtype=torch.int32)
+    out = torch.zeros(N, dtype=torch.int32)
+    kernel[(N,)](hist, out, N)
+
+    assert detector.last_status == "ok", (
+        f"unexpected status {detector.last_status!r}; "
+        f"reason={detector.unsupported_reason!r}"
+    )
+
+    race_types = {r.race_type for r in detector.last_reports}
+    assert RaceType.WAW in race_types, (
+        f"expected a WAW race on the phase-1 histogram write across pids; "
+        f"got {race_types}"
+    )
+    assert RaceType.RAW in race_types, (
+        f"expected a RAW race between phase-1 store and phase-2 load on "
+        f"hist_ptr + pid; got {race_types}"
+    )
+
+    hist_base = hist.data_ptr()
+    hist_end = hist_base + N * hist.element_size()
+    for r in detector.last_reports:
+        assert r.witness_grid_a[0] != r.witness_grid_b[0], (
+            "race witnesses must be two distinct program instances; "
+            f"got a={r.witness_grid_a}, b={r.witness_grid_b}"
+        )
+        assert hist_base <= r.witness_addr < hist_end, (
+            "race witness address must fall inside the histogram tensor; "
+            f"got {r.witness_addr} not in [{hist_base}, {hist_end})"
+        )
