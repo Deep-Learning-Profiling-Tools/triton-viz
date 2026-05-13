@@ -829,3 +829,71 @@ def test_no_race_kernel_reports_ok_status(_isolate_race_detector_atomic_cfg):
     assert detector.last_status == "ok"
     assert detector.unsupported_reason is None
     assert detector.last_reports == []
+
+
+# ======== Counterexample: load-dependent mask must not be generalized ========
+
+
+def test_load_dependent_mask_must_not_be_generalized_from_first_block(
+    _isolate_race_detector_atomic_cfg,
+):
+    """False negative: loaded input value in a store mask is not modeled per PID.
+
+    Ground truth for ``flag = [1, 0, 0]`` over ``grid = (3,)``:
+      pid=0: v = flag[0] = 1 -> mask = False, inactive
+      pid=1: v = flag[1] = 0 -> mask = True,  writes out[0]
+      pid=2: v = flag[2] = 0 -> mask = True,  writes out[0]
+
+    pid=1 and pid=2 are two distinct program instances, both write the same
+    scalar address ``out_ptr`` without atomics or synchronisation — a
+    standard WAW data race.
+
+    A sound input-dependent analyzer must produce a witness like:
+        pid_a = 1, pid_b = 2
+        flag[pid_a] = 0, flag[pid_b] = 0
+        addr_a = addr_b = out.data_ptr()
+
+    The current branch sees ``tl.load(flag_ptr + pid)`` through the symbolic
+    capture path, which (a) returns a pointer expression rather than the
+    loaded value, and (b) triggers ``replace_subtree("load")`` concretisation
+    of the mask using the first sampled block's value. Combined with the
+    one-shot ``pre_run_callback`` lifecycle, this generalises ``mask = False``
+    (the value seen by pid=0) to every symbolic PID, so the detector reports
+    zero races. This test asserts the correct semantics; it should fail on
+    the current branch and pass after a fix that models loaded values per
+    PID (e.g. via a finite-map / Z3 ``Select`` over the input tensor).
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(flag_ptr, out_ptr):
+        pid = tl.program_id(0)
+        v = tl.load(flag_ptr + pid)
+        tl.store(out_ptr, pid, mask=(v == 0))
+
+    # First captured block (pid=0) sees flag[0] == 1; later blocks are the
+    # racing writers. The asymmetry is what exposes the over-generalisation.
+    flag = torch.tensor([1, 0, 0], dtype=torch.int32)
+    out = torch.full((1,), -1, dtype=torch.int32)
+    kernel[(3,)](flag, out)
+
+    # The launch should NOT be flagged unsupported — the kernel is plain
+    # load + masked store with no atomics-in-loop or RMW-return downstream.
+    assert detector.last_status == "ok", (
+        f"unexpected status {detector.last_status!r}; "
+        f"reason={detector.unsupported_reason!r}"
+    )
+    assert detector.unsupported_reason is None
+
+    # Sound analyzer behavior: at least one race report, and at least one
+    # of them must be a WAW (pid=1 vs pid=2 both writing out[0]).
+    assert len(detector.last_reports) >= 1, (
+        "expected at least one race report between pid=1 and pid=2 "
+        "writing the same scalar out[0]"
+    )
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports), (
+        "expected a WAW race; got race types: "
+        f"{[r.race_type for r in detector.last_reports]}"
+    )
