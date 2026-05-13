@@ -151,6 +151,62 @@ def _range_to_iterator_constraint(
     return And(bounds, (var - start) % abs_step == 0)
 
 
+def _max_loop_idx_offset(expr: "SymbolicExpr", idx_z3: ArithRef) -> int | None:
+    """Largest ``c_max`` such that every occurrence of ``idx_z3`` in ``expr``
+    appears as ``add(idx_z3, c)`` with ``c >= c_max`` (a bare reference counts
+    as ``c = 0``).
+
+    Returns ``None`` if ``idx_z3`` does not appear in ``expr``.
+
+    Used by ``_loop_hook_after`` to tighten the iterator bound for loop-carried
+    state: a value of the form ``idx_z3 + c`` can only be observed at the load
+    site if some real iteration produced it, i.e. ``idx_z3 + c < stop``. The
+    walker is conservative — any occurrence in an unrecognized shape (mul, sub,
+    add with non-int sibling, etc.) contributes ``0``, so the resulting bound
+    never relaxes a real OOB.
+    """
+    offsets: list[int] = []
+
+    def _is_idx_leaf(node: "SymbolicExpr | None") -> bool:
+        return (
+            node is not None
+            and node.op == "const"
+            and node.loop_ctx is not None
+            and node.loop_ctx.idx_z3 is idx_z3
+        )
+
+    def _nonneg_int_const(node: "SymbolicExpr | None") -> int | None:
+        if node is None or node.op != "const" or node.loop_ctx is not None:
+            return None
+        value = getattr(node, "value", None)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value if value >= 0 else None
+
+    def walk(node: "SymbolicExpr | None") -> None:
+        if node is None:
+            return
+        if _is_idx_leaf(node):
+            offsets.append(0)
+            return
+        if node.op == "add":
+            lhs = node.children.get("lhs")
+            rhs = node.children.get("rhs")
+            for idx_child, other_child in ((lhs, rhs), (rhs, lhs)):
+                if _is_idx_leaf(idx_child):
+                    c = _nonneg_int_const(other_child)
+                    offsets.append(c if c is not None else 0)
+                    walk(other_child)
+                    return
+        for child in node.children.values():
+            walk(child)
+
+    walk(expr)
+    if not offsets:
+        return None
+    return min(offsets)
+
+
 @dataclass
 class PendingCheck:
     symbolic_expr: SymbolicExpr
@@ -2205,7 +2261,24 @@ class SymbolicClient(Client):
                     f" with iterator constraints: {all_iterator_constraints} ",
                     f" and expression-related constraints: {pending.constraints} ",
                 )
-            self._process_pending_check(ctx, pending, all_iterator_constraints)
+
+            # A load that touches state of the form (idx_z3 + c) is only
+            # reachable when some real iteration produced that state, i.e.
+            # idx_z3 + c < stop. Without this tightening, Z3 picks the largest
+            # idx_z3 in [start, stop) and reports the post-update dead value as
+            # OOB (false positive on loop-carried pointer advances).
+            extra_pushed = False
+            if ctx.step > 0:
+                c_max = _max_loop_idx_offset(pending.symbolic_expr, ctx.idx_z3)
+                if c_max is not None and c_max > 0:
+                    solver.push()
+                    solver.add(ctx.idx_z3 + c_max < ctx.stop)
+                    extra_pushed = True
+            try:
+                self._process_pending_check(ctx, pending, all_iterator_constraints)
+            finally:
+                if extra_pushed:
+                    solver.pop()
 
         if ctx.pending_checks:
             solver.pop()
