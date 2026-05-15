@@ -336,6 +336,18 @@ class SymbolicExpr:
     ] = {}
     _OP_CLASS_MAP: ClassVar[dict[str, type[SymbolicExpr]]] = {}
 
+    # Narrow extension hook: a client (currently SymbolicRaceDetector) can
+    # install a load-value provider to give tl.load value semantics in Z3
+    # (e.g. Select(arr, addr) over a per-launch snapshot). When the slot is
+    # None, LoadSymbolicExpr falls back to the legacy pointer-as-value
+    # behaviour from IndirectSymbolicExprBase, which preserves sanitizer
+    # semantics. The provider owns ALL policy (mask/other handling, dtype
+    # guards, unsupported boundaries) — this module just dispatches.
+    _load_value_provider: ClassVar[
+        Callable[["LoadSymbolicExpr"], tuple[Z3Expr, ConstraintConjunction]] | None
+    ] = None
+    _load_value_provider_owner: ClassVar[int | None] = None
+
     @classmethod
     def register_op_class(
         cls, op_cls: type[SymbolicExpr], op_types: tuple[str, ...]
@@ -841,6 +853,12 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         )
         self.shape = self.ptr.shape
 
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        provider = SymbolicExpr._load_value_provider
+        if provider is None:
+            return super()._to_z3_impl()
+        return provider(self)
+
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
     value: SymbolicExpr
@@ -858,6 +876,14 @@ class StoreSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("value", value)
         self.add_child("mask", mask)
         self.add_child("other", other)
+        # Set dtype/shape so consumers (e.g. race-detector elem_size inference)
+        # can introspect the access width without walking back to ptr.
+        ptr_dtype = self.ptr.dtype
+        if isinstance(ptr_dtype, tl.pointer_type):
+            self.dtype = ptr_dtype.element_ty
+        else:
+            self.dtype = getattr(self.value, "dtype", ptr_dtype)
+        self.shape = self.ptr.shape
 
 
 class UnarySymbolicExpr(SymbolicExpr):
@@ -1564,7 +1590,23 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
         self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError("atomic_cas operation is not implemented yet")
+        ptr_z3, constraints_ptr = self.ptr._to_z3()
+        cmp_z3, constraints_cmp = self.cmp._to_z3()
+        val_z3, constraints_val = self.val._to_z3()
+        constraints = _and_constraints(
+            constraints_ptr, constraints_cmp, constraints_val
+        )
+
+        del cmp_z3, val_z3
+
+        if isinstance(ptr_z3, list):
+            z3_expr = [
+                Int(f"atomic_cas_old_{id(self)}_{idx}") for idx in range(len(ptr_z3))
+            ]
+        else:
+            z3_expr = Int(f"atomic_cas_old_{id(self)}")
+
+        return z3_expr, constraints
 
 
 class AtomicRmwSymbolicExpr(SymbolicExpr):
@@ -1976,7 +2018,9 @@ class SymbolicClient(Client):
             ptr, value, None, cache_modifier, eviction_policy
         )
 
-    def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
+    def _op_atomic_cas_overrider(
+        self, ptr, cmp, val, sem=None, scope=None, *args, **kwargs
+    ):
         ptr_sym = SymbolicExpr.from_value(ptr)
         cmp_sym = SymbolicExpr.from_value(cmp)
         val_sym = SymbolicExpr.from_value(val)
