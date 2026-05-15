@@ -3,7 +3,7 @@ import pytest
 import triton.language as tl
 
 from triton_viz.core import patch as patch_mod
-from triton_viz.core.patch import _triton_snapshot_scope
+from triton_viz.core.patch import _triton_snapshot_scope, patch_lang, unpatch_lang
 
 
 def _dummy_kernel():
@@ -72,3 +72,29 @@ def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
         scope.restore()
 
     assert getattr(descriptor, attr) is original
+
+
+def test_constexpr_patch_lifecycle():
+    """patch_lang must add .to/__getattr__ to constexpr; unpatch_lang must restore."""
+    # Snapshot before-state
+    had_to = hasattr(tl.constexpr, "to")
+    had_getattr = hasattr(tl.constexpr, "__getattr__")
+    orig_to = getattr(tl.constexpr, "to", None)
+    orig_getattr = getattr(tl.constexpr, "__getattr__", None)
+
+    patch_lang(_dummy_kernel, "triton")
+    try:
+        assert hasattr(tl.constexpr, "to")
+        assert callable(tl.constexpr.to)
+        assert hasattr(tl.constexpr, "__getattr__")
+        assert callable(tl.constexpr.__getattr__)
+    finally:
+        unpatch_lang("triton")
+
+    # Verify exact before-state is restored
+    assert hasattr(tl.constexpr, "to") == had_to
+    assert hasattr(tl.constexpr, "__getattr__") == had_getattr
+    if had_to:
+        assert getattr(tl.constexpr, "to") is orig_to
+    if had_getattr:
+        assert getattr(tl.constexpr, "__getattr__") is orig_getattr

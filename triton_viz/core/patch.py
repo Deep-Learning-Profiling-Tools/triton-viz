@@ -18,9 +18,12 @@ from .data import (
     RawStore,
 )
 import inspect
+import numpy as np
 from triton.runtime.interpreter import (
     GridExecutor,
+    TensorHandle,
     _implicit_cvt,
+    _get_np_dtype,
     interpreter_builder,
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
@@ -35,6 +38,170 @@ from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 
 
 _MISSING = object()
+
+_F32_MIN_NORMAL = 2**-126
+_F32_MAX = (2 - 2**-23) * 2**127
+
+_RTZ_STORAGE: dict[np.dtype, type[np.unsignedinteger]] = {
+    np.dtype(np.float16): np.uint16,
+    np.dtype(np.float32): np.uint32,
+    np.dtype(np.float64): np.uint64,
+}
+
+try:
+    import ml_dtypes as _ml_dtypes
+
+    _RTZ_STORAGE[np.dtype(_ml_dtypes.bfloat16)] = np.uint16
+except ImportError:
+    _ml_dtypes = None  # type: ignore[assignment]
+
+
+def _src_triton_dtype(value: object) -> tl.core.dtype:
+    """Infer the Triton dtype for a Python literal, mirroring upstream to_tensor."""
+    if isinstance(value, bool):
+        return tl.int1
+    if isinstance(value, int):
+        if -(2**31) <= value < 2**31:
+            return tl.int32
+        if 2**31 <= value < 2**32:
+            return tl.uint32
+        if -(2**63) <= value < 2**63:
+            return tl.int64
+        if 0 <= value < 2**64:
+            return tl.uint64
+        raise OverflowError(
+            f"Integer literal {value} is outside the representable range "
+            f"[-2**63, 2**64) for Triton integer types"
+        )
+    assert isinstance(value, float)
+    abs_x: float = abs(value)
+    if (
+        abs_x == 0.0
+        or abs_x != abs_x
+        or abs_x == float("inf")
+        or (_F32_MIN_NORMAL <= abs_x <= _F32_MAX)
+    ):
+        return tl.float32
+    return tl.float64
+
+
+def _src_np_dtype(value: object) -> np.dtype:
+    """Infer the numpy dtype for a Python literal, matching Triton's to_tensor logic."""
+    return np.dtype(_get_np_dtype(_src_triton_dtype(value)))
+
+
+def _cast_np_dtype(triton_dtype: tl.core.dtype) -> np.dtype:
+    """Numpy dtype for semantic cast. Raises for exotic types without numpy equivalents."""
+    np_dt = _get_np_dtype(triton_dtype)
+    # _get_np_dtype maps bf16->uint16 and fp8->uint8 (storage types).
+    # For cast we need semantic types; bf16 is available via ml_dtypes.
+    if triton_dtype == tl.bfloat16:
+        if _ml_dtypes is None:
+            raise TypeError("constexpr.to(bfloat16) requires ml_dtypes to be installed")
+        return np.dtype(_ml_dtypes.bfloat16)
+    if np_dt in (np.uint8, np.uint16) and triton_dtype not in (
+        tl.uint8,
+        tl.uint16,
+        tl.int1,
+    ):
+        raise TypeError(
+            f"constexpr.to({triton_dtype}) is not supported in interpreter mode "
+            f"(no numpy-compatible semantic type for {triton_dtype})"
+        )
+    return np.dtype(np_dt)
+
+
+def _fp_downcast_rtz(value: float, dst_np_dtype: np.dtype) -> np.generic:
+    """Round-toward-zero float downcast by correcting rtne when it rounds away from zero."""
+    rtne_result = dst_np_dtype.type(value)
+    if abs(float(rtne_result)) > abs(value):
+        # rtne rounded away from zero -- subtract 1 ULP
+        storage = _RTZ_STORAGE[dst_np_dtype]
+        bits = np.frombuffer(
+            np.array([rtne_result], dtype=dst_np_dtype).tobytes(),
+            dtype=storage,
+        )[0]
+        bits -= np.array(1, dtype=storage)
+        return np.frombuffer(
+            np.array([bits], dtype=storage).tobytes(),
+            dtype=dst_np_dtype,
+        )[0]
+    return rtne_result
+
+
+def _typed_scalar_tensor(result: np.generic, dtype: tl.core.dtype) -> tl.core.tensor:
+    """Wrap a numpy scalar as a Triton interpreter tensor with an exact dtype."""
+    storage_np = _get_np_dtype(dtype)
+    arr = np.array([result])
+    if arr.dtype != storage_np:
+        # Semantic/storage dtype differ (e.g. ml_dtypes.bfloat16 -> uint16)
+        arr = arr.view(storage_np)
+    return tl.core.tensor(TensorHandle(arr, dtype), dtype)
+
+
+def _constexpr_to(self, dtype, fp_downcast_rounding=None, bitcast=False):
+    """Interpreter-mode implementation of constexpr.to(dtype).
+
+    Computes the cast with numpy directly (not via interpreter_semantic)
+    to avoid re-entering patched tl ops when a client like the sanitizer
+    is active.
+    """
+    value = self.value if not isinstance(self.value, tl.constexpr) else self.value.value
+    dtype = dtype.value if isinstance(dtype, tl.constexpr) else dtype
+    fp_downcast_rounding = (
+        fp_downcast_rounding.value
+        if isinstance(fp_downcast_rounding, tl.constexpr)
+        else fp_downcast_rounding
+    )
+    bitcast_val = bitcast.value if isinstance(bitcast, tl.constexpr) else bitcast
+
+    if bitcast_val:
+        src_triton = _src_triton_dtype(value)
+        src_bits = src_triton.primitive_bitwidth
+        dst_bits = dtype.primitive_bitwidth
+        if src_bits != dst_bits:
+            raise ValueError(
+                f"Cannot bitcast data-type of size {src_bits} to "
+                f"data-type of size {dst_bits}"
+            )
+        src_np = _src_np_dtype(value)
+        dst_np = np.dtype(_get_np_dtype(dtype))
+        raw = np.array([value], dtype=src_np).tobytes()
+        result = np.frombuffer(raw, dtype=dst_np)[0]
+    else:
+        dst_np = _cast_np_dtype(dtype)
+        src_np = _src_np_dtype(value)
+
+        if fp_downcast_rounding is not None:
+            _VALID_ROUNDING_MODES = ("rtne", "rtz")
+            if fp_downcast_rounding not in _VALID_ROUNDING_MODES:
+                raise ValueError(
+                    f"fp_downcast_rounding must be one of {_VALID_ROUNDING_MODES}, "
+                    f"got {fp_downcast_rounding!r}"
+                )
+            src_is_float = src_np.kind == "f"
+            dst_is_float = dst_np.kind == "f" or (
+                _ml_dtypes is not None and dst_np == np.dtype(_ml_dtypes.bfloat16)
+            )
+            if not (
+                dst_is_float and src_is_float and dst_np.itemsize < src_np.itemsize
+            ):
+                raise ValueError(
+                    f"fp_downcast_rounding is only valid for float-to-smaller-float casts, "
+                    f"got {src_np} -> {dst_np}"
+                )
+
+        if fp_downcast_rounding == "rtz":
+            result = _fp_downcast_rtz(value, dst_np)
+        else:
+            result = np.array([value], dtype=src_np).astype(dst_np)[0]
+
+    return _typed_scalar_tensor(result, dtype)
+
+
+def _constexpr_getattr(self, name):
+    """Proxy attribute access to the wrapped value for interpreter mode."""
+    return getattr(self.value, name)
 
 
 class _LangPatchScope:
@@ -55,6 +222,27 @@ class _LangPatchScope:
                 delattr(obj, name)
             else:
                 setattr(obj, name, original)
+
+
+def _patch_constexpr(scope: _LangPatchScope) -> None:
+    """Patch tl.constexpr with .to() and __getattr__ for interpreter mode."""
+    if not hasattr(tl.constexpr, "to"):
+        scope.set_attr(tl.constexpr, "to", _constexpr_to)
+    if not hasattr(tl.constexpr, "__getattr__"):
+        scope.set_attr(tl.constexpr, "__getattr__", _constexpr_getattr)
+
+
+def _normalize_constexpr_arg(arg):
+    """Wrap a kernel argument in tl.constexpr if it isn't already one.
+
+    None is left as-is because Triton APIs accept ``constexpr | None``
+    (e.g. ``reduce(..., dtype=None)``).
+    """
+    if isinstance(arg, tl.constexpr):
+        return arg
+    if arg is None:
+        return None
+    return tl.constexpr(arg)
 
 
 _LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": [], "nki_beta2": []}
@@ -325,6 +513,7 @@ def patch_lang(fn, backend, client_manager=None):
     if backend == "triton":
         scope = _triton_snapshot_scope(fn)
         triton_patch_lang(fn)
+        _patch_constexpr(scope)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
@@ -445,18 +634,24 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
     # Prepare call arguments
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
+    # grid_args keeps constexprs as raw host values (matching upstream Triton)
+    # so that grid lambdas see plain Python types, not tl.constexpr wrappers.
+    grid_args = {
+        name: (arg if name in self.constexprs else _implicit_cvt(arg))
+        for name, arg in args.items()
+    }
+    grid_args.pop("self", None)
     call_args = {}
     for name, arg in args.items():
         if name in self.constexprs:
-            call_args[name] = arg
-            ret = arg
+            ret = _normalize_constexpr_arg(arg)
         else:
             ret = _implicit_cvt(arg)
         client_manager.arg_callback(name, arg, ret)
         call_args[name] = ret
     call_args.pop("self", None)
     # Iterate through grid
-    grid = self.grid(call_args) if callable(self.grid) else self.grid
+    grid = self.grid(grid_args) if callable(self.grid) else self.grid
     assert len(grid) <= 3
     grid = grid + (1,) * (3 - len(grid))
 
