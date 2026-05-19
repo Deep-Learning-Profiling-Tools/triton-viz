@@ -36,6 +36,12 @@ class Config:
       subset of blocks to reduce profiling overhead.
     - profiler_disable_buffer_load_check: PROFILER_DISABLE_BUFFER_LOAD_CHECK,
       disables buffer load checks in the profiler.
+    - sanitizer_per_element_warn_threshold:
+      SANITIZER_PER_ELEMENT_WARN_THRESHOLD, element count above which the
+      sanitizer emits a UserWarning before falling back to per-element
+      address enumeration for non-unit-inner-stride tensors. Behavior is
+      unchanged; the warning just signals that the symbolic solver may slow
+      down. Set to 0 to disable the warning entirely.
     """
 
     def __init__(self) -> None:
@@ -62,6 +68,9 @@ class Config:
         )
         self.profiler_disable_buffer_load_check: bool = _is_one(
             "PROFILER_DISABLE_BUFFER_LOAD_CHECK"
+        )
+        self.sanitizer_per_element_warn_threshold: int = _get_int_env(
+            "SANITIZER_PER_ELEMENT_WARN_THRESHOLD", 8192, minimum=0
         )
 
 

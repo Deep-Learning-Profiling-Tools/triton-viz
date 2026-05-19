@@ -154,3 +154,41 @@ def get_physical_addr_from_tensor_slice(tensor: torch.Tensor) -> list[tuple[int,
             )
         )
     return segments
+
+
+def get_physical_addr_per_element(tensor: torch.Tensor) -> list[tuple[int, int]]:
+    """One (start, end) byte segment per logical element of ``tensor``.
+
+    Each segment covers exactly ``element_size()`` bytes, so the resulting
+    list precisely describes the view footprint — bytes between logical
+    elements are *not* covered. Stride-0 dims collapse to size 1 since they
+    alias the same memory for every index along that axis.
+
+    Use this when neither the storage-contiguous nor the inner-stride-equal-
+    to-one fast paths apply (e.g. a 1-D view with stride > 1).
+    """
+    dims = tensor.dim()
+    if dims == 0:
+        return [
+            (
+                tensor.data_ptr()
+                + int(tensor.storage_offset()) * tensor.element_size(),
+                tensor.data_ptr()
+                + int(tensor.storage_offset()) * tensor.element_size()
+                + tensor.element_size()
+                - 1,
+            )
+        ]
+
+    itemsize = tensor.element_size()
+    base = tensor.data_ptr()
+    storage_offset = int(tensor.storage_offset())
+    strides = [int(tensor.stride(d)) for d in range(dims)]
+    sizes = [1 if strides[d] == 0 else int(tensor.size(d)) for d in range(dims)]
+
+    segments = []
+    for idxs in itertools.product(*(range(s) for s in sizes)):
+        offset = storage_offset + sum(i * st for i, st in zip(idxs, strides))
+        start = base + offset * itemsize
+        segments.append((start, start + itemsize - 1))
+    return segments
