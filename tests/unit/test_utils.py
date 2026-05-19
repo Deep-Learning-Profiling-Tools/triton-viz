@@ -168,54 +168,51 @@ def test_tracer_without_oob_trace_source_uses_oob_line(use_decorator: bool):
     assert "load_callback" in tb_info.line_of_code
 
 
-def _relative_segments(tensor: torch.Tensor) -> list[tuple[int, int]]:
-    """Segments as (start, end) byte offsets relative to ``tensor.data_ptr()``."""
-    base = tensor.data_ptr()
-    return [(s - base, e - base) for s, e in get_physical_addr_per_element(tensor)]
+def _tensor_contiguous_1d() -> torch.Tensor:
+    return torch.tensor([10, 20, 30], dtype=torch.int32)
 
 
-def test_get_physical_addr_per_element_contiguous_1d():
-    """Contiguous 1-D tensor: each element occupies itemsize bytes back-to-back."""
-    t = torch.tensor([10, 20, 30], dtype=torch.int32)
-
-    assert _relative_segments(t) == [(0, 3), (4, 7), (8, 11)]
+def _tensor_strided_zero_offset() -> torch.Tensor:
+    return torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)[0::2]
 
 
-def test_get_physical_addr_per_element_strided_zero_offset():
-    """``base[0::2]`` view: segments at every other element, no offset shift."""
-    base_t = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
-    view = base_t[0::2]
-    assert view.storage_offset() == 0
-
-    # Three logical elements at byte offsets 0, 8, 16 of view.data_ptr().
-    assert _relative_segments(view) == [(0, 3), (8, 11), (16, 19)]
+def _tensor_strided_nonzero_offset() -> torch.Tensor:
+    # storage_offset=1 verifies we don't double-count it on top of data_ptr.
+    return torch.tensor([99, 10, 99, 11, 99, 12], dtype=torch.int32)[1::2]
 
 
-def test_get_physical_addr_per_element_strided_nonzero_offset():
-    """``base[1::2]``: storage_offset is non-zero; segments are still relative to
-    ``view.data_ptr()`` (i.e. start at 0), confirming we do not double-count
-    storage_offset on top of ``data_ptr``."""
-    base_t = torch.tensor([99, 10, 99, 11, 99, 12], dtype=torch.int32)
-    view = base_t[1::2]
-    assert view.storage_offset() == 1
-
-    assert _relative_segments(view) == [(0, 3), (8, 11), (16, 19)]
+def _tensor_broadcast_stride_zero() -> torch.Tensor:
+    # expand() produces stride-0 dim that must collapse to size 1.
+    return torch.arange(3, dtype=torch.int32).unsqueeze(0).expand(4, 3)
 
 
-def test_get_physical_addr_per_element_collapses_stride_zero():
-    """``expand``-ed dim (stride 0) collapses to size 1 — same memory regardless
-    of the broadcast extent."""
-    row = torch.arange(3, dtype=torch.int32)
-    view = row.unsqueeze(0).expand(4, 3)  # strides (0, 1), shape (4, 3)
-
-    # 4-way broadcast collapses, leaving the 3 inner elements only.
-    assert _relative_segments(view) == [(0, 3), (4, 7), (8, 11)]
+def _tensor_zero_dim() -> torch.Tensor:
+    return torch.tensor(42, dtype=torch.int32)
 
 
-def test_get_physical_addr_per_element_zero_dim():
-    """0-D tensor returns a single segment covering itemsize bytes."""
-    t = torch.tensor(42, dtype=torch.int32)
-    assert _relative_segments(t) == [(0, 3)]
+@pytest.mark.parametrize(
+    "make_tensor, expected",
+    [
+        (_tensor_contiguous_1d, [(0, 3), (4, 7), (8, 11)]),
+        (_tensor_strided_zero_offset, [(0, 3), (8, 11), (16, 19)]),
+        (_tensor_strided_nonzero_offset, [(0, 3), (8, 11), (16, 19)]),
+        (_tensor_broadcast_stride_zero, [(0, 3), (4, 7), (8, 11)]),
+        (_tensor_zero_dim, [(0, 3)]),
+    ],
+    ids=[
+        "contiguous_1d",
+        "strided_zero_offset",
+        "strided_nonzero_offset",
+        "broadcast_stride_zero",
+        "zero_dim",
+    ],
+)
+def test_get_physical_addr_per_element(make_tensor, expected):
+    """Segments are (start, end) byte offsets relative to ``data_ptr()``."""
+    t = make_tensor()
+    base = t.data_ptr()
+    relative = [(s - base, e - base) for s, e in get_physical_addr_per_element(t)]
+    assert relative == expected
 
 
 def test_undecorated_helper_captured_via_boundary_marker():
