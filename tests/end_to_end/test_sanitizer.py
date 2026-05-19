@@ -1303,9 +1303,9 @@ def strided_view_wrong_stride_kernel(bins_ptr, out_ptr, BLOCK: tl.constexpr):
 @pytest.fixture
 def _isolate_per_element_threshold():
     """Save and restore the per-element warning threshold."""
-    saved = config.sanitizer_per_element_warn_threshold
+    saved = config.symbolic_per_element_warn_threshold
     yield
-    config.sanitizer_per_element_warn_threshold = saved
+    config.symbolic_per_element_warn_threshold = saved
 
 
 def test_strided_view_oob_load():
@@ -1378,7 +1378,7 @@ def test_strided_view_between_element_oob():
 def test_strided_view_warns_on_large_numel(_isolate_per_element_threshold):
     """Per-element enumeration emits UserWarning above the threshold."""
     strided_view_sanitizer.records.clear()
-    config.sanitizer_per_element_warn_threshold = 1  # force a warning
+    config.symbolic_per_element_warn_threshold = 1  # force a warning
 
     vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
     bins_base = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
@@ -1392,3 +1392,41 @@ def test_strided_view_warns_on_large_numel(_isolate_per_element_threshold):
 
     # Warning path must not change correctness — no OOB with correct mask.
     assert len(strided_view_sanitizer.records) == 0
+
+
+# Dedicated sanitizer keeps this test independent of the shared symbolic cache.
+nonzero_offset_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=nonzero_offset_sanitizer)
+@triton.jit
+def nonzero_offset_load_kernel(
+    vals_ptr,
+    bins_ptr,
+    out_ptr,
+    L: tl.constexpr,
+    SV: tl.constexpr,
+    SB: tl.constexpr,
+):
+    offs = tl.arange(0, 4)
+    v = tl.load(vals_ptr + offs * SV, mask=offs < L, other=0)
+    b = tl.load(bins_ptr + offs * SB, mask=offs < L, other=-1)
+    tl.store(out_ptr + offs, v * 100 + b, mask=offs < L)
+
+
+def test_strided_view_nonzero_storage_offset_no_oob():
+    """Regression: a stride-2 view with non-zero ``storage_offset`` (e.g.
+    ``base[1::2]``) must not trip false-positive OOBs. Previously the helper
+    double-counted ``storage_offset`` and shifted every valid address."""
+    nonzero_offset_sanitizer.records.clear()
+
+    vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    bins_base = torch.tensor([99, 10, 99, 11, 99, 12], dtype=torch.int32)
+    bins = bins_base[1::2]  # storage_offset=1, stride=2, visible [10, 11, 12]
+    out = torch.empty((4,), dtype=torch.int32)
+
+    nonzero_offset_load_kernel[(1,)](
+        vals_base, bins, out, L=3, SV=vals_base.stride(0), SB=bins.stride(0)
+    )
+
+    assert len(nonzero_offset_sanitizer.records) == 0

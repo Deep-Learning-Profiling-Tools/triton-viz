@@ -2436,7 +2436,7 @@ class SymbolicClient(Client):
             # Non-unit inner stride (e.g. a 1-D ``tensor[::k]`` view):
             # enumerate one segment per element so the address check uses
             # precise view semantics (between-element bytes count as OOB).
-            threshold = cfg.sanitizer_per_element_warn_threshold
+            threshold = cfg.symbolic_per_element_warn_threshold
             if threshold > 0 and arg.numel() > threshold:
                 warnings.warn(
                     f"Tensor {name!r} has {arg.numel()} elements with "

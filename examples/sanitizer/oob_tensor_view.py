@@ -30,7 +30,7 @@ def oob_load_kernel(
     tl.store(out_ptr + offs, v * 100 + b, mask=offs < L)
 
 
-def test_oob_tensor_view():
+def main():
     vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
     bins_base = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
 
@@ -45,4 +45,5 @@ def test_oob_tensor_view():
     print(out)
 
 
-test_oob_tensor_view()
+if __name__ == "__main__":
+    main()
