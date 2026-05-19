@@ -179,6 +179,13 @@ def get_physical_addr_per_element(tensor: torch.Tensor) -> list[tuple[int, int]]
     strides = [int(tensor.stride(d)) for d in range(dims)]
     sizes = [1 if strides[d] == 0 else int(tensor.size(d)) for d in range(dims)]
 
+    # TODO(perf): the consumer OR's one Z3 clause per segment, so cost
+    # scales with numel. For stride>1 views the legal set can be expressed
+    # as a stride equation instead -- roughly
+    #   0 <= (addr - base) < numel * stride * itemsize
+    #   (addr - base) % (stride * itemsize) < itemsize
+    # generalising to N-D by combining per-axis constraints. That keeps
+    # the Z3 expression O(dims) instead of O(numel).
     segments = []
     for idxs in itertools.product(*(range(s) for s in sizes)):
         offset = sum(i * st for i, st in zip(idxs, strides))
