@@ -1027,6 +1027,39 @@ def test_non_contiguous_expanded_tensor():
     read_expanded_kernel[(M,)](x, out, x.stride(0), x.stride(1), M, N, BLOCK_N=8)
 
 
+# ======== Sliced View with Nonzero storage_offset Regression Test ===========
+
+
+inner_stride1_offset_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=inner_stride1_offset_sanitizer)
+@triton.jit
+def inner_stride1_offset_no_oob_kernel(x_ptr, out_ptr, L: tl.constexpr):
+    offs = tl.arange(0, 4)
+    x = tl.load(x_ptr + offs, mask=offs < L, other=0)
+    tl.store(out_ptr + offs, x, mask=offs < L)
+
+
+def test_inner_stride1_nonzero_storage_offset_no_oob():
+    """Sliced view with inner-stride 1 and nonzero storage_offset: reading
+    the inner-contiguous first row is legal and must not be reported as OOB.
+    Regression for get_physical_addr_from_tensor_slice() double-counting
+    storage_offset."""
+    inner_stride1_offset_sanitizer.records.clear()
+
+    base = torch.arange(20, dtype=torch.int32).reshape(4, 5)
+    x = base[1:3, 1:4]
+    # shape=(2, 3), stride=(5, 1), storage_offset=6
+    # First row is physically contiguous: x_ptr + {0, 1, 2}
+
+    out = torch.empty((4,), dtype=torch.int32)
+
+    inner_stride1_offset_no_oob_kernel[(1,)](x, out, L=3)
+
+    assert len(inner_stride1_offset_sanitizer.records) == 0
+
+
 # ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
 
 

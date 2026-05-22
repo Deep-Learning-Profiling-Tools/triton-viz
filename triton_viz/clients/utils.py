@@ -138,19 +138,21 @@ def get_physical_addr_from_tensor_slice(tensor: torch.Tensor) -> list[tuple[int,
     # Stride-0 dims access the same memory for all indices, so collapse to size 1
     outer_dims = [d for d in range(dims) if d != inner_dim]
 
+    itemsize = tensor.element_size()
+    base = tensor.data_ptr()
+    inner_dim_size = int(tensor.size(inner_dim))
+
     segments = []
     for idxs in itertools.product(
         *(range(1 if tensor.stride(d) == 0 else tensor.size(d)) for d in outer_dims)
     ):
-        offset = int(tensor.storage_offset()) + sum(
-            idx * int(tensor.stride(d)) for idx, d in zip(idxs, outer_dims)
-        )
-        inner_dim_size = int(tensor.size(inner_dim))
+        # tensor.data_ptr() already accounts for storage_offset, so offsets here
+        # are measured relative to data_ptr() — adding storage_offset would double-count.
+        offset = sum(idx * int(tensor.stride(d)) for idx, d in zip(idxs, outer_dims))
         segments.append(
             (
-                tensor.data_ptr() + offset * tensor.element_size(),
-                tensor.data_ptr()
-                + (offset + inner_dim_size - 1) * tensor.element_size(),
+                base + offset * itemsize,
+                base + (offset + inner_dim_size - 1) * itemsize,
             )
         )
     return segments
