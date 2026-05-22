@@ -43,6 +43,9 @@ class Config:
       non-unit-inner-stride tensors. Behavior is unchanged; the warning just
       signals that the symbolic solver may slow down. Set to 0 to disable
       the warning entirely.
+    - sanitizer_report_max_segments: SANITIZER_REPORT_MAX_SEGMENTS, max
+      number of address segments to list verbatim in the OOB report before
+      truncating to a head/tail summary. Affects display only (min 2).
     """
 
     def __init__(self) -> None:
@@ -72,6 +75,9 @@ class Config:
         )
         self.symbolic_per_element_warn_threshold: int = _get_int_env(
             "SYMBOLIC_PER_ELEMENT_WARN_THRESHOLD", 8192, minimum=0
+        )
+        self.sanitizer_report_max_segments: int = _get_int_env(
+            "SANITIZER_REPORT_MAX_SEGMENTS", 8, minimum=2
         )
 
 
