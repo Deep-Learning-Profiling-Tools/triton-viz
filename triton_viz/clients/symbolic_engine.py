@@ -1199,15 +1199,18 @@ class ReduceSymbolicExpr(SymbolicExpr):
         assert (
             input_shape
         ), "ReduceSymbolicExpr expects block input with non-empty shape"
-        # Resolve axis value
-        if isinstance(axis, int):
-            axis_val = axis
-        elif isinstance(axis, SymbolicExpr) and hasattr(axis, "to_py"):
-            axis_val = axis.to_py()
-        else:
-            axis_val = None
-        # Resolve keepdims value
-        keepdims_val = keepdims if isinstance(keepdims, bool) else bool(keepdims)
+        # Resolve axis/keepdims from the normalized children. Negative axes are
+        # valid Triton axes and must be interpreted relative to input rank.
+        axis_val = self.axis.to_py() if self.axis is not None else None
+        if axis_val is not None:
+            axis_val = int(axis_val)
+            if axis_val < 0:
+                axis_val += len(input_shape)
+            if axis_val < 0 or axis_val >= len(input_shape):
+                raise ValueError(
+                    f"Reduction axis {axis_val} is out of bounds for shape {self.input.shape}"
+                )
+        keepdims_val = bool(self.keepdims.to_py())
         if axis_val is not None:
             if keepdims_val:
                 output_shape = (
