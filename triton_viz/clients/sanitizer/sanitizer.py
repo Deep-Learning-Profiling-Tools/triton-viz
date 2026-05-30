@@ -10,6 +10,7 @@ from typing import (
 import sys
 
 from torch import Tensor
+from triton.tools.tensor_descriptor import TensorDescriptor
 from z3 import Not, sat
 from z3.z3 import BoolRef, IntNumRef
 
@@ -182,6 +183,18 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
     def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
         # TODO: init a reserved_args field per backend to filter out these args
         if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
+            if isinstance(arg, TensorDescriptor):
+                self.cache_args.append(
+                    (
+                        "TensorDescriptor",
+                        repr(arg.base),
+                        tuple(arg.shape),
+                        tuple(arg.strides),
+                        tuple(arg.block_shape),
+                        arg.padding,
+                    )
+                )
+                return
             self.cache_args.append(arg)
 
     def _cache_tensor_arg(self, arg: Tensor) -> None:
@@ -299,7 +312,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         ``_check_range_satisfiable`` for historical compatibility, and it
         doesn't distinguish reads vs writes at the Z3 level.
         """
-        del op_type, access_mode  # unused by sanitizer
         z3_addr, z3_constraints = expr.eval()
         if not self.loop_stack:
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)

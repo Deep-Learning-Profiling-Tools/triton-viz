@@ -179,6 +179,12 @@ loop_deferred_check_recorder: LoopDeferredCheckRecorder = LoopDeferredCheckRecor
     abort_on_error=False
 )
 sort_pointer_sanitizer: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
+tuple_pointer_cast_checker: SymbolicSanitizer = SymbolicSanitizer(
+    abort_on_error=False
+)
+tuple_pointer_item_checker: SymbolicSanitizer = SymbolicSanitizer(
+    abort_on_error=False
+)
 
 
 # ======== Kernels ===========
@@ -241,6 +247,30 @@ def sort_pointer_oob_kernel(out_ptr, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
     sorted_offsets = tl.sort(offs, 0, descending=True)
     tl.store(out_ptr + sorted_offsets, offs, mask=offs == 0)
+
+
+@triton_viz.trace(client=tuple_pointer_cast_checker)
+@triton.jit
+def pointer_tuple_cast_where_store_kernel(peer_ptrs):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, 1)
+    peer_ptr = peer_ptrs[0].to(tl.int64, bitcast=True)
+    zero_ptr = tl.zeros((1,), dtype=tl.int64)
+    selected_ptr = tl.where(pid == 0, peer_ptr, zero_ptr)
+    selected_ptr = selected_ptr.to(peer_ptrs[0].dtype, bitcast=True)
+    tl.store(selected_ptr + offs, tl.full((1,), 1.0, dtype=tl.float32))
+
+
+@triton_viz.trace(client=tuple_pointer_item_checker)
+@triton.jit
+def pointer_tuple_item_select_store_kernel(peer_ptrs, rank_ptr):
+    dst_rank = tl.load(rank_ptr)
+    dst_ptr = tl.zeros((1,), dtype=tl.int64).item()
+    for i in tl.static_range(2):
+        if dst_rank == i:
+            dst_ptr = peer_ptrs[i].to(tl.int64, bitcast=True)
+    dst_ptr = dst_ptr.to(peer_ptrs[0].dtype, bitcast=True)
+    tl.store(dst_ptr, 1.0)
 
 
 # ======== Indirect Load/Store Tests ===========
@@ -326,6 +356,29 @@ def test_sort_used_in_pointer_falls_back_to_eager_offsets():
     sort_pointer_oob_kernel[(1,)](out, BLOCK=8)
 
     assert sort_pointer_sanitizer.records
+
+
+def test_tuple_pointer_int_cast_uses_registered_tuple_ranges():
+    tuple_pointer_cast_checker.records.clear()
+
+    out0 = torch.empty((1,), dtype=torch.float32)
+    out1 = torch.empty((1,), dtype=torch.float32)
+
+    pointer_tuple_cast_where_store_kernel[(1,)]((out0, out1))
+
+    assert tuple_pointer_cast_checker.records == []
+
+
+def test_tuple_pointer_item_selection_uses_registered_tuple_ranges():
+    tuple_pointer_item_checker.records.clear()
+
+    out0 = torch.empty((1,), dtype=torch.float32)
+    out1 = torch.empty((1,), dtype=torch.float32)
+    rank = torch.tensor([1], dtype=torch.int32)
+
+    pointer_tuple_item_select_store_kernel[(1,)]((out0, out1), rank)
+
+    assert tuple_pointer_item_checker.records == []
 
 
 # Dedicated sanitizer for nested loop regression test

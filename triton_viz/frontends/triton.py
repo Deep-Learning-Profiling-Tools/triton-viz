@@ -127,6 +127,8 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "create_fp_to_fp": FpToFp,
         "create_umulhi": Umulhi,
         "create_bitcast": Bitcast,
+        "create_ptr_to_int": CastImpl,
+        "create_int_to_ptr": CastImpl,
         "create_atomic_cas": AtomicCas,
         "create_atomic_rmw": AtomicRMW,
     },
