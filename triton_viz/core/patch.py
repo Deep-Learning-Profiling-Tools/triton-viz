@@ -22,6 +22,7 @@ from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
     interpreter_builder,
+    _patch_builtin,
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
 from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
@@ -114,6 +115,18 @@ def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
         _capture_builtin_attrs(scope, tl.core.tensor_descriptor_base)
 
     return scope
+
+
+def _triton_extra_builtin_modules() -> tuple[Any, ...]:
+    modules = []
+    extra = getattr(tl, "extra", None)
+    if extra is None:
+        return ()
+    for name in ("cuda", "hip"):
+        module = getattr(extra, name, None)
+        if module is not None:
+            modules.append(module)
+    return tuple(modules)
 
 
 def _pop_lang_patch_scope(backend: str) -> Any | None:
@@ -325,6 +338,8 @@ def patch_lang(fn, backend, client_manager=None):
     if backend == "triton":
         scope = _triton_snapshot_scope(fn)
         triton_patch_lang(fn)
+        for module in _triton_extra_builtin_modules():
+            _patch_builtin(module, interpreter_builder, scope)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
@@ -423,6 +438,7 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
         return
 
     builder = OPERATION_REGISTRY[backend].builder
+    launch_num_warps = kwargs.get("num_warps", 4)
 
     # Removes not used reserved keywords from kwargs
     # Triton doesn't support keyword-only, variable positional or variable keyword arguments
@@ -511,10 +527,18 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
 
         start_time = time.time()
 
-    if max_workers == 1:
-        run_grid_loops_1thread(grid)
-    else:
-        run_grid_loops(grid)
+    old_num_warps = getattr(builder.options, "num_warps", _MISSING)
+    object.__setattr__(builder.options, "num_warps", launch_num_warps)
+    try:
+        if max_workers == 1:
+            run_grid_loops_1thread(grid)
+        else:
+            run_grid_loops(grid)
+    finally:
+        if old_num_warps is _MISSING:
+            object.__delattr__(builder.options, "num_warps")
+        else:
+            object.__setattr__(builder.options, "num_warps", old_num_warps)
 
     if cfg.enable_timing:
         end_time = time.time()
