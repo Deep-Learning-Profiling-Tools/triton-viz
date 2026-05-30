@@ -1413,5 +1413,5 @@ def test_strided_view_warns_on_large_numel(_isolate_per_element_threshold):
             vals_base, bins, out, L=3, SV=vals_base.stride(0), SB=bins.stride(0)
         )
 
-    # Warning path must not change correctness — no OOB with correct mask.
+    # Warning path must not change correctness -- no OOB with correct mask.
     assert len(strided_view_sanitizer.records) == 0

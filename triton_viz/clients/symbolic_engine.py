@@ -2449,6 +2449,30 @@ class SymbolicClient(Client):
         """Called from ``arg_callback`` after a tensor is registered."""
         pass
 
+    def _tensor_physical_addresses(
+        self, name: str, arg: Tensor
+    ) -> list[tuple[int, int, Tensor]]:
+        if arg.is_contiguous() or check_storage_contiguous(arg):
+            start = arg.data_ptr()
+            end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
+            return [(start, end, arg)]
+
+        if check_inner_stride_equal_to_one(arg):
+            return [
+                (start, end, arg)
+                for start, end in get_physical_addr_from_tensor_slice(arg)
+            ]
+
+        threshold = cfg.symbolic_per_element_warn_threshold
+        if threshold > 0 and arg.numel() > threshold:
+            warnings.warn(
+                f"Tensor {name!r} has {arg.numel()} elements with "
+                "non-unit inner stride; per-element enumeration may "
+                "slow the symbolic solver significantly.",
+                stacklevel=2,
+            )
+        return [(start, end, arg) for start, end in get_physical_addr_per_element(arg)]
+
     def _clear_cache(self) -> None:
         """Extra cache state to clear inside ``post_run_callback``."""
         pass
@@ -2475,30 +2499,7 @@ class SymbolicClient(Client):
 
         if isinstance(arg, TensorWrapper):
             arg = arg.base
-        if arg.is_contiguous() or check_storage_contiguous(arg):
-            start = arg.data_ptr()
-            end = arg.data_ptr() + (arg.numel() - 1) * arg.element_size()
-            tensor_physical_addresses = [(start, end, arg)]
-        elif check_inner_stride_equal_to_one(arg):
-            tensor_physical_addresses = [
-                (start, end, arg)
-                for start, end in get_physical_addr_from_tensor_slice(arg)
-            ]
-        else:
-            # Non-unit inner stride (e.g. a 1-D ``tensor[::k]`` view):
-            # enumerate one segment per element so the address check uses
-            # precise view semantics (between-element bytes count as OOB).
-            threshold = cfg.symbolic_per_element_warn_threshold
-            if threshold > 0 and arg.numel() > threshold:
-                warnings.warn(
-                    f"Tensor {name!r} has {arg.numel()} elements with "
-                    "non-unit inner stride; per-element enumeration may "
-                    "slow the symbolic solver significantly.",
-                    stacklevel=2,
-                )
-            tensor_physical_addresses = [
-                (start, end, arg) for start, end in get_physical_addr_per_element(arg)
-            ]
+        tensor_physical_addresses = self._tensor_physical_addresses(name, arg)
         self._record_tensor_name(arg, name)
         self._cache_tensor_arg(arg)
         self.tensors.append(arg)
