@@ -1131,6 +1131,29 @@ def test_inner_stride1_nonzero_storage_offset_no_oob():
     assert len(inner_stride1_offset_sanitizer.records) == 0
 
 
+cumsum_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=cumsum_sanitizer)
+@triton.jit
+def cumsum_indexed_store_kernel(active_ptr, out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    active = tl.load(active_ptr + offs)
+    write_idx = tl.cumsum(active, 0) - 1
+    tl.store(out_ptr + write_idx, active)
+
+
+def test_sanitizer_supports_data_dependent_cumsum_index():
+    cumsum_sanitizer.records.clear()
+
+    active = torch.ones((8,), dtype=torch.int32)
+    out = torch.empty_like(active)
+
+    cumsum_indexed_store_kernel[(1,)](active, out, BLOCK=active.numel())
+
+    assert len(cumsum_sanitizer.records) == 0
+
+
 # ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
 
 

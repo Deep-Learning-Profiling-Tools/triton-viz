@@ -1324,10 +1324,23 @@ class CumsumSymbolicExpr(SymbolicExpr):
         self.add_child("input", input)
         self.add_child("axis", axis)
         self.add_child("reverse", reverse)
-        self.dtype, self.shape = self._unpack_dtype(dtype)
+        dtype = self.input.dtype if dtype is None else dtype
+        self.dtype, self.shape = self._unpack_dtype(dtype, self.input.shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+
+    def concretize(self) -> Any:
+        input_concrete = self.input.concretize()
+        axis = int(self.axis.to_py())
+        reverse = bool(self.reverse.to_py())
+        data = input_concrete.data
+        if reverse:
+            data = np.flip(data, axis=axis)
+        out = np.cumsum(data, axis=axis)
+        if reverse:
+            out = np.flip(out, axis=axis)
+        return TensorHandle(out.astype(_get_np_dtype(input_concrete.dtype)), input_concrete.dtype)
 
 
 class MakeBlockPtrSymbolicExpr(SymbolicExpr):
@@ -2123,6 +2136,9 @@ class SymbolicClient(Client):
         if expr.has_op("sort"):
             self._on_data_dependent_value()
             expr = expr.replace_subtree("sort")
+        if expr.has_op("cumsum"):
+            self._on_data_dependent_value()
+            expr = expr.replace_subtree("cumsum")
         if expr.has_op("load"):
             self._on_data_dependent_value()
             expr = expr.replace_subtree("load")
