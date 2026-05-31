@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
 import time
-from functools import partial, partialmethod
+from functools import partialmethod
 import warnings
 
 from .config import config as cfg
@@ -37,7 +37,6 @@ from ..frontends.base import AdapterResult, OPERATION_REGISTRY
 
 
 _MISSING = object()
-_INLINE_ASM_APPROXIMATION_WARNED = False
 
 
 class _LangPatchScope:
@@ -131,43 +130,37 @@ def _triton_extra_builtin_modules() -> tuple[Any, ...]:
     return tuple(modules)
 
 
-def _warn_inline_asm_approximation_once() -> None:
-    global _INLINE_ASM_APPROXIMATION_WARNED
-    if _INLINE_ASM_APPROXIMATION_WARNED:
-        return
-    _INLINE_ASM_APPROXIMATION_WARNED = True
-    warnings.warn(
-        "Triton inline assembly is approximated in trace mode by returning "
-        "input tensor values; traced values may differ from the numeric result "
-        "of the real inline assembly.",
-        RuntimeWarning,
-        stacklevel=3,
-    )
-
-
-def _inline_asm_placeholder_result(args: Any, dtype: Any) -> Any | None:
-    _warn_inline_asm_approximation_once()
-    if isinstance(dtype, (list, tuple)):
-        # Just return the first argument for simplicity
-        return tuple(args[0] for _ in dtype)
-    return args[0]
-
-
 def _patch_triton_inline_asm(scope: _LangPatchScope) -> None:
+    warned = False
 
-    inline_asm_elementwise_fallback = partial(
-        lambda _placeholder,
+    def _warn_inline_asm_approximation_once() -> None:
+        nonlocal warned
+        if warned:
+            return
+        warned = True
+        warnings.warn(
+            "Triton inline assembly is approximated in trace mode by returning "
+            "input tensor values; traced values may differ from the numeric result "
+            "of the real inline assembly.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    def _inline_asm_elementwise_fallback(
         asm,
         constraints,
         args,
         dtype,
         is_pure,
         pack,
-        **kwargs: _placeholder(args, dtype),
-        _inline_asm_placeholder_result,
-    )
+        **kwargs,
+    ):
+        _warn_inline_asm_approximation_once()
+        if isinstance(dtype, (list, tuple)):
+            return tuple(args[0].to(_dtype) for _dtype in dtype)
+        return args[0]
 
-    scope.set_attr(tl, "inline_asm_elementwise", inline_asm_elementwise_fallback)
+    scope.set_attr(tl, "inline_asm_elementwise", _inline_asm_elementwise_fallback)
 
 
 def _pop_lang_patch_scope(backend: str) -> Any | None:
