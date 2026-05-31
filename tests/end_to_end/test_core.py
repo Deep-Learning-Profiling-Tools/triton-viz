@@ -76,9 +76,7 @@ def test_trace_patches_extra_cuda_builtins():
 
     out = torch.empty((128,), dtype=torch.int32)
     extra_cuda_builtin_kernel[(1,)](out, num_warps=4)
-    torch.testing.assert_close(
-        out, torch.arange(128, dtype=torch.int32)
-    )
+    torch.testing.assert_close(out, torch.arange(128, dtype=torch.int32))
 
 
 # ======== Nested JIT Call Tests =========
