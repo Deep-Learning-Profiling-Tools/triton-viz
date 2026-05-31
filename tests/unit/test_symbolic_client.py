@@ -14,6 +14,7 @@ from typing import cast
 import triton.language as tl
 
 from triton_viz.clients.symbolic_engine import (
+    SymbolicClient,
     SymbolicExpr,
     ConstSymbolicExpr,
     ReduceSymbolicExpr,
@@ -21,6 +22,7 @@ from triton_viz.clients.symbolic_engine import (
     StoreSymbolicExpr,
     _range_to_iterator_constraint,
 )
+from triton_viz.core.data import Sort
 from z3.z3 import ArithRef, BoolRef, IntNumRef
 from z3 import Solver, Int, sat
 
@@ -506,6 +508,26 @@ def test_reduce_shape_max_min():
     for op in ("max", "min"):
         reduced = ReduceSymbolicExpr(op, inp, axis=1)
         assert reduced.shape == (4,), f"op={op}: expected (4,), got {reduced.shape}"
+
+
+def test_symbolic_sort_overrider_preserves_input_shape_and_dtype():
+    class DummySymbolicClient(SymbolicClient):
+        def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+            return False
+
+        def post_warmup_callback(self, jit_fn, ret) -> None:
+            pass
+
+    inp = _make_block_expr(tl.float32, [4, 8])
+    callback = DummySymbolicClient().register_op_callback(Sort).op_overrider
+
+    assert callback is not None
+    result = callback(inp, dim=1, descending=True, stable=True)
+
+    assert result is not inp
+    assert result.has_op("sort")
+    assert result.dtype == tl.float32
+    assert result.shape == (4, 8)
 
 
 # ======== LoadSymbolicExpr dtype Tests ===========
