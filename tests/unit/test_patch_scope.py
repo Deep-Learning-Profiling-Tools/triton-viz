@@ -1,9 +1,13 @@
 import pytest
+import warnings
 
 import triton.language as tl
 
 from triton_viz.core import patch as patch_mod
-from triton_viz.core.patch import _triton_snapshot_scope
+from triton_viz.core.patch import (
+    _inline_asm_placeholder_result,
+    _triton_snapshot_scope,
+)
 
 
 def _dummy_kernel():
@@ -72,3 +76,32 @@ def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
         scope.restore()
 
     assert getattr(descriptor, attr) is original
+
+
+def test_inline_asm_placeholder_returns_inputs_and_warns_once(monkeypatch):
+    monkeypatch.setattr(patch_mod, "_INLINE_ASM_APPROXIMATION_WARNED", False)
+    a = object()
+    b = object()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+
+        assert _inline_asm_placeholder_result([a, b], tl.int32) is a
+        tuple_result = _inline_asm_placeholder_result(
+            [a, b], (tl.int32, tl.float32, tl.int1)
+        )
+        assert tuple_result == (a, b, a)
+
+    assert len(caught) == 1
+    assert "inline assembly is approximated" in str(caught[0].message)
+
+
+def test_inline_asm_placeholder_defers_without_inputs(monkeypatch):
+    monkeypatch.setattr(patch_mod, "_INLINE_ASM_APPROXIMATION_WARNED", False)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+
+        assert _inline_asm_placeholder_result([], tl.int32) is None
+
+    assert caught == []
