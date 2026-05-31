@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue, Empty
 import threading
 import time
-from functools import partialmethod
+from functools import partial, partialmethod
 import warnings
 
 from .config import config as cfg
@@ -146,41 +146,21 @@ def _warn_inline_asm_approximation_once() -> None:
 
 
 def _inline_asm_placeholder_result(args: Any, dtype: Any) -> Any | None:
-    if not args:
-        return None
-
     _warn_inline_asm_approximation_once()
     if isinstance(dtype, (list, tuple)):
-        return tuple(args[idx % len(args)] for idx, _ in enumerate(dtype))
+        return tuple(args[idx] for idx, _ in enumerate(dtype))
     return args[0]
 
 
 def _patch_triton_inline_asm(scope: _LangPatchScope) -> None:
-    patched_inline_asm = tl.inline_asm_elementwise
+    inline_asm_elementwise_fallback = partial(
+        lambda _placeholder, asm, constraints, args, dtype, is_pure, pack, **kwargs: _placeholder(
+            args, dtype
+        ),
+        _inline_asm_placeholder_result,
+    )
 
-    def _inline_asm_elementwise_fallback(
-        asm,
-        constraints,
-        args,
-        dtype,
-        is_pure,
-        pack,
-        **kwargs,
-    ):
-        placeholder = _inline_asm_placeholder_result(args, dtype)
-        if placeholder is not None:
-            return placeholder
-        return patched_inline_asm(
-            asm,
-            constraints,
-            args,
-            dtype,
-            is_pure,
-            pack,
-            **kwargs,
-        )
-
-    scope.set_attr(tl, "inline_asm_elementwise", _inline_asm_elementwise_fallback)
+    scope.set_attr(tl, "inline_asm_elementwise", inline_asm_elementwise_fallback)
 
 
 def _pop_lang_patch_scope(backend: str) -> Any | None:
