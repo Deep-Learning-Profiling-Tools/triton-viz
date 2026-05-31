@@ -154,9 +154,14 @@ def _inline_asm_placeholder_result(args: Any, dtype: Any) -> Any | None:
 
 def _patch_triton_inline_asm(scope: _LangPatchScope) -> None:
     inline_asm_elementwise_fallback = partial(
-        lambda _placeholder, asm, constraints, args, dtype, is_pure, pack, **kwargs: _placeholder(
-            args, dtype
-        ),
+        lambda _placeholder,
+        asm,
+        constraints,
+        args,
+        dtype,
+        is_pure,
+        pack,
+        **kwargs: _placeholder(args, dtype),
         _inline_asm_placeholder_result,
     )
 
