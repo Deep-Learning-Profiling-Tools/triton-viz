@@ -68,22 +68,17 @@ def test_unpatch_lang_restores_builtins():
 
 
 def test_trace_patches_extra_cuda_builtins():
-    if not torch.cuda.is_available():
-        pytest.skip("cuda required for triton kernel execution")
-
     @triton_viz.trace("sanitizer")
     @triton.jit
     def extra_cuda_builtin_kernel(out):
         offs = tl.arange(0, tl.extra.cuda.num_threads())
         tl.store(out + offs, offs)
 
-    out = torch.empty((128,), device="cuda", dtype=torch.int32)
+    out = torch.empty((128,), dtype=torch.int32)
     extra_cuda_builtin_kernel[(1,)](out, num_warps=4)
-    if extra_cuda_builtin_kernel.jit_fn is not None:
-        extra_cuda_builtin_kernel.jit_fn[(1,)](out, num_warps=4)
-        torch.testing.assert_close(
-            out, torch.arange(128, device="cuda", dtype=torch.int32)
-        )
+    torch.testing.assert_close(
+        out, torch.arange(128, dtype=torch.int32)
+    )
 
 
 # ======== Nested JIT Call Tests =========
