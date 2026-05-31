@@ -93,8 +93,9 @@ def test_inline_asm_patch_returns_inputs_and_warns_once():
 
         patch_mod.patch_lang(_dummy_kernel, "triton")
         try:
-            assert (
-                tl.inline_asm_elementwise("", "", [a, b], tl.int32, True, 1) is a
+            assert tl.inline_asm_elementwise("", "", [a, b], tl.int32, True, 1) == (
+                "a",
+                tl.int32,
             )
             tuple_result = tl.inline_asm_elementwise(
                 "", "", [a, b], (tl.int32, tl.float32, tl.int1), True, 1
@@ -107,7 +108,7 @@ def test_inline_asm_patch_returns_inputs_and_warns_once():
         finally:
             patch_mod.unpatch_lang("triton")
 
-    assert a.cast_dtypes == [tl.int32, tl.float32, tl.int1]
+    assert a.cast_dtypes == [tl.int32, tl.int32, tl.float32, tl.int1]
     assert b.cast_dtypes == []
     assert len(caught) == 1
     assert "inline assembly is approximated" in str(caught[0].message)

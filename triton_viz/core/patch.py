@@ -158,7 +158,7 @@ def _patch_triton_inline_asm(scope: _LangPatchScope) -> None:
         _warn_inline_asm_approximation_once()
         if isinstance(dtype, (list, tuple)):
             return tuple(args[0].to(_dtype) for _dtype in dtype)
-        return args[0]
+        return args[0].to(dtype)
 
     scope.set_attr(tl, "inline_asm_elementwise", _inline_asm_elementwise_fallback)
 
