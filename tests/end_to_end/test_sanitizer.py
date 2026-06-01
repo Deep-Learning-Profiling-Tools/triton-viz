@@ -1027,6 +1027,126 @@ def test_non_contiguous_expanded_tensor():
     read_expanded_kernel[(M,)](x, out, x.stride(0), x.stride(1), M, N, BLOCK_N=8)
 
 
+# ======== Sliced View with Nonzero storage_offset Regression Test ===========
+
+
+inner_stride1_offset_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=inner_stride1_offset_sanitizer)
+@triton.jit
+def inner_stride1_offset_no_oob_kernel(x_ptr, out_ptr, L: tl.constexpr):
+    offs = tl.arange(0, 4)
+    x = tl.load(x_ptr + offs, mask=offs < L, other=0)
+    tl.store(out_ptr + offs, x, mask=offs < L)
+
+
+def test_inner_stride1_nonzero_storage_offset_no_oob():
+    """Sliced view with inner-stride 1 and nonzero storage_offset: reading
+    the inner-contiguous first row is legal and must not be reported as OOB.
+    Regression for get_physical_addr_from_tensor_slice() double-counting
+    storage_offset."""
+    inner_stride1_offset_sanitizer.records.clear()
+
+    base = torch.arange(20, dtype=torch.int32).reshape(4, 5)
+    x = base[1:3, 1:4]
+    # shape=(2, 3), stride=(5, 1), storage_offset=6
+    # First row is physically contiguous: x_ptr + {0, 1, 2}
+
+    out = torch.empty((4,), dtype=torch.int32)
+
+    inner_stride1_offset_no_oob_kernel[(1,)](x, out, L=3)
+
+    assert len(inner_stride1_offset_sanitizer.records) == 0
+
+
+# ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
+
+
+data_dep_div_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=data_dep_div_sanitizer)
+@triton.jit
+def data_dep_loop_div_kernel(Lens, Out, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    seq_len = tl.load(Lens + pid)
+    # integer division of a loaded value produces a SymbolicExpr
+    num_blocks = (seq_len + BLOCK - 1) // BLOCK
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    for i in range(0, num_blocks):
+        acc += 1.0
+    tl.store(Out + pid * BLOCK + tl.arange(0, BLOCK), acc)
+
+
+def test_data_dependent_loop_bound_div():
+    """
+    Data-dependent loop bound via integer division of a loaded value
+    must not crash the symbolic engine (e.g. 'to_py must be implemented
+    by subclasses').
+    """
+    data_dep_div_sanitizer.records.clear()
+
+    N = 4
+    BLOCK = 16
+    lens = torch.tensor([48, 32, 64, 16], dtype=torch.int32)
+    out = torch.empty(N, BLOCK)
+
+    data_dep_loop_div_kernel[(N,)](lens, out, BLOCK=BLOCK)
+
+    assert (
+        len(data_dep_div_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(data_dep_div_sanitizer.records)}"
+
+
+# ======== Data-Dependent Loop Bound (tl.cdiv) Tests ===========
+
+
+cdiv_loop_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=cdiv_loop_sanitizer)
+@triton.jit
+def cdiv_loop_bound_kernel(
+    X, Out, seqlen, chunk_size, BLOCK_CS: tl.constexpr, BLOCK_N: tl.constexpr
+):
+    pid_m = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    # min of runtime values — produces a symbolic expr involving pid
+    chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
+    # tl.cdiv on that value → idiv in symbolic tree
+    num_iters = tl.cdiv(chunk_size_limit, BLOCK_CS)
+    offs = tl.arange(0, BLOCK_N)
+    acc = tl.zeros([BLOCK_N], dtype=tl.float32)
+    for cs in range(0, num_iters):
+        acc += tl.load(X + offs, mask=offs < BLOCK_N)
+    tl.store(Out + pid_m * BLOCK_N + offs, acc)
+
+
+def test_data_dependent_cdiv_loop_bound():
+    """
+    tl.cdiv on a runtime value used as a loop bound must not crash the
+    symbolic engine with 'NotImplementedError: Concretize for op idiv'.
+    """
+    cdiv_loop_sanitizer.records.clear()
+
+    seqlen = 64
+    chunk_size = 32
+    BLOCK_CS = 16
+    BLOCK_N = 16
+    nchunks = seqlen // chunk_size
+    x = torch.ones(BLOCK_N)
+    out = torch.empty(2, BLOCK_N)
+
+    cdiv_loop_bound_kernel[(2, nchunks)](
+        x, out, seqlen, chunk_size, BLOCK_CS=BLOCK_CS, BLOCK_N=BLOCK_N
+    )
+
+    assert (
+        len(cdiv_loop_sanitizer.records) == 0
+    ), f"Expected no OOB records, got {len(cdiv_loop_sanitizer.records)}"
+
+
 # ======== TensorWrapper Regression Test ===========
 
 
@@ -1180,3 +1300,100 @@ def test_reinterpret_tensor_wrapper():
     x = torch.ones(N, dtype=torch.float16, device="cpu")
     y = torch.empty(N, dtype=torch.float16, device="cpu")
     copy_kernel[(1,)](triton.reinterpret(x, tl.float16), y, N, BLOCK=64)
+
+
+# ======== Strided Tensor View OOB Tests (triton-lang/triton#10336) ===========
+
+
+strided_view_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=strided_view_sanitizer)
+@triton.jit
+def strided_view_oob_load_kernel(
+    vals_ptr,
+    bins_ptr,
+    out_ptr,
+    L: tl.constexpr,
+    SV: tl.constexpr,
+    SB: tl.constexpr,
+):
+    offs = tl.arange(0, 8)
+    v = tl.load(vals_ptr + offs * SV, mask=offs < L, other=0)
+    b = tl.load(bins_ptr + offs * SB, mask=offs < L, other=-1)  # OOB HERE!
+    tl.store(out_ptr + offs, v * 100 + b, mask=offs < L)
+
+
+@pytest.fixture
+def _isolate_per_element_threshold():
+    """Save and restore the per-element warning threshold."""
+    saved = config.symbolic_per_element_warn_threshold
+    yield
+    config.symbolic_per_element_warn_threshold = saved
+
+
+def test_strided_view_oob_load():
+    """
+    Regression for triton-lang/triton#10336.
+
+    A masked tl.load with ``mask = offs < L`` reads past the underlying
+    storage when L exceeds the strided view's element count. The JIT path
+    silently performs the wild pointer read; the sanitizer should detect it.
+
+    Setup:
+      - bins_base has 5 int32 elements (20 bytes of storage).
+      - bins = bins_base[0::2] is a view of 3 elements with stride 2.
+      - L=4 makes the mask true for offs=3, so the kernel issues a load at
+        bins_ptr + 3*2 = bins_base[6], past the underlying storage.
+    """
+    strided_view_sanitizer.records.clear()
+
+    vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    bins_base = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
+
+    vals = vals_base
+    bins = bins_base[0::2]  # visible values [10, 11, 12], stride=2
+    out = torch.empty((4,), dtype=torch.int32)
+
+    strided_view_oob_load_kernel[(1,)](
+        vals, bins, out, L=4, SV=vals.stride(0), SB=bins.stride(0)
+    )
+
+    assert len(strided_view_sanitizer.records) > 0, "Expected OOB to be detected"
+
+
+def test_strided_view_correct_mask_no_oob():
+    """Correctly-masked access on a stride-2 view must not produce OOB."""
+    strided_view_sanitizer.records.clear()
+
+    vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    bins_base = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
+
+    bins = bins_base[0::2]
+    out = torch.empty((4,), dtype=torch.int32)
+
+    # L=3 matches bins.numel(); mask excludes the would-be OOB offset.
+    strided_view_oob_load_kernel[(1,)](
+        vals_base, bins, out, L=3, SV=vals_base.stride(0), SB=bins.stride(0)
+    )
+
+    assert len(strided_view_sanitizer.records) == 0
+
+
+def test_strided_view_warns_on_large_numel(_isolate_per_element_threshold):
+    """Per-element enumeration emits UserWarning above the threshold."""
+    strided_view_sanitizer.records.clear()
+    config.symbolic_per_element_warn_threshold = 1  # force a warning
+
+    vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    bins_base = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
+    bins = bins_base[0::2]
+    out = torch.empty((4,), dtype=torch.int32)
+
+    with pytest.warns(UserWarning, match="non-unit inner stride"):
+        strided_view_oob_load_kernel[(1,)](
+            vals_base, bins, out, L=3, SV=vals_base.stride(0), SB=bins.stride(0)
+        )
+
+    # Warning path must not change correctness — no OOB with correct mask.
+    assert len(strided_view_sanitizer.records) == 0

@@ -126,6 +126,14 @@ def check_inner_stride_equal_to_one(tensor: torch.Tensor):
 
 
 def get_physical_addr_from_tensor_slice(tensor: torch.Tensor) -> list[tuple[int, int]]:
+    """One contiguous byte segment per outer-index tuple, covering the run of
+    ``inner_dim_size`` elements along the dim whose stride is 1.
+
+    Segments are byte-inclusive ``(start, end)`` ranges, matching the
+    convention used by :func:`get_physical_addr_per_element`. ``data_ptr()``
+    already points at the view's element-0 address (it folds in
+    ``storage_offset``), so element offsets are computed relative to it.
+    """
     non_zero = [s for s in tensor.stride() if s != 0]
     if len(non_zero) == 0 or sorted(non_zero)[0] != 1:
         raise ValueError("inner dim must be contiguous!")
@@ -137,20 +145,56 @@ def get_physical_addr_from_tensor_slice(tensor: torch.Tensor) -> list[tuple[int,
     )
     # Stride-0 dims access the same memory for all indices, so collapse to size 1
     outer_dims = [d for d in range(dims) if d != inner_dim]
+    itemsize = tensor.element_size()
+    base = tensor.data_ptr()
+    inner_dim_size = int(tensor.size(inner_dim))
 
     segments = []
     for idxs in itertools.product(
         *(range(1 if tensor.stride(d) == 0 else tensor.size(d)) for d in outer_dims)
     ):
-        offset = int(tensor.storage_offset()) + sum(
-            idx * int(tensor.stride(d)) for idx, d in zip(idxs, outer_dims)
-        )
-        inner_dim_size = int(tensor.size(inner_dim))
-        segments.append(
-            (
-                tensor.data_ptr() + offset * tensor.element_size(),
-                tensor.data_ptr()
-                + (offset + inner_dim_size - 1) * tensor.element_size(),
-            )
-        )
+        # tensor.data_ptr() already accounts for storage_offset, so offsets here
+        # are measured relative to data_ptr().
+        offset = sum(idx * int(tensor.stride(d)) for idx, d in zip(idxs, outer_dims))
+        start = base + offset * itemsize
+        end = start + inner_dim_size * itemsize - 1
+        segments.append((start, end))
+    return segments
+
+
+def get_physical_addr_per_element(tensor: torch.Tensor) -> list[tuple[int, int]]:
+    """One (start, end) byte segment per logical element of ``tensor``.
+
+    Each segment covers exactly ``element_size()`` bytes, so the resulting
+    list precisely describes the view footprint — bytes between logical
+    elements are *not* covered. Stride-0 dims collapse to size 1 since they
+    alias the same memory for every index along that axis.
+
+    Use this when neither the storage-contiguous nor the inner-stride-equal-
+    to-one fast paths apply (e.g. a 1-D view with stride > 1).
+    """
+    itemsize = tensor.element_size()
+    # ``tensor.data_ptr()`` already points at the view's element-0 address
+    # (i.e. it folds in ``storage_offset``), so element indices are measured
+    # *relative to* it and must not add storage_offset back in.
+    base = tensor.data_ptr()
+    dims = tensor.dim()
+    if dims == 0:
+        return [(base, base + itemsize - 1)]
+
+    strides = [int(tensor.stride(d)) for d in range(dims)]
+    sizes = [1 if strides[d] == 0 else int(tensor.size(d)) for d in range(dims)]
+
+    # TODO(perf): the consumer OR's one Z3 clause per segment, so cost
+    # scales with numel. For stride>1 views the legal set can be expressed
+    # as a stride equation instead -- roughly
+    #   0 <= (addr - base) < numel * stride * itemsize
+    #   (addr - base) % (stride * itemsize) < itemsize
+    # generalising to N-D by combining per-axis constraints. That keeps
+    # the Z3 expression O(dims) instead of O(numel).
+    segments = []
+    for idxs in itertools.product(*(range(s) for s in sizes)):
+        offset = sum(i * st for i, st in zip(idxs, strides))
+        start = base + offset * itemsize
+        segments.append((start, start + itemsize - 1))
     return segments
