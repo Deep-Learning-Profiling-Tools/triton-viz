@@ -1,8 +1,10 @@
 import pytest
+import torch
 from typing import cast
 
 from triton_viz.core.config import config as cfg
 from triton_viz.clients import Sanitizer
+from triton_viz.clients.sanitizer.report import _classify_layout_and_segments
 from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
     SymbolicSanitizer,
@@ -143,3 +145,75 @@ def test_post_run_callback_clears_state_on_last_block():
     assert sanitizer.tensor_names == {}
     assert sanitizer.cache_args == []
     assert sanitizer.cache_grid is None
+
+
+# ======== Report Layout Classification Tests ===========
+
+
+def _normalize(layout_segments, tensor):
+    """Translate ``(layout, segments)`` to ``(layout, relative_segments)``.
+
+    Segment endpoints are made relative to ``tensor.data_ptr()`` so the asserts
+    do not depend on PyTorch's allocator returning specific addresses.
+    """
+    layout, segments = layout_segments
+    base = tensor.data_ptr() if tensor.numel() else 0
+    return layout, [(s - base, e - base) for s, e in segments]
+
+
+def test_classify_contiguous_1d():
+    t = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    assert _normalize(_classify_layout_and_segments(t), t) == (
+        "contiguous",
+        [(0, 15)],
+    )
+
+
+def test_classify_dim0_contiguous_transpose():
+    # ``t.T`` alone is storage-contiguous (just F-order), so it falls into the
+    # single-segment path. Slice it to force the dim-0-contiguous bucket:
+    # ``t.T[1:]`` has strides (1, 8) and a non-zero storage_offset.
+    t = torch.arange(32, dtype=torch.int32).reshape(4, 8).T[1:]  # shape (7, 4)
+    layout, rel = _normalize(_classify_layout_and_segments(t), t)
+    assert layout == "dim-0-contiguous"
+    # 4 segments (outer dim 1 size = 4), each covering 7 int32 elements = 28 bytes,
+    # separated by stride[1]=8 elements = 32 bytes.
+    assert len(rel) == 4
+    assert rel[0] == (0, 27)
+    assert rel[1] == (32, 59)
+
+
+def test_classify_dim1_contiguous_slice():
+    # ``t[:, 2:6]``: storage-discontiguous but inner dim 1 still has stride 1.
+    base_t = torch.arange(32, dtype=torch.int32).reshape(4, 8)
+    t = base_t[:, 2:6]
+    layout, rel = _normalize(_classify_layout_and_segments(t), t)
+    assert layout == "dim-1-contiguous"
+    # 4 row segments, each 4 int32 wide = 16 bytes; rows separated by 32 bytes.
+    assert len(rel) == 4
+    assert rel[0] == (0, 15)
+    assert rel[1] == (32, 47)
+
+
+def test_classify_per_element_strided_view():
+    base_t = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
+    view = base_t[0::2]
+    assert _normalize(_classify_layout_and_segments(view), view) == (
+        "per-element",
+        [(0, 3), (8, 11), (16, 19)],
+    )
+
+
+def test_classify_per_element_nonzero_storage_offset():
+    base_t = torch.tensor([99, 10, 99, 11, 99, 12], dtype=torch.int32)
+    view = base_t[1::2]
+    assert view.storage_offset() == 1
+    assert _normalize(_classify_layout_and_segments(view), view) == (
+        "per-element",
+        [(0, 3), (8, 11), (16, 19)],
+    )
+
+
+def test_classify_empty_tensor():
+    t = torch.empty((0,), dtype=torch.int32)
+    assert _classify_layout_and_segments(t) == ("empty", [])

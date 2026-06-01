@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import reduce
@@ -79,6 +80,7 @@ from ..core.data import (
 from .utils import (
     check_storage_contiguous,
     get_physical_addr_from_tensor_slice,
+    get_physical_addr_per_element,
     check_inner_stride_equal_to_one,
 )
 
@@ -2431,9 +2433,20 @@ class SymbolicClient(Client):
                 for start, end in get_physical_addr_from_tensor_slice(arg)
             ]
         else:
-            raise ValueError(
-                "This symbolic client only supports contiguously stored tensors for now!"
-            )
+            # Non-unit inner stride (e.g. a 1-D ``tensor[::k]`` view):
+            # enumerate one segment per element so the address check uses
+            # precise view semantics (between-element bytes count as OOB).
+            threshold = cfg.symbolic_per_element_warn_threshold
+            if threshold > 0 and arg.numel() > threshold:
+                warnings.warn(
+                    f"Tensor {name!r} has {arg.numel()} elements with "
+                    "non-unit inner stride; per-element enumeration may "
+                    "slow the symbolic solver significantly.",
+                    stacklevel=2,
+                )
+            tensor_physical_addresses = [
+                (start, end, arg) for start, end in get_physical_addr_per_element(arg)
+            ]
         self._record_tensor_name(arg, name)
         self._cache_tensor_arg(arg)
         self.tensors.append(arg)

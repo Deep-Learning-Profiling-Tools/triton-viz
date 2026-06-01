@@ -1300,3 +1300,100 @@ def test_reinterpret_tensor_wrapper():
     x = torch.ones(N, dtype=torch.float16, device="cpu")
     y = torch.empty(N, dtype=torch.float16, device="cpu")
     copy_kernel[(1,)](triton.reinterpret(x, tl.float16), y, N, BLOCK=64)
+
+
+# ======== Strided Tensor View OOB Tests (triton-lang/triton#10336) ===========
+
+
+strided_view_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=strided_view_sanitizer)
+@triton.jit
+def strided_view_oob_load_kernel(
+    vals_ptr,
+    bins_ptr,
+    out_ptr,
+    L: tl.constexpr,
+    SV: tl.constexpr,
+    SB: tl.constexpr,
+):
+    offs = tl.arange(0, 8)
+    v = tl.load(vals_ptr + offs * SV, mask=offs < L, other=0)
+    b = tl.load(bins_ptr + offs * SB, mask=offs < L, other=-1)  # OOB HERE!
+    tl.store(out_ptr + offs, v * 100 + b, mask=offs < L)
+
+
+@pytest.fixture
+def _isolate_per_element_threshold():
+    """Save and restore the per-element warning threshold."""
+    saved = config.symbolic_per_element_warn_threshold
+    yield
+    config.symbolic_per_element_warn_threshold = saved
+
+
+def test_strided_view_oob_load():
+    """
+    Regression for triton-lang/triton#10336.
+
+    A masked tl.load with ``mask = offs < L`` reads past the underlying
+    storage when L exceeds the strided view's element count. The JIT path
+    silently performs the wild pointer read; the sanitizer should detect it.
+
+    Setup:
+      - bins_base has 5 int32 elements (20 bytes of storage).
+      - bins = bins_base[0::2] is a view of 3 elements with stride 2.
+      - L=4 makes the mask true for offs=3, so the kernel issues a load at
+        bins_ptr + 3*2 = bins_base[6], past the underlying storage.
+    """
+    strided_view_sanitizer.records.clear()
+
+    vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    bins_base = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
+
+    vals = vals_base
+    bins = bins_base[0::2]  # visible values [10, 11, 12], stride=2
+    out = torch.empty((4,), dtype=torch.int32)
+
+    strided_view_oob_load_kernel[(1,)](
+        vals, bins, out, L=4, SV=vals.stride(0), SB=bins.stride(0)
+    )
+
+    assert len(strided_view_sanitizer.records) > 0, "Expected OOB to be detected"
+
+
+def test_strided_view_correct_mask_no_oob():
+    """Correctly-masked access on a stride-2 view must not produce OOB."""
+    strided_view_sanitizer.records.clear()
+
+    vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    bins_base = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
+
+    bins = bins_base[0::2]
+    out = torch.empty((4,), dtype=torch.int32)
+
+    # L=3 matches bins.numel(); mask excludes the would-be OOB offset.
+    strided_view_oob_load_kernel[(1,)](
+        vals_base, bins, out, L=3, SV=vals_base.stride(0), SB=bins.stride(0)
+    )
+
+    assert len(strided_view_sanitizer.records) == 0
+
+
+def test_strided_view_warns_on_large_numel(_isolate_per_element_threshold):
+    """Per-element enumeration emits UserWarning above the threshold."""
+    strided_view_sanitizer.records.clear()
+    config.symbolic_per_element_warn_threshold = 1  # force a warning
+
+    vals_base = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    bins_base = torch.tensor([10, 99, 11, 99, 12], dtype=torch.int32)
+    bins = bins_base[0::2]
+    out = torch.empty((4,), dtype=torch.int32)
+
+    with pytest.warns(UserWarning, match="non-unit inner stride"):
+        strided_view_oob_load_kernel[(1,)](
+            vals_base, bins, out, L=3, SV=vals_base.stride(0), SB=bins.stride(0)
+        )
+
+    # Warning path must not change correctness — no OOB with correct mask.
+    assert len(strided_view_sanitizer.records) == 0

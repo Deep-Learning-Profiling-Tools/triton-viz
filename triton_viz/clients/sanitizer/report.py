@@ -2,13 +2,51 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ...core.config import config as cfg
 from ...core.data import Load, Store
 from ...utils.traceback_utils import read_source_segment
+from ..utils import (
+    check_inner_stride_equal_to_one,
+    check_storage_contiguous,
+    get_physical_addr_from_tensor_slice,
+    get_physical_addr_per_element,
+)
 from .data import (
     OutOfBoundsRecord,
     OutOfBoundsRecordBruteForce,
     OutOfBoundsRecordZ3,
 )
+
+
+def _classify_layout_and_segments(tensor):
+    """Return ``(layout_label, segments)`` mirroring SymbolicClient.arg_callback.
+
+    Segments are ``(start, end)`` byte ranges with both endpoints inclusive.
+    The layout label is one of:
+      - ``contiguous`` — whole storage is one contiguous segment
+      - ``dim-N-contiguous`` — dim N has stride 1; other dims index into
+        independent contiguous runs
+      - ``per-element`` — no dim has stride 1; each logical element is its
+        own segment (precise view semantics)
+      - ``empty`` — tensor has zero elements
+    """
+    if tensor.numel() == 0:
+        return "empty", []
+    if tensor.is_contiguous() or check_storage_contiguous(tensor):
+        start = tensor.data_ptr()
+        end = start + tensor.numel() * tensor.element_size() - 1
+        return "contiguous", [(start, end)]
+    if check_inner_stride_equal_to_one(tensor):
+        inner_dim = min(
+            (d for d in range(tensor.dim()) if tensor.stride(d) != 0),
+            key=lambda d: tensor.stride(d),
+        )
+        return (
+            f"dim-{inner_dim}-contiguous",
+            get_physical_addr_from_tensor_slice(tensor),
+        )
+    return "per-element", get_physical_addr_per_element(tensor)
+
 
 if TYPE_CHECKING:
     from ..symbolic_engine import SymbolicExpr
@@ -172,14 +210,44 @@ def print_oob_record_pdb_style(
         f"  {green}{'contiguous:':<{col1_width}}{reset_color} {str(tensor.is_contiguous()):<{col2_width}} {green}{'base_ptr:':<{col3_width}}{reset_color} 0x{tensor.data_ptr():016x}"
     )
 
-    total_bytes = np.prod(tensor.shape) * tensor.element_size()
-    size_str = f"{total_bytes} bytes"
-    range_str = (
-        f"[0x{tensor.data_ptr():016x}, 0x{tensor.data_ptr() + total_bytes:016x})"
-    )
-    print(
-        f"  {green}{'size:':<{col1_width}}{reset_color} {size_str:<{col2_width}} {green}{'valid_range:':<{col3_width}}{reset_color} {range_str}"
-    )
+    total_bytes = int(np.prod(tensor.shape)) * tensor.element_size()
+    layout, segments = _classify_layout_and_segments(tensor)
+
+    def _seg_str(seg):
+        s, e = seg
+        return f"[0x{s:016x}, 0x{e + 1:016x})"
+
+    if len(segments) == 1:
+        # Single-segment: keep the original one-line format.
+        size_str = f"{total_bytes} bytes"
+        range_str = _seg_str(segments[0])
+        print(
+            f"  {green}{'size:':<{col1_width}}{reset_color} {size_str:<{col2_width}} {green}{'valid_range:':<{col3_width}}{reset_color} {range_str}"
+        )
+    elif len(segments) == 0:
+        print(f"  {green}{'size:':<{col1_width}}{reset_color} 0 bytes (empty tensor)")
+        print(f"  {green}{'valid_range:':<{col1_width}}{reset_color} (no segments)")
+    else:
+        span_start = segments[0][0]
+        span_end = segments[-1][1] + 1
+        size_str = f"{total_bytes} bytes (layout: {layout})"
+        print(f"  {green}{'size:':<{col1_width}}{reset_color} {size_str}")
+        range_header = (
+            f"{len(segments)} segments spanning "
+            f"[0x{span_start:016x}, 0x{span_end:016x})"
+        )
+        print(f"  {green}{'valid_range:':<{col1_width}}{reset_color} {range_header}")
+        max_display = max(2, cfg.sanitizer_report_max_segments)
+        if len(segments) <= max_display:
+            for seg in segments:
+                print(f"    {_seg_str(seg)}")
+        else:
+            head = tail = max_display // 2
+            for seg in segments[:head]:
+                print(f"    {_seg_str(seg)}")
+            print(f"    ... ({len(segments) - head - tail} more)")
+            for seg in segments[-tail:]:
+                print(f"    {_seg_str(seg)}")
 
     # ===================== Call Stack =====================
     print(f"{bold}{cyan}━━━ Call Stack ━━━{reset_color}")
