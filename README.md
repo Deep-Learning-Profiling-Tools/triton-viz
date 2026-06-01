@@ -121,11 +121,13 @@ def kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
     tl.store(out_ptr + offsets, values)
 ```
 
-Use the CLI wrappers to run an existing Python script without editing it:
+Use the CLI wrappers to run an existing Python script without editing it. These
+wrappers patch plain `@triton.jit` kernels, so use them with scripts that do not
+already apply `@triton_viz.trace(...)`.
 
 ```sh
-triton-sanitizer examples/sanitizer/gemm_oob.py
-triton-profiler examples/profiler/load_store.py
+triton-sanitizer examples/sanitizer/oob_cli.py
+triton-profiler examples/profiler/load_store_cli.py
 triton-visualizer trace.tvz
 ```
 
