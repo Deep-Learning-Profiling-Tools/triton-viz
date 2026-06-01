@@ -68,7 +68,7 @@ def test_unpatch_lang_restores_builtins():
 
 
 def test_trace_patches_extra_cuda_builtins():
-    @triton_viz.trace("sanitizer")
+    @triton_viz.trace("tracer")
     @triton.jit
     def extra_cuda_builtin_kernel(out):
         offs = tl.arange(0, tl.extra.cuda.num_threads())
