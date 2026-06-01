@@ -153,6 +153,8 @@ def get_physical_addr_from_tensor_slice(tensor: torch.Tensor) -> list[tuple[int,
     for idxs in itertools.product(
         *(range(1 if tensor.stride(d) == 0 else tensor.size(d)) for d in outer_dims)
     ):
+        # tensor.data_ptr() already accounts for storage_offset, so offsets here
+        # are measured relative to data_ptr().
         offset = sum(idx * int(tensor.stride(d)) for idx, d in zip(idxs, outer_dims))
         start = base + offset * itemsize
         end = start + inner_dim_size * itemsize - 1

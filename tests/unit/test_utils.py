@@ -9,7 +9,12 @@ from z3 import Int
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.clients.symbolic_engine import LoopContext
 from triton_viz.clients.tracer.tracer import Tracer
-from triton_viz.clients.utils import get_physical_addr_per_element
+from triton_viz.clients.utils import (
+    check_inner_stride_equal_to_one,
+    check_storage_contiguous,
+    get_physical_addr_from_tensor_slice,
+    get_physical_addr_per_element,
+)
 from triton_viz.core.data import Load
 from triton_viz.core.trace import trace_source
 from triton_viz.utils import traceback_utils
@@ -234,3 +239,35 @@ def test_undecorated_helper_captured_via_boundary_marker():
     assert any("my_kernel" in fn for fn in func_names)
     assert any("helper_a" in fn for fn in func_names)
     assert any("helper_b" in fn for fn in func_names)
+
+
+def _relative_slice_segments(tensor: torch.Tensor) -> list[tuple[int, int]]:
+    base = tensor.data_ptr()
+    return [
+        (s - base, e - base) for s, e in get_physical_addr_from_tensor_slice(tensor)
+    ]
+
+
+def test_get_physical_addr_from_tensor_slice_nonzero_storage_offset():
+    """Sliced view with nonzero storage_offset: segments must be relative to
+    tensor.data_ptr() (which already accounts for storage_offset), not double-counted."""
+    base = torch.arange(20, dtype=torch.int32).reshape(4, 5)
+    view = base[1:3, 1:4]
+    # visible:
+    # [[ 6,  7,  8],
+    #  [11, 12, 13]]
+
+    assert view.shape == (2, 3)
+    assert view.stride() == (5, 1)
+    assert view.storage_offset() == 6
+
+    # Ensure this goes through get_physical_addr_from_tensor_slice().
+    assert not view.is_contiguous()
+    assert not check_storage_contiguous(view)
+    assert check_inner_stride_equal_to_one(view)
+
+    # Helper convention: end is the last valid byte in the segment,
+    # matching the sanitizer's inclusive address checks.
+    # itemsize = 4 bytes; row stride = 5 elements = 20 bytes; inner size = 3 elements.
+    # Row 0 covers bytes [0, 11]; row 1 covers bytes [20, 31], all relative to data_ptr().
+    assert _relative_slice_segments(view) == [(0, 11), (20, 31)]
