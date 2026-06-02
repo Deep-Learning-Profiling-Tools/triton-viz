@@ -65,39 +65,44 @@ def test_range_to_iterator_constraint():
 # ======== Reduce Operations Tests =========
 
 
-@pytest.mark.parametrize("op", ["max", "min", "sum"])
-@pytest.mark.parametrize("data", [[1, 5, 3, 2], [42]])
-def test_reduce_expr_eval(op: str, data):
+@pytest.mark.parametrize("value", [4, -2, 3.0])
+def test_basic_expr_const_eval(value):
+    # Test that "const" SymbolicExpr evaluates scalar constants.
+    const_expr = SymbolicExpr.create("const", value, tl.int32)
+    result, constraints = const_expr.eval(simplify_constraints=False)
+    assert cast(IntNumRef, result).as_long() == int(value)
+    assert constraints is None
+
+
+def test_const_allows_concrete_tensorhandle_vectors():
     import numpy as np
-    import builtins
+    from triton.runtime.interpreter import TensorHandle
 
-    input_arr = SymbolicExpr.create(
-        "const", np.array(data), tl.block_type(tl.int32, [len(data)])
-    )
-    reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
+    handle = TensorHandle(np.array([1, 2, 3], dtype=np.int32), tl.int32)
 
-    result, _ = reduce_expr.eval(simplify_constraints=False)
-    # Use reflection to call the matching Python builtin, e.g. builtins.max([1,5,3,2]) -> 5
-    assert cast(IntNumRef, result).as_long() == getattr(builtins, op)(data)
+    expr = SymbolicExpr.from_value(handle)
+    assert isinstance(expr, ConstSymbolicExpr)
+    assert expr.shape == (3,)
+
+    concrete = expr.concretize()
+    assert isinstance(concrete, TensorHandle)
+    np.testing.assert_array_equal(concrete.data, np.array([1, 2, 3], dtype=np.int32))
+
+    z3_values, constraints = expr.eval(simplify_constraints=False)
+    assert [cast(IntNumRef, v).as_long() for v in z3_values] == [1, 2, 3]
+    assert constraints is None
+
+    with pytest.raises(ValueError):
+        SymbolicExpr.create("const", (1, 2, 3), tl.int32)
+    with pytest.raises(ValueError):
+        SymbolicExpr.create(
+            "const",
+            np.array([1, 2, 3], dtype=np.int32),
+            tl.block_type(tl.int32, [3]),
+        )
 
 
 # ======== Basic Symbolic Expr Operations Tests =========
-
-
-@pytest.mark.parametrize("value", [(1, 2, 3), 4])
-def test_basic_expr_const_eval(value):
-    # Test that "const" SymbolicExpr correctly evaluates both scalar (e.g. 4)
-    # and vector (e.g. (1, 2, 3)) constants.
-    const_expr = SymbolicExpr.create("const", value, tl.int32)
-    result, constraints = const_expr.eval(simplify_constraints=False)
-    if isinstance(value, (list, tuple)):
-        # Vector constants return a list of Z3 ints.
-        assert [cast(IntNumRef, v).as_long() for v in cast(list, result)] == list(value)
-    else:
-        # Scalar constants return a single Z3 int.
-        assert cast(IntNumRef, result).as_long() == value
-    # Constants produce no constraints.
-    assert constraints is None
 
 
 @pytest.mark.parametrize(

@@ -503,10 +503,6 @@ class SymbolicExpr:
         if isinstance(var, tl.core.tensor):
             var = var.handle
         if isinstance(var, TensorHandle):
-            if len(var.data) != 1:
-                raise ValueError(
-                    f"Unsupported var.data: {var.data} with length more than one!"
-                )
             if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
                 return var.dtype
             if isinstance(var.dtype, tl.pointer_type):  # if a pointer
@@ -554,11 +550,9 @@ class SymbolicExpr:
         dtype = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
         if isinstance(var, TensorHandle):  # if a TensorHandle
-            if len(var.data) != 1:
-                raise ValueError(
-                    "SymbolicExpr.from_value only supports scalar TensorHandle!"
-                )
-            return cls.create("const", var.data.item(), dtype)
+            if var.data.size == 1:
+                return cls.create("const", var.data.item(), dtype)
+            return cls.create("const", var, dtype)
         if isinstance(
             var, SymbolicExpr.builtin_scala_types
         ):  # if a python builtin type
@@ -622,6 +616,11 @@ class SymbolicExpr:
                 for child in self.children.values()
             )
         ):
+            if self.op == "const" and isinstance(
+                getattr(self, "value", None),
+                (tl.core.dtype, tl.pointer_type, tl.block_type),
+            ):
+                return self
             concrete = self.concretize()
             if not isinstance(concrete, TensorHandle):
                 raise TypeError(f"Unexpected dtype: {type(concrete)}!")
@@ -693,42 +692,43 @@ class ConstSymbolicExpr(SymbolicExpr):
 
     def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
         super().__init__(op)
+        if not isinstance(
+            value, (tl.core.dtype, tl.pointer_type, tl.block_type)
+        ):
+            if isinstance(value, np.ndarray):
+                if value.size != 1:
+                    raise ValueError("const only supports scalar ndarray values")
+            elif isinstance(value, SymbolicExpr.tuple_types):
+                raise ValueError("const only supports scalar values")
         self.value = value
         self.dtype, self.shape = self._unpack_dtype(dtype)
+        if isinstance(value, TensorHandle) and value.data.size != 1 and not self.shape:
+            self.shape = tuple(int(x) for x in value.data.shape)
 
     def _node_label_core(self) -> str:
         return f"const={self.value}"
 
     def to_py(self) -> Any:
-        """
-        Valid only for nodes with op == 'const':
-        - If `value` is a TensorHandle:
-            • Scalar  -> return int/float
-            • Multi-element -> return a Python list
-        - Otherwise, return the original Python object
-          (e.g., int, float, tuple, list, etc.).
-        """
         v = self.value
         if isinstance(v, TensorHandle):
-            if len(v.data) == 1:
-                return v.data.item()  # scalar case
-            else:
-                return v.data.tolist()  # multi-element case
+            if v.data.size != 1:
+                return v.data
+            return v.data.item()
+        if isinstance(v, np.ndarray):
+            return v.item()
         return v
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         value = self.value
         if isinstance(value, TensorHandle):
             value = self.value.data
+        if isinstance(value, np.ndarray):
+            if value.size != 1:
+                return [IntVal(int(v)) for v in value.reshape(-1)], None
+            value = value.item()
 
         if self.loop_ctx:  # if the self is a loop iterator
             z3_expr: Z3Expr = self.loop_ctx.idx_z3
-        elif isinstance(
-            value, np.ndarray
-        ):  # only const nodes can be created with ndarray
-            z3_expr = [IntVal(int(v)) for v in value.flat]
-        elif isinstance(value, tuple):
-            z3_expr = [IntVal(int(v)) for v in value]
         elif isinstance(value, (int, float)):
             # Convert to int for Z3 - Z3's IntVal cannot parse float strings
             z3_expr = IntVal(int(value))
@@ -752,10 +752,11 @@ class ConstSymbolicExpr(SymbolicExpr):
                 np.array([self.value], dtype=_get_np_dtype(dtype)),
                 dtype,
             )
-        elif isinstance(self.value, SymbolicExpr.tuple_types):
-            seq = cast(Sequence[Any], self.value)
-            np_array = np.array(seq, dtype=_get_np_dtype(dtype))
-            return TensorHandle(np_array, dtype)
+        elif isinstance(self.value, np.ndarray):
+            return TensorHandle(
+                np.array([self.value.item()], dtype=_get_np_dtype(dtype)),
+                dtype,
+            )
         elif isinstance(self.value, TensorHandle):
             return self.value
 
