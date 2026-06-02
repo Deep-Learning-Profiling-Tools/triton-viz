@@ -1154,6 +1154,27 @@ def test_sanitizer_supports_data_dependent_cumsum_index():
     assert len(cumsum_sanitizer.records) == 0
 
 
+ashr_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=ashr_index_sanitizer)
+@triton.jit
+def ashr_index_store_kernel(out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    write_idx = offs >> 1
+    tl.store(out_ptr + write_idx, offs)
+
+
+def test_sanitizer_supports_ashr_in_symbolic_address():
+    ashr_index_sanitizer.records.clear()
+
+    out = torch.empty((4,), dtype=torch.int32)
+
+    ashr_index_store_kernel[(1,)](out, BLOCK=out.numel())
+
+    assert len(ashr_index_sanitizer.records) == 0
+
+
 # ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
 
 

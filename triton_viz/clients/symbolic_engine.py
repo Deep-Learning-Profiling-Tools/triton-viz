@@ -944,22 +944,30 @@ class BinarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         return handler(self, lhs, rhs), constraints
 
+    def _to_tensor_handle(self, value: Any) -> TensorHandle:
+        if isinstance(value, TensorHandle):
+            return value
+        return TensorHandle(
+            np.asarray(value, dtype=_get_np_dtype(self.dtype)), self.dtype
+        )
+
     def concretize(self) -> Any:
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
         np_op = self._NUMPY_OPS.get(self.op, None)
-        # Most ops (add, sub, mul, …) have a numpy mapping and are called
-        # with concrete_fn(lhs, rhs, np_op).  Some ops like "idiv" have
+        # Most ops (add, sub, mul, ...) have a NumPy mapping and are called
+        # with concrete_fn(lhs, rhs, np_op). Some ops like "idiv" have
         # their own concrete_fn that handles the computation internally
-        # (e.g. InterpreterBuilder.create_idiv) and only takes (lhs, rhs).
-        # Fall through to the 2-arg call for those.
+        # and only takes (lhs, rhs). Fall through to the 2-arg call for those.
         if np_op is not None:
-            return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+            return self._to_tensor_handle(
+                self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+            )
         if self.concrete_fn is None:
             raise NotImplementedError(
                 f"Concretize for binary op '{self.op}' is not implemented"
             )
-        return self.concrete_fn(lhs_concrete, rhs_concrete)  # type: ignore
+        return self._to_tensor_handle(self.concrete_fn(lhs_concrete, rhs_concrete))  # type: ignore
 
     @staticmethod
     def _apply_binop(op_func, left, right):
@@ -1095,7 +1103,18 @@ class BinarySymbolicExpr(SymbolicExpr):
         return self._apply_binop(_bit_xor, lhs, rhs)
 
     def _op_ashr(self, lhs, rhs):
-        raise NotImplementedError("Arithmetic shift right is not implemented in Z3")
+        bitwidth = (
+            self._infer_bitwidth(self)
+            or self._infer_bitwidth(self.lhs)
+            or self._infer_bitwidth(self.rhs)
+            or 64
+        )
+
+        def _ashr(a, b):
+            shifted = self._to_bv(a, bitwidth) >> self._to_bv(b, bitwidth)
+            return BV2Int(shifted, is_signed=True)
+
+        return self._apply_binop(_ashr, lhs, rhs)
 
     _NUMPY_OPS: ClassVar[dict[str, Callable[[Any, Any], Any]]] = {
         "add": np.add,
@@ -1115,6 +1134,7 @@ class BinarySymbolicExpr(SymbolicExpr):
         "bitwise_or": np.bitwise_or,
         "bitwise_xor": np.bitwise_xor,
         "right_shift": np.right_shift,
+        "ashr": np.right_shift,
         "left_shift": np.left_shift,
     }
 
