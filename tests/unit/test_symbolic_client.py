@@ -11,7 +11,9 @@ tests live next to their respective clients.
 import pytest
 from typing import cast
 
+import numpy as np
 import triton.language as tl
+from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.clients.symbolic_engine import (
     SymbolicClient,
@@ -100,6 +102,13 @@ def test_basic_expr_const_eval(value):
     assert constraints is None
 
 
+def test_tensorhandle_vector_from_value_is_not_symbolic():
+    handle = TensorHandle(np.array([1, 2, 3], dtype=np.int32), tl.int32)
+
+    with pytest.raises(ValueError):
+        SymbolicExpr.from_value(handle)
+
+
 @pytest.mark.parametrize(
     "axis,expected_pid",
     [
@@ -185,6 +194,32 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
     assert constraints is None
 
 
+def test_binary_expr_eval_broadcasts_singleton_vector_operand():
+    lhs_expr = SymbolicExpr.create("const", (1, 2, 3), tl.int32)
+    rhs_expr = SymbolicExpr.create("const", (10,), tl.int32)
+    expr = SymbolicExpr.create("add", lhs_expr, rhs_expr)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert [cast(IntNumRef, value).as_long() for value in cast(list, result)] == [
+        11,
+        12,
+        13,
+    ]
+    assert constraints is None
+
+
+def test_binary_expr_concretize_vector_constants():
+    lhs = SymbolicExpr.create("const", (8, 4, 2), tl.int32)
+    rhs = SymbolicExpr.create("const", (1, 2, 3), tl.int32)
+    expr = SymbolicExpr.create("add", lhs, rhs)
+
+    concrete = expr.concretize()
+
+    assert isinstance(concrete, TensorHandle)
+    np.testing.assert_array_equal(concrete.data, np.array([9, 6, 5], dtype=np.int32))
+
+
 def test_bitwise_bool_expr_eval():
     """
     Test short circuiting behavior of bitwise_and and bitwise_or operators which do not
@@ -229,6 +264,24 @@ def test_pointer_expr_addptr_eval():
     expr = SymbolicExpr.create("addptr", base, offset)
     result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == 112
+    assert constraints is None
+
+
+def test_pointer_expr_addptr_broadcasts_singleton_pointer_base():
+    base_handle = TensorHandle(
+        np.array([100], dtype=np.uint64), tl.pointer_type(tl.int32)
+    )
+    base = SymbolicExpr.from_value(base_handle)
+    offset = SymbolicExpr.create("const", (0, 1, 2), tl.int32)
+    expr = SymbolicExpr.create("addptr", base, offset)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert [cast(IntNumRef, value).as_long() for value in cast(list, result)] == [
+        100,
+        104,
+        108,
+    ]
     assert constraints is None
 
 

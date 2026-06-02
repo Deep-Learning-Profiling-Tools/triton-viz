@@ -622,6 +622,11 @@ class SymbolicExpr:
                 for child in self.children.values()
             )
         ):
+            if self.op == "const" and isinstance(
+                getattr(self, "value", None),
+                (tl.core.dtype, tl.pointer_type, tl.block_type),
+            ):
+                return self
             concrete = self.concretize()
             if not isinstance(concrete, TensorHandle):
                 raise TypeError(f"Unexpected dtype: {type(concrete)}!")
@@ -944,15 +949,37 @@ class BinarySymbolicExpr(SymbolicExpr):
         return handler(self, lhs, rhs), constraints
 
     def concretize(self) -> Any:
+        np_op = self._NUMPY_OPS.get(self.op, None)
+        if np_op is not None and self.lhs.op == "const" and self.rhs.op == "const":
+            lhs_value = getattr(self.lhs, "value", None)
+            rhs_value = getattr(self.rhs, "value", None)
+            if isinstance(lhs_value, TensorHandle) and isinstance(
+                rhs_value, TensorHandle
+            ):
+                data = np_op(lhs_value.data, rhs_value.data)
+                return TensorHandle(
+                    np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+                )
+
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
-        np_op = self._NUMPY_OPS.get(self.op, None)
+        if isinstance(lhs_concrete, SymbolicExpr):
+            lhs_concrete = lhs_concrete.concretize()
+        if isinstance(rhs_concrete, SymbolicExpr):
+            rhs_concrete = rhs_concrete.concretize()
         # Most ops (add, sub, mul, …) have a numpy mapping and are called
         # with concrete_fn(lhs, rhs, np_op).  Some ops like "idiv" have
         # their own concrete_fn that handles the computation internally
         # (e.g. InterpreterBuilder.create_idiv) and only takes (lhs, rhs).
         # Fall through to the 2-arg call for those.
         if np_op is not None:
+            if isinstance(lhs_concrete, TensorHandle) and isinstance(
+                rhs_concrete, TensorHandle
+            ):
+                data = np_op(lhs_concrete.data, rhs_concrete.data)
+                return TensorHandle(
+                    np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+                )
             return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
         if self.concrete_fn is None:
             raise NotImplementedError(
@@ -965,6 +992,10 @@ class BinarySymbolicExpr(SymbolicExpr):
         lhs_is_list = isinstance(left, list)
         rhs_is_list = isinstance(right, list)
         if lhs_is_list and rhs_is_list:
+            if len(left) == 1 and len(right) != 1:
+                return [op_func(left[0], ri) for ri in right]
+            if len(right) == 1 and len(left) != 1:
+                return [op_func(li, right[0]) for li in left]
             if len(left) != len(right):
                 raise ValueError(
                     f"List operands must have same length: {len(left)} vs {len(right)}"
@@ -1412,11 +1443,18 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
             z3_expr = ptr_z3 + offset_z3 * element_bytewidth
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
-            if len(ptr_z3) != len(offset_z3):
+            if len(ptr_z3) == 1 and len(offset_z3) != 1:
+                z3_expr = [ptr_z3[0] + o * element_bytewidth for o in offset_z3]
+            elif len(offset_z3) == 1 and len(ptr_z3) != 1:
+                z3_expr = [p + offset_z3[0] * element_bytewidth for p in ptr_z3]
+            elif len(ptr_z3) != len(offset_z3):
                 raise ValueError(
                     f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
                 )
-            z3_expr = [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
+            else:
+                z3_expr = [
+                    p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)
+                ]
         elif isinstance(ptr_z3, list):
             z3_expr = [p + offset_z3 * element_bytewidth for p in ptr_z3]
         else:  # isinstance(offset_z3, list):
