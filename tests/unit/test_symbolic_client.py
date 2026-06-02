@@ -11,7 +11,9 @@ tests live next to their respective clients.
 import pytest
 from typing import cast
 
+import numpy as np
 import triton.language as tl
+from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.clients.symbolic_engine import (
     SymbolicClient,
@@ -100,6 +102,25 @@ def test_basic_expr_const_eval(value):
     assert constraints is None
 
 
+def test_tensorhandle_vector_const_concretize_and_eval():
+    handle = TensorHandle(np.array([1, 2, 3], dtype=np.int32), tl.int32)
+
+    expr = SymbolicExpr.from_value(handle)
+
+    assert isinstance(expr, SymbolicExpr)
+    assert expr.to_py() == [1, 2, 3]
+    concrete = expr.concretize()
+    assert isinstance(concrete, TensorHandle)
+    np.testing.assert_array_equal(concrete.data, handle.data)
+    result, constraints = expr.eval(simplify_constraints=False)
+    assert [cast(IntNumRef, value).as_long() for value in cast(list, result)] == [
+        1,
+        2,
+        3,
+    ]
+    assert constraints is None
+
+
 @pytest.mark.parametrize(
     "axis,expected_pid",
     [
@@ -185,6 +206,56 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
     assert constraints is None
 
 
+def test_binary_expr_eval_broadcasts_singleton_vector_operand():
+    lhs_expr = SymbolicExpr.create("const", (1, 2, 3), tl.int32)
+    rhs_expr = SymbolicExpr.create("const", (10,), tl.int32)
+    expr = SymbolicExpr.create("add", lhs_expr, rhs_expr)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert [cast(IntNumRef, value).as_long() for value in cast(list, result)] == [
+        11,
+        12,
+        13,
+    ]
+    assert constraints is None
+
+
+def test_binary_expr_concretize_vector_tensorhandles():
+    lhs = TensorHandle(np.array([8, 4, 2], dtype=np.int32), tl.int32)
+    rhs = TensorHandle(np.array([1, 2, 3], dtype=np.int32), tl.int32)
+    expr = SymbolicExpr.create("add", SymbolicExpr.from_value(lhs), SymbolicExpr.from_value(rhs))
+
+    concrete = expr.concretize()
+
+    assert isinstance(concrete, TensorHandle)
+    np.testing.assert_array_equal(concrete.data, np.array([9, 6, 5], dtype=np.int32))
+
+
+def test_ashr_expr_eval_and_concretize_vector_tensorhandles():
+    lhs = SymbolicExpr.create("const", (8, 4, 2), tl.int32)
+    rhs = SymbolicExpr.create("const", (1,), tl.int32)
+    expr = SymbolicExpr.create("ashr", lhs, rhs)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert [cast(IntNumRef, value).as_long() for value in cast(list, result)] == [
+        4,
+        2,
+        1,
+    ]
+    assert constraints is None
+
+    lhs_handle = TensorHandle(np.array([8, 4, 2], dtype=np.int32), tl.int32)
+    rhs_handle = TensorHandle(np.array([1, 1, 1], dtype=np.int32), tl.int32)
+    concrete_expr = SymbolicExpr.create(
+        "ashr", SymbolicExpr.from_value(lhs_handle), SymbolicExpr.from_value(rhs_handle)
+    )
+    concrete = concrete_expr.concretize()
+    assert isinstance(concrete, TensorHandle)
+    np.testing.assert_array_equal(concrete.data, np.array([4, 2, 1], dtype=np.int32))
+
+
 def test_bitwise_bool_expr_eval():
     """
     Test short circuiting behavior of bitwise_and and bitwise_or operators which do not
@@ -219,6 +290,23 @@ def test_bitwise_bool_expr_eval():
     assert constraints is None
 
 
+def test_where_expr_concretize_vector_tensorhandles():
+    cond = TensorHandle(np.array([True, False, True], dtype=bool), tl.int1)
+    lhs = TensorHandle(np.array([10, 20, 30], dtype=np.int32), tl.int32)
+    rhs = TensorHandle(np.array([-1, -2, -3], dtype=np.int32), tl.int32)
+    expr = SymbolicExpr.create(
+        "where",
+        SymbolicExpr.from_value(cond),
+        SymbolicExpr.from_value(lhs),
+        SymbolicExpr.from_value(rhs),
+    )
+
+    concrete = expr.concretize()
+
+    assert isinstance(concrete, TensorHandle)
+    np.testing.assert_array_equal(concrete.data, np.array([10, -2, 30], dtype=np.int32))
+
+
 # ======== Pointer Symbolic Expr Operations Tests =========
 
 
@@ -229,6 +317,24 @@ def test_pointer_expr_addptr_eval():
     expr = SymbolicExpr.create("addptr", base, offset)
     result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == 112
+    assert constraints is None
+
+
+def test_pointer_expr_addptr_broadcasts_singleton_pointer_base():
+    base_handle = TensorHandle(
+        np.array([100], dtype=np.uint64), tl.pointer_type(tl.int32)
+    )
+    base = SymbolicExpr.from_value(base_handle)
+    offset = SymbolicExpr.create("const", (0, 1, 2), tl.int32)
+    expr = SymbolicExpr.create("addptr", base, offset)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert [cast(IntNumRef, value).as_long() for value in cast(list, result)] == [
+        100,
+        104,
+        108,
+    ]
     assert constraints is None
 
 
