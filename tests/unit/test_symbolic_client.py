@@ -603,3 +603,4 @@ def test_store_dtype_block_of_pointers():
     )
     store = StoreSymbolicExpr("store", ptr, value)
     assert store.dtype is None, f"Expected None, got {store.dtype}"
+

@@ -1192,6 +1192,33 @@ def test_sanitizer_supports_where_in_symbolic_address():
     assert len(where_index_sanitizer.records) == 0
 
 
+masked_compaction_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=masked_compaction_index_sanitizer)
+@triton.jit
+def masked_compaction_index_store_kernel(bitmask_ptr, out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    word = tl.load(bitmask_ptr + offs * 0)
+    active = (word >> offs) & 1
+    exc_cumsum = tl.cumsum(active, 0) - active
+    active_flags = active.to(tl.int1)
+    rev_arange = tl.where(active_flags, 0, BLOCK - 1 - offs)
+    write_idx = exc_cumsum + rev_arange
+    tl.store(out_ptr + write_idx, active)
+
+
+def test_sanitizer_materializes_loaded_masked_compaction_store_indices():
+    masked_compaction_index_sanitizer.records.clear()
+
+    bitmask = torch.tensor([0b0101], dtype=torch.int32)
+    out = torch.empty((4,), dtype=torch.int32)
+
+    masked_compaction_index_store_kernel[(1,)](bitmask, out, BLOCK=out.numel())
+
+    assert len(masked_compaction_index_sanitizer.records) == 0
+
+
 # ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
 
 
