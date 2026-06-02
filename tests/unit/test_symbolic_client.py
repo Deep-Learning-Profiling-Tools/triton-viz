@@ -237,6 +237,23 @@ def test_bitwise_bool_expr_eval():
     assert constraints is None
 
 
+def test_where_expr_concretize_scalar_constants():
+    cond = SymbolicExpr.create("const", True, tl.int1)
+    lhs = SymbolicExpr.create("const", 10, tl.int32)
+    rhs = SymbolicExpr.create("const", -1, tl.int32)
+    expr = SymbolicExpr.create(
+        "where",
+        cond,
+        lhs,
+        rhs,
+    )
+
+    concrete = expr.concretize()
+
+    assert isinstance(concrete, TensorHandle)
+    np.testing.assert_array_equal(concrete.data, np.array([10], dtype=np.int32))
+
+
 # ======== Pointer Symbolic Expr Operations Tests =========
 
 
