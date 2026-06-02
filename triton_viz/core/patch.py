@@ -98,6 +98,12 @@ def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
         for value in fn.__globals__.values()
         if inspect.ismodule(value) and value in [tl, tl.core]
     ]
+    if langs:
+        # Triton's interpreter scan patch mutates both tl and tl.core even when
+        # the kernel only imports one of them.
+        for lang in (tl, tl.core):
+            if lang not in langs:
+                langs.append(lang)
     for lang in langs:
         _capture_builtin_attrs(scope, lang)
         _capture_builtin_attrs(scope, lang.tensor)
