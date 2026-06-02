@@ -67,6 +67,18 @@ def test_unpatch_lang_restores_builtins():
         dummy_kernel[grid](x, BLOCK_SIZE=block_size)
 
 
+def test_trace_patches_extra_cuda_builtins():
+    @triton_viz.trace("tracer")
+    @triton.jit
+    def extra_cuda_builtin_kernel(out):
+        offs = tl.arange(0, tl.extra.cuda.num_threads())
+        tl.store(out + offs, offs)
+
+    out = torch.empty((128,), dtype=torch.int32)
+    extra_cuda_builtin_kernel[(1,)](out, num_warps=4)
+    torch.testing.assert_close(out, torch.arange(128, dtype=torch.int32))
+
+
 # ======== Nested JIT Call Tests =========
 @triton_viz.trace(client=Sanitizer(abort_on_error=True))
 @triton.jit
