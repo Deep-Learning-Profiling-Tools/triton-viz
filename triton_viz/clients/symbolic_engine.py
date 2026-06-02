@@ -503,10 +503,6 @@ class SymbolicExpr:
         if isinstance(var, tl.core.tensor):
             var = var.handle
         if isinstance(var, TensorHandle):
-            if len(var.data) != 1:
-                raise ValueError(
-                    f"Unsupported var.data: {var.data} with length more than one!"
-                )
             if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
                 return var.dtype
             if isinstance(var.dtype, tl.pointer_type):  # if a pointer
@@ -554,11 +550,7 @@ class SymbolicExpr:
         dtype = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
         if isinstance(var, TensorHandle):  # if a TensorHandle
-            if len(var.data) != 1:
-                raise ValueError(
-                    "SymbolicExpr.from_value only supports scalar TensorHandle!"
-                )
-            return cls.create("const", var.data.item(), dtype)
+            return cls.create("const", var, dtype)
         if isinstance(
             var, SymbolicExpr.builtin_scala_types
         ):  # if a python builtin type
@@ -622,6 +614,11 @@ class SymbolicExpr:
                 for child in self.children.values()
             )
         ):
+            if self.op == "const" and isinstance(
+                getattr(self, "value", None),
+                (tl.core.dtype, tl.pointer_type, tl.block_type),
+            ):
+                return self
             concrete = self.concretize()
             if not isinstance(concrete, TensorHandle):
                 raise TypeError(f"Unexpected dtype: {type(concrete)}!")
@@ -944,15 +941,37 @@ class BinarySymbolicExpr(SymbolicExpr):
         return handler(self, lhs, rhs), constraints
 
     def concretize(self) -> Any:
+        np_op = self._NUMPY_OPS.get(self.op, None)
+        if np_op is not None and self.lhs.op == "const" and self.rhs.op == "const":
+            lhs_value = getattr(self.lhs, "value", None)
+            rhs_value = getattr(self.rhs, "value", None)
+            if isinstance(lhs_value, TensorHandle) and isinstance(
+                rhs_value, TensorHandle
+            ):
+                data = np_op(lhs_value.data, rhs_value.data)
+                return TensorHandle(
+                    np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+                )
+
         lhs_concrete = self.lhs.concretize()
         rhs_concrete = self.rhs.concretize()
-        np_op = self._NUMPY_OPS.get(self.op, None)
+        if isinstance(lhs_concrete, SymbolicExpr):
+            lhs_concrete = lhs_concrete.concretize()
+        if isinstance(rhs_concrete, SymbolicExpr):
+            rhs_concrete = rhs_concrete.concretize()
         # Most ops (add, sub, mul, …) have a numpy mapping and are called
         # with concrete_fn(lhs, rhs, np_op).  Some ops like "idiv" have
         # their own concrete_fn that handles the computation internally
         # (e.g. InterpreterBuilder.create_idiv) and only takes (lhs, rhs).
         # Fall through to the 2-arg call for those.
         if np_op is not None:
+            if isinstance(lhs_concrete, TensorHandle) and isinstance(
+                rhs_concrete, TensorHandle
+            ):
+                data = np_op(lhs_concrete.data, rhs_concrete.data)
+                return TensorHandle(
+                    np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+                )
             return self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
         if self.concrete_fn is None:
             raise NotImplementedError(
@@ -965,6 +984,10 @@ class BinarySymbolicExpr(SymbolicExpr):
         lhs_is_list = isinstance(left, list)
         rhs_is_list = isinstance(right, list)
         if lhs_is_list and rhs_is_list:
+            if len(left) == 1 and len(right) != 1:
+                return [op_func(left[0], ri) for ri in right]
+            if len(right) == 1 and len(left) != 1:
+                return [op_func(li, right[0]) for li in left]
             if len(left) != len(right):
                 raise ValueError(
                     f"List operands must have same length: {len(left)} vs {len(right)}"
@@ -1094,7 +1117,18 @@ class BinarySymbolicExpr(SymbolicExpr):
         return self._apply_binop(_bit_xor, lhs, rhs)
 
     def _op_ashr(self, lhs, rhs):
-        raise NotImplementedError("Arithmetic shift right is not implemented in Z3")
+        bitwidth = (
+            self._infer_bitwidth(self)
+            or self._infer_bitwidth(self.lhs)
+            or self._infer_bitwidth(self.rhs)
+            or 64
+        )
+
+        def _ashr(a, b):
+            shifted = self._to_bv(a, bitwidth) >> self._to_bv(b, bitwidth)
+            return BV2Int(shifted, is_signed=True)
+
+        return self._apply_binop(_ashr, lhs, rhs)
 
     _NUMPY_OPS: ClassVar[dict[str, Callable[[Any, Any], Any]]] = {
         "add": np.add,
@@ -1114,6 +1148,7 @@ class BinarySymbolicExpr(SymbolicExpr):
         "bitwise_or": np.bitwise_or,
         "bitwise_xor": np.bitwise_xor,
         "right_shift": np.right_shift,
+        "ashr": np.right_shift,
         "left_shift": np.left_shift,
     }
 
@@ -1158,6 +1193,27 @@ class WhereSymbolicExpr(SymbolicExpr):
         if handler is None:
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         return handler(self)
+
+    def concretize(self) -> Any:
+        cond = self.cond.concretize()
+        lhs = self.lhs.concretize()
+        rhs = self.rhs.concretize()
+        if isinstance(cond, SymbolicExpr):
+            cond = cond.concretize()
+        if isinstance(lhs, SymbolicExpr):
+            lhs = lhs.concretize()
+        if isinstance(rhs, SymbolicExpr):
+            rhs = rhs.concretize()
+        if not (
+            isinstance(cond, TensorHandle)
+            and isinstance(lhs, TensorHandle)
+            and isinstance(rhs, TensorHandle)
+        ):
+            raise TypeError(
+                "where concretization expects TensorHandle condition and values"
+            )
+        data = np.where(cond.data.astype(bool), lhs.data, rhs.data)
+        return TensorHandle(np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype)
 
     def _where(self) -> tuple[Z3Expr, ConstraintConjunction]:
         def _normalize(expr):
@@ -1412,11 +1468,18 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
             z3_expr = ptr_z3 + offset_z3 * element_bytewidth
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
-            if len(ptr_z3) != len(offset_z3):
+            if len(ptr_z3) == 1 and len(offset_z3) != 1:
+                z3_expr = [ptr_z3[0] + o * element_bytewidth for o in offset_z3]
+            elif len(offset_z3) == 1 and len(ptr_z3) != 1:
+                z3_expr = [p + offset_z3[0] * element_bytewidth for p in ptr_z3]
+            elif len(ptr_z3) != len(offset_z3):
                 raise ValueError(
                     f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
                 )
-            z3_expr = [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
+            else:
+                z3_expr = [
+                    p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)
+                ]
         elif isinstance(ptr_z3, list):
             z3_expr = [p + offset_z3 * element_bytewidth for p in ptr_z3]
         else:  # isinstance(offset_z3, list):
@@ -2133,15 +2196,21 @@ class SymbolicClient(Client):
     def _materialize_memory_operand(self, expr: Any) -> Any:
         if not isinstance(expr, SymbolicExpr):
             return expr
+        materialized = False
         if expr.has_op("sort"):
             self._on_data_dependent_value()
             expr = expr.replace_subtree("sort")
+            materialized = True
         if expr.has_op("cumsum"):
             self._on_data_dependent_value()
             expr = expr.replace_subtree("cumsum")
+            materialized = True
         if expr.has_op("load"):
             self._on_data_dependent_value()
             expr = expr.replace_subtree("load")
+            materialized = True
+        if materialized:
+            expr = expr.replace_subtree()
         return expr
 
     def _should_skip_loop_hooks(self) -> bool:
@@ -2399,23 +2468,35 @@ class SymbolicClient(Client):
         )
 
     def _op_load_overrider(self, ptr, mask, other, *args):
-        ptr = self._materialize_memory_operand(ptr)
-        mask = self._materialize_memory_operand(mask)
         ptr_sym = SymbolicExpr.from_value(ptr)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         other_sym = SymbolicExpr.from_value(other) if other is not None else None
         ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
-        self._handle_access_check(ret, Load, "read")
+
+        check_ptr = self._materialize_memory_operand(ptr)
+        check_mask = self._materialize_memory_operand(mask)
+        check_ptr_sym = SymbolicExpr.from_value(check_ptr)
+        check_mask_sym = (
+            SymbolicExpr.from_value(check_mask) if check_mask is not None else None
+        )
+        check_ret = SymbolicExpr.create("load", check_ptr_sym, check_mask_sym, other_sym)
+        self._handle_access_check(check_ret, Load, "read")
         return ret
 
     def _op_store_overrider(self, ptr, value, mask, *args):
-        ptr = self._materialize_memory_operand(ptr)
-        mask = self._materialize_memory_operand(mask)
         ptr_sym = SymbolicExpr.from_value(ptr)
         value_sym = SymbolicExpr.from_value(value)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
-        self._handle_access_check(ret, Store, "write")
+
+        check_ptr = self._materialize_memory_operand(ptr)
+        check_mask = self._materialize_memory_operand(mask)
+        check_ptr_sym = SymbolicExpr.from_value(check_ptr)
+        check_mask_sym = (
+            SymbolicExpr.from_value(check_mask) if check_mask is not None else None
+        )
+        check_ret = SymbolicExpr.create("store", check_ptr_sym, value_sym, check_mask_sym)
+        self._handle_access_check(check_ret, Store, "write")
         return ret
 
     def _op_tensor_pointer_load_overrider(
@@ -2427,22 +2508,30 @@ class SymbolicClient(Client):
         eviction_policy,
         is_volatile,
     ):
-        ptr = self._materialize_memory_operand(ptr)
         ptr_sym = SymbolicExpr.from_value(ptr)
         ret = SymbolicExpr.create("tensor_pointer_load", ptr_sym, boundary_check)
-        self._handle_access_check(ret, TensorPointerLoad, "read")
+        check_ptr = self._materialize_memory_operand(ptr)
+        check_ptr_sym = SymbolicExpr.from_value(check_ptr)
+        check_ret = SymbolicExpr.create(
+            "tensor_pointer_load", check_ptr_sym, boundary_check
+        )
+        self._handle_access_check(check_ret, TensorPointerLoad, "read")
         return ret
 
     def _op_tensor_pointer_store_overrider(
         self, ptr, value, boundary_check, cache_modifier, eviction_policy
     ):
-        ptr = self._materialize_memory_operand(ptr)
         ptr_sym = SymbolicExpr.from_value(ptr)
         value_sym = SymbolicExpr.from_value(value)
         ret = SymbolicExpr.create(
             "tensor_pointer_store", ptr_sym, value_sym, boundary_check
         )
-        self._handle_access_check(ret, TensorPointerStore, "write")
+        check_ptr = self._materialize_memory_operand(ptr)
+        check_ptr_sym = SymbolicExpr.from_value(check_ptr)
+        check_ret = SymbolicExpr.create(
+            "tensor_pointer_store", check_ptr_sym, value_sym, boundary_check
+        )
+        self._handle_access_check(check_ret, TensorPointerStore, "write")
         return ret
 
     # ── Abstract hooks subclasses MUST implement ──────────────────────
