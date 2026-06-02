@@ -646,6 +646,20 @@ class SymbolicExpr:
         self._has_op_cache[op_name] = False
         return False
 
+    def has_vector_const(self) -> bool:
+        value = getattr(self, "value", None)
+        if (
+            self.op == "const"
+            and isinstance(value, TensorHandle)
+            and value.data.size != 1
+        ):
+            return True
+        return any(
+            child.has_vector_const()
+            for child in self.children.values()
+            if child is not None
+        )
+
     def to_tree_str(self) -> str:
         """
         Render the AST as an ASCII tree using anytree.RenderTree.
@@ -2175,15 +2189,19 @@ class SymbolicClient(Client):
     def _materialize_memory_operand(self, expr: Any) -> Any:
         if not isinstance(expr, SymbolicExpr):
             return expr
-        if expr.has_op("sort"):
+
+        materialized = False
+        for anchor_op in ("sort", "cumsum", "load"):
+            if expr.has_op(anchor_op):
+                materialized = True
+                expr = expr.replace_subtree(anchor_op)
+
+        if materialized:
             self._on_data_dependent_value()
-            expr = expr.replace_subtree("sort")
-        if expr.has_op("cumsum"):
-            self._on_data_dependent_value()
-            expr = expr.replace_subtree("cumsum")
-        if expr.has_op("load"):
-            self._on_data_dependent_value()
-            expr = expr.replace_subtree("load")
+            if expr.has_vector_const():
+                expr = expr.replace_subtree()
+            return expr
+
         return expr
 
     def _should_skip_loop_hooks(self) -> bool:
@@ -2447,6 +2465,7 @@ class SymbolicClient(Client):
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         other_sym = SymbolicExpr.from_value(other) if other is not None else None
         ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
+
         self._handle_access_check(ret, Load, "read")
         return ret
 
@@ -2457,6 +2476,7 @@ class SymbolicClient(Client):
         value_sym = SymbolicExpr.from_value(value)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
+
         self._handle_access_check(ret, Store, "write")
         return ret
 
