@@ -2196,15 +2196,21 @@ class SymbolicClient(Client):
     def _materialize_memory_operand(self, expr: Any) -> Any:
         if not isinstance(expr, SymbolicExpr):
             return expr
+        materialized = False
         if expr.has_op("sort"):
             self._on_data_dependent_value()
             expr = expr.replace_subtree("sort")
+            materialized = True
         if expr.has_op("cumsum"):
             self._on_data_dependent_value()
             expr = expr.replace_subtree("cumsum")
+            materialized = True
         if expr.has_op("load"):
             self._on_data_dependent_value()
             expr = expr.replace_subtree("load")
+            materialized = True
+        if materialized:
+            expr = expr.replace_subtree()
         return expr
 
     def _should_skip_loop_hooks(self) -> bool:
@@ -2462,23 +2468,35 @@ class SymbolicClient(Client):
         )
 
     def _op_load_overrider(self, ptr, mask, other, *args):
-        ptr = self._materialize_memory_operand(ptr)
-        mask = self._materialize_memory_operand(mask)
         ptr_sym = SymbolicExpr.from_value(ptr)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         other_sym = SymbolicExpr.from_value(other) if other is not None else None
         ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
-        self._handle_access_check(ret, Load, "read")
+
+        check_ptr = self._materialize_memory_operand(ptr)
+        check_mask = self._materialize_memory_operand(mask)
+        check_ptr_sym = SymbolicExpr.from_value(check_ptr)
+        check_mask_sym = (
+            SymbolicExpr.from_value(check_mask) if check_mask is not None else None
+        )
+        check_ret = SymbolicExpr.create("load", check_ptr_sym, check_mask_sym, other_sym)
+        self._handle_access_check(check_ret, Load, "read")
         return ret
 
     def _op_store_overrider(self, ptr, value, mask, *args):
-        ptr = self._materialize_memory_operand(ptr)
-        mask = self._materialize_memory_operand(mask)
         ptr_sym = SymbolicExpr.from_value(ptr)
         value_sym = SymbolicExpr.from_value(value)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
-        self._handle_access_check(ret, Store, "write")
+
+        check_ptr = self._materialize_memory_operand(ptr)
+        check_mask = self._materialize_memory_operand(mask)
+        check_ptr_sym = SymbolicExpr.from_value(check_ptr)
+        check_mask_sym = (
+            SymbolicExpr.from_value(check_mask) if check_mask is not None else None
+        )
+        check_ret = SymbolicExpr.create("store", check_ptr_sym, value_sym, check_mask_sym)
+        self._handle_access_check(check_ret, Store, "write")
         return ret
 
     def _op_tensor_pointer_load_overrider(
@@ -2490,22 +2508,30 @@ class SymbolicClient(Client):
         eviction_policy,
         is_volatile,
     ):
-        ptr = self._materialize_memory_operand(ptr)
         ptr_sym = SymbolicExpr.from_value(ptr)
         ret = SymbolicExpr.create("tensor_pointer_load", ptr_sym, boundary_check)
-        self._handle_access_check(ret, TensorPointerLoad, "read")
+        check_ptr = self._materialize_memory_operand(ptr)
+        check_ptr_sym = SymbolicExpr.from_value(check_ptr)
+        check_ret = SymbolicExpr.create(
+            "tensor_pointer_load", check_ptr_sym, boundary_check
+        )
+        self._handle_access_check(check_ret, TensorPointerLoad, "read")
         return ret
 
     def _op_tensor_pointer_store_overrider(
         self, ptr, value, boundary_check, cache_modifier, eviction_policy
     ):
-        ptr = self._materialize_memory_operand(ptr)
         ptr_sym = SymbolicExpr.from_value(ptr)
         value_sym = SymbolicExpr.from_value(value)
         ret = SymbolicExpr.create(
             "tensor_pointer_store", ptr_sym, value_sym, boundary_check
         )
-        self._handle_access_check(ret, TensorPointerStore, "write")
+        check_ptr = self._materialize_memory_operand(ptr)
+        check_ptr_sym = SymbolicExpr.from_value(check_ptr)
+        check_ret = SymbolicExpr.create(
+            "tensor_pointer_store", check_ptr_sym, value_sym, boundary_check
+        )
+        self._handle_access_check(check_ret, TensorPointerStore, "write")
         return ret
 
     # ── Abstract hooks subclasses MUST implement ──────────────────────

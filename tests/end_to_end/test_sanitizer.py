@@ -1154,6 +1154,32 @@ def test_sanitizer_supports_data_dependent_cumsum_index():
     assert len(cumsum_sanitizer.records) == 0
 
 
+masked_compaction_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=masked_compaction_index_sanitizer)
+@triton.jit
+def masked_compaction_index_store_kernel(active_ptr, out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    active = tl.load(active_ptr + offs)
+    exc_cumsum = tl.cumsum(active, 0) - active
+    active_flags = active.to(tl.int1)
+    rev_arange = tl.where(active_flags, 0, BLOCK - 1 - offs)
+    write_idx = exc_cumsum + rev_arange
+    tl.store(out_ptr + write_idx, active)
+
+
+def test_sanitizer_materializes_data_dependent_cumsum_store_indices():
+    masked_compaction_index_sanitizer.records.clear()
+
+    active = torch.tensor([1, 0, 1, 0], dtype=torch.int32)
+    out = torch.empty_like(active)
+
+    masked_compaction_index_store_kernel[(1,)](active, out, BLOCK=active.numel())
+
+    assert len(masked_compaction_index_sanitizer.records) == 0
+
+
 # ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
 
 
