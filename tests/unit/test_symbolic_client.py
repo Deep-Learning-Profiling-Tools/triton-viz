@@ -11,7 +11,9 @@ tests live next to their respective clients.
 import pytest
 from typing import cast
 
+import numpy as np
 import triton.language as tl
+from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.clients.symbolic_engine import (
     SymbolicClient,
@@ -182,6 +184,17 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
         assert str(result) == str(expected)
     else:
         assert cast(IntNumRef, result).as_long() == expected
+    assert constraints is None
+
+
+def test_ashr_expr_eval_scalar_constants():
+    lhs = SymbolicExpr.create("const", -8, tl.int32)
+    rhs = SymbolicExpr.create("const", 1, tl.int32)
+    expr = SymbolicExpr.create("ashr", lhs, rhs)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert cast(IntNumRef, result).as_long() == -4
     assert constraints is None
 
 
