@@ -75,6 +75,26 @@ def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
     assert getattr(descriptor, attr) is original
 
 
+def test_patch_lang_restores_core_reduce_scan_from_tl_kernel():
+    """Interpreter scan patching mutates tl.core even for tl-only kernels."""
+    original_reduce = tl.reduce
+    original_scan = tl.associative_scan
+    original_core_reduce = tl.core.reduce
+    original_core_scan = tl.core.associative_scan
+
+    patch_mod.patch_lang(_dummy_kernel, "triton")
+    try:
+        assert tl.associative_scan is not original_scan
+        assert tl.core.associative_scan is not original_core_scan
+    finally:
+        patch_mod.unpatch_lang("triton")
+
+    assert tl.reduce is original_reduce
+    assert tl.associative_scan is original_scan
+    assert tl.core.reduce is original_core_reduce
+    assert tl.core.associative_scan is original_core_scan
+
+
 def test_inline_asm_patch_returns_inputs_and_warns_once():
     class CastableArg:
         def __init__(self, name):
