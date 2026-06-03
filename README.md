@@ -15,35 +15,25 @@ Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to
 <details>
   <summary>Table of Contents</summary>
   <ol>
+    <li><a href="#about">About</a></li>
     <li>
-      <a href="#About">About</a>
-    <li>
-      <a href="#Getting-Started">Getting Started</a>
+      <a href="#getting-started">Getting Started</a>
       <ul>
-        <li><a href="#Prerequisites">Prerequisites</a></li>
-        <li><a href="#Installation-of-Triton_Viz">Installation of Triton_Viz</a></li>
-      </ul>
-    <li>
-      <a href="#Working-with-Examples">Working with examples</a>
-    <ul>
-        <li><a href="#More-Puzzles">More puzzles</a></li>
+        <li><a href="#prerequisites">Prerequisites</a></li>
+        <li><a href="#installation-of-triton-viz">Installation of Triton-Viz</a></li>
       </ul>
     </li>
-    <li><a href="#Webpage-Notes">Webpage notes</a></li>
-    <li><a href="#Analysis-Clients">Analysis clients</a></li>
-    <li><a href="#Visualizer-Features">Visualizer features</a></li>
-    <li><a href="#License">License</a></li>
+    <li>
+      <a href="#working-with-examples">Working with examples</a>
+    </li>
+    <li><a href="#analysis-clients">Analysis clients</a></li>
+    <li><a href="#license">License</a></li>
   </ol>
 </details>
 
 ## About
 
-Triton-Viz is a visualization and analysis toolkit specifically designed to complement the development and optimization of applications written in OpenAI's Triton, an open-source programming language aimed at simplifying the task of coding for accelerators such as GPUs.
-Triton-Viz offers a suite of features to enhance the debugging, performance analysis, and understanding of Triton code.
-
-Given that Triton allows developers to program at a higher level while still targeting low-level accelerator devices, managing and optimizing resources like memory becomes a crucial aspect of development.
-Triton-Viz addresses these challenges by providing real-time visualization of tensor operations and their memory usage.
-The best part about this tool is that while it does focus on visualizing GPU operations, users are not required to have GPU resources to run examples on their system.
+Triton-Viz helps developers inspect Triton kernels with visualization, profiling, and memory-safety analysis tools. It can run many examples through Triton's interpreter, so GPU access is not required for basic debugging workflows.
 
 
 ## Getting Started
@@ -109,9 +99,45 @@ uv sync --extra test # tests but no NKI support
 
 ## Working with Examples
 
+Run an example directly with Python:
+
 ```sh
-cd examples
-python <file_name>.py
+python examples/visualizer/matmul.py
+```
+
+Use the decorator API when writing or modifying a Triton kernel:
+
+```py
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("sanitizer")  # also supports "tracer" and "profiler"
+@triton.jit
+def kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
+    offsets = tl.arange(0, BLOCK)
+    values = tl.load(x_ptr + offsets)
+    tl.store(out_ptr + offsets, values)
+```
+
+Use the CLI wrappers to run an existing Python script without editing it. These
+wrappers patch plain `@triton.jit` kernels, so use them with scripts that do not
+already apply `@triton_viz.trace(...)`.
+
+```sh
+triton-sanitizer examples/sanitizer/oob_cli.py
+triton-profiler examples/profiler/load_store_cli.py
+triton-visualizer trace.tvz
+```
+
+For visualizer workflows, save a trace and launch the UI from Python:
+
+```py
+import triton_viz
+
+triton_viz.save("trace.tvz")
+triton_viz.launch()
 ```
 
 ## Analysis Clients
