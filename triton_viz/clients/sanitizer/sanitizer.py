@@ -286,44 +286,44 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         assert addr_sym is not None
         addr_ok = self._addr_ok_for_expr(symbolic_expr)
 
-        def _check_single_addr(addr_expr: Z3Expr) -> None:
-            solver.push()
-            solver.add(addr_sym == addr_expr)
+        def _report_if_sat() -> None:
+            if solver.check() != sat:
+                return
+
+            model = solver.model()
+            violation_val = model.evaluate(addr_sym, model_completion=True)
+            if isinstance(violation_val, IntNumRef):
+                violation_addr = violation_val.as_long()
+            else:
+                raise RuntimeError("Unexpected violation address type from Z3 model!")
+
+            tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+            if symbolic_expr.op in ("store", "tensor_pointer_store"):
+                op_type: type[Load] | type[Store] = Store
+            else:
+                op_type = Load
+
+            self._report(
+                op_type, tensor, violation_addr, symbolic_expr, source_location
+            )
+
+        solver.push()
+        try:
             solver.add(Not(addr_ok))
             if expr_constraints is not None:
                 solver.add(expr_constraints)
-            if solver.check() == sat:
-                # Get the model to find the violation address
-                model = solver.model()
-                violation_val = model.evaluate(addr_sym, model_completion=True)
-                if isinstance(violation_val, IntNumRef):
-                    violation_addr = violation_val.as_long()
-                else:
-                    raise RuntimeError(
-                        "Unexpected violation address type from Z3 model!"
-                    )
 
-                # Find the tensor that this address belongs to
-                tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+            if isinstance(access_addr, list):
+                if not access_addr:
+                    return
+                solver.add(Or(*(addr_sym == addr for addr in access_addr)))
+                _report_if_sat()
+                return
 
-                # Determine operation type from symbolic expression
-                if symbolic_expr.op in ("store", "tensor_pointer_store"):
-                    op_type: type[Load] | type[Store] = Store
-                else:
-                    op_type = Load
-
-                # Report with symbolic expression and source location
-                self._report(
-                    op_type, tensor, violation_addr, symbolic_expr, source_location
-                )
+            solver.add(addr_sym == access_addr)
+            _report_if_sat()
+        finally:
             solver.pop()
-
-        if isinstance(access_addr, list):
-            for addr in access_addr:
-                _check_single_addr(addr)
-            return
-
-        _check_single_addr(access_addr)
 
     def _handle_access_check(
         self,
