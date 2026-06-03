@@ -92,6 +92,7 @@ AccessMode: TypeAlias = Literal["read", "write"]
 Z3Expr: TypeAlias = ExprRef | list[ExprRef] | Tactic | Probe
 ConstraintExpr: TypeAlias = ExprRef | bool | int | float
 ConstraintConjunction: TypeAlias = BoolRef | None
+SymbolicChild: TypeAlias = "SymbolicExpr | tuple[SymbolicExpr, ...]"
 
 
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
@@ -173,6 +174,7 @@ class LoopContext:
     start: int = 0
     stop: int = 0
     step: int = 1
+    current_value: int | None = None
     signature_cache: dict[int, int] = field(default_factory=dict)
     pending_checks: list[PendingCheck] = field(default_factory=list)
 
@@ -190,6 +192,7 @@ class SymbolicExprDataWrapper:
     def __init__(self, symbolic_expr: SymbolicExpr, value: str | None = None):
         self._value = value
         self.symbolic_expr = symbolic_expr
+        self._is_scalar = self.size == 1
 
     def invalidate(self) -> None:
         self._value = None
@@ -213,6 +216,22 @@ class SymbolicExprDataWrapper:
         if len(shape) == 0:
             return 1
         return math.prod(shape)
+
+    def _scalar_data(self) -> np.ndarray:
+        if not self._is_scalar:
+            raise ValueError(
+                f"Expected scalar symbolic data, got shape {self.symbolic_expr.shape}"
+            )
+        concrete = self.symbolic_expr.concretize()
+        if not isinstance(concrete, TensorHandle):
+            raise TypeError(f"Expected TensorHandle, got {type(concrete)}")
+        return concrete.data
+
+    def __getitem__(self, item: Any) -> Any:
+        return self._scalar_data()[item]
+
+    def squeeze(self, axis: int | tuple[int, ...] | None = None) -> np.ndarray:
+        return self._scalar_data().squeeze(axis)
 
     @staticmethod
     def coerce_int(val: Any) -> int:
@@ -241,6 +260,9 @@ class SymbolicExprDataWrapper:
         if isinstance(int_val, list):
             int_val = int_val[0]
         return self.coerce_int(int_val)
+
+    def __bool__(self) -> bool:
+        return bool(self._scalar_data().item())
 
     def __str__(self) -> str:
         return self.value
@@ -370,7 +392,7 @@ class SymbolicExpr:
         self.concrete_fn: Callable[..., Any] | None = None
 
         # deal with args
-        self.children: dict[str, SymbolicExpr | None] = {}
+        self.children: dict[str, SymbolicChild | None] = {}
 
         # for-loop iterator association
         self.loop_ctx: LoopContext | None = None
@@ -441,6 +463,13 @@ class SymbolicExpr:
             if child_symbolic_expr is None:
                 Node(f"{child_key}: None", parent=root)
                 continue
+            if isinstance(child_symbolic_expr, tuple):
+                tuple_node = Node(f"{child_key}: tuple", parent=root)
+                for idx, item in enumerate(child_symbolic_expr):
+                    child_node = item._to_anytree()
+                    child_node.name = f"{idx}: {child_node.name}"
+                    child_node.parent = tuple_node
+                continue
             child_node = child_symbolic_expr._to_anytree()
             child_node.name = f"{child_key}: {child_node.name}"
             child_node.parent = root
@@ -498,9 +527,10 @@ class SymbolicExpr:
                 raise ValueError("Cannot infer dtype from an empty tuple/list.")
             first_dtype = SymbolicExpr._infer_literal_dtype(seq[0])
             for v in seq[1:]:  # assume only one consistent dtype in the tuple
-                if SymbolicExpr._infer_literal_dtype(v) != first_dtype:
+                dtype = SymbolicExpr._infer_literal_dtype(v)
+                if dtype != first_dtype:
                     raise ValueError(
-                        f"All elements in the tuple must have the same dtype, but found {first_dtype} and {SymbolicExpr.from_value(v).dtype}"
+                        f"All elements in the tuple must have the same dtype, but found {first_dtype} and {dtype}"
                     )
             return first_dtype
         if isinstance(var, SymbolicExpr.builtin_scala_types):
@@ -518,7 +548,7 @@ class SymbolicExpr:
         cls.loop_ctx_provider = fn
 
     @classmethod
-    def from_value(cls, var: Any) -> SymbolicExpr:
+    def from_value(cls, var: Any) -> SymbolicExpr | tuple[SymbolicExpr, ...]:
         """Create a SymbolicExpr from a Python value."""
         if isinstance(var, tl.core.tensor):  # if a triton tensor
             var = var.handle  # get its handle
@@ -526,11 +556,18 @@ class SymbolicExpr:
         if isinstance(var, cls):  # if already SymbolicExpr
             return var
 
-        dtype = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
-
         if isinstance(var, SymbolicExpr.tuple_types):  # if a tuple
             seq = cast(Sequence[Any], var)
-            return cls.create("const", tuple(seq), dtype)
+            children: list[SymbolicExpr] = []
+            for item in seq:
+                child = cls.from_value(item)
+                if isinstance(child, tuple):
+                    raise ValueError("Nested symbolic tuples are not supported.")
+                children.append(child)
+            return tuple(children)
+
+        dtype = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
+
         if isinstance(var, TensorHandle):  # if a TensorHandle
             if len(var.data) != 1:
                 raise ValueError(
@@ -589,14 +626,25 @@ class SymbolicExpr:
         for name, child in list(self.children.items()):
             if child is None:
                 continue
-            new_child = child.replace_subtree(anchor_op)
-            self.add_child(name, new_child)
+            if isinstance(child, tuple):
+                new_child_tuple = tuple(
+                    item.replace_subtree(anchor_op) for item in child
+                )
+                self.add_child(name, new_child_tuple)
+                continue
+            new_child_expr = child.replace_subtree(anchor_op)
+            self.add_child(name, new_child_expr)
 
         # inplace replace to "const" node
         if anchor_op is None or (
             self.op == anchor_op
             and all(
-                (child is None) or (not child.has_op(anchor_op))
+                (child is None)
+                or (
+                    all(not item.has_op(anchor_op) for item in child)
+                    if isinstance(child, tuple)
+                    else not child.has_op(anchor_op)
+                )
                 for child in self.children.values()
             )
         ):
@@ -618,6 +666,11 @@ class SymbolicExpr:
             return True
         for _, child_symbolic_expr in self.children.items():
             if child_symbolic_expr is None:
+                continue
+            if isinstance(child_symbolic_expr, tuple):
+                if any(child.has_op(op_name) for child in child_symbolic_expr):
+                    self._has_op_cache[op_name] = True
+                    return True
                 continue
             if child_symbolic_expr.has_op(op_name):
                 self._has_op_cache[op_name] = True
@@ -720,6 +773,11 @@ class ConstSymbolicExpr(SymbolicExpr):
         if dtype is None:
             raise RuntimeError("const node is missing dtype information")
 
+        if self.loop_ctx is not None and self.loop_ctx.current_value is not None:
+            return TensorHandle(
+                np.array([self.loop_ctx.current_value], dtype=_get_np_dtype(dtype)),
+                dtype,
+            )
         if isinstance(self.value, (SymbolicExpr.builtin_scala_types, tl.pointer_type)):
             return TensorHandle(
                 np.array([self.value], dtype=_get_np_dtype(dtype)),
@@ -2222,6 +2280,7 @@ class SymbolicClient(Client):
         if self._should_skip_loop_hooks():
             return idx
         if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            self.loop_stack[-1].current_value = int(idx)
             return self.loop_stack[-1].idx
         return idx
 
@@ -2295,7 +2354,14 @@ class SymbolicClient(Client):
             ):
                 return node.to_py()
             for child in node.children.values():
-                if child is not None:
+                if child is None:
+                    continue
+                if isinstance(child, tuple):
+                    for item in child:
+                        base = walk(item)
+                        if base is not None:
+                            return base
+                else:
                     base = walk(child)
                     if base is not None:
                         return base
@@ -2492,6 +2558,11 @@ class SymbolicClient(Client):
         return []
 
     def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
+        if isinstance(arg, (tuple, list)):
+            for idx, item in enumerate(arg):
+                self.arg_callback(f"{name}[{idx}]", item, None)
+            self._cache_non_tensor_arg(name, tuple(type(item).__name__ for item in arg))
+            return
         if not hasattr(arg, "data_ptr"):
             self._cache_non_tensor_arg(name, arg)
             return
