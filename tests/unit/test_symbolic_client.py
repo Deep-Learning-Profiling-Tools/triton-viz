@@ -185,6 +185,17 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
     assert constraints is None
 
 
+def test_ashr_expr_eval_scalar_constants():
+    lhs = SymbolicExpr.create("const", -8, tl.int32)
+    rhs = SymbolicExpr.create("const", 1, tl.int32)
+    expr = SymbolicExpr.create("ashr", lhs, rhs)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert cast(IntNumRef, result).as_long() == -4
+    assert constraints is None
+
+
 def test_bitwise_bool_expr_eval():
     """
     Test short circuiting behavior of bitwise_and and bitwise_or operators which do not

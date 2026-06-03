@@ -14,6 +14,7 @@ from .config import config as cfg
 from .callbacks import OpCallbacks
 
 from .data import (
+    Ashr,
     Op,
     RawLoad,
     RawStore,
@@ -264,6 +265,8 @@ class PatchOp:
                         ret.concrete_fn = original_ops[interpreter_builder][
                             "create_masked_store"
                         ]
+                    elif self.op_type == Ashr:
+                        ret.concrete_fn = original_ops[interpreter_builder]["binary_op"]
                     else:
                         ret.concrete_fn = self.op
         else:
