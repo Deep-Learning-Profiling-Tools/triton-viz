@@ -463,6 +463,13 @@ def test_reduce_shape_2d_axis0():
     assert reduced.shape == (8,)
 
 
+def test_reduce_shape_negative_axis():
+    """tl.sum(x, axis=-1) on [4, 8] -> [4]."""
+    inp = _make_block_expr(tl.float32, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=-1)
+    assert reduced.shape == (4,)
+
+
 def test_reduce_shape_2d_axis1_keepdims():
     """tl.sum(x, axis=1, keepdims=True) on [4, 8] -> [4, 1]."""
     inp = _make_block_expr(tl.float32, [4, 8])
@@ -475,6 +482,13 @@ def test_reduce_shape_2d_axis0_keepdims():
     inp = _make_block_expr(tl.float32, [4, 8])
     reduced = ReduceSymbolicExpr("sum", inp, axis=0, keepdims=True)
     assert reduced.shape == (1, 8)
+
+
+def test_reduce_shape_negative_axis_keepdims():
+    """tl.sum(x, axis=-1, keepdims=True) on [4, 8] -> [4, 1]."""
+    inp = _make_block_expr(tl.float32, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=-1, keepdims=True)
+    assert reduced.shape == (4, 1)
 
 
 def test_reduce_shape_1d_to_scalar():
