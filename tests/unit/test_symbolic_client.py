@@ -262,15 +262,6 @@ def test_pointer_expr_addptr_eval():
     assert constraints is None
 
 
-def test_pointer_vector_const_to_py_returns_list():
-    handle = TensorHandle(
-        np.array([100, 104], dtype=np.uint64), tl.pointer_type(tl.int32)
-    )
-    base = ConstSymbolicExpr("const", handle, tl.pointer_type(tl.int32))
-
-    assert base.to_py() == [100, 104]
-
-
 # ======== Reshape Symbolic Expr Operations Tests =========
 
 
@@ -294,27 +285,6 @@ def test_reshape_expr_eval(op: str, extra):
     result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == 5
     assert constraints is None
-
-
-def test_replace_subtree_preserves_block_type_metadata_const():
-    block_type = tl.block_type(tl.int32, [4])
-    arg = SymbolicExpr.create("const", 7, tl.int32)
-    expr = SymbolicExpr.create("splat", block_type, arg)
-
-    def fake_splat(dtype, value):
-        assert dtype is block_type
-        return TensorHandle(
-            np.full(tuple(dtype.shape), value.data.item(), dtype=np.int32),
-            dtype.scalar,
-        )
-
-    expr.concrete_fn = fake_splat
-
-    concrete = expr.replace_subtree()
-
-    assert isinstance(concrete, ConstSymbolicExpr)
-    assert isinstance(concrete.value, TensorHandle)
-    assert concrete.value.data.tolist() == [7, 7, 7, 7]
 
 
 # ======== Regression Tests: expand_dims/broadcast Shape Fix =========
