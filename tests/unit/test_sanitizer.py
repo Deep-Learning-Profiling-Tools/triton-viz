@@ -1,9 +1,12 @@
 import pytest
 import torch
+import triton.language as tl
 from typing import cast
+from z3 import BoolVal, IntVal
 
 from triton_viz.core.config import config as cfg
 from triton_viz.clients import Sanitizer
+from triton_viz.clients.symbolic_engine import SymbolicExpr
 from triton_viz.clients.sanitizer.report import _classify_layout_and_segments
 from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
@@ -145,6 +148,35 @@ def test_post_run_callback_clears_state_on_last_block():
     assert sanitizer.tensor_names == {}
     assert sanitizer.cache_args == []
     assert sanitizer.cache_grid is None
+
+
+def test_range_check_uses_per_lane_mask_constraints():
+    tensor = torch.empty((4,), dtype=torch.int32)
+    base = tensor.data_ptr()
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append(
+        (base, base + tensor.numel() * tensor.element_size() - 1, tensor)
+    )
+    sanitizer.grid_callback((1, 1, 1))
+
+    ptr = SymbolicExpr.create("const", base, tl.pointer_type(tl.int32))
+    expr = SymbolicExpr.create("load", ptr, None, None)
+    oob_addr = base + 1024
+
+    sanitizer._check_range_satisfiable(
+        [IntVal(oob_addr), IntVal(base)],
+        [BoolVal(False), BoolVal(True)],
+        expr,
+    )
+    assert sanitizer.records == []
+
+    sanitizer._check_range_satisfiable(
+        [IntVal(oob_addr)],
+        [BoolVal(True)],
+        expr,
+    )
+    assert len(sanitizer.records) == 1
 
 
 # ======== Report Layout Classification Tests ===========

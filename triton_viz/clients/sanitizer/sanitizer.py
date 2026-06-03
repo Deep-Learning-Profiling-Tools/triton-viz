@@ -122,9 +122,29 @@ def _make_signature(
     else:
         addr_hash = hash(addr_expr)
 
-    constr_hash = 0 if constraints is None else hash(constraints)
+    if constraints is None:
+        constr_hash = 0
+    elif isinstance(constraints, list):
+        constr_hash = hash(tuple(0 if c is None else hash(c) for c in constraints))
+    else:
+        constr_hash = hash(constraints)
 
     return hash((addr_hash, constr_hash))
+
+
+def _broadcast_constraints(
+    constraints: ConstraintConjunction,
+    lane_count: int,
+) -> list[BoolRef | None]:
+    if not isinstance(constraints, list):
+        return [constraints] * lane_count
+    if len(constraints) == lane_count:
+        return constraints
+    if len(constraints) == 1:
+        return constraints * lane_count
+    raise ValueError(
+        f"Cannot pair {len(constraints)} constraints with {lane_count} addresses"
+    )
 
 
 @dataclass(frozen=True)
@@ -261,11 +281,13 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         assert solver is not None
         assert addr_sym is not None
 
-        def _check_single_addr(addr_expr: Z3Expr) -> None:
+        def _check_single_addr(
+            addr_expr: Z3Expr, constraints: BoolRef | None
+        ) -> None:
             solver.push()
             solver.add(addr_sym == addr_expr)
-            if expr_constraints is not None:
-                solver.add(expr_constraints)
+            if constraints is not None:
+                solver.add(constraints)
             if solver.check() == sat:
                 # Get the model to find the violation address
                 model = solver.model()
@@ -293,11 +315,16 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             solver.pop()
 
         if isinstance(access_addr, list):
-            for addr in access_addr:
-                _check_single_addr(addr)
+            constraints = _broadcast_constraints(expr_constraints, len(access_addr))
+            for addr, lane_constraints in zip(access_addr, constraints):
+                _check_single_addr(addr, lane_constraints)
             return
 
-        _check_single_addr(access_addr)
+        if isinstance(expr_constraints, list):
+            constraints = _broadcast_constraints(expr_constraints, 1)[0]
+        else:
+            constraints = expr_constraints
+        _check_single_addr(access_addr, constraints)
 
     def _handle_access_check(
         self,

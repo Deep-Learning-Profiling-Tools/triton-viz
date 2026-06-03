@@ -91,8 +91,9 @@ AccessMode: TypeAlias = Literal["read", "write"]
 
 Z3Expr: TypeAlias = ExprRef | list[ExprRef] | Tactic | Probe
 ConstraintExpr: TypeAlias = ExprRef | bool | int | float
-ConstraintConjunction: TypeAlias = BoolRef | None
 SymbolicChild: TypeAlias = "SymbolicExpr | tuple[SymbolicExpr, ...]"
+LaneConstraintConjunction: TypeAlias = BoolRef | None
+ConstraintConjunction: TypeAlias = BoolRef | list[LaneConstraintConjunction] | None
 
 
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
@@ -116,7 +117,7 @@ def _iter_constraints_to_bool(
 
 def _and_constraints(
     *constraints: ConstraintExpr | Sequence[ConstraintExpr] | None,
-) -> ConstraintConjunction:
+) -> LaneConstraintConjunction:
     parts: list[BoolRef] = []
     for constraint in constraints:
         if constraint is None:
@@ -131,6 +132,45 @@ def _and_constraints(
     if len(parts) == 1:
         return parts[0]
     return And(*parts)
+
+
+def _broadcast_lane_value(value: Any, lane_count: int) -> list[Any]:
+    if isinstance(value, (list, tuple)):
+        if len(value) == lane_count:
+            return list(value)
+        if len(value) == 1:
+            return list(value) * lane_count
+        raise ValueError(
+            f"Cannot broadcast {len(value)} values to {lane_count} lanes"
+        )
+    return [value] * lane_count
+
+
+def _lane_count_from(*values: Any) -> int | None:
+    lane_count: int | None = None
+    for value in values:
+        if not isinstance(value, (list, tuple)):
+            continue
+        if lane_count is None:
+            lane_count = len(value)
+        elif len(value) not in (1, lane_count):
+            raise ValueError(
+                f"Cannot combine lane constraints of length {len(value)} and {lane_count}"
+            )
+    return lane_count
+
+
+def _and_lane_constraints(
+    lane_count: int,
+    *constraints: ConstraintExpr | Sequence[ConstraintExpr] | None,
+) -> list[LaneConstraintConjunction]:
+    lane_constraints = [
+        _broadcast_lane_value(constraint, lane_count) for constraint in constraints
+    ]
+    return [
+        _and_constraints(*(constraint[i] for constraint in lane_constraints))
+        for i in range(lane_count)
+    ]
 
 
 def _range_to_iterator_constraint(
@@ -604,8 +644,17 @@ class SymbolicExpr:
 
         if constraints is not None and simplify_constraints:
             if self._simplified_constraints is None:
-                # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
-                self._simplified_constraints = cast(BoolRef, simplify(constraints))
+                if isinstance(constraints, list):
+                    # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
+                    self._simplified_constraints = [
+                        cast(BoolRef, simplify(constraint))
+                        if constraint is not None
+                        else None
+                        for constraint in constraints
+                    ]
+                else:
+                    # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
+                    self._simplified_constraints = cast(BoolRef, simplify(constraints))
             return self._simplified_z3, self._simplified_constraints
 
         return self._simplified_z3, constraints
@@ -875,10 +924,23 @@ class IndirectSymbolicExprBase(SymbolicExpr):
         ptr, constraints_ptr = ptr_expr._to_z3()
         mask_expr = self.mask
         mask_constraint: ConstraintExpr | Sequence[ConstraintExpr] | None = None
+        constraints_mask: ConstraintConjunction = None
         if mask_expr is not None:
-            mask, _ = mask_expr._to_z3()
+            mask, constraints_mask = mask_expr._to_z3()
             mask_constraint = mask
-        return ptr, _and_constraints(constraints_ptr, mask_constraint)
+
+        lane_count = _lane_count_from(ptr, constraints_ptr, mask_constraint, constraints_mask)
+        if lane_count is None:
+            return ptr, _and_constraints(
+                constraints_ptr, constraints_mask, mask_constraint
+            )
+
+        return _broadcast_lane_value(ptr, lane_count), _and_lane_constraints(
+            lane_count,
+            constraints_ptr,
+            constraints_mask,
+            mask_constraint,
+        )
 
     def concretize(self) -> Any:
         ptr_concrete = self.ptr.concretize()
