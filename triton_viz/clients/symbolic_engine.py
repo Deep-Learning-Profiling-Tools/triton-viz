@@ -758,17 +758,12 @@ class ConstSymbolicExpr(SymbolicExpr):
         Valid only for nodes with op == 'const':
         - If `value` is a TensorHandle:
             • Scalar  -> return int/float
-            • Multi-element pointer -> return the first pointer base
             • Multi-element -> return a Python list
         - Otherwise, return the original Python object
           (e.g., int, float, tuple, list, etc.).
         """
         v = self.value
         if isinstance(v, TensorHandle):
-            if isinstance(self.dtype, tl.pointer_type):
-                for item in v.data.flat:
-                    return int(item)
-                return None
             if len(v.data) == 1:
                 return v.data.item()  # scalar case
             else:
@@ -2450,6 +2445,11 @@ class SymbolicClient(Client):
                 and not node.shape
             ):
                 base = node.to_py()
+                if isinstance(base, list):
+                    for item in base:
+                        if isinstance(item, (int, np.integer)):
+                            return int(item)
+                    return None
                 if isinstance(base, (int, np.integer)):
                     return int(base)
                 return None

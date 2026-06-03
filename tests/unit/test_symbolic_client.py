@@ -262,13 +262,13 @@ def test_pointer_expr_addptr_eval():
     assert constraints is None
 
 
-def test_pointer_vector_const_to_py_returns_base_pointer():
+def test_pointer_vector_const_to_py_returns_list():
     handle = TensorHandle(
         np.array([100, 104], dtype=np.uint64), tl.pointer_type(tl.int32)
     )
     base = ConstSymbolicExpr("const", handle, tl.pointer_type(tl.int32))
 
-    assert base.to_py() == 100
+    assert base.to_py() == [100, 104]
 
 
 # ======== Reshape Symbolic Expr Operations Tests =========
