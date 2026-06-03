@@ -2601,8 +2601,8 @@ class SymbolicClient(Client):
         """Constraint added to the solver under ``addr_ok``.
 
         Race detector keeps the positive premise (every captured access sits
-        inside a registered tensor). Sanitizer overrides with ``Not(addr_ok)``
-        so unsatisfiability proves every access is in-bounds.
+        inside a registered tensor). Sanitizer can defer address-range
+        premises until each access check when it needs access-specific ranges.
         """
         return addr_ok
 

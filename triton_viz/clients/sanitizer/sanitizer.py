@@ -11,7 +11,7 @@ import sys
 
 from torch import Tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
-from z3 import And, BoolVal, Not, Or, Solver, sat
+from z3 import And, BoolVal, Not, Or, sat
 from z3.z3 import BoolRef, IntNumRef
 
 from ...core.client import Client
@@ -176,9 +176,10 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
     # ── Sanitizer-specific hook overrides ─────────────────────────
 
     def _addr_ok_premise(self, addr_ok: BoolRef) -> BoolRef:
-        # Sanitizer proves in-bounds by asking Z3 whether addr_ok can be
-        # violated — so the premise added to the solver is its negation.
-        return Not(addr_ok)
+        # Sanitizer adds the actual invalid-address premise under the
+        # per-access push/pop scope, because it may need tensor-specific
+        # ranges instead of the global union of all registered tensors.
+        return BoolVal(True)
 
     def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
         # TODO: init a reserved_args field per backend to filter out these args
@@ -210,9 +211,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         # the launch.
         self.cache_grid = tuple(int(g) for g in grid)
         SymbolicClient.grid_callback(self, grid)
-        solver = Solver()
-        solver.add(self.pid_ok)
-        self.solver = solver
 
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
@@ -252,6 +250,12 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         raise RuntimeError("No tensor registered in SymbolicSanitizer!")
 
     def _addr_ok_for_expr(self, symbolic_expr: SymbolicExpr) -> BoolRef:
+        """Return the valid-address predicate for one memory access.
+
+        Prefer the ranges belonging to the tensor that the pointer expression
+        originates from. The global ``addr_ok`` union is only a fallback for
+        expressions whose base tensor cannot be resolved.
+        """
         addr_sym = self.addr_sym
         assert addr_sym is not None
 
