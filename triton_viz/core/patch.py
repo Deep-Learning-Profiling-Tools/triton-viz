@@ -266,9 +266,7 @@ class PatchOp:
                             "create_masked_store"
                         ]
                     elif self.op_type == Ashr:
-                        ret.concrete_fn = original_ops[interpreter_builder][
-                            "binary_op"
-                        ]
+                        ret.concrete_fn = original_ops[interpreter_builder]["binary_op"]
                     else:
                         ret.concrete_fn = self.op
         else:
