@@ -196,6 +196,26 @@ def test_ashr_expr_eval_scalar_constants():
     assert constraints is None
 
 
+def test_unsigned_shift_expr_eval_scalar_constants():
+    lhs = SymbolicExpr.create("const", 0xFFFF0008, tl.uint32)
+    rhs = SymbolicExpr.create("const", 16, tl.uint32)
+    expr = SymbolicExpr.create("right_shift", lhs, rhs)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert cast(IntNumRef, result).as_long() == 0xFFFF
+    assert constraints is None
+
+    lhs = SymbolicExpr.create("const", 2, tl.uint32)
+    rhs = SymbolicExpr.create("const", 4, tl.uint32)
+    expr = SymbolicExpr.create("left_shift", lhs, rhs)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert cast(IntNumRef, result).as_long() == 32
+    assert constraints is None
+
+
 def test_bitwise_bool_expr_eval():
     """
     Test short circuiting behavior of bitwise_and and bitwise_or operators which do not
@@ -245,6 +265,17 @@ def test_where_expr_concretize_scalar_constants():
 
     assert isinstance(concrete, TensorHandle)
     np.testing.assert_array_equal(concrete.data, np.array([10], dtype=np.int32))
+
+
+def test_unary_expr_concretize_vector_constants():
+    handle = TensorHandle(np.array([1.0, 4.0], dtype=np.float32), tl.float32)
+    arg = SymbolicExpr.from_value(handle)
+    expr = SymbolicExpr.create("sqrt", arg)
+
+    concrete = expr.concretize()
+
+    assert isinstance(concrete, TensorHandle)
+    np.testing.assert_allclose(concrete.data, np.array([1.0, 2.0], dtype=np.float32))
 
 
 # ======== Pointer Symbolic Expr Operations Tests =========
@@ -320,6 +351,47 @@ def test_broadcast_updates_shape():
     # broadcast to shape (4,)
     expr = SymbolicExpr.create("broadcast", arg, (4,))
     assert expr.shape == (4,), f"Expected shape (4,), got {expr.shape}"
+
+
+def test_symbolic_data_wrapper_exposes_numpy_array_protocol():
+    handle = TensorHandle(np.arange(4, dtype=np.int32).reshape(2, 2), tl.int32)
+    expr = SymbolicExpr.from_value(handle)
+
+    assert expr.data.shape == (2, 2)
+    assert expr.data.dtype == np.dtype("int32")
+    np.testing.assert_array_equal(expr.data.flatten(), np.array([0, 1, 2, 3]))
+    np.testing.assert_array_equal(np.asarray(expr.data), handle.data)
+
+
+def test_shape_expr_concretize_vector_constants():
+    handle = TensorHandle(np.arange(4, dtype=np.int32), tl.int32)
+    arg = SymbolicExpr.from_value(handle)
+
+    expanded = SymbolicExpr.create("expand_dims", arg, 0).concretize()
+    assert isinstance(expanded, TensorHandle)
+    np.testing.assert_array_equal(expanded.data, np.arange(4, dtype=np.int32)[None, :])
+
+    reshaped_expr = SymbolicExpr.create(
+        "reshape",
+        arg,
+        (SymbolicExpr.create("const", 2, tl.int32), SymbolicExpr.create("const", 2, tl.int32)),
+    )
+    reshaped = reshaped_expr.concretize()
+    assert isinstance(reshaped, TensorHandle)
+    np.testing.assert_array_equal(
+        reshaped.data, np.arange(4, dtype=np.int32).reshape(2, 2)
+    )
+
+    transposed = SymbolicExpr.create("trans", reshaped_expr, (1, 0)).concretize()
+    assert isinstance(transposed, TensorHandle)
+    np.testing.assert_array_equal(
+        transposed.data, np.arange(4, dtype=np.int32).reshape(2, 2).T
+    )
+
+    scalar = SymbolicExpr.create("const", 7, tl.int32)
+    broadcast = SymbolicExpr.create("broadcast", scalar, (2,)).concretize()
+    assert isinstance(broadcast, TensorHandle)
+    np.testing.assert_array_equal(broadcast.data, np.array([7, 7], dtype=np.int32))
 
 
 # ======== Block Pointer Symbolic Expr Tests =========
@@ -603,4 +675,3 @@ def test_store_dtype_block_of_pointers():
     )
     store = StoreSymbolicExpr("store", ptr, value)
     assert store.dtype is None, f"Expected None, got {store.dtype}"
-
