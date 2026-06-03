@@ -24,6 +24,7 @@ from triton.runtime.interpreter import (
     GridExecutor,
     _implicit_cvt,
     interpreter_builder,
+    interpreter_semantic,
     _patch_builtin,
 )
 from triton.runtime.interpreter import _patch_lang as triton_patch_lang
@@ -63,24 +64,13 @@ class _LangPatchScope:
 _LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": [], "nki_beta2": []}
 
 
-def _push_lang_patch_scope(backend: str, scope: Any) -> None:
-    _LANG_PATCH_SCOPES.setdefault(backend, []).append(scope)
+def _capture_builtin_attrs(scope: _LangPatchScope, obj: Any) -> None:
+    for name, member in inspect.getmembers(obj):
+        if tl.core.is_builtin(member):
+            scope.set_attr(obj, name, member)
 
 
-def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
-    """
-    Stores Triton attributes into a LangPatchScope for later unpatching.
-    This is to be run before patching with the interpreter.
-    This is equivalent to what triton>=3.6.0 does natively
-    but also works for triton<3.6.0.
-    """
-
-    def _capture_builtin_attrs(scope: _LangPatchScope, obj: Any) -> None:
-        for name, member in inspect.getmembers(obj):
-            if tl.core.is_builtin(member):
-                scope.set_attr(obj, name, member)
-
-    scope = _LangPatchScope()
+def _triton_language_attr_targets() -> list[tuple[Any, tuple[str, ...]]]:
     tensor_attrs = ("__index__", "__bool__", "__repr__", "__str__", "T")
     lang_attrs = (
         "range",
@@ -93,31 +83,84 @@ def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
         "reduce",
         "associative_scan",
     )
-    langs = [
-        value
-        for value in fn.__globals__.values()
-        if inspect.ismodule(value) and value in [tl, tl.core]
-    ]
-    if langs:
-        # Triton's interpreter scan patch mutates both tl and tl.core even when
-        # the kernel only imports one of them.
-        for lang in (tl, tl.core):
-            if lang not in langs:
-                langs.append(lang)
+
+    targets: list[tuple[Any, tuple[str, ...]]] = []
+    for lang in (tl, tl.core):
+        targets.append((lang.tensor, tensor_attrs))
+        targets.append((lang, lang_attrs))
+        targets.append((lang.dtype, ("to_ir",)))
+        if lang == tl:
+            targets.append((lang.math, ()))
+    if hasattr(tl.core, "tensor_descriptor_base"):
+        targets.append((tl.core.tensor_descriptor_base, ()))
+    return targets
+
+
+def _capture_triton_language_baseline() -> list[tuple[Any, str, Any]]:
+    baseline: list[tuple[Any, str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+
+    def save(obj: Any, name: str) -> None:
+        key = (id(obj), name)
+        if key in seen:
+            return
+        seen.add(key)
+        baseline.append((obj, name, getattr(obj, name, _MISSING)))
+
+    for obj, attrs in _triton_language_attr_targets():
+        for name, member in inspect.getmembers(obj):
+            if tl.core.is_builtin(member):
+                save(obj, name)
+        for attr in attrs:
+            save(obj, attr)
+
+    return baseline
+
+
+_TRITON_LANGUAGE_BASELINE = _capture_triton_language_baseline()
+
+
+def _restore_triton_language_baseline() -> None:
+    for obj, name, original in reversed(_TRITON_LANGUAGE_BASELINE):
+        if original is _MISSING:
+            if hasattr(obj, name):
+                delattr(obj, name)
+        else:
+            setattr(obj, name, original)
+
+
+def _push_lang_patch_scope(backend: str, scope: Any) -> None:
+    _LANG_PATCH_SCOPES.setdefault(backend, []).append(scope)
+
+
+def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
+    """
+    Stores Triton attributes into a LangPatchScope for later unpatching.
+    This is to be run before patching with the interpreter.
+    This is equivalent to what triton>=3.6.0 does natively
+    but also works for triton<3.6.0.
+    """
+
+    scope = _LangPatchScope()
+    # Triton's interpreter patch mutates global tl/tl.core objects. Snapshot
+    # both unconditionally so nested or generated JIT functions without a
+    # direct `tl` global still restore the language state after tracing.
+    langs = [tl, tl.core]
+    for value in fn.__globals__.values():
+        if inspect.ismodule(value) and value in (tl, tl.core) and value not in langs:
+            langs.append(value)
     for lang in langs:
         _capture_builtin_attrs(scope, lang)
         _capture_builtin_attrs(scope, lang.tensor)
         if lang == tl:
             _capture_builtin_attrs(scope, lang.math)
 
-        for attr in tensor_attrs:
-            if hasattr(lang.tensor, attr):
-                scope.set_attr(lang.tensor, attr, getattr(lang.tensor, attr))
-
-        for attr in lang_attrs:
-            if hasattr(lang, attr):
-                scope.set_attr(lang, attr, getattr(lang, attr))
-        scope.set_attr(lang.dtype, "to_ir", lang.dtype.to_ir)
+        for obj, attrs in _triton_language_attr_targets():
+            if obj not in (lang, lang.tensor, lang.dtype, getattr(lang, "math", None)):
+                continue
+            for attr in attrs:
+                if hasattr(obj, attr):
+                    scope.set_attr(obj, attr, getattr(obj, attr))
 
     if hasattr(tl.core, "tensor_descriptor_base"):
         _capture_builtin_attrs(scope, tl.core.tensor_descriptor_base)
@@ -168,6 +211,45 @@ def _patch_triton_inline_asm(scope: _LangPatchScope) -> None:
         return args[0].to(dtype)
 
     scope.set_attr(tl, "inline_asm_elementwise", _inline_asm_elementwise_fallback)
+
+
+def _patch_triton_semantic_to_tensor(scope: _LangPatchScope) -> None:
+    original_to_tensor = interpreter_semantic.to_tensor
+
+    def _is_triton_tensor_like(x: Any) -> bool:
+        return type(x).__name__ == "tensor" or (
+            hasattr(x, "handle") and hasattr(x, "dtype")
+        )
+
+    def _to_tensor_symbolic_aware(x, check_type=True):
+        unwrapped = x.value if isinstance(x, tl.constexpr) else x
+        if _is_triton_tensor_like(unwrapped):
+            return unwrapped
+        try:
+            return original_to_tensor(x, check_type)
+        except TypeError:
+            if isinstance(unwrapped, tl.core.tensor):
+                return unwrapped
+            raise
+
+    scope.set_attr(interpreter_semantic, "to_tensor", _to_tensor_symbolic_aware)
+
+
+def _patch_triton_data_dependent_helpers(scope: _LangPatchScope) -> None:
+    if not hasattr(tl, "bitonic_merge"):
+        return
+
+    original_bitonic_merge = tl.bitonic_merge
+
+    def _bitonic_merge_concrete(x, *args, **kwargs):
+        handle = getattr(x, "handle", None)
+        concretize = getattr(handle, "concretize", None)
+        if concretize is None:
+            return original_bitonic_merge(x, *args, **kwargs)
+        concrete = concretize()
+        return original_bitonic_merge(tl.core.tensor(concrete, x.type), *args, **kwargs)
+
+    scope.set_attr(tl, "bitonic_merge", _bitonic_merge_concrete)
 
 
 def _pop_lang_patch_scope(backend: str) -> Any | None:
@@ -386,6 +468,8 @@ def patch_lang(fn, backend, client_manager=None):
         for module in _triton_extra_builtin_modules():
             _patch_builtin(module, interpreter_builder, scope)
         _patch_triton_inline_asm(scope)
+        _patch_triton_semantic_to_tensor(scope)
+        _patch_triton_data_dependent_helpers(scope)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
@@ -412,6 +496,8 @@ def unpatch_lang(backend):
     scope = _pop_lang_patch_scope(backend)
     if scope is not None and hasattr(scope, "restore"):
         scope.restore()
+    if backend == "triton" and not _LANG_PATCH_SCOPES.get("triton"):
+        _restore_triton_language_baseline()
 
 
 @dataclass(frozen=True)

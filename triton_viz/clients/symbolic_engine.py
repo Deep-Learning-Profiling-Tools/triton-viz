@@ -29,6 +29,7 @@ from z3 import (
     Int2BV,
     BV2Int,
     BitVecRef,
+    LShR,
     BoolVal,
 )
 from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
@@ -91,7 +92,8 @@ AccessMode: TypeAlias = Literal["read", "write"]
 
 Z3Expr: TypeAlias = ExprRef | list[ExprRef] | Tactic | Probe
 ConstraintExpr: TypeAlias = ExprRef | bool | int | float
-ConstraintConjunction: TypeAlias = BoolRef | None
+LaneConstraintConjunction: TypeAlias = BoolRef | None
+ConstraintConjunction: TypeAlias = BoolRef | list[LaneConstraintConjunction] | None
 
 
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
@@ -115,7 +117,7 @@ def _iter_constraints_to_bool(
 
 def _and_constraints(
     *constraints: ConstraintExpr | Sequence[ConstraintExpr] | None,
-) -> ConstraintConjunction:
+) -> LaneConstraintConjunction:
     parts: list[BoolRef] = []
     for constraint in constraints:
         if constraint is None:
@@ -130,6 +132,45 @@ def _and_constraints(
     if len(parts) == 1:
         return parts[0]
     return And(*parts)
+
+
+def _broadcast_lane_value(value: Any, lane_count: int) -> list[Any]:
+    if isinstance(value, (list, tuple)):
+        if len(value) == lane_count:
+            return list(value)
+        if len(value) == 1:
+            return list(value) * lane_count
+        raise ValueError(
+            f"Cannot broadcast {len(value)} values to {lane_count} lanes"
+        )
+    return [value] * lane_count
+
+
+def _lane_count_from(*values: Any) -> int | None:
+    lane_count: int | None = None
+    for value in values:
+        if not isinstance(value, (list, tuple)):
+            continue
+        if lane_count is None:
+            lane_count = len(value)
+        elif len(value) not in (1, lane_count):
+            raise ValueError(
+                f"Cannot combine lane constraints of length {len(value)} and {lane_count}"
+            )
+    return lane_count
+
+
+def _and_lane_constraints(
+    lane_count: int,
+    *constraints: ConstraintExpr | Sequence[ConstraintExpr] | None,
+) -> list[LaneConstraintConjunction]:
+    lane_constraints = [
+        _broadcast_lane_value(constraint, lane_count) for constraint in constraints
+    ]
+    return [
+        _and_constraints(*(constraint[i] for constraint in lane_constraints))
+        for i in range(lane_count)
+    ]
 
 
 def _range_to_iterator_constraint(
@@ -192,9 +233,11 @@ class SymbolicExprDataWrapper:
         self._value = value
         self.symbolic_expr = symbolic_expr
         self._is_scalar = self.size == 1
+        self._concrete: TensorHandle | None = None
 
     def invalidate(self) -> None:
         self._value = None
+        self._concrete = None
 
     def _ensure_value(self) -> str:
         if self._value is None:
@@ -216,21 +259,65 @@ class SymbolicExprDataWrapper:
             return 1
         return math.prod(shape)
 
+    def _concrete_data(self) -> np.ndarray:
+        concrete = self._concrete
+        if concrete is None:
+            concrete = self.symbolic_expr.concretize()
+            if not isinstance(concrete, TensorHandle):
+                raise TypeError(f"Expected TensorHandle, got {type(concrete)}")
+            self._concrete = concrete
+        return concrete.data
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(self._concrete_data().shape)
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._concrete_data().dtype
+
     def _scalar_data(self) -> np.ndarray:
-        if not self._is_scalar:
+        concrete = self._concrete_data()
+        if concrete.size != 1:
             raise ValueError(
                 f"Expected scalar symbolic data, got shape {self.symbolic_expr.shape}"
             )
-        concrete = self.symbolic_expr.concretize()
-        if not isinstance(concrete, TensorHandle):
-            raise TypeError(f"Expected TensorHandle, got {type(concrete)}")
-        return concrete.data
+        return concrete
+
+    def flatten(self, *args: Any, **kwargs: Any) -> np.ndarray:
+        return self._concrete_data().flatten(*args, **kwargs)
+
+    def astype(self, *args: Any, **kwargs: Any) -> np.ndarray:
+        return self._concrete_data().astype(*args, **kwargs)
+
+    def item(self, *args: Any, **kwargs: Any) -> Any:
+        return self._concrete_data().item(*args, **kwargs)
+
+    def reshape(self, *args: Any, **kwargs: Any) -> np.ndarray:
+        return self._concrete_data().reshape(*args, **kwargs)
+
+    def __array__(self, dtype: Any = None) -> np.ndarray:
+        data = self._concrete_data()
+        if dtype is None:
+            return data
+        return data.astype(dtype)
+
+    def __len__(self) -> int:
+        return len(self._concrete_data())
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._concrete_data())
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "value":
+            return self._ensure_value()
+        return getattr(self._concrete_data(), name)
 
     def __getitem__(self, item: Any) -> Any:
-        return self._scalar_data()[item]
+        return self._concrete_data()[item]
 
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> np.ndarray:
-        return self._scalar_data().squeeze(axis)
+        return self._concrete_data().squeeze(axis)
 
     @staticmethod
     def coerce_int(val: Any) -> int:
@@ -264,10 +351,10 @@ class SymbolicExprDataWrapper:
         return bool(self._scalar_data().item())
 
     def __str__(self) -> str:
-        return self.value
+        return self._ensure_value()
 
     def __repr__(self) -> str:
-        return self.value
+        return self._ensure_value()
 
 
 class SymbolicExpr:
@@ -462,6 +549,16 @@ class SymbolicExpr:
             if child_symbolic_expr is None:
                 Node(f"{child_key}: None", parent=root)
                 continue
+            if isinstance(child_symbolic_expr, tuple):
+                tuple_node = Node(f"{child_key}: tuple", parent=root)
+                for idx, item in enumerate(child_symbolic_expr):
+                    if isinstance(item, SymbolicExpr):
+                        child_node = item._to_anytree()
+                        child_node.name = f"{idx}: {child_node.name}"
+                        child_node.parent = tuple_node
+                    else:
+                        Node(f"{idx}: {item!r}", parent=tuple_node)
+                continue
             child_node = child_symbolic_expr._to_anytree()
             child_node.name = f"{child_key}: {child_node.name}"
             child_node.parent = root
@@ -583,8 +680,17 @@ class SymbolicExpr:
 
         if constraints is not None and simplify_constraints:
             if self._simplified_constraints is None:
-                # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
-                self._simplified_constraints = cast(BoolRef, simplify(constraints))
+                if isinstance(constraints, list):
+                    # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
+                    self._simplified_constraints = [
+                        cast(BoolRef, simplify(constraint))
+                        if constraint is not None
+                        else None
+                        for constraint in constraints
+                    ]
+                else:
+                    # Z3 stubs type simplify(...) as ExprRef even when input is BoolRef.
+                    self._simplified_constraints = cast(BoolRef, simplify(constraints))
             return self._simplified_z3, self._simplified_constraints
 
         return self._simplified_z3, constraints
@@ -845,10 +951,23 @@ class IndirectSymbolicExprBase(SymbolicExpr):
         ptr, constraints_ptr = ptr_expr._to_z3()
         mask_expr = self.mask
         mask_constraint: ConstraintExpr | Sequence[ConstraintExpr] | None = None
+        constraints_mask: ConstraintConjunction = None
         if mask_expr is not None:
-            mask, _ = mask_expr._to_z3()
+            mask, constraints_mask = mask_expr._to_z3()
             mask_constraint = mask
-        return ptr, _and_constraints(constraints_ptr, mask_constraint)
+
+        lane_count = _lane_count_from(ptr, constraints_ptr, mask_constraint, constraints_mask)
+        if lane_count is None:
+            return ptr, _and_constraints(
+                constraints_ptr, constraints_mask, mask_constraint
+            )
+
+        return _broadcast_lane_value(ptr, lane_count), _and_lane_constraints(
+            lane_count,
+            constraints_ptr,
+            constraints_mask,
+            mask_constraint,
+        )
 
     def concretize(self) -> Any:
         ptr_concrete = self.ptr.concretize()
@@ -925,6 +1044,20 @@ class UnarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Unary op {self.op} is not implemented")
         return handler(val), constraints
 
+    def concretize(self) -> Any:
+        concrete = self.arg.concretize()
+        handler = self._NUMPY_OPS.get(self.op)
+        if handler is None:
+            if self.concrete_fn is None:
+                raise NotImplementedError(
+                    f"Concretize for unary op '{self.op}' is not implemented"
+                )
+            return self.concrete_fn(concrete)  # type: ignore
+        return TensorHandle(
+            np.asarray(handler(concrete.data), dtype=_get_np_dtype(self.dtype)),
+            self.dtype,
+        )
+
     @staticmethod
     def _abs(val) -> Z3Expr:
         return If(val >= 0, val, -val)
@@ -932,6 +1065,21 @@ class UnarySymbolicExpr(SymbolicExpr):
     _Z3_BUILDERS: ClassVar[dict[str, Callable[[Z3Expr], Z3Expr]]] = {
         "abs": _abs,
         "fabs": _abs,
+    }
+
+    _NUMPY_OPS: ClassVar[dict[str, Callable[[Any], Any]]] = {
+        "cos": np.cos,
+        "exp": np.exp,
+        "exp2": np.exp2,
+        "abs": np.abs,
+        "fabs": np.abs,
+        "floor": np.floor,
+        "ceil": np.ceil,
+        "log": np.log,
+        "log2": np.log2,
+        "sqrt": np.sqrt,
+        "sin": np.sin,
+        "rsqrt": lambda x: 1 / np.sqrt(x),
     }
 
 
@@ -1116,6 +1264,38 @@ class BinarySymbolicExpr(SymbolicExpr):
 
         return self._apply_binop(_bit_xor, lhs, rhs)
 
+    def _op_right_shift(self, lhs, rhs):
+        lhs_expr = self.lhs
+        rhs_expr = self.rhs
+        bitwidth = (
+            self._infer_bitwidth(self)
+            or self._infer_bitwidth(lhs_expr)
+            or self._infer_bitwidth(rhs_expr)
+            or 64
+        )
+
+        def _right_shift(a, b):
+            shifted = LShR(self._to_bv(a, bitwidth), self._to_bv(b, bitwidth))
+            return BV2Int(shifted, is_signed=False)
+
+        return self._apply_binop(_right_shift, lhs, rhs)
+
+    def _op_left_shift(self, lhs, rhs):
+        lhs_expr = self.lhs
+        rhs_expr = self.rhs
+        bitwidth = (
+            self._infer_bitwidth(self)
+            or self._infer_bitwidth(lhs_expr)
+            or self._infer_bitwidth(rhs_expr)
+            or 64
+        )
+
+        def _left_shift(a, b):
+            shifted = self._to_bv(a, bitwidth) << self._to_bv(b, bitwidth)
+            return BV2Int(shifted, is_signed=False)
+
+        return self._apply_binop(_left_shift, lhs, rhs)
+
     def _op_ashr(self, lhs, rhs):
         bitwidth = (
             self._infer_bitwidth(self)
@@ -1171,6 +1351,8 @@ class BinarySymbolicExpr(SymbolicExpr):
         "bitwise_and": _op_bitwise_and,
         "bitwise_or": _op_bitwise_or,
         "bitwise_xor": _op_bitwise_xor,
+        "right_shift": _op_right_shift,
+        "left_shift": _op_left_shift,
         "ashr": _op_ashr,
     }
 
@@ -1576,6 +1758,14 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
 
+    def concretize(self) -> Any:
+        concrete = self.arg.concretize()
+        axis = self.axis.to_py()
+        return TensorHandle(
+            np.expand_dims(concrete.data, axis=axis).astype(concrete.data.dtype),
+            concrete.dtype,
+        )
+
 
 class BroadcastSymbolicExpr(SymbolicExpr):
     arg: SymbolicExpr
@@ -1598,18 +1788,51 @@ class BroadcastSymbolicExpr(SymbolicExpr):
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
 
+    def concretize(self) -> Any:
+        concrete = self.arg.concretize()
+        shape = self.target_shape if self.target_shape else self.arg.shape
+        return TensorHandle(
+            np.broadcast_to(concrete.data, shape).astype(concrete.data.dtype),
+            concrete.dtype,
+        )
+
 
 class ReshapeSymbolicExpr(SymbolicExpr):
     arg: SymbolicExpr
+    target_shape: tuple[int, ...]
+
+    @staticmethod
+    def _shape_to_tuple(shape: Any) -> tuple[int, ...]:
+        if isinstance(shape, tuple):
+            return tuple(
+                int(item.to_py()) if hasattr(item, "to_py") else int(item)
+                for item in shape
+            )
+        if hasattr(shape, "to_py"):
+            shape = shape.to_py()
+        if isinstance(shape, np.ndarray):
+            shape = shape.tolist()
+        if isinstance(shape, (int, np.integer)):
+            return (int(shape),)
+        return tuple(int(x) for x in shape)
 
     def __init__(self, op: str, arg: Any, shape: Any):
         super().__init__(op)
         self.add_child("arg", arg)
+        self.add_child("target", shape)
+        self.target_shape = self._shape_to_tuple(self.target)
         self.dtype = self.arg.dtype
-        self.shape = self.arg.shape
+        self.shape = self.target_shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
+
+    def concretize(self) -> Any:
+        concrete = self.arg.concretize()
+        return TensorHandle(
+            np.reshape(concrete.data, self.target_shape).astype(concrete.data.dtype),
+            concrete.dtype,
+        )
 
 
 class TransSymbolicExpr(SymbolicExpr):
@@ -1620,11 +1843,24 @@ class TransSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
         self.add_child("permutation", permutation)
+        permutation_value = (
+            permutation.to_py() if hasattr(permutation, "to_py") else permutation
+        )
+        self.permutation_value = tuple(int(x) for x in permutation_value)
         self.dtype = self.arg.dtype
-        self.shape = self.arg.shape
+        self.shape = tuple(self.arg.shape[i] for i in self.permutation_value)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         return self.arg._to_z3()
+
+    def concretize(self) -> Any:
+        concrete = self.arg.concretize()
+        return TensorHandle(
+            np.transpose(concrete.data, axes=self.permutation_value).astype(
+                concrete.data.dtype
+            ),
+            concrete.dtype,
+        )
 
 
 class JoinSymbolicExpr(SymbolicExpr):
