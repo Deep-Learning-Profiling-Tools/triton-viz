@@ -178,6 +178,7 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
 loop_deferred_check_recorder: LoopDeferredCheckRecorder = LoopDeferredCheckRecorder(
     abort_on_error=False
 )
+sort_pointer_sanitizer: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
 # ======== Kernels ===========
@@ -232,6 +233,14 @@ def loop_deferred_check_simplify_kernel(out_ptr):
     for i in range(0, num_blocks):
         idx = pid + 1
         tl.store(out_ptr + idx, idx)
+
+
+@triton_viz.trace(client=sort_pointer_sanitizer)
+@triton.jit
+def sort_pointer_oob_kernel(out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    sorted_offsets = tl.sort(offs, 0, descending=True)
+    tl.store(out_ptr + sorted_offsets, offs, mask=offs == 0)
 
 
 # ======== Indirect Load/Store Tests ===========
@@ -308,6 +317,15 @@ def test_loop_deferred_checks_simplify():
     loop_deferred_check_simplify_kernel[(2,)](out)
 
     assert load_index_checker.observed_offsets == []
+
+
+def test_sort_used_in_pointer_falls_back_to_eager_offsets():
+    sort_pointer_sanitizer.records.clear()
+
+    out = torch.empty((7,), dtype=torch.int32)
+    sort_pointer_oob_kernel[(1,)](out, BLOCK=8)
+
+    assert sort_pointer_sanitizer.records
 
 
 # Dedicated sanitizer for nested loop regression test

@@ -177,6 +177,11 @@ class ReduceSum(Reduce):
 
 
 @dataclass
+class Sort(Op):
+    name: ClassVar[str] = "sort"
+
+
+@dataclass
 class Splat(Op):
     # Broadcasts a scalar to a tensor
     name: ClassVar[str] = "splat"

@@ -53,6 +53,7 @@ from ..core.data import (
     ReduceSum,
     ReduceMax,
     ReduceMin,
+    Sort,
     Splat,
     Idiv,
     Rsqrt,
@@ -304,6 +305,7 @@ class SymbolicExpr:
         "dot",
     )
     SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum",)
+    SORT_OPS: ClassVar[tuple[str, ...]] = ("sort",)
     POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
         "splat",
@@ -326,6 +328,7 @@ class SymbolicExpr:
         + RESHAPE_OPS
         + CAST_OPS
         + SCAN_OPS
+        + SORT_OPS
         + ATOMIC_OPS
     )
 
@@ -1422,6 +1425,36 @@ class SplatSymbolicExpr(SymbolicExpr):
         return self.concrete_fn(self.block_type.to_py(), self.arg.concretize())  # type: ignore
 
 
+class SortSymbolicExpr(SymbolicExpr):
+    input: SymbolicExpr
+    dim: SymbolicExpr | None
+    descending: SymbolicExpr
+    stable: SymbolicExpr | None
+
+    def __init__(self, op: str, input: Any, dim: Any, descending: Any, stable: Any):
+        super().__init__(op)
+        self.add_child("input", input)
+        self.add_child("dim", dim)
+        self.add_child("descending", descending)
+        self.add_child("stable", stable)
+        self.dtype = self.input.dtype
+        self.shape = self.input.shape
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        return self.input._to_z3()
+
+    def concretize(self) -> Any:
+        concrete = self.input.concretize()
+        axis = self.dim.to_py() if self.dim is not None else 0
+        descending = bool(self.descending.to_py())
+        stable = bool(self.stable.to_py()) if self.stable is not None else False
+        sort_kwargs = {"kind": "stable"} if stable else {}
+        data = np.sort(concrete.data, axis=axis, **sort_kwargs)
+        if descending:
+            data = np.flip(data, axis=axis)
+        return TensorHandle(data.astype(concrete.data.dtype), concrete.dtype)
+
+
 class ExpandDimsSymbolicExpr(SymbolicExpr):
     arg: SymbolicExpr
     axis: SymbolicExpr
@@ -1720,6 +1753,7 @@ SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
 SymbolicExpr.register_op_class(AddPtrSymbolicExpr, ("addptr",))
 SymbolicExpr.register_op_class(AdvanceSymbolicExpr, ("advance",))
 SymbolicExpr.register_op_class(SplatSymbolicExpr, ("splat",))
+SymbolicExpr.register_op_class(SortSymbolicExpr, ("sort",))
 SymbolicExpr.register_op_class(ExpandDimsSymbolicExpr, ("expand_dims",))
 SymbolicExpr.register_op_class(BroadcastSymbolicExpr, ("broadcast",))
 SymbolicExpr.register_op_class(ReshapeSymbolicExpr, ("reshape",))
@@ -1897,6 +1931,15 @@ class SymbolicClient(Client):
             return (val, idx)
         return val
 
+    def _op_sort_overrider(self, input, dim=None, descending=False, stable=None):
+        return SymbolicExpr.create(
+            "sort",
+            SymbolicExpr.from_value(input),
+            dim,
+            descending,
+            stable,
+        )
+
     def _op_splat_overrider(self, shape, arg):
         return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))
 
@@ -2005,6 +2048,7 @@ class SymbolicClient(Client):
             ReduceSum: self._op_reduce_sum_overrider,
             ReduceMax: self._op_reduce_max_overrider,
             ReduceMin: self._op_reduce_min_overrider,
+            Sort: self._op_sort_overrider,
             Splat: self._op_splat_overrider,
             Idiv: self._op_idiv_overrider,
             Rsqrt: self._op_rsqrt_overrider,
@@ -2042,6 +2086,17 @@ class SymbolicClient(Client):
     def _on_data_dependent_value(self) -> None:
         """Hook called when a data-dependent value forces concretization."""
         self.need_full_grid = True
+
+    def _materialize_memory_operand(self, expr: Any) -> Any:
+        if not isinstance(expr, SymbolicExpr):
+            return expr
+        if expr.has_op("sort"):
+            self._on_data_dependent_value()
+            expr = expr.replace_subtree("sort")
+        if expr.has_op("load"):
+            self._on_data_dependent_value()
+            expr = expr.replace_subtree("load")
+        return expr
 
     def _should_skip_loop_hooks(self) -> bool:
         """Return True to skip loop hook processing."""
@@ -2297,12 +2352,8 @@ class SymbolicClient(Client):
         )
 
     def _op_load_overrider(self, ptr, mask, other, *args):
-        if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
-            self.need_full_grid = True
-            ptr = ptr.replace_subtree("load")
-        if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
-            self.need_full_grid = True
-            mask = mask.replace_subtree("load")
+        ptr = self._materialize_memory_operand(ptr)
+        mask = self._materialize_memory_operand(mask)
         ptr_sym = SymbolicExpr.from_value(ptr)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         other_sym = SymbolicExpr.from_value(other) if other is not None else None
@@ -2311,12 +2362,8 @@ class SymbolicClient(Client):
         return ret
 
     def _op_store_overrider(self, ptr, value, mask, *args):
-        if isinstance(ptr, SymbolicExpr) and ptr.has_op("load"):
-            self.need_full_grid = True
-            ptr = ptr.replace_subtree("load")
-        if isinstance(mask, SymbolicExpr) and mask.has_op("load"):
-            self.need_full_grid = True
-            mask = mask.replace_subtree("load")
+        ptr = self._materialize_memory_operand(ptr)
+        mask = self._materialize_memory_operand(mask)
         ptr_sym = SymbolicExpr.from_value(ptr)
         value_sym = SymbolicExpr.from_value(value)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
@@ -2333,6 +2380,7 @@ class SymbolicClient(Client):
         eviction_policy,
         is_volatile,
     ):
+        ptr = self._materialize_memory_operand(ptr)
         ptr_sym = SymbolicExpr.from_value(ptr)
         ret = SymbolicExpr.create("tensor_pointer_load", ptr_sym, boundary_check)
         self._handle_access_check(ret, TensorPointerLoad, "read")
@@ -2341,6 +2389,7 @@ class SymbolicClient(Client):
     def _op_tensor_pointer_store_overrider(
         self, ptr, value, boundary_check, cache_modifier, eviction_policy
     ):
+        ptr = self._materialize_memory_operand(ptr)
         ptr_sym = SymbolicExpr.from_value(ptr)
         value_sym = SymbolicExpr.from_value(value)
         ret = SymbolicExpr.create(
