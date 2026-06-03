@@ -206,13 +206,16 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.cache_args.clear()
         self.cache_grid = None
 
+    def _clear_symbolic_launch_state(self) -> None:
+        SymbolicClient._clear_symbolic_launch_state(self)
+        self._addr_ok_cache.clear()
+
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         # Sanitizer needs ``cache_grid`` tracked alongside the shared setup so
         # ``pre_run_callback`` can consult it before deciding whether to skip
         # the launch.
         self.cache_grid = tuple(int(g) for g in grid)
         SymbolicClient.grid_callback(self, grid)
-        self._addr_ok_cache.clear()
 
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
