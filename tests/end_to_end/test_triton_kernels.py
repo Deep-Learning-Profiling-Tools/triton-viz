@@ -17,6 +17,14 @@ RAGGED_METADATA_N_SLICES = [1, 7, 33, 911, 1025]
 REMAP_RAGGED_METADATA_N_SLICES = [9, 32, 911, 1025]
 
 
+TOPK_FORWARD_CASES = [
+    (7, 13, 8, True, "float16"),
+]
+TOPK_BACKWARD_CASES = [
+    (7, 13, 8, True, "float16"),
+]
+
+
 def _require_cuda(device):
     if device != "cuda" or not torch.cuda.is_available():
         pytest.skip("triton-viz sanitizer cases require CUDA")
@@ -156,4 +164,81 @@ def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
     _trace_kernel(monkeypatch, ragged_mod, "_remap_ragged_tensor_metadata", sanitizer)
     tri_metadata = ragged_mod.make_ragged_tensor_metadata(slice_sizes, n_total_rows)
     ragged_mod.remap_ragged_tensor_metadata(tri_metadata, slice_map)
+    assert len(sanitizer.records) == 0
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "n_cols", "k", "apply_softmax", "dtype"),
+    TOPK_FORWARD_CASES,
+)
+@pytest.mark.parametrize("device", ["cuda"], indirect=True)
+def test_triton_viz_sanitizer_topk_forward(
+    monkeypatch, device, n_rows, n_cols, k, apply_softmax, dtype
+):
+    _require_cuda(device)
+
+    topk_mod = pytest.importorskip("triton_kernels.topk")
+
+    torch.manual_seed(0)
+    x = torch.randn((n_rows, n_cols), dtype=getattr(torch, dtype), device=device)
+
+    sparse_tri = topk_mod.topk(x, k, apply_softmax=apply_softmax)
+    sparse_ref = topk_mod.topk_torch(x, k, apply_softmax=apply_softmax)
+    assert torch.allclose(
+        sparse_tri.vals.float(),
+        sparse_ref.vals.float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+    assert_equal(sparse_tri.indx, sparse_ref.indx)
+    assert_equal(sparse_tri.mask.storage.data, sparse_ref.mask.storage.data)
+    assert (
+        sparse_tri.mask.storage.data.stride() == sparse_ref.mask.storage.data.stride()
+    )
+    assert sparse_tri.mask.storage.data.shape == sparse_ref.mask.storage.data.shape
+
+    sanitizer = _new_sanitizer()
+    _trace_kernel(monkeypatch, topk_mod, "_topk_forward", sanitizer)
+    topk_mod.topk_forward(x, k, apply_softmax=apply_softmax)
+    assert len(sanitizer.records) == 0
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "n_cols", "k", "apply_softmax", "dtype"),
+    TOPK_BACKWARD_CASES,
+)
+@pytest.mark.parametrize("device", ["cuda"], indirect=True)
+def test_triton_viz_sanitizer_topk_backward(
+    monkeypatch, device, n_rows, n_cols, k, apply_softmax, dtype
+):
+    _require_cuda(device)
+
+    topk_mod = pytest.importorskip("triton_kernels.topk")
+
+    torch.manual_seed(0)
+    x = torch.randn((n_rows, n_cols), device=device, dtype=getattr(torch, dtype))
+    y_indx = torch.sort(
+        torch.rand(n_rows, n_cols, device=device).argsort(dim=1).int()[:, :k],
+        dim=1,
+    )[0].to(torch.int16)
+    dy_vals = torch.randn((n_rows, k), device=device, dtype=getattr(torch, dtype))
+    active = max(1, n_rows // 2)
+    active_rows = torch.tensor(active, device=device, dtype=torch.int32)
+
+    dx = topk_mod.topk_backward(
+        x, y_indx, dy_vals, k=k, n_rows=active_rows, apply_softmax=apply_softmax
+    )
+    torch.cuda.synchronize()
+    assert dx.shape == x.shape
+
+    sanitizer = _new_sanitizer()
+    _trace_kernel(monkeypatch, topk_mod, "_topk_backward", sanitizer)
+    topk_mod.topk_backward(
+        x,
+        y_indx,
+        dy_vals,
+        k=k,
+        n_rows=active_rows,
+        apply_softmax=apply_softmax,
+    )
     assert len(sanitizer.records) == 0

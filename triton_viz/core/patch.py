@@ -9,6 +9,7 @@ import threading
 import time
 from functools import partialmethod
 import warnings
+from triton import knobs
 
 from .config import config as cfg
 from .callbacks import OpCallbacks
@@ -170,6 +171,10 @@ def _patch_triton_semantic_to_tensor(scope: _LangPatchScope) -> None:
     scope.set_attr(interpreter_semantic, "to_tensor", _to_tensor_symbolic_aware)
 
 
+def _patch_triton_interpret_knob(scope: _LangPatchScope) -> None:
+    scope.set_attr(knobs.runtime, "interpret", True)
+
+
 _thread_local_interpreter_state = threading.local()
 _thread_local_interpreter_state.grid_idx = None  # just set a default
 
@@ -196,6 +201,9 @@ class PatchOp:
         self.op_type = op_type
         self.callbacks = callbacks
         self.adapter = adapter
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.op, name)
 
     def __call__(self, *args, **kwargs):
         if cfg.num_sms > 1:
@@ -378,6 +386,7 @@ def patch_lang(fn, backend, client_manager=None):
             _patch_builtin(module, interpreter_builder, scope)
         _patch_triton_inline_asm(scope)
         _patch_triton_semantic_to_tensor(scope)
+        _patch_triton_interpret_knob(scope)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
