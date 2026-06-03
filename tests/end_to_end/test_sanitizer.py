@@ -66,11 +66,29 @@ class LoadIndexChecker(SymbolicSanitizer):
                 return None
             return np.sum(offsets, axis=0)
 
+        def _offsets_from_const_pointer(expr):
+            if expr.op != "const" or not isinstance(expr.dtype, tl.pointer_type):
+                return None
+
+            ptrs = expr.to_py()
+            if not isinstance(ptrs, list):
+                return None
+
+            tensor = self._resolve_tensor(expr)
+            if tensor is None:
+                return None
+
+            return (
+                np.asarray(ptrs, dtype=np.int64) - tensor.data_ptr()
+            ) // tensor.element_size()
+
         def _new_load_overrider(ptr, *args, **kwargs):
             # exec original overrider
             load_expr = orig_overrider(ptr, *args, **kwargs)
             p = load_expr.ptr
             offs = _sum_offsets_from_addptr(p)
+            if offs is None:
+                offs = _offsets_from_const_pointer(p)
             if offs is not None:
                 self._offset_lists.append(offs.tolist())
             return load_expr
@@ -1190,6 +1208,33 @@ def test_sanitizer_supports_where_in_symbolic_address():
     where_index_store_kernel[(1,)](out, BLOCK=out.numel())
 
     assert len(where_index_sanitizer.records) == 0
+
+
+masked_compaction_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=masked_compaction_index_sanitizer)
+@triton.jit
+def masked_compaction_index_store_kernel(bitmask_ptr, out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    word = tl.load(bitmask_ptr + offs * 0)
+    active = (word >> offs) & 1
+    exc_cumsum = tl.cumsum(active, 0) - active
+    active_flags = active.to(tl.int1)
+    rev_arange = tl.where(active_flags, 0, BLOCK - 1 - offs)
+    write_idx = exc_cumsum + rev_arange
+    tl.store(out_ptr + write_idx, active)
+
+
+def test_sanitizer_materializes_loaded_masked_compaction_store_indices():
+    masked_compaction_index_sanitizer.records.clear()
+
+    bitmask = torch.tensor([0b0101], dtype=torch.int32)
+    out = torch.empty((4,), dtype=torch.int32)
+
+    masked_compaction_index_store_kernel[(1,)](bitmask, out, BLOCK=out.numel())
+
+    assert len(masked_compaction_index_sanitizer.records) == 0
 
 
 # ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
