@@ -686,11 +686,16 @@ class SymbolicExpr:
             and value.data.size != 1
         ):
             return True
-        return any(
-            child.has_vector_const()
-            for child in self.children.values()
-            if child is not None
-        )
+        for child_symbolic_expr in self.children.values():
+            if child_symbolic_expr is None:
+                continue
+            if isinstance(child_symbolic_expr, tuple):
+                if any(child.has_vector_const() for child in child_symbolic_expr):
+                    return True
+                continue
+            if child_symbolic_expr.has_vector_const():
+                return True
+        return False
 
     def to_tree_str(self) -> str:
         """
@@ -1243,7 +1248,9 @@ class WhereSymbolicExpr(SymbolicExpr):
                 "where concretization expects TensorHandle condition and values"
             )
         data = np.where(cond.data.astype(bool), lhs.data, rhs.data)
-        return TensorHandle(np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype)
+        return TensorHandle(
+            np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+        )
 
     def _where(self) -> tuple[Z3Expr, ConstraintConjunction]:
         def _normalize(expr):
