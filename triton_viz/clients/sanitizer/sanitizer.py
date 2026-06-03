@@ -150,6 +150,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.records: list[OutOfBoundsRecordZ3] = []
         self.cache_args: list[Any] = []
         self.cache_grid: tuple[int, ...] | None = None
+        self._addr_ok_cache: dict[int, BoolRef] = {}
 
     # Explicit forwarders to SymbolicClient: the Sanitizer factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
@@ -211,6 +212,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         # the launch.
         self.cache_grid = tuple(int(g) for g in grid)
         SymbolicClient.grid_callback(self, grid)
+        self._addr_ok_cache.clear()
 
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
@@ -263,6 +265,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         if resolved_tensor is None:
             return self.addr_ok
 
+        cache_key = id(resolved_tensor)
+        cached = self._addr_ok_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         ranges = [
             And(addr_sym >= start, addr_sym <= end)
             for start, end, tensor in self.tensor_addrs
@@ -270,7 +277,9 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         ]
         if not ranges:
             return BoolVal(False)
-        return cast(BoolRef, Or(*ranges))
+        addr_ok = ranges[0] if len(ranges) == 1 else cast(BoolRef, Or(*ranges))
+        self._addr_ok_cache[cache_key] = addr_ok
+        return addr_ok
 
     def _check_range_satisfiable(
         self,
