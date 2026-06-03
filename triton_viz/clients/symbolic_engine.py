@@ -2481,9 +2481,10 @@ class SymbolicClient(Client):
             return None
         base_candidates = base if isinstance(base, list) else [base]
         for candidate in base_candidates:
-            if not isinstance(candidate, (int, np.integer)):
+            try:
+                candidate = int(candidate)
+            except (TypeError, ValueError):
                 continue
-            candidate = int(candidate)
             for tensor in self.tensors:
                 if tensor.data_ptr() == candidate:
                     return tensor
