@@ -287,6 +287,27 @@ def test_reshape_expr_eval(op: str, extra):
     assert constraints is None
 
 
+def test_replace_subtree_preserves_block_type_metadata_const():
+    block_type = tl.block_type(tl.int32, [4])
+    arg = SymbolicExpr.create("const", 7, tl.int32)
+    expr = SymbolicExpr.create("splat", block_type, arg)
+
+    def fake_splat(dtype, value):
+        assert dtype is block_type
+        return TensorHandle(
+            np.full(tuple(dtype.shape), value.data.item(), dtype=np.int32),
+            dtype.scalar,
+        )
+
+    expr.concrete_fn = fake_splat
+
+    concrete = expr.replace_subtree()
+
+    assert isinstance(concrete, ConstSymbolicExpr)
+    assert isinstance(concrete.value, TensorHandle)
+    assert concrete.value.data.tolist() == [7, 7, 7, 7]
+
+
 # ======== Regression Tests: expand_dims/broadcast Shape Fix =========
 
 

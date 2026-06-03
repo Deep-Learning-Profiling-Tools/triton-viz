@@ -648,6 +648,10 @@ class SymbolicExpr:
                 for child in self.children.values()
             )
         ):
+            if self.op == "const" and isinstance(
+                getattr(self, "value", None), tl.core.dtype
+            ):
+                return self
             concrete = self.concretize()
             if not isinstance(concrete, TensorHandle):
                 raise TypeError(f"Unexpected dtype: {type(concrete)}!")
