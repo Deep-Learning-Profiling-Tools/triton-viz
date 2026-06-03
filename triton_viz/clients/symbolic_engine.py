@@ -2234,18 +2234,14 @@ class SymbolicClient(Client):
             return expr
 
         materialized = False
-        needs_full_concretization = False
         for anchor_op in ("sort", "cumsum", "load"):
             if expr.has_op(anchor_op):
                 materialized = True
-                needs_full_concretization = (
-                    needs_full_concretization or anchor_op == "cumsum"
-                )
                 expr = expr.replace_subtree(anchor_op)
 
         if materialized:
             self._on_data_dependent_value()
-            if needs_full_concretization and expr.has_vector_const():
+            if expr.has_vector_const():
                 expr = expr.replace_subtree()
             return expr
 
