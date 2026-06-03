@@ -8,6 +8,7 @@ from queue import SimpleQueue, Empty
 import threading
 import time
 from functools import partialmethod
+import warnings
 
 from .config import config as cfg
 from .callbacks import OpCallbacks
@@ -127,6 +128,39 @@ def _triton_extra_builtin_modules() -> tuple[Any, ...]:
         if module is not None:
             modules.append(module)
     return tuple(modules)
+
+
+def _patch_triton_inline_asm(scope: _LangPatchScope) -> None:
+    warned = False
+
+    def _warn_inline_asm_approximation_once() -> None:
+        nonlocal warned
+        if warned:
+            return
+        warned = True
+        warnings.warn(
+            "Triton inline assembly is approximated in trace mode by returning "
+            "input tensor values; traced values may differ from the numeric result "
+            "of the real inline assembly.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    def _inline_asm_elementwise_fallback(
+        asm,
+        constraints,
+        args,
+        dtype,
+        is_pure,
+        pack,
+        **kwargs,
+    ):
+        _warn_inline_asm_approximation_once()
+        if isinstance(dtype, (list, tuple)):
+            return tuple(args[0].to(_dtype) for _dtype in dtype)
+        return args[0].to(dtype)
+
+    scope.set_attr(tl, "inline_asm_elementwise", _inline_asm_elementwise_fallback)
 
 
 def _pop_lang_patch_scope(backend: str) -> Any | None:
@@ -340,6 +374,7 @@ def patch_lang(fn, backend, client_manager=None):
         triton_patch_lang(fn)
         for module in _triton_extra_builtin_modules():
             _patch_builtin(module, interpreter_builder, scope)
+        _patch_triton_inline_asm(scope)
     elif backend == "nki":
         from triton_viz.core.nki import nki_patch_lang
 
