@@ -179,12 +179,8 @@ loop_deferred_check_recorder: LoopDeferredCheckRecorder = LoopDeferredCheckRecor
     abort_on_error=False
 )
 sort_pointer_sanitizer: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
-tuple_pointer_cast_checker: SymbolicSanitizer = SymbolicSanitizer(
-    abort_on_error=False
-)
-tuple_pointer_item_checker: SymbolicSanitizer = SymbolicSanitizer(
-    abort_on_error=False
-)
+tuple_pointer_cast_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
+tuple_pointer_item_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
 # ======== Kernels ===========

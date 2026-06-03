@@ -92,6 +92,7 @@ AccessMode: TypeAlias = Literal["read", "write"]
 Z3Expr: TypeAlias = ExprRef | list[ExprRef] | Tactic | Probe
 ConstraintExpr: TypeAlias = ExprRef | bool | int | float
 ConstraintConjunction: TypeAlias = BoolRef | None
+SymbolicChild: TypeAlias = "SymbolicExpr | tuple[SymbolicExpr, ...]"
 
 
 def _constraint_to_bool(expr: ConstraintExpr) -> BoolRef:
@@ -391,7 +392,7 @@ class SymbolicExpr:
         self.concrete_fn: Callable[..., Any] | None = None
 
         # deal with args
-        self.children: dict[str, SymbolicExpr | None] = {}
+        self.children: dict[str, SymbolicChild | None] = {}
 
         # for-loop iterator association
         self.loop_ctx: LoopContext | None = None
@@ -462,6 +463,13 @@ class SymbolicExpr:
             if child_symbolic_expr is None:
                 Node(f"{child_key}: None", parent=root)
                 continue
+            if isinstance(child_symbolic_expr, tuple):
+                tuple_node = Node(f"{child_key}: tuple", parent=root)
+                for idx, item in enumerate(child_symbolic_expr):
+                    child_node = item._to_anytree()
+                    child_node.name = f"{idx}: {child_node.name}"
+                    child_node.parent = tuple_node
+                continue
             child_node = child_symbolic_expr._to_anytree()
             child_node.name = f"{child_key}: {child_node.name}"
             child_node.parent = root
@@ -519,9 +527,10 @@ class SymbolicExpr:
                 raise ValueError("Cannot infer dtype from an empty tuple/list.")
             first_dtype = SymbolicExpr._infer_literal_dtype(seq[0])
             for v in seq[1:]:  # assume only one consistent dtype in the tuple
-                if SymbolicExpr._infer_literal_dtype(v) != first_dtype:
+                dtype = SymbolicExpr._infer_literal_dtype(v)
+                if dtype != first_dtype:
                     raise ValueError(
-                        f"All elements in the tuple must have the same dtype, but found {first_dtype} and {SymbolicExpr.from_value(v).dtype}"
+                        f"All elements in the tuple must have the same dtype, but found {first_dtype} and {dtype}"
                     )
             return first_dtype
         if isinstance(var, SymbolicExpr.builtin_scala_types):
@@ -549,7 +558,13 @@ class SymbolicExpr:
 
         if isinstance(var, SymbolicExpr.tuple_types):  # if a tuple
             seq = cast(Sequence[Any], var)
-            return tuple(cls.from_value(item) for item in seq)
+            children: list[SymbolicExpr] = []
+            for item in seq:
+                child = cls.from_value(item)
+                if isinstance(child, tuple):
+                    raise ValueError("Nested symbolic tuples are not supported.")
+                children.append(child)
+            return tuple(children)
 
         dtype = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
 
@@ -611,14 +626,25 @@ class SymbolicExpr:
         for name, child in list(self.children.items()):
             if child is None:
                 continue
-            new_child = child.replace_subtree(anchor_op)
-            self.add_child(name, new_child)
+            if isinstance(child, tuple):
+                new_child_tuple = tuple(
+                    item.replace_subtree(anchor_op) for item in child
+                )
+                self.add_child(name, new_child_tuple)
+                continue
+            new_child_expr = child.replace_subtree(anchor_op)
+            self.add_child(name, new_child_expr)
 
         # inplace replace to "const" node
         if anchor_op is None or (
             self.op == anchor_op
             and all(
-                (child is None) or (not child.has_op(anchor_op))
+                (child is None)
+                or (
+                    all(not item.has_op(anchor_op) for item in child)
+                    if isinstance(child, tuple)
+                    else not child.has_op(anchor_op)
+                )
                 for child in self.children.values()
             )
         ):
@@ -640,6 +666,11 @@ class SymbolicExpr:
             return True
         for _, child_symbolic_expr in self.children.items():
             if child_symbolic_expr is None:
+                continue
+            if isinstance(child_symbolic_expr, tuple):
+                if any(child.has_op(op_name) for child in child_symbolic_expr):
+                    self._has_op_cache[op_name] = True
+                    return True
                 continue
             if child_symbolic_expr.has_op(op_name):
                 self._has_op_cache[op_name] = True
@@ -2323,7 +2354,14 @@ class SymbolicClient(Client):
             ):
                 return node.to_py()
             for child in node.children.values():
-                if child is not None:
+                if child is None:
+                    continue
+                if isinstance(child, tuple):
+                    for item in child:
+                        base = walk(item)
+                        if base is not None:
+                            return base
+                else:
                     base = walk(child)
                     if base is not None:
                         return base
