@@ -11,7 +11,9 @@ tests live next to their respective clients.
 import pytest
 from typing import cast
 
+import numpy as np
 import triton.language as tl
+from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.clients.symbolic_engine import (
     SymbolicClient,

@@ -1229,7 +1229,9 @@ class WhereSymbolicExpr(SymbolicExpr):
                 "where concretization expects TensorHandle condition and values"
             )
         data = np.where(cond.data.astype(bool), lhs.data, rhs.data)
-        return TensorHandle(np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype)
+        return TensorHandle(
+            np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+        )
 
     def _where(self) -> tuple[Z3Expr, ConstraintConjunction]:
         def _normalize(expr):
