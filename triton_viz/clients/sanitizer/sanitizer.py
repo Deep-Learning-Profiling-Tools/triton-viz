@@ -11,7 +11,7 @@ import sys
 
 from torch import Tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
-from z3 import Not, sat
+from z3 import And, BoolVal, Not, Or, Solver, sat
 from z3.z3 import BoolRef, IntNumRef
 
 from ...core.client import Client
@@ -210,6 +210,9 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         # the launch.
         self.cache_grid = tuple(int(g) for g in grid)
         SymbolicClient.grid_callback(self, grid)
+        solver = Solver()
+        solver.add(self.pid_ok)
+        self.solver = solver
 
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
@@ -260,10 +263,25 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         addr_sym = self.addr_sym
         assert solver is not None
         assert addr_sym is not None
+        resolved_tensor = self._resolve_tensor(symbolic_expr)
+
+        def _range_ok_for_resolved_tensor() -> BoolRef:
+            if resolved_tensor is None:
+                return self.addr_ok
+
+            ranges = [
+                And(addr_sym >= start, addr_sym <= end)
+                for start, end, tensor in self.tensor_addrs
+                if tensor is resolved_tensor
+            ]
+            if not ranges:
+                return BoolVal(False)
+            return cast(BoolRef, Or(*ranges))
 
         def _check_single_addr(addr_expr: Z3Expr) -> None:
             solver.push()
             solver.add(addr_sym == addr_expr)
+            solver.add(Not(_range_ok_for_resolved_tensor()))
             if expr_constraints is not None:
                 solver.add(expr_constraints)
             if solver.check() == sat:

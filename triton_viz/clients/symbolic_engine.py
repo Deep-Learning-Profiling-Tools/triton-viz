@@ -2234,14 +2234,18 @@ class SymbolicClient(Client):
             return expr
 
         materialized = False
+        needs_full_concretization = False
         for anchor_op in ("sort", "cumsum", "load"):
             if expr.has_op(anchor_op):
                 materialized = True
+                needs_full_concretization = (
+                    needs_full_concretization or anchor_op == "cumsum"
+                )
                 expr = expr.replace_subtree(anchor_op)
 
         if materialized:
             self._on_data_dependent_value()
-            if expr.has_vector_const():
+            if needs_full_concretization and expr.has_vector_const():
                 expr = expr.replace_subtree()
             return expr
 
@@ -2440,7 +2444,15 @@ class SymbolicClient(Client):
                 and isinstance(node.dtype, tl.pointer_type)
                 and not node.shape
             ):
-                return node.to_py()
+                base = node.to_py()
+                if isinstance(base, list):
+                    for item in base:
+                        if isinstance(item, (int, np.integer)):
+                            return int(item)
+                    return None
+                if isinstance(base, (int, np.integer)):
+                    return int(base)
+                return None
             for child in node.children.values():
                 if child is None:
                     continue
