@@ -1371,7 +1371,9 @@ class CumsumSymbolicExpr(SymbolicExpr):
         out = np.cumsum(data, axis=axis)
         if reverse:
             out = np.flip(out, axis=axis)
-        return TensorHandle(out.astype(_get_np_dtype(input_concrete.dtype)), input_concrete.dtype)
+        return TensorHandle(
+            out.astype(_get_np_dtype(input_concrete.dtype)), input_concrete.dtype
+        )
 
 
 class MakeBlockPtrSymbolicExpr(SymbolicExpr):
