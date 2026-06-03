@@ -2437,22 +2437,14 @@ class SymbolicClient(Client):
 
     # ── Tensor resolution helpers ─────────────────────────────────────
 
-    def _collect_tensor_base(self, expr: SymbolicExpr) -> int | None:
-        def walk(node: SymbolicExpr) -> int | None:
+    def _collect_tensor_base(self, expr: SymbolicExpr) -> Any | None:
+        def walk(node: SymbolicExpr) -> Any | None:
             if (
                 node.op == "const"
                 and isinstance(node.dtype, tl.pointer_type)
                 and not node.shape
             ):
-                base = node.to_py()
-                if isinstance(base, list):
-                    for item in base:
-                        if isinstance(item, (int, np.integer)):
-                            return int(item)
-                    return None
-                if isinstance(base, (int, np.integer)):
-                    return int(base)
-                return None
+                return node.to_py()
             for child in node.children.values():
                 if child is None:
                     continue
@@ -2491,12 +2483,17 @@ class SymbolicClient(Client):
         base = self._collect_tensor_base(symbolic_expr)
         if base is None:
             return None
-        for tensor in self.tensors:
-            if tensor.data_ptr() == base:
-                return tensor
-        for start, end, tensor in self.tensor_addrs:
-            if start <= base <= end:
-                return tensor
+        base_candidates = base if isinstance(base, list) else [base]
+        for candidate in base_candidates:
+            if not isinstance(candidate, (int, np.integer)):
+                continue
+            candidate = int(candidate)
+            for tensor in self.tensors:
+                if tensor.data_ptr() == candidate:
+                    return tensor
+            for start, end, tensor in self.tensor_addrs:
+                if start <= candidate <= end:
+                    return tensor
         return None
 
     # ── Memory-op overriders ──────────────────────────────────────────

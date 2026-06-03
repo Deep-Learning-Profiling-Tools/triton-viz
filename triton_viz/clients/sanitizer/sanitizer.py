@@ -251,6 +251,23 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
         raise RuntimeError("No tensor registered in SymbolicSanitizer!")
 
+    def _addr_ok_for_expr(self, symbolic_expr: SymbolicExpr) -> BoolRef:
+        addr_sym = self.addr_sym
+        assert addr_sym is not None
+
+        resolved_tensor = self._resolve_tensor(symbolic_expr)
+        if resolved_tensor is None:
+            return self.addr_ok
+
+        ranges = [
+            And(addr_sym >= start, addr_sym <= end)
+            for start, end, tensor in self.tensor_addrs
+            if tensor is resolved_tensor
+        ]
+        if not ranges:
+            return BoolVal(False)
+        return cast(BoolRef, Or(*ranges))
+
     def _check_range_satisfiable(
         self,
         access_addr: Z3Expr,
@@ -263,25 +280,12 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         addr_sym = self.addr_sym
         assert solver is not None
         assert addr_sym is not None
-        resolved_tensor = self._resolve_tensor(symbolic_expr)
-
-        def _range_ok_for_resolved_tensor() -> BoolRef:
-            if resolved_tensor is None:
-                return self.addr_ok
-
-            ranges = [
-                And(addr_sym >= start, addr_sym <= end)
-                for start, end, tensor in self.tensor_addrs
-                if tensor is resolved_tensor
-            ]
-            if not ranges:
-                return BoolVal(False)
-            return cast(BoolRef, Or(*ranges))
+        addr_ok = self._addr_ok_for_expr(symbolic_expr)
 
         def _check_single_addr(addr_expr: Z3Expr) -> None:
             solver.push()
             solver.add(addr_sym == addr_expr)
-            solver.add(Not(_range_ok_for_resolved_tensor()))
+            solver.add(Not(addr_ok))
             if expr_constraints is not None:
                 solver.add(expr_constraints)
             if solver.check() == sat:
