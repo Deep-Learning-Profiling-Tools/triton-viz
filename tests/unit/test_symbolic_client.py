@@ -11,7 +11,9 @@ tests live next to their respective clients.
 import pytest
 from typing import cast
 
+import numpy as np
 import triton.language as tl
+from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.clients.symbolic_engine import (
     SymbolicClient,
@@ -603,4 +605,3 @@ def test_store_dtype_block_of_pointers():
     )
     store = StoreSymbolicExpr("store", ptr, value)
     assert store.dtype is None, f"Expected None, got {store.dtype}"
-
