@@ -1210,6 +1210,29 @@ class WhereSymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         return handler(self)
 
+    def concretize(self) -> Any:
+        cond = self.cond.concretize()
+        lhs = self.lhs.concretize()
+        rhs = self.rhs.concretize()
+        if isinstance(cond, SymbolicExpr):
+            cond = cond.concretize()
+        if isinstance(lhs, SymbolicExpr):
+            lhs = lhs.concretize()
+        if isinstance(rhs, SymbolicExpr):
+            rhs = rhs.concretize()
+        if not (
+            isinstance(cond, TensorHandle)
+            and isinstance(lhs, TensorHandle)
+            and isinstance(rhs, TensorHandle)
+        ):
+            raise TypeError(
+                "where concretization expects TensorHandle condition and values"
+            )
+        data = np.where(cond.data.astype(bool), lhs.data, rhs.data)
+        return TensorHandle(
+            np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+        )
+
     def _where(self) -> tuple[Z3Expr, ConstraintConjunction]:
         def _normalize(expr):
             if not isinstance(expr, list):

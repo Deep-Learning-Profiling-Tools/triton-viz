@@ -1171,6 +1171,27 @@ def test_sanitizer_supports_ashr_in_symbolic_address():
     assert len(ashr_index_sanitizer.records) == 0
 
 
+where_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=where_index_sanitizer)
+@triton.jit
+def where_index_store_kernel(out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    write_idx = tl.where(offs % 2 == 0, offs, BLOCK - 1 - offs)
+    tl.store(out_ptr + write_idx, offs)
+
+
+def test_sanitizer_supports_where_in_symbolic_address():
+    where_index_sanitizer.records.clear()
+
+    out = torch.empty((4,), dtype=torch.int32)
+
+    where_index_store_kernel[(1,)](out, BLOCK=out.numel())
+
+    assert len(where_index_sanitizer.records) == 0
+
+
 # ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
 
 
