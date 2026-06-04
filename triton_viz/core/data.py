@@ -177,6 +177,18 @@ class ReduceSum(Reduce):
 
 
 @dataclass
+class ReduceXor(Reduce):
+    name: ClassVar[str] = "reduce_xor"
+    reduce_type: ClassVar[str] = "xor_sum"
+
+
+@dataclass
+class ReduceOr(Reduce):
+    name: ClassVar[str] = "reduce_or"
+    reduce_type: ClassVar[str] = "reduce_or"
+
+
+@dataclass
 class Sort(Op):
     name: ClassVar[str] = "sort"
 

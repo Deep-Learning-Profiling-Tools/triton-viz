@@ -52,6 +52,8 @@ from ..core.data import (
     ExpandDims,
     Broadcast,
     ReduceSum,
+    ReduceXor,
+    ReduceOr,
     ReduceMax,
     ReduceMin,
     Sort,
@@ -302,6 +304,7 @@ class SymbolicExpr:
         "sqrt",
         "sin",
         "rsqrt",
+        "negative",
     )
     BINARY_OP_SYMBOL_TABLE: ClassVar[dict[str, str]] = {
         "add": "+",
@@ -334,6 +337,8 @@ class SymbolicExpr:
         "min",
         "argmax",
         "argmin",
+        "xor_sum",
+        "reduce_or",
         "dot",
     )
     SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum",)
@@ -993,9 +998,16 @@ class UnarySymbolicExpr(SymbolicExpr):
     def _abs(val) -> Z3Expr:
         return If(val >= 0, val, -val)
 
+    @staticmethod
+    def _negative(val) -> Z3Expr:
+        if isinstance(val, list):
+            return [-cast(Any, item) for item in val]
+        return cast(Z3Expr, -cast(Any, val))
+
     _Z3_BUILDERS: ClassVar[dict[str, Callable[[Z3Expr], Z3Expr]]] = {
         "abs": _abs,
         "fabs": _abs,
+        "negative": _negative,
     }
 
     _NUMPY_OPS: ClassVar[dict[str, Callable[[Any], Any]]] = {
@@ -1011,6 +1023,7 @@ class UnarySymbolicExpr(SymbolicExpr):
         "sqrt": np.sqrt,
         "sin": np.sin,
         "rsqrt": lambda x: 1 / np.sqrt(x),
+        "negative": np.negative,
     }
 
 
@@ -1377,6 +1390,8 @@ class ReduceSymbolicExpr(SymbolicExpr):
         "sum",
         "max",
         "min",
+        "xor_sum",
+        "reduce_or",
         "argmax",
         "argmin",
     )
@@ -1444,12 +1459,46 @@ class ReduceSymbolicExpr(SymbolicExpr):
         arr, constraints = self.input._to_z3()
         return reduce(lambda a, b: If(a <= b, a, b), arr), constraints
 
+    def _reduce_xor_sum(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        arr, constraints = self.input._to_z3()
+        bitwidth = BinarySymbolicExpr._infer_bitwidth(self.input) or 64
+        # Z3 integer expressions do not have bitwise operators; convert each
+        # operand to the Triton integer width before folding the reduction.
+        return (
+            reduce(
+                lambda a, b: BinarySymbolicExpr._from_bv(
+                    BinarySymbolicExpr._to_bv(a, bitwidth)
+                    ^ BinarySymbolicExpr._to_bv(b, bitwidth)
+                ),
+                arr,
+            ),
+            constraints,
+        )
+
+    def _reduce_or(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        arr, constraints = self.input._to_z3()
+        bitwidth = BinarySymbolicExpr._infer_bitwidth(self.input) or 64
+        # ``tl.reduce_or`` uses the same bit-vector lowering as other bitwise
+        # symbolic ops, but folds across one reduction axis.
+        return (
+            reduce(
+                lambda a, b: BinarySymbolicExpr._from_bv(
+                    BinarySymbolicExpr._to_bv(a, bitwidth)
+                    | BinarySymbolicExpr._to_bv(b, bitwidth)
+                ),
+                arr,
+            ),
+            constraints,
+        )
+
     _Z3_BUILDERS: ClassVar[
         dict[str, Callable[[ReduceSymbolicExpr], tuple[Z3Expr, ConstraintConjunction]]]
     ] = {
         "sum": _reduce_sum,
         "max": _reduce_max,
         "min": _reduce_min,
+        "xor_sum": _reduce_xor_sum,
+        "reduce_or": _reduce_or,
     }
 
 
@@ -1985,7 +2034,8 @@ SymbolicExpr.register_op_class(UnarySymbolicExpr, SymbolicExpr.UNARY_OPS)
 SymbolicExpr.register_op_class(BinarySymbolicExpr, SymbolicExpr.BINARY_OPS)
 SymbolicExpr.register_op_class(WhereSymbolicExpr, ("where",))
 SymbolicExpr.register_op_class(
-    ReduceSymbolicExpr, ("sum", "max", "min", "argmax", "argmin")
+    ReduceSymbolicExpr,
+    ("sum", "max", "min", "xor_sum", "reduce_or", "argmax", "argmin"),
 )
 SymbolicExpr.register_op_class(DotSymbolicExpr, ("dot",))
 SymbolicExpr.register_op_class(CumsumSymbolicExpr, ("cumsum",))
@@ -2022,6 +2072,7 @@ _UNARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
     np.log2: "log2",
     np.sqrt: "sqrt",
     np.sin: "sin",
+    np.negative: "negative",
 }
 
 _BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
@@ -2037,7 +2088,9 @@ _BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
     np.equal: "equal",
     np.fmod: "mod",
     np.maximum: "maximum",
+    np.fmax: "maximum",
     np.minimum: "minimum",
+    np.fmin: "minimum",
     np.bitwise_and: "bitwise_and",
     np.bitwise_or: "bitwise_or",
     np.bitwise_xor: "bitwise_xor",
@@ -2154,6 +2207,16 @@ class SymbolicClient(Client):
     def _op_reduce_sum_overrider(self, input, axis=None, keep_dims=False, **kwargs):
         return SymbolicExpr.create(
             "sum", SymbolicExpr.from_value(input), axis, keep_dims
+        )
+
+    def _op_reduce_xor_overrider(self, input, axis=None, keep_dims=False, **kwargs):
+        return SymbolicExpr.create(
+            "xor_sum", SymbolicExpr.from_value(input), axis, keep_dims
+        )
+
+    def _op_reduce_or_overrider(self, input, axis=None, keep_dims=False, **kwargs):
+        return SymbolicExpr.create(
+            "reduce_or", SymbolicExpr.from_value(input), axis, keep_dims
         )
 
     def _op_reduce_max_overrider(self, input, axis=None, keep_dims=False, **kwargs):
@@ -2287,6 +2350,8 @@ class SymbolicClient(Client):
             ExpandDims: self._op_expand_dims_overrider,
             Broadcast: self._op_broadcast_overrider,
             ReduceSum: self._op_reduce_sum_overrider,
+            ReduceXor: self._op_reduce_xor_overrider,
+            ReduceOr: self._op_reduce_or_overrider,
             ReduceMax: self._op_reduce_max_overrider,
             ReduceMin: self._op_reduce_min_overrider,
             Sort: self._op_sort_overrider,
