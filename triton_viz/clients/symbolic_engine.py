@@ -2352,7 +2352,7 @@ class SymbolicClient(Client):
             SymbolicExpr.from_value(shape),
         )
 
-    def _op_trans_overrider(self, arg, perm=[1, 0]):
+    def _op_trans_overrider(self, arg, perm=(1, 0)):
         return SymbolicExpr.create("trans", SymbolicExpr.from_value(arg), perm)
 
     def _op_join_overrider(self, lhs, rhs):
