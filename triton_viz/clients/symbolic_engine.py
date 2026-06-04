@@ -140,9 +140,7 @@ def _broadcast_lane_value(value: Any, lane_count: int) -> list[Any]:
             return list(value)
         if len(value) == 1:
             return list(value) * lane_count
-        raise ValueError(
-            f"Cannot broadcast {len(value)} values to {lane_count} lanes"
-        )
+        raise ValueError(f"Cannot broadcast {len(value)} values to {lane_count} lanes")
     return [value] * lane_count
 
 
@@ -697,6 +695,10 @@ class SymbolicExpr:
                 for child in self.children.values()
             )
         ):
+            if self.op == "const" and isinstance(
+                getattr(self, "value", None), tl.core.dtype
+            ):
+                return self
             concrete = self.concretize()
             if not isinstance(concrete, TensorHandle):
                 raise TypeError(f"Unexpected dtype: {type(concrete)}!")
@@ -735,11 +737,16 @@ class SymbolicExpr:
             and value.data.size != 1
         ):
             return True
-        return any(
-            child.has_vector_const()
-            for child in self.children.values()
-            if child is not None
-        )
+        for child_symbolic_expr in self.children.values():
+            if child_symbolic_expr is None:
+                continue
+            if isinstance(child_symbolic_expr, tuple):
+                if any(child.has_vector_const() for child in child_symbolic_expr):
+                    return True
+                continue
+            if child_symbolic_expr.has_vector_const():
+                return True
+        return False
 
     def to_tree_str(self) -> str:
         """
@@ -929,7 +936,9 @@ class IndirectSymbolicExprBase(SymbolicExpr):
             mask, constraints_mask = mask_expr._to_z3()
             mask_constraint = mask
 
-        lane_count = _lane_count_from(ptr, constraints_ptr, mask_constraint, constraints_mask)
+        lane_count = _lane_count_from(
+            ptr, constraints_ptr, mask_constraint, constraints_mask
+        )
         if lane_count is None:
             return ptr, _and_constraints(
                 constraints_ptr, constraints_mask, mask_constraint
@@ -1305,7 +1314,9 @@ class WhereSymbolicExpr(SymbolicExpr):
                 "where concretization expects TensorHandle condition and values"
             )
         data = np.where(cond.data.astype(bool), lhs.data, rhs.data)
-        return TensorHandle(np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype)
+        return TensorHandle(
+            np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+        )
 
     def _where(self) -> tuple[Z3Expr, ConstraintConjunction]:
         def _normalize(expr):
@@ -2044,6 +2055,7 @@ class SymbolicClient(Client):
         self.pid_ok: BoolRef | None = None
         self.solver: Solver | None = None
         self.addr_sym: ArithRef | None = None
+        self.addr_ok_cache: dict[int, BoolRef] = {}
         SymbolicExpr.set_loop_ctx_provider(
             lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
         )
@@ -2484,8 +2496,8 @@ class SymbolicClient(Client):
 
     # ── Tensor resolution helpers ─────────────────────────────────────
 
-    def _collect_tensor_base(self, expr: SymbolicExpr) -> int | None:
-        def walk(node: SymbolicExpr) -> int | None:
+    def _collect_tensor_base(self, expr: SymbolicExpr) -> Any | None:
+        def walk(node: SymbolicExpr) -> Any | None:
             if (
                 node.op == "const"
                 and isinstance(node.dtype, tl.pointer_type)
@@ -2530,12 +2542,15 @@ class SymbolicClient(Client):
         base = self._collect_tensor_base(symbolic_expr)
         if base is None:
             return None
-        for tensor in self.tensors:
-            if tensor.data_ptr() == base:
-                return tensor
-        for start, end, tensor in self.tensor_addrs:
-            if start <= base <= end:
-                return tensor
+        base_candidates = base if isinstance(base, list) else [base]
+        for candidate in base_candidates:
+            candidate = int(candidate)
+            for tensor in self.tensors:
+                if tensor.data_ptr() == candidate:
+                    return tensor
+            for start, end, tensor in self.tensor_addrs:
+                if start <= candidate <= end:
+                    return tensor
         return None
 
     # ── Memory-op overriders ──────────────────────────────────────────
@@ -2643,8 +2658,8 @@ class SymbolicClient(Client):
         """Constraint added to the solver under ``addr_ok``.
 
         Race detector keeps the positive premise (every captured access sits
-        inside a registered tensor). Sanitizer overrides with ``Not(addr_ok)``
-        so unsatisfiability proves every access is in-bounds.
+        inside a registered tensor). Sanitizer can defer address-range
+        premises until each access check when it needs access-specific ranges.
         """
         return addr_ok
 
@@ -2689,6 +2704,7 @@ class SymbolicClient(Client):
         self.tensors.clear()
         self.tensor_addrs.clear()
         self.tensor_names.clear()
+        self.addr_ok_cache.clear()
 
     # ── Client callbacks with shared defaults ─────────────────────────
 

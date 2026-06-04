@@ -11,7 +11,7 @@ import sys
 
 from torch import Tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
-from z3 import Not, sat
+from z3 import And, BoolVal, Not, Or, sat
 from z3.z3 import BoolRef, IntNumRef
 
 from ...core.client import Client
@@ -196,9 +196,10 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
     # ── Sanitizer-specific hook overrides ─────────────────────────
 
     def _addr_ok_premise(self, addr_ok: BoolRef) -> BoolRef:
-        # Sanitizer proves in-bounds by asking Z3 whether addr_ok can be
-        # violated — so the premise added to the solver is its negation.
-        return Not(addr_ok)
+        # Sanitizer adds the actual invalid-address premise under the
+        # per-access push/pop scope, because it may need tensor-specific
+        # ranges instead of the global union of all registered tensors.
+        return BoolVal(True)
 
     def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
         # TODO: init a reserved_args field per backend to filter out these args
@@ -268,6 +269,36 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
         raise RuntimeError("No tensor registered in SymbolicSanitizer!")
 
+    def _addr_ok_for_expr(self, symbolic_expr: SymbolicExpr) -> BoolRef:
+        """Return the valid-address predicate for one memory access.
+
+        Prefer the ranges belonging to the tensor that the pointer expression
+        originates from. The global ``addr_ok`` union is only a fallback for
+        expressions whose base tensor cannot be resolved.
+        """
+        addr_sym = self.addr_sym
+        assert addr_sym is not None
+
+        resolved_tensor = self._resolve_tensor(symbolic_expr)
+        if resolved_tensor is None:
+            return self.addr_ok
+
+        cache_key = id(resolved_tensor)
+        cached = self.addr_ok_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        ranges = [
+            And(addr_sym >= start, addr_sym <= end)
+            for start, end, tensor in self.tensor_addrs
+            if tensor is resolved_tensor
+        ]
+        if not ranges:
+            return BoolVal(False)
+        addr_ok = ranges[0] if len(ranges) == 1 else cast(BoolRef, Or(*ranges))
+        self.addr_ok_cache[cache_key] = addr_ok
+        return addr_ok
+
     def _check_range_satisfiable(
         self,
         access_addr: Z3Expr,
@@ -280,51 +311,66 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         addr_sym = self.addr_sym
         assert solver is not None
         assert addr_sym is not None
+        addr_ok = self._addr_ok_for_expr(symbolic_expr)
 
-        def _check_single_addr(
+        def _report_if_sat() -> None:
+            if solver.check() != sat:
+                return
+
+            model = solver.model()
+            violation_val = model.evaluate(addr_sym, model_completion=True)
+            if isinstance(violation_val, IntNumRef):
+                violation_addr = violation_val.as_long()
+            else:
+                raise RuntimeError("Unexpected violation address type from Z3 model!")
+
+            tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+            if symbolic_expr.op in ("store", "tensor_pointer_store"):
+                op_type: type[Load] | type[Store] = Store
+            else:
+                op_type = Load
+
+            self._report(
+                op_type, tensor, violation_addr, symbolic_expr, source_location
+            )
+
+        def _lane_addr_constraint(
             addr_expr: Z3Expr, constraints: BoolRef | None
-        ) -> None:
-            solver.push()
-            solver.add(addr_sym == addr_expr)
-            if constraints is not None:
-                solver.add(constraints)
-            if solver.check() == sat:
-                # Get the model to find the violation address
-                model = solver.model()
-                violation_val = model.evaluate(addr_sym, model_completion=True)
-                if isinstance(violation_val, IntNumRef):
-                    violation_addr = violation_val.as_long()
-                else:
-                    raise RuntimeError(
-                        "Unexpected violation address type from Z3 model!"
-                    )
+        ) -> BoolRef:
+            lane_addr = addr_sym == addr_expr
+            if constraints is None:
+                return cast(BoolRef, lane_addr)
+            return cast(BoolRef, And(constraints, lane_addr))
 
-                # Find the tensor that this address belongs to
-                tensor = self._find_tensor_for_expr(symbolic_expr, violation_addr)
+        solver.push()
+        try:
+            solver.add(Not(addr_ok))
 
-                # Determine operation type from symbolic expression
-                if symbolic_expr.op in ("store", "tensor_pointer_store"):
-                    op_type: type[Load] | type[Store] = Store
-                else:
-                    op_type = Load
-
-                # Report with symbolic expression and source location
-                self._report(
-                    op_type, tensor, violation_addr, symbolic_expr, source_location
+            if isinstance(access_addr, list):
+                if not access_addr:
+                    return
+                lane_constraints = _broadcast_constraints(
+                    expr_constraints, len(access_addr)
                 )
+                solver.add(
+                    Or(
+                        *(
+                            _lane_addr_constraint(addr, constraints)
+                            for addr, constraints in zip(access_addr, lane_constraints)
+                        )
+                    )
+                )
+                _report_if_sat()
+                return
+
+            if isinstance(expr_constraints, list):
+                scalar_constraints = _broadcast_constraints(expr_constraints, 1)[0]
+            else:
+                scalar_constraints = expr_constraints
+            solver.add(_lane_addr_constraint(access_addr, scalar_constraints))
+            _report_if_sat()
+        finally:
             solver.pop()
-
-        if isinstance(access_addr, list):
-            constraints = _broadcast_constraints(expr_constraints, len(access_addr))
-            for addr, lane_constraints in zip(access_addr, constraints):
-                _check_single_addr(addr, lane_constraints)
-            return
-
-        if isinstance(expr_constraints, list):
-            constraints = _broadcast_constraints(expr_constraints, 1)[0]
-        else:
-            constraints = expr_constraints
-        _check_single_addr(access_addr, constraints)
 
     def _handle_access_check(
         self,

@@ -134,9 +134,7 @@ def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
     )
     slice_sizes[torch.randint(0, n_slices, (1,), device=device)] = 0
     slice_map = torch.randperm(n_slices, device=device, dtype=torch.int32)
-    slice_map[
-        torch.randint(0, n_slices, (min(5, n_slices),), device=device)
-    ] = -1
+    slice_map[torch.randint(0, n_slices, (min(5, n_slices),), device=device)] = -1
 
     tri_metadata = ragged_mod.make_ragged_tensor_metadata(slice_sizes, n_total_rows)
     ref_metadata = ragged_mod.make_ragged_tensor_metadata_torch(
