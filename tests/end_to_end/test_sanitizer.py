@@ -66,11 +66,29 @@ class LoadIndexChecker(SymbolicSanitizer):
                 return None
             return np.sum(offsets, axis=0)
 
+        def _offsets_from_const_pointer(expr):
+            if expr.op != "const" or not isinstance(expr.dtype, tl.pointer_type):
+                return None
+
+            ptrs = expr.to_py()
+            if not isinstance(ptrs, list):
+                return None
+
+            tensor = self._resolve_tensor(expr)
+            if tensor is None:
+                return None
+
+            return (
+                np.asarray(ptrs, dtype=np.int64) - tensor.data_ptr()
+            ) // tensor.element_size()
+
         def _new_load_overrider(ptr, *args, **kwargs):
             # exec original overrider
             load_expr = orig_overrider(ptr, *args, **kwargs)
             p = load_expr.ptr
             offs = _sum_offsets_from_addptr(p)
+            if offs is None:
+                offs = _offsets_from_const_pointer(p)
             if offs is not None:
                 self._offset_lists.append(offs.tolist())
             return load_expr
