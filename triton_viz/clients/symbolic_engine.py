@@ -67,6 +67,7 @@ from ..core.data import (
     Fabs,
     Ashr,
     Advance,
+    AssociativeScan,
     FpToFp,
     Umulhi,
     CumSum,
@@ -341,7 +342,7 @@ class SymbolicExpr:
         "reduce_or",
         "dot",
     )
-    SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum",)
+    SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum", "associative_scan")
     SORT_OPS: ClassVar[tuple[str, ...]] = ("sort",)
     POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
@@ -1565,6 +1566,79 @@ class CumsumSymbolicExpr(SymbolicExpr):
         )
 
 
+class AssociativeScanSymbolicExpr(SymbolicExpr):
+    input: SymbolicExpr
+    axis: SymbolicExpr
+    reverse: SymbolicExpr
+
+    def __init__(self, op: str, input: Any, axis: Any, combine_fn: Any, reverse: Any):
+        super().__init__(op)
+        self.add_child("input", input)
+        self.add_child("axis", axis)
+        self.add_child("reverse", reverse)
+        self.combine_fn = combine_fn
+        self.dtype = self.input.dtype
+        self.shape = self.input.shape
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+
+    @staticmethod
+    def _combine_name(combine_fn: Any) -> str:
+        fn = getattr(combine_fn, "fn", combine_fn)
+        return getattr(fn, "__name__", getattr(combine_fn, "__name__", ""))
+
+    @staticmethod
+    def _keyed_add_scan(data: np.ndarray, axis: int) -> np.ndarray:
+        moved = np.moveaxis(data, axis, -1)
+        out = np.empty_like(moved)
+        key_mask = np.asarray(0xFFFF0000, dtype=moved.dtype)
+        run_mask = np.asarray(0x0000FFFF, dtype=moved.dtype)
+
+        for prefix in np.ndindex(moved.shape[:-1]):
+            acc = moved[prefix + (0,)]
+            out[prefix + (0,)] = acc
+            for i in range(1, moved.shape[-1]):
+                y = moved[prefix + (i,)]
+                kx = acc & key_mask
+                ky = y & key_mask
+                run_length = (acc & run_mask) + (y & run_mask)
+                acc = np.where(kx == ky, kx | run_length, y).astype(moved.dtype)
+                out[prefix + (i,)] = acc
+
+        return np.moveaxis(out, -1, axis)
+
+    def concretize(self) -> Any:
+        input_concrete = self.input.concretize()
+        axis = int(self.axis.to_py())
+        if axis < 0:
+            axis += len(input_concrete.data.shape)
+        reverse = bool(self.reverse.to_py())
+        data = input_concrete.data
+        if reverse:
+            data = np.flip(data, axis=axis)
+
+        combine_name = self._combine_name(self.combine_fn)
+        if combine_name == "_sum_combine":
+            out = np.cumsum(data, axis=axis)
+        elif combine_name == "_prod_combine":
+            out = np.cumprod(data, axis=axis)
+        elif combine_name == "_keyed_add":
+            out = self._keyed_add_scan(data, axis)
+        else:
+            raise NotImplementedError(
+                f"Concretize for associative_scan combine function "
+                f"{combine_name!r} is not implemented"
+            )
+
+        if reverse:
+            out = np.flip(out, axis=axis)
+        return TensorHandle(
+            out.astype(_get_np_dtype(input_concrete.dtype), copy=False),
+            input_concrete.dtype,
+        )
+
+
 class MakeBlockPtrSymbolicExpr(SymbolicExpr):
     base: SymbolicExpr
     ndim: int
@@ -2039,6 +2113,7 @@ SymbolicExpr.register_op_class(
 )
 SymbolicExpr.register_op_class(DotSymbolicExpr, ("dot",))
 SymbolicExpr.register_op_class(CumsumSymbolicExpr, ("cumsum",))
+SymbolicExpr.register_op_class(AssociativeScanSymbolicExpr, ("associative_scan",))
 SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
 SymbolicExpr.register_op_class(AddPtrSymbolicExpr, ("addptr",))
 SymbolicExpr.register_op_class(AdvanceSymbolicExpr, ("advance",))
@@ -2312,6 +2387,17 @@ class SymbolicClient(Client):
             dtype,
         )
 
+    def _op_associative_scan_overrider(
+        self, input, axis, combine_fn, reverse=False, **kwargs
+    ):
+        return SymbolicExpr.create(
+            "associative_scan",
+            SymbolicExpr.from_value(input),
+            axis,
+            combine_fn,
+            reverse,
+        )
+
     def _op_bitcast_overrider(self, src, dst_type):
         return SymbolicExpr.create("bitcast", SymbolicExpr.from_value(src), dst_type)
 
@@ -2368,6 +2454,7 @@ class SymbolicClient(Client):
             FpToFp: self._op_fp_to_fp_overrider,
             Umulhi: self._op_umulhi_overrider,
             CumSum: self._op_cumsum_overrider,
+            AssociativeScan: self._op_associative_scan_overrider,
             Bitcast: self._op_bitcast_overrider,
             AtomicCas: self._op_atomic_cas_overrider,
             AtomicRMW: self._op_atomic_rmw_overrider,
@@ -2398,7 +2485,7 @@ class SymbolicClient(Client):
             return expr
 
         materialized = False
-        for anchor_op in ("sort", "cumsum", "load"):
+        for anchor_op in ("sort", "cumsum", "associative_scan", "load"):
             if expr.has_op(anchor_op):
                 materialized = True
                 expr = expr.replace_subtree(anchor_op)

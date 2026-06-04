@@ -275,6 +275,11 @@ class CumSum(Op):
 
 
 @dataclass
+class AssociativeScan(Op):
+    name: ClassVar[str] = "associative_scan"
+
+
+@dataclass
 class Bitcast(Op):
     name: ClassVar[str] = "bitcast"
 

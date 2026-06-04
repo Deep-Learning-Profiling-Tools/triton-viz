@@ -171,19 +171,26 @@ class ClientManager:
     @contextmanager
     def patch_run(self, fn, backend: str):
         namespaces = OPERATION_REGISTRY[backend].namespaces
+        post_lang_patch_attrs = {"associative_scan"} if backend == "triton" else set()
         with patch_calls(backend):
             # Collect all for-loop callbacks from clients
             all_loop_callbacks = []
+            post_lang_patches = []
             for client in self.clients.values():
                 for namespace, attrs in namespaces.items():  # patch ops
                     for attr, op in attrs.items():
                         callbacks = client.register_op_callback(op)
-                        patch_op(namespace, attr, callbacks, backend=backend)
+                        if attr in post_lang_patch_attrs:
+                            post_lang_patches.append((namespace, attr, callbacks))
+                        else:
+                            patch_op(namespace, attr, callbacks, backend=backend)
                 all_loop_callbacks.append(client.register_for_loop_callback())
 
             self._populate_loop_hooks(all_loop_callbacks)
             patch_for_loop()
             patch_lang(fn, backend, client_manager=self)
+            for namespace, attr, callbacks in post_lang_patches:
+                patch_op(namespace, attr, callbacks, backend=backend)
             try:
                 yield
             finally:

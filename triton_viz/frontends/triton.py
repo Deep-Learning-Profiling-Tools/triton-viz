@@ -7,6 +7,7 @@ from triton.runtime.interpreter import interpreter_builder
 from triton_viz.core.data import (
     AddPtr,
     Advance,
+    AssociativeScan,
     Ashr,
     AtomicCas,
     AtomicRMW,
@@ -142,6 +143,7 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "reduce_or": ReduceOr,
         "sort": Sort,
         "cumsum": CumSum,
+        "associative_scan": AssociativeScan,
         "trans": Trans,
     },
     tl.standard: {

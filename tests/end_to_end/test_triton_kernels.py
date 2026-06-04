@@ -1,3 +1,5 @@
+import itertools
+
 import pytest
 import torch
 
@@ -15,6 +17,26 @@ COMPACTION_CASES = [
 ]
 RAGGED_METADATA_N_SLICES = [1, 7, 33, 911, 1025]
 REMAP_RAGGED_METADATA_N_SLICES = [9, 32, 911, 1025]
+BITMATRIX_METADATA_CASES = [
+    pytest.param(
+        n_rows,
+        n_cols,
+        k,
+        marks=pytest.mark.xfail(
+            reason="bitmatrix metadata currently needs sanitizer branch/path "
+            "constraints to avoid false positive OOB reports",
+            strict=True,
+        )
+        if (n_rows, n_cols) != (7, 13)
+        else (),
+    )
+    for n_rows, n_cols, k in itertools.product(
+        [7, 256, 17111],
+        [13, 32, 128, 811],
+        [1, 4, 8],
+    )
+    if k <= n_cols
+]
 
 
 TOPK_FORWARD_CASES = [
@@ -34,6 +56,12 @@ def _new_sanitizer():
     pytest.importorskip("triton_viz")
     sanitizer_mod = pytest.importorskip("triton_viz.clients.sanitizer.sanitizer")
     return sanitizer_mod.SymbolicSanitizer(abort_on_error=True)
+
+
+def _new_recording_sanitizer():
+    pytest.importorskip("triton_viz")
+    sanitizer_mod = pytest.importorskip("triton_viz.clients.sanitizer.sanitizer")
+    return sanitizer_mod.SymbolicSanitizer(abort_on_error=False)
 
 
 def _trace_kernel(monkeypatch, module, name, sanitizer):
@@ -164,6 +192,54 @@ def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
     _trace_kernel(monkeypatch, ragged_mod, "_remap_ragged_tensor_metadata", sanitizer)
     tri_metadata = ragged_mod.make_ragged_tensor_metadata(slice_sizes, n_total_rows)
     ragged_mod.remap_ragged_tensor_metadata(tri_metadata, slice_map)
+    assert len(sanitizer.records) == 0
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "n_cols", "k"),
+    BITMATRIX_METADATA_CASES,
+)
+@pytest.mark.parametrize("device", ["cuda"], indirect=True)
+def test_triton_viz_sanitizer_bitmatrix_metadata(
+    monkeypatch, device, n_rows, n_cols, k
+):
+    _require_cuda(device)
+
+    bitmatrix_mod = pytest.importorskip("triton_kernels.tensor_details.bitmatrix")
+    dtype_mod = pytest.importorskip("triton_kernels.tensor_details.dtype")
+    sum_mod = pytest.importorskip(
+        "triton_kernels.tensor_details.bitmatrix_details.sum_bitmatrix_rows"
+    )
+    tensor_mod = pytest.importorskip("triton_kernels.tensor")
+
+    torch.manual_seed(0)
+    indx = torch.rand(n_rows, n_cols, device=device).argsort(dim=1).int()[:, :k]
+    indx = torch.sort(indx, dim=1)[0]
+    rows = torch.arange(n_rows, device=device).unsqueeze(1).expand_as(indx)
+    bitmask_data = torch.zeros(
+        (n_rows, (n_cols + 31) // 32), dtype=torch.int32, device=device
+    )
+    bitmask_data.index_put_((rows, indx // 32), 1 << (indx % 32), accumulate=True)
+    bitmask = tensor_mod.wrap_torch_tensor(
+        bitmask_data.view(torch.uint32), dtype=dtype_mod.BIT, shape=(n_rows, n_cols)
+    )
+
+    metadata_tri = bitmatrix_mod.make_bitmatrix_metadata(indx, bitmask)
+    metadata_ref = bitmatrix_mod.make_bitmatrix_metadata_torch(indx, bitmask)
+
+    assert_equal(metadata_tri.col_sum, metadata_ref.col_sum)
+    assert_equal(metadata_tri.row_sorted_indx, metadata_ref.row_sorted_indx)
+    assert_equal(metadata_tri.col_sorted_indx, metadata_ref.col_sorted_indx)
+
+    sanitizer = _new_recording_sanitizer()
+    _trace_kernel(monkeypatch, sum_mod, "_sum_bitmatrix_rows", sanitizer)
+    _trace_kernel(
+        monkeypatch, bitmatrix_mod, "_bitmatrix_metadata_compute_stage1", sanitizer
+    )
+    _trace_kernel(
+        monkeypatch, bitmatrix_mod, "_bitmatrix_metadata_compute_stage2", sanitizer
+    )
+    bitmatrix_mod.make_bitmatrix_metadata(indx, bitmask)
     assert len(sanitizer.records) == 0
 
 
