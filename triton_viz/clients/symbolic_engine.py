@@ -45,6 +45,7 @@ from ..core.data import (
     UnaryOp,
     BinaryOp,
     TernaryOp,
+    Fma,
     ProgramId,
     Dot,
     MakeRange,
@@ -64,6 +65,7 @@ from ..core.data import (
     Reshape,
     Trans,
     Join,
+    Split,
     Fabs,
     Ashr,
     Advance,
@@ -330,7 +332,7 @@ class SymbolicExpr:
         "umulhi": "umulhi",
     }
     BINARY_OPS: ClassVar[tuple[str, ...]] = tuple(BINARY_OP_SYMBOL_TABLE.keys())
-    TERNARY_OPS: ClassVar[tuple[str, ...]] = ("where",)
+    TERNARY_OPS: ClassVar[tuple[str, ...]] = ("where", "fma")
     REDUCE_OPS: ClassVar[tuple[str, ...]] = (
         "sum",
         "max",
@@ -350,6 +352,7 @@ class SymbolicExpr:
         "broadcast",
         "reshape",
         "join",
+        "split",
         "trans",
     )
     CAST_OPS: ClassVar[tuple[str, ...]] = ("cast_impl", "bitcast", "fp_to_fp")
@@ -1385,6 +1388,57 @@ class WhereSymbolicExpr(SymbolicExpr):
     }
 
 
+class FmaSymbolicExpr(SymbolicExpr):
+    x: SymbolicExpr
+    y: SymbolicExpr
+    z: SymbolicExpr
+
+    def __init__(self, op: str, x: Any, y: Any, z: Any):
+        super().__init__(op)
+        self.add_child("x", x)
+        self.add_child("y", y)
+        self.add_child("z", z)
+        self.dtype = self.z.dtype
+        self.shape = self.z.shape
+
+    @staticmethod
+    def _normalize(expr):
+        return expr if isinstance(expr, list) else [expr]
+
+    @staticmethod
+    def _broadcast(*lists):
+        max_len = max(len(lst) for lst in lists)
+        broadcasted = []
+        for lst in lists:
+            if len(lst) == 1:
+                broadcasted.append(lst * max_len)
+            else:
+                assert len(lst) == max_len, "Incompatible lengths for broadcasting"
+                broadcasted.append(lst)
+        return tuple(broadcasted)
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        x, constraints_x = self.x._to_z3()
+        y, constraints_y = self.y._to_z3()
+        z, constraints_z = self.z._to_z3()
+        x, y, z = self._broadcast(
+            self._normalize(x), self._normalize(y), self._normalize(z)
+        )
+        return (
+            [x_i * y_i + z_i for x_i, y_i, z_i in zip(x, y, z)],
+            _and_constraints(constraints_x, constraints_y, constraints_z),
+        )
+
+    def concretize(self) -> Any:
+        x = self.x.concretize()
+        y = self.y.concretize()
+        z = self.z.concretize()
+        data = x.data * y.data + z.data
+        return TensorHandle(
+            np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
+        )
+
+
 class ReduceSymbolicExpr(SymbolicExpr):
     _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = (
         "sum",
@@ -1834,6 +1888,31 @@ class JoinSymbolicExpr(SymbolicExpr):
         )
 
 
+class SplitSymbolicExpr(SymbolicExpr):
+    arg: SymbolicExpr
+    index: SymbolicExpr
+
+    def __init__(self, op: str, arg: Any, index: Any):
+        super().__init__(op)
+        self.add_child("arg", arg)
+        self.add_child("index", index)
+        self.dtype = self.arg.dtype
+        self.shape = self.arg.shape[:-1]
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        raise NotImplementedError(
+            "Split operation is not implemented in Z3 evaluation yet"
+        )
+
+    def concretize(self) -> Any:
+        concrete = self.arg.concretize()
+        index = int(self.index.to_py())
+        return TensorHandle(
+            concrete.data[..., index].astype(concrete.data.dtype),
+            concrete.dtype,
+        )
+
+
 class CastSymbolicExpr(SymbolicExpr):
     _SUPPORTED_OPS: ClassVar[tuple[str, ...]] = ("cast_impl", "bitcast")
     src: SymbolicExpr
@@ -2033,6 +2112,7 @@ SymbolicExpr.register_op_class(StoreSymbolicExpr, ("store",))
 SymbolicExpr.register_op_class(UnarySymbolicExpr, SymbolicExpr.UNARY_OPS)
 SymbolicExpr.register_op_class(BinarySymbolicExpr, SymbolicExpr.BINARY_OPS)
 SymbolicExpr.register_op_class(WhereSymbolicExpr, ("where",))
+SymbolicExpr.register_op_class(FmaSymbolicExpr, ("fma",))
 SymbolicExpr.register_op_class(
     ReduceSymbolicExpr,
     ("sum", "max", "min", "xor_sum", "reduce_or", "argmax", "argmin"),
@@ -2049,6 +2129,7 @@ SymbolicExpr.register_op_class(BroadcastSymbolicExpr, ("broadcast",))
 SymbolicExpr.register_op_class(ReshapeSymbolicExpr, ("reshape",))
 SymbolicExpr.register_op_class(TransSymbolicExpr, ("trans",))
 SymbolicExpr.register_op_class(JoinSymbolicExpr, ("join",))
+SymbolicExpr.register_op_class(SplitSymbolicExpr, ("split",))
 SymbolicExpr.register_op_class(CastSymbolicExpr, ("cast_impl", "bitcast"))
 SymbolicExpr.register_op_class(FpToFpSymbolicExpr, ("fp_to_fp",))
 SymbolicExpr.register_op_class(AtomicCasSymbolicExpr, ("atomic_cas",))
@@ -2177,6 +2258,14 @@ class SymbolicClient(Client):
             return SymbolicExpr.create("where", lhs_sym, rhs_sym, other_sym)
         raise NotImplementedError(f"Unsupported ternary operation: {op}")
 
+    def _op_fma_overrider(self, x, y, z):
+        return SymbolicExpr.create(
+            "fma",
+            SymbolicExpr.from_value(x),
+            SymbolicExpr.from_value(y),
+            SymbolicExpr.from_value(z),
+        )
+
     def _op_addptr_overrider(self, ptr, offset):
         return SymbolicExpr.create(
             "addptr",
@@ -2273,6 +2362,13 @@ class SymbolicClient(Client):
             SymbolicExpr.from_value(rhs),
         )
 
+    def _op_split_overrider(self, arg):
+        arg_sym = SymbolicExpr.from_value(arg)
+        return (
+            SymbolicExpr.create("split", arg_sym, 0),
+            SymbolicExpr.create("split", arg_sym, 1),
+        )
+
     def _op_fabs_overrider(self, arg):
         return SymbolicExpr.create("fabs", SymbolicExpr.from_value(arg))
 
@@ -2344,6 +2440,7 @@ class SymbolicClient(Client):
             UnaryOp: self._op_unary_op_overrider,
             BinaryOp: self._op_binary_op_overrider,
             TernaryOp: self._op_ternary_op_overrider,
+            Fma: self._op_fma_overrider,
             AddPtr: self._op_addptr_overrider,
             Dot: self._op_dot_overrider,
             MakeRange: self._op_make_range_overrider,
@@ -2362,6 +2459,7 @@ class SymbolicClient(Client):
             Reshape: self._op_reshape_overrider,
             Trans: self._op_trans_overrider,
             Join: self._op_join_overrider,
+            Split: self._op_split_overrider,
             Fabs: self._op_fabs_overrider,
             Ashr: self._op_ashr_overrider,
             Advance: self._op_advance_overrider,

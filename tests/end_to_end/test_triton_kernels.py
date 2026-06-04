@@ -7,6 +7,11 @@ def assert_equal(*args, **kwargs):
     return triton_kernels_testing.assert_equal(*args, **kwargs)
 
 
+def assert_close(*args, **kwargs):
+    triton_kernels_testing = pytest.importorskip("triton_kernels.testing")
+    return triton_kernels_testing.assert_close(*args, **kwargs)
+
+
 COMPACTION_CASES = [
     (8192, 64, 4, 0.5),
     (8192, 64, 4, 1.0),
@@ -23,6 +28,7 @@ TOPK_FORWARD_CASES = [
 TOPK_BACKWARD_CASES = [
     (7, 13, 8, True, "float16"),
 ]
+SWIGLU_CASES = [(1311, 4352, 1e-2), (1311, 4352, 10)]
 
 
 def _require_cuda(device):
@@ -241,4 +247,25 @@ def test_triton_viz_sanitizer_topk_backward(
         n_rows=active_rows,
         apply_softmax=apply_softmax,
     )
+    assert len(sanitizer.records) == 0
+
+
+@pytest.mark.parametrize(("m", "n", "limit"), SWIGLU_CASES)
+@pytest.mark.parametrize("device", ["cuda"], indirect=True)
+def test_triton_viz_sanitizer_swiglu(monkeypatch, device, m, n, limit):
+    _require_cuda(device)
+
+    swiglu_mod = pytest.importorskip("triton_kernels.swiglu")
+
+    torch.manual_seed(2)
+    x = torch.randn((m, n), device=device, dtype=torch.bfloat16)
+    precision_config = swiglu_mod.PrecisionConfig(limit=limit)
+
+    tri_y = swiglu_mod.swiglu(x, 0.5, precision_config)
+    ref_y = swiglu_mod.swiglu_torch(x, 0.5, precision_config)
+    assert_close(tri_y, ref_y)
+
+    sanitizer = _new_sanitizer()
+    _trace_kernel(monkeypatch, swiglu_mod, "_swiglu", sanitizer)
+    swiglu_mod.swiglu(x, 0.5, precision_config)
     assert len(sanitizer.records) == 0
