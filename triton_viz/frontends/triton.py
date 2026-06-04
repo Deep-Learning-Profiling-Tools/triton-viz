@@ -125,6 +125,7 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "create_rsqrt": Rsqrt,
         "cast_impl": CastImpl,
         "create_reshape": Reshape,
+        "create_trans": Trans,
         "create_join": Join,
         "create_split": Split,
         "create_fabs": Fabs,
@@ -146,7 +147,6 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "reduce_or": ReduceOr,
         "sort": Sort,
         "cumsum": CumSum,
-        "trans": Trans,
     },
     tl.standard: {
         "max": ReduceMax,
