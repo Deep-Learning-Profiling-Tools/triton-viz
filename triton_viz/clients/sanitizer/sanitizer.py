@@ -150,7 +150,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.records: list[OutOfBoundsRecordZ3] = []
         self.cache_args: list[Any] = []
         self.cache_grid: tuple[int, ...] | None = None
-        self._addr_ok_cache: dict[int, BoolRef] = {}
 
     # Explicit forwarders to SymbolicClient: the Sanitizer factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
@@ -205,10 +204,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
     def _clear_cache(self) -> None:
         self.cache_args.clear()
         self.cache_grid = None
-
-    def _clear_symbolic_launch_state(self) -> None:
-        SymbolicClient._clear_symbolic_launch_state(self)
-        self._addr_ok_cache.clear()
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         # Sanitizer needs ``cache_grid`` tracked alongside the shared setup so
@@ -269,7 +264,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             return self.addr_ok
 
         cache_key = id(resolved_tensor)
-        cached = self._addr_ok_cache.get(cache_key)
+        cached = self.addr_ok_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -281,7 +276,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         if not ranges:
             return BoolVal(False)
         addr_ok = ranges[0] if len(ranges) == 1 else cast(BoolRef, Or(*ranges))
-        self._addr_ok_cache[cache_key] = addr_ok
+        self.addr_ok_cache[cache_key] = addr_ok
         return addr_ok
 
     def _check_range_satisfiable(
