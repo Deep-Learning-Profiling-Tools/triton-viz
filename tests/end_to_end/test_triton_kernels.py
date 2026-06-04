@@ -32,6 +32,15 @@ TOPK_BACKWARD_CASES = [
 ]
 SWIGLU_CASES = [(1311, 4352, 1e-2), (1311, 4352, 10)]
 MXFP4_TILE_UPCAST_CASES = ["float16", "bfloat16", "float32"]
+REDUCE_CASES = [
+    ((3, 15, 25), 0, torch.float16),
+    ((3, 15, 25), 1, torch.float16),
+    ((3, 15, 25), 2, torch.float16),
+    ((4, 4, 4), 0, torch.float32),
+    ((4, 4, 4), 1, torch.float32),
+    ((4, 4, 4), 2, torch.float32),
+    ((15, 345, 789), 2, torch.float16),
+]
 _mxfp4_tile_upcast = None
 
 
@@ -50,6 +59,23 @@ def _trace_kernel(monkeypatch, module, name, sanitizer):
     triton_viz = pytest.importorskip("triton_viz")
     traced = triton_viz.trace(client=sanitizer)(getattr(module, name))
     monkeypatch.setattr(module, name, traced)
+
+
+def _trace_specialization_get(
+    monkeypatch, specialization_module, sanitizer, kernel_names
+):
+    orig_get = specialization_module.get
+    traced_modules = set()
+
+    def wrapped_get(**kwargs):
+        module = orig_get(**kwargs)
+        if id(module) not in traced_modules:
+            for name in kernel_names:
+                _trace_kernel(monkeypatch, module, name, sanitizer)
+            traced_modules.add(id(module))
+        return module
+
+    monkeypatch.setattr(specialization_module, "get", wrapped_get)
 
 
 @pytest.mark.parametrize(
@@ -365,4 +391,49 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(device, dst_dtype):
         scale.shape[-1],
         tl_dtype,
     )
+    assert len(sanitizer.records) == 0
+
+
+@pytest.mark.parametrize(("shape", "dim", "dtype"), REDUCE_CASES)
+@pytest.mark.parametrize("device", ["cuda"], indirect=True)
+def test_triton_viz_sanitizer_reduce(monkeypatch, device, shape, dim, dtype):
+    _require_cuda(device)
+
+    reduce_mod = pytest.importorskip("triton_kernels.reduce")
+
+    torch.manual_seed(0)
+    x_tri = torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
+    x_ref = x_tri.detach().clone().requires_grad_(True)
+
+    y_tri, _ = reduce_mod.reduce(x_tri, dim=dim)
+    y_ref, _ = reduce_mod.reduce_torch(
+        x_ref,
+        dim=dim,
+        x_flex=None,
+        y_flex=None,
+    )
+    assert torch.allclose(y_tri.float(), y_ref.float(), atol=1e-3, rtol=1e-3)
+
+    dy = torch.randn_like(y_tri)
+    y_tri.backward(dy)
+    y_ref.backward(dy)
+    assert torch.allclose(x_tri.grad.float(), x_ref.grad.float(), atol=1e-3, rtol=1e-3)
+
+    sanitizer = _new_sanitizer()
+    _trace_kernel(monkeypatch, reduce_mod, "_create_row_idxs", sanitizer)
+    _trace_specialization_get(
+        monkeypatch,
+        reduce_mod.forward_specializations,
+        sanitizer,
+        ("_reduce_forward",),
+    )
+    _trace_specialization_get(
+        monkeypatch,
+        reduce_mod.backward_specializations,
+        sanitizer,
+        ("_reduce_backward",),
+    )
+    x_san = x_tri.detach().clone().requires_grad_(True)
+    y_san, _ = reduce_mod.reduce(x_san, dim=dim)
+    y_san.backward(torch.randn_like(y_san))
     assert len(sanitizer.records) == 0

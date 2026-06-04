@@ -510,6 +510,16 @@ def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
         args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
 
     # Prepare call arguments
+    # Triton may omit nullable positional values immediately before constexpr
+    # keyword arguments in interpreter launches. Restore those slots so Python
+    # signature binding preserves the original argument positions.
+    kwarg_indexes = [
+        argspec.args.index(name) for name in kwargs_hst if name in argspec.args
+    ]
+    if kwarg_indexes:
+        positional_limit = min(kwarg_indexes)
+        if len(args_hst) < positional_limit:
+            args_hst = [*args_hst, *([None] * (positional_limit - len(args_hst)))]
     args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
     call_args = {}
     for name, arg in args.items():
@@ -604,6 +614,21 @@ def _jit_function_call(self, *args, backend=None, **kwargs):
     assert backend is not None
     patch_lang(self.fn, backend, client_manager=_current_client_manager)
     try:
+
+        def unwrap_constexpr(value):
+            # Nested JIT helpers are executed as Python functions under tracing,
+            # so compile-time wrappers must behave like their underlying values.
+            if isinstance(value, tl.constexpr):
+                return unwrap_constexpr(value.value)
+            if hasattr(value, "__dict__") and isinstance(value, tl.core.base_value):
+                for name, attr in vars(value).items():
+                    unwrapped_attr = unwrap_constexpr(attr)
+                    if unwrapped_attr is not attr:
+                        object.__setattr__(value, name, unwrapped_attr)
+            return value
+
+        args = tuple(unwrap_constexpr(arg) for arg in args)
+        kwargs = {key: unwrap_constexpr(value) for key, value in kwargs.items()}
         return self.fn(*args, **kwargs)
     finally:
         unpatch_lang(backend)
