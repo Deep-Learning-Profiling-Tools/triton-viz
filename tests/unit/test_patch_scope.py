@@ -1,7 +1,9 @@
 import pytest
 import warnings
 
+import numpy as np
 import triton.language as tl
+from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.core import patch as patch_mod
 from triton_viz.core.patch import _triton_snapshot_scope
@@ -132,3 +134,14 @@ def test_inline_asm_patch_returns_inputs_and_warns_once():
     assert b.cast_dtypes == []
     assert len(caught) == 1
     assert "inline assembly is approximated" in str(caught[0].message)
+
+
+def test_patch_lang_accepts_constexpr_wrapped_symbolic_tensors():
+    handle = TensorHandle(np.array([1, 2], dtype=np.int32), tl.int32)
+    tensor = tl.core.tensor(handle, tl.block_type(tl.int32, [2]))
+
+    patch_mod.patch_lang(_dummy_kernel, "triton")
+    try:
+        assert patch_mod.interpreter_semantic.to_tensor(tl.constexpr(tensor)) is tensor
+    finally:
+        patch_mod.unpatch_lang("triton")
