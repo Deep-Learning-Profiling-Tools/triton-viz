@@ -1993,6 +1993,7 @@ class SymbolicClient(Client):
         self.pid_ok: BoolRef | None = None
         self.solver: Solver | None = None
         self.addr_sym: ArithRef | None = None
+        self._addr_ok_cache: dict[int, BoolRef] = {}
         SymbolicExpr.set_loop_ctx_provider(
             lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
         )
@@ -2641,6 +2642,7 @@ class SymbolicClient(Client):
         self.tensors.clear()
         self.tensor_addrs.clear()
         self.tensor_names.clear()
+        self._addr_ok_cache.clear()
 
     # ── Client callbacks with shared defaults ─────────────────────────
 
