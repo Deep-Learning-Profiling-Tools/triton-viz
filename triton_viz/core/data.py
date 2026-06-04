@@ -97,6 +97,11 @@ class TernaryOp(Op):
 
 
 @dataclass
+class Fma(Op):
+    name: ClassVar[str] = "fma"
+
+
+@dataclass
 class Dot(Op):
     name: ClassVar[str] = "dot"
     input_shape: tuple
@@ -237,6 +242,11 @@ class Reshape(Op):
 @dataclass
 class Join(Op):
     name: ClassVar[str] = "join"
+
+
+@dataclass
+class Split(Op):
+    name: ClassVar[str] = "split"
 
 
 @dataclass
