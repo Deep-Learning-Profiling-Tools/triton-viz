@@ -264,7 +264,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             return self.addr_ok
 
         cache_key = id(resolved_tensor)
-        cached = self._addr_ok_cache.get(cache_key)
+        cached = self.addr_ok_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -276,7 +276,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         if not ranges:
             return BoolVal(False)
         addr_ok = ranges[0] if len(ranges) == 1 else cast(BoolRef, Or(*ranges))
-        self._addr_ok_cache[cache_key] = addr_ok
+        self.addr_ok_cache[cache_key] = addr_ok
         return addr_ok
 
     def _check_range_satisfiable(
