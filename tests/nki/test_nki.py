@@ -7,7 +7,12 @@ import pytest
 from triton_viz.core.frontend.base import _LangPatchScope
 
 try:
-    from triton_viz.core.simulation.nki import Builder, NDArray, nki_patch_lang, nki_unpatch_lang
+    from triton_viz.core.simulation.nki import (
+        Builder,
+        NDArray,
+        nki_patch_lang,
+        nki_unpatch_lang,
+    )
     import neuronxcc.nki.language as nl
 except ModuleNotFoundError:
     pytest.skip(
