@@ -129,6 +129,31 @@ class Frontend:
     ):
         return callbacks.op_overrider(*args, **kwargs)
 
+    @staticmethod
+    def concrete_fn_for_op(
+        namespace_ops: dict[str, Callable], op_type: type[Op], original_op: Callable
+    ) -> Callable:
+        return original_op
+
+    @staticmethod
+    def symbolic_ops_for_op_type(op_type: type[Op]) -> tuple[str, ...]:
+        return ()
+
+    def prepare_patched_op(
+        self, namespace: Any, op_type: type[Op], original_op: Callable
+    ) -> None:
+        symbolic_ops = self.symbolic_ops_for_op_type(op_type)
+        if not symbolic_ops:
+            return
+
+        from triton_viz.clients.symbolic_engine import SymbolicExpr
+
+        concrete_fn = self.concrete_fn_for_op(
+            self.original_ops[namespace], op_type, original_op
+        )
+        for symbolic_op in symbolic_ops:
+            SymbolicExpr.set_concrete_fn(symbolic_op, concrete_fn)
+
     def patch_for_loop(self) -> None:
         return None
 

@@ -380,6 +380,7 @@ class SymbolicExpr:
         dict[tuple[int, int], tuple[ArithRef, ConstraintConjunction]]
     ] = {}
     _OP_CLASS_MAP: ClassVar[dict[str, type[SymbolicExpr]]] = {}
+    _CONCRETE_FNS: ClassVar[dict[str, Callable[..., Any]]] = {}
 
     @classmethod
     def register_op_class(
@@ -387,6 +388,10 @@ class SymbolicExpr:
     ) -> None:
         for op_type in op_types:
             cls._OP_CLASS_MAP[op_type] = op_cls
+
+    @classmethod
+    def set_concrete_fn(cls, op: str, concrete_fn: Callable[..., Any]) -> None:
+        cls._CONCRETE_FNS[op] = concrete_fn
 
     @classmethod
     def create(cls, op: str, *args: Any) -> SymbolicExpr:
@@ -407,7 +412,7 @@ class SymbolicExpr:
         self.shape: tuple[int, ...] = ()
 
         # Functions and arguments for concretization
-        self.concrete_fn: Callable[..., Any] | None = None
+        self.concrete_fn: Callable[..., Any] | None = self._CONCRETE_FNS.get(op)
 
         # deal with args
         self.children: dict[str, SymbolicChild | None] = {}
@@ -1065,9 +1070,10 @@ class BinarySymbolicExpr(SymbolicExpr):
         rhs_concrete = self.rhs.concretize()
         np_op = self._NUMPY_OPS.get(self.op, None)
         # Most ops (add, sub, mul, ...) have a NumPy mapping and are called
-        # with concrete_fn(lhs, rhs, np_op). Some ops like "idiv" have
-        # their own concrete_fn that handles the computation internally
-        # and only takes (lhs, rhs). Fall through to the 2-arg call for those.
+        # with concrete_fn(lhs, rhs, np_op). Some ops like "idiv" and Triton's
+        # signed right shift have concrete functions that handle the computation
+        # internally and only take (lhs, rhs). Fall through to the 2-arg call
+        # for those.
         if np_op is not None:
             return self._to_tensor_handle(
                 self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
@@ -1275,7 +1281,6 @@ class BinarySymbolicExpr(SymbolicExpr):
         "bitwise_or": np.bitwise_or,
         "bitwise_xor": np.bitwise_xor,
         "right_shift": np.right_shift,
-        "ashr": np.right_shift,
         "left_shift": np.left_shift,
     }
 
