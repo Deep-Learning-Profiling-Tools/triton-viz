@@ -1,17 +1,13 @@
 from copy import deepcopy
 from collections.abc import Callable
+from typing import Any
 from ..utils.traceback_utils import CODE_KEYS, get_code_key
-from triton.runtime import KernelInterface, Autotuner
-from triton.runtime.autotuner import Heuristics
-from triton.runtime.interpreter import InterpretedFunction
-from triton import JITFunction
 
 from .config import config as cfg
 from ..clients import Sanitizer, Profiler, RaceDetector, Tracer
 from ..clients.race_detector.race_detector import NullRaceDetector
 from .client import ClientManager, Client
 from .data import Launch
-from .frontend import triton as triton_frontend
 import types
 
 
@@ -49,19 +45,44 @@ class TraceInterface:
         launches.append(self.client_manager.launch)
 
 
-class TritonTrace(KernelInterface, TraceInterface):
+class LaunchInterface:
+    def warmup(self, *args, grid, **kwargs):
+        from triton.runtime.jit import MockTensor
+
+        return self.run(
+            grid=grid,
+            warmup=True,
+            *map(MockTensor.wrap_dtype, args),
+            **kwargs,
+        )
+
+    def __getitem__(self, grid):
+        return lambda *args, **kwargs: self.run(
+            grid=grid,
+            warmup=False,
+            *args,
+            **kwargs,
+        )
+
+
+class TritonTrace(LaunchInterface, TraceInterface):
     def __init__(
         self,
-        runner: JITFunction | InterpretedFunction | Autotuner | Heuristics,
+        runner: Any,
         client: str | Client,
     ) -> None:
-        self.jit_fn: JITFunction | None = None
+        from triton import JITFunction
+        from triton.runtime import Autotuner
+        from triton.runtime.autotuner import Heuristics
+        from triton.runtime.interpreter import InterpretedFunction
+
+        self.jit_fn: Any | None = None
         self.base_fn: Callable | None = None
-        self.interpreted_fn: InterpretedFunction | None = None
+        self.interpreted_fn: Any | None = None
 
         def unpack_kernel(
-            source: TritonTrace | JITFunction | InterpretedFunction | Heuristics,
-        ) -> tuple[JITFunction | None, Callable | None, InterpretedFunction | None]:
+            source: Any,
+        ) -> tuple[Any | None, Callable | None, Any | None]:
             if isinstance(source, TritonTrace):
                 return source.jit_fn, source.base_fn, source.interpreted_fn
             if isinstance(source, JITFunction):
@@ -156,6 +177,8 @@ class TritonTrace(KernelInterface, TraceInterface):
         # we need to execute the underlying function directly
 
         # check that client sets match for calling and called functions
+        from .frontend import triton as triton_frontend
+
         outer_client_manager = triton_frontend.frontend.current_client_manager()
         if outer_client_manager is not None:
             outer_clients = set(outer_client_manager.clients)
@@ -174,7 +197,7 @@ class TritonTrace(KernelInterface, TraceInterface):
                 self.warmup_runner.warmup(*args, **kwargs)
 
 
-class NKITrace(KernelInterface, TraceInterface):
+class NKITrace(LaunchInterface, TraceInterface):
     def __init__(self, kernel, client: str | Client, beta2: bool = True) -> None:
         nki_fn_cls: object = None
         if beta2:
@@ -227,7 +250,7 @@ class NKITrace(KernelInterface, TraceInterface):
         )
 
     def __getitem__(self, *grid):
-        return KernelInterface.__getitem__(self, tuple(*grid))
+        return LaunchInterface.__getitem__(self, tuple(*grid))
 
     def __call__(self, *args, **kwargs):
         return self[(1,)](*args, **kwargs)
@@ -286,6 +309,11 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
     if not isinstance(client, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(client)}")
 
+    def _is_sanitizer_client(selected: str | Client) -> bool:
+        if isinstance(selected, str):
+            return selected.lower() == "sanitizer"
+        return isinstance(selected, Sanitizer)
+
     def _is_race_detector_client(selected: str | Client) -> bool:
         if isinstance(selected, str):
             return selected.lower() == "race_detector"
@@ -298,7 +326,7 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
         # test_flag_off_does_not_swallow_explicit_instance.
         return isinstance(selected, NullRaceDetector)
 
-    def decorator(kernel) -> TritonTrace | NKITrace | KernelInterface:
+    def decorator(kernel) -> TritonTrace | NKITrace | Any:
         if cfg.cli_active and isinstance(kernel, TraceInterface):
             raise RuntimeError(
                 "@triton_viz.trace() decorator cannot be used together with "
@@ -307,12 +335,7 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
                 "when using CLI tools."
             )
 
-        is_sanitizer_client = (
-            client.lower() == "sanitizer"
-            if isinstance(client, str)
-            else isinstance(client, Sanitizer)
-        )
-        if is_sanitizer_client and not cfg.enable_sanitizer:
+        if _is_sanitizer_client(client) and not cfg.enable_sanitizer:
             # when dry-running triton-sanitizer CLI (i.e. wrap kernels with sanitizer
             # tracing but don't actually sanitize), don't actually trace the kernel
             return kernel
@@ -335,17 +358,10 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
         # NKI frontends allow Python functions through NKIInterpretedFunction.
         if frontend in ("nki", "nki_beta2"):
             return NKITrace(kernel, client, beta2=("beta2" in frontend))
-        if isinstance(
-            kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
-        ):
-            if frontend == "triton":
-                return TritonTrace(kernel, client)
-            else:
-                raise ValueError(f"Unknown frontend: {frontend}")
-
-        raise TypeError(
-            f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}"
-        )
+        elif frontend == "triton":
+            return TritonTrace(kernel, client)
+        else:
+            raise ValueError(f"Unknown frontend: {frontend}")
 
     return decorator
 
