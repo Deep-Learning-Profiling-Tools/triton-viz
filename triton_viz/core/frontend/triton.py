@@ -51,12 +51,14 @@ from ..data import (
     Fma,
     FpToFp,
     Idiv,
+    IntToPtr,
     Join,
     Load,
     MakeBlockPointer,
     MakeRange,
     Op,
     ProgramId,
+    PtrToInt,
     RawLoad,
     RawStore,
     ReduceMax,
@@ -119,8 +121,8 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "create_fp_to_fp": FpToFp,
         "create_umulhi": Umulhi,
         "create_bitcast": Bitcast,
-        "create_ptr_to_int": CastImpl,
-        "create_int_to_ptr": CastImpl,
+        "create_ptr_to_int": PtrToInt,
+        "create_int_to_ptr": IntToPtr,
         "create_atomic_cas": AtomicCas,
         "create_atomic_rmw": AtomicRMW,
     },
@@ -515,10 +517,6 @@ class TritonFrontend(Frontend):
             return namespace_ops["create_masked_store"]
         if op_type == Ashr:
             return partial(TritonFrontend._concrete_ashr, namespace_ops["binary_op"])
-        if op_type == CastImpl:
-            return namespace_ops["cast_impl"]
-        if op_type == Bitcast:
-            return namespace_ops["cast_impl"]
         return original_op
 
     @staticmethod
@@ -609,6 +607,8 @@ class TritonFrontend(Frontend):
             Umulhi: ("umulhi",),
             CumSum: ("cumsum",),
             Bitcast: ("bitcast",),
+            PtrToInt: ("bitcast",),
+            IntToPtr: ("bitcast",),
             AtomicCas: ("atomic_cas",),
             AtomicRMW: ("atomic_rmw",),
         }

@@ -3,8 +3,11 @@ import pytest
 from triton_viz.core.callbacks import OpCallbacks
 from triton_viz.core.data import (
     AddPtr,
+    CastImpl,
+    IntToPtr,
     Load,
     ProgramId,
+    PtrToInt,
     ReduceSum,
     Store,
 )
@@ -122,6 +125,15 @@ def test_program_id_adapter_returns_axis_only():
     result = adapter(program_id)
     assert result.args == (program_id,)
     assert result.kwargs == {}
+
+
+def test_triton_pointer_cast_aliases_have_distinct_op_types():
+    frontend = get_frontend("triton")
+    builder_ops = frontend.namespaces[frontend.builder]
+
+    assert builder_ops["cast_impl"] is CastImpl
+    assert builder_ops["create_ptr_to_int"] is PtrToInt
+    assert builder_ops["create_int_to_ptr"] is IntToPtr
 
 
 @pytest.mark.skipif(not HAS_NKI, reason="NKI extras not installed")
