@@ -354,8 +354,6 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
         trace_source(kernel)
 
         # First-time wrapping
-        # Triton frontend needs JIT/Interpreter/Autotuner.
-        # NKI frontends allow Python functions through NKIInterpretedFunction.
         if frontend in ("nki", "nki_beta2"):
             return NKITrace(kernel, client, beta2=("beta2" in frontend))
         elif frontend == "triton":
