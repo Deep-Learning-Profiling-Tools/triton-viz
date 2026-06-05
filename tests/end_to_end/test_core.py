@@ -46,6 +46,18 @@ def test_trace_decorator_add_clients():
     assert sum(c == "tracer" for c in clients) == 1
 
 
+def test_trace_specialized_option_handles_constexpr_helpers():
+    @triton.jit
+    def helper(value, scale: tl.constexpr):
+        return value + scale
+
+    traced = triton_viz.trace("tracer", specialized=True)(helper)
+    traced.interpreted_fn = lambda value, scale: value + scale
+
+    assert traced.specialized is True
+    assert traced(3, tl.constexpr(4)) == 7
+
+
 # ======== Unpatch Tests =========
 def test_unpatch_lang_restores_builtins():
     @triton.jit

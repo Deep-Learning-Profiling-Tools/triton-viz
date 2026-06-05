@@ -5,6 +5,7 @@ from triton.runtime import KernelInterface, Autotuner
 from triton.runtime.autotuner import Heuristics
 from triton.runtime.interpreter import InterpretedFunction
 from triton import JITFunction
+import triton.language as tl
 
 from .config import config as cfg
 from ..clients import Sanitizer, Profiler, RaceDetector, Tracer
@@ -16,6 +17,19 @@ import types
 
 
 launches: list[Launch] = []
+
+
+def _unwrap_triton_constexpr(value):
+    # Specialized Triton helper functions can receive constexpr wrappers from
+    # generated kernels; the Python implementation expects their raw values.
+    if isinstance(value, tl.constexpr):
+        return _unwrap_triton_constexpr(value.value)
+    if hasattr(value, "__dict__") and isinstance(value, tl.core.base_value):
+        for name, attr in vars(value).items():
+            unwrapped_attr = _unwrap_triton_constexpr(attr)
+            if unwrapped_attr is not attr:
+                object.__setattr__(value, name, unwrapped_attr)
+    return value
 
 
 class TraceInterface:
@@ -54,10 +68,12 @@ class TritonTrace(KernelInterface, TraceInterface):
         self,
         runner: JITFunction | InterpretedFunction | Autotuner | Heuristics,
         client: str | Client,
+        specialized: bool = False,
     ) -> None:
         self.jit_fn: JITFunction | None = None
         self.base_fn: Callable | None = None
         self.interpreted_fn: InterpretedFunction | None = None
+        self.specialized = specialized
 
         def unpack_kernel(
             source: TritonTrace | JITFunction | InterpretedFunction | Heuristics,
@@ -166,6 +182,13 @@ class TritonTrace(KernelInterface, TraceInterface):
                     f"outer={outer_clients}, inner={inner_clients}"
                 )
 
+        if self.specialized:
+            args = tuple(_unwrap_triton_constexpr(arg) for arg in args)
+            kwargs = {
+                key: _unwrap_triton_constexpr(value) for key, value in kwargs.items()
+            }
+
+        assert self.interpreted_fn is not None
         return self.interpreted_fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
@@ -270,18 +293,29 @@ def trace_source(kernel):
     return kernel
 
 
-def trace(client: str | Client | None = None, backend: str = "triton"):
+def trace(
+    client: str | Client | None = None,
+    backend: str = "triton",
+    specialized: bool = False,
+):
     """
     Create a trace object that can be used to run a kernel with instrumentation client(s).
 
     :param kernel: The kernel to run.
     :param client: A client to run with the kernel. Defaults to Tracer() if not specified.
+    :param specialized: Treat a Triton JIT helper as a specialized device
+        function when it is called from another traced kernel. This is intended
+        for nested helper functions, not as a way to bypass tracing for
+        launched kernels.
     """
     if client is None:
         client = Tracer()
 
     if not isinstance(client, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(client)}")
+
+    if specialized and backend != "triton":
+        raise ValueError("specialized=True is only supported for Triton trace targets")
 
     def _is_sanitizer_client(selected: str | Client) -> bool:
         if isinstance(selected, str):
@@ -323,6 +357,12 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         if isinstance(kernel, TraceInterface):
             trace = kernel
             trace.add_client(client)
+            if specialized:
+                if not isinstance(trace, TritonTrace):
+                    raise ValueError(
+                        "specialized=True is only supported for Triton trace targets"
+                    )
+                trace.specialized = True
             return trace
 
         trace_source(kernel)
@@ -336,7 +376,7 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
         ):
             if backend == "triton":
-                return TritonTrace(kernel, client)
+                return TritonTrace(kernel, client, specialized=specialized)
             else:
                 raise ValueError(f"Unknown backend: {backend}")
 

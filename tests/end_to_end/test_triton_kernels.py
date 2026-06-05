@@ -55,14 +55,21 @@ def _new_sanitizer():
     return sanitizer_mod.SymbolicSanitizer(abort_on_error=True)
 
 
-def _trace_kernel(monkeypatch, module, name, sanitizer):
+def _trace_kernel(monkeypatch, module, name, sanitizer, *, specialized=False):
     triton_viz = pytest.importorskip("triton_viz")
-    traced = triton_viz.trace(client=sanitizer)(getattr(module, name))
+    traced = triton_viz.trace(client=sanitizer, specialized=specialized)(
+        getattr(module, name)
+    )
     monkeypatch.setattr(module, name, traced)
 
 
 def _trace_specialization_get(
-    monkeypatch, specialization_module, sanitizer, kernel_names
+    monkeypatch,
+    specialization_module,
+    sanitizer,
+    kernel_names,
+    *,
+    specialized_global_names=(),
 ):
     orig_get = specialization_module.get
     traced_modules = set()
@@ -71,6 +78,18 @@ def _trace_specialization_get(
         module = orig_get(**kwargs)
         if id(module) not in traced_modules:
             for name in kernel_names:
+                kernel = getattr(module, name)
+                # SpecializationModule clones launch kernels into dynamic modules.
+                # Patch captured nested helpers in that generated global scope.
+                for global_name in specialized_global_names:
+                    globals_dict = kernel.fn.__globals__
+                    if global_name in globals_dict:
+                        triton_viz = pytest.importorskip("triton_viz")
+                        traced = triton_viz.trace(
+                            client=sanitizer,
+                            specialized=True,
+                        )(globals_dict[global_name])
+                        monkeypatch.setitem(globals_dict, global_name, traced)
                 _trace_kernel(monkeypatch, module, name, sanitizer)
             traced_modules.add(id(module))
         return module
@@ -426,6 +445,7 @@ def test_triton_viz_sanitizer_reduce(monkeypatch, device, shape, dim, dtype):
         reduce_mod.forward_specializations,
         sanitizer,
         ("_reduce_forward",),
+        specialized_global_names=("_reduce_forward_inner",),
     )
     _trace_specialization_get(
         monkeypatch,

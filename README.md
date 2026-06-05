@@ -121,6 +121,13 @@ def kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
     tl.store(out_ptr + offsets, values)
 ```
 
+For Triton JIT helper functions that are called from another traced kernel, use
+`specialized=True` with the same client:
+
+```py
+helper = triton_viz.trace("sanitizer", specialized=True)(helper)
+```
+
 Use the CLI wrappers to run an existing Python script without editing it. These
 wrappers patch plain `@triton.jit` kernels, so use them with scripts that do not
 already apply `@triton_viz.trace(...)`.
