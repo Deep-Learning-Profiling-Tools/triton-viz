@@ -130,7 +130,7 @@ class Frontend:
         return callbacks.op_overrider(*args, **kwargs)
 
     @staticmethod
-    def concrete_fn_for_op(
+    def concrete_fn_for_op_type(
         namespace_ops: dict[str, Callable], op_type: type[Op], original_op: Callable
     ) -> Callable:
         return original_op
@@ -148,7 +148,7 @@ class Frontend:
 
         from triton_viz.clients.symbolic_engine import SymbolicExpr
 
-        concrete_fn = self.concrete_fn_for_op(
+        concrete_fn = self.concrete_fn_for_op_type(
             self.original_ops[namespace], op_type, original_op
         )
         for symbolic_op in symbolic_ops:

@@ -508,7 +508,7 @@ class TritonFrontend(Frontend):
             time.sleep(yield_sleep_sec)
 
     @staticmethod
-    def concrete_fn_for_op(
+    def concrete_fn_for_op_type(
         namespace_ops: dict[str, Callable], op_type: type[Op], original_op: Callable
     ) -> Callable:
         if op_type == RawLoad:
