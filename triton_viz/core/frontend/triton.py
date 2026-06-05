@@ -313,11 +313,7 @@ class TritonFrontend(Frontend):
         # without mutating the user's global dictionary.
         if self._loop_wrapper_arg in {
             arg.arg
-            for arg in (
-                node.args.posonlyargs
-                + node.args.args
-                + node.args.kwonlyargs
-            )
+            for arg in (node.args.posonlyargs + node.args.args + node.args.kwonlyargs)
         }:
             return node
 

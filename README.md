@@ -147,9 +147,9 @@ Triton is the default DSL frontend. NKI support is optional and selected with
 the `frontend` argument:
 
 ```py
-triton_viz.trace("tracer")                         # Triton
-triton_viz.trace("tracer", frontend="nki")         # NKI
-triton_viz.trace("tracer", frontend="nki_beta2")   # NKI Beta 2
+triton_viz.trace("tracer")  # Triton
+triton_viz.trace("tracer", frontend="nki")  # NKI
+triton_viz.trace("tracer", frontend="nki_beta2")  # NKI Beta 2
 ```
 
 The runtime integration code lives under `triton_viz/core/frontend/`. NKI
