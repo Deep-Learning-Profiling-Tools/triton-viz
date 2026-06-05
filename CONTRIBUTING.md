@@ -15,24 +15,25 @@ pre-commit install
 
 # Test
 uv run pytest tests/ -m ""      # run all tests
-npm run build:frontend           # build JS frontend (if working on the visualizer)
-npm run test:frontend            # test JS (if working on the visualizer)
+npm run build:frontend           # build the web UI (if working on the visualizer)
+npm run test:frontend            # test the web UI (if working on the visualizer)
 ```
 
 ## Project Structure
 
 ```
-frontend/             # TypeScript frontend source code
+frontend/             # TypeScript web UI source code
 examples/             # Entry points for new users to try out triton-viz functionality
 docs/                 # triton-viz website
 triton_viz/
-  frontends/          # Where to put DSL-specific code to attach to triton-viz
-  transformers/       # AST rewriters
+  core/frontend/      # DSL operation adapters and runtime patching
+  core/simulation/    # NKI simulation runtimes
+  clients/            # Visualizer, profiler, and sanitizer clients
   visualizer/         # Python interface for the visualizer
   utils/              # Miscellaneous utility functions
 tests/
   unit/               # Unit tests
   end_to_end/         # End-to-end tests
-  frontend/           # Frontend tests
+  frontend/           # Web UI tests
   nki/                # NKI-related tests
 ```

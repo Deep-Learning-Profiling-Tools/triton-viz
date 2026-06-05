@@ -41,7 +41,7 @@ class Store(Op):
     masks: npt.NDArray[np.bool_]
     mem_src: str = "SBUF"
     mem_dst: str = "HBM"
-    backend: str = "nki"
+    frontend: str = "nki"
     bytes: int = 0
     time_idx: int = 0
 
@@ -60,7 +60,7 @@ class Load(Op):
     # buffer: str
     mem_src: str = "HBM"
     mem_dst: str = "SBUF"
-    backend: str = "nki"
+    frontend: str = "nki"
     bytes: int = 0
     time_idx: int = 0
 
@@ -116,17 +116,6 @@ class Dot(Op):
     def update_intermediate(self, row: int, col: int, result: float):
         # Store only the result as a float
         self.intermediate_results[(row, col)] = result
-
-
-@dataclass
-class Flip(Op):
-    name: ClassVar[str] = "flip"
-    input_shape: tuple
-    output_shape: tuple
-    dim: int
-    # Optional payloads to help frontend render actual values when available
-    input_data: list | None = None
-    output_data: list | None = None
 
 
 @dataclass

@@ -5,7 +5,7 @@ import nki.language as nl
 import numpy as np
 
 TRITON_VIZ_ENABLED = True
-PRE_TRACE = True  # if True, run the NKI Beta 2 tracer before running interpreter. Can be set to false, though has less guarantees with matching NKI compiler behavior.
+PRE_TRACE = True  # Run NKI Beta 2 compiler tracing before Triton-Viz simulation for stronger semantic checks.
 
 
 def rmsnorm_kernel(x, gamma, out, eps=1e-6):
@@ -97,7 +97,7 @@ def _run_demo():
     if TRITON_VIZ_ENABLED:
         import triton_viz
 
-        traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(rmsnorm_kernel)
+        traced_kernel = triton_viz.trace("tracer", frontend="nki_beta2")(rmsnorm_kernel)
         traced_kernel[kernel_grid](*kernel_args, pre_trace=PRE_TRACE)
         assert np.allclose(expected, out)
         print("☑️ Actual equals expected!")

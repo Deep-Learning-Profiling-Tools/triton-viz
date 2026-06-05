@@ -16,7 +16,8 @@ from .patch import (
 )
 from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
-from .patch import patch_lang, unpatch_lang, OPERATION_REGISTRY
+from .patch import patch_lang, unpatch_lang
+from .frontend.base import get_frontend
 from .config import config as cfg
 
 
@@ -169,30 +170,35 @@ class ClientManager:
             jit_fn.warmup = jit_fn.warmup.__wrapped__
 
     @contextmanager
-    def patch_run(self, fn, backend: str):
-        namespaces = OPERATION_REGISTRY[backend].namespaces
-        with patch_calls(backend):
+    def patch_run(self, fn, frontend_name: str):
+        namespaces = get_frontend(frontend_name).namespaces
+        with patch_calls(frontend_name):
             # Collect all for-loop callbacks from clients
             all_loop_callbacks = []
             for client in self.clients.values():
                 for namespace, attrs in namespaces.items():  # patch ops
                     for attr, op in attrs.items():
                         callbacks = client.register_op_callback(op)
-                        patch_op(namespace, attr, callbacks, backend=backend)
+                        patch_op(
+                            namespace,
+                            attr,
+                            callbacks,
+                            frontend_name=frontend_name,
+                        )
                 all_loop_callbacks.append(client.register_for_loop_callback())
 
             self._populate_loop_hooks(all_loop_callbacks)
-            patch_for_loop()
-            patch_lang(fn, backend, client_manager=self)
+            patch_for_loop(frontend_name)
+            patch_lang(fn, frontend_name, client_manager=self)
             try:
                 yield
             finally:
                 for namespace, attrs in namespaces.items():
                     for attr, op in attrs.items():
-                        unpatch_op(namespace, attr, backend)
-                unpatch_for_loop()
+                        unpatch_op(namespace, attr, frontend_name)
+                unpatch_for_loop(frontend_name)
                 self._clear_loop_hooks()
-                unpatch_lang(backend)
+                unpatch_lang(frontend_name)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         with self._lock_context():

@@ -28,7 +28,7 @@ class Config:
     - enable_timing: ENABLE_TIMING, collects timing info during execution.
     - report_grid_execution_progress: REPORT_GRID_EXECUTION_PROGRESS, logs per
       program block progress in the interpreter.
-    - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, uses a fake tensor backend in
+    - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, uses fake tensor storage in
       sanitizer runs to avoid real memory reads.
     - profiler_enable_load_store_skipping: PROFILER_ENABLE_LOAD_STORE_SKIPPING,
       skips redundant load/store checks to speed profiling.

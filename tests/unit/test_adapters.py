@@ -9,13 +9,13 @@ from triton_viz.core.data import (
     Store,
 )
 
-from triton_viz.frontends.base import AdapterResult, OPERATION_REGISTRY
-from triton_viz.frontends.nki import HAS_NKI
+from triton_viz.core.frontend.base import AdapterResult, get_frontend
+from triton_viz.core.frontend.nki import HAS_NKI
 
 from triton_viz.core.patch import PatchOp
 
-TRITON_ADAPTERS = OPERATION_REGISTRY["triton"].adapters
-NKI_ADAPTERS = OPERATION_REGISTRY["nki"].adapters
+TRITON_ADAPTERS = get_frontend("triton").adapters
+NKI_ADAPTERS = get_frontend("nki").adapters
 
 
 def test_adapter_result_kwargs_copy():

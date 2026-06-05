@@ -2992,7 +2992,7 @@ class NullSymbolicClient:
     def _disabled(self, method: str) -> NoReturn:
         raise RuntimeError(
             f"[{type(self).__name__}] '{method}' was called, "
-            "but the backend is off; no functionality is available."
+            "but the feature is off; no functionality is available."
         )
 
     def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:

@@ -5,7 +5,6 @@ from triton_viz.core.data import (
     Load,
     Store,
     Transfer,
-    Flip,
 )
 from triton_viz.clients.sanitizer.data import OutOfBoundsRecordBruteForce
 import numpy as np
@@ -317,44 +316,6 @@ def prepare_visualization_data(program_records, tensor_table):
                     for f in getattr(record, "call_path", [])
                 ],
                 # prepare C values after kernel (if available from intermediate or recompute best-effort)
-            }
-
-        elif isinstance(record, Flip):
-            visualization_data.append(
-                {
-                    "type": "Flip",
-                    "input_shape": record.input_shape,
-                    "output_shape": record.output_shape,
-                    "dim": int(getattr(record, "dim", 0)),
-                    "uuid": record_uuid,
-                    "op_index": current_time,
-                    "time_idx": int(getattr(record, "time_idx", current_time)),
-                }
-            )
-
-            raw_tensor_data[record_uuid] = {
-                "op_type": "Flip",
-                "op_index": current_time,
-                "tracebacks": [
-                    {
-                        "filename": f.filename,
-                        "lineno": f.lineno,
-                        "line": f.line_of_code,
-                        "name": f.func_name,
-                    }
-                    for f in getattr(record, "call_path", [])
-                ],
-                # best-effort payload for potential future value viz
-                "input_shape": list(record.input_shape),
-                "output_shape": list(record.output_shape),
-                "dim": int(getattr(record, "dim", 0)),
-                # optionally include data for hover value queries
-                "input_data": None
-                if getattr(record, "input_data", None) is None
-                else torch.tensor(record.input_data),
-                "output_data": None
-                if getattr(record, "output_data", None) is None
-                else torch.tensor(record.output_data),
             }
 
         elif isinstance(record, Load):
