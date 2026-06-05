@@ -178,11 +178,11 @@ class NKITrace(KernelInterface, TraceInterface):
     def __init__(self, kernel, client: str | Client, beta2: bool = True) -> None:
         nki_fn_cls: object = None
         if beta2:
-            from .nki_beta2 import NKIBeta2InterpretedFunction
+            from .simulation.nki_beta2 import NKIBeta2InterpretedFunction
 
             nki_fn_cls = NKIBeta2InterpretedFunction
         else:
-            from .nki import NKIInterpretedFunction
+            from .simulation.nki import NKIInterpretedFunction
 
             nki_fn_cls = NKIInterpretedFunction
 

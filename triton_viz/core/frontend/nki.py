@@ -19,7 +19,7 @@ from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
 HAS_NKI = False
 nki_builder = None
 try:
-    from triton_viz.core.nki import NDArray, nki_builder  # type: ignore
+    from triton_viz.core.simulation.nki import NDArray, nki_builder  # type: ignore
 
     HAS_NKI = True
 except ModuleNotFoundError:
@@ -111,7 +111,7 @@ class NKIFrontend(Frontend):
         )
 
     def patch_lang(self, fn, client_manager: Any = None) -> _LangPatchScope:
-        from triton_viz.core.nki import nki_patch_lang
+        from triton_viz.core.simulation.nki import nki_patch_lang
 
         scope = _LangPatchScope()
         nki_patch_lang(scope)

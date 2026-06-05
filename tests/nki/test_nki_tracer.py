@@ -10,7 +10,7 @@ import math
 
 try:
     import neuronxcc.nki.language as nl
-    from triton_viz.core.nki import NDArray
+    from triton_viz.core.simulation.nki import NDArray
 except ModuleNotFoundError:
     pytest.skip(
         "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",

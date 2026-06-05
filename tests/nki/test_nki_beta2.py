@@ -12,7 +12,7 @@ try:
     from triton_viz.core.trace import launches
     import nki.isa as nisa
     import nki.language as nl
-    import triton_viz.core.nki_beta2 as b2
+    import triton_viz.core.simulation.nki_beta2 as b2
     from triton_viz.utils.dtypes import STORAGE_DTYPES
 except ModuleNotFoundError:
     pytest.skip(

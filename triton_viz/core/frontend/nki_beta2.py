@@ -12,7 +12,7 @@ nl = None
 NDArray = None
 nki_builder = None
 try:
-    from triton_viz.core import nki_beta2 as _nki_beta2  # type: ignore
+    from triton_viz.core.simulation import nki_beta2 as _nki_beta2  # type: ignore
 
     NDArray = _nki_beta2.NDArray
     nki_builder = _nki_beta2.nki_builder
@@ -87,7 +87,7 @@ class NKIBeta2Frontend(Frontend):
         )
 
     def patch_lang(self, fn, client_manager: Any = None) -> _LangPatchScope:
-        from triton_viz.core.nki_beta2 import nki_patch_lang
+        from triton_viz.core.simulation.nki_beta2 import nki_patch_lang
 
         scope = _LangPatchScope()
         nki_patch_lang(scope)

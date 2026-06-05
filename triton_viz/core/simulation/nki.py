@@ -11,8 +11,8 @@ except (
     ) from exc
 import inspect
 import textwrap
-from ..transformers.nki_extract_slice import transform_code
-from .masked_load_store import masked_load, masked_store
+from ...transformers.nki_extract_slice import transform_code
+from ..masked_load_store import masked_load, masked_store
 
 
 class NDArray:
