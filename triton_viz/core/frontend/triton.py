@@ -84,53 +84,6 @@ from .base import (
 from ...transformers.for_loop_patcher import _visit_For as triton_viz_visit_For
 
 
-def program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(axis)
-
-
-def _triton_raw_store_adapter(
-    ptr: Any, value: Any, *_args: Any, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, value)
-
-
-def _triton_store_adapter(
-    ptr: Any, _value: Any, mask: Any, *_args: Any, **kwargs: Any
-) -> AdapterResult:
-    keys = kwargs.get("keys")
-    return AdapterResult(ptr, mask, keys)
-
-
-def _triton_raw_load_adapter(ptr: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(ptr)
-
-
-def _triton_load_adapter(
-    ptr: Any, mask: Any, _other: Any, *_args: Any, **kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, mask, kwargs.get("keys"))
-
-
-def _triton_dot_adapter(a: Any, b: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(a, b)
-
-
-def _triton_reduce_sum_adapter(
-    input_tensor: Any,
-    axis: Any = None,
-    keep_dims: bool = False,
-    *_args: Any,
-    **_kwargs: Any,
-) -> AdapterResult:
-    return AdapterResult(input_tensor, axis, keep_dims)
-
-
-def _triton_addptr_adapter(
-    ptr: Any, offset: Any, *_args: Any, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(ptr, offset)
-
-
 TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
     interpreter_builder: {
         "create_get_program_id": ProgramId,
@@ -192,14 +145,26 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
 
 
 TRITON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
-    ProgramId: program_id_adapter,
-    RawStore: _triton_raw_store_adapter,
-    Store: _triton_store_adapter,
-    RawLoad: _triton_raw_load_adapter,
-    Load: _triton_load_adapter,
-    Dot: _triton_dot_adapter,
-    ReduceSum: _triton_reduce_sum_adapter,
-    AddPtr: _triton_addptr_adapter,
+    ProgramId: lambda axis, *_args, **_kwargs: AdapterResult(axis),
+    RawStore: lambda ptr, value, *_args, **_kwargs: AdapterResult(ptr, value),
+    Store: lambda ptr, _value, mask, *_args, **kwargs: AdapterResult(
+        ptr,
+        mask,
+        kwargs.get("keys"),
+    ),
+    RawLoad: lambda ptr, *_args, **_kwargs: AdapterResult(ptr),
+    Load: lambda ptr, mask, _other, *_args, **kwargs: AdapterResult(
+        ptr,
+        mask,
+        kwargs.get("keys"),
+    ),
+    Dot: lambda a, b, *_args, **_kwargs: AdapterResult(a, b),
+    ReduceSum: lambda input_tensor,
+    axis=None,
+    keep_dims=False,
+    *_args,
+    **_kwargs: AdapterResult(input_tensor, axis, keep_dims),
+    AddPtr: lambda ptr, offset, *_args, **_kwargs: AdapterResult(ptr, offset),
 }
 
 
@@ -309,10 +274,6 @@ def _patch_triton_semantic_to_tensor(scope: _LangPatchScope) -> None:
     scope.set_attr(interpreter_semantic, "to_tensor", _to_tensor_symbolic_aware)
 
 
-def _patch_triton_interpret_knob(scope: _LangPatchScope) -> None:
-    scope.set_attr(knobs.runtime, "interpret", True)
-
-
 _thread_local_interpreter_state = threading.local()
 _thread_local_interpreter_state.grid_idx = None  # just set a default
 _current_client_manager = None
@@ -322,13 +283,13 @@ def _get_current_client_manager():
     return _current_client_manager
 
 
-def _set_thread_grid_idx(self, x: int, y: int, z: int) -> None:
-    _thread_local_interpreter_state.grid_idx = (x, y, z)
-
-
 # Bind to the builder class so attribute access uses thread-local storage.
 _interp_cls = interpreter_builder.__class__
-_interp_cls.set_grid_idx = _set_thread_grid_idx  # type: ignore[attr-defined]
+_interp_cls.set_grid_idx = lambda self, x, y, z: setattr(  # type: ignore[attr-defined]
+    _thread_local_interpreter_state,
+    "grid_idx",
+    (x, y, z),
+)
 _interp_cls.grid_idx = property(lambda self: _thread_local_interpreter_state.grid_idx)  # type: ignore[attr-defined]
 
 
@@ -407,14 +368,6 @@ def _run_op_overrider(
 _loop_patcher = LoopPatcher(_OrigASTTransformer, triton_viz_visit_For)
 
 
-def _patch_for_loop() -> None:
-    _loop_patcher.patch()
-
-
-def _unpatch_for_loop() -> None:
-    _loop_patcher.unpatch()
-
-
 def _patch_lang(fn, client_manager=None) -> _LangPatchScope:
     scope = _triton_snapshot_scope(fn)
     triton_patch_lang(fn)
@@ -422,7 +375,7 @@ def _patch_lang(fn, client_manager=None) -> _LangPatchScope:
         _patch_builtin(module, interpreter_builder, scope)
     _patch_triton_inline_asm(scope)
     _patch_triton_semantic_to_tensor(scope)
-    _patch_triton_interpret_knob(scope)
+    scope.set_attr(knobs.runtime, "interpret", True)
 
     if client_manager is not None:
         scope.set_item(fn.__globals__, "_triton_viz_loop_patcher", client_manager)
@@ -689,10 +642,10 @@ class TritonFrontend(Frontend):
         return _run_op_overrider(op, op_type, callbacks, args, kwargs)
 
     def patch_for_loop(self) -> None:
-        _patch_for_loop()
+        _loop_patcher.patch()
 
     def unpatch_for_loop(self) -> None:
-        _unpatch_for_loop()
+        _loop_patcher.unpatch()
 
     def patch_lang(self, fn, client_manager=None) -> _LangPatchScope:
         return _patch_lang(fn, client_manager=client_manager)

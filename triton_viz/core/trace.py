@@ -286,11 +286,6 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
     if not isinstance(client, (str, Client)):
         raise TypeError(f"Expected str or Client, got {type(client)}")
 
-    def _is_sanitizer_client(selected: str | Client) -> bool:
-        if isinstance(selected, str):
-            return selected.lower() == "sanitizer"
-        return isinstance(selected, Sanitizer)
-
     def _is_race_detector_client(selected: str | Client) -> bool:
         if isinstance(selected, str):
             return selected.lower() == "race_detector"
@@ -312,7 +307,12 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
                 "when using CLI tools."
             )
 
-        if _is_sanitizer_client(client) and not cfg.enable_sanitizer:
+        is_sanitizer_client = (
+            client.lower() == "sanitizer"
+            if isinstance(client, str)
+            else isinstance(client, Sanitizer)
+        )
+        if is_sanitizer_client and not cfg.enable_sanitizer:
             # when dry-running triton-sanitizer CLI (i.e. wrap kernels with sanitizer
             # tracing but don't actually sanitize), don't actually trace the kernel
             return kernel

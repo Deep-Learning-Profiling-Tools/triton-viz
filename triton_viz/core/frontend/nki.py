@@ -26,31 +26,6 @@ except ModuleNotFoundError:
     pass
 
 
-def program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(axis)
-
-
-def _nki_allocate_adapter(*_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult()
-
-
-def _nki_load_adapter(
-    src: Any, keys: Any, *, mask: Any | None = None, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(src, mask, keys)
-
-
-def _nki_store_adapter(
-    dst: Any,
-    keys: Any,
-    value: Any,
-    *,
-    mask: Any | None = None,
-    **_kwargs: Any,
-) -> AdapterResult:
-    return AdapterResult(dst, mask, keys)
-
-
 def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
     assert HAS_NKI
     if _kwargs.get("transpose_x", False):
@@ -85,10 +60,18 @@ if HAS_NKI:
     }
 
     NKI_ADAPTERS = {
-        ProgramId: program_id_adapter,
-        Allocate: _nki_allocate_adapter,
-        Load: _nki_load_adapter,
-        Store: _nki_store_adapter,
+        ProgramId: lambda axis, *_args, **_kwargs: AdapterResult(axis),
+        Allocate: lambda *_args, **_kwargs: AdapterResult(),
+        Load: lambda src, keys, *, mask=None, **_kwargs: AdapterResult(
+            src,
+            mask,
+            keys,
+        ),
+        Store: lambda dst, keys, value, *, mask=None, **_kwargs: AdapterResult(
+            dst,
+            mask,
+            keys,
+        ),
         Dot: _nki_dot_adapter,
         ReduceSum: _nki_reduce_sum_adapter,
     }

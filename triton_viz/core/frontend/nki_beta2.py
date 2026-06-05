@@ -24,14 +24,6 @@ except ModuleNotFoundError:
     pass
 
 
-def program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(axis)
-
-
-def _nki_beta2_allocate_adapter(*_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult()
-
-
 def _nki_beta2_dot_adapter(
     dst: Any, stationary: Any, moving: Any, *_args: Any, **kwargs: Any
 ) -> AdapterResult:
@@ -39,12 +31,6 @@ def _nki_beta2_dot_adapter(
     assert NDArray is not None
     x = NDArray(value=stationary.data.T)
     return AdapterResult(x, moving)
-
-
-def _nki_beta2_transfer_adapter(
-    dst: Any, src: Any, *_args: Any, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(src, dst, src.buffer, dst.buffer)
 
 
 NKI_BETA2_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
@@ -63,10 +49,15 @@ if HAS_NKI_BETA2:
     }
 
     NKI_BETA2_ADAPTERS = {
-        ProgramId: program_id_adapter,
-        Allocate: _nki_beta2_allocate_adapter,
+        ProgramId: lambda axis, *_args, **_kwargs: AdapterResult(axis),
+        Allocate: lambda *_args, **_kwargs: AdapterResult(),
         Dot: _nki_beta2_dot_adapter,
-        Transfer: _nki_beta2_transfer_adapter,
+        Transfer: lambda dst, src, *_args, **_kwargs: AdapterResult(
+            src,
+            dst,
+            src.buffer,
+            dst.buffer,
+        ),
     }
 
 
