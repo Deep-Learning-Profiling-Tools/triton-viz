@@ -119,4 +119,3 @@ class NKIFrontend(Frontend):
 
 
 frontend = register_frontend(NKIFrontend())
-

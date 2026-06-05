@@ -11,7 +11,6 @@ from ..clients import Sanitizer, Profiler, RaceDetector, Tracer
 from ..clients.race_detector.race_detector import NullRaceDetector
 from .client import ClientManager, Client
 from .data import Launch
-from . import patch
 from .frontend import triton as triton_frontend
 import types
 
