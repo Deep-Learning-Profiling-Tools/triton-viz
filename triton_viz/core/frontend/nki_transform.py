@@ -1,4 +1,5 @@
 import ast
+from typing import cast
 
 
 class NKITransformer(ast.NodeTransformer):
@@ -54,7 +55,7 @@ class NKITransformer(ast.NodeTransformer):
             func=call_node.func,
             args=[
                 slice_node.value,
-                self._create_slice_value_node(slice_node.slice),
+                cast(ast.expr, self._create_slice_value_node(slice_node.slice)),
                 *call_node.args[1:],
             ],
             keywords=call_node.keywords,

@@ -258,8 +258,8 @@ class TritonFrontend(Frontend):
         if isinstance(node.iter, ast.Call):
             iter_callable = node.iter.func
             iter_args = ast.Tuple(elts=node.iter.args, ctx=ast.Load())
-            kw_keys = []
-            kw_vals = []
+            kw_keys: list[ast.expr | None] = []
+            kw_vals: list[ast.expr] = []
             for kw in node.iter.keywords:
                 if kw.arg is None:
                     continue
@@ -306,7 +306,7 @@ class TritonFrontend(Frontend):
     def _visit_triton_function_def(
         self, transformer: ast.NodeTransformer, node: ast.FunctionDef
     ):
-        node = transformer.generic_visit(node)
+        node = cast(ast.FunctionDef, transformer.generic_visit(node))
         # Triton compiles rewritten kernels with a local namespace, but loop
         # bodies resolve names from the function defaults/globals. Add the
         # wrapper as a defaulted kw-only arg so the rewritten loop can call it
@@ -509,13 +509,15 @@ class TritonFrontend(Frontend):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ):
+        op_overrider = callbacks.op_overrider
+        assert op_overrider is not None
         if op_type in self.namespaces[tl.math].values():
             raise NotImplementedError("Patching math ops not yet supported")
         elif op_type in self.namespaces[tl].values():
             # see triton.runtime.interpreter:ReduceOps.sum
             # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
             # Then, convert return value from TensorHandle to tl.tensor
-            symbolic_ret = callbacks.op_overrider(args[0].handle, *args[1:], **kwargs)
+            symbolic_ret = op_overrider(args[0].handle, *args[1:], **kwargs)
             if isinstance(symbolic_ret, tuple):
                 ret_parts = []
                 for sym_elem in symbolic_ret:
@@ -544,7 +546,7 @@ class TritonFrontend(Frontend):
                 fn.concrete_fn = op
             return ret
 
-        ret = callbacks.op_overrider(*args, **kwargs)
+        ret = op_overrider(*args, **kwargs)
         if ret is not None:
             original_ops = self.original_ops
             if op_type == RawLoad:
@@ -558,8 +560,8 @@ class TritonFrontend(Frontend):
             elif op_type == Ashr:
                 ret.concrete_fn = original_ops[interpreter_builder]["binary_op"]
             else:
-                ret_parts = ret if isinstance(ret, tuple) else (ret,)
-                for elem in ret_parts:
+                ret_values = ret if isinstance(ret, tuple) else (ret,)
+                for elem in ret_values:
                     elem.concrete_fn = op
         return ret
 

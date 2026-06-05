@@ -1,8 +1,8 @@
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any
+from typing import Any, cast
 
 from triton_viz.core.data import Op
 
@@ -30,7 +30,7 @@ class _LangPatchScope:
         while self._changes:
             kind, obj, name, original = self._changes.pop()
             if kind == "item":
-                mapping = obj
+                mapping = cast(MutableMapping[str, Any], obj)
                 if original is _MISSING:
                     del mapping[name]
                 else:
