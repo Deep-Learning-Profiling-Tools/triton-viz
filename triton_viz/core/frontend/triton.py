@@ -477,9 +477,7 @@ class TritonFrontend(Frontend):
         argspec = inspect.getfullargspec(grid_executor.fn)
         triton_viz_args = ["client_manager", "jit_fn"]
         kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k in argspec.args or k in triton_viz_args
+            k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
         }
         client_manager = kwargs.pop("client_manager")
 
