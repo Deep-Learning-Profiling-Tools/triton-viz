@@ -375,7 +375,7 @@ def _run_demo():
     if TRITON_VIZ_ENABLED:
         import triton_viz
 
-        traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(
+        traced_kernel = triton_viz.trace("tracer", frontend="nki_beta2")(
             tiled_attention_kernel
         )
         traced_kernel[kernel_grid](*kernel_args, pre_trace=PRE_TRACE)

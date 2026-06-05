@@ -276,7 +276,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
 
 
 class NullRaceDetector(NullSymbolicClient, RaceDetector):
-    """A do-nothing object returned when the race-detector backend is 'off'.
+    """A do-nothing object returned when the race detector is off.
     Every callback raises via ``NullSymbolicClient`` so misuse is obvious.
     """
 

@@ -146,7 +146,7 @@ Analyze kernels across visualization, profiling, and sanitization with a single 
 
 - Visualizer: currently supports load, store, and matmul operations for 1/2/3D tensors (more operations and dimensions coming soon).
 - Profiler: flags non-unrolled loops, inefficient mask usage, and missing buffer_load optimizations while tracking load/store byte counts with low-overhead sampling.
-- Sanitizer: symbolically checks tensor memory accesses for out-of-bounds errors and emits reports with tensor metadata, call stack, and expression trees; optional fake-memory backend avoids real reads.
+- Sanitizer: symbolically checks tensor memory accesses for out-of-bounds errors and emits reports with tensor metadata, call stack, and expression trees; optional fake-memory storage avoids real reads.
 
 ### Save and load traces
 
@@ -173,7 +173,7 @@ Triton-Viz uses a small set of environment variables to configure runtime behavi
 - `ENABLE_PROFILER` (default: `1`): enable the profiler pipeline that collects performance data.
 - `ENABLE_TIMING` (default: `0`): collect timing data during execution.
 - `REPORT_GRID_EXECUTION_PROGRESS` (default: `0`): report per-program block execution progress in the interpreter.
-- `SANITIZER_ENABLE_FAKE_TENSOR` (default: `0`): use a fake tensor backend for sanitizer runs to avoid real memory reads.
+- `SANITIZER_ENABLE_FAKE_TENSOR` (default: `0`): use fake tensor storage for sanitizer runs to avoid real memory reads.
 - `PROFILER_ENABLE_LOAD_STORE_SKIPPING` (default: `1`): skip redundant load/store checks to reduce profiling overhead.
 - `PROFILER_ENABLE_BLOCK_SAMPLING` (default: `1`): sample a subset of blocks to reduce profiling overhead.
 - `PROFILER_DISABLE_BUFFER_LOAD_CHECK` (default: `0`): disable buffer load checks in the profiler.

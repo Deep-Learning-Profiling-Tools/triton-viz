@@ -173,7 +173,7 @@ def _run_demo():
     if TRITON_VIZ_ENABLED:
         import triton_viz
 
-        traced_kernel = triton_viz.trace("tracer", backend="nki_beta2")(mlp_kernel)
+        traced_kernel = triton_viz.trace("tracer", frontend="nki_beta2")(mlp_kernel)
         traced_kernel[kernel_grid](*kernel_args, pre_trace=PRE_TRACE)
         assert np.allclose(expected, out[:batch, :out_dim], atol=1e-4, rtol=1e-4)
         print("☑️ Actual equals expected!")

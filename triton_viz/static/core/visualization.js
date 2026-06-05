@@ -616,7 +616,7 @@ async function fetchData() {
     }
     catch (error) {
         console.error('Error fetching data:', error);
-        showControlToast('Failed to load data. Please ensure the backend is running.');
+        showControlToast('Failed to load data. Please ensure the server is running.');
     }
 }
 if (document.readyState === 'loading') {

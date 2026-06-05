@@ -182,7 +182,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         return BoolVal(True)
 
     def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
-        # TODO: init a reserved_args field per backend to filter out these args
+        # TODO: init a reserved_args field per frontend to filter out these args
         if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
             if isinstance(arg, TensorDescriptor):
                 self.cache_args.append(
@@ -422,7 +422,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
 class NullSanitizer(NullSymbolicClient, Sanitizer):
     """
-    A do-nothing object returned when the sanitizer backend is 'off'.
+    A do-nothing object returned when the sanitizer is off.
     Every callback raises via ``NullSymbolicClient`` so misuse is obvious.
     """
 

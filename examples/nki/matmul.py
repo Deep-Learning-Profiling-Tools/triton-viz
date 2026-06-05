@@ -139,7 +139,7 @@ def _run_demo():
 
     if TRITON_VIZ_ENABLED:
         print("Executing matmul_kernel with NKI interpreter...")
-        traced_kernel = triton_viz.trace("tracer", backend="nki")(kernel)
+        traced_kernel = triton_viz.trace("tracer", frontend="nki")(kernel)
         kernel_instance = traced_kernel[kernel_grid]
         kernel_instance(*kernel_args)
         triton_viz.launch(share=False)

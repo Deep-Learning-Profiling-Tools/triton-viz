@@ -2,7 +2,9 @@ from collections.abc import Callable
 from typing import Any
 
 from triton_viz.core.data import Allocate, Dot, Op, ProgramId, Transfer
-from triton_viz.frontends.base import AdapterResult, Frontend, OPERATION_REGISTRY
+
+from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
+
 
 HAS_NKI_BETA2 = False
 nisa = None
@@ -67,10 +69,29 @@ if HAS_NKI_BETA2:
         Transfer: _nki_beta2_transfer_adapter,
     }
 
-NKI_BETA2_FRONTEND = Frontend.from_namespaces(
-    builder=nki_builder,
-    namespaces=NKI_BETA2_NAMESPACES,
-    adapters=NKI_BETA2_ADAPTERS,
-)
 
-OPERATION_REGISTRY["nki_beta2"] = NKI_BETA2_FRONTEND
+class NKIBeta2Frontend(Frontend):
+    def __init__(self):
+        definition = Frontend.from_namespaces(
+            name="nki_beta2",
+            builder=nki_builder,
+            namespaces=NKI_BETA2_NAMESPACES,
+            adapters=NKI_BETA2_ADAPTERS,
+        )
+        super().__init__(
+            name=definition.name,
+            builder=definition.builder,
+            original_ops=definition.original_ops,
+            adapters=definition.adapters,
+            namespaces=definition.namespaces,
+        )
+
+    def patch_lang(self, fn, client_manager: Any = None) -> _LangPatchScope:
+        from triton_viz.core.nki_beta2 import nki_patch_lang
+
+        scope = _LangPatchScope()
+        nki_patch_lang(scope)
+        return scope
+
+
+frontend = register_frontend(NKIBeta2Frontend())

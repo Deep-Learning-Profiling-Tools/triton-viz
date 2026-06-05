@@ -12,11 +12,9 @@ from triton_viz.core.data import (
     Store,
     UnaryOp,
 )
-from triton_viz.frontends.base import (
-    AdapterResult,
-    Frontend,
-    OPERATION_REGISTRY,
-)
+
+from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
+
 
 HAS_NKI = False
 nki_builder = None
@@ -95,10 +93,30 @@ if HAS_NKI:
         ReduceSum: _nki_reduce_sum_adapter,
     }
 
-NKI_FRONTEND = Frontend.from_namespaces(
-    builder=nki_builder,
-    namespaces=NKI_NAMESPACES,
-    adapters=NKI_ADAPTERS,
-)
 
-OPERATION_REGISTRY["nki"] = NKI_FRONTEND
+class NKIFrontend(Frontend):
+    def __init__(self):
+        definition = Frontend.from_namespaces(
+            name="nki",
+            builder=nki_builder,
+            namespaces=NKI_NAMESPACES,
+            adapters=NKI_ADAPTERS,
+        )
+        super().__init__(
+            name=definition.name,
+            builder=definition.builder,
+            original_ops=definition.original_ops,
+            adapters=definition.adapters,
+            namespaces=definition.namespaces,
+        )
+
+    def patch_lang(self, fn, client_manager: Any = None) -> _LangPatchScope:
+        from triton_viz.core.nki import nki_patch_lang
+
+        scope = _LangPatchScope()
+        nki_patch_lang(scope)
+        return scope
+
+
+frontend = register_frontend(NKIFrontend())
+

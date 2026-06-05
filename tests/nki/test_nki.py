@@ -4,7 +4,7 @@ Test script to verify NDArray slicing functionality after fixes
 """
 import numpy as np
 import pytest
-from triton_viz.core.patch import _LangPatchScope
+from triton_viz.core.frontend.base import _LangPatchScope
 
 try:
     from triton_viz.core.nki import Builder, NDArray, nki_patch_lang, nki_unpatch_lang

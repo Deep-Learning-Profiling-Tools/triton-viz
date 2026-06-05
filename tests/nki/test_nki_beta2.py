@@ -6,7 +6,7 @@ import pytest
 import triton_viz
 
 try:
-    from triton_viz.core.patch import _LangPatchScope
+    from triton_viz.core.frontend.base import _LangPatchScope
     from triton_viz.clients import Tracer
     from triton_viz.core.data import Dot, Transfer
     from triton_viz.core.trace import launches
@@ -257,7 +257,7 @@ def test_trace_records_beta2_nc_matmul():
         nisa.tensor_copy(out_tile, res_psum)
         nisa.dma_copy(out, out_tile)
 
-    traced = triton_viz.trace(client=Tracer(), backend="nki_beta2")(kernel)
+    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
     lhs = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
     rhs = np.arange(128 * 512, dtype=np.float32).reshape(128, 512)
     out = np.empty((128, 512), dtype=np.float32)
@@ -284,7 +284,7 @@ def test_trace_records_beta2_transfers():
         nisa.tensor_copy(out_tile, psum_tile)
         nisa.dma_copy(out, out_tile)
 
-    traced = triton_viz.trace(client=Tracer(), backend="nki_beta2")(kernel)
+    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
     src = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
     out = np.empty((128, 128), dtype=np.float32)
     traced[(1,)](src, out)
@@ -322,7 +322,7 @@ def test_trace_records_beta2_transfer_bytes_for_mixed_dtypes():
         nisa.tensor_copy(out_tile, psum_tile)
         nisa.dma_copy(out, out_tile)
 
-    traced = triton_viz.trace(client=Tracer(), backend="nki_beta2")(kernel)
+    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
     src = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
     out = np.empty((128, 128), dtype=np.float16)
     traced[(1,)](src, out)
@@ -353,7 +353,7 @@ def test_trace_no_grid_needed():
         nisa.tensor_copy(out_tile, res_psum)
         nisa.dma_copy(out, out_tile)
 
-    traced = triton_viz.trace(client=Tracer(), backend="nki_beta2")(kernel)
+    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
     lhs = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
     rhs = np.arange(128 * 512, dtype=np.float32).reshape(128, 512)
     out = np.empty((128, 512), dtype=np.float32)

@@ -12,6 +12,7 @@ from ..clients.race_detector.race_detector import NullRaceDetector
 from .client import ClientManager, Client
 from .data import Launch
 from . import patch
+from .frontend import triton as triton_frontend
 import types
 
 
@@ -144,7 +145,7 @@ class TritonTrace(KernelInterface, TraceInterface):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
 
-        with self.client_manager.patch_run(self.base_fn, backend="triton"):
+        with self.client_manager.patch_run(self.base_fn, frontend_name="triton"):
             kwargs.update({"client_manager": self.client_manager})
             kwargs.update({"jit_fn": self.jit_fn})
             ret = self.runner.run(*args, **kwargs)
@@ -156,7 +157,7 @@ class TritonTrace(KernelInterface, TraceInterface):
         # we need to execute the underlying function directly
 
         # check that client sets match for calling and called functions
-        outer_client_manager = getattr(patch, "_current_client_manager", None)
+        outer_client_manager = triton_frontend.frontend.current_client_manager()
         if outer_client_manager is not None:
             outer_clients = set(outer_client_manager.clients)
             inner_clients = set(self.client_manager.clients)
@@ -186,7 +187,7 @@ class NKITrace(KernelInterface, TraceInterface):
 
             nki_fn_cls = NKIInterpretedFunction
 
-        self.backend = "nki_beta2" if beta2 else "nki"
+        self.frontend_name = "nki_beta2" if beta2 else "nki"
         if isinstance(kernel, nki_fn_cls):
             assert hasattr(kernel, "fn")
             self.interpreter_fn = kernel
@@ -237,9 +238,9 @@ class NKITrace(KernelInterface, TraceInterface):
         pre_trace: determines whether to do an initial NKI Beta 2 trace to capture some semantic errors.
             pre_trace=False has fewer guarantees on interpreter parity with NKI compiler but must be set
             if you want full python flexibility inside kernels (e.g. importing modules inside a kernel).
-            Does nothing if self.backend == 'nki'.
+            Does nothing if self.frontend_name == 'nki'.
         """
-        if self.backend == "nki_beta2" and pre_trace:
+        if self.frontend_name == "nki_beta2" and pre_trace:
             import nki
 
             kwargs.pop("warmup", None)
@@ -248,7 +249,10 @@ class NKITrace(KernelInterface, TraceInterface):
                 *args, **kwargs
             )
             kwargs["grid"] = grid
-        with self.client_manager.patch_run(self.func, backend=self.backend):
+        with self.client_manager.patch_run(
+            self.func,
+            frontend_name=self.frontend_name,
+        ):
             kwargs.update({"client_manager": self.client_manager})
             ret = self.interpreter_fn.run(*args, **kwargs)
             self.finalize()
@@ -270,7 +274,7 @@ def trace_source(kernel):
     return kernel
 
 
-def trace(client: str | Client | None = None, backend: str = "triton"):
+def trace(client: str | Client | None = None, frontend: str = "triton"):
     """
     Create a trace object that can be used to run a kernel with instrumentation client(s).
 
@@ -328,17 +332,17 @@ def trace(client: str | Client | None = None, backend: str = "triton"):
         trace_source(kernel)
 
         # First-time wrapping
-        # Triton backend need JIT/Interpreter/Autotuner；
-        # NKI allow Python function（ NKIInterpretedFunction）
-        if backend in ("nki", "nki_beta2"):
-            return NKITrace(kernel, client, beta2=("beta2" in backend))
+        # Triton frontend needs JIT/Interpreter/Autotuner.
+        # NKI frontends allow Python functions through NKIInterpretedFunction.
+        if frontend in ("nki", "nki_beta2"):
+            return NKITrace(kernel, client, beta2=("beta2" in frontend))
         if isinstance(
             kernel, (JITFunction, InterpretedFunction, Autotuner, Heuristics)
         ):
-            if backend == "triton":
+            if frontend == "triton":
                 return TritonTrace(kernel, client)
             else:
-                raise ValueError(f"Unknown backend: {backend}")
+                raise ValueError(f"Unknown frontend: {frontend}")
 
         raise TypeError(
             f"Expected JITFunction, InterpretedFunction or Trace, got {type(kernel)}"

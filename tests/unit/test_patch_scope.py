@@ -6,7 +6,7 @@ import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.core import patch as patch_mod
-from triton_viz.core.patch import _triton_snapshot_scope
+from triton_viz.core.frontend import triton as triton_frontend
 
 
 def _dummy_kernel():
@@ -22,7 +22,7 @@ def test_scope_restores_tensor_magic_methods():
         for attr in ("__index__", "__bool__", "__repr__", "__str__", "T")
         if hasattr(tensor, attr)
     ]
-    scope = _triton_snapshot_scope(_dummy_kernel)
+    scope = triton_frontend._triton_snapshot_scope(_dummy_kernel)
     originals = {attr: getattr(tensor, attr) for attr in attrs}
 
     try:
@@ -60,12 +60,12 @@ def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
             return [(attr, sentinel)]
         return []
 
-    monkeypatch.setattr(patch_mod.inspect, "getmembers", _getmembers)
+    monkeypatch.setattr(triton_frontend.inspect, "getmembers", _getmembers)
     monkeypatch.setattr(
-        patch_mod.tl.core, "is_builtin", lambda member: member is sentinel
+        triton_frontend.tl.core, "is_builtin", lambda member: member is sentinel
     )
 
-    scope = _triton_snapshot_scope(_dummy_kernel)
+    scope = triton_frontend._triton_snapshot_scope(_dummy_kernel)
     replacement = lambda *_args, **_kwargs: None
 
     try:
@@ -142,6 +142,30 @@ def test_patch_lang_accepts_constexpr_wrapped_symbolic_tensors():
 
     patch_mod.patch_lang(_dummy_kernel, "triton")
     try:
-        assert patch_mod.interpreter_semantic.to_tensor(tl.constexpr(tensor)) is tensor
+        assert (
+            triton_frontend.interpreter_semantic.to_tensor(tl.constexpr(tensor))
+            is tensor
+        )
     finally:
         patch_mod.unpatch_lang("triton")
+
+
+def test_patch_lang_restores_loop_patcher_global():
+    key = "_triton_viz_loop_patcher"
+    globals_dict = _dummy_kernel.__globals__
+    original = globals_dict.get(key, None)
+    had_original = key in globals_dict
+
+    class ClientManagerStub:
+        pass
+
+    try:
+        patch_mod.patch_lang(_dummy_kernel, "triton", ClientManagerStub())
+        assert key in globals_dict
+    finally:
+        patch_mod.unpatch_lang("triton")
+
+    if had_original:
+        assert globals_dict[key] is original
+    else:
+        assert key not in globals_dict
