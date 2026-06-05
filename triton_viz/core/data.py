@@ -279,6 +279,16 @@ class Bitcast(Op):
 
 
 @dataclass
+class PtrToInt(Op):
+    name: ClassVar[str] = "ptr_to_int"
+
+
+@dataclass
+class IntToPtr(Op):
+    name: ClassVar[str] = "int_to_ptr"
+
+
+@dataclass
 class AtomicCas(Op):
     name: ClassVar[str] = "atomic_cas"
 

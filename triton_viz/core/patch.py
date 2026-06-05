@@ -89,6 +89,7 @@ def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, frontend_name: s
     op_type = frontend.namespaces[namespace][attr]
     original_op = frontend.original_ops[namespace][attr]
     adapter = frontend.adapters[op_type]
+    frontend.prepare_patched_op(namespace, op_type, original_op)
     patched_op = PatchOp(
         original_op,
         op_type,

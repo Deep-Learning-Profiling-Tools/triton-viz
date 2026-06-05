@@ -2,6 +2,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 import ast
 import inspect
 from queue import Empty, SimpleQueue
@@ -10,6 +11,7 @@ import time
 from typing import Any, cast
 import warnings
 
+import numpy as np
 import triton.language as tl
 from triton import knobs
 from triton.runtime import JITFunction
@@ -17,9 +19,11 @@ from triton.runtime.interpreter import (
     ASTTransformer as _OrigASTTransformer,
     FunctionRewriter,
     GridExecutor,
+    TensorHandle,
     _implicit_cvt,
     _patch_builtin,
     _patch_lang as triton_patch_lang,
+    _get_signed_np_dtype,
     _rewrap_tensor,
     _tuple_create,
     _unwrap_tensor,
@@ -47,12 +51,14 @@ from ..data import (
     Fma,
     FpToFp,
     Idiv,
+    IntToPtr,
     Join,
     Load,
     MakeBlockPointer,
     MakeRange,
     Op,
     ProgramId,
+    PtrToInt,
     RawLoad,
     RawStore,
     ReduceMax,
@@ -115,8 +121,8 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "create_fp_to_fp": FpToFp,
         "create_umulhi": Umulhi,
         "create_bitcast": Bitcast,
-        "create_ptr_to_int": CastImpl,
-        "create_int_to_ptr": CastImpl,
+        "create_ptr_to_int": PtrToInt,
+        "create_int_to_ptr": IntToPtr,
         "create_atomic_cas": AtomicCas,
         "create_atomic_rmw": AtomicRMW,
     },
@@ -501,6 +507,126 @@ class TritonFrontend(Frontend):
             self._thread_local_interpreter_state.last_yield_ts = now
             time.sleep(yield_sleep_sec)
 
+    @staticmethod
+    def concrete_fn_for_op_type(
+        namespace_ops: dict[str, Callable], op_type: type[Op], original_op: Callable
+    ) -> Callable:
+        if op_type == RawLoad:
+            return namespace_ops["create_masked_load"]
+        if op_type == RawStore:
+            return namespace_ops["create_masked_store"]
+        if op_type == Ashr:
+            return partial(TritonFrontend._concrete_ashr, namespace_ops["binary_op"])
+        return original_op
+
+    @staticmethod
+    def _concrete_ashr(binary_op: Callable, lhs: Any, rhs: Any) -> Any:
+        lhs_signed = TensorHandle(
+            lhs.data.astype(_get_signed_np_dtype(lhs.data.dtype)),
+            lhs.dtype,
+            dict(lhs.attr),
+        )
+        rhs_signed = TensorHandle(
+            rhs.data.astype(_get_signed_np_dtype(rhs.data.dtype)),
+            rhs.dtype,
+            dict(rhs.attr),
+        )
+        return binary_op(lhs_signed, rhs_signed, np.right_shift)
+
+    @staticmethod
+    def symbolic_ops_for_op_type(op_type: type[Op]) -> tuple[str, ...]:
+        if op_type == UnaryOp:
+            return (
+                "cos",
+                "exp",
+                "exp2",
+                "abs",
+                "floor",
+                "ceil",
+                "log",
+                "log2",
+                "sqrt",
+                "sin",
+                "negative",
+            )
+        if op_type == BinaryOp:
+            return (
+                "add",
+                "sub",
+                "mul",
+                "div",
+                "mod",
+                "less",
+                "less_equal",
+                "greater",
+                "greater_equal",
+                "not_equal",
+                "equal",
+                "maximum",
+                "minimum",
+                "bitwise_and",
+                "bitwise_or",
+                "bitwise_xor",
+                "right_shift",
+                "left_shift",
+            )
+        symbolic_ops_by_type = {
+            ProgramId: ("pid",),
+            RawLoad: ("load",),
+            Load: ("load",),
+            RawStore: ("store",),
+            Store: ("store",),
+            TernaryOp: ("where",),
+            Fma: ("fma",),
+            Dot: ("dot",),
+            MakeRange: ("arange",),
+            AddPtr: ("addptr",),
+            ExpandDims: ("expand_dims",),
+            Broadcast: ("broadcast",),
+            ReduceSum: ("sum",),
+            ReduceXor: ("xor_sum",),
+            ReduceOr: ("reduce_or",),
+            ReduceMax: ("max", "argmax"),
+            ReduceMin: ("min", "argmin"),
+            Sort: ("sort",),
+            Splat: ("splat",),
+            MakeBlockPointer: ("make_block_ptr",),
+            TensorPointerLoad: ("tensor_pointer_load",),
+            TensorPointerStore: ("tensor_pointer_store",),
+            Idiv: ("idiv",),
+            Rsqrt: ("rsqrt",),
+            CastImpl: ("cast_impl",),
+            Reshape: ("reshape",),
+            Trans: ("trans",),
+            Join: ("join",),
+            Split: ("split",),
+            Fabs: ("fabs",),
+            Ashr: ("ashr",),
+            Advance: ("advance",),
+            FpToFp: ("fp_to_fp",),
+            Umulhi: ("umulhi",),
+            CumSum: ("cumsum",),
+            Bitcast: ("bitcast",),
+            PtrToInt: ("bitcast",),
+            IntToPtr: ("bitcast",),
+            AtomicCas: ("atomic_cas",),
+            AtomicRMW: ("atomic_rmw",),
+        }
+        return symbolic_ops_by_type.get(op_type, ())
+
+    def _wrap_tl_ret(self, ret: Any, fallback_dtype: Any) -> Any:
+        if isinstance(ret, tl.tensor):
+            return ret
+        if isinstance(ret, tuple):
+            return tuple(
+                self._wrap_tl_ret(ret_elem, fallback_dtype) for ret_elem in ret
+            )
+
+        shape = getattr(ret, "shape", ())
+        dtype = getattr(ret, "dtype", None)
+        ret_dtype = tl.block_type(dtype, list(shape)) if shape and dtype else dtype
+        return tl.core.tensor(ret, ret_dtype or fallback_dtype)
+
     def run_op_overrider(
         self,
         op: Callable,
@@ -517,53 +643,10 @@ class TritonFrontend(Frontend):
             # see triton.runtime.interpreter:ReduceOps.sum
             # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
             # Then, convert return value from TensorHandle to tl.tensor
-            symbolic_ret = op_overrider(args[0].handle, *args[1:], **kwargs)
-            if isinstance(symbolic_ret, tuple):
-                ret_parts = []
-                for sym_elem in symbolic_ret:
-                    _shape = getattr(sym_elem, "shape", ())
-                    _dtype = getattr(sym_elem, "dtype", None)
-                    if _shape and _dtype:
-                        elem_dtype = tl.block_type(_dtype, list(_shape))
-                    else:
-                        elem_dtype = _dtype or args[0].dtype
-                    elem_tensor = tl.core.tensor(sym_elem, elem_dtype)
-                    fn = cast(Any, elem_tensor.handle)
-                    if fn is not None:
-                        fn.concrete_fn = op
-                    ret_parts.append(elem_tensor)
-                return tuple(ret_parts)
+            ret = op_overrider(args[0].handle, *args[1:], **kwargs)
+            return self._wrap_tl_ret(ret, args[0].dtype)
 
-            _shape = getattr(symbolic_ret, "shape", ())
-            _dtype = getattr(symbolic_ret, "dtype", None)
-            if _shape and _dtype:
-                ret_dtype = tl.block_type(_dtype, list(_shape))
-            else:
-                ret_dtype = _dtype or args[0].dtype
-            ret = tl.core.tensor(symbolic_ret, ret_dtype)
-            fn = cast(Any, ret.handle)
-            if fn is not None:
-                fn.concrete_fn = op
-            return ret
-
-        ret = op_overrider(*args, **kwargs)
-        if ret is not None:
-            original_ops = self.original_ops
-            if op_type == RawLoad:
-                ret.concrete_fn = original_ops[interpreter_builder][
-                    "create_masked_load"
-                ]
-            elif op_type == RawStore:
-                ret.concrete_fn = original_ops[interpreter_builder][
-                    "create_masked_store"
-                ]
-            elif op_type == Ashr:
-                ret.concrete_fn = original_ops[interpreter_builder]["binary_op"]
-            else:
-                ret_values = ret if isinstance(ret, tuple) else (ret,)
-                for elem in ret_values:
-                    elem.concrete_fn = op
-        return ret
+        return op_overrider(*args, **kwargs)
 
     def patch_for_loop(self) -> None:
         if self._loop_ast_patched:

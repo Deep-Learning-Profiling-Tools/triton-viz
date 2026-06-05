@@ -25,6 +25,8 @@ from .data import (
     Idiv,
     Rsqrt,
     CastImpl,
+    PtrToInt,
+    IntToPtr,
 )
 from .masked_load_store import masked_load, masked_store
 
@@ -56,6 +58,8 @@ __all__ = [
     "Idiv",
     "Rsqrt",
     "CastImpl",
+    "PtrToInt",
+    "IntToPtr",
     "masked_load",
     "masked_store",
 ]

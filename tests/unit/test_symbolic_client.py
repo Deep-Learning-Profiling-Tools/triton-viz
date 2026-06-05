@@ -9,11 +9,12 @@ tests live next to their respective clients.
 """
 
 import pytest
+from functools import partial
 from typing import cast
 
 import numpy as np
 import triton.language as tl
-from triton.runtime.interpreter import TensorHandle
+from triton.runtime.interpreter import TensorHandle, interpreter_builder
 
 from triton_viz.clients.symbolic_engine import (
     SymbolicClient,
@@ -25,6 +26,7 @@ from triton_viz.clients.symbolic_engine import (
     _range_to_iterator_constraint,
 )
 from triton_viz.core.data import Sort
+from triton_viz.core.frontend.triton import TritonFrontend
 from z3.z3 import ArithRef, BoolRef, IntNumRef
 from z3 import Solver, Int, sat
 
@@ -267,6 +269,39 @@ def test_where_expr_concretize_scalar_constants():
 
     assert isinstance(concrete, TensorHandle)
     np.testing.assert_array_equal(concrete.data, np.array([10], dtype=np.int32))
+
+
+def test_concrete_ashr_does_not_mutate_shared_tensor_handle():
+    original_ashr_fn = SymbolicExpr._CONCRETE_FNS.get("ashr")
+    SymbolicExpr.set_concrete_fn(
+        "ashr",
+        partial(TritonFrontend._concrete_ashr, interpreter_builder.binary_op),
+    )
+
+    try:
+        original_data = np.array([0x80000000], dtype=np.uint32)
+        handle = TensorHandle(original_data.copy(), tl.uint32)
+        shared = SymbolicExpr.create("const", handle, tl.uint32)
+        rhs = SymbolicExpr.create("const", 1, tl.uint32)
+        cond = SymbolicExpr.create("const", True, tl.int1)
+        expr = SymbolicExpr.create(
+            "where",
+            cond,
+            shared,
+            SymbolicExpr.create("ashr", shared, rhs),
+        )
+
+        concrete = expr.concretize()
+    finally:
+        if original_ashr_fn is None:
+            SymbolicExpr._CONCRETE_FNS.pop("ashr", None)
+        else:
+            SymbolicExpr.set_concrete_fn("ashr", original_ashr_fn)
+
+    assert isinstance(concrete, TensorHandle)
+    assert handle.data.dtype == np.uint32
+    np.testing.assert_array_equal(handle.data, original_data)
+    np.testing.assert_array_equal(concrete.data, original_data)
 
 
 def test_unary_expr_concretize_vector_constants():
