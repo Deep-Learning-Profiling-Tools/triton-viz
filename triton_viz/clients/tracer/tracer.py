@@ -11,7 +11,6 @@ from ...core.data import (
     Dot,
     Grid,
     Allocate,
-    Flip,
 )
 from ...utils.traceback_utils import extract_user_frames
 from triton_viz.core.masked_load_store import masked_load
@@ -207,27 +206,6 @@ class Tracer(Client):
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
-        def post_flip_callback(ret, x, *args, **kwargs):
-            if not self.sample:
-                return
-            # Try to capture dim argument
-            dim = None
-            if args:
-                dim = args[0]
-            if "dim" in kwargs:
-                dim = kwargs.get("dim")
-            try:
-                in_shape = tuple(x.data.shape)
-                out_shape = tuple(ret.data.shape)
-            except Exception:
-                in_shape = getattr(getattr(x, "handle", None), "data", None)
-                out_shape = getattr(getattr(ret, "handle", None), "data", None)
-                in_shape = tuple(getattr(in_shape, "shape", []) or [])
-                out_shape = tuple(getattr(out_shape, "shape", []) or [])
-            rec = Flip(in_shape, out_shape, int(dim) if dim is not None else 0)
-            rec.call_path = extract_user_frames(num_frames=1)
-            self.records.append(rec)
-
         callbacks = {
             Allocate: OpCallbacks(after_callback=post_allocate_callback),
             Load: OpCallbacks(before_callback=pre_load_callback),
@@ -236,8 +214,6 @@ class Tracer(Client):
             ReduceSum: OpCallbacks(after_callback=post_reduce_sum_callback),
             Dot: OpCallbacks(after_callback=post_dot_callback),
         }
-        # Flip is wrapped at tl.flip; we don't have an interpreter op to hook here.
-        # The wrapper in patch_lang will append Flip records directly to tracer.
         return callbacks.get(op_type, OpCallbacks())
 
     def register_for_loop_callback(self):

@@ -150,22 +150,20 @@ def test_patch_lang_accepts_constexpr_wrapped_symbolic_tensors():
         patch_mod.unpatch_lang("triton")
 
 
-def test_patch_lang_restores_loop_patcher_global():
-    key = "_triton_viz_loop_patcher"
+def test_patch_lang_does_not_inject_loop_global():
+    legacy_key = "_triton_viz_" + "loop_patcher"
+    wrapper_key = "_triton_viz_loop_iter_wrapper"
     globals_dict = _dummy_kernel.__globals__
-    original = globals_dict.get(key, None)
-    had_original = key in globals_dict
 
     class ClientManagerStub:
         pass
 
     try:
         patch_mod.patch_lang(_dummy_kernel, "triton", ClientManagerStub())
-        assert key in globals_dict
+        assert legacy_key not in globals_dict
+        assert wrapper_key not in globals_dict
     finally:
         patch_mod.unpatch_lang("triton")
 
-    if had_original:
-        assert globals_dict[key] is original
-    else:
-        assert key not in globals_dict
+    assert legacy_key not in globals_dict
+    assert wrapper_key not in globals_dict

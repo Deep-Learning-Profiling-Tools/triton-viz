@@ -26,6 +26,7 @@ Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to
     <li>
       <a href="#working-with-examples">Working with examples</a>
     </li>
+    <li><a href="#dsl-frontends">DSL frontends</a></li>
     <li><a href="#analysis-clients">Analysis clients</a></li>
     <li><a href="#license">License</a></li>
   </ol>
@@ -52,7 +53,7 @@ Most users can install directly from PyPI:
 pip install triton-viz
 ```
 
-If you want to run examples from this repo, contribute, or build the frontend, install from source instead:
+If you want to run examples from this repo, contribute, or build the web UI, install from source instead:
 
 ```sh
 git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
@@ -60,10 +61,10 @@ cd triton-viz
 uv sync # or "uv sync --extra test" if you're running tests
 ```
 
-### Frontend Build
+### Web UI Build
 
-The PyPI package ships with prebuilt frontend assets in `triton_viz/static`, so
-you do not need npm to run the visualizer. If you want to modify the frontend,
+The PyPI package ships with prebuilt web UI assets in `triton_viz/static`, so
+you do not need npm to run the visualizer. If you want to modify the web UI,
 rebuild the TS sources:
 
 ```sh
@@ -95,7 +96,7 @@ uv sync --extra test # tests but no NKI support
 * To run core Triton-viz tests, run `pytest tests/`.
 * (if NKI installed) To run NKI-specific tests, run `pytest tests/ -m nki`.
 * To run all tests (Triton + NKI), run `pytest tests/ -m ""`.
-* To run visualizer frontend tests, run `npm run test:frontend`.
+* To run visualizer web UI tests, run `npm run test:frontend`.
 
 ## Working with Examples
 
@@ -139,6 +140,20 @@ import triton_viz
 triton_viz.save("trace.tvz")
 triton_viz.launch()
 ```
+
+## DSL Frontends
+
+Triton is the default DSL frontend. NKI support is optional and selected with
+the `frontend` argument:
+
+```py
+triton_viz.trace("tracer")                         # Triton
+triton_viz.trace("tracer", frontend="nki")         # NKI
+triton_viz.trace("tracer", frontend="nki_beta2")   # NKI Beta 2
+```
+
+The runtime integration code lives under `triton_viz/core/frontend/`. NKI
+simulation runtimes live under `triton_viz/core/simulation/`.
 
 ## Analysis Clients
 

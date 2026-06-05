@@ -41,39 +41,6 @@ class _LangPatchScope:
                 setattr(obj, name, original)
 
 
-class LoopPatcher:
-    """Manages frontend AST patching for for-loop interception."""
-
-    def __init__(
-        self,
-        transformer_cls: type,
-        visit_for: Callable,
-        method_name: str = "visit_For",
-    ):
-        self._transformer_cls = transformer_cls
-        self._visit_for = visit_for
-        self._method_name = method_name
-        self._orig_visit_for: Callable | None = None
-        self._patched: bool = False
-
-    def patch(self) -> None:
-        if not self._patched:
-            self._orig_visit_for = getattr(
-                self._transformer_cls,
-                self._method_name,
-                None,
-            )
-            setattr(self._transformer_cls, self._method_name, self._visit_for)
-            self._patched = True
-
-    def unpatch(self) -> None:
-        if not self._patched:
-            return
-        if self._orig_visit_for is not None:
-            setattr(self._transformer_cls, self._method_name, self._orig_visit_for)
-        self._patched = False
-
-
 @dataclass
 class AdapterResult:
     """

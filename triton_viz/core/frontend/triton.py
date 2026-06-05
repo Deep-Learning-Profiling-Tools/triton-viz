@@ -2,6 +2,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+import ast
 import inspect
 from queue import Empty, SimpleQueue
 import threading
@@ -14,6 +15,7 @@ from triton import knobs
 from triton.runtime import JITFunction
 from triton.runtime.interpreter import (
     ASTTransformer as _OrigASTTransformer,
+    FunctionRewriter,
     GridExecutor,
     _implicit_cvt,
     _patch_builtin,
@@ -71,16 +73,13 @@ from ..data import (
     Umulhi,
     UnaryOp,
 )
-from ..flip_patch import patch_flip
 from .base import (
     AdapterResult,
     Frontend,
-    LoopPatcher,
     _LangPatchScope,
     _MISSING,
     register_frontend,
 )
-from ...transformers.for_loop_patcher import _visit_For as triton_viz_visit_For
 
 
 TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
@@ -214,7 +213,9 @@ class TritonFrontend(Frontend):
         self._thread_local_interpreter_state = threading.local()
         self._thread_local_interpreter_state.grid_idx = None
         self._current_client_manager = None
-        self._loop_patcher = LoopPatcher(_OrigASTTransformer, triton_viz_visit_For)
+        self._loop_wrapper_arg = "_triton_viz_loop_iter_wrapper"
+        self._loop_ast_methods: dict[str, Callable | object] = {}
+        self._loop_ast_patched = False
         self._patch_calls_scope = 0
         self._bind_interpreter_builder_thread_state()
 
@@ -222,10 +223,132 @@ class TritonFrontend(Frontend):
         def set_grid_idx(_builder, x: int, y: int, z: int) -> None:
             self._thread_local_interpreter_state.grid_idx = (x, y, z)
 
+        # Triton's interpreter builder is a process-global singleton. Store grid
+        # coordinates in Triton-Viz state so concurrent block workers do not race
+        # through one shared builder attribute.
         interpreter_cls = interpreter_builder.__class__
         interpreter_cls.set_grid_idx = set_grid_idx  # type: ignore[attr-defined]
         interpreter_cls.grid_idx = property(  # type: ignore[attr-defined]
             lambda _builder: self._thread_local_interpreter_state.grid_idx
+        )
+
+    def _visit_triton_for(self, transformer: ast.NodeTransformer, node: ast.For):
+        transformer.generic_visit(node)
+
+        # Preserve which range spelling the user wrote so loop clients can
+        # distinguish Python loops, `tl.range`, and `tl.static_range`.
+        range_type = "unknown"
+        if isinstance(node.iter, ast.Call):
+            func = node.iter.func
+            if isinstance(func, ast.Name) and func.id == "range":
+                range_type = "python_range"
+            elif (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "tl"
+            ):
+                if func.attr == "range":
+                    range_type = "tl_range"
+                elif func.attr == "static_range":
+                    range_type = "tl_static_range"
+
+        # Rebuild the loop iterator as a callable plus explicit args. This lets
+        # range-wrapper clients replace the iterable before the original call is
+        # evaluated, which is needed for symbolic loop bounds.
+        if isinstance(node.iter, ast.Call):
+            iter_callable = node.iter.func
+            iter_args = ast.Tuple(elts=node.iter.args, ctx=ast.Load())
+            kw_keys = []
+            kw_vals = []
+            for kw in node.iter.keywords:
+                if kw.arg is None:
+                    continue
+                kw_keys.append(ast.Constant(value=kw.arg))
+                kw_vals.append(kw.value)
+            iter_kwargs = ast.Dict(keys=kw_keys, values=kw_vals)
+        else:
+            iter_callable = ast.Lambda(
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=[],
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    defaults=[],
+                ),
+                body=node.iter,
+            )
+            iter_args = ast.Tuple(elts=[], ctx=ast.Load())
+            iter_kwargs = ast.Dict(keys=[], values=[])
+
+        return ast.fix_missing_locations(
+            ast.For(
+                target=node.target,
+                iter=ast.Call(
+                    # `_loop_wrapper_arg` is injected as a hidden keyword-only
+                    # default by `_visit_triton_function_def`, avoiding any
+                    # helper name in user kernel globals.
+                    func=ast.Name(id=self._loop_wrapper_arg, ctx=ast.Load()),
+                    args=[
+                        iter_callable,
+                        iter_args,
+                        iter_kwargs,
+                        ast.Constant(value=node.lineno),
+                        ast.Constant(value=range_type),
+                    ],
+                    keywords=[],
+                ),
+                body=node.body,
+                orelse=node.orelse,
+                type_comment=node.type_comment,
+            )
+        )
+
+    def _visit_triton_function_def(
+        self, transformer: ast.NodeTransformer, node: ast.FunctionDef
+    ):
+        node = transformer.generic_visit(node)
+        # Triton compiles rewritten kernels with a local namespace, but loop
+        # bodies resolve names from the function defaults/globals. Add the
+        # wrapper as a defaulted kw-only arg so the rewritten loop can call it
+        # without mutating the user's global dictionary.
+        if self._loop_wrapper_arg in {
+            arg.arg
+            for arg in (
+                node.args.posonlyargs
+                + node.args.args
+                + node.args.kwonlyargs
+            )
+        }:
+            return node
+
+        node.args.kwonlyargs.append(ast.arg(arg=self._loop_wrapper_arg))
+        node.args.kw_defaults.append(
+            ast.Name(id=self._loop_wrapper_arg, ctx=ast.Load())
+        )
+        return ast.fix_missing_locations(node)
+
+    def loop_iter_wrapper(
+        self,
+        iterable_callable: Callable,
+        iter_args: Any,
+        iter_kwargs: Any,
+        lineno: int,
+        range_type: str,
+    ):
+        client_manager = self.current_client_manager()
+        if client_manager is None:
+            # Device-function rewrites can run outside a top-level traced launch.
+            # In that case, preserve Triton's normal behavior and just evaluate
+            # the original iterable.
+            args = tuple(iter_args) if iter_args is not None else ()
+            kwargs = dict(iter_kwargs) if iter_kwargs is not None else {}
+            return iterable_callable(*args, **kwargs)
+        return client_manager.loop_iter_wrapper(
+            iterable_callable,
+            iter_args,
+            iter_kwargs,
+            lineno,
+            range_type,
         )
 
     @staticmethod
@@ -445,12 +568,46 @@ class TritonFrontend(Frontend):
         return ret
 
     def patch_for_loop(self) -> None:
-        self._loop_patcher.patch()
+        if self._loop_ast_patched:
+            return
+
+        # Patch Triton's process-global AST transformer, but keep exact originals
+        # so nested tracing scopes and later unpatching restore Triton behavior.
+        self._loop_ast_methods = {
+            "visit_For": getattr(_OrigASTTransformer, "visit_For", _MISSING),
+            "visit_FunctionDef": getattr(
+                _OrigASTTransformer, "visit_FunctionDef", _MISSING
+            ),
+        }
+
+        frontend = self
+
+        def visit_for(transformer, node):
+            return frontend._visit_triton_for(transformer, node)
+
+        def visit_function_def(transformer, node):
+            return frontend._visit_triton_function_def(transformer, node)
+
+        _OrigASTTransformer.visit_For = visit_for
+        _OrigASTTransformer.visit_FunctionDef = visit_function_def
+        self._loop_ast_patched = True
 
     def unpatch_for_loop(self) -> None:
-        self._loop_patcher.unpatch()
+        if not self._loop_ast_patched:
+            return
+
+        for method_name, original in self._loop_ast_methods.items():
+            if original is _MISSING:
+                delattr(_OrigASTTransformer, method_name)
+            else:
+                setattr(_OrigASTTransformer, method_name, original)
+        self._loop_ast_methods = {}
+        self._loop_ast_patched = False
 
     def patch_lang(self, fn, client_manager=None) -> _LangPatchScope:
+        # Snapshot before calling Triton's patcher because Triton mutates many
+        # attributes in-place and older Triton versions do not retain enough
+        # restore metadata for nested/generated kernels.
         scope = self._triton_snapshot_scope(fn)
         triton_patch_lang(fn)
         for module in self._triton_extra_builtin_modules():
@@ -458,19 +615,9 @@ class TritonFrontend(Frontend):
         self._patch_triton_inline_asm(scope)
         self._patch_triton_semantic_to_tensor(scope)
         scope.set_attr(knobs.runtime, "interpret", True)
-
-        if client_manager is not None:
-            scope.set_item(fn.__globals__, "_triton_viz_loop_patcher", client_manager)
-        patch_flip(scope, self.current_client_manager)
         return scope
 
-    def _grid_executor_call(self, grid_executor, *args_dev, **kwargs):
-        if kwargs.pop("warmup", False):
-            return
-
-        builder = self.builder
-        launch_num_warps = kwargs.get("num_warps", 4)
-
+    def _prepare_grid_launch(self, grid_executor, args_dev, kwargs):
         # Removes not used reserved keywords from kwargs
         # Triton doesn't support keyword-only, variable positional or variable keyword arguments
         # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
@@ -480,101 +627,140 @@ class TritonFrontend(Frontend):
             k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
         }
         client_manager = kwargs.pop("client_manager")
+        self._current_client_manager = client_manager
+
+        # Triton's CPU interpreter materializes host-side arguments. In virtual
+        # memory mode we keep only fake tensor metadata so sanitizer/profiler
+        # runs do not need to read real device memory.
+        kwargs.pop("jit_fn")
+        if cfg.virtual_memory:
+            args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
+        else:
+            args_hst, kwargs_hst = grid_executor._init_args_hst(args_dev, kwargs)
+
+        args = inspect.getcallargs(
+            grid_executor.fn,
+            *args_hst,
+            **kwargs_hst,
+        )
+        # The hidden loop-wrapper default is an implementation detail of the
+        # rewritten function; clients should not see it as a kernel argument.
+        args.pop(self._loop_wrapper_arg, None)
+        call_args = {}
+        for name, arg in args.items():
+            if name in grid_executor.constexprs:
+                call_args[name] = arg
+                ret = arg
+            else:
+                ret = _implicit_cvt(arg)
+            client_manager.arg_callback(name, arg, ret)
+            call_args[name] = ret
+        call_args.pop("self", None)
+
+        grid = (
+            grid_executor.grid(call_args)
+            if callable(grid_executor.grid)
+            else grid_executor.grid
+        )
+        assert len(grid) <= 3
+        grid = grid + (1,) * (3 - len(grid))
+
+        self.builder.set_grid_dim(*grid)
+        client_manager.grid_callback(grid)
+        total_blocks = grid[0] * grid[1] * grid[2]
+        max_workers = min(cfg.num_sms, total_blocks)
+        return (
+            client_manager,
+            kwargs,
+            args_hst,
+            kwargs_hst,
+            call_args,
+            grid,
+            max_workers,
+        )
+
+    def _run_grid(self, grid_executor, call_args, client_manager, grid, max_workers):
+        def run_block(x, y, z):
+            # Each worker sets its own thread-local grid index before callbacks
+            # and kernel execution observe `tl.program_id`.
+            interpreter_builder.set_grid_idx(x, y, z)
+            client_manager.grid_idx_callback((x, y, z))
+            if not client_manager.pre_run_callback(grid_executor.fn):
+                return True
+            grid_executor.fn(**call_args)
+            return client_manager.post_run_callback(grid_executor.fn)
+
+        if max_workers == 1:
+            for x in range(grid[0]):
+                for y in range(grid[1]):
+                    for z in range(grid[2]):
+                        if not run_block(x, y, z):
+                            return
+            return
+
+        tasks: SimpleQueue = SimpleQueue()
+        for x in range(grid[0]):
+            for y in range(grid[1]):
+                for z in range(grid[2]):
+                    tasks.put((x, y, z))
+
+        stop_event = threading.Event()
+
+        def worker():
+            while not stop_event.is_set():
+                try:
+                    x, y, z = tasks.get_nowait()
+                except Empty:
+                    return
+                if not run_block(x, y, z):
+                    stop_event.set()
+                    return
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(worker) for _ in range(max_workers)]
+            for fut in futures:
+                fut.result()
+
+    def _grid_executor_call(self, grid_executor, *args_dev, **kwargs):
+        if kwargs.pop("warmup", False):
+            return
+
+        launch_num_warps = kwargs.get("num_warps", 4)
 
         previous_client_manager = self._current_client_manager
-        self._current_client_manager = client_manager
         try:
-            kwargs.pop("jit_fn")
-            if cfg.virtual_memory:
-                args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
-            else:
-                args_hst, kwargs_hst = grid_executor._init_args_hst(args_dev, kwargs)
-
-            args = inspect.getcallargs(
-                grid_executor.fn,
-                *args_hst,
-                **kwargs_hst,
-            )
-            call_args = {}
-            for name, arg in args.items():
-                if name in grid_executor.constexprs:
-                    call_args[name] = arg
-                    ret = arg
-                else:
-                    ret = _implicit_cvt(arg)
-                client_manager.arg_callback(name, arg, ret)
-                call_args[name] = ret
-            call_args.pop("self", None)
-
-            grid = (
-                grid_executor.grid(call_args)
-                if callable(grid_executor.grid)
-                else grid_executor.grid
-            )
-            assert len(grid) <= 3
-            grid = grid + (1,) * (3 - len(grid))
-
-            builder.set_grid_dim(*grid)
-            client_manager.grid_callback(grid)
-            total_blocks = grid[0] * grid[1] * grid[2]
-            max_workers = min(cfg.num_sms, total_blocks)
-
-            def run_grid_loops(grid):
-                tasks: SimpleQueue = SimpleQueue()
-                for x in range(grid[0]):
-                    for y in range(grid[1]):
-                        for z in range(grid[2]):
-                            tasks.put((x, y, z))
-
-                stop_event = threading.Event()
-
-                def _worker():
-                    while not stop_event.is_set():
-                        try:
-                            x, y, z = tasks.get_nowait()
-                        except Empty:
-                            return
-                        interpreter_builder.set_grid_idx(x, y, z)
-                        client_manager.grid_idx_callback((x, y, z))
-                        if not client_manager.pre_run_callback(grid_executor.fn):
-                            continue
-                        grid_executor.fn(**call_args)
-                        if not client_manager.post_run_callback(grid_executor.fn):
-                            stop_event.set()
-                            return
-
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(_worker) for _ in range(max_workers)]
-                    for fut in futures:
-                        fut.result()
-
-            def run_grid_loops_1thread(grid):
-                for x in range(grid[0]):
-                    for y in range(grid[1]):
-                        for z in range(grid[2]):
-                            interpreter_builder.set_grid_idx(x, y, z)
-                            client_manager.grid_idx_callback((x, y, z))
-                            if not client_manager.pre_run_callback(grid_executor.fn):
-                                continue
-                            grid_executor.fn(**call_args)
-                            if not client_manager.post_run_callback(grid_executor.fn):
-                                return
+            (
+                client_manager,
+                kwargs,
+                args_hst,
+                kwargs_hst,
+                call_args,
+                grid,
+                max_workers,
+            ) = self._prepare_grid_launch(grid_executor, args_dev, kwargs)
 
             if cfg.enable_timing:
                 start_time = time.time()
 
-            old_num_warps = getattr(builder.options, "num_warps", _MISSING)
-            object.__setattr__(builder.options, "num_warps", launch_num_warps)
+            old_num_warps = getattr(self.builder.options, "num_warps", _MISSING)
+            object.__setattr__(self.builder.options, "num_warps", launch_num_warps)
             try:
-                if max_workers == 1:
-                    run_grid_loops_1thread(grid)
-                else:
-                    run_grid_loops(grid)
+                self._run_grid(
+                    grid_executor,
+                    call_args,
+                    client_manager,
+                    grid,
+                    max_workers,
+                )
             finally:
                 if old_num_warps is _MISSING:
-                    object.__delattr__(builder.options, "num_warps")
+                    object.__delattr__(self.builder.options, "num_warps")
                 else:
-                    object.__setattr__(builder.options, "num_warps", old_num_warps)
+                    object.__setattr__(
+                        self.builder.options,
+                        "num_warps",
+                        old_num_warps,
+                    )
 
             if cfg.enable_timing:
                 end_time = time.time()
@@ -606,15 +792,33 @@ class TritonFrontend(Frontend):
             # Only patch at top-level scope.
             old_grid_executor_call = GridExecutor.__call__
             old_jit_function_call = JITFunction.__call__
+            old_compile_and_exec = FunctionRewriter._compile_and_exec
 
+            # GridExecutor is the top-level kernel launch path; JITFunction is
+            # the device-function path that can be called from interpreted code.
             def grid_executor_call(grid_executor, *args_dev, **kwargs):
                 return self._grid_executor_call(grid_executor, *args_dev, **kwargs)
 
             def jit_function_call(jit_function, *args, **kwargs):
                 return self._jit_function_call(jit_function, *args, **kwargs)
 
+            def compile_and_exec(rewriter, transformed_ast):
+                # Triton's FunctionRewriter executes code with `rewriter.kwargs`
+                # as the local namespace. Temporarily add the hidden loop wrapper
+                # there so rewritten function defaults can bind it.
+                old_kwargs = rewriter.kwargs
+                rewriter.kwargs = {
+                    **old_kwargs,
+                    self._loop_wrapper_arg: self.loop_iter_wrapper,
+                }
+                try:
+                    return old_compile_and_exec(rewriter, transformed_ast)
+                finally:
+                    rewriter.kwargs = old_kwargs
+
             GridExecutor.__call__ = grid_executor_call
             JITFunction.__call__ = jit_function_call
+            FunctionRewriter._compile_and_exec = compile_and_exec
 
         self._patch_calls_scope += 1
         try:
@@ -625,6 +829,7 @@ class TritonFrontend(Frontend):
                 # Only unpatch at top-level scope.
                 GridExecutor.__call__ = old_grid_executor_call
                 JITFunction.__call__ = old_jit_function_call
+                FunctionRewriter._compile_and_exec = old_compile_and_exec
 
 
 frontend = register_frontend(TritonFrontend())
