@@ -22,7 +22,7 @@ def test_scope_restores_tensor_magic_methods():
         for attr in ("__index__", "__bool__", "__repr__", "__str__", "T")
         if hasattr(tensor, attr)
     ]
-    scope = triton_frontend._triton_snapshot_scope(_dummy_kernel)
+    scope = triton_frontend.frontend._triton_snapshot_scope(_dummy_kernel)
     originals = {attr: getattr(tensor, attr) for attr in attrs}
 
     try:
@@ -65,7 +65,7 @@ def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
         triton_frontend.tl.core, "is_builtin", lambda member: member is sentinel
     )
 
-    scope = triton_frontend._triton_snapshot_scope(_dummy_kernel)
+    scope = triton_frontend.frontend._triton_snapshot_scope(_dummy_kernel)
     replacement = lambda *_args, **_kwargs: None
 
     try:
