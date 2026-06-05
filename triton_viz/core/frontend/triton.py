@@ -513,14 +513,16 @@ class TritonFrontend(Frontend):
         if op_type == RawStore:
             return namespace_ops["create_masked_store"]
         if op_type == Ashr:
-            return partial(TritonFrontend._concrete_ashr, namespace_ops["binary_op"])
+            def _concrete_ashr(binary_op: Callable, lhs: Any, rhs: Any) -> Any:
+                lhs.data = lhs.data.astype(_get_signed_np_dtype(lhs.data.dtype))
+                rhs.data = rhs.data.astype(_get_signed_np_dtype(rhs.data.dtype))
+                return binary_op(lhs, rhs, np.right_shift)
+            return partial(_concrete_ashr, namespace_ops["binary_op"])
+        if op_type == CastImpl:
+            return namespace_ops["cast_impl"]
+        if op_type == Bitcast:
+            return namespace_ops["cast_impl"]
         return original_op
-
-    @staticmethod
-    def _concrete_ashr(binary_op: Callable, lhs: Any, rhs: Any) -> Any:
-        lhs.data = lhs.data.astype(_get_signed_np_dtype(lhs.data.dtype))
-        rhs.data = rhs.data.astype(_get_signed_np_dtype(rhs.data.dtype))
-        return binary_op(lhs, rhs, np.right_shift)
 
     @staticmethod
     def symbolic_ops_for_op_type(op_type: type[Op]) -> tuple[str, ...]:
