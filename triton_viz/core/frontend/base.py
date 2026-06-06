@@ -139,6 +139,28 @@ class Frontend:
     def symbolic_ops_for_op_type(op_type: type[Op]) -> tuple[str, ...]:
         return ()
 
+    def normalize_symbolic_value(self, value: Any) -> Any:
+        """Convert frontend values/types into frontend-neutral symbolic metadata."""
+        from triton_viz.core.symbolic_metadata import normalize_symbolic_value
+
+        return normalize_symbolic_value(value)
+
+    def to_frontend_symbolic_value(self, value: Any) -> Any:
+        """Convert neutral symbolic values/types back to frontend runtime objects."""
+        return value
+
+    def from_frontend_symbolic_value(self, value: Any) -> Any:
+        """Normalize concrete replay returns from frontend objects to neutral values."""
+        return self.normalize_symbolic_value(value)
+
+    def wrap_symbolic_loop_index(self, expr: Any, dtype: Any) -> Any:
+        """Wrap a symbolic loop index in the frontend's scalar tensor type if needed."""
+        return expr
+
+    def wrap_symbolic_concrete_fn(self, concrete_fn: Callable) -> Callable:
+        """Wrap original ops that need frontend-specific symbolic replay conversion."""
+        return concrete_fn
+
     def prepare_patched_op(
         self, namespace: Any, op_type: type[Op], original_op: Callable
     ) -> None:
@@ -148,9 +170,14 @@ class Frontend:
 
         from triton_viz.clients.symbolic_engine import SymbolicExpr
 
+        SymbolicExpr.set_frontend_hooks(
+            self.normalize_symbolic_value,
+            self.wrap_symbolic_loop_index,
+        )
         concrete_fn = self.concrete_fn_for_op_type(
             self.original_ops[namespace], op_type, original_op
         )
+        concrete_fn = self.wrap_symbolic_concrete_fn(concrete_fn)
         for symbolic_op in symbolic_ops:
             SymbolicExpr.set_concrete_fn(symbolic_op, concrete_fn)
 

@@ -13,6 +13,7 @@ from triton_viz.clients.symbolic_engine import (
     RangeWrapper,
     _range_to_iterator_constraint,
 )
+from triton_viz.core.symbolic_metadata import is_pointer_dtype
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.core.callbacks import ForLoopCallbacks
 from triton_viz.core.config import config
@@ -67,7 +68,7 @@ class LoadIndexChecker(SymbolicSanitizer):
             return np.sum(offsets, axis=0)
 
         def _offsets_from_const_pointer(expr):
-            if expr.op != "const" or not isinstance(expr.dtype, tl.pointer_type):
+            if expr.op != "const" or not is_pointer_dtype(expr.dtype):
                 return None
 
             ptrs = expr.to_py()

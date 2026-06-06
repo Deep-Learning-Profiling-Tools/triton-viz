@@ -8,7 +8,7 @@ import inspect
 from queue import Empty, SimpleQueue
 import threading
 import time
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 import warnings
 
 import numpy as np
@@ -78,6 +78,32 @@ from ..data import (
     Trans,
     Umulhi,
     UnaryOp,
+)
+from ..symbolic_metadata import (
+    BFLOAT16,
+    FLOAT16,
+    FLOAT32,
+    FLOAT64,
+    FLOAT8_E4M3,
+    FLOAT8_E4M3FN,
+    FLOAT8_E5M2,
+    INT1,
+    INT8,
+    INT16,
+    INT32,
+    INT64,
+    UINT8,
+    UINT16,
+    UINT32,
+    UINT64,
+    SymbolicDType,
+    SymbolicPointerDType,
+    SymbolicScalarDType,
+    SymbolicTensorValue,
+    SymbolicTypeSpec,
+    block_type as symbolic_block_type,
+    dtype_to_numpy,
+    pointer_type as symbolic_pointer_type,
 )
 from .base import (
     AdapterResult,
@@ -458,6 +484,35 @@ class TritonFrontend(Frontend):
 
         scope.set_attr(interpreter_semantic, "to_tensor", _to_tensor_symbolic_aware)
 
+    @staticmethod
+    def _patch_triton_unsplat(scope: _LangPatchScope) -> None:
+        original_create_unsplat = interpreter_builder.create_unsplat
+
+        def _create_unsplat_symbolic_aware(arg):
+            from triton_viz.clients.symbolic_engine import SymbolicExpr
+
+            if isinstance(arg, SymbolicExpr):
+                if arg.op == "splat":
+                    return arg.arg
+                concrete = arg.concretize()
+                if isinstance(concrete, SymbolicTensorValue):
+                    if concrete.data.size != 1:
+                        raise ValueError(
+                            f"Expected single-element symbolic tensor, got {concrete.shape}"
+                        )
+                    return SymbolicExpr.create(
+                        "const",
+                        concrete.data.reshape(-1)[0].item(),
+                        concrete.dtype,
+                    )
+            return original_create_unsplat(arg)
+
+        scope.set_attr(
+            interpreter_builder,
+            "create_unsplat",
+            _create_unsplat_symbolic_aware,
+        )
+
     def _init_args_hst(self, args_dev, kwargs):
         def _to_cpu(arg):
             if isinstance(arg, tuple):
@@ -614,6 +669,147 @@ class TritonFrontend(Frontend):
         }
         return symbolic_ops_by_type.get(op_type, ())
 
+    _TRITON_TO_SYMBOLIC_DTYPES: ClassVar[dict[str, SymbolicScalarDType]] = {
+        "int1": INT1,
+        "int8": INT8,
+        "int16": INT16,
+        "int32": INT32,
+        "int64": INT64,
+        "uint8": UINT8,
+        "uint16": UINT16,
+        "uint32": UINT32,
+        "uint64": UINT64,
+        "fp16": FLOAT16,
+        "fp32": FLOAT32,
+        "fp64": FLOAT64,
+        "bf16": BFLOAT16,
+        "fp8e4nv": FLOAT8_E4M3,
+        "fp8e5": FLOAT8_E5M2,
+        "fp8e4b15": FLOAT8_E4M3FN,
+    }
+
+    _SYMBOLIC_TO_TRITON_DTYPE_NAMES: ClassVar[dict[SymbolicScalarDType, str]] = {
+        INT1: "int1",
+        INT8: "int8",
+        INT16: "int16",
+        INT32: "int32",
+        INT64: "int64",
+        UINT8: "uint8",
+        UINT16: "uint16",
+        UINT32: "uint32",
+        UINT64: "uint64",
+        FLOAT16: "float16",
+        FLOAT32: "float32",
+        FLOAT64: "float64",
+        BFLOAT16: "bfloat16",
+        FLOAT8_E4M3: "float8e4nv",
+        FLOAT8_E5M2: "float8e5",
+        FLOAT8_E4M3FN: "float8e4b15",
+    }
+
+    @classmethod
+    def _normalize_triton_type(cls, dtype: Any) -> SymbolicDType | SymbolicTypeSpec:
+        if isinstance(dtype, tl.block_type):
+            scalar = cls._normalize_triton_type(dtype.scalar)
+            if isinstance(scalar, SymbolicTypeSpec):
+                raise TypeError(f"Unexpected nested block dtype: {dtype}")
+            return symbolic_block_type(scalar, [int(dim) for dim in dtype.shape])
+        if isinstance(dtype, tl.pointer_type):
+            element = cls._normalize_triton_type(dtype.element_ty)
+            if isinstance(element, SymbolicTypeSpec):
+                raise TypeError(f"Unexpected block pointer element dtype: {dtype}")
+            return symbolic_pointer_type(element)
+        if isinstance(dtype, tl.core.dtype):
+            try:
+                return cls._TRITON_TO_SYMBOLIC_DTYPES[str(dtype)]
+            except KeyError as exc:
+                raise TypeError(f"Unsupported Triton dtype: {dtype}") from exc
+        if isinstance(dtype, (SymbolicScalarDType, SymbolicPointerDType)):
+            return dtype
+        if isinstance(dtype, SymbolicTypeSpec):
+            return dtype
+        raise TypeError(f"Unsupported Triton type: {dtype}")
+
+    @classmethod
+    def _to_triton_dtype(cls, dtype: SymbolicDType) -> Any:
+        if isinstance(dtype, SymbolicPointerDType):
+            return tl.pointer_type(cls._to_triton_dtype(dtype.element_ty))
+        try:
+            return getattr(tl, cls._SYMBOLIC_TO_TRITON_DTYPE_NAMES[dtype])
+        except KeyError as exc:
+            raise TypeError(f"Unsupported symbolic dtype for Triton: {dtype}") from exc
+
+    @classmethod
+    def _to_triton_type(cls, value: SymbolicDType | SymbolicTypeSpec) -> Any:
+        if isinstance(value, SymbolicTypeSpec):
+            dtype = cls._to_triton_dtype(value.dtype)
+            return tl.block_type(dtype, list(value.shape)) if value.shape else dtype
+        return cls._to_triton_dtype(value)
+
+    def normalize_symbolic_value(self, value: Any) -> Any:
+        if isinstance(value, tl.core.tensor):
+            value = value.handle
+        if isinstance(value, TensorHandle):
+            dtype_or_spec = self._normalize_triton_type(value.dtype)
+            dtype = (
+                dtype_or_spec.dtype
+                if isinstance(dtype_or_spec, SymbolicTypeSpec)
+                else dtype_or_spec
+            )
+            return SymbolicTensorValue(
+                np.asarray(value.data),
+                dtype,
+                dict(getattr(value, "attr", {})),
+            )
+        if isinstance(value, (tl.block_type, tl.pointer_type, tl.core.dtype)):
+            return self._normalize_triton_type(value)
+        if isinstance(value, tl.core.tuple):
+            return tuple(self.normalize_symbolic_value(item) for item in value)
+        if isinstance(value, tuple):
+            return tuple(self.normalize_symbolic_value(item) for item in value)
+        if isinstance(value, list):
+            return [self.normalize_symbolic_value(item) for item in value]
+        return super().normalize_symbolic_value(value)
+
+    def to_frontend_symbolic_value(self, value: Any) -> Any:
+        if isinstance(value, SymbolicTensorValue):
+            return TensorHandle(
+                np.asarray(value.data, dtype=dtype_to_numpy(value.dtype)),
+                self._to_triton_dtype(value.dtype),
+                dict(value.attr),
+            )
+        if isinstance(value, (SymbolicScalarDType, SymbolicPointerDType)):
+            return self._to_triton_dtype(value)
+        if isinstance(value, SymbolicTypeSpec):
+            return self._to_triton_type(value)
+        if isinstance(value, tuple):
+            return tuple(self.to_frontend_symbolic_value(item) for item in value)
+        if isinstance(value, list):
+            return [self.to_frontend_symbolic_value(item) for item in value]
+        return value
+
+    def from_frontend_symbolic_value(self, value: Any) -> Any:
+        if isinstance(value, tuple):
+            return tuple(self.from_frontend_symbolic_value(item) for item in value)
+        if isinstance(value, list):
+            return [self.from_frontend_symbolic_value(item) for item in value]
+        return self.normalize_symbolic_value(value)
+
+    def wrap_symbolic_loop_index(self, expr: Any, dtype: Any) -> Any:
+        return tl.tensor(expr, self._to_triton_dtype(dtype))
+
+    def wrap_symbolic_concrete_fn(self, concrete_fn: Callable) -> Callable:
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            frontend_args = tuple(self.to_frontend_symbolic_value(arg) for arg in args)
+            frontend_kwargs = {
+                key: self.to_frontend_symbolic_value(value)
+                for key, value in kwargs.items()
+            }
+            ret = concrete_fn(*frontend_args, **frontend_kwargs)
+            return self.from_frontend_symbolic_value(ret)
+
+        return wrapped
+
     def _wrap_tl_ret(self, ret: Any, fallback_dtype: Any) -> Any:
         if isinstance(ret, tl.tensor):
             return ret
@@ -624,6 +820,8 @@ class TritonFrontend(Frontend):
 
         shape = getattr(ret, "shape", ())
         dtype = getattr(ret, "dtype", None)
+        if isinstance(dtype, (SymbolicScalarDType, SymbolicPointerDType)):
+            dtype = self._to_triton_dtype(dtype)
         ret_dtype = tl.block_type(dtype, list(shape)) if shape and dtype else dtype
         return tl.core.tensor(ret, ret_dtype or fallback_dtype)
 
@@ -695,6 +893,7 @@ class TritonFrontend(Frontend):
             _patch_builtin(module, interpreter_builder, scope)
         self._patch_triton_inline_asm(scope)
         self._patch_triton_semantic_to_tensor(scope)
+        self._patch_triton_unsplat(scope)
         scope.set_attr(knobs.runtime, "interpret", True)
         return scope
 
