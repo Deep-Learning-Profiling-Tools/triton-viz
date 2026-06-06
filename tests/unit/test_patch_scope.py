@@ -177,7 +177,8 @@ def test_patch_lang_does_not_inject_loop_global():
     globals_dict = _dummy_kernel.__globals__
 
     class ClientManagerStub:
-        pass
+        def get_client(self, name):
+            return object() if name == "sanitizer" else None
 
     try:
         patch_mod.patch_lang(_dummy_kernel, "triton", ClientManagerStub())
@@ -188,3 +189,89 @@ def test_patch_lang_does_not_inject_loop_global():
 
     assert legacy_key not in globals_dict
     assert wrapper_key not in globals_dict
+
+
+def test_grid_executor_call_restores_interpreter_options(monkeypatch):
+    frontend = triton_frontend.frontend
+    builder_options = frontend.builder.options
+    old_num_warps = getattr(builder_options, "num_warps", triton_frontend._MISSING)
+    old_sanitize_overflow = getattr(
+        builder_options, "sanitize_overflow", triton_frontend._MISSING
+    )
+
+    class GridExecutorStub:
+        fn = staticmethod(_dummy_kernel)
+
+    class ClientManagerStub:
+        def get_client(self, name):
+            return object() if name == "sanitizer" else None
+
+    def prepare_grid_launch(_grid_executor, _args_dev, _kwargs):
+        return ClientManagerStub(), {}, [], {}, {}, (1, 1, 1), 1
+
+    def run_grid(_grid_executor, _call_args, _client_manager, _grid, _max_workers):
+        assert builder_options.num_warps == 7
+        assert builder_options.sanitize_overflow is False
+        raise RuntimeError("stop after checking scoped options")
+
+    monkeypatch.setattr(frontend, "_prepare_grid_launch", prepare_grid_launch)
+    monkeypatch.setattr(frontend, "_run_grid", run_grid)
+
+    try:
+        object.__setattr__(builder_options, "num_warps", 3)
+        object.__setattr__(builder_options, "sanitize_overflow", True)
+        with pytest.raises(RuntimeError, match="scoped options"):
+            frontend._grid_executor_call(GridExecutorStub(), num_warps=7)
+        assert builder_options.num_warps == 3
+        assert builder_options.sanitize_overflow is True
+    finally:
+        if old_num_warps is triton_frontend._MISSING:
+            object.__delattr__(builder_options, "num_warps")
+        else:
+            object.__setattr__(builder_options, "num_warps", old_num_warps)
+        if old_sanitize_overflow is triton_frontend._MISSING:
+            object.__delattr__(builder_options, "sanitize_overflow")
+        else:
+            object.__setattr__(
+                builder_options, "sanitize_overflow", old_sanitize_overflow
+            )
+
+
+def test_grid_executor_call_keeps_overflow_sanitizer_for_non_sanitizer_clients(
+    monkeypatch,
+):
+    frontend = triton_frontend.frontend
+    builder_options = frontend.builder.options
+    old_sanitize_overflow = getattr(
+        builder_options, "sanitize_overflow", triton_frontend._MISSING
+    )
+
+    class GridExecutorStub:
+        fn = staticmethod(_dummy_kernel)
+
+    class ClientManagerStub:
+        def get_client(self, _name):
+            return None
+
+    def prepare_grid_launch(_grid_executor, _args_dev, _kwargs):
+        return ClientManagerStub(), {}, [], {}, {}, (1, 1, 1), 1
+
+    def run_grid(_grid_executor, _call_args, _client_manager, _grid, _max_workers):
+        assert builder_options.sanitize_overflow is True
+        raise RuntimeError("stop after checking non-sanitizer options")
+
+    monkeypatch.setattr(frontend, "_prepare_grid_launch", prepare_grid_launch)
+    monkeypatch.setattr(frontend, "_run_grid", run_grid)
+
+    try:
+        object.__setattr__(builder_options, "sanitize_overflow", True)
+        with pytest.raises(RuntimeError, match="non-sanitizer options"):
+            frontend._grid_executor_call(GridExecutorStub())
+        assert builder_options.sanitize_overflow is True
+    finally:
+        if old_sanitize_overflow is triton_frontend._MISSING:
+            object.__delattr__(builder_options, "sanitize_overflow")
+        else:
+            object.__setattr__(
+                builder_options, "sanitize_overflow", old_sanitize_overflow
+            )

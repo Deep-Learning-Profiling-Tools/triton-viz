@@ -41,6 +41,8 @@ class Client(ABC):
 
     def lock_fn(self, fn: Callable) -> Callable:
         """Forces serial execution of the given function."""
+        if cfg.num_sms <= 1:
+            return fn
 
         @wraps(fn)
         def wrapped(*args, **kwargs):

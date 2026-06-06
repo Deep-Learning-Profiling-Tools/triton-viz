@@ -1052,12 +1052,15 @@ class TritonFrontend(Frontend):
             if cfg.enable_timing:
                 start_time = time.time()
 
-            # Triton's interpreter overflow asserts add runtime work that
-            # Triton-Viz clients do not consume, so keep them off for launches.
-            with self._builder_options_scope(
-                num_warps=launch_num_warps,
-                sanitize_overflow=False,
-            ):
+            builder_options: dict[str, Any] = {"num_warps": launch_num_warps}
+            if client_manager.get_client("sanitizer") is not None:
+                # Triton-Viz sanitizer reasons about address validity, not
+                # Triton's interpreter-only overflow device_asserts. Those
+                # asserts build large extra symbolic trees, so keep them off
+                # only during sanitizer tracing.
+                builder_options["sanitize_overflow"] = False
+
+            with self._builder_options_scope(**builder_options):
                 self._run_grid(
                     grid_executor,
                     call_args,
