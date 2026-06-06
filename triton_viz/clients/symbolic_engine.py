@@ -34,9 +34,6 @@ from z3 import (
 )
 from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
 
-import triton.language as tl
-from triton.runtime.interpreter import TensorHandle, _get_np_dtype
-
 from ..core.client import Client
 from ..core.callbacks import OpCallbacks, ForLoopCallbacks
 from ..core.config import config as cfg
@@ -59,6 +56,7 @@ from ..core.data import (
     ReduceMin,
     Sort,
     Splat,
+    Unsplat,
     Idiv,
     Rsqrt,
     CastImpl,
@@ -84,6 +82,23 @@ from ..core.data import (
     MakeBlockPointer,
     TensorPointerLoad,
     TensorPointerStore,
+)
+from ..core.symbolic_metadata import (
+    FLOAT32,
+    INT1,
+    INT32,
+    SymbolicDType,
+    SymbolicPointerDType,
+    SymbolicScalarDType,
+    SymbolicTensorValue,
+    SymbolicTypeSpec,
+    dtype_to_numpy,
+    element_bytewidth,
+    is_pointer_dtype,
+    normalize_symbolic_value,
+    pointee_dtype,
+    type_spec,
+    unpack_type_spec,
 )
 from .utils import (
     check_storage_contiguous,
@@ -186,7 +201,7 @@ class PendingCheck:
 class LoopContext:
     lineno: int
     length: int
-    idx: tl.tensor
+    idx: Any
     idx_z3: ArithRef
     start: int = 0
     stop: int = 0
@@ -198,12 +213,11 @@ class LoopContext:
 
 class SymbolicExprDataWrapper:
     """
-    This wrapper is used as a workaround of triton interpreter legacy code.
-    In def _get_bool(self) of class tensor,
+    This wrapper is used as a workaround for frontend tensor truthiness code.
+    Some runtimes inspect:
         "data = self.handle.data
         return bool(data) if data.size == 1 else True"
-    Since we replaced TensorHandle with SymbolicExpr,
-    we need to wrap SymbolicExpr with a class that has size attribute, and data.size != 1.
+    Symbolic expressions therefore expose a data-like object with a size.
     """
 
     def __init__(self, symbolic_expr: SymbolicExpr, value: str | None = None):
@@ -239,8 +253,8 @@ class SymbolicExprDataWrapper:
                 f"Expected scalar symbolic data, got shape {self.symbolic_expr.shape}"
             )
         concrete = self.symbolic_expr.concretize()
-        if not isinstance(concrete, TensorHandle):
-            raise TypeError(f"Expected TensorHandle, got {type(concrete)}")
+        if not isinstance(concrete, SymbolicTensorValue):
+            raise TypeError(f"Expected symbolic tensor value, got {type(concrete)}")
         return concrete.data
 
     def __getitem__(self, item: Any) -> Any:
@@ -257,10 +271,11 @@ class SymbolicExprDataWrapper:
             return int(val)
         if isinstance(val, float):
             return int(val)
-        if isinstance(val, TensorHandle):
+        if isinstance(val, SymbolicTensorValue):
             if val.data.size != 1:
                 raise ValueError(
-                    "Expected scalar TensorHandle, got size " f"{val.data.size}"
+                    "Expected scalar symbolic tensor value, got size "
+                    f"{val.data.size}"
                 )
             return int(val.data.item())
         if isinstance(val, np.ndarray):
@@ -350,6 +365,7 @@ class SymbolicExpr:
     POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
         "splat",
+        "unsplat",
         "expand_dims",
         "broadcast",
         "reshape",
@@ -408,9 +424,9 @@ class SymbolicExpr:
         """
         assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
         self.op = op
-        # Tensor handle attributes, including `attr`, `dtype`, and `data`
+        # Tensor-like attributes used by frontend runtimes.
         self.attr: dict[str, Any] = {}
-        self.dtype: tl.core.dtype | None = None
+        self.dtype: SymbolicDType | None = None
         self.shape: tuple[int, ...] = ()
 
         # Functions and arguments for concretization
@@ -432,11 +448,11 @@ class SymbolicExpr:
         self._data_wrapper: SymbolicExprDataWrapper | None = None
 
     @staticmethod
-    def _unpack_dtype(dtype, fallback_shape=()):
-        """Split a block_type into (scalar_dtype, shape), passing through scalars."""
-        if isinstance(dtype, tl.block_type):
-            return dtype.scalar, tuple(int(x) for x in dtype.shape)
-        return dtype, fallback_shape
+    def _unpack_dtype(
+        dtype: SymbolicDType | SymbolicTypeSpec,
+        fallback_shape: Sequence[int] = (),
+    ) -> tuple[SymbolicDType, tuple[int, ...]]:
+        return unpack_type_spec(dtype, fallback_shape)
 
     def add_child(self, name: str, value: Any) -> None:
         child = SymbolicExpr.from_value(value) if value is not None else None
@@ -517,37 +533,25 @@ class SymbolicExpr:
     def _node_label_core(self) -> str:
         return self.op
 
-    triton_scala_dtypes: ClassVar[tuple[tl.core.dtype, ...]] = (
-        tl.int1,
-        tl.int8,
-        tl.int16,
-        tl.int32,
-        tl.int64,
-        tl.uint8,
-        tl.uint16,
-        tl.uint32,
-        tl.uint64,
-        tl.float16,
-        tl.float32,
-        tl.float64,
+    tuple_types: ClassVar[tuple[type, ...]] = (tuple, list)
+    _NORMALIZE_VALUE: ClassVar[Callable[[Any], Any]] = staticmethod(
+        normalize_symbolic_value
     )
-    builtin_scala_types: ClassVar[tuple[type, ...]] = (int, float)
-    tuple_types: ClassVar[tuple[type, ...]] = (tl.core.tuple, tuple, list)
+    _WRAP_LOOP_INDEX: ClassVar[Callable[[Any, SymbolicDType], Any]] = staticmethod(
+        lambda expr, _dtype: expr
+    )
 
     @staticmethod
-    def _infer_literal_dtype(var: Any) -> tl.core.dtype | tl.pointer_type:
-        if isinstance(var, tl.core.tensor):
-            var = var.handle
-        if isinstance(var, TensorHandle):
-            if len(var.data) != 1:
+    def _infer_literal_dtype(var: Any) -> SymbolicDType | SymbolicTypeSpec:
+        if isinstance(var, SymbolicTensorValue):
+            if var.data.size != 1:
                 raise ValueError(
                     f"Unsupported var.data: {var.data} with length more than one!"
                 )
-            if var.dtype in SymbolicExpr.triton_scala_dtypes:  # if an immediate
-                return var.dtype
-            if isinstance(var.dtype, tl.pointer_type):  # if a pointer
-                return var.dtype
-        if isinstance(var, tl.core.dtype):
+            return var.dtype
+        if isinstance(var, SymbolicTypeSpec):
+            return var
+        if isinstance(var, (SymbolicScalarDType, SymbolicPointerDType)):
             return var
         if isinstance(var, SymbolicExpr.tuple_types):
             seq = cast(Sequence[Any], var)
@@ -561,9 +565,24 @@ class SymbolicExpr:
                         f"All elements in the tuple must have the same dtype, but found {first_dtype} and {dtype}"
                     )
             return first_dtype
-        if isinstance(var, SymbolicExpr.builtin_scala_types):
-            return tl.int32 if isinstance(var, int) else tl.float32
+        if isinstance(var, (int, np.integer, bool)):
+            return INT32
+        if isinstance(var, (float, np.floating)):
+            return FLOAT32
         raise ValueError(f"Unsupported type: {type(var)}")
+
+    @classmethod
+    def set_frontend_hooks(
+        cls,
+        normalize_value: Callable[[Any], Any],
+        wrap_loop_index: Callable[[Any, SymbolicDType], Any],
+    ) -> None:
+        cls._NORMALIZE_VALUE = staticmethod(normalize_value)
+        cls._WRAP_LOOP_INDEX = staticmethod(wrap_loop_index)
+
+    @classmethod
+    def wrap_loop_index(cls, expr: Any, dtype: SymbolicDType) -> Any:
+        return cls._WRAP_LOOP_INDEX(expr, dtype)
 
     # Stored on the class and may be accessed through either the class or an instance;
     # therefore the callable must tolerate an extra bound argument (self/cls).
@@ -578,8 +597,7 @@ class SymbolicExpr:
     @classmethod
     def from_value(cls, var: Any) -> SymbolicExpr | tuple[SymbolicExpr, ...]:
         """Create a SymbolicExpr from a Python value."""
-        if isinstance(var, tl.core.tensor):  # if a triton tensor
-            var = var.handle  # get its handle
+        var = cls._NORMALIZE_VALUE(var)
 
         if isinstance(var, cls):  # if already SymbolicExpr
             return var
@@ -594,20 +612,19 @@ class SymbolicExpr:
                 children.append(child)
             return tuple(children)
 
-        dtype = SymbolicExpr._infer_literal_dtype(var)  # get the triton dtype
+        dtype = SymbolicExpr._infer_literal_dtype(var)
 
-        if isinstance(var, TensorHandle):  # if a TensorHandle
-            if len(var.data) != 1:
+        if isinstance(var, SymbolicTensorValue):
+            if var.data.size != 1:
                 raise ValueError(
-                    "SymbolicExpr.from_value only supports scalar TensorHandle!"
+                    "SymbolicExpr.from_value only supports scalar tensor values!"
                 )
             return cls.create("const", var.data.item(), dtype)
-        if isinstance(
-            var, SymbolicExpr.builtin_scala_types
-        ):  # if a python builtin type
+        if isinstance(var, (int, np.integer, bool, float, np.floating)):
             return cls.create("const", var, dtype)
-        if isinstance(var, tl.core.dtype):
-            # If it's a triton dtype, we can create a const node with it
+        if isinstance(
+            var, (SymbolicScalarDType, SymbolicPointerDType, SymbolicTypeSpec)
+        ):
             return cls.create("const", var, dtype)
 
         raise ValueError("Unknown type:", type(var))
@@ -643,7 +660,7 @@ class SymbolicExpr:
         raise NotImplementedError("to_py must be implemented by subclasses")
 
     def concretize(self) -> Any:
-        """Return a concrete TensorHandle for this expression."""
+        """Return a concrete tensor value for this expression."""
         raise NotImplementedError(f"Concretize for op {self.op} is not implemented")
 
     def replace_subtree(self, anchor_op: str | None = None) -> SymbolicExpr:
@@ -677,14 +694,19 @@ class SymbolicExpr:
             )
         ):
             if self.op == "const" and isinstance(
-                getattr(self, "value", None), tl.core.dtype
+                getattr(self, "value", None),
+                (SymbolicScalarDType, SymbolicPointerDType, SymbolicTypeSpec),
             ):
                 return self
             concrete = self.concretize()
-            if not isinstance(concrete, TensorHandle):
+            if not isinstance(concrete, SymbolicTensorValue):
                 raise TypeError(f"Unexpected dtype: {type(concrete)}!")
 
-            self = SymbolicExpr.create("const", concrete, concrete.dtype)
+            self = SymbolicExpr.create(
+                "const",
+                concrete,
+                type_spec(concrete.dtype, concrete.shape),
+            )
 
         return self
 
@@ -714,7 +736,7 @@ class SymbolicExpr:
         value = getattr(self, "value", None)
         if (
             self.op == "const"
-            and isinstance(value, TensorHandle)
+            and isinstance(value, SymbolicTensorValue)
             and value.data.size != 1
         ):
             return True
@@ -739,8 +761,7 @@ class SymbolicExpr:
             lines.append(f"{prefix}{node.name}")
         return "\n" + "\n".join(lines)
 
-    # Tensor handle methods, not used in sanitizer
-    # TODO: inherits a tensor handle protocol?
+    # Tensor-like methods, not used in sanitizer.
     def set_attr(self, key, value):
         self.attr[key] = value
 
@@ -773,10 +794,18 @@ class SymbolicExpr:
 class ConstSymbolicExpr(SymbolicExpr):
     value: Any
 
-    def __init__(self, op: str, value: Any, dtype: tl.core.dtype | tl.pointer_type):
+    def __init__(
+        self,
+        op: str,
+        value: Any,
+        dtype: SymbolicDType | SymbolicTypeSpec,
+    ):
         super().__init__(op)
+        value = SymbolicExpr._NORMALIZE_VALUE(value)
+        dtype = SymbolicExpr._NORMALIZE_VALUE(dtype)
         self.value = value
-        self.dtype, self.shape = self._unpack_dtype(dtype)
+        fallback_shape = value.shape if isinstance(value, SymbolicTensorValue) else ()
+        self.dtype, self.shape = self._unpack_dtype(dtype, fallback_shape)
 
     def _node_label_core(self) -> str:
         return f"const={self.value}"
@@ -784,14 +813,14 @@ class ConstSymbolicExpr(SymbolicExpr):
     def to_py(self) -> Any:
         """
         Valid only for nodes with op == 'const':
-        - If `value` is a TensorHandle:
+        - If `value` is a tensor value:
             • Scalar  -> return int/float
             • Multi-element -> return a Python list
         - Otherwise, return the original Python object
           (e.g., int, float, tuple, list, etc.).
         """
         v = self.value
-        if isinstance(v, TensorHandle):
+        if isinstance(v, SymbolicTensorValue):
             if len(v.data) == 1:
                 return v.data.item()  # scalar case
             else:
@@ -800,7 +829,7 @@ class ConstSymbolicExpr(SymbolicExpr):
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         value = self.value
-        if isinstance(value, TensorHandle):
+        if isinstance(value, SymbolicTensorValue):
             value = self.value.data
 
         if self.loop_ctx:  # if the self is a loop iterator
@@ -811,7 +840,7 @@ class ConstSymbolicExpr(SymbolicExpr):
             z3_expr = [IntVal(int(v)) for v in value.flat]
         elif isinstance(value, tuple):
             z3_expr = [IntVal(int(v)) for v in value]
-        elif isinstance(value, (int, float)):
+        elif isinstance(value, (int, np.integer, bool, float, np.floating)):
             # Convert to int for Z3 - Z3's IntVal cannot parse float strings
             z3_expr = IntVal(int(value))
         else:
@@ -825,20 +854,25 @@ class ConstSymbolicExpr(SymbolicExpr):
             raise RuntimeError("const node is missing dtype information")
 
         if self.loop_ctx is not None and self.loop_ctx.current_value is not None:
-            return TensorHandle(
-                np.array([self.loop_ctx.current_value], dtype=_get_np_dtype(dtype)),
+            return SymbolicTensorValue(
+                np.array([self.loop_ctx.current_value], dtype=dtype_to_numpy(dtype)),
                 dtype,
             )
-        if isinstance(self.value, (SymbolicExpr.builtin_scala_types, tl.pointer_type)):
-            return TensorHandle(
-                np.array([self.value], dtype=_get_np_dtype(dtype)),
+        if isinstance(self.value, (int, np.integer, bool, float, np.floating)):
+            return SymbolicTensorValue(
+                np.array([self.value], dtype=dtype_to_numpy(dtype)),
                 dtype,
             )
         elif isinstance(self.value, SymbolicExpr.tuple_types):
             seq = cast(Sequence[Any], self.value)
-            np_array = np.array(seq, dtype=_get_np_dtype(dtype))
-            return TensorHandle(np_array, dtype)
-        elif isinstance(self.value, TensorHandle):
+            np_array = np.array(seq, dtype=dtype_to_numpy(dtype))
+            return SymbolicTensorValue(np_array, dtype)
+        elif isinstance(self.value, np.ndarray):
+            return SymbolicTensorValue(
+                np.asarray(self.value, dtype=dtype_to_numpy(dtype)),
+                dtype,
+            )
+        elif isinstance(self.value, SymbolicTensorValue):
             return self.value
 
         raise RuntimeError(f"Unsupported const value type: {type(self.value)}")
@@ -850,7 +884,7 @@ class PidSymbolicExpr(SymbolicExpr):
     def __init__(self, op: str, axis: Any):
         super().__init__(op)
         self.add_child("axis", axis)
-        self.dtype = tl.int32
+        self.dtype = INT32
 
     def _node_label_core(self) -> str:
         axis_val = self.axis.to_py()
@@ -881,7 +915,7 @@ class ArangeSymbolicExpr(SymbolicExpr):
         # Program ID / arange are always int32
         start_const = cast(ConstSymbolicExpr, self.start)
         end_const = cast(ConstSymbolicExpr, self.end)
-        self.dtype = tl.int32
+        self.dtype = INT32
         self.shape = (end_const.value - start_const.value,)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
@@ -920,8 +954,8 @@ class IndirectSymbolicExprBase(SymbolicExpr):
     def concretize(self) -> Any:
         ptr_concrete = self.ptr.concretize()
         if self.mask is None:
-            mask_concrete = TensorHandle(
-                np.ones_like(ptr_concrete.data, dtype=bool), tl.int1
+            mask_concrete = SymbolicTensorValue(
+                np.ones_like(ptr_concrete.data, dtype=bool), INT1
             )
         else:
             mask_concrete = self.mask.concretize()
@@ -948,11 +982,7 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("mask", mask)
         self.add_child("other", other)
         ptr_dtype = self.ptr.dtype
-        self.dtype = (
-            ptr_dtype.element_ty
-            if isinstance(ptr_dtype, tl.pointer_type)
-            else ptr_dtype
-        )
+        self.dtype = pointee_dtype(ptr_dtype)
         self.shape = self.ptr.shape
 
 
@@ -999,9 +1029,12 @@ class UnarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(
                 f"Concretize for unary op '{self.op}' is not implemented"
             )
-        return TensorHandle(
-            np.asarray(handler(concrete.data), dtype=_get_np_dtype(self.dtype)),
-            self.dtype,
+        dtype = self.dtype
+        if dtype is None:
+            raise RuntimeError(f"{self.op} node is missing dtype information")
+        return SymbolicTensorValue(
+            np.asarray(handler(concrete.data), dtype=dtype_to_numpy(dtype)),
+            dtype,
         )
 
     @staticmethod
@@ -1060,11 +1093,14 @@ class BinarySymbolicExpr(SymbolicExpr):
             raise NotImplementedError(f"Eval for op {self.op} is not implemented")
         return handler(self, lhs, rhs), constraints
 
-    def _to_tensor_handle(self, value: Any) -> TensorHandle:
-        if isinstance(value, TensorHandle):
+    def _to_tensor_value(self, value: Any) -> SymbolicTensorValue:
+        if isinstance(value, SymbolicTensorValue):
             return value
-        return TensorHandle(
-            np.asarray(value, dtype=_get_np_dtype(self.dtype)), self.dtype
+        dtype = self.dtype
+        if dtype is None:
+            raise RuntimeError(f"{self.op} node is missing dtype information")
+        return SymbolicTensorValue(
+            np.asarray(value, dtype=dtype_to_numpy(dtype)), dtype
         )
 
     def concretize(self) -> Any:
@@ -1077,14 +1113,27 @@ class BinarySymbolicExpr(SymbolicExpr):
         # internally and only take (lhs, rhs). Fall through to the 2-arg call
         # for those.
         if np_op is not None:
-            return self._to_tensor_handle(
-                self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
-            )
+            if self.concrete_fn is not None:
+                return self._to_tensor_value(
+                    self.concrete_fn(lhs_concrete, rhs_concrete, np_op)  # type: ignore
+                )
+            return self._to_tensor_value(np_op(lhs_concrete.data, rhs_concrete.data))
         if self.concrete_fn is None:
+            if self.op == "idiv":
+                return self._to_tensor_value(
+                    np.floor_divide(lhs_concrete.data, rhs_concrete.data)
+                )
+            if self.op == "ashr":
+                return self._to_tensor_value(
+                    np.right_shift(
+                        lhs_concrete.data.astype(np.int64),
+                        rhs_concrete.data,
+                    )
+                )
             raise NotImplementedError(
                 f"Concretize for binary op '{self.op}' is not implemented"
             )
-        return self._to_tensor_handle(self.concrete_fn(lhs_concrete, rhs_concrete))  # type: ignore
+        return self._to_tensor_value(self.concrete_fn(lhs_concrete, rhs_concrete))  # type: ignore
 
     @staticmethod
     def _apply_binop(op_func, left, right):
@@ -1341,17 +1390,18 @@ class WhereSymbolicExpr(SymbolicExpr):
         if isinstance(rhs, SymbolicExpr):
             rhs = rhs.concretize()
         if not (
-            isinstance(cond, TensorHandle)
-            and isinstance(lhs, TensorHandle)
-            and isinstance(rhs, TensorHandle)
+            isinstance(cond, SymbolicTensorValue)
+            and isinstance(lhs, SymbolicTensorValue)
+            and isinstance(rhs, SymbolicTensorValue)
         ):
             raise TypeError(
-                "where concretization expects TensorHandle condition and values"
+                "where concretization expects tensor value condition and values"
             )
+        dtype = self.dtype
+        if dtype is None:
+            raise RuntimeError("where node is missing dtype information")
         data = np.where(cond.data.astype(bool), lhs.data, rhs.data)
-        return TensorHandle(
-            np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
-        )
+        return SymbolicTensorValue(np.asarray(data, dtype=dtype_to_numpy(dtype)), dtype)
 
     def _where(self) -> tuple[Z3Expr, ConstraintConjunction]:
         def _normalize(expr):
@@ -1441,9 +1491,10 @@ class FmaSymbolicExpr(SymbolicExpr):
         y = self.y.concretize()
         z = self.z.concretize()
         data = x.data * y.data + z.data
-        return TensorHandle(
-            np.asarray(data, dtype=_get_np_dtype(self.dtype)), self.dtype
-        )
+        dtype = self.dtype
+        if dtype is None:
+            raise RuntimeError("fma node is missing dtype information")
+        return SymbolicTensorValue(np.asarray(data, dtype=dtype_to_numpy(dtype)), dtype)
 
 
 class ReduceSymbolicExpr(SymbolicExpr):
@@ -1494,8 +1545,9 @@ class ReduceSymbolicExpr(SymbolicExpr):
                 output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
         else:
             output_shape = [1] * len(input_shape) if keepdims_val else []
+        scalar_ty: SymbolicDType
         if op in ("argmax", "argmin"):
-            scalar_ty = tl.int32
+            scalar_ty = INT32
         else:
             assert self.input.dtype is not None
             scalar_ty = self.input.dtype
@@ -1539,8 +1591,8 @@ class ReduceSymbolicExpr(SymbolicExpr):
     def _reduce_or(self) -> tuple[Z3Expr, ConstraintConjunction]:
         arr, constraints = self.input._to_z3()
         bitwidth = BinarySymbolicExpr._infer_bitwidth(self.input) or 64
-        # ``tl.reduce_or`` uses the same bit-vector lowering as other bitwise
-        # symbolic ops, but folds across one reduction axis.
+        # This uses the same bit-vector lowering as other bitwise symbolic ops,
+        # but folds across one reduction axis.
         return (
             reduce(
                 lambda a, b: BinarySymbolicExpr._from_bv(
@@ -1606,6 +1658,7 @@ class CumsumSymbolicExpr(SymbolicExpr):
         self.add_child("axis", axis)
         self.add_child("reverse", reverse)
         dtype = self.input.dtype if dtype is None else dtype
+        dtype = SymbolicExpr._NORMALIZE_VALUE(dtype)
         self.dtype, self.shape = self._unpack_dtype(dtype, self.input.shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
@@ -1621,8 +1674,9 @@ class CumsumSymbolicExpr(SymbolicExpr):
         out = np.cumsum(data, axis=axis)
         if reverse:
             out = np.flip(out, axis=axis)
-        return TensorHandle(
-            out.astype(_get_np_dtype(input_concrete.dtype)), input_concrete.dtype
+        return SymbolicTensorValue(
+            out.astype(dtype_to_numpy(input_concrete.dtype)),
+            input_concrete.dtype,
         )
 
 
@@ -1673,7 +1727,6 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
 
 
 class AddPtrSymbolicExpr(SymbolicExpr):
-    _INT_DTYPES: ClassVar[tuple[type, ...]] = (int, np.integer, bool)
     ptr: SymbolicExpr
     offset: SymbolicExpr
 
@@ -1690,20 +1743,19 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         ptr_z3, constraints_ptr = ptr_expr._to_z3()
         offset_z3, constraints_offset = offset_expr._to_z3()
         constraints = _and_constraints(constraints_ptr, constraints_offset)
-        ptr_dtype = cast(Any, ptr_expr.dtype)
-        element_bytewidth = max(1, ptr_dtype.element_ty.primitive_bitwidth // 8)
+        element_size = element_bytewidth(ptr_expr.dtype)
         if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
-            z3_expr = ptr_z3 + offset_z3 * element_bytewidth
+            z3_expr = ptr_z3 + offset_z3 * element_size
         elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
             if len(ptr_z3) != len(offset_z3):
                 raise ValueError(
                     f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
                 )
-            z3_expr = [p + o * element_bytewidth for p, o in zip(ptr_z3, offset_z3)]
+            z3_expr = [p + o * element_size for p, o in zip(ptr_z3, offset_z3)]
         elif isinstance(ptr_z3, list):
-            z3_expr = [p + offset_z3 * element_bytewidth for p in ptr_z3]
+            z3_expr = [p + offset_z3 * element_size for p in ptr_z3]
         else:  # isinstance(offset_z3, list):
-            z3_expr = [ptr_z3 + o * element_bytewidth for o in offset_z3]
+            z3_expr = [ptr_z3 + o * element_size for o in offset_z3]
         return z3_expr, constraints
 
     def concretize(self) -> Any:
@@ -1751,6 +1803,42 @@ class SplatSymbolicExpr(SymbolicExpr):
         return self.concrete_fn(self.block_type.to_py(), self.arg.concretize())  # type: ignore
 
 
+class UnsplatSymbolicExpr(SymbolicExpr):
+    arg: SymbolicExpr
+
+    def __init__(self, op: str, arg: Any):
+        super().__init__(op)
+        self.add_child("arg", arg)
+        self.dtype = self.arg.dtype
+        self.shape = ()
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        value, constraints = self.arg._to_z3()
+        if isinstance(value, list):
+            if len(value) != 1:
+                raise ValueError(
+                    f"Unsplat expects a single-element tensor, got {len(value)}"
+                )
+            return value[0], constraints
+        return value, constraints
+
+    def concretize(self) -> Any:
+        concrete = self.arg.concretize()
+        if self.concrete_fn is not None:
+            return self.concrete_fn(concrete)  # type: ignore
+        if not isinstance(concrete, SymbolicTensorValue):
+            raise TypeError(f"Expected symbolic tensor value, got {type(concrete)}")
+        if concrete.data.size != 1:
+            raise ValueError(
+                f"Unsplat expects a single-element tensor, got {concrete.shape}"
+            )
+        dtype = self.dtype
+        if dtype is None:
+            raise RuntimeError("unsplat node is missing dtype information")
+        data = np.array([concrete.data.reshape(-1)[0]], dtype=dtype_to_numpy(dtype))
+        return SymbolicTensorValue(data, dtype)
+
+
 class SortSymbolicExpr(SymbolicExpr):
     input: SymbolicExpr
     dim: SymbolicExpr | None
@@ -1778,7 +1866,7 @@ class SortSymbolicExpr(SymbolicExpr):
         data = np.sort(concrete.data, axis=axis, **sort_kwargs)
         if descending:
             data = np.flip(data, axis=axis)
-        return TensorHandle(data.astype(concrete.data.dtype), concrete.dtype)
+        return SymbolicTensorValue(data.astype(concrete.data.dtype), concrete.dtype)
 
 
 class ExpandDimsSymbolicExpr(SymbolicExpr):
@@ -1806,7 +1894,7 @@ class ExpandDimsSymbolicExpr(SymbolicExpr):
     def concretize(self) -> Any:
         concrete = self.arg.concretize()
         axis = self.axis.to_py()
-        return TensorHandle(
+        return SymbolicTensorValue(
             np.expand_dims(concrete.data, axis=axis).astype(concrete.data.dtype),
             concrete.dtype,
         )
@@ -1819,7 +1907,7 @@ class BroadcastSymbolicExpr(SymbolicExpr):
         super().__init__(op)
         self.add_child("arg", arg)
         shape = _shape_to_tuple(shape) if shape else ()
-        self.dtype = self.arg.dtype if self.arg.dtype else tl.int32
+        self.dtype = self.arg.dtype if self.arg.dtype else INT32
         self.shape = shape if shape else self.arg.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
@@ -1827,7 +1915,7 @@ class BroadcastSymbolicExpr(SymbolicExpr):
 
     def concretize(self) -> Any:
         concrete = self.arg.concretize()
-        return TensorHandle(
+        return SymbolicTensorValue(
             np.broadcast_to(concrete.data, self.shape).astype(concrete.data.dtype),
             concrete.dtype,
         )
@@ -1847,7 +1935,7 @@ class ReshapeSymbolicExpr(SymbolicExpr):
 
     def concretize(self) -> Any:
         concrete = self.arg.concretize()
-        return TensorHandle(
+        return SymbolicTensorValue(
             np.reshape(concrete.data, self.shape).astype(concrete.data.dtype),
             concrete.dtype,
         )
@@ -1870,7 +1958,7 @@ class TransSymbolicExpr(SymbolicExpr):
 
     def concretize(self) -> Any:
         concrete = self.arg.concretize()
-        return TensorHandle(
+        return SymbolicTensorValue(
             np.transpose(concrete.data, axes=_shape_to_tuple(self.permutation)).astype(
                 concrete.data.dtype
             ),
@@ -1914,7 +2002,7 @@ class SplitSymbolicExpr(SymbolicExpr):
     def concretize(self) -> Any:
         concrete = self.arg.concretize()
         index = int(self.index.to_py())
-        return TensorHandle(
+        return SymbolicTensorValue(
             concrete.data[..., index].astype(concrete.data.dtype),
             concrete.dtype,
         )
@@ -1940,8 +2028,15 @@ class CastSymbolicExpr(SymbolicExpr):
 
     def concretize(self) -> Any:
         src_concrete = self.src.concretize()
-        dst = tl.block_type(self.dtype, list(self.shape)) if self.shape else self.dtype
-        return self.concrete_fn(src_concrete, dst)  # type: ignore
+        if self.dtype is None:
+            raise RuntimeError("cast node is missing dtype information")
+        dst = type_spec(self.dtype, self.shape) if self.shape else self.dtype
+        if self.concrete_fn is not None:
+            return self.concrete_fn(src_concrete, dst)  # type: ignore
+        return SymbolicTensorValue(
+            src_concrete.data.astype(dtype_to_numpy(self.dtype)),
+            self.dtype,
+        )
 
 
 class FpToFpSymbolicExpr(SymbolicExpr):
@@ -1954,7 +2049,9 @@ class FpToFpSymbolicExpr(SymbolicExpr):
         self.add_child("src", src)
         self.add_child("dst_type", dst_type)
         self.add_child("rounding_mode", rounding_mode)
-        self.dtype, self.shape = self._unpack_dtype(self.dst_type.dtype, self.src.shape)
+        self.dtype, self.shape = self._unpack_dtype(
+            self.dst_type.to_py(), self.src.shape
+        )
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         raise NotImplementedError(f"Eval for op {self.op} is not implemented")
@@ -2003,13 +2100,8 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
     @staticmethod
     def _resolve_element_dtype(
         ptr: SymbolicExpr,
-    ) -> tl.core.dtype | None:
-        dt = ptr.dtype
-        if dt is None:
-            return None
-        if isinstance(dt, tl.pointer_type):
-            return dt.element_ty
-        return dt
+    ) -> SymbolicDType | None:
+        return pointee_dtype(ptr.dtype)
 
     @staticmethod
     def _resolve_block_shape(ptr: SymbolicExpr) -> tuple[int, ...]:
@@ -2055,13 +2147,7 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
             block_shape,
         ) = self._resolve_block_ptr_components(self.ptr)
 
-        base_dtype = base.dtype
-        if isinstance(base_dtype, tl.pointer_type) and hasattr(
-            base_dtype.element_ty, "primitive_bitwidth"
-        ):
-            elem_size = max(1, base_dtype.element_ty.primitive_bitwidth // 8)
-        else:
-            elem_size = 1
+        elem_size = element_bytewidth(base.dtype)
 
         base_z3, c_base = base._to_z3()
         addr = base_z3
@@ -2130,6 +2216,7 @@ SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
 SymbolicExpr.register_op_class(AddPtrSymbolicExpr, ("addptr",))
 SymbolicExpr.register_op_class(AdvanceSymbolicExpr, ("advance",))
 SymbolicExpr.register_op_class(SplatSymbolicExpr, ("splat",))
+SymbolicExpr.register_op_class(UnsplatSymbolicExpr, ("unsplat",))
 SymbolicExpr.register_op_class(SortSymbolicExpr, ("sort",))
 SymbolicExpr.register_op_class(ExpandDimsSymbolicExpr, ("expand_dims",))
 SymbolicExpr.register_op_class(BroadcastSymbolicExpr, ("broadcast",))
@@ -2343,6 +2430,9 @@ class SymbolicClient(Client):
     def _op_splat_overrider(self, shape, arg):
         return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))
 
+    def _op_unsplat_overrider(self, arg):
+        return SymbolicExpr.create("unsplat", SymbolicExpr.from_value(arg))
+
     def _op_idiv_overrider(self, lhs, rhs):
         return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
 
@@ -2460,6 +2550,7 @@ class SymbolicClient(Client):
             ReduceMin: self._op_reduce_min_overrider,
             Sort: self._op_sort_overrider,
             Splat: self._op_splat_overrider,
+            Unsplat: self._op_unsplat_overrider,
             Idiv: self._op_idiv_overrider,
             Rsqrt: self._op_rsqrt_overrider,
             CastImpl: self._op_cast_impl_overrider,
@@ -2618,8 +2709,8 @@ class SymbolicClient(Client):
             return
 
         idx_z3 = Int(f"loop_i_{lineno}")
-        sym = SymbolicExpr.create("const", idx_z3, tl.int32)
-        idx = tl.tensor(sym, tl.int32)
+        sym = SymbolicExpr.create("const", idx_z3, INT32)
+        idx = SymbolicExpr.wrap_loop_index(sym, INT32)
         ctx = LoopContext(
             lineno,
             iterable.length,
@@ -2708,8 +2799,11 @@ class SymbolicClient(Client):
         def walk(node: SymbolicExpr) -> Any | None:
             if (
                 node.op == "const"
-                and isinstance(node.dtype, tl.pointer_type)
-                and not node.shape
+                and is_pointer_dtype(node.dtype)
+                and not isinstance(
+                    getattr(node, "value", None),
+                    (SymbolicScalarDType, SymbolicPointerDType, SymbolicTypeSpec),
+                )
             ):
                 return node.to_py()
             for child in node.children.values():
@@ -2931,9 +3025,7 @@ class SymbolicClient(Client):
         if not hasattr(arg, "data_ptr"):
             self._cache_non_tensor_arg(name, arg)
             return
-        from triton.runtime.jit import TensorWrapper
-
-        if isinstance(arg, TensorWrapper):
+        if hasattr(arg, "base") and hasattr(arg.base, "data_ptr"):
             arg = arg.base
         tensor_physical_addresses = self._tensor_physical_addresses(name, arg)
         self._record_tensor_name(arg, name)

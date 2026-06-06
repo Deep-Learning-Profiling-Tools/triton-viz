@@ -194,6 +194,11 @@ class Splat(Op):
 
 
 @dataclass
+class Unsplat(Op):
+    name: ClassVar[str] = "unsplat"
+
+
+@dataclass
 class MakeBlockPointer(Op):
     name: ClassVar[str] = "make_block_ptr"
 
