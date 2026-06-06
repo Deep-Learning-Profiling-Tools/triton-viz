@@ -799,8 +799,8 @@ class ConstSymbolicExpr(SymbolicExpr):
         dtype: SymbolicDType | SymbolicTypeSpec,
     ):
         super().__init__(op)
-        value = self._NORMALIZE_VALUE(value)
-        dtype = self._NORMALIZE_VALUE(dtype)
+        value = SymbolicExpr._NORMALIZE_VALUE(value)
+        dtype = SymbolicExpr._NORMALIZE_VALUE(dtype)
         self.value = value
         fallback_shape = value.shape if isinstance(value, SymbolicTensorValue) else ()
         self.dtype, self.shape = self._unpack_dtype(dtype, fallback_shape)
@@ -1543,6 +1543,7 @@ class ReduceSymbolicExpr(SymbolicExpr):
                 output_shape = input_shape[:axis_val] + input_shape[axis_val + 1 :]
         else:
             output_shape = [1] * len(input_shape) if keepdims_val else []
+        scalar_ty: SymbolicDType
         if op in ("argmax", "argmin"):
             scalar_ty = INT32
         else:
@@ -1655,7 +1656,7 @@ class CumsumSymbolicExpr(SymbolicExpr):
         self.add_child("axis", axis)
         self.add_child("reverse", reverse)
         dtype = self.input.dtype if dtype is None else dtype
-        dtype = self._NORMALIZE_VALUE(dtype)
+        dtype = SymbolicExpr._NORMALIZE_VALUE(dtype)
         self.dtype, self.shape = self._unpack_dtype(dtype, self.input.shape)
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
