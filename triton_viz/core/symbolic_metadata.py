@@ -82,6 +82,8 @@ FLOAT8_E4M3 = SymbolicScalarDType(
 FLOAT8_E5M2 = SymbolicScalarDType(
     "float8_e5m2", 8, cast(np.dtype[Any], STORAGE_DTYPES["float8_e5m2"])
 )
+FLOAT8_E4B8 = SymbolicScalarDType("float8_e4b8", 8, np.dtype(np.uint8))
+FLOAT8_E5B16 = SymbolicScalarDType("float8_e5b16", 8, np.dtype(np.uint8))
 FLOAT8_E4M3FN = SymbolicScalarDType(
     "float8_e4m3fn", 8, cast(np.dtype[Any], STORAGE_DTYPES["float8_e4m3fn"])
 )
@@ -106,6 +108,8 @@ _DTYPES: tuple[SymbolicScalarDType, ...] = (
     BFLOAT16,
     FLOAT8_E4M3,
     FLOAT8_E5M2,
+    FLOAT8_E4B8,
+    FLOAT8_E5B16,
     FLOAT8_E4M3FN,
     FLOAT4_E2M1FN,
 )
@@ -115,7 +119,10 @@ DTYPE_BY_NAME.update(
     {
         "bool": INT1,
         "fp8e4nv": FLOAT8_E4M3,
+        "fp8e4b8": FLOAT8_E4B8,
         "fp8e5": FLOAT8_E5M2,
+        "fp8e5b16": FLOAT8_E5B16,
+        "fp8e4b15": FLOAT8_E4M3FN,
         "float16": FLOAT16,
         "half": FLOAT16,
         "float": FLOAT32,

@@ -77,6 +77,7 @@ from ..data import (
     TernaryOp,
     Trans,
     Umulhi,
+    Unsplat,
     UnaryOp,
 )
 from ..symbolic_metadata import (
@@ -84,9 +85,11 @@ from ..symbolic_metadata import (
     FLOAT16,
     FLOAT32,
     FLOAT64,
+    FLOAT8_E4B8,
     FLOAT8_E4M3,
     FLOAT8_E4M3FN,
     FLOAT8_E5M2,
+    FLOAT8_E5B16,
     INT1,
     INT8,
     INT16,
@@ -131,6 +134,7 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "create_expand_dims": ExpandDims,
         "create_broadcast": Broadcast,
         "create_splat": Splat,
+        "create_unsplat": Unsplat,
         "create_make_block_ptr": MakeBlockPointer,
         "create_tensor_pointer_load": TensorPointerLoad,
         "create_tensor_pointer_store": TensorPointerStore,
@@ -484,35 +488,6 @@ class TritonFrontend(Frontend):
 
         scope.set_attr(interpreter_semantic, "to_tensor", _to_tensor_symbolic_aware)
 
-    @staticmethod
-    def _patch_triton_unsplat(scope: _LangPatchScope) -> None:
-        original_create_unsplat = interpreter_builder.create_unsplat
-
-        def _create_unsplat_symbolic_aware(arg):
-            from triton_viz.clients.symbolic_engine import SymbolicExpr
-
-            if isinstance(arg, SymbolicExpr):
-                if arg.op == "splat":
-                    return arg.arg
-                concrete = arg.concretize()
-                if isinstance(concrete, SymbolicTensorValue):
-                    if concrete.data.size != 1:
-                        raise ValueError(
-                            f"Expected single-element symbolic tensor, got {concrete.shape}"
-                        )
-                    return SymbolicExpr.create(
-                        "const",
-                        concrete.data.reshape(-1)[0].item(),
-                        concrete.dtype,
-                    )
-            return original_create_unsplat(arg)
-
-        scope.set_attr(
-            interpreter_builder,
-            "create_unsplat",
-            _create_unsplat_symbolic_aware,
-        )
-
     def _init_args_hst(self, args_dev, kwargs):
         def _to_cpu(arg):
             if isinstance(arg, tuple):
@@ -645,6 +620,7 @@ class TritonFrontend(Frontend):
             ReduceMin: ("min", "argmin"),
             Sort: ("sort",),
             Splat: ("splat",),
+            Unsplat: ("unsplat",),
             MakeBlockPointer: ("make_block_ptr",),
             TensorPointerLoad: ("tensor_pointer_load",),
             TensorPointerStore: ("tensor_pointer_store",),
@@ -684,7 +660,9 @@ class TritonFrontend(Frontend):
         "fp64": FLOAT64,
         "bf16": BFLOAT16,
         "fp8e4nv": FLOAT8_E4M3,
+        "fp8e4b8": FLOAT8_E4B8,
         "fp8e5": FLOAT8_E5M2,
+        "fp8e5b16": FLOAT8_E5B16,
         "fp8e4b15": FLOAT8_E4M3FN,
     }
 
@@ -703,7 +681,9 @@ class TritonFrontend(Frontend):
         FLOAT64: "float64",
         BFLOAT16: "bfloat16",
         FLOAT8_E4M3: "float8e4nv",
+        FLOAT8_E4B8: "float8e4b8",
         FLOAT8_E5M2: "float8e5",
+        FLOAT8_E5B16: "float8e5b16",
         FLOAT8_E4M3FN: "float8e4b15",
     }
 
@@ -893,7 +873,6 @@ class TritonFrontend(Frontend):
             _patch_builtin(module, interpreter_builder, scope)
         self._patch_triton_inline_asm(scope)
         self._patch_triton_semantic_to_tensor(scope)
-        self._patch_triton_unsplat(scope)
         scope.set_attr(knobs.runtime, "interpret", True)
         return scope
 

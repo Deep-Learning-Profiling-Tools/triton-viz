@@ -56,6 +56,7 @@ from ..core.data import (
     ReduceMin,
     Sort,
     Splat,
+    Unsplat,
     Idiv,
     Rsqrt,
     CastImpl,
@@ -364,6 +365,7 @@ class SymbolicExpr:
     POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
         "splat",
+        "unsplat",
         "expand_dims",
         "broadcast",
         "reshape",
@@ -1801,6 +1803,42 @@ class SplatSymbolicExpr(SymbolicExpr):
         return self.concrete_fn(self.block_type.to_py(), self.arg.concretize())  # type: ignore
 
 
+class UnsplatSymbolicExpr(SymbolicExpr):
+    arg: SymbolicExpr
+
+    def __init__(self, op: str, arg: Any):
+        super().__init__(op)
+        self.add_child("arg", arg)
+        self.dtype = self.arg.dtype
+        self.shape = ()
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        value, constraints = self.arg._to_z3()
+        if isinstance(value, list):
+            if len(value) != 1:
+                raise ValueError(
+                    f"Unsplat expects a single-element tensor, got {len(value)}"
+                )
+            return value[0], constraints
+        return value, constraints
+
+    def concretize(self) -> Any:
+        concrete = self.arg.concretize()
+        if self.concrete_fn is not None:
+            return self.concrete_fn(concrete)  # type: ignore
+        if not isinstance(concrete, SymbolicTensorValue):
+            raise TypeError(f"Expected symbolic tensor value, got {type(concrete)}")
+        if concrete.data.size != 1:
+            raise ValueError(
+                f"Unsplat expects a single-element tensor, got {concrete.shape}"
+            )
+        dtype = self.dtype
+        if dtype is None:
+            raise RuntimeError("unsplat node is missing dtype information")
+        data = np.array([concrete.data.reshape(-1)[0]], dtype=dtype_to_numpy(dtype))
+        return SymbolicTensorValue(data, dtype)
+
+
 class SortSymbolicExpr(SymbolicExpr):
     input: SymbolicExpr
     dim: SymbolicExpr | None
@@ -2178,6 +2216,7 @@ SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
 SymbolicExpr.register_op_class(AddPtrSymbolicExpr, ("addptr",))
 SymbolicExpr.register_op_class(AdvanceSymbolicExpr, ("advance",))
 SymbolicExpr.register_op_class(SplatSymbolicExpr, ("splat",))
+SymbolicExpr.register_op_class(UnsplatSymbolicExpr, ("unsplat",))
 SymbolicExpr.register_op_class(SortSymbolicExpr, ("sort",))
 SymbolicExpr.register_op_class(ExpandDimsSymbolicExpr, ("expand_dims",))
 SymbolicExpr.register_op_class(BroadcastSymbolicExpr, ("broadcast",))
@@ -2391,6 +2430,9 @@ class SymbolicClient(Client):
     def _op_splat_overrider(self, shape, arg):
         return SymbolicExpr.create("splat", shape, SymbolicExpr.from_value(arg))
 
+    def _op_unsplat_overrider(self, arg):
+        return SymbolicExpr.create("unsplat", SymbolicExpr.from_value(arg))
+
     def _op_idiv_overrider(self, lhs, rhs):
         return SymbolicExpr.from_value(lhs) // SymbolicExpr.from_value(rhs)
 
@@ -2508,6 +2550,7 @@ class SymbolicClient(Client):
             ReduceMin: self._op_reduce_min_overrider,
             Sort: self._op_sort_overrider,
             Splat: self._op_splat_overrider,
+            Unsplat: self._op_unsplat_overrider,
             Idiv: self._op_idiv_overrider,
             Rsqrt: self._op_rsqrt_overrider,
             CastImpl: self._op_cast_impl_overrider,
