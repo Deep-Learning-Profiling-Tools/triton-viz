@@ -737,8 +737,6 @@ def test_store_dtype_block_of_pointers():
     ptr = ConstSymbolicExpr(
         "const", value=0, dtype=block_type(pointer_type(FLOAT32), [1, 16])
     )
-    value = ConstSymbolicExpr(
-        "const", value=0, dtype=block_type(FLOAT32, [1, 16])
-    )
+    value = ConstSymbolicExpr("const", value=0, dtype=block_type(FLOAT32, [1, 16]))
     store = StoreSymbolicExpr("store", ptr, value)
     assert store.dtype is None, f"Expected None, got {store.dtype}"

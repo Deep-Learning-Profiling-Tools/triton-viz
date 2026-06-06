@@ -134,9 +134,7 @@ def pointer_type(element_ty: SymbolicDType | str) -> SymbolicPointerDType:
     return SymbolicPointerDType(dtype)
 
 
-def block_type(
-    dtype: SymbolicDType | str, shape: Sequence[int]
-) -> SymbolicTypeSpec:
+def block_type(dtype: SymbolicDType | str, shape: Sequence[int]) -> SymbolicTypeSpec:
     return SymbolicTypeSpec(
         normalize_dtype(dtype),
         tuple(int(dim) for dim in shape),
@@ -151,7 +149,9 @@ def type_spec(
         if shape is not None:
             return SymbolicTypeSpec(dtype.dtype, tuple(int(dim) for dim in shape))
         return dtype
-    return SymbolicTypeSpec(normalize_dtype(dtype), tuple(int(dim) for dim in shape or ()))
+    return SymbolicTypeSpec(
+        normalize_dtype(dtype), tuple(int(dim) for dim in shape or ())
+    )
 
 
 def normalize_dtype(dtype: SymbolicDType | str) -> SymbolicDType:

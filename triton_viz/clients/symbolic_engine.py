@@ -1097,7 +1097,9 @@ class BinarySymbolicExpr(SymbolicExpr):
         dtype = self.dtype
         if dtype is None:
             raise RuntimeError(f"{self.op} node is missing dtype information")
-        return SymbolicTensorValue(np.asarray(value, dtype=dtype_to_numpy(dtype)), dtype)
+        return SymbolicTensorValue(
+            np.asarray(value, dtype=dtype_to_numpy(dtype)), dtype
+        )
 
     def concretize(self) -> Any:
         lhs_concrete = self.lhs.concretize()
