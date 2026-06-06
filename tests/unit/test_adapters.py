@@ -167,9 +167,7 @@ def test_triton_frontend_normalizes_block_pointer_type():
         (tl.float8e5b16, FLOAT8_E5B16),
     ],
 )
-def test_triton_frontend_normalizes_other_fp8_dtypes(
-    triton_dtype, symbolic_dtype
-):
+def test_triton_frontend_normalizes_other_fp8_dtypes(triton_dtype, symbolic_dtype):
     frontend = get_frontend("triton")
 
     assert frontend.normalize_symbolic_value(triton_dtype) == symbolic_dtype
