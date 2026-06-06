@@ -30,6 +30,8 @@ class Config:
       program block progress in the interpreter.
     - virtual_memory: SANITIZER_ENABLE_FAKE_TENSOR, uses fake tensor storage in
       sanitizer runs to avoid real memory reads.
+    - sanitizer_exhaustive_mode: SANITIZER_EXHAUSTIVE_MODE, broadens sanitizer
+      scalar and tensor-size assumptions for possible-OOB checks.
     - profiler_enable_load_store_skipping: PROFILER_ENABLE_LOAD_STORE_SKIPPING,
       skips redundant load/store checks to speed profiling.
     - profiler_enable_block_sampling: PROFILER_ENABLE_BLOCK_SAMPLING, samples a
@@ -64,6 +66,7 @@ class Config:
             "REPORT_GRID_EXECUTION_PROGRESS"
         )
         self.virtual_memory: bool = _is_one("SANITIZER_ENABLE_FAKE_TENSOR")
+        self.sanitizer_exhaustive_mode: bool = _is_one("SANITIZER_EXHAUSTIVE_MODE")
         self.profiler_enable_load_store_skipping: bool = _is_one(
             "PROFILER_ENABLE_LOAD_STORE_SKIPPING", "1"
         )

@@ -237,6 +237,11 @@ def loop_bounds_pid_kernel(out_ptr):
     tl.store(out_ptr + pid, start)
 
 
+@triton.jit
+def exhaustive_scalar_oob_kernel(ptr, n, stride):
+    tl.load(ptr + n * stride)
+
+
 @triton_viz.trace(client=loop_deferred_check_recorder)
 @triton.jit
 def loop_deferred_check_kernel(out_ptr):
@@ -307,6 +312,22 @@ def test_indirect_load():
     assert (
         expected_offsets == observed_offsets
     ), "Observed offsets do not match expected offsets."
+
+
+def test_exhaustive_mode_broadens_scalar_oob_check():
+    ptr = torch.empty((4,), dtype=torch.float32)
+
+    normal = SymbolicSanitizer(abort_on_error=False, exhaustive_mode=False)
+    normal_kernel = triton_viz.trace(client=normal)(exhaustive_scalar_oob_kernel)
+    normal_kernel[(1,)](ptr, 0, 1)
+    assert len(normal.records) == 0
+
+    exhaustive = SymbolicSanitizer(abort_on_error=False, exhaustive_mode=True)
+    exhaustive_kernel = triton_viz.trace(client=exhaustive)(
+        exhaustive_scalar_oob_kernel
+    )
+    exhaustive_kernel[(1,)](ptr, 0, 1)
+    assert len(exhaustive.records) > 0
 
 
 # ======== Loop Tests ===========

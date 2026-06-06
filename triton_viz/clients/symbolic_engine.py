@@ -287,8 +287,15 @@ class SymbolicExprDataWrapper:
         return self._ensure_value()
 
 
+@dataclass(frozen=True)
+class ExhaustiveScalarInput:
+    name: str
+    dtype: tl.core.dtype
+    lower: int
+    upper: int
+
 class SymbolicExpr:
-    BASIC_OPS: ClassVar[tuple[str, ...]] = ("const", "pid", "arange")
+    BASIC_OPS: ClassVar[tuple[str, ...]] = ("const", "pid", "arange", "input_scalar")
     INDIRECT_OPS: ClassVar[tuple[str, ...]] = (
         "load",
         "store",
@@ -383,6 +390,7 @@ class SymbolicExpr:
     ] = {}
     _OP_CLASS_MAP: ClassVar[dict[str, type[SymbolicExpr]]] = {}
     _CONCRETE_FNS: ClassVar[dict[str, Callable[..., Any]]] = {}
+    EXHAUSTIVE_SCALAR_INPUTS: ClassVar[dict[int, ExhaustiveScalarInput]] = {}
 
     @classmethod
     def register_op_class(
@@ -437,6 +445,48 @@ class SymbolicExpr:
         if isinstance(dtype, tl.block_type):
             return dtype.scalar, tuple(int(x) for x in dtype.shape)
         return dtype, fallback_shape
+
+    @staticmethod
+    def _integer_dtype_range(
+        dtype: tl.core.dtype | tl.pointer_type,
+    ) -> tuple[int, int] | None:
+        if isinstance(dtype, tl.pointer_type) or not dtype.is_int():
+            return None
+
+        bits = int(dtype.primitive_bitwidth)
+        dtype_name = str(dtype)
+        if dtype_name == "int1":
+            return 0, 2
+        if dtype_name.startswith("u"):
+            return 0, 2**bits
+        return -(2 ** (bits - 1)), 2 ** (bits - 1)
+
+    @classmethod
+    def register_exhaustive_scalar_input(
+        cls,
+        handle: TensorHandle,
+        name: str,
+        lower_override: int | None = None,
+        upper_override: int | None = None,
+    ) -> None:
+        bounds = cls._integer_dtype_range(handle.dtype)
+        if bounds is None:
+            return
+        lower, upper = bounds
+        if lower_override is not None:
+            lower = max(lower, lower_override)
+        if upper_override is not None:
+            upper = min(upper, upper_override)
+        cls.EXHAUSTIVE_SCALAR_INPUTS[id(handle)] = ExhaustiveScalarInput(
+            name=name,
+            dtype=handle.dtype,
+            lower=lower,
+            upper=upper,
+        )
+
+    @classmethod
+    def clear_exhaustive_scalar_inputs(cls) -> None:
+        cls.EXHAUSTIVE_SCALAR_INPUTS.clear()
 
     def add_child(self, name: str, value: Any) -> None:
         child = SymbolicExpr.from_value(value) if value is not None else None
@@ -601,6 +651,8 @@ class SymbolicExpr:
                 raise ValueError(
                     "SymbolicExpr.from_value only supports scalar TensorHandle!"
                 )
+            if cls.EXHAUSTIVE_SCALAR_INPUTS and id(var) in cls.EXHAUSTIVE_SCALAR_INPUTS:
+                return cls.create("input_scalar", var)
             return cls.create("const", var.data.item(), dtype)
         if isinstance(
             var, SymbolicExpr.builtin_scala_types
@@ -900,6 +952,35 @@ class ArangeSymbolicExpr(SymbolicExpr):
         return self.concrete_fn(
             self.ret_ty.to_py(), self.start.to_py(), self.end.to_py()
         )  # type: ignore
+
+
+class InputScalarSymbolicExpr(SymbolicExpr):
+    metadata: ExhaustiveScalarInput
+
+    def __init__(self, op: str, handle: TensorHandle):
+        super().__init__(op)
+        metadata = self.EXHAUSTIVE_SCALAR_INPUTS.get(id(handle))
+        if metadata is None:
+            raise RuntimeError("input scalar node is missing exhaustive metadata")
+        self.metadata = metadata
+        self.dtype = metadata.dtype
+
+    def _node_label_core(self) -> str:
+        return f"input_scalar={self.metadata.name}"
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        var = Int(self.metadata.name)
+        constraints = _and_constraints(
+            var >= self.metadata.lower,
+            var < self.metadata.upper,
+        )
+        return var, constraints
+
+    def to_py(self) -> Any:
+        raise RuntimeError("exhaustive input scalar has no concrete Python value")
+
+    def concretize(self) -> Any:
+        raise RuntimeError("exhaustive input scalar cannot be concretized")
 
 
 class IndirectSymbolicExprBase(SymbolicExpr):
@@ -2112,6 +2193,7 @@ class TensorPointerStoreSymbolicExpr(TensorPointerSymbolicExpr):
 
 
 SymbolicExpr.register_op_class(ConstSymbolicExpr, ("const",))
+SymbolicExpr.register_op_class(InputScalarSymbolicExpr, ("input_scalar",))
 SymbolicExpr.register_op_class(PidSymbolicExpr, ("pid",))
 SymbolicExpr.register_op_class(ArangeSymbolicExpr, ("arange",))
 SymbolicExpr.register_op_class(LoadSymbolicExpr, ("load",))
@@ -2871,7 +2953,7 @@ class SymbolicClient(Client):
         """
         return addr_ok
 
-    def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
+    def _cache_non_tensor_arg(self, name: str, arg: Any, arg_cvt: Any = None) -> None:
         """Called from ``arg_callback`` for args without a ``data_ptr``."""
         pass
 
@@ -2913,6 +2995,7 @@ class SymbolicClient(Client):
         self.tensor_addrs.clear()
         self.tensor_names.clear()
         self.addr_ok_cache.clear()
+        SymbolicExpr.clear_exhaustive_scalar_inputs()
 
     # ── Client callbacks with shared defaults ─────────────────────────
 
@@ -2925,11 +3008,14 @@ class SymbolicClient(Client):
     def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
         if isinstance(arg, (tuple, list)):
             for idx, item in enumerate(arg):
-                self.arg_callback(f"{name}[{idx}]", item, None)
-            self._cache_non_tensor_arg(name, tuple(type(item).__name__ for item in arg))
+                item_cvt = arg_cvt[idx] if isinstance(arg_cvt, (tuple, list)) else None
+                self.arg_callback(f"{name}[{idx}]", item, item_cvt)
+            self._cache_non_tensor_arg(
+                name, tuple(type(item).__name__ for item in arg), arg_cvt
+            )
             return
         if not hasattr(arg, "data_ptr"):
-            self._cache_non_tensor_arg(name, arg)
+            self._cache_non_tensor_arg(name, arg, arg_cvt)
             return
         from triton.runtime.jit import TensorWrapper
 

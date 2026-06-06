@@ -9,7 +9,9 @@ from typing import (
 )
 import sys
 
+import triton.language as tl
 from torch import Tensor
+from triton.runtime.interpreter import TensorHandle
 from triton.tools.tensor_descriptor import TensorDescriptor
 from z3 import And, BoolVal, Not, Or, sat
 from z3.z3 import BoolRef, IntNumRef
@@ -44,6 +46,7 @@ from .report import (
 from ...core.config import config as cfg
 
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
+_EXHAUSTIVE_TENSOR_BYTES = 128 * 1024**3
 
 
 class Sanitizer(Client):
@@ -145,11 +148,18 @@ _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
 
 
 class SymbolicSanitizer(Sanitizer, SymbolicClient):
-    def __init__(self, abort_on_error: bool = True):
+    def __init__(
+        self, abort_on_error: bool = True, exhaustive_mode: bool | None = None
+    ):
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[OutOfBoundsRecordZ3] = []
         self.cache_args: list[Any] = []
         self.cache_grid: tuple[int, ...] | None = None
+        self.exhaustive_mode = (
+            cfg.sanitizer_exhaustive_mode
+            if exhaustive_mode is None
+            else exhaustive_mode
+        )
 
     # Explicit forwarders to SymbolicClient: the Sanitizer factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
@@ -181,7 +191,67 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         # ranges instead of the global union of all registered tensors.
         return BoolVal(True)
 
-    def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
+    @staticmethod
+    def _z3_safe_name(name: str) -> str:
+        return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
+
+    @staticmethod
+    def _is_concrete_layout_scalar(name: str) -> bool:
+        lowered = name.lower()
+        return (
+            "stride" in lowered
+            or "block" in lowered
+            or "offset" in lowered
+            or "offs" in lowered
+            or lowered.startswith("grid_")
+            or lowered.startswith("n_")
+            or lowered.startswith("num_")
+            or lowered.startswith("shape_")
+            or lowered.endswith("_size")
+            or lowered.endswith("_dim")
+            or lowered == "batch_size"
+            or name in {"M", "N", "K"}
+        )
+
+    @staticmethod
+    def _is_nonnegative_size_scalar(name: str) -> bool:
+        lowered = name.lower()
+        return (
+            lowered.startswith("n_")
+            or lowered.startswith("grid_")
+            or lowered.startswith("num_")
+            or lowered.startswith("shape_")
+            or lowered.endswith("_size")
+            or lowered.endswith("_dim")
+            or lowered == "batch_size"
+        )
+
+    def _register_exhaustive_scalar_arg(self, name: str, arg_cvt: Any) -> None:
+        if not self.exhaustive_mode or self._is_concrete_layout_scalar(name):
+            return
+
+        if isinstance(arg_cvt, tl.core.tensor):
+            handle = arg_cvt.handle
+            lower_override = 0 if self._is_nonnegative_size_scalar(name) else None
+            SymbolicExpr.register_exhaustive_scalar_input(
+                handle,
+                f"input_{self._z3_safe_name(name)}",
+                lower_override=lower_override,
+            )
+            return
+
+        if isinstance(arg_cvt, (tuple, list)):
+            for idx, item in enumerate(arg_cvt):
+                self._register_exhaustive_scalar_arg(f"{name}_{idx}", item)
+            return
+
+        if isinstance(arg_cvt, TensorDescriptor):
+            for idx, shape in enumerate(arg_cvt.shape):
+                self._register_exhaustive_scalar_arg(f"{name}_shape_{idx}", shape)
+
+    def _cache_non_tensor_arg(self, name: str, arg: Any, arg_cvt: Any = None) -> None:
+        self._register_exhaustive_scalar_arg(name, arg_cvt)
+
         # TODO: init a reserved_args field per frontend to filter out these args
         if name not in ["num_warps", "num_stages", "maxnreg", "num_ctas"]:
             if isinstance(arg, TensorDescriptor):
@@ -201,6 +271,16 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
     def _cache_tensor_arg(self, arg: Tensor) -> None:
         self.cache_args.append((arg.shape, arg.stride(), arg.dtype))
 
+    def _tensor_physical_addresses(
+        self, name: str, arg: Tensor
+    ) -> list[tuple[int, int, Tensor]]:
+        if not self.exhaustive_mode:
+            return SymbolicClient._tensor_physical_addresses(self, name, arg)
+
+        start = arg.data_ptr()
+        end = start + _EXHAUSTIVE_TENSOR_BYTES - 1
+        return [(start, end, arg)]
+
     def _clear_cache(self) -> None:
         self.cache_args.clear()
         self.cache_grid = None
@@ -214,7 +294,8 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
-            fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
+            cache_args = (("exhaustive_mode", self.exhaustive_mode), *self.cache_args)
+            fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(cache_args))
             self._clear_cache()
             if fn_cache not in _fn_symbolic_cache_set:
                 _fn_symbolic_cache_set.add(fn_cache)

@@ -1,15 +1,22 @@
 import pytest
 import torch
+import numpy as np
+import triton.language as tl
 from typing import cast
+from triton.runtime.interpreter import TensorHandle, _implicit_cvt
+from z3 import Solver, sat, unsat
 
 from triton_viz.core.config import config as cfg
 from triton_viz.clients import Sanitizer
+from triton_viz.clients.symbolic_engine import SymbolicExpr
 from triton_viz.clients.sanitizer.report import _classify_layout_and_segments
 from triton_viz.clients.sanitizer.sanitizer import (
     NullSanitizer,
     SymbolicSanitizer,
     _fn_symbolic_cache_set,
 )
+
+_EXHAUSTIVE_TENSOR_BYTES = 128 * 1024**3
 
 
 # ======== Init Tests ===========
@@ -19,8 +26,11 @@ from triton_viz.clients.sanitizer.sanitizer import (
 def _isolate_sanitizer_cfg():
     """Save and restore cfg.enable_sanitizer around every test."""
     saved = cfg.enable_sanitizer
+    saved_exhaustive_mode = cfg.sanitizer_exhaustive_mode
     yield
     cfg.enable_sanitizer = saved
+    cfg.sanitizer_exhaustive_mode = saved_exhaustive_mode
+    SymbolicExpr.clear_exhaustive_scalar_inputs()
 
 
 def test_sanitizer_init(_isolate_sanitizer_cfg):
@@ -29,6 +39,71 @@ def test_sanitizer_init(_isolate_sanitizer_cfg):
 
     cfg.enable_sanitizer = False
     assert isinstance(Sanitizer(), NullSanitizer)
+
+
+def test_exhaustive_mode_config_and_constructor(_isolate_sanitizer_cfg):
+    cfg.sanitizer_exhaustive_mode = True
+    assert SymbolicSanitizer(abort_on_error=False).exhaustive_mode is True
+
+    assert (
+        SymbolicSanitizer(abort_on_error=False, exhaustive_mode=False).exhaustive_mode
+        is False
+    )
+
+    cfg.sanitizer_exhaustive_mode = False
+    assert (
+        SymbolicSanitizer(abort_on_error=False, exhaustive_mode=True).exhaustive_mode
+        is True
+    )
+
+
+def test_exhaustive_mode_widens_tensor_address_range(_isolate_sanitizer_cfg):
+    tensor = torch.empty(4, dtype=torch.int32)
+
+    normal = SymbolicSanitizer(abort_on_error=False, exhaustive_mode=False)
+    normal_start, normal_end, _ = normal._tensor_physical_addresses("x", tensor)[0]
+    assert normal_end - normal_start + 1 == (
+        (tensor.numel() - 1) * tensor.element_size() + 1
+    )
+
+    exhaustive = SymbolicSanitizer(abort_on_error=False, exhaustive_mode=True)
+    start, end, resolved = exhaustive._tensor_physical_addresses("x", tensor)[0]
+    assert start == tensor.data_ptr()
+    assert end - start + 1 == _EXHAUSTIVE_TENSOR_BYTES
+    assert resolved is tensor
+
+
+def _assert_scalar_range(arg, arg_cvt, lower: int, upper: int) -> None:
+    sanitizer = SymbolicSanitizer(abort_on_error=False, exhaustive_mode=True)
+    sanitizer.arg_callback("n", arg, arg_cvt)
+
+    expr = SymbolicExpr.from_value(arg_cvt)
+    z3_expr, constraints = expr.eval(simplify_constraints=False)
+
+    solver = Solver()
+    solver.add(constraints)
+    solver.push()
+    solver.add(z3_expr == lower)
+    assert solver.check() == sat
+    solver.pop()
+
+    solver.push()
+    solver.add(z3_expr == upper)
+    assert solver.check() == unsat
+    solver.pop()
+
+    SymbolicExpr.clear_exhaustive_scalar_inputs()
+
+
+def test_exhaustive_mode_signed_scalar_uses_dtype_range(_isolate_sanitizer_cfg):
+    _assert_scalar_range(3, _implicit_cvt(3), -(2**31), 2**31)
+
+
+def test_exhaustive_mode_unsigned_scalar_uses_dtype_range(_isolate_sanitizer_cfg):
+    arg_cvt = tl.tensor(
+        TensorHandle(np.array([1], dtype=np.uint32), tl.uint32), tl.uint32
+    )
+    _assert_scalar_range(1, arg_cvt, 0, 2**32)
 
 
 # ======== Launch-lifecycle regression tests ===========
