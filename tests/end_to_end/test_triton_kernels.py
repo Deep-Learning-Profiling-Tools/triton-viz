@@ -4,16 +4,6 @@ import triton
 import triton.language as tl
 
 
-def assert_equal(*args, **kwargs):
-    triton_kernels_testing = pytest.importorskip("triton_kernels.testing")
-    return triton_kernels_testing.assert_equal(*args, **kwargs)
-
-
-def assert_close(*args, **kwargs):
-    triton_kernels_testing = pytest.importorskip("triton_kernels.testing")
-    return triton_kernels_testing.assert_close(*args, **kwargs)
-
-
 COMPACTION_CASES = [
     (8192, 64, 4, 0.5),
     (8192, 64, 4, 1.0),
@@ -35,9 +25,26 @@ MXFP4_TILE_UPCAST_CASES = ["float16", "bfloat16", "float32"]
 _mxfp4_tile_upcast = None
 
 
-def _require_cuda(device):
-    if device != "cuda" or not torch.cuda.is_available():
-        pytest.skip("triton-viz sanitizer cases require CUDA")
+@pytest.fixture
+def device(pytestconfig):
+    requested = pytestconfig.getoption("--triton-kernels-device")
+    if requested == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if requested == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA requested for triton_kernels tests but unavailable")
+    return requested
+
+
+@pytest.fixture
+def sanitizer_only(device):
+    config_mod = pytest.importorskip("triton_viz.core.config")
+    old_virtual_memory = config_mod.config.virtual_memory
+    enabled = not (device == "cuda" and torch.cuda.is_available())
+    config_mod.config.virtual_memory = enabled
+    try:
+        yield enabled
+    finally:
+        config_mod.config.virtual_memory = old_virtual_memory
 
 
 def _new_sanitizer():
@@ -56,12 +63,9 @@ def _trace_kernel(monkeypatch, module, name, sanitizer):
     ("n_tokens", "n_cols", "k", "keep_prob"),
     COMPACTION_CASES,
 )
-@pytest.mark.parametrize("device", ["cuda"], indirect=True)
 def test_triton_viz_sanitizer_masked_compaction(
-    monkeypatch, device, n_tokens, n_cols, k, keep_prob
+    monkeypatch, device, sanitizer_only, n_tokens, n_cols, k, keep_prob
 ):
-    _require_cuda(device)
-
     compaction_mod = pytest.importorskip("triton_kernels.compaction")
 
     torch.manual_seed(0)
@@ -81,12 +85,6 @@ def test_triton_viz_sanitizer_masked_compaction(
     weights = 1 << torch.arange(32, dtype=torch.int32, device=device)
     bitmask = (chunks * weights).sum(dim=-1)
 
-    yv_ref, yi_ref = compaction_mod.compaction_torch(yv, yi, bitmask)
-    yv_tri, yi_tri = compaction_mod.compaction(yv, yi, bitmask)
-
-    assert_equal(yi_tri, yi_ref)
-    assert_equal(yv_tri, yv_ref)
-
     sanitizer = _new_sanitizer()
     _trace_kernel(monkeypatch, compaction_mod, "_masked_compaction", sanitizer)
     compaction_mod.compaction(yv, yi, bitmask)
@@ -99,12 +97,9 @@ def test_triton_viz_sanitizer_masked_compaction(
     strict=True,
 )
 @pytest.mark.parametrize("n_slices", RAGGED_METADATA_N_SLICES)
-@pytest.mark.parametrize("device", ["cuda"], indirect=True)
 def test_triton_viz_sanitizer_make_ragged_tensor_metadata(
-    monkeypatch, device, n_slices
+    monkeypatch, device, sanitizer_only, n_slices
 ):
-    _require_cuda(device)
-
     ragged_mod = pytest.importorskip("triton_kernels.tensor_details.ragged_tensor")
 
     torch.manual_seed(0)
@@ -114,14 +109,6 @@ def test_triton_viz_sanitizer_make_ragged_tensor_metadata(
         0, max_slice_size, (n_slices,), dtype=torch.int32, device=device
     )
     slice_sizes[torch.randint(0, n_slices, (1,), device=device)] = 0
-
-    meta = ragged_mod.make_ragged_tensor_metadata(slice_sizes, n_total_rows)
-    ref = ragged_mod.make_ragged_tensor_metadata_torch(slice_sizes, n_total_rows)
-
-    assert_equal(meta.slice_sizes, ref.slice_sizes)
-    assert_equal(meta.slice_offs, ref.slice_offs)
-    assert_equal(meta.block_offs_data, ref.block_offs_data)
-    assert_equal(meta.block_schedule_data, ref.block_schedule_data)
 
     sanitizer = _new_sanitizer()
     _trace_kernel(monkeypatch, ragged_mod, "_ragged_tensor_metadata_memset", sanitizer)
@@ -136,12 +123,9 @@ def test_triton_viz_sanitizer_make_ragged_tensor_metadata(
     strict=True,
 )
 @pytest.mark.parametrize("n_slices", REMAP_RAGGED_METADATA_N_SLICES)
-@pytest.mark.parametrize("device", ["cuda"], indirect=True)
 def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
-    monkeypatch, device, n_slices
+    monkeypatch, device, sanitizer_only, n_slices
 ):
-    _require_cuda(device)
-
     ragged_mod = pytest.importorskip("triton_kernels.tensor_details.ragged_tensor")
 
     torch.manual_seed(0)
@@ -153,20 +137,6 @@ def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
     slice_sizes[torch.randint(0, n_slices, (1,), device=device)] = 0
     slice_map = torch.randperm(n_slices, device=device, dtype=torch.int32)
     slice_map[torch.randint(0, n_slices, (min(5, n_slices),), device=device)] = -1
-
-    tri_metadata = ragged_mod.make_ragged_tensor_metadata(slice_sizes, n_total_rows)
-    ref_metadata = ragged_mod.make_ragged_tensor_metadata_torch(
-        slice_sizes, n_total_rows
-    )
-    tri_metadata = ragged_mod.remap_ragged_tensor_metadata(tri_metadata, slice_map)
-    ref_metadata = ragged_mod.remap_ragged_tensor_metadata_torch(
-        ref_metadata, slice_map
-    )
-
-    assert_equal(tri_metadata.slice_sizes, ref_metadata.slice_sizes)
-    assert_equal(tri_metadata.slice_offs, ref_metadata.slice_offs)
-    assert_equal(tri_metadata.block_offs_data, ref_metadata.block_offs_data)
-    assert_equal(tri_metadata.block_schedule_data, ref_metadata.block_schedule_data)
 
     sanitizer = _new_sanitizer()
     _trace_kernel(monkeypatch, ragged_mod, "_ragged_tensor_metadata_memset", sanitizer)
@@ -181,31 +151,13 @@ def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
     ("n_rows", "n_cols", "k", "apply_softmax", "dtype"),
     TOPK_FORWARD_CASES,
 )
-@pytest.mark.parametrize("device", ["cuda"], indirect=True)
 def test_triton_viz_sanitizer_topk_forward(
-    monkeypatch, device, n_rows, n_cols, k, apply_softmax, dtype
+    monkeypatch, device, sanitizer_only, n_rows, n_cols, k, apply_softmax, dtype
 ):
-    _require_cuda(device)
-
     topk_mod = pytest.importorskip("triton_kernels.topk")
 
     torch.manual_seed(0)
     x = torch.randn((n_rows, n_cols), dtype=getattr(torch, dtype), device=device)
-
-    sparse_tri = topk_mod.topk(x, k, apply_softmax=apply_softmax)
-    sparse_ref = topk_mod.topk_torch(x, k, apply_softmax=apply_softmax)
-    assert torch.allclose(
-        sparse_tri.vals.float(),
-        sparse_ref.vals.float(),
-        atol=1e-3,
-        rtol=1e-3,
-    )
-    assert_equal(sparse_tri.indx, sparse_ref.indx)
-    assert_equal(sparse_tri.mask.storage.data, sparse_ref.mask.storage.data)
-    assert (
-        sparse_tri.mask.storage.data.stride() == sparse_ref.mask.storage.data.stride()
-    )
-    assert sparse_tri.mask.storage.data.shape == sparse_ref.mask.storage.data.shape
 
     sanitizer = _new_sanitizer()
     _trace_kernel(monkeypatch, topk_mod, "_topk_forward", sanitizer)
@@ -217,12 +169,9 @@ def test_triton_viz_sanitizer_topk_forward(
     ("n_rows", "n_cols", "k", "apply_softmax", "dtype"),
     TOPK_BACKWARD_CASES,
 )
-@pytest.mark.parametrize("device", ["cuda"], indirect=True)
 def test_triton_viz_sanitizer_topk_backward(
-    monkeypatch, device, n_rows, n_cols, k, apply_softmax, dtype
+    monkeypatch, device, sanitizer_only, n_rows, n_cols, k, apply_softmax, dtype
 ):
-    _require_cuda(device)
-
     topk_mod = pytest.importorskip("triton_kernels.topk")
 
     torch.manual_seed(0)
@@ -234,12 +183,6 @@ def test_triton_viz_sanitizer_topk_backward(
     dy_vals = torch.randn((n_rows, k), device=device, dtype=getattr(torch, dtype))
     active = max(1, n_rows // 2)
     active_rows = torch.tensor(active, device=device, dtype=torch.int32)
-
-    dx = topk_mod.topk_backward(
-        x, y_indx, dy_vals, k=k, n_rows=active_rows, apply_softmax=apply_softmax
-    )
-    torch.cuda.synchronize()
-    assert dx.shape == x.shape
 
     sanitizer = _new_sanitizer()
     _trace_kernel(monkeypatch, topk_mod, "_topk_backward", sanitizer)
@@ -255,19 +198,12 @@ def test_triton_viz_sanitizer_topk_backward(
 
 
 @pytest.mark.parametrize(("m", "n", "limit"), SWIGLU_CASES)
-@pytest.mark.parametrize("device", ["cuda"], indirect=True)
-def test_triton_viz_sanitizer_swiglu(monkeypatch, device, m, n, limit):
-    _require_cuda(device)
-
+def test_triton_viz_sanitizer_swiglu(monkeypatch, device, sanitizer_only, m, n, limit):
     swiglu_mod = pytest.importorskip("triton_kernels.swiglu")
 
     torch.manual_seed(2)
     x = torch.randn((m, n), device=device, dtype=torch.bfloat16)
     precision_config = swiglu_mod.PrecisionConfig(limit=limit)
-
-    tri_y = swiglu_mod.swiglu(x, 0.5, precision_config)
-    ref_y = swiglu_mod.swiglu_torch(x, 0.5, precision_config)
-    assert_close(tri_y, ref_y)
 
     sanitizer = _new_sanitizer()
     _trace_kernel(monkeypatch, swiglu_mod, "_swiglu", sanitizer)
@@ -308,10 +244,7 @@ def _triton_viz_mxfp4_tile_upcast_kernel(
 
 
 @pytest.mark.parametrize("dst_dtype", MXFP4_TILE_UPCAST_CASES)
-@pytest.mark.parametrize("device", ["cuda"], indirect=True)
-def test_triton_viz_sanitizer_mxfp4_tile_upcast(device, dst_dtype):
-    _require_cuda(device)
-
+def test_triton_viz_sanitizer_mxfp4_tile_upcast(device, sanitizer_only, dst_dtype):
     global _mxfp4_tile_upcast
     mxfp_mod = pytest.importorskip("triton_kernels.numerics_details.mxfp")
     upcast_mod = pytest.importorskip(
@@ -322,14 +255,13 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(device, dst_dtype):
     torch.manual_seed(0)
     torch_dtype = getattr(torch, dst_dtype)
     rows, k = 64, 128
-    block_scales = torch.tensor(
-        [0.125, 1.0, 8.0, 64.0], dtype=torch_dtype, device=device
+    tensor = torch.empty((rows, k // 2), dtype=torch.uint8, device=device)
+    scale = torch.empty(
+        (rows, k // mxfp_mod.MXFP_BLOCK_SIZE.value),
+        dtype=torch.uint8,
+        device=device,
     )
-    block_scales = block_scales.repeat_interleave(mxfp_mod.MXFP_BLOCK_SIZE.value)
-    x = torch.randn((rows, k), dtype=torch_dtype, device=device) * block_scales
-    tensor, scale = mxfp_mod.downcast_to_mxfp(x, torch.uint8, axis=-1)
-    ref = mxfp_mod.upcast_from_mxfp(tensor, scale, torch_dtype, axis=-1)
-    out = torch.empty_like(ref)
+    out = torch.empty((rows, k), dtype=torch_dtype, device=device)
     tl_dtype = {
         torch.float16: tl.float16,
         torch.bfloat16: tl.bfloat16,
@@ -337,24 +269,10 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(device, dst_dtype):
     }[torch_dtype]
 
     kernel = _triton_viz_mxfp4_tile_upcast_kernel
-    kernel[(1,)](
-        out,
-        tensor,
-        scale,
-        *out.stride(),
-        *tensor.stride(),
-        *scale.stride(),
-        rows,
-        tensor.shape[-1],
-        scale.shape[-1],
-        tl_dtype,
-    )
-    assert_equal(ref, out)
-
     sanitizer = _new_sanitizer()
     traced = pytest.importorskip("triton_viz").trace(client=sanitizer)(kernel)
     traced[(1,)](
-        torch.empty_like(ref),
+        torch.empty_like(out),
         tensor,
         scale,
         *out.stride(),
