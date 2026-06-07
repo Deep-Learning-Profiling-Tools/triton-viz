@@ -118,6 +118,7 @@ class Client(ABC):
 class ClientManager:
     def __init__(self, clients: list[Client] | None = None):
         self.clients: dict[str, Client] = {}
+        self._client_values: tuple[Client, ...] = ()
         if clients:
             self.add_clients(clients)
         self.launch = Launch()
@@ -140,6 +141,7 @@ class ClientManager:
             )
             if not duplicate:
                 self.clients[new_client.NAME] = new_client
+        self._client_values = tuple(self.clients.values())
 
     @contextmanager
     def patch_warmup(self, jit_fn):
@@ -201,13 +203,27 @@ class ClientManager:
                 unpatch_lang(frontend_name)
 
     def pre_run_callback(self, fn: Callable) -> bool:
+        if cfg.num_sms <= 1:
+            if len(self._client_values) == 1:
+                return self._client_values[0].pre_run_callback(fn)
+            rets = [client.pre_run_callback(fn) for client in self._client_values]
+            return all(rets) if rets else True
         with self._lock_context():
-            rets = [client.pre_run_callback(fn) for client in self.clients.values()]
+            if len(self._client_values) == 1:
+                return self._client_values[0].pre_run_callback(fn)
+            rets = [client.pre_run_callback(fn) for client in self._client_values]
             return all(rets) if rets else True
 
     def post_run_callback(self, fn: Callable) -> bool:
+        if cfg.num_sms <= 1:
+            if len(self._client_values) == 1:
+                return self._client_values[0].post_run_callback(fn)
+            rets = [client.post_run_callback(fn) for client in self._client_values]
+            return any(rets)
         with self._lock_context():
-            rets = [client.post_run_callback(fn) for client in self.clients.values()]
+            if len(self._client_values) == 1:
+                return self._client_values[0].post_run_callback(fn)
+            rets = [client.post_run_callback(fn) for client in self._client_values]
             return any(rets)
 
     def finalize(self) -> None:
@@ -222,29 +238,43 @@ class ClientManager:
         with self._lock_context():
             if hasattr(arg, "data_ptr"):
                 self.launch.tensors.add(arg)
-            for client in self.clients.values():
+            for client in self._client_values:
                 client.arg_callback(name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int]):
         with self._lock_context():
             self.launch.grid = grid
-            for client in self.clients.values():
+            for client in self._client_values:
                 client.grid_callback(grid)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
+        if cfg.num_sms <= 1:
+            if len(self._client_values) == 1:
+                self._client_values[0].grid_idx_callback(grid_idx)
+                return
+            for client in self._client_values:
+                client.grid_idx_callback(grid_idx)
+            return
         with self._lock_context():
-            for client in self.clients.values():
+            if len(self._client_values) == 1:
+                self._client_values[0].grid_idx_callback(grid_idx)
+                return
+            for client in self._client_values:
                 client.grid_idx_callback(grid_idx)
 
     # --- For-loop callback management ---
 
     def _clear_loop_hooks(self) -> None:
         self._range_type_hooks: list[Callable] = []
+        self._range_type_hook: Callable | None = None
         self._before: list[Callable] = []
+        self._before_hook: Callable | None = None
         self._iter_listeners: list[Callable] = []
+        self._iter_listener: Callable | None = None
         self._iter_overrider: Callable | None = None
         self._range_wrapper_factory: Callable | None = None
         self._after: list[Callable] = []
+        self._after_hook: Callable | None = None
 
     def _populate_loop_hooks(self, callbacks_list: list[ForLoopCallbacks]) -> None:
         self._clear_loop_hooks()
@@ -265,12 +295,26 @@ class ClientManager:
                 self._range_wrapper_factory = cb.range_wrapper_factory
             if cb.after_loop_callback is not None:
                 self._after.append(cb.after_loop_callback)
+        if len(self._range_type_hooks) == 1:
+            self._range_type_hook = self._range_type_hooks[0]
+        if len(self._before) == 1:
+            self._before_hook = self._before[0]
+        if len(self._iter_listeners) == 1:
+            self._iter_listener = self._iter_listeners[0]
+        if len(self._after) == 1:
+            self._after_hook = self._after[0]
 
     def range_type(self, lineno: int, range_type: str) -> None:
+        if self._range_type_hook is not None:
+            self._range_type_hook(lineno, range_type)
+            return
         for hook in self._range_type_hooks:
             hook(lineno, range_type)
 
     def before_loop(self, lineno: int, iterable: Any) -> None:
+        if self._before_hook is not None:
+            self._before_hook(lineno, iterable)
+            return
         for hook in self._before:
             hook(lineno, iterable)
 
@@ -280,12 +324,18 @@ class ClientManager:
             if new_idx is not None:
                 idx = new_idx
 
-        for hook in self._iter_listeners:
-            hook(lineno, idx)
+        if self._iter_listener is not None:
+            self._iter_listener(lineno, idx)
+        else:
+            for hook in self._iter_listeners:
+                hook(lineno, idx)
 
         return idx
 
     def after_loop(self, lineno: int) -> None:
+        if self._after_hook is not None:
+            self._after_hook(lineno)
+            return
         for hook in self._after:
             hook(lineno)
 

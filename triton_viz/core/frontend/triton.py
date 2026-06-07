@@ -32,7 +32,6 @@ from triton.runtime.interpreter import (
 )
 from triton.tools.tensor_descriptor import TensorDescriptor
 
-from ..callbacks import OpCallbacks
 from ..config import config as cfg
 from ..data import (
     AddPtr,
@@ -253,6 +252,11 @@ class TritonFrontend(Frontend):
         self._loop_ast_methods: dict[str, Callable | object] = {}
         self._loop_ast_patched = False
         self._patch_calls_scope = 0
+        self._triton_language_targets = tuple(self._triton_language_attr_targets())
+        self._triton_extra_modules = self._triton_extra_builtin_modules()
+        self._triton_builtin_attr_cache: dict[int, tuple[str, ...]] = {}
+        self._math_op_types = frozenset(self.namespaces[tl.math].values())
+        self._tl_op_types = frozenset(self.namespaces[tl].values())
         self._bind_interpreter_builder_thread_state()
 
     def _bind_interpreter_builder_thread_state(self) -> None:
@@ -421,10 +425,18 @@ class TritonFrontend(Frontend):
         # Triton's interpreter patch mutates global tl/tl.core objects. Snapshot
         # both unconditionally so nested or generated JIT functions without a
         # direct `tl` global still restore the language state after tracing.
-        for obj, attrs in self._triton_language_attr_targets():
-            for name, member in inspect.getmembers(obj):
-                if tl.core.is_builtin(member):
-                    scope.set_attr(obj, name, member)
+        for obj, attrs in self._triton_language_targets:
+            obj_id = id(obj)
+            builtin_names = self._triton_builtin_attr_cache.get(obj_id)
+            if builtin_names is None:
+                builtin_names = tuple(
+                    name
+                    for name, member in inspect.getmembers(obj)
+                    if tl.core.is_builtin(member)
+                )
+                self._triton_builtin_attr_cache[obj_id] = builtin_names
+            for name in builtin_names:
+                scope.set_attr(obj, name, getattr(obj, name))
             for attr in attrs:
                 if hasattr(obj, attr):
                     scope.set_attr(obj, attr, getattr(obj, attr))
@@ -727,6 +739,22 @@ class TritonFrontend(Frontend):
         return cls._to_triton_dtype(value)
 
     def normalize_symbolic_value(self, value: Any) -> Any:
+        if isinstance(
+            value,
+            (
+                SymbolicTensorValue,
+                SymbolicScalarDType,
+                SymbolicPointerDType,
+                SymbolicTypeSpec,
+                int,
+                np.integer,
+                bool,
+                float,
+                np.floating,
+                type(None),
+            ),
+        ):
+            return value
         if isinstance(value, tl.core.tensor):
             value = value.handle
         if isinstance(value, TensorHandle):
@@ -809,15 +837,13 @@ class TritonFrontend(Frontend):
         self,
         op: Callable,
         op_type: type[Op],
-        callbacks: OpCallbacks,
+        op_overrider: Callable,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ):
-        op_overrider = callbacks.op_overrider
-        assert op_overrider is not None
-        if op_type in self.namespaces[tl.math].values():
+        if op_type in self._math_op_types:
             raise NotImplementedError("Patching math ops not yet supported")
-        elif op_type in self.namespaces[tl].values():
+        elif op_type in self._tl_op_types:
             # see triton.runtime.interpreter:ReduceOps.sum
             # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
             # Then, convert return value from TensorHandle to tl.tensor
@@ -825,6 +851,9 @@ class TritonFrontend(Frontend):
             return self._wrap_tl_ret(ret, args[0].dtype)
 
         return op_overrider(*args, **kwargs)
+
+    def can_call_op_overrider_directly(self, op_type: type[Op]) -> bool:
+        return op_type not in self._math_op_types and op_type not in self._tl_op_types
 
     def patch_for_loop(self) -> None:
         if self._loop_ast_patched:
@@ -869,7 +898,7 @@ class TritonFrontend(Frontend):
         # restore metadata for nested/generated kernels.
         scope = self._triton_snapshot_scope(fn)
         triton_patch_lang(fn)
-        for module in self._triton_extra_builtin_modules():
+        for module in self._triton_extra_modules:
             _patch_builtin(module, interpreter_builder, scope)
         self._patch_triton_inline_asm(scope)
         self._patch_triton_semantic_to_tensor(scope)
@@ -1001,8 +1030,19 @@ class TritonFrontend(Frontend):
             if cfg.enable_timing:
                 start_time = time.time()
 
+            disable_sanitize_overflow = (
+                client_manager.get_client("sanitizer") is not None
+            )
             old_num_warps = getattr(self.builder.options, "num_warps", _MISSING)
+            old_sanitize_overflow = getattr(
+                self.builder.options, "sanitize_overflow", _MISSING
+            )
             object.__setattr__(self.builder.options, "num_warps", launch_num_warps)
+            if disable_sanitize_overflow:
+                # Sanitizer validates memory addresses. Triton's interpreter
+                # integer-overflow device_asserts create extra symbolic trees
+                # unrelated to OOB reporting, so keep them off for this launch.
+                object.__setattr__(self.builder.options, "sanitize_overflow", False)
             try:
                 self._run_grid(
                     grid_executor,
@@ -1020,6 +1060,14 @@ class TritonFrontend(Frontend):
                         "num_warps",
                         old_num_warps,
                     )
+                if old_sanitize_overflow is _MISSING:
+                    object.__delattr__(self.builder.options, "sanitize_overflow")
+                else:
+                    object.__setattr__(
+                        self.builder.options,
+                        "sanitize_overflow",
+                        old_sanitize_overflow,
+                    )
 
             if cfg.enable_timing:
                 end_time = time.time()
@@ -1036,6 +1084,12 @@ class TritonFrontend(Frontend):
             self._current_client_manager = previous_client_manager
 
     def _jit_function_call(self, jit_function, *args, **kwargs):
+        if (
+            self._current_client_manager is not None
+            and not self._jit_function_needs_lang_patch(jit_function)
+        ):
+            return jit_function.fn(*args, **kwargs)
+
         scope = self.patch_lang(
             jit_function.fn,
             client_manager=self._current_client_manager,
@@ -1044,6 +1098,15 @@ class TritonFrontend(Frontend):
             return jit_function.fn(*args, **kwargs)
         finally:
             scope.restore()
+
+    @staticmethod
+    def _jit_function_needs_lang_patch(jit_function) -> bool:
+        langs = [
+            value
+            for value in jit_function.fn.__globals__.values()
+            if inspect.ismodule(value) and value in (tl, tl.core)
+        ]
+        return not langs or any(lang is tl.core for lang in langs)
 
     @contextmanager
     def patch_calls(self):
