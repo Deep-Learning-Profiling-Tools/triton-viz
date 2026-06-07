@@ -9,6 +9,7 @@ from typing import (
 )
 import sys
 
+import numpy as np
 from torch import Tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
 from z3 import And, BoolVal, Not, Or, sat
@@ -20,6 +21,7 @@ from ...core.data import (
     Op,
     Load,
     Store,
+    TensorPointerStore,
 )
 from ..symbolic_engine import (
     SymbolicExpr,
@@ -42,6 +44,7 @@ from .report import (
     print_oob_record_pdb_style,
 )
 from ...core.config import config as cfg
+from ...core.symbolic_metadata import SymbolicTensorValue
 
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
 
@@ -159,7 +162,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         SymbolicClient.grid_idx_callback(self, grid_idx)
 
     def finalize(self) -> list:
-        return SymbolicClient.finalize(self)
+        try:
+            return SymbolicClient.finalize(self)
+        finally:
+            self._clear_cache()
+            self._clear_symbolic_launch_state()
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return SymbolicClient.register_for_loop_callback(self)
@@ -171,7 +178,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         return SymbolicClient.register_op_callback(self, op_type)
 
     def post_run_callback(self, fn: Callable) -> bool:
-        return SymbolicClient.post_run_callback(self, fn)
+        if self.need_full_grid is None:
+            self.need_full_grid = False
+        ret = self.need_full_grid
+        self.need_full_grid = None
+        return ret
 
     # ── Sanitizer-specific hook overrides ─────────────────────────
 
@@ -180,6 +191,12 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         # per-access push/pop scope, because it may need tensor-specific
         # ranges instead of the global union of all registered tensors.
         return BoolVal(True)
+
+    def _build_global_addr_ok_at_grid(self) -> bool:
+        # Sanitizer almost always checks tensor-specific ranges via
+        # ``_addr_ok_for_expr``. Defer the more expensive global union until an
+        # unresolved pointer expression actually needs the fallback.
+        return False
 
     def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
         # TODO: init a reserved_args field per frontend to filter out these args
@@ -211,6 +228,73 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         # the launch.
         self.cache_grid = tuple(int(g) for g in grid)
         SymbolicClient.grid_callback(self, grid)
+
+    def _op_store_overrider(self, ptr, value, mask, *args):
+        del value, args
+        ptr = self._materialize_memory_operand(ptr)
+        mask = self._materialize_memory_operand(mask)
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
+        # Store values do not affect address validity. Avoiding the value
+        # subtree keeps sanitizer store checks focused on pointer + mask.
+        ret = SymbolicExpr.create("store", ptr_sym, None, mask_sym)
+
+        if self._check_concrete_ptr_access(ptr_sym, mask_sym, ret):
+            return ret
+
+        self._handle_access_check(ret, Store, "write")
+        return ret
+
+    def _op_tensor_pointer_store_overrider(
+        self, ptr, value, boundary_check, cache_modifier, eviction_policy
+    ):
+        del value, cache_modifier, eviction_policy
+        ptr = self._materialize_memory_operand(ptr)
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        ret = SymbolicExpr.create("tensor_pointer_store", ptr_sym, None, boundary_check)
+        self._handle_access_check(ret, TensorPointerStore, "write")
+        return ret
+
+    def _check_concrete_ptr_access(
+        self,
+        ptr_sym: SymbolicExpr,
+        mask_sym: SymbolicExpr | None,
+        access_expr: SymbolicExpr,
+    ) -> bool:
+        concrete_addrs = self._concrete_ptr_addrs(ptr_sym, mask_sym)
+        if concrete_addrs is None:
+            return False
+        self._check_concrete_addr_values(concrete_addrs, access_expr, None)
+        return True
+
+    def _concrete_ptr_addrs(
+        self, ptr_sym: SymbolicExpr, mask_sym: SymbolicExpr | None
+    ) -> list[int] | None:
+        if ptr_sym.op != "const":
+            return None
+        ptr_value = getattr(ptr_sym, "value", None)
+        if not isinstance(ptr_value, SymbolicTensorValue):
+            return None
+
+        addrs = np.asarray(ptr_value.data, dtype=np.uint64).reshape(-1)
+        if mask_sym is None:
+            return [int(addr) for addr in addrs]
+
+        if mask_sym.op != "const":
+            return None
+        mask_value = getattr(mask_sym, "value", None)
+        if isinstance(mask_value, SymbolicTensorValue):
+            mask = np.asarray(mask_value.data, dtype=bool)
+        elif isinstance(mask_value, (bool, int, np.integer)):
+            mask = np.asarray(mask_value, dtype=bool)
+        else:
+            return None
+
+        try:
+            mask = np.broadcast_to(mask, ptr_value.data.shape).reshape(-1)
+        except ValueError:
+            return None
+        return [int(addr) for addr, active in zip(addrs, mask) if active]
 
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
@@ -261,6 +345,8 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
         resolved_tensor = self._resolve_tensor(symbolic_expr)
         if resolved_tensor is None:
+            if self.addr_ok is None or self.addr_ok.eq(BoolVal(False)):
+                self.addr_ok = self._build_global_addr_ok(addr_sym)
             return self.addr_ok
 
         cache_key = id(resolved_tensor)
@@ -286,6 +372,19 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         symbolic_expr: SymbolicExpr,
         source_location: tuple[str, int, str] | None = None,
     ) -> None:
+        if (
+            expr_constraints is None
+            and (
+                isinstance(access_addr, IntNumRef)
+                or (
+                    isinstance(access_addr, list)
+                    and (not access_addr or isinstance(access_addr[0], IntNumRef))
+                )
+            )
+            and self._check_concrete_addr(access_addr, symbolic_expr, source_location)
+        ):
+            return
+
         # Use push/pop on persistent solver
         solver = self.solver
         addr_sym = self.addr_sym
@@ -332,6 +431,92 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         finally:
             solver.pop()
 
+    def _check_concrete_addr(
+        self,
+        access_addr: Z3Expr,
+        symbolic_expr: SymbolicExpr,
+        source_location: tuple[str, int, str] | None,
+    ) -> bool:
+        if isinstance(access_addr, list):
+            concrete_addrs = []
+            for addr in access_addr:
+                if not isinstance(addr, IntNumRef):
+                    return False
+                concrete_addrs.append(addr.as_long())
+        elif isinstance(access_addr, IntNumRef):
+            concrete_addrs = [access_addr.as_long()]
+        else:
+            return False
+        return self._check_concrete_addr_values(
+            concrete_addrs, symbolic_expr, source_location
+        )
+
+    def _check_concrete_addr_values(
+        self,
+        concrete_addrs: list[int],
+        symbolic_expr: SymbolicExpr,
+        source_location: tuple[str, int, str] | None,
+    ) -> bool:
+        if not concrete_addrs:
+            return True
+
+        min_addr = min(concrete_addrs)
+        max_addr = max(concrete_addrs)
+        tensor = self._resolve_tensor(symbolic_expr)
+        if tensor is None:
+            ranges = [(start, end, tensor) for start, end, tensor in self.tensor_addrs]
+        else:
+            ranges = [
+                (start, end, range_tensor)
+                for start, end, range_tensor in self.tensor_addrs
+                if range_tensor is tensor
+            ]
+        if not ranges:
+            return False
+
+        if len(ranges) == 1:
+            start, end, _ = ranges[0]
+            if min_addr >= start and max_addr <= end:
+                return True
+            violation_addr = next(
+                addr for addr in concrete_addrs if addr < start or addr > end
+            )
+            report_tensor = (
+                tensor
+                if tensor is not None
+                else self._find_tensor_for_expr(symbolic_expr, violation_addr)
+            )
+            op_type: type[Load] | type[Store]
+            if symbolic_expr.op in ("store", "tensor_pointer_store"):
+                op_type = Store
+            else:
+                op_type = Load
+            self._report(
+                op_type,
+                report_tensor,
+                violation_addr,
+                symbolic_expr,
+                source_location,
+            )
+            return True
+
+        for addr in concrete_addrs:
+            if any(start <= addr <= end for start, end, _ in ranges):
+                continue
+            report_tensor = (
+                tensor
+                if tensor is not None
+                else self._find_tensor_for_expr(symbolic_expr, addr)
+            )
+            if symbolic_expr.op in ("store", "tensor_pointer_store"):
+                op_type = Store
+            else:
+                op_type = Load
+            self._report(op_type, report_tensor, addr, symbolic_expr, source_location)
+            return True
+
+        return True
+
     def _handle_access_check(
         self,
         expr: SymbolicExpr,
@@ -345,11 +530,21 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         ``_check_range_satisfiable`` for historical compatibility, and it
         doesn't distinguish reads vs writes at the Z3 level.
         """
-        z3_addr, z3_constraints = expr.eval()
         if not self.loop_stack:
+            expr_signature = hash(("expr", expr.signature()))
+            if expr_signature in self.access_check_cache:
+                return
+            z3_addr, z3_constraints = expr.eval()
+            z3_signature = hash(("z3", _make_signature(z3_addr, z3_constraints)))
+            if z3_signature in self.access_check_cache:
+                self.access_check_cache.add(expr_signature)
+                return
+            self.access_check_cache.add(expr_signature)
+            self.access_check_cache.add(z3_signature)
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)
             return
 
+        z3_addr, z3_constraints = expr.eval()
         ctx = self.loop_stack[-1]
         signature = _make_signature(z3_addr, z3_constraints)
         pending_idx = ctx.signature_cache.get(signature)
