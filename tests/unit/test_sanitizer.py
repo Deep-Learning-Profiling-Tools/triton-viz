@@ -3,6 +3,8 @@ import pytest
 import torch
 from typing import cast
 
+from z3 import BoolVal, Int, IntVal
+
 from triton_viz.core.config import config as cfg
 from triton_viz.core.data import Store
 from triton_viz.core.symbolic_metadata import (
@@ -19,7 +21,8 @@ from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     _fn_symbolic_cache_set,
 )
-from triton_viz.clients.symbolic_engine import SymbolicExpr
+from triton_viz.clients.sanitizer.ir_analysis import LoopRangeSummary
+from triton_viz.clients.symbolic_engine import LoopContext, SymbolicExpr
 
 
 # ======== Init Tests ===========
@@ -103,6 +106,22 @@ def test_pre_run_callback_cache_miss_on_grid_change(_isolate_fn_symbolic_cache):
     _populate_for_launch(b, (4, 1, 1))
     assert b.pre_run_callback(kernel) is True
     assert len(_isolate_fn_symbolic_cache) == 2
+
+
+def test_pre_run_callback_prepares_loop_summaries(_isolate_fn_symbolic_cache):
+    def kernel():
+        for i in range(8):
+            _ = i
+
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    _populate_for_launch(sanitizer, (1, 1, 1))
+
+    assert sanitizer.pre_run_callback(kernel) is True
+
+    summaries = list(sanitizer.loop_range_summaries.values())
+    assert len(summaries) == 1
+    assert summaries[0].target == "i"
+    assert summaries[0].trip_count == 8
 
 
 def test_post_run_callback_preserves_state_mid_full_grid():
@@ -200,6 +219,82 @@ def test_concrete_ptr_access_respects_masked_lanes():
     assert len(sanitizer.records) == 1
     assert sanitizer.records[0].op_type is Store
     assert sanitizer.records[0].violation_address == end + tensor.element_size()
+
+
+def test_loop_access_summary_skips_duplicate_eval():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    sanitizer.loop_range_summaries[123] = LoopRangeSummary(
+        lineno=123,
+        target="i",
+        range_type="python_range",
+        start=0,
+        stop=8,
+        step=1,
+    )
+    loop_i = Int("loop_i_test")
+    sanitizer.loop_stack.append(
+        LoopContext(
+            lineno=123,
+            length=8,
+            idx=object(),
+            idx_z3=loop_i,
+            iterator_constraint=BoolVal(True),
+        )
+    )
+
+    class AccessExpr:
+        op = "load"
+        eval_count = 0
+
+        def signature(self):
+            return 42
+
+        def has_op(self, op):
+            return False
+
+        def eval(self):
+            self.eval_count += 1
+            return IntVal(0), None
+
+    access = AccessExpr()
+
+    sanitizer._handle_access_check(cast(SymbolicExpr, access), Store, "read")
+    sanitizer._handle_access_check(cast(SymbolicExpr, access), Store, "read")
+
+    ctx = sanitizer.loop_stack[-1]
+    assert access.eval_count == 1
+    assert len(ctx.pending_checks) == 1
+    assert len(ctx.access_summary_cache) == 1
+
+
+def test_loop_access_summary_uses_runtime_length_for_dynamic_ir_bound():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    sanitizer.loop_range_summaries[123] = LoopRangeSummary(
+        lineno=123,
+        target="i",
+        range_type="python_range",
+        start=0,
+        stop=None,
+        step=1,
+    )
+    loop_i = Int("loop_i_dynamic_bound")
+    ctx = LoopContext(
+        lineno=123,
+        length=8,
+        idx=object(),
+        idx_z3=loop_i,
+        iterator_constraint=BoolVal(True),
+    )
+
+    class AccessExpr:
+        op = "load"
+
+        def has_op(self, op):
+            return False
+
+    assert sanitizer._should_use_loop_access_summary(
+        ctx, cast(SymbolicExpr, AccessExpr())
+    )
 
 
 # ======== Report Layout Classification Tests ===========

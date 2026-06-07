@@ -209,6 +209,7 @@ class LoopContext:
     step: int = 1
     current_value: int | None = None
     signature_cache: dict[int, int] = field(default_factory=dict)
+    access_summary_cache: dict[int, int] = field(default_factory=dict)
     pending_checks: list[PendingCheck] = field(default_factory=list)
 
 

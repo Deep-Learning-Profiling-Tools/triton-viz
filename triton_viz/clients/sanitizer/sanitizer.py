@@ -43,6 +43,7 @@ from .report import (
     print_oob_record,
     print_oob_record_pdb_style,
 )
+from .ir_analysis import LoopRangeSummary, summarize_loop_structure
 from ...core.config import config as cfg
 from ...core.symbolic_metadata import SymbolicTensorValue
 
@@ -153,6 +154,8 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.records: list[OutOfBoundsRecordZ3] = []
         self.cache_args: list[Any] = []
         self.cache_grid: tuple[int, ...] | None = None
+        self.loop_range_summaries: dict[int, LoopRangeSummary] = {}
+        self.loop_summary_fn_id: int | None = None
 
     # Explicit forwarders to SymbolicClient: the Sanitizer factory
     # carries concrete stubs (NotImplementedError or ``return True``) to
@@ -302,9 +305,44 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             self._clear_cache()
             if fn_cache not in _fn_symbolic_cache_set:
                 _fn_symbolic_cache_set.add(fn_cache)
+                self._prepare_loop_summaries(fn)
                 return True
             return False
+        self._prepare_loop_summaries(fn)
         return SymbolicClient.pre_run_callback(self, fn)
+
+    def _prepare_loop_summaries(self, fn: Callable) -> None:
+        fn_id = id(fn)
+        if self.loop_summary_fn_id == fn_id:
+            return
+        self.loop_summary_fn_id = fn_id
+        try:
+            summaries = summarize_loop_structure(fn)
+        except (OSError, TypeError, SyntaxError):
+            self.loop_range_summaries = {}
+            return
+        self.loop_range_summaries = {summary.lineno: summary for summary in summaries}
+
+    def _should_use_loop_access_summary(
+        self, ctx: LoopContext, expr: SymbolicExpr
+    ) -> bool:
+        summary = self.loop_range_summaries.get(ctx.lineno)
+        if summary is None:
+            return False
+        # Static source analysis identifies whether this source line is a loop
+        # shape we understand. Runtime wrapping has already materialized
+        # constexpr-dependent bounds, so use ctx.length when the source contains
+        # non-literal bounds such as range(0, OUTER) or range(K // TILE_SIZE).
+        trip_count = (
+            summary.trip_count if summary.trip_count is not None else ctx.length
+        )
+        if trip_count < 8:
+            return False
+        return (
+            expr.op not in ("tensor_pointer_load", "tensor_pointer_store")
+            and not expr.has_op("make_block_ptr")
+            and not expr.has_op("advance")
+        )
 
     def _find_tensor_for_expr(
         self, symbolic_expr: SymbolicExpr, violation_addr: int
@@ -544,8 +582,17 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)
             return
 
-        z3_addr, z3_constraints = expr.eval()
         ctx = self.loop_stack[-1]
+        access_summary: int | None = None
+        if self._should_use_loop_access_summary(ctx, expr):
+            access_summary = hash(("loop-access", expr.signature()))
+            pending_idx = ctx.access_summary_cache.get(access_summary)
+            if pending_idx is not None:
+                if cfg.verbose:
+                    print(f"[{self.LOG_TAG}]  ↪ skip duplicated addr summary in loop")
+                return
+
+        z3_addr, z3_constraints = expr.eval()
         signature = _make_signature(z3_addr, z3_constraints)
         pending_idx = ctx.signature_cache.get(signature)
         if pending_idx is None:
@@ -561,7 +608,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
                 source_location=source_location,
             )
             ctx.pending_checks.append(pending_check)
+            if access_summary is not None:
+                ctx.access_summary_cache[access_summary] = len(ctx.pending_checks) - 1
         else:
+            if access_summary is not None:
+                ctx.access_summary_cache[access_summary] = pending_idx
             if cfg.verbose:
                 print(f"[{self.LOG_TAG}]  ↪ skip duplicated addr in loop")
 
