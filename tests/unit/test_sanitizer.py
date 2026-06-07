@@ -1,8 +1,17 @@
+import numpy as np
 import pytest
 import torch
 from typing import cast
 
 from triton_viz.core.config import config as cfg
+from triton_viz.core.data import Store
+from triton_viz.core.symbolic_metadata import (
+    INT1,
+    INT32,
+    SymbolicTensorValue,
+    pointer_type,
+    type_spec,
+)
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.report import _classify_layout_and_segments
 from triton_viz.clients.sanitizer.sanitizer import (
@@ -10,6 +19,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     _fn_symbolic_cache_set,
 )
+from triton_viz.clients.symbolic_engine import SymbolicExpr
 
 
 # ======== Init Tests ===========
@@ -36,8 +46,8 @@ def test_sanitizer_init(_isolate_sanitizer_cfg):
 # These guard the two spots that break most easily when SymbolicClient's
 # launch-lifecycle machinery is reshuffled:
 #   1. the cross-launch fn cache (sanitizer's pre_run_callback short-circuit)
-#   2. the post_run_callback guard that must NOT wipe launch state mid-
-#      full-grid enumeration.
+#   2. launch cleanup happens at finalize, after concurrent block workers are
+#      done with the shared tensor registry.
 
 
 @pytest.fixture
@@ -123,8 +133,8 @@ def test_post_run_callback_preserves_state_mid_full_grid():
     assert sanitizer.cache_grid == (4, 1, 1)
 
 
-def test_post_run_callback_clears_state_on_last_block():
-    """On the final block we DO want launch state cleared."""
+def test_finalize_clears_state_after_last_block():
+    """Launch state is cleared at finalize, not inside a block callback."""
     sanitizer = SymbolicSanitizer(abort_on_error=False)
 
     sentinel_tensor = object()
@@ -138,13 +148,58 @@ def test_post_run_callback_clears_state_on_last_block():
     sanitizer.grid_idx = (3, 0, 0)  # final block
     sanitizer.need_full_grid = True
 
-    sanitizer.post_run_callback(lambda: None)
+    assert sanitizer.post_run_callback(lambda: None) is True
+
+    assert sanitizer.tensors == [sentinel_tensor]
+    assert sanitizer.tensor_addrs == [(0, 0, sentinel_tensor)]
+    assert sanitizer.tensor_names == {id(sentinel_tensor): {"X"}}
+    assert sanitizer.cache_args == [("fake",)]
+    assert sanitizer.cache_grid == (4, 1, 1)
+
+    sanitizer.finalize()
 
     assert sanitizer.tensors == []
     assert sanitizer.tensor_addrs == []
     assert sanitizer.tensor_names == {}
     assert sanitizer.cache_args == []
     assert sanitizer.cache_grid is None
+
+
+def test_concrete_ptr_access_respects_masked_lanes():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+
+    ptr_dtype = pointer_type(INT32)
+    ptr_value = SymbolicTensorValue(
+        np.array([base, end + tensor.element_size()], dtype=np.uint64),
+        ptr_dtype,
+    )
+    ptr_sym = SymbolicExpr.create("const", ptr_value, type_spec(ptr_dtype, (2,)))
+    inactive_oob_mask = SymbolicExpr.create(
+        "const",
+        SymbolicTensorValue(np.array([True, False], dtype=bool), INT1),
+        type_spec(INT1, (2,)),
+    )
+    access_expr = SymbolicExpr.create("store", ptr_sym, None, inactive_oob_mask)
+
+    assert sanitizer._check_concrete_ptr_access(ptr_sym, inactive_oob_mask, access_expr)
+    assert sanitizer.records == []
+
+    active_oob_mask = SymbolicExpr.create(
+        "const",
+        SymbolicTensorValue(np.array([True, True], dtype=bool), INT1),
+        type_spec(INT1, (2,)),
+    )
+    access_expr = SymbolicExpr.create("store", ptr_sym, None, active_oob_mask)
+
+    assert sanitizer._check_concrete_ptr_access(ptr_sym, active_oob_mask, access_expr)
+    assert len(sanitizer.records) == 1
+    assert sanitizer.records[0].op_type is Store
+    assert sanitizer.records[0].violation_address == end + tensor.element_size()
 
 
 # ======== Report Layout Classification Tests ===========
