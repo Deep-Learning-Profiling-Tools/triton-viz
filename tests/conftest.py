@@ -9,7 +9,7 @@ def pytest_addoption(parser):
         default="auto",
         help=(
             "Device mode for tests/end_to_end/test_triton_kernels.py. "
-            "'cpu' runs sanitizer-only fake-tensor checks for CI without CUDA."
+            "'cpu' runs CPU fake-tensor checks for CI without CUDA."
         ),
     )
 
