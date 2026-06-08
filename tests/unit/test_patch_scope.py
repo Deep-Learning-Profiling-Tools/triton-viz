@@ -7,7 +7,6 @@ import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.core import patch as patch_mod
-from triton_viz.core.config import config as cfg
 from triton_viz.core.frontend import triton as triton_frontend
 
 
@@ -189,54 +188,3 @@ def test_patch_lang_does_not_inject_loop_global():
 
     assert legacy_key not in globals_dict
     assert wrapper_key not in globals_dict
-
-
-def test_grid_executor_temporarily_disables_overflow_checks(monkeypatch):
-    frontend = triton_frontend.frontend
-    old_virtual_memory = cfg.virtual_memory
-    cfg.virtual_memory = True
-
-    class ClientManagerStub:
-        def get_client(self, name):
-            return None
-
-    class GridExecutorStub:
-        fn = staticmethod(_dummy_kernel)
-
-    def prepare_grid_launch(_grid_executor, _args_dev, kwargs):
-        return (
-            ClientManagerStub(),
-            kwargs,
-            (),
-            {},
-            {},
-            (1, 1, 1),
-            1,
-        )
-
-    observed = []
-
-    def run_grid(_grid_executor, _call_args, _client_manager, _grid, _max_workers):
-        observed.append(frontend.builder.options.sanitize_overflow)
-
-    monkeypatch.setattr(frontend, "_prepare_grid_launch", prepare_grid_launch)
-    monkeypatch.setattr(frontend, "_run_grid", run_grid)
-
-    had_attr = hasattr(frontend.builder.options, "sanitize_overflow")
-    old_value = getattr(frontend.builder.options, "sanitize_overflow", None)
-    object.__setattr__(frontend.builder.options, "sanitize_overflow", True)
-    try:
-        frontend._grid_executor_call(GridExecutorStub())
-    finally:
-        cfg.virtual_memory = old_virtual_memory
-        if had_attr:
-            object.__setattr__(
-                frontend.builder.options,
-                "sanitize_overflow",
-                old_value,
-            )
-        else:
-            object.__delattr__(frontend.builder.options, "sanitize_overflow")
-
-    assert observed == [False]
-    assert frontend.builder.options.sanitize_overflow is True

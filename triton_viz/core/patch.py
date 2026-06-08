@@ -34,10 +34,14 @@ class PatchOp:
     ):
         self.op = op
         self.op_type = op_type
+        # Copy callback fields once at patch time; patched ops are called for
+        # every frontend operation, so avoid repeated bundle attribute lookups.
         self.before_callback = callbacks.before_callback
         self.after_callback = callbacks.after_callback
         self.op_overrider = callbacks.op_overrider
         self.adapter = adapter
+        # Frontend hooks are resolved before installing the wrapper so __call__
+        # stays independent of frontend registry lookups.
         self.maybe_yield_for_multism = maybe_yield_for_multism
         self.run_op_overrider = run_op_overrider
 

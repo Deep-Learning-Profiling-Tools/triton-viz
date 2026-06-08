@@ -252,9 +252,13 @@ class TritonFrontend(Frontend):
         self._loop_ast_methods: dict[str, Callable | object] = {}
         self._loop_ast_patched = False
         self._patch_calls_scope = 0
+        # These targets are stable for the process; compute them once so each
+        # launch only snapshots current values, not the list of attributes.
         self._triton_language_targets = tuple(self._triton_language_attr_targets())
         self._triton_extra_modules = self._triton_extra_builtin_modules()
         self._triton_builtin_attr_cache: dict[int, tuple[str, ...]] = {}
+        # Most patched ops are interpreter-builder ops and can call overriders
+        # directly. Cache the smaller frontend-wrapped sets for quick routing.
         self._math_op_types = frozenset(self.namespaces[tl.math].values())
         self._tl_op_types = frozenset(self.namespaces[tl].values())
         self._frontend_wrapped_op_types = self._math_op_types | self._tl_op_types
@@ -842,6 +846,8 @@ class TritonFrontend(Frontend):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ):
+        # Interpreter-builder ops already use TensorHandle-style arguments; tl
+        # namespace ops need Triton tensor <-> handle conversion around clients.
         if op_type not in self._frontend_wrapped_op_types:
             return op_overrider(*args, **kwargs)
         if op_type in self._math_op_types:
@@ -1009,6 +1015,8 @@ class TritonFrontend(Frontend):
 
     @contextmanager
     def _builder_options_scope(self, **updates: Any):
+        # Triton's builder is process-global. Restore missing attributes as
+        # missing too, not merely to None, so launches do not leak option state.
         originals = {
             name: getattr(self.builder.options, name, _MISSING) for name in updates
         }
@@ -1091,6 +1099,9 @@ class TritonFrontend(Frontend):
     @staticmethod
     def _jit_function_uses_core_module(jit_function) -> bool:
         fn = jit_function.fn
+        # JIT helpers that call tl.core directly need a fresh language patch for
+        # semantic injection. Plain user/device JIT helpers can reuse the active
+        # top-level launch patch and skip another scope.
         return any(fn.__globals__.get(name) is tl.core for name in fn.__code__.co_names)
 
     @contextmanager
