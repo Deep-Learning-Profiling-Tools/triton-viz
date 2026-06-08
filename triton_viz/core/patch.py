@@ -29,43 +29,59 @@ class PatchOp:
         op_type: type[Op],
         callbacks: OpCallbacks,
         adapter: Callable[..., AdapterResult],
-        frontend_name: str = "triton",
+        run_op_overrider: Callable,
+        maybe_yield_for_multism: Callable[[], None],
     ):
         self.op = op
         self.op_type = op_type
-        self.callbacks = callbacks
+        # Copy callback fields once at patch time; patched ops are called for
+        # every frontend operation, so avoid repeated bundle attribute lookups.
+        self.before_callback = callbacks.before_callback
+        self.after_callback = callbacks.after_callback
+        self.op_overrider = callbacks.op_overrider
         self.adapter = adapter
-        self.frontend_name = frontend_name
+        # Frontend hooks are resolved before installing the wrapper so __call__
+        # stays independent of frontend registry lookups.
+        self.maybe_yield_for_multism = maybe_yield_for_multism
+        self.run_op_overrider = run_op_overrider
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.op, name)
 
     def __call__(self, *args, **kwargs):
-        _frontend(self.frontend_name).maybe_yield_for_multism()
+        self.maybe_yield_for_multism()
 
-        if self.callbacks.before_callback:
+        if not self.before_callback and not self.after_callback:
+            if self.op_overrider:
+                return self.run_op_overrider(
+                    self.op,
+                    self.op_type,
+                    self.op_overrider,
+                    args,
+                    kwargs,
+                )
+            return self.op(*args, **kwargs)
+
+        if self.before_callback:
             before_args = self.adapter(*args, **kwargs)
-            self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
+            self.before_callback(*before_args.args, **before_args.kwargs)
 
-        if self.callbacks.op_overrider:
-            ret = self._run_op_overrider(args, kwargs)
+        if self.op_overrider:
+            ret = self.run_op_overrider(
+                self.op,
+                self.op_type,
+                self.op_overrider,
+                args,
+                kwargs,
+            )
         else:
             ret = self.op(*args, **kwargs)
 
-        if self.callbacks.after_callback:
+        if self.after_callback:
             # Pass ret so that we don't have to derive output shape from args.
             after_args = self.adapter(*args, **kwargs)
-            self.callbacks.after_callback(ret, *after_args.args, **after_args.kwargs)
+            self.after_callback(ret, *after_args.args, **after_args.kwargs)
         return ret
-
-    def _run_op_overrider(self, args: tuple[Any, ...], kwargs: dict[str, Any]):
-        return _frontend(self.frontend_name).run_op_overrider(
-            self.op,
-            self.op_type,
-            self.callbacks,
-            args,
-            kwargs,
-        )
 
 
 def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, frontend_name: str):
@@ -95,7 +111,8 @@ def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, frontend_name: s
         op_type,
         callbacks,
         adapter,
-        frontend_name=frontend_name,
+        run_op_overrider=frontend.run_op_overrider,
+        maybe_yield_for_multism=frontend.maybe_yield_for_multism,
     )
     setattr(namespace, attr, patched_op)
 

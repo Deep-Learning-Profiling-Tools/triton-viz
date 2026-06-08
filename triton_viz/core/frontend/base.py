@@ -123,11 +123,11 @@ class Frontend:
         self,
         op: Callable,
         op_type: type[Op],
-        callbacks: Any,
+        op_overrider: Callable,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ):
-        return callbacks.op_overrider(*args, **kwargs)
+        return op_overrider(*args, **kwargs)
 
     @staticmethod
     def concrete_fn_for_op_type(

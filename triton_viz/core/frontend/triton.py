@@ -32,7 +32,6 @@ from triton.runtime.interpreter import (
 )
 from triton.tools.tensor_descriptor import TensorDescriptor
 
-from ..callbacks import OpCallbacks
 from ..config import config as cfg
 from ..data import (
     AddPtr,
@@ -253,6 +252,16 @@ class TritonFrontend(Frontend):
         self._loop_ast_methods: dict[str, Callable | object] = {}
         self._loop_ast_patched = False
         self._patch_calls_scope = 0
+        # These targets are stable for the process; compute them once so each
+        # launch only snapshots current values, not the list of attributes.
+        self._triton_language_targets = tuple(self._triton_language_attr_targets())
+        self._triton_extra_modules = self._triton_extra_builtin_modules()
+        self._triton_builtin_attr_cache: dict[int, tuple[str, ...]] = {}
+        # Most patched ops are interpreter-builder ops and can call overriders
+        # directly. Cache the smaller frontend-wrapped sets for quick routing.
+        self._math_op_types = frozenset(self.namespaces[tl.math].values())
+        self._tl_op_types = frozenset(self.namespaces[tl].values())
+        self._frontend_wrapped_op_types = self._math_op_types | self._tl_op_types
         self._bind_interpreter_builder_thread_state()
 
     def _bind_interpreter_builder_thread_state(self) -> None:
@@ -421,10 +430,18 @@ class TritonFrontend(Frontend):
         # Triton's interpreter patch mutates global tl/tl.core objects. Snapshot
         # both unconditionally so nested or generated JIT functions without a
         # direct `tl` global still restore the language state after tracing.
-        for obj, attrs in self._triton_language_attr_targets():
-            for name, member in inspect.getmembers(obj):
-                if tl.core.is_builtin(member):
-                    scope.set_attr(obj, name, member)
+        for obj, attrs in self._triton_language_targets:
+            obj_id = id(obj)
+            builtin_names = self._triton_builtin_attr_cache.get(obj_id)
+            if builtin_names is None:
+                builtin_names = tuple(
+                    name
+                    for name, member in inspect.getmembers(obj)
+                    if tl.core.is_builtin(member)
+                )
+                self._triton_builtin_attr_cache[obj_id] = builtin_names
+            for name in builtin_names:
+                scope.set_attr(obj, name, getattr(obj, name))
             for attr in attrs:
                 if hasattr(obj, attr):
                     scope.set_attr(obj, attr, getattr(obj, attr))
@@ -727,6 +744,22 @@ class TritonFrontend(Frontend):
         return cls._to_triton_dtype(value)
 
     def normalize_symbolic_value(self, value: Any) -> Any:
+        if isinstance(
+            value,
+            (
+                SymbolicTensorValue,
+                SymbolicScalarDType,
+                SymbolicPointerDType,
+                SymbolicTypeSpec,
+                int,
+                np.integer,
+                bool,
+                float,
+                np.floating,
+                type(None),
+            ),
+        ):
+            return value
         if isinstance(value, tl.core.tensor):
             value = value.handle
         if isinstance(value, TensorHandle):
@@ -809,22 +842,22 @@ class TritonFrontend(Frontend):
         self,
         op: Callable,
         op_type: type[Op],
-        callbacks: OpCallbacks,
+        op_overrider: Callable,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ):
-        op_overrider = callbacks.op_overrider
-        assert op_overrider is not None
-        if op_type in self.namespaces[tl.math].values():
+        # Interpreter-builder ops already use TensorHandle-style arguments; tl
+        # namespace ops need Triton tensor <-> handle conversion around clients.
+        if op_type not in self._frontend_wrapped_op_types:
+            return op_overrider(*args, **kwargs)
+        if op_type in self._math_op_types:
             raise NotImplementedError("Patching math ops not yet supported")
-        elif op_type in self.namespaces[tl].values():
-            # see triton.runtime.interpreter:ReduceOps.sum
-            # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
-            # Then, convert return value from TensorHandle to tl.tensor
-            ret = op_overrider(args[0].handle, *args[1:], **kwargs)
-            return self._wrap_tl_ret(ret, args[0].dtype)
 
-        return op_overrider(*args, **kwargs)
+        # see triton.runtime.interpreter:ReduceOps.sum
+        # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
+        # Then, convert return value from TensorHandle to tl.tensor
+        ret = op_overrider(args[0].handle, *args[1:], **kwargs)
+        return self._wrap_tl_ret(ret, args[0].dtype)
 
     def patch_for_loop(self) -> None:
         if self._loop_ast_patched:
@@ -869,7 +902,7 @@ class TritonFrontend(Frontend):
         # restore metadata for nested/generated kernels.
         scope = self._triton_snapshot_scope(fn)
         triton_patch_lang(fn)
-        for module in self._triton_extra_builtin_modules():
+        for module in self._triton_extra_modules:
             _patch_builtin(module, interpreter_builder, scope)
         self._patch_triton_inline_asm(scope)
         self._patch_triton_semantic_to_tensor(scope)
@@ -980,6 +1013,24 @@ class TritonFrontend(Frontend):
             for fut in futures:
                 fut.result()
 
+    @contextmanager
+    def _builder_options_scope(self, **updates: Any):
+        # Triton's builder is process-global. Restore missing attributes as
+        # missing too, not merely to None, so launches do not leak option state.
+        originals = {
+            name: getattr(self.builder.options, name, _MISSING) for name in updates
+        }
+        for name, value in updates.items():
+            object.__setattr__(self.builder.options, name, value)
+        try:
+            yield
+        finally:
+            for name, value in originals.items():
+                if value is _MISSING:
+                    object.__delattr__(self.builder.options, name)
+                else:
+                    object.__setattr__(self.builder.options, name, value)
+
     def _grid_executor_call(self, grid_executor, *args_dev, **kwargs):
         if kwargs.pop("warmup", False):
             return
@@ -1001,9 +1052,12 @@ class TritonFrontend(Frontend):
             if cfg.enable_timing:
                 start_time = time.time()
 
-            old_num_warps = getattr(self.builder.options, "num_warps", _MISSING)
-            object.__setattr__(self.builder.options, "num_warps", launch_num_warps)
-            try:
+            # Triton's interpreter overflow asserts add runtime work that
+            # Triton-Viz clients do not consume, so keep them off for launches.
+            with self._builder_options_scope(
+                num_warps=launch_num_warps,
+                sanitize_overflow=False,
+            ):
                 self._run_grid(
                     grid_executor,
                     call_args,
@@ -1011,15 +1065,6 @@ class TritonFrontend(Frontend):
                     grid,
                     max_workers,
                 )
-            finally:
-                if old_num_warps is _MISSING:
-                    object.__delattr__(self.builder.options, "num_warps")
-                else:
-                    object.__setattr__(
-                        self.builder.options,
-                        "num_warps",
-                        old_num_warps,
-                    )
 
             if cfg.enable_timing:
                 end_time = time.time()
@@ -1036,6 +1081,12 @@ class TritonFrontend(Frontend):
             self._current_client_manager = previous_client_manager
 
     def _jit_function_call(self, jit_function, *args, **kwargs):
+        if (
+            self._current_client_manager is not None
+            and not self._jit_function_uses_core_module(jit_function)
+        ):
+            return jit_function.fn(*args, **kwargs)
+
         scope = self.patch_lang(
             jit_function.fn,
             client_manager=self._current_client_manager,
@@ -1044,6 +1095,14 @@ class TritonFrontend(Frontend):
             return jit_function.fn(*args, **kwargs)
         finally:
             scope.restore()
+
+    @staticmethod
+    def _jit_function_uses_core_module(jit_function) -> bool:
+        fn = jit_function.fn
+        # JIT helpers that call tl.core directly need a fresh language patch for
+        # semantic injection. Plain user/device JIT helpers can reuse the active
+        # top-level launch patch and skip another scope.
+        return any(fn.__globals__.get(name) is tl.core for name in fn.__code__.co_names)
 
     @contextmanager
     def patch_calls(self):

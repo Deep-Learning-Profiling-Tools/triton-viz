@@ -29,7 +29,8 @@ from triton_viz.core.symbolic_metadata import (
 
 from triton_viz.core.patch import PatchOp
 
-TRITON_ADAPTERS = get_frontend("triton").adapters
+TRITON_FRONTEND = get_frontend("triton")
+TRITON_ADAPTERS = TRITON_FRONTEND.adapters
 NKI_ADAPTERS = get_frontend("nki").adapters
 
 
@@ -265,6 +266,8 @@ def test_patchop_uses_adapter_for_callbacks():
         op_type=Store,
         callbacks=callbacks,
         adapter=adapter,
+        run_op_overrider=TRITON_FRONTEND.run_op_overrider,
+        maybe_yield_for_multism=TRITON_FRONTEND.maybe_yield_for_multism,
     )
 
     ptr = object()
