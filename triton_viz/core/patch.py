@@ -5,7 +5,6 @@ from typing import Any
 from .frontend.base import AdapterResult, LANG_PATCH_SCOPES
 from .frontend.base import get_frontend
 from .callbacks import OpCallbacks
-from .config import config as cfg
 from .data import Op
 
 
@@ -31,7 +30,7 @@ class PatchOp:
         callbacks: OpCallbacks,
         adapter: Callable[..., AdapterResult],
         run_op_overrider: Callable,
-        maybe_yield_for_multism: Callable[[], None] | None = None,
+        maybe_yield_for_multism: Callable[[], None],
     ):
         self.op = op
         self.op_type = op_type
@@ -46,8 +45,7 @@ class PatchOp:
         return getattr(self.op, name)
 
     def __call__(self, *args, **kwargs):
-        if self.maybe_yield_for_multism is not None:
-            self.maybe_yield_for_multism()
+        self.maybe_yield_for_multism()
 
         if not self.before_callback and not self.after_callback:
             if self.op_overrider:
@@ -104,16 +102,13 @@ def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, frontend_name: s
     original_op = frontend.original_ops[namespace][attr]
     adapter = frontend.adapters[op_type]
     frontend.prepare_patched_op(namespace, op_type, original_op)
-    maybe_yield_for_multism = (
-        frontend.maybe_yield_for_multism if cfg.num_sms > 1 else None
-    )
     patched_op = PatchOp(
         original_op,
         op_type,
         callbacks,
         adapter,
         run_op_overrider=frontend.run_op_overrider,
-        maybe_yield_for_multism=maybe_yield_for_multism,
+        maybe_yield_for_multism=frontend.maybe_yield_for_multism,
     )
     setattr(namespace, attr, patched_op)
 

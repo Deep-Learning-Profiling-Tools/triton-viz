@@ -257,6 +257,7 @@ class TritonFrontend(Frontend):
         self._triton_builtin_attr_cache: dict[int, tuple[str, ...]] = {}
         self._math_op_types = frozenset(self.namespaces[tl.math].values())
         self._tl_op_types = frozenset(self.namespaces[tl].values())
+        self._frontend_wrapped_op_types = self._math_op_types | self._tl_op_types
         self._bind_interpreter_builder_thread_state()
 
     def _bind_interpreter_builder_thread_state(self) -> None:
@@ -841,16 +842,16 @@ class TritonFrontend(Frontend):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ):
+        if op_type not in self._frontend_wrapped_op_types:
+            return op_overrider(*args, **kwargs)
         if op_type in self._math_op_types:
             raise NotImplementedError("Patching math ops not yet supported")
-        elif op_type in self._tl_op_types:
-            # see triton.runtime.interpreter:ReduceOps.sum
-            # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
-            # Then, convert return value from TensorHandle to tl.tensor
-            ret = op_overrider(args[0].handle, *args[1:], **kwargs)
-            return self._wrap_tl_ret(ret, args[0].dtype)
 
-        return op_overrider(*args, **kwargs)
+        # see triton.runtime.interpreter:ReduceOps.sum
+        # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
+        # Then, convert return value from TensorHandle to tl.tensor
+        ret = op_overrider(args[0].handle, *args[1:], **kwargs)
+        return self._wrap_tl_ret(ret, args[0].dtype)
 
     def patch_for_loop(self) -> None:
         if self._loop_ast_patched:
@@ -1089,12 +1090,13 @@ class TritonFrontend(Frontend):
 
     @staticmethod
     def _jit_function_needs_lang_patch(jit_function) -> bool:
+        referenced_globals = inspect.getclosurevars(jit_function.fn).globals
         langs = [
             value
-            for value in jit_function.fn.__globals__.values()
+            for value in referenced_globals.values()
             if inspect.ismodule(value) and value in (tl, tl.core)
         ]
-        return not langs or any(lang is tl.core for lang in langs)
+        return any(lang is tl.core for lang in langs)
 
     @contextmanager
     def patch_calls(self):

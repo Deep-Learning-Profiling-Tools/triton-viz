@@ -267,6 +267,7 @@ def test_patchop_uses_adapter_for_callbacks():
         callbacks=callbacks,
         adapter=adapter,
         run_op_overrider=TRITON_FRONTEND.run_op_overrider,
+        maybe_yield_for_multism=TRITON_FRONTEND.maybe_yield_for_multism,
     )
 
     ptr = object()

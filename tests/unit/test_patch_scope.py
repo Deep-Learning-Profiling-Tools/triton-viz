@@ -1,5 +1,6 @@
 import pytest
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import triton.language as tl
@@ -13,6 +14,25 @@ from triton_viz.core.frontend import triton as triton_frontend
 def _dummy_kernel():
     """Provides tl/tl.core globals for language patch scope capture."""
     return tl.arange(0, 1)
+
+
+_UNUSED_TL_CORE_ALIAS = tl.core
+_TL_CORE_ALIAS = tl.core
+
+
+def _uses_no_triton_language_module():
+    return 1
+
+
+def _uses_tl_core_alias():
+    return _TL_CORE_ALIAS
+
+
+def test_jit_function_lang_patch_check_uses_referenced_globals_only():
+    needs_patch = triton_frontend.frontend._jit_function_needs_lang_patch
+
+    assert not needs_patch(SimpleNamespace(fn=_uses_no_triton_language_module))
+    assert needs_patch(SimpleNamespace(fn=_uses_tl_core_alias))
 
 
 def test_scope_restores_tensor_magic_methods():
