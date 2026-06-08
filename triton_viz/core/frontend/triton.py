@@ -1043,17 +1043,12 @@ class TritonFrontend(Frontend):
             if cfg.enable_timing:
                 start_time = time.time()
 
-            disable_sanitize_overflow = (
-                client_manager.get_client("sanitizer") is not None
-            )
-            builder_option_updates = {"num_warps": launch_num_warps}
-            if disable_sanitize_overflow:
-                # Sanitizer validates memory addresses. Triton's interpreter
-                # integer-overflow device_asserts create extra symbolic trees
-                # unrelated to OOB reporting, so keep them off for this launch.
-                builder_option_updates["sanitize_overflow"] = False
-
-            with self._builder_options_scope(**builder_option_updates):
+            # Triton's interpreter overflow asserts add runtime work that
+            # Triton-Viz clients do not consume, so keep them off for launches.
+            with self._builder_options_scope(
+                num_warps=launch_num_warps,
+                sanitize_overflow=False,
+            ):
                 self._run_grid(
                     grid_executor,
                     call_args,

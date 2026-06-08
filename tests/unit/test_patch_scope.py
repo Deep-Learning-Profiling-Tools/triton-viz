@@ -170,14 +170,14 @@ def test_patch_lang_does_not_inject_loop_global():
     assert wrapper_key not in globals_dict
 
 
-def test_sanitizer_grid_executor_temporarily_disables_overflow_checks(monkeypatch):
+def test_grid_executor_temporarily_disables_overflow_checks(monkeypatch):
     frontend = triton_frontend.frontend
     old_virtual_memory = cfg.virtual_memory
     cfg.virtual_memory = True
 
     class ClientManagerStub:
         def get_client(self, name):
-            return object() if name == "sanitizer" else None
+            return None
 
     class GridExecutorStub:
         fn = staticmethod(_dummy_kernel)
