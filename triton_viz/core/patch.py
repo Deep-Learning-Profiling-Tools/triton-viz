@@ -30,36 +30,34 @@ class PatchOp:
         op_type: type[Op],
         callbacks: OpCallbacks,
         adapter: Callable[..., AdapterResult],
-        frontend_name: str = "triton",
-        frontend: Any | None = None,
+        maybe_yield_for_multism: Callable[[], None] | None = None,
+        run_op_overrider: Callable | None = None,
+        can_call_op_overrider_directly: bool = True,
     ):
         self.op = op
         self.op_type = op_type
-        self.callbacks = callbacks
         self.before_callback = callbacks.before_callback
         self.after_callback = callbacks.after_callback
         self.op_overrider = callbacks.op_overrider
         self.adapter = adapter
-        self.frontend_name = frontend_name
-        self.frontend = frontend if frontend is not None else _frontend(frontend_name)
-        self.maybe_yield_for_multism = (
-            self.frontend.maybe_yield_for_multism if cfg.num_sms > 1 else None
-        )
+        self.maybe_yield_for_multism = maybe_yield_for_multism
         self.run_op_overrider = (
             None
-            if self.op_overrider
-            and self.frontend.can_call_op_overrider_directly(op_type)
-            else self.frontend.run_op_overrider
+            if self.op_overrider and can_call_op_overrider_directly
+            else run_op_overrider
         )
-        self._has_callbacks = bool(
-            self.maybe_yield_for_multism or self.before_callback or self.after_callback
+        self._has_before_or_after_callback = bool(
+            self.before_callback or self.after_callback
         )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.op, name)
 
     def __call__(self, *args, **kwargs):
-        if not self._has_callbacks:
+        if self.maybe_yield_for_multism is not None:
+            self.maybe_yield_for_multism()
+
+        if not self._has_before_or_after_callback:
             if self.op_overrider:
                 if self.run_op_overrider is None:
                     return self.op_overrider(*args, **kwargs)
@@ -71,9 +69,6 @@ class PatchOp:
                     kwargs,
                 )
             return self.op(*args, **kwargs)
-
-        if self.maybe_yield_for_multism is not None:
-            self.maybe_yield_for_multism()
 
         if self.before_callback:
             before_args = self.adapter(*args, **kwargs)
@@ -122,13 +117,17 @@ def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, frontend_name: s
     original_op = frontend.original_ops[namespace][attr]
     adapter = frontend.adapters[op_type]
     frontend.prepare_patched_op(namespace, op_type, original_op)
+    maybe_yield_for_multism = (
+        frontend.maybe_yield_for_multism if cfg.num_sms > 1 else None
+    )
     patched_op = PatchOp(
         original_op,
         op_type,
         callbacks,
         adapter,
-        frontend_name=frontend_name,
-        frontend=frontend,
+        maybe_yield_for_multism=maybe_yield_for_multism,
+        run_op_overrider=frontend.run_op_overrider,
+        can_call_op_overrider_directly=frontend.can_call_op_overrider_directly(op_type),
     )
     setattr(namespace, attr, patched_op)
 

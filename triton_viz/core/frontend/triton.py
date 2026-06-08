@@ -853,6 +853,9 @@ class TritonFrontend(Frontend):
         return op_overrider(*args, **kwargs)
 
     def can_call_op_overrider_directly(self, op_type: type[Op]) -> bool:
+        # Triton language ops need frontend-specific argument/return conversion
+        # in run_op_overrider; interpreter builder ops already receive the
+        # representation expected by client overriders.
         return op_type not in self._math_op_types and op_type not in self._tl_op_types
 
     def patch_for_loop(self) -> None:
