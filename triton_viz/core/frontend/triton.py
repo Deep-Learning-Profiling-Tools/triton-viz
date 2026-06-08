@@ -1073,7 +1073,10 @@ class TritonFrontend(Frontend):
             self._current_client_manager = previous_client_manager
 
     def _jit_function_call(self, jit_function, *args, **kwargs):
-        if self._current_client_manager is not None:
+        if (
+            self._current_client_manager is not None
+            and not self._jit_function_uses_core_module(jit_function)
+        ):
             return jit_function.fn(*args, **kwargs)
 
         scope = self.patch_lang(
@@ -1084,6 +1087,11 @@ class TritonFrontend(Frontend):
             return jit_function.fn(*args, **kwargs)
         finally:
             scope.restore()
+
+    @staticmethod
+    def _jit_function_uses_core_module(jit_function) -> bool:
+        fn = jit_function.fn
+        return any(fn.__globals__.get(name) is tl.core for name in fn.__code__.co_names)
 
     @contextmanager
     def patch_calls(self):

@@ -1,5 +1,6 @@
 import pytest
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import triton.language as tl
@@ -13,6 +14,26 @@ from triton_viz.core.frontend import triton as triton_frontend
 def _dummy_kernel():
     """Provides tl/tl.core globals for language patch scope capture."""
     return tl.arange(0, 1)
+
+
+_TL_CORE_ALIAS = tl.core
+
+
+def _uses_tl_language_module():
+    return tl.arange(0, 1)
+
+
+def _uses_tl_core_alias():
+    return _TL_CORE_ALIAS.full([1], 0, tl.float32)
+
+
+def test_jit_function_core_module_check_is_function_specific():
+    uses_core = triton_frontend.frontend._jit_function_uses_core_module
+
+    assert not uses_core(SimpleNamespace(fn=_uses_tl_language_module))
+    assert uses_core(SimpleNamespace(fn=_uses_tl_core_alias))
+    assert uses_core(tl.zeros)
+    assert not uses_core(tl.cdiv)
 
 
 def test_scope_restores_tensor_magic_methods():
