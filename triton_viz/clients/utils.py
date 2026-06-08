@@ -104,16 +104,13 @@ def check_storage_contiguous(tensor: torch.Tensor):
 
     if isinstance(tensor, TensorWrapper):
         tensor = tensor.base
-    if not all(hasattr(tensor, attr) for attr in ("shape", "stride")):
-        raise TypeError(
-            f"Only tensor-like objects with shape and stride are supported, "
-            f"but found {type(tensor)}"
-        )
+    assert (
+        type(tensor) == torch.Tensor
+    ), f"Only torch.Tensor is supported, but found {type(tensor)}"
     shape_prod = 1
-    strides = tensor.stride()
-    indices = sorted(range(len(strides)), key=strides.__getitem__)
+    indices = sorted(range(len(tensor.stride())), key=tensor.stride().__getitem__)
     for i, index in enumerate(indices):
-        stride = strides[index]
+        stride = tensor.stride(index)
         shape = tensor.shape[index]
         if i == 0 and stride != 1:
             return False
