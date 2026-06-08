@@ -30,9 +30,8 @@ class PatchOp:
         op_type: type[Op],
         callbacks: OpCallbacks,
         adapter: Callable[..., AdapterResult],
+        run_op_overrider: Callable,
         maybe_yield_for_multism: Callable[[], None] | None = None,
-        run_op_overrider: Callable | None = None,
-        can_call_op_overrider_directly: bool = True,
     ):
         self.op = op
         self.op_type = op_type
@@ -41,14 +40,7 @@ class PatchOp:
         self.op_overrider = callbacks.op_overrider
         self.adapter = adapter
         self.maybe_yield_for_multism = maybe_yield_for_multism
-        self.run_op_overrider = (
-            None
-            if self.op_overrider and can_call_op_overrider_directly
-            else run_op_overrider
-        )
-        self._has_before_or_after_callback = bool(
-            self.before_callback or self.after_callback
-        )
+        self.run_op_overrider = run_op_overrider
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.op, name)
@@ -57,10 +49,8 @@ class PatchOp:
         if self.maybe_yield_for_multism is not None:
             self.maybe_yield_for_multism()
 
-        if not self._has_before_or_after_callback:
+        if not self.before_callback and not self.after_callback:
             if self.op_overrider:
-                if self.run_op_overrider is None:
-                    return self.op_overrider(*args, **kwargs)
                 return self.run_op_overrider(
                     self.op,
                     self.op_type,
@@ -75,16 +65,13 @@ class PatchOp:
             self.before_callback(*before_args.args, **before_args.kwargs)
 
         if self.op_overrider:
-            if self.run_op_overrider is None:
-                ret = self.op_overrider(*args, **kwargs)
-            else:
-                ret = self.run_op_overrider(
-                    self.op,
-                    self.op_type,
-                    self.op_overrider,
-                    args,
-                    kwargs,
-                )
+            ret = self.run_op_overrider(
+                self.op,
+                self.op_type,
+                self.op_overrider,
+                args,
+                kwargs,
+            )
         else:
             ret = self.op(*args, **kwargs)
 
@@ -125,9 +112,8 @@ def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, frontend_name: s
         op_type,
         callbacks,
         adapter,
-        maybe_yield_for_multism=maybe_yield_for_multism,
         run_op_overrider=frontend.run_op_overrider,
-        can_call_op_overrider_directly=frontend.can_call_op_overrider_directly(op_type),
+        maybe_yield_for_multism=maybe_yield_for_multism,
     )
     setattr(namespace, attr, patched_op)
 

@@ -852,12 +852,6 @@ class TritonFrontend(Frontend):
 
         return op_overrider(*args, **kwargs)
 
-    def can_call_op_overrider_directly(self, op_type: type[Op]) -> bool:
-        # Triton language ops need frontend-specific argument/return conversion
-        # in run_op_overrider; interpreter builder ops already receive the
-        # representation expected by client overriders.
-        return op_type not in self._math_op_types and op_type not in self._tl_op_types
-
     def patch_for_loop(self) -> None:
         if self._loop_ast_patched:
             return
@@ -1012,6 +1006,22 @@ class TritonFrontend(Frontend):
             for fut in futures:
                 fut.result()
 
+    @contextmanager
+    def _builder_options_scope(self, **updates: Any):
+        originals = {
+            name: getattr(self.builder.options, name, _MISSING) for name in updates
+        }
+        for name, value in updates.items():
+            object.__setattr__(self.builder.options, name, value)
+        try:
+            yield
+        finally:
+            for name, value in originals.items():
+                if value is _MISSING:
+                    object.__delattr__(self.builder.options, name)
+                else:
+                    object.__setattr__(self.builder.options, name, value)
+
     def _grid_executor_call(self, grid_executor, *args_dev, **kwargs):
         if kwargs.pop("warmup", False):
             return
@@ -1036,17 +1046,14 @@ class TritonFrontend(Frontend):
             disable_sanitize_overflow = (
                 client_manager.get_client("sanitizer") is not None
             )
-            old_num_warps = getattr(self.builder.options, "num_warps", _MISSING)
-            old_sanitize_overflow = getattr(
-                self.builder.options, "sanitize_overflow", _MISSING
-            )
-            object.__setattr__(self.builder.options, "num_warps", launch_num_warps)
+            builder_option_updates = {"num_warps": launch_num_warps}
             if disable_sanitize_overflow:
                 # Sanitizer validates memory addresses. Triton's interpreter
                 # integer-overflow device_asserts create extra symbolic trees
                 # unrelated to OOB reporting, so keep them off for this launch.
-                object.__setattr__(self.builder.options, "sanitize_overflow", False)
-            try:
+                builder_option_updates["sanitize_overflow"] = False
+
+            with self._builder_options_scope(**builder_option_updates):
                 self._run_grid(
                     grid_executor,
                     call_args,
@@ -1054,23 +1061,6 @@ class TritonFrontend(Frontend):
                     grid,
                     max_workers,
                 )
-            finally:
-                if old_num_warps is _MISSING:
-                    object.__delattr__(self.builder.options, "num_warps")
-                else:
-                    object.__setattr__(
-                        self.builder.options,
-                        "num_warps",
-                        old_num_warps,
-                    )
-                if old_sanitize_overflow is _MISSING:
-                    object.__delattr__(self.builder.options, "sanitize_overflow")
-                else:
-                    object.__setattr__(
-                        self.builder.options,
-                        "sanitize_overflow",
-                        old_sanitize_overflow,
-                    )
 
             if cfg.enable_timing:
                 end_time = time.time()

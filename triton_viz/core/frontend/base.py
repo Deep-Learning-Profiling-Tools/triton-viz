@@ -129,9 +129,6 @@ class Frontend:
     ):
         return op_overrider(*args, **kwargs)
 
-    def can_call_op_overrider_directly(self, op_type: type[Op]) -> bool:
-        return True
-
     @staticmethod
     def concrete_fn_for_op_type(
         namespace_ops: dict[str, Callable], op_type: type[Op], original_op: Callable
