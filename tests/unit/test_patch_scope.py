@@ -26,11 +26,16 @@ def _uses_tl_core_alias():
     return _TL_CORE_ALIAS.full([1], 0, tl.float32)
 
 
+def _uses_tl_dot_core():
+    return tl.core.full([1], 0, tl.float32)
+
+
 def test_jit_function_core_module_check_is_function_specific():
     uses_core = triton_frontend.frontend._jit_function_uses_core_module
 
     assert not uses_core(SimpleNamespace(fn=_uses_tl_language_module))
     assert uses_core(SimpleNamespace(fn=_uses_tl_core_alias))
+    assert uses_core(SimpleNamespace(fn=_uses_tl_dot_core))
     assert uses_core(tl.zeros)
     assert not uses_core(tl.cdiv)
 

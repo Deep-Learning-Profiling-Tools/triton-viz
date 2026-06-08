@@ -2,6 +2,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+import dis
 from functools import partial
 import ast
 import inspect
@@ -1102,7 +1103,23 @@ class TritonFrontend(Frontend):
         # JIT helpers that call tl.core directly need a fresh language patch for
         # semantic injection. Plain user/device JIT helpers can reuse the active
         # top-level launch patch and skip another scope.
-        return any(fn.__globals__.get(name) is tl.core for name in fn.__code__.co_names)
+        if any(fn.__globals__.get(name) is tl.core for name in fn.__code__.co_names):
+            return True
+
+        loaded_tl_global = False
+        for instruction in dis.get_instructions(fn):
+            if instruction.opname == "LOAD_GLOBAL":
+                loaded_tl_global = fn.__globals__.get(instruction.argval) is tl
+            elif (
+                loaded_tl_global
+                and instruction.opname == "LOAD_ATTR"
+                and instruction.argval == "core"
+            ):
+                return True
+            else:
+                loaded_tl_global = False
+
+        return False
 
     @contextmanager
     def patch_calls(self):
