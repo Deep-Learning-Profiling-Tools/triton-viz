@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import numpy as np
 
 from triton_viz.utils.dtypes import STORAGE_DTYPES
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,18 @@ class SymbolicTensorValue:
     @property
     def shape(self) -> tuple[int, ...]:
         return tuple(int(dim) for dim in self.data.shape)
+
+
+@dataclass(frozen=True)
+class ConcreteRangeInfo:
+    tensor: Tensor | None
+    ranges: list[tuple[int, int, Tensor]]
+
+
+@dataclass(frozen=True)
+class ConcreteAccessRoute:
+    addrs: list[int]
+    range_info: ConcreteRangeInfo
 
 
 INT1 = SymbolicScalarDType("int1", 1, np.dtype(bool))

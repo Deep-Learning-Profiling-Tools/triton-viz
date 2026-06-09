@@ -1,8 +1,17 @@
+import numpy as np
 import pytest
 import torch
 from typing import cast
 
 from triton_viz.core.config import config as cfg
+from triton_viz.core.data import Load, Store
+from triton_viz.core.symbolic_metadata import (
+    INT1,
+    INT32,
+    SymbolicTensorValue,
+    pointer_type,
+    type_spec,
+)
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.report import _classify_layout_and_segments
 from triton_viz.clients.sanitizer.sanitizer import (
@@ -10,6 +19,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     _fn_symbolic_cache_set,
 )
+from triton_viz.clients.symbolic_engine import SymbolicExpr
 
 
 # ======== Init Tests ===========
@@ -145,6 +155,112 @@ def test_post_run_callback_clears_state_on_last_block():
     assert sanitizer.tensor_names == {}
     assert sanitizer.cache_args == []
     assert sanitizer.cache_grid is None
+
+
+def _make_concrete_ptr_and_mask(
+    addrs: list[int],
+    mask_values: list[bool],
+) -> tuple[SymbolicExpr, SymbolicExpr]:
+    ptr_dtype = pointer_type(INT32)
+    ptr_sym = SymbolicExpr.create(
+        "const",
+        SymbolicTensorValue(np.asarray(addrs, dtype=np.uint64), ptr_dtype),
+        type_spec(ptr_dtype, (len(addrs),)),
+    )
+    mask_sym = SymbolicExpr.create(
+        "const",
+        SymbolicTensorValue(np.asarray(mask_values, dtype=bool), INT1),
+        type_spec(INT1, (len(mask_values),)),
+    )
+    return ptr_sym, mask_sym
+
+
+def test_concrete_ptr_access_respects_masked_lanes_for_load_and_store():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+
+    ptr_sym, inactive_oob_mask = _make_concrete_ptr_and_mask(
+        [base, end + tensor.element_size()],
+        [True, False],
+    )
+
+    def fail_symbolic_path(*_args, **_kwargs):
+        raise AssertionError("concrete pointer access should not hit symbolic path")
+
+    sanitizer._handle_access_check = fail_symbolic_path  # type: ignore[method-assign]
+
+    sanitizer._op_store_overrider(ptr_sym, 0, inactive_oob_mask)
+    sanitizer._op_load_overrider(ptr_sym, inactive_oob_mask, None)
+    assert sanitizer.records == []
+
+    _ptr_sym, active_oob_mask = _make_concrete_ptr_and_mask(
+        [base, end + tensor.element_size()],
+        [True, True],
+    )
+
+    sanitizer._op_store_overrider(ptr_sym, 0, active_oob_mask)
+    assert len(sanitizer.records) == 1
+    assert sanitizer.records[0].op_type is Store
+    assert sanitizer.records[0].violation_address == end + tensor.element_size()
+
+    sanitizer.records.clear()
+    sanitizer._op_load_overrider(ptr_sym, active_oob_mask, None)
+    assert len(sanitizer.records) == 1
+    assert sanitizer.records[0].op_type is Load
+    assert sanitizer.records[0].violation_address == end + tensor.element_size()
+
+
+def test_concrete_ptr_router_uses_symbolic_path_inside_loops():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    ptr_sym, mask_sym = _make_concrete_ptr_and_mask([base], [True])
+
+    calls = []
+
+    def record_symbolic_path(expr, op_type, access_mode):
+        calls.append((expr.op, op_type, access_mode))
+
+    sanitizer._handle_access_check = record_symbolic_path  # type: ignore[method-assign]
+    sanitizer.loop_stack.append(object())  # type: ignore[arg-type]
+
+    sanitizer._op_load_overrider(ptr_sym, mask_sym, None)
+
+    assert calls == [("load", Load, "read")]
+    assert sanitizer.records == []
+
+
+def test_concrete_ptr_router_uses_concrete_path_for_large_multi_range_access():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(128, dtype=torch.int32)
+    base = tensor.data_ptr()
+    stride_bytes = tensor.element_size() * 2
+    ranges = [
+        (base + i * stride_bytes, base + i * stride_bytes + tensor.element_size() - 1)
+        for i in range(64)
+    ]
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.extend((start, end, tensor) for start, end in ranges)
+    ptr_sym, mask_sym = _make_concrete_ptr_and_mask(
+        [start for start, _end in ranges],
+        [True] * len(ranges),
+    )
+
+    def fail_symbolic_path(*_args, **_kwargs):
+        raise AssertionError("large concrete access should not hit symbolic path")
+
+    sanitizer._handle_access_check = fail_symbolic_path  # type: ignore[method-assign]
+
+    sanitizer._op_store_overrider(ptr_sym, 0, mask_sym)
+
+    assert sanitizer.records == []
 
 
 # ======== Report Layout Classification Tests ===========
