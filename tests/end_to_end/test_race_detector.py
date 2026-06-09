@@ -95,6 +95,239 @@ def test_second_launch_of_loop_kernel_does_not_crash():
         assert detector.last_status == "ok"
 
 
+# ======== Loops — Cross-Iteration Cross-Block Races ========
+
+
+def test_loop_cross_iteration_race_detected():
+    """Block 0 at iteration 1 and block 1 at iteration 0 both write out[1].
+    Regression test: the flushed loop's iterator var was omitted from
+    copy_local_vars (the loop is popped off loop_stack before
+    _process_pending_check runs), so the two-copy solver never alpha-renamed
+    it — both program copies were pinned to the same iteration and every
+    cross-iteration cross-block race came back unsat.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(2):
+            tl.store(out_ptr + pid + i, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+
+
+def test_loop_disjoint_blocks_no_race():
+    """Per-copy iterator renaming must keep the iterator's range constraint:
+    addr = pid*2 + i with i in [0, 2) gives disjoint blocks for ANY pair of
+    iterations, so an unbounded renamed iterator would be a false positive.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(2):
+            tl.store(out_ptr + pid * 2 + i, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
+def test_nested_loop_cross_iteration_race_and_no_race():
+    """Nested loops: the inner flush must carry BOTH iterator vars (outer from
+    the still-active loop_stack, inner from the flushed LoopContext)."""
+
+    racy = SymbolicRaceDetector()
+
+    @triton_viz.trace(racy)
+    @triton.jit
+    def racy_kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(2):
+            for j in range(2):
+                tl.store(out_ptr + pid + i * 2 + j, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    racy_kernel[(2,)](out)
+    assert racy.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in racy.last_reports)
+
+    clean = SymbolicRaceDetector()
+
+    @triton_viz.trace(clean)
+    @triton.jit
+    def clean_kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(2):
+            for j in range(2):
+                tl.store(out_ptr + pid * 4 + i * 2 + j, 1.0)
+
+    clean_kernel[(2,)](out)
+    assert clean.last_status == "ok"
+    assert clean.last_reports == []
+
+
+def test_post_loop_leftover_iterator_no_false_positive():
+    """A store after the loop that reuses the leftover Python loop variable
+    must be modeled with the iterator's concrete final value (identical in
+    every block), not a symbolic var. Regression test: per-copy renaming is
+    launch-wide per var, so without concretization the post-loop record's
+    iterator was renamed but carried no range premise — an unbounded var
+    that produced cross-tensor false positives on this race-free kernel.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(a_ptr, out_ptr):
+        pid = tl.program_id(0)
+        for i in range(2):
+            tl.store(a_ptr + pid * 2 + i, 1.0)
+        tl.store(out_ptr + pid + i, 1.0)
+
+    a = torch.zeros(8, dtype=torch.float32)
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](a, out)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
+def test_post_loop_leftover_iterator_true_race_detected():
+    """Leftover-iterator concretization must not hide real races: with
+    i == 1 after the loop, every block stores to out[1] — a WAW race."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        acc = 0.0
+        for i in range(2):
+            acc += 1.0
+        tl.store(out_ptr + i, acc + pid)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+
+
+def test_sibling_loop_leftover_iterator_no_false_positive():
+    """A second loop whose body reuses the first loop's leftover iterator:
+    the finished iterator concretizes to its final value while the active
+    loop's own iterator stays symbolic and per-copy renamed."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(2):
+            pass
+        for j in range(2):
+            tl.store(out_ptr + pid * 4 + i * 2 + j, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
+def test_inner_loop_final_value_varying_with_outer_is_unsupported():
+    """An inner loop whose trip count depends on the still-active outer
+    iterator has no single final value for its leftover variable (it is
+    1 - outer here), and the deferred store dedupes across outer
+    iterations — no constant substitution is correct. The launch must be
+    marked unsupported rather than reporting a phantom race (this kernel
+    is race-free: block0 writes out[1], block1 writes out[2])."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        acc = 0.0
+        for outer in range(2):
+            for i in range(2 - outer):
+                acc += 1.0
+            tl.store(out_ptr + pid + outer + i, acc)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "finished loop iterator" in detector.unsupported_reason
+    assert detector.last_reports == []
+
+
+def test_zero_iteration_reentry_keeps_leftover_iterator_value():
+    """A zero-trip re-activation of an inner loop leaves the leftover
+    Python variable at the previous activation's final value; the detector
+    must restore that substitution instead of leaving the iterator var
+    unbounded. Race-free: a gets {0} / {2}, out gets {0} / {1}."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(a_ptr, out_ptr):
+        pid = tl.program_id(0)
+        for outer in range(2):
+            for i in range(1 - outer):
+                tl.store(a_ptr + pid * 2 + i, 1.0)
+        tl.store(out_ptr + pid + i, 1.0)
+
+    a = torch.zeros(8, dtype=torch.float32)
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](a, out)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
+def test_tl_range_load_store_cross_iteration_race():
+    """tl.range loop with a load+store body: the WAW on out_ptr is detected
+    across iterations and the read-read overlap on x_ptr stays race-free."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(x_ptr, out_ptr):
+        pid = tl.program_id(0)
+        for i in tl.range(0, 2):
+            v = tl.load(x_ptr + pid + i)
+            tl.store(out_ptr + pid + i, v)
+
+    x = torch.zeros(8, dtype=torch.float32)
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](x, out)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports
+    assert {r.race_type for r in detector.last_reports} == {RaceType.WAW}
+
+
 # ======== RAW+WAW — Non-atomic Histogram ========
 
 

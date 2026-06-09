@@ -3073,10 +3073,11 @@ class SymbolicClient(Client):
     ) -> None:
         """Handle a single pending check when a loop is flushed.
 
-        ``ctx`` is passed in even though the two current consumers don't need
-        it — reserving it keeps the base signature stable for Step 2
-        loop-aware reasoning (outer-loop introspection, nested-loop
-        diagnostics, etc.).
+        ``ctx`` is the LoopContext that was just popped off ``loop_stack`` —
+        it is the only way an impl can reach the flushed loop's own iterator
+        (``ctx.idx_z3``), since ``loop_stack`` now holds only the still-active
+        outer loops. The race detector relies on this for per-copy iterator
+        renaming; the sanitizer doesn't need it.
         """
         raise NotImplementedError
 

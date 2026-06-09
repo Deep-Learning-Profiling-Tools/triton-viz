@@ -47,6 +47,7 @@ from ..symbolic_engine import (
 from .data import AccessEventRecord, MemorySem
 from .hb_common import (
     UnsupportedSymbolicRaceQuery,
+    apply_sub,
     normalize_copy_local_vars,
 )
 from .two_copy_symbolic_hb_solver import TwoCopySymbolicHBSolver
@@ -242,6 +243,20 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # load-value provider raises unsupported on subsequent loads because
         # the unknown write may alias a snapshotted load source.
         self._unknown_written_region_seen: bool = False
+        # Finished-loop iterator substitutions, keyed by loop lineno:
+        # (idx_z3, IntVal(final iteration value)). See
+        # _apply_finished_iter_subs for why leftover iterator references
+        # must be concretized at record time.
+        self._finished_loop_iter_subs: dict[int, tuple[Any, Any]] = {}
+        # Stash of the substitution entry popped when a loop re-enters,
+        # restored on a zero-iteration exit (a zero-trip loop leaves the
+        # leftover Python variable — and thus its final value — unchanged).
+        self._suspended_iter_subs: list[tuple[int, tuple[Any, Any] | None]] = []
+        # Every iterator var created this launch, plus the ones whose final
+        # value varied across activations under an active outer loop
+        # (substituting any single constant for those would be wrong).
+        self._known_iter_var_keys: set[tuple[int, str, str]] = set()
+        self._unstable_iter_var_keys: set[tuple[int, str, str]] = set()
 
     # ── Unsupported-launch plumbing ──────────────────────────────────────
 
@@ -638,6 +653,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._load_value_regions = []
         self._written_regions = []
         self._unknown_written_region_seen = False
+        self._finished_loop_iter_subs = {}
+        self._suspended_iter_subs = []
+        self._known_iter_var_keys = set()
+        self._unstable_iter_var_keys = set()
         SymbolicExpr.ARANGE_DICT.clear()
         SymbolicClient.grid_callback(self, grid)
         # Install the load-value provider with an owner token so a stale
@@ -737,6 +756,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._load_value_regions = []
         self._written_regions = []
         self._unknown_written_region_seen = False
+        self._finished_loop_iter_subs = {}
+        self._suspended_iter_subs = []
+        self._known_iter_var_keys = set()
+        self._unstable_iter_var_keys = set()
         if SymbolicExpr._load_value_provider_owner == id(self):
             SymbolicExpr._load_value_provider = None
             SymbolicExpr._load_value_provider_owner = None
@@ -818,6 +841,115 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     def _current_loop_iter_vars(self) -> tuple[Any, ...]:
         return tuple(c.idx_z3 for c in self.loop_stack)
 
+    # ── Finished-loop iterator concretization ─────────────────────────────
+    # After a range loop exits, the leftover Python loop variable (and any
+    # value derived from it) still lowers to the loop's symbolic loop_i_*
+    # var, yet every program instance concretely holds the same final
+    # iteration value. Keeping the symbolic var in post-loop records is
+    # unsound either way: un-renamed it pins both solver copies together,
+    # and renamed (which happens launch-wide once any in-loop record lists
+    # the var in copy_local_vars) it roams unbounded because post-loop
+    # records carry no range premise for it. Substituting the concrete
+    # final value at record time models the actual semantics — but only
+    # when that value is well defined:
+    #   * a zero-trip re-activation leaves the leftover variable (and so
+    #     its substitution) unchanged, hence the stash/restore;
+    #   * a loop whose final value varies across activations under a still-
+    #     active outer loop has no single correct constant (deferred records
+    #     dedupe across those activations), so its var is marked unstable
+    #     and any record still referencing it is rejected as unsupported by
+    #     _refs_unresolved_iter_var.
+
+    def _loop_hook_before(self, lineno: int, iterable: Any) -> None:
+        SymbolicClient._loop_hook_before(self, lineno, iterable)
+        if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            ctx = self.loop_stack[-1]
+            self._known_iter_var_keys.add(self._iter_var_key(ctx.idx_z3))
+            # Reactivation: suspend the finished-value substitution so this
+            # loop's own deferred records keep the symbolic var for per-copy
+            # renaming. Restored on a zero-iteration exit.
+            self._suspended_iter_subs.append(
+                (lineno, self._finished_loop_iter_subs.pop(lineno, None))
+            )
+
+    def _loop_hook_after(self, lineno: int) -> None:
+        ctx = (
+            self.loop_stack[-1]
+            if self.loop_stack and self.loop_stack[-1].lineno == lineno
+            else None
+        )
+        SymbolicClient._loop_hook_after(self, lineno)
+        if ctx is None:
+            return
+        stashed_lineno, stashed = self._suspended_iter_subs.pop()
+        assert stashed_lineno == lineno
+        var_key = self._iter_var_key(ctx.idx_z3)
+        if var_key in self._unstable_iter_var_keys:
+            return
+        if ctx.current_value is None:
+            # Zero-trip activation: the leftover variable still holds the
+            # previous activation's final value — restore its substitution.
+            if stashed is not None:
+                self._finished_loop_iter_subs[lineno] = stashed
+            return
+        # Register AFTER the super() flush so the loop's own records (which
+        # are recorded during the flush) keep their symbolic iterator; only
+        # records created after this point see the concrete final value.
+        final = IntVal(int(ctx.current_value))
+        if stashed is not None and not stashed[1].eq(final) and self.loop_stack:
+            # The final value varies across activations while an outer loop
+            # is active: pendings deferred in that outer loop dedupe across
+            # the differing activations, so no constant is correct.
+            self._unstable_iter_var_keys.add(var_key)
+            return
+        self._finished_loop_iter_subs[lineno] = (ctx.idx_z3, final)
+
+    def _apply_finished_iter_subs(self, value: Any) -> Any:
+        if not self._finished_loop_iter_subs:
+            return value
+        return apply_sub(value, tuple(self._finished_loop_iter_subs.values()))
+
+    @staticmethod
+    def _iter_var_key(v: Any) -> tuple[int, str, str]:
+        # Mirrors the dedup key used by hb_common.normalize_copy_local_vars.
+        return (v.hash(), str(v.sort()), v.decl().name())
+
+    def _refs_unresolved_iter_var(
+        self, values: tuple[Any, ...], allowed_vars: tuple[Any, ...]
+    ) -> bool:
+        """True if any Z3 expr in ``values`` references a loop iterator var
+        that is neither substituted away nor legitimately symbolic here.
+
+        ``allowed_vars`` are the iterators the record is allowed to keep
+        symbolic: the still-active outer loops' plus (for deferred records)
+        the flushed loop's own — exactly the ones the two-copy solver
+        alpha-renames via copy_local_vars. Anything else is a finished
+        iterator whose substitution was skipped (unstable final value or a
+        lifecycle corner); recording it would be silently wrong, so the
+        caller marks the launch unsupported instead.
+        """
+        disallowed = self._known_iter_var_keys - {
+            self._iter_var_key(v) for v in allowed_vars
+        }
+        if not disallowed:
+            return False
+        stack: list[Any] = list(values)
+        while stack:
+            v = stack.pop()
+            if v is None or isinstance(v, (bool, int, float, str)):
+                continue
+            if isinstance(v, (list, tuple)):
+                stack.extend(v)
+                continue
+            if not hasattr(v, "num_args"):
+                continue
+            if v.num_args() == 0:
+                if self._iter_var_key(v) in disallowed:
+                    return True
+                continue
+            stack.extend(v.children())
+        return False
+
     def _force_eval_record_templates(self) -> None:
         """Ensure record template fields are Z3-ish, not unevaluated SymbolicExpr.
 
@@ -892,8 +1024,23 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # rather than snapshotting solver assertions, which can carry sampled
         # PID equalities that pin pid_a == pid_b == sampled_pid after alpha-
         # renaming and break the two-copy alias query.
-        local = self._normalize_constraints(expr_constraints)
-        premises = self._normalize_constraints(semantic_constraints)
+        access_addr = self._apply_finished_iter_subs(access_addr)
+        active = self._apply_finished_iter_subs(active)
+        local = self._normalize_constraints(
+            self._apply_finished_iter_subs(expr_constraints)
+        )
+        premises = self._normalize_constraints(
+            self._apply_finished_iter_subs(semantic_constraints)
+        )
+        allowed_iter_vars = copy_local_vars + self._current_loop_iter_vars()
+        if self._refs_unresolved_iter_var(
+            (access_addr, active, local, premises), allowed_iter_vars
+        ):
+            self._raise_or_mark(
+                "access references a finished loop iterator with no stable "
+                "final value"
+            )
+            return
 
         self.records.append(
             AccessEventRecord(
@@ -970,9 +1117,24 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         if not self._note_written_tensor(tensor):
             return
 
-        local = self._normalize_constraints(expr_constraints)
-        premises = self._normalize_constraints(semantic_constraints)
+        addr_expr = self._apply_finished_iter_subs(addr_expr)
+        cmp_value = self._apply_finished_iter_subs(cmp_value)
+        value = self._apply_finished_iter_subs(value)
+        local = self._normalize_constraints(
+            self._apply_finished_iter_subs(expr_constraints)
+        )
+        premises = self._normalize_constraints(
+            self._apply_finished_iter_subs(semantic_constraints)
+        )
         loop_vars = self._current_loop_iter_vars()
+        if self._refs_unresolved_iter_var(
+            (addr_expr, cmp_value, value, local, premises), loop_vars
+        ):
+            self._raise_or_mark(
+                "atomic_cas references a finished loop iterator with no "
+                "stable final value"
+            )
+            return
 
         # Raw symbolic templates: writes / written_value are recomputed by the
         # two-copy solver per copy from cas_cmp_value / cas_new_value /
@@ -1028,9 +1190,23 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         if not self._note_written_tensor(tensor):
             return
 
-        local = self._normalize_constraints(expr_constraints)
-        premises = self._normalize_constraints(semantic_constraints)
+        addr_expr = self._apply_finished_iter_subs(addr_expr)
+        active = self._apply_finished_iter_subs(active)
+        local = self._normalize_constraints(
+            self._apply_finished_iter_subs(expr_constraints)
+        )
+        premises = self._normalize_constraints(
+            self._apply_finished_iter_subs(semantic_constraints)
+        )
         loop_vars = self._current_loop_iter_vars()
+        if self._refs_unresolved_iter_var(
+            (addr_expr, active, local, premises), loop_vars
+        ):
+            self._raise_or_mark(
+                "atomic_rmw references a finished loop iterator with no "
+                "stable final value"
+            )
+            return
 
         self.records.append(
             AccessEventRecord(
@@ -1306,13 +1482,20 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         pending: PendingCheck,
         iter_constraints: list[BoolRef],
     ) -> None:
-        del ctx
         if self._unsupported_capture:
             return
         # Items enqueued by _handle_access_check are PendingEvent instances
         # (subclass of PendingCheck) — narrow so attribute accesses are
         # type-safe under Literal["read", "write"].
         assert isinstance(pending, PendingEvent)
+        # _loop_hook_after pops the flushed loop off loop_stack BEFORE calling
+        # this, so _current_loop_iter_vars() only sees still-active outer
+        # loops — the flushed loop's own iterator must come from ctx. Without
+        # it the two-copy solver would not alpha-rename loop_i_* per copy,
+        # pinning both program instances to the same iteration and missing
+        # every cross-iteration cross-block race. The iterator's range
+        # constraint travels alongside in iter_constraints -> premises, so
+        # the renamed var stays bounded in each copy.
         self._record_access_event(
             pending.access_mode,
             pending.op_type,
@@ -1321,7 +1504,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             pending.symbolic_expr,
             pending.source_location,
             semantic_constraints=tuple(iter_constraints),
-            copy_local_vars=self._current_loop_iter_vars(),
+            copy_local_vars=(*self._current_loop_iter_vars(), ctx.idx_z3),
             active=pending.active,
         )
 
