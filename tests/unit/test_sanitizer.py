@@ -36,8 +36,8 @@ def test_sanitizer_init(_isolate_sanitizer_cfg):
 # These guard the two spots that break most easily when SymbolicClient's
 # launch-lifecycle machinery is reshuffled:
 #   1. the cross-launch fn cache (sanitizer's pre_run_callback short-circuit)
-#   2. the post_run_callback guard that must NOT wipe launch state mid-
-#      full-grid enumeration.
+#   2. launch cleanup happens at finalize, after concurrent block workers are
+#      done with the shared tensor registry.
 
 
 @pytest.fixture
@@ -123,8 +123,8 @@ def test_post_run_callback_preserves_state_mid_full_grid():
     assert sanitizer.cache_grid == (4, 1, 1)
 
 
-def test_post_run_callback_clears_state_on_last_block():
-    """On the final block we DO want launch state cleared."""
+def test_finalize_clears_state_after_last_block():
+    """Launch state is cleared at finalize, not inside a block callback."""
     sanitizer = SymbolicSanitizer(abort_on_error=False)
 
     sentinel_tensor = object()
@@ -138,7 +138,15 @@ def test_post_run_callback_clears_state_on_last_block():
     sanitizer.grid_idx = (3, 0, 0)  # final block
     sanitizer.need_full_grid = True
 
-    sanitizer.post_run_callback(lambda: None)
+    assert sanitizer.post_run_callback(lambda: None) is True
+
+    assert sanitizer.tensors == [sentinel_tensor]
+    assert sanitizer.tensor_addrs == [(0, 0, sentinel_tensor)]
+    assert sanitizer.tensor_names == {id(sentinel_tensor): {"X"}}
+    assert sanitizer.cache_args == [("fake",)]
+    assert sanitizer.cache_grid == (4, 1, 1)
+
+    sanitizer.finalize()
 
     assert sanitizer.tensors == []
     assert sanitizer.tensor_addrs == []

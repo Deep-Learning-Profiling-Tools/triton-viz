@@ -159,7 +159,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         SymbolicClient.grid_idx_callback(self, grid_idx)
 
     def finalize(self) -> list:
-        return SymbolicClient.finalize(self)
+        try:
+            return SymbolicClient.finalize(self)
+        finally:
+            self._clear_cache()
+            self._clear_symbolic_launch_state()
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return SymbolicClient.register_for_loop_callback(self)
@@ -171,7 +175,11 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         return SymbolicClient.register_op_callback(self, op_type)
 
     def post_run_callback(self, fn: Callable) -> bool:
-        return SymbolicClient.post_run_callback(self, fn)
+        if self.need_full_grid is None:
+            self.need_full_grid = False
+        ret = self.need_full_grid
+        self.need_full_grid = None
+        return ret
 
     # ── Sanitizer-specific hook overrides ─────────────────────────
 
