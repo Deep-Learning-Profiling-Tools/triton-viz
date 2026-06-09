@@ -203,6 +203,7 @@ class LoopContext:
     length: int
     idx: Any
     idx_z3: ArithRef
+    iterator_constraint: BoolRef | None = None
     start: int = 0
     stop: int = 0
     step: int = 1
@@ -325,6 +326,7 @@ class SymbolicExpr:
         "rsqrt",
         "negative",
     )
+    UNARY_OP_SET: ClassVar[frozenset[str]] = frozenset(UNARY_OPS)
     BINARY_OP_SYMBOL_TABLE: ClassVar[dict[str, str]] = {
         "add": "+",
         "sub": "-",
@@ -349,6 +351,7 @@ class SymbolicExpr:
         "umulhi": "umulhi",
     }
     BINARY_OPS: ClassVar[tuple[str, ...]] = tuple(BINARY_OP_SYMBOL_TABLE.keys())
+    BINARY_OP_SET: ClassVar[frozenset[str]] = frozenset(BINARY_OPS)
     TERNARY_OPS: ClassVar[tuple[str, ...]] = ("where", "fma")
     REDUCE_OPS: ClassVar[tuple[str, ...]] = (
         "sum",
@@ -389,6 +392,7 @@ class SymbolicExpr:
         + SORT_OPS
         + ATOMIC_OPS
     )
+    SUPPORTED_OP_SET: ClassVar[frozenset[str]] = frozenset(SUPPORTED_OPS)
 
     PID0: ClassVar[ArithRef] = Int("pid_0")
     PID1: ClassVar[ArithRef] = Int("pid_1")
@@ -422,7 +426,7 @@ class SymbolicExpr:
         """
         :param op: Operation type, e.g. "const", "add", "sub", "mul", "div", "pid", "arange"
         """
-        assert op in self.SUPPORTED_OPS, f"Unsupported op: {op}"
+        assert op in self.SUPPORTED_OP_SET, f"Unsupported op: {op}"
         self.op = op
         # Tensor-like attributes used by frontend runtimes.
         self.attr: dict[str, Any] = {}
@@ -445,6 +449,7 @@ class SymbolicExpr:
         self._simplified_z3: Z3Expr | None = None
         self._simplified_constraints: ConstraintConjunction | None = None
         self._has_op_cache: dict[str, bool] = {}
+        self.expr_signature: int | None = None
         self._data_wrapper: SymbolicExprDataWrapper | None = None
 
     @staticmethod
@@ -459,10 +464,66 @@ class SymbolicExpr:
         self.children[name] = child
         setattr(self, name, child)
         self._has_op_cache.clear()
+        self.expr_signature = None
         self._simplified_z3 = None
         self._simplified_constraints = None
         if self._data_wrapper is not None:
             self._data_wrapper.invalidate()
+
+    def signature(self) -> int:
+        """Return a structural hash for deduplicating equivalent expr trees."""
+        if self.expr_signature is not None:
+            return self.expr_signature
+
+        child_parts: list[tuple[str, Any]] = []
+        for name, child in self.children.items():
+            if child is None:
+                child_parts.append((name, None))
+            elif isinstance(child, tuple):
+                child_parts.append((name, tuple(item.signature() for item in child)))
+            else:
+                child_parts.append((name, child.signature()))
+
+        value_part: Any = None
+        if self.op == "const":
+            value_part = self._value_signature(getattr(self, "value", None))
+
+        self.expr_signature = hash(
+            (
+                self.op,
+                self.dtype,
+                self.shape,
+                value_part,
+                tuple(child_parts),
+            )
+        )
+        return self.expr_signature
+
+    @classmethod
+    def _value_signature(cls, value: Any) -> Any:
+        if isinstance(value, SymbolicTensorValue):
+            return (
+                "tensor",
+                value.dtype,
+                value.data.shape,
+                value.data.dtype.str,
+                hash(value.data.tobytes()),
+            )
+        if isinstance(value, np.ndarray):
+            return (
+                "ndarray",
+                value.shape,
+                value.dtype.str,
+                hash(value.tobytes()),
+            )
+        if isinstance(value, cls.tuple_types):
+            seq = cast(Sequence[Any], value)
+            return tuple(cls._value_signature(item) for item in seq)
+        if isinstance(
+            value, (int, np.integer, bool, float, np.floating, str, type(None))
+        ):
+            return value
+        return (type(value).__name__, repr(value))
 
     def __add__(self, other: SymbolicExpr) -> SymbolicExpr:
         return SymbolicExpr.create("add", self, other)
@@ -1008,7 +1069,7 @@ class UnarySymbolicExpr(SymbolicExpr):
     arg: SymbolicExpr
 
     def __init__(self, op: str, arg: Any):
-        if op not in SymbolicExpr.UNARY_OPS:
+        if op not in SymbolicExpr.UNARY_OP_SET:
             raise NotImplementedError(f"Unsupported unary op: {op}")
         super().__init__(op)
         self.add_child("arg", arg)
@@ -1075,7 +1136,7 @@ class BinarySymbolicExpr(SymbolicExpr):
     rhs: SymbolicExpr
 
     def __init__(self, op: str, lhs: Any, rhs: Any):
-        if op not in SymbolicExpr.BINARY_OPS:
+        if op not in SymbolicExpr.BINARY_OP_SET:
             raise NotImplementedError(f"Unsupported binary op: {op}")
         super().__init__(op)
         self.add_child("lhs", lhs)
@@ -2317,9 +2378,21 @@ class SymbolicClient(Client):
         self.last_grid: tuple[int, int, int] | None = None
         self.addr_ok: BoolRef | None = None
         self.pid_ok: BoolRef | None = None
-        self.solver: Solver | None = None
-        self.addr_sym: ArithRef | None = None
+        self.solver: Solver | None = Solver()
+        self.addr_sym: ArithRef | None = Int("addr")
         self.addr_ok_cache: dict[int, BoolRef] = {}
+        self.loop_iterator_constraint_cache: dict[
+            tuple[int, int, int, int], BoolRef
+        ] = {}
+        self.access_check_cache: set[int] = set()
+        self.op_overrider_map = self._build_op_overrider_map()
+        self.op_callback_cache: dict[type[Op], OpCallbacks] = {}
+        self.for_loop_callbacks = ForLoopCallbacks(
+            range_wrapper_factory=self.lock_fn(self._wrap_range),
+            before_loop_callback=self.lock_fn(self._loop_hook_before),
+            loop_iter_overrider=self.lock_fn(self._loop_hook_iter_overrider),
+            after_loop_callback=self.lock_fn(self._loop_hook_after),
+        )
         SymbolicExpr.set_loop_ctx_provider(
             lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
         )
@@ -2579,11 +2652,16 @@ class SymbolicClient(Client):
         }
 
     def register_op_callback(self, op_type: type[Op], *args, **kwargs) -> OpCallbacks:
-        overrider_map = self._build_op_overrider_map()
-        overrider = overrider_map.get(op_type)
+        cached = self.op_callback_cache.get(op_type)
+        if cached is not None:
+            return cached
+        overrider = self.op_overrider_map.get(op_type)
         if overrider is not None:
-            return OpCallbacks(op_overrider=self.lock_fn(overrider))
-        return OpCallbacks()
+            callbacks = OpCallbacks(op_overrider=self.lock_fn(overrider))
+        else:
+            callbacks = OpCallbacks()
+        self.op_callback_cache[op_type] = callbacks
+        return callbacks
 
     # ── For-loop infrastructure ───────────────────────────────────
 
@@ -2711,11 +2789,22 @@ class SymbolicClient(Client):
         idx_z3 = Int(f"loop_i_{lineno}")
         sym = SymbolicExpr.create("const", idx_z3, INT32)
         idx = SymbolicExpr.wrap_loop_index(sym, INT32)
+        constraint_key = (lineno, iterable.start, iterable.stop, iterable.step)
+        iterator_constraint = self.loop_iterator_constraint_cache.get(constraint_key)
+        if iterator_constraint is None:
+            iterator_constraint = _range_to_iterator_constraint(
+                idx_z3,
+                start=iterable.start,
+                stop=iterable.stop,
+                step=iterable.step,
+            )
+            self.loop_iterator_constraint_cache[constraint_key] = iterator_constraint
         ctx = LoopContext(
             lineno,
             iterable.length,
             idx,
             idx_z3,
+            iterator_constraint,
             start=iterable.start,
             stop=iterable.stop,
             step=iterable.step,
@@ -2749,22 +2838,17 @@ class SymbolicClient(Client):
         all_iterator_constraints: list[BoolRef] = []
         if ctx.pending_checks:
             solver.push()
-            iterator_constraint = _range_to_iterator_constraint(
-                ctx.idx_z3, start=ctx.start, stop=ctx.stop, step=ctx.step
-            )
-            solver.add(iterator_constraint)
-            all_iterator_constraints.append(iterator_constraint)
+            iterator_constraint = ctx.iterator_constraint
+            if iterator_constraint is not None:
+                solver.add(iterator_constraint)
+                all_iterator_constraints.append(iterator_constraint)
 
             # Also add constraints for all outer loops that are still active.
             for outer_ctx in self.loop_stack:
-                outer_constraint = _range_to_iterator_constraint(
-                    outer_ctx.idx_z3,
-                    start=outer_ctx.start,
-                    stop=outer_ctx.stop,
-                    step=outer_ctx.step,
-                )
-                solver.add(outer_constraint)
-                all_iterator_constraints.append(outer_constraint)
+                outer_constraint = outer_ctx.iterator_constraint
+                if outer_constraint is not None:
+                    solver.add(outer_constraint)
+                    all_iterator_constraints.append(outer_constraint)
 
         for pending in ctx.pending_checks:
             if cfg.verbose:
@@ -2786,12 +2870,7 @@ class SymbolicClient(Client):
             )
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
-        return ForLoopCallbacks(
-            range_wrapper_factory=self.lock_fn(self._wrap_range),
-            before_loop_callback=self.lock_fn(self._loop_hook_before),
-            loop_iter_overrider=self.lock_fn(self._loop_hook_iter_overrider),
-            after_loop_callback=self.lock_fn(self._loop_hook_after),
-        )
+        return self.for_loop_callbacks
 
     # ── Tensor resolution helpers ─────────────────────────────────────
 
@@ -2956,14 +3035,26 @@ class SymbolicClient(Client):
 
     # ── Overridable hooks with safe defaults ──────────────────────────
 
-    def _addr_ok_premise(self, addr_ok: BoolRef) -> BoolRef:
+    def _addr_ok_expr(self) -> BoolRef:
+        addr = self.addr_sym
+        assert addr is not None
+        if self.addr_ok is None:
+            addr_ok_expr = (
+                Or(*[And(addr >= s, addr <= e) for s, e, _ in self.tensor_addrs])
+                if self.tensor_addrs
+                else BoolVal(False)
+            )
+            self.addr_ok = cast(BoolRef, addr_ok_expr)
+        return self.addr_ok
+
+    def _addr_ok_premise(self) -> BoolRef:
         """Constraint added to the solver under ``addr_ok``.
 
         Race detector keeps the positive premise (every captured access sits
         inside a registered tensor). Sanitizer can defer address-range
         premises until each access check when it needs access-specific ranges.
         """
-        return addr_ok
+        return self._addr_ok_expr()
 
     def _cache_non_tensor_arg(self, name: str, arg: Any) -> None:
         """Called from ``arg_callback`` for args without a ``data_ptr``."""
@@ -3007,6 +3098,7 @@ class SymbolicClient(Client):
         self.tensor_addrs.clear()
         self.tensor_names.clear()
         self.addr_ok_cache.clear()
+        self.access_check_cache.clear()
 
     # ── Client callbacks with shared defaults ─────────────────────────
 
@@ -3037,29 +3129,25 @@ class SymbolicClient(Client):
         grid = tuple(int(g) for g in grid)
         self.last_grid = (grid[0] - 1, grid[1] - 1, grid[2] - 1)
         self.grid = grid
-        addr = Int("addr")
-
-        addr_ok_expr = (
-            Or(*[And(addr >= s, addr <= e) for s, e, _ in self.tensor_addrs])
-            if self.tensor_addrs
-            else BoolVal(False)
+        self.addr_ok = None
+        self.pid_ok = cast(
+            BoolRef,
+            And(
+                SymbolicExpr.PID0 < grid[0],
+                SymbolicExpr.PID1 < grid[1],
+                SymbolicExpr.PID2 < grid[2],
+                SymbolicExpr.PID0 >= 0,
+                SymbolicExpr.PID1 >= 0,
+                SymbolicExpr.PID2 >= 0,
+            ),
         )
-        self.addr_ok = cast(BoolRef, addr_ok_expr)
 
-        pid_ok_expr = And(
-            SymbolicExpr.PID0 < self.grid[0],
-            SymbolicExpr.PID1 < self.grid[1],
-            SymbolicExpr.PID2 < self.grid[2],
-            SymbolicExpr.PID0 >= 0,
-            SymbolicExpr.PID1 >= 0,
-            SymbolicExpr.PID2 >= 0,
-        )
-        self.pid_ok = cast(BoolRef, pid_ok_expr)
-
-        self.solver = Solver()
-        self.solver.add(self._addr_ok_premise(self.addr_ok))
+        if self.solver is None:
+            self.solver = Solver()
+        else:
+            self.solver.reset()
+        self.solver.add(self._addr_ok_premise())
         self.solver.add(self.pid_ok)
-        self.addr_sym = addr
 
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.need_full_grid is None:
