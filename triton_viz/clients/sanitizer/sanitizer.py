@@ -9,6 +9,7 @@ from typing import (
 )
 import sys
 
+import numpy as np
 from torch import Tensor
 from triton.tools.tensor_descriptor import TensorDescriptor
 from z3 import And, BoolVal, Not, Or, sat
@@ -42,6 +43,11 @@ from .report import (
     print_oob_record_pdb_style,
 )
 from ...core.config import config as cfg
+from ...core.symbolic_metadata import (
+    ConcreteAccessRoute,
+    ConcreteRangeInfo,
+    SymbolicTensorValue,
+)
 
 SanitizerT = TypeVar("SanitizerT", bound="Sanitizer")
 
@@ -212,6 +218,114 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.cache_grid = tuple(int(g) for g in grid)
         SymbolicClient.grid_callback(self, grid)
 
+    def _op_load_overrider(self, ptr, mask, other, *args):
+        del args
+        ptr = self._materialize_memory_operand(ptr)
+        mask = self._materialize_memory_operand(mask)
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
+        other_sym = SymbolicExpr.from_value(other) if other is not None else None
+        ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
+
+        self._route_pointer_access(ret, ptr_sym, mask_sym, Load, "read")
+        return ret
+
+    def _op_store_overrider(self, ptr, value, mask, *args):
+        del value, args
+        ptr = self._materialize_memory_operand(ptr)
+        mask = self._materialize_memory_operand(mask)
+        ptr_sym = SymbolicExpr.from_value(ptr)
+        mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
+        # Store values do not affect address validity. Avoiding the value
+        # subtree keeps sanitizer store checks focused on pointer + mask.
+        ret = SymbolicExpr.create("store", ptr_sym, None, mask_sym)
+
+        self._route_pointer_access(ret, ptr_sym, mask_sym, Store, "write")
+        return ret
+
+    def _route_pointer_access(
+        self,
+        access_expr: SymbolicExpr,
+        ptr_sym: SymbolicExpr,
+        mask_sym: SymbolicExpr | None,
+        op_type: type[Op],
+        access_mode: AccessMode,
+    ) -> None:
+        concrete_route = self._concrete_ptr_access_route(access_expr, ptr_sym, mask_sym)
+        if concrete_route is not None:
+            self._check_concrete_addr_values(
+                concrete_route.addrs,
+                access_expr,
+                None,
+                concrete_route.range_info,
+            )
+            return
+
+        self._handle_access_check(access_expr, op_type, access_mode)
+
+    def _concrete_ptr_access_route(
+        self,
+        access_expr: SymbolicExpr,
+        ptr_sym: SymbolicExpr,
+        mask_sym: SymbolicExpr | None,
+    ) -> ConcreteAccessRoute | None:
+        if self.loop_stack:
+            return None
+
+        concrete_addrs = self._concrete_ptr_addrs(ptr_sym, mask_sym)
+        if concrete_addrs is None:
+            return None
+
+        range_info = self._concrete_addr_range_info(access_expr)
+        if range_info is None:
+            return None
+        return ConcreteAccessRoute(concrete_addrs, range_info)
+
+    def _concrete_ptr_addrs(
+        self, ptr_sym: SymbolicExpr, mask_sym: SymbolicExpr | None
+    ) -> list[int] | None:
+        if ptr_sym.op != "const":
+            return None
+        ptr_value = getattr(ptr_sym, "value", None)
+        if not isinstance(ptr_value, SymbolicTensorValue):
+            return None
+
+        addrs = np.asarray(ptr_value.data, dtype=np.uint64).reshape(-1)
+        if mask_sym is None:
+            return [int(addr) for addr in addrs]
+
+        if mask_sym.op != "const":
+            return None
+        mask_value = getattr(mask_sym, "value", None)
+        if isinstance(mask_value, SymbolicTensorValue):
+            mask = np.asarray(mask_value.data, dtype=bool)
+        elif isinstance(mask_value, (bool, int, np.integer)):
+            mask = np.asarray(mask_value, dtype=bool)
+        else:
+            return None
+
+        try:
+            mask = np.broadcast_to(mask, ptr_value.data.shape).reshape(-1)
+        except ValueError:
+            return None
+        return [int(addr) for addr, active in zip(addrs, mask) if active]
+
+    def _concrete_addr_range_info(
+        self, symbolic_expr: SymbolicExpr
+    ) -> ConcreteRangeInfo | None:
+        tensor = self._resolve_tensor(symbolic_expr)
+        if tensor is None:
+            ranges = [(start, end, tensor) for start, end, tensor in self.tensor_addrs]
+        else:
+            ranges = [
+                (start, end, range_tensor)
+                for start, end, range_tensor in self.tensor_addrs
+                if range_tensor is tensor
+            ]
+        if not ranges:
+            return None
+        return ConcreteRangeInfo(tensor, ranges)
+
     def pre_run_callback(self, fn: Callable) -> bool:
         if self.cache_grid:
             fn_cache = _FnSymbolicCache(fn, self.cache_grid, tuple(self.cache_args))
@@ -331,6 +445,64 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             _report_if_sat()
         finally:
             solver.pop()
+
+    def _check_concrete_addr_values(
+        self,
+        concrete_addrs: list[int],
+        symbolic_expr: SymbolicExpr,
+        source_location: tuple[str, int, str] | None,
+        range_info: ConcreteRangeInfo,
+    ) -> bool:
+        if not concrete_addrs:
+            return True
+
+        min_addr = min(concrete_addrs)
+        max_addr = max(concrete_addrs)
+        tensor = range_info.tensor
+        ranges = range_info.ranges
+
+        if len(ranges) == 1:
+            start, end, _ = ranges[0]
+            if min_addr >= start and max_addr <= end:
+                return True
+            violation_addr = next(
+                addr for addr in concrete_addrs if addr < start or addr > end
+            )
+            report_tensor = (
+                tensor
+                if tensor is not None
+                else self._find_tensor_for_expr(symbolic_expr, violation_addr)
+            )
+            op_type: type[Load] | type[Store]
+            if symbolic_expr.op in ("store", "tensor_pointer_store"):
+                op_type = Store
+            else:
+                op_type = Load
+            self._report(
+                op_type,
+                report_tensor,
+                violation_addr,
+                symbolic_expr,
+                source_location,
+            )
+            return True
+
+        for addr in concrete_addrs:
+            if any(start <= addr <= end for start, end, _ in ranges):
+                continue
+            report_tensor = (
+                tensor
+                if tensor is not None
+                else self._find_tensor_for_expr(symbolic_expr, addr)
+            )
+            if symbolic_expr.op in ("store", "tensor_pointer_store"):
+                op_type = Store
+            else:
+                op_type = Load
+            self._report(op_type, report_tensor, addr, symbolic_expr, source_location)
+            return True
+
+        return True
 
     def _handle_access_check(
         self,
