@@ -3158,10 +3158,10 @@ class SymbolicClient(Client):
     def pre_run_callback(self, fn: Callable) -> bool:
         if self._launch_should_stop:
             return False
-        should_run = True if self.need_full_grid is None else self.need_full_grid
-        if should_run:
-            self._active_blocks += 1
-        return should_run
+        return True if self.need_full_grid is None else self.need_full_grid
+
+    def block_start_callback(self, fn: Callable) -> None:
+        self._active_blocks += 1
 
     def post_run_callback(self, fn: Callable) -> bool:
         if self.need_full_grid is None:

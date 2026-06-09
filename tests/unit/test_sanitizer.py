@@ -4,6 +4,8 @@ import torch
 from typing import cast
 from z3 import Int
 
+from triton_viz.core.callbacks import ForLoopCallbacks, OpCallbacks
+from triton_viz.core.client import Client, ClientManager
 from triton_viz.core.config import config as cfg
 from triton_viz.core.data import Load, Store
 from triton_viz.core.symbolic_metadata import (
@@ -105,6 +107,49 @@ def test_pre_run_callback_cache_miss_on_grid_change(_isolate_fn_symbolic_cache):
     _populate_for_launch(b, (4, 1, 1))
     assert b.pre_run_callback(kernel) is True
     assert len(_isolate_fn_symbolic_cache) == 2
+
+
+def test_vetoed_block_does_not_count_as_active_sanitizer_block():
+    class VetoClient(Client):
+        NAME = "veto"
+
+        def pre_run_callback(self, fn):
+            return False
+
+        def post_run_callback(self, fn):
+            return True
+
+        def arg_callback(self, name, arg, arg_cvt):
+            return None
+
+        def grid_callback(self, grid):
+            return None
+
+        def grid_idx_callback(self, grid_idx):
+            return None
+
+        def register_op_callback(self, op_type, *args, **kwargs):
+            return OpCallbacks()
+
+        def register_for_loop_callback(self):
+            return ForLoopCallbacks()
+
+        def finalize(self):
+            return []
+
+        def pre_warmup_callback(self, jit_fn, *args, **kwargs):
+            return False
+
+        def post_warmup_callback(self, jit_fn, ret):
+            return None
+
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    manager = ClientManager([sanitizer, VetoClient()])
+    manager.grid_callback((1, 1, 1))
+    manager.grid_idx_callback((0, 0, 0))
+
+    assert manager.pre_run_callback(lambda: None) is False
+    assert sanitizer._active_blocks == 0
 
 
 def test_post_run_callback_preserves_state_mid_full_grid():
