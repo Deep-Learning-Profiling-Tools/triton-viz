@@ -724,7 +724,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.solver = None
         self.addr_ok = None
         self.pid_ok = None
-        self.addr_sym = None
+        # addr_sym is instance-lifetime, not launch-scoped: it is created once
+        # in SymbolicClient.__init__ and never recreated, and the next launch's
+        # grid_callback dereferences it via _addr_ok_premise(). Clearing it
+        # here would crash the second launch of any traced kernel.
         self.grid = None
         self.grid_idx = None
         self.last_grid = None

@@ -44,6 +44,57 @@ def test_waw_overlapping_store():
     assert any(r.race_type == RaceType.WAW for r in races)
 
 
+# ======== Relaunch — Same Traced Kernel Twice ========
+
+
+def test_second_launch_of_same_kernel_detects_again():
+    """The trace decorator holds one client instance across launches, so the
+    second launch must recapture and re-solve. Regression test: finalize's
+    _clear_launch_runtime used to null addr_sym, which SymbolicClient's
+    grid_callback dereferences but never recreates — the second launch of any
+    traced kernel crashed with an AssertionError before this was fixed.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        block_start = pid * (BLOCK_SIZE - 1)  # BUG: should be BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        tl.store(output_ptr + offsets, offsets.to(tl.float32), mask=mask)
+
+    n, bs = 32, 8
+    out = torch.empty(n, dtype=torch.float32)
+    for _ in range(2):
+        kernel[(triton.cdiv(n, bs),)](out, n, bs)
+        assert detector.last_status == "ok"
+        assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+
+
+def test_second_launch_of_loop_kernel_does_not_crash():
+    """Loop kernels exercise _loop_hook_after, which also asserts on the
+    launch-runtime symbolic state; relaunching must not trip it either.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        for _i in range(2):
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            tl.store(out_ptr + offs, tl.full((BLOCK,), 1.0, tl.float32))
+
+    out = torch.zeros(16, dtype=torch.float32)
+    for _ in range(2):
+        kernel[(2,)](out, 8)
+        assert detector.last_status == "ok"
+
+
 # ======== RAW+WAW — Non-atomic Histogram ========
 
 
