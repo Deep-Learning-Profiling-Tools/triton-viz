@@ -181,7 +181,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
     # ── Sanitizer-specific hook overrides ─────────────────────────
 
-    def _addr_ok_premise(self, addr_ok: BoolRef) -> BoolRef:
+    def _addr_ok_premise(self) -> BoolRef:
         # Sanitizer adds the actual invalid-address premise under the
         # per-access push/pop scope, because it may need tensor-specific
         # ranges instead of the global union of all registered tensors.
@@ -370,18 +370,17 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         originates from. The global ``addr_ok`` union is only a fallback for
         expressions whose base tensor cannot be resolved.
         """
-        addr_sym = self.addr_sym
-        assert addr_sym is not None
-
         resolved_tensor = self._resolve_tensor(symbolic_expr)
         if resolved_tensor is None:
-            return self.addr_ok
+            return self._addr_ok_expr()
 
         cache_key = id(resolved_tensor)
         cached = self.addr_ok_cache.get(cache_key)
         if cached is not None:
             return cached
 
+        addr_sym = self.addr_sym
+        assert addr_sym is not None
         ranges = [
             And(addr_sym >= start, addr_sym <= end)
             for start, end, tensor in self.tensor_addrs
@@ -517,11 +516,21 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         ``_check_range_satisfiable`` for historical compatibility, and it
         doesn't distinguish reads vs writes at the Z3 level.
         """
-        z3_addr, z3_constraints = expr.eval()
         if not self.loop_stack:
+            expr_signature = hash(("expr", expr.signature()))
+            if expr_signature in self.access_check_cache:
+                return
+            z3_addr, z3_constraints = expr.eval()
+            z3_signature = hash(("z3", _make_signature(z3_addr, z3_constraints)))
+            if z3_signature in self.access_check_cache:
+                self.access_check_cache.add(expr_signature)
+                return
+            self.access_check_cache.add(expr_signature)
+            self.access_check_cache.add(z3_signature)
             self._check_range_satisfiable(z3_addr, z3_constraints, expr)
             return
 
+        z3_addr, z3_constraints = expr.eval()
         ctx = self.loop_stack[-1]
         signature = _make_signature(z3_addr, z3_constraints)
         pending_idx = ctx.signature_cache.get(signature)
