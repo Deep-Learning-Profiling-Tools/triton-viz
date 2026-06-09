@@ -11,8 +11,8 @@ except (
     ) from exc
 import inspect
 import textwrap
-from ..transformers.nki_extract_slice import transform_code
-from .masked_load_store import masked_load, masked_store
+from ..frontend.nki_transform import transform_code
+from ..masked_load_store import masked_load, masked_store
 
 
 class NDArray:
@@ -484,7 +484,7 @@ class NKIInterpretedFunction:
         if client_manager is not None:
             client_manager.grid_callback(grid_dims)
 
-        # Apply AST transformers
+        # Apply the NKI frontend AST transformer.
         if hasattr(self.fn, "__code__"):
             # Get the source code of the function (stripped of leading indents in case it was defined in scope)
             source_code = textwrap.dedent(inspect.getsource(self.fn))

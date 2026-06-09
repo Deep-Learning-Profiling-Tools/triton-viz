@@ -1260,7 +1260,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         )
 
     @staticmethod
-    def _atomic_rmw_return_dtype(ptr_sym: SymbolicExpr, val_sym: SymbolicExpr) -> Any:
+    def _atomic_rmw_return_dtype(
+        ptr_sym: SymbolicExpr | tuple[SymbolicExpr, ...],
+        val_sym: SymbolicExpr | tuple[SymbolicExpr, ...],
+    ) -> Any:
         ptr_dtype = getattr(ptr_sym, "dtype", None)
         elem_ty = getattr(ptr_dtype, "element_ty", None)
         if elem_ty is not None:
@@ -1321,7 +1324,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
 
 
 class NullRaceDetector(NullSymbolicClient, RaceDetector):
-    """A do-nothing object returned when the race-detector backend is 'off'.
+    """A do-nothing object returned when the race detector is off.
     Every callback raises via ``NullSymbolicClient`` so misuse is obvious.
     """
 

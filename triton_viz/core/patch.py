@@ -1,140 +1,25 @@
-import triton.language as tl
-from contextlib import contextmanager
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, cast
-from concurrent.futures import ThreadPoolExecutor
-from queue import SimpleQueue, Empty
-import threading
-import time
-from functools import partialmethod
+from contextlib import contextmanager
+from typing import Any
 
-from .config import config as cfg
+from .frontend.base import AdapterResult, LANG_PATCH_SCOPES
+from .frontend.base import get_frontend
 from .callbacks import OpCallbacks
-
-from .data import (
-    Op,
-    RawLoad,
-    RawStore,
-)
-import inspect
-from triton.runtime.interpreter import (
-    GridExecutor,
-    _implicit_cvt,
-    interpreter_builder,
-)
-from triton.runtime.interpreter import _patch_lang as triton_patch_lang
-from triton.runtime.interpreter import ASTTransformer as _OrigASTTransformer
-from triton.runtime.interpreter import _tuple_create, _unwrap_tensor, _rewrap_tensor
-from triton.tools.tensor_descriptor import TensorDescriptor
-from triton.runtime import JITFunction
-from ..transformers.for_loop_patcher import _visit_For as triton_viz_visit_For
-
-from .flip_patch import patch_flip
-from ..frontends.base import AdapterResult, OPERATION_REGISTRY
+from .data import Op
 
 
-_MISSING = object()
-
-
-class _LangPatchScope:
-    """Tracks patched attributes so they can be restored."""
-
-    def __init__(self) -> None:
-        self._changes: list[tuple[object, str, object]] = []
-
-    def set_attr(self, obj: object, name: str, value: object) -> None:
-        original = getattr(obj, name, _MISSING)
-        self._changes.append((obj, name, original))
-        setattr(obj, name, value)
-
-    def restore(self) -> None:
-        while self._changes:
-            obj, name, original = self._changes.pop()
-            if original is _MISSING:
-                delattr(obj, name)
-            else:
-                setattr(obj, name, original)
-
-
-_LANG_PATCH_SCOPES: dict[str, list[Any]] = {"triton": [], "nki": [], "nki_beta2": []}
-
-
-def _push_lang_patch_scope(backend: str, scope: Any) -> None:
-    _LANG_PATCH_SCOPES.setdefault(backend, []).append(scope)
-
-
-def _triton_snapshot_scope(fn: Callable[..., Any]) -> _LangPatchScope:
+def _frontend(frontend_name: str):
     """
-    Stores Triton attributes into a LangPatchScope for later unpatching.
-    This is to be run before patching with the interpreter.
-    This is equivalent to what triton>=3.6.0 does natively
-    but also works for triton<3.6.0.
+    Purpose:
+        Load a frontend object only when that frontend is used.
+
+    Args:
+        frontend_name: Frontend name to resolve.
+
+    Returns:
+        Frontend object implementing the registry and runtime patching interface.
     """
-
-    def _capture_builtin_attrs(scope: _LangPatchScope, obj: Any) -> None:
-        for name, member in inspect.getmembers(obj):
-            if tl.core.is_builtin(member):
-                scope.set_attr(obj, name, member)
-
-    scope = _LangPatchScope()
-    tensor_attrs = ("__index__", "__bool__", "__repr__", "__str__", "T")
-    lang_attrs = (
-        "range",
-        "static_range",
-        "static_assert",
-        "static_print",
-        "multiple_of",
-        "max_contiguous",
-        "max_constancy",
-        "reduce",
-        "associative_scan",
-    )
-    langs = [
-        value
-        for value in fn.__globals__.values()
-        if inspect.ismodule(value) and value in [tl, tl.core]
-    ]
-    for lang in langs:
-        _capture_builtin_attrs(scope, lang)
-        _capture_builtin_attrs(scope, lang.tensor)
-        if lang == tl:
-            _capture_builtin_attrs(scope, lang.math)
-
-        for attr in tensor_attrs:
-            if hasattr(lang.tensor, attr):
-                scope.set_attr(lang.tensor, attr, getattr(lang.tensor, attr))
-
-        for attr in lang_attrs:
-            if hasattr(lang, attr):
-                scope.set_attr(lang, attr, getattr(lang, attr))
-        scope.set_attr(lang.dtype, "to_ir", lang.dtype.to_ir)
-
-    if hasattr(tl.core, "tensor_descriptor_base"):
-        _capture_builtin_attrs(scope, tl.core.tensor_descriptor_base)
-
-    return scope
-
-
-def _pop_lang_patch_scope(backend: str) -> Any | None:
-    scopes = _LANG_PATCH_SCOPES.get(backend)
-    if not scopes:
-        return None
-    return scopes.pop()
-
-
-_thread_local_interpreter_state = threading.local()
-_thread_local_interpreter_state.grid_idx = None  # just set a default
-
-
-def _set_thread_grid_idx(self, x: int, y: int, z: int) -> None:
-    _thread_local_interpreter_state.grid_idx = (x, y, z)
-
-
-# Bind to the builder class so attribute access uses thread-local storage.
-_interp_cls = interpreter_builder.__class__
-_interp_cls.set_grid_idx = _set_thread_grid_idx  # type: ignore[attr-defined]
-_interp_cls.grid_idx = property(lambda self: _thread_local_interpreter_state.grid_idx)  # type: ignore[attr-defined]
+    return get_frontend(frontend_name)
 
 
 class PatchOp:
@@ -144,123 +29,127 @@ class PatchOp:
         op_type: type[Op],
         callbacks: OpCallbacks,
         adapter: Callable[..., AdapterResult],
+        run_op_overrider: Callable,
+        maybe_yield_for_multism: Callable[[], None],
     ):
         self.op = op
         self.op_type = op_type
-        self.callbacks = callbacks
+        # Copy callback fields once at patch time; patched ops are called for
+        # every frontend operation, so avoid repeated bundle attribute lookups.
+        self.before_callback = callbacks.before_callback
+        self.after_callback = callbacks.after_callback
+        self.op_overrider = callbacks.op_overrider
         self.adapter = adapter
+        # Frontend hooks are resolved before installing the wrapper so __call__
+        # stays independent of frontend registry lookups.
+        self.maybe_yield_for_multism = maybe_yield_for_multism
+        self.run_op_overrider = run_op_overrider
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.op, name)
 
     def __call__(self, *args, **kwargs):
-        if cfg.num_sms > 1:
-            # periodically sleep briefly so other worker threads can run
-            _YIELD_INTERVAL_SEC = 0.005  # Request GIL handoff roughly every 5ms
-            _YIELD_SLEEP_SEC = (
-                0.0005  # Small positive sleep to encourage OS-level yield
-            )
-            now = time.perf_counter()
-            last = getattr(_thread_local_interpreter_state, "last_yield_ts", 0.0)
-            if now - last >= _YIELD_INTERVAL_SEC:
-                _thread_local_interpreter_state.last_yield_ts = now
-                time.sleep(_YIELD_SLEEP_SEC)
+        self.maybe_yield_for_multism()
 
-        if self.callbacks.before_callback:
-            before_args = self.adapter(*args, **kwargs)
-            self.callbacks.before_callback(*before_args.args, **before_args.kwargs)
-        if self.callbacks.op_overrider:
-            if (
-                self.op_type
-                in OPERATION_REGISTRY["triton"].namespaces[tl.math].values()
-            ):
-                raise NotImplementedError("Patching math ops not yet supported")
-            elif self.op_type in OPERATION_REGISTRY["triton"].namespaces[tl].values():
-                # see triton.runtime.interpreter:ReduceOps.sum
-                # First, convert input from tl.tensor to TensorHandle. Here, input tensor is args[0]
-                # Then, convert return value from TensorHandle to tl.tensor
-                symbolic_ret = self.callbacks.op_overrider(
-                    args[0].handle, *args[1:], **kwargs
+        if not self.before_callback and not self.after_callback:
+            if self.op_overrider:
+                return self.run_op_overrider(
+                    self.op,
+                    self.op_type,
+                    self.op_overrider,
+                    args,
+                    kwargs,
                 )
-                if isinstance(symbolic_ret, tuple):
-                    ret_parts = []
-                    for sym_elem in symbolic_ret:
-                        _shape = getattr(sym_elem, "shape", ())
-                        _dtype = getattr(sym_elem, "dtype", None)
-                        if _shape and _dtype:
-                            elem_dtype = tl.block_type(_dtype, list(_shape))
-                        else:
-                            elem_dtype = _dtype or args[0].dtype
-                        elem_tensor = tl.core.tensor(sym_elem, elem_dtype)
-                        fn = cast(Any, elem_tensor.handle)
-                        if fn is not None:
-                            fn.concrete_fn = self.op
-                        ret_parts.append(elem_tensor)
-                    ret = tuple(ret_parts)
-                else:
-                    _shape = getattr(symbolic_ret, "shape", ())
-                    _dtype = getattr(symbolic_ret, "dtype", None)
-                    if _shape and _dtype:
-                        ret_dtype = tl.block_type(_dtype, list(_shape))
-                    else:
-                        ret_dtype = _dtype or args[0].dtype
-                    ret = tl.core.tensor(symbolic_ret, ret_dtype)
-                    fn = cast(Any, ret.handle)
-                    if fn is not None:
-                        fn.concrete_fn = self.op
-            else:  # interpreter_builder
-                ret = self.callbacks.op_overrider(*args, **kwargs)
-                if ret is not None:
-                    original_ops = OPERATION_REGISTRY["triton"].original_ops
-                    if self.op_type == RawLoad:
-                        ret.concrete_fn = original_ops[interpreter_builder][
-                            "create_masked_load"
-                        ]
-                    elif self.op_type == RawStore:
-                        ret.concrete_fn = original_ops[interpreter_builder][
-                            "create_masked_store"
-                        ]
-                    else:
-                        ret.concrete_fn = self.op
+            return self.op(*args, **kwargs)
+
+        if self.before_callback:
+            before_args = self.adapter(*args, **kwargs)
+            self.before_callback(*before_args.args, **before_args.kwargs)
+
+        if self.op_overrider:
+            ret = self.run_op_overrider(
+                self.op,
+                self.op_type,
+                self.op_overrider,
+                args,
+                kwargs,
+            )
         else:
             ret = self.op(*args, **kwargs)
-        if self.callbacks.after_callback:
-            # Pass ret so that we don't have to derive output shape from args
+
+        if self.after_callback:
+            # Pass ret so that we don't have to derive output shape from args.
             after_args = self.adapter(*args, **kwargs)
-            self.callbacks.after_callback(ret, *after_args.args, **after_args.kwargs)
+            self.after_callback(ret, *after_args.args, **after_args.kwargs)
         return ret
 
 
-def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, backend: str):
+def patch_op(namespace: Any, attr: str, callbacks: OpCallbacks, frontend_name: str):
     """
-    Register a callback to be called before and after an operator is executed.
+    Purpose:
+        Replace one frontend operator with a PatchOp wrapper that invokes callbacks.
 
-    :param namespace: The namespace object that owns the operator.
-    :param attr: The attribute name for the operator on the namespace.
-    :param callbacks: The OpCallbacks object containing before_callback, after_callback, and op_overrider.
-    :param backend: The backend to use ('triton', 'nki', 'nki_beta2', or None for current backend).
+    Args:
+        namespace: Namespace object that owns the operator.
+        attr: Attribute name for the operator on the namespace.
+        callbacks: Callback bundle for before, after, and override behavior.
+        frontend_name: Frontend name that owns the operator registry entry.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If frontend_name is not registered.
     """
-    if backend not in OPERATION_REGISTRY:
-        raise ValueError(f"Unknown backend: {backend}")
-
-    registry = OPERATION_REGISTRY[backend]
-    op_type = registry.namespaces[namespace][attr]
-    original_op = registry.original_ops[namespace][attr]
-    adapter = registry.adapters[op_type]
-    patched_op = PatchOp(original_op, op_type, callbacks, adapter)
+    frontend = _frontend(frontend_name)
+    op_type = frontend.namespaces[namespace][attr]
+    original_op = frontend.original_ops[namespace][attr]
+    adapter = frontend.adapters[op_type]
+    frontend.prepare_patched_op(namespace, op_type, original_op)
+    patched_op = PatchOp(
+        original_op,
+        op_type,
+        callbacks,
+        adapter,
+        run_op_overrider=frontend.run_op_overrider,
+        maybe_yield_for_multism=frontend.maybe_yield_for_multism,
+    )
     setattr(namespace, attr, patched_op)
 
 
-def unpatch_op(namespace: Any, attr: str, backend: str):
+def unpatch_op(namespace: Any, attr: str, frontend_name: str):
     """
-    Unregister a callback for an operator.
+    Purpose:
+        Restore one previously patched frontend operator to its original function.
 
-    :param namespace: The namespace object that owns the operator.
-    :param attr: The attribute name for the operator on the namespace.
+    Args:
+        namespace: Namespace object that owns the operator.
+        attr: Attribute name for the operator on the namespace.
+        frontend_name: Frontend name that owns the operator registry entry.
+
+    Returns:
+        None.
     """
-    registry = OPERATION_REGISTRY[backend]
-    original_op = registry.original_ops[namespace][attr]
+    frontend = _frontend(frontend_name)
+    original_op = frontend.original_ops[namespace][attr]
     setattr(namespace, attr, original_op)
 
 
 class LoopIter:
+    """
+    Purpose:
+        Wrap an iterable so registered loop hooks run around each iteration.
+
+    Args:
+        hooks: Object that owns range_type, before_loop, loop_iter, and after_loop hooks.
+        iterable: Iterable produced by the patched loop expression.
+        lineno: Source line number for the loop.
+        range_type: Frontend-specific classification of the loop iterable.
+
+    Returns:
+        Iterator that yields possibly overridden loop indices.
+    """
+
     def __init__(self, hooks, iterable, lineno, range_type):
         self._it = iter(iterable)
         self._lineno = lineno
@@ -289,271 +178,89 @@ class LoopIter:
         return idx
 
 
-class _LoopPatcher:
-    """Manages AST patching for for-loop interception."""
+def patch_for_loop(frontend_name: str = "triton"):
+    """
+    Purpose:
+        Enable frontend-specific for-loop interception when supported.
 
-    def __init__(self):
-        self._orig_visit_for: Callable | None = None
-        self._patched: bool = False
+    Args:
+        frontend_name: Frontend name to patch.
 
-    def patch(self) -> None:
-        if not self._patched:
-            self._orig_visit_for = getattr(_OrigASTTransformer, "visit_For", None)
-            _OrigASTTransformer.visit_For = triton_viz_visit_For  # type: ignore[assignment]
-            self._patched = True
-
-    def unpatch(self) -> None:
-        if not self._patched:
-            return
-        if self._orig_visit_for is not None:
-            _OrigASTTransformer.visit_For = self._orig_visit_for
-        self._patched = False
+    Returns:
+        None.
+    """
+    _frontend(frontend_name).patch_for_loop()
 
 
-_loop_patcher = _LoopPatcher()
+def unpatch_for_loop(frontend_name: str = "triton"):
+    """
+    Purpose:
+        Disable frontend-specific for-loop interception if it was enabled.
+
+    Args:
+        frontend_name: Frontend name to unpatch.
+
+    Returns:
+        None.
+    """
+    _frontend(frontend_name).unpatch_for_loop()
 
 
-def patch_for_loop():
-    _loop_patcher.patch()
+def patch_lang(fn, frontend_name, client_manager=None):
+    """
+    Purpose:
+        Patch frontend language/runtime symbols for one traced function scope.
+
+    Args:
+        fn: Function whose execution scope needs frontend language patching.
+        frontend_name: Frontend name to patch.
+        client_manager: Optional active ClientManager exposed to patched helpers.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If frontend_name is unsupported.
+    """
+    scope = _frontend(frontend_name).patch_lang(
+        fn,
+        client_manager=client_manager,
+    )
+
+    LANG_PATCH_SCOPES.setdefault(frontend_name, []).append(scope)
 
 
-def unpatch_for_loop():
-    _loop_patcher.unpatch()
+def unpatch_lang(frontend_name):
+    """
+    Purpose:
+        Restore the most recent language/runtime patch scope for a frontend.
 
+    Args:
+        frontend_name: Frontend name whose latest patch scope should be restored.
 
-def patch_lang(fn, backend, client_manager=None):
-    if backend == "triton":
-        scope = _triton_snapshot_scope(fn)
-        triton_patch_lang(fn)
-    elif backend == "nki":
-        from triton_viz.core.nki import nki_patch_lang
-
-        scope = _LangPatchScope()
-        nki_patch_lang(scope)
-    elif backend == "nki_beta2":
-        from triton_viz.core.nki_beta2 import nki_patch_lang
-
-        scope = _LangPatchScope()
-        nki_patch_lang(scope)
-    else:
-        raise ValueError(
-            f"Unsupported backend {backend} received. Triton-viz only supports one of ('triton', 'nki', 'nki_beta2')."
-        )
-
-    _push_lang_patch_scope(backend, scope)
-
-    if client_manager is not None:
-        fn.__globals__["_triton_viz_loop_patcher"] = client_manager
-    patch_flip(scope, lambda: _current_client_manager)
-
-
-def unpatch_lang(backend):
-    scope = _pop_lang_patch_scope(backend)
+    Returns:
+        None.
+    """
+    scopes = LANG_PATCH_SCOPES.get(frontend_name)
+    scope = scopes.pop() if scopes else None
     if scope is not None and hasattr(scope, "restore"):
         scope.restore()
 
 
-@dataclass(frozen=True)
-class FakeTensor:
-    _data_ptr: int
-    dtype: str
-    shape: tuple[int, ...] = ()
-    _stride: tuple[int, ...] = ()
-    _is_contiguous: bool = True
-    _element_size: int = 1
-    device: str = "fake_tensor"
-
-    def data_ptr(self) -> int:
-        return self._data_ptr
-
-    def stride(self) -> tuple[int, ...]:
-        return self._stride
-
-    def is_contiguous(self) -> bool:
-        return self._is_contiguous
-
-    def numel(self) -> int:
-        size = 1
-        for dim in self.shape:
-            size *= dim
-        return size
-
-    def element_size(self) -> int:
-        return self._element_size
-
-
-def _init_args_hst(args_dev, kwargs):
-    def _to_cpu(arg):
-        if isinstance(arg, tuple):
-            return _tuple_create(arg, map(_to_cpu, arg))
-        elif isinstance(arg, TensorDescriptor):
-            return TensorDescriptor(
-                _to_cpu(arg.base),
-                arg.shape,
-                arg.strides,
-                arg.block_shape,
-            )
-        elif not hasattr(arg, "data_ptr"):
-            return arg
-
-        unwrapped_arg = _unwrap_tensor(arg)
-        cpu_arg = FakeTensor(
-            _data_ptr=unwrapped_arg.data_ptr(),
-            dtype=unwrapped_arg.dtype,
-            shape=unwrapped_arg.shape,
-            _stride=unwrapped_arg.stride(),
-            _is_contiguous=unwrapped_arg.is_contiguous(),
-            _element_size=unwrapped_arg.element_size(),
-        )
-        cpu_arg = _rewrap_tensor(cpu_arg, original_tensor=arg)
-        return cpu_arg
-
-    args_hst = [_to_cpu(arg) for arg in args_dev]
-
-    # Process keyword arguments
-    kwargs_hst = {}
-    for key, value in kwargs.items():
-        kwargs_hst[key] = _to_cpu(value)
-    return args_hst, kwargs_hst
-
-
-def _grid_executor_call(self, *args_dev, backend=None, **kwargs):
-    assert backend is not None
-    if kwargs.pop("warmup", False):
-        return
-
-    builder = OPERATION_REGISTRY[backend].builder
-
-    # Removes not used reserved keywords from kwargs
-    # Triton doesn't support keyword-only, variable positional or variable keyword arguments
-    # It's safe to inspect only positional or keyword arguments (i.e., argspec.args)
-    argspec = inspect.getfullargspec(self.fn)
-    triton_viz_args = ["client_manager", "jit_fn"]
-    kwargs = {
-        k: v for k, v in kwargs.items() if k in argspec.args or k in triton_viz_args
-    }
-    client_manager = kwargs.pop("client_manager")
-
-    # Expose client_manager to tl.flip wrapper via a module-global
-    global _current_client_manager
-    _current_client_manager = client_manager
-    kwargs.pop("jit_fn")
-    if cfg.virtual_memory:
-        args_hst, kwargs_hst = _init_args_hst(args_dev, kwargs)
-    else:
-        args_hst, kwargs_hst = self._init_args_hst(args_dev, kwargs)
-
-    # Prepare call arguments
-    args = inspect.getcallargs(self.fn, *args_hst, **kwargs_hst)
-    call_args = {}
-    for name, arg in args.items():
-        if name in self.constexprs:
-            call_args[name] = arg
-            ret = arg
-        else:
-            ret = _implicit_cvt(arg)
-        client_manager.arg_callback(name, arg, ret)
-        call_args[name] = ret
-    call_args.pop("self", None)
-    # Iterate through grid
-    grid = self.grid(call_args) if callable(self.grid) else self.grid
-    assert len(grid) <= 3
-    grid = grid + (1,) * (3 - len(grid))
-
-    builder.set_grid_dim(*grid)
-    client_manager.grid_callback(grid)
-    total_blocks = grid[0] * grid[1] * grid[2]
-    max_workers = min(cfg.num_sms, total_blocks)
-
-    def run_grid_loops(grid):
-        tasks: SimpleQueue = SimpleQueue()
-        for x in range(grid[0]):
-            for y in range(grid[1]):
-                for z in range(grid[2]):
-                    tasks.put((x, y, z))
-
-        stop_event = threading.Event()
-
-        def _worker():
-            while not stop_event.is_set():
-                try:
-                    x, y, z = tasks.get_nowait()
-                except Empty:
-                    return
-                interpreter_builder.set_grid_idx(x, y, z)
-                client_manager.grid_idx_callback((x, y, z))
-                if not client_manager.pre_run_callback(self.fn):
-                    continue
-                self.fn(**call_args)
-                if not client_manager.post_run_callback(self.fn):
-                    stop_event.set()
-                    return
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_worker) for _ in range(max_workers)]
-            for fut in futures:
-                fut.result()
-
-    def run_grid_loops_1thread(grid):
-        for x in range(grid[0]):
-            for y in range(grid[1]):
-                for z in range(grid[2]):
-                    interpreter_builder.set_grid_idx(x, y, z)
-                    client_manager.grid_idx_callback((x, y, z))
-                    if not client_manager.pre_run_callback(self.fn):
-                        continue
-                    self.fn(**call_args)
-                    if not client_manager.post_run_callback(self.fn):
-                        return
-
-    if cfg.enable_timing:
-        import time
-
-        start_time = time.time()
-
-    if max_workers == 1:
-        run_grid_loops_1thread(grid)
-    else:
-        run_grid_loops(grid)
-
-    if cfg.enable_timing:
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        name = self.fn.__name__
-        print(f"Triton-Viz: execution time for {name}: {elapsed_time * 1000:.3f} ms")
-    # Copy arguments back to propagate side-effects
-    if not cfg.virtual_memory:
-        self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
-
-
-def _jit_function_call(self, *args, backend=None, **kwargs):
-    assert backend is not None
-    patch_lang(self.fn, backend, client_manager=_current_client_manager)
-    try:
-        return self.fn(*args, **kwargs)
-    finally:
-        unpatch_lang(backend)
-
-
-patch_calls_scope = 0
-
-
 @contextmanager
-def patch_calls(backend):
-    global patch_calls_scope
-    if patch_calls_scope == 0:
-        # only patch at top-level scope (e.g. with patch_calls_top(): with patch_calls_bottom())
-        old_grid_executor_call = GridExecutor.__call__
-        old_jit_function_call = JITFunction.__call__
-        GridExecutor.__call__ = partialmethod(_grid_executor_call, backend=backend)
-        JITFunction.__call__ = partialmethod(_jit_function_call, backend=backend)
-    patch_calls_scope += 1
-    try:
+def patch_calls(frontend_name):
+    """
+    Purpose:
+        Patch frontend call entry points while a traced launch is active.
+
+    Args:
+        frontend_name: Frontend name whose call entry points should be patched.
+
+    Returns:
+        Context manager that restores call entry points when the scope exits.
+
+    Yields:
+        None. Control returns to the caller while frontend call patches are active.
+    """
+    with _frontend(frontend_name).patch_calls():
         yield
-    finally:
-        patch_calls_scope -= 1
-        if patch_calls_scope == 0:
-            # only unpatch at top-level scope (e.g. in above example, don't
-            # unpatch in between patch_calls_bottom() and patch_calls_top() scopes
-            GridExecutor.__call__ = old_grid_executor_call
-            JITFunction.__call__ = old_jit_function_call

@@ -13,6 +13,7 @@ from triton_viz.clients.symbolic_engine import (
     RangeWrapper,
     _range_to_iterator_constraint,
 )
+from triton_viz.core.symbolic_metadata import is_pointer_dtype
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.core.callbacks import ForLoopCallbacks
 from triton_viz.core.config import config
@@ -66,11 +67,29 @@ class LoadIndexChecker(SymbolicSanitizer):
                 return None
             return np.sum(offsets, axis=0)
 
+        def _offsets_from_const_pointer(expr):
+            if expr.op != "const" or not is_pointer_dtype(expr.dtype):
+                return None
+
+            ptrs = expr.to_py()
+            if not isinstance(ptrs, list):
+                return None
+
+            tensor = self._resolve_tensor(expr)
+            if tensor is None:
+                return None
+
+            return (
+                np.asarray(ptrs, dtype=np.int64) - tensor.data_ptr()
+            ) // tensor.element_size()
+
         def _new_load_overrider(ptr, *args, **kwargs):
             # exec original overrider
             load_expr = orig_overrider(ptr, *args, **kwargs)
             p = load_expr.ptr
             offs = _sum_offsets_from_addptr(p)
+            if offs is None:
+                offs = _offsets_from_const_pointer(p)
             if offs is not None:
                 self._offset_lists.append(offs.tolist())
             return load_expr
@@ -178,6 +197,9 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
 loop_deferred_check_recorder: LoopDeferredCheckRecorder = LoopDeferredCheckRecorder(
     abort_on_error=False
 )
+sort_pointer_sanitizer: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
+tuple_pointer_cast_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
+tuple_pointer_item_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
 # ======== Kernels ===========
@@ -232,6 +254,38 @@ def loop_deferred_check_simplify_kernel(out_ptr):
     for i in range(0, num_blocks):
         idx = pid + 1
         tl.store(out_ptr + idx, idx)
+
+
+@triton_viz.trace(client=sort_pointer_sanitizer)
+@triton.jit
+def sort_pointer_oob_kernel(out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    sorted_offsets = tl.sort(offs, 0, descending=True)
+    tl.store(out_ptr + sorted_offsets, offs, mask=offs == 0)
+
+
+@triton_viz.trace(client=tuple_pointer_cast_checker)
+@triton.jit
+def pointer_tuple_cast_where_store_kernel(peer_ptrs):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, 1)
+    peer_ptr = peer_ptrs[0].to(tl.int64, bitcast=True)
+    zero_ptr = tl.zeros((1,), dtype=tl.int64)
+    selected_ptr = tl.where(pid == 0, peer_ptr, zero_ptr)
+    selected_ptr = selected_ptr.to(peer_ptrs[0].dtype, bitcast=True)
+    tl.store(selected_ptr + offs, tl.full((1,), 1.0, dtype=tl.float32))
+
+
+@triton_viz.trace(client=tuple_pointer_item_checker)
+@triton.jit
+def pointer_tuple_item_select_store_kernel(peer_ptrs, rank_ptr):
+    dst_rank = tl.load(rank_ptr)
+    dst_ptr = tl.zeros((1,), dtype=tl.int64).item()
+    for i in tl.static_range(2):
+        if dst_rank == i:
+            dst_ptr = peer_ptrs[i].to(tl.int64, bitcast=True)
+    dst_ptr = dst_ptr.to(peer_ptrs[0].dtype, bitcast=True)
+    tl.store(dst_ptr, 1.0)
 
 
 # ======== Indirect Load/Store Tests ===========
@@ -308,6 +362,38 @@ def test_loop_deferred_checks_simplify():
     loop_deferred_check_simplify_kernel[(2,)](out)
 
     assert load_index_checker.observed_offsets == []
+
+
+def test_sort_used_in_pointer_falls_back_to_eager_offsets():
+    sort_pointer_sanitizer.records.clear()
+
+    out = torch.empty((7,), dtype=torch.int32)
+    sort_pointer_oob_kernel[(1,)](out, BLOCK=8)
+
+    assert sort_pointer_sanitizer.records
+
+
+def test_tuple_pointer_int_cast_uses_registered_tuple_ranges():
+    tuple_pointer_cast_checker.records.clear()
+
+    out0 = torch.empty((1,), dtype=torch.float32)
+    out1 = torch.empty((1,), dtype=torch.float32)
+
+    pointer_tuple_cast_where_store_kernel[(1,)]((out0, out1))
+
+    assert tuple_pointer_cast_checker.records == []
+
+
+def test_tuple_pointer_item_selection_uses_registered_tuple_ranges():
+    tuple_pointer_item_checker.records.clear()
+
+    out0 = torch.empty((1,), dtype=torch.float32)
+    out1 = torch.empty((1,), dtype=torch.float32)
+    rank = torch.tensor([1], dtype=torch.int32)
+
+    pointer_tuple_item_select_store_kernel[(1,)]((out0, out1), rank)
+
+    assert tuple_pointer_item_checker.records == []
 
 
 # Dedicated sanitizer for nested loop regression test
@@ -1060,6 +1146,98 @@ def test_inner_stride1_nonzero_storage_offset_no_oob():
     assert len(inner_stride1_offset_sanitizer.records) == 0
 
 
+cumsum_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=cumsum_sanitizer)
+@triton.jit
+def cumsum_indexed_store_kernel(active_ptr, out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    active = tl.load(active_ptr + offs)
+    write_idx = tl.cumsum(active, 0) - 1
+    tl.store(out_ptr + write_idx, active)
+
+
+def test_sanitizer_supports_data_dependent_cumsum_index():
+    cumsum_sanitizer.records.clear()
+
+    active = torch.ones((8,), dtype=torch.int32)
+    out = torch.empty_like(active)
+
+    cumsum_indexed_store_kernel[(1,)](active, out, BLOCK=active.numel())
+
+    assert len(cumsum_sanitizer.records) == 0
+
+
+ashr_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=ashr_index_sanitizer)
+@triton.jit
+def ashr_index_store_kernel(out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    write_idx = offs >> 1
+    tl.store(out_ptr + write_idx, offs)
+
+
+def test_sanitizer_supports_ashr_in_symbolic_address():
+    ashr_index_sanitizer.records.clear()
+
+    out = torch.empty((4,), dtype=torch.int32)
+
+    ashr_index_store_kernel[(1,)](out, BLOCK=out.numel())
+
+    assert len(ashr_index_sanitizer.records) == 0
+
+
+where_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=where_index_sanitizer)
+@triton.jit
+def where_index_store_kernel(out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    write_idx = tl.where(offs % 2 == 0, offs, BLOCK - 1 - offs)
+    tl.store(out_ptr + write_idx, offs)
+
+
+def test_sanitizer_supports_where_in_symbolic_address():
+    where_index_sanitizer.records.clear()
+
+    out = torch.empty((4,), dtype=torch.int32)
+
+    where_index_store_kernel[(1,)](out, BLOCK=out.numel())
+
+    assert len(where_index_sanitizer.records) == 0
+
+
+masked_compaction_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
+
+
+@triton_viz.trace(client=masked_compaction_index_sanitizer)
+@triton.jit
+def masked_compaction_index_store_kernel(bitmask_ptr, out_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    word = tl.load(bitmask_ptr + offs * 0)
+    active = (word >> offs) & 1
+    exc_cumsum = tl.cumsum(active, 0) - active
+    active_flags = active.to(tl.int1)
+    rev_arange = tl.where(active_flags, 0, BLOCK - 1 - offs)
+    write_idx = exc_cumsum + rev_arange
+    tl.store(out_ptr + write_idx, active)
+
+
+def test_sanitizer_materializes_loaded_masked_compaction_store_indices():
+    masked_compaction_index_sanitizer.records.clear()
+
+    bitmask = torch.tensor([0b0101], dtype=torch.int32)
+    out = torch.empty((4,), dtype=torch.int32)
+
+    masked_compaction_index_store_kernel[(1,)](bitmask, out, BLOCK=out.numel())
+
+    assert len(masked_compaction_index_sanitizer.records) == 0
+
+
 # ======== Data-Dependent Loop Bound (Integer Division) Tests ===========
 
 
@@ -1395,5 +1573,5 @@ def test_strided_view_warns_on_large_numel(_isolate_per_element_threshold):
             vals_base, bins, out, L=3, SV=vals_base.stride(0), SB=bins.stride(0)
         )
 
-    # Warning path must not change correctness — no OOB with correct mask.
+    # Warning path must not change correctness -- no OOB with correct mask.
     assert len(strided_view_sanitizer.records) == 0

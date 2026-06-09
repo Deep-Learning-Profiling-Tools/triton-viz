@@ -1,21 +1,37 @@
 import pytest
+import numpy as np
+import triton.language as tl
+from triton.runtime.interpreter import TensorHandle
 
 from triton_viz.core.callbacks import OpCallbacks
 from triton_viz.core.data import (
     AddPtr,
+    CastImpl,
+    IntToPtr,
     Load,
     ProgramId,
+    PtrToInt,
     ReduceSum,
     Store,
 )
 
-from triton_viz.frontends.base import AdapterResult, OPERATION_REGISTRY
-from triton_viz.frontends.nki import HAS_NKI
+from triton_viz.core.frontend.base import AdapterResult, get_frontend
+from triton_viz.core.frontend.nki import HAS_NKI
+from triton_viz.core.symbolic_metadata import (
+    FLOAT32,
+    FLOAT8_E4B8,
+    FLOAT8_E5B16,
+    INT32,
+    SymbolicTensorValue,
+    SymbolicTypeSpec,
+    pointer_type,
+)
 
 from triton_viz.core.patch import PatchOp
 
-TRITON_ADAPTERS = OPERATION_REGISTRY["triton"].adapters
-NKI_ADAPTERS = OPERATION_REGISTRY["nki"].adapters
+TRITON_FRONTEND = get_frontend("triton")
+TRITON_ADAPTERS = TRITON_FRONTEND.adapters
+NKI_ADAPTERS = get_frontend("nki").adapters
 
 
 def test_adapter_result_kwargs_copy():
@@ -124,6 +140,94 @@ def test_program_id_adapter_returns_axis_only():
     assert result.kwargs == {}
 
 
+def test_triton_pointer_cast_aliases_have_distinct_op_types():
+    frontend = get_frontend("triton")
+    builder_ops = frontend.namespaces[frontend.builder]
+
+    assert builder_ops["cast_impl"] is CastImpl
+    assert builder_ops["create_ptr_to_int"] is PtrToInt
+    assert builder_ops["create_int_to_ptr"] is IntToPtr
+
+
+def test_triton_frontend_normalizes_block_pointer_type():
+    frontend = get_frontend("triton")
+
+    spec = frontend.normalize_symbolic_value(
+        tl.block_type(tl.pointer_type(tl.float32), [1, 16])
+    )
+
+    assert isinstance(spec, SymbolicTypeSpec)
+    assert spec.dtype == pointer_type(FLOAT32)
+    assert spec.shape == (1, 16)
+
+
+@pytest.mark.parametrize(
+    "triton_dtype,symbolic_dtype",
+    [
+        (tl.float8e4b8, FLOAT8_E4B8),
+        (tl.float8e5b16, FLOAT8_E5B16),
+    ],
+)
+def test_triton_frontend_normalizes_other_fp8_dtypes(triton_dtype, symbolic_dtype):
+    frontend = get_frontend("triton")
+
+    assert frontend.normalize_symbolic_value(triton_dtype) == symbolic_dtype
+
+    spec = frontend.normalize_symbolic_value(
+        tl.block_type(tl.pointer_type(triton_dtype), [2, 4])
+    )
+    assert isinstance(spec, SymbolicTypeSpec)
+    assert spec.dtype == pointer_type(symbolic_dtype)
+    assert spec.shape == (2, 4)
+
+    handle = TensorHandle(np.array([1, 2], dtype=np.uint8), triton_dtype)
+    normalized = frontend.normalize_symbolic_value(handle)
+    assert isinstance(normalized, SymbolicTensorValue)
+    assert normalized.dtype == symbolic_dtype
+    np.testing.assert_array_equal(normalized.data, handle.data)
+
+    round_tripped = frontend.to_frontend_symbolic_value(normalized)
+    assert isinstance(round_tripped, TensorHandle)
+    assert round_tripped.dtype == triton_dtype
+    np.testing.assert_array_equal(round_tripped.data, handle.data)
+
+
+def test_triton_frontend_normalizes_tensor_and_round_trips():
+    frontend = get_frontend("triton")
+    handle = TensorHandle(np.array([7], dtype=np.int32), tl.int32)
+    tensor = tl.core.tensor(handle, tl.int32)
+
+    normalized = frontend.normalize_symbolic_value(tensor)
+
+    assert isinstance(normalized, SymbolicTensorValue)
+    assert normalized.dtype == INT32
+    np.testing.assert_array_equal(normalized.data, np.array([7], dtype=np.int32))
+
+    round_tripped = frontend.to_frontend_symbolic_value(normalized)
+    assert isinstance(round_tripped, TensorHandle)
+    assert round_tripped.dtype == tl.int32
+    np.testing.assert_array_equal(round_tripped.data, handle.data)
+
+
+def test_triton_frontend_wraps_symbolic_concrete_fn():
+    frontend = get_frontend("triton")
+
+    def concrete_fn(value, dtype):
+        assert isinstance(value, TensorHandle)
+        assert dtype == tl.float32
+        return TensorHandle(value.data.astype(np.float32), dtype)
+
+    wrapped = frontend.wrap_symbolic_concrete_fn(concrete_fn)
+    result = wrapped(
+        SymbolicTensorValue(np.array([3], dtype=np.int32), INT32),
+        FLOAT32,
+    )
+
+    assert isinstance(result, SymbolicTensorValue)
+    assert result.dtype == FLOAT32
+    np.testing.assert_array_equal(result.data, np.array([3], dtype=np.float32))
+
+
 @pytest.mark.skipif(not HAS_NKI, reason="NKI extras not installed")
 def test_nki_load_store_adapters_align_with_clients():
     """NKI adapters normalize masked load/store to (tensor, mask, keys)."""
@@ -162,6 +266,8 @@ def test_patchop_uses_adapter_for_callbacks():
         op_type=Store,
         callbacks=callbacks,
         adapter=adapter,
+        run_op_overrider=TRITON_FRONTEND.run_op_overrider,
+        maybe_yield_for_multism=TRITON_FRONTEND.maybe_yield_for_multism,
     )
 
     ptr = object()

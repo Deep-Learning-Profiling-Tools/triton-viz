@@ -12,45 +12,18 @@ from triton_viz.core.data import (
     Store,
     UnaryOp,
 )
-from triton_viz.frontends.base import (
-    AdapterResult,
-    Frontend,
-    OPERATION_REGISTRY,
-)
+
+from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
+
 
 HAS_NKI = False
 nki_builder = None
 try:
-    from triton_viz.core.nki import NDArray, nki_builder  # type: ignore
+    from triton_viz.core.simulation.nki import NDArray, nki_builder  # type: ignore
 
     HAS_NKI = True
 except ModuleNotFoundError:
     pass
-
-
-def program_id_adapter(axis: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult(axis)
-
-
-def _nki_allocate_adapter(*_args: Any, **_kwargs: Any) -> AdapterResult:
-    return AdapterResult()
-
-
-def _nki_load_adapter(
-    src: Any, keys: Any, *, mask: Any | None = None, **_kwargs: Any
-) -> AdapterResult:
-    return AdapterResult(src, mask, keys)
-
-
-def _nki_store_adapter(
-    dst: Any,
-    keys: Any,
-    value: Any,
-    *,
-    mask: Any | None = None,
-    **_kwargs: Any,
-) -> AdapterResult:
-    return AdapterResult(dst, mask, keys)
 
 
 def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
@@ -87,18 +60,45 @@ if HAS_NKI:
     }
 
     NKI_ADAPTERS = {
-        ProgramId: program_id_adapter,
-        Allocate: _nki_allocate_adapter,
-        Load: _nki_load_adapter,
-        Store: _nki_store_adapter,
+        ProgramId: lambda axis, *_args, **_kwargs: AdapterResult(axis),
+        Allocate: lambda *_args, **_kwargs: AdapterResult(),
+        Load: lambda src, keys, *, mask=None, **_kwargs: AdapterResult(
+            src,
+            mask,
+            keys,
+        ),
+        Store: lambda dst, keys, value, *, mask=None, **_kwargs: AdapterResult(
+            dst,
+            mask,
+            keys,
+        ),
         Dot: _nki_dot_adapter,
         ReduceSum: _nki_reduce_sum_adapter,
     }
 
-NKI_FRONTEND = Frontend.from_namespaces(
-    builder=nki_builder,
-    namespaces=NKI_NAMESPACES,
-    adapters=NKI_ADAPTERS,
-)
 
-OPERATION_REGISTRY["nki"] = NKI_FRONTEND
+class NKIFrontend(Frontend):
+    def __init__(self):
+        definition = Frontend.from_namespaces(
+            name="nki",
+            builder=nki_builder,
+            namespaces=NKI_NAMESPACES,
+            adapters=NKI_ADAPTERS,
+        )
+        super().__init__(
+            name=definition.name,
+            builder=definition.builder,
+            original_ops=definition.original_ops,
+            adapters=definition.adapters,
+            namespaces=definition.namespaces,
+        )
+
+    def patch_lang(self, fn, client_manager: Any = None) -> _LangPatchScope:
+        from triton_viz.core.simulation.nki import nki_patch_lang
+
+        scope = _LangPatchScope()
+        nki_patch_lang(scope)
+        return scope
+
+
+frontend = register_frontend(NKIFrontend())

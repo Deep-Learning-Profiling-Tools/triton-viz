@@ -8,12 +8,17 @@ every symbolic client relies on. Sanitizer- and race-detector-specific
 tests live next to their respective clients.
 """
 
+import os
 import pytest
+import subprocess
+import sys
+from pathlib import Path
 from typing import cast
 
-import triton.language as tl
+import numpy as np
 
 from triton_viz.clients.symbolic_engine import (
+    SymbolicClient,
     SymbolicExpr,
     ConstSymbolicExpr,
     ReduceSymbolicExpr,
@@ -21,11 +26,51 @@ from triton_viz.clients.symbolic_engine import (
     StoreSymbolicExpr,
     _range_to_iterator_constraint,
 )
+from triton_viz.core.data import Sort
+from triton_viz.core.symbolic_metadata import (
+    FLOAT16,
+    FLOAT32,
+    INT1,
+    INT32,
+    UINT32,
+    SymbolicTensorValue,
+    SymbolicTypeSpec,
+    block_type,
+    pointer_type,
+)
 from z3.z3 import ArithRef, BoolRef, IntNumRef
 from z3 import Solver, Int, sat
 
 
 # ======== Range Constraint Tests ===========
+
+
+def test_symbolic_engine_imports_without_loading_triton():
+    root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = (
+        str(root)
+        if not env.get("PYTHONPATH")
+        else f"{root}{os.pathsep}{env['PYTHONPATH']}"
+    )
+    code = """
+import builtins
+original_import = builtins.__import__
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "triton" or name.startswith("triton."):
+        raise RuntimeError(f"blocked import: {name}")
+    return original_import(name, globals, locals, fromlist, level)
+builtins.__import__ = guarded_import
+import triton_viz.clients.symbolic_engine
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_range_to_iterator_constraint():
@@ -70,7 +115,7 @@ def test_reduce_expr_eval(op: str, data):
     import builtins
 
     input_arr = SymbolicExpr.create(
-        "const", np.array(data), tl.block_type(tl.int32, [len(data)])
+        "const", np.array(data), block_type(INT32, [len(data)])
     )
     reduce_expr = SymbolicExpr.create(op, input_arr, None, False)
 
@@ -86,7 +131,7 @@ def test_reduce_expr_eval(op: str, data):
 def test_basic_expr_const_eval(value):
     # Test that "const" SymbolicExpr correctly evaluates both scalar (e.g. 4)
     # and vector (e.g. (1, 2, 3)) constants.
-    const_expr = SymbolicExpr.create("const", value, tl.int32)
+    const_expr = SymbolicExpr.create("const", value, INT32)
     result, constraints = const_expr.eval(simplify_constraints=False)
     if isinstance(value, (list, tuple)):
         # Vector constants return a list of Z3 ints.
@@ -95,6 +140,16 @@ def test_basic_expr_const_eval(value):
         # Scalar constants return a single Z3 int.
         assert cast(IntNumRef, result).as_long() == value
     # Constants produce no constraints.
+    assert constraints is None
+
+
+def test_numpy_scalar_const_eval():
+    const_expr = SymbolicExpr.from_value(np.int32(7))
+    assert isinstance(const_expr, ConstSymbolicExpr)
+
+    result, constraints = const_expr.eval(simplify_constraints=False)
+
+    assert cast(IntNumRef, result).as_long() == 7
     assert constraints is None
 
 
@@ -117,7 +172,7 @@ def test_basic_expr_pid_eval(axis, expected_pid):
 @pytest.mark.parametrize("start,end", [(4, 8), (0, 4)])
 def test_basic_expr_arange_eval(start, end):
     # Test that arange expr produces a named symbolic variable with range constraints.
-    arange_expr = SymbolicExpr.create("arange", tl.int32, start, end)
+    arange_expr = SymbolicExpr.create("arange", INT32, start, end)
     result, constraints = arange_expr.eval(simplify_constraints=False)
     result = cast(ArithRef, result)
     assert result.decl().name() == f"arange_{start}_{end}"
@@ -139,7 +194,7 @@ def test_basic_expr_arange_eval(start, end):
 )
 def test_unary_expr_eval(op: str, value: int, expected: int):
     # Test that unary ops (abs, fabs) correctly evaluate on constant inputs.
-    arg = SymbolicExpr.create("const", value, tl.int32)
+    arg = SymbolicExpr.create("const", value, INT32)
     expr = SymbolicExpr.create(op, arg)
     result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == expected
@@ -172,8 +227,8 @@ def test_unary_expr_eval(op: str, value: int, expected: int):
 )
 def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
     # Test arithmetic, comparison, and bitwise binary ops on constant inputs.
-    lhs_expr = SymbolicExpr.create("const", lhs, tl.int32)
-    rhs_expr = SymbolicExpr.create("const", rhs, tl.int32)
+    lhs_expr = SymbolicExpr.create("const", lhs, INT32)
+    rhs_expr = SymbolicExpr.create("const", rhs, INT32)
     expr = SymbolicExpr.create(op, lhs_expr, rhs_expr)
     result, constraints = expr.eval(simplify_constraints=False)
     if isinstance(expected, bool):
@@ -183,13 +238,44 @@ def test_binary_expr_eval(op: str, lhs: int, rhs: int, expected):
     assert constraints is None
 
 
+def test_ashr_expr_eval_scalar_constants():
+    lhs = SymbolicExpr.create("const", -8, INT32)
+    rhs = SymbolicExpr.create("const", 1, INT32)
+    expr = SymbolicExpr.create("ashr", lhs, rhs)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert cast(IntNumRef, result).as_long() == -4
+    assert constraints is None
+
+
+def test_unsigned_shift_expr_eval_scalar_constants():
+    lhs = SymbolicExpr.create("const", 0xFFFF0008, UINT32)
+    rhs = SymbolicExpr.create("const", 16, UINT32)
+    expr = SymbolicExpr.create("right_shift", lhs, rhs)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert cast(IntNumRef, result).as_long() == 0xFFFF
+    assert constraints is None
+
+    lhs = SymbolicExpr.create("const", 2, UINT32)
+    rhs = SymbolicExpr.create("const", 4, UINT32)
+    expr = SymbolicExpr.create("left_shift", lhs, rhs)
+
+    result, constraints = expr.eval(simplify_constraints=False)
+
+    assert cast(IntNumRef, result).as_long() == 32
+    assert constraints is None
+
+
 def test_bitwise_bool_expr_eval():
     """
     Test short circuiting behavior of bitwise_and and bitwise_or operators which do not
     go through bitvector conversion like other binary operators.
     """
-    a = SymbolicExpr.create("const", 1, tl.int32)
-    b = SymbolicExpr.create("const", 2, tl.int32)
+    a = SymbolicExpr.create("const", 1, INT32)
+    b = SymbolicExpr.create("const", 2, INT32)
     cond_true = SymbolicExpr.create("less", a, b)
     cond_false = SymbolicExpr.create("greater", a, b)
 
@@ -208,8 +294,8 @@ def test_bitwise_bool_expr_eval():
     where_expr = SymbolicExpr.create(
         "where",
         and_expr,
-        SymbolicExpr.create("const", 1, tl.int32),
-        SymbolicExpr.create("const", 0, tl.int32),
+        SymbolicExpr.create("const", 1, INT32),
+        SymbolicExpr.create("const", 0, INT32),
     )
     result, constraints = where_expr.eval(simplify_constraints=False)
     assert isinstance(result, list)
@@ -217,13 +303,62 @@ def test_bitwise_bool_expr_eval():
     assert constraints is None
 
 
+def test_where_expr_concretize_scalar_constants():
+    cond = SymbolicExpr.create("const", True, INT1)
+    lhs = SymbolicExpr.create("const", 10, INT32)
+    rhs = SymbolicExpr.create("const", -1, INT32)
+    expr = SymbolicExpr.create(
+        "where",
+        cond,
+        lhs,
+        rhs,
+    )
+
+    concrete = expr.concretize()
+
+    assert isinstance(concrete, SymbolicTensorValue)
+    np.testing.assert_array_equal(concrete.data, np.array([10], dtype=np.int32))
+
+
+def test_concrete_ashr_does_not_mutate_shared_tensor_value():
+    original_data = np.array([0x80000000], dtype=np.uint32)
+    value = SymbolicTensorValue(original_data.copy(), UINT32)
+    shared = SymbolicExpr.create("const", value, UINT32)
+    rhs = SymbolicExpr.create("const", 1, UINT32)
+    cond = SymbolicExpr.create("const", True, INT1)
+    expr = SymbolicExpr.create(
+        "where",
+        cond,
+        shared,
+        SymbolicExpr.create("ashr", shared, rhs),
+    )
+
+    concrete = expr.concretize()
+
+    assert isinstance(concrete, SymbolicTensorValue)
+    assert value.data.dtype == np.uint32
+    np.testing.assert_array_equal(value.data, original_data)
+    np.testing.assert_array_equal(concrete.data, original_data)
+
+
+def test_unary_expr_concretize_vector_constants():
+    value = SymbolicTensorValue(np.array([1.0, 4.0], dtype=np.float32), FLOAT32)
+    arg = SymbolicExpr.create("const", value, block_type(FLOAT32, [2]))
+    expr = SymbolicExpr.create("sqrt", arg)
+
+    concrete = expr.concretize()
+
+    assert isinstance(concrete, SymbolicTensorValue)
+    np.testing.assert_allclose(concrete.data, np.array([1.0, 2.0], dtype=np.float32))
+
+
 # ======== Pointer Symbolic Expr Operations Tests =========
 
 
 def test_pointer_expr_addptr_eval():
     # Test that addptr scales offset by element size (100 + 3 * 4 = 112).
-    base = SymbolicExpr.create("const", 100, tl.pointer_type(tl.int32))
-    offset = SymbolicExpr.create("const", 3, tl.int32)
+    base = SymbolicExpr.create("const", 100, pointer_type(INT32))
+    offset = SymbolicExpr.create("const", 3, INT32)
     expr = SymbolicExpr.create("addptr", base, offset)
     result, constraints = expr.eval(simplify_constraints=False)
     assert cast(IntNumRef, result).as_long() == 112
@@ -236,7 +371,7 @@ def test_pointer_expr_addptr_eval():
 @pytest.mark.parametrize(
     "op,extra",
     [
-        ("splat", tl.block_type(tl.int32, [2])),
+        ("splat", block_type(INT32, [2])),
         ("expand_dims", 0),
         ("broadcast", (2,)),
         ("reshape", (2,)),
@@ -245,7 +380,7 @@ def test_pointer_expr_addptr_eval():
 )
 def test_reshape_expr_eval(op: str, extra):
     # Test that reshape ops (splat, expand_dims, broadcast, reshape, trans) preserve scalar value.
-    arg = SymbolicExpr.create("const", 5, tl.int32)
+    arg = SymbolicExpr.create("const", 5, INT32)
     if op == "splat":
         expr = SymbolicExpr.create(op, extra, arg)
     else:
@@ -260,7 +395,7 @@ def test_reshape_expr_eval(op: str, extra):
 
 def test_expand_dims_updates_shape():
     # Scalar constant has empty shape
-    arg = SymbolicExpr.create("const", 5, tl.int32)
+    arg = SymbolicExpr.create("const", 5, INT32)
     assert arg.shape == ()
 
     # expand_dims at axis 0 should insert dimension of size 1
@@ -268,7 +403,7 @@ def test_expand_dims_updates_shape():
     assert expr.shape == (1,), f"Expected shape (1,), got {expr.shape}"
 
     # Test with tensor input and positive axis
-    tensor_arg = SymbolicExpr.create("arange", tl.int32, 0, 8)
+    tensor_arg = SymbolicExpr.create("arange", INT32, 0, 8)
     assert tensor_arg.shape == (8,)
     expr2 = SymbolicExpr.create("expand_dims", tensor_arg, 0)
     assert expr2.shape == (1, 8), f"Expected shape (1, 8), got {expr2.shape}"
@@ -284,7 +419,7 @@ def test_expand_dims_updates_shape():
 
 def test_broadcast_updates_shape():
     # Scalar constant has empty shape
-    arg = SymbolicExpr.create("const", 5, tl.int32)
+    arg = SymbolicExpr.create("const", 5, INT32)
     assert arg.shape == ()
 
     # broadcast to shape (4,)
@@ -292,15 +427,49 @@ def test_broadcast_updates_shape():
     assert expr.shape == (4,), f"Expected shape (4,), got {expr.shape}"
 
 
+def test_shape_expr_concretize_vector_constants():
+    value = SymbolicTensorValue(np.arange(4, dtype=np.int32), INT32)
+    arg = SymbolicExpr.create("const", value, block_type(INT32, [4]))
+
+    expanded = SymbolicExpr.create("expand_dims", arg, 0).concretize()
+    assert isinstance(expanded, SymbolicTensorValue)
+    np.testing.assert_array_equal(expanded.data, np.arange(4, dtype=np.int32)[None, :])
+
+    reshaped_expr = SymbolicExpr.create(
+        "reshape",
+        arg,
+        (
+            SymbolicExpr.create("const", 2, INT32),
+            SymbolicExpr.create("const", 2, INT32),
+        ),
+    )
+    reshaped = reshaped_expr.concretize()
+    assert isinstance(reshaped, SymbolicTensorValue)
+    np.testing.assert_array_equal(
+        reshaped.data, np.arange(4, dtype=np.int32).reshape(2, 2)
+    )
+
+    transposed = SymbolicExpr.create("trans", reshaped_expr, (1, 0)).concretize()
+    assert isinstance(transposed, SymbolicTensorValue)
+    np.testing.assert_array_equal(
+        transposed.data, np.arange(4, dtype=np.int32).reshape(2, 2).T
+    )
+
+    scalar = SymbolicExpr.create("const", 7, INT32)
+    broadcast = SymbolicExpr.create("broadcast", scalar, (2,)).concretize()
+    assert isinstance(broadcast, SymbolicTensorValue)
+    np.testing.assert_array_equal(broadcast.data, np.array([7, 7], dtype=np.int32))
+
+
 # ======== Block Pointer Symbolic Expr Tests =========
 
 
 def test_make_block_ptr_symbolic_expr_creation():
     """Create MakeBlockPtrSymbolicExpr with concrete values, verify children and attributes."""
-    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
-    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
-    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
-    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+    base = SymbolicExpr.create("const", 1000, pointer_type(FLOAT32))
+    shape_list = [SymbolicExpr.create("const", 64, INT32)]
+    stride_list = [SymbolicExpr.create("const", 1, INT32)]
+    offset_list = [SymbolicExpr.create("const", 0, INT32)]
     block_shape_vals = [32]
     order_vals = [0]
 
@@ -328,10 +497,10 @@ def test_make_block_ptr_symbolic_expr_creation():
 
 def test_advance_symbolic_expr_creation():
     """Create Advance wrapping MakeBlockPtr, verify children."""
-    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
-    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
-    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
-    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+    base = SymbolicExpr.create("const", 1000, pointer_type(FLOAT32))
+    shape_list = [SymbolicExpr.create("const", 64, INT32)]
+    stride_list = [SymbolicExpr.create("const", 1, INT32)]
+    offset_list = [SymbolicExpr.create("const", 0, INT32)]
 
     mbp = SymbolicExpr.create(
         "make_block_ptr",
@@ -343,7 +512,7 @@ def test_advance_symbolic_expr_creation():
         [0],
     )
 
-    delta = SymbolicExpr.create("const", 32, tl.int32)
+    delta = SymbolicExpr.create("const", 32, INT32)
     adv = SymbolicExpr.create("advance", mbp, [delta])
     assert adv.op == "advance"
     assert adv.ndim == 1
@@ -354,10 +523,10 @@ def test_advance_symbolic_expr_creation():
 
 def test_tensor_pointer_load_z3_eval():
     """Create make_block_ptr -> tensor_pointer_load, call .eval(), verify Z3 expression."""
-    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
-    shape_list = [SymbolicExpr.create("const", 64, tl.int32)]
-    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
-    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+    base = SymbolicExpr.create("const", 1000, pointer_type(FLOAT32))
+    shape_list = [SymbolicExpr.create("const", 64, INT32)]
+    stride_list = [SymbolicExpr.create("const", 1, INT32)]
+    offset_list = [SymbolicExpr.create("const", 0, INT32)]
 
     mbp = SymbolicExpr.create(
         "make_block_ptr",
@@ -387,10 +556,10 @@ def test_resolve_block_ptr_through_advance_chain():
     """Create make_block_ptr -> advance -> advance, verify accumulated offsets."""
     from triton_viz.clients.symbolic_engine import TensorPointerLoadSymbolicExpr
 
-    base = SymbolicExpr.create("const", 1000, tl.pointer_type(tl.float32))
-    shape_list = [SymbolicExpr.create("const", 128, tl.int32)]
-    stride_list = [SymbolicExpr.create("const", 1, tl.int32)]
-    offset_list = [SymbolicExpr.create("const", 0, tl.int32)]
+    base = SymbolicExpr.create("const", 1000, pointer_type(FLOAT32))
+    shape_list = [SymbolicExpr.create("const", 128, INT32)]
+    stride_list = [SymbolicExpr.create("const", 1, INT32)]
+    offset_list = [SymbolicExpr.create("const", 0, INT32)]
 
     mbp = SymbolicExpr.create(
         "make_block_ptr",
@@ -402,10 +571,10 @@ def test_resolve_block_ptr_through_advance_chain():
         [0],
     )
 
-    delta1 = SymbolicExpr.create("const", 32, tl.int32)
+    delta1 = SymbolicExpr.create("const", 32, INT32)
     adv1 = SymbolicExpr.create("advance", mbp, [delta1])
 
-    delta2 = SymbolicExpr.create("const", 32, tl.int32)
+    delta2 = SymbolicExpr.create("const", 32, INT32)
     adv2 = SymbolicExpr.create("advance", adv1, [delta2])
 
     # Create a load to use its _resolve_block_ptr_components
@@ -432,22 +601,22 @@ def test_resolve_block_ptr_through_advance_chain():
 
 def _make_block_expr(scalar_ty, shape):
     """Helper: create a ConstSymbolicExpr with the given block dtype."""
-    return ConstSymbolicExpr("const", value=0, dtype=tl.block_type(scalar_ty, shape))
+    return ConstSymbolicExpr("const", value=0, dtype=block_type(scalar_ty, shape))
 
 
 def test_dtype_is_always_scalar():
-    """dtype must always be a scalar type, never a block_type."""
-    expr = _make_block_expr(tl.float32, [4, 8])
-    assert not isinstance(expr.dtype, tl.block_type)
-    assert expr.dtype == tl.float32
+    """dtype must always be a scalar type, never a type spec."""
+    expr = _make_block_expr(FLOAT32, [4, 8])
+    assert not isinstance(expr.dtype, SymbolicTypeSpec)
+    assert expr.dtype == FLOAT32
     assert expr.shape == (4, 8)
-    full = tl.block_type(expr.dtype, list(expr.shape))
-    assert isinstance(full, tl.block_type)
+    full = block_type(expr.dtype, list(expr.shape))
+    assert isinstance(full, SymbolicTypeSpec)
 
 
 def test_reduce_shape_2d_axis1():
     """tl.sum(x, axis=1) on [4, 8] -> [4]."""
-    inp = _make_block_expr(tl.float32, [4, 8])
+    inp = _make_block_expr(FLOAT32, [4, 8])
     assert inp.shape == (4, 8)
 
     reduced = ReduceSymbolicExpr("sum", inp, axis=1)
@@ -456,28 +625,42 @@ def test_reduce_shape_2d_axis1():
 
 def test_reduce_shape_2d_axis0():
     """tl.sum(x, axis=0) on [4, 8] -> [8]."""
-    inp = _make_block_expr(tl.float32, [4, 8])
+    inp = _make_block_expr(FLOAT32, [4, 8])
     reduced = ReduceSymbolicExpr("sum", inp, axis=0)
     assert reduced.shape == (8,)
 
 
+def test_reduce_shape_negative_axis():
+    """tl.sum(x, axis=-1) on [4, 8] -> [4]."""
+    inp = _make_block_expr(FLOAT32, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=-1)
+    assert reduced.shape == (4,)
+
+
 def test_reduce_shape_2d_axis1_keepdims():
     """tl.sum(x, axis=1, keepdims=True) on [4, 8] -> [4, 1]."""
-    inp = _make_block_expr(tl.float32, [4, 8])
+    inp = _make_block_expr(FLOAT32, [4, 8])
     reduced = ReduceSymbolicExpr("sum", inp, axis=1, keepdims=True)
     assert reduced.shape == (4, 1)
 
 
 def test_reduce_shape_2d_axis0_keepdims():
     """tl.sum(x, axis=0, keepdims=True) on [4, 8] -> [1, 8]."""
-    inp = _make_block_expr(tl.float32, [4, 8])
+    inp = _make_block_expr(FLOAT32, [4, 8])
     reduced = ReduceSymbolicExpr("sum", inp, axis=0, keepdims=True)
     assert reduced.shape == (1, 8)
 
 
+def test_reduce_shape_negative_axis_keepdims():
+    """tl.sum(x, axis=-1, keepdims=True) on [4, 8] -> [4, 1]."""
+    inp = _make_block_expr(FLOAT32, [4, 8])
+    reduced = ReduceSymbolicExpr("sum", inp, axis=-1, keepdims=True)
+    assert reduced.shape == (4, 1)
+
+
 def test_reduce_shape_1d_to_scalar():
     """tl.sum(x, axis=0) on [8] -> scalar ()."""
-    inp = _make_block_expr(tl.float32, [8])
+    inp = _make_block_expr(FLOAT32, [8])
     assert inp.shape == (8,)
 
     reduced = ReduceSymbolicExpr("sum", inp, axis=0)
@@ -486,26 +669,46 @@ def test_reduce_shape_1d_to_scalar():
 
 def test_reduce_shape_all_axes():
     """tl.sum(x) with axis=None on [4, 8] -> scalar ()."""
-    inp = _make_block_expr(tl.float32, [4, 8])
+    inp = _make_block_expr(FLOAT32, [4, 8])
     reduced = ReduceSymbolicExpr("sum", inp, axis=None)
     assert reduced.shape == ()
 
 
 def test_reduce_shape_preserves_scalar_type():
     """Reduced dtype keeps the original scalar type (e.g. float16)."""
-    inp = _make_block_expr(tl.float16, [4, 8])
+    inp = _make_block_expr(FLOAT16, [4, 8])
     reduced = ReduceSymbolicExpr("sum", inp, axis=1)
     assert reduced.shape == (4,)
-    assert reduced.dtype == tl.float16
+    assert reduced.dtype == FLOAT16
 
 
 def test_reduce_shape_max_min():
     """tl.max and tl.min compute the same output shape as tl.sum."""
-    inp = _make_block_expr(tl.float32, [4, 8])
+    inp = _make_block_expr(FLOAT32, [4, 8])
 
     for op in ("max", "min"):
         reduced = ReduceSymbolicExpr(op, inp, axis=1)
         assert reduced.shape == (4,), f"op={op}: expected (4,), got {reduced.shape}"
+
+
+def test_symbolic_sort_overrider_preserves_input_shape_and_dtype():
+    class DummySymbolicClient(SymbolicClient):
+        def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+            return False
+
+        def post_warmup_callback(self, jit_fn, ret) -> None:
+            pass
+
+    inp = _make_block_expr(FLOAT32, [4, 8])
+    callback = DummySymbolicClient().register_op_callback(Sort).op_overrider
+
+    assert callback is not None
+    result = callback(inp, dim=1, descending=True, stable=True)
+
+    assert result is not inp
+    assert result.has_op("sort")
+    assert result.dtype == FLOAT32
+    assert result.shape == (4, 8)
 
 
 # ======== LoadSymbolicExpr dtype Tests ===========
@@ -518,11 +721,11 @@ def test_load_dtype_block_of_pointers():
     expected load dtype: block_type(fp32, [1, 16])
     """
     ptr = ConstSymbolicExpr(
-        "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
+        "const", value=0, dtype=block_type(pointer_type(FLOAT32), [1, 16])
     )
     load = LoadSymbolicExpr("load", ptr)
     assert load.shape == (1, 16), f"Expected shape (1, 16), got {load.shape}"
-    assert load.dtype == tl.float32, f"Expected tl.float32, got {load.dtype}"
+    assert load.dtype == FLOAT32, f"Expected FLOAT32, got {load.dtype}"
 
 
 def test_store_dtype_block_of_pointers():
@@ -535,11 +738,9 @@ def test_store_dtype_block_of_pointers():
     expected store dtype: fp32 (unpacked from the value's block_type)
     """
     ptr = ConstSymbolicExpr(
-        "const", value=0, dtype=tl.block_type(tl.pointer_type(tl.float32), [1, 16])
+        "const", value=0, dtype=block_type(pointer_type(FLOAT32), [1, 16])
     )
-    value = ConstSymbolicExpr(
-        "const", value=0, dtype=tl.block_type(tl.float32, [1, 16])
-    )
+    value = ConstSymbolicExpr("const", value=0, dtype=block_type(FLOAT32, [1, 16]))
     store = StoreSymbolicExpr("store", ptr, value)
-    assert store.dtype == tl.float32, f"Expected tl.float32, got {store.dtype}"
+    assert store.dtype == FLOAT32, f"Expected FLOAT32, got {store.dtype}"
     assert store.shape == (1, 16), f"Expected shape (1, 16), got {store.shape}"

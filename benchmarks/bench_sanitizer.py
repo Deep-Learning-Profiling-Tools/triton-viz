@@ -2,16 +2,18 @@
 """Sanitizer performance benchmark for CI.
 
 Runs a set of Triton kernels through the SymbolicSanitizer and records
-wall-clock timing.  Three modes:
+wall-clock timing.  Four modes:
 
   Run (default)          → execute benchmarks, write JSON
   Compare                → compare two JSON files, emit markdown table
   Compare-single         → emit markdown table from a single JSON file
+  Triton-kernels pytest  → run selected Triton-kernels E2E benchmarks
 
 Usage:
   python benchmarks/bench_sanitizer.py --output results.json
   python benchmarks/bench_sanitizer.py --compare base.json pr.json
   python benchmarks/bench_sanitizer.py --compare-single pr.json
+  python benchmarks/bench_sanitizer.py --triton-kernels-output-prefix /tmp/bench-pr
 """
 
 from __future__ import annotations
@@ -19,10 +21,14 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import shutil
 import signal
 import statistics
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -1399,6 +1405,125 @@ BENCHMARKS["fused_linear_jsd"] = {
 # ---------------------------------------------------------------------------
 
 
+TRITON_KERNEL_BENCHMARKS = [
+    (
+        "triton_kernels._masked_compaction",
+        "masked-compaction",
+        "test_triton_viz_sanitizer_masked_compaction",
+    ),
+    (
+        "triton_kernels._ragged_tensor_metadata_memset_compute",
+        "ragged-metadata-make",
+        "test_triton_viz_sanitizer_make_ragged_tensor_metadata",
+    ),
+    (
+        "triton_kernels._remap_ragged_tensor_metadata",
+        "ragged-metadata-remap",
+        "test_triton_viz_sanitizer_remap_ragged_tensor_metadata",
+    ),
+    (
+        "triton_kernels._topk_forward",
+        "topk-forward",
+        "test_triton_viz_sanitizer_topk_forward",
+    ),
+    (
+        "triton_kernels._topk_backward",
+        "topk-backward",
+        "test_triton_viz_sanitizer_topk_backward",
+    ),
+    ("triton_kernels._swiglu", "swiglu", "test_triton_viz_sanitizer_swiglu"),
+    (
+        "triton_kernels.upcast_mxfp4_tile",
+        "mxfp4-tile-upcast",
+        "test_triton_viz_sanitizer_mxfp4_tile_upcast",
+    ),
+]
+
+
+def _result_entry(times: list[float], error: str | None = None) -> dict[str, Any]:
+    if error is not None:
+        return {
+            "times": [],
+            "mean": None,
+            "median": None,
+            "min": None,
+            "stddev": None,
+            "error": error,
+        }
+    return {
+        "times": times,
+        "mean": statistics.mean(times),
+        "median": statistics.median(times),
+        "min": min(times),
+        "stddev": statistics.stdev(times) if len(times) > 1 else 0.0,
+    }
+
+
+def _pytest_benchmark_result(
+    command: list[str], cwd: Path, iterations: int
+) -> dict[str, Any]:
+    times: list[float] = []
+    for i in range(iterations):
+        print(f"  iteration {i + 1}/{iterations}: {' '.join(command)}", flush=True)
+        t0 = time.perf_counter()
+        completed = subprocess.run(command, cwd=cwd, text=True)
+        elapsed = time.perf_counter() - t0
+        if completed.returncode != 0:
+            return _result_entry(
+                times,
+                error=f"Command exited with status {completed.returncode}",
+            )
+        times.append(elapsed)
+    return _result_entry(times)
+
+
+def _write_single_benchmark_result(
+    name: str, result: dict[str, Any], output: Path, iterations: int
+) -> None:
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "python_version": platform.python_version(),
+        "iterations": iterations,
+        "warmup_iterations": 0,
+        "benchmarks": {name: result},
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(output, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Results written to {output}")
+
+
+def run_triton_kernel_benchmarks(
+    cwd: str,
+    output_prefix: str,
+    round_id: str,
+    iterations: int = 1,
+    device: str = "cpu",
+) -> None:
+    cwd_path = Path(cwd).resolve()
+    test_file = cwd_path / "tests/end_to_end/test_triton_kernels.py"
+    if not test_file.exists():
+        print(f"Skipping Triton-kernels benchmarks; missing {test_file}")
+        return
+
+    pytest_command = (
+        ["uv", "run", "pytest"]
+        if shutil.which("uv")
+        else [sys.executable, "-m", "pytest"]
+    )
+    for name, slug, test_name in TRITON_KERNEL_BENCHMARKS:
+        nodeid = f"tests/end_to_end/test_triton_kernels.py::{test_name}"
+        command = [
+            *pytest_command,
+            nodeid,
+            "-q",
+            f"--triton-kernels-device={device}",
+        ]
+        output = Path(f"{output_prefix}-{slug}-{round_id}.json")
+        result = _pytest_benchmark_result(command, cwd_path, iterations)
+        _write_single_benchmark_result(name, result, output, iterations)
+
+
 def run_benchmarks(
     warmup: int = 1,
     iterations: int = 20,
@@ -1508,6 +1633,13 @@ def _fmt_change(base_val: float | None, pr_val: float | None) -> str:
     return f"{sign}{pct:.1%}{flag}"
 
 
+def _fmt_samples(bench: dict) -> str:
+    times = bench.get("times")
+    if not isinstance(times, list):
+        return "N/A"
+    return str(len(times))
+
+
 def _has_regression(base_val: float | None, pr_val: float | None) -> bool:
     if base_val is None or pr_val is None or base_val == 0:
         return False
@@ -1516,10 +1648,10 @@ def _has_regression(base_val: float | None, pr_val: float | None) -> bool:
 
 def generate_comparison(base: dict, pr: dict) -> str:
     lines = [
-        "## Sanitizer Performance Benchmark",
+        "## Performance Benchmark",
         "",
-        "| Benchmark | main (min) | PR (min) | Change |",
-        "|-----------|------------|----------|--------|",
+        "| Benchmark | main (min) | PR (min) | Change | Samples |",
+        "|-----------|------------|----------|--------|---------|",
     ]
 
     all_names = list(pr.get("benchmarks", {}).keys())
@@ -1549,7 +1681,8 @@ def generate_comparison(base: dict, pr: dict) -> str:
 
         lines.append(
             f"| {name} | {_fmt_time(base_val)} | {_fmt_time(pr_val)} "
-            f"| {_fmt_change(base_val, pr_val)} |"
+            f"| {_fmt_change(base_val, pr_val)} "
+            f"| {_fmt_samples(base_bench)} / {_fmt_samples(pr_bench)} |"
         )
 
     # Total row
@@ -1557,7 +1690,7 @@ def generate_comparison(base: dict, pr: dict) -> str:
     pt = pr_total if pr_total_valid else None
     lines.append(
         f"| **Total** | **{_fmt_time(bt)}** | **{_fmt_time(pt)}** "
-        f"| {_fmt_change(bt, pt)} |"
+        f"| {_fmt_change(bt, pt)} | N/A |"
     )
 
     lines.append("")
@@ -1568,17 +1701,20 @@ def generate_comparison(base: dict, pr: dict) -> str:
     lines.append(
         f"_Iterations: {pr.get('warmup_iterations', '?')} warmup + {pr.get('iterations', '?')} measured_"
     )
+    lines.append(
+        "_Samples are shown as main / PR; long pytest benchmarks may use fewer samples._"
+    )
     return "\n".join(lines)
 
 
 def generate_single(pr: dict) -> str:
     lines = [
-        "## Sanitizer Performance Benchmark",
+        "## Performance Benchmark",
         "",
         "_No baseline available (benchmark script not present on main)._",
         "",
-        "| Benchmark | PR (min) |",
-        "|-----------|----------|",
+        "| Benchmark | PR (min) | Samples |",
+        "|-----------|----------|---------|",
     ]
 
     pr_total = 0.0
@@ -1590,15 +1726,16 @@ def generate_single(pr: dict) -> str:
             pr_total += val
         else:
             pr_total_valid = False
-        lines.append(f"| {name} | {_fmt_time(val)} |")
+        lines.append(f"| {name} | {_fmt_time(val)} | {_fmt_samples(bench)} |")
 
     pt = pr_total if pr_total_valid else None
-    lines.append(f"| **Total** | **{_fmt_time(pt)}** |")
+    lines.append(f"| **Total** | **{_fmt_time(pt)}** | N/A |")
 
     lines.append("")
     lines.append(
         f"_Iterations: {pr.get('warmup_iterations', '?')} warmup + {pr.get('iterations', '?')} measured_"
     )
+    lines.append("_Long pytest benchmarks may use fewer samples._")
     return "\n".join(lines)
 
 
@@ -1665,8 +1802,46 @@ def main():
         metavar="JSON_FILE",
         help="Merge multiple result JSON files into one (use with --output)",
     )
+    parser.add_argument(
+        "--triton-kernels-output-prefix",
+        help="Run Triton-kernels pytest benchmarks and write per-kernel JSON files",
+    )
+    parser.add_argument(
+        "--triton-kernels-cwd",
+        default=".",
+        help="Repository checkout where Triton-kernels pytest benchmarks run",
+    )
+    parser.add_argument(
+        "--triton-kernels-round",
+        default="1",
+        help="Round suffix for Triton-kernels benchmark output files",
+    )
+    parser.add_argument(
+        "--triton-kernels-device",
+        choices=("auto", "cuda", "cpu"),
+        default="cpu",
+        help="Device mode for Triton-kernels pytest benchmarks",
+    )
+    parser.add_argument(
+        "--triton-kernels-iterations",
+        type=int,
+        default=1,
+        help="Measured iterations for each Triton-kernels pytest benchmark",
+    )
 
     args = parser.parse_args()
+
+    if args.triton_kernels_output_prefix:
+        if args.triton_kernels_iterations < 1:
+            parser.error("--triton-kernels-iterations must be >= 1")
+        run_triton_kernel_benchmarks(
+            cwd=args.triton_kernels_cwd,
+            output_prefix=args.triton_kernels_output_prefix,
+            round_id=args.triton_kernels_round,
+            iterations=args.triton_kernels_iterations,
+            device=args.triton_kernels_device,
+        )
+        return
 
     # Compare mode
     if args.compare:

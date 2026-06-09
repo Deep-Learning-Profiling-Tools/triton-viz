@@ -1,8 +1,18 @@
+import numpy as np
 import pytest
 import torch
 from typing import cast
+from z3 import Int
 
 from triton_viz.core.config import config as cfg
+from triton_viz.core.data import Load, Store
+from triton_viz.core.symbolic_metadata import (
+    INT1,
+    INT32,
+    SymbolicTensorValue,
+    pointer_type,
+    type_spec,
+)
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.report import _classify_layout_and_segments
 from triton_viz.clients.sanitizer.sanitizer import (
@@ -10,6 +20,8 @@ from triton_viz.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     _fn_symbolic_cache_set,
 )
+from triton_viz.clients.sanitizer.range_summary import IntRange, access_interval_summary
+from triton_viz.clients.symbolic_engine import LoopContext, PendingCheck, SymbolicExpr
 
 
 # ======== Init Tests ===========
@@ -145,6 +157,416 @@ def test_post_run_callback_clears_state_on_last_block():
     assert sanitizer.tensor_names == {}
     assert sanitizer.cache_args == []
     assert sanitizer.cache_grid is None
+
+
+def _make_concrete_ptr_and_mask(
+    addrs: list[int],
+    mask_values: list[bool],
+) -> tuple[SymbolicExpr, SymbolicExpr]:
+    ptr_dtype = pointer_type(INT32)
+    ptr_sym = SymbolicExpr.create(
+        "const",
+        SymbolicTensorValue(np.asarray(addrs, dtype=np.uint64), ptr_dtype),
+        type_spec(ptr_dtype, (len(addrs),)),
+    )
+    mask_sym = SymbolicExpr.create(
+        "const",
+        SymbolicTensorValue(np.asarray(mask_values, dtype=bool), INT1),
+        type_spec(INT1, (len(mask_values),)),
+    )
+    return ptr_sym, mask_sym
+
+
+def test_concrete_ptr_access_respects_masked_lanes_for_load_and_store():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+
+    ptr_sym, inactive_oob_mask = _make_concrete_ptr_and_mask(
+        [base, end + tensor.element_size()],
+        [True, False],
+    )
+
+    def fail_symbolic_path(*_args, **_kwargs):
+        raise AssertionError("concrete pointer access should not hit symbolic path")
+
+    sanitizer._handle_access_check = fail_symbolic_path  # type: ignore[method-assign]
+
+    sanitizer._op_store_overrider(ptr_sym, 0, inactive_oob_mask)
+    sanitizer._op_load_overrider(ptr_sym, inactive_oob_mask, None)
+    assert sanitizer.records == []
+
+    _ptr_sym, active_oob_mask = _make_concrete_ptr_and_mask(
+        [base, end + tensor.element_size()],
+        [True, True],
+    )
+
+    sanitizer._op_store_overrider(ptr_sym, 0, active_oob_mask)
+    assert len(sanitizer.records) == 1
+    assert sanitizer.records[0].op_type is Store
+    assert sanitizer.records[0].violation_address == end + tensor.element_size()
+
+    sanitizer.records.clear()
+    sanitizer._op_load_overrider(ptr_sym, active_oob_mask, None)
+    assert len(sanitizer.records) == 1
+    assert sanitizer.records[0].op_type is Load
+    assert sanitizer.records[0].violation_address == end + tensor.element_size()
+
+
+def test_concrete_ptr_router_uses_symbolic_path_inside_loops():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    ptr_sym, mask_sym = _make_concrete_ptr_and_mask([base], [True])
+
+    calls = []
+
+    def record_symbolic_path(expr, op_type, access_mode):
+        calls.append((expr.op, op_type, access_mode))
+
+    sanitizer._handle_access_check = record_symbolic_path  # type: ignore[method-assign]
+    sanitizer.loop_stack.append(object())  # type: ignore[arg-type]
+
+    sanitizer._op_load_overrider(ptr_sym, mask_sym, None)
+
+    assert calls == [("load", Load, "read")]
+    assert sanitizer.records == []
+
+
+def test_concrete_ptr_router_uses_concrete_path_for_large_multi_range_access():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(128, dtype=torch.int32)
+    base = tensor.data_ptr()
+    stride_bytes = tensor.element_size() * 2
+    ranges = [
+        (base + i * stride_bytes, base + i * stride_bytes + tensor.element_size() - 1)
+        for i in range(64)
+    ]
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.extend((start, end, tensor) for start, end in ranges)
+    ptr_sym, mask_sym = _make_concrete_ptr_and_mask(
+        [start for start, _end in ranges],
+        [True] * len(ranges),
+    )
+
+    def fail_symbolic_path(*_args, **_kwargs):
+        raise AssertionError("large concrete access should not hit symbolic path")
+
+    sanitizer._handle_access_check = fail_symbolic_path  # type: ignore[method-assign]
+
+    sanitizer._op_store_overrider(ptr_sym, 0, mask_sym)
+
+    assert sanitizer.records == []
+
+
+def _make_loop_affine_access(
+    base: int,
+    element_size: int,
+    start: int,
+    stop: int,
+    step: int,
+) -> tuple[LoopContext, SymbolicExpr]:
+    idx_z3 = Int("loop_i_123")
+    idx_sym = SymbolicExpr.create("const", 0, INT32)
+    ctx = LoopContext(
+        lineno=123,
+        length=len(range(start, stop, step)),
+        idx=idx_sym,
+        idx_z3=idx_z3,
+        start=start,
+        stop=stop,
+        step=step,
+    )
+    idx_sym.loop_ctx = ctx
+
+    base_sym = SymbolicExpr.create("const", base, pointer_type(INT32))
+    scale_sym = SymbolicExpr.create("const", element_size, INT32)
+    offset_sym = SymbolicExpr.create("mul", idx_sym, scale_sym)
+    ptr_sym = SymbolicExpr.create("add", base_sym, offset_sym)
+    access_expr = SymbolicExpr.create("load", ptr_sym, None, None)
+    return ctx, access_expr
+
+
+def test_loop_range_summary_skips_z3_for_proven_safe_access():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    sanitizer.grid = (1, 1, 1)
+
+    ctx, access_expr = _make_loop_affine_access(
+        base,
+        tensor.element_size(),
+        start=0,
+        stop=tensor.numel(),
+        step=1,
+    )
+    pending = PendingCheck(access_expr, Int("addr"), None)
+
+    def fail_z3_path(*_args, **_kwargs):
+        raise AssertionError("range summary should skip the Z3 check")
+
+    sanitizer._check_range_satisfiable = fail_z3_path  # type: ignore[method-assign]
+
+    sanitizer._process_pending_check(ctx, pending, [])
+
+
+def test_loop_range_summary_skips_z3_for_addptr_access():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    sanitizer.grid = (1, 1, 1)
+
+    ctx, _access_expr = _make_loop_affine_access(
+        base,
+        tensor.element_size(),
+        start=0,
+        stop=tensor.numel(),
+        step=1,
+    )
+    ptr_sym = SymbolicExpr.create(
+        "addptr",
+        SymbolicExpr.create("const", base, pointer_type(INT32)),
+        ctx.idx,
+    )
+    access_expr = SymbolicExpr.create("load", ptr_sym, None, None)
+    pending = PendingCheck(access_expr, Int("addr"), None)
+
+    def fail_z3_path(*_args, **_kwargs):
+        raise AssertionError("range summary should skip the Z3 check")
+
+    sanitizer._check_range_satisfiable = fail_z3_path  # type: ignore[method-assign]
+
+    sanitizer._process_pending_check(ctx, pending, [])
+
+
+def test_loop_range_summary_skips_z3_for_fma_affine_access():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    sanitizer.grid = (1, 1, 1)
+
+    ctx, access_expr = _make_loop_affine_access(
+        base,
+        tensor.element_size(),
+        start=0,
+        stop=tensor.numel(),
+        step=1,
+    )
+    idx_sym = ctx.idx
+    scale_sym = SymbolicExpr.create("const", tensor.element_size(), INT32)
+    base_sym = SymbolicExpr.create("const", base, pointer_type(INT32))
+    ptr_sym = SymbolicExpr.create("fma", idx_sym, scale_sym, base_sym)
+    access_expr = SymbolicExpr.create("load", ptr_sym, None, None)
+    pending = PendingCheck(access_expr, Int("addr"), None)
+
+    def fail_z3_path(*_args, **_kwargs):
+        raise AssertionError("range summary should skip the Z3 check")
+
+    sanitizer._check_range_satisfiable = fail_z3_path  # type: ignore[method-assign]
+
+    sanitizer._process_pending_check(ctx, pending, [])
+
+
+def test_loop_range_summary_falls_back_when_interval_can_escape_tensor():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    sanitizer.grid = (1, 1, 1)
+
+    ctx, access_expr = _make_loop_affine_access(
+        base,
+        tensor.element_size(),
+        start=0,
+        stop=tensor.numel() + 1,
+        step=1,
+    )
+    pending = PendingCheck(access_expr, Int("addr"), None)
+    calls = []
+
+    def record_z3_path(*args, **_kwargs):
+        calls.append(args)
+
+    sanitizer._check_range_satisfiable = record_z3_path  # type: ignore[method-assign]
+
+    sanitizer._process_pending_check(ctx, pending, [])
+
+    assert len(calls) == 1
+
+
+def test_loop_range_summary_handles_abs_without_sign_flip():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    sanitizer.grid = (1, 1, 1)
+
+    ctx, _access_expr = _make_loop_affine_access(
+        base,
+        tensor.element_size(),
+        start=0,
+        stop=tensor.numel(),
+        step=1,
+    )
+    base_sym = SymbolicExpr.create("const", base, pointer_type(INT32))
+    negative_offset = SymbolicExpr.create("const", -tensor.element_size(), INT32)
+    abs_offset = SymbolicExpr.create("abs", negative_offset)
+    ptr_sym = SymbolicExpr.create("sub", base_sym, abs_offset)
+    access_expr = SymbolicExpr.create("load", ptr_sym, None, None)
+    pending = PendingCheck(access_expr, Int("addr"), None)
+    calls = []
+
+    assert access_interval_summary(access_expr, sanitizer.grid) == IntRange(
+        base - tensor.element_size(),
+        base - tensor.element_size(),
+    )
+
+    def record_z3_path(*args, **_kwargs):
+        calls.append(args)
+
+    sanitizer._check_range_satisfiable = record_z3_path  # type: ignore[method-assign]
+
+    sanitizer._process_pending_check(ctx, pending, [])
+
+    assert len(calls) == 1
+
+
+def test_loop_range_summary_falls_back_for_forbidden_unary_address_op():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    sanitizer.grid = (1, 1, 1)
+
+    ctx, _access_expr = _make_loop_affine_access(
+        base,
+        tensor.element_size(),
+        start=0,
+        stop=tensor.numel(),
+        step=1,
+    )
+    floor_offset = SymbolicExpr.create(
+        "floor",
+        SymbolicExpr.create("const", tensor.element_size(), INT32),
+    )
+    ptr_sym = SymbolicExpr.create(
+        "add",
+        SymbolicExpr.create("const", base, pointer_type(INT32)),
+        floor_offset,
+    )
+    access_expr = SymbolicExpr.create("load", ptr_sym, None, None)
+    pending = PendingCheck(access_expr, Int("addr"), None)
+    calls = []
+
+    def record_z3_path(*args, **_kwargs):
+        calls.append(args)
+
+    sanitizer._check_range_satisfiable = record_z3_path  # type: ignore[method-assign]
+
+    sanitizer._process_pending_check(ctx, pending, [])
+
+    assert len(calls) == 1
+
+
+def test_loop_range_summary_falls_back_for_cast_address_op():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    sanitizer.grid = (1, 1, 1)
+
+    ctx, access_expr = _make_loop_affine_access(
+        base,
+        tensor.element_size(),
+        start=0,
+        stop=tensor.numel(),
+        step=1,
+    )
+    ptr_sym = SymbolicExpr.create(
+        "bitcast",
+        access_expr.ptr,
+        pointer_type(INT32),
+    )
+    access_expr = SymbolicExpr.create("load", ptr_sym, None, None)
+    pending = PendingCheck(access_expr, Int("addr"), None)
+    calls = []
+
+    def record_z3_path(*args, **_kwargs):
+        calls.append(args)
+
+    sanitizer._check_range_satisfiable = record_z3_path  # type: ignore[method-assign]
+
+    sanitizer._process_pending_check(ctx, pending, [])
+
+    assert len(calls) == 1
+
+
+def test_loop_range_summary_falls_back_for_left_shift_address_op():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty(4, dtype=torch.int32)
+    base = tensor.data_ptr()
+    end = base + tensor.numel() * tensor.element_size() - 1
+    sanitizer.tensors.append(tensor)
+    sanitizer.tensor_addrs.append((base, end, tensor))
+    sanitizer.grid = (1, 1, 1)
+
+    ctx, _access_expr = _make_loop_affine_access(
+        base,
+        tensor.element_size(),
+        start=0,
+        stop=tensor.numel(),
+        step=1,
+    )
+    shifted = SymbolicExpr.create(
+        "left_shift",
+        SymbolicExpr.create("const", -1, INT32),
+        SymbolicExpr.create("const", 2, INT32),
+    )
+    offset = SymbolicExpr.create(
+        "add",
+        shifted,
+        SymbolicExpr.create("const", tensor.element_size(), INT32),
+    )
+    ptr_sym = SymbolicExpr.create(
+        "add",
+        SymbolicExpr.create("const", base, pointer_type(INT32)),
+        offset,
+    )
+    access_expr = SymbolicExpr.create("load", ptr_sym, None, None)
+    pending = PendingCheck(access_expr, Int("addr"), None)
+    calls = []
+
+    def record_z3_path(*args, **_kwargs):
+        calls.append(args)
+
+    sanitizer._check_range_satisfiable = record_z3_path  # type: ignore[method-assign]
+
+    sanitizer._process_pending_check(ctx, pending, [])
+
+    assert len(calls) == 1
 
 
 # ======== Report Layout Classification Tests ===========

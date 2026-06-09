@@ -1,22 +1,32 @@
-from .profiler.profiler import Profiler
-from .profiler.data import LoadStoreBytes, OpTypeCounts
-from .race_detector.data import RaceType
-from .race_detector.race_detector import RaceDetector
-from .sanitizer.sanitizer import Sanitizer
-from .sanitizer.data import OutOfBoundsRecord
-from .symbolic_engine import SymbolicExpr, SymbolicClient, RangeWrapper
-from .tracer.tracer import Tracer
+from __future__ import annotations
 
-__all__ = [
-    "Profiler",
-    "RaceDetector",
-    "RaceType",
-    "Sanitizer",
-    "LoadStoreBytes",
-    "OpTypeCounts",
-    "OutOfBoundsRecord",
-    "SymbolicExpr",
-    "SymbolicClient",
-    "RangeWrapper",
-    "Tracer",
-]
+from importlib import import_module
+from typing import Any
+
+
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "Profiler": ("triton_viz.clients.profiler.profiler", "Profiler"),
+    "LoadStoreBytes": ("triton_viz.clients.profiler.data", "LoadStoreBytes"),
+    "OpTypeCounts": ("triton_viz.clients.profiler.data", "OpTypeCounts"),
+    "RaceDetector": ("triton_viz.clients.race_detector.race_detector", "RaceDetector"),
+    "RaceType": ("triton_viz.clients.race_detector.data", "RaceType"),
+    "Sanitizer": ("triton_viz.clients.sanitizer.sanitizer", "Sanitizer"),
+    "OutOfBoundsRecord": ("triton_viz.clients.sanitizer.data", "OutOfBoundsRecord"),
+    "SymbolicExpr": ("triton_viz.clients.symbolic_engine", "SymbolicExpr"),
+    "SymbolicClient": ("triton_viz.clients.symbolic_engine", "SymbolicClient"),
+    "RangeWrapper": ("triton_viz.clients.symbolic_engine", "RangeWrapper"),
+    "Tracer": ("triton_viz.clients.tracer.tracer", "Tracer"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        module_name, attr_name = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value

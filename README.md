@@ -15,35 +15,26 @@ Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to
 <details>
   <summary>Table of Contents</summary>
   <ol>
+    <li><a href="#about">About</a></li>
     <li>
-      <a href="#About">About</a>
-    <li>
-      <a href="#Getting-Started">Getting Started</a>
+      <a href="#getting-started">Getting Started</a>
       <ul>
-        <li><a href="#Prerequisites">Prerequisites</a></li>
-        <li><a href="#Installation-of-Triton_Viz">Installation of Triton_Viz</a></li>
-      </ul>
-    <li>
-      <a href="#Working-with-Examples">Working with examples</a>
-    <ul>
-        <li><a href="#More-Puzzles">More puzzles</a></li>
+        <li><a href="#prerequisites">Prerequisites</a></li>
+        <li><a href="#installation-of-triton-viz">Installation of Triton-Viz</a></li>
       </ul>
     </li>
-    <li><a href="#Webpage-Notes">Webpage notes</a></li>
-    <li><a href="#Analysis-Clients">Analysis clients</a></li>
-    <li><a href="#Visualizer-Features">Visualizer features</a></li>
-    <li><a href="#License">License</a></li>
+    <li>
+      <a href="#working-with-examples">Working with examples</a>
+    </li>
+    <li><a href="#dsl-frontends">DSL frontends</a></li>
+    <li><a href="#analysis-clients">Analysis clients</a></li>
+    <li><a href="#license">License</a></li>
   </ol>
 </details>
 
 ## About
 
-Triton-Viz is a visualization and analysis toolkit specifically designed to complement the development and optimization of applications written in OpenAI's Triton, an open-source programming language aimed at simplifying the task of coding for accelerators such as GPUs.
-Triton-Viz offers a suite of features to enhance the debugging, performance analysis, and understanding of Triton code.
-
-Given that Triton allows developers to program at a higher level while still targeting low-level accelerator devices, managing and optimizing resources like memory becomes a crucial aspect of development.
-Triton-Viz addresses these challenges by providing real-time visualization of tensor operations and their memory usage.
-The best part about this tool is that while it does focus on visualizing GPU operations, users are not required to have GPU resources to run examples on their system.
+Triton-Viz helps developers inspect Triton kernels with visualization, profiling, and memory-safety analysis tools. It can run many examples through Triton's interpreter, so GPU access is not required for basic debugging workflows.
 
 
 ## Getting Started
@@ -62,7 +53,7 @@ Most users can install directly from PyPI:
 pip install triton-viz
 ```
 
-If you want to run examples from this repo, contribute, or build the frontend, install from source instead:
+If you want to run examples from this repo, contribute, or build the web UI, install from source instead:
 
 ```sh
 git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
@@ -70,10 +61,10 @@ cd triton-viz
 uv sync # or "uv sync --extra test" if you're running tests
 ```
 
-### Frontend Build
+### Web UI Build
 
-The PyPI package ships with prebuilt frontend assets in `triton_viz/static`, so
-you do not need npm to run the visualizer. If you want to modify the frontend,
+The PyPI package ships with prebuilt web UI assets in `triton_viz/static`, so
+you do not need npm to run the visualizer. If you want to modify the web UI,
 rebuild the TS sources:
 
 ```sh
@@ -105,14 +96,64 @@ uv sync --extra test # tests but no NKI support
 * To run core Triton-viz tests, run `pytest tests/`.
 * (if NKI installed) To run NKI-specific tests, run `pytest tests/ -m nki`.
 * To run all tests (Triton + NKI), run `pytest tests/ -m ""`.
-* To run visualizer frontend tests, run `npm run test:frontend`.
+* To run visualizer web UI tests, run `npm run test:frontend`.
 
 ## Working with Examples
 
+Run an example directly with Python:
+
 ```sh
-cd examples
-python <file_name>.py
+python examples/visualizer/matmul.py
 ```
+
+Use the decorator API when writing or modifying a Triton kernel:
+
+```py
+import triton
+import triton.language as tl
+import triton_viz
+
+
+@triton_viz.trace("sanitizer")  # also supports "tracer" and "profiler"
+@triton.jit
+def kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
+    offsets = tl.arange(0, BLOCK)
+    values = tl.load(x_ptr + offsets)
+    tl.store(out_ptr + offsets, values)
+```
+
+Use the CLI wrappers to run an existing Python script without editing it. These
+wrappers patch plain `@triton.jit` kernels, so use them with scripts that do not
+already apply `@triton_viz.trace(...)`.
+
+```sh
+triton-sanitizer examples/sanitizer/oob_cli.py
+triton-profiler examples/profiler/load_store_cli.py
+triton-visualizer trace.tvz
+```
+
+For visualizer workflows, save a trace and launch the UI from Python:
+
+```py
+import triton_viz
+
+triton_viz.save("trace.tvz")
+triton_viz.launch()
+```
+
+## DSL Frontends
+
+Triton is the default DSL frontend. NKI support is optional and selected with
+the `frontend` argument:
+
+```py
+triton_viz.trace("tracer")  # Triton
+triton_viz.trace("tracer", frontend="nki")  # NKI
+triton_viz.trace("tracer", frontend="nki_beta2")  # NKI Beta 2
+```
+
+The runtime integration code lives under `triton_viz/core/frontend/`. NKI
+simulation runtimes live under `triton_viz/core/simulation/`.
 
 ## Analysis Clients
 
@@ -120,7 +161,7 @@ Analyze kernels across visualization, profiling, and sanitization with a single 
 
 - Visualizer: currently supports load, store, and matmul operations for 1/2/3D tensors (more operations and dimensions coming soon).
 - Profiler: flags non-unrolled loops, inefficient mask usage, and missing buffer_load optimizations while tracking load/store byte counts with low-overhead sampling.
-- Sanitizer: symbolically checks tensor memory accesses for out-of-bounds errors and emits reports with tensor metadata, call stack, and expression trees; optional fake-memory backend avoids real reads.
+- Sanitizer: symbolically checks tensor memory accesses for out-of-bounds errors and emits reports with tensor metadata, call stack, and expression trees; optional fake-memory storage avoids real reads.
 
 ### Save and load traces
 
@@ -147,7 +188,7 @@ Triton-Viz uses a small set of environment variables to configure runtime behavi
 - `ENABLE_PROFILER` (default: `1`): enable the profiler pipeline that collects performance data.
 - `ENABLE_TIMING` (default: `0`): collect timing data during execution.
 - `REPORT_GRID_EXECUTION_PROGRESS` (default: `0`): report per-program block execution progress in the interpreter.
-- `SANITIZER_ENABLE_FAKE_TENSOR` (default: `0`): use a fake tensor backend for sanitizer runs to avoid real memory reads.
+- `SANITIZER_ENABLE_FAKE_TENSOR` (default: `0`): use fake tensor storage for sanitizer runs to avoid real memory reads.
 - `PROFILER_ENABLE_LOAD_STORE_SKIPPING` (default: `1`): skip redundant load/store checks to reduce profiling overhead.
 - `PROFILER_ENABLE_BLOCK_SAMPLING` (default: `1`): sample a subset of blocks to reduce profiling overhead.
 - `PROFILER_DISABLE_BUFFER_LOAD_CHECK` (default: `0`): disable buffer load checks in the profiler.

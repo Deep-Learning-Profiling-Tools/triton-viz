@@ -553,43 +553,6 @@ def get_load_value():
         return jsonify({"error": "Global tensor data not found"}), 200
 
 
-@app.route("/api/getFlipValue", methods=["POST"])
-def get_flip_value():
-    """Return a value from input or output of a Flip op by linear index or 2D coords.
-
-    Request JSON: { uuid, which: "input"|"output", x, y }
-    - If tensor is 1D, use x only; if 2D, use x (col), y (row)
-    """
-    global raw_tensor_data
-    data = request.json or {}
-    uuid = data.get("uuid")
-    which = (data.get("which") or "input").lower()
-    x = data.get("x")
-    y = data.get("y")
-    if not uuid or uuid not in raw_tensor_data:
-        return jsonify({"error": "Operation not found"}), 404
-    op = raw_tensor_data[uuid]
-    t = op.get("input_data") if which == "input" else op.get("output_data")
-    shape = op.get("input_shape") if which == "input" else op.get("output_shape")
-    if t is None or shape is None:
-        return jsonify({"error": "Flip tensor data unavailable"}), 200
-    try:
-        if len(shape) <= 1:
-            idx = int(x or 0)
-            return jsonify({"value": t[idx].item()})
-        elif len(shape) == 2:
-            rr = int(y or 0)
-            cc = int(x or 0)
-            return jsonify({"value": t[rr, cc].item()})
-        else:
-            # higher dims not directly supported; fallback to flat index
-            idx = int(x or 0)
-            flat = t.view(-1)
-            return jsonify({"value": flat[idx].item()})
-    except Exception as e:
-        return jsonify({"error": f"Flip get value failed: {e}"}), 200
-
-
 def _build_highlight_descriptor(coords: np.ndarray) -> dict[str, list[int]] | None:
     """Infer a shape+stride descriptor from highlighted coordinates.
 

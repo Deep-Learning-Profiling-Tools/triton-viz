@@ -44,11 +44,15 @@ jobs:
       run: |
         cd main-branch
         uv sync --extra test
+        uv pip install --pre -U triton
+        uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Install PR dependencies
       run: |
         cd pr-branch
         uv sync --extra test
+        uv pip install --pre -U triton
+        uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Run interleaved A/B benchmarks
       run: |
@@ -57,9 +61,14 @@ jobs:
         #   main PR main PR main PR ...  (4 rounds x 5 iters = 20 total)
         ROUNDS=4
         ITERS=5
+        TRITON_KERNEL_ROUNDS=1
         MAIN_HAS_BENCH=false
         if [ -f main-branch/benchmarks/bench_sanitizer.py ]; then
           MAIN_HAS_BENCH=true
+        fi
+        MAIN_HAS_TRITON_KERNELS=false
+        if [ -f main-branch/tests/end_to_end/test_triton_kernels.py ]; then
+          MAIN_HAS_TRITON_KERNELS=true
         fi
         for i in $(seq 1 $ROUNDS); do
           echo "=== Round $i/$ROUNDS ==="
@@ -69,6 +78,18 @@ jobs:
           fi
           (cd pr-branch && uv run python benchmarks/bench_sanitizer.py \
             --iterations $ITERS --output /tmp/bench-pr-$i.json)
+          if [ "$i" -le "$TRITON_KERNEL_ROUNDS" ]; then
+            if [ "$MAIN_HAS_TRITON_KERNELS" = true ]; then
+              (cd pr-branch && uv run python benchmarks/bench_sanitizer.py \
+                --triton-kernels-cwd ../main-branch \
+                --triton-kernels-output-prefix /tmp/bench-main-triton-kernels \
+                --triton-kernels-round "$i") || true
+            fi
+            (cd pr-branch && uv run python benchmarks/bench_sanitizer.py \
+              --triton-kernels-cwd . \
+              --triton-kernels-output-prefix /tmp/bench-pr-triton-kernels \
+              --triton-kernels-round "$i")
+          fi
         done
 
     - name: Merge rounds and generate comparison
