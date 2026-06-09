@@ -2376,6 +2376,9 @@ class SymbolicClient(Client):
         self.tensor_names: dict[int, set[str]] = {}
         self.need_full_grid: bool | None = None
         self.last_grid: tuple[int, int, int] | None = None
+        self._active_blocks: int = 0
+        self._launch_should_stop: bool = False
+        self._pending_launch_clear: bool = False
         self.addr_ok: BoolRef | None = None
         self.pid_ok: BoolRef | None = None
         self.solver: Solver | None = Solver()
@@ -3129,6 +3132,9 @@ class SymbolicClient(Client):
         grid = tuple(int(g) for g in grid)
         self.last_grid = (grid[0] - 1, grid[1] - 1, grid[2] - 1)
         self.grid = grid
+        self._active_blocks = 0
+        self._launch_should_stop = False
+        self._pending_launch_clear = False
         self.addr_ok = None
         self.pid_ok = cast(
             BoolRef,
@@ -3150,16 +3156,27 @@ class SymbolicClient(Client):
         self.solver.add(self.pid_ok)
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        if self.need_full_grid is None:
-            return True
-        return self.need_full_grid
+        if self._launch_should_stop:
+            return False
+        should_run = True if self.need_full_grid is None else self.need_full_grid
+        if should_run:
+            self._active_blocks += 1
+        return should_run
 
     def post_run_callback(self, fn: Callable) -> bool:
         if self.need_full_grid is None:
             self.need_full_grid = False
         if self.grid_idx == self.last_grid or not self.need_full_grid:
+            # Under concurrent block execution, another block may already be
+            # running in this launch. Defer clearing tensor/solver caches until
+            # every block that passed pre_run_callback has reached post_run.
+            self._launch_should_stop = True
+            self._pending_launch_clear = True
+        self._active_blocks = max(0, self._active_blocks - 1)
+        if self._pending_launch_clear and self._active_blocks == 0:
             self._clear_cache()
             self._clear_symbolic_launch_state()
+            self._pending_launch_clear = False
         ret = self.need_full_grid
         self.need_full_grid = None
         return ret

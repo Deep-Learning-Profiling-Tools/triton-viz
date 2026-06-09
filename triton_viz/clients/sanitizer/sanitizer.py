@@ -42,6 +42,7 @@ from .report import (
     print_oob_record,
     print_oob_record_pdb_style,
 )
+from .range_summary import access_range_proves_in_bounds
 from ...core.config import config as cfg
 from ...core.symbolic_metadata import (
     ConcreteAccessRoute,
@@ -332,7 +333,7 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
             self._clear_cache()
             if fn_cache not in _fn_symbolic_cache_set:
                 _fn_symbolic_cache_set.add(fn_cache)
-                return True
+                return SymbolicClient.pre_run_callback(self, fn)
             return False
         return SymbolicClient.pre_run_callback(self, fn)
 
@@ -503,6 +504,20 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
 
         return True
 
+    def _range_summary_proves_safe(self, symbolic_expr: SymbolicExpr) -> bool:
+        resolved_tensor = self._resolve_tensor(symbolic_expr)
+        if resolved_tensor is None:
+            ranges = self.tensor_addrs
+        else:
+            ranges = [
+                (start, end, tensor)
+                for start, end, tensor in self.tensor_addrs
+                if tensor is resolved_tensor
+            ]
+        if not ranges:
+            return False
+        return access_range_proves_in_bounds(symbolic_expr, ranges, self.grid)
+
     def _handle_access_check(
         self,
         expr: SymbolicExpr,
@@ -558,6 +573,8 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         iter_constraints: list[BoolRef],
     ) -> None:
         del ctx, iter_constraints  # verbose logging is handled by the base
+        if self._range_summary_proves_safe(pending.symbolic_expr):
+            return
         self._check_range_satisfiable(
             pending.addr_expr,
             pending.constraints,
