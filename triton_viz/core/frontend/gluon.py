@@ -1,0 +1,467 @@
+from collections.abc import Callable
+from typing import Any
+
+import numpy as np
+import triton.language as tl
+import triton.experimental.gluon.language as gluon_lang  # type: ignore
+from triton.experimental.gluon.language import _core as gluon_core  # type: ignore
+from triton.experimental.gluon.language import _math as gluon_math  # type: ignore
+from triton.experimental.gluon.language import _semantic as gluon_semantic  # type: ignore
+from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
+    tdm as gluon_amd_tdm,
+)
+from triton.experimental.gluon.language.nvidia.blackwell import (  # type: ignore
+    tma as gluon_blackwell_tma,
+)
+from triton.experimental.gluon.language.nvidia.hopper import (  # type: ignore
+    tma as gluon_hopper_tma,
+)
+
+from ..data import (
+    AddPtr,
+    Allocate,
+    BinaryOp,
+    Broadcast,
+    Dot,
+    ExpandDims,
+    Fma,
+    Join,
+    Load,
+    MakeRange,
+    Op,
+    ProgramId,
+    Reshape,
+    Rsqrt,
+    Splat,
+    Store,
+    TernaryOp,
+    UnaryOp,
+)
+from ..symbolic_metadata import (
+    INT32,
+    SymbolicTensorValue,
+    SymbolicTypeSpec,
+    TensorDescriptorAccess,
+)
+
+from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
+from .triton import TritonFrontend
+
+
+def _gluon_load_adapter(
+    ptr: Any,
+    *_args: Any,
+    mask: Any = None,
+    other: Any = None,
+    pred: Any = None,
+    **_kwargs: Any,
+) -> AdapterResult:
+    if mask is None:
+        mask = pred
+    if _is_global_tensor_descriptor_like(ptr) and _args:
+        return AdapterResult(TensorDescriptorAccess(ptr, _args[0], mask), mask, None)
+    if mask is None and not _is_descriptor_like(ptr):
+        if _args:
+            mask = _args[0]
+    return AdapterResult(ptr, mask, None)
+
+
+def _gluon_descriptor_load_adapter(
+    pred_arg_index: int,
+) -> Callable[..., AdapterResult]:
+    def adapter(
+        ptr: Any,
+        *_args: Any,
+        mask: Any = None,
+        pred: Any = None,
+        **_kwargs: Any,
+    ) -> AdapterResult:
+        if mask is None:
+            mask = pred
+        if mask is None and len(_args) > pred_arg_index:
+            mask = _args[pred_arg_index]
+        if _is_global_tensor_descriptor_like(ptr) and _args:
+            return AdapterResult(
+                TensorDescriptorAccess(ptr, _args[0], mask), mask, None
+            )
+        return _gluon_load_adapter(ptr, *_args, mask=mask)
+
+    return adapter
+
+
+def _set_descriptor_load_adapter(op: Callable, pred_arg_index: int) -> None:
+    GLUON_CALLABLE_ADAPTERS[op] = _gluon_descriptor_load_adapter(pred_arg_index)
+
+
+def _gluon_store_adapter(
+    ptr: Any,
+    value: Any = None,
+    *_args: Any,
+    mask: Any = None,
+    pred: Any = None,
+    **_kwargs: Any,
+) -> AdapterResult:
+    if mask is None:
+        mask = pred
+    if _is_global_tensor_descriptor_like(ptr) and value is not None:
+        return AdapterResult(TensorDescriptorAccess(ptr, value, mask), mask, None)
+    if mask is None and not _is_descriptor_like(ptr):
+        if _args:
+            mask = _args[0]
+    return AdapterResult(ptr, mask, None)
+
+
+def _is_descriptor_like(value: Any) -> bool:
+    type_name = type(value).__name__
+    return type_name in {
+        "shared_memory_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor_im2col",
+        "TensorDescriptor",
+        "TensorDescriptorIm2Col",
+    } or hasattr(value, "block_shape")
+
+
+def _is_shared_memory_descriptor_like(value: Any) -> bool:
+    return type(value).__name__ == "shared_memory_descriptor"
+
+
+def _is_global_tensor_descriptor_like(value: Any) -> bool:
+    # Shared-memory descriptor accesses are not modeled yet; only global tensor
+    # descriptors become TensorDescriptorAccess records for symbolic checking.
+    return _is_descriptor_like(value) and not _is_shared_memory_descriptor_like(value)
+
+
+def _gluon_binary_adapter(
+    lhs: Any,
+    rhs: Any,
+    *_args: Any,
+    **_kwargs: Any,
+) -> AdapterResult:
+    return AdapterResult(lhs, rhs)
+
+
+def _gluon_unary_adapter(arg: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(arg)
+
+
+def _gluon_binary_op_adapter(op: Callable) -> Callable[..., AdapterResult]:
+    def adapter(lhs: Any, rhs: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+        return AdapterResult(lhs, rhs, op)
+
+    return adapter
+
+
+def _gluon_unary_op_adapter(op: Callable) -> Callable[..., AdapterResult]:
+    def adapter(arg: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+        return AdapterResult(arg, op)
+
+    return adapter
+
+
+def _gluon_where_adapter(
+    condition: Any,
+    x: Any,
+    y: Any,
+    *_args: Any,
+    **_kwargs: Any,
+) -> AdapterResult:
+    return AdapterResult(condition, x, y, np.where)
+
+
+def _gluon_allocate_adapter(*args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(*args[:4])
+
+
+def _gluon_make_range_adapter(start: Any, end: Any, *_args: Any, **_kwargs: Any):
+    start_value = int(start)
+    end_value = int(end)
+    return AdapterResult(
+        SymbolicTypeSpec(INT32, (end_value - start_value,)), start_value, end_value
+    )
+
+
+def _gluon_semantic_addptr_adapter(
+    _semantic: Any,
+    lhs: Any,
+    rhs: Any,
+    *_args: Any,
+    **_kwargs: Any,
+) -> AdapterResult:
+    return AdapterResult(lhs, rhs)
+
+
+def _gluon_semantic_binary_op_adapter(op: Callable) -> Callable[..., AdapterResult]:
+    def adapter(
+        _semantic: Any,
+        lhs: Any,
+        rhs: Any,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> AdapterResult:
+        return AdapterResult(lhs, rhs, op)
+
+    return adapter
+
+
+def _existing_ops(namespace: Any, attrs: dict[str, type[Op]]) -> dict[str, type[Op]]:
+    if namespace is None:
+        return {}
+    return {
+        attr: op_type for attr, op_type in attrs.items() if hasattr(namespace, attr)
+    }
+
+
+GLUON_CORE_OPS: dict[str, type[Op]] = {
+    "program_id": ProgramId,
+    "load": Load,
+    "store": Store,
+    "arange": MakeRange,
+    "full": Splat,
+    "dot_fma": Dot,
+    "expand_dims": ExpandDims,
+    "reshape": Reshape,
+    "broadcast": Broadcast,
+    "join": Join,
+    "add": BinaryOp,
+    "sub": BinaryOp,
+    "mul": BinaryOp,
+    "where": TernaryOp,
+}
+
+
+GLUON_MATH_OPS: dict[str, type[Op]] = {
+    "exp": UnaryOp,
+    "exp2": UnaryOp,
+    "fma": Fma,
+    "log": UnaryOp,
+    "log2": UnaryOp,
+    "cos": UnaryOp,
+    "rsqrt": Rsqrt,
+    "sin": UnaryOp,
+    "sqrt": UnaryOp,
+    "abs": UnaryOp,
+    "floor": UnaryOp,
+    "ceil": UnaryOp,
+}
+
+
+GLUON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
+    gluon_core: dict(GLUON_CORE_OPS),
+    gluon_lang: dict(GLUON_CORE_OPS),
+    gluon_math: GLUON_MATH_OPS,
+    gluon_semantic.GluonSemantic: {
+        "add": AddPtr,
+        "less_than": BinaryOp,
+        "less_equal": BinaryOp,
+        "greater_than": BinaryOp,
+        "greater_equal": BinaryOp,
+    },
+}
+_TMA_NAMESPACES: tuple[tuple[Any, dict[str, type[Op]]], ...] = (
+    (
+        gluon_hopper_tma,
+        {
+            "make_tensor_descriptor": Allocate,
+            "async_load": Load,
+            "async_load_im2col": Load,
+            "async_store": Store,
+            "async_copy_global_to_shared": Load,
+            "async_copy_global_to_shared_im2col": Load,
+            "async_copy_shared_to_global": Store,
+            "async_atomic_add": Store,
+            "async_atomic_min": Store,
+            "async_atomic_max": Store,
+            "async_atomic_and": Store,
+            "async_atomic_or": Store,
+            "async_atomic_xor": Store,
+        },
+    ),
+    (
+        gluon_blackwell_tma,
+        {
+            "make_tensor_descriptor": Allocate,
+            "async_load": Load,
+            "async_load_im2col": Load,
+            "async_store": Store,
+            "async_copy_global_to_shared": Load,
+            "async_copy_global_to_shared_im2col": Load,
+            "async_copy_shared_to_global": Store,
+            "async_atomic_add": Store,
+            "async_atomic_min": Store,
+            "async_atomic_max": Store,
+            "async_atomic_and": Store,
+            "async_atomic_or": Store,
+            "async_atomic_xor": Store,
+        },
+    ),
+    (
+        gluon_amd_tdm,
+        {
+            "make_tensor_descriptor": Allocate,
+            "update_tensor_descriptor": Allocate,
+            "async_load": Load,
+            "async_store": Store,
+        },
+    ),
+)
+for namespace, attrs in _TMA_NAMESPACES:
+    existing = _existing_ops(namespace, attrs)
+    if existing:
+        GLUON_NAMESPACES[namespace] = existing
+
+_GLUON_BINARY_NUMPY_OPS: dict[str, Callable] = {
+    "add": np.add,
+    "sub": np.subtract,
+    "mul": np.multiply,
+}
+_GLUON_UNARY_NUMPY_OPS: dict[str, Callable] = {
+    "abs": np.abs,
+    "ceil": np.ceil,
+    "cos": np.cos,
+    "exp": np.exp,
+    "exp2": np.exp2,
+    "floor": np.floor,
+    "log": np.log,
+    "log2": np.log2,
+    "sin": np.sin,
+    "sqrt": np.sqrt,
+}
+_TMA_LOAD_PRED_ARG_INDICES: dict[str, int] = {
+    "async_load": 3,
+    "async_load_im2col": 4,
+    "async_copy_global_to_shared": 3,
+    "async_copy_global_to_shared_im2col": 4,
+}
+GLUON_CALLABLE_ADAPTERS: dict[Callable, Callable[..., AdapterResult]] = {}
+for namespace, attrs in GLUON_NAMESPACES.items():
+    for attr, op_type in attrs.items():
+        original = getattr(namespace, attr)
+        if op_type is BinaryOp and attr in _GLUON_BINARY_NUMPY_OPS:
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_binary_op_adapter(
+                _GLUON_BINARY_NUMPY_OPS[attr]
+            )
+        elif op_type is UnaryOp and attr in _GLUON_UNARY_NUMPY_OPS:
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_unary_op_adapter(
+                _GLUON_UNARY_NUMPY_OPS[attr]
+            )
+        if namespace is gluon_amd_tdm and attr == "async_load":
+            _set_descriptor_load_adapter(original, 2)
+        elif attr in _TMA_LOAD_PRED_ARG_INDICES:
+            _set_descriptor_load_adapter(original, _TMA_LOAD_PRED_ARG_INDICES[attr])
+
+GLUON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
+    ProgramId: lambda axis, *_args, **_kwargs: AdapterResult(axis),
+    Load: _gluon_load_adapter,
+    Store: _gluon_store_adapter,
+    MakeRange: _gluon_make_range_adapter,
+    Splat: lambda shape, value, *_args, **_kwargs: AdapterResult(shape, value),
+    Allocate: _gluon_allocate_adapter,
+    Dot: lambda a, b, acc, *_args, **_kwargs: AdapterResult(a, b, acc, None, None),
+    BinaryOp: _gluon_binary_adapter,
+    AddPtr: _gluon_binary_adapter,
+    UnaryOp: _gluon_unary_adapter,
+    TernaryOp: _gluon_where_adapter,
+    Fma: lambda x, y, z, *_args, **_kwargs: AdapterResult(x, y, z),
+    Rsqrt: lambda arg, *_args, **_kwargs: AdapterResult(arg),
+}
+GLUON_CALLABLE_ADAPTERS[
+    getattr(gluon_semantic.GluonSemantic, "add")
+] = _gluon_semantic_addptr_adapter
+_GLUON_SEMANTIC_BINARY_NUMPY_OPS: dict[str, Callable] = {
+    "less_than": np.less,
+    "less_equal": np.less_equal,
+    "greater_than": np.greater,
+    "greater_equal": np.greater_equal,
+}
+for attr, op in _GLUON_SEMANTIC_BINARY_NUMPY_OPS.items():
+    GLUON_CALLABLE_ADAPTERS[
+        getattr(gluon_semantic.GluonSemantic, attr)
+    ] = _gluon_semantic_binary_op_adapter(op)
+
+
+class GluonFrontend(Frontend):
+    def __init__(self):
+        definition = Frontend.from_namespaces(
+            name="gluon",
+            builder=None,
+            namespaces=GLUON_NAMESPACES,
+            adapters=GLUON_ADAPTERS,
+        )
+        super().__init__(
+            name=definition.name,
+            builder=definition.builder,
+            original_ops=definition.original_ops,
+            adapters=definition.adapters,
+            namespaces=definition.namespaces,
+        )
+
+    @staticmethod
+    def symbolic_ops_for_op_type(op_type: type[Op]) -> tuple[str, ...]:
+        return TritonFrontend.symbolic_ops_for_op_type(op_type)
+
+    def run_op_overrider(
+        self,
+        op: Callable,
+        op_type: type[Op],
+        op_overrider: Callable,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ):
+        adapter = GLUON_CALLABLE_ADAPTERS.get(op, self.adapters[op_type])
+        adapter_result = adapter(*args, **kwargs)
+        return op_overrider(*adapter_result.args, **adapter_result.kwargs)
+
+    def normalize_symbolic_value(self, value: Any) -> Any:
+        if type(value).__name__ == "constexpr" and hasattr(value, "value"):
+            return value.value
+        if isinstance(value, gluon_core.tensor):
+            value = value.handle
+        if isinstance(value, (tl.block_type, tl.pointer_type, tl.core.dtype)):
+            return TritonFrontend._normalize_triton_type(value)
+        if isinstance(value, SymbolicTensorValue):
+            return value
+        return super().normalize_symbolic_value(value)
+
+    def to_frontend_symbolic_value(self, value: Any) -> Any:
+        if isinstance(value, tuple):
+            return tuple(self.to_frontend_symbolic_value(item) for item in value)
+        if isinstance(value, list):
+            return [self.to_frontend_symbolic_value(item) for item in value]
+        return value
+
+    def from_frontend_symbolic_value(self, value: Any) -> Any:
+        if isinstance(value, gluon_core.tensor):
+            value = value.handle
+        if isinstance(value, tuple):
+            return tuple(self.from_frontend_symbolic_value(item) for item in value)
+        if isinstance(value, list):
+            return [self.from_frontend_symbolic_value(item) for item in value]
+        return value
+
+    def wrap_symbolic_concrete_fn(self, concrete_fn: Callable) -> Callable:
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            frontend_args = tuple(self.to_frontend_symbolic_value(arg) for arg in args)
+            frontend_kwargs = {
+                key: self.to_frontend_symbolic_value(value)
+                for key, value in kwargs.items()
+            }
+            ret = concrete_fn(*frontend_args, **frontend_kwargs)
+            return self.from_frontend_symbolic_value(ret)
+
+        return wrapped
+
+    def patch_lang(self, fn, client_manager: Any = None) -> _LangPatchScope:
+        scope = _LangPatchScope()
+        globals_dict = getattr(fn, "__globals__", {})
+        for namespace, attrs in self.namespaces.items():
+            for attr in attrs:
+                original = self.original_ops[namespace][attr]
+                patched = getattr(namespace, attr)
+                for name, value in list(globals_dict.items()):
+                    if value is original:
+                        scope.set_item(globals_dict, name, patched)
+        return scope
+
+
+frontend = register_frontend(GluonFrontend())

@@ -62,6 +62,27 @@ def test_scope_restores_tensor_magic_methods():
         assert getattr(tensor, attr) is original
 
 
+def test_scope_removes_tensor_magic_methods_added_by_interpreter():
+    tensor = tl.tensor
+    attr = "__bool__"
+    had_original = hasattr(tensor, attr)
+    original = getattr(tensor, attr, None)
+    replacement = lambda self: True
+
+    try:
+        if had_original:
+            delattr(tensor, attr)
+
+        scope = triton_frontend.frontend._triton_snapshot_scope(_dummy_kernel)
+        setattr(tensor, attr, replacement)
+        scope.restore()
+
+        assert not hasattr(tensor, attr)
+    finally:
+        if had_original:
+            setattr(tensor, attr, original)
+
+
 def test_scope_restores_tensor_descriptor_base_builtins(monkeypatch):
     """Scope must restore descriptor builtins on tensor_descriptor_base."""
     if not hasattr(tl.core, "tensor_descriptor_base"):

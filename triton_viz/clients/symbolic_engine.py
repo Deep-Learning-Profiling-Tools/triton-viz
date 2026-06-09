@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import warnings
+import weakref
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import reduce
@@ -31,6 +32,7 @@ from z3 import (
     BitVecRef,
     LShR,
     BoolVal,
+    Not,
 )
 from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
 
@@ -87,16 +89,19 @@ from ..core.symbolic_metadata import (
     FLOAT32,
     INT1,
     INT32,
+    DTYPE_BY_NAME,
     SymbolicDType,
     SymbolicPointerDType,
     SymbolicScalarDType,
     SymbolicTensorValue,
     SymbolicTypeSpec,
+    TensorDescriptorAccess,
     dtype_to_numpy,
     element_bytewidth,
     is_pointer_dtype,
     normalize_symbolic_value,
     pointee_dtype,
+    pointer_type,
     type_spec,
     unpack_type_spec,
 )
@@ -177,14 +182,26 @@ def _range_to_iterator_constraint(
     return And(bounds, (var - start) % abs_step == 0)
 
 
+def _literal_int(value: Any) -> int | None:
+    if isinstance(value, SymbolicExpr):
+        if value.op != "const":
+            return None
+        return _literal_int(value.to_py())
+    if isinstance(value, (bool, int)):
+        return int(value)
+    return None
+
+
 def _shape_to_tuple(shape: Any) -> tuple[int, ...]:
+    if hasattr(shape, "handle"):
+        shape = shape.handle
     if hasattr(shape, "to_py"):
         shape = shape.to_py()
     if isinstance(shape, np.ndarray):
         shape = shape.tolist()
     if isinstance(shape, (int, np.integer)):
         return (int(shape),)
-    return tuple(int(x.to_py()) if hasattr(x, "to_py") else int(x) for x in shape)
+    return tuple(cast(int, _literal_int(x)) for x in shape)
 
 
 @dataclass
@@ -303,6 +320,24 @@ class SymbolicExprDataWrapper:
         return self._ensure_value()
 
 
+@dataclass(frozen=True)
+class SymbolicTensorDescriptorValue:
+    base: Any
+    shape: tuple[int, ...]
+    strides: tuple[int, ...]
+    block_shape: tuple[int, ...]
+    base_offset: int = 0
+
+
+# Gluon descriptor objects are created during frontend codegen and may be
+# short-lived. Keep their symbolic metadata in a weak map so this module-level
+# registry does not extend descriptor lifetime after the launch/codegen state is
+# released.
+_SYMBOLIC_TENSOR_DESCRIPTORS: weakref.WeakKeyDictionary[
+    Any, SymbolicTensorDescriptorValue
+] = weakref.WeakKeyDictionary()
+
+
 class SymbolicExpr:
     BASIC_OPS: ClassVar[tuple[str, ...]] = ("const", "pid", "arange")
     INDIRECT_OPS: ClassVar[tuple[str, ...]] = (
@@ -365,7 +400,12 @@ class SymbolicExpr:
     )
     SCAN_OPS: ClassVar[tuple[str, ...]] = ("cumsum",)
     SORT_OPS: ClassVar[tuple[str, ...]] = ("sort",)
-    POINTER_OPS: ClassVar[tuple[str, ...]] = ("make_block_ptr", "addptr", "advance")
+    POINTER_OPS: ClassVar[tuple[str, ...]] = (
+        "make_block_ptr",
+        "addptr",
+        "advance",
+        "descriptor_access",
+    )
     RESHAPE_OPS: ClassVar[tuple[str, ...]] = (
         "splat",
         "unsplat",
@@ -1787,6 +1827,29 @@ class MakeBlockPtrSymbolicExpr(SymbolicExpr):
         )
 
 
+def _offset_pointer_to_z3(
+    ptr_expr: SymbolicExpr,
+    offset_expr: SymbolicExpr,
+) -> tuple[Z3Expr, ConstraintConjunction]:
+    ptr_z3, constraints_ptr = ptr_expr._to_z3()
+    offset_z3, constraints_offset = offset_expr._to_z3()
+    constraints = _and_constraints(constraints_ptr, constraints_offset)
+    element_size = element_bytewidth(ptr_expr.dtype)
+    if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
+        z3_expr = ptr_z3 + offset_z3 * element_size
+    elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
+        if len(ptr_z3) != len(offset_z3):
+            raise ValueError(
+                f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
+            )
+        z3_expr = [p + o * element_size for p, o in zip(ptr_z3, offset_z3)]
+    elif isinstance(ptr_z3, list):
+        z3_expr = [p + offset_z3 * element_size for p in ptr_z3]
+    else:  # isinstance(offset_z3, list):
+        z3_expr = [ptr_z3 + o * element_size for o in offset_z3]
+    return z3_expr, constraints
+
+
 class AddPtrSymbolicExpr(SymbolicExpr):
     ptr: SymbolicExpr
     offset: SymbolicExpr
@@ -1799,28 +1862,86 @@ class AddPtrSymbolicExpr(SymbolicExpr):
         self.shape = self.ptr.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        ptr_expr = self.ptr
-        offset_expr = self.offset
-        ptr_z3, constraints_ptr = ptr_expr._to_z3()
-        offset_z3, constraints_offset = offset_expr._to_z3()
-        constraints = _and_constraints(constraints_ptr, constraints_offset)
-        element_size = element_bytewidth(ptr_expr.dtype)
-        if not isinstance(ptr_z3, list) and not isinstance(offset_z3, list):  # hot path
-            z3_expr = ptr_z3 + offset_z3 * element_size
-        elif isinstance(ptr_z3, list) and isinstance(offset_z3, list):
-            if len(ptr_z3) != len(offset_z3):
-                raise ValueError(
-                    f"ptr {ptr_z3} and offset {offset_z3} don't have the same length!"
-                )
-            z3_expr = [p + o * element_size for p, o in zip(ptr_z3, offset_z3)]
-        elif isinstance(ptr_z3, list):
-            z3_expr = [p + offset_z3 * element_size for p in ptr_z3]
-        else:  # isinstance(offset_z3, list):
-            z3_expr = [ptr_z3 + o * element_size for o in offset_z3]
-        return z3_expr, constraints
+        return _offset_pointer_to_z3(self.ptr, self.offset)
 
     def concretize(self) -> Any:
         return self.concrete_fn(self.ptr.concretize(), self.offset.concretize())  # type: ignore
+
+
+class DescriptorAccessSymbolicExpr(SymbolicExpr):
+    base: SymbolicExpr
+    offset: SymbolicExpr
+    coords: tuple[SymbolicExpr, ...]
+    extents: tuple[SymbolicExpr, ...]
+    block_extents: tuple[SymbolicExpr, ...]
+    pred: SymbolicExpr | None
+
+    def __init__(
+        self,
+        op: str,
+        base: Any,
+        offset: Any,
+        coords: Any,
+        extents: Any,
+        block_extents: Any,
+        pred: Any = None,
+    ):
+        super().__init__(op)
+        self.add_child("base", base)
+        self.add_child("offset", offset)
+        self.add_child("coords", coords)
+        self.add_child("extents", extents)
+        self.add_child("block_extents", block_extents)
+        self.add_child("pred", pred)
+        self.dtype = self.base.dtype
+        self.shape = self.base.shape
+        self._addr_ok_cache: BoolRef | None = None
+
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        return _offset_pointer_to_z3(self.base, self.offset)
+
+    def concretize(self) -> Any:
+        return self.concrete_fn(self.base.concretize(), self.offset.concretize())  # type: ignore
+
+    @property
+    def addr_ok(self) -> BoolRef | None:
+        if self._addr_ok_cache is not None:
+            return self._addr_ok_cache
+        if _descriptor_predicate_is_false(self.pred):
+            self._addr_ok_cache = BoolVal(True)
+            return self._addr_ok_cache
+
+        constraints: list[ConstraintExpr] = []
+        bounds: list[BoolRef] = []
+        for coord, extent, block_extent in zip(
+            self.coords,
+            self.extents,
+            self.block_extents,
+        ):
+            coord_z3, coord_constraints = coord.eval()
+            if isinstance(coord_z3, list):
+                return None
+            extent_value = _literal_int(extent)
+            block_extent_value = _literal_int(block_extent)
+            if extent_value is None or block_extent_value is None:
+                return None
+            bounds.append(cast(BoolRef, coord_z3 >= 0))
+            bounds.append(cast(BoolRef, coord_z3 + block_extent_value <= extent_value))
+            if coord_constraints is not None:
+                constraints.append(coord_constraints)
+
+        ok = And(*bounds) if len(bounds) > 1 else bounds[0]
+        pred_bool, pred_constraints = _predicate_bool(self.pred)
+        if pred_bool is not None:
+            ok = Or(Not(pred_bool), ok)
+        if pred_constraints is not None:
+            constraints.append(pred_constraints)
+        addr_ok = _and_constraints(*constraints, ok)
+        self._addr_ok_cache = cast(
+            BoolRef,
+            addr_ok if addr_ok is not None else BoolVal(True),
+        )
+        return self._addr_ok_cache
 
 
 class AdvanceSymbolicExpr(SymbolicExpr):
@@ -2275,6 +2396,7 @@ SymbolicExpr.register_op_class(DotSymbolicExpr, ("dot",))
 SymbolicExpr.register_op_class(CumsumSymbolicExpr, ("cumsum",))
 SymbolicExpr.register_op_class(MakeBlockPtrSymbolicExpr, ("make_block_ptr",))
 SymbolicExpr.register_op_class(AddPtrSymbolicExpr, ("addptr",))
+SymbolicExpr.register_op_class(DescriptorAccessSymbolicExpr, ("descriptor_access",))
 SymbolicExpr.register_op_class(AdvanceSymbolicExpr, ("advance",))
 SymbolicExpr.register_op_class(SplatSymbolicExpr, ("splat",))
 SymbolicExpr.register_op_class(UnsplatSymbolicExpr, ("unsplat",))
@@ -2333,6 +2455,118 @@ _BINARY_NUMPY_TO_SYM_OP: dict[Callable[..., Any], str] = {
     np.right_shift: "right_shift",
     np.left_shift: "left_shift",
 }
+
+
+def symbolic_tensor_descriptor_value(
+    descriptor: Any,
+    *,
+    base: Any = None,
+    shape: Any = None,
+    strides: Any = None,
+    block_shape: Any = None,
+) -> SymbolicTensorDescriptorValue:
+    registered = _SYMBOLIC_TENSOR_DESCRIPTORS.get(descriptor)
+    if registered is not None:
+        return registered
+
+    if base is None:
+        base = descriptor.base
+        shape = descriptor.shape
+        strides = descriptor.strides
+        block_shape = descriptor.block_shape
+
+    value = SymbolicTensorDescriptorValue(
+        base=base,
+        shape=_shape_to_tuple(shape),
+        strides=_shape_to_tuple(strides),
+        block_shape=_shape_to_tuple(block_shape),
+        base_offset=int(getattr(descriptor, "base_offset", 0)),
+    )
+    # The weak-key registry follows the frontend descriptor object's lifetime.
+    _SYMBOLIC_TENSOR_DESCRIPTORS[descriptor] = value
+    return value
+
+
+def _descriptor_base_ptr(base: Any) -> SymbolicExpr:
+    if isinstance(base, Tensor):
+        dtype_name = str(base.dtype).removeprefix("torch.")
+        return SymbolicExpr.create(
+            "const",
+            int(base.data_ptr()),
+            pointer_type(DTYPE_BY_NAME.get(dtype_name, FLOAT32)),
+        )
+    return cast(SymbolicExpr, SymbolicExpr.from_value(base))
+
+
+def _descriptor_coords(coords: Any) -> tuple[Any, ...]:
+    if isinstance(coords, (tuple, list)) or _is_triton_tuple(coords):
+        return tuple(coords)
+    return (coords,)
+
+
+def _is_triton_tuple(value: Any) -> bool:
+    # Keep symbolic_engine import-light; importing triton.language here breaks
+    # clients that only need the shared symbolic model.
+    value_type = type(value)
+    return (
+        value_type.__module__ == "triton.language.core"
+        and value_type.__name__ == "tuple"
+    )
+
+
+def _descriptor_predicate_is_false(pred: Any) -> bool:
+    if pred is None:
+        return False
+    value = _literal_int(pred)
+    return value == 0
+
+
+def _predicate_bool(pred: Any) -> tuple[BoolRef | None, ConstraintConjunction]:
+    if pred is None:
+        return None, None
+    pred_expr = cast(SymbolicExpr, SymbolicExpr.from_value(pred))
+    pred_z3, pred_constraints = pred_expr.eval()
+    if isinstance(pred_z3, list):
+        pred_bool = Or(*(_constraint_to_bool(item) for item in pred_z3))
+    else:
+        pred_bool = _constraint_to_bool(pred_z3)
+    return pred_bool, pred_constraints
+
+
+def _descriptor_offset(
+    descriptor: SymbolicTensorDescriptorValue, coords: tuple[Any, ...]
+) -> Any:
+    offset: Any = SymbolicExpr.create("const", int(descriptor.base_offset), INT32)
+    for coord, stride in zip(coords, descriptor.strides):
+        term = coord
+        if stride != 1:
+            term = SymbolicExpr.create(
+                "mul", coord, SymbolicExpr.create("const", int(stride), INT32)
+            )
+        offset = SymbolicExpr.create("add", offset, term)
+    return offset
+
+
+def symbolic_tensor_descriptor_access(
+    descriptor: Any,
+    coords: Any,
+    *,
+    pred: Any = None,
+) -> SymbolicExpr:
+    descriptor_value = symbolic_tensor_descriptor_value(descriptor)
+    coord_values = _descriptor_coords(coords)
+
+    offset = _descriptor_offset(descriptor_value, coord_values)
+    base_ptr = _descriptor_base_ptr(descriptor_value.base)
+    return SymbolicExpr.create(
+        "descriptor_access",
+        base_ptr,
+        offset,
+        coord_values,
+        descriptor_value.shape,
+        descriptor_value.block_shape,
+        pred,
+    )
 
 
 @dataclass
@@ -2690,6 +2924,15 @@ class SymbolicClient(Client):
 
         return expr
 
+    def _symbolic_memory_ptr(self, ptr: Any) -> SymbolicExpr:
+        if isinstance(ptr, TensorDescriptorAccess):
+            return symbolic_tensor_descriptor_access(
+                ptr.descriptor,
+                ptr.coords,
+                pred=ptr.pred,
+            )
+        return cast(SymbolicExpr, SymbolicExpr.from_value(ptr))
+
     def _should_skip_loop_hooks(self) -> bool:
         """Return True to skip loop hook processing."""
         return False
@@ -2961,7 +3204,7 @@ class SymbolicClient(Client):
     def _op_load_overrider(self, ptr, mask, other, *args):
         ptr = self._materialize_memory_operand(ptr)
         mask = self._materialize_memory_operand(mask)
-        ptr_sym = SymbolicExpr.from_value(ptr)
+        ptr_sym = self._symbolic_memory_ptr(ptr)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         other_sym = SymbolicExpr.from_value(other) if other is not None else None
         ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
@@ -2972,7 +3215,7 @@ class SymbolicClient(Client):
     def _op_store_overrider(self, ptr, value, mask, *args):
         ptr = self._materialize_memory_operand(ptr)
         mask = self._materialize_memory_operand(mask)
-        ptr_sym = SymbolicExpr.from_value(ptr)
+        ptr_sym = self._symbolic_memory_ptr(ptr)
         value_sym = SymbolicExpr.from_value(value)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         ret = SymbolicExpr.create("store", ptr_sym, value_sym, mask_sym)
@@ -3117,11 +3360,11 @@ class SymbolicClient(Client):
                 self.arg_callback(f"{name}[{idx}]", item, None)
             self._cache_non_tensor_arg(name, tuple(type(item).__name__ for item in arg))
             return
+        if hasattr(arg, "base") and hasattr(arg.base, "data_ptr"):
+            arg = arg.base
         if not hasattr(arg, "data_ptr"):
             self._cache_non_tensor_arg(name, arg)
             return
-        if hasattr(arg, "base") and hasattr(arg.base, "data_ptr"):
-            arg = arg.base
         tensor_physical_addresses = self._tensor_physical_addresses(name, arg)
         self._record_tensor_name(arg, name)
         self._cache_tensor_arg(arg)
