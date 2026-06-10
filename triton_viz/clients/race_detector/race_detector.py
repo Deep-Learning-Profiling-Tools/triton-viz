@@ -1,8 +1,5 @@
-import os
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from types import FrameType
 from typing import (
     Any,
     ClassVar,
@@ -11,7 +8,6 @@ from typing import (
 )
 
 import torch
-import triton
 from z3 import (
     If,
     Implies,
@@ -47,6 +43,7 @@ from ..symbolic_engine import (
     AccessMode,
     _and_constraints,
     _constraint_to_bool,
+    scalar_truthiness_from_user_code,
 )
 from .data import AccessEventRecord, MemorySem
 from .hb_common import (
@@ -59,17 +56,6 @@ from ...utils.traceback_utils import capture_current_source_location
 from ...core.config import config as cfg
 
 RaceDetectorT = TypeVar("RaceDetectorT", bound="RaceDetector")
-
-# Frame classification for the scalar-concretize observer: triton's own
-# frontend does truthiness on scalar tensors as None-guard plumbing
-# (e.g. semantic.py's ``if mask and mask.type.is_block():``), which must not
-# be confused with user host-side control flow like ``if pid == 0:``.
-_TRITON_PKG_DIR = os.path.dirname(os.path.abspath(triton.__file__)) + os.sep
-_TRITON_INTERPRETER_FILE = os.path.join(_TRITON_PKG_DIR, "runtime", "interpreter.py")
-_TRITON_VIZ_PKG_DIR = (
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    + os.sep
-)
 
 
 def _make_event_signature(
@@ -366,31 +352,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         except Exception:
             return False
 
-    @staticmethod
-    def _scalar_truthiness_from_user_code() -> bool:
-        """True when the in-flight scalar concretization was initiated by
-        user kernel code rather than triton/triton_viz internals.
-
-        Walk outward from the observer, skipping triton_viz frames (wrapper
-        and observer mechanics) and triton's interpreter (pure truthiness
-        plumbing: ``_get_bool`` and its lambdas sit between any initiator
-        and ``__bool__``). The first remaining frame is the initiator: a
-        frame inside the triton package (e.g. semantic.py's ``if mask and
-        ...`` None-guards) is internal canonicalization that is uniform
-        across blocks; anything else is the user's own control flow.
-        """
-        frame: FrameType | None = sys._getframe(1)
-        while frame is not None:
-            filename = frame.f_code.co_filename
-            if (
-                filename.startswith(_TRITON_VIZ_PKG_DIR)
-                or filename == _TRITON_INTERPRETER_FILE
-            ):
-                frame = frame.f_back
-                continue
-            return not filename.startswith(_TRITON_PKG_DIR)
-        return False
-
     def _scalar_concretize_observer_impl(self, expr: SymbolicExpr) -> None:
         """Policy for the engine's scalar-concretization hook.
 
@@ -407,7 +368,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             return
         if not self._expr_varies_per_instance(expr):
             return
-        if not self._scalar_truthiness_from_user_code():
+        if not scalar_truthiness_from_user_code():
             return
         self._raise_or_mark(
             "host-side control flow on a value that varies per program "

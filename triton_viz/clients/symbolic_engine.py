@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import math
+import os
+import sys
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import reduce
+from types import FrameType
 from typing import (
     Any,
     ClassVar,
@@ -212,6 +215,56 @@ class LoopContext:
     pending_checks: list[PendingCheck] = field(default_factory=list)
 
 
+# Frame classification for scalar truthiness/concretization: triton's own
+# frontend does truthiness on scalar tensors as None-guard plumbing (e.g.
+# semantic.py's ``if mask and mask.type.is_block():``), which must not be
+# confused with user host-side control flow like ``if pid == 0:``.
+_TRITON_VIZ_PKG_DIR = (
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
+)
+_TRITON_FRAME_DIRS: tuple[str, str] | None = None
+
+
+def _triton_frame_dirs() -> tuple[str, str]:
+    """(triton package dir, triton interpreter file), resolved lazily."""
+    global _TRITON_FRAME_DIRS
+    if _TRITON_FRAME_DIRS is None:
+        import triton
+
+        pkg_dir = os.path.dirname(os.path.abspath(triton.__file__)) + os.sep
+        _TRITON_FRAME_DIRS = (
+            pkg_dir,
+            os.path.join(pkg_dir, "runtime", "interpreter.py"),
+        )
+    return _TRITON_FRAME_DIRS
+
+
+def scalar_truthiness_from_user_code() -> bool:
+    """True when the in-flight scalar truthiness/read was initiated by user
+    kernel code rather than triton/triton_viz internals.
+
+    Walk outward from the caller, skipping triton_viz frames (wrapper and
+    client mechanics) and triton's interpreter (pure truthiness plumbing:
+    ``_get_bool`` and its lambdas sit between any initiator and
+    ``__bool__``). The first remaining frame is the initiator: a frame
+    inside the triton package (e.g. semantic.py's ``if mask and ...``
+    None-guards) is internal canonicalization that is uniform across
+    blocks; anything else is the user's own control flow.
+    """
+    triton_pkg_dir, triton_interpreter_file = _triton_frame_dirs()
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        filename = frame.f_code.co_filename
+        if (
+            filename.startswith(_TRITON_VIZ_PKG_DIR)
+            or filename == triton_interpreter_file
+        ):
+            frame = frame.f_back
+            continue
+        return not filename.startswith(triton_pkg_dir)
+    return False
+
+
 class SymbolicExprDataWrapper:
     """
     This wrapper is used as a workaround for frontend tensor truthiness code.
@@ -297,6 +350,18 @@ class SymbolicExprDataWrapper:
         return self.coerce_int(int_val)
 
     def __bool__(self) -> bool:
+        # Compiled Triton evaluates `if tensor:` via plain object truthiness
+        # (always True for a present tensor); the interpreter's data-based
+        # bool is a scalar hack (see interpreter _get_bool). Frontend-internal
+        # None-guards — semantic.py's `if mask and mask.type.is_block():` —
+        # must therefore see "present", not a concretized data value, which
+        # under symbolic capture would bake the capture block's data into the
+        # decision and is not even defined for value-less ops such as a
+        # symbolic atomic_cas result. User host-side control flow keeps the
+        # interpreter's concrete-value semantics (symbolic clients observe it
+        # via the scalar-concretize hook in _scalar_data).
+        if not scalar_truthiness_from_user_code():
+            return True
         return bool(self._scalar_data().item())
 
     def __str__(self) -> str:
