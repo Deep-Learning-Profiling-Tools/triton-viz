@@ -7,12 +7,17 @@ the CAS return), then asks Z3 whether any pair of cross-copy events is
 unordered, in conflict, and aliasing.
 
 Model boundary (closed-world atomic source assumption):
-  When an initial scalar source is identifiable, source choices are closed
+  When an initial scalar source is identifiable AND no unmodeled write (plain
+  store or atomic RMW) can overlap the location, source choices are closed
   over: (initial source) + (modeled CAS writers in the two selected copies).
-  When the initial source is not identifiable, ``rf_unknown_R`` is introduced
-  but does NOT enable a synchronizes-with edge. Synchronization through a
-  third program instance is therefore not modeled. The guarded acquire/release
-  CAS no-race result depends on this closed-world assumption.
+  Otherwise ``rf_unknown_R`` is introduced but does NOT enable a
+  synchronizes-with edge — an overlapping plain-store/RMW can publish a value
+  outside the closed world (e.g. a flag set via ``tl.atomic_xchg``), so the
+  reader's old value must not be over-constrained or every conflict gated on
+  it silently disappears. Synchronization through a third program instance is
+  not modeled. The guarded acquire/release CAS no-race result depends on the
+  closed world, which holds whenever the flag is only ever written by modeled
+  CAS.
 
 Address-domain invariant:
   ``record.addr_expr`` consumed by this solver MUST be a byte address matching
@@ -519,14 +524,54 @@ class TwoCopySymbolicHBSolver:
             return clauses[0]
         return Or(*clauses)
 
+    def _has_unmodeled_overlapping_writer(self, r: SymbolicMemoryEvent) -> bool:
+        """True when a write the rf model does not include — a plain store or
+        an atomic RMW (whose written value is not modeled) — can overlap the
+        location ``r`` reads.
+
+        Such a writer can publish a value the closed-world choice set
+        excludes; without an escape hatch the reader's ``old_value`` would be
+        over-constrained and every conflict gated on it silently vanishes
+        (e.g. a guard flag set via ``tl.atomic_xchg``). Overlap is decided by
+        Z3 on the symbolic addresses under grid/arange bounds, so writers to
+        other tensors (distinct concrete bases) never weaken the closed
+        world.
+        """
+        candidates = [
+            e
+            for e in self.events
+            if e.atomic_kind != "cas"
+            and (e.record.access_mode == "write" or e.atomic_kind == "rmw")
+            and self._can_be_rf_candidate(e, r)
+        ]
+        if not candidates:
+            return False
+        solver = Solver()
+        solver.add(self.grid_constraints)
+        for c in self.arange_constraints_a:
+            solver.add(c)
+        for c in self.arange_constraints_b:
+            solver.add(c)
+        for e in candidates:
+            solver.push()
+            solver.add(self._byte_overlap(e, r))
+            feasible = solver.check() == sat
+            solver.pop()
+            if feasible:
+                return True
+        return False
+
     def _build_read_from_choices(self) -> None:
         # Closed-world atomic source model.
         # If the initial scalar source is identifiable, source choices are
         # closed over: (initial source) + (modeled CAS writers). If the
-        # initial source is not identifiable, rf_unknown is introduced and
-        # does NOT enable synchronizes-with. This is intentionally NOT a full
+        # initial source is not identifiable — or a plain-store/RMW write can
+        # overlap the location, publishing a value the closed world does not
+        # contain — rf_unknown is introduced and does NOT enable
+        # synchronizes-with. This is intentionally NOT a full
         # coherence/read-from model over all program instances; the guarded
-        # acq_rel CAS no-race result depends on this closed-world assumption.
+        # acq_rel CAS no-race result depends on this closed-world assumption
+        # holding whenever the flag is only ever written by modeled CAS.
         cas_writers = [e for e in self.events if e.atomic_kind == "cas"]
         for r in self.events:
             if r.atomic_kind != "cas":
@@ -539,7 +584,7 @@ class TwoCopySymbolicHBSolver:
                 self.rf_init_source[r.idx] = rf_init
                 choices.append(rf_init)
                 self.rf_constraints.append(Implies(rf_init, And(r.reads, init_pred)))
-            else:
+            if init_pred is None or self._has_unmodeled_overlapping_writer(r):
                 rf_unknown = Bool(f"rf_unknown_{r.idx}")
                 self.rf_unknown_source[r.idx] = rf_unknown
                 choices.append(rf_unknown)

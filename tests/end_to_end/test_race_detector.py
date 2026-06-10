@@ -1143,6 +1143,66 @@ def test_data_dependent_atomic_address_is_unsupported(
     assert detector.last_reports == []
 
 
+# ======== CAS read-from with unmodeled (non-CAS) writers ========
+
+
+@triton.jit
+def _rmw_published_guard_kernel(flag_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    tl.atomic_xchg(flag_ptr, 1, mask=is_prod)
+    old = tl.atomic_cas(flag_ptr, 1, 1, sem="relaxed", scope="gpu")
+    offs = tl.arange(0, BLOCK)
+    m = (old == 1) & (offs < 1)
+    tl.store(out_ptr + offs, 1.0, mask=m)
+
+
+def test_cas_guard_published_by_rmw_reports_race(_isolate_race_detector_atomic_cfg):
+    """flag starts at 0 and is published to 1 via atomic_xchg — a writer the
+    closed-world rf model does not include. Both blocks can then observe 1
+    through the relaxed CAS and store out[0]: a real WAW. Regression test:
+    the reader's old value used to be hard-pinned to {initial} + {CAS-written
+    values} = {0}, making the guard infeasible and silencing the race with
+    last_status ok. An overlapping non-CAS writer must open the rf_unknown
+    escape (without fabricating synchronizes-with)."""
+
+    flag = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(4, dtype=torch.float32)
+    detector = _run_detector(_rmw_published_guard_kernel, (2,), flag, out, 2)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+
+
+@triton.jit
+def _rmw_other_tensor_guard_kernel(flag_ptr, other_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    tl.atomic_xchg(other_ptr, 1, mask=is_prod)
+    old = tl.atomic_cas(flag_ptr, 1, 1, sem="relaxed", scope="gpu")
+    offs = tl.arange(0, BLOCK)
+    m = (old == 1) & (offs < 1)
+    tl.store(out_ptr + offs, 1.0, mask=m)
+
+
+def test_cas_closed_world_holds_without_overlapping_writer(
+    _isolate_race_detector_atomic_cfg,
+):
+    """The xchg targets a different tensor, so the flag is only ever written
+    by modeled CAS: the closed world must hold and the old == 1 guard stays
+    infeasible (initial 0; CAS(cmp=1, new=1) can only republish 0) — the
+    rf_unknown escape must not weaken no-race verdicts when no overlapping
+    unmodeled writer exists."""
+
+    flag = torch.zeros(1, dtype=torch.int32)
+    other = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(4, dtype=torch.float32)
+    detector = _run_detector(_rmw_other_tensor_guard_kernel, (2,), flag, other, out, 2)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
 def test_reject_data_dependent_address_marks_unsupported(
     _isolate_race_detector_atomic_cfg,
 ):
