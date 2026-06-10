@@ -328,6 +328,83 @@ def test_tl_range_load_store_cross_iteration_race():
     assert {r.race_type for r in detector.last_reports} == {RaceType.WAW}
 
 
+# ======== Host-Side Control Flow on Per-Instance Values ========
+
+
+def test_pid_dependent_branch_is_unsupported_not_false_positive():
+    """`if pid == 0:` is resolved by the interpreter with the capture
+    block's concrete pid; the branch condition is not modeled, so the
+    guarded store would be recorded unconditionally for every PID and this
+    race-free kernel (only block 0 writes) reported a phantom WAW. The
+    launch must be marked unsupported instead."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        if pid == 0:
+            offs = tl.arange(0, BLOCK)
+            tl.store(out_ptr + offs, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out, 8)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "varies per program instance" in detector.unsupported_reason
+    assert detector.last_reports == []
+
+
+def test_pid_dependent_branch_is_unsupported_not_false_negative():
+    """Blocks 1 and 2 both write out[0] — a real WAW — but the capture
+    block (0) does not take the branch, so nothing was recorded and the
+    launch finished "ok" with zero reports. Unsupported is the only honest
+    verdict without path-condition modeling."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        if pid > 0:
+            tl.store(out_ptr, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(3,)](out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "varies per program instance" in detector.unsupported_reason
+    assert detector.last_reports == []
+
+
+def test_pid_dependent_loop_bound_is_unsupported():
+    """A loop bound containing pid is concretized to the capture block's
+    trip count (need_full_grid is the sanitizer's compensation; one-shot
+    capture has none), silently truncating every other block's iteration
+    space."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in tl.range(0, pid + 1):
+            tl.store(out_ptr + pid + i, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "concretized" in detector.unsupported_reason
+    assert detector.last_reports == []
+
+
 # ======== RAW+WAW — Non-atomic Histogram ========
 
 

@@ -1,5 +1,8 @@
+import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import FrameType
 from typing import (
     Any,
     ClassVar,
@@ -8,6 +11,7 @@ from typing import (
 )
 
 import torch
+import triton
 from z3 import (
     If,
     Implies,
@@ -55,6 +59,17 @@ from ...utils.traceback_utils import capture_current_source_location
 from ...core.config import config as cfg
 
 RaceDetectorT = TypeVar("RaceDetectorT", bound="RaceDetector")
+
+# Frame classification for the scalar-concretize observer: triton's own
+# frontend does truthiness on scalar tensors as None-guard plumbing
+# (e.g. semantic.py's ``if mask and mask.type.is_block():``), which must not
+# be confused with user host-side control flow like ``if pid == 0:``.
+_TRITON_PKG_DIR = os.path.dirname(os.path.abspath(triton.__file__)) + os.sep
+_TRITON_INTERPRETER_FILE = os.path.join(_TRITON_PKG_DIR, "runtime", "interpreter.py")
+_TRITON_VIZ_PKG_DIR = (
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    + os.sep
+)
 
 
 def _make_event_signature(
@@ -325,6 +340,101 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             raise UnsupportedSymbolicRaceQuery(reason)
         self._mark_unsupported(reason)
         return True
+
+    # Ops whose value differs across program instances (pid, arange lanes)
+    # or depends on runtime memory contents (loads, sorts/scans over loaded
+    # tensors, atomic returns). A scalar built only from constants — or from
+    # enclosing loop iterators, which concretize per iteration — takes the
+    # same value in every block, so host-side use of it stays sound.
+    _PER_INSTANCE_OPS: ClassVar[tuple[str, ...]] = (
+        "pid",
+        "arange",
+        "load",
+        "tensor_pointer_load",
+        "atomic_cas",
+        "atomic_rmw",
+        "sort",
+        "cumsum",
+    )
+
+    @classmethod
+    def _expr_varies_per_instance(cls, expr: SymbolicExpr | None) -> bool:
+        if expr is None:
+            return False
+        try:
+            return any(expr.has_op(op) for op in cls._PER_INSTANCE_OPS)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _scalar_truthiness_from_user_code() -> bool:
+        """True when the in-flight scalar concretization was initiated by
+        user kernel code rather than triton/triton_viz internals.
+
+        Walk outward from the observer, skipping triton_viz frames (wrapper
+        and observer mechanics) and triton's interpreter (pure truthiness
+        plumbing: ``_get_bool`` and its lambdas sit between any initiator
+        and ``__bool__``). The first remaining frame is the initiator: a
+        frame inside the triton package (e.g. semantic.py's ``if mask and
+        ...`` None-guards) is internal canonicalization that is uniform
+        across blocks; anything else is the user's own control flow.
+        """
+        frame: FrameType | None = sys._getframe(1)
+        while frame is not None:
+            filename = frame.f_code.co_filename
+            if (
+                filename.startswith(_TRITON_VIZ_PKG_DIR)
+                or filename == _TRITON_INTERPRETER_FILE
+            ):
+                frame = frame.f_back
+                continue
+            return not filename.startswith(_TRITON_PKG_DIR)
+        return False
+
+    def _scalar_concretize_observer_impl(self, expr: SymbolicExpr) -> None:
+        """Policy for the engine's scalar-concretization hook.
+
+        Host-side control flow (``if pid == 0:``, ``while flag:``) forces a
+        scalar symbolic value to the capture block's concrete value. Under
+        one-shot capture that bakes block (0,0,0)'s branch decisions into
+        the template for every PID: events inside a pid-guarded branch
+        become unconditional for all pids (false positives) and branches
+        the capture block doesn't take record nothing (false negatives) —
+        with last_status still "ok". No path condition is modeled, so the
+        only sound verdict is unsupported.
+        """
+        if self._unsupported_capture:
+            return
+        if not self._expr_varies_per_instance(expr):
+            return
+        if not self._scalar_truthiness_from_user_code():
+            return
+        self._raise_or_mark(
+            "host-side control flow on a value that varies per program "
+            "instance (program id, tl.arange, or loaded data) is "
+            "unsupported by one-shot symbolic capture"
+        )
+
+    def _on_data_dependent_value(self, expr: Any = None) -> None:
+        """Loop bounds / materialized operands that depend on loads or pids
+        are concretized to the capture block's values (the sanitizer
+        compensates by running the full grid via need_full_grid; one-shot
+        capture cannot), so the launch verdict would be silently wrong.
+
+        A bound built only from enclosing loop iterators is exempt: it
+        concretizes to the right value on every iteration, and the
+        finished-iterator machinery models the leftovers.
+        """
+        SymbolicClient._on_data_dependent_value(self, expr)
+        if self._unsupported_capture:
+            return
+        if isinstance(expr, SymbolicExpr) and not self._expr_varies_per_instance(expr):
+            return
+        self._raise_or_mark(
+            "loop bound or operand depending on per-instance or loaded "
+            "data was concretized; unsupported by one-shot symbolic "
+            "capture"
+        )
 
     @staticmethod
     def _tensor_region(tensor: Any) -> tuple[int, int, Any]:
@@ -665,6 +775,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # the slot.
         SymbolicExpr._load_value_provider = self._load_value_provider_impl
         SymbolicExpr._load_value_provider_owner = id(self)
+        SymbolicExpr._scalar_concretize_observer = self._scalar_concretize_observer_impl
+        SymbolicExpr._scalar_concretize_observer_owner = id(self)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         return SymbolicClient.register_op_callback(self, op_type)
@@ -763,6 +875,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         if SymbolicExpr._load_value_provider_owner == id(self):
             SymbolicExpr._load_value_provider = None
             SymbolicExpr._load_value_provider_owner = None
+        if SymbolicExpr._scalar_concretize_observer_owner == id(self):
+            SymbolicExpr._scalar_concretize_observer = None
+            SymbolicExpr._scalar_concretize_observer_owner = None
 
     @staticmethod
     def _normalize_constraints(

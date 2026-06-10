@@ -253,6 +253,9 @@ class SymbolicExprDataWrapper:
             raise ValueError(
                 f"Expected scalar symbolic data, got shape {self.symbolic_expr.shape}"
             )
+        observer = SymbolicExpr._scalar_concretize_observer
+        if observer is not None:
+            observer(self.symbolic_expr)
         concrete = self.symbolic_expr.concretize()
         if not isinstance(concrete, SymbolicTensorValue):
             raise TypeError(f"Expected symbolic tensor value, got {type(concrete)}")
@@ -415,6 +418,18 @@ class SymbolicExpr:
         Callable[["LoadSymbolicExpr"], tuple[Z3Expr, ConstraintConjunction]] | None
     ] = None
     _load_value_provider_owner: ClassVar[int | None] = None
+
+    # Narrow extension hook: a client (currently SymbolicRaceDetector) can
+    # observe scalar concretizations driven by host-side control flow —
+    # SymbolicExprDataWrapper._scalar_data, i.e. Python truthiness on a
+    # scalar symbolic value (`if pid == 0:`). The observer owns ALL policy
+    # (e.g. marking a one-shot capture unsupported when the value varies
+    # per program instance); this module just dispatches before
+    # concretizing.
+    _scalar_concretize_observer: ClassVar[
+        Callable[["SymbolicExpr"], None] | None
+    ] = None
+    _scalar_concretize_observer_owner: ClassVar[int | None] = None
 
     @classmethod
     def register_op_class(
@@ -2712,8 +2727,14 @@ class SymbolicClient(Client):
 
     # ── For-loop infrastructure ───────────────────────────────────
 
-    def _on_data_dependent_value(self) -> None:
-        """Hook called when a data-dependent value forces concretization."""
+    def _on_data_dependent_value(self, expr: Any = None) -> None:
+        """Hook called when a data-dependent value forces concretization.
+
+        ``expr`` is the symbolic value being concretized when the call site
+        has one; clients may inspect it to refine their policy (e.g. a value
+        built only from enclosing loop iterators concretizes per iteration
+        and stays sound under one-shot capture).
+        """
         self.need_full_grid = True
 
     def _materialize_memory_operand(self, expr: Any) -> Any:
@@ -2727,7 +2748,7 @@ class SymbolicClient(Client):
                 expr = expr.replace_subtree(anchor_op)
 
         if materialized:
-            self._on_data_dependent_value()
+            self._on_data_dependent_value(expr)
             if expr.has_vector_const():
                 expr = expr.replace_subtree()
             return expr
@@ -2743,7 +2764,7 @@ class SymbolicClient(Client):
             if expr.op == "const":
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
             elif expr.has_op("load"):
-                self._on_data_dependent_value()
+                self._on_data_dependent_value(expr)
                 expr = expr.replace_subtree("load")
                 # replace_subtree("load") only concretizes load nodes, so the
                 # result may still be a compound op
@@ -2758,7 +2779,7 @@ class SymbolicClient(Client):
                 z3_expr, _ = expr.eval()
                 if isinstance(z3_expr, IntNumRef):
                     return z3_expr.as_long()
-                self._on_data_dependent_value()
+                self._on_data_dependent_value(expr)
                 expr = expr.replace_subtree()
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
         return int(expr)
