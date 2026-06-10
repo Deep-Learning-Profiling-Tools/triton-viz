@@ -405,6 +405,59 @@ def test_pid_dependent_loop_bound_is_unsupported():
     assert detector.last_reports == []
 
 
+# ======== 2D Tiles — Independent Arange Instances ========
+
+
+def test_2d_tile_independent_arange_instances_race_detected():
+    """Row and column index vectors are independent tl.arange instances with
+    equal (start, end). Regression test: ARANGE_DICT used to intern the
+    summary var by (start, end) only, pinning row == col — the modeled
+    footprint collapsed to the tile diagonal and this real cross-block
+    overlap (block0 writes {0..3}, block1 writes {1..4}) came back unsat.
+    """
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        r = tl.arange(0, 2)
+        c = tl.arange(0, 2)
+        offs = r[:, None] * 2 + c[None, :]
+        tl.store(out_ptr + pid + offs, 1.0)
+
+    out = torch.zeros(16, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+
+
+def test_2d_tile_disjoint_blocks_no_race():
+    """Independent per-arange vars must stay range-bounded per copy: with
+    addrs = pid*4 + 2r + c the full rectangular footprints of the two blocks
+    are disjoint, so any unbounded or conflated index var would show up as a
+    false positive here."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        r = tl.arange(0, 2)
+        c = tl.arange(0, 2)
+        offs = r[:, None] * 2 + c[None, :]
+        tl.store(out_ptr + pid * 4 + offs, 1.0)
+
+    out = torch.zeros(16, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
 # ======== RAW+WAW — Non-atomic Histogram ========
 
 

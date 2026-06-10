@@ -239,6 +239,30 @@ def _triton_frame_dirs() -> tuple[str, str]:
     return _TRITON_FRAME_DIRS
 
 
+def innermost_user_site() -> tuple[str, int] | None:
+    """(filename, lineno) of the nearest frame outside triton/triton_viz.
+
+    Unlike traceback_utils' CODE_KEYS-based extraction, this is a plain
+    package-boundary walk, so it identifies the user call line regardless of
+    how the executing kernel's code object was recompiled (a kernel defined
+    inside a function executes with qualname ``kernel``, not
+    ``outer.<locals>.kernel``, which defeats code-key matching). Used for
+    stable per-callsite identities (e.g. arange interning), not for
+    user-facing tracebacks.
+    """
+    triton_pkg_dir, _ = _triton_frame_dirs()
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        filename = frame.f_code.co_filename
+        if filename.startswith(_TRITON_VIZ_PKG_DIR) or filename.startswith(
+            triton_pkg_dir
+        ):
+            frame = frame.f_back
+            continue
+        return (filename, frame.f_lineno)
+    return None
+
+
 def scalar_truthiness_from_user_code() -> bool:
     """True when the in-flight scalar truthiness/read was initiated by user
     kernel code rather than triton/triton_viz internals.
@@ -1070,14 +1094,39 @@ class ArangeSymbolicExpr(SymbolicExpr):
         end_const = cast(ConstSymbolicExpr, self.end)
         self.dtype = INT32
         self.shape = (end_const.value - start_const.value,)
+        # Where this arange was created in user code. Part of the interning
+        # key: semantically independent arange instances must not share a summary var
+        # (see _to_z3_impl), while re-executions of the same source line
+        # (loop iterations) must keep reusing one var so loop signature
+        # dedup keeps working. A plain package-boundary frame walk, NOT
+        # capture_current_source_location: code-key matching fails for
+        # kernels defined inside functions (recompiled code objects lose the
+        # <locals> qualname), which would collapse every site to the launch
+        # line.
+        self.creation_site = innermost_user_site()
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         start = self.start.to_py()
         end = self.end.to_py()
-        key = (start, end)
+        # Two independent arange instances with equal (start, end) — e.g. the row and
+        # column index vectors of a square tile, combined via broadcasting —
+        # must lower to DISTINCT summary vars: a shared var pins row == col
+        # and the modeled footprint collapses to the tile diagonal, silently
+        # missing every race whose witness needs row != col. Keying by
+        # creation site keeps them apart. Limitations: two same-range
+        # arange instances created on a single source line still collapse, and ONE
+        # arange broadcast against itself (offs[:, None] + offs[None, :])
+        # is inherently a single summary var taking two roles — both remain
+        # diagonal-only under-approximations.
+        site = self.creation_site
+        if site is None:
+            key: tuple[Any, ...] = (start, end)
+            name = f"arange_{start}_{end}"
+        else:
+            key = (start, end, site[0], site[1])
+            name = f"arange_{start}_{end}_l{site[1]}_{len(SymbolicExpr.ARANGE_DICT)}"
         if key in SymbolicExpr.ARANGE_DICT:
             return SymbolicExpr.ARANGE_DICT[key]
-        name = f"arange_{start}_{end}"
         v = Int(name)
         constraints = _and_constraints(v >= start, v < end)
         SymbolicExpr.ARANGE_DICT[key] = (v, constraints)

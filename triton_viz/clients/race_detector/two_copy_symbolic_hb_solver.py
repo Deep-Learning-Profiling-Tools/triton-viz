@@ -257,14 +257,19 @@ class TwoCopySymbolicHBSolver:
         sub_a, sub_b = [], []
         cons_a, cons_b = [], []
         for key, value in self.arange_dict.items():
-            # ARANGE_DICT entry shape: key=(start, end), value=(orig_var, _).
+            # ARANGE_DICT entry shape: key=(start, end) or
+            # (start, end, filename, lineno) — the engine keys interned vars
+            # by creation site so independent same-range arange instances stay
+            # distinct. value=(orig_var, _). Per-copy names derive from the
+            # original var's name so every dict entry renames uniquely.
             try:
-                start, end = key
+                start, end = key[0], key[1]
                 orig_var = value[0] if isinstance(value, (list, tuple)) else value
+                base_name = orig_var.decl().name()
             except Exception:
                 continue
-            var_a = Int(f"arange_a_{start}_{end}")
-            var_b = Int(f"arange_b_{start}_{end}")
+            var_a = Int(f"{base_name}__a")
+            var_b = Int(f"{base_name}__b")
             sub_a.append((orig_var, var_a))
             sub_b.append((orig_var, var_b))
             cons_a.append(And(var_a >= start, var_a < end))

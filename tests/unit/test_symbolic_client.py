@@ -171,11 +171,14 @@ def test_basic_expr_pid_eval(axis, expected_pid):
 
 @pytest.mark.parametrize("start,end", [(4, 8), (0, 4)])
 def test_basic_expr_arange_eval(start, end):
-    # Test that arange expr produces a named symbolic variable with range constraints.
+    # Test that arange expr produces a named symbolic variable with range
+    # constraints. The name is suffixed with the creation site (independent
+    # same-range arange instances must not share a summary var), so only the prefix
+    # is stable.
     arange_expr = SymbolicExpr.create("arange", INT32, start, end)
     result, constraints = arange_expr.eval(simplify_constraints=False)
     result = cast(ArithRef, result)
-    assert result.decl().name() == f"arange_{start}_{end}"
+    assert result.decl().name().startswith(f"arange_{start}_{end}")
     assert constraints is not None
     constraints_str = str(constraints)
     assert f"{result} >= {start}" in constraints_str
