@@ -273,7 +273,8 @@ def check_access(
 
 def check_graph(graph: AccessGraph, ctx: LaunchContext) -> list[CompiledOOB]:
     """Check every access; raises UnsupportedTTIR if any access can't be
-    modeled (the client converts that into an unsupported/fallback verdict)."""
+    modeled (the client converts that into an ``unsupported`` verdict with
+    empty records — it does not auto-fall back to interpreted checking)."""
     out: list[CompiledOOB] = []
     for access in graph.accesses:
         v = check_access(access, graph, ctx)

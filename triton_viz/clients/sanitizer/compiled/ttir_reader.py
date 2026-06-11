@@ -30,8 +30,9 @@ from dataclasses import dataclass, field
 class UnsupportedTTIR(Exception):
     """Raised for constructs outside the compiled sanitizer's v1 model
     (indirect/data-dependent addressing, block pointers, nested loops, ...).
-    The client converts this into a dynamic-mode fallback or unsupported
-    status — never a silent wrong verdict."""
+    The client converts this into an ``unsupported`` status (empty records) —
+    never a silent wrong verdict. v1 does not auto-fall back to interpreted
+    checking; run the eager ``Sanitizer()`` to check an unsupported kernel."""
 
 
 # ─────────────────────────── address-expression terms ───────────────────────────
@@ -483,6 +484,19 @@ def parse_ttir(text: str) -> AccessGraph:
                 line_no,
             )
             continue
+
+        # ---- fail closed on unrecognized memory ops ----
+        # A tt.load/tt.store syntax variant the regexes above did not match, or
+        # an unmodeled side-effecting memory op (atomics), must NOT fall through
+        # to the value/DataDep handling below: a store has no result so it would
+        # be silently dropped, and an atomic's access would go unchecked while
+        # its result becomes a harmless-looking DataDep. Either way check_graph
+        # would then prove "ok" without having checked a real access. Bail to
+        # unsupported instead so the proof stays sound.
+        if body.startswith(("tt.load", "tt.store", "tt.atomic_")):
+            raise UnsupportedTTIR(
+                f"line {line_no}: unsupported memory op syntax: {body[:60]}"
+            )
 
         # ---- ops whose result is just data (ignored) ----
         if res is not None and (

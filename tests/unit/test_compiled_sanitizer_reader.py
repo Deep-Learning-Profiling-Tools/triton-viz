@@ -110,3 +110,28 @@ def test_block_pointer_kernel_is_unsupported():
 def test_non_ttir_input_is_unsupported():
     with pytest.raises(UnsupportedTTIR, match="no tt.func"):
         parse_ttir("garbage\n.version 8.0\n")
+
+
+def test_unrecognized_store_syntax_fails_closed():
+    """A tt.store the store regex does not match (here: an attribute dict
+    before the ':') must raise, not be silently dropped. A store has no SSA
+    result, so without the fail-closed guard it would fall through unrecorded
+    and check_graph would prove "ok" while a real write went unchecked."""
+    text = _read("add_sm80.ttir").replace(
+        "tt.store %1, %2, %mask_3 :",
+        "tt.store %1, %2, %mask_3 {cache = 1 : i32} :",
+    )
+    with pytest.raises(UnsupportedTTIR, match="unsupported memory op"):
+        parse_ttir(text)
+
+
+def test_atomic_op_fails_closed():
+    """Atomics are real memory accesses the v1 model does not check. They must
+    be reported unsupported, not become an unchecked DataDep result that lets
+    the rest of the kernel still prove in-bounds."""
+    text = _read("add_sm80.ttir").replace(
+        "tt.store %1, %2, %mask_3 : tensor<1024x!tt.ptr<f32>> loc(#loc13)",
+        "%atom = tt.atomic_rmw fadd, %1, %2, %mask_3 : tensor<1024xf32> loc(#loc13)",
+    )
+    with pytest.raises(UnsupportedTTIR, match="unsupported memory op"):
+        parse_ttir(text)
