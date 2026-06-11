@@ -223,3 +223,61 @@ def test_kernel_cache_autotune_with_dummy_benchmarker():
         assert (
             bench_fn is not None and bench_fn.__name__ == "dummy_benchmarker"
         ), f"Expected dummy_benchmarker, got: {bench_fn}"
+
+
+def test_grid_as_list_launch_is_accepted():
+    """A grid supplied as a list (or a grid callable returning a list) must not
+    crash. Regression: _prepare_grid_launch padded the grid with
+    `grid + (1,) * ...`, which raised "can only concatenate list (not tuple) to
+    list" when the grid was a list. A list grid must behave like the tuple."""
+
+    def launch(grid):
+        # A fresh client per launch so records are not cumulative.
+        triton_viz.clear()
+
+        @triton_viz.trace(client=Tracer())
+        @triton.jit
+        def k(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < n
+            x = tl.load(x_ptr + offs, mask=mask, other=0)
+            tl.store(out_ptr + offs, x, mask=mask)
+
+        n, block = 6, 4
+        x = torch.arange(n, dtype=torch.float32)
+        out = torch.empty_like(x)
+        k[grid](x, out, n, BLOCK=block)
+        return [type(r) for r in launches[-1].records]
+
+    g = triton.cdiv(6, 4)
+    list_records = launch([g])  # grid is a list
+    cb_records = launch(lambda meta: [g])  # grid callable returns a list
+    tuple_records = launch((g,))  # tuple grid: the reference behavior
+
+    assert list_records == tuple_records == cb_records
+    assert Load in list_records and Store in list_records
+
+
+def test_empty_grid_launch_is_noop():
+    """An empty grid (a zero dimension, e.g. a launch over an empty tensor)
+    must be a correct no-op, not crash. Regression: max_workers = min(num_sms,
+    total_blocks) became 0 for an empty grid, and ThreadPoolExecutor(0) raised
+    "max_workers must be greater than 0". No block runs, so there is no
+    Load/Store."""
+    triton_viz.clear()
+
+    @triton_viz.trace(client=Tracer())
+    @triton.jit
+    def k(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n
+        x = tl.load(x_ptr + offs, mask=mask, other=0)
+        tl.store(out_ptr + offs, x, mask=mask)
+
+    x = torch.empty(0, dtype=torch.float32)
+    out = torch.empty(0, dtype=torch.float32)
+    k[(0,)](x, out, 0, BLOCK=4)  # must not raise
+    record_types = [type(r) for r in launches[-1].records]
+    assert Load not in record_types and Store not in record_types
