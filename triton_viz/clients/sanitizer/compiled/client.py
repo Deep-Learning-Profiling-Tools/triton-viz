@@ -8,9 +8,12 @@ that the launch is in-bounds for all inputs consistent with those scalar
 values; SAT is a witness reported as an :class:`OutOfBoundsRecordZ3`,
 matching the eager sanitizer's record/abort contract.
 
-Data-dependent (indirect/gather) addressing and block-pointer kernels are
-marked unsupported — the eager ``Sanitizer()`` covers those by executing
-the indices concretely.
+Data-dependent (indirect/gather) addressing, block pointers,
+non-contiguous tensors, and nested loops are reported as
+``last_status="unsupported"`` with empty records — NOT a silent "ok"
+proof, but also NOT an automatic fallback. v1 does not run the
+interpreter on unsupported kernels; to check them, run the eager
+``Sanitizer()`` (which executes indices concretely) on the same kernel.
 """
 
 from __future__ import annotations
@@ -53,20 +56,32 @@ class CompiledSanitizer(Client):
         self.records: list[OutOfBoundsRecordZ3] = []
         self.last_status: str = "ok"
         self.unsupported_reason: str | None = None
-        self._pending_ttir: str | None = None
         # TTIR-hash -> parsed AccessGraph (or None if unsupported).
         self._graph_cache: dict[int, AccessGraph | None] = {}
-        self._reset_launch()
+        self._reset_launch()  # also initializes self._pending_ttir = None
 
     def _reset_launch(self) -> None:
         self._tensor_meta: dict[str, TensorMeta] = {}
         self._tensor_obj: dict[str, torch.Tensor] = {}
         self._params: dict[str, int] = {}
         self._grid: tuple[int, int, int] = (1, 1, 1)
+        # _pending_ttir is the CURRENT launch's captured TTIR — it must not
+        # survive into the next launch. The parsed-graph cache (_graph_cache,
+        # keyed by TTIR hash) is what persists across launches; the pending
+        # input does not. Without this, a later launch whose warmup produces
+        # no TTIR would re-analyze a previous kernel's graph against the
+        # current launch's metadata (wrong locs, or a wrong-graph false
+        # verdict). Cleared at launch teardown (finalize's finally) so a
+        # no-TTIR launch correctly falls to "unsupported".
+        self._pending_ttir: str | None = None
 
     # ── compilation hooks: grab the runtime's own TTIR ────────────────
 
     def pre_warmup_callback(self, jit_fn: Callable, *args: Any, **kwargs: Any) -> bool:
+        # Start each launch's TTIR capture fresh (belt-and-suspenders with the
+        # finalize teardown): if this warmup yields no TTIR, finalize sees
+        # None and reports unsupported instead of reusing a stale graph.
+        self._pending_ttir = None
         return True
 
     def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:

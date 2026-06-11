@@ -5,6 +5,8 @@ tests need a CUDA driver for the warmup compilation and are skipped without
 one.
 """
 
+from pathlib import Path
+
 import pytest
 import torch
 import triton
@@ -14,9 +16,23 @@ import triton_viz
 from triton_viz.clients import Sanitizer
 from triton_viz.clients.sanitizer.compiled.client import CompiledSanitizer
 
+
+def _runtime_int(value: int):
+    """An arg_cvt that is NOT identical to the int arg, so arg_callback treats
+    it as a runtime scalar (substituted) rather than a constexpr."""
+    return object()
+
+
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="warmup compilation needs a CUDA driver"
 )
+
+
+class _FakeKernel:
+    """Stand-in for a triton CompiledKernel: only .asm is read."""
+
+    def __init__(self, asm):
+        self.asm = asm
 
 
 def test_factory_dispatch():
@@ -26,6 +42,55 @@ def test_factory_dispatch():
     assert isinstance(compiled, CompiledSanitizer)
     # compile kwarg must not leak into __init__ and must honor abort flag.
     assert Sanitizer(compile=True, abort_on_error=False).abort_on_error is False
+
+
+def test_stale_ttir_does_not_leak_across_launches():
+    """A captured TTIR is per-launch input. If a later launch's warmup yields
+    no TTIR, finalize must report unsupported — never re-analyze the previous
+    kernel's graph against the current launch's metadata."""
+    add_ttir = (
+        Path(__file__).resolve().parents[1] / "golden" / "ttgir" / "add_sm80.ttir"
+    ).read_text()
+
+    det = CompiledSanitizer(abort_on_error=False)
+
+    # Launch 1: warmup captures a real TTIR, finalize analyzes it.
+    det.pre_warmup_callback(None)
+    det.post_warmup_callback(None, _FakeKernel({"ttir": add_ttir}))
+    det.grid_callback((1, 1, 1))
+    det.arg_callback("x_ptr", torch.empty(8), None)
+    det.arg_callback("y_ptr", torch.empty(8), None)
+    det.arg_callback("out_ptr", torch.empty(8), None)
+    det.arg_callback("n_elements", 8, _runtime_int(8))
+    det.finalize()
+    assert det.last_status == "ok"
+
+    # Launch 2: warmup produces NO TTIR. The stale add graph must not be used.
+    det.pre_warmup_callback(None)
+    det.post_warmup_callback(None, _FakeKernel({}))  # no "ttir" key
+    det.grid_callback((4, 1, 1))
+    det.finalize()
+    assert det.last_status == "unsupported"
+    assert det.records == []
+
+
+def test_unsupported_is_reported_only_no_auto_eager_fallback():
+    """v1 contract: an unsupported construct yields last_status='unsupported'
+    with empty records — it does NOT silently fall back to interpreted
+    (eager) checking. This pins the documented semantics so the PR text, the
+    API, and the implementation can't drift."""
+    # A gather kernel's TTIR has a data-dependent address -> unsupported.
+    gather_ttir = (
+        Path(__file__).resolve().parents[1] / "golden" / "ttgir" / "gather_sm80.ttir"
+    ).read_text()
+
+    det = CompiledSanitizer(abort_on_error=False)
+    det.pre_warmup_callback(None)
+    det.post_warmup_callback(None, _FakeKernel({"ttir": gather_ttir}))
+    det.grid_callback((1, 1, 1))
+    det.finalize()
+    assert det.last_status == "unsupported"
+    assert det.records == []  # reported, not interpreted
 
 
 def test_disable_flag_overrides_compile_mode():

@@ -7,8 +7,11 @@ concrete tensor metadata and scalar argument values — proving in-boundedness
 for ALL inputs consistent with those scalars and the grid, with no
 interpreted execution. Selected via ``Sanitizer(compile=True)``.
 
-Data-dependent (gather/indirect) addressing and block-pointer kernels are
-marked unsupported; the eager ``Sanitizer()`` covers those.
+Data-dependent (gather/indirect) addressing, block pointers,
+non-contiguous tensors, and nested loops are reported as ``unsupported``
+(empty records, ``last_status="unsupported"``). v1 does not fall back to
+interpretation automatically; run the eager ``Sanitizer()`` to check an
+unsupported kernel.
 """
 
 from .client import CompiledSanitizer

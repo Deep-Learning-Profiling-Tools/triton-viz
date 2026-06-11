@@ -217,9 +217,14 @@ def check_access(
     """Run the OOB query for one access; return a violation or None."""
     meta = ctx.tensors.get(access.base_param)
     if meta is None:
-        # Base pointer never registered (e.g. an output not passed?). Cannot
-        # bound it — skip rather than fabricate.
-        return None
+        # The base pointer has no registered tensor metadata, so this access
+        # cannot be bounded. Skipping it would let an unchecked load/store
+        # slip through and still report last_status="ok" — a false proof.
+        # A static proof is only valid once EVERY access is checked, so bail
+        # to "unsupported" (the client surfaces it) rather than skip.
+        raise UnsupportedTTIR(
+            f"missing tensor metadata for base pointer {access.base_param!r}"
+        )
     if not meta.contiguous:
         raise UnsupportedTTIR(
             f"non-contiguous tensor {access.base_param} (v1 assumes contiguous)"

@@ -11,7 +11,9 @@ later; ``tl.constexpr`` values are already folded into TTIR constants.
 Why TTIR (not TTGIR): out-of-bounds is cleanest in the element address
 space, before layouts/pipelining add noise, and TTIR has no indirect loads
 unless the kernel itself gathers — which is exactly the data-dependent case
-we mark unsupported so the dynamic mode can take over.
+we report as ``unsupported``. v1 does NOT fall back to interpretation
+automatically; to check an unsupported kernel, run the eager
+``Sanitizer()`` on it.
 
 Address model: ``tt.addptr(base, off)`` accumulates an ELEMENT offset; the
 byte address is ``base.data_ptr() + offset * elem_size``. An access is OOB

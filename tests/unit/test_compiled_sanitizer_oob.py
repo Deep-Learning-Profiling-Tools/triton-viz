@@ -184,3 +184,22 @@ def test_descending_loop_is_unsupported():
     ctx = LaunchContext(grid=(1, 1, 1), params={}, tensors={"out": _meta(16)})
     with pytest.raises(UnsupportedTTIR, match="step"):
         check_graph(g, ctx)
+
+
+# ──────────────── completeness: no skipped access ────────────────
+
+
+def test_missing_tensor_metadata_is_unsupported_not_ok():
+    """A static proof requires checking EVERY access. A base pointer with no
+    registered tensor metadata cannot be bounded, so the analysis must bail
+    to unsupported rather than skip the access and return an empty (false)
+    proof."""
+    g = AccessGraph(
+        kernel_name="synthetic",
+        func_args=[FuncArg("p", True, 32)],
+        accesses=[AccessEvent("load", "p", Const(0), None, 32, None, 1)],
+        loop=None,
+    )
+    ctx = LaunchContext(grid=(1, 1, 1), params={}, tensors={})
+    with pytest.raises(UnsupportedTTIR, match="missing tensor metadata"):
+        check_graph(g, ctx)
