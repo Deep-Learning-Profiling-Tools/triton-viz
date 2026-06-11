@@ -874,21 +874,45 @@ def test_cas_relaxed_guarded_reports_race(_isolate_race_detector_atomic_cfg):
 
 
 def test_cas_cta_guarded_cross_grid_reports_race(_isolate_race_detector_atomic_cfg):
+    """cta-scoped CAS establishes no cross-CTA synchronization, so the
+    data store/load pair races (RAW) — and the two CAS operations
+    themselves, being block-local atomics from different CTAs at the same
+    address, are not mutually atomic either (WAW)."""
+
     flag = torch.zeros(1, dtype=torch.int32)
     data = torch.zeros(1, dtype=torch.int32)
     out = torch.zeros(2, dtype=torch.int32)
 
     detector = _run_detector(_cas_cta_guarded_kernel, (2,), flag, data, out)
 
-    assert len(detector.last_reports) == 1
+    assert len(detector.last_reports) == 2
     _assert_launch_reports(detector)
     _assert_atomic_records(detector, sem="acq_rel", scope="cta")
+    data_reports = [
+        r
+        for r in detector.last_reports
+        if not (r.first.record.is_atomic or r.second.record.is_atomic)
+    ]
+    cas_reports = [
+        r
+        for r in detector.last_reports
+        if r.first.record.is_atomic and r.second.record.is_atomic
+    ]
+    assert len(data_reports) == 1 and len(cas_reports) == 1
     _assert_report_lines(
-        detector.last_reports[0],
+        data_reports[0],
         _cas_cta_guarded_kernel,
         (
             "tl.store(data_ptr, 1, mask=is_prod)",
             "x = tl.load(data_ptr, mask=cons_mask, other=0)",
+        ),
+    )
+    _assert_report_lines(
+        cas_reports[0],
+        _cas_cta_guarded_kernel,
+        (
+            'old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="cta")',
+            'old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="cta")',
         ),
     )
 
@@ -1193,6 +1217,47 @@ def test_data_dependent_atomic_address_is_unsupported(
     assert detector.last_status == "unsupported"
     assert detector.unsupported_reason is not None
     assert "data-dependent" in detector.unsupported_reason
+    assert detector.last_reports == []
+
+
+# ======== Atomic scope — cta atomics are not cross-CTA atomic ========
+
+
+@triton.jit
+def _cta_scoped_atomic_add_kernel(out_ptr):
+    tl.atomic_add(out_ptr, 1, scope="cta")
+
+
+def test_cta_scoped_atomics_from_different_blocks_race(
+    _isolate_race_detector_atomic_cfg,
+):
+    """PTX .cta scope guarantees atomicity within one CTA only; two
+    cta-scoped atomics from different blocks at the same address are not
+    mutually atomic. Regression test: atomic-vs-atomic pairs used to be
+    unconditionally race-free regardless of scope."""
+
+    out = torch.zeros(1, dtype=torch.int32)
+    detector = _run_detector(_cta_scoped_atomic_add_kernel, (2,), out)
+
+    assert detector.last_status == "ok"
+    assert len(detector.last_reports) == 1
+
+
+@triton.jit
+def _gpu_scoped_atomic_add_kernel(out_ptr):
+    tl.atomic_add(out_ptr, 1, scope="gpu")
+
+
+def test_gpu_scoped_atomics_at_same_address_no_race(
+    _isolate_race_detector_atomic_cfg,
+):
+    """Device-scope same-width atomics at the same address stay mutually
+    atomic and race-free."""
+
+    out = torch.zeros(1, dtype=torch.int32)
+    detector = _run_detector(_gpu_scoped_atomic_add_kernel, (2,), out)
+
+    assert detector.last_status == "ok"
     assert detector.last_reports == []
 
 

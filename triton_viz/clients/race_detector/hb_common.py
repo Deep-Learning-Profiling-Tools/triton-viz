@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Iterator
 
-from z3 import And, BoolSort, BoolVal, Or, substitute
+from z3 import And, BoolSort, BoolVal, Not, Or, substitute
 from z3.z3 import BoolRef, IntNumRef
 
 
@@ -127,9 +127,16 @@ def build_transitive_hb(
 
 
 def conflicting_access_modes(first: Any, second: Any) -> BoolRef:
-    """``(write,read|write)`` conflict ∧ at-least-one-non-atomic.
+    """``(write,read|write)`` conflict, minus mutually-atomic pairs.
 
-    Preserves the rule that atomic-vs-atomic never races.
+    An atomic-vs-atomic pair is race-free only when the two operations are
+    actually atomic with respect to EACH OTHER: both at least device scope
+    (callers only query cross-block pairs, so a ``"cta"``-scoped atomic
+    never covers the peer block — PTX ``.cta`` scope guarantees atomicity
+    within one CTA only), same access width, and the exact same address.
+    Byte-overlapping atomics at different addresses or widths are torn
+    accesses, which race like plain writes.
+
     Built with explicit ``And``/``Or`` to avoid Python operator-precedence
     pitfalls between Z3 expressions and Python booleans.
     """
@@ -137,8 +144,20 @@ def conflicting_access_modes(first: Any, second: Any) -> BoolRef:
         And(first.writes, Or(second.reads, second.writes)),
         And(second.writes, Or(first.reads, first.writes)),
     )
-    at_least_one_non_atomic = BoolVal((not first.is_atomic) or (not second.is_atomic))
-    return And(access_conflict, at_least_one_non_atomic)
+    if not (first.is_atomic and second.is_atomic):
+        return access_conflict
+
+    device_scope = (getattr(first, "scope", None) or "gpu") != "cta" and (
+        getattr(second, "scope", None) or "gpu"
+    ) != "cta"
+    elem_first = getattr(first, "elem_size", None)
+    elem_second = getattr(second, "elem_size", None)
+    # Events without width metadata (demo HBSolver) keep address-equality
+    # semantics for mutual atomicity.
+    same_width = elem_first is None or elem_second is None or elem_first == elem_second
+    if not (device_scope and same_width):
+        return access_conflict
+    return And(access_conflict, Not(first.addr == second.addr))
 
 
 def minimal_atomic_read_from(

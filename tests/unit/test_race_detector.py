@@ -310,6 +310,10 @@ def test_relaxed_cas_does_not_synchronize_even_when_guarded_load_succeeds():
 
 
 def test_cta_scope_does_not_synchronize_across_different_grids():
+    """cta scope neither synchronizes across CTAs (the data pair races) nor
+    makes the CAS pair mutually atomic (block-local atomics from different
+    CTAs at the same address race too)."""
+
     records = _build_cas_records(load_guarded_by_cas_success=True)
     p0_store_data, p0_release_cas, p1_acquire_cas, p1_load_data = records
     del p0_store_data, p1_load_data
@@ -319,14 +323,20 @@ def test_cta_scope_does_not_synchronize_across_different_grids():
 
     reports = HBSolver(records).find_races()
 
-    assert len(reports) == 1
+    assert len(reports) == 2
 
-    report = reports[0]
-    assert {report.first.name, report.second.name} == {
-        "P0_store_data",
-        "P1_load_data",
-    }
-    assert report.model.get("P1_acquire_cas_old") == "1"
+    data_reports = [
+        r
+        for r in reports
+        if {r.first.name, r.second.name} == {"P0_store_data", "P1_load_data"}
+    ]
+    cas_reports = [
+        r
+        for r in reports
+        if {r.first.name, r.second.name} == {"P0_release_cas", "P1_acquire_cas"}
+    ]
+    assert len(data_reports) == 1 and len(cas_reports) == 1
+    assert data_reports[0].model.get("P1_acquire_cas_old") == "1"
 
 
 def test_null_race_detector_reports_disabled_status():

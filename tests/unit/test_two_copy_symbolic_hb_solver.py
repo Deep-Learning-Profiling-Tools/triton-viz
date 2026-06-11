@@ -689,3 +689,39 @@ def test_cas_trylock_single_winner_suppresses_guarded_waw():
 
     reports = _solve([cas, guarded_store], grid=(2, 1, 1)).find_races()
     assert reports == []
+
+
+# ──────────────────────── Atomic mutual-atomicity boundaries ────────────────
+
+
+def test_mixed_width_atomics_at_same_address_race():
+    """A 4-byte and an 8-byte atomic RMW at the same base address overlap
+    but are not mutually atomic (torn access) — must race."""
+    base = 1_000_000
+    narrow = _rmw_record(IntVal(base), event_id=0, program_seq=0, elem_size=4)
+    wide = _rmw_record(IntVal(base), event_id=1, program_seq=1, elem_size=8)
+
+    reports = _solve([narrow, wide], grid=(2, 1, 1)).find_races()
+    assert reports, "expected torn mixed-width atomic pair to race"
+
+
+def test_same_width_atomics_at_same_address_no_race():
+    """Identical-width device-scope atomics at the same address are
+    mutually atomic — race-free (the pre-fix rule, still intact)."""
+    base = 1_000_000
+    a = _rmw_record(IntVal(base), event_id=0, program_seq=0, elem_size=4)
+    b = _rmw_record(IntVal(base), event_id=1, program_seq=1, elem_size=4)
+
+    reports = _solve([a, b], grid=(2, 1, 1)).find_races()
+    assert reports == []
+
+
+def test_partially_overlapping_same_width_atomics_race():
+    """Same width but byte-overlapping at DIFFERENT addresses (e.g. a
+    misaligned pair) is torn, not mutually atomic — must race."""
+    base = 1_000_000
+    a = _rmw_record(IntVal(base), event_id=0, program_seq=0, elem_size=4)
+    b = _rmw_record(IntVal(base + 2), event_id=1, program_seq=1, elem_size=4)
+
+    reports = _solve([a, b], grid=(2, 1, 1)).find_races()
+    assert reports, "expected partially overlapping atomics to race"
