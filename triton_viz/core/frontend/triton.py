@@ -445,6 +445,14 @@ class TritonFrontend(Frontend):
             for attr in attrs:
                 if hasattr(obj, attr):
                     scope.set_attr(obj, attr, getattr(obj, attr))
+                else:
+                    # The interpreter ADDS this attribute (e.g. tensor.__bool__
+                    # / __index__ are absent natively). Snapshotting only
+                    # pre-existing attrs would leave the interpreter version
+                    # installed after restore, so a later real compilation
+                    # routes through the interpreter ("ir.value has no
+                    # attribute 'data'"). Schedule its removal instead.
+                    scope.mark_removed(obj, attr)
 
         return scope
 

@@ -26,6 +26,16 @@ class _LangPatchScope:
         self._changes.append(("item", mapping, key, original))
         mapping[key] = value
 
+    def mark_removed(self, obj: object, name: str) -> None:
+        """Record that ``name`` is currently absent on ``obj`` so ``restore``
+        deletes it if a later patch adds it. Unlike ``set_attr`` this does not
+        modify ``obj`` now — it only schedules the removal. Needed because the
+        interpreter installs attributes that do not exist natively (e.g.
+        ``tensor.__bool__`` / ``__index__``); snapshotting only pre-existing
+        attrs would leave those installed, corrupting subsequent real
+        compilation."""
+        self._changes.append(("attr", obj, name, _MISSING))
+
     def restore(self) -> None:
         while self._changes:
             kind, obj, name, original = self._changes.pop()
@@ -36,7 +46,12 @@ class _LangPatchScope:
                 else:
                     mapping[name] = original
             elif original is _MISSING:
-                delattr(obj, name)
+                # Guard: the same target object can be scheduled for removal
+                # more than once (e.g. tl.tensor is tl.core.tensor), and a
+                # marked attribute may never have been added. delattr only when
+                # present so restore stays idempotent.
+                if hasattr(obj, name):
+                    delattr(obj, name)
             else:
                 setattr(obj, name, original)
 
