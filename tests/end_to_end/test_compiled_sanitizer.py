@@ -28,6 +28,24 @@ def test_factory_dispatch():
     assert Sanitizer(compile=True, abort_on_error=False).abort_on_error is False
 
 
+def test_disable_flag_overrides_compile_mode():
+    """ENABLE_SANITIZER=0 must disable compiled mode too: Sanitizer(compile=
+    True) collapses to NullSanitizer (so trace() leaves the kernel
+    untraced), instead of warming up and aborting on OOB."""
+    from triton_viz.core.config import config as cfg
+
+    saved = cfg.enable_sanitizer
+    try:
+        cfg.enable_sanitizer = False
+        off = Sanitizer(compile=True, abort_on_error=False)
+        assert type(off).__name__ == "NullSanitizer"
+        cfg.enable_sanitizer = True
+        on = Sanitizer(compile=True, abort_on_error=False)
+        assert isinstance(on, CompiledSanitizer)
+    finally:
+        cfg.enable_sanitizer = saved
+
+
 @requires_cuda
 def test_correct_kernel_is_proven_in_bounds():
     det = Sanitizer(compile=True, abort_on_error=False)

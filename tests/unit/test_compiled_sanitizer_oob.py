@@ -7,12 +7,19 @@ from triton_viz.clients.sanitizer.compiled.oob import (
     TensorMeta,
     check_graph,
 )
+import pytest
+
 from triton_viz.clients.sanitizer.compiled.ttir_reader import (
     AccessEvent,
     AccessGraph,
     Arange,
     Bin,
+    Const,
     FuncArg,
+    LoopInfo,
+    LoopVar,
+    Param,
+    UnsupportedTTIR,
     parse_ttir,
 )
 
@@ -123,3 +130,57 @@ def test_reused_arange_rows_and_cols_are_independent():
     v = check_graph(g, ctx)
     assert len(v) == 1
     assert v[0].violation_offset < 0  # row < col -> negative element offset
+
+
+# ──────────────── loop lower bound / step (iteration model) ────────────────
+
+
+def _store_loop(lower, step, upper, offset):
+    return AccessGraph(
+        kernel_name="synthetic",
+        func_args=[FuncArg("out", True, 32)],
+        accesses=[AccessEvent("store", "out", offset, None, 32, None, 1)],
+        loop=LoopInfo(
+            loop_ssa="%loop",
+            induction_var="%k",
+            lower=lower,
+            step=step,
+            upper=upper,
+        ),  # fmt: skip
+    )
+
+
+def test_loop_nonzero_lower_no_false_positive():
+    """for k in range(1, n): store(out + (k-1)) writes offsets 0..n-2 — in
+    bounds for numel == n-1. The old model bounded the induction value as
+    [0, upper), so iteration k=0 (which never runs) drove offset to -1, a
+    false OOB. The iteration model excludes it."""
+    g = _store_loop(
+        Const(1), Const(1), Param("n"), Bin("-", LoopVar("%loop"), Const(1))
+    )
+    ctx = LaunchContext(grid=(1, 1, 1), params={"n": 8}, tensors={"out": _meta(7)})
+    assert check_graph(g, ctx) == []
+
+
+def test_loop_step_skips_unrun_iterations():
+    """for k in range(0, n, 2): store(out + k) accesses only even induction
+    values {0,2,4,6} for n=8 — in bounds for numel=7. The old model checked
+    every v in [0, n), so the never-run v=7 false-flagged OOB."""
+    g = _store_loop(Const(0), Const(2), Param("n"), LoopVar("%loop"))
+    in_bounds = LaunchContext(
+        grid=(1, 1, 1), params={"n": 8}, tensors={"out": _meta(7)}
+    )
+    assert check_graph(g, in_bounds) == []
+    # A genuine OOB on a real (even) iteration is still caught.
+    oob = LaunchContext(grid=(1, 1, 1), params={"n": 8}, tensors={"out": _meta(6)})
+    v = check_graph(g, oob)
+    assert len(v) == 1 and v[0].violation_offset == 6
+
+
+def test_descending_loop_is_unsupported():
+    """A non-positive step is not modeled — unsupported, never a silent
+    proof."""
+    g = _store_loop(Const(10), Const(-1), Const(0), LoopVar("%loop"))
+    ctx = LaunchContext(grid=(1, 1, 1), params={}, tensors={"out": _meta(16)})
+    with pytest.raises(UnsupportedTTIR, match="step"):
+        check_graph(g, ctx)

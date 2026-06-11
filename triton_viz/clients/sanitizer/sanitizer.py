@@ -65,11 +65,16 @@ class Sanitizer(Client):
 
     def __new__(cls: type[SanitizerT], *args: Any, **kwargs: Any) -> SanitizerT:
         if cls is Sanitizer:
-            # compile=True selects the static TTIR analyzer (CompiledSanitizer,
-            # a plain Client — NOT a Sanitizer subclass — so Python does not
-            # re-invoke __init__ on the returned object). Torch-style dual
-            # mode: Sanitizer() is eager, Sanitizer(compile=True) is compiled.
-            if kwargs.pop("compile", False):
+            # Torch-style dual mode: Sanitizer() is eager, Sanitizer(compile=
+            # True) is the static TTIR analyzer. The disable flag wins over the
+            # mode: when cfg.enable_sanitizer is off both spellings collapse to
+            # NullSanitizer, so an explicit Sanitizer(compile=True) under
+            # ENABLE_SANITIZER=0 stays inert (trace() then leaves the kernel
+            # untraced, since NullSanitizer IS a Sanitizer) instead of warming
+            # up and aborting. CompiledSanitizer is a plain Client — NOT a
+            # Sanitizer subclass — so Python does not re-invoke __init__ on it.
+            compile_mode = kwargs.pop("compile", False)
+            if compile_mode and cfg.enable_sanitizer:
                 from .compiled.client import CompiledSanitizer
 
                 compiled_obj = object.__new__(CompiledSanitizer)

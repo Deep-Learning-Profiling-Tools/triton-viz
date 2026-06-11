@@ -75,11 +75,23 @@ class CompiledOOB:
 
 class _Env:
     """Allocates and caches Z3 free variables for one access query, adding
-    their range constraints to the solver."""
+    their range constraints to the solver.
 
-    def __init__(self, ctx: LaunchContext, loop_upper: int | None) -> None:
+    The loop free variable is the 0-based ITERATION INDEX ``iter``, not the
+    induction value: scf.for ``%k = lower to upper step step`` visits
+    ``lower, lower+step, ...``, so the induction value at iteration ``iter``
+    is ``lower + iter*step`` and a loop-carried pointer advanced by ``delta``
+    each iteration sits at ``offset0 + iter*delta``. Constraining ``iter``
+    (with ``lower + iter*step < upper``) instead of bounding the induction
+    value as ``[0, upper)`` is what makes non-zero ``lower`` / non-unit
+    ``step`` loops sound rather than checking iterations that never run.
+    """
+
+    def __init__(
+        self, ctx: LaunchContext, loop_bounds: tuple[int, int, int] | None
+    ) -> None:
         self.ctx = ctx
-        self.loop_upper = loop_upper
+        self.loop_bounds = loop_bounds  # (lower, step, upper) concrete
         self.constraints: list[BoolRef] = []
         self._pid = [Int(f"pid_{i}") for i in range(3)]
         self._arange: dict[tuple[str, int], ArithRef] = {}
@@ -101,17 +113,24 @@ class _Env:
             self.constraints.append(v < ar.end)
         return v
 
-    def loop(self, loop_ssa: str) -> ArithRef:
+    def loop_iter(self, loop_ssa: str) -> ArithRef:
+        """0-based iteration index, constrained to the iterations that run."""
         v = self._loop.get(loop_ssa)
         if v is None:
-            v = Int(f"loop_{loop_ssa.strip('%')}")
+            v = Int(f"iter_{loop_ssa.strip('%')}")
             self._loop[loop_ssa] = v
             self.constraints.append(v >= 0)
-            if self.loop_upper is not None:
-                self.constraints.append(v < self.loop_upper)
-            else:
-                self.constraints.append(v >= 0)
+            if self.loop_bounds is not None:
+                lower, step, upper = self.loop_bounds
+                self.constraints.append(lower + v * step < upper)
         return v
+
+    def induction_value(self, loop_ssa: str) -> ArithRef:
+        it = self.loop_iter(loop_ssa)
+        if self.loop_bounds is None:
+            return it
+        lower, step, _upper = self.loop_bounds
+        return lower + it * step
 
 
 def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
@@ -127,13 +146,13 @@ def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
     if isinstance(term, Arange):
         return env.arange(term)
     if isinstance(term, LoopVar):
-        return env.loop(term.loop_ssa)
+        return env.induction_value(term.loop_ssa)
     if isinstance(term, IterArgOffset):
         info = graph.iter_args[term.arg_id]
         if graph.loop is None:
             raise UnsupportedTTIR("iter-arg offset outside a loop")
-        k = env.loop(graph.loop.loop_ssa)
-        return _eval(info.offset0, env, graph) + k * _eval(info.delta, env, graph)
+        it = env.loop_iter(graph.loop.loop_ssa)
+        return _eval(info.offset0, env, graph) + it * _eval(info.delta, env, graph)
     if isinstance(term, Bin):
         a, b = _eval(term.a, env, graph), _eval(term.b, env, graph)
         if term.op == "+":
@@ -167,19 +186,29 @@ def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
     raise UnsupportedTTIR(f"unhandled term {type(term).__name__}")
 
 
-def _loop_upper(graph: AccessGraph, ctx: LaunchContext) -> int | None:
+def _loop_bounds(graph: AccessGraph, ctx: LaunchContext) -> tuple[int, int, int] | None:
+    """Evaluate (lower, step, upper) concretely from the scalar args. Returns
+    None when there's no loop; raises UnsupportedTTIR for a non-constant
+    bound or a non-positive step (descending loops are not modeled)."""
     if graph.loop is None:
         return None
-    # Evaluate the upper bound concretely (it's an int term over params).
-    tmp = _Env(ctx, None)
-    expr = _eval(graph.loop.upper, tmp, graph)
     from z3 import simplify
 
-    s = simplify(expr)
-    try:
-        return s.as_long()
-    except Exception:
-        raise UnsupportedTTIR("loop upper bound is not concrete at launch")
+    tmp = _Env(ctx, None)
+
+    def conc(term: Term, what: str) -> int:
+        s = simplify(_eval(term, tmp, graph))
+        try:
+            return s.as_long()
+        except Exception:
+            raise UnsupportedTTIR(f"loop {what} is not concrete at launch")
+
+    lower = conc(graph.loop.lower, "lower bound")
+    step = conc(graph.loop.step, "step")
+    upper = conc(graph.loop.upper, "upper bound")
+    if step <= 0:
+        raise UnsupportedTTIR(f"loop step {step} <= 0 (descending loops unsupported)")
+    return (lower, step, upper)
 
 
 def check_access(
@@ -196,8 +225,8 @@ def check_access(
             f"non-contiguous tensor {access.base_param} (v1 assumes contiguous)"
         )
 
-    loop_upper = _loop_upper(graph, ctx)
-    env = _Env(ctx, loop_upper)
+    loop_bounds = _loop_bounds(graph, ctx)
+    env = _Env(ctx, loop_bounds)
 
     offset = _eval(access.offset, env, graph)
     solver = Solver()
@@ -223,7 +252,7 @@ def check_access(
     for (ssa, dim), var in env._arange.items():
         witness[f"arange_{ssa.strip('%')}_d{dim}"] = mval(var)
     for ssa, var in env._loop.items():
-        witness[f"loop_{ssa.strip('%')}"] = mval(var)
+        witness[f"iter_{ssa.strip('%')}"] = mval(var)
 
     return CompiledOOB(
         kind=access.kind,
