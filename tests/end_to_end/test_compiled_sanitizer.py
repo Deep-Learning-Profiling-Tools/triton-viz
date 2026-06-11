@@ -44,6 +44,19 @@ def test_factory_dispatch():
     assert Sanitizer(compile=True, abort_on_error=False).abort_on_error is False
 
 
+def test_compile_false_dispatches_to_eager():
+    """Sanitizer(compile=False) must dispatch to the eager SymbolicSanitizer.
+    Regression: the factory returns a Sanitizer SUBCLASS, so Python re-invokes
+    its __init__ with the ORIGINAL kwargs (including compile=False). If that
+    __init__ does not tolerate the stray `compile`, this legitimate-looking
+    spelling raises TypeError instead of constructing an eager sanitizer."""
+    det = Sanitizer(compile=False, abort_on_error=False)
+    assert type(det).__name__ == "SymbolicSanitizer"
+    assert det.abort_on_error is False
+    # The default spelling (no compile kwarg) must keep working too.
+    assert type(Sanitizer(abort_on_error=True)).__name__ == "SymbolicSanitizer"
+
+
 def test_stale_ttir_does_not_leak_across_launches():
     """A captured TTIR is per-launch input. If a later launch's warmup yields
     no TTIR, finalize must report unsupported — never re-analyze the previous
