@@ -179,6 +179,27 @@ def resolve_slot(graph: EventGraph, index_ssa: str | None) -> SlotExpr:
     return RotatingSlot(base=base, modulus=modulus)
 
 
+def _validate_slot(slot: SlotExpr, stages: int, alloc: str, line_no: int) -> None:
+    """A resolved slot must fit the allocation's stage geometry, else the IR
+    violates the model's assumptions — fail closed (unsupported) rather than
+    feed an out-of-range slot to the solver and emit a proof/report computed
+    under a broken buffer model. A rotating slot must wrap at the stage count;
+    a constant slot must index an existing stage ``[0, stages)``.
+    """
+    if isinstance(slot, RotatingSlot):
+        if slot.modulus != stages:
+            raise UnsupportedTTGIR(
+                f"line {line_no}: rotation modulus {slot.modulus} != "
+                f"stage count {stages} of {alloc}"
+            )
+    else:  # ConstSlot
+        if not 0 <= slot.value < stages:
+            raise UnsupportedTTGIR(
+                f"line {line_no}: constant slot {slot.value} is out of range "
+                f"[0, {stages}) for {alloc}"
+            )
+
+
 def _find_modulus(graph: EventGraph, name: str, seen: set[str]) -> int | None:
     if name in seen:
         return None
@@ -358,13 +379,7 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
     copies: list[ModelCopy] = []
     for ce in graph.copies:
         slot = resolve_slot(graph, ce.index_ssa)
-        if isinstance(slot, RotatingSlot):
-            stages = graph.allocations[ce.alloc].stages
-            if slot.modulus != stages:
-                raise UnsupportedTTGIR(
-                    f"line {ce.line_no}: rotation modulus {slot.modulus} != "
-                    f"stage count {stages} of {ce.alloc}"
-                )
+        _validate_slot(slot, graph.allocations[ce.alloc].stages, ce.alloc, ce.line_no)
         committed = ce.token in commit_rank_by_token
         const_rank, lpos = commit_rank_by_token.get(ce.token, (None, None))
         if ce.segment == "loop" and committed and lpos is None:
@@ -409,6 +424,7 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
     loads: list[ModelLoad] = []
     for le in graph.loads:
         slot = resolve_slot(graph, le.index_ssa)
+        _validate_slot(slot, graph.allocations[le.alloc].stages, le.alloc, le.line_no)
         wait = None
         if le.token is not None and le.token in wait_by_result:
             wait = wait_by_result[le.token]

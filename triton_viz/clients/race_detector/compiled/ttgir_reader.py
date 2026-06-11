@@ -59,10 +59,16 @@ class Allocation:
     # Stage count: leading dim when views are taken via memdesc_index;
     # resolved by the reader from observed memdesc_index result ranks.
     stages: int = 1
+    # True once a ttg.memdesc_index views this buffer: the leading memdesc dim
+    # is then the stage axis, even when the depth is 1 (e.g. a single-buffered
+    # ``memdesc<1x64x32>`` indexed by ``memdesc_index %buf[%idx]``). Keyed off
+    # the indexing op, not ``stages > 1``, so a depth-1 staged buffer is not
+    # mistaken for an un-staged one.
+    has_stage_dim: bool = False
 
     @property
     def buffer_dims(self) -> tuple[int, ...]:
-        return self.memdesc.dims[1:] if self.stages > 1 else self.memdesc.dims
+        return self.memdesc.dims[1:] if self.has_stage_dim else self.memdesc.dims
 
     @property
     def stage_bytes(self) -> int:
@@ -562,6 +568,7 @@ def parse_ttgir(text: str) -> EventGraph:
                 )
             views[results[0]] = (alloc, idx)
             allocations[alloc].stages = allocations[alloc].memdesc.dims[0]
+            allocations[alloc].has_stage_dim = True
             continue
 
         if op_kind == "ttg.async_copy_global_to_local":

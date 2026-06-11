@@ -129,6 +129,11 @@ class RaceDetector(Client):
     backend with ``RaceDetector(compile=True)``; extra keywords flow to the
     chosen backend's ``__init__`` (e.g. ``RaceDetector(compile=True,
     collect_smtlib=True)``).
+
+    Note: the compiled backend runs STANDALONE — it skips the interpreted run,
+    so it cannot be composed with other clients (Tracer, the dynamic detector,
+    Profiler) in one ``@triton_viz.trace``; ClientManager raises if you try.
+    Trace the dynamic and compiled detectors as separate decorations.
     """
 
     NAME = "race_detector"

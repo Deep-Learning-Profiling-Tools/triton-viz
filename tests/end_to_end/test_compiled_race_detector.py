@@ -16,7 +16,7 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import CompiledRaceDetector, RaceDetector, Tracer
+from triton_viz.clients import CompiledRaceDetector, RaceDetector, RaceType, Tracer
 from triton_viz.clients.race_detector.compiled import analyze_ttgir
 from triton_viz.core.client import ClientManager
 from triton_viz.core.config import config
@@ -64,7 +64,7 @@ def _assert_races(text: str, expect_min: int = 1) -> list:
     assert r.status == "ok", r.unsupported_reason
     assert len(r.reports) >= expect_min, "mutation not detected"
     for rep in r.reports:
-        assert rep.race_type == "RAW"
+        assert rep.race_type == RaceType.RAW
         assert rep.witness["k_load"] >= 0
         assert rep.witness["slot"] >= 0
     return r.reports
@@ -91,19 +91,48 @@ def test_mutation_deleted_wait():
     _assert_races(mutated)
 
 
+def _shrink_to_single_buffer(stock: str) -> str:
+    """Single-buffer the double-buffered pipeline, well-formed: memdesc depth
+    2 -> 1, rotation wrap 2 -> 1, AND the prologue's stage-1 prefetch redirected
+    from slot 1 to slot 0 (a depth-1 buffer has no slot 1). Every slot now
+    indexes the lone stage, so the geometry is consistent and the prefetch
+    overwrites the slot the current iteration still reads."""
+    mutated = stock.replace("!ttg.memdesc<2x", "!ttg.memdesc<1x").replace(
+        "memdesc<2x", "memdesc<1x"
+    )
+    mutated = mutated.replace(
+        "arith.cmpi sge, %acc_93, %c2_i32", "arith.cmpi sge, %acc_93, %c1_i32"
+    ).replace("arith.cmpi sge, %acc_104, %c2_i32", "arith.cmpi sge, %acc_104, %c1_i32")
+    # Prologue stage-1 prefetch: index slot 0, not the now-nonexistent slot 1.
+    mutated = mutated.replace("%a[%c1_i32]", "%a[%c0_i32]").replace(
+        "%b[%c1_i32]", "%b[%c0_i32]"
+    )
+    return mutated
+
+
 def test_mutation_shrunk_stage_dim():
-    """Single-buffering a double-buffered pipeline (stage dim 2 -> 1 with a
-    consistent rotation modulus) makes the prefetch overwrite the slot the
-    current iteration still reads."""
+    """A well-formed single-buffering of a double-buffered pipeline must be
+    caught as a race: the prefetch overwrites the slot the current iteration
+    still reads."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    _assert_races(_shrink_to_single_buffer(stock))
+
+
+def test_const_slot_out_of_range_is_unsupported():
+    """Shrinking the memdesc to depth 1 WITHOUT fixing the prologue leaves a
+    constant slot-1 access into a 1-stage buffer — inconsistent geometry. The
+    model must fail closed (unsupported) rather than emit a proof/report
+    computed under a broken buffer model."""
     stock = _read("matmul_s3_sm80.ttgir")
     mutated = stock.replace("!ttg.memdesc<2x", "!ttg.memdesc<1x").replace(
         "memdesc<2x", "memdesc<1x"
     )
-    # Keep the rotation consistent with the shrunk buffer: wrap at 1.
     mutated = mutated.replace(
         "arith.cmpi sge, %acc_93, %c2_i32", "arith.cmpi sge, %acc_93, %c1_i32"
     ).replace("arith.cmpi sge, %acc_104, %c2_i32", "arith.cmpi sge, %acc_104, %c1_i32")
-    _assert_races(mutated)
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "out of range" in (r.unsupported_reason or "")
 
 
 def test_mutation_rotation_off_by_one():
@@ -200,6 +229,21 @@ def test_compiled_detector_is_standalone_only():
         ClientManager([CompiledRaceDetector(), Tracer()])
     with pytest.raises(RuntimeError, match="standalone"):
         ClientManager([Tracer(), CompiledRaceDetector()])
+
+
+def test_compile_true_respects_disabled_flag():
+    """RaceDetector(compile=True) still honors the global enable flag: with the
+    detector off, the factory returns the NullRaceDetector (status 'disabled'),
+    exactly like the default RaceDetector(), so ENABLE_RACE_DETECTOR=0 keeps
+    zero runtime impact."""
+    saved = config.enable_race_detector
+    config.enable_race_detector = False
+    try:
+        detector = RaceDetector(compile=True)
+        assert detector.last_status == "disabled"
+        assert not isinstance(detector, CompiledRaceDetector)
+    finally:
+        config.enable_race_detector = saved
 
 
 def test_smtlib_artifact_export():

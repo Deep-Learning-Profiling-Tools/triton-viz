@@ -18,6 +18,7 @@ separate ``@triton_viz.trace`` decorations.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from typing import Any, ClassVar
 
@@ -57,8 +58,12 @@ class CompiledRaceDetector(Client):
         self.unsupported_reason: str | None = None
         self.smtlib: list[str] = []
         self._pending_ttgir: list[str] = []
-        # ttgir-hash -> AnalysisResult; one analysis per specialization.
-        self._analysis_cache: dict[int, AnalysisResult] = {}
+        # ttgir content digest -> AnalysisResult; one analysis per
+        # specialization. Keyed by a stable SHA-256 of the TTGIR text rather
+        # than Python's built-in hash(): the cache holds proof/witness verdicts
+        # (a soundness boundary), so it must be collision-resistant and
+        # reproducible, not process-randomized.
+        self._analysis_cache: dict[str, AnalysisResult] = {}
 
     # ── compilation hooks ─────────────────────────────────────────────
 
@@ -124,7 +129,7 @@ class CompiledRaceDetector(Client):
         status = "ok"
         reason: str | None = None
         for text in self._pending_ttgir:
-            key = hash(text)
+            key = hashlib.sha256(text.encode("utf-8")).hexdigest()
             result = self._analysis_cache.get(key)
             if result is None:
                 result = analyze_ttgir(text, collect_smtlib=self.collect_smtlib)

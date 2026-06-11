@@ -36,6 +36,7 @@ from typing import Any
 
 from z3 import And, Int, Solver, sat
 
+from ..data import RaceType
 from .hb import (
     ConstSlot,
     ModelCopy,
@@ -50,9 +51,14 @@ from .ttgir_reader import EventGraph, UnsupportedTTGIR, parse_ttgir
 
 @dataclass(frozen=True)
 class CompiledRaceReport:
-    """A shared-memory race found by the compiled-mode analysis."""
+    """A shared-memory race found by the compiled-mode analysis.
 
-    race_type: str  # "RAW"
+    ``race_type`` reuses the dynamic detector's :class:`RaceType` enum so
+    consumers can branch on it uniformly across both modes (v1 only emits
+    ``RaceType.RAW``).
+    """
+
+    race_type: RaceType  # RaceType.RAW in v1
     alloc: str
     alloc_var: str | None  # user variable name from loc, if any
     writer_loc: str
@@ -194,7 +200,7 @@ def _check_pair(
         f"does not cover its commit group"
     )
     report = CompiledRaceReport(
-        race_type="RAW",
+        race_type=RaceType.RAW,
         alloc=copy.alloc,
         alloc_var=alloc_var,
         writer_loc=writer_loc,
