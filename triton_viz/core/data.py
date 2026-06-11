@@ -304,6 +304,16 @@ class AtomicRMW(Op):
 
 
 @dataclass
+class DeviceAssert(Op):
+    name: ClassVar[str] = "device_assert"
+
+
+@dataclass
+class Assume(Op):
+    name: ClassVar[str] = "assume"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str

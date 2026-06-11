@@ -78,6 +78,8 @@ from ..core.data import (
     IntToPtr,
     AtomicCas,
     AtomicRMW,
+    DeviceAssert,
+    Assume,
     RawLoad,
     RawStore,
     Load,
@@ -2779,6 +2781,22 @@ class SymbolicClient(Client):
         mask_sym = SymbolicExpr.from_value(mask)
         return SymbolicExpr.create("atomic_rmw", ptr_sym, val_sym, mask_sym)
 
+    def _op_device_assert_overrider(self, condition, *args, **kwargs):
+        # The interpreter's create_assert does `assert condition`, which is
+        # object-truthy on a SymbolicExpr and would silently pass — route the
+        # condition to the client hook instead of evaluating it concretely.
+        self._handle_assumption(condition)
+
+    def _op_assume_overrider(self, condition, *args, **kwargs):
+        self._handle_assumption(condition)
+
+    def _handle_assumption(self, condition: Any) -> None:
+        """Hook for ``tl.device_assert`` / ``tl.assume`` conditions captured
+        symbolically. Default: drop the condition (the prior implicit
+        behavior, made explicit). Clients may collect conditions as solver
+        assumptions — every feasible real execution satisfies them.
+        """
+
     def _build_op_overrider_map(self) -> dict[type[Op], Callable]:
         """Return a mapping of shared Op types to their overrider methods."""
         return {
@@ -2818,6 +2836,8 @@ class SymbolicClient(Client):
             IntToPtr: self._op_bitcast_overrider,
             AtomicCas: self._op_atomic_cas_overrider,
             AtomicRMW: self._op_atomic_rmw_overrider,
+            DeviceAssert: self._op_device_assert_overrider,
+            Assume: self._op_assume_overrider,
             RawLoad: self._op_raw_load_overrider,
             RawStore: self._op_raw_store_overrider,
             Load: self._op_load_overrider,

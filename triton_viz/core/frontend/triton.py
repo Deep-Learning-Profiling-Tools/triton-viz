@@ -39,6 +39,8 @@ from ..data import (
     Ashr,
     AtomicCas,
     AtomicRMW,
+    DeviceAssert,
+    Assume,
     BinaryOp,
     Bitcast,
     Broadcast,
@@ -154,6 +156,8 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "create_int_to_ptr": IntToPtr,
         "create_atomic_cas": AtomicCas,
         "create_atomic_rmw": AtomicRMW,
+        "create_assert": DeviceAssert,
+        "create_assume": Assume,
     },
     tl: {
         "max": ReduceMax,

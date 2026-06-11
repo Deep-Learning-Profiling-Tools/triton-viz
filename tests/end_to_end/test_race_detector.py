@@ -1220,6 +1220,66 @@ def test_data_dependent_atomic_address_is_unsupported(
     assert detector.last_reports == []
 
 
+# ======== tl.assume — conditions constrain the two-copy model ========
+
+
+def test_assume_constrains_the_model():
+    """tl.assume conditions hold on every feasible execution, so they are
+    sound solver assumptions (instantiated per program copy). Regression
+    test: the interpreter's `assert condition` was object-truthy on the
+    symbolic condition and silently dropped it."""
+
+    restricting = SymbolicRaceDetector()
+
+    @triton_viz.trace(restricting)
+    @triton.jit
+    def assumed(out_ptr):
+        pid = tl.program_id(0)
+        tl.assume(pid < 1)
+        tl.store(out_ptr, pid.to(tl.float32))
+
+    out = torch.zeros(4, dtype=torch.float32)
+    assumed[(2,)](out)
+    assert restricting.last_status == "ok"
+    assert restricting.last_reports == []
+
+    loose = SymbolicRaceDetector()
+
+    @triton_viz.trace(loose)
+    @triton.jit
+    def assumed_loose(out_ptr):
+        pid = tl.program_id(0)
+        tl.assume(pid >= 0)
+        tl.store(out_ptr, pid.to(tl.float32))
+
+    assumed_loose[(2,)](out)
+    assert loose.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in loose.last_reports)
+
+
+def test_assume_inside_loop_is_unsupported():
+    """Loop-body assumptions are per-iteration path conditions the one-shot
+    capture cannot attribute; mark unsupported instead of misapplying them
+    launch-wide."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(2):
+            tl.assume(pid >= 0)
+            tl.store(out_ptr + pid + i, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "inside a loop" in detector.unsupported_reason
+
+
 # ======== Atomic scope — cta atomics are not cross-CTA atomic ========
 
 
