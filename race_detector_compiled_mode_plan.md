@@ -107,8 +107,10 @@ tests/golden/ttgir/*.ttgir          # checked-in dumps + mutants
 - **Reports**: return `list[RaceReport]` from `finalize()`, maintain
   `last_reports/last_status/unsupported_reason` — tests, `launches[-1].records`,
   visualizer and `trace_io` all work unchanged.
-- **Mode composition**: `RaceDetector` factory grows a mode switch
-  (`cfg.race_detector_mode = dynamic | compiled | both`). Caveat (verified):
+- **Mode composition**: the public `RaceDetector(...)` factory selects the backend via a
+  `compile` keyword — `RaceDetector(compile=True)` dispatches `__new__` to
+  `CompiledRaceDetector` (flag on); the default / `compile=False` stays the dynamic
+  `SymbolicRaceDetector`; flag off is `NullRaceDetector` either way. Caveat (verified):
   `ClientManager.pre_run_callback` combines with `all()` — a compiled-mode client must
   return `True` from `pre_run_callback` (let other clients decide) and simply do nothing
   per block; it must NOT return `False` or it suppresses co-registered clients' blocks.

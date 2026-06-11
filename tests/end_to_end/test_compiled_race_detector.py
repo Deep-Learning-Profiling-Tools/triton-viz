@@ -16,8 +16,9 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import CompiledRaceDetector
+from triton_viz.clients import CompiledRaceDetector, RaceDetector
 from triton_viz.clients.race_detector.compiled import analyze_ttgir
+from triton_viz.core.config import config
 
 GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "ttgir"
 
@@ -142,9 +143,24 @@ requires_cuda = pytest.mark.skipif(
 )
 
 
+@pytest.fixture
+def _enable_race_detector():
+    # The public RaceDetector(...) factory only returns a real backend while
+    # the flag is on; otherwise it is the NullRaceDetector and trace() leaves
+    # the kernel untraced.
+    saved = config.enable_race_detector
+    config.enable_race_detector = True
+    try:
+        yield
+    finally:
+        config.enable_race_detector = saved
+
+
 @requires_cuda
-def test_trace_pipelined_matmul_proves_race_free():
-    detector = CompiledRaceDetector()
+def test_trace_pipelined_matmul_proves_race_free(_enable_race_detector):
+    detector = RaceDetector(compile=True)
+    # The factory routes compile=True to the static compiled-mode backend.
+    assert isinstance(detector, CompiledRaceDetector)
 
     @triton_viz.trace(detector)
     @triton.jit
@@ -214,8 +230,8 @@ def test_trace_pipelined_matmul_proves_race_free():
 
 
 @requires_cuda
-def test_trace_elementwise_kernel_is_ok():
-    detector = CompiledRaceDetector()
+def test_trace_elementwise_kernel_is_ok(_enable_race_detector):
+    detector = RaceDetector(compile=True)
 
     @triton_viz.trace(detector)
     @triton.jit
