@@ -1,3 +1,4 @@
+import pytest
 import torch
 import triton
 import triton.language as tl
@@ -248,6 +249,7 @@ def test_grid_as_list_launch_is_accepted():
         x = torch.arange(n, dtype=torch.float32)
         out = torch.empty_like(x)
         k[grid](x, out, n, BLOCK=block)
+        torch.testing.assert_close(out, x)
         return [type(r) for r in launches[-1].records]
 
     g = triton.cdiv(6, 4)
@@ -281,3 +283,24 @@ def test_empty_grid_launch_is_noop():
     k[(0,)](x, out, 0, BLOCK=4)  # must not raise
     record_types = [type(r) for r in launches[-1].records]
     assert Load not in record_types and Store not in record_types
+
+
+def test_negative_grid_dim_raises():
+    """A negative grid dimension is an illegal launch configuration and must
+    raise, not silently behave like an empty grid (range(-1) is empty, so a
+    negative dim would otherwise be an invisible no-op)."""
+    triton_viz.clear()
+
+    @triton_viz.trace(client=Tracer())
+    @triton.jit
+    def k(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n
+        x = tl.load(x_ptr + offs, mask=mask, other=0)
+        tl.store(out_ptr + offs, x, mask=mask)
+
+    x = torch.arange(4, dtype=torch.float32)
+    out = torch.empty_like(x)
+    with pytest.raises(ValueError, match="non-negative"):
+        k[(-1,)](x, out, 4, BLOCK=4)

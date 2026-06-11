@@ -954,21 +954,25 @@ class TritonFrontend(Frontend):
             if callable(grid_executor.grid)
             else grid_executor.grid
         )
-        assert len(grid) <= 3
         # A kernel's grid callable may return a list (e.g. `lambda meta:
         # [triton.cdiv(...)]`); coerce to tuple before padding so the
         # concatenation below does not raise "can only concatenate list (not
         # tuple) to list".
-        grid = tuple(grid) + (1,) * (3 - len(grid))
+        grid = tuple(grid)
+        if len(grid) > 3:
+            raise ValueError(f"Triton grid must have at most 3 dimensions, got {grid}")
+        if any(dim < 0 for dim in grid):
+            raise ValueError(f"Triton grid dimensions must be non-negative, got {grid}")
+        grid = grid + (1,) * (3 - len(grid))
 
         self.builder.set_grid_dim(*grid)
         client_manager.grid_callback(grid)
         total_blocks = grid[0] * grid[1] * grid[2]
         # An empty grid (a zero dim, e.g. a launch over an empty tensor) means
         # zero blocks. Keep at least one worker so ThreadPoolExecutor does not
-        # raise "max_workers must be greater than 0"; the serial loop then runs
-        # over range(0) and is a correct no-op.
-        max_workers = max(1, min(cfg.num_sms, total_blocks))
+        # raise "max_workers must be greater than 0"; one of the nested ranges
+        # in the block loop is then empty and the launch is a correct no-op.
+        max_workers = 1 if total_blocks == 0 else min(cfg.num_sms, total_blocks)
         return (
             client_manager,
             kwargs,
