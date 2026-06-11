@@ -248,6 +248,82 @@ class PipelineModel:
     generic_only: bool  # no async machinery at all
 
 
+def _token_allocs(
+    graph: EventGraph,
+    token: str,
+    commit_by_result: dict[str, tuple[str, ...]],
+    copy_alloc_by_token: dict[str, str],
+    wait_operands_by_result: dict[str, tuple[str, ...]],
+    seen: set[str],
+) -> set[str]:
+    """Allocations that an async token transitively awaits.
+
+    A commit-group result token awaits the allocations of its copies. A
+    loop-carried iter_arg token awaits whatever its init and the value yielded
+    into it await — the pipeline rotation threads a fresh commit token into the
+    same arg each iteration, all of one allocation by construction. A prior
+    async_wait's result token awaits whatever that wait's own operands await
+    (wait-chaining). Cycles (malformed SSA) terminate via ``seen``.
+    """
+    if token in seen:
+        return set()
+    seen.add(token)
+    allocs: set[str] = set()
+    copies = commit_by_result.get(token)
+    if copies is not None:
+        for ct in copies:
+            a = copy_alloc_by_token.get(ct)
+            if a is not None:
+                allocs.add(a)
+        return allocs
+
+    def recurse(nxt: str) -> None:
+        allocs.update(
+            _token_allocs(
+                graph,
+                nxt,
+                commit_by_result,
+                copy_alloc_by_token,
+                wait_operands_by_result,
+                seen,
+            )
+        )
+
+    if graph.loop is not None and any(arg == token for arg, _ in graph.loop.iter_args):
+        init = graph.iter_arg_init(token)
+        if init is not None:
+            recurse(init)
+        yielded = graph.yielded_for_arg(token)
+        if yielded is not None:
+            recurse(yielded)
+    chained = wait_operands_by_result.get(token)
+    if chained is not None:
+        for tok in chained:
+            recurse(tok)
+    return allocs
+
+
+def _wait_guarded_allocs(
+    graph: EventGraph,
+    operand_tokens: tuple[str, ...],
+    commit_by_result: dict[str, tuple[str, ...]],
+    copy_alloc_by_token: dict[str, str],
+    wait_operands_by_result: dict[str, tuple[str, ...]],
+) -> set[str]:
+    """Allocations a wait actually awaits, via its operand tokens."""
+    allocs: set[str] = set()
+    for tok in operand_tokens:
+        allocs |= _token_allocs(
+            graph,
+            tok,
+            commit_by_result,
+            copy_alloc_by_token,
+            wait_operands_by_result,
+            set(),
+        )
+    return allocs
+
+
 def build_pipeline_model(graph: EventGraph) -> PipelineModel:
     """Derive the counting model from the event graph.
 
@@ -311,6 +387,22 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
             )
         )
 
+    # Per-allocation coverage gate: which allocations each wait actually
+    # awaits, derived from its operand tokens (not just its num count). A wait
+    # that names explicit tokens but omits a load's allocation cannot order
+    # that load after any copy to it, so the load is uncovered even if the num
+    # count would otherwise "cover" it. On stock pipeliner IR every wait names
+    # the tokens consistent with its num, so this never downgrades a real
+    # proof; it closes the blind spot where a dropped/weakened wait operand
+    # silently read as a proof instead of a report.
+    commit_by_result: dict[str, tuple[str, ...]] = {
+        c.token: c.copy_tokens for c in graph.commits if c.token
+    }
+    copy_alloc_by_token: dict[str, str] = {c.token: c.alloc for c in graph.copies}
+    wait_operands_by_result: dict[str, tuple[str, ...]] = {
+        w.result: w.operand_tokens for w in graph.waits if w.result
+    }
+
     # Wait guarding each load: prefer the token edge; otherwise the nearest
     # preceding wait in the same segment; otherwise uncovered.
     wait_by_result = {w.result: w for w in graph.waits if w.result}
@@ -331,6 +423,17 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
             raise UnsupportedTTGIR(
                 f"line {le.line_no}: load guarded by a wait in another segment"
             )
+        wait_num = wait.num if wait is not None else None
+        if wait is not None and wait.operand_tokens:
+            guarded = _wait_guarded_allocs(
+                graph,
+                wait.operand_tokens,
+                commit_by_result,
+                copy_alloc_by_token,
+                wait_operands_by_result,
+            )
+            if le.alloc not in guarded:
+                wait_num = None  # this wait does not await the load's alloc
         issued_before_wait = 0
         if wait is not None and wait.segment == "loop":
             issued_before_wait = sum(
@@ -342,7 +445,7 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
             ModelLoad(
                 alloc=le.alloc,
                 slot=slot,
-                wait_num=wait.num if wait is not None else None,
+                wait_num=wait_num,
                 issued_before_wait=issued_before_wait,
                 loc=le.loc,
                 line_no=le.line_no,

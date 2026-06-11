@@ -29,8 +29,21 @@ Every load-bearing claim below was verified empirically on this machine
     `ttng.fence_async_shared`.
 - **Guarantee**: per kernel *specialization* (constexprs and divisibility fixed — that is
   what compilation means), but **for all inputs, all grids, symbolic loop trip counts**.
-  UNSAT = a proof; SAT = a witness (thread pair / iteration distance / stage / byte)
-  mapped back to a source line via MLIR locs.
+  UNSAT = a proof; SAT = a witness (iteration distance / stage / slot) mapped back to a
+  source line via MLIR locs; the witness `byte_offset` is a representative byte derived
+  from the layout closed forms *after* the solve, not part of the solved query.
+
+> **v1 as shipped — model boundary (read before trusting an `ok`).** The implemented
+> query is a **wait-coverage** check: for each (copy, load) on a slot, does the load's
+> guarding `async_wait` cover the copy's commit group (counting + per-allocation operand
+> gating)? UNSAT is a proof *of that property*, not a full byte-level data-race proof. It
+> models the whole-tile cp.async shape (same slot ⇒ full byte overlap) and the RAW
+> direction only, under the lockstep/Membar-barrier assumption. It does **not** yet
+> implement: copy/load active masks, sub-tile byte-overlap or per-thread/register
+> footprint in the solver (sound for the whole-tile shape, see `smt_encoder.py`), the
+> sm90 `ttng.*` path (M4 — flagged unsupported), or **allocation aliasing**: a
+> `local_alloc` after a `local_dealloc` (buffer reuse) is flagged **unsupported**, not
+> proven — see the "Allocation aliasing" bullet below.
 
 ### Non-goals for v1 (explicit, each with a reason)
 - **Generic-proxy ordering** (`local_store` vs `local_load` without async involvement):
@@ -187,11 +200,15 @@ formulas below were verified exhaustively against the C++ `LinearLayout` ground 
 - **Multibuffering**: stage is a leading dim on the memdesc
   (`!ttg.memdesc<2x64x32xf16, …, mutable>`); `ttg.memdesc_index %buf[%idx]` adds
   `idx · stageBytes`. Measured: sm80 depth = `num_stages−1`, sm90 depth = `num_stages`.
-- **Allocation aliasing**: `local_dealloc` + later `local_alloc`/scratch may reuse bytes
-  (verified via `metadata.shared`). v1 models each allocation's base as a symbolic BV
-  constant with non-overlap constraints *only between live ranges that overlap in program
-  order*; dealloc'd-then-reused pairs keep overlapping bases possible, so misordered
-  access to a recycled buffer is reportable rather than assumed-disjoint.
+- **Allocation aliasing** (deferred — **not implemented in v1 as shipped**): `local_dealloc`
+  + later `local_alloc`/scratch may reuse bytes (verified via `metadata.shared`). The
+  intended model gives each allocation a symbolic BV base with non-overlap constraints
+  only between live ranges that overlap in program order. v1 does **not** track allocation
+  bases or live ranges and the encoder only forms same-allocation (copy, load) pairs, so to
+  stay sound the reader flags any `local_alloc` that follows a `local_dealloc` as
+  **unsupported** rather than silently assuming disjointness. A *terminal* dealloc (stock
+  epilogue cleanup, no later alloc) is harmless and ignored. Cross-allocation aliasing is a
+  v2 item alongside Membar verification.
 
 **Broadcast caveat (FP guard)**: layouts with zero bases make several threads own the
 *same* element (verified). Same-address writes whose addr functions are literally
@@ -249,6 +266,12 @@ scope/width-aware mutual-atomicity rule we just landed):
 - Per cross-agent event pair: `SAT?(active_a ∧ active_b ∧ byte_overlap ∧
   conflicting ∧ ¬HB(a,b) ∧ ¬HB(b,a))` — same shape as
   `TwoCopySymbolicHBSolver._race_expr`, with QF_BV addresses instead of integers.
+  **(v1 as shipped):** the implemented `_check_pair` solves a reduced form of this —
+  same-slot equality stands in for `byte_overlap` (sound for whole-tile copy/load, where
+  same slot ⇒ full overlap), and `active_a ∧ active_b` (masks) and the per-thread/register
+  footprint are dropped because they do not change which commit group a wait covers. The
+  full `active ∧ byte_overlap ∧ thread-footprint` formula is the v2 generalization to
+  sub-tile / partially-masked shapes.
 - Witness extraction: model gives `tid`s, `d`, stage, byte offset; locs come from result
   values (access ops all produce results; `tt.store` is global-side and out of scope) →
   `RaceReport` with both source lines, same dataclass as dynamic mode.

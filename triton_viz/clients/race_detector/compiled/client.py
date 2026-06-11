@@ -6,12 +6,14 @@ returns True; ``post_warmup_callback`` receives the ``CompiledKernel`` whose
 ASTSource, which would miss the divisibility specialization and silently
 analyze unpipelined IR). Analysis is cached per compiled-kernel hash.
 
-The client registers no op overriders: under ``triton_viz.trace`` the
-interpreted grid run executes concretely; ``post_run_callback`` returns
-False to stop after the first block (the static analysis does not need the
-interpreter at all). When composed with other clients, callbacks follow the
-ClientManager rules: ``pre_run`` must stay True (all()-combined) so it never
-suppresses a co-registered client's blocks.
+The client registers no op overriders and needs nothing from the interpreted
+grid run: ``pre_run_callback`` returns False to skip each block's body
+entirely (the static analysis works off the warmup TTGIR alone). Because
+``ClientManager.pre_run_callback`` all()-combines every client's vote, that
+False would suppress a co-registered client's capture — so this client is
+STANDALONE: ``ClientManager.add_clients`` rejects composing it with any other
+client (see ``STANDALONE`` below). Run the dynamic and compiled detectors as
+separate ``@triton_viz.trace`` decorations.
 """
 
 from __future__ import annotations
@@ -30,14 +32,22 @@ class CompiledRaceDetector(Client):
 
     Public surface mirrors the dynamic ``RaceDetector``:
       * ``last_reports``: list of :class:`CompiledRaceReport`
-      * ``last_status``: ``"ok"`` (analysis ran; empty list is a proof for
-        the analyzed specializations) | ``"unsupported"`` | ``"no_ttgir"``
+      * ``last_status``: ``"ok"`` (analysis ran; an empty list means no
+        wait-coverage violation was found for the analyzed specializations,
+        within the model boundary documented in ``hb.py``) |
+        ``"unsupported"`` | ``"no_ttgir"``
       * ``unsupported_reason``
+
+    Standalone-only: skips the interpreted run, so ``ClientManager`` refuses to
+    compose it with other clients (see the module docstring).
     """
 
     NAME = "race_detector_compiled"
     LOG_TAG: ClassVar[str] = "CompiledRaceDetector"
     LOG_VERB: ClassVar[str] = "analyzing"
+    # Skips the interpreted run via pre_run_callback() == False; ClientManager
+    # enforces that this is the only client in the trace.
+    STANDALONE: ClassVar[bool] = True
 
     def __init__(self, collect_smtlib: bool = False) -> None:
         super().__init__()
@@ -79,11 +89,10 @@ class CompiledRaceDetector(Client):
         # The static analysis never needs the interpreted kernel body, and
         # executing it concretely can fail on constructs only the symbolic
         # clients' loop machinery handles (e.g. range(tl.cdiv(...)) bounds).
-        # Returning False skips every block's body. CAVEAT: pre_run is
-        # all()-combined across co-registered clients, so this client must
-        # run STANDALONE — composing it with an interpreting client in one
-        # trace() would suppress that client's capture. Run the dynamic and
-        # compiled detectors as separate trace decorations instead.
+        # Returning False skips every block's body. Because pre_run is
+        # all()-combined across clients, this would suppress a co-registered
+        # client's capture — which is exactly why STANDALONE is set and
+        # ClientManager.add_clients refuses to compose this client with others.
         return False
 
     def post_run_callback(self, fn: Callable) -> bool:

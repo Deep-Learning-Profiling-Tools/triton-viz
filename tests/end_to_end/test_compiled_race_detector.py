@@ -16,8 +16,9 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import CompiledRaceDetector, RaceDetector
+from triton_viz.clients import CompiledRaceDetector, RaceDetector, Tracer
 from triton_viz.clients.race_detector.compiled import analyze_ttgir
+from triton_viz.core.client import ClientManager
 from triton_viz.core.config import config
 
 GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "ttgir"
@@ -122,6 +123,83 @@ def test_mutation_dropped_commit_group():
     )
     reports = _assert_races(mutated)
     assert len(reports) == 1
+
+
+def test_mutation_dropped_wait_operand_token():
+    """The stock loop wait awaits BOTH allocations' commit tokens
+    (``async_wait %a_87, %b_89 {num = 2}``). Dropping the B token while
+    keeping num=2 is a wait that no longer awaits B: the counting model alone
+    would still read it as covered (the num is unchanged), so the per-token
+    coverage gate must catch it and report exactly the B-buffer loads — never
+    a silent ``ok``."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "ttg.async_wait %a_87, %b_89 {num = 2 : i32}",
+        "ttg.async_wait %a_87 {num = 2 : i32}",
+    )
+    reports = _assert_races(mutated)
+    # A stays awaited (operand %a_87 present) — only B loads are uncovered.
+    assert reports, "dropped wait token not detected"
+    assert all(r.alloc == "%b" for r in reports), [r.alloc for r in reports]
+
+
+def test_malformed_commit_group_is_unsupported():
+    """An operand-style ``async_commit_group %tok`` (no ``tokens`` keyword)
+    is outside the parsed vocabulary. It must degrade to unsupported, not be
+    silently swallowed as an empty commit group (which would corrupt commit
+    rank accounting)."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "ttg.async_commit_group tokens %a_116",
+        "ttg.async_commit_group %a_116",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "async_commit_group" in (r.unsupported_reason or "")
+
+
+def test_conditional_region_in_loop_is_unsupported():
+    """A conditional region inside the pipelined loop is not modeled; the
+    reader must say so rather than mis-track the loop/epilogue boundary via
+    naive brace counting (a ``} else {`` nets +1, not 0)."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "%a_96 = ttg.async_wait %a_87, %b_89 {num = 2 : i32} loc(#loc72)",
+        "%a_96 = ttg.async_wait %a_87, %b_89 {num = 2 : i32} loc(#loc72)\n"
+        "      scf.if %arg13 {\n"
+        "      } else {\n"
+        "      }",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "region" in (r.unsupported_reason or "")
+
+
+def test_local_alloc_after_dealloc_is_unsupported():
+    """A local_alloc following a local_dealloc may reuse the freed storage —
+    allocation aliasing the v1 model does not track. It must degrade to
+    unsupported (the terminal epilogue deallocs in the stock IR, with no
+    later alloc, stay a clean proof — see the stock test)."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "ttg.local_dealloc %b : !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)",
+        "ttg.local_dealloc %b : !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)\n"
+        "    %reuse = ttg.local_alloc : () -> !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "dealloc" in (r.unsupported_reason or "")
+
+
+def test_compiled_detector_is_standalone_only():
+    """The compiled detector skips the interpreted run (pre_run=False), which
+    is all()-combined — composing it with another client would suppress that
+    client's capture. ClientManager must reject the composition up front."""
+    ClientManager([CompiledRaceDetector()])  # standalone is fine
+    with pytest.raises(RuntimeError, match="standalone"):
+        ClientManager([CompiledRaceDetector(), Tracer()])
+    with pytest.raises(RuntimeError, match="standalone"):
+        ClientManager([Tracer(), CompiledRaceDetector()])
 
 
 def test_smtlib_artifact_export():

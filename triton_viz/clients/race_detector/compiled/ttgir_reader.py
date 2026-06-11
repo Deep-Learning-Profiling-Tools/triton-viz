@@ -136,10 +136,20 @@ class CommitEvent:
 
 @dataclass
 class WaitEvent:
-    """``ttg.async_wait {num=N}``."""
+    """``ttg.async_wait %tok0, %tok1, ... {num=N}``.
+
+    ``operand_tokens`` are the async-token SSA operands the wait synchronizes
+    on (loop-carried commit-group tokens in the pipelined loop). They identify
+    *which* allocations the wait actually awaits; an empty tuple is the
+    operandless ``async_wait {num=0}`` "wait for all groups" form. The HB
+    model uses these to gate coverage per allocation (see hb.py) so that
+    dropping a token — a wait that no longer awaits an allocation it is
+    assumed to guard — degrades to a report rather than a silent ``ok``.
+    """
 
     result: str | None
     num: int
+    operand_tokens: tuple[str, ...]
     segment: str
     body_pos: int
     loc: SourceLoc | None
@@ -354,6 +364,12 @@ def parse_ttgir(text: str) -> EventGraph:
     segment = "prologue"
     loop_depth = 0
     seen_loop_with_events = False
+    # Set once a ttg.local_dealloc frees a buffer. v1 does not model the
+    # allocation base / live ranges, so a buffer that is freed and then
+    # re-allocated (storage aliasing) is outside the model — a local_alloc
+    # after a dealloc must degrade to unsupported. A *terminal* dealloc (the
+    # stock epilogue cleanup, with no later alloc) is harmless and ignored.
+    seen_dealloc = False
     body_pos = {"prologue": 0, "loop": 0, "epilogue": 0}
 
     def next_pos() -> int:
@@ -455,8 +471,18 @@ def parse_ttgir(text: str) -> EventGraph:
                     segment = "epilogue"
                 continue
             if body.endswith("{"):
-                # nested region inside the loop (scf.if etc.)
-                loop_depth += 1
+                # A line opening a region inside the loop body — an scf.if /
+                # scf.while opener, or a "} else {" continuation that both
+                # closes and reopens a region. v1 does not model conditional
+                # or nested regions inside the pipelined loop: their smem
+                # events are not unconditional, and naive brace counting
+                # mis-tracks the loop/epilogue boundary (a "} else {" nets +1,
+                # not 0, leaving every epilogue event mislabeled "loop").
+                # Fail fast rather than silently mis-model.
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: nested/conditional region inside a "
+                    "pipelined loop is not modeled in v1"
+                )
 
         op_kind = body.split(" ")[0].rstrip(",")
 
@@ -498,7 +524,18 @@ def parse_ttgir(text: str) -> EventGraph:
             defs[results[0]] = SsaDef("select", am.groups(), {}, line_no, segment)
             continue
 
+        if op_kind == "ttg.local_dealloc":
+            # Buffer freed. Harmless on its own (terminal cleanup); only a
+            # subsequent local_alloc — potential storage reuse — is a problem.
+            seen_dealloc = True
+            continue
+
         if op_kind == "ttg.local_alloc":
+            if seen_dealloc:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: local_alloc after local_dealloc — buffer "
+                    "reuse / allocation aliasing is not modeled in v1"
+                )
             lm = _RE_LOCAL_ALLOC.match(body)
             if not lm or not results:
                 raise UnsupportedTTGIR(f"line {line_no}: unparsable local_alloc")
@@ -551,7 +588,15 @@ def parse_ttgir(text: str) -> EventGraph:
 
         if op_kind == "ttg.async_commit_group":
             cm2 = _RE_COMMIT.match(body)
-            tokens = _split_ssa_list(cm2.group(1)) if cm2 and cm2.group(1) else ()
+            if cm2 is None:
+                # A genuinely unparsable commit group (e.g. operand-style
+                # ``async_commit_group %tok`` from a printer/version we have
+                # not modeled). The bare ``async_commit_group`` (no tokens)
+                # form DOES match — that is a real, intentionally-empty group.
+                # Silently treating a non-match as an empty group would corrupt
+                # commit-rank accounting, so fail fast like every other smem op.
+                raise UnsupportedTTGIR(f"line {line_no}: unparsable async_commit_group")
+            tokens = _split_ssa_list(cm2.group(1)) if cm2.group(1) else ()
             commits.append(
                 CommitEvent(
                     token=results[0] if results else "",
@@ -571,6 +616,7 @@ def parse_ttgir(text: str) -> EventGraph:
                 WaitEvent(
                     result=results[0] if results else None,
                     num=int(wm.group(2)),
+                    operand_tokens=_split_ssa_list(wm.group(1) or ""),
                     segment=segment,
                     body_pos=next_pos(),
                     loc=loc,
@@ -610,8 +656,8 @@ def parse_ttgir(text: str) -> EventGraph:
                 seen_loop_with_events = True
             continue
 
-        # ttg.local_dealloc / ttg.convert_layout / tt.* / arith.* on tensors:
-        # not events in the v1 model.
+        # ttg.convert_layout / tt.* / arith.* on tensors: not events in the v1
+        # model. (ttg.local_dealloc is handled above.)
 
     # Resolve loc ids (aliases live at the bottom of the file).
     event_lists: list[list[Any]] = [copies, loads, stores, waits]

@@ -11,9 +11,19 @@ such that
     (counting semantics: ``async_wait {num=N}`` leaves at most the N most
     recent groups outstanding).
 
-SAT means a witness execution where the load can read bytes the async copy
-is still writing — a RAW race on shared memory. UNSAT over all pairs is a
-proof for the specialization (model boundary in hb.py / the plan).
+SAT means a witness execution where the load reads a slot whose async copy
+the wait does not cover — a RAW race on shared memory. UNSAT over all pairs
+proves the specialization has no such wait-coverage violation, within the
+model boundary in hb.py / the plan.
+
+Scope of the query (deliberately): it solves over symbolic iterations, slots
+and trip count, with commit-group/wait-coverage counting as the race
+predicate. It does NOT encode the copy/load active masks, sub-tile byte
+overlap, or per-thread/register footprint — sound here because the modeled
+cp.async shape is whole-tile copy + whole-tile load per slot (same slot ⇒ full
+byte overlap) and masking does not change which commit group a wait covers.
+The ``byte_offset`` in a report is a representative witness byte computed from
+the layout closed forms after the solve, not a solved quantity.
 
 A side artifact per query can be exported as SMT-LIB2 — the "SMT-IR"
 interchange format from the design plan.
