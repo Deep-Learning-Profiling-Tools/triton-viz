@@ -2939,6 +2939,13 @@ class SymbolicClient(Client):
     ):
         if self._should_skip_loop_hooks():
             return None
+        # tl.static_range is compile-time unrolled: every iteration runs
+        # with a CONCRETE index, and host-side consumers depend on that
+        # (e.g. indexing a pointer tuple, ptrs[i], needs a real __index__).
+        # Wrapping it with a symbolic iterator both breaks those consumers
+        # and mismodels the unrolled semantics — iterate it concretely.
+        if _range_type == "tl_static_range":
+            return None
         iter_args = tuple(iter_args or ())
         iter_kwargs = iter_kwargs or {}
 

@@ -1220,6 +1220,31 @@ def test_data_dependent_atomic_address_is_unsupported(
     assert detector.last_reports == []
 
 
+# ======== tl.static_range — concrete unrolling ========
+
+
+def test_static_range_unrolls_concretely_and_detects_race():
+    """tl.static_range is compile-time unrolled, so each iteration records
+    with a concrete index (no symbolic iterator). Regression test: wrapping
+    it symbolically broke host-side consumers of the index (tuple
+    indexing's __index__) and mismodeled the unrolled semantics."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in tl.static_range(2):
+            tl.store(out_ptr + pid + i, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+
+
 # ======== tl.clamp — symbolic ternary support ========
 
 
