@@ -65,6 +65,16 @@ class Sanitizer(Client):
 
     def __new__(cls: type[SanitizerT], *args: Any, **kwargs: Any) -> SanitizerT:
         if cls is Sanitizer:
+            # compile=True selects the static TTIR analyzer (CompiledSanitizer,
+            # a plain Client — NOT a Sanitizer subclass — so Python does not
+            # re-invoke __init__ on the returned object). Torch-style dual
+            # mode: Sanitizer() is eager, Sanitizer(compile=True) is compiled.
+            if kwargs.pop("compile", False):
+                from .compiled.client import CompiledSanitizer
+
+                compiled_obj = object.__new__(CompiledSanitizer)
+                CompiledSanitizer.__init__(compiled_obj, *args, **kwargs)
+                return cast(SanitizerT, compiled_obj)
             target_cls = cast(
                 type["Sanitizer"],
                 SymbolicSanitizer if cfg.enable_sanitizer else NullSanitizer,
