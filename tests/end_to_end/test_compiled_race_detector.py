@@ -187,6 +187,21 @@ def test_malformed_commit_group_is_unsupported():
     assert "async_commit_group" in (r.unsupported_reason or "")
 
 
+def test_commit_group_without_result_is_unsupported():
+    """ttg.async_commit_group always prints its !ttg.async.token result; a
+    result-less commit group is malformed (its token is what a wait names, so
+    a group with no token is unreachable by any wait). The reader fails closed
+    rather than fabricate an empty token."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "%a_117 = ttg.async_commit_group tokens %a_116",
+        "ttg.async_commit_group tokens %a_116",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "result" in (r.unsupported_reason or "")
+
+
 def test_conditional_region_in_loop_is_unsupported():
     """A conditional region inside the pipelined loop is not modeled; the
     reader must say so rather than mis-track the loop/epilogue boundary via

@@ -603,10 +603,19 @@ def parse_ttgir(text: str) -> EventGraph:
                 # Silently treating a non-match as an empty group would corrupt
                 # commit-rank accounting, so fail fast like every other smem op.
                 raise UnsupportedTTGIR(f"line {line_no}: unparsable async_commit_group")
+            if not results:
+                # The op always prints its !ttg.async.token result; a
+                # result-less commit group is malformed. Its token is what a
+                # wait names (commit_by_result in hb.py keys on it), so a group
+                # with no token is unreachable by any wait — fail closed rather
+                # than fabricate an empty token.
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: async_commit_group without an SSA result token"
+                )
             tokens = _split_ssa_list(cm2.group(1)) if cm2.group(1) else ()
             commits.append(
                 CommitEvent(
-                    token=results[0] if results else "",
+                    token=results[0],
                     copy_tokens=tokens,
                     segment=segment,
                     body_pos=next_pos(),
