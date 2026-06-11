@@ -1,0 +1,358 @@
+"""Happens-before model for the cp.async pipeline at TTGIR level.
+
+TTGIR carries NO CTA barriers (the backend Membar pass inserts ``bar.sync``
+during lowering — verified: zero barrier ops in any dump, five in the PTX).
+Ordering at this level comes from:
+
+  * program order within a thread,
+  * commit-group counting: ``ttg.async_wait {num=N}`` blocks until at most N
+    commit groups are outstanding, i.e. every group except the N most recent
+    ones is complete,
+  * the multibuffer rotation: ``memdesc_index`` indices are loop-carried
+    ``addi``/``cmpi``/``select`` chains implementing ``(k + c) mod S``.
+
+Model boundary (documented in the plan §1/§5): threads are abstracted as
+advancing through loop iterations in lockstep (the Membar-inserted barriers
+bound warp drift), so the checkable contract is the RAW direction — an async
+copy must be covered by the wait that guards the load reading its slot.
+This catches the real mutation classes: wrong/deleted wait nums, shrunk
+stage dims, rotation off-by-one, dropped commit groups. WAR (a far-ahead
+copy overwriting a slot mid-read) is barrier-protected under the same
+assumption and is not checked in v1.
+
+Everything extracted here is *checked, not trusted*: rotation closed forms
+are validated by exhaustive simulation of the parsed select chain.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from .ttgir_reader import (
+    EventGraph,
+    SourceLoc,
+    UnsupportedTTGIR,
+)
+
+
+# ───────────────────────────── slot expressions ─────────────────────────────
+
+
+@dataclass(frozen=True)
+class ConstSlot:
+    value: int
+
+
+@dataclass(frozen=True)
+class RotatingSlot:
+    """Slot used at loop iteration k is ``(base + k) mod modulus``."""
+
+    base: int
+    modulus: int
+
+
+SlotExpr = ConstSlot | RotatingSlot
+
+
+def _eval_chain(
+    graph: EventGraph,
+    name: str,
+    env: dict[str, int],
+    _stack: frozenset[str] = frozenset(),
+) -> int:
+    """Concretely evaluate an SSA scalar given loop-carried values in env.
+
+    A name reappearing on the active evaluation stack means the printed SSA
+    references form a cycle (malformed/adversarial input) — unsupported, not
+    a RecursionError.
+    """
+    if name in env:
+        return env[name]
+    if name in graph.constants:
+        return graph.constants[name]
+    if name in _stack:
+        raise UnsupportedTTGIR(f"cyclic scalar chain through {name}")
+    d = graph.defs.get(name)
+    if d is None:
+        raise UnsupportedTTGIR(f"cannot evaluate {name} (unknown producer)")
+    stack = _stack | {name}
+    if d.kind == "addi":
+        return _eval_chain(graph, d.operands[0], env, stack) + _eval_chain(
+            graph, d.operands[1], env, stack
+        )
+    if d.kind == "cmpi":
+        a = _eval_chain(graph, d.operands[0], env, stack)
+        b = _eval_chain(graph, d.operands[1], env, stack)
+        pred = d.attrs["pred"]
+        table = {
+            "sge": a >= b,
+            "sgt": a > b,
+            "sle": a <= b,
+            "slt": a < b,
+            "eq": a == b,
+            "ne": a != b,
+        }
+        if pred not in table:
+            raise UnsupportedTTGIR(f"cmpi predicate {pred} unsupported")
+        return int(table[pred])
+    if d.kind == "select":
+        c = _eval_chain(graph, d.operands[0], env, stack)
+        return _eval_chain(graph, d.operands[1] if c else d.operands[2], env, stack)
+    raise UnsupportedTTGIR(f"cannot evaluate {name} (op {d.kind})")
+
+
+def _chain_iter_arg(graph: EventGraph, name: str, seen: set[str]) -> str | None:
+    """Find the single loop iter_arg the scalar chain ``name`` depends on."""
+    if name in seen:
+        return None
+    seen.add(name)
+    if graph.loop and any(arg == name for arg, _ in graph.loop.iter_args):
+        return name
+    if name in graph.constants:
+        return None
+    d = graph.defs.get(name)
+    if d is None:
+        return None
+    found: str | None = None
+    for op in d.operands:
+        sub = _chain_iter_arg(graph, op, seen)
+        if sub is not None:
+            if found is not None and found != sub:
+                raise UnsupportedTTGIR(
+                    f"index chain {name} depends on multiple iter_args"
+                )
+            found = sub
+    return found
+
+
+def resolve_slot(graph: EventGraph, index_ssa: str | None) -> SlotExpr:
+    """Resolve a memdesc_index operand to a slot expression.
+
+    Constants resolve directly. Loop-carried chains are CHECKED against the
+    rotation closed form ``(base + k) mod S`` by simulating the parsed
+    ``addi``/``cmpi``/``select`` chain for enough iterations to cover two
+    full periods; any mismatch (or an unrecognizable chain) is unsupported.
+    """
+    if index_ssa is None or index_ssa == "":
+        return ConstSlot(0)
+    if index_ssa in graph.constants:
+        return ConstSlot(graph.constants[index_ssa])
+    if graph.loop is None:
+        raise UnsupportedTTGIR(f"non-constant slot index {index_ssa} outside a loop")
+
+    arg = _chain_iter_arg(graph, index_ssa, set())
+    if arg is None:
+        raise UnsupportedTTGIR(
+            f"slot index {index_ssa} is not a constant or iter_arg chain"
+        )
+    init_name = graph.iter_arg_init(arg)
+    yielded = graph.yielded_for_arg(arg)
+    if init_name is None or init_name not in graph.constants:
+        raise UnsupportedTTGIR(f"iter_arg {arg} has non-constant init")
+    init = graph.constants[init_name]
+
+    # The value USED at iteration k is index_ssa evaluated with arg = its
+    # k-th value; arg advances via the yielded chain. Simulate.
+    # Derive the modulus from the cmpi bound in the chain (any cmpi against
+    # a constant); fall back to allocation stage count at the caller.
+    modulus = _find_modulus(graph, index_ssa, set())
+    if modulus is None or modulus <= 0:
+        raise UnsupportedTTGIR(f"cannot derive rotation modulus for {index_ssa}")
+
+    sim_values = []
+    arg_val = init
+    steps = 2 * modulus + 4
+    for _k in range(steps):
+        used = _eval_chain(graph, index_ssa, {arg: arg_val})
+        sim_values.append(used)
+        if yielded is None:
+            raise UnsupportedTTGIR(f"iter_arg {arg} is never advanced by scf.yield")
+        arg_val = _eval_chain(graph, yielded, {arg: arg_val})
+
+    base = sim_values[0] % modulus
+    for k, v in enumerate(sim_values):
+        if v != (base + k) % modulus:
+            raise UnsupportedTTGIR(
+                f"slot index {index_ssa} does not follow (base + k) mod "
+                f"{modulus}: simulated {sim_values}"
+            )
+    return RotatingSlot(base=base, modulus=modulus)
+
+
+def _find_modulus(graph: EventGraph, name: str, seen: set[str]) -> int | None:
+    if name in seen:
+        return None
+    seen.add(name)
+    d = graph.defs.get(name)
+    if d is None:
+        return None
+    if d.kind == "cmpi":
+        bound = d.operands[1]
+        if bound in graph.constants:
+            return graph.constants[bound]
+    for op in d.operands:
+        sub = _find_modulus(graph, op, seen)
+        if sub is not None:
+            return sub
+    return None
+
+
+# ───────────────────────────── pipeline model ─────────────────────────────
+
+
+@dataclass(frozen=True)
+class ModelCopy:
+    """One async copy with its slot and commit rank.
+
+    Commit rank: prologue copies have constant ranks 1..P in program order.
+    A loop-body copy at iteration k has rank ``P + g*k + pos`` where g is
+    the number of commit groups per iteration and pos its 1-based position
+    among the body's commits. ``rank is None`` means the copy is never
+    committed — no wait can ever cover it.
+    """
+
+    alloc: str
+    slot: SlotExpr
+    const_rank: int | None  # for prologue copies
+    loop_pos: int | None  # 1-based commit position within the loop body
+    loc: SourceLoc | None
+    line_no: int
+    committed: bool
+
+
+@dataclass(frozen=True)
+class ModelLoad:
+    """One local_load with its slot and the wait that guards it.
+
+    ``wait_num is None`` means no wait guards the load (uncovered).
+    ``issued_before_wait`` counts the commit groups issued in the loop body
+    BEFORE the guarding wait (0 in the observed dumps: the wait leads the
+    body). Total groups issued when the wait at iteration k returns is
+    ``P + g*k + issued_before_wait``.
+    """
+
+    alloc: str
+    slot: SlotExpr
+    wait_num: int | None
+    issued_before_wait: int
+    loc: SourceLoc | None
+    line_no: int
+
+
+@dataclass
+class PipelineModel:
+    prologue_commits: int  # P
+    commits_per_iter: int  # g
+    copies: list[ModelCopy]
+    loads: list[ModelLoad]
+    generic_only: bool  # no async machinery at all
+
+
+def build_pipeline_model(graph: EventGraph) -> PipelineModel:
+    """Derive the counting model from the event graph.
+
+    Raises UnsupportedTTGIR when the async structure falls outside the
+    shapes the model can describe soundly.
+    """
+    if not graph.copies:
+        return PipelineModel(0, 0, [], [], generic_only=True)
+
+    # Commit ranks. Token -> commit mapping first.
+    copy_to_commit: dict[str, tuple[str, int]] = {}  # copy token -> (segment, idx)
+    prologue_rank = 0
+    loop_pos = 0
+    commit_rank_by_token: dict[str, tuple[int | None, int | None]] = {}
+    for c in graph.commits:
+        if c.segment == "prologue":
+            prologue_rank += 1
+            rank: tuple[int | None, int | None] = (prologue_rank, None)
+        elif c.segment == "loop":
+            loop_pos += 1
+            rank = (None, loop_pos)
+        else:
+            # commits in the epilogue do not protect anything we model
+            rank = (None, None)
+        for tok in c.copy_tokens:
+            commit_rank_by_token[tok] = rank
+            copy_to_commit[tok] = (c.segment, c.body_pos)
+
+    P = prologue_rank
+    g = loop_pos
+
+    copies: list[ModelCopy] = []
+    for ce in graph.copies:
+        slot = resolve_slot(graph, ce.index_ssa)
+        if isinstance(slot, RotatingSlot):
+            stages = graph.allocations[ce.alloc].stages
+            if slot.modulus != stages:
+                raise UnsupportedTTGIR(
+                    f"line {ce.line_no}: rotation modulus {slot.modulus} != "
+                    f"stage count {stages} of {ce.alloc}"
+                )
+        committed = ce.token in commit_rank_by_token
+        const_rank, lpos = commit_rank_by_token.get(ce.token, (None, None))
+        if ce.segment == "loop" and committed and lpos is None:
+            raise UnsupportedTTGIR(
+                f"line {ce.line_no}: loop copy committed outside the loop"
+            )
+        if ce.segment == "prologue" and committed and const_rank is None:
+            raise UnsupportedTTGIR(
+                f"line {ce.line_no}: prologue copy committed inside the loop"
+            )
+        copies.append(
+            ModelCopy(
+                alloc=ce.alloc,
+                slot=slot,
+                const_rank=const_rank,
+                loop_pos=lpos,
+                loc=ce.loc,
+                line_no=ce.line_no,
+                committed=committed,
+            )
+        )
+
+    # Wait guarding each load: prefer the token edge; otherwise the nearest
+    # preceding wait in the same segment; otherwise uncovered.
+    wait_by_result = {w.result: w for w in graph.waits if w.result}
+    loads: list[ModelLoad] = []
+    for le in graph.loads:
+        slot = resolve_slot(graph, le.index_ssa)
+        wait = None
+        if le.token is not None and le.token in wait_by_result:
+            wait = wait_by_result[le.token]
+        else:
+            candidates = [
+                w
+                for w in graph.waits
+                if w.segment == le.segment and w.body_pos < le.body_pos
+            ]
+            wait = candidates[-1] if candidates else None
+        if wait is not None and wait.segment != le.segment:
+            raise UnsupportedTTGIR(
+                f"line {le.line_no}: load guarded by a wait in another segment"
+            )
+        issued_before_wait = 0
+        if wait is not None and wait.segment == "loop":
+            issued_before_wait = sum(
+                1
+                for c in graph.commits
+                if c.segment == "loop" and c.body_pos < wait.body_pos
+            )
+        loads.append(
+            ModelLoad(
+                alloc=le.alloc,
+                slot=slot,
+                wait_num=wait.num if wait is not None else None,
+                issued_before_wait=issued_before_wait,
+                loc=le.loc,
+                line_no=le.line_no,
+            )
+        )
+
+    return PipelineModel(
+        prologue_commits=P,
+        commits_per_iter=g,
+        copies=copies,
+        loads=loads,
+        generic_only=False,
+    )
