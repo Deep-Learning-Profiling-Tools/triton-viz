@@ -1220,6 +1220,46 @@ def test_data_dependent_atomic_address_is_unsupported(
     assert detector.last_reports == []
 
 
+# ======== tl.clamp — symbolic ternary support ========
+
+
+def test_clamp_on_symbolic_values_is_supported():
+    """tl.clamp lowers through the ternary-op overrider as
+    minimum(maximum(x, lo), hi). Regression test: np.clip used to raise
+    NotImplementedError('Unsupported ternary operation'), crashing any
+    kernel that clamps a symbolic value."""
+
+    clean = SymbolicRaceDetector()
+
+    @triton_viz.trace(clean)
+    @triton.jit
+    def clean_kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        x = tl.load(x_ptr + offs)
+        tl.store(out_ptr + offs, tl.clamp(x, 0.0, 1.0))
+
+    x = torch.ones(8, dtype=torch.float32)
+    out = torch.zeros(8, dtype=torch.float32)
+    clean_kernel[(2,)](x, out, 4)
+    assert clean.last_status == "ok"
+    assert clean.last_reports == []
+
+    racy = SymbolicRaceDetector()
+
+    @triton_viz.trace(racy)
+    @triton.jit
+    def racy_kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * (BLOCK - 1) + tl.arange(0, BLOCK)
+        x = tl.load(x_ptr + offs)
+        tl.store(out_ptr + offs, tl.clamp(x, 0.0, 1.0))
+
+    racy_kernel[(2,)](x, out, 4)
+    assert racy.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in racy.last_reports)
+
+
 # ======== tl.assume — conditions constrain the two-copy model ========
 
 

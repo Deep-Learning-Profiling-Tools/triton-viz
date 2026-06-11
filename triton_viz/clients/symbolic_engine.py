@@ -2599,6 +2599,16 @@ class SymbolicClient(Client):
         other_sym = SymbolicExpr.from_value(other)
         if op is np.where:
             return SymbolicExpr.create("where", lhs_sym, rhs_sym, other_sym)
+        if op is np.clip:
+            # tl.clamp(x, lo, hi) == minimum(maximum(x, lo), hi). np.clip
+            # tolerates one open bound; tl.clamp always passes both, but
+            # keep the composition robust either way.
+            clipped = lhs_sym
+            if rhs is not None:
+                clipped = SymbolicExpr.create("maximum", clipped, rhs_sym)
+            if other is not None:
+                clipped = SymbolicExpr.create("minimum", clipped, other_sym)
+            return clipped
         raise NotImplementedError(f"Unsupported ternary operation: {op}")
 
     def _op_fma_overrider(self, x, y, z):
