@@ -21,6 +21,10 @@ class _LangPatchScope:
         self._changes.append(("attr", obj, name, original))
         setattr(obj, name, value)
 
+    def save_attr(self, obj: object, name: str) -> None:
+        original = getattr(obj, name, _MISSING)
+        self._changes.append(("attr", obj, name, original))
+
     def set_item(self, mapping: dict[str, Any], key: str, value: object) -> None:
         original = mapping.get(key, _MISSING)
         self._changes.append(("item", mapping, key, original))
@@ -36,7 +40,8 @@ class _LangPatchScope:
                 else:
                     mapping[name] = original
             elif original is _MISSING:
-                delattr(obj, name)
+                if hasattr(obj, name):
+                    delattr(obj, name)
             else:
                 setattr(obj, name, original)
 
