@@ -182,6 +182,23 @@ def test_program_id_adapter_returns_axis_only():
 def test_gluon_descriptor_memory_adapters_accept_async_signatures():
     load = GLUON_ADAPTERS[Load]
     store = GLUON_ADAPTERS[Store]
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    normal_descriptor_load = gluon_frontend._gluon_descriptor_load_adapter(
+        3,
+        descriptor_kwarg="tensor_desc",
+        coords_kwarg="coord",
+    )
+    im2col_descriptor_load = gluon_frontend._gluon_descriptor_load_adapter(
+        4,
+        descriptor_kwarg="tensor_desc",
+        coords_kwarg="coord",
+    )
+    tdm_descriptor_load = gluon_frontend._gluon_descriptor_load_adapter(
+        2,
+        descriptor_kwarg="src",
+        coords_kwarg="offsets",
+    )
     desc = type("TensorDescriptor", (), {"block_shape": (1,)})()
 
     def assert_descriptor_access(result, coords, mask=None):
@@ -193,10 +210,17 @@ def test_gluon_descriptor_memory_adapters_accept_async_signatures():
         assert other is None
 
     assert load("ptr", "mask").args == ("ptr", "mask", None)
-    assert_descriptor_access(load(desc, "coord", "bar", "result"), "coord")
-    assert_descriptor_access(load(desc, "coord", "bar", "result", "pred"), "coord")
     assert_descriptor_access(
-        load(
+        normal_descriptor_load(desc, "coord", "bar", "result"),
+        "coord",
+    )
+    assert_descriptor_access(
+        normal_descriptor_load(desc, "coord", "bar", "result", "pred"),
+        "coord",
+        "pred",
+    )
+    assert_descriptor_access(
+        im2col_descriptor_load(
             desc,
             "coord",
             "offsets",
@@ -205,13 +229,40 @@ def test_gluon_descriptor_memory_adapters_accept_async_signatures():
             "pred",
         ),
         "coord",
+        "pred",
     )
-    assert_descriptor_access(load(desc, "offsets", "dest"), "offsets")
-    assert_descriptor_access(load(desc, "offsets", "dest", "pred"), "offsets")
     assert_descriptor_access(
-        load(desc, "coord", "bar", "result", pred="pred"),
+        tdm_descriptor_load(desc, "offsets", "dest"),
+        "offsets",
+    )
+    assert_descriptor_access(
+        tdm_descriptor_load(desc, "offsets", "dest", "pred"),
+        "offsets",
+        "pred",
+    )
+    assert_descriptor_access(
+        normal_descriptor_load(desc, "coord", "bar", "result", pred="pred"),
         "coord",
         "pred",
+    )
+    assert_descriptor_access(
+        normal_descriptor_load(desc, coord="kw_coord", barrier="bar", result="result"),
+        "kw_coord",
+    )
+    assert_descriptor_access(
+        normal_descriptor_load(
+            tensor_desc=desc,
+            coord="kw_coord",
+            barrier="bar",
+            result="result",
+            pred="kw_pred",
+        ),
+        "kw_coord",
+        "kw_pred",
+    )
+    assert_descriptor_access(
+        tdm_descriptor_load(src=desc, offsets="kw_offsets", dest="dest"),
+        "kw_offsets",
     )
 
     assert store("ptr", "value", "mask").args == ("ptr", "mask", None)
@@ -231,9 +282,21 @@ def test_gluon_descriptor_load_adapters_honor_positional_predicates():
     from triton_viz.core.frontend import gluon as gluon_frontend
 
     desc = type("TensorDescriptor", (), {"block_shape": (1,)})()
-    normal_load = gluon_frontend._gluon_descriptor_load_adapter(3)
-    im2col_load = gluon_frontend._gluon_descriptor_load_adapter(4)
-    tdm_load = gluon_frontend._gluon_descriptor_load_adapter(2)
+    normal_load = gluon_frontend._gluon_descriptor_load_adapter(
+        3,
+        descriptor_kwarg="tensor_desc",
+        coords_kwarg="coord",
+    )
+    im2col_load = gluon_frontend._gluon_descriptor_load_adapter(
+        4,
+        descriptor_kwarg="tensor_desc",
+        coords_kwarg="coord",
+    )
+    tdm_load = gluon_frontend._gluon_descriptor_load_adapter(
+        2,
+        descriptor_kwarg="src",
+        coords_kwarg="offsets",
+    )
 
     access, mask, other = normal_load(desc, "coord", "barrier", "result", False).args
     assert access.pred is False
@@ -260,10 +323,10 @@ def test_gluon_descriptor_load_adapters_honor_positional_predicates():
     assert other is None
 
 
-def test_gluon_shared_memory_descriptor_is_not_patched():
+def test_gluon_shared_memory_descriptor_class_is_not_an_op():
     from triton.experimental.gluon.language import _core as gluon_core
 
-    assert gluon_core.shared_memory_descriptor not in GLUON_FRONTEND.namespaces
+    assert "shared_memory_descriptor" not in GLUON_FRONTEND.namespaces[gluon_core]
 
 
 def test_gluon_load_store_adapters_keep_first_positional_mask():
@@ -282,14 +345,26 @@ def test_gluon_load_store_adapters_keep_first_positional_mask():
     )
 
 
-def test_gluon_frontend_routes_tensor_descriptor_access_to_overrider():
+def test_gluon_load_adapter_does_not_treat_pred_as_mask():
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    assert gluon_frontend._gluon_load_adapter("ptr", pred="pred").args == (
+        "ptr",
+        None,
+        None,
+    )
+
+
+def test_gluon_frontend_routes_tensor_descriptor_access_to_overrider(monkeypatch):
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
     class FakeTensor:
         dtype = "float32"
 
         def data_ptr(self):
             return 4096
 
-    class FakeDescriptor:
+    class TensorDescriptor:
         base = FakeTensor()
         shape = (4, 4)
         strides = (4, 1)
@@ -304,7 +379,17 @@ def test_gluon_frontend_routes_tensor_descriptor_access_to_overrider():
         calls.append((ptr, mask, other))
         return "overridden"
 
-    desc = FakeDescriptor()
+    monkeypatch.setitem(
+        gluon_frontend.GLUON_CALLABLE_ADAPTERS,
+        original,
+        gluon_frontend._gluon_descriptor_load_adapter(
+            1,
+            descriptor_kwarg="desc",
+            coords_kwarg="coords",
+        ),
+    )
+
+    desc = TensorDescriptor()
     result = GLUON_FRONTEND.run_op_overrider(
         original,
         Load,
