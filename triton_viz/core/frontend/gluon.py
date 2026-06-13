@@ -53,44 +53,37 @@ def _gluon_load_adapter(
     *_args: Any,
     mask: Any = None,
     other: Any = None,
-    pred: Any = None,
     **_kwargs: Any,
 ) -> AdapterResult:
-    if mask is None:
-        mask = pred
-    if _is_global_tensor_descriptor_like(ptr) and _args:
-        return AdapterResult(TensorDescriptorAccess(ptr, _args[0], mask), mask, None)
-    if mask is None and not _is_descriptor_like(ptr):
-        if _args:
-            mask = _args[0]
+    if mask is None and _args:
+        mask = _args[0]
     return AdapterResult(ptr, mask, None)
 
 
 def _gluon_descriptor_load_adapter(
     pred_arg_index: int,
+    *,
+    descriptor_kwarg: str,
+    coords_kwarg: str,
 ) -> Callable[..., AdapterResult]:
     def adapter(
-        ptr: Any,
-        *_args: Any,
+        *args: Any,
         mask: Any = None,
         pred: Any = None,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> AdapterResult:
         if mask is None:
             mask = pred
-        if mask is None and len(_args) > pred_arg_index:
-            mask = _args[pred_arg_index]
-        if _is_global_tensor_descriptor_like(ptr) and _args:
-            return AdapterResult(
-                TensorDescriptorAccess(ptr, _args[0], mask), mask, None
-            )
-        return _gluon_load_adapter(ptr, *_args, mask=mask)
+        load_args = args[1:] if args else ()
+        if mask is None and len(load_args) > pred_arg_index:
+            mask = load_args[pred_arg_index]
+        descriptor = args[0] if args else kwargs[descriptor_kwarg]
+        coords = load_args[0] if load_args else kwargs[coords_kwarg]
+        return AdapterResult(
+            TensorDescriptorAccess(descriptor, coords, mask), mask, None
+        )
 
     return adapter
-
-
-def _set_descriptor_load_adapter(op: Callable, pred_arg_index: int) -> None:
-    GLUON_CALLABLE_ADAPTERS[op] = _gluon_descriptor_load_adapter(pred_arg_index)
 
 
 def _gluon_store_adapter(
@@ -105,21 +98,14 @@ def _gluon_store_adapter(
         mask = pred
     if _is_global_tensor_descriptor_like(ptr) and value is not None:
         return AdapterResult(TensorDescriptorAccess(ptr, value, mask), mask, None)
-    if mask is None and not _is_descriptor_like(ptr):
+    if (
+        mask is None
+        and not _is_global_tensor_descriptor_like(ptr)
+        and not _is_shared_memory_descriptor_like(ptr)
+    ):
         if _args:
             mask = _args[0]
     return AdapterResult(ptr, mask, None)
-
-
-def _is_descriptor_like(value: Any) -> bool:
-    type_name = type(value).__name__
-    return type_name in {
-        "shared_memory_descriptor",
-        "tensor_descriptor",
-        "tensor_descriptor_im2col",
-        "TensorDescriptor",
-        "TensorDescriptorIm2Col",
-    } or hasattr(value, "block_shape")
 
 
 def _is_shared_memory_descriptor_like(value: Any) -> bool:
@@ -127,9 +113,13 @@ def _is_shared_memory_descriptor_like(value: Any) -> bool:
 
 
 def _is_global_tensor_descriptor_like(value: Any) -> bool:
-    # Shared-memory descriptor accesses are not modeled yet; only global tensor
-    # descriptors become TensorDescriptorAccess records for symbolic checking.
-    return _is_descriptor_like(value) and not _is_shared_memory_descriptor_like(value)
+    type_name = type(value).__name__
+    return type_name in {
+        "tensor_descriptor",
+        "tensor_descriptor_im2col",
+        "TensorDescriptor",
+        "TensorDescriptorIm2Col",
+    }
 
 
 def _gluon_binary_adapter(
@@ -346,9 +336,17 @@ for namespace, attrs in GLUON_NAMESPACES.items():
                 _GLUON_UNARY_NUMPY_OPS[attr]
             )
         if namespace is gluon_amd_tdm and attr == "async_load":
-            _set_descriptor_load_adapter(original, 2)
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_descriptor_load_adapter(
+                2,
+                descriptor_kwarg="src",
+                coords_kwarg="offsets",
+            )
         elif attr in _TMA_LOAD_PRED_ARG_INDICES:
-            _set_descriptor_load_adapter(original, _TMA_LOAD_PRED_ARG_INDICES[attr])
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_descriptor_load_adapter(
+                _TMA_LOAD_PRED_ARG_INDICES[attr],
+                descriptor_kwarg="tensor_desc",
+                coords_kwarg="coord",
+            )
 
 GLUON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
     ProgramId: lambda axis, *_args, **_kwargs: AdapterResult(axis),
