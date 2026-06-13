@@ -2886,6 +2886,29 @@ for _simulated, _original in (
     (_mbarrier_arrive, gluon_amd_mbarrier.arrive),
     (_cluster_arrive, gluon_amd_cluster.arrive),
     (_cluster_wait, gluon_amd_cluster.wait),
+    (_amd_mfma, gluon_amd_cdna3.mfma),
+    (_amd_mfma, gluon_amd_cdna4.mfma),
+    (_amd_mma_scaled, gluon_amd_cdna4.mfma_scaled),
+    (_amd_scaled_upcast, gluon_amd_cdna3.scaled_upcast),
+    (_amd_scaled_upcast, gluon_amd_cdna4.scaled_upcast),
+    (_buffer_load, gluon_amd_cdna3.buffer_load),
+    (_buffer_store, gluon_amd_cdna3.buffer_store),
+    (_buffer_atomic_add, gluon_amd_cdna3.buffer_atomic_add),
+    (_buffer_atomic_max, gluon_amd_cdna3.buffer_atomic_max),
+    (_buffer_atomic_min, gluon_amd_cdna3.buffer_atomic_min),
+    (_buffer_atomic_and, gluon_amd_cdna3.buffer_atomic_and),
+    (_buffer_atomic_or, gluon_amd_cdna3.buffer_atomic_or),
+    (_buffer_atomic_xor, gluon_amd_cdna3.buffer_atomic_xor),
+    (_buffer_atomic_xchg, gluon_amd_cdna3.buffer_atomic_xchg),
+    (_buffer_load, gluon_amd_cdna4.buffer_load),
+    (_buffer_store, gluon_amd_cdna4.buffer_store),
+    (_buffer_atomic_add, gluon_amd_cdna4.buffer_atomic_add),
+    (_buffer_atomic_max, gluon_amd_cdna4.buffer_atomic_max),
+    (_buffer_atomic_min, gluon_amd_cdna4.buffer_atomic_min),
+    (_buffer_atomic_and, gluon_amd_cdna4.buffer_atomic_and),
+    (_buffer_atomic_or, gluon_amd_cdna4.buffer_atomic_or),
+    (_buffer_atomic_xor, gluon_amd_cdna4.buffer_atomic_xor),
+    (_buffer_atomic_xchg, gluon_amd_cdna4.buffer_atomic_xchg),
 ):
     _simulated.__triton_viz_simulated__ = True  # type: ignore[attr-defined]
     _register_replay_callable(_simulated)
@@ -3101,6 +3124,23 @@ def gluon_patch_lang(
         "async_wait": _tdm_async_wait,
         "prefetch": _tdm_prefetch,
     }
+    amd_cdna_overrides: dict[str, Callable] = {
+        "mfma": _amd_mfma,
+        "scaled_upcast": _amd_scaled_upcast,
+        "buffer_load": _buffer_load,
+        "buffer_store": _buffer_store,
+        "buffer_atomic_add": _buffer_atomic_add,
+        "buffer_atomic_max": _buffer_atomic_max,
+        "buffer_atomic_min": _buffer_atomic_min,
+        "buffer_atomic_and": _buffer_atomic_and,
+        "buffer_atomic_or": _buffer_atomic_or,
+        "buffer_atomic_xor": _buffer_atomic_xor,
+        "buffer_atomic_xchg": _buffer_atomic_xchg,
+    }
+    amd_cdna4_overrides: dict[str, Callable] = {
+        **amd_cdna_overrides,
+        "mfma_scaled": _amd_mma_scaled,
+    }
     module_overrides: dict[Any, dict[str, Callable]] = {
         gl: core_overrides,
         gluon_core: core_overrides,
@@ -3119,6 +3159,8 @@ def gluon_patch_lang(
         gluon_amd_mbarrier: amd_mbarrier_overrides,
         gluon_amd_cluster: amd_cluster_overrides,
         gluon_amd_tdm: amd_tdm_overrides,
+        gluon_amd_cdna3: amd_cdna_overrides,
+        gluon_amd_cdna4: amd_cdna4_overrides,
     }
     jit_modules = (gluon_blackwell_float2,)
 
