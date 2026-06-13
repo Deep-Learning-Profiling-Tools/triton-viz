@@ -266,7 +266,9 @@ def _simulated_descriptor_overrider_args(
         pred = kwargs.get("pred")
         if pred is None and len(args) > 4:
             pred = args[4]
-        return AdapterResult(TensorDescriptorAccess(descriptor, coord, pred), None, None)
+        return AdapterResult(
+            TensorDescriptorAccess(descriptor, coord, pred), None, None
+        )
     if op_type is Store:
         return AdapterResult(TensorDescriptorAccess(descriptor, coord, None), 0, None)
     return None
@@ -568,9 +570,13 @@ for namespace, attrs in GLUON_NAMESPACES.items():
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_async_copy_load_adapter
         elif namespace is gluon_amd_async_copy and attr == "shared_to_global":
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_async_copy_store_adapter
-        elif namespace is gluon_amd_cdna4_async_copy and attr == "global_load_to_shared":
+        elif (
+            namespace is gluon_amd_cdna4_async_copy and attr == "global_load_to_shared"
+        ):
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_async_copy_load_adapter
-        elif namespace is gluon_amd_cdna4_async_copy and attr == "buffer_load_to_shared":
+        elif (
+            namespace is gluon_amd_cdna4_async_copy and attr == "buffer_load_to_shared"
+        ):
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_buffer_load_to_shared_adapter
         elif attr in _TMA_LOAD_PRED_ARG_INDICES:
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_descriptor_load_adapter(

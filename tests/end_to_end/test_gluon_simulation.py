@@ -3,7 +3,10 @@ import triton
 import triton.language.extra.libdevice as libdevice
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.nvidia.hopper import TensorDescriptor, TensorDescriptorIm2Col
+from triton.experimental.gluon.nvidia.hopper import (
+    TensorDescriptor,
+    TensorDescriptorIm2Col,
+)
 from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 from triton.experimental.gluon.language.nvidia.blackwell import (
     TensorMemoryLayout,
@@ -26,7 +29,9 @@ from triton.experimental.gluon.language.nvidia.blackwell.float2 import (
     unpack as float2_unpack,
     unpack2,
 )
-from triton.experimental.gluon.language.nvidia.blackwell import float2 as blackwell_float2
+from triton.experimental.gluon.language.nvidia.blackwell import (
+    float2 as blackwell_float2,
+)
 from triton.experimental.gluon.language.nvidia.blackwell import tma as blackwell_tma
 from triton.experimental.gluon.language.amd import cdna3 as amd_cdna3
 from triton.experimental.gluon.language.amd import cdna4 as amd_cdna4
@@ -38,8 +43,12 @@ from triton.experimental.gluon.language.amd.cdna4 import async_copy as cdna4_asy
 from triton.experimental.gluon.language.amd.gfx1250 import (
     async_copy as amd_async_copy,
 )
-from triton.experimental.gluon.language.amd.gfx1250 import buffer_load as amd_buffer_load
-from triton.experimental.gluon.language.amd.gfx1250 import buffer_store as amd_buffer_store
+from triton.experimental.gluon.language.amd.gfx1250 import (
+    buffer_load as amd_buffer_load,
+)
+from triton.experimental.gluon.language.amd.gfx1250 import (
+    buffer_store as amd_buffer_store,
+)
 from triton.experimental.gluon.language.amd.gfx1250 import cluster as amd_cluster
 from triton.experimental.gluon.language.amd.gfx1250 import tdm as amd_tdm
 from triton.experimental.gluon.language.amd.gfx1250 import wmma as amd_wmma
@@ -579,7 +588,9 @@ def _tma_elementwise_add_kernel(
 
 
 @gluon.jit
-def _tma_message_passing_kernel(message_desc, ready, output, MESSAGE_SIZE: gl.constexpr):
+def _tma_message_passing_kernel(
+    message_desc, ready, output, MESSAGE_SIZE: gl.constexpr
+):
     pid = gl.program_id(0)
     layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
     offsets = gl.arange(0, MESSAGE_SIZE, layout)
@@ -689,7 +700,9 @@ def _conv2d_im2col_wgmma_kernel(
     out_x = m_residual % out_w
 
     a_smem = gl.allocate_shared_memory(dtype, in_desc.block_shape, in_desc.layout)
-    b_smem = gl.allocate_shared_memory(dtype, weight_desc.block_shape, weight_desc.layout)
+    b_smem = gl.allocate_shared_memory(
+        dtype, weight_desc.block_shape, weight_desc.layout
+    )
     mma_layout: gl.constexpr = _wgmma_layout(dtype, BLOCK_M, BLOCK_N, num_warps)
     acc = gl.zeros((BLOCK_M, BLOCK_N), dtype=gl.float32, layout=mma_layout)
     bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
@@ -724,7 +737,9 @@ def _conv2d_im2col_wgmma_kernel(
         acc = warpgroup_mma_wait(num_outstanding=0, deps=(acc,))
 
     mbarrier.invalidate(bar)
-    out_smem = gl.allocate_shared_memory(out_desc.dtype, out_desc.block_shape, out_desc.layout)
+    out_smem = gl.allocate_shared_memory(
+        out_desc.dtype, out_desc.block_shape, out_desc.layout
+    )
     out_smem.store(acc.to(out_desc.dtype))
     fence_async_shared()
     tma.async_copy_shared_to_global(out_desc, [offs_m, pid_n * BLOCK_N], out_smem)
@@ -999,7 +1014,9 @@ def _math_helpers_kernel(out, clamp_out, BLOCK: gl.constexpr):
 
 
 @gluon.jit
-def _libdevice_helpers_kernel(x_ptr, y_ptr, exp_out, fast_exp_out, div_out, N: gl.constexpr):
+def _libdevice_helpers_kernel(
+    x_ptr, y_ptr, exp_out, fast_exp_out, div_out, N: gl.constexpr
+):
     layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
     offsets = gl.arange(0, N, layout)
     x = gl.load(x_ptr + offsets)
@@ -1071,7 +1088,9 @@ def _amd_tdm_copy_kernel(
 
     row_offsets = gl.arange(0, BLOCK_M, index_layout)
     row_indices = gl.load(row_indices_ptr + row_offsets)
-    gather_smem = gl.allocate_shared_memory(gl.float32, (BLOCK_M, BLOCK_N), shared_layout)
+    gather_smem = gl.allocate_shared_memory(
+        gl.float32, (BLOCK_M, BLOCK_N), shared_layout
+    )
     amd_tdm.async_gather(desc, row_indices, 0, gather_smem)
     amd_tdm.async_wait(0)
     amd_tdm.async_store(gather_desc, [0, 0], gather_smem)
@@ -1450,7 +1469,9 @@ def _atomic_memory_ops_kernel(counter, addends, add_old, xchg_old, BLOCK: gl.con
     offsets = gl.arange(0, BLOCK, layout)
     values = gl.load(addends + offsets)
     mask = offsets != 1
-    old = gl.atomic_add(counter + offsets, values, mask=mask, sem="relaxed", scope="gpu")
+    old = gl.atomic_add(
+        counter + offsets, values, mask=mask, sem="relaxed", scope="gpu"
+    )
     gl.store(add_old + offsets, old, mask=mask)
     exchanged = gl.atomic_xchg(
         counter + offsets,
@@ -1567,7 +1588,9 @@ def _float2_helpers_kernel(
 
 @gluon.jit
 def _float2_pack_reduce_kernel(values_ptr, roundtrip_ptr, even_sum_ptr, odd_sum_ptr):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, 4, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, 8, gl.SliceLayout(0, layout))
     values = gl.load(values_ptr + offs_m[:, None] * 8 + offs_n[None, :])
@@ -1584,7 +1607,9 @@ def _float2_pack_reduce_kernel(values_ptr, roundtrip_ptr, even_sum_ptr, odd_sum_
 
 @gluon.jit
 def _float2_constructor_convert_kernel(values_ptr, out_ptr):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, 2, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, 4, gl.SliceLayout(0, layout))
     values = gl.load(values_ptr + offs_m[:, None] * 4 + offs_n[None, :])
@@ -1630,7 +1655,9 @@ def _tensor_shape_helpers_kernel(
     expanded_cols = gl.expand_dims(offsets_n, 0)
     expanded = gl.load(values_ptr + expanded_rows).broadcast_to(M, N)
     expanded_mask = (expanded_rows < M) & (expanded_cols < N)
-    gl.store(expanded_out + expanded_rows * N + expanded_cols, expanded, mask=expanded_mask)
+    gl.store(
+        expanded_out + expanded_rows * N + expanded_cols, expanded, mask=expanded_mask
+    )
 
     reshaped = broadcasted.reshape((M, 2, N // 2)).permute((0, 2, 1))
     lhs, rhs = gl.split(reshaped)
@@ -1736,7 +1763,9 @@ def _warp_specialize_helpers_kernel(out, counter):
 
 
 @gluon.jit
-def _ws_elementwise_load_partition(descs, barriers, buffers, xoff, ynumel, YBLOCK: gl.constexpr):
+def _ws_elementwise_load_partition(
+    descs, barriers, buffers, xoff, ynumel, YBLOCK: gl.constexpr
+):
     a_desc, b_desc, _ = descs
     load_empty_bars, load_ready_bars, _, _ = barriers
     a_bufs, b_bufs, _ = buffers
@@ -1750,7 +1779,9 @@ def _ws_elementwise_load_partition(descs, barriers, buffers, xoff, ynumel, YBLOC
         load_ready_bar = load_ready_bars.index(index)
         mbarrier.wait(load_empty_bar, phase ^ 1)
         yoff = i * YBLOCK
-        mbarrier.expect(load_ready_bar, a_desc.block_type.nbytes + b_desc.block_type.nbytes)
+        mbarrier.expect(
+            load_ready_bar, a_desc.block_type.nbytes + b_desc.block_type.nbytes
+        )
         tma.async_load(a_desc, [xoff, yoff], load_ready_bar, a_buf)
         tma.async_load(b_desc, [xoff, yoff], load_ready_bar, b_buf)
 
@@ -1791,7 +1822,9 @@ def _ws_elementwise_compute_partition(
 
 
 @gluon.jit
-def _ws_elementwise_store_partition(descs, barriers, buffers, xoff, ynumel, YBLOCK: gl.constexpr):
+def _ws_elementwise_store_partition(
+    descs, barriers, buffers, xoff, ynumel, YBLOCK: gl.constexpr
+):
     _, _, c_desc = descs
     _, _, c_empty_bars, c_ready_bars = barriers
     _, _, c_bufs = buffers
@@ -1818,14 +1851,30 @@ def _warp_specialized_elementwise_add_kernel(
     XBLOCK: gl.constexpr,
     YBLOCK: gl.constexpr,
 ):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
-    a_bufs = gl.allocate_shared_memory(a_desc.dtype, [2] + a_desc.block_type.shape, a_desc.layout)
-    b_bufs = gl.allocate_shared_memory(b_desc.dtype, [2] + b_desc.block_type.shape, b_desc.layout)
-    c_bufs = gl.allocate_shared_memory(c_desc.dtype, [2] + c_desc.block_type.shape, c_desc.layout)
-    load_empty_bars = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    load_ready_bars = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    c_empty_bars = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    c_ready_bars = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    a_bufs = gl.allocate_shared_memory(
+        a_desc.dtype, [2] + a_desc.block_type.shape, a_desc.layout
+    )
+    b_bufs = gl.allocate_shared_memory(
+        b_desc.dtype, [2] + b_desc.block_type.shape, b_desc.layout
+    )
+    c_bufs = gl.allocate_shared_memory(
+        c_desc.dtype, [2] + c_desc.block_type.shape, c_desc.layout
+    )
+    load_empty_bars = gl.allocate_shared_memory(
+        gl.int64, [2, 1], mbarrier.MBarrierLayout()
+    )
+    load_ready_bars = gl.allocate_shared_memory(
+        gl.int64, [2, 1], mbarrier.MBarrierLayout()
+    )
+    c_empty_bars = gl.allocate_shared_memory(
+        gl.int64, [2, 1], mbarrier.MBarrierLayout()
+    )
+    c_ready_bars = gl.allocate_shared_memory(
+        gl.int64, [2, 1], mbarrier.MBarrierLayout()
+    )
     for i in gl.static_range(2):
         mbarrier.init(load_empty_bars.index(i), count=1)
         mbarrier.init(load_ready_bars.index(i), count=1)
@@ -1837,9 +1886,18 @@ def _warp_specialized_elementwise_add_kernel(
     xoff = gl.program_id(0) * XBLOCK
     gl.warp_specialize(
         [
-            (_ws_elementwise_compute_partition, (barriers, buffers, ynumel, YBLOCK, layout)),
-            (_ws_elementwise_load_partition, (descs, barriers, buffers, xoff, ynumel, YBLOCK)),
-            (_ws_elementwise_store_partition, (descs, barriers, buffers, xoff, ynumel, YBLOCK)),
+            (
+                _ws_elementwise_compute_partition,
+                (barriers, buffers, ynumel, YBLOCK, layout),
+            ),
+            (
+                _ws_elementwise_load_partition,
+                (descs, barriers, buffers, xoff, ynumel, YBLOCK),
+            ),
+            (
+                _ws_elementwise_store_partition,
+                (descs, barriers, buffers, xoff, ynumel, YBLOCK),
+            ),
         ],
         [1, 1],
         [24, 24],
@@ -1925,9 +1983,7 @@ def _small_wgmma_kernel(
     )
     mbarrier.expect(
         bar,
-        a_desc.block_type.nbytes
-        + b_desc.block_type.nbytes
-        + c_desc.block_type.nbytes,
+        a_desc.block_type.nbytes + b_desc.block_type.nbytes + c_desc.block_type.nbytes,
     )
     tma.async_load(a_desc, [0, 0], bar, a_smem)
     tma.async_load(b_desc, [0, 0], bar, b_smem)
@@ -2019,8 +2075,12 @@ def _pipelined_wgmma_kernel(a_desc, b_desc, c_desc, num_warps: gl.constexpr):
     BLOCK_K: gl.constexpr = a_desc.block_type.shape[1]
     K = a_desc.shape[1]
     dtype: gl.constexpr = a_desc.dtype
-    a_smem = gl.allocate_shared_memory(dtype, [2] + a_desc.block_type.shape, a_desc.layout)
-    b_smem = gl.allocate_shared_memory(dtype, [2] + b_desc.block_type.shape, b_desc.layout)
+    a_smem = gl.allocate_shared_memory(
+        dtype, [2] + a_desc.block_type.shape, a_desc.layout
+    )
+    b_smem = gl.allocate_shared_memory(
+        dtype, [2] + b_desc.block_type.shape, b_desc.layout
+    )
     index = 0
     pid_m = gl.program_id(axis=0)
     pid_n = gl.program_id(axis=1)
@@ -2080,8 +2140,12 @@ def _persistent_wgmma_matmul_kernel(
         pid_m, pid_n = scheduler.get_tile(idx)
         off_m = pid_m * BLOCK_M
         off_n = pid_n * BLOCK_N
-        a_smem = gl.allocate_shared_memory(dtype, a_desc.block_type.shape, a_desc.layout)
-        b_smem = gl.allocate_shared_memory(dtype, b_desc.block_type.shape, b_desc.layout)
+        a_smem = gl.allocate_shared_memory(
+            dtype, a_desc.block_type.shape, a_desc.layout
+        )
+        b_smem = gl.allocate_shared_memory(
+            dtype, b_desc.block_type.shape, b_desc.layout
+        )
         for k in range(0, K, BLOCK_K):
             mbarrier.expect(bar, a_desc.block_type.nbytes + b_desc.block_type.nbytes)
             tma.async_load(a_desc, [off_m, k], bar, a_smem)
@@ -2092,7 +2156,9 @@ def _persistent_wgmma_matmul_kernel(
             mma = mma.issue_async_mma(a_smem, b_smem)
 
         mma = mma.wait_num_outstanding(0)
-        c_smem = gl.allocate_shared_memory(dtype, c_desc.block_type.shape, c_desc.layout)
+        c_smem = gl.allocate_shared_memory(
+            dtype, c_desc.block_type.shape, c_desc.layout
+        )
         c, mma = mma.take_result()
         c_smem.store(c.to(dtype))
         fence_async_shared()
@@ -2186,8 +2252,12 @@ def _persistent_wgmma_pipelined_kernel(
         b_desc.layout,
     )
     if not STEALB:
-        c_smem = gl.allocate_shared_memory(dtype, c_desc.block_type.shape, c_desc.layout)
-    bars = gl.allocate_shared_memory(gl.int64, [num_buffers, 1], mbarrier.MBarrierLayout())
+        c_smem = gl.allocate_shared_memory(
+            dtype, c_desc.block_type.shape, c_desc.layout
+        )
+    bars = gl.allocate_shared_memory(
+        gl.int64, [num_buffers, 1], mbarrier.MBarrierLayout()
+    )
     for i in gl.static_range(num_buffers):
         mbarrier.init(bars.index(i), count=1)
 
@@ -2423,9 +2493,7 @@ def _tcgen05_small_mma_kernel(
     )
     mbarrier.expect(
         bar,
-        a_desc.block_type.nbytes
-        + b_desc.block_type.nbytes
-        + c_desc.block_type.nbytes,
+        a_desc.block_type.nbytes + b_desc.block_type.nbytes + c_desc.block_type.nbytes,
     )
     tma.async_load(a_desc, [0, 0], bar, a_smem)
     tma.async_load(b_desc, [0, 0], bar, b_smem)
@@ -2485,7 +2553,9 @@ def _tcgen05_scaled_mma_kernel(
     K: gl.constexpr,
     VEC: gl.constexpr,
 ):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, M, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, N, gl.SliceLayout(0, layout))
     offs_k = gl.arange(0, K, gl.SliceLayout(0, layout))
@@ -2493,14 +2563,12 @@ def _tcgen05_scaled_mma_kernel(
 
     a = gl.load(a_ptr + offs_m[:, None] * K + offs_k[None, :])
     b = gl.load(b_ptr + offs_k[:, None] * N + offs_n[None, :])
-    a_scales = gl.load(
-        a_scale_ptr + offs_m[:, None] * (K // VEC) + offs_scale[None, :]
-    )
-    b_scales = gl.load(
-        b_scale_ptr + offs_n[:, None] * (K // VEC) + offs_scale[None, :]
-    )
+    a_scales = gl.load(a_scale_ptr + offs_m[:, None] * (K // VEC) + offs_scale[None, :])
+    b_scales = gl.load(b_scale_ptr + offs_n[:, None] * (K // VEC) + offs_scale[None, :])
 
-    smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for([M, K], a_ptr.dtype.element_ty)
+    smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
+        [M, K], a_ptr.dtype.element_ty
+    )
     b_smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
         [K, N],
         b_ptr.dtype.element_ty,
@@ -2589,7 +2657,9 @@ def _tcgen05_descriptor_scaled_mma_kernel(
     use_acc = False
     phase = 0
     scale_k: gl.constexpr = BLOCK_K // VEC
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     scale_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
     scale_n = gl.arange(0, BLOCK_N, gl.SliceLayout(1, layout))
     scale_cols = gl.arange(0, scale_k, gl.SliceLayout(0, layout))
@@ -2623,7 +2693,9 @@ def _tcgen05_descriptor_scaled_mma_kernel(
 
     mbarrier.invalidate(bar)
     mbarrier.invalidate(mma_bar)
-    c_smem = gl.allocate_shared_memory(c_desc.dtype, c_desc.block_type.shape, c_desc.layout)
+    c_smem = gl.allocate_shared_memory(
+        c_desc.dtype, c_desc.block_type.shape, c_desc.layout
+    )
     c_smem.store(acc.load().to(c_desc.dtype))
     fence_async_shared()
     tma.async_copy_shared_to_global(c_desc, [off_m, off_n], c_smem)
@@ -2717,7 +2789,9 @@ def _tcgen05_descriptor_scaled_tma_pipeline_kernel(
 
     mbarrier.invalidate(load_bar)
     mbarrier.invalidate(mma_bar)
-    c_smem = gl.allocate_shared_memory(c_desc.dtype, c_desc.block_type.shape, c_desc.layout)
+    c_smem = gl.allocate_shared_memory(
+        c_desc.dtype, c_desc.block_type.shape, c_desc.layout
+    )
     c_smem.store(acc.load().to(c_desc.dtype))
     fence_async_shared()
     tma.async_copy_shared_to_global(c_desc, [0, 0], c_smem)
@@ -2832,10 +2906,14 @@ def _tcgen05_copy_kernel(
     smem_layout: gl.constexpr,
     tmem_layout: gl.constexpr,
 ):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, M, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, N, gl.SliceLayout(0, layout))
-    value = gl.load(in_ptr + offs_m[:, None] * in_stride0 + offs_n[None, :] * in_stride1)
+    value = gl.load(
+        in_ptr + offs_m[:, None] * in_stride0 + offs_n[None, :] * in_stride1
+    )
     smem = gl.allocate_shared_memory(value.dtype, (M, N), smem_layout)
     tmem = allocate_tensor_memory(value.dtype, (M, N), tmem_layout)
     smem.store(value)
@@ -2846,7 +2924,9 @@ def _tcgen05_copy_kernel(
     tcgen05_commit(bar)
     mbarrier.wait(bar, 0)
     output = gl.convert_layout(tmem.load(), layout)
-    gl.store(out_ptr + offs_m[:, None] * out_stride0 + offs_n[None, :] * out_stride1, output)
+    gl.store(
+        out_ptr + offs_m[:, None] * out_stride0 + offs_n[None, :] * out_stride1, output
+    )
 
 
 @gluon.aggregate
@@ -2947,7 +3027,9 @@ def _matmul_accumulate_epilogue_partition(p):
     BLOCK_M: gl.constexpr = p.c_desc.block_type.shape[0]
     BLOCK_N: gl.constexpr = p.c_desc.block_type.shape[1]
 
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, BLOCK_N, gl.SliceLayout(0, layout))
 
@@ -3014,7 +3096,9 @@ def _tcgen05_matmul_accumulate_kernel(
         mbarrier.init(load_empty_bars.index(i), count=1)
         mbarrier.init(load_ready_bars.index(i), count=1)
 
-    c_buf = gl.allocate_shared_memory(c_desc.dtype, c_desc.block_type.shape, c_desc.layout)
+    c_buf = gl.allocate_shared_memory(
+        c_desc.dtype, c_desc.block_type.shape, c_desc.layout
+    )
     c_empty_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
     c_ready_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
     mbarrier.init(c_empty_bar, count=1)
@@ -3022,8 +3106,12 @@ def _tcgen05_matmul_accumulate_kernel(
 
     tmem_layout: gl.constexpr = TensorMemoryLayout([BLOCK_M, BLOCK_N], col_stride=1)
     acc_bufs = allocate_tensor_memory(gl.float32, [2, BLOCK_M, BLOCK_N], tmem_layout)
-    acc_empty_bars = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    acc_ready_bars = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    acc_empty_bars = gl.allocate_shared_memory(
+        gl.int64, [2, 1], mbarrier.MBarrierLayout()
+    )
+    acc_ready_bars = gl.allocate_shared_memory(
+        gl.int64, [2, 1], mbarrier.MBarrierLayout()
+    )
     for i in gl.static_range(2):
         mbarrier.init(acc_empty_bars.index(i), count=1)
         mbarrier.init(acc_ready_bars.index(i), count=1)
@@ -3067,7 +3155,9 @@ def _tensor_memory_load_reduction_kernel(
     M: gl.constexpr,
     N: gl.constexpr,
 ):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, M, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, N, gl.SliceLayout(0, layout))
     data = gl.load(in_ptr + offs_m[:, None] * N + offs_n[None, :])
@@ -3087,7 +3177,9 @@ def _tensor_memory_load_reduction_kernel(
 
 @gluon.jit
 def _shared_memory_slice_kernel(in_ptr, out_ptr, M: gl.constexpr, N: gl.constexpr):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, M, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, N, gl.SliceLayout(0, layout))
     data = gl.load(in_ptr + offs_m[:, None] * N + offs_n[None, :])
@@ -3121,9 +3213,7 @@ def _tma_gather_kernel(
         [gl.num_warps()],
         [0],
     )
-    x_offsets = gl.load(
-        x_offsets_ptr + gl.arange(0, BLOCK_X, coalesced_1d_layout)
-    )
+    x_offsets = gl.load(x_offsets_ptr + gl.arange(0, BLOCK_X, coalesced_1d_layout))
     offsets_layout: gl.constexpr = gl.SliceLayout(
         0,
         gl.BlockedLayout([1, 4], [32, 1], [1, gl.num_warps()], [1, 0]),
@@ -3197,9 +3287,7 @@ def _tma_scatter_kernel(
         [gl.num_warps()],
         [0],
     )
-    x_offsets = gl.load(
-        x_offsets_ptr + gl.arange(0, BLOCK_X, coalesced_1d_layout)
-    )
+    x_offsets = gl.load(x_offsets_ptr + gl.arange(0, BLOCK_X, coalesced_1d_layout))
     offsets_layout: gl.constexpr = gl.SliceLayout(
         0,
         gl.BlockedLayout([1, 4], [32, 1], [1, gl.num_warps()], [1, 0]),
@@ -3290,7 +3378,9 @@ def _tma_async_atomic_float_kernel(
     BLOCK_M: gl.constexpr,
     BLOCK_N: gl.constexpr,
 ):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, BLOCK_N, gl.SliceLayout(0, layout))
     src = gl.load(src_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :])
@@ -3312,7 +3402,9 @@ def _tma_async_atomic_bitwise_kernel(
     BLOCK_M: gl.constexpr,
     BLOCK_N: gl.constexpr,
 ):
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, gl.num_warps()], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
     offs_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, BLOCK_N, gl.SliceLayout(0, layout))
     src = gl.load(src_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :])
@@ -3430,7 +3522,9 @@ def test_gluon_simulator_runs_cpasync_elementwise_add_synchronously_on_cpu():
     b = 10 + a
     c = torch.empty_like(a)
     smem_layout = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[1, 0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_cpasync_elementwise_add_kernel)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _cpasync_elementwise_add_kernel
+    )
 
     kernel[(1,)](
         a,
@@ -3502,9 +3596,7 @@ def test_gluon_simulator_runs_pipelined_tma_add_on_cpu():
     a_desc = TensorDescriptor.from_tensor(a, [8, 4], layout)
     b_desc = TensorDescriptor.from_tensor(b, [8, 4], layout)
     c_desc = TensorDescriptor.from_tensor(c, [8, 4], layout)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(
-        _tma_elementwise_add_kernel
-    )
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tma_elementwise_add_kernel)
 
     kernel[(1,)](
         a_desc,
@@ -3834,12 +3926,12 @@ def test_gluon_simulator_runs_conv2d_tma_im2col_wgmma_on_cpu():
     )
     weight_2d = weight.reshape(co, r * s * ci)
     weight_layout = gl.NVMMASharedLayout.get_default_for([block_n, block_k], gl.float16)
-    weight_desc = TensorDescriptor.from_tensor(weight_2d, [block_n, block_k], weight_layout)
+    weight_desc = TensorDescriptor.from_tensor(
+        weight_2d, [block_n, block_k], weight_layout
+    )
     out_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
     out_desc = TensorDescriptor.from_tensor(output, [block_m, block_n], out_layout)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(
-        _conv2d_im2col_wgmma_kernel
-    )
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_conv2d_im2col_wgmma_kernel)
 
     kernel[(1, 1)](
         in_desc,
@@ -4454,9 +4546,7 @@ def test_gluon_simulator_runs_tma_tcgen05_multicast_on_cpu():
     a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
     b_desc = TensorDescriptor.from_tensor(b, [block_k, block_n], b_layout)
     c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(
-        _tma_tcgen05_multicast_kernel
-    )
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tma_tcgen05_multicast_kernel)
 
     kernel[(1,)](
         a_desc,
@@ -4764,9 +4854,7 @@ def test_gluon_simulator_runs_amd_cdna4_async_copy_ops_on_cpu():
     values = torch.tensor([1.0, -2.0, 3.5, 4.25], dtype=torch.float32)
     out_global = torch.full_like(values, -1.0)
     out_buffer = torch.full_like(values, -1.0)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(
-        _amd_cdna4_async_copy_kernel
-    )
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_cdna4_async_copy_kernel)
 
     kernel[(1,)](values, out_global, out_buffer, values.numel(), num_warps=1)
 
@@ -4933,9 +5021,7 @@ def test_gluon_simulator_runs_map_elementwise_causal_mask_on_cpu():
     values = torch.arange(32, dtype=torch.float32)
     out = torch.empty_like(values)
     col_limit_right = 20
-    kernel = triton_viz.trace("tracer", frontend="gluon")(
-        _map_elementwise_mask_kernel
-    )
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_map_elementwise_mask_kernel)
 
     kernel[(1,)](values, out, col_limit_right, values.numel(), num_warps=1)
 
@@ -4990,9 +5076,7 @@ def test_gluon_simulator_runs_pointer_bitcast_store_on_cpu():
         dtype=torch.int32,
     )
     out = torch.empty((4,), dtype=torch.float32)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(
-        _pointer_bitcast_store_kernel
-    )
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_pointer_bitcast_store_kernel)
 
     kernel[(1,)](out, values, values.numel(), num_warps=1)
 

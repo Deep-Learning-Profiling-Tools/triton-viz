@@ -379,7 +379,9 @@ class SimulatedTensorDescriptor(gluon_hopper_tma.tensor_descriptor):
                 self.origin[dim] + coord[dim] + block_idx[dim]
                 for dim in range(len(coord))
             )
-            if not all(0 <= dst_idx[dim] < self.shape[dim] for dim in range(len(coord))):
+            if not all(
+                0 <= dst_idx[dim] < self.shape[dim] for dim in range(len(coord))
+            ):
                 continue
             value = values[block_idx]
             if kind == "add":
@@ -399,7 +401,9 @@ class SimulatedTensorDescriptor(gluon_hopper_tma.tensor_descriptor):
 
     def load_im2col_block(self, coord: Any, offsets: Any) -> np.ndarray:
         if len(self.shape) != 4:
-            raise NotImplementedError("Simulated TMA im2col currently supports rank-4 NHWC")
+            raise NotImplementedError(
+                "Simulated TMA im2col currently supports rank-4 NHWC"
+            )
         if self.pixel_box_lower_corner is None or self.pixel_box_upper_corner is None:
             raise TypeError("TMA im2col descriptor requires pixel box corners")
         coord = _normalize_coord(coord, len(self.shape))
@@ -429,7 +433,12 @@ class SimulatedTensorDescriptor(gluon_hopper_tma.tensor_descriptor):
             w = lower_w + within_batch % box_w
             for channel in range(self.block_shape[1]):
                 c = coord_c + channel * stride_c
-                if 0 <= batch < n_dim and 0 <= h < h_dim and 0 <= w < w_dim and 0 <= c < c_dim:
+                if (
+                    0 <= batch < n_dim
+                    and 0 <= h < h_dim
+                    and 0 <= w < w_dim
+                    and 0 <= c < c_dim
+                ):
                     result[pixel, channel] = src[batch, h, w, c]
         return result
 
@@ -610,7 +619,9 @@ class SimulatedSharedMemoryDescriptor(gluon_core.shared_memory_descriptor):
             self.data.reshape(shape),
         )
 
-    def permute(self, order: Any, _semantic: Any = None) -> "SimulatedSharedMemoryDescriptor":
+    def permute(
+        self, order: Any, _semantic: Any = None
+    ) -> "SimulatedSharedMemoryDescriptor":
         order = tuple(int(_unwrap_constexpr(item)) for item in _unwrap_constexpr(order))
         return SimulatedSharedMemoryDescriptor(
             self.element_ty,
@@ -771,7 +782,9 @@ class SimulatedTensorMemoryDescriptor(gluon_blackwell.tensor_memory_descriptor):
         self.data[...] = np.asarray(value.handle.data, dtype=self.data.dtype)
         return None
 
-    def index(self, idx: Any, _semantic: Any = None) -> "SimulatedTensorMemoryDescriptor":
+    def index(
+        self, idx: Any, _semantic: Any = None
+    ) -> "SimulatedTensorMemoryDescriptor":
         idx_value = _to_int(idx)
         return SimulatedTensorMemoryDescriptor(
             self.element_ty,
@@ -956,7 +969,11 @@ def _async_load(
     if mask is None and args:
         mask = args[0]
     other = kwargs.get("other")
-    value = gl.load(src, mask=mask, other=other) if other is not None else gl.load(src, mask=mask)
+    value = (
+        gl.load(src, mask=mask, other=other)
+        if other is not None
+        else gl.load(src, mask=mask)
+    )
     dst.store(value)
     return None
 
@@ -1263,7 +1280,9 @@ def _tdm_make_tensor_descriptor(
     layout: Any,
     _semantic: Any = None,
 ) -> SimulatedTensorDescriptor:
-    return _make_tensor_descriptor(base, shape, strides, block_shape, layout, "zero", _semantic)
+    return _make_tensor_descriptor(
+        base, shape, strides, block_shape, layout, "zero", _semantic
+    )
 
 
 def _tdm_update_tensor_descriptor(
@@ -1355,7 +1374,9 @@ def _tdm_async_gather(
     _semantic: Any = None,
 ) -> None:
     _yield_warp_specialize()
-    return _tma_async_gather(desc, src_row_indices, src_col_offset, mbarrier, dst, pred, _semantic=_semantic)
+    return _tma_async_gather(
+        desc, src_row_indices, src_col_offset, mbarrier, dst, pred, _semantic=_semantic
+    )
 
 
 def _tdm_async_scatter(
@@ -1392,7 +1413,9 @@ def _noop(*_args: Any, **_kwargs: Any) -> None:
 
 
 class _WarpPipelineStage:
-    def __init__(self, label: Any = None, *, priority: Any = None, **_kwargs: Any) -> None:
+    def __init__(
+        self, label: Any = None, *, priority: Any = None, **_kwargs: Any
+    ) -> None:
         del label, priority
 
     def __enter__(self):
@@ -1404,8 +1427,10 @@ class _WarpPipelineStage:
 
 
 def _is_gluon_jit_function(value: Any) -> bool:
-    return callable(value) and callable(getattr(value, "fn", None)) and (
-        getattr(value, "arg_names", None) is not None
+    return (
+        callable(value)
+        and callable(getattr(value, "fn", None))
+        and (getattr(value, "arg_names", None) is not None)
     )
 
 
@@ -1431,7 +1456,13 @@ def _aggregate_new_wrapper(aggregate_cls: type, original_new: Callable) -> Calla
     if not fields:
         fields = tuple(annotations)
 
-    def wrapped(this_cls, *args: Any, _semantic: Any = None, _generator: Any = None, **kwargs: Any):
+    def wrapped(
+        this_cls,
+        *args: Any,
+        _semantic: Any = None,
+        _generator: Any = None,
+        **kwargs: Any,
+    ):
         del _semantic, _generator
         converted_args = list(args)
         for index, value in enumerate(converted_args):
@@ -1439,11 +1470,15 @@ def _aggregate_new_wrapper(aggregate_cls: type, original_new: Callable) -> Calla
                 break
             field = fields[index]
             if annotations.get(field) == tl.tensor and not isinstance(value, tl.tensor):
-                converted_args[index] = gluon_semantic.to_tensor(_unwrap_constexpr(value))
+                converted_args[index] = gluon_semantic.to_tensor(
+                    _unwrap_constexpr(value)
+                )
         converted_kwargs = dict(kwargs)
         for field, value in list(converted_kwargs.items()):
             if annotations.get(field) == tl.tensor and not isinstance(value, tl.tensor):
-                converted_kwargs[field] = gluon_semantic.to_tensor(_unwrap_constexpr(value))
+                converted_kwargs[field] = gluon_semantic.to_tensor(
+                    _unwrap_constexpr(value)
+                )
         return original_new(this_cls, *converted_args, **converted_kwargs)
 
     return wrapped
@@ -1456,7 +1491,9 @@ def _patch_aggregate_jit_methods(value: Any, scope: _LangPatchScope) -> bool:
     if getattr(value, "__triton_aggregate__", False):
         original_new = getattr(value, "__new__", None)
         if original_new is not None:
-            scope.set_attr(value, "__new__", _aggregate_new_wrapper(value, original_new))
+            scope.set_attr(
+                value, "__new__", _aggregate_new_wrapper(value, original_new)
+            )
             patched = True
     for name, member in inspect.getmembers(value):
         if _is_gluon_jit_function(member):
@@ -1514,7 +1551,9 @@ def _program_id(axis: Any, _semantic: Any = None):
 
 
 def _arange(start: Any, end: Any, layout: Any = None, _semantic: Any = None):
-    return gluon_semantic.arange(int(_unwrap_constexpr(start)), int(_unwrap_constexpr(end)))
+    return gluon_semantic.arange(
+        int(_unwrap_constexpr(start)), int(_unwrap_constexpr(end))
+    )
 
 
 def _full(
@@ -1525,7 +1564,9 @@ def _full(
     _semantic: Any = None,
 ):
     shape = tuple(int(_unwrap_constexpr(dim)) for dim in shape)
-    return gluon_semantic.full(list(shape), _unwrap_constexpr(value), _unwrap_constexpr(dtype))
+    return gluon_semantic.full(
+        list(shape), _unwrap_constexpr(value), _unwrap_constexpr(dtype)
+    )
 
 
 def _full_like(
@@ -1543,7 +1584,9 @@ def _full_like(
     target_shape = tuple(int(_unwrap_constexpr(dim)) for dim in target_shape)
     value_data = np.asarray(_to_python_scalar(value), dtype=_get_np_dtype(dtype))
     if value_data.shape:
-        data = np.broadcast_to(value_data, target_shape).astype(_get_np_dtype(dtype), copy=True)
+        data = np.broadcast_to(value_data, target_shape).astype(
+            _get_np_dtype(dtype), copy=True
+        )
     else:
         data = np.full(target_shape, value_data.item(), dtype=_get_np_dtype(dtype))
     ret_ty = tl.block_type(dtype, list(data.shape)) if data.shape else dtype
@@ -1787,13 +1830,17 @@ def _zeros(
     return _full(shape, 0, dtype, layout)
 
 
-def _reduction_tensor(value: Any, np_func: Callable, axis: Any = None, keep_dims: bool = False):
+def _reduction_tensor(
+    value: Any, np_func: Callable, axis: Any = None, keep_dims: bool = False
+):
     tensor = gluon_semantic.to_tensor(value)
     axis = _unwrap_constexpr(axis)
     keep_dims = bool(_unwrap_constexpr(keep_dims))
     data = np_func(tensor.handle.data, axis=axis, keepdims=keep_dims)
     data = np.asarray(data, dtype=tensor.handle.data.dtype)
-    ret_ty = tl.block_type(tensor.dtype, list(data.shape)) if data.shape else tensor.dtype
+    ret_ty = (
+        tl.block_type(tensor.dtype, list(data.shape)) if data.shape else tensor.dtype
+    )
     return tl.tensor(TensorHandle(data, tensor.dtype), ret_ty)
 
 
@@ -1871,7 +1918,7 @@ def _reduce(
             axis += len(data_inputs[0].shape)
         original_axis_none = False
     input_shape = data_inputs[0].shape
-    output_shape = input_shape[:axis] + input_shape[axis + 1:]
+    output_shape = input_shape[:axis] + input_shape[axis + 1 :]
     outputs = [np.zeros(output_shape, dtype=data.dtype) for data in data_inputs]
     reducer = (
         _device_function_wrapper(combine_fn)
@@ -1881,7 +1928,7 @@ def _reduce(
 
     for flat_index in range(data_inputs[0].size):
         input_index = np.unravel_index(flat_index, input_shape)
-        output_index = input_index[:axis] + input_index[axis + 1:]
+        output_index = input_index[:axis] + input_index[axis + 1 :]
         values = tuple(
             _scalar_tensor(data[input_index], tensors[index].dtype)
             for index, data in enumerate(data_inputs)
@@ -1943,7 +1990,7 @@ def _map_elementwise(
 
     broadcasted = np.broadcast_arrays(*arrays)
     out_shape = broadcasted[0].shape
-    flat_results = []
+    flat_results: list[list[Any]] = []
     first_result = None
     for idx in np.ndindex(out_shape):
         call_args = [array[idx].item() for array in broadcasted]
@@ -2041,7 +2088,9 @@ def _amd_scaled_upcast(
     axis = _unwrap_constexpr(axis)
     elem_type = _unwrap_constexpr(elem_type)
     if src_tensor.dtype == tl.uint8 and axis is not None:
-        values = _unpack_e2m1(np.asarray(src_tensor.handle.data, dtype=np.uint8), int(axis))
+        values = _unpack_e2m1(
+            np.asarray(src_tensor.handle.data, dtype=np.uint8), int(axis)
+        )
     elif src_tensor.dtype in (tl.float8e4nv, tl.float8e5):
         values = _mxfp_value_handle_to_float32(src_tensor.handle)
     else:
@@ -2051,9 +2100,14 @@ def _amd_scaled_upcast(
         data = _convert_float(result, tl.float32, tl.bfloat16, None).view(
             _get_np_dtype(tl.bfloat16)
         )
-        return tl.tensor(TensorHandle(data, tl.bfloat16), tl.block_type(tl.bfloat16, list(result.shape)))
+        return tl.tensor(
+            TensorHandle(data, tl.bfloat16),
+            tl.block_type(tl.bfloat16, list(result.shape)),
+        )
     data = result.astype(_get_np_dtype(elem_type), copy=False)
-    return tl.tensor(TensorHandle(data, elem_type), tl.block_type(elem_type, list(result.shape)))
+    return tl.tensor(
+        TensorHandle(data, elem_type), tl.block_type(elem_type, list(result.shape))
+    )
 
 
 def _fp4_to_fp(src: Any, elem_type: Any, axis: Any, _semantic: Any = None):
@@ -2068,9 +2122,14 @@ def _fp4_to_fp(src: Any, elem_type: Any, axis: Any, _semantic: Any = None):
         data = _convert_float(values, tl.float32, tl.bfloat16, None).view(
             _get_np_dtype(tl.bfloat16)
         )
-        return tl.tensor(TensorHandle(data, tl.bfloat16), tl.block_type(tl.bfloat16, list(values.shape)))
+        return tl.tensor(
+            TensorHandle(data, tl.bfloat16),
+            tl.block_type(tl.bfloat16, list(values.shape)),
+        )
     data = values.astype(_get_np_dtype(elem_type), copy=False)
-    return tl.tensor(TensorHandle(data, elem_type), tl.block_type(elem_type, list(values.shape)))
+    return tl.tensor(
+        TensorHandle(data, elem_type), tl.block_type(elem_type, list(values.shape))
+    )
 
 
 def _warpgroup_mma_wait(
@@ -2129,7 +2188,6 @@ def _warp_specialize(
     finally:
         gluon_frontend._set_warp_specialize_scheduler(previous_scheduler)
     return None
-
 
 
 def _tcgen05_copy(
@@ -2259,10 +2317,14 @@ def _tcgen05_mma_scaled(
     lhs_scales = _expand_scale_groups(_as_numpy_operand(a_scale), a_data.shape[0], k)
     lhs = a_data * lhs_scales
     if b_data.shape[0] == k:
-        rhs_scales = _expand_scale_groups(_as_numpy_operand(b_scale), b_data.shape[1], k)
+        rhs_scales = _expand_scale_groups(
+            _as_numpy_operand(b_scale), b_data.shape[1], k
+        )
         rhs = b_data * rhs_scales.T
     else:
-        rhs_scales = _expand_scale_groups(_as_numpy_operand(b_scale), b_data.shape[0], k)
+        rhs_scales = _expand_scale_groups(
+            _as_numpy_operand(b_scale), b_data.shape[0], k
+        )
         rhs = (b_data * rhs_scales).T
     result = np.matmul(lhs, rhs)
     if bool(_to_python_scalar(use_acc)):
@@ -2342,7 +2404,9 @@ def _fma(x: Any, y: Any, z: Any, _semantic: Any = None):
     x, y = gluon_semantic.broadcast_impl_value(x, y)
     x, z = gluon_semantic.broadcast_impl_value(x, z)
     y, z = gluon_semantic.broadcast_impl_value(y, z)
-    return tl.tensor(interpreter_builder.create_fma(x.handle, y.handle, z.handle), x.type)
+    return tl.tensor(
+        interpreter_builder.create_fma(x.handle, y.handle, z.handle), x.type
+    )
 
 
 def _expand_dims(input: Any, axis: Any, _semantic: Any = None):
@@ -2448,8 +2512,12 @@ def _inline_asm_elementwise(
     dtype = _unwrap_constexpr(dtype)
 
     if asm_key == "mov.b32 $0, { $1, $2 };":
-        low, high = np.broadcast_arrays(_uint_bits(args[0], 32), _uint_bits(args[1], 32))
-        packed = (low & np.uint32(0xFFFF)) | ((high & np.uint32(0xFFFF)) << np.uint32(16))
+        low, high = np.broadcast_arrays(
+            _uint_bits(args[0], 32), _uint_bits(args[1], 32)
+        )
+        packed = (low & np.uint32(0xFFFF)) | (
+            (high & np.uint32(0xFFFF)) << np.uint32(16)
+        )
         return _result_tensor(packed, dtype)
 
     if asm_key == "mov.b64 $0, { $1, $2 };":
@@ -2457,7 +2525,10 @@ def _inline_asm_elementwise(
 
     if asm_key == "mov.b64 { $0, $1 }, $2;":
         low, high = _unpack_f32x2(args[0])
-        return tuple(_result_tensor(data, out_dtype) for data, out_dtype in zip((low, high), dtype))
+        return tuple(
+            _result_tensor(data, out_dtype)
+            for data, out_dtype in zip((low, high), dtype)
+        )
 
     if asm_key in {
         "add.f32x2 $0, $1, $2;",
@@ -2482,9 +2553,8 @@ def _inline_asm_elementwise(
 
     if "cvt.rn.satfinite.e4m3x2.f32" in asm_key:
         lane0, lane1 = _unpack_f32x2(args[0])
-        packed = (
-            _fp8e4m3fn_bits(lane0).astype(np.uint16)
-            | (_fp8e4m3fn_bits(lane1).astype(np.uint16) << np.uint16(8))
+        packed = _fp8e4m3fn_bits(lane0).astype(np.uint16) | (
+            _fp8e4m3fn_bits(lane1).astype(np.uint16) << np.uint16(8)
         )
         return _result_tensor(packed, dtype)
 
@@ -2705,7 +2775,9 @@ def _block_type_layout(self: tl.block_type):
     return getattr(self, "_triton_viz_layout", None)
 
 
-def gluon_patch_lang(fn: Callable, scope: _LangPatchScope | None = None) -> _LangPatchScope:
+def gluon_patch_lang(
+    fn: Callable, scope: _LangPatchScope | None = None
+) -> _LangPatchScope:
     """Patch Gluon language symbols used by ``fn`` for interpreter execution."""
 
     if scope is None:
@@ -3043,9 +3115,9 @@ def gluon_patch_lang(fn: Callable, scope: _LangPatchScope | None = None) -> _Lan
         if _patch_aggregate_jit_methods(value, scope):
             continue
         if inspect.ismodule(value):
-            overrides = module_overrides.get(value)
-            if overrides is not None:
-                _patch_namespace_overrides(value, overrides, scope)
+            module_override = module_overrides.get(value)
+            if module_override is not None:
+                _patch_namespace_overrides(value, module_override, scope)
             continue
         if not callable(value):
             continue
@@ -3070,7 +3142,9 @@ class GluonInterpretedFunction:
             if annotations.get(name) in ("constexpr", tl.constexpr)
         }
 
-    def _call_args(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _call_args(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
         argspec = inspect.getfullargspec(self.fn)
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in argspec.args}
         return inspect.getcallargs(self.fn, *args, **filtered_kwargs)
