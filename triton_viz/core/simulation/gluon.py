@@ -2833,6 +2833,9 @@ for _simulated, _original in (
     (_reduce, gl.reduce),
     (_map_elementwise, gl.map_elementwise),
     (_num_warps, gluon_core.num_warps),
+    (_warpgroup_mma_init, gluon_hopper.warpgroup_mma_init),
+    (_warpgroup_mma, gluon_hopper.warpgroup_mma),
+    (_warpgroup_mma_wait, gluon_hopper.warpgroup_mma_wait),
     (_exp, gluon_math.exp),
     (_exp2, gluon_math.exp2),
     (_log2, gluon_math.log2),
@@ -2995,6 +2998,12 @@ def gluon_patch_lang(
         "async_atomic_xor": _tma_async_atomic_xor,
         "store_wait": _noop,
     }
+    hopper_overrides: dict[str, Callable] = {
+        "warpgroup_mma_init": _warpgroup_mma_init,
+        "warpgroup_mma": _warpgroup_mma,
+        "warpgroup_mma_wait": _warpgroup_mma_wait,
+        "fence_async_shared": _noop,
+    }
     mbarrier_overrides: dict[str, Callable] = {
         "allocate_mbarrier": _allocate_mbarrier,
         "arrive": _mbarrier_arrive,
@@ -3009,6 +3018,7 @@ def gluon_patch_lang(
         gluon_math: math_overrides,
         gluon_standard: standard_overrides,
         triton_libdevice: libdevice_overrides,
+        gluon_hopper: hopper_overrides,
         gluon_hopper_tma: tma_overrides,
         gluon_hopper_mbarrier: mbarrier_overrides,
     }
