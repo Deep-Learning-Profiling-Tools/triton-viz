@@ -47,6 +47,9 @@ from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
 )
 from triton.experimental.gluon.language.nvidia import blackwell as gluon_blackwell  # type: ignore
 from triton.experimental.gluon.language.nvidia import hopper as gluon_hopper  # type: ignore
+from triton.experimental.gluon.language.nvidia.blackwell import (  # type: ignore
+    float2 as gluon_blackwell_float2,
+)
 from triton.experimental.gluon.language.nvidia.blackwell import clc as gluon_clc  # type: ignore
 from triton.experimental.gluon.language.nvidia.blackwell import (  # type: ignore
     tma as gluon_blackwell_tma,
@@ -2827,6 +2830,7 @@ for _simulated, _original in (
     (_sum, gl.sum),
     (_max, gl.max),
     (_allocate_shared_memory, gl.allocate_shared_memory),
+    (_allocate_tensor_memory, gluon_blackwell.allocate_tensor_memory),
     (_broadcast, gl.broadcast),
     (_join, gl.join),
     (_dot_fma, gl.dot_fma),
@@ -2836,6 +2840,13 @@ for _simulated, _original in (
     (_warpgroup_mma_init, gluon_hopper.warpgroup_mma_init),
     (_warpgroup_mma, gluon_hopper.warpgroup_mma),
     (_warpgroup_mma_wait, gluon_hopper.warpgroup_mma_wait),
+    (_tcgen05_copy, gluon_blackwell.tcgen05_copy),
+    (_tcgen05_mma, gluon_blackwell.tcgen05_mma),
+    (_tcgen05_mma_scaled, gluon_blackwell.tcgen05_mma_scaled),
+    (_tcgen05_mma_barrier_count, gluon_blackwell.tcgen05_mma_barrier_count),
+    (_tcgen05_commit, gluon_blackwell.tcgen05_commit),
+    (_clc_try_cancel, gluon_clc.try_cancel),
+    (_clc_load_result, gluon_clc.load_result),
     (_exp, gluon_math.exp),
     (_exp2, gluon_math.exp2),
     (_log2, gluon_math.log2),
@@ -3004,6 +3015,24 @@ def gluon_patch_lang(
         "warpgroup_mma_wait": _warpgroup_mma_wait,
         "fence_async_shared": _noop,
     }
+    blackwell_overrides: dict[str, Callable] = {
+        "allocate_tensor_memory": _allocate_tensor_memory,
+        "tcgen05_copy": _tcgen05_copy,
+        "tcgen05_mma": _tcgen05_mma,
+        "tcgen05_mma_scaled": _tcgen05_mma_scaled,
+        "tcgen05_mma_barrier_count": _tcgen05_mma_barrier_count,
+        "tcgen05_commit": _tcgen05_commit,
+        "fence_async_shared": _noop,
+    }
+    blackwell_tma_overrides: dict[str, Callable] = {
+        **tma_overrides,
+        "async_gather": _tma_async_gather,
+        "async_scatter": _tma_async_scatter,
+    }
+    clc_overrides: dict[str, Callable] = {
+        "try_cancel": _clc_try_cancel,
+        "load_result": _clc_load_result,
+    }
     mbarrier_overrides: dict[str, Callable] = {
         "allocate_mbarrier": _allocate_mbarrier,
         "arrive": _mbarrier_arrive,
@@ -3019,10 +3048,13 @@ def gluon_patch_lang(
         gluon_standard: standard_overrides,
         triton_libdevice: libdevice_overrides,
         gluon_hopper: hopper_overrides,
+        gluon_blackwell: blackwell_overrides,
+        gluon_blackwell_tma: blackwell_tma_overrides,
+        gluon_clc: clc_overrides,
         gluon_hopper_tma: tma_overrides,
         gluon_hopper_mbarrier: mbarrier_overrides,
     }
-    jit_modules: tuple[Any, ...] = ()
+    jit_modules = (gluon_blackwell_float2,)
 
     original_to_patched: dict[int, Callable] = {}
     for module in (
