@@ -2909,6 +2909,13 @@ for _simulated, _original in (
     (_buffer_atomic_or, gluon_amd_cdna4.buffer_atomic_or),
     (_buffer_atomic_xor, gluon_amd_cdna4.buffer_atomic_xor),
     (_buffer_atomic_xchg, gluon_amd_cdna4.buffer_atomic_xchg),
+    (_amd_wmma, gluon_amd_rdna3.wmma),
+    (_amd_wmma, gluon_amd_rdna4.wmma),
+    (_amd_wmma, gluon_amd_gfx1250.wmma),
+    (_amd_mma_scaled, gluon_amd_gfx1250.wmma_scaled),
+    (_amd_scaled_upcast, gluon_amd_gfx1250.scaled_upcast),
+    (_buffer_load, gluon_amd_gfx1250.buffer_load),
+    (_buffer_store, gluon_amd_gfx1250.buffer_store),
 ):
     _simulated.__triton_viz_simulated__ = True  # type: ignore[attr-defined]
     _register_replay_callable(_simulated)
@@ -3141,6 +3148,16 @@ def gluon_patch_lang(
         **amd_cdna_overrides,
         "mfma_scaled": _amd_mma_scaled,
     }
+    amd_gfx1250_overrides: dict[str, Callable] = {
+        "wmma": _amd_wmma,
+        "wmma_scaled": _amd_mma_scaled,
+        "scaled_upcast": _amd_scaled_upcast,
+        "buffer_load": _buffer_load,
+        "buffer_store": _buffer_store,
+    }
+    amd_rdna_overrides: dict[str, Callable] = {
+        "wmma": _amd_wmma,
+    }
     module_overrides: dict[Any, dict[str, Callable]] = {
         gl: core_overrides,
         gluon_core: core_overrides,
@@ -3161,6 +3178,9 @@ def gluon_patch_lang(
         gluon_amd_tdm: amd_tdm_overrides,
         gluon_amd_cdna3: amd_cdna_overrides,
         gluon_amd_cdna4: amd_cdna4_overrides,
+        gluon_amd_rdna3: amd_rdna_overrides,
+        gluon_amd_rdna4: amd_rdna_overrides,
+        gluon_amd_gfx1250: amd_gfx1250_overrides,
     }
     jit_modules = (gluon_blackwell_float2,)
 
