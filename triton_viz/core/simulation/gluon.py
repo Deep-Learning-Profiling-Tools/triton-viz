@@ -2855,6 +2855,7 @@ for _simulated, _original in (
     (_libdevice_exp, triton_libdevice.exp),
     (_libdevice_fast_expf, triton_libdevice.fast_expf),
     (_libdevice_fast_dividef, triton_libdevice.fast_dividef),
+    (_WarpPipelineStage, gluon_amd.warp_pipeline_stage),
     (_inline_asm_elementwise, gl.inline_asm_elementwise),
     (_expand_dims, gl.expand_dims),
     (_fp4_to_fp, gl.fp4_to_fp),
@@ -2862,6 +2863,29 @@ for _simulated, _original in (
     (_cast, gl.tensor.cast),
     (_atomic_add, gl.atomic_add),
     (_atomic_xchg, gl.atomic_xchg),
+    (_tdm_make_tensor_descriptor, gluon_amd_tdm.make_tensor_descriptor),
+    (_tdm_update_tensor_descriptor, gluon_amd_tdm.update_tensor_descriptor),
+    (_tdm_async_load, gluon_amd_tdm.async_load),
+    (_tdm_async_store, gluon_amd_tdm.async_store),
+    (_tdm_async_gather, gluon_amd_tdm.async_gather),
+    (_tdm_async_scatter, gluon_amd_tdm.async_scatter),
+    (_tdm_async_wait, gluon_amd_tdm.async_wait),
+    (_tdm_prefetch, gluon_amd_tdm.prefetch),
+    (_async_load, gluon_amd_cdna4_async_copy.global_load_to_shared),
+    (_buffer_load_to_shared, gluon_amd_cdna4_async_copy.buffer_load_to_shared),
+    (_async_commit_group, gluon_amd_cdna4_async_copy.commit_group),
+    (_async_wait_group, gluon_amd_cdna4_async_copy.wait_group),
+    (_load_shared_relaxed, gluon_amd_cdna4_async_copy.load_shared_relaxed),
+    (_async_load, gluon_amd_async_copy.global_to_shared),
+    (_async_store, gluon_amd_async_copy.shared_to_global),
+    (_async_commit_group, gluon_amd_async_copy.commit_group),
+    (_async_wait_group, gluon_amd_async_copy.wait_group),
+    (_async_mbarrier_arrive, gluon_amd_async_copy.mbarrier_arrive),
+    (_mbarrier_init, gluon_amd_mbarrier.init),
+    (_mbarrier_wait, gluon_amd_mbarrier.wait),
+    (_mbarrier_arrive, gluon_amd_mbarrier.arrive),
+    (_cluster_arrive, gluon_amd_cluster.arrive),
+    (_cluster_wait, gluon_amd_cluster.wait),
 ):
     _simulated.__triton_viz_simulated__ = True  # type: ignore[attr-defined]
     _register_replay_callable(_simulated)
@@ -2993,6 +3017,9 @@ def gluon_patch_lang(
         "fast_expf": _libdevice_fast_expf,
         "fast_dividef": _libdevice_fast_dividef,
     }
+    amd_overrides: dict[str, Callable] = {
+        "warp_pipeline_stage": _WarpPipelineStage,
+    }
     tma_overrides: dict[str, Callable] = {
         "make_tensor_descriptor": _make_tensor_descriptor,
         "async_load": _tma_async_load,
@@ -3041,6 +3068,39 @@ def gluon_patch_lang(
         "wait": _mbarrier_wait,
         "invalidate": _mbarrier_invalidate,
     }
+    amd_async_copy_overrides: dict[str, Callable] = {
+        "global_to_shared": _async_load,
+        "shared_to_global": _async_store,
+        "commit_group": _async_commit_group,
+        "wait_group": _async_wait_group,
+        "mbarrier_arrive": _async_mbarrier_arrive,
+    }
+    amd_cdna4_async_copy_overrides: dict[str, Callable] = {
+        "global_load_to_shared": _async_load,
+        "buffer_load_to_shared": _buffer_load_to_shared,
+        "commit_group": _async_commit_group,
+        "wait_group": _async_wait_group,
+        "load_shared_relaxed": _load_shared_relaxed,
+    }
+    amd_mbarrier_overrides: dict[str, Callable] = {
+        "init": _mbarrier_init,
+        "wait": _mbarrier_wait,
+        "arrive": _mbarrier_arrive,
+    }
+    amd_cluster_overrides: dict[str, Callable] = {
+        "arrive": _cluster_arrive,
+        "wait": _cluster_wait,
+    }
+    amd_tdm_overrides: dict[str, Callable] = {
+        "make_tensor_descriptor": _tdm_make_tensor_descriptor,
+        "update_tensor_descriptor": _tdm_update_tensor_descriptor,
+        "async_load": _tdm_async_load,
+        "async_store": _tdm_async_store,
+        "async_gather": _tdm_async_gather,
+        "async_scatter": _tdm_async_scatter,
+        "async_wait": _tdm_async_wait,
+        "prefetch": _tdm_prefetch,
+    }
     module_overrides: dict[Any, dict[str, Callable]] = {
         gl: core_overrides,
         gluon_core: core_overrides,
@@ -3053,6 +3113,12 @@ def gluon_patch_lang(
         gluon_clc: clc_overrides,
         gluon_hopper_tma: tma_overrides,
         gluon_hopper_mbarrier: mbarrier_overrides,
+        gluon_amd: amd_overrides,
+        gluon_amd_cdna4_async_copy: amd_cdna4_async_copy_overrides,
+        gluon_amd_async_copy: amd_async_copy_overrides,
+        gluon_amd_mbarrier: amd_mbarrier_overrides,
+        gluon_amd_cluster: amd_cluster_overrides,
+        gluon_amd_tdm: amd_tdm_overrides,
     }
     jit_modules = (gluon_blackwell_float2,)
 
