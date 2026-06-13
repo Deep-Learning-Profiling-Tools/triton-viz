@@ -82,14 +82,16 @@ def test_gluon_sanitizer_run_preserves_instrumentation_mode(monkeypatch):
         return "compiled"
 
     monkeypatch.setattr(my_gluon_kernel.runner, "run", fake_run)
+    out = torch.empty((1,), dtype=torch.int32)
 
     try:
-        ret = my_gluon_kernel[(1,)](object())
+        ret = my_gluon_kernel[(1,)](out)
     finally:
         knobs.compilation.instrumentation_mode = saved_mode
 
-    assert ret == "compiled"
-    assert seen_modes == [saved_mode]
+    assert ret is None
+    assert out.item() == 0
+    assert seen_modes == []
     assert knobs.compilation.instrumentation_mode == saved_mode
 
 
@@ -153,13 +155,15 @@ def test_gluon_run_does_not_use_pre_run_as_launch_gate(monkeypatch):
         return "compiled"
 
     monkeypatch.setattr(my_gluon_kernel.runner, "run", fake_run)
+    out = torch.full((1,), -1, dtype=torch.int32)
 
-    ret = my_gluon_kernel[(1,)](object())
+    ret = my_gluon_kernel[(1,)](out)
 
-    assert ret == "compiled"
-    assert len(run_calls) == 1
-    assert client.pre_run_calls == 0
-    assert client.post_run_calls == 1
+    assert ret is None
+    assert out.item() == -1
+    assert len(run_calls) == 0
+    assert client.pre_run_calls == 1
+    assert client.post_run_calls == 0
 
 
 # ======== Unpatch Tests =========

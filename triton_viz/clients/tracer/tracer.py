@@ -67,7 +67,7 @@ class Tracer(Client):
         pass
 
     def arg_callback(self, name, arg, arg_cvt):
-        if hasattr(arg, "data_ptr"):
+        if getattr(arg, "data_ptr", None) is not None:
             self.tensors.append(arg)
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]):
@@ -84,15 +84,17 @@ class Tracer(Client):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        def post_allocate_callback(ret):
-            assert hasattr(ret, "data")
+        def post_allocate_callback(ret, *_args):
+            if getattr(ret, "data", None) is None:
+                return
             self.tensors.append(ret)
 
         def _convert_keys_to_numpy(keys):
             """Convert any NDArrays in keys to numpy arrays."""
             if isinstance(keys, (tuple, list)):
                 return tuple(_convert_keys_to_numpy(k) for k in keys)
-            return keys.data if hasattr(keys, "data") else keys
+            data = getattr(keys, "data", None)
+            return data if data is not None else keys
 
         @self.lock_fn
         def pre_load_callback(ptr, mask, keys):
@@ -160,7 +162,7 @@ class Tracer(Client):
                     base = base._parent
                 return (
                     base
-                    if hasattr(base, "data_ptr")
+                    if getattr(base, "data_ptr", None) is not None
                     else self._get_tensor(ptr.data_ptr())
                 )
 
@@ -198,11 +200,20 @@ class Tracer(Client):
         def post_dot_callback(ret, input, other):
             if not self.sample:
                 return
-            input_shape = input.data.shape
-            other_shape = other.data.shape
-            ret_shape = ret.data.shape
+            input_data = getattr(getattr(input, "handle", None), "data", None)
+            if input_data is None:
+                input_data = input.data
+            other_data = getattr(getattr(other, "handle", None), "data", None)
+            if other_data is None:
+                other_data = other.data
+            ret_data = getattr(getattr(ret, "handle", None), "data", None)
+            if ret_data is None:
+                ret_data = ret.data
+            input_shape = input_data.shape
+            other_shape = other_data.shape
+            ret_shape = ret_data.shape
             # Pass input/other raw arrays so draw.py can render MatMul
-            rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            rec = Dot(input_shape, other_shape, ret_shape, input_data, other_data)
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 

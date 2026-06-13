@@ -7,6 +7,17 @@ import triton.experimental.gluon.language as gluon_lang  # type: ignore
 from triton.experimental.gluon.language import _core as gluon_core  # type: ignore
 from triton.experimental.gluon.language import _math as gluon_math  # type: ignore
 from triton.experimental.gluon.language import _semantic as gluon_semantic  # type: ignore
+from triton.experimental.gluon.language.amd import cdna3 as gluon_amd_cdna3  # type: ignore
+from triton.experimental.gluon.language.amd import cdna4 as gluon_amd_cdna4  # type: ignore
+from triton.experimental.gluon.language.amd import gfx1250 as gluon_amd_gfx1250  # type: ignore
+from triton.experimental.gluon.language.amd import rdna3 as gluon_amd_rdna3  # type: ignore
+from triton.experimental.gluon.language.amd import rdna4 as gluon_amd_rdna4  # type: ignore
+from triton.experimental.gluon.language.amd.cdna4 import (  # type: ignore
+    async_copy as gluon_amd_cdna4_async_copy,
+)
+from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
+    async_copy as gluon_amd_async_copy,
+)
 from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
     tdm as gluon_amd_tdm,
 )
@@ -47,6 +58,21 @@ from ..symbolic_metadata import (
 from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
 from .triton import TritonFrontend
 
+_WARP_SPECIALIZE_SCHEDULER: Any = None
+_MISSING = object()
+
+
+def _set_warp_specialize_scheduler(scheduler: Any) -> Any:
+    global _WARP_SPECIALIZE_SCHEDULER
+    previous = _WARP_SPECIALIZE_SCHEDULER
+    _WARP_SPECIALIZE_SCHEDULER = scheduler
+    return previous
+
+
+def _maybe_yield_warp_specialize() -> None:
+    if _WARP_SPECIALIZE_SCHEDULER is not None:
+        _WARP_SPECIALIZE_SCHEDULER.yield_point()
+
 
 def _gluon_load_adapter(
     ptr: Any,
@@ -55,8 +81,18 @@ def _gluon_load_adapter(
     other: Any = None,
     **_kwargs: Any,
 ) -> AdapterResult:
+    if _is_simulated_tensor_descriptor_like(ptr) and _args:
+        ptr_handle, mask_handle = _simulated_descriptor_pointer_args(ptr, _args[0])
+        return AdapterResult(ptr_handle, mask_handle, None)
     if mask is None and _args:
         mask = _args[0]
+    ptr = _gluon_tensor_handle(ptr)
+    mask = _gluon_tensor_handle(mask)
+    ptr_data = getattr(ptr, "data", _MISSING)
+    if mask is None and ptr_data is not _MISSING:
+        from triton.runtime.interpreter import TensorHandle
+
+        mask = TensorHandle(np.ones_like(ptr_data, dtype=bool), tl.int1)
     return AdapterResult(ptr, mask, None)
 
 
@@ -86,6 +122,40 @@ def _gluon_descriptor_load_adapter(
     return adapter
 
 
+def _gluon_async_copy_load_adapter(
+    smem: Any,
+    pointer: Any,
+    mask: Any = None,
+    *_args: Any,
+    **_kwargs: Any,
+) -> AdapterResult:
+    return _gluon_load_adapter(pointer, mask=mask)
+
+
+def _gluon_async_copy_store_adapter(
+    pointer: Any,
+    smem: Any,
+    mask: Any = None,
+    *_args: Any,
+    **_kwargs: Any,
+) -> AdapterResult:
+    return _gluon_store_adapter(pointer, mask=mask)
+
+
+def _gluon_buffer_load_to_shared_adapter(
+    smem: Any,
+    ptr: Any,
+    offsets: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> AdapterResult:
+    del smem
+    return _gluon_load_adapter(
+        ptr + offsets,
+        mask=args[0] if args else kwargs.get("mask"),
+    )
+
+
 def _gluon_store_adapter(
     ptr: Any,
     value: Any = None,
@@ -94,6 +164,9 @@ def _gluon_store_adapter(
     pred: Any = None,
     **_kwargs: Any,
 ) -> AdapterResult:
+    if _is_simulated_tensor_descriptor_like(ptr) and _args:
+        ptr_handle, mask_handle = _simulated_descriptor_pointer_args(ptr, value)
+        return AdapterResult(ptr_handle, mask_handle, None)
     if mask is None:
         mask = pred
     if _is_global_tensor_descriptor_like(ptr) and value is not None:
@@ -105,6 +178,13 @@ def _gluon_store_adapter(
     ):
         if _args:
             mask = _args[0]
+    ptr = _gluon_tensor_handle(ptr)
+    mask = _gluon_tensor_handle(mask)
+    ptr_data = getattr(ptr, "data", _MISSING)
+    if mask is None and ptr_data is not _MISSING:
+        from triton.runtime.interpreter import TensorHandle
+
+        mask = TensorHandle(np.ones_like(ptr_data, dtype=bool), tl.int1)
     return AdapterResult(ptr, mask, None)
 
 
@@ -120,6 +200,82 @@ def _is_global_tensor_descriptor_like(value: Any) -> bool:
         "TensorDescriptor",
         "TensorDescriptorIm2Col",
     }
+
+
+def _is_simulated_tensor_descriptor_like(value: Any) -> bool:
+    return type(value).__name__ == "SimulatedTensorDescriptor"
+
+
+def _simulated_descriptor_scalar(value: Any) -> int:
+    if type(value).__name__ == "constexpr":
+        value = getattr(value, "value", value)
+    if isinstance(value, gluon_core.tensor):
+        value = value.handle
+    tensor_data = getattr(value, "data", _MISSING)
+    if tensor_data is not _MISSING:
+        data = np.asarray(tensor_data)
+        if data.size == 1:
+            return int(data.reshape(-1)[0])
+    return int(value)
+
+
+def _simulated_descriptor_pointer_args(descriptor: Any, coord: Any) -> tuple[Any, Any]:
+    from triton.runtime.interpreter import TensorHandle
+
+    coord = coord if isinstance(coord, (list, tuple)) else (coord,)
+    coord_values = tuple(_simulated_descriptor_scalar(item) for item in coord)
+    block_shape = tuple(int(dim) for dim in descriptor.block_shape)
+    strides = tuple(int(stride) for stride in descriptor.strides)
+    base = descriptor.base
+    data_ptr = getattr(base, "data_ptr", None)
+    base_ptr = int(data_ptr()) if callable(data_ptr) else 0
+    dtype = getattr(descriptor, "dtype", None)
+    if dtype is None and getattr(base, "dtype", _MISSING) is not _MISSING:
+        import triton
+
+        dtype = tl.str_to_ty(triton.runtime.jit.mangle_type(base), None)
+        if isinstance(dtype, tl.pointer_type):
+            dtype = dtype.element_ty
+    element_size_fn = getattr(base, "element_size", None)
+    element_size = int(element_size_fn()) if callable(element_size_fn) else 1
+    offsets = np.zeros(block_shape, dtype=np.uint64)
+    mask = np.ones(block_shape, dtype=bool)
+    for block_idx in np.ndindex(block_shape):
+        element_offset = 0
+        for dim, idx in enumerate(block_idx):
+            element_offset += (coord_values[dim] + idx) * strides[dim]
+        offsets[block_idx] = base_ptr + element_offset * element_size
+    return TensorHandle(offsets, tl.pointer_type(dtype or tl.int8)), TensorHandle(
+        mask,
+        tl.int1,
+    )
+
+
+def _simulated_descriptor_overrider_args(
+    op_type: type[Op],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> AdapterResult | None:
+    if not args or not _is_simulated_tensor_descriptor_like(args[0]):
+        return None
+    descriptor = args[0]
+    coord = args[1] if len(args) > 1 else kwargs.get("coord")
+    if coord is None:
+        return None
+    if op_type is Load:
+        pred = kwargs.get("pred")
+        if pred is None and len(args) > 4:
+            pred = args[4]
+        return AdapterResult(TensorDescriptorAccess(descriptor, coord, pred), None, None)
+    if op_type is Store:
+        return AdapterResult(TensorDescriptorAccess(descriptor, coord, None), 0, None)
+    return None
+
+
+def _gluon_tensor_handle(value: Any) -> Any:
+    if isinstance(value, gluon_core.tensor):
+        return value.handle
+    return value
 
 
 def _gluon_binary_adapter(
@@ -157,6 +313,10 @@ def _gluon_where_adapter(
     **_kwargs: Any,
 ) -> AdapterResult:
     return AdapterResult(condition, x, y, np.where)
+
+
+def _gluon_dot_adapter(a: Any, b: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
+    return AdapterResult(_gluon_tensor_handle(a), _gluon_tensor_handle(b))
 
 
 def _gluon_allocate_adapter(*args: Any, **_kwargs: Any) -> AdapterResult:
@@ -197,9 +357,8 @@ def _gluon_semantic_binary_op_adapter(op: Callable) -> Callable[..., AdapterResu
 def _existing_ops(namespace: Any, attrs: dict[str, type[Op]]) -> dict[str, type[Op]]:
     if namespace is None:
         return {}
-    return {
-        attr: op_type for attr, op_type in attrs.items() if hasattr(namespace, attr)
-    }
+    namespace_attrs = vars(namespace)
+    return {attr: op_type for attr, op_type in attrs.items() if attr in namespace_attrs}
 
 
 GLUON_CORE_OPS: dict[str, type[Op]] = {
@@ -286,12 +445,76 @@ _TMA_NAMESPACES: tuple[tuple[Any, dict[str, type[Op]]], ...] = (
         },
     ),
     (
+        gluon_amd_cdna3,
+        {
+            "mfma": Dot,
+            "buffer_load": Load,
+            "buffer_store": Store,
+            "buffer_atomic_add": Store,
+            "buffer_atomic_max": Store,
+            "buffer_atomic_min": Store,
+            "buffer_atomic_and": Store,
+            "buffer_atomic_or": Store,
+            "buffer_atomic_xor": Store,
+            "buffer_atomic_xchg": Store,
+        },
+    ),
+    (
+        gluon_amd_cdna4,
+        {
+            "mfma": Dot,
+            "buffer_load": Load,
+            "buffer_store": Store,
+            "buffer_atomic_add": Store,
+            "buffer_atomic_max": Store,
+            "buffer_atomic_min": Store,
+            "buffer_atomic_and": Store,
+            "buffer_atomic_or": Store,
+            "buffer_atomic_xor": Store,
+            "buffer_atomic_xchg": Store,
+        },
+    ),
+    (
+        gluon_amd_rdna3,
+        {
+            "wmma": Dot,
+        },
+    ),
+    (
+        gluon_amd_rdna4,
+        {
+            "wmma": Dot,
+        },
+    ),
+    (
+        gluon_amd_cdna4_async_copy,
+        {
+            "global_load_to_shared": Load,
+            "buffer_load_to_shared": Load,
+        },
+    ),
+    (
+        gluon_amd_gfx1250,
+        {
+            "wmma": Dot,
+            "buffer_load": Load,
+            "buffer_store": Store,
+        },
+    ),
+    (
         gluon_amd_tdm,
         {
             "make_tensor_descriptor": Allocate,
             "update_tensor_descriptor": Allocate,
             "async_load": Load,
             "async_store": Store,
+        },
+    ),
+    (
+        gluon_amd_async_copy,
+        {
+            "global_to_shared": Load,
+            "shared_to_global": Store,
         },
     ),
 )
@@ -341,6 +564,14 @@ for namespace, attrs in GLUON_NAMESPACES.items():
                 descriptor_kwarg="src",
                 coords_kwarg="offsets",
             )
+        elif namespace is gluon_amd_async_copy and attr == "global_to_shared":
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_async_copy_load_adapter
+        elif namespace is gluon_amd_async_copy and attr == "shared_to_global":
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_async_copy_store_adapter
+        elif namespace is gluon_amd_cdna4_async_copy and attr == "global_load_to_shared":
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_async_copy_load_adapter
+        elif namespace is gluon_amd_cdna4_async_copy and attr == "buffer_load_to_shared":
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_buffer_load_to_shared_adapter
         elif attr in _TMA_LOAD_PRED_ARG_INDICES:
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_descriptor_load_adapter(
                 _TMA_LOAD_PRED_ARG_INDICES[attr],
@@ -355,7 +586,7 @@ GLUON_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {
     MakeRange: _gluon_make_range_adapter,
     Splat: lambda shape, value, *_args, **_kwargs: AdapterResult(shape, value),
     Allocate: _gluon_allocate_adapter,
-    Dot: lambda a, b, acc, *_args, **_kwargs: AdapterResult(a, b, acc, None, None),
+    Dot: _gluon_dot_adapter,
     BinaryOp: _gluon_binary_adapter,
     AddPtr: _gluon_binary_adapter,
     UnaryOp: _gluon_unary_adapter,
@@ -398,6 +629,9 @@ class GluonFrontend(Frontend):
     def symbolic_ops_for_op_type(op_type: type[Op]) -> tuple[str, ...]:
         return TritonFrontend.symbolic_ops_for_op_type(op_type)
 
+    def maybe_yield_for_multism(self) -> None:
+        _maybe_yield_warp_specialize()
+
     def run_op_overrider(
         self,
         op: Callable,
@@ -406,15 +640,51 @@ class GluonFrontend(Frontend):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ):
-        adapter = GLUON_CALLABLE_ADAPTERS.get(op, self.adapters[op_type])
+        adapter_key = getattr(op, "__triton_viz_original__", op)
+        adapter = GLUON_CALLABLE_ADAPTERS.get(adapter_key, self.adapters[op_type])
         adapter_result = adapter(*args, **kwargs)
-        return op_overrider(*adapter_result.args, **adapter_result.kwargs)
+        if getattr(op, "__triton_viz_simulated__", False):
+            descriptor_args = _simulated_descriptor_overrider_args(
+                op_type,
+                args,
+                kwargs,
+            )
+            # Symbolic clients may not understand every concrete TensorHandle
+            # shape yet; keep simulation moving after best-effort callbacks.
+            try:
+                if descriptor_args is not None:
+                    op_overrider(*descriptor_args.args, **descriptor_args.kwargs)
+                else:
+                    op_overrider(*adapter_result.args, **adapter_result.kwargs)
+            except (NotImplementedError, TypeError, ValueError):
+                pass
+            return op(*args, **kwargs)
+        ret = op_overrider(*adapter_result.args, **adapter_result.kwargs)
+        return ret
 
     def normalize_symbolic_value(self, value: Any) -> Any:
-        if type(value).__name__ == "constexpr" and hasattr(value, "value"):
-            return value.value
+        if type(value).__name__ == "constexpr":
+            constexpr_value = getattr(value, "value", _MISSING)
+            if constexpr_value is not _MISSING:
+                return constexpr_value
         if isinstance(value, gluon_core.tensor):
             value = value.handle
+        try:
+            from triton.runtime.interpreter import TensorHandle
+        except ImportError:  # pragma: no cover - Triton import already required here
+            TensorHandle = ()  # type: ignore[assignment]
+        if isinstance(value, TensorHandle):
+            dtype_or_spec = TritonFrontend._normalize_triton_type(value.dtype)
+            dtype = (
+                dtype_or_spec.dtype
+                if isinstance(dtype_or_spec, SymbolicTypeSpec)
+                else dtype_or_spec
+            )
+            return SymbolicTensorValue(
+                np.asarray(value.data),
+                dtype,
+                dict(getattr(value, "attr", {})),
+            )
         if isinstance(value, (tl.block_type, tl.pointer_type, tl.core.dtype)):
             return TritonFrontend._normalize_triton_type(value)
         if isinstance(value, SymbolicTensorValue):

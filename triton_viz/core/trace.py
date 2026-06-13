@@ -13,6 +13,7 @@ import inspect
 
 
 launches: list[Launch] = []
+_MISSING = object()
 
 
 class TraceInterface:
@@ -289,24 +290,32 @@ class GluonTrace(LaunchInterface, TraceInterface):
         # Gluon has exposed different JIT class names across Triton versions.
         # Treat an object that already has the JIT runner protocol as compiled,
         # and only call gluon.jit for raw Python functions.
-        if not all(hasattr(runner, attr) for attr in ("fn", "run", "arg_names")):
+        if any(
+            getattr(runner, attr, _MISSING) is _MISSING
+            for attr in ("fn", "run", "arg_names")
+        ):
             runner = gluon.jit(runner)
 
         self.runner = runner
         self.fn = runner
         self.base_fn = runner.fn
         self.arg_names = runner.arg_names
+        from .simulation.gluon import GluonInterpretedFunction
+
+        self.interpreter_fn = GluonInterpretedFunction(self.base_fn, self.arg_names)
 
         TraceInterface.__init__(self, client)
 
         for attr in ("__name__", "__module__", "__doc__", "__qualname__"):
-            if hasattr(runner, attr):
-                setattr(self, attr, getattr(runner, attr))
-            elif hasattr(self.base_fn, attr):
-                setattr(self, attr, getattr(self.base_fn, attr))
+            value = getattr(runner, attr, _MISSING)
+            if value is _MISSING:
+                value = getattr(self.base_fn, attr, _MISSING)
+            if value is not _MISSING:
+                setattr(self, attr, value)
 
-        if hasattr(runner, "src"):
-            self.src = runner.src
+        src = getattr(runner, "src", _MISSING)
+        if src is not _MISSING:
+            self.src = src
 
     def _bound_call_args(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -344,18 +353,27 @@ class GluonTrace(LaunchInterface, TraceInterface):
         bound_args = self._bound_call_args(args, launch_kwargs)
         canonical_grid = self._canonical_grid(grid, bound_args)
 
-        for name, arg in bound_args.items():
-            self.client_manager.arg_callback(name, arg, None)
-        self.client_manager.grid_callback(canonical_grid)
-        self.client_manager.grid_idx_callback((0, 0, 0))
+        from .simulation.gluon import gluon_patch_lang
 
-        with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
-            try:
-                ret = self.runner.run(*args, **kwargs)
-            finally:
-                self.client_manager.post_run_callback(self.base_fn)
+        sim_scope = gluon_patch_lang(self.base_fn)
+        try:
+            with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
+                ret = self.interpreter_fn.run(
+                    *args,
+                    **kwargs,
+                    client_manager=self.client_manager,
+                    _patch_lang=False,
+                )
+        finally:
+            sim_scope.restore()
+
+        if canonical_grid != self.client_manager.launch.grid:
+            self.client_manager.grid_callback(canonical_grid)
             self.finalize()
             return ret
+
+        self.finalize()
+        return ret
 
     def __call__(self, *args, **kwargs):
         return self.runner(*args, **kwargs)
