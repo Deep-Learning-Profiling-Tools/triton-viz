@@ -198,11 +198,19 @@ class Tracer(Client):
         def post_dot_callback(ret, input, other):
             if not self.sample:
                 return
-            input_shape = input.data.shape
-            other_shape = other.data.shape
-            ret_shape = ret.data.shape
+
+            def _dot_data(value):
+                handle_data = getattr(getattr(value, "handle", None), "data", None)
+                return value.data if handle_data is None else handle_data
+
+            input_data = _dot_data(input)
+            other_data = _dot_data(other)
+            ret_data = _dot_data(ret)
+            input_shape = input_data.shape
+            other_shape = other_data.shape
+            ret_shape = ret_data.shape
             # Pass input/other raw arrays so draw.py can render MatMul
-            rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            rec = Dot(input_shape, other_shape, ret_shape, input_data, other_data)
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
