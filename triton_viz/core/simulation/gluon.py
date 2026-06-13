@@ -3100,6 +3100,14 @@ def gluon_patch_lang(
         "wait": _mbarrier_wait,
         "invalidate": _mbarrier_invalidate,
     }
+    ampere_async_copy_overrides: dict[str, Callable] = {
+        "async_load": _async_load,
+        "async_copy_global_to_shared": _async_load,
+        "mbarrier_arrive": _noop,
+        "commit_group": _noop,
+        "wait_group": _noop,
+        "wait_all": _noop,
+    }
     amd_async_copy_overrides: dict[str, Callable] = {
         "global_to_shared": _async_load,
         "shared_to_global": _async_store,
@@ -3172,6 +3180,7 @@ def gluon_patch_lang(
         gluon_clc: clc_overrides,
         gluon_hopper_tma: tma_overrides,
         gluon_hopper_mbarrier: mbarrier_overrides,
+        gluon_ampere_async_copy: ampere_async_copy_overrides,
         gluon_amd: amd_overrides,
         gluon_amd_cdna4_async_copy: amd_cdna4_async_copy_overrides,
         gluon_amd_async_copy: amd_async_copy_overrides,
