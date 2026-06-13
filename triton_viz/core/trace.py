@@ -296,6 +296,9 @@ class GluonTrace(LaunchInterface, TraceInterface):
         self.fn = runner
         self.base_fn = runner.fn
         self.arg_names = runner.arg_names
+        from .simulation.gluon import GluonInterpretedFunction
+
+        self.interpreter_fn = GluonInterpretedFunction(self.base_fn, self.arg_names)
 
         TraceInterface.__init__(self, client)
 
@@ -338,22 +341,13 @@ class GluonTrace(LaunchInterface, TraceInterface):
                 "GluonTrace.run() missing required keyword argument: 'grid'"
             )
 
-        launch_kwargs = dict(kwargs)
-        launch_kwargs.pop("warmup", None)
-        launch_kwargs.pop("grid", None)
-        bound_args = self._bound_call_args(args, launch_kwargs)
-        canonical_grid = self._canonical_grid(grid, bound_args)
-
-        for name, arg in bound_args.items():
-            self.client_manager.arg_callback(name, arg, None)
-        self.client_manager.grid_callback(canonical_grid)
-        self.client_manager.grid_idx_callback((0, 0, 0))
-
         with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
-            try:
-                ret = self.runner.run(*args, **kwargs)
-            finally:
-                self.client_manager.post_run_callback(self.base_fn)
+            ret = self.interpreter_fn.run(
+                *args,
+                **kwargs,
+                client_manager=self.client_manager,
+                _patch_lang=False,
+            )
             self.finalize()
             return ret
 

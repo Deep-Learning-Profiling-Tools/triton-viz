@@ -84,8 +84,7 @@ class Tracer(Client):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        def post_allocate_callback(ret):
-            assert hasattr(ret, "data")
+        def post_allocate_callback(ret, *_args):
             self.tensors.append(ret)
 
         def _convert_keys_to_numpy(keys):
@@ -93,6 +92,11 @@ class Tracer(Client):
             if isinstance(keys, (tuple, list)):
                 return tuple(_convert_keys_to_numpy(k) for k in keys)
             return keys.data if hasattr(keys, "data") else keys
+
+        def _mask_data(mask, offsets):
+            if mask is None:
+                return np.ones_like(offsets, dtype=bool)
+            return mask.data
 
         @self.lock_fn
         def pre_load_callback(ptr, mask, keys):
@@ -105,10 +109,13 @@ class Tracer(Client):
                 offsets = ptr.data - tensor.data_ptr()
             else:
                 keys = _convert_keys_to_numpy(keys)
-                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
+                if mask is None:
+                    offsets = masked_load(ptr.get_offsets().data, keys)
+                else:
+                    offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
                 tensor = ptr
 
-            rec = Load(tensor.data_ptr(), offsets, mask.data)
+            rec = Load(tensor.data_ptr(), offsets, _mask_data(mask, offsets))
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
@@ -121,16 +128,15 @@ class Tracer(Client):
                 first_ptr = np.reshape(ptr.data, (-1))[0]
                 tensor = self._get_tensor(first_ptr)
                 offsets = ptr.data - tensor.data_ptr()
-                mask_data = mask.data
+                mask_data = _mask_data(mask, offsets)
             else:
                 keys = _convert_keys_to_numpy(keys)
                 if mask is None:
                     offsets = masked_load(ptr.get_offsets().data, keys)
-                    mask_data = np.ones_like(offsets).astype(bool)
                 else:
-                    mask_data = mask.data
-                    offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
+                    offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
                 tensor = ptr
+                mask_data = _mask_data(mask, offsets)
 
             rec = Store(tensor.data_ptr(), offsets, mask_data)
             rec.call_path = extract_user_frames(num_frames=1)
@@ -206,15 +212,19 @@ class Tracer(Client):
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
-        callbacks = {
-            Allocate: OpCallbacks(after_callback=post_allocate_callback),
-            Load: OpCallbacks(before_callback=pre_load_callback),
-            Store: OpCallbacks(before_callback=pre_store_callback),
-            Transfer: OpCallbacks(before_callback=pre_transfer_callback),
-            ReduceSum: OpCallbacks(after_callback=post_reduce_sum_callback),
-            Dot: OpCallbacks(after_callback=post_dot_callback),
-        }
-        return callbacks.get(op_type, OpCallbacks())
+        if op_type is Allocate:
+            return OpCallbacks(after_callback=post_allocate_callback)
+        if issubclass(op_type, Load):
+            return OpCallbacks(before_callback=pre_load_callback)
+        if issubclass(op_type, Store):
+            return OpCallbacks(before_callback=pre_store_callback)
+        if op_type is Transfer:
+            return OpCallbacks(before_callback=pre_transfer_callback)
+        if op_type is ReduceSum:
+            return OpCallbacks(after_callback=post_reduce_sum_callback)
+        if op_type is Dot:
+            return OpCallbacks(after_callback=post_dot_callback)
+        return OpCallbacks()
 
     def register_for_loop_callback(self):
         return ForLoopCallbacks()
