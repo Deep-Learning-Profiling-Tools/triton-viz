@@ -168,7 +168,21 @@ class TritonTrace(LaunchInterface, TraceInterface):
         with self.client_manager.patch_run(self.base_fn, frontend_name="triton"):
             kwargs.update({"client_manager": self.client_manager})
             kwargs.update({"jit_fn": self.jit_fn})
-            ret = self.runner.run(*args, **kwargs)
+            try:
+                ret = self.runner.run(*args, **kwargs)
+            except BaseException:
+                # A mid-launch abort (e.g. a client raising under
+                # abort_on_error) must still release per-launch state —
+                # clients install class-level hooks (load-value provider,
+                # scalar-concretize observer) that would otherwise leak into
+                # the next launch of a different client. finalize() is the
+                # only place that clears them; best-effort, never masking
+                # the original exception.
+                try:
+                    self.finalize()
+                except Exception:
+                    pass
+                raise
             self.finalize()
             return ret
 
