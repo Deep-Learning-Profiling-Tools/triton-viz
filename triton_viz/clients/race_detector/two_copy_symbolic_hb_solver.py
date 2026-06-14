@@ -229,20 +229,7 @@ class TwoCopySymbolicHBSolver:
             copy_local_substitutions=tuple(copy_local_subs_b),
         )
 
-        # 6. Lower every record under both contexts. extra_assumptions are
-        # capture-side templates (tl.assume / tl.device_assert conditions
-        # over PID0/1/2 and arange vars): every feasible execution satisfies
-        # them, so instantiate one copy per program instance.
-        self.assumption_constraints: tuple[Any, ...] = tuple(
-            apply_sub(
-                a,
-                ctx.pid_substitutions
-                + ctx.arange_substitutions
-                + ctx.copy_local_substitutions,
-            )
-            for ctx in (self.ctx_a, self.ctx_b)
-            for a in self.extra_assumptions
-        )
+        # 6. Lower every record under both contexts.
         self.events: list[SymbolicMemoryEvent] = self._lower_two_copies()
 
         # 7. Atomic-order vars + RF source booleans, BEFORE building the HB
@@ -973,7 +960,7 @@ class TwoCopySymbolicHBSolver:
             solver.add(c)
         for c in self.atomic_coherence_constraints:
             solver.add(c)
-        for c in self.assumption_constraints:
+        for c in self.extra_assumptions:
             solver.add(as_bool(c))
         return solver
 
