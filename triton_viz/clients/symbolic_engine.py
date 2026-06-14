@@ -78,6 +78,8 @@ from ..core.data import (
     IntToPtr,
     AtomicCas,
     AtomicRMW,
+    DeviceAssert,
+    Assume,
     RawLoad,
     RawStore,
     Load,
@@ -2600,6 +2602,7 @@ class SymbolicClient(Client):
             before_loop_callback=self.lock_fn(self._loop_hook_before),
             loop_iter_overrider=self.lock_fn(self._loop_hook_iter_overrider),
             after_loop_callback=self.lock_fn(self._loop_hook_after),
+            abandoned_loop_callback=self.lock_fn(self._loop_hook_abandoned),
         )
         SymbolicExpr.set_loop_ctx_provider(
             lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
@@ -2823,6 +2826,22 @@ class SymbolicClient(Client):
         mask_sym = SymbolicExpr.from_value(mask)
         return SymbolicExpr.create("atomic_rmw", ptr_sym, val_sym, mask_sym)
 
+    def _op_device_assert_overrider(self, condition, *args, **kwargs):
+        # The interpreter's create_assert does `assert condition`, which is
+        # object-truthy on a SymbolicExpr and would silently pass — route the
+        # condition to the client hook instead of evaluating it concretely.
+        self._handle_assumption(condition)
+
+    def _op_assume_overrider(self, condition, *args, **kwargs):
+        self._handle_assumption(condition)
+
+    def _handle_assumption(self, condition: Any) -> None:
+        """Hook for ``tl.device_assert`` / ``tl.assume`` conditions captured
+        symbolically. Default: drop the condition (the prior implicit
+        behavior, made explicit). Clients may collect conditions as solver
+        assumptions — every feasible real execution satisfies them.
+        """
+
     def _build_op_overrider_map(self) -> dict[type[Op], Callable]:
         """Return a mapping of shared Op types to their overrider methods."""
         return {
@@ -2862,6 +2881,8 @@ class SymbolicClient(Client):
             IntToPtr: self._op_bitcast_overrider,
             AtomicCas: self._op_atomic_cas_overrider,
             AtomicRMW: self._op_atomic_rmw_overrider,
+            DeviceAssert: self._op_device_assert_overrider,
+            Assume: self._op_assume_overrider,
             RawLoad: self._op_raw_load_overrider,
             RawStore: self._op_raw_store_overrider,
             Load: self._op_load_overrider,
@@ -3101,6 +3122,32 @@ class SymbolicClient(Client):
                 f"[{self.LOG_TAG}] ▶ leave loop@{lineno} end. "
                 f"(processed {len(ctx.pending_checks)} unique addr patterns)"
             )
+
+    def _loop_hook_abandoned(self, lineno, exc_type) -> None:
+        """Teardown for a loop that exited without exhausting its iterable
+        (break / early return / an exception in the loop body). Pops the
+        context so loop_stack stays balanced — a stale context would swallow
+        every later access into its never-flushed pending queue — and defers
+        the pending-check policy to ``_process_abandoned_loop``.
+        """
+        if self._should_skip_loop_hooks():
+            return
+        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
+            return
+        ctx = self.loop_stack.pop()
+        if cfg.verbose:
+            print(
+                f"[{self.LOG_TAG}] ▶ abandon loop@{lineno} "
+                f"({len(ctx.pending_checks)} pending addr patterns)"
+            )
+        self._process_abandoned_loop(ctx, exc_type)
+
+    def _process_abandoned_loop(self, ctx: LoopContext, exc_type) -> None:
+        """Policy hook for an abandoned loop's never-flushed pending checks.
+
+        The default keeps the legacy behavior of dropping them; clients that
+        cannot afford silent drops (e.g. the race detector) override this.
+        """
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return self.for_loop_callbacks
