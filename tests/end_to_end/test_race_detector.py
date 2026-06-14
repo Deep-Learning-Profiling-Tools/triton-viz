@@ -1,3 +1,4 @@
+import importlib.util
 import inspect
 
 import pytest
@@ -6,9 +7,13 @@ import triton
 import triton.language as tl
 
 import triton_viz
-from triton_viz.clients import RaceDetector, RaceType
+from triton_viz.clients import RaceDetector, RaceType, Sanitizer
+from triton_viz.clients.race_detector.hb_common import UnsupportedSymbolicRaceQuery
 from triton_viz.clients.race_detector.hb_solver import RaceReport
 from triton_viz.clients.race_detector.race_detector import SymbolicRaceDetector
+from triton_viz.clients.symbolic_engine import SymbolicExpr
+from triton_viz.core.callbacks import ForLoopCallbacks, OpCallbacks
+from triton_viz.core.client import Client
 from triton_viz.core.config import config as cfg
 from triton_viz.core.trace import launches
 
@@ -328,6 +333,189 @@ def test_tl_range_load_store_cross_iteration_race():
     assert {r.race_type for r in detector.last_reports} == {RaceType.WAW}
 
 
+# ======== Loop Lifecycle — break / abort / nested re-entry / file identity ==
+
+
+def test_loop_break_marks_unsupported_and_next_launch_recovers():
+    """A `break` exits the loop without exhausting it, so the deferred
+    accesses are never flushed. Regression test: LoopIter only fired
+    after_loop on StopIteration, so the pending WAW store was silently
+    dropped (last_status == 'ok' with no reports) and the dead LoopContext
+    stayed on loop_stack, swallowing every access of subsequent launches on
+    the same detector instance."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def break_kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(4):
+            tl.store(out_ptr + pid, 1.0)
+            break
+
+    out = torch.zeros(8, dtype=torch.float32)
+    break_kernel[(2,)](out)
+
+    # Never a silent clean verdict for an early-exited loop.
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "loop exited early" in detector.unsupported_reason
+    assert detector.loop_stack == []
+
+    # The next launch on the same detector instance must be unaffected:
+    # both blocks write out[0] — a real WAW race.
+    @triton_viz.trace(detector)
+    @triton.jit
+    def racy_kernel(out_ptr):
+        tl.store(out_ptr, 1.0)
+
+    racy_kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+    assert detector.loop_stack == []
+
+
+def test_abort_mid_loop_does_not_poison_next_launch():
+    """abort_on_error raising from inside a loop body (atomic-in-loop)
+    bypasses the StopIteration flush. Regression test: the stale LoopContext
+    survived _clear_launch_runtime/grid_callback, so the next launch's
+    accesses were deferred into the dead context and a genuinely racy
+    kernel finished with last_status == 'ok' and zero reports."""
+
+    detector = SymbolicRaceDetector(abort_on_error=True)
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def atomic_in_loop_kernel(out_ptr):
+        for _i in range(4):
+            tl.atomic_add(out_ptr, 1)
+
+    flag = torch.zeros(4, dtype=torch.int32)
+    with pytest.raises(UnsupportedSymbolicRaceQuery, match="atomic_rmw inside loop"):
+        atomic_in_loop_kernel[(2,)](flag)
+    assert detector.loop_stack == []
+    # The aborted launch must not read as a clean verdict.
+    assert detector.last_status == "unsupported"
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def racy_kernel(out_ptr):
+        tl.store(out_ptr, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    racy_kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+
+
+def test_nested_loop_records_do_not_scale_with_outer_trip_count():
+    """Each outer iteration re-enters the inner loop with a fresh
+    LoopContext (empty signature_cache), so the inner flush used to append
+    one structurally identical record per outer iteration — K duplicate
+    records, K*(K+1)/2 duplicate reports for one source-level race, and a
+    quadratic solver blowup. The launch-level flush dedup must collapse
+    them to one."""
+
+    clean = SymbolicRaceDetector()
+
+    @triton_viz.trace(clean)
+    @triton.jit
+    def clean_kernel(out_ptr, K: tl.constexpr):
+        pid = tl.program_id(0)
+        for i in range(K):
+            for j in range(2):
+                tl.store(out_ptr + pid * 2 * K + i * 2 + j, 1.0)
+
+    out = torch.zeros(32, dtype=torch.float32)
+    clean_kernel[(2,)](out, 8)
+
+    assert clean.last_status == "ok"
+    assert clean.last_reports == []
+    assert len(clean.records) == 1
+
+    racy = SymbolicRaceDetector()
+
+    @triton_viz.trace(racy)
+    @triton.jit
+    def racy_kernel(out_ptr, K: tl.constexpr):
+        pid = tl.program_id(0)
+        for i in range(K):
+            for j in range(2):
+                tl.store(out_ptr + pid + i * 2 + j, 1.0)
+
+    racy_kernel[(2,)](out, 8)
+
+    assert racy.last_status == "ok"
+    assert len(racy.records) == 1
+    # One source-level race must yield one report, not K*(K+1)/2 duplicates.
+    assert len(racy.last_reports) == 1
+    assert racy.last_reports[0].race_type == RaceType.WAW
+
+
+_SAME_LINENO_HELPER_SRC = """\
+import triton
+import triton.language as tl
+import triton_viz
+
+
+def make_helper(detector):
+    @triton_viz.trace(detector)
+    @triton.jit
+    def helper(h_ptr):
+        pid = tl.program_id(0)
+        for j in range(8):
+            tl.store(h_ptr + pid * 8 + j, 1.0)
+    return helper
+"""
+
+
+def test_same_relative_lineno_loops_in_different_files_do_not_collide(tmp_path):
+    """Loop identity must include the source file: hook linenos are
+    function-relative, so the kernel's loop and a traced helper's loop in
+    another file can share a lineno. Regression test: the helper's
+    _loop_hook_after used to overwrite the kernel loop's finished-iterator
+    slot (keyed by lineno alone), substituting the helper's final value 7
+    for the leftover `i` (concretely 3) — the post-helper store
+    pid*(14 - 2*i) + i then collapsed to element 7 for BOTH blocks and a
+    WAW race was fabricated on this race-free kernel (pid0 writes 3, pid1
+    writes 11)."""
+
+    helper_file = tmp_path / "race_helper_module.py"
+    helper_file.write_text(_SAME_LINENO_HELPER_SRC)
+    spec = importlib.util.spec_from_file_location("race_helper_module", helper_file)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    detector = SymbolicRaceDetector()
+    # Triton's rewriter compiles the kernel against module globals (closures
+    # over test locals are lost), so publish the helper as a module global.
+    globals()["_same_lineno_helper"] = module.make_helper(detector)
+    try:
+        # The kernel's `for` sits at the same function-relative lineno (3)
+        # as the helper's `for` in the other file.
+        @triton_viz.trace(detector)
+        @triton.jit
+        def kernel(out_ptr, h_ptr):
+            pid = tl.program_id(0)
+            for i in range(4):
+                pid = pid + 0
+            _same_lineno_helper(h_ptr)  # noqa: F821
+            tl.store(out_ptr + pid * (14 - 2 * i) + i, 1.0)
+
+        out = torch.zeros(16, dtype=torch.float32)
+        h = torch.zeros(16, dtype=torch.float32)
+        kernel[(2,)](out, h)
+    finally:
+        del globals()["_same_lineno_helper"]
+
+    assert detector.last_status == "ok", detector.unsupported_reason
+    assert detector.last_reports == []
+
+
 # ======== Host-Side Control Flow on Per-Instance Values ========
 
 
@@ -543,6 +731,75 @@ def test_no_race_atomic_histogram():
 
     races = launches[-1].records
     assert len(races) == 0
+
+
+# ======== Intra-Instance Duplicate Lanes / Single-Block Launches ========
+
+
+def test_single_block_duplicate_lane_store_reports_race():
+    """grid=(1,) makes the solver's different_blocks constraint UNSAT, so
+    every cross-copy query is vacuous. Regression test: lanes 0/2 (and 1/3)
+    of one store write the same byte with no defined lane order — a real
+    WAW that used to come back as a silent 'ok' with zero reports."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        tl.store(out_ptr + offs % 2, offs)
+
+    out = torch.zeros(2, dtype=torch.int32)
+    kernel[(1,)](out, 4)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+    # The witness is a single program instance, not a cross-block pair.
+    for r in detector.last_reports:
+        assert r.witness_grid_a == r.witness_grid_b
+
+
+def test_single_block_disjoint_store_reports_ok():
+    """The intra-instance query must not turn lane-injective single-block
+    stores into false positives."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        tl.store(out_ptr + offs, offs)
+
+    out = torch.zeros(4, dtype=torch.int32)
+    kernel[(1,)](out, 4)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
+def test_duplicate_lane_store_detected_in_multi_block_launch():
+    """Duplicate lanes inside each program instance with block-disjoint
+    footprints: invisible to the cross-copy (different_blocks) queries even
+    on a multi-block grid."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = tl.arange(0, BLOCK)
+        tl.store(out_ptr + pid * BLOCK + offs % 2, offs)
+
+    out = torch.zeros(8, dtype=torch.int32)
+    kernel[(2,)](out, 4)
+
+    assert detector.last_status == "ok"
+    assert any(
+        r.witness_grid_a == r.witness_grid_b for r in detector.last_reports
+    ), "expected an intra-instance duplicate-lane report"
 
 
 # ======== Minimal While+CAS Smoke Test ========
@@ -1202,7 +1459,8 @@ def _data_dependent_atomic_addr_kernel(idx_ptr, flag_ptr):
     pid = tl.program_id(0)
     idx = tl.load(idx_ptr + pid)
     # Atomic CAS at a data-dependent address — the symbolic engine retains
-    # the load in the pointer expression, so _expr_contains_load fires.
+    # the load in the pointer expression, so the value-dependent-op guard
+    # fires.
     tl.atomic_cas(flag_ptr + idx, 0, 1, sem="acq_rel", scope="gpu")
 
 
@@ -1838,3 +2096,387 @@ def test_aiter_3091_redundant_histogram_writes(
             "race witness address must fall inside the histogram tensor; "
             f"got {r.witness_addr} not in [{hist_base}, {hist_end})"
         )
+
+
+# ======== Launch lifecycle — capture slot, finalize cleanup, status ========
+
+
+class _BlockCountingClient(Client):
+    """Minimal co-attached client that records which blocks executed."""
+
+    NAME = "block_counter"
+
+    def __init__(self):
+        super().__init__()
+        self.blocks_run: list[tuple[int, ...] | None] = []
+        self._last_grid_idx: tuple[int, ...] | None = None
+
+    def pre_run_callback(self, fn):
+        return True
+
+    def post_run_callback(self, fn):
+        # post_run only fires for blocks that actually executed the kernel.
+        self.blocks_run.append(self._last_grid_idx)
+        return False
+
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs):
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret):
+        pass
+
+    def arg_callback(self, name, arg, arg_cvt):
+        pass
+
+    def grid_callback(self, grid):
+        pass
+
+    def grid_idx_callback(self, grid_idx):
+        self._last_grid_idx = grid_idx
+
+    def register_op_callback(self, op_type, *args, **kwargs):
+        return OpCallbacks()
+
+    def register_for_loop_callback(self):
+        return ForLoopCallbacks()
+
+    def finalize(self):
+        return []
+
+
+def test_co_attached_client_sees_full_grid_when_engine_needs_it():
+    """A data-dependent loop bound flips the engine's need_full_grid, so
+    every block must keep running for a co-attached client. Regression
+    test: the race detector's pre_run returned False once its one-shot
+    capture finished, and ClientManager's all() aggregation starved the
+    co-attached client of blocks 1..3."""
+
+    counter = _BlockCountingClient()
+    detector = SymbolicRaceDetector()
+
+    # Detector registered LAST: patch_op rebuilds each op from the original,
+    # so the last client's overriders win (the counter registers none).
+    @triton_viz.trace(detector)
+    @triton_viz.trace(counter)
+    @triton.jit
+    def kernel(n_ptr, out_ptr):
+        pid = tl.program_id(0)
+        n = tl.load(n_ptr)
+        for i in range(n):
+            tl.store(out_ptr + pid * 4 + i, 1.0)
+
+    n = torch.tensor([2], dtype=torch.int32)
+    out = torch.zeros(16, dtype=torch.float32)
+    kernel[(4,)](n, out)
+
+    assert sorted(counter.blocks_run) == [
+        (0, 0, 0),
+        (1, 0, 0),
+        (2, 0, 0),
+        (3, 0, 0),
+    ], f"co-attached client starved: only saw {counter.blocks_run}"
+    # One-shot capture cannot model the load-dependent bound: never 'ok'.
+    assert detector.last_status == "unsupported"
+
+
+def test_concurrent_workers_capture_exactly_once():
+    """Under TRITON_VIZ_NUM_SMS >= 2 several worker threads pass pre_run
+    before any post_run. Regression test: the capture gate was only set in
+    post_run, so multiple workers captured concurrently into shared
+    per-launch state — duplicated records, interleaved program_seq, and
+    K*(K+1)/2 duplicate reports for one source-level race."""
+
+    saved_num_sms = cfg.num_sms
+    cfg.num_sms = 4
+    try:
+        detector = SymbolicRaceDetector()
+
+        @triton_viz.trace(detector)
+        @triton.jit
+        def kernel(out_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * (BLOCK - 1) + tl.arange(0, BLOCK)
+            mask = offs < n
+            tl.store(out_ptr + offs, offs.to(tl.float32), mask=mask)
+
+        out = torch.empty(64, dtype=torch.float32)
+        kernel[(8,)](out, 64, 8)
+
+        assert detector.last_status == "ok"
+        # One-shot capture: the kernel's single store -> exactly one record
+        # and one WAW report, regardless of how many workers ran blocks.
+        assert len(detector.records) == 1
+        assert len(detector.last_reports) == 1
+        assert detector.last_reports[0].race_type == RaceType.WAW
+
+        # Loop bookkeeping is part of the shared capture state too: a
+        # sibling worker pushing/popping contexts corrupted it pre-fix.
+        det_loop = SymbolicRaceDetector()
+
+        @triton_viz.trace(det_loop)
+        @triton.jit
+        def loop_kernel(out_ptr):
+            pid = tl.program_id(0)
+            for i in range(2):
+                for j in range(2):
+                    tl.store(out_ptr + pid + 2 * i + j, 1.0)
+
+        out2 = torch.zeros(16, dtype=torch.float32)
+        loop_kernel[(8,)](out2)
+        assert det_loop.last_status == "ok"
+        assert len(det_loop.records) == 1
+    finally:
+        cfg.num_sms = saved_num_sms
+
+
+def test_mid_capture_exception_reports_aborted_not_ok():
+    """An exception escaping the kernel mid-capture is routed through
+    finalize by trace.py before re-raising. Regression test: finalize's
+    early path reported last_status == 'ok' with empty reports —
+    indistinguishable from a clean no-race verdict even though no analysis
+    ran."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        tl.store(out_ptr + pid, 1.0)
+        x = 1 // 0  # noqa: F841 — host-side crash mid-capture
+
+    out = torch.zeros(4, dtype=torch.float32)
+    with pytest.raises(ZeroDivisionError):
+        kernel[(2,)](out)
+
+    assert detector.last_status == "aborted"
+    assert detector.last_reports == []
+
+
+def test_abort_on_error_status_survives_raise():
+    """abort_on_error raises out of the launch; the detector must still
+    record the unsupported verdict. Regression test: _raise_or_mark raised
+    without setting the unsupported state, so the exception-path finalize
+    reported a clean 'ok'."""
+
+    detector = SymbolicRaceDetector(abort_on_error=True)
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        if pid == 0:
+            tl.store(out_ptr, 1.0)
+
+    out = torch.zeros(4, dtype=torch.float32)
+    with pytest.raises(UnsupportedSymbolicRaceQuery):
+        kernel[(2,)](out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert detector.last_reports == []
+
+
+def test_solver_crash_clears_hooks_and_never_reports_ok(monkeypatch):
+    """An exception escaping finalize's solver phase must still release the
+    launch runtime — the class-level hooks would otherwise leak into later
+    launches of other clients — and must not leave the launch-start 'ok'
+    behind."""
+    import triton_viz.clients.race_detector.race_detector as rd_module
+
+    class _BoomSolver:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("simulated solver failure")
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def racy_kernel(out_ptr):
+        tl.store(out_ptr, 1.0)
+
+    out = torch.zeros(4, dtype=torch.float32)
+    monkeypatch.setattr(rd_module, "TwoCopySymbolicHBSolver", _BoomSolver)
+    with pytest.raises(RuntimeError, match="simulated solver failure"):
+        racy_kernel[(2,)](out)
+
+    assert detector.last_status == "aborted"
+    assert detector.last_reports == []
+    assert SymbolicExpr._load_value_provider is None
+    assert SymbolicExpr._scalar_concretize_observer is None
+
+    # A later sanitizer launch must be clean — pre-fix, the leaked
+    # load-value provider hijacked the sanitizer's masked-load eval and
+    # crashed it with UnsupportedSymbolicRaceQuery.
+    sanitizer = Sanitizer(abort_on_error=True)
+
+    @triton_viz.trace(sanitizer)
+    @triton.jit
+    def sanitizer_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n
+        v = tl.load(x_ptr + offs, mask=mask)  # masked load WITHOUT other
+        tl.store(out_ptr + offs, v, mask=mask)
+
+    x = torch.ones(32)
+    out2 = torch.zeros(32)
+    sanitizer_kernel[(4,)](x, out2, 32, 8)
+
+
+def test_z3_unknown_reports_unsupported_not_ok(monkeypatch):
+    """A race query Z3 cannot decide (timeout, nonlinear give-up) must not
+    collapse into a clean 'ok' verdict. Regression test: find_races only
+    appended candidates on '== sat', so an unknown silently became
+    last_status == 'ok' with zero reports."""
+    import triton_viz.clients.race_detector.two_copy_symbolic_hb_solver as tc_module
+    from z3 import unknown as z3_unknown
+
+    class _UnknownSolver:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add(self, *args, **kwargs):
+            pass
+
+        def push(self):
+            pass
+
+        def pop(self):
+            pass
+
+        def check(self):
+            return z3_unknown
+
+        def reason_unknown(self):
+            return "stubbed unknown"
+
+        def model(self):
+            raise AssertionError("model() must not be read on unknown")
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        tl.store(out_ptr + pid, 1.0)
+
+    out = torch.zeros(4, dtype=torch.float32)
+    monkeypatch.setattr(tc_module, "Solver", _UnknownSolver)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.last_reports == []
+    assert "could not decide" in (detector.unsupported_reason or "")
+
+
+# ======== Block pointers — tile footprint modeling ========
+
+
+@triton.jit
+def _block_ptr_store_kernel(out_ptr, STRIDE: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    bp = tl.make_block_ptr(
+        base=out_ptr,
+        shape=(64,),
+        strides=(1,),
+        offsets=(pid * STRIDE,),
+        block_shape=(BLOCK,),
+        order=(0,),
+    )
+    tl.store(bp, tl.full((BLOCK,), 1.0, tl.float32), boundary_check=(0,))
+
+
+def test_block_ptr_overlapping_tiles_report_race():
+    """tl.make_block_ptr accesses must lower the tile footprint (the access
+    expr, not its descriptor ptr). Regression test: _handle_access_check
+    evaluated expr.ptr, whose make_block_ptr lowering raises
+    NotImplementedError — every block-pointer kernel crashed."""
+    out = torch.zeros(64, dtype=torch.float32)
+    # Tiles [0, 16) and [8, 24) overlap.
+    detector = _run_detector(_block_ptr_store_kernel, (2,), out, 8, 16)
+    assert detector.last_status == "ok", detector.unsupported_reason
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+
+
+def test_block_ptr_disjoint_tiles_report_ok():
+    """Disjoint tiles must stay clean: the tile index vars are copy-local,
+    so the solver quantifies each program copy's tile element independently
+    without fabricating overlap."""
+    out = torch.zeros(64, dtype=torch.float32)
+    detector = _run_detector(_block_ptr_store_kernel, (2,), out, 16, 16)
+    assert detector.last_status == "ok", detector.unsupported_reason
+    assert detector.last_reports == []
+
+
+@triton.jit
+def _block_ptr_advance_loop_kernel(out_ptr, STRIDE: tl.constexpr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    bp = tl.make_block_ptr(
+        base=out_ptr,
+        shape=(64,),
+        strides=(1,),
+        offsets=(pid * STRIDE,),
+        block_shape=(BLOCK,),
+        order=(0,),
+    )
+    for _i in range(2):
+        tl.store(bp, tl.full((BLOCK,), 1.0, tl.float32), boundary_check=(0,))
+        bp = tl.advance(bp, (BLOCK,))
+
+
+def test_block_ptr_advance_loop_race_and_no_race():
+    """tl.advance chains flushed through the loop-deferred path must keep
+    their tile index vars copy-local (PendingEvent carries them to
+    _process_pending_check)."""
+    out = torch.zeros(64, dtype=torch.float32)
+    # pid 0 covers [0, 16), pid 1 covers [8, 24): overlap -> race.
+    racy = _run_detector(_block_ptr_advance_loop_kernel, (2,), out, 8, 8)
+    assert racy.last_status == "ok", racy.unsupported_reason
+    assert any(r.race_type == RaceType.WAW for r in racy.last_reports)
+
+    # pid 0 covers [0, 16), pid 1 covers [16, 32): disjoint -> clean.
+    clean = _run_detector(_block_ptr_advance_loop_kernel, (2,), out, 16, 8)
+    assert clean.last_status == "ok", clean.unsupported_reason
+    assert clean.last_reports == []
+
+
+# ======== Value-dependent addresses — cumsum / sort ========
+
+
+@triton.jit
+def _cumsum_ptr_kernel(out_ptr, BLOCK: tl.constexpr):
+    offs = tl.cumsum(tl.full((BLOCK,), 1, tl.int32), 0)
+    tl.store(out_ptr + offs, tl.full((BLOCK,), 1.0, tl.float32))
+
+
+def test_cumsum_derived_pointer_is_unsupported_not_crash():
+    """Regression test: the address guard only checked has_op("load"), so a
+    cumsum-derived pointer reached eval and CumsumSymbolicExpr's
+    NotImplementedError crashed the launch instead of yielding an
+    unsupported verdict."""
+    out = torch.zeros(64, dtype=torch.float32)
+    detector = _run_detector(_cumsum_ptr_kernel, (2,), out, 8)
+    assert detector.last_status == "unsupported"
+    assert "cumsum" in (detector.unsupported_reason or "")
+    assert detector.last_reports == []
+
+
+@triton.jit
+def _sort_ptr_kernel(out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    sorted_offs = tl.sort(BLOCK - 1 - offs)
+    tl.store(out_ptr + pid * BLOCK + sorted_offs, offs.to(tl.float32))
+
+
+def test_sort_derived_pointer_is_unsupported_not_silent_ok():
+    """Regression test: SortSymbolicExpr lowers as the identity of its
+    input, so a sort-derived pointer recorded the unsorted lanes — a wrong
+    per-lane footprint under a clean 'ok' verdict."""
+    out = torch.zeros(64, dtype=torch.float32)
+    detector = _run_detector(_sort_ptr_kernel, (2,), out, 8)
+    assert detector.last_status == "unsupported"
+    assert "sort" in (detector.unsupported_reason or "")
+    assert detector.last_reports == []

@@ -39,6 +39,7 @@ from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
 
 from ..core.client import Client
 from ..core.callbacks import OpCallbacks, ForLoopCallbacks
+from ..core.patch import LoopSite
 from ..core.config import config as cfg
 from ..core.data import (
     Op,
@@ -204,7 +205,10 @@ class PendingCheck:
 
 @dataclass
 class LoopContext:
-    lineno: int
+    # Loop identity as delivered by the loop hooks: a LoopSite combining the
+    # function-relative lineno with a stable file token, so two loops at the
+    # same lineno in different source files never share a context slot.
+    lineno: LoopSite | int
     length: int
     idx: Any
     idx_z3: ArithRef
@@ -220,15 +224,24 @@ class LoopContext:
 # Frame classification for scalar truthiness/concretization: triton's own
 # frontend does truthiness on scalar tensors as None-guard plumbing (e.g.
 # semantic.py's ``if mask and mask.type.is_block():``), which must not be
-# confused with user host-side control flow like ``if pid == 0:``.
+# confused with value-level control flow like ``if pid == 0:``.
 _TRITON_VIZ_PKG_DIR = (
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
 )
-_TRITON_FRAME_DIRS: tuple[str, str] | None = None
+_TRITON_FRAME_DIRS: tuple[str, str, frozenset[str]] | None = None
 
 
-def _triton_frame_dirs() -> tuple[str, str]:
-    """(triton package dir, triton interpreter file), resolved lazily."""
+def _triton_frame_dirs() -> tuple[str, str, frozenset[str]]:
+    """(triton package dir, triton interpreter file, frontend plumbing
+    files), resolved lazily.
+
+    The plumbing files are the frontend's canonicalization layer — the
+    modules that in compiled Triton execute at compile time, where
+    ``bool(tensor)`` is plain object truthiness. @jit modules that also
+    live under the triton package (language/standard.py, language/random.py,
+    tools/...) are deliberately NOT in this set: their ``if`` statements
+    compile to control flow on the value.
+    """
     global _TRITON_FRAME_DIRS
     if _TRITON_FRAME_DIRS is None:
         import triton
@@ -237,6 +250,12 @@ def _triton_frame_dirs() -> tuple[str, str]:
         _TRITON_FRAME_DIRS = (
             pkg_dir,
             os.path.join(pkg_dir, "runtime", "interpreter.py"),
+            frozenset(
+                (
+                    os.path.join(pkg_dir, "language", "semantic.py"),
+                    os.path.join(pkg_dir, "language", "core.py"),
+                )
+            ),
         )
     return _TRITON_FRAME_DIRS
 
@@ -252,7 +271,7 @@ def innermost_user_site() -> tuple[str, int] | None:
     stable per-callsite identities (e.g. arange interning), not for
     user-facing tracebacks.
     """
-    triton_pkg_dir, _ = _triton_frame_dirs()
+    triton_pkg_dir, _, _ = _triton_frame_dirs()
     frame: FrameType | None = sys._getframe(1)
     while frame is not None:
         filename = frame.f_code.co_filename
@@ -266,18 +285,22 @@ def innermost_user_site() -> tuple[str, int] | None:
 
 
 def scalar_truthiness_from_user_code() -> bool:
-    """True when the in-flight scalar truthiness/read was initiated by user
-    kernel code rather than triton/triton_viz internals.
+    """True when the in-flight scalar truthiness/read was initiated by
+    kernel-level code rather than the triton frontend's plumbing.
 
     Walk outward from the caller, skipping triton_viz frames (wrapper and
     client mechanics) and triton's interpreter (pure truthiness plumbing:
     ``_get_bool`` and its lambdas sit between any initiator and
-    ``__bool__``). The first remaining frame is the initiator: a frame
-    inside the triton package (e.g. semantic.py's ``if mask and ...``
-    None-guards) is internal canonicalization that is uniform across
-    blocks; anything else is the user's own control flow.
+    ``__bool__``). The first remaining frame is the initiator. Only the
+    frontend's canonicalization modules (see ``_triton_frame_dirs``) count
+    as internal: there ``if mask and ...`` None-guards must see "present"
+    — compiled Triton runs them at compile time with object truthiness.
+    Everything else, INCLUDING @jit code that happens to live under the
+    triton package tree, is kernel code whose branches compile to control
+    flow on the value, so it keeps the interpreter's concrete-value
+    semantics.
     """
-    triton_pkg_dir, triton_interpreter_file = _triton_frame_dirs()
+    _, triton_interpreter_file, plumbing_files = _triton_frame_dirs()
     frame: FrameType | None = sys._getframe(1)
     while frame is not None:
         filename = frame.f_code.co_filename
@@ -287,7 +310,7 @@ def scalar_truthiness_from_user_code() -> bool:
         ):
             frame = frame.f_back
             continue
-        return not filename.startswith(triton_pkg_dir)
+        return filename not in plumbing_files
     return False
 
 
@@ -376,16 +399,19 @@ class SymbolicExprDataWrapper:
         return self.coerce_int(int_val)
 
     def __bool__(self) -> bool:
-        # Compiled Triton evaluates `if tensor:` via plain object truthiness
-        # (always True for a present tensor); the interpreter's data-based
-        # bool is a scalar hack (see interpreter _get_bool). Frontend-internal
-        # None-guards — semantic.py's `if mask and mask.type.is_block():` —
-        # must therefore see "present", not a concretized data value, which
-        # under symbolic capture would bake the capture block's data into the
-        # decision and is not even defined for value-less ops such as a
-        # symbolic atomic_cas result. User host-side control flow keeps the
-        # interpreter's concrete-value semantics (symbolic clients observe it
-        # via the scalar-concretize hook in _scalar_data).
+        # Frontend plumbing (semantic.py / core.py) evaluates `if tensor:`
+        # at compile time in compiled Triton, i.e. via plain object
+        # truthiness — always True for a present tensor. Its None-guards
+        # (`if mask and mask.type.is_block():`, `other.handle if other else
+        # None`) must therefore see "present", not a concretized data value:
+        # concretizing there would drop a user-provided falsy `other` and is
+        # not even defined for value-less ops such as a symbolic atomic_cas
+        # result. Every OTHER initiator — user host-side control flow and
+        # any kernel code, even files under the triton package tree —
+        # branches on the VALUE, so it keeps the interpreter's
+        # concrete-value semantics (symbolic clients observe it via the
+        # scalar-concretize hook in _scalar_data and own the
+        # unsupported-marking policy).
         if not scalar_truthiness_from_user_code():
             return True
         return bool(self._scalar_data().item())
@@ -2372,6 +2398,17 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
             return base, shapes, strides, new_offsets, bs
         raise TypeError(f"Expected block pointer, got {type(ptr)}")
 
+    def tile_index_vars(self) -> tuple[Any, ...]:
+        """Free Z3 vars quantifying the tile footprint lowered by
+        ``_to_z3_impl`` — one per block dimension, range-bound in the
+        returned constraints. Exposed so clients reasoning over the
+        footprint (e.g. per-program-copy renaming) can identify the vars
+        without parsing names out of the lowered expression.
+        """
+        return tuple(
+            Int(f"blk_k_{d}") for d in range(len(self._resolve_block_shape(self.ptr)))
+        )
+
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         (
             base,
@@ -2389,8 +2426,9 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
         if c_base:
             parts.append(c_base)
 
+        k_vars = self.tile_index_vars()
         for d in range(len(block_shape)):
-            k_d = Int(f"blk_k_{d}")
+            k_d = k_vars[d]
             off_z3, c_off = offsets[d]._to_z3()
             stride_z3, c_stride = strides[d]._to_z3()
 
@@ -2558,7 +2596,7 @@ class SymbolicClient(Client):
         self.addr_sym: ArithRef | None = Int("addr")
         self.addr_ok_cache: dict[int, BoolRef] = {}
         self.loop_iterator_constraint_cache: dict[
-            tuple[int, int, int, int], BoolRef
+            tuple[LoopSite | int, int, int, int], BoolRef
         ] = {}
         self.access_check_cache: set[int] = set()
         self.op_overrider_map = self._build_op_overrider_map()
@@ -2568,6 +2606,7 @@ class SymbolicClient(Client):
             before_loop_callback=self.lock_fn(self._loop_hook_before),
             loop_iter_overrider=self.lock_fn(self._loop_hook_iter_overrider),
             after_loop_callback=self.lock_fn(self._loop_hook_after),
+            abandoned_loop_callback=self.lock_fn(self._loop_hook_abandoned),
         )
         SymbolicExpr.set_loop_ctx_provider(
             lambda *_args, **_kwargs: (self.loop_stack[-1] if self.loop_stack else None)
@@ -3005,6 +3044,9 @@ class SymbolicClient(Client):
                 print("not a range wrapper, skipping for-loop iterator association.")
             return
 
+        # `lineno` is a LoopSite, so the interned var name embeds both the
+        # function-relative lineno and the file token — loops at the same
+        # lineno in different files get distinct symbolic iterators.
         idx_z3 = Int(f"loop_i_{lineno}")
         sym = SymbolicExpr.create("const", idx_z3, INT32)
         idx = SymbolicExpr.wrap_loop_index(sym, INT32)
@@ -3087,6 +3129,32 @@ class SymbolicClient(Client):
                 f"[{self.LOG_TAG}] ▶ leave loop@{lineno} end. "
                 f"(processed {len(ctx.pending_checks)} unique addr patterns)"
             )
+
+    def _loop_hook_abandoned(self, lineno, exc_type) -> None:
+        """Teardown for a loop that exited without exhausting its iterable
+        (break / early return / an exception in the loop body). Pops the
+        context so loop_stack stays balanced — a stale context would swallow
+        every later access into its never-flushed pending queue — and defers
+        the pending-check policy to ``_process_abandoned_loop``.
+        """
+        if self._should_skip_loop_hooks():
+            return
+        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
+            return
+        ctx = self.loop_stack.pop()
+        if cfg.verbose:
+            print(
+                f"[{self.LOG_TAG}] ▶ abandon loop@{lineno} "
+                f"({len(ctx.pending_checks)} pending addr patterns)"
+            )
+        self._process_abandoned_loop(ctx, exc_type)
+
+    def _process_abandoned_loop(self, ctx: LoopContext, exc_type) -> None:
+        """Policy hook for an abandoned loop's never-flushed pending checks.
+
+        The default keeps the legacy behavior of dropping them; clients that
+        cannot afford silent drops (e.g. the race detector) override this.
+        """
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return self.for_loop_callbacks
@@ -3319,6 +3387,7 @@ class SymbolicClient(Client):
         self.tensor_names.clear()
         self.addr_ok_cache.clear()
         self.access_check_cache.clear()
+        self.loop_stack.clear()
 
     # ── Client callbacks with shared defaults ─────────────────────────
 
@@ -3352,6 +3421,10 @@ class SymbolicClient(Client):
         self._active_blocks = 0
         self._launch_should_stop = False
         self._pending_launch_clear = False
+        # Defensive: a previous launch that aborted mid-loop must not leak its
+        # contexts into this launch — a stale context would swallow every
+        # access into a pending queue that is never flushed.
+        self.loop_stack.clear()
         self.addr_ok = None
         self.pid_ok = cast(
             BoolRef,

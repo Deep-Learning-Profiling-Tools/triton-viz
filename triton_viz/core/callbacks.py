@@ -19,3 +19,6 @@ class ForLoopCallbacks:
     loop_iter_overrider: Callable | None = None
     loop_iter_listener: Callable | None = None
     after_loop_callback: Callable | None = None
+    # (loop_site, exc_type) -> None; fired when a loop exits without
+    # exhausting its iterable (break / early return / exception).
+    abandoned_loop_callback: Callable | None = None

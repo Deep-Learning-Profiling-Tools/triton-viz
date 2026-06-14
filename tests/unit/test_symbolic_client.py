@@ -25,6 +25,7 @@ from triton_viz.clients.symbolic_engine import (
     LoadSymbolicExpr,
     StoreSymbolicExpr,
     _range_to_iterator_constraint,
+    _triton_frame_dirs,
 )
 from triton_viz.core.data import Sort
 from triton_viz.core.symbolic_metadata import (
@@ -747,3 +748,74 @@ def test_store_dtype_block_of_pointers():
     store = StoreSymbolicExpr("store", ptr, value)
     assert store.dtype == FLOAT32, f"Expected FLOAT32, got {store.dtype}"
     assert store.shape == (1, 16), f"Expected shape (1, 16), got {store.shape}"
+
+
+# ======== Scalar Truthiness Frame Classification Tests ===========
+
+
+def _bool_from_frame(filename: str, obj) -> bool:
+    """Call bool(obj) from a frame whose co_filename is ``filename`` — the
+    initiator frame the truthiness classifier sees (compile() needs no real
+    file at that path)."""
+    code = compile("def probe(x):\n    return bool(x)\n", filename, "exec")
+    namespace: dict = {}
+    exec(code, namespace)
+    return namespace["probe"](obj)
+
+
+def _valueless_scalar_expr() -> SymbolicExpr:
+    # atomic_cas results have no concrete value: concretize() is undefined.
+    return SymbolicExpr.create(
+        "atomic_cas",
+        ConstSymbolicExpr("const", value=0, dtype=pointer_type(INT32)),
+        ConstSymbolicExpr("const", value=0, dtype=INT32),
+        ConstSymbolicExpr("const", value=1, dtype=INT32),
+    )
+
+
+def test_truthiness_frontend_plumbing_is_object_truthy():
+    """Frontend plumbing (semantic.py / core.py) runs at compile time in
+    compiled Triton, where ``bool(tensor)`` is object truthiness: its
+    None-guards must see "present" both for a value-less CAS-derived scalar
+    (whose concretization is undefined) and for a concrete FALSY scalar —
+    ``other.handle if other else None`` must not drop a user-provided
+    ``other=0``."""
+    _, _, plumbing_files = _triton_frame_dirs()
+    assert plumbing_files
+    for plumbing_file in plumbing_files:
+        assert _bool_from_frame(plumbing_file, _valueless_scalar_expr().data) is True
+        falsy = ConstSymbolicExpr("const", value=0, dtype=INT32)
+        assert _bool_from_frame(plumbing_file, falsy.data) is True
+
+
+def test_truthiness_triton_tree_kernel_code_uses_concrete_value():
+    """Kernel code that happens to live under the triton package tree
+    (vendored kernels, @jit helpers like language/standard.py) branches on
+    the VALUE: a concrete scalar must yield its real truthiness there, not
+    an unconditionally forced True. Regression test: the classifier used to
+    treat every triton-package initiator as plumbing, silently capturing
+    the wrong branch."""
+    triton_pkg_dir, _, plumbing_files = _triton_frame_dirs()
+    vendored = os.path.join(triton_pkg_dir, "tools", "vendored_kernel.py")
+    jit_helper = os.path.join(triton_pkg_dir, "language", "standard.py")
+    for kernel_file in (vendored, jit_helper):
+        assert kernel_file not in plumbing_files
+        falsy = ConstSymbolicExpr("const", value=0, dtype=INT32)
+        truthy = ConstSymbolicExpr("const", value=1, dtype=INT32)
+        assert _bool_from_frame(kernel_file, falsy.data) is False
+        assert _bool_from_frame(kernel_file, truthy.data) is True
+
+
+def test_truthiness_triton_tree_valueless_scalar_fails_loudly():
+    """When the engine cannot know the value of a kernel-level branch
+    condition it must fail loudly, never silently pick a branch (clients
+    with a scalar-concretize observer get to mark unsupported first)."""
+    triton_pkg_dir, _, _ = _triton_frame_dirs()
+    vendored = os.path.join(triton_pkg_dir, "tools", "vendored_kernel.py")
+    with pytest.raises(NotImplementedError):
+        _bool_from_frame(vendored, _valueless_scalar_expr().data)
+
+
+def test_truthiness_user_code_keeps_concrete_value_semantics():
+    assert bool(ConstSymbolicExpr("const", value=0, dtype=INT32).data) is False
+    assert bool(ConstSymbolicExpr("const", value=1, dtype=INT32).data) is True

@@ -25,6 +25,21 @@ Address-domain invariant:
   this. Capture-side normalisation must convert element / tensor-relative
   offsets to byte addresses BEFORE the records reach the solver.
 
+Intra-instance duplicate lanes:
+  Cross-copy queries assert ``different_blocks``, so they can never witness
+  two lanes of one store colliding inside a single program instance — and a
+  grid=(1,1,1) launch makes ``different_blocks`` UNSAT outright. A separate
+  same-instance query pins ``pid_a == pid_b`` and every launch-level
+  copy-local var equal, leaving the arange lane vars as the only
+  alpha-difference between the copies; requiring a lane-identity difference
+  then asks whether two DISTINCT lanes of the same dynamic access conflict.
+
+Z3 ``unknown`` policy:
+  ``unknown`` is never treated as unsat. A race query that comes back
+  undecided raises :class:`UnsupportedSymbolicRaceQuery` (the launch reports
+  ``unsupported`` instead of a silent clean verdict), and an undecided
+  overlap in the closed-world escape check opens the ``rf_unknown`` escape.
+
 Limitations (current):
   - **Initial atomic source covers scalar tensors and small contiguous flag
     arrays** (``numel <= _MAX_INITIAL_ATOMIC_ELEMENTS = 1024``). Larger or
@@ -63,6 +78,7 @@ from z3 import (
     Solver,
     is_true,
     sat,
+    unsat,
 )
 from z3.z3 import BoolRef, ModelRef
 
@@ -121,6 +137,35 @@ def _import_symbolic_expr_pids():
     from ..symbolic_engine import SymbolicExpr
 
     return (SymbolicExpr.PID0, SymbolicExpr.PID1, SymbolicExpr.PID2)
+
+
+def _z3_var_key(v: Any) -> tuple[int, str, str]:
+    # Mirrors the dedup key used by hb_common.normalize_copy_local_vars.
+    return (v.hash(), str(v.sort()), v.decl().name())
+
+
+def _collect_z3_var_keys(values: tuple[Any, ...]) -> set[tuple[int, str, str]]:
+    """Keys of every 0-ary leaf in ``values``. Numeral leaves are included
+    but can never collide with a variable's key."""
+    seen: set[tuple[int, str, str]] = set()
+    stack: list[Any] = list(values)
+    while stack:
+        v = stack.pop()
+        if v is None or isinstance(v, (bool, int, float, str)):
+            continue
+        if isinstance(v, (list, tuple)):
+            stack.extend(v)
+            continue
+        if not hasattr(v, "num_args"):
+            continue
+        if v.num_args() == 0:
+            try:
+                seen.add(_z3_var_key(v))
+            except Exception:
+                pass
+            continue
+        stack.extend(v.children())
+    return seen
 
 
 class TwoCopySymbolicHBSolver:
@@ -217,20 +262,154 @@ class TwoCopySymbolicHBSolver:
 
     # ──────────────────────── Public API ────────────────────────
 
+    _CROSS_INSTANCE_REASON: str = (
+        "unordered conflicting memory accesses across two symbolic "
+        "program instances under the current symbolic assumptions"
+    )
+    _INTRA_INSTANCE_REASON: str = (
+        "conflicting lanes of a single program instance touch the same "
+        "bytes with no defined intra-instance order"
+    )
+
     def find_races(self) -> list[RaceReport]:
         events_a = [e for e in self.events if e.copy == "a"]
         events_b = [e for e in self.events if e.copy == "b"]
 
-        candidates: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef]]
+        candidates: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]]
         candidates = []
         for a in events_a:
             for b in events_b:
                 solver = self._new_solver()
                 solver.add(self._race_expr(a, b))
-                if solver.check() == sat:
-                    candidates.append((a, b, solver.model()))
+                if self._race_query_is_sat(solver, a, b):
+                    candidates.append(
+                        (a, b, solver.model(), self._CROSS_INSTANCE_REASON)
+                    )
 
+        candidates.extend(self._find_intra_instance_candidates(events_a, events_b))
         return self._dedupe_reports(candidates)
+
+    @staticmethod
+    def _race_query_is_sat(
+        solver: Solver, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent
+    ) -> bool:
+        """``solver.check()`` with Z3 ``unknown`` made conservative.
+
+        ``unknown`` (timeout, nonlinear give-up) must not collapse into
+        unsat: dropping the pair would turn an undecided query into a
+        silent clean "ok" verdict. There is no witness model to report
+        either, so escalate to :class:`UnsupportedSymbolicRaceQuery` —
+        ``SymbolicRaceDetector.finalize`` then reports the launch as
+        unsupported instead of race-free.
+        """
+        result = solver.check()
+        if result == sat:
+            return True
+        if result == unsat:
+            return False
+        detail = solver.reason_unknown()
+        raise UnsupportedSymbolicRaceQuery(
+            f"Z3 could not decide the race query for {a.name} vs {b.name}"
+            + (f" ({detail})" if detail else "")
+        )
+
+    def _find_intra_instance_candidates(
+        self,
+        events_a: list[SymbolicMemoryEvent],
+        events_b: list[SymbolicMemoryEvent],
+    ) -> list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]]:
+        """Duplicate-lane conflicts inside a single program instance.
+
+        See the module docstring: cross-copy queries assert
+        ``different_blocks`` and therefore cannot witness these (under
+        grid=(1,1,1) they are vacuously unsat). Distinct ops within an
+        instance are program-ordered and an atomic op's lanes serialize, so
+        the intra-instance hazard is duplicate addresses across the lanes
+        of a single non-atomic store — plus record pairs the capture left
+        genuinely unordered (equal or unset sequence numbers).
+        """
+        same_instance = self._same_instance_constraints()
+        out: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]]
+        out = []
+        for a in events_a:
+            for b in events_b:
+                lane_cond = self._intra_pair_lane_condition(a, b)
+                if lane_cond is None:
+                    continue
+                solver = self._base_solver()
+                for c in same_instance:
+                    solver.add(c)
+                solver.add(lane_cond)
+                solver.add(self._race_expr(a, b))
+                if self._race_query_is_sat(solver, a, b):
+                    out.append((a, b, solver.model(), self._INTRA_INSTANCE_REASON))
+        return out
+
+    def _intra_pair_lane_condition(
+        self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent
+    ) -> BoolRef | None:
+        """Lane-identity constraint for an intra-instance pair, or ``None``
+        when the pair cannot race within one instance (program-ordered,
+        serialized, never writes, or the symmetric duplicate of an
+        already-queried pair).
+        """
+        if a.record is b.record:
+            # Lanes of one atomic op serialize against each other; a
+            # load's duplicate lanes read-read and cannot conflict.
+            if a.record.is_atomic or a.record.access_mode != "write":
+                return None
+            if a.lane > b.lane:
+                return None  # symmetric duplicate
+            if a.lane < b.lane:
+                return BoolVal(True)  # explicitly distinct lanes
+            return self._lane_identity_differs(a)
+        # Distinct ops within one instance are program-ordered; only pairs
+        # the capture left without an order (equal or unset sequence
+        # numbers) can be concurrently in flight.
+        if a.event_id > b.event_id:
+            return None  # symmetric duplicate
+        if a.program_seq >= 0 and b.program_seq >= 0 and a.program_seq != b.program_seq:
+            return None
+        return BoolVal(True)
+
+    def _lane_identity_differs(self, e: SymbolicMemoryEvent) -> BoolRef | None:
+        """Constraint that the a/b copies of ``e`` denote two DIFFERENT
+        lanes of its record, or ``None`` for a true scalar access (no
+        second lane exists).
+
+        Each arange summary var is injective in the lane index, so any one
+        of the record's arange vars differing across the copies witnesses
+        two distinct lanes. Vars in the activity condition count too: a
+        store whose address ignores the lane still has its lanes
+        distinguished by the mask.
+        """
+        occurring = _collect_z3_var_keys((e.addr, e.active, e.writes))
+        diffs = [
+            var_a != var_b
+            for (_, var_a), (_, var_b) in zip(
+                self.ctx_a.arange_substitutions, self.ctx_b.arange_substitutions
+            )
+            if _z3_var_key(var_a) in occurring or _z3_var_key(var_b) in occurring
+        ]
+        if not diffs:
+            return None
+        return diffs[0] if len(diffs) == 1 else Or(*diffs)
+
+    def _same_instance_constraints(self) -> tuple[BoolRef, ...]:
+        """Pin the b copy onto the a copy's program instance.
+
+        ``pid_a == pid_b`` makes the two copies the same block. Copy-local
+        vars (loop iterators, CAS returns) are pinned equal because within
+        one instance the two lane roles share each dynamic op's iteration
+        and return value — leaving them free would let an ordered
+        cross-iteration pair masquerade as an intra-instance lane conflict.
+        """
+        cons: list[BoolRef] = [self.ctx_a.pid[i] == self.ctx_b.pid[i] for i in range(3)]
+        for (_, var_a), (_, var_b) in zip(
+            self.ctx_a.copy_local_substitutions, self.ctx_b.copy_local_substitutions
+        ):
+            cons.append(var_a == var_b)
+        return tuple(cons)
 
     # ──────────────────────── Construction ────────────────────────
 
@@ -502,6 +681,17 @@ class TwoCopySymbolicHBSolver:
         t = r.record.tensor
         if t is None or r.old_value is None:
             return None
+        # Mirror the capture-side dtype guard (_is_modelable_dtype): the
+        # model is integer-only, so a float-valued flag must fall back to
+        # rf_unknown rather than be silently truncated — int(0.7) == 0
+        # would let the modeled CAS succeed where the real one fails (or
+        # mask a real race behind a fabricated single-winner lock).
+        dtype = getattr(t, "dtype", None)
+        if dtype is not None and (
+            bool(getattr(dtype, "is_floating_point", False))
+            or bool(getattr(dtype, "is_complex", False))
+        ):
+            return None
         try:
             numel = int(t.numel())
             if numel <= 0 or numel > cls._MAX_INITIAL_ATOMIC_ELEMENTS:
@@ -525,14 +715,15 @@ class TwoCopySymbolicHBSolver:
 
         clauses = []
         for i, value in enumerate(values):
-            try:
-                init_value = int(value)
-            except Exception:
+            # bool is an int subclass; anything else (a duck-typed tensor
+            # without a dtype attribute yielding floats) must not be
+            # truncated — fall back to rf_unknown.
+            if not isinstance(value, int):
                 return None
             clauses.append(
                 And(
                     r.addr == IntVal(base + i * elem_size),
-                    r.old_value == IntVal(init_value),
+                    r.old_value == IntVal(int(value)),
                 )
             )
 
@@ -573,7 +764,10 @@ class TwoCopySymbolicHBSolver:
         for e in candidates:
             solver.push()
             solver.add(self._byte_overlap(e, r))
-            feasible = solver.check() == sat
+            # Z3 ``unknown`` must open the escape: keeping the closed world
+            # on an undecided overlap would over-constrain the reader's old
+            # value and silently hide every conflict gated on it.
+            feasible = solver.check() != unsat
             solver.pop()
             if feasible:
                 return True
@@ -765,10 +959,12 @@ class TwoCopySymbolicHBSolver:
                         )
                     )
 
-    def _new_solver(self) -> Solver:
+    def _base_solver(self) -> Solver:
+        """Assertions shared by every race query; the caller adds the
+        cross-instance (``different_blocks``) or same-instance constraints.
+        """
         solver = Solver()
         solver.add(self.grid_constraints)
-        solver.add(self.different_blocks)
         for c in self.arange_constraints_a:
             solver.add(c)
         for c in self.arange_constraints_b:
@@ -779,6 +975,11 @@ class TwoCopySymbolicHBSolver:
             solver.add(c)
         for c in self.assumption_constraints:
             solver.add(as_bool(c))
+        return solver
+
+    def _new_solver(self) -> Solver:
+        solver = self._base_solver()
+        solver.add(self.different_blocks)
         return solver
 
     # ──────────────────────── Reports ────────────────────────
@@ -793,11 +994,13 @@ class TwoCopySymbolicHBSolver:
 
     def _dedupe_reports(
         self,
-        candidates: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef]],
+        candidates: list[
+            tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]
+        ],
     ) -> list[RaceReport]:
         seen: set[tuple[tuple[int, int], tuple[int, int]]] = set()
         reports: list[RaceReport] = []
-        for a, b, model in candidates:
+        for a, b, model, reason in candidates:
             first, second = self._canonical_pair(a, b)
             key = (
                 (first.event_id, first.lane),
@@ -806,7 +1009,7 @@ class TwoCopySymbolicHBSolver:
             if key in seen:
                 continue
             seen.add(key)
-            reports.append(self._make_report(first, second, model))
+            reports.append(self._make_report(first, second, model, reason))
         return reports
 
     def _make_report(
@@ -814,6 +1017,7 @@ class TwoCopySymbolicHBSolver:
         first: SymbolicMemoryEvent,
         second: SymbolicMemoryEvent,
         model: ModelRef,
+        reason: str,
     ) -> RaceReport:
         fw = bool(is_true(model.evaluate(first.writes, model_completion=True)))
         sw = bool(is_true(model.evaluate(second.writes, model_completion=True)))
@@ -845,10 +1049,7 @@ class TwoCopySymbolicHBSolver:
             first=first,
             second=second,
             model=self._model_to_dict(model),
-            reason=(
-                "unordered conflicting memory accesses across two symbolic "
-                "program instances under the current symbolic assumptions"
-            ),
+            reason=reason,
             race_type_value=race_type,
             witness_addr=int(witness_addr),
             witness_grid_a=witness_grid_a,
