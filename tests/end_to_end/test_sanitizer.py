@@ -17,7 +17,14 @@ from triton_viz.core.symbolic_metadata import is_pointer_dtype
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.core.callbacks import ForLoopCallbacks
 from triton_viz.core.config import config
+from triton_viz.core.patch import LoopSite, loop_file_token
 from z3.z3 import BoolRef
+
+
+def _loop_var_name(lineno: int) -> str:
+    """Expected symbolic iterator name for a loop in this test file."""
+    token = loop_file_token(_loop_var_name.__code__.co_filename)
+    return f"loop_i_{LoopSite(lineno, token)}"
 
 
 @pytest.fixture
@@ -345,12 +352,13 @@ def test_loop_deferred_checks_after_context():
 
     assert loop_deferred_check_recorder.after_loop_pending == [1]
     addr_expr, _ = loop_deferred_check_recorder.check_inside_loop[0]
-    assert "4*loop_i_2" in str(addr_expr)
+    loop_var = _loop_var_name(2)
+    assert f"4*{loop_var}" in str(addr_expr)
     iterator_constraints_str = " ".join(
         str(c) for c in loop_deferred_check_recorder.iterator_constraints
     )
-    assert "loop_i_2 >= 0" in iterator_constraints_str
-    assert "loop_i_2 < 4" in iterator_constraints_str
+    assert f"{loop_var} >= 0" in iterator_constraints_str
+    assert f"{loop_var} < 4" in iterator_constraints_str
     assert loop_deferred_check_recorder.records
 
 
