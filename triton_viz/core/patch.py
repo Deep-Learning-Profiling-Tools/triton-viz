@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from contextlib import contextmanager
 import hashlib
+from functools import wraps
 from typing import Any, NamedTuple
 
 from .frontend.base import AdapterResult, LANG_PATCH_SCOPES
@@ -47,7 +48,21 @@ class PatchOp:
         self.run_op_overrider = run_op_overrider
 
     def __getattr__(self, name: str) -> Any:
+        # Module-level patched ops are PatchOp instances; preserve access to
+        # attributes exposed by the original callable.
         return getattr(self.op, name)
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        # PatchOp can be installed on classes, e.g. Gluon shared-memory
+        # descriptor methods. Preserve normal method binding so self is passed.
+        if instance is None:
+            return self
+
+        @wraps(self.op)
+        def bound(*args: Any, **kwargs: Any) -> Any:
+            return self(instance, *args, **kwargs)
+
+        return bound
 
     def __call__(self, *args, **kwargs):
         self.maybe_yield_for_multism()

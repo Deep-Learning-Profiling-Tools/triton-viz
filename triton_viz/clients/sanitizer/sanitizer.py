@@ -19,6 +19,7 @@ from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import (
     Op,
+    Allocate,
     Load,
     Store,
 )
@@ -31,6 +32,7 @@ from ..symbolic_engine import (
     Z3Expr,
     ConstraintConjunction,
     AccessMode,
+    symbolic_tensor_descriptor_value,
 )
 from .data import OutOfBoundsRecordZ3
 from ...utils.traceback_utils import (
@@ -175,12 +177,36 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         SymbolicClient.arg_callback(self, name, arg, arg_cvt)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        if op_type is Allocate:
+            cached = self.op_callback_cache.get(op_type)
+            if cached is None:
+                cached = OpCallbacks(
+                    after_callback=self.lock_fn(self._op_allocate_after_callback)
+                )
+                self.op_callback_cache[op_type] = cached
+            return cached
         return SymbolicClient.register_op_callback(self, op_type)
 
     def post_run_callback(self, fn: Callable) -> bool:
         return SymbolicClient.post_run_callback(self, fn)
 
     # ── Sanitizer-specific hook overrides ─────────────────────────
+
+    def _op_allocate_after_callback(
+        self,
+        ret: Any,
+        base: Any,
+        shape: Any,
+        strides: Any,
+        block_shape: Any,
+    ) -> None:
+        symbolic_tensor_descriptor_value(
+            ret,
+            base=base,
+            shape=shape,
+            strides=strides,
+            block_shape=block_shape,
+        )
 
     def _addr_ok_premise(self) -> BoolRef:
         # Sanitizer adds the actual invalid-address premise under the
@@ -219,11 +245,10 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self.cache_grid = tuple(int(g) for g in grid)
         SymbolicClient.grid_callback(self, grid)
 
-    def _op_load_overrider(self, ptr, mask, other, *args):
-        del args
+    def _op_load_overrider(self, ptr, mask, other, *_args):
         ptr = self._materialize_memory_operand(ptr)
         mask = self._materialize_memory_operand(mask)
-        ptr_sym = SymbolicExpr.from_value(ptr)
+        ptr_sym = self._symbolic_memory_ptr(ptr)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         other_sym = SymbolicExpr.from_value(other) if other is not None else None
         ret = SymbolicExpr.create("load", ptr_sym, mask_sym, other_sym)
@@ -231,11 +256,10 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         self._route_pointer_access(ret, ptr_sym, mask_sym, Load, "read")
         return ret
 
-    def _op_store_overrider(self, ptr, value, mask, *args):
-        del value, args
+    def _op_store_overrider(self, ptr, _value, mask, *_args):
         ptr = self._materialize_memory_operand(ptr)
         mask = self._materialize_memory_operand(mask)
-        ptr_sym = SymbolicExpr.from_value(ptr)
+        ptr_sym = self._symbolic_memory_ptr(ptr)
         mask_sym = SymbolicExpr.from_value(mask) if mask is not None else None
         # Store values do not affect address validity. Avoiding the value
         # subtree keeps sanitizer store checks focused on pointer + mask.
@@ -371,6 +395,12 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         originates from. The global ``addr_ok`` union is only a fallback for
         expressions whose base tensor cannot be resolved.
         """
+        ptr = cast(Any, symbolic_expr).ptr
+        if ptr.op == "descriptor_access":
+            # Descriptor/TMA accesses need descriptor-coordinate bounds, not
+            # just the final pointer address range inside the backing tensor.
+            return ptr.addr_ok
+
         resolved_tensor = self._resolve_tensor(symbolic_expr)
         if resolved_tensor is None:
             return self._addr_ok_expr()

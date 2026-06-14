@@ -75,6 +75,13 @@ class ConcreteAccessRoute:
     range_info: ConcreteRangeInfo
 
 
+@dataclass(frozen=True)
+class TensorDescriptorAccess:
+    descriptor: Any
+    coords: Any
+    pred: Any = None
+
+
 INT1 = SymbolicScalarDType("int1", 1, np.dtype(bool))
 INT8 = SymbolicScalarDType("int8", 8, np.dtype(np.int8))
 INT16 = SymbolicScalarDType("int16", 16, np.dtype(np.int16))
