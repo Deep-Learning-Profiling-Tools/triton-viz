@@ -6,6 +6,8 @@ import triton.language as tl
 
 import triton_viz
 from triton_viz.clients import Profiler, Sanitizer
+from triton_viz.core.callbacks import ForLoopCallbacks, OpCallbacks
+from triton_viz.core.client import Client
 
 
 # ======== Trace Decorator Tests =========
@@ -44,6 +46,120 @@ def test_trace_decorator_add_clients():
     assert sum(c == "sanitizer" for c in clients) == 1
     assert sum(c == "profiler" for c in clients) == 1
     assert sum(c == "tracer" for c in clients) == 1
+
+
+def test_trace_decorator_supports_gluon_frontend():
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as ttgl
+    from triton_viz.core.trace import GluonTrace
+
+    @triton_viz.trace("tracer", frontend="gluon")
+    @gluon.jit
+    def my_gluon_kernel(out):
+        pid = ttgl.program_id(0)
+        ttgl.store(out + pid, pid)
+
+    assert isinstance(my_gluon_kernel, GluonTrace)
+    assert my_gluon_kernel.client_manager.get_client("tracer") is not None
+
+
+def test_gluon_sanitizer_run_preserves_instrumentation_mode(monkeypatch):
+    from triton import knobs
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as ttgl
+
+    @triton_viz.trace(client=Sanitizer(abort_on_error=False), frontend="gluon")
+    @gluon.jit
+    def my_gluon_kernel(out):
+        pid = ttgl.program_id(0)
+        ttgl.store(out + pid, pid)
+
+    seen_modes = []
+    saved_mode = knobs.compilation.instrumentation_mode
+
+    def fake_run(*args, **kwargs):
+        seen_modes.append(knobs.compilation.instrumentation_mode)
+        return "compiled"
+
+    monkeypatch.setattr(my_gluon_kernel.runner, "run", fake_run)
+
+    try:
+        ret = my_gluon_kernel[(1,)](object())
+    finally:
+        knobs.compilation.instrumentation_mode = saved_mode
+
+    assert ret == "compiled"
+    assert seen_modes == [saved_mode]
+    assert knobs.compilation.instrumentation_mode == saved_mode
+
+
+class _PreRunSkippingClient(Client):
+    NAME = "pre_run_skipping"
+
+    def __init__(self):
+        super().__init__()
+        self.pre_run_calls = 0
+        self.post_run_calls = 0
+
+    def pre_run_callback(self, fn):
+        self.pre_run_calls += 1
+        return False
+
+    def post_run_callback(self, fn):
+        self.post_run_calls += 1
+        return True
+
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs):
+        return False
+
+    def post_warmup_callback(self, jit_fn, ret):
+        pass
+
+    def arg_callback(self, name, arg, arg_cvt):
+        pass
+
+    def grid_callback(self, grid):
+        pass
+
+    def grid_idx_callback(self, grid_idx):
+        pass
+
+    def register_op_callback(self, op_type, *args, **kwargs):
+        return OpCallbacks()
+
+    def register_for_loop_callback(self):
+        return ForLoopCallbacks()
+
+    def finalize(self):
+        return []
+
+
+def test_gluon_run_does_not_use_pre_run_as_launch_gate(monkeypatch):
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as ttgl
+
+    client = _PreRunSkippingClient()
+
+    @triton_viz.trace(client=client, frontend="gluon")
+    @gluon.jit
+    def my_gluon_kernel(out):
+        pid = ttgl.program_id(0)
+        ttgl.store(out + pid, pid)
+
+    run_calls = []
+
+    def fake_run(*args, **kwargs):
+        run_calls.append((args, kwargs))
+        return "compiled"
+
+    monkeypatch.setattr(my_gluon_kernel.runner, "run", fake_run)
+
+    ret = my_gluon_kernel[(1,)](object())
+
+    assert ret == "compiled"
+    assert len(run_calls) == 1
+    assert client.pre_run_calls == 0
+    assert client.post_run_calls == 1
 
 
 # ======== Unpatch Tests =========
