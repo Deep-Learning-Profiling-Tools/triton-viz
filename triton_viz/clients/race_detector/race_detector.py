@@ -262,11 +262,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # load-value provider raises unsupported on subsequent loads because
         # the unknown write may alias a snapshotted load source.
         self._unknown_written_region_seen: bool = False
-        # Finished-loop iterator substitutions, keyed by loop site (the
-        # LoopSite delivered by the loop hooks — lineno alone would collide
-        # across files): (idx_z3, IntVal(final iteration value)). See
-        # _apply_finished_iter_subs for why leftover iterator references
-        # must be concretized at record time.
+        # Finished-loop iterator substitutions, keyed by loop hook lineno:
+        # (idx_z3, IntVal(final iteration value)). See _apply_finished_iter_subs
+        # for why leftover iterator references must be concretized at record time.
         self._finished_loop_iter_subs: dict[Any, tuple[Any, Any]] = {}
         # tl.assume / tl.device_assert conditions captured this launch,
         # fed to the two-copy solver as per-copy assumption templates.

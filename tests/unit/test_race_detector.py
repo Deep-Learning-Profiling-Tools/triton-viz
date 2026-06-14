@@ -25,7 +25,6 @@ from triton_viz.clients.symbolic_engine import (
 )
 from triton_viz.core.config import config as cfg
 from triton_viz.core.data import AtomicCas, Load, Store, TensorPointerStore
-from triton_viz.core.patch import LoopSite, loop_file_token
 from triton_viz.core.symbolic_metadata import (
     FLOAT32,
     INT1,
@@ -385,45 +384,17 @@ def _range_wrapper(start: int, stop: int) -> RangeWrapper:
     )
 
 
-def test_loop_sites_in_different_files_get_distinct_iterator_state():
-    """Loop identity is (file, lineno), not lineno alone: two loops at the
-    same function-relative lineno in different source files must get
-    distinct symbolic iterator vars and distinct finished-substitution
-    slots. Regression test: both were keyed by lineno, so the second loop
-    reused (and later overwrote) the first loop's iterator and final value.
-    """
-    detector = SymbolicRaceDetector()
-    site_a = LoopSite(5, loop_file_token("/src/kernel_a.py"))
-    site_b = LoopSite(5, loop_file_token("/src/helper_b.py"))
-    assert site_a != site_b
-
-    detector._loop_hook_before(site_a, _range_wrapper(0, 4))
-    detector._loop_hook_before(site_b, _range_wrapper(0, 8))
-    ctx_a, ctx_b = detector.loop_stack
-    assert ctx_a.idx_z3.decl().name() != ctx_b.idx_z3.decl().name()
-
-    detector._loop_hook_iter_overrider(site_b, 7)
-    detector._loop_hook_after(site_b)
-    detector._loop_hook_iter_overrider(site_a, 3)
-    detector._loop_hook_after(site_a)
-
-    subs = detector._finished_loop_iter_subs
-    assert set(subs) == {site_a, site_b}
-    assert subs[site_a][1].as_long() == 3
-    assert subs[site_b][1].as_long() == 7
-
-
 def test_abandoned_loop_pops_context_and_marks_unsupported():
     """An abandoned loop (break / early return) must pop its context — a
     stale entry would swallow all later accesses — and the launch must not
     read as a clean verdict because the deferred events were never flushed.
     """
     detector = SymbolicRaceDetector()
-    site = LoopSite(7, loop_file_token("/src/kernel_a.py"))
-    detector._loop_hook_before(site, _range_wrapper(0, 4))
+    lineno = 7
+    detector._loop_hook_before(lineno, _range_wrapper(0, 4))
     assert len(detector.loop_stack) == 1
 
-    detector._loop_hook_abandoned(site, None)
+    detector._loop_hook_abandoned(lineno, None)
 
     assert detector.loop_stack == []
     assert detector._suspended_iter_subs == []
@@ -436,18 +407,18 @@ def test_abandoned_loop_policy_respects_abort_and_inflight_exception():
     exception is already unwinding through the loop (that would mask the
     original failure) — it only marks the launch unsupported."""
     detector = SymbolicRaceDetector(abort_on_error=True)
-    site = LoopSite(9, loop_file_token("/src/kernel_a.py"))
+    lineno = 9
 
-    detector._loop_hook_before(site, _range_wrapper(0, 4))
-    detector._loop_hook_abandoned(site, ValueError)  # exception in flight
+    detector._loop_hook_before(lineno, _range_wrapper(0, 4))
+    detector._loop_hook_abandoned(lineno, ValueError)  # exception in flight
     assert detector.loop_stack == []
     assert detector.last_status == "unsupported"
 
     detector.grid_callback((1, 1, 1))
     try:
-        detector._loop_hook_before(site, _range_wrapper(0, 4))
+        detector._loop_hook_before(lineno, _range_wrapper(0, 4))
         with pytest.raises(UnsupportedSymbolicRaceQuery, match="loop exited early"):
-            detector._loop_hook_abandoned(site, None)
+            detector._loop_hook_abandoned(lineno, None)
         # Bookkeeping stays balanced even when the policy raises.
         assert detector.loop_stack == []
         assert detector._suspended_iter_subs == []

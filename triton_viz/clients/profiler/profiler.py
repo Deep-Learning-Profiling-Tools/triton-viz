@@ -14,10 +14,6 @@ import numpy as np
 from dataclasses import dataclass, replace
 
 
-def _loop_lineno(loop_site) -> int:
-    return loop_site.lineno if hasattr(loop_site, "lineno") else loop_site
-
-
 @dataclass(frozen=False)
 class LoopInfo:
     length: int | None = None
@@ -334,20 +330,18 @@ class Profiler(Client):
 
     def register_for_loop_callback(self):
         @self.lock_fn
-        def loop_hook_range_type(loop_site, range_type: str) -> None:
-            lineno = _loop_lineno(loop_site)
+        def loop_hook_range_type(lineno: int, range_type: str) -> None:
             cur = self.loop_info.get(lineno, LoopInfo())
             self.loop_info[lineno] = replace(cur, range_type=range_type)
 
         @self.lock_fn
-        def loop_hook_before(loop_site, iterable):
+        def loop_hook_before(lineno, iterable):
             if self.disable_for_loop_unroll_check:
                 return
 
             if not isinstance(iterable, range):
                 return
 
-            lineno = _loop_lineno(loop_site)
             # Only record each unique loop (by line number) once
             # Different blocks will execute the same loop, so we deduplicate by lineno
             if self.loop_info[lineno].length is not None:
@@ -360,7 +354,7 @@ class Profiler(Client):
             self.loop_info[lineno] = replace(cur, length=length)
 
         @self.lock_fn
-        def loop_hook_after(loop_site) -> None:
+        def loop_hook_after(lineno: int) -> None:
             # No action needed after loop for profiler
             pass
 

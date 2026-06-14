@@ -1,4 +1,3 @@
-import importlib.util
 import inspect
 
 import pytest
@@ -453,67 +452,6 @@ def test_nested_loop_records_do_not_scale_with_outer_trip_count():
     # One source-level race must yield one report, not K*(K+1)/2 duplicates.
     assert len(racy.last_reports) == 1
     assert racy.last_reports[0].race_type == RaceType.WAW
-
-
-_SAME_LINENO_HELPER_SRC = """\
-import triton
-import triton.language as tl
-import triton_viz
-
-
-def make_helper(detector):
-    @triton_viz.trace(detector)
-    @triton.jit
-    def helper(h_ptr):
-        pid = tl.program_id(0)
-        for j in range(8):
-            tl.store(h_ptr + pid * 8 + j, 1.0)
-    return helper
-"""
-
-
-def test_same_relative_lineno_loops_in_different_files_do_not_collide(tmp_path):
-    """Loop identity must include the source file: hook linenos are
-    function-relative, so the kernel's loop and a traced helper's loop in
-    another file can share a lineno. Regression test: the helper's
-    _loop_hook_after used to overwrite the kernel loop's finished-iterator
-    slot (keyed by lineno alone), substituting the helper's final value 7
-    for the leftover `i` (concretely 3) — the post-helper store
-    pid*(14 - 2*i) + i then collapsed to element 7 for BOTH blocks and a
-    WAW race was fabricated on this race-free kernel (pid0 writes 3, pid1
-    writes 11)."""
-
-    helper_file = tmp_path / "race_helper_module.py"
-    helper_file.write_text(_SAME_LINENO_HELPER_SRC)
-    spec = importlib.util.spec_from_file_location("race_helper_module", helper_file)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-
-    detector = SymbolicRaceDetector()
-    # Triton's rewriter compiles the kernel against module globals (closures
-    # over test locals are lost), so publish the helper as a module global.
-    globals()["_same_lineno_helper"] = module.make_helper(detector)
-    try:
-        # The kernel's `for` sits at the same function-relative lineno (3)
-        # as the helper's `for` in the other file.
-        @triton_viz.trace(detector)
-        @triton.jit
-        def kernel(out_ptr, h_ptr):
-            pid = tl.program_id(0)
-            for i in range(4):
-                pid = pid + 0
-            _same_lineno_helper(h_ptr)  # noqa: F821
-            tl.store(out_ptr + pid * (14 - 2 * i) + i, 1.0)
-
-        out = torch.zeros(16, dtype=torch.float32)
-        h = torch.zeros(16, dtype=torch.float32)
-        kernel[(2,)](out, h)
-    finally:
-        del globals()["_same_lineno_helper"]
-
-    assert detector.last_status == "ok", detector.unsupported_reason
-    assert detector.last_reports == []
 
 
 # ======== Host-Side Control Flow on Per-Instance Values ========

@@ -1,7 +1,6 @@
 from collections.abc import Callable
 from contextlib import contextmanager
-import hashlib
-from typing import Any, NamedTuple
+from typing import Any
 
 from .frontend.base import AdapterResult, LANG_PATCH_SCOPES
 from .frontend.base import get_frontend
@@ -136,36 +135,6 @@ def unpatch_op(namespace: Any, attr: str, frontend_name: str):
     setattr(namespace, attr, original_op)
 
 
-class LoopSite(NamedTuple):
-    """Identity of one rewritten for-loop.
-
-    The loop rewrite records function-relative line numbers (the kernel
-    source is parsed with ``def`` at line 1), so two loops in different
-    source files can share a line number. Loop hooks and per-loop symbolic
-    state are therefore keyed by (lineno, file token), never lineno alone.
-    """
-
-    lineno: int
-    file_token: str
-
-    def __str__(self) -> str:
-        # Embedded in symbolic iterator var names (``loop_i_{site}``), so it
-        # must be deterministic for a given source location.
-        return f"{self.lineno}_{self.file_token}"
-
-
-_FILE_TOKEN_CACHE: dict[str, str] = {}
-
-
-def loop_file_token(filename: str) -> str:
-    """Short stable token identifying a source file inside a LoopSite."""
-    token = _FILE_TOKEN_CACHE.get(filename)
-    if token is None:
-        token = hashlib.blake2s(filename.encode(), digest_size=4).hexdigest()
-        _FILE_TOKEN_CACHE[filename] = token
-    return token
-
-
 class LoopIter:
     """
     Purpose:
@@ -175,7 +144,7 @@ class LoopIter:
         hooks: Object that owns range_type, before_loop, loop_iter,
             after_loop, and abandoned_loop hooks.
         iterable: Iterable produced by the patched loop expression.
-        loop_site: LoopSite identifying the loop's source location.
+        lineno: Source line number for the loop.
         range_type: Frontend-specific classification of the loop iterable.
 
     Returns:
@@ -187,16 +156,16 @@ class LoopIter:
     when the iterable was NOT exhausted. The hook owner decides policy.
     """
 
-    def __init__(self, hooks, iterable, loop_site, range_type):
+    def __init__(self, hooks, iterable, lineno, range_type):
         self._it = iter(iterable)
-        self._loop_site = loop_site
+        self._lineno = lineno
         self._hooks = hooks
         self._exhausted = False
         # triggering range_type
-        self._hooks.range_type(self._loop_site, range_type)
+        self._hooks.range_type(self._lineno, range_type)
         # triggering before_loop
         if self._hooks.before_loop:
-            self._hooks.before_loop(self._loop_site, iterable)
+            self._hooks.before_loop(self._lineno, iterable)
 
     def __iter__(self):
         return self
@@ -209,11 +178,11 @@ class LoopIter:
             # Exiting the loop and triggering after_loop
             self._exhausted = True
             if self._hooks.after_loop:
-                self._hooks.after_loop(self._loop_site)
+                self._hooks.after_loop(self._lineno)
             raise
 
         # trigger loop overriders and loop listeners
-        idx = self._hooks.loop_iter(self._loop_site, idx)
+        idx = self._hooks.loop_iter(self._lineno, idx)
         return idx
 
     def __enter__(self):
@@ -221,7 +190,7 @@ class LoopIter:
 
     def __exit__(self, exc_type, exc_value, traceback):
         if not self._exhausted and self._hooks.abandoned_loop:
-            self._hooks.abandoned_loop(self._loop_site, exc_type)
+            self._hooks.abandoned_loop(self._lineno, exc_type)
         return False
 
 
