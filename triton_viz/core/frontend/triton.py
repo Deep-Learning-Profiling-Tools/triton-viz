@@ -39,8 +39,6 @@ from ..data import (
     Ashr,
     AtomicCas,
     AtomicRMW,
-    DeviceAssert,
-    Assume,
     BinaryOp,
     Bitcast,
     Broadcast,
@@ -109,7 +107,6 @@ from ..symbolic_metadata import (
     dtype_to_numpy,
     pointer_type as symbolic_pointer_type,
 )
-from ..patch import PassthroughLoopIter
 from .base import (
     AdapterResult,
     Frontend,
@@ -157,8 +154,6 @@ TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
         "create_int_to_ptr": IntToPtr,
         "create_atomic_cas": AtomicCas,
         "create_atomic_rmw": AtomicRMW,
-        "create_assert": DeviceAssert,
-        "create_assume": Assume,
     },
     tl: {
         "max": ReduceMax,
@@ -254,7 +249,6 @@ class TritonFrontend(Frontend):
         self._thread_local_interpreter_state.grid_idx = None
         self._current_client_manager = None
         self._loop_wrapper_arg = "_triton_viz_loop_iter_wrapper"
-        self._loop_iter_name = "_triton_viz_loop_iter"
         self._loop_ast_methods: dict[str, Callable | object] = {}
         self._loop_ast_patched = False
         self._patch_calls_scope = 0
@@ -331,47 +325,26 @@ class TritonFrontend(Frontend):
             iter_args = ast.Tuple(elts=[], ctx=ast.Load())
             iter_kwargs = ast.Dict(keys=[], values=[])
 
-        # The loop runs inside a `with` block over the wrapper object so the
-        # `abandoned_loop` hook fires deterministically when the loop exits
-        # without exhausting its iterable (break / early return / exception);
-        # a bare `for` would silently skip all loop teardown in those cases.
-        # A single shared target name is safe even for nested loops: both the
-        # `with` block and the `for` statement keep their own object reference
-        # on the interpreter stack, so an inner rebinding of the name cannot
-        # affect the outer loop or its teardown.
         return ast.fix_missing_locations(
-            ast.With(
-                items=[
-                    ast.withitem(
-                        context_expr=ast.Call(
-                            # `_loop_wrapper_arg` is injected as a hidden
-                            # keyword-only default by
-                            # `_visit_triton_function_def`, avoiding any
-                            # helper name in user kernel globals.
-                            func=ast.Name(id=self._loop_wrapper_arg, ctx=ast.Load()),
-                            args=[
-                                iter_callable,
-                                iter_args,
-                                iter_kwargs,
-                                ast.Constant(value=node.lineno),
-                                ast.Constant(value=range_type),
-                            ],
-                            keywords=[],
-                        ),
-                        optional_vars=ast.Name(
-                            id=self._loop_iter_name, ctx=ast.Store()
-                        ),
-                    )
-                ],
-                body=[
-                    ast.For(
-                        target=node.target,
-                        iter=ast.Name(id=self._loop_iter_name, ctx=ast.Load()),
-                        body=node.body,
-                        orelse=node.orelse,
-                        type_comment=node.type_comment,
-                    )
-                ],
+            ast.For(
+                target=node.target,
+                iter=ast.Call(
+                    # `_loop_wrapper_arg` is injected as a hidden keyword-only
+                    # default by `_visit_triton_function_def`, avoiding any
+                    # helper name in user kernel globals.
+                    func=ast.Name(id=self._loop_wrapper_arg, ctx=ast.Load()),
+                    args=[
+                        iter_callable,
+                        iter_args,
+                        iter_kwargs,
+                        ast.Constant(value=node.lineno),
+                        ast.Constant(value=range_type),
+                    ],
+                    keywords=[],
+                ),
+                body=node.body,
+                orelse=node.orelse,
+                type_comment=node.type_comment,
             )
         )
 
@@ -407,11 +380,10 @@ class TritonFrontend(Frontend):
         if client_manager is None:
             # Device-function rewrites can run outside a top-level traced launch.
             # In that case, preserve Triton's normal behavior and just evaluate
-            # the original iterable (wrapped so the rewritten `with` block
-            # still has a context manager to enter).
+            # the original iterable.
             args = tuple(iter_args) if iter_args is not None else ()
             kwargs = dict(iter_kwargs) if iter_kwargs is not None else {}
-            return PassthroughLoopIter(iterable_callable(*args, **kwargs))
+            return iterable_callable(*args, **kwargs)
         return client_manager.loop_iter_wrapper(
             iterable_callable,
             iter_args,

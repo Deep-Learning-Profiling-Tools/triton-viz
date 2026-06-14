@@ -141,26 +141,19 @@ class LoopIter:
         Wrap an iterable so registered loop hooks run around each iteration.
 
     Args:
-        hooks: Object that owns range_type, before_loop, loop_iter,
-            after_loop, and abandoned_loop hooks.
+        hooks: Object that owns range_type, before_loop, loop_iter, and after_loop hooks.
         iterable: Iterable produced by the patched loop expression.
         lineno: Source line number for the loop.
         range_type: Frontend-specific classification of the loop iterable.
 
     Returns:
         Iterator that yields possibly overridden loop indices.
-
-    The for-loop rewrite executes the loop inside a ``with`` block over this
-    object, giving early exits (break / return / an exception in the loop
-    body) a deterministic teardown point: ``abandoned_loop`` fires exactly
-    when the iterable was NOT exhausted. The hook owner decides policy.
     """
 
     def __init__(self, hooks, iterable, lineno, range_type):
         self._it = iter(iterable)
         self._lineno = lineno
         self._hooks = hooks
-        self._exhausted = False
         # triggering range_type
         self._hooks.range_type(self._lineno, range_type)
         # triggering before_loop
@@ -176,7 +169,6 @@ class LoopIter:
             idx = next(self._it)
         except StopIteration:
             # Exiting the loop and triggering after_loop
-            self._exhausted = True
             if self._hooks.after_loop:
                 self._hooks.after_loop(self._lineno)
             raise
@@ -184,36 +176,6 @@ class LoopIter:
         # trigger loop overriders and loop listeners
         idx = self._hooks.loop_iter(self._lineno, idx)
         return idx
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        if not self._exhausted and self._hooks.abandoned_loop:
-            self._hooks.abandoned_loop(self._lineno, exc_type)
-        return False
-
-
-class PassthroughLoopIter:
-    """Loop wrapper used when no client manager is active.
-
-    Preserves the original iterable's behavior while still satisfying the
-    ``with`` protocol emitted by the for-loop rewrite.
-    """
-
-    __slots__ = ("_iterable",)
-
-    def __init__(self, iterable):
-        self._iterable = iterable
-
-    def __iter__(self):
-        return iter(self._iterable)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        return False
 
 
 def patch_for_loop(frontend_name: str = "triton"):
