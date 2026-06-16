@@ -1814,6 +1814,7 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
 def patch_lang(fn: Callable | None = None) -> _LangPatchScope:
     """Patch Gluon builtins to execute through the NumPy interpreter builder."""
 
+    del fn
     scope = _LangPatchScope()
     for module in _GLUON_BUILTIN_MODULES:
         _patch_gluon_builtins(module, scope)
@@ -1821,11 +1822,4 @@ def patch_lang(fn: Callable | None = None) -> _LangPatchScope:
         _patch_gluon_builtins(cls, scope)
     _patch_lang_tensor(gluon_core.tensor, scope)
     _patch_lang_core(gluon_core, scope)
-
-    if fn is not None:
-        globals_dict = getattr(fn, "__globals__", {})
-        patched_modules = set(_GLUON_BUILTIN_MODULES)
-        for name, value in list(globals_dict.items()):
-            if inspect.ismodule(value) and value in patched_modules:
-                scope.set_item(globals_dict, name, value)
     return scope

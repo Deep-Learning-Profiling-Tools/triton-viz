@@ -1,6 +1,7 @@
 import numpy as np
 
 from triton.experimental.gluon import language as gl
+from triton.experimental.gluon.language import _core as gluon_core
 from triton.experimental.gluon.language import _layouts as layouts
 
 from triton_viz.core.simulation import gluon
@@ -9,6 +10,21 @@ from triton_viz.core.simulation import gluon
 def test_gluon_simulation_uses_dedicated_builder():
     assert hasattr(gluon.gluon_builder, "create_local_scatter")
     assert not hasattr(gluon.interpreter_builder, "create_local_scatter")
+
+
+def test_gluon_patch_lang_restores_module_and_class_builtins():
+    original_full = gl.full
+    original_scatter = gluon_core.shared_memory_descriptor.scatter
+
+    scope = gluon.patch_lang()
+    try:
+        assert gl.full is not original_full
+        assert gluon_core.shared_memory_descriptor.scatter is not original_scatter
+    finally:
+        scope.restore()
+
+    assert gl.full is original_full
+    assert gluon_core.shared_memory_descriptor.scatter is original_scatter
 
 
 def test_gluon_shared_scatter_routes_through_builder():
