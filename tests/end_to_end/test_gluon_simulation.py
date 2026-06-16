@@ -862,6 +862,318 @@ def _GroupedPersistentTileScheduler(GROUP_SIZE_M):
 
 
 @gluon.jit
+def _amd_core_helpers_kernel(values_ptr, abs_out, old_out, lock, BLOCK: gl.constexpr):
+    layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    offsets = gl.arange(0, BLOCK, layout)
+    gl.assume(BLOCK > 0)
+    offsets = gl.multiple_of(offsets, [1])
+    values = gl.load(values_ptr + offsets)
+    gl.store(abs_out + offsets, gl.abs(values))
+    old = gl.atomic_cas(lock, 0, 7)
+    gl.store(old_out, old)
+
+
+@gluon.jit
+def _amd_tdm_copy_kernel(
+    inp,
+    copy_out,
+    gather_out,
+    scatter_out,
+    row_indices_ptr,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    BLOCK_M: gl.constexpr,
+    BLOCK_N: gl.constexpr,
+):
+    index_layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    shared_layout: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, [1, 0])
+    desc = amd_tdm.make_tensor_descriptor(
+        inp,
+        (M, N),
+        (N, 1),
+        (BLOCK_M, BLOCK_N),
+        shared_layout,
+    )
+    copy_desc = amd_tdm.make_tensor_descriptor(
+        copy_out,
+        (M, N),
+        (N, 1),
+        (BLOCK_M, BLOCK_N),
+        shared_layout,
+    )
+    gather_desc = amd_tdm.make_tensor_descriptor(
+        gather_out,
+        (BLOCK_M, BLOCK_N),
+        (BLOCK_N, 1),
+        (BLOCK_M, BLOCK_N),
+        shared_layout,
+    )
+    scatter_desc = amd_tdm.make_tensor_descriptor(
+        scatter_out,
+        (M, N),
+        (N, 1),
+        (BLOCK_M, BLOCK_N),
+        shared_layout,
+    )
+    smem = gl.allocate_shared_memory(gl.float32, (BLOCK_M, BLOCK_N), shared_layout)
+    amd_tdm.async_load(desc, [0, 0], smem)
+    amd_tdm.async_wait(0)
+    amd_tdm.async_store(copy_desc, [0, 0], smem)
+    amd_tdm.prefetch(desc, [0, 0])
+
+    row_offsets = gl.arange(0, BLOCK_M, index_layout)
+    row_indices = gl.load(row_indices_ptr + row_offsets)
+    gather_smem = gl.allocate_shared_memory(
+        gl.float32, (BLOCK_M, BLOCK_N), shared_layout
+    )
+    amd_tdm.async_gather(desc, row_indices, 0, gather_smem)
+    amd_tdm.async_wait(0)
+    amd_tdm.async_store(gather_desc, [0, 0], gather_smem)
+    amd_tdm.async_scatter(scatter_desc, row_indices, 0, gather_smem)
+    amd_tdm.async_wait(0)
+
+
+@gluon.jit
+def _amd_tdm_update_descriptor_kernel(
+    inp,
+    out_offset,
+    out_bounded,
+    M: gl.constexpr,
+    N: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 1], [0, 1])
+    desc = amd_tdm.make_tensor_descriptor(
+        inp,
+        [M, N],
+        [N, 1],
+        [2, N],
+        layout,
+    )
+    offset_desc = amd_tdm.update_tensor_descriptor(desc, add_offsets=[2, 0])
+    offset_smem = gl.allocate_shared_memory(gl.float32, [2, N], layout)
+    amd_tdm.async_load(offset_desc, [0, 0], offset_smem)
+    amd_tdm.async_store(
+        amd_tdm.make_tensor_descriptor(out_offset, [2, N], [N, 1], [2, N], layout),
+        [0, 0],
+        offset_smem,
+    )
+    bounded_desc = amd_tdm.update_tensor_descriptor(
+        desc,
+        add_offsets=[M - 1, 0],
+        set_bounds=[1, N],
+    )
+    bounded_smem = gl.allocate_shared_memory(gl.float32, [2, N], layout)
+    amd_tdm.async_load(bounded_desc, [0, 0], bounded_smem)
+    amd_tdm.async_store(
+        amd_tdm.make_tensor_descriptor(out_bounded, [2, N], [N, 1], [2, N], layout),
+        [0, 0],
+        bounded_smem,
+    )
+
+
+@gluon.jit
+def _amd_async_copy_kernel(inp, out, BLOCK: gl.constexpr):
+    layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    shared_layout: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, [0])
+    offsets = gl.arange(0, BLOCK, layout)
+    smem = gl.allocate_shared_memory(gl.float32, (BLOCK,), shared_layout)
+    amd_async_copy.global_to_shared(smem, inp + offsets)
+    amd_async_copy.commit_group()
+    amd_async_copy.wait_group(0)
+    amd_cluster.arrive()
+    amd_cluster.wait()
+    amd_async_copy.shared_to_global(out + offsets, smem)
+    amd_async_copy.commit_group()
+    amd_async_copy.wait_group(0)
+
+
+@gluon.jit
+def _amd_cdna4_async_copy_kernel(inp, out_global, out_buffer, BLOCK: gl.constexpr):
+    layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    offsets = gl.arange(0, BLOCK, layout).to(gl.int32)
+    smem = gl.allocate_shared_memory(gl.float32, [BLOCK], layout)
+    cdna4_async_copy.global_load_to_shared(smem, inp + offsets)
+    cdna4_async_copy.commit_group()
+    cdna4_async_copy.wait_group(0)
+    global_values = cdna4_async_copy.load_shared_relaxed(smem, layout)
+    gl.store(out_global + offsets, global_values)
+
+    mask = offsets < (BLOCK - 1)
+    cdna4_async_copy.buffer_load_to_shared(smem, inp, offsets, mask, other=-3.0)
+    cdna4_async_copy.commit_group()
+    cdna4_async_copy.wait_group(0)
+    buffer_values = cdna4_async_copy.load_shared_relaxed(smem, layout)
+    gl.store(out_buffer + offsets, buffer_values)
+
+
+@gluon.jit
+def _amd_buffer_ops_kernel(inp, out_module, out_direct, BLOCK: gl.constexpr):
+    layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    offsets = gl.arange(0, BLOCK, layout).to(gl.int32)
+    mask = offsets < (BLOCK - 1)
+    module_values = gl.amd.gfx1250.buffer_load(inp, offsets, mask=mask, other=-1.0)
+    gl.amd.gfx1250.buffer_store(module_values + 1.0, out_module, offsets, mask=mask)
+    direct_values = amd_buffer_load(inp, offsets, mask=mask, other=-2.0)
+    amd_buffer_store(direct_values + 2.0, out_direct, offsets, mask=mask)
+
+
+@gluon.jit
+def _amd_wmma_kernel(
+    a_ptr,
+    b_ptr,
+    out_module,
+    out_direct,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    K: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 1], [0, 1])
+    offs_m = gl.arange(0, M, layout)[:, None]
+    offs_n = gl.arange(0, N, layout)[None, :]
+    offs_k = gl.arange(0, K, layout)
+    a = gl.load(a_ptr + offs_m * K + offs_k[None, :])
+    b = gl.load(b_ptr + offs_k[:, None] * N + offs_n)
+    acc = gl.zeros((M, N), dtype=gl.float32, layout=layout)
+    module_result = gl.amd.gfx1250.wmma(a, b, acc)
+    direct_result = amd_wmma(a, b, acc)
+    gl.store(out_module + offs_m * N + offs_n, module_result)
+    gl.store(out_direct + offs_m * N + offs_n, direct_result)
+
+
+@gluon.jit
+def _amd_rdna_wmma_kernel(
+    a_ptr,
+    b_ptr,
+    out_rdna3,
+    out_rdna4,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    K: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 1], [0, 1])
+    offs_m = gl.arange(0, M, layout)[:, None]
+    offs_n = gl.arange(0, N, layout)[None, :]
+    offs_k = gl.arange(0, K, layout)
+    a = gl.load(a_ptr + offs_m * K + offs_k[None, :])
+    b = gl.load(b_ptr + offs_k[:, None] * N + offs_n)
+    acc = gl.zeros((M, N), dtype=gl.float32, layout=layout)
+    rdna3_result = gl.amd.rdna3.wmma(a, b, acc)
+    rdna4_result = amd_rdna4.wmma(a, b, acc)
+    gl.store(out_rdna3 + offs_m * N + offs_n, rdna3_result)
+    gl.store(out_rdna4 + offs_m * N + offs_n, rdna4_result)
+
+
+@gluon.jit
+def _amd_scaled_upcast_kernel(out_cdna3, out_cdna4, out_gfx1250):
+    packed_layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    unpacked_layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    packed = gl.full([2], 0x21, gl.uint8, packed_layout)
+    scale = gl.full([4], 0x7F, gl.uint8, unpacked_layout)
+    cdna3_values = gl.amd.cdna3.scaled_upcast(packed, scale, gl.float16, axis=0)
+    cdna4_values = amd_cdna4.scaled_upcast(packed, scale, gl.float16, axis=0)
+    gfx1250_values = gl.amd.gfx1250.scaled_upcast(packed, scale, gl.float16, axis=0)
+    offsets = gl.arange(0, 4, unpacked_layout)
+    gl.store(out_cdna3 + offsets, cdna3_values)
+    gl.store(out_cdna4 + offsets, cdna4_values)
+    gl.store(out_gfx1250 + offsets, gfx1250_values)
+
+
+@gluon.jit
+def _fp4_to_fp_kernel(out, BLOCK: gl.constexpr):
+    packed_layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    unpacked_layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    packed = gl.full([2], 0x21, gl.uint8, packed_layout)
+    values = gl.fp4_to_fp(packed, gl.float32, axis=0)
+    offsets = gl.arange(0, BLOCK, unpacked_layout)
+    gl.store(out + offsets, values)
+
+
+@gluon.jit
+def _amd_warp_pipeline_stage_kernel(inp, out, BLOCK: gl.constexpr):
+    layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    offsets = gl.arange(0, BLOCK, layout)
+    with gl.amd.warp_pipeline_stage("load", priority=3):
+        values = gl.load(inp + offsets)
+    with amd_warp_pipeline_stage("compute"):
+        values = (values + 1.0) * 2.0
+    gl.store(out + offsets, values)
+
+
+@gluon.jit
+def _amd_cdna_buffer_ops_kernel(
+    inp,
+    out_cdna3,
+    out_cdna4,
+    atomic_values,
+    old_values,
+    BLOCK: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    offsets = gl.arange(0, BLOCK, layout).to(gl.int32)
+    mask = offsets < (BLOCK - 1)
+    cdna3_values = gl.amd.cdna3.buffer_load(inp, offsets, mask=mask, other=-1.0)
+    gl.amd.cdna3.buffer_store(cdna3_values + 1.0, out_cdna3, offsets, mask=mask)
+    cdna4_values = amd_cdna4.buffer_load(inp, offsets, mask=mask, other=-2.0)
+    amd_cdna4.buffer_store(cdna4_values + 2.0, out_cdna4, offsets, mask=mask)
+    old = amd_cdna3.buffer_atomic_add(atomic_values, offsets, 3, mask=mask)
+    gl.store(old_values + offsets, old, mask=mask)
+
+
+@gluon.jit
+def _amd_cdna_mfma_kernel(
+    a_ptr,
+    b_ptr,
+    out_cdna3,
+    out_cdna4,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    K: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 1], [0, 1])
+    offs_m = gl.arange(0, M, layout)[:, None]
+    offs_n = gl.arange(0, N, layout)[None, :]
+    offs_k = gl.arange(0, K, layout)
+    a = gl.load(a_ptr + offs_m * K + offs_k[None, :])
+    b = gl.load(b_ptr + offs_k[:, None] * N + offs_n)
+    acc = gl.zeros((M, N), dtype=gl.float32, layout=layout)
+    cdna3_result = gl.amd.cdna3.mfma(a, b, acc)
+    cdna4_result = amd_cdna4.mfma(a, b, acc)
+    gl.store(out_cdna3 + offs_m * N + offs_n, cdna3_result)
+    gl.store(out_cdna4 + offs_m * N + offs_n, cdna4_result)
+
+
+@gluon.jit
+def _amd_scaled_mma_kernel(
+    a_ptr,
+    b_ptr,
+    out_cdna4,
+    out_gfx1250,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    K: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 1], [0, 1])
+    offs_m = gl.arange(0, M, layout)[:, None]
+    offs_n = gl.arange(0, N, layout)[None, :]
+    offs_k = gl.arange(0, K, layout)
+    a = gl.load(a_ptr + offs_m * K + offs_k[None, :])
+    b = gl.load(b_ptr + offs_k[:, None] * N + offs_n)
+    acc = gl.zeros((M, N), dtype=gl.float32, layout=layout)
+    cdna4_result = amd_cdna4.mfma_scaled(a, 0x7F, "e4m3", b, 0x7F, "e4m3", acc)
+    gfx1250_result = gl.amd.gfx1250.wmma_scaled(
+        a,
+        0x7F,
+        "e4m3",
+        b,
+        0x7F,
+        "e4m3",
+        acc,
+    )
+    gl.store(out_cdna4 + offs_m * N + offs_n, cdna4_result)
+    gl.store(out_gfx1250 + offs_m * N + offs_n, gfx1250_result)
+
+
+@gluon.jit
 def _layout_anchor_and_barrier_kernel(in_ptr, out_ptr, N: gl.constexpr):
     layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
     offsets = gl.arange(0, N, layout)
@@ -3680,6 +3992,238 @@ def test_gluon_simulator_sanitizer_reports_tma_descriptor_oob_on_cpu():
         x.data_ptr() + block_m * block_n * x.element_size()
     )
     assert "descriptor_access" in str(sanitizer.records[0].symbolic_expr)
+
+
+def test_gluon_simulator_runs_amd_core_helpers_on_cpu():
+    values = torch.tensor([-3, 4, -5, 6], dtype=torch.int32)
+    abs_out = torch.empty_like(values)
+    old_out = torch.empty((), dtype=torch.int32)
+    lock = torch.zeros((), dtype=torch.int32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_core_helpers_kernel)
+
+    kernel[(1,)](values, abs_out, old_out, lock, values.numel(), num_warps=1)
+
+    torch.testing.assert_close(abs_out, torch.abs(values), atol=0, rtol=0)
+    assert old_out.item() == 0
+    assert lock.item() == 7
+
+
+def test_gluon_simulator_runs_amd_tdm_copy_ops_on_cpu():
+    values = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    copy_out = torch.full_like(values, -1.0)
+    gather_out = torch.full((4, 4), -1.0, dtype=torch.float32)
+    scatter_out = torch.full_like(values, -1.0)
+    row_indices = torch.tensor([4, 1, 3, 0], dtype=torch.int32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_tdm_copy_kernel)
+
+    kernel[(1,)](
+        values,
+        copy_out,
+        gather_out,
+        scatter_out,
+        row_indices,
+        values.shape[0],
+        values.shape[1],
+        row_indices.numel(),
+        values.shape[1],
+        num_warps=1,
+    )
+
+    expected_copy = torch.full_like(values, -1.0)
+    expected_copy[: row_indices.numel(), :] = values[: row_indices.numel(), :]
+    torch.testing.assert_close(copy_out, expected_copy, atol=0, rtol=0)
+    torch.testing.assert_close(gather_out, values[row_indices], atol=0, rtol=0)
+    expected_scatter = torch.full_like(values, -1.0)
+    expected_scatter[row_indices] = values[row_indices]
+    torch.testing.assert_close(scatter_out, expected_scatter, atol=0, rtol=0)
+
+
+def test_gluon_simulator_updates_amd_tdm_descriptors_on_cpu():
+    values = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    out_offset = torch.full((2, 4), -1.0, dtype=torch.float32)
+    out_bounded = torch.full((2, 4), -1.0, dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _amd_tdm_update_descriptor_kernel
+    )
+
+    kernel[(1,)](
+        values,
+        out_offset,
+        out_bounded,
+        values.shape[0],
+        values.shape[1],
+        num_warps=1,
+    )
+
+    torch.testing.assert_close(out_offset, values[2:4], atol=0, rtol=0)
+    expected_bounded = torch.zeros_like(out_bounded)
+    expected_bounded[0] = values[-1]
+    torch.testing.assert_close(out_bounded, expected_bounded, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_async_copy_ops_on_cpu():
+    values = torch.tensor([1.0, -2.0, 3.5, 4.25], dtype=torch.float32)
+    out = torch.full_like(values, -1.0)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_async_copy_kernel)
+
+    kernel[(1,)](values, out, values.numel(), num_warps=1)
+
+    torch.testing.assert_close(out, values, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_cdna4_async_copy_ops_on_cpu():
+    values = torch.tensor([1.0, -2.0, 3.5, 4.25], dtype=torch.float32)
+    out_global = torch.full_like(values, -1.0)
+    out_buffer = torch.full_like(values, -1.0)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_cdna4_async_copy_kernel)
+
+    kernel[(1,)](values, out_global, out_buffer, values.numel(), num_warps=1)
+
+    torch.testing.assert_close(out_global, values, atol=0, rtol=0)
+    expected_buffer = torch.tensor([1.0, -2.0, 3.5, -3.0], dtype=torch.float32)
+    torch.testing.assert_close(out_buffer, expected_buffer, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_buffer_ops_on_cpu():
+    values = torch.tensor([2.0, 4.0, 8.0, 16.0], dtype=torch.float32)
+    out_module = torch.full_like(values, -9.0)
+    out_direct = torch.full_like(values, -7.0)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_buffer_ops_kernel)
+
+    kernel[(1,)](values, out_module, out_direct, values.numel(), num_warps=1)
+
+    expected_module = torch.tensor([3.0, 5.0, 9.0, -9.0], dtype=torch.float32)
+    expected_direct = torch.tensor([4.0, 6.0, 10.0, -7.0], dtype=torch.float32)
+    torch.testing.assert_close(out_module, expected_module, atol=0, rtol=0)
+    torch.testing.assert_close(out_direct, expected_direct, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_wmma_on_cpu():
+    a = torch.arange(8, dtype=torch.float32).reshape(2, 4) + 1
+    b = torch.arange(8, dtype=torch.float32).reshape(4, 2) - 2
+    out_module = torch.empty((2, 2), dtype=torch.float32)
+    out_direct = torch.empty((2, 2), dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_wmma_kernel)
+
+    kernel[(1,)](a, b, out_module, out_direct, 2, 2, 4, num_warps=1)
+
+    expected = a @ b
+    torch.testing.assert_close(out_module, expected, atol=0, rtol=0)
+    torch.testing.assert_close(out_direct, expected, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_rdna_wmma_on_cpu():
+    a = torch.arange(8, dtype=torch.float32).reshape(2, 4) + 1
+    b = torch.arange(8, dtype=torch.float32).reshape(4, 2) - 2
+    out_rdna3 = torch.empty((2, 2), dtype=torch.float32)
+    out_rdna4 = torch.empty((2, 2), dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_rdna_wmma_kernel)
+
+    kernel[(1,)](a, b, out_rdna3, out_rdna4, 2, 2, 4, num_warps=1)
+
+    expected = a @ b
+    torch.testing.assert_close(out_rdna3, expected, atol=0, rtol=0)
+    torch.testing.assert_close(out_rdna4, expected, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_scaled_upcast_on_cpu():
+    out_cdna3 = torch.empty((4,), dtype=torch.float16)
+    out_cdna4 = torch.empty((4,), dtype=torch.float16)
+    out_gfx1250 = torch.empty((4,), dtype=torch.float16)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_scaled_upcast_kernel)
+
+    kernel[(1,)](out_cdna3, out_cdna4, out_gfx1250, num_warps=1)
+
+    expected = torch.tensor([0.5, 1.0, 0.5, 1.0], dtype=torch.float16)
+    torch.testing.assert_close(out_cdna3, expected, atol=0, rtol=0)
+    torch.testing.assert_close(out_cdna4, expected, atol=0, rtol=0)
+    torch.testing.assert_close(out_gfx1250, expected, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_fp4_to_fp_on_cpu():
+    out = torch.empty((4,), dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_fp4_to_fp_kernel)
+
+    kernel[(1,)](out, out.numel(), num_warps=1)
+
+    expected = torch.tensor([0.5, 1.0, 0.5, 1.0], dtype=torch.float32)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_warp_pipeline_stage_on_cpu():
+    values = torch.tensor([1.0, -2.0, 3.5, 4.25], dtype=torch.float32)
+    out = torch.empty_like(values)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _amd_warp_pipeline_stage_kernel
+    )
+
+    kernel[(1,)](values, out, values.numel(), num_warps=1)
+
+    torch.testing.assert_close(out, (values + 1.0) * 2.0, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_cdna_buffer_ops_on_cpu():
+    values = torch.tensor([2.0, 4.0, 8.0, 16.0], dtype=torch.float32)
+    out_cdna3 = torch.full_like(values, -9.0)
+    out_cdna4 = torch.full_like(values, -7.0)
+    atomic_values = torch.tensor([10, 20, 30, 40], dtype=torch.int32)
+    old_values = torch.full_like(atomic_values, -1)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_cdna_buffer_ops_kernel)
+
+    kernel[(1,)](
+        values,
+        out_cdna3,
+        out_cdna4,
+        atomic_values,
+        old_values,
+        values.numel(),
+        num_warps=1,
+    )
+
+    expected_cdna3 = torch.tensor([3.0, 5.0, 9.0, -9.0], dtype=torch.float32)
+    expected_cdna4 = torch.tensor([4.0, 6.0, 10.0, -7.0], dtype=torch.float32)
+    torch.testing.assert_close(out_cdna3, expected_cdna3, atol=0, rtol=0)
+    torch.testing.assert_close(out_cdna4, expected_cdna4, atol=0, rtol=0)
+    torch.testing.assert_close(
+        old_values,
+        torch.tensor([10, 20, 30, -1], dtype=torch.int32),
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        atomic_values,
+        torch.tensor([13, 23, 33, 40], dtype=torch.int32),
+        atol=0,
+        rtol=0,
+    )
+
+
+def test_gluon_simulator_runs_amd_cdna_mfma_on_cpu():
+    a = torch.arange(8, dtype=torch.float32).reshape(2, 4) + 1
+    b = torch.arange(8, dtype=torch.float32).reshape(4, 2) - 2
+    out_cdna3 = torch.empty((2, 2), dtype=torch.float32)
+    out_cdna4 = torch.empty((2, 2), dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_cdna_mfma_kernel)
+
+    kernel[(1,)](a, b, out_cdna3, out_cdna4, 2, 2, 4, num_warps=1)
+
+    expected = a @ b
+    torch.testing.assert_close(out_cdna3, expected, atol=0, rtol=0)
+    torch.testing.assert_close(out_cdna4, expected, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_amd_scaled_mma_on_cpu():
+    a = torch.arange(8, dtype=torch.float32).reshape(2, 4) + 1
+    b = torch.arange(8, dtype=torch.float32).reshape(4, 2) - 2
+    out_cdna4 = torch.empty((2, 2), dtype=torch.float32)
+    out_gfx1250 = torch.empty((2, 2), dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_scaled_mma_kernel)
+
+    kernel[(1,)](a, b, out_cdna4, out_gfx1250, 2, 2, 4, num_warps=1)
+
+    expected = a @ b
+    torch.testing.assert_close(out_cdna4, expected, atol=0, rtol=0)
+    torch.testing.assert_close(out_gfx1250, expected, atol=0, rtol=0)
 
 
 def test_gluon_simulator_runs_layout_anchor_and_barrier_on_cpu():
