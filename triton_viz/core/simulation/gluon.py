@@ -2232,3 +2232,622 @@ def _as_numpy_operand(value: Any) -> np.ndarray:
     if isinstance(value, TensorHandle):
         return np.asarray(value.data)
     return np.asarray(value)
+
+
+def _warpgroup_mma_init(value: Any, _semantic: Any = None):
+    return value
+
+
+def _warpgroup_mma(
+    a: Any,
+    b: Any,
+    acc: Any,
+    *,
+    use_acc: Any = True,
+    precision: Any = None,
+    max_num_imprecise_acc: Any = None,
+    is_async: Any = False,
+    _semantic: Any = None,
+):
+    del precision, max_num_imprecise_acc
+    a_data = _as_numpy_operand(a).astype(np.float32)
+    b_data = _as_numpy_operand(b).astype(np.float32)
+    acc_tensor = gluon_semantic.to_tensor(acc)
+    acc_data = np.asarray(acc_tensor.handle.data, dtype=np.float32)
+    if bool(_to_python_scalar(use_acc)):
+        result = np.matmul(a_data, b_data) + acc_data
+    else:
+        result = np.matmul(a_data, b_data)
+    result = result.astype(_get_np_dtype(acc_tensor.dtype), copy=False)
+    return tl.tensor(TensorHandle(result, acc_tensor.dtype), acc_tensor.type)
+
+
+def _amd_wmma(a: Any, b: Any, acc: Any, _semantic: Any = None):
+    del _semantic
+    return _warpgroup_mma(a, b, acc)
+
+
+def _amd_mfma(a: Any, b: Any, acc: Any, _semantic: Any = None):
+    del _semantic
+    return _warpgroup_mma(a, b, acc)
+
+
+def _amd_scaled_upcast(
+    src: Any,
+    scale: Any,
+    elem_type: Any,
+    axis: Any = None,
+    _semantic: Any = None,
+):
+    del _semantic
+    src_tensor = gluon_semantic.to_tensor(src)
+    scale_data = _scale_values(_as_numpy_operand(scale))
+    axis = _unwrap_constexpr(axis)
+    elem_type = _unwrap_constexpr(elem_type)
+    if src_tensor.dtype == tl.uint8 and axis is not None:
+        values = _unpack_e2m1(
+            np.asarray(src_tensor.handle.data, dtype=np.uint8), int(axis)
+        )
+    elif src_tensor.dtype in (tl.float8e4nv, tl.float8e5):
+        values = _mxfp_value_handle_to_float32(src_tensor.handle)
+    else:
+        values = np.asarray(src_tensor.handle.data, dtype=np.float32)
+    result = values.astype(np.float32) * np.broadcast_to(scale_data, values.shape)
+    if elem_type == tl.bfloat16:
+        data = _convert_float(result, tl.float32, tl.bfloat16, None).view(
+            _get_np_dtype(tl.bfloat16)
+        )
+        return tl.tensor(
+            TensorHandle(data, tl.bfloat16),
+            tl.block_type(tl.bfloat16, list(result.shape)),
+        )
+    data = result.astype(_get_np_dtype(elem_type), copy=False)
+    return tl.tensor(
+        TensorHandle(data, elem_type), tl.block_type(elem_type, list(result.shape))
+    )
+
+
+def _fp4_to_fp(src: Any, elem_type: Any, axis: Any, _semantic: Any = None):
+    del _semantic
+    src_tensor = gluon_semantic.to_tensor(src)
+    elem_type = _unwrap_constexpr(elem_type)
+    values = _unpack_e2m1(
+        np.asarray(src_tensor.handle.data, dtype=np.uint8),
+        int(_unwrap_constexpr(axis)),
+    )
+    if elem_type == tl.bfloat16:
+        data = _convert_float(values, tl.float32, tl.bfloat16, None).view(
+            _get_np_dtype(tl.bfloat16)
+        )
+        return tl.tensor(
+            TensorHandle(data, tl.bfloat16),
+            tl.block_type(tl.bfloat16, list(values.shape)),
+        )
+    data = values.astype(_get_np_dtype(elem_type), copy=False)
+    return tl.tensor(
+        TensorHandle(data, elem_type), tl.block_type(elem_type, list(values.shape))
+    )
+
+
+def _warpgroup_mma_wait(
+    num_outstanding: Any = 0,
+    deps: Any = None,
+    _semantic: Any = None,
+):
+    del num_outstanding
+    if deps is None:
+        raise ValueError("warpgroup_mma_wait deps must be given")
+    if len(deps) == 1:
+        return deps[0]
+    return tuple(deps)
+
+
+def _warp_specialize(
+    functions_and_args: Any,
+    worker_num_warps: Any,
+    worker_num_regs: Any = None,
+    _semantic: Any = None,
+    _generator: Any = None,
+) -> None:
+    del worker_num_warps, worker_num_regs, _semantic, _generator
+    functions_and_args = list(functions_and_args)
+    if len(functions_and_args) <= 1:
+        for fn, args in functions_and_args:
+            fn(*args)
+        return None
+
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    scheduler = _WarpSpecializeScheduler(len(functions_and_args))
+    previous_scheduler = gluon_frontend._set_warp_specialize_scheduler(scheduler)
+    grid_dim = _CURRENT_GRID_DIM
+    grid_idx = _CURRENT_GRID_IDX
+
+    def run_partition(partition_id: int, fn: Callable, args: tuple[Any, ...]) -> None:
+        if grid_dim is not None:
+            interpreter_builder.set_grid_dim(*grid_dim)
+        if grid_idx is not None:
+            interpreter_builder.set_grid_idx(*grid_idx)
+        scheduler.bind(partition_id)
+        try:
+            fn(*args)
+        finally:
+            scheduler.finish(partition_id)
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(functions_and_args)) as executor:
+            futures = [
+                executor.submit(run_partition, partition_id, fn, tuple(args))
+                for partition_id, (fn, args) in enumerate(functions_and_args)
+            ]
+            for future in futures:
+                future.result()
+    finally:
+        gluon_frontend._set_warp_specialize_scheduler(previous_scheduler)
+    return None
+
+
+def _tcgen05_copy(
+    src: SharedMemoryHandle,
+    dst: TensorMemoryHandle,
+    _semantic: Any = None,
+) -> None:
+    dst.data[...] = np.asarray(src.data, dtype=dst.data.dtype)
+    return None
+
+
+def _signal_mbarriers(mbarriers: Any, preds: Any = None) -> None:
+    if mbarriers is None:
+        return
+    barriers = mbarriers if isinstance(mbarriers, (list, tuple)) else (mbarriers,)
+    if preds is None:
+        pred_values = (True,) * len(barriers)
+    elif isinstance(preds, (list, tuple)):
+        pred_values = tuple(preds)
+    else:
+        pred_values = (preds,)
+    for index, barrier in enumerate(barriers):
+        pred = pred_values[index] if index < len(pred_values) else True
+        if bool(_to_python_scalar(pred)):
+            _mbarrier_signal(barrier)
+
+
+def _tcgen05_mma(
+    a: Any,
+    b: Any,
+    acc: TensorMemoryHandle,
+    *,
+    use_acc: Any = True,
+    pred: Any = True,
+    multicast: Any = False,
+    mbarriers: Any = None,
+    mbarrier_preds: Any = None,
+    _semantic: Any = None,
+) -> None:
+    del multicast
+    if not bool(_to_python_scalar(pred)):
+        return None
+    a_data = _as_numpy_operand(a).astype(np.float32)
+    b_data = _as_numpy_operand(b).astype(np.float32)
+    result = np.matmul(a_data, b_data)
+    if bool(_to_python_scalar(use_acc)):
+        result = result + acc.data.astype(np.float32)
+    acc.data[...] = result.astype(acc.data.dtype, copy=False)
+    _signal_mbarriers(mbarriers, mbarrier_preds)
+    return None
+
+
+def _scale_values(scale: np.ndarray) -> np.ndarray:
+    if np.issubdtype(scale.dtype, np.integer):
+        raw = scale.astype(np.uint8, copy=False)
+        values = np.exp2(raw.astype(np.int16) - 127).astype(np.float32)
+        return np.where(raw == 255, np.nan, values)
+    return scale.astype(np.float32)
+
+
+def _expand_scale_groups(scale: np.ndarray, rows: int, k: int) -> np.ndarray:
+    scale = _scale_values(np.asarray(scale))
+    if scale.ndim == 0:
+        return np.full((rows, k), scale.item(), dtype=np.float32)
+    if scale.ndim == 1:
+        scale = scale.reshape(1, -1)
+    scale = np.broadcast_to(scale, (rows, scale.shape[1]))
+    repeats = max(1, int(np.ceil(k / scale.shape[1])))
+    return np.repeat(scale, repeats, axis=1)[:, :k]
+
+
+def _scale_operand_or_ones(scale: Any, rows: int, k: int) -> np.ndarray:
+    if _unwrap_constexpr(scale) is None:
+        return np.ones((rows, k), dtype=np.float32)
+    return _expand_scale_groups(_as_numpy_operand(scale), rows, k)
+
+
+def _amd_mma_scaled(
+    a: Any,
+    a_scale: Any,
+    a_format: Any,
+    b: Any,
+    b_scale: Any,
+    b_format: Any,
+    acc: Any,
+    _semantic: Any = None,
+):
+    del a_format, b_format, _semantic
+    a_data = _as_numpy_operand(a).astype(np.float32)
+    b_data = _as_numpy_operand(b).astype(np.float32)
+    acc_tensor = gluon_semantic.to_tensor(acc)
+    k = a_data.shape[1]
+    lhs = a_data * _scale_operand_or_ones(a_scale, a_data.shape[0], k)
+    if b_data.shape[0] == k:
+        rhs_scales = _scale_operand_or_ones(b_scale, b_data.shape[1], k)
+        rhs = b_data * rhs_scales.T
+    else:
+        rhs_scales = _scale_operand_or_ones(b_scale, b_data.shape[0], k)
+        rhs = (b_data * rhs_scales).T
+    result = np.matmul(lhs, rhs) + np.asarray(acc_tensor.handle.data, dtype=np.float32)
+    result = result.astype(_get_np_dtype(acc_tensor.dtype), copy=False)
+    return tl.tensor(TensorHandle(result, acc_tensor.dtype), acc_tensor.type)
+
+
+def _tcgen05_mma_scaled(
+    a: Any,
+    b: Any,
+    acc: TensorMemoryHandle,
+    a_scale: Any,
+    b_scale: Any,
+    a_type: Any,
+    b_type: Any,
+    *,
+    use_acc: Any = True,
+    pred: Any = True,
+    multicast: Any = False,
+    mbarriers: Any = None,
+    mbarrier_preds: Any = None,
+    _semantic: Any = None,
+) -> None:
+    del a_type, b_type, multicast
+    if not bool(_to_python_scalar(pred)):
+        return None
+    a_data = _as_numpy_operand(a).astype(np.float32)
+    b_data = _as_numpy_operand(b).astype(np.float32)
+    k = a_data.shape[1]
+    lhs_scales = _expand_scale_groups(_as_numpy_operand(a_scale), a_data.shape[0], k)
+    lhs = a_data * lhs_scales
+    if b_data.shape[0] == k:
+        rhs_scales = _expand_scale_groups(
+            _as_numpy_operand(b_scale), b_data.shape[1], k
+        )
+        rhs = b_data * rhs_scales.T
+    else:
+        rhs_scales = _expand_scale_groups(
+            _as_numpy_operand(b_scale), b_data.shape[0], k
+        )
+        rhs = (b_data * rhs_scales).T
+    result = np.matmul(lhs, rhs)
+    if bool(_to_python_scalar(use_acc)):
+        result = result + acc.data.astype(np.float32)
+    acc.data[...] = result.astype(acc.data.dtype, copy=False)
+    _signal_mbarriers(mbarriers, mbarrier_preds)
+    return None
+
+
+def _tcgen05_commit(
+    barrier: Any,
+    pred: Any = True,
+    descs: Any = (),
+    _semantic: Any = None,
+) -> None:
+    del descs
+    if bool(_to_python_scalar(pred)):
+        _mbarrier_signal(barrier)
+    return None
+
+
+def _tcgen05_mma_barrier_count(
+    smems: Any,
+    multicast: Any,
+    two_ctas: Any,
+) -> int:
+    del smems, multicast, two_ctas
+    return 1
+
+
+def _clc_try_cancel(
+    result: SharedMemoryHandle,
+    barrier: SharedMemoryHandle,
+    _semantic: Any = None,
+) -> None:
+    del result
+    _PENDING_CLC_BARRIERS.add(_mbarrier_key(barrier))
+    return None
+
+
+def _clc_load_result(
+    src: SharedMemoryHandle,
+    _semantic: Any = None,
+) -> SimulatedCLCResult:
+    del src
+    return SimulatedCLCResult()
+
+
+def _num_warps(_semantic: Any = None, _generator: Any = None):
+    return 1 if _CURRENT_NUM_WARPS is None else _CURRENT_NUM_WARPS
+
+
+def _exp(x: Any, _semantic: Any = None):
+    x = gluon_semantic.to_tensor(x)
+    return tl.tensor(interpreter_builder.create_exp(x.handle), x.type)
+
+
+def _exp2(x: Any, _semantic: Any = None):
+    x = gluon_semantic.to_tensor(x)
+    return tl.tensor(interpreter_builder.create_exp2(x.handle), x.type)
+
+
+def _log2(x: Any, _semantic: Any = None):
+    x = gluon_semantic.to_tensor(x)
+    return tl.tensor(interpreter_builder.create_log2(x.handle), x.type)
+
+
+def _rsqrt(x: Any, _semantic: Any = None):
+    x = gluon_semantic.to_tensor(x)
+    return tl.tensor(interpreter_builder.create_rsqrt(x.handle), x.type)
+
+
+def _fma(x: Any, y: Any, z: Any, _semantic: Any = None):
+    x = gluon_semantic.to_tensor(x)
+    y = gluon_semantic.to_tensor(y)
+    z = gluon_semantic.to_tensor(z)
+    x, y = gluon_semantic.broadcast_impl_value(x, y)
+    x, z = gluon_semantic.broadcast_impl_value(x, z)
+    y, z = gluon_semantic.broadcast_impl_value(y, z)
+    return tl.tensor(
+        interpreter_builder.create_fma(x.handle, y.handle, z.handle), x.type
+    )
+
+
+def _expand_dims(input: Any, axis: Any, _semantic: Any = None):
+    tensor = gluon_semantic.to_tensor(input)
+    axis = int(_unwrap_constexpr(axis))
+    handle = interpreter_builder.create_expand_dims(tensor.handle, axis)
+    shape = list(handle.data.shape)
+    ret_ty = tl.block_type(tensor.dtype, shape) if shape else tensor.dtype
+    return tl.tensor(handle, ret_ty)
+
+
+def _libdevice_exp(x: Any, _semantic: Any = None):
+    x = gluon_semantic.to_tensor(x)
+    return _result_tensor(np.exp(x.handle.data), x.dtype)
+
+
+def _libdevice_fast_expf(x: Any, _semantic: Any = None):
+    return _libdevice_exp(x, _semantic)
+
+
+def _libdevice_fast_dividef(x: Any, y: Any, _semantic: Any = None):
+    x = gluon_semantic.to_tensor(x)
+    y = gluon_semantic.to_tensor(y)
+    x, y = gluon_semantic.broadcast_impl_value(x, y)
+    return _result_tensor(x.handle.data / y.handle.data, x.dtype)
+
+
+def _result_tensor(data: np.ndarray, dtype: tl.dtype):
+    data = np.asarray(data, dtype=_get_np_dtype(dtype))
+    ret_ty = tl.block_type(dtype, list(data.shape)) if data.shape else dtype
+    return tl.tensor(TensorHandle(data, dtype), ret_ty)
+
+
+def _uint_bits(value: Any, bits: int) -> np.ndarray:
+    data = _tensor_data(value)
+    if np.issubdtype(data.dtype, np.floating):
+        if bits == 32:
+            return data.astype(np.float32).view(np.uint32)
+        if bits == 64:
+            return data.astype(np.float64).view(np.uint64)
+    dtype = np.uint32 if bits == 32 else np.uint64
+    return data.astype(dtype, copy=False)
+
+
+def _pack_f32x2(x0: Any, x1: Any) -> np.ndarray:
+    low, high = np.broadcast_arrays(_uint_bits(x0, 32), _uint_bits(x1, 32))
+    packed = low.astype(np.uint64) | (high.astype(np.uint64) << np.uint64(32))
+    return packed.view(np.int64)
+
+
+def _unpack_f32x2(value: Any) -> tuple[np.ndarray, np.ndarray]:
+    packed = _tensor_data(value).astype(np.int64, copy=False).view(np.uint64)
+    low = (packed & np.uint64(0xFFFFFFFF)).astype(np.uint32).view(np.float32)
+    high = (packed >> np.uint64(32)).astype(np.uint32).view(np.float32)
+    return low, high
+
+
+def _fp8e4m3fn_bits(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    sign = np.signbit(values).astype(np.uint8) << np.uint8(7)
+    abs_values = np.abs(values)
+    max_finite = np.float32(448.0)
+    clipped = np.minimum(abs_values, max_finite)
+    normal = clipped >= np.float32(2.0**-6)
+    exponent = np.zeros_like(clipped, dtype=np.int32)
+    mantissa = np.zeros_like(clipped, dtype=np.int32)
+
+    if np.any(normal):
+        normal_values = clipped[normal]
+        exp = np.floor(np.log2(normal_values)).astype(np.int32)
+        scaled = normal_values / np.exp2(exp)
+        man = np.rint((scaled - 1.0) * 8.0).astype(np.int32)
+        carry = man == 8
+        exp = exp + carry.astype(np.int32)
+        man = np.where(carry, 0, man)
+        exp = np.minimum(exp, 8)
+        man = np.where(exp == 8, np.minimum(man, 6), man)
+        exponent[normal] = exp + 7
+        mantissa[normal] = man
+
+    if np.any(~normal):
+        subnormal_values = clipped[~normal]
+        mantissa[~normal] = np.rint(subnormal_values / np.float32(2.0**-9)).astype(
+            np.int32
+        )
+
+    bits = sign | ((exponent.astype(np.uint8) & 0xF) << np.uint8(3))
+    bits = bits | (mantissa.astype(np.uint8) & 0x7)
+    return np.where(abs_values == 0, sign, bits).astype(np.uint8)
+
+
+def _inline_asm_elementwise(
+    asm: str,
+    constraints: str,
+    args: Any,
+    dtype: Any,
+    is_pure: Any,
+    pack: Any,
+    _semantic: Any = None,
+):
+    del constraints, is_pure, pack, _semantic
+    asm_key = " ".join(asm.split())
+    dtype = _unwrap_constexpr(dtype)
+
+    if asm_key == "mov.b32 $0, { $1, $2 };":
+        low, high = np.broadcast_arrays(
+            _uint_bits(args[0], 32), _uint_bits(args[1], 32)
+        )
+        packed = (low & np.uint32(0xFFFF)) | (
+            (high & np.uint32(0xFFFF)) << np.uint32(16)
+        )
+        return _result_tensor(packed, dtype)
+
+    if asm_key == "mov.b64 $0, { $1, $2 };":
+        return _result_tensor(_pack_f32x2(args[0], args[1]), dtype)
+
+    if asm_key == "mov.b64 { $0, $1 }, $2;":
+        low, high = _unpack_f32x2(args[0])
+        return tuple(
+            _result_tensor(data, out_dtype)
+            for data, out_dtype in zip((low, high), dtype)
+        )
+
+    if asm_key in {
+        "add.f32x2 $0, $1, $2;",
+        "sub.f32x2 $0, $1, $2;",
+        "mul.f32x2 $0, $1, $2;",
+    }:
+        a0, a1 = _unpack_f32x2(args[0])
+        b0, b1 = _unpack_f32x2(args[1])
+        if asm_key.startswith("add"):
+            low, high = a0 + b0, a1 + b1
+        elif asm_key.startswith("sub"):
+            low, high = a0 - b0, a1 - b1
+        else:
+            low, high = a0 * b0, a1 * b1
+        return _result_tensor(_pack_f32x2(low, high), dtype)
+
+    if asm_key == "fma.rn.f32x2 $0, $1, $2, $3;":
+        a0, a1 = _unpack_f32x2(args[0])
+        b0, b1 = _unpack_f32x2(args[1])
+        c0, c1 = _unpack_f32x2(args[2])
+        return _result_tensor(_pack_f32x2(a0 * b0 + c0, a1 * b1 + c1), dtype)
+
+    if "cvt.rn.satfinite.e4m3x2.f32" in asm_key:
+        lane0, lane1 = _unpack_f32x2(args[0])
+        packed = _fp8e4m3fn_bits(lane0).astype(np.uint16) | (
+            _fp8e4m3fn_bits(lane1).astype(np.uint16) << np.uint16(8)
+        )
+        return _result_tensor(packed, dtype)
+
+    raise NotImplementedError(f"Unsupported Gluon inline assembly: {asm_key}")
+
+
+def _atomic_add(
+    pointer: Any,
+    val: Any,
+    mask: Any = None,
+    sem: Any = None,
+    scope: Any = None,
+    _semantic: Any = None,
+):
+    del _semantic
+    _yield_warp_specialize()
+    val = gluon_semantic.to_tensor(val)
+    mask = _unwrap_constexpr(mask)
+    return gluon_semantic.atomic_add(
+        pointer,
+        val,
+        mask,
+        _unwrap_constexpr(sem),
+        _unwrap_constexpr(scope),
+    )
+
+
+def _atomic_xchg(
+    pointer: Any,
+    val: Any,
+    mask: Any = None,
+    sem: Any = None,
+    scope: Any = None,
+    _semantic: Any = None,
+):
+    del _semantic
+    _yield_warp_specialize()
+    val = gluon_semantic.to_tensor(val)
+    mask = _unwrap_constexpr(mask)
+    return gluon_semantic.atomic_xchg(
+        pointer,
+        val,
+        mask,
+        _unwrap_constexpr(sem),
+        _unwrap_constexpr(scope),
+    )
+
+
+for _simulated, _original in (
+    (_program_id, gl.program_id),
+    (_arange, gl.arange),
+    (_full, gl.full),
+    (_cdiv, gl.cdiv),
+    (_to_tensor, gl.to_tensor),
+    (_num_programs, gl.num_programs),
+    (_num_ctas, gluon_core.num_ctas),
+    (_barrier, gl.barrier),
+    (_static_print, gl.static_print),
+    (_set_auto_layout, gl.set_auto_layout),
+    (_load, gl.load),
+    (_store, gl.store),
+    (_split, gl.split),
+    (_reshape, gl.reshape),
+    (_permute, gl.permute),
+    (_convert_layout, gl.convert_layout),
+    (_cast, gl.cast),
+    (_tensor_to, gl.tensor.to),
+    (_where, gl.where),
+    (_minimum, gl.minimum),
+    (_maximum, gl.maximum),
+    (_clamp, gl.clamp),
+    (_zeros, gl.zeros),
+    (_sum, gl.sum),
+    (_max, gl.max),
+    (_allocate_shared_memory, gl.allocate_shared_memory),
+    (_broadcast, gl.broadcast),
+    (_join, gl.join),
+    (_dot_fma, gl.dot_fma),
+    (_reduce, gl.reduce),
+    (_map_elementwise, gl.map_elementwise),
+    (_num_warps, gluon_core.num_warps),
+    (_exp, gluon_math.exp),
+    (_exp2, gluon_math.exp2),
+    (_log2, gluon_math.log2),
+    (_rsqrt, gluon_math.rsqrt),
+    (_fma, gluon_math.fma),
+    (_libdevice_exp, triton_libdevice.exp),
+    (_libdevice_fast_expf, triton_libdevice.fast_expf),
+    (_libdevice_fast_dividef, triton_libdevice.fast_dividef),
+    (_inline_asm_elementwise, gl.inline_asm_elementwise),
+    (_expand_dims, gl.expand_dims),
+    (_fp4_to_fp, gl.fp4_to_fp),
+    (_broadcast_to, gl.tensor.broadcast_to),
+    (_cast, gl.tensor.cast),
+    (_atomic_add, gl.atomic_add),
+    (_atomic_xchg, gl.atomic_xchg),
+):
+    _simulated.__triton_viz_simulated__ = True  # type: ignore[attr-defined]
+    _register_replay_callable(_simulated)
