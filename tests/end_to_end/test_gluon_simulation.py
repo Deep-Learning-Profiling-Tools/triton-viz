@@ -770,6 +770,26 @@ def _tma_oob_kernel(
 
 
 @gluon.aggregate
+class _Counter:
+    index: gl.tensor
+    phase: gl.tensor
+    num_barriers: gl.constexpr
+
+    @gluon.jit
+    def create(phase, num_barriers: gl.constexpr):
+        return _Counter(gl.to_tensor(0), gl.to_tensor(phase), num_barriers)
+
+    @gluon.must_use_result
+    @gluon.jit
+    def next(self, pred=True):
+        incr = self.index + gl.where(pred, 1, 0)
+        rollover = incr == self.num_barriers
+        index = gl.where(rollover, 0, incr)
+        phase = gl.where(rollover, self.phase ^ 1, self.phase)
+        return _Counter(index, phase, self.num_barriers)
+
+
+@gluon.aggregate
 class _PersistentTileScheduler:
     pid_start: gl.tensor
     pid_end: gl.tensor
@@ -849,6 +869,81 @@ def _layout_anchor_and_barrier_kernel(in_ptr, out_ptr, N: gl.constexpr):
     values = gl.set_auto_layout(values, layout)
     gl.barrier()
     gl.store(out_ptr + offsets, values + 1.0)
+
+
+@gluon.jit
+def _float2_helpers_kernel(
+    f0_ptr,
+    f1_ptr,
+    out_sum0,
+    out_sum1,
+    out_fma0,
+    out_fma1,
+    out_full0,
+    out_full1,
+    BLOCK: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
+    offsets = gl.arange(0, BLOCK, layout)
+    f0 = gl.load(f0_ptr + offsets)
+    f1 = gl.load(f1_ptr + offsets)
+    lhs = pack2(f0, f1)
+    rhs = pack2(f1, f0)
+    sum0, sum1 = unpack2(lhs + rhs)
+    fma0, fma1 = unpack2(float2_fma(lhs, rhs, lhs))
+    two = gl.full((BLOCK,), 2.0, gl.float32, layout)
+    full0, full1 = unpack2(lhs * float2_full_like(lhs, two))
+    gl.store(out_sum0 + offsets, sum0)
+    gl.store(out_sum1 + offsets, sum1)
+    gl.store(out_fma0 + offsets, fma0)
+    gl.store(out_fma1 + offsets, fma1)
+    gl.store(out_full0 + offsets, full0)
+    gl.store(out_full1 + offsets, full1)
+
+
+@gluon.jit
+def _float2_pack_reduce_kernel(values_ptr, roundtrip_ptr, even_sum_ptr, odd_sum_ptr):
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    offs_m = gl.arange(0, 4, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, 8, gl.SliceLayout(0, layout))
+    values = gl.load(values_ptr + offs_m[:, None] * 8 + offs_n[None, :])
+    packed = blackwell_float2.pack(values, axis=1)
+    unpacked = blackwell_float2.unpack(packed, axis=1)
+    reduced = packed.sum(axis=1)
+    even_sum, odd_sum = blackwell_float2.unpack2(reduced)
+    gl.store(roundtrip_ptr + offs_m[:, None] * 8 + offs_n[None, :], unpacked)
+    row_layout: gl.constexpr = gl.BlockedLayout([1], [32], [gl.num_warps()], [0])
+    row_offsets = gl.arange(0, 4, row_layout)
+    gl.store(even_sum_ptr + row_offsets, gl.convert_layout(even_sum, row_layout))
+    gl.store(odd_sum_ptr + row_offsets, gl.convert_layout(odd_sum, row_layout))
+
+
+@gluon.jit
+def _float2_constructor_convert_kernel(values_ptr, out_ptr):
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    offs_m = gl.arange(0, 2, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, 4, gl.SliceLayout(0, layout))
+    values = gl.load(values_ptr + offs_m[:, None] * 4 + offs_n[None, :])
+    packed = float2_pack(values, axis=1)
+    converted = gl.convert_layout(
+        packed.value,
+        packed.value.type.layout,
+        assert_trivial=True,
+    )
+    rebuilt = Float2Tensor(converted)
+    scale = gl.full(
+        rebuilt.value.shape,
+        2.0,
+        gl.float32,
+        layout=rebuilt.value.type.layout,
+    )
+    scaled = float2_fma(rebuilt, float2_full_like(rebuilt, scale), rebuilt)
+    unpacked = float2_unpack(scaled, axis=1)
+    gl.store(out_ptr + offs_m[:, None] * 4 + offs_n[None, :], unpacked)
 
 
 @gluon.constexpr_function
@@ -1378,6 +1473,971 @@ def _persistent_wgmma_pipelined_kernel(
     tma.store_wait(pendings=0)
 
 
+@gluon.jit
+def _tmem_roundtrip_kernel(
+    in_ptr,
+    out_ptr,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    global_layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1],
+        [1, 32],
+        [1, num_warps],
+        [1, 0],
+    )
+    offs_m = gl.arange(0, M, gl.SliceLayout(1, global_layout))
+    offs_n = gl.arange(0, N, gl.SliceLayout(0, global_layout))
+    offs = offs_m[:, None] * N + offs_n[None, :]
+    value = gl.load(in_ptr + offs)
+    tmem_layout: gl.constexpr = TensorMemoryLayout(
+        block=(64, 64),
+        col_stride=32 // in_ptr.dtype.element_ty.primitive_bitwidth,
+    )
+    tmem = allocate_tensor_memory(
+        element_ty=in_ptr.dtype.element_ty,
+        shape=[M, N],
+        layout=tmem_layout,
+    )
+    value = gl.convert_layout(value, tmem.get_reg_layout())
+    tmem.store(value)
+    out = gl.convert_layout(tmem.load(), global_layout)
+    gl.store(out_ptr + offs, out)
+
+
+@gluon.jit
+def _tcgen05_small_mma_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    d_desc,
+    tmem_block: gl.constexpr,
+    LHS_IN_TMEM: gl.constexpr,
+    USE_COMMIT: gl.constexpr,
+):
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    a_smem = gl.allocate_shared_memory(
+        a_desc.dtype,
+        a_desc.block_type.shape,
+        a_desc.layout,
+    )
+    b_smem = gl.allocate_shared_memory(
+        b_desc.dtype,
+        b_desc.block_type.shape,
+        b_desc.layout,
+    )
+    c_smem = gl.allocate_shared_memory(
+        c_desc.dtype,
+        c_desc.block_type.shape,
+        c_desc.layout,
+    )
+    mbarrier.expect(
+        bar,
+        a_desc.block_type.nbytes + b_desc.block_type.nbytes + c_desc.block_type.nbytes,
+    )
+    tma.async_load(a_desc, [0, 0], bar, a_smem)
+    tma.async_load(b_desc, [0, 0], bar, b_smem)
+    tma.async_load(c_desc, [0, 0], bar, c_smem)
+    mbarrier.wait(bar, phase=0)
+    mbarrier.invalidate(bar)
+    mbarrier.init(bar, count=1)
+
+    M: gl.constexpr = d_desc.block_type.shape[0]
+    N: gl.constexpr = d_desc.block_type.shape[1]
+    K: gl.constexpr = a_desc.block_type.shape[1]
+    acc_tmem_layout: gl.constexpr = TensorMemoryLayout(
+        tmem_block,
+        col_stride=32 // d_desc.dtype.primitive_bitwidth,
+    )
+    acc_tmem = allocate_tensor_memory(d_desc.dtype, [M, N], acc_tmem_layout)
+    acc = c_smem.load(acc_tmem.get_reg_layout())
+    acc_tmem.store(acc)
+
+    if LHS_IN_TMEM:
+        lhs_tmem_layout: gl.constexpr = TensorMemoryLayout(tmem_block, col_stride=1)
+        lhs_tmem = allocate_tensor_memory(a_desc.dtype, [M, K], lhs_tmem_layout)
+        lhs = a_smem.load(lhs_tmem.get_reg_layout())
+        lhs_tmem.store(lhs)
+        a = lhs_tmem
+    else:
+        a = a_smem
+
+    if USE_COMMIT:
+        tcgen05_mma(a, b_smem, acc_tmem)
+        tcgen05_commit(bar)
+    else:
+        tcgen05_mma(a, b_smem, acc_tmem, mbarriers=[bar], mbarrier_preds=[True])
+    mbarrier.wait(bar, phase=0)
+    mbarrier.invalidate(bar)
+
+    d_smem = gl.allocate_shared_memory(
+        d_desc.dtype,
+        d_desc.block_type.shape,
+        d_desc.layout,
+    )
+    d_smem.store(acc_tmem.load())
+    fence_async_shared()
+    tma.async_copy_shared_to_global(d_desc, [0, 0], d_smem)
+    tma.store_wait(pendings=0)
+
+
+@gluon.jit
+def _tcgen05_scaled_mma_kernel(
+    a_ptr,
+    b_ptr,
+    a_scale_ptr,
+    b_scale_ptr,
+    out_ptr,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    K: gl.constexpr,
+    VEC: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    offs_m = gl.arange(0, M, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, N, gl.SliceLayout(0, layout))
+    offs_k = gl.arange(0, K, gl.SliceLayout(0, layout))
+    offs_scale = gl.arange(0, K // VEC, gl.SliceLayout(0, layout))
+
+    a = gl.load(a_ptr + offs_m[:, None] * K + offs_k[None, :])
+    b = gl.load(b_ptr + offs_k[:, None] * N + offs_n[None, :])
+    a_scales = gl.load(a_scale_ptr + offs_m[:, None] * (K // VEC) + offs_scale[None, :])
+    b_scales = gl.load(b_scale_ptr + offs_n[:, None] * (K // VEC) + offs_scale[None, :])
+
+    smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
+        [M, K], a_ptr.dtype.element_ty
+    )
+    b_smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
+        [K, N],
+        b_ptr.dtype.element_ty,
+    )
+    a_smem = gl.allocate_shared_memory(a_ptr.dtype.element_ty, [M, K], smem_layout)
+    b_smem = gl.allocate_shared_memory(b_ptr.dtype.element_ty, [K, N], b_smem_layout)
+    a_smem.store(a)
+    b_smem.store(b)
+
+    scale_layout: gl.constexpr = TensorMemoryScalesLayout()
+    a_scale_tmem = allocate_tensor_memory(
+        a_scale_ptr.dtype.element_ty,
+        [M, K // VEC],
+        scale_layout,
+    )
+    b_scale_tmem = allocate_tensor_memory(
+        b_scale_ptr.dtype.element_ty,
+        [N, K // VEC],
+        scale_layout,
+    )
+    a_scale_tmem.store(a_scales)
+    b_scale_tmem.store(b_scales)
+
+    acc_layout: gl.constexpr = TensorMemoryLayout([M, N], col_stride=1)
+    acc = allocate_tensor_memory(gl.float32, [M, N], acc_layout)
+    tcgen05_mma_scaled(
+        a_smem,
+        b_smem,
+        acc,
+        a_scale_tmem,
+        b_scale_tmem,
+        "e4m3",
+        "e4m3",
+        use_acc=False,
+    )
+    result = gl.convert_layout(acc.load(), layout)
+    gl.store(out_ptr + offs_m[:, None] * N + offs_n[None, :], result)
+
+
+@gluon.jit
+def _tcgen05_descriptor_scaled_mma_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    a_scale_ptr,
+    b_scale_ptr,
+    VEC: gl.constexpr,
+):
+    BLOCK_M: gl.constexpr = c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = c_desc.block_type.shape[1]
+    BLOCK_K: gl.constexpr = a_desc.block_type.shape[1]
+    K = a_desc.shape[1]
+    pid_m = gl.program_id(0)
+    pid_n = gl.program_id(1)
+    off_m = pid_m * BLOCK_M
+    off_n = pid_n * BLOCK_N
+
+    a_smem = gl.allocate_shared_memory(
+        a_desc.dtype,
+        a_desc.block_type.shape,
+        a_desc.layout,
+    )
+    b_smem = gl.allocate_shared_memory(
+        b_desc.dtype,
+        b_desc.block_type.shape,
+        b_desc.layout,
+    )
+    scale_layout: gl.constexpr = TensorMemoryScalesLayout()
+    a_scale_tmem = allocate_tensor_memory(
+        a_scale_ptr.dtype.element_ty,
+        [BLOCK_M, BLOCK_K // VEC],
+        scale_layout,
+    )
+    b_scale_tmem = allocate_tensor_memory(
+        b_scale_ptr.dtype.element_ty,
+        [BLOCK_N, BLOCK_K // VEC],
+        scale_layout,
+    )
+    acc_layout: gl.constexpr = TensorMemoryLayout([BLOCK_M, BLOCK_N], col_stride=1)
+    acc = allocate_tensor_memory(gl.float32, [BLOCK_M, BLOCK_N], acc_layout)
+
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mma_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    mbarrier.init(mma_bar, count=1)
+    use_acc = False
+    phase = 0
+    scale_k: gl.constexpr = BLOCK_K // VEC
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    scale_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
+    scale_n = gl.arange(0, BLOCK_N, gl.SliceLayout(1, layout))
+    scale_cols = gl.arange(0, scale_k, gl.SliceLayout(0, layout))
+    for k in range(0, K, BLOCK_K):
+        mbarrier.expect(bar, a_desc.block_type.nbytes + b_desc.block_type.nbytes)
+        tma.async_load(a_desc, [off_m, k], bar, a_smem)
+        tma.async_load(b_desc, [off_n, k], bar, b_smem)
+        mbarrier.wait(bar, phase)
+
+        a_scale_base = (off_m + scale_m[:, None]) * (K // VEC) + k // VEC
+        b_scale_base = (off_n + scale_n[:, None]) * (K // VEC) + k // VEC
+        a_scales = gl.load(a_scale_ptr + a_scale_base + scale_cols[None, :])
+        b_scales = gl.load(b_scale_ptr + b_scale_base + scale_cols[None, :])
+        a_scale_tmem.store(gl.convert_layout(a_scales, a_scale_tmem.get_reg_layout()))
+        b_scale_tmem.store(gl.convert_layout(b_scales, b_scale_tmem.get_reg_layout()))
+
+        tcgen05_mma_scaled(
+            a_smem,
+            b_smem.permute((1, 0)),
+            acc,
+            a_scale_tmem,
+            b_scale_tmem,
+            "e4m3",
+            "e4m3",
+            use_acc=use_acc,
+        )
+        tcgen05_commit(mma_bar)
+        mbarrier.wait(mma_bar, phase)
+        use_acc = True
+        phase ^= 1
+
+    mbarrier.invalidate(bar)
+    mbarrier.invalidate(mma_bar)
+    c_smem = gl.allocate_shared_memory(
+        c_desc.dtype, c_desc.block_type.shape, c_desc.layout
+    )
+    c_smem.store(acc.load().to(c_desc.dtype))
+    fence_async_shared()
+    tma.async_copy_shared_to_global(c_desc, [off_m, off_n], c_smem)
+    tma.store_wait(0)
+
+
+@gluon.jit
+def _tcgen05_descriptor_scaled_tma_pipeline_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    a_scale_desc,
+    b_scale_desc,
+    VEC: gl.constexpr,
+):
+    BLOCK_M: gl.constexpr = c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = c_desc.block_type.shape[1]
+    BLOCK_K: gl.constexpr = a_desc.block_type.shape[1]
+    SCALE_K: gl.constexpr = BLOCK_K // VEC
+    K = a_desc.shape[1]
+
+    a_smem = gl.allocate_shared_memory(
+        a_desc.dtype,
+        a_desc.block_type.shape,
+        a_desc.layout,
+    )
+    b_smem = gl.allocate_shared_memory(
+        b_desc.dtype,
+        b_desc.block_type.shape,
+        b_desc.layout,
+    )
+    a_scale_smem = gl.allocate_shared_memory(
+        a_scale_desc.dtype,
+        a_scale_desc.block_type.shape,
+        a_scale_desc.layout,
+    )
+    b_scale_smem = gl.allocate_shared_memory(
+        b_scale_desc.dtype,
+        b_scale_desc.block_type.shape,
+        b_scale_desc.layout,
+    )
+    scale_layout: gl.constexpr = TensorMemoryScalesLayout()
+    a_scale_tmem = allocate_tensor_memory(
+        a_scale_desc.dtype,
+        [BLOCK_M, SCALE_K],
+        scale_layout,
+    )
+    b_scale_tmem = allocate_tensor_memory(
+        b_scale_desc.dtype,
+        [BLOCK_N, SCALE_K],
+        scale_layout,
+    )
+    acc_layout: gl.constexpr = TensorMemoryLayout([BLOCK_M, BLOCK_N], col_stride=1)
+    acc = allocate_tensor_memory(gl.float32, [BLOCK_M, BLOCK_N], acc_layout)
+    load_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mma_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(load_bar, count=1)
+    mbarrier.init(mma_bar, count=1)
+
+    phase = 0
+    use_acc = False
+    for k in range(0, K, BLOCK_K):
+        mbarrier.expect(
+            load_bar,
+            a_desc.block_type.nbytes
+            + b_desc.block_type.nbytes
+            + a_scale_desc.block_type.nbytes
+            + b_scale_desc.block_type.nbytes,
+        )
+        tma.async_load(a_desc, [0, k], load_bar, a_smem)
+        tma.async_load(b_desc, [0, k], load_bar, b_smem)
+        tma.async_load(a_scale_desc, [0, k // VEC], load_bar, a_scale_smem)
+        tma.async_load(b_scale_desc, [0, k // VEC], load_bar, b_scale_smem)
+        mbarrier.wait(load_bar, phase)
+        tcgen05_copy(a_scale_smem, a_scale_tmem)
+        tcgen05_copy(b_scale_smem, b_scale_tmem)
+        tcgen05_mma_scaled(
+            a_smem,
+            b_smem.permute((1, 0)),
+            acc,
+            a_scale_tmem,
+            b_scale_tmem,
+            "e4m3",
+            "e4m3",
+            use_acc=use_acc,
+        )
+        tcgen05_commit(mma_bar)
+        mbarrier.wait(mma_bar, phase)
+        use_acc = True
+        phase ^= 1
+
+    mbarrier.invalidate(load_bar)
+    mbarrier.invalidate(mma_bar)
+    c_smem = gl.allocate_shared_memory(
+        c_desc.dtype, c_desc.block_type.shape, c_desc.layout
+    )
+    c_smem.store(acc.load().to(c_desc.dtype))
+    fence_async_shared()
+    tma.async_copy_shared_to_global(c_desc, [0, 0], c_smem)
+    tma.store_wait(0)
+
+
+@gluon.jit
+def _two_cta_tcgen05_kernel(a_desc, b_desc, c_desc):
+    gl.static_assert(gl.num_ctas() == 2)
+    cluster_m: gl.constexpr = a_desc.block_shape[0]
+    tile_n: gl.constexpr = b_desc.block_shape[1]
+    cta_m: gl.constexpr = cluster_m // 2
+    cga_layout: gl.constexpr = c_desc.layout.cga_layout
+
+    smem_a = gl.allocate_shared_memory(a_desc.dtype, a_desc.block_shape, a_desc.layout)
+    smem_b = gl.allocate_shared_memory(b_desc.dtype, b_desc.block_shape, b_desc.layout)
+
+    tma_bar = mbarrier.allocate_mbarrier(two_ctas=True)
+    mma_bar = mbarrier.allocate_mbarrier()
+    mbarrier.init(tma_bar, count=1)
+    mbarrier.init(mma_bar, count=1)
+
+    mbarrier.expect(tma_bar, a_desc.nbytes_per_cta + b_desc.nbytes_per_cta)
+    tma.async_load(a_desc, [0, 0], tma_bar, smem_a)
+    tma.async_load(b_desc, [0, 0], tma_bar, smem_b)
+    mbarrier.wait(tma_bar, phase=0, deps=[smem_a, smem_b])
+    mbarrier.invalidate(tma_bar)
+
+    acc_layout: gl.constexpr = TensorMemoryLayout(
+        block=(cta_m, tile_n),
+        col_stride=1,
+        cga_layout=cga_layout,
+        two_ctas=True,
+    )
+    acc = allocate_tensor_memory(gl.float32, [cluster_m, tile_n], acc_layout)
+    tcgen05_mma(smem_a, smem_b, acc, use_acc=False, mbarriers=[mma_bar])
+    mbarrier.wait(mma_bar, phase=0, deps=[smem_a, smem_b])
+    mbarrier.invalidate(mma_bar)
+
+    c_smem = gl.allocate_shared_memory(c_desc.dtype, c_desc.block_shape, c_desc.layout)
+    c_smem.store(acc.load().to(c_desc.dtype))
+    tma.async_copy_shared_to_global(c_desc, [0, 0], c_smem)
+
+
+@gluon.jit
+def _tma_tcgen05_multicast_kernel(
+    a_desc,
+    b_desc,
+    out_desc,
+    NUM_K_TILES: gl.constexpr,
+    acc_tmem_layout: gl.constexpr,
+):
+    block_m: gl.constexpr = a_desc.block_shape[0]
+    block_k: gl.constexpr = a_desc.block_shape[1]
+    block_n: gl.constexpr = b_desc.block_shape[1]
+
+    smem_a = gl.allocate_shared_memory(a_desc.dtype, a_desc.block_shape, a_desc.layout)
+    smem_b = gl.allocate_shared_memory(b_desc.dtype, b_desc.block_shape, b_desc.layout)
+    acc_tmem = allocate_tensor_memory(gl.float32, [block_m, block_n], acc_tmem_layout)
+    tma_bar = mbarrier.allocate_mbarrier(two_ctas=True)
+    mma_bar = mbarrier.allocate_mbarrier()
+    mbarrier.init(tma_bar, count=1)
+    mbarrier.init(
+        mma_bar,
+        count=tcgen05_mma_barrier_count(
+            [smem_a, smem_b],
+            multicast=True,
+            two_ctas=acc_tmem.type.layout.two_ctas,
+        ),
+    )
+
+    phase_tma = 0
+    phase_mma = 0
+    for k in range(NUM_K_TILES):
+        mbarrier.expect(tma_bar, a_desc.nbytes_per_cta + b_desc.nbytes_per_cta)
+        tma.async_load(a_desc, [0, k * block_k], tma_bar, smem_a, multicast=True)
+        tma.async_load(b_desc, [k * block_k, 0], tma_bar, smem_b, multicast=True)
+        mbarrier.wait(tma_bar, phase=phase_tma, deps=[smem_a, smem_b])
+        phase_tma ^= 1
+        tcgen05_mma(
+            smem_a,
+            smem_b,
+            acc_tmem,
+            use_acc=(k != 0),
+            multicast=True,
+            mbarriers=[mma_bar],
+        )
+        mbarrier.wait(mma_bar, phase=phase_mma, deps=[smem_a, smem_b])
+        phase_mma ^= 1
+
+    mbarrier.invalidate(tma_bar)
+    mbarrier.invalidate(mma_bar)
+    out_smem = gl.allocate_shared_memory(
+        out_desc.dtype,
+        out_desc.block_shape,
+        out_desc.layout,
+    )
+    out_smem.store(acc_tmem.load().to(out_desc.dtype))
+    tma.async_copy_shared_to_global(out_desc, [0, 0], out_smem)
+
+
+@gluon.jit
+def _tcgen05_copy_kernel(
+    in_ptr,
+    in_stride0,
+    in_stride1,
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    smem_layout: gl.constexpr,
+    tmem_layout: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    offs_m = gl.arange(0, M, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, N, gl.SliceLayout(0, layout))
+    value = gl.load(
+        in_ptr + offs_m[:, None] * in_stride0 + offs_n[None, :] * in_stride1
+    )
+    smem = gl.allocate_shared_memory(value.dtype, (M, N), smem_layout)
+    tmem = allocate_tensor_memory(value.dtype, (M, N), tmem_layout)
+    smem.store(value)
+    fence_async_shared()
+    tcgen05_copy(smem, tmem)
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    tcgen05_commit(bar)
+    mbarrier.wait(bar, 0)
+    output = gl.convert_layout(tmem.load(), layout)
+    gl.store(
+        out_ptr + offs_m[:, None] * out_stride0 + offs_n[None, :] * out_stride1, output
+    )
+
+
+@gluon.aggregate
+class _AccumPartitionArgs:
+    a_desc: tma.tensor_descriptor
+    b_desc: tma.tensor_descriptor
+    c_desc: tma.tensor_descriptor
+    d_ptr: gl.tensor
+    d_stride_m: gl.tensor
+    d_stride_n: gl.tensor
+    a_bufs: gl.shared_memory_descriptor
+    b_bufs: gl.shared_memory_descriptor
+    load_empty_bars: gl.shared_memory_descriptor
+    load_ready_bars: gl.shared_memory_descriptor
+    c_buf: gl.shared_memory_descriptor
+    c_empty_bar: gl.shared_memory_descriptor
+    c_ready_bar: gl.shared_memory_descriptor
+    acc_bufs: tensor_memory_descriptor
+    acc_empty_bars: gl.shared_memory_descriptor
+    acc_ready_bars: gl.shared_memory_descriptor
+    SchedulerImpl: gl.constexpr
+
+
+@gluon.jit
+def _matmul_accumulate_load_partition(p):
+    BLOCK_M: gl.constexpr = p.c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = p.c_desc.block_type.shape[1]
+    BLOCK_K: gl.constexpr = p.a_desc.block_type.shape[1]
+    K = p.a_desc.shape[1]
+
+    c_phase = 1
+    state = _Counter.create(1, p.load_empty_bars.shape[0])
+    scheduler = p.SchedulerImpl.initialize(
+        p.c_desc.shape[0],
+        p.c_desc.shape[1],
+        BLOCK_M,
+        BLOCK_N,
+    )
+    for idx in range(scheduler.get_num_tiles()):
+        pid_m, pid_n = scheduler.get_tile(idx)
+        off_m = pid_m * BLOCK_M
+        off_n = pid_n * BLOCK_N
+        mbarrier.wait(p.c_empty_bar, c_phase)
+        mbarrier.expect(p.c_ready_bar, p.c_desc.block_type.nbytes)
+        tma.async_load(p.c_desc, [off_m, off_n], p.c_ready_bar, p.c_buf)
+        c_phase ^= 1
+        for k in range(0, K, BLOCK_K):
+            bar = p.load_ready_bars.index(state.index)
+            mbarrier.wait(p.load_empty_bars.index(state.index), state.phase)
+            mbarrier.expect(
+                bar,
+                p.a_desc.block_type.nbytes + p.b_desc.block_type.nbytes,
+            )
+            tma.async_load(p.a_desc, [off_m, k], bar, p.a_bufs.index(state.index))
+            tma.async_load(p.b_desc, [k, off_n], bar, p.b_bufs.index(state.index))
+            state = state.next()
+
+
+@gluon.jit
+def _matmul_accumulate_mma_partition(p):
+    BLOCK_M: gl.constexpr = p.c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = p.c_desc.block_type.shape[1]
+    BLOCK_K: gl.constexpr = p.a_desc.block_type.shape[1]
+    K = p.a_desc.shape[1]
+
+    c_phase = 0
+    load_state = _Counter.create(0, p.load_empty_bars.shape[0])
+    acc_state = _Counter.create(1, p.acc_empty_bars.shape[0])
+    scheduler = p.SchedulerImpl.initialize(
+        p.c_desc.shape[0],
+        p.c_desc.shape[1],
+        BLOCK_M,
+        BLOCK_N,
+    )
+    for _ in range(scheduler.get_num_tiles()):
+        mbarrier.wait(p.c_ready_bar, c_phase)
+        mbarrier.wait(p.acc_empty_bars.index(acc_state.index), acc_state.phase)
+        acc_buf = p.acc_bufs.index(acc_state.index)
+        tcgen05_copy(p.c_buf, acc_buf)
+        tcgen05_commit(p.c_empty_bar)
+        c_phase ^= 1
+        for _ in range(0, K, BLOCK_K):
+            mbarrier.wait(p.load_ready_bars.index(load_state.index), load_state.phase)
+            tcgen05_mma(
+                p.a_bufs.index(load_state.index),
+                p.b_bufs.index(load_state.index),
+                acc_buf,
+                use_acc=True,
+            )
+            tcgen05_commit(p.load_empty_bars.index(load_state.index))
+            load_state = load_state.next()
+        tcgen05_commit(p.acc_ready_bars.index(acc_state.index))
+        acc_state = acc_state.next()
+
+
+@gluon.jit
+def _matmul_accumulate_epilogue_partition(p):
+    BLOCK_M: gl.constexpr = p.c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = p.c_desc.block_type.shape[1]
+
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    offs_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, BLOCK_N, gl.SliceLayout(0, layout))
+
+    acc_state = _Counter.create(0, p.acc_empty_bars.shape[0])
+    scheduler = p.SchedulerImpl.initialize(
+        p.c_desc.shape[0],
+        p.c_desc.shape[1],
+        BLOCK_M,
+        BLOCK_N,
+    )
+    for idx in range(scheduler.get_num_tiles()):
+        pid_m, pid_n = scheduler.get_tile(idx)
+        off_m = pid_m * BLOCK_M
+        off_n = pid_n * BLOCK_N
+        mbarrier.wait(p.acc_ready_bars.index(acc_state.index), acc_state.phase)
+        acc = p.acc_bufs.index(acc_state.index).load()
+        mbarrier.arrive(p.acc_empty_bars.index(acc_state.index), count=1)
+        acc_state = acc_state.next()
+        acc = gl.convert_layout(acc, layout)
+        gl.store(
+            p.d_ptr
+            + (off_m + offs_m)[:, None] * p.d_stride_m
+            + (off_n + offs_n)[None, :] * p.d_stride_n,
+            acc,
+        )
+
+
+@gluon.jit
+def _tcgen05_matmul_accumulate_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    d_ptr,
+    d_stride_m,
+    d_stride_n,
+    SchedulerImpl: gl.constexpr,
+    num_buffers: gl.constexpr,
+):
+    BLOCK_M: gl.constexpr = c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = c_desc.block_type.shape[1]
+    dtype: gl.constexpr = a_desc.dtype
+
+    a_bufs = gl.allocate_shared_memory(
+        dtype,
+        [num_buffers] + a_desc.block_type.shape,
+        a_desc.layout,
+    )
+    b_bufs = gl.allocate_shared_memory(
+        dtype,
+        [num_buffers] + b_desc.block_type.shape,
+        b_desc.layout,
+    )
+    load_empty_bars = gl.allocate_shared_memory(
+        gl.int64,
+        [num_buffers, 1],
+        mbarrier.MBarrierLayout(),
+    )
+    load_ready_bars = gl.allocate_shared_memory(
+        gl.int64,
+        [num_buffers, 1],
+        mbarrier.MBarrierLayout(),
+    )
+    for i in gl.static_range(num_buffers):
+        mbarrier.init(load_empty_bars.index(i), count=1)
+        mbarrier.init(load_ready_bars.index(i), count=1)
+
+    c_buf = gl.allocate_shared_memory(
+        c_desc.dtype, c_desc.block_type.shape, c_desc.layout
+    )
+    c_empty_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    c_ready_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(c_empty_bar, count=1)
+    mbarrier.init(c_ready_bar, count=1)
+
+    tmem_layout: gl.constexpr = TensorMemoryLayout([BLOCK_M, BLOCK_N], col_stride=1)
+    acc_bufs = allocate_tensor_memory(gl.float32, [2, BLOCK_M, BLOCK_N], tmem_layout)
+    acc_empty_bars = gl.allocate_shared_memory(
+        gl.int64, [2, 1], mbarrier.MBarrierLayout()
+    )
+    acc_ready_bars = gl.allocate_shared_memory(
+        gl.int64, [2, 1], mbarrier.MBarrierLayout()
+    )
+    for i in gl.static_range(2):
+        mbarrier.init(acc_empty_bars.index(i), count=1)
+        mbarrier.init(acc_ready_bars.index(i), count=1)
+
+    p = _AccumPartitionArgs(
+        a_desc,
+        b_desc,
+        c_desc,
+        d_ptr,
+        d_stride_m,
+        d_stride_n,
+        a_bufs,
+        b_bufs,
+        load_empty_bars,
+        load_ready_bars,
+        c_buf,
+        c_empty_bar,
+        c_ready_bar,
+        acc_bufs,
+        acc_empty_bars,
+        acc_ready_bars,
+        SchedulerImpl,
+    )
+    gl.warp_specialize(
+        [
+            (_matmul_accumulate_epilogue_partition, (p,)),
+            (_matmul_accumulate_mma_partition, (p,)),
+            (_matmul_accumulate_load_partition, (p,)),
+        ],
+        [1, 1],
+        [24, 24],
+    )
+
+
+@gluon.jit
+def _tensor_memory_load_reduction_kernel(
+    in_ptr,
+    values_out,
+    max_out,
+    min_out,
+    M: gl.constexpr,
+    N: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    offs_m = gl.arange(0, M, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, N, gl.SliceLayout(0, layout))
+    data = gl.load(in_ptr + offs_m[:, None] * N + offs_n[None, :])
+    tmem_layout: gl.constexpr = TensorMemoryLayout((64, 64), col_stride=1)
+    tmem = allocate_tensor_memory(data.dtype, [M, N], tmem_layout)
+    tmem.store(data)
+    sliced = tmem.slice(8, 16)
+    values, maxima = sliced.load_max()
+    _, minima = sliced.load_min(abs=True)
+    out_n = gl.arange(0, 16, gl.SliceLayout(0, layout))
+    gl.store(values_out + offs_m[:, None] * 16 + out_n[None, :], values)
+    row_layout: gl.constexpr = gl.BlockedLayout([1], [32], [gl.num_warps()], [0])
+    row_offsets = gl.arange(0, M, row_layout)
+    gl.store(max_out + row_offsets, gl.convert_layout(maxima, row_layout))
+    gl.store(min_out + row_offsets, gl.convert_layout(minima, row_layout))
+
+
+@gluon.jit
+def _tma_gather_kernel(
+    out_ptr,
+    out_stride_x,
+    out_stride_y,
+    tensor_desc,
+    x_offsets_ptr,
+    y_offset,
+    BLOCK_X: gl.constexpr,
+):
+    BLOCK_Y: gl.constexpr = tensor_desc.block_type.shape[1]
+    coalesced_1d_layout: gl.constexpr = gl.BlockedLayout(
+        [1],
+        [32],
+        [gl.num_warps()],
+        [0],
+    )
+    x_offsets = gl.load(x_offsets_ptr + gl.arange(0, BLOCK_X, coalesced_1d_layout))
+    offsets_layout: gl.constexpr = gl.SliceLayout(
+        0,
+        gl.BlockedLayout([1, 4], [32, 1], [1, gl.num_warps()], [1, 0]),
+    )
+    x_offsets = gl.convert_layout(x_offsets, offsets_layout)
+    smem_dest = gl.allocate_shared_memory(
+        tensor_desc.dtype,
+        [BLOCK_X, BLOCK_Y],
+        tensor_desc.layout,
+    )
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    mbarrier.expect(bar, BLOCK_X * tensor_desc.block_type.nbytes)
+    blackwell_tma.async_gather(
+        tensor_desc,
+        x_offsets,
+        y_offset,
+        barrier=bar,
+        result=smem_dest,
+    )
+    mbarrier.wait(bar, phase=0)
+    mbarrier.invalidate(bar)
+
+    coalesced_2d_layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1],
+        [1, 32],
+        [1, gl.num_warps()],
+        [1, 0],
+    )
+    out = smem_dest.load(coalesced_2d_layout)
+    indices_x = (
+        gl.arange(0, BLOCK_X, gl.SliceLayout(1, coalesced_2d_layout))[:, None]
+        * out_stride_x
+    )
+    indices_y = (
+        gl.arange(0, BLOCK_Y, gl.SliceLayout(0, coalesced_2d_layout))[None, :]
+        * out_stride_y
+    )
+    gl.store(out_ptr + indices_x + indices_y, out)
+
+
+@gluon.jit
+def _tma_scatter_kernel(
+    tensor_desc,
+    x_offsets_ptr,
+    y_offset,
+    src_ptr,
+    src_stride_x,
+    src_stride_y,
+    BLOCK_X: gl.constexpr,
+):
+    BLOCK_Y: gl.constexpr = tensor_desc.block_type.shape[1]
+    coalesced_2d_layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1],
+        [1, 32],
+        [1, gl.num_warps()],
+        [1, 0],
+    )
+    indices_x = (
+        gl.arange(0, BLOCK_X, gl.SliceLayout(1, coalesced_2d_layout))[:, None]
+        * src_stride_x
+    )
+    indices_y = (
+        gl.arange(0, BLOCK_Y, gl.SliceLayout(0, coalesced_2d_layout))[None, :]
+        * src_stride_y
+    )
+    src = gl.load(src_ptr + indices_x + indices_y)
+    coalesced_1d_layout: gl.constexpr = gl.BlockedLayout(
+        [1],
+        [32],
+        [gl.num_warps()],
+        [0],
+    )
+    x_offsets = gl.load(x_offsets_ptr + gl.arange(0, BLOCK_X, coalesced_1d_layout))
+    offsets_layout: gl.constexpr = gl.SliceLayout(
+        0,
+        gl.BlockedLayout([1, 4], [32, 1], [1, gl.num_warps()], [1, 0]),
+    )
+    x_offsets = gl.convert_layout(x_offsets, offsets_layout)
+    smem_src = gl.allocate_shared_memory(
+        tensor_desc.dtype,
+        [BLOCK_X, BLOCK_Y],
+        tensor_desc.layout,
+    )
+    smem_src.store(src)
+    fence_async_shared()
+    blackwell_tma.async_scatter(tensor_desc, x_offsets, y_offset, smem_src)
+    blackwell_tma.store_wait(0)
+
+
+@gluon.jit
+def _tma_gather_scatter_matmul_kernel(
+    x_desc,
+    w_desc,
+    out_desc,
+    gather_indices,
+    scatter_indices,
+    BLOCK_M: gl.constexpr,
+):
+    BLOCK_K: gl.constexpr = w_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = w_desc.block_type.shape[1]
+    offsets_layout: gl.constexpr = gl.SliceLayout(
+        0,
+        gl.BlockedLayout([1, 4], [32, 1], [1, gl.num_warps()], [1, 0]),
+    )
+    offsets = gl.arange(0, BLOCK_M, offsets_layout)
+    gather_offsets = gl.load(gather_indices + offsets)
+    scatter_offsets = gl.load(scatter_indices + offsets)
+
+    x_smem = gl.allocate_shared_memory(
+        x_desc.dtype,
+        [BLOCK_M, BLOCK_K],
+        x_desc.layout,
+    )
+    w_smem = gl.allocate_shared_memory(
+        w_desc.dtype,
+        w_desc.block_type.shape,
+        w_desc.layout,
+    )
+    load_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(load_bar, count=1)
+    mbarrier.expect(
+        load_bar,
+        BLOCK_M * x_desc.block_type.nbytes + w_desc.block_type.nbytes,
+    )
+    blackwell_tma.async_gather(
+        x_desc,
+        gather_offsets,
+        0,
+        barrier=load_bar,
+        result=x_smem,
+    )
+    tma.async_load(w_desc, [0, 0], load_bar, w_smem)
+    mbarrier.wait(load_bar, phase=0)
+    mbarrier.invalidate(load_bar)
+
+    acc_layout: gl.constexpr = TensorMemoryLayout([BLOCK_M, BLOCK_N], col_stride=1)
+    acc = allocate_tensor_memory(gl.float32, [BLOCK_M, BLOCK_N], acc_layout)
+    mma_bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(mma_bar, count=1)
+    tcgen05_mma(x_smem, w_smem, acc, use_acc=False, mbarriers=[mma_bar])
+    mbarrier.wait(mma_bar, phase=0)
+    mbarrier.invalidate(mma_bar)
+
+    out_smem = gl.allocate_shared_memory(
+        out_desc.dtype,
+        [BLOCK_M, BLOCK_N],
+        out_desc.layout,
+    )
+    out_smem.store(acc.load().to(out_desc.dtype))
+    fence_async_shared()
+    blackwell_tma.async_scatter(out_desc, scatter_offsets, 0, out_smem)
+    blackwell_tma.store_wait(0)
+
+
+@gluon.jit
+def _tma_async_atomic_float_kernel(
+    add_desc,
+    min_desc,
+    max_desc,
+    src_ptr,
+    BLOCK_M: gl.constexpr,
+    BLOCK_N: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    offs_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, BLOCK_N, gl.SliceLayout(0, layout))
+    src = gl.load(src_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :])
+    smem = gl.allocate_shared_memory(src.dtype, [BLOCK_M, BLOCK_N], add_desc.layout)
+    smem.store(src)
+    fence_async_shared()
+    tma.async_atomic_add(add_desc, [1, 2], smem)
+    tma.async_atomic_min(min_desc, [1, 2], smem)
+    tma.async_atomic_max(max_desc, [1, 2], smem)
+    tma.store_wait(0)
+
+
+@gluon.jit
+def _tma_async_atomic_bitwise_kernel(
+    and_desc,
+    or_desc,
+    xor_desc,
+    src_ptr,
+    BLOCK_M: gl.constexpr,
+    BLOCK_N: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1], [1, 32], [1, gl.num_warps()], [1, 0]
+    )
+    offs_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, BLOCK_N, gl.SliceLayout(0, layout))
+    src = gl.load(src_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :])
+    smem = gl.allocate_shared_memory(src.dtype, [BLOCK_M, BLOCK_N], and_desc.layout)
+    smem.store(src)
+    fence_async_shared()
+    blackwell_tma.async_atomic_and(and_desc, [1, 1], smem)
+    blackwell_tma.async_atomic_or(or_desc, [1, 1], smem)
+    blackwell_tma.async_atomic_xor(xor_desc, [1, 1], smem)
+    blackwell_tma.store_wait(0)
+
+
 def test_gluon_simulator_runs_intro_scalar_range_memcpy_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.empty_like(inp)
@@ -1571,6 +2631,169 @@ def test_gluon_simulator_runs_pipelined_tma_add_on_cpu():
     )
 
     torch.testing.assert_close(c, a + b, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_blackwell_tma_gather_on_cpu():
+    block_x = 8
+    block_y = 8
+    y_offset = -2
+    inp = torch.arange(6 * 12, dtype=torch.float32).reshape(6, 12)
+    x_offsets = torch.tensor([-1, 0, 4, 2, 6, 5, 1, 3], dtype=torch.int32)
+    out = torch.full((block_x, block_y), -1.0)
+    layout = gl.NVMMASharedLayout.get_default_for([block_x, block_y], gl.float32)
+    desc = TensorDescriptor.from_tensor(inp, [1, block_y], layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tma_gather_kernel)
+
+    kernel[(1,)](
+        out,
+        *out.stride(),
+        desc,
+        x_offsets,
+        y_offset,
+        block_x,
+        num_warps=4,
+    )
+
+    expected = torch.zeros_like(out)
+    for out_row, src_row in enumerate(x_offsets.tolist()):
+        for out_col in range(block_y):
+            src_col = y_offset + out_col
+            if 0 <= src_row < inp.shape[0] and 0 <= src_col < inp.shape[1]:
+                expected[out_row, out_col] = inp[src_row, src_col]
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_blackwell_tma_scatter_on_cpu():
+    block_x = 8
+    block_y = 8
+    y_offset = 6
+    inp = torch.full((6, 12), -1.0)
+    x_offsets = torch.tensor([0, 5, 6, 3, 2, 8, 1, 4], dtype=torch.int32)
+    src = torch.arange(block_x * block_y, dtype=torch.float32).reshape(
+        block_x,
+        block_y,
+    )
+    layout = gl.NVMMASharedLayout.get_default_for([block_x, block_y], gl.float32)
+    desc = TensorDescriptor.from_tensor(inp, [1, block_y], layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tma_scatter_kernel)
+
+    kernel[(1,)](
+        desc,
+        x_offsets,
+        y_offset,
+        src,
+        *src.stride(),
+        block_x,
+        num_warps=4,
+    )
+
+    expected = torch.full_like(inp, -1.0)
+    for src_row, dst_row in enumerate(x_offsets.tolist()):
+        for src_col in range(block_y):
+            dst_col = y_offset + src_col
+            if 0 <= dst_row < inp.shape[0] and 0 <= dst_col < inp.shape[1]:
+                expected[dst_row, dst_col] = src[src_row, src_col]
+    torch.testing.assert_close(inp, expected, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_fused_tma_gather_scatter_matmul_on_cpu():
+    torch.manual_seed(19)
+    block_m = 8
+    block_k = 16
+    block_n = 16
+    x = torch.randn((12, block_k), dtype=torch.float16) / 4
+    w = torch.randn((block_k, block_n), dtype=torch.float16) / 4
+    out = torch.full((12, block_n), -7.0, dtype=torch.float16)
+    gather = torch.tensor([9, 1, 7, 0, 4, 11, 2, 6], dtype=torch.int32)
+    scatter = torch.tensor([3, 10, 0, 8, 5, 1, 11, 4], dtype=torch.int32)
+    x_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    w_layout = gl.NVMMASharedLayout.get_default_for([block_k, block_n], gl.float16)
+    out_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    x_desc = TensorDescriptor.from_tensor(x, [1, block_k], x_layout)
+    w_desc = TensorDescriptor.from_tensor(w, [block_k, block_n], w_layout)
+    out_desc = TensorDescriptor.from_tensor(out, [1, block_n], out_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _tma_gather_scatter_matmul_kernel
+    )
+
+    kernel[(1,)](
+        x_desc,
+        w_desc,
+        out_desc,
+        gather,
+        scatter,
+        block_m,
+        num_warps=4,
+    )
+
+    expected = torch.full_like(out, -7.0)
+    expected[scatter.long()] = (x[gather.long()].float() @ w.float()).half()
+    torch.testing.assert_close(out.float(), expected.float(), atol=1e-3, rtol=1e-3)
+
+
+def test_gluon_simulator_runs_tma_async_atomic_float_ops_on_cpu():
+    block_m = 2
+    block_n = 4
+    src = torch.tensor(
+        [[3.0, -2.0, 0.5, 8.0], [1.5, 7.0, -4.0, 0.25]],
+        dtype=torch.float32,
+    )
+    add_dst = torch.arange(40, dtype=torch.float32).reshape(5, 8)
+    min_dst = add_dst + 10.0
+    max_dst = add_dst - 10.0
+    layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float32)
+    add_desc = TensorDescriptor.from_tensor(add_dst, [block_m, block_n], layout)
+    min_desc = TensorDescriptor.from_tensor(min_dst, [block_m, block_n], layout)
+    max_desc = TensorDescriptor.from_tensor(max_dst, [block_m, block_n], layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _tma_async_atomic_float_kernel
+    )
+
+    expected_add = add_dst.clone()
+    expected_min = min_dst.clone()
+    expected_max = max_dst.clone()
+    expected_add[1:3, 2:6] += src
+    expected_min[1:3, 2:6] = torch.minimum(expected_min[1:3, 2:6], src)
+    expected_max[1:3, 2:6] = torch.maximum(expected_max[1:3, 2:6], src)
+
+    kernel[(1,)](add_desc, min_desc, max_desc, src, block_m, block_n, num_warps=4)
+
+    torch.testing.assert_close(add_dst, expected_add, atol=0, rtol=0)
+    torch.testing.assert_close(min_dst, expected_min, atol=0, rtol=0)
+    torch.testing.assert_close(max_dst, expected_max, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_tma_async_atomic_bitwise_ops_on_cpu():
+    block_m = 2
+    block_n = 4
+    src = torch.tensor(
+        [[0x0F, 0x33, 0x55, 0xAA], [0xF0, 0xCC, 0x5A, 0xA5]],
+        dtype=torch.int32,
+    )
+    base = torch.arange(40, dtype=torch.int32).reshape(5, 8) + 0x80
+    and_dst = base.clone()
+    or_dst = base.clone()
+    xor_dst = base.clone()
+    layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.int32)
+    and_desc = TensorDescriptor.from_tensor(and_dst, [block_m, block_n], layout)
+    or_desc = TensorDescriptor.from_tensor(or_dst, [block_m, block_n], layout)
+    xor_desc = TensorDescriptor.from_tensor(xor_dst, [block_m, block_n], layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _tma_async_atomic_bitwise_kernel
+    )
+
+    expected_and = and_dst.clone()
+    expected_or = or_dst.clone()
+    expected_xor = xor_dst.clone()
+    expected_and[1:3, 1:5] = torch.bitwise_and(expected_and[1:3, 1:5], src)
+    expected_or[1:3, 1:5] = torch.bitwise_or(expected_or[1:3, 1:5], src)
+    expected_xor[1:3, 1:5] = torch.bitwise_xor(expected_xor[1:3, 1:5], src)
+
+    kernel[(1,)](and_desc, or_desc, xor_desc, src, block_m, block_n, num_warps=4)
+
+    torch.testing.assert_close(and_dst, expected_and, atol=0, rtol=0)
+    torch.testing.assert_close(or_dst, expected_or, atol=0, rtol=0)
+    torch.testing.assert_close(xor_dst, expected_xor, atol=0, rtol=0)
 
 
 def test_gluon_simulator_runs_tma_message_passing_synchronously_on_cpu():
@@ -2036,6 +3259,409 @@ def test_gluon_simulator_runs_splitn_pipelined_persistent_wgmma_matmul_on_cpu():
     )
 
 
+def test_gluon_simulator_runs_tensor_memory_roundtrip_on_cpu():
+    inp = torch.arange(64 * 64, dtype=torch.float32).reshape(64, 64)
+    out = torch.empty_like(inp)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tmem_roundtrip_kernel)
+
+    kernel[(1,)](inp, out, *inp.shape, num_warps=4)
+
+    torch.testing.assert_close(out, inp, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_tcgen05_small_mma_on_cpu():
+    torch.manual_seed(5)
+    a = torch.randn(64, 32, dtype=torch.float16) / 4
+    b = torch.randn(32, 64, dtype=torch.float16) / 4
+    c = torch.randn(64, 64, dtype=torch.float32) / 4
+    d = torch.empty_like(c)
+    a_layout = gl.NVMMASharedLayout.get_default_for(a.shape, gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for(b.shape, gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for(c.shape, gl.float32)
+    a_desc = TensorDescriptor.from_tensor(a, a.shape, a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, b.shape, b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, c.shape, c_layout)
+    d_desc = TensorDescriptor.from_tensor(d, d.shape, c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tcgen05_small_mma_kernel)
+
+    kernel[(1,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        d_desc,
+        (64, 64),
+        False,
+        True,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(d, a.float() @ b.float() + c, atol=1e-2, rtol=1e-2)
+
+
+def test_gluon_simulator_runs_tcgen05_small_mma_with_lhs_tmem_on_cpu():
+    torch.manual_seed(6)
+    a = torch.randn(64, 32, dtype=torch.float16) / 4
+    b = torch.randn(32, 64, dtype=torch.float16) / 4
+    c = torch.randn(64, 64, dtype=torch.float32) / 4
+    d = torch.empty_like(c)
+    a_layout = gl.NVMMASharedLayout.get_default_for(a.shape, gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for(b.shape, gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for(c.shape, gl.float32)
+    a_desc = TensorDescriptor.from_tensor(a, a.shape, a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, b.shape, b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, c.shape, c_layout)
+    d_desc = TensorDescriptor.from_tensor(d, d.shape, c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tcgen05_small_mma_kernel)
+
+    kernel[(1,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        d_desc,
+        (64, 64),
+        True,
+        False,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(d, a.float() @ b.float() + c, atol=1e-2, rtol=1e-2)
+
+
+def test_gluon_simulator_runs_tcgen05_scaled_mma_on_cpu():
+    a = torch.tensor(
+        [[1.0, 2.0, 3.0, 4.0], [0.5, -1.0, 2.0, -0.5]],
+        dtype=torch.float32,
+    )
+    b = torch.tensor(
+        [
+            [1.0, -1.0, 0.5, 2.0],
+            [2.0, 0.0, -0.5, 1.0],
+            [0.5, 1.5, 1.0, -1.0],
+            [1.0, -2.0, 2.0, 0.5],
+        ],
+        dtype=torch.float32,
+    )
+    a_scale = torch.tensor([[127, 128], [126, 127]], dtype=torch.uint8)
+    b_scale = torch.tensor(
+        [[127, 128], [128, 126], [127, 127], [126, 128]],
+        dtype=torch.uint8,
+    )
+    out = torch.empty((2, 4), dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tcgen05_scaled_mma_kernel)
+
+    kernel[(1,)](
+        a,
+        b,
+        a_scale,
+        b_scale,
+        out,
+        a.shape[0],
+        b.shape[1],
+        a.shape[1],
+        2,
+        num_warps=4,
+    )
+
+    a_scale_float = torch.pow(
+        2.0,
+        a_scale.float() - 127.0,
+    ).repeat_interleave(2, dim=1)
+    b_scale_float = torch.pow(
+        2.0,
+        b_scale.float() - 127.0,
+    ).repeat_interleave(2, dim=1)
+    expected = (a * a_scale_float) @ (b * b_scale_float.T)
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_gluon_simulator_runs_descriptor_tcgen05_scaled_mma_on_cpu():
+    a = torch.tensor(
+        [[1.0, -2.0, 0.5, 4.0], [0.25, 3.0, -1.5, 2.0]],
+        dtype=torch.float32,
+    )
+    b = torch.tensor(
+        [
+            [1.0, 0.5, -1.0, 2.0],
+            [-0.5, 1.5, 2.0, -1.0],
+            [2.0, -1.0, 0.25, 0.5],
+            [0.75, 2.0, -0.5, -1.5],
+        ],
+        dtype=torch.float32,
+    )
+    a_scale = torch.tensor([[127, 128], [126, 127]], dtype=torch.uint8)
+    b_scale = torch.tensor(
+        [[128, 127], [127, 126], [126, 128], [128, 128]],
+        dtype=torch.uint8,
+    )
+    out = torch.empty((2, 4), dtype=torch.float32)
+    a_layout = gl.NVMMASharedLayout.get_default_for(list(a.shape), gl.float32)
+    b_layout = gl.NVMMASharedLayout.get_default_for(list(b.shape), gl.float32)
+    c_layout = gl.NVMMASharedLayout.get_default_for(list(out.shape), gl.float32)
+    a_desc = TensorDescriptor.from_tensor(a, list(a.shape), a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, list(b.shape), b_layout)
+    c_desc = TensorDescriptor.from_tensor(out, list(out.shape), c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _tcgen05_descriptor_scaled_mma_kernel
+    )
+
+    kernel[(1, 1)](a_desc, b_desc, c_desc, a_scale, b_scale, 2, num_warps=4)
+
+    a_scale_float = torch.pow(2.0, a_scale.float() - 127.0).repeat_interleave(
+        2,
+        dim=1,
+    )
+    b_scale_float = torch.pow(2.0, b_scale.float() - 127.0).repeat_interleave(
+        2,
+        dim=1,
+    )
+    expected = (a * a_scale_float) @ (b * b_scale_float).T
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_gluon_simulator_runs_tma_loaded_scale_tcgen05_pipeline_on_cpu():
+    a = torch.tensor(
+        [
+            [1.0, -2.0, 0.5, 4.0],
+            [0.25, 3.0, -1.5, 2.0],
+        ],
+        dtype=torch.float32,
+    )
+    b = torch.tensor(
+        [
+            [1.0, 0.5, -1.0, 2.0],
+            [-0.5, 1.5, 2.0, -1.0],
+            [2.0, -1.0, 0.25, 0.5],
+            [0.75, 2.0, -0.5, -1.5],
+        ],
+        dtype=torch.float32,
+    )
+    a_scale_values = torch.tensor([[127, 128], [126, 127]], dtype=torch.uint8)
+    b_scale_values = torch.tensor(
+        [[128, 127], [127, 126], [126, 128], [128, 128]],
+        dtype=torch.uint8,
+    )
+    a_scale = torch.zeros((2, 16), dtype=torch.uint8)
+    b_scale = torch.zeros((4, 16), dtype=torch.uint8)
+    a_scale[:, :2] = a_scale_values
+    b_scale[:, :2] = b_scale_values
+    out = torch.empty((2, 4), dtype=torch.float32)
+    block_m, block_n, block_k, vec = 2, 4, 2, 2
+    a_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float32)
+    b_layout = gl.NVMMASharedLayout.get_default_for([block_n, block_k], gl.float32)
+    c_layout = gl.NVMMASharedLayout.get_default_for(list(out.shape), gl.float32)
+    scale_a_layout = gl.NVMMASharedLayout.get_default_for(
+        [block_m, block_k // vec],
+        gl.uint8,
+    )
+    scale_b_layout = gl.NVMMASharedLayout.get_default_for(
+        [block_n, block_k // vec],
+        gl.uint8,
+    )
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_n, block_k], b_layout)
+    c_desc = TensorDescriptor.from_tensor(out, list(out.shape), c_layout)
+    a_scale_desc = TensorDescriptor.from_tensor(
+        a_scale,
+        [block_m, block_k // vec],
+        scale_a_layout,
+    )
+    b_scale_desc = TensorDescriptor.from_tensor(
+        b_scale,
+        [block_n, block_k // vec],
+        scale_b_layout,
+    )
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _tcgen05_descriptor_scaled_tma_pipeline_kernel
+    )
+
+    kernel[(1,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        a_scale_desc,
+        b_scale_desc,
+        vec,
+        num_warps=4,
+    )
+
+    a_scale_float = torch.pow(2.0, a_scale_values.float() - 127.0).repeat_interleave(
+        vec,
+        dim=1,
+    )
+    b_scale_float = torch.pow(2.0, b_scale_values.float() - 127.0).repeat_interleave(
+        vec,
+        dim=1,
+    )
+    expected = (a * a_scale_float) @ (b * b_scale_float).T
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_gluon_simulator_runs_two_cta_tcgen05_on_cpu():
+    torch.manual_seed(12)
+    a = torch.randn(32, 16, dtype=torch.float16) / 4
+    b = torch.randn(16, 32, dtype=torch.float16) / 4
+    c = torch.empty((32, 32), dtype=torch.float16)
+    a_layout = gl.NVMMASharedLayout.get_default_for(
+        list(a.shape),
+        gl.float16,
+        cga_layout=[(1, 0)],
+    )
+    b_layout = gl.NVMMASharedLayout.get_default_for(
+        list(b.shape),
+        gl.float16,
+        cga_layout=[(0, 1)],
+    )
+    c_layout = gl.NVMMASharedLayout.get_default_for(
+        list(c.shape),
+        gl.float16,
+        cga_layout=[(1, 0)],
+    )
+    a_desc = TensorDescriptor.from_tensor(a, list(a.shape), a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, list(b.shape), b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, list(c.shape), c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_two_cta_tcgen05_kernel)
+
+    kernel[(1,)](a_desc, b_desc, c_desc, num_warps=4, num_ctas=2)
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+
+
+def test_gluon_simulator_runs_tma_tcgen05_multicast_on_cpu():
+    torch.manual_seed(21)
+    block_m = 32
+    block_n = 32
+    block_k = 16
+    num_k_tiles = 2
+    a = torch.randn((block_m, block_k * num_k_tiles), dtype=torch.float16) / 4
+    b = torch.randn((block_k * num_k_tiles, block_n), dtype=torch.float16) / 4
+    c = torch.empty((block_m, block_n), dtype=torch.float16)
+    cga_layout_a = ((1, 0), (2, 0))
+    cga_layout_b = ((0, 1), (0, 0))
+    cga_layout_c = ((1, 0), (2, 0))
+    a_layout = gl.NVMMASharedLayout.get_default_for(
+        [block_m, block_k],
+        gl.float16,
+        cga_layout=cga_layout_a,
+    )
+    b_layout = gl.NVMMASharedLayout.get_default_for(
+        [block_k, block_n],
+        gl.float16,
+        cga_layout=cga_layout_b,
+    )
+    c_layout = gl.NVMMASharedLayout.get_default_for(
+        [block_m, block_n],
+        gl.float16,
+        cga_layout=cga_layout_c,
+    )
+    acc_layout = TensorMemoryLayout(
+        block=(16, block_n),
+        col_stride=1,
+        cga_layout=cga_layout_c,
+        two_ctas=True,
+    )
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_k, block_n], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tma_tcgen05_multicast_kernel)
+
+    kernel[(1,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        num_k_tiles,
+        acc_layout,
+        num_warps=4,
+        num_ctas=4,
+    )
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+
+
+def test_gluon_simulator_runs_tcgen05_copy_on_cpu():
+    inp = torch.arange(64 * 64, dtype=torch.float32).reshape(64, 64)
+    out = torch.empty_like(inp)
+    smem_layout = gl.NVMMASharedLayout.get_default_for([64, 64], gl.float32)
+    tmem_layout = TensorMemoryLayout((64, 64), col_stride=1)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_tcgen05_copy_kernel)
+
+    kernel[(1,)](
+        inp,
+        *inp.stride(),
+        out,
+        *out.stride(),
+        *inp.shape,
+        smem_layout,
+        tmem_layout,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(out, inp, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_tcgen05_accumulate_pipeline_on_cpu():
+    torch.manual_seed(18)
+    a = torch.randn(64, 64, dtype=torch.float16) / 4
+    b = torch.randn(64, 64, dtype=torch.float16) / 4
+    c = torch.randn(64, 64, dtype=torch.float32) / 4
+    d = torch.empty_like(c)
+    a_layout = gl.NVMMASharedLayout.get_default_for([64, 32], gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for([32, 64], gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for([64, 64], gl.float32)
+    a_desc = TensorDescriptor.from_tensor(a, [64, 32], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [32, 64], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [64, 64], c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _tcgen05_matmul_accumulate_kernel
+    )
+
+    kernel[(1,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        d,
+        *d.stride(),
+        _GroupedPersistentTileScheduler(1),
+        2,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(d, a.float() @ b.float() + c, atol=1e-2, rtol=1e-2)
+
+
+def test_gluon_simulator_runs_tensor_memory_load_reductions_on_cpu():
+    inp = (torch.arange(64 * 64, dtype=torch.float32).reshape(64, 64) - 2048) / 64
+    values_out = torch.empty((64, 16), dtype=torch.float32)
+    max_out = torch.empty((64,), dtype=torch.float32)
+    min_abs_out = torch.empty((64,), dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _tensor_memory_load_reduction_kernel
+    )
+
+    kernel[(1,)](
+        inp,
+        values_out,
+        max_out,
+        min_abs_out,
+        *inp.shape,
+        num_warps=4,
+    )
+
+    sliced = inp[:, 8:24]
+    torch.testing.assert_close(values_out, sliced, atol=0, rtol=0)
+    torch.testing.assert_close(max_out, sliced.max(dim=1).values, atol=0, rtol=0)
+    torch.testing.assert_close(min_abs_out, sliced.abs().min(dim=1).values)
+
+
 def test_gluon_simulator_sanitizer_reports_tma_descriptor_oob_on_cpu():
     block_m = 16
     block_n = 16
@@ -2066,3 +3692,64 @@ def test_gluon_simulator_runs_layout_anchor_and_barrier_on_cpu():
     kernel[(1,)](values, out, values.numel(), num_warps=1)
 
     torch.testing.assert_close(out, values + 1.0, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_float2_helpers_on_cpu():
+    f0 = torch.tensor([1.0, -2.0, 0.25, 8.0], dtype=torch.float32)
+    f1 = torch.tensor([3.0, 4.5, -0.5, 0.125], dtype=torch.float32)
+    out_sum0 = torch.empty_like(f0)
+    out_sum1 = torch.empty_like(f0)
+    out_fma0 = torch.empty_like(f0)
+    out_fma1 = torch.empty_like(f0)
+    out_full0 = torch.empty_like(f0)
+    out_full1 = torch.empty_like(f0)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_float2_helpers_kernel)
+
+    kernel[(1,)](
+        f0,
+        f1,
+        out_sum0,
+        out_sum1,
+        out_fma0,
+        out_fma1,
+        out_full0,
+        out_full1,
+        f0.numel(),
+        num_warps=1,
+    )
+
+    torch.testing.assert_close(out_sum0, f0 + f1, atol=0, rtol=0)
+    torch.testing.assert_close(out_sum1, f0 + f1, atol=0, rtol=0)
+    torch.testing.assert_close(out_fma0, f0 * f1 + f0, atol=0, rtol=0)
+    torch.testing.assert_close(out_fma1, f1 * f0 + f1, atol=0, rtol=0)
+    torch.testing.assert_close(out_full0, f0 * 2.0, atol=0, rtol=0)
+    torch.testing.assert_close(out_full1, f1 * 2.0, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_float2_pack_unpack_and_reduce_on_cpu():
+    values = torch.arange(32, dtype=torch.float32).reshape(4, 8) - 7.5
+    roundtrip = torch.empty_like(values)
+    even_sum = torch.empty((4,), dtype=torch.float32)
+    odd_sum = torch.empty((4,), dtype=torch.float32)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_float2_pack_reduce_kernel)
+
+    kernel[(1,)](values, roundtrip, even_sum, odd_sum, num_warps=4)
+
+    torch.testing.assert_close(roundtrip, values, atol=0, rtol=0)
+    torch.testing.assert_close(even_sum, values[:, 0::2].sum(dim=1), atol=0, rtol=0)
+    torch.testing.assert_close(odd_sum, values[:, 1::2].sum(dim=1), atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_float2_constructor_convert_on_cpu():
+    values = torch.tensor(
+        [[1.0, -2.0, 0.25, 4.0], [3.0, -0.5, 2.5, -1.25]],
+        dtype=torch.float32,
+    )
+    out = torch.empty_like(values)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _float2_constructor_convert_kernel
+    )
+
+    kernel[(1,)](values, out, num_warps=4)
+
+    torch.testing.assert_close(out, values * 3.0, atol=0, rtol=0)
