@@ -1811,10 +1811,9 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
             _patch_gluon_attr(pkg, name, member, scope)
 
 
-def patch_lang(fn: Callable | None = None) -> _LangPatchScope:
+def patch_lang(fn: Callable) -> _LangPatchScope:
     """Patch Gluon builtins to execute through the NumPy interpreter builder."""
 
-    del fn
     scope = _LangPatchScope()
     for module in _GLUON_BUILTIN_MODULES:
         _patch_gluon_builtins(module, scope)
