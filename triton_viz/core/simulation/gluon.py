@@ -19,7 +19,9 @@ import triton.language as tl
 import triton.language.extra.libdevice as triton_libdevice  # type: ignore
 from triton.experimental.gluon import language as gl  # type: ignore
 from triton.experimental.gluon.language import _core as gluon_core  # type: ignore
+from triton.experimental.gluon.language import _layouts as gluon_layouts  # type: ignore
 from triton.experimental.gluon.language import _math as gluon_math  # type: ignore
+from triton.experimental.gluon.language import _semantic as gluon_semantic_module  # type: ignore
 from triton.experimental.gluon.language import _standard as gluon_standard  # type: ignore
 from triton.experimental.gluon.language import amd as gluon_amd  # type: ignore
 from triton.experimental.gluon.language.amd import cdna3 as gluon_amd_cdna3  # type: ignore
@@ -70,7 +72,6 @@ from triton.runtime.interpreter import (  # type: ignore
     _unpack_e2m1,
     interpreter_builder,
 )
-from triton.language.semantic import TritonSemantic
 
 from ..frontend.base import AdapterResult, _LangPatchScope
 from ..symbolic_metadata import TensorDescriptorAccess
@@ -134,30 +135,19 @@ class _WarpSpecializeScheduler:
             self._condition.notify_all()
 
 
-class GluonSemantic(TritonSemantic):
+class GluonSemantic(gluon_semantic_module.GluonSemantic):
     """Triton interpreter semantic with Gluon-compatible builtin signatures."""
 
-    def arange(self, start: int, end: int, layout: Any = None):
-        return super().arange(start, end)
-
-    def full(self, shape: list[int], value: Any, dtype: tl.dtype, layout: Any = None):
-        return super().full(shape, value, dtype)
-
-    def dot_fma(self, a: tl.tensor, b: tl.tensor, acc: tl.tensor):
-        return super().dot(
-            a,
-            b,
-            acc,
-            input_precision=None,
-            max_num_imprecise_acc=0,
-            out_dtype=None,
-        )
-
     def convert_layout(self, value: Any, layout: Any, assert_trivial: bool = False):
-        return value
+        ty = value.type
+        if not isinstance(ty, gluon_core.distributed_type):
+            return value
+        ret_ty = gluon_core.distributed_type(ty.element_ty, ty.shape, layout)
+        handle = self.builder.create_convert_layout(ret_ty.to_ir(self.builder), value.handle)
+        return gluon_core.tensor(handle, ret_ty)
 
 
-gluon_semantic = GluonSemantic(interpreter_builder)
+gluon_semantic: GluonSemantic
 
 
 def _unwrap_constexpr(value: Any) -> Any:
@@ -228,8 +218,16 @@ class SimulatedBlockType:
 
 
 class SimulatedTensorDescriptorType:
-    def __init__(self, block_type: SimulatedBlockType) -> None:
+    def __init__(self, block_type: SimulatedBlockType, layout: Any = None) -> None:
         self.block_type = block_type
+        self.layout = layout
+
+
+class SimulatedTensorDescriptorLayoutType:
+    def __init__(self, block_type: tl.block_type, is_signed: bool, layout: Any) -> None:
+        self.block_type = block_type
+        self.is_signed = is_signed
+        self.layout = layout
 
 
 class SimulatedSharedMemoryDescriptorType:
@@ -844,50 +842,826 @@ class TensorMemoryHandle(TensorHandle, gluon_blackwell.tensor_memory_descriptor)
         )
 
 
-def _allocate_shared_memory(
-    element_ty: Any,
-    shape: Any,
-    layout: Any,
-    value: Any = None,
-    _semantic: Any = None,
-):
-    element_ty = _unwrap_constexpr(element_ty)
-    shape = [int(_unwrap_constexpr(dim)) for dim in _unwrap_constexpr(shape)]
-    desc = SharedMemoryHandle(element_ty, shape, _unwrap_constexpr(layout))
-    if value is not None:
-        desc.store(value)
-    return desc
+def _as_shape(value: Any) -> tuple[int, ...]:
+    return tuple(int(_unwrap_constexpr(dim)) for dim in _unwrap_constexpr(value))
 
 
-def _allocate_tensor_memory(
-    element_ty: Any,
-    shape: Any,
-    layout: Any,
-    value: Any = None,
-    _semantic: Any = None,
-):
-    element_ty = _unwrap_constexpr(element_ty)
-    shape = [int(_unwrap_constexpr(dim)) for dim in _unwrap_constexpr(shape)]
-    desc = TensorMemoryHandle(element_ty, shape, _unwrap_constexpr(layout))
-    if value is not None:
-        desc.store(value)
-    return desc
+def _set_handle_layout(handle: TensorHandle, layout: Any) -> TensorHandle:
+    handle.set_attr("gluon.layout", layout)
+    return handle
 
 
-def _allocate_mbarrier(
-    batch: Any = None,
-    two_ctas: Any = False,
-    _semantic: Any = None,
-) -> SharedMemoryHandle:
-    num_ctas = 1 if _CURRENT_NUM_CTAS is None else int(_CURRENT_NUM_CTAS)
-    two_ctas = bool(_unwrap_constexpr(two_ctas))
-    barrier_count = num_ctas // 2 if two_ctas else num_ctas
-    barrier_count = max(1, barrier_count)
-    if batch is None:
-        shape = [barrier_count]
-    else:
-        shape = [_to_int(batch), barrier_count]
-    return _allocate_shared_memory(gl.int64, shape, None)
+def _get_handle_layout(handle: TensorHandle) -> Any:
+    return handle.attr.get("gluon.layout", gluon_layouts.AutoLayout())
+
+
+def _tensor_result(data: np.ndarray, dtype: tl.dtype, layout: Any = None) -> TensorHandle:
+    return _set_handle_layout(TensorHandle(data, dtype), layout or gluon_layouts.AutoLayout())
+
+
+def _local_indices(indices: np.ndarray, axis: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    for output_index in np.ndindex(indices.shape):
+        memory_index = list(output_index)
+        memory_index[axis] = int(indices[output_index])
+        yield output_index, tuple(memory_index)
+
+
+def _rmw_kind(rmw_op: Any) -> str:
+    name = getattr(rmw_op, "name", str(rmw_op)).lower()
+    if "fadd" in name or name.endswith("add") or ".add" in name:
+        return "add"
+    if "umin" in name or "min" in name:
+        return "min"
+    if "umax" in name or "max" in name:
+        return "max"
+    if "and" in name:
+        return "and"
+    if "or" in name:
+        return "or"
+    if "xor" in name:
+        return "xor"
+    if "xchg" in name:
+        return "xchg"
+    raise ValueError(f"Unsupported local atomic scatter RMW op: {rmw_op}")
+
+
+def _apply_rmw(kind: str, old: Any, value: Any) -> Any:
+    if kind == "add":
+        return old + value
+    if kind == "min":
+        return np.minimum(old, value)
+    if kind == "max":
+        return np.maximum(old, value)
+    if kind == "and":
+        return np.bitwise_and(old, value)
+    if kind == "or":
+        return np.bitwise_or(old, value)
+    if kind == "xor":
+        return np.bitwise_xor(old, value)
+    if kind == "xchg":
+        return value
+    raise ValueError(f"Unsupported local atomic scatter RMW kind: {kind}")
+
+
+class Builder(interpreter_builder.__class__):
+    """Interpreter builder with the Gluon-specific methods used by semantics."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        if not hasattr(self.options, "enable_iisan"):
+            object.__setattr__(self.options, "enable_iisan", False)
+
+    def get_auto_layout(self):
+        return gluon_layouts.AutoLayout()
+
+    def get_coalesced_layout(self):
+        return gluon_layouts.CoalescedLayout()
+
+    def get_blocked_layout(
+        self,
+        size_per_thread: Any,
+        threads_per_warp: Any,
+        warps_per_cta: Any,
+        order: Any,
+        cga_layout: Any = None,
+    ):
+        return gluon_layouts.BlockedLayout(
+            list(size_per_thread),
+            list(threads_per_warp),
+            list(warps_per_cta),
+            list(order),
+            [] if cga_layout is None else list(cga_layout),
+        )
+
+    def get_slice_layout(self, dim: int, parent: Any):
+        return gluon_layouts.SliceLayout(int(dim), parent)
+
+    def get_distributed_linear_layout(
+        self,
+        reg_bases: Any,
+        lane_bases: Any,
+        warp_bases: Any,
+        block_bases: Any,
+        shape: Any,
+    ):
+        return gluon_layouts.DistributedLinearLayout(
+            list(reg_bases),
+            list(lane_bases),
+            list(warp_bases),
+            list(block_bases),
+            list(shape),
+        )
+
+    def get_dot_operand_layout(self, operand_index: int, parent: Any, k_width: int):
+        return gluon_layouts.DotOperandLayout(int(operand_index), parent, int(k_width))
+
+    def get_mma_layout(
+        self,
+        version: Any,
+        warps_per_cta: Any,
+        cga_layout: Any,
+        instr_shape: Any,
+    ):
+        return gluon_layouts.NVMMADistributedLayout(
+            list(version),
+            list(warps_per_cta),
+            list(instr_shape),
+            [] if cga_layout is None else list(cga_layout),
+        )
+
+    def get_nvmma_shared_layout(
+        self,
+        swizzle_byte_width: int,
+        element_bitwidth: int,
+        transposed: bool,
+        fp4_padded: bool,
+        cga_layout: Any,
+        rank: int,
+    ):
+        return gluon_layouts.NVMMASharedLayout(
+            int(swizzle_byte_width),
+            int(element_bitwidth),
+            int(rank),
+            bool(transposed),
+            bool(fp4_padded),
+            [] if cga_layout is None else list(cga_layout),
+        )
+
+    def get_swizzled_shared_layout(
+        self,
+        vec: int,
+        per_phase: int,
+        max_phase: int,
+        order: Any,
+        cga_layout: Any,
+    ):
+        return gluon_layouts.SwizzledSharedLayout(
+            int(vec),
+            int(per_phase),
+            int(max_phase),
+            list(order),
+            [] if cga_layout is None else list(cga_layout),
+        )
+
+    def get_padded_shared_layout(
+        self,
+        intervals: Any,
+        paddings: Any,
+        offset_bases: Any,
+        cga_layout: Any,
+        shape: Any,
+    ):
+        return gluon_layouts.PaddedSharedLayout(
+            [list(pair) for pair in zip(intervals, paddings)],
+            list(offset_bases),
+            [] if cga_layout is None else list(cga_layout),
+            list(shape),
+        )
+
+    def get_shared_linear_layout(
+        self,
+        offset_bases: Any,
+        block_bases: Any = None,
+        alignment: int = 16,
+    ):
+        return gluon_layouts.SharedLinearLayout(
+            list(offset_bases),
+            [] if block_bases is None else list(block_bases),
+            int(alignment),
+        )
+
+    def get_distributed_ty(self, element_ty: tl.dtype, shape: Any, layout: Any):
+        del layout
+        return tl.block_type(element_ty, list(shape))
+
+    def get_shared_mem_desc_ty(
+        self,
+        element_ty: tl.dtype,
+        shape: Any,
+        layout: Any,
+        alloc_shape: Any,
+    ):
+        return SimulatedSharedMemoryDescriptorType(
+            element_ty,
+            list(shape),
+            layout,
+            list(alloc_shape),
+        )
+
+    def get_tensor_mem_desc_ty(
+        self,
+        element_ty: tl.dtype,
+        shape: Any,
+        layout: Any,
+        alloc_shape: Any,
+    ):
+        return SimulatedTensorMemoryDescriptorType(
+            element_ty,
+            list(shape),
+            layout,
+            list(alloc_shape),
+        )
+
+    def get_tensor_descriptor_layout_type(
+        self,
+        block_type: tl.block_type,
+        is_signed: bool,
+        layout: Any,
+    ):
+        return SimulatedTensorDescriptorLayoutType(block_type, bool(is_signed), layout)
+
+    def get_tensor_descriptor_im2col_layout_type(
+        self,
+        block_type: tl.block_type,
+        is_signed: bool,
+        layout: Any,
+    ):
+        return SimulatedTensorDescriptorLayoutType(block_type, bool(is_signed), layout)
+
+    def get_gluon_layout_from_tensor(self, handle: TensorHandle):
+        return _get_handle_layout(handle)
+
+    def get_gluon_layout_from_memdesc(self, handle: Any):
+        return getattr(handle, "layout", gluon_layouts.AutoLayout())
+
+    def is_convert_layout_trivial(self, _ret_ty: Any, _value: Any) -> bool:
+        return True
+
+    def create_convert_layout(self, ret_ty: Any, value: TensorHandle):
+        layout = getattr(ret_ty, "layout", gluon_layouts.AutoLayout())
+        return _tensor_result(np.asarray(value.data).copy(), value.dtype, layout)
+
+    def create_local_alloc(
+        self,
+        desc_ty: SimulatedSharedMemoryDescriptorType,
+        value: TensorHandle | None = None,
+    ):
+        data = np.zeros(desc_ty.alloc_shape, dtype=_get_np_dtype(desc_ty.element_ty))
+        if value is not None:
+            data[...] = np.asarray(value.data, dtype=data.dtype)
+        return SharedMemoryHandle(desc_ty.element_ty, list(desc_ty.shape), desc_ty.layout, data)
+
+    def create_local_load(self, _ret_ty: Any, mem_desc: SharedMemoryHandle):
+        return _tensor_result(
+            np.asarray(mem_desc.data).copy(),
+            mem_desc.element_ty,
+            mem_desc.layout,
+        )
+
+    def create_local_store(self, mem_desc: SharedMemoryHandle, value: TensorHandle):
+        mem_desc.data[...] = np.asarray(value.data, dtype=mem_desc.data.dtype)
+        return None
+
+    def create_local_gather(
+        self,
+        _ret_ty: Any,
+        mem_desc: SharedMemoryHandle,
+        indices: TensorHandle,
+        axis: int,
+    ):
+        indices_data = np.asarray(indices.data)
+        result = np.empty(indices_data.shape, dtype=mem_desc.data.dtype)
+        for output_index, memory_index in _local_indices(indices_data, int(axis)):
+            result[output_index] = mem_desc.data[memory_index]
+        return _tensor_result(result, mem_desc.element_ty, _get_handle_layout(indices))
+
+    def create_local_scatter(
+        self,
+        mem_desc: SharedMemoryHandle,
+        values: TensorHandle,
+        indices: TensorHandle,
+        axis: int,
+    ):
+        indices_data = np.asarray(indices.data)
+        values_data = np.asarray(values.data)
+        for output_index, memory_index in _local_indices(indices_data, int(axis)):
+            mem_desc.data[memory_index] = values_data[output_index]
+        return None
+
+    def create_local_atomic_scatter_rmw(
+        self,
+        rmw_op: Any,
+        mem_desc: SharedMemoryHandle,
+        values: TensorHandle,
+        indices: TensorHandle,
+        mask: TensorHandle | None,
+        axis: int,
+    ):
+        kind = _rmw_kind(rmw_op)
+        indices_data = np.asarray(indices.data)
+        values_data = np.asarray(values.data)
+        mask_data = None if mask is None else np.asarray(mask.data, dtype=bool)
+        old_values = np.empty(indices_data.shape, dtype=mem_desc.data.dtype)
+        for output_index, memory_index in _local_indices(indices_data, int(axis)):
+            old = mem_desc.data[memory_index]
+            old_values[output_index] = old
+            if mask_data is not None and not mask_data[output_index]:
+                continue
+            mem_desc.data[memory_index] = _apply_rmw(
+                kind,
+                old,
+                values_data[output_index],
+            )
+        return _tensor_result(old_values, mem_desc.element_ty, _get_handle_layout(values))
+
+    def create_local_dealloc(self, _mem_desc: SharedMemoryHandle):
+        return None
+
+    def create_memdesc_subslice(
+        self,
+        ret_ty: SimulatedSharedMemoryDescriptorType,
+        mem_desc: SharedMemoryHandle,
+        offsets: Any,
+    ):
+        slices = []
+        for dim, offset in enumerate(offsets):
+            start = int(offset)
+            stop = start + int(ret_ty.shape[dim])
+            slices.append(slice(start, stop))
+        return SharedMemoryHandle(
+            ret_ty.element_ty,
+            list(ret_ty.shape),
+            ret_ty.layout,
+            mem_desc.data[tuple(slices)],
+        )
+
+    def create_memdesc_index(
+        self,
+        ret_ty: SimulatedSharedMemoryDescriptorType,
+        mem_desc: SharedMemoryHandle,
+        index: TensorHandle,
+    ):
+        index_value = int(np.asarray(index.data).reshape(-1)[0])
+        return SharedMemoryHandle(
+            ret_ty.element_ty,
+            list(ret_ty.shape),
+            ret_ty.layout,
+            mem_desc.data[index_value],
+        )
+
+    def create_memdesc_trans(self, mem_desc: SharedMemoryHandle, order: Any):
+        order = tuple(int(item) for item in order)
+        return SharedMemoryHandle(
+            mem_desc.element_ty,
+            [mem_desc.shape[dim] for dim in order],
+            mem_desc.layout,
+            np.transpose(mem_desc.data, order),
+        )
+
+    def create_memdesc_reshape(self, mem_desc: SharedMemoryHandle, shape: Any):
+        shape = list(_as_shape(shape))
+        return SharedMemoryHandle(
+            mem_desc.element_ty,
+            shape,
+            mem_desc.layout,
+            mem_desc.data.reshape(shape),
+        )
+
+    def create_memdesc_reinterpret(
+        self,
+        ret_ty: SimulatedSharedMemoryDescriptorType,
+        mem_desc: SharedMemoryHandle,
+    ):
+        data = mem_desc.data.view(_get_np_dtype(ret_ty.element_ty)).reshape(ret_ty.shape)
+        return SharedMemoryHandle(ret_ty.element_ty, list(ret_ty.shape), ret_ty.layout, data)
+
+    def create_tmem_alloc(
+        self,
+        desc_ty: SimulatedTensorMemoryDescriptorType,
+        value: TensorHandle | None = None,
+    ):
+        data = np.zeros(desc_ty.alloc_shape, dtype=_get_np_dtype(desc_ty.element_ty))
+        if value is not None:
+            data[...] = np.asarray(value.data, dtype=data.dtype)
+        return TensorMemoryHandle(desc_ty.element_ty, list(desc_ty.shape), desc_ty.layout, data)
+
+    def create_tmem_load(self, _ret_ty: Any, desc: TensorMemoryHandle, *args: Any):
+        if not args:
+            return _tensor_result(np.asarray(desc.data).copy(), desc.element_ty, desc.layout)
+        red_op = args[0]
+        abs_flag = args[1] if len(args) > 1 else False
+        data = np.asarray(desc.data)
+        if bool(_to_python_scalar(abs_flag)):
+            data = np.abs(data)
+        name = getattr(red_op, "name", str(red_op)).lower()
+        reduced_data = np.min(data, axis=1) if "min" in name else np.max(data, axis=1)
+        return (
+            _tensor_result(np.asarray(desc.data).copy(), desc.element_ty, desc.layout),
+            _tensor_result(np.asarray(reduced_data, dtype=data.dtype), desc.element_ty, desc.layout),
+            desc.layout,
+        )
+
+    def create_tmem_store(
+        self,
+        desc: TensorMemoryHandle,
+        value: TensorHandle,
+        pred: TensorHandle,
+    ):
+        if bool(np.asarray(pred.data).reshape(-1)[0]):
+            desc.data[...] = np.asarray(value.data, dtype=desc.data.dtype)
+        return None
+
+    def create_tmem_subslice(
+        self,
+        ret_ty: SimulatedTensorMemoryDescriptorType,
+        desc: TensorMemoryHandle,
+        start: Any,
+    ):
+        start_value = _to_int(start)
+        return TensorMemoryHandle(
+            ret_ty.element_ty,
+            ret_ty.shape,
+            ret_ty.layout,
+            desc.data[:, start_value : start_value + ret_ty.shape[-1]],
+        )
+
+    def create_make_tensor_descriptor(
+        self,
+        desc_ty: SimulatedTensorDescriptorLayoutType,
+        base_handle: TensorHandle,
+        shape_handles: list[TensorHandle],
+        stride_handles: list[TensorHandle],
+        padding: Any = "zero",
+    ):
+        shape = [_to_int(handle) for handle in shape_handles]
+        strides = [_to_int(handle) for handle in stride_handles]
+        block_shape = list(desc_ty.block_type.shape)
+        return SimulatedTensorDescriptor(
+            base_handle,
+            shape,
+            strides,
+            block_shape,
+            desc_ty.layout,
+            str(padding).split(".")[-1].lower(),
+        )
+
+    def create_async_tma_copy_global_to_local(
+        self,
+        tensor_desc: SimulatedTensorDescriptor,
+        coord: Any,
+        barrier: Any,
+        result: SharedMemoryHandle,
+        pred: TensorHandle,
+        *args: Any,
+    ):
+        del barrier, args
+        if not bool(np.asarray(pred.data).reshape(-1)[0]):
+            return None
+        result.data[...] = tensor_desc.load_block(coord)
+        return None
+
+    def create_async_tma_copy_local_to_global(
+        self,
+        tensor_desc: SimulatedTensorDescriptor,
+        coord: Any,
+        src: SharedMemoryHandle,
+    ):
+        tensor_desc.store_block(coord, np.asarray(src.data))
+        return None
+
+    def create_async_tma_reduce(
+        self,
+        kind: Any,
+        tensor_desc: SimulatedTensorDescriptor,
+        coord: Any,
+        src: SharedMemoryHandle,
+    ):
+        kind_name = str(kind).split(".")[-1].lower()
+        tensor_desc.reduce_block(coord, np.asarray(src.data), kind_name)
+        return None
+
+    def create_clc_try_cancel(self, result: Any, barrier: Any):
+        del result
+        _PENDING_CLC_BARRIERS.add(_mbarrier_key(barrier))
+        return None
+
+    def create_clc_load_result(self, _src: Any):
+        return SimulatedCLCResult()
+
+    def create_clc_is_canceled(self, result: SimulatedCLCResult):
+        return result.is_canceled().handle
+
+    def create_clc_get_program_id(self, result: SimulatedCLCResult, dim: Any):
+        return result.program_id(dim).handle
+
+    def get_int128_ty(self):
+        return tl.int64
+
+    def create_set_auto_layout(self, layout: Any, value: TensorHandle):
+        return _tensor_result(np.asarray(value.data).copy(), value.dtype, layout)
+
+    def create_histogram(
+        self,
+        data: TensorHandle,
+        bins: int,
+        mask: TensorHandle | None,
+        _layout: Any = None,
+    ):
+        return super().create_histogram(data, bins, mask)
+
+    def create_fp4_to_fp(self, src: TensorHandle, elem_type: tl.dtype, axis: int):
+        del axis
+        return TensorHandle(
+            _unpack_e2m1(src.data).astype(_get_np_dtype(elem_type)),
+            elem_type,
+        )
+
+    def create_scaled_upcast_fp8(
+        self,
+        _ret_ty: Any,
+        src: TensorHandle,
+        scale: TensorHandle,
+    ):
+        return TensorHandle(src.data.astype(np.float32) * scale.data, tl.float32)
+
+    def create_scaled_upcast_fp4(
+        self,
+        src: TensorHandle,
+        scale: TensorHandle,
+        elem_type: tl.dtype,
+        axis: int,
+    ):
+        del axis
+        return TensorHandle(
+            _unpack_e2m1(src.data).astype(_get_np_dtype(elem_type)) * scale.data,
+            elem_type,
+        )
+
+    def _buffer_ptrs(self, ptr: TensorHandle, offsets: TensorHandle):
+        return self.create_addptr(ptr, offsets)
+
+    def create_buffer_load(
+        self,
+        _ret_ty: Any,
+        ptr: TensorHandle,
+        offsets: TensorHandle,
+        mask: TensorHandle | None,
+        other: TensorHandle | None,
+        cache_modifier: Any = None,
+    ):
+        del cache_modifier
+        ptrs = self._buffer_ptrs(ptr, offsets)
+        if mask is None:
+            mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
+        return self.create_masked_load(ptrs, mask, other, None, None, False)
+
+    def create_buffer_store(
+        self,
+        stored_value: TensorHandle,
+        ptr: TensorHandle,
+        offsets: TensorHandle,
+        mask: TensorHandle | None,
+        cache_modifier: Any = None,
+    ):
+        del cache_modifier
+        ptrs = self._buffer_ptrs(ptr, offsets)
+        if mask is None:
+            mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
+        return self.create_masked_store(ptrs, stored_value, mask, None, None)
+
+    def create_buffer_atomic_rmw(
+        self,
+        rmw_op: Any,
+        ptr: TensorHandle,
+        offsets: TensorHandle,
+        value: TensorHandle,
+        sem: Any,
+        scope: Any,
+        mask: TensorHandle | None,
+    ):
+        del sem, scope
+        ptrs = self._buffer_ptrs(ptr, offsets)
+        if mask is None:
+            mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
+        old = self.create_masked_load(ptrs, mask, None, None, None, False)
+        new_data = _apply_rmw(_rmw_kind(rmw_op), old.data, value.data)
+        new_value = TensorHandle(new_data.astype(old.data.dtype), old.dtype)
+        self.create_masked_store(ptrs, new_value, mask, None, None)
+        return old
+
+    def create_buffer_load_to_local(
+        self,
+        dest: SharedMemoryHandle,
+        ptr: TensorHandle,
+        offsets: TensorHandle,
+        mask: TensorHandle | None,
+        other: TensorHandle | None,
+        *args: Any,
+    ):
+        del args
+        value = self.create_buffer_load(None, ptr, offsets, mask, other)
+        dest.data[...] = np.asarray(value.data, dtype=dest.data.dtype)
+        return None
+
+    def create_async_copy_global_to_local(
+        self,
+        dest: SharedMemoryHandle,
+        ptr: TensorHandle,
+        mask: TensorHandle | None,
+        other: TensorHandle | None = None,
+        *args: Any,
+    ):
+        del args
+        value = self.create_buffer_load(None, ptr, TensorHandle(np.array([0]), tl.int32), mask, other)
+        dest.data[...] = np.asarray(value.data, dtype=dest.data.dtype)
+        return None
+
+    def create_async_copy_local_to_global(
+        self,
+        src: SharedMemoryHandle,
+        ptr: TensorHandle,
+        mask: TensorHandle | None,
+        *args: Any,
+    ):
+        del args
+        value = TensorHandle(np.asarray(src.data), src.element_ty)
+        if mask is None:
+            mask = TensorHandle(np.ones_like(value.data, dtype=bool), tl.int1)
+        return self.create_masked_store(ptr, value, mask, None, None)
+
+    def create_async_copy_mbarrier_arrive(self, mbarrier: Any, *args: Any):
+        del args
+        _mbarrier_signal(mbarrier)
+        return None
+
+    def create_async_copy_lds_barrier_arrive(self, mbarrier: Any, *args: Any):
+        self.create_async_copy_mbarrier_arrive(mbarrier, *args)
+        return None
+
+    def create_async_commit_group(self):
+        return None
+
+    def create_async_wait_group(self, num_outstanding: Any = 0):
+        del num_outstanding
+        return None
+
+    def create_mbarrier_init(self, barrier: Any, *args: Any):
+        _mbarrier_init(barrier, *args)
+        return None
+
+    def create_mbarrier_inval(self, barrier: Any):
+        _mbarrier_invalidate(barrier)
+        return None
+
+    def create_mbarrier_expect(self, barrier: Any, *args: Any):
+        _mbarrier_expect(barrier, *args)
+        return None
+
+    def create_mbarrier_arrive(self, barrier: Any, *args: Any):
+        _mbarrier_arrive(barrier, *args)
+        return None
+
+    def create_mbarrier_wait(self, barrier: Any, phase: Any = None, pred: Any = True, *args: Any):
+        del args
+        _mbarrier_wait(barrier, phase, pred=pred)
+        return None
+
+    def create_lds_barrier_init(self, barrier: Any, *args: Any):
+        return self.create_mbarrier_init(barrier, *args)
+
+    def create_lds_barrier_wait(self, barrier: Any, phase: Any = None, *args: Any):
+        return self.create_mbarrier_wait(barrier, phase, *args)
+
+    def create_lds_barrier_arrive(self, barrier: Any, *args: Any):
+        _mbarrier_arrive(barrier, *args)
+        return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
+
+    def create_fence_mbarrier_init_release_cluster(self):
+        return None
+
+    def create_fence_async_shared(self, cluster: Any = False):
+        del cluster
+        return None
+
+    def create_async_shared_store(
+        self,
+        dst: SharedMemoryHandle,
+        value: TensorHandle,
+        mbarrier: Any,
+    ):
+        dst.data[...] = np.asarray(value.data, dtype=dst.data.dtype)
+        _mbarrier_signal(mbarrier)
+        return None
+
+    def create_cluster_arrive(self, *args: Any):
+        del args
+        return None
+
+    def create_cluster_wait(self):
+        return None
+
+    def create_cluster_barrier(self, *args: Any):
+        del args
+        return None
+
+    def create_amd_cluster_arrive(self):
+        return None
+
+    def create_amd_cluster_wait(self):
+        return None
+
+    def create_async_tdm_copy_global_to_local(
+        self,
+        src: SimulatedTensorDescriptor,
+        offsets: list[TensorHandle],
+        dest: SharedMemoryHandle,
+        pred: TensorHandle,
+        *args: Any,
+    ):
+        del args
+        if bool(np.asarray(pred.data).reshape(-1)[0]):
+            coord = tuple(_to_int(offset) for offset in offsets)
+            dest.data[...] = src.load_block(coord)
+        return None
+
+    def create_async_tdm_copy_local_to_global(
+        self,
+        dest: SimulatedTensorDescriptor,
+        offsets: list[TensorHandle],
+        src: SharedMemoryHandle,
+        mbarrier: Any = None,
+        *args: Any,
+    ):
+        del args
+        coord = tuple(_to_int(offset) for offset in offsets)
+        dest.store_block(coord, np.asarray(src.data))
+        if mbarrier is not None:
+            _mbarrier_signal(mbarrier)
+        return None
+
+    def create_async_tdm_wait(self, num_outstanding: Any = 0):
+        del num_outstanding
+        return None
+
+    def create_async_tdm_scatter(
+        self,
+        desc: SimulatedTensorDescriptor,
+        row_indices: TensorHandle,
+        col_offset: TensorHandle,
+        src: SharedMemoryHandle,
+        *args: Any,
+    ):
+        del args
+        for row, row_index in enumerate(np.asarray(row_indices.data).reshape(-1)):
+            desc.store_block((int(row_index), _to_int(col_offset)), src.data[row])
+        return None
+
+    def create_async_tdm_gather(
+        self,
+        desc: SimulatedTensorDescriptor,
+        row_indices: TensorHandle,
+        col_offset: TensorHandle,
+        dst: SharedMemoryHandle,
+        *args: Any,
+    ):
+        del args
+        for row, row_index in enumerate(np.asarray(row_indices.data).reshape(-1)):
+            dst.data[row] = desc.load_block((int(row_index), _to_int(col_offset)))
+        return None
+
+    def create_tdm_prefetch(self, *args: Any):
+        del args
+        return SimulatedCLCResult()
+
+    def create_tmem_copy(self, src: SharedMemoryHandle, dst: TensorMemoryHandle):
+        dst.data[...] = np.asarray(src.data, dtype=dst.data.dtype)
+        return None
+
+    def create_tcgen05_mma(self, *args: Any):
+        del args
+        return None
+
+    def create_tcgen05_mma_scaled(self, *args: Any):
+        del args
+        return None
+
+    def create_tcgen05_commit(self, barrier: Any, pred: TensorHandle, *args: Any):
+        del args
+        if bool(np.asarray(pred.data).reshape(-1)[0]):
+            _mbarrier_signal(barrier)
+        return None
+
+    def create_warpgroup_mma(self, a: Any, b: Any, acc: TensorHandle, *args: Any):
+        del a, b, args
+        return acc
+
+    def create_warpgroup_mma_wait(self, deps: list[TensorHandle], num_outstanding: Any):
+        del num_outstanding
+        return deps
+
+    def create_warp_pipeline_border(self, marker: Any, priority: Any):
+        del marker, priority
+        return None
+
+    def create_warp_yield(self, values: list[Any]):
+        return values
+
+    def create_warp_return(self):
+        return None
+
+
+gluon_builder = Builder()
+gluon_semantic = GluonSemantic(gluon_builder)
 
 
 def _mbarrier_key(barrier: Any) -> int:
@@ -978,143 +1752,80 @@ def _mbarrier_invalidate(barrier: Any, *args: Any, **kwargs: Any) -> None:
     _mbarrier_signal(barrier)
 
 
-def _async_load(
-    dst: SharedMemoryHandle,
-    src: Any,
-    *args: Any,
-    mask: Any = None,
-    pred: Any = None,
-    **kwargs: Any,
-) -> None:
-    if mask is None:
-        mask = pred
-    if mask is None and args:
-        mask = args[0]
-    other = kwargs.get("other")
-    value = (
-        gl.load(src, mask=mask, other=other)
-        if other is not None
-        else gl.load(src, mask=mask)
+_GLUON_BUILTIN_MODULES: tuple[Any, ...] = (
+    gluon_core,
+    gl,
+    gluon_math,
+    gluon_standard,
+    gluon_amd,
+    gluon_amd_cdna3,
+    gluon_amd_cdna4,
+    gluon_amd_cdna4_async_copy,
+    gluon_amd_gfx1250,
+    gluon_amd_async_copy,
+    gluon_amd_cluster,
+    gluon_amd_mbarrier,
+    gluon_amd_tdm,
+    gluon_amd_rdna3,
+    gluon_amd_rdna4,
+    gluon_ampere_async_copy,
+    gluon_blackwell,
+    gluon_blackwell_tma,
+    gluon_clc,
+    gluon_hopper,
+    gluon_hopper_mbarrier,
+    gluon_hopper_tma,
+)
+
+
+_GLUON_BUILTIN_CLASSES: tuple[Any, ...] = (
+    gluon_core.shared_memory_descriptor,
+    gluon_blackwell.tensor_memory_descriptor,
+    gluon_clc.clc_result,
+)
+
+
+def _is_gluon_builtin(member: Any) -> bool:
+    return callable(member) and bool(
+        getattr(member, gluon_core.GLUON_BUILTIN, False)
+        or tl.core.is_builtin(member)
     )
-    dst.store(value)
-    return None
 
 
-def _buffer_load_to_shared(
-    dst: SharedMemoryHandle,
-    ptr: Any,
-    offsets: Any,
-    mask: Any = None,
-    other: Any = None,
-    cache_modifier: Any = "",
-    _semantic: Any = None,
+def _patch_gluon_attr(
+    obj: Any,
+    name: str,
+    member: Callable,
+    scope: _LangPatchScope,
 ) -> None:
-    del cache_modifier, _semantic
-    value = _buffer_load(ptr, offsets, mask=mask, other=other)
-    dst.store(value)
-    return None
+    def new_member(*args: Any, member: Callable = member, **kwargs: Any):
+        kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
+        return member(*args, **kwargs, _semantic=gluon_semantic)
+
+    scope.set_attr(obj, name, new_member)
 
 
-def _load_shared_relaxed(
-    smem: SharedMemoryHandle,
-    layout: Any,
-    _semantic: Any = None,
-):
-    del _semantic
-    return smem.load(_unwrap_constexpr(layout))
+def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
+    for name, member in inspect.getmembers(pkg):
+        if _is_gluon_builtin(member):
+            _patch_gluon_attr(pkg, name, member, scope)
 
 
-def _async_store(
-    dst: Any,
-    src: SharedMemoryHandle,
-    mask: Any = None,
-    cache_modifier: Any = "",
-    _semantic: Any = None,
-) -> None:
-    del cache_modifier, _semantic
-    _yield_warp_specialize()
-    gl.store(dst, src.load(), mask=mask)
-    return None
+def patch_lang(fn: Callable | None = None) -> _LangPatchScope:
+    """Patch Gluon builtins to execute through the NumPy interpreter builder."""
 
+    scope = _LangPatchScope()
+    for module in _GLUON_BUILTIN_MODULES:
+        _patch_gluon_builtins(module, scope)
+    for cls in _GLUON_BUILTIN_CLASSES:
+        _patch_gluon_builtins(cls, scope)
+    _patch_lang_tensor(gluon_core.tensor, scope)
+    _patch_lang_core(gluon_core, scope)
 
-def _async_mbarrier_arrive(mbarrier: Any, _semantic: Any = None) -> None:
-    del _semantic
-    _mbarrier_signal(mbarrier)
-    return None
-
-
-def _async_commit_group(_semantic: Any = None) -> None:
-    return None
-
-
-def _async_wait_group(num_outstanding: Any = 0, _semantic: Any = None) -> None:
-    return None
-
-
-def _buffer_load(
-    ptr: Any,
-    offsets: Any,
-    mask: Any = None,
-    other: Any = None,
-    cache: Any = None,
-    _semantic: Any = None,
-):
-    del cache, _semantic
-    _yield_warp_specialize()
-    address = ptr + gluon_semantic.to_tensor(offsets)
-    if other is not None:
-        return gl.load(address, mask=mask, other=other)
-    return gl.load(address, mask=mask)
-
-
-def _buffer_store(
-    stored_value: Any,
-    ptr: Any,
-    offsets: Any,
-    mask: Any = None,
-    cache: Any = None,
-    _semantic: Any = None,
-) -> None:
-    del cache, _semantic
-    _yield_warp_specialize()
-    address = ptr + gluon_semantic.to_tensor(offsets)
-    gl.store(address, stored_value, mask=mask)
-    return None
-
-
-def _buffer_atomic(kind: str) -> Callable:
-    def atomic(
-        ptr: Any,
-        offsets: Any,
-        value: Any,
-        mask: Any = None,
-        sem: Any = None,
-        scope: Any = None,
-        _semantic: Any = None,
-    ):
-        del sem, scope, _semantic
-        _yield_warp_specialize()
-        address = ptr + gluon_semantic.to_tensor(offsets)
-        old = gl.load(address, mask=mask)
-        value_tensor = gluon_semantic.to_tensor(value)
-        if kind == "add":
-            new_value = old + value_tensor
-        elif kind == "max":
-            new_value = gl.maximum(old, value_tensor)
-        elif kind == "min":
-            new_value = gl.minimum(old, value_tensor)
-        elif kind == "and":
-            new_value = old & value_tensor
-        elif kind == "or":
-            new_value = old | value_tensor
-        elif kind == "xor":
-            new_value = old ^ value_tensor
-        elif kind == "xchg":
-            new_value = value_tensor
-        else:
-            raise ValueError(f"Unsupported AMD buffer atomic: {kind}")
-        gl.store(address, new_value, mask=mask)
-        return old
-
-    atomic.__name__ = f"_buffer_atomic_{kind}"
-    return atomic
+    if fn is not None:
+        globals_dict = getattr(fn, "__globals__", {})
+        patched_modules = set(_GLUON_BUILTIN_MODULES)
+        for name, value in list(globals_dict.items()):
+            if inspect.ismodule(value) and value in patched_modules:
+                scope.set_item(globals_dict, name, value)
+    return scope
