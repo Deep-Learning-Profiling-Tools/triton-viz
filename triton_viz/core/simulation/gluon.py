@@ -1118,3 +1118,607 @@ def _buffer_atomic(kind: str) -> Callable:
 
     atomic.__name__ = f"_buffer_atomic_{kind}"
     return atomic
+
+
+_buffer_atomic_add = _buffer_atomic("add")
+_buffer_atomic_max = _buffer_atomic("max")
+_buffer_atomic_min = _buffer_atomic("min")
+_buffer_atomic_and = _buffer_atomic("and")
+_buffer_atomic_or = _buffer_atomic("or")
+_buffer_atomic_xor = _buffer_atomic("xor")
+_buffer_atomic_xchg = _buffer_atomic("xchg")
+
+
+def _cluster_arrive(_semantic: Any = None) -> None:
+    return None
+
+
+def _cluster_wait(_semantic: Any = None) -> None:
+    return None
+
+
+def _make_tensor_descriptor(
+    base: Any,
+    shape: list[Any],
+    strides: list[Any],
+    block_shape: list[Any],
+    layout: Any,
+    padding_option: str = "zero",
+    _semantic: Any = None,
+) -> SimulatedTensorDescriptor:
+    host_base = base
+    if isinstance(base, tl.tensor):
+        ptr = int(np.asarray(base.handle.data).reshape(-1)[0])
+        host_base = _POINTER_TENSORS.get(ptr, base)
+    return SimulatedTensorDescriptor(
+        host_base,
+        [_to_int(dim) for dim in shape],
+        [_to_int(stride) for stride in strides],
+        [_to_int(dim) for dim in _unwrap_constexpr(block_shape)],
+        _unwrap_constexpr(layout),
+        str(_unwrap_constexpr(padding_option)),
+    )
+
+
+def _tma_async_load(
+    tensor_desc: Any,
+    coord: Any,
+    barrier: Any,
+    result: SharedMemoryHandle,
+    pred: Any = True,
+    multicast: Any = False,
+    _semantic: Any = None,
+) -> None:
+    if not bool(_to_python_scalar(pred)):
+        return None
+    desc = _descriptor_from_host(tensor_desc)
+    result.data[...] = desc.load_block(coord)
+    _mbarrier_complete_bytes(barrier, desc.block_type.nbytes)
+    return None
+
+
+def _tma_async_load_im2col(
+    tensor_desc: Any,
+    coord: Any,
+    offsets: Any,
+    barrier: Any,
+    result: SharedMemoryHandle,
+    pred: Any = True,
+    multicast: Any = False,
+    _semantic: Any = None,
+) -> None:
+    del multicast
+    if not bool(_to_python_scalar(pred)):
+        return None
+    desc = _descriptor_from_host(tensor_desc)
+    result.data[...] = desc.load_im2col_block(coord, offsets)
+    _mbarrier_complete_bytes(barrier, desc.block_type.nbytes)
+    return None
+
+
+def _tma_async_store(
+    tensor_desc: Any,
+    coord: Any,
+    src: SharedMemoryHandle,
+    _semantic: Any = None,
+) -> None:
+    desc = _descriptor_from_host(tensor_desc)
+    desc.store_block(coord, np.asarray(src.data, dtype=_get_np_dtype(desc.dtype)))
+    return None
+
+
+def _tma_async_atomic(kind: str) -> Callable:
+    def atomic(
+        tensor_desc: Any,
+        coord: Any,
+        src: SharedMemoryHandle,
+        _semantic: Any = None,
+    ) -> None:
+        desc = _descriptor_from_host(tensor_desc)
+        values = np.asarray(src.data, dtype=_get_np_dtype(desc.dtype))
+        desc.reduce_block(coord, values, kind)
+        return None
+
+    atomic.__name__ = f"_tma_async_atomic_{kind}"
+    return atomic
+
+
+_tma_async_atomic_add = _tma_async_atomic("add")
+_tma_async_atomic_min = _tma_async_atomic("min")
+_tma_async_atomic_max = _tma_async_atomic("max")
+_tma_async_atomic_and = _tma_async_atomic("and")
+_tma_async_atomic_or = _tma_async_atomic("or")
+_tma_async_atomic_xor = _tma_async_atomic("xor")
+
+
+def _tensor_data(value: Any) -> np.ndarray:
+    if isinstance(value, tl.tensor):
+        return np.asarray(value.handle.data)
+    if isinstance(value, TensorHandle):
+        return np.asarray(value.data)
+    return np.asarray(value)
+
+
+def _descriptor_pointer_args(
+    descriptor: Any, coord: Any
+) -> tuple[TensorHandle, TensorHandle]:
+    coord = coord if isinstance(coord, (list, tuple)) else (coord,)
+    coord_values = tuple(_to_int(item) for item in coord)
+    block_shape = tuple(int(dim) for dim in descriptor.block_shape)
+    strides = tuple(int(stride) for stride in descriptor.strides)
+    base = descriptor.base
+    data_ptr = getattr(base, "data_ptr", None)
+    base_ptr = int(data_ptr()) if callable(data_ptr) else 0
+    element_size_fn = getattr(base, "element_size", None)
+    element_size = int(element_size_fn()) if callable(element_size_fn) else 1
+    offsets = np.zeros(block_shape, dtype=np.uint64)
+    mask = np.ones(block_shape, dtype=bool)
+    for block_idx in np.ndindex(block_shape):
+        element_offset = 0
+        for dim, idx in enumerate(block_idx):
+            element_offset += (coord_values[dim] + idx) * strides[dim]
+        offsets[block_idx] = base_ptr + element_offset * element_size
+    return TensorHandle(offsets, tl.pointer_type(descriptor.dtype)), TensorHandle(
+        mask,
+        tl.int1,
+    )
+
+
+def _descriptor_load_adapter(descriptor: Any, coord: Any, *_args: Any, **_kwargs: Any):
+    ptr_handle, mask_handle = _descriptor_pointer_args(descriptor, coord)
+    return AdapterResult(ptr_handle, mask_handle, None)
+
+
+def _descriptor_store_adapter(descriptor: Any, coord: Any, *_args: Any, **_kwargs: Any):
+    ptr_handle, mask_handle = _descriptor_pointer_args(descriptor, coord)
+    return AdapterResult(ptr_handle, mask_handle, None)
+
+
+def _register_descriptor_callback_adapters() -> None:
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    pointer_load_adapter = gluon_frontend.GLUON_ADAPTERS[gluon_frontend.Load]
+    pointer_store_adapter = gluon_frontend.GLUON_ADAPTERS[gluon_frontend.Store]
+
+    def load_adapter(ptr: Any, *args: Any, **kwargs: Any) -> AdapterResult:
+        if isinstance(ptr, SimulatedTensorDescriptor):
+            return _descriptor_load_adapter(ptr, *args, **kwargs)
+        return pointer_load_adapter(ptr, *args, **kwargs)
+
+    def store_adapter(ptr: Any, *args: Any, **kwargs: Any) -> AdapterResult:
+        if isinstance(ptr, SimulatedTensorDescriptor):
+            return _descriptor_store_adapter(ptr, *args, **kwargs)
+        return pointer_store_adapter(ptr, *args, **kwargs)
+
+    gluon_frontend.GLUON_ADAPTERS[gluon_frontend.Load] = load_adapter
+    gluon_frontend.GLUON_ADAPTERS[gluon_frontend.Store] = store_adapter
+
+
+_register_descriptor_callback_adapters()
+
+
+def _symbolic_numpy_op_adapter(
+    default_adapter: Callable[..., AdapterResult],
+    numpy_op: Callable[..., Any],
+) -> Callable[..., AdapterResult]:
+    return lambda *args, **kwargs: AdapterResult(
+        *default_adapter(*args, **kwargs).args, numpy_op
+    )
+
+
+_SYMBOLIC_NUMPY_OP_BY_ATTR: dict[str, Callable[..., Any]] = {
+    "abs": np.abs,
+    "add": np.add,
+    "ceil": np.ceil,
+    "cos": np.cos,
+    "exp": np.exp,
+    "exp2": np.exp2,
+    "floor": np.floor,
+    "greater_equal": np.greater_equal,
+    "greater_than": np.greater,
+    "less_equal": np.less_equal,
+    "less_than": np.less,
+    "log": np.log,
+    "log2": np.log2,
+    "mul": np.multiply,
+    "sin": np.sin,
+    "sqrt": np.sqrt,
+    "sub": np.subtract,
+    "where": np.where,
+}
+
+
+def _register_symbolic_adapter_for_attr(
+    op: Callable,
+    attr: str,
+    default_adapter: Callable[..., AdapterResult],
+) -> None:
+    numpy_op = _SYMBOLIC_NUMPY_OP_BY_ATTR.get(attr)
+    if numpy_op is not None:
+        from triton_viz.core.frontend import gluon as gluon_frontend
+
+        gluon_frontend.GLUON_CALLABLE_ADAPTERS[op] = _symbolic_numpy_op_adapter(
+            default_adapter,
+            numpy_op,
+        )
+
+
+def _descriptor_symbolic_load_adapter(
+    coord_index: int, pred_index: int | None = None
+) -> Callable[..., AdapterResult]:
+    def adapter(*args: Any, **kwargs: Any) -> AdapterResult:
+        coord = args[coord_index] if len(args) > coord_index else kwargs.get("coord")
+        pred = kwargs.get("pred")
+        if pred is None and pred_index is not None and len(args) > pred_index:
+            pred = args[pred_index]
+        return AdapterResult(TensorDescriptorAccess(args[0], coord, pred), None, None)
+
+    return adapter
+
+
+def _descriptor_symbolic_store_adapter(
+    coord_index: int,
+) -> Callable[..., AdapterResult]:
+    def adapter(*args: Any, **kwargs: Any) -> AdapterResult:
+        coord = args[coord_index] if len(args) > coord_index else kwargs.get("coord")
+        return AdapterResult(TensorDescriptorAccess(args[0], coord, None), 0, None)
+
+    return adapter
+
+
+def _register_simulated_callable_adapter(
+    op: Any,
+    adapter: Callable[..., AdapterResult],
+) -> None:
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    gluon_frontend.GLUON_CALLABLE_ADAPTERS[op] = adapter
+    gluon_frontend.GLUON_REPLAY_CALLABLES.add(op)
+
+
+def _register_replay_callable(op: Any) -> None:
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    gluon_frontend.GLUON_REPLAY_CALLABLES.add(op)
+
+
+def _tma_async_gather(
+    tensor_desc: Any,
+    x_offsets: Any,
+    y_offset: Any,
+    barrier: Any = None,
+    result: SharedMemoryHandle | None = None,
+    pred: Any = True,
+    multicast: Any = False,
+    _semantic: Any = None,
+) -> None:
+    del multicast
+    if result is None:
+        raise ValueError("async_gather requires a result shared-memory descriptor")
+    if not bool(_to_python_scalar(pred)):
+        return None
+    desc = _descriptor_from_host(tensor_desc)
+    rows = _tensor_data(x_offsets).astype(np.int64).reshape(-1)
+    col_offset = _to_int(y_offset)
+    dst = result.data
+    dst.fill(0)
+    src = desc._array
+    for out_row, src_row in enumerate(rows):
+        for out_col in range(dst.shape[1]):
+            src_col = col_offset + out_col
+            if 0 <= src_row < desc.shape[0] and 0 <= src_col < desc.shape[1]:
+                dst[out_row, out_col] = src[int(src_row), src_col]
+    if barrier is not None:
+        _mbarrier_complete_bytes(barrier, dst.shape[0] * desc.block_type.nbytes)
+    return None
+
+
+def _tma_async_scatter(
+    tensor_desc: Any,
+    x_offsets: Any,
+    y_offset: Any,
+    src: SharedMemoryHandle,
+    _semantic: Any = None,
+) -> None:
+    desc = _descriptor_from_host(tensor_desc)
+    rows = _tensor_data(x_offsets).astype(np.int64).reshape(-1)
+    col_offset = _to_int(y_offset)
+    if col_offset < 0 or np.any(rows < 0):
+        raise ValueError("async_scatter offsets must be non-negative")
+    dst = desc._array
+    values = np.asarray(src.data, dtype=_get_np_dtype(desc.dtype))
+    for in_row, dst_row in enumerate(rows):
+        if dst_row >= desc.shape[0]:
+            continue
+        for in_col in range(values.shape[1]):
+            dst_col = col_offset + in_col
+            if 0 <= dst_col < desc.shape[1]:
+                dst[int(dst_row), dst_col] = values[in_row, in_col]
+    return None
+
+
+def _tdm_make_tensor_descriptor(
+    base: Any,
+    shape: list[Any],
+    strides: list[Any],
+    block_shape: list[Any],
+    layout: Any,
+    _semantic: Any = None,
+) -> SimulatedTensorDescriptor:
+    return _make_tensor_descriptor(
+        base, shape, strides, block_shape, layout, "zero", _semantic
+    )
+
+
+def _tdm_update_tensor_descriptor(
+    desc: Any,
+    add_offsets: list[Any] | None = None,
+    set_bounds: list[Any] | None = None,
+    dest: Any = None,
+    pred: Any = None,
+    barrier: Any = None,
+    _semantic: Any = None,
+) -> SimulatedTensorDescriptor:
+    del dest, pred, barrier, _semantic
+    desc = _descriptor_from_host(desc)
+    origin = list(desc.origin)
+    shape = list(desc.shape)
+    if add_offsets is not None:
+        offsets = _normalize_coord(add_offsets, len(desc.shape))
+        origin = [origin[dim] + offsets[dim] for dim in range(len(origin))]
+    if set_bounds is not None:
+        bounds = _normalize_coord(set_bounds, len(desc.shape))
+        shape = [origin[dim] + bounds[dim] for dim in range(len(origin))]
+    return SimulatedTensorDescriptor(
+        desc.base,
+        shape,
+        list(desc.strides),
+        list(desc.block_shape),
+        desc.layout,
+        desc.padding,
+        list(desc.element_strides),
+        (
+            list(desc.pixel_box_lower_corner)
+            if desc.pixel_box_lower_corner is not None
+            else None
+        ),
+        (
+            list(desc.pixel_box_upper_corner)
+            if desc.pixel_box_upper_corner is not None
+            else None
+        ),
+        origin,
+    )
+
+
+def _tdm_async_load(
+    src: Any,
+    offsets: list[Any],
+    dest: SharedMemoryHandle,
+    pred: Any = True,
+    mbarrier: Any = None,
+    warp_used_hint: Any = None,
+    cache_modifier: Any = "",
+    _semantic: Any = None,
+) -> None:
+    del warp_used_hint, cache_modifier, _semantic
+    _yield_warp_specialize()
+    if not bool(_to_python_scalar(pred)):
+        return None
+    desc = _descriptor_from_host(src)
+    dest.data[...] = desc.load_block(offsets)
+    if mbarrier is not None:
+        _mbarrier_signal(mbarrier)
+    return None
+
+
+def _tdm_async_store(
+    dest: Any,
+    offsets: list[Any],
+    src: SharedMemoryHandle,
+    mbarrier: Any = None,
+    cache_modifier: Any = "",
+    _semantic: Any = None,
+) -> None:
+    del cache_modifier, _semantic
+    _yield_warp_specialize()
+    desc = _descriptor_from_host(dest)
+    desc.store_block(offsets, np.asarray(src.data, dtype=_get_np_dtype(desc.dtype)))
+    if mbarrier is not None:
+        _mbarrier_signal(mbarrier)
+    return None
+
+
+def _tdm_async_gather(
+    desc: Any,
+    src_row_indices: Any,
+    src_col_offset: Any,
+    dst: SharedMemoryHandle,
+    pred: Any = True,
+    mbarrier: Any = None,
+    _semantic: Any = None,
+) -> None:
+    _yield_warp_specialize()
+    return _tma_async_gather(
+        desc, src_row_indices, src_col_offset, mbarrier, dst, pred, _semantic=_semantic
+    )
+
+
+def _tdm_async_scatter(
+    desc: Any,
+    dst_row_indices: Any,
+    dst_col_offset: Any,
+    src: SharedMemoryHandle,
+    mbarrier: Any = None,
+    _semantic: Any = None,
+) -> None:
+    _yield_warp_specialize()
+    _tma_async_scatter(desc, dst_row_indices, dst_col_offset, src, _semantic=_semantic)
+    if mbarrier is not None:
+        _mbarrier_signal(mbarrier)
+    return None
+
+
+def _tdm_async_wait(num_outstanding: Any = 0, _semantic: Any = None) -> None:
+    return None
+
+
+def _tdm_prefetch(
+    src: Any,
+    offsets: list[Any],
+    pred: Any = True,
+    speculative: Any = False,
+    _semantic: Any = None,
+) -> None:
+    return None
+
+
+def _noop(*_args: Any, **_kwargs: Any) -> None:
+    return None
+
+
+class _WarpPipelineStage:
+    def __init__(
+        self, label: Any = None, *, priority: Any = None, **_kwargs: Any
+    ) -> None:
+        del label, priority
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        del exc, tb
+        return False if exc_type is not None else False
+
+
+def _is_gluon_jit_function(value: Any) -> bool:
+    return (
+        callable(value)
+        and callable(getattr(value, "fn", None))
+        and (getattr(value, "arg_names", None) is not None)
+    )
+
+
+def _device_function_wrapper(jit_fn: Any) -> Callable:
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        scope = gluon_patch_lang(jit_fn.fn)
+        try:
+            return jit_fn.fn(*args, **kwargs)
+        finally:
+            scope.restore()
+
+    wrapped.__name__ = getattr(
+        jit_fn,
+        "__name__",
+        getattr(jit_fn.fn, "__name__", "gluon_device_fn"),
+    )
+    return wrapped
+
+
+def _aggregate_new_wrapper(aggregate_cls: type, original_new: Callable) -> Callable:
+    fields = tuple(getattr(aggregate_cls, "__aggregate_fields__", ()))
+    annotations = getattr(aggregate_cls, "__annotations__", {})
+    if not fields:
+        fields = tuple(annotations)
+
+    def wrapped(
+        this_cls,
+        *args: Any,
+        _semantic: Any = None,
+        _generator: Any = None,
+        **kwargs: Any,
+    ):
+        del _semantic, _generator
+        converted_args = list(args)
+        for index, value in enumerate(converted_args):
+            if index >= len(fields):
+                break
+            field = fields[index]
+            if annotations.get(field) == tl.tensor and not isinstance(value, tl.tensor):
+                converted_args[index] = gluon_semantic.to_tensor(
+                    _unwrap_constexpr(value)
+                )
+        converted_kwargs = dict(kwargs)
+        for field, value in list(converted_kwargs.items()):
+            if annotations.get(field) == tl.tensor and not isinstance(value, tl.tensor):
+                converted_kwargs[field] = gluon_semantic.to_tensor(
+                    _unwrap_constexpr(value)
+                )
+        return original_new(this_cls, *converted_args, **converted_kwargs)
+
+    return wrapped
+
+
+def _patch_aggregate_jit_methods(value: Any, scope: _LangPatchScope) -> bool:
+    if not inspect.isclass(value):
+        return False
+    patched = False
+    if getattr(value, "__triton_aggregate__", False):
+        original_new = getattr(value, "__new__", None)
+        if original_new is not None:
+            scope.set_attr(
+                value, "__new__", _aggregate_new_wrapper(value, original_new)
+            )
+            patched = True
+    for name, member in inspect.getmembers(value):
+        if _is_gluon_jit_function(member):
+            scope.set_attr(value, name, _device_function_wrapper(member))
+            patched = True
+    return patched
+
+
+def _patch_jit_function_globals(jit_fn: Any, scope: _LangPatchScope) -> None:
+    fn = getattr(jit_fn, "fn", None)
+    globals_dict = getattr(fn, "__globals__", {})
+    for value in list(globals_dict.values()):
+        _patch_aggregate_jit_methods(value, scope)
+
+
+for _simulated_tma in (
+    _make_tensor_descriptor,
+    _tma_async_load,
+    _tma_async_load_im2col,
+    _tma_async_store,
+    _tma_async_atomic_add,
+    _tma_async_atomic_min,
+    _tma_async_atomic_max,
+    _tma_async_atomic_and,
+    _tma_async_atomic_or,
+    _tma_async_atomic_xor,
+    _tma_async_gather,
+    _tma_async_scatter,
+    _noop,
+):
+    _simulated_tma.__triton_viz_simulated__ = True  # type: ignore[attr-defined]
+    _register_replay_callable(_simulated_tma)
+
+_register_simulated_callable_adapter(
+    _tma_async_load,
+    _descriptor_symbolic_load_adapter(coord_index=1, pred_index=4),
+)
+_register_simulated_callable_adapter(
+    _tma_async_load_im2col,
+    _descriptor_symbolic_load_adapter(coord_index=1, pred_index=5),
+)
+_simulated_descriptor_stores: tuple[Callable[..., Any], ...] = (
+    _tma_async_store,
+    _tma_async_atomic_add,
+    _tma_async_atomic_min,
+    _tma_async_atomic_max,
+    _tma_async_atomic_and,
+    _tma_async_atomic_or,
+    _tma_async_atomic_xor,
+)
+for _simulated_descriptor_store in _simulated_descriptor_stores:
+    _register_simulated_callable_adapter(
+        _simulated_descriptor_store,
+        _descriptor_symbolic_store_adapter(coord_index=1),
+    )
+_register_simulated_callable_adapter(
+    _tdm_async_load,
+    _descriptor_symbolic_load_adapter(coord_index=1, pred_index=3),
+)
+_register_simulated_callable_adapter(
+    _tdm_async_store,
+    _descriptor_symbolic_store_adapter(coord_index=1),
+)
