@@ -1255,6 +1255,43 @@ class Builder(interpreter_builder.__class__):
             str(padding).split(".")[-1].lower(),
         )
 
+    def create_update_tensor_descriptor(
+        self,
+        desc: TensorDescriptor,
+        add_offsets: list[TensorHandle] | None = None,
+        set_bounds: list[TensorHandle] | None = None,
+        pred: Any = None,
+        clamp_bounds: bool = False,
+    ):
+        origin = list(desc.origin)
+        shape = list(desc.shape)
+        if add_offsets:
+            offsets = _normalize_coord(add_offsets, len(desc.shape))
+            origin = [origin[dim] + offsets[dim] for dim in range(len(origin))]
+        if set_bounds:
+            bounds = _normalize_coord(set_bounds, len(desc.shape))
+            shape = [origin[dim] + bounds[dim] for dim in range(len(origin))]
+        return TensorDescriptor(
+            desc.base,
+            shape,
+            list(desc.strides),
+            list(desc.block_shape),
+            desc.layout,
+            desc.padding,
+            list(desc.element_strides),
+            (
+                list(desc.pixel_box_lower_corner)
+                if desc.pixel_box_lower_corner is not None
+                else None
+            ),
+            (
+                list(desc.pixel_box_upper_corner)
+                if desc.pixel_box_upper_corner is not None
+                else None
+            ),
+            origin,
+        )
+
     def create_async_tma_copy_global_to_local(
         self,
         tensor_desc: TensorDescriptor,
@@ -1262,11 +1299,16 @@ class Builder(interpreter_builder.__class__):
         barrier: Any,
         result: SharedMemoryHandle,
         pred: TensorHandle,
-        *args: Any,
+        multicast: Any = False,
+        offsets: Any = None,
     ):
         if not bool(np.asarray(pred.data).reshape(-1)[0]):
             return None
-        result.data[...] = tensor_desc.load_block(coord)
+        if offsets is None:
+            result.data[...] = tensor_desc.load_block(coord)
+        else:
+            result.data[...] = tensor_desc.load_im2col_block(coord, offsets)
+        self._signal_barrier(barrier)
         return None
 
     def create_async_tma_copy_local_to_global(
@@ -1287,6 +1329,55 @@ class Builder(interpreter_builder.__class__):
     ):
         kind_name = str(kind).split(".")[-1].lower()
         tensor_desc.reduce_block(coord, np.asarray(src.data), kind_name)
+        return None
+
+    def create_async_tma_gather(
+        self,
+        tensor_desc: TensorDescriptor,
+        x_offsets: TensorHandle,
+        y_offset: TensorHandle,
+        barrier: Any,
+        result: SharedMemoryHandle,
+        pred: TensorHandle,
+        multicast: Any = False,
+    ):
+        if not bool(np.asarray(pred.data).reshape(-1)[0]):
+            return None
+        rows = np.asarray(x_offsets.data).astype(np.int64).reshape(-1)
+        col_offset = _to_int(y_offset)
+        result.data.fill(0)
+        src = tensor_desc._array
+        for out_row, src_row in enumerate(rows):
+            for out_col in range(result.data.shape[1]):
+                src_col = col_offset + out_col
+                if (
+                    0 <= src_row < tensor_desc.shape[0]
+                    and 0 <= src_col < tensor_desc.shape[1]
+                ):
+                    result.data[out_row, out_col] = src[int(src_row), src_col]
+        self._signal_barrier(barrier)
+        return None
+
+    def create_async_tma_scatter(
+        self,
+        tensor_desc: TensorDescriptor,
+        x_offsets: TensorHandle,
+        y_offset: TensorHandle,
+        src: SharedMemoryHandle,
+    ):
+        rows = np.asarray(x_offsets.data).astype(np.int64).reshape(-1)
+        col_offset = _to_int(y_offset)
+        if col_offset < 0 or np.any(rows < 0):
+            raise ValueError("async_scatter offsets must be non-negative")
+        dst = tensor_desc._array
+        values = np.asarray(src.data, dtype=_get_np_dtype(tensor_desc.dtype))
+        for in_row, dst_row in enumerate(rows):
+            if dst_row >= tensor_desc.shape[0]:
+                continue
+            for in_col in range(values.shape[1]):
+                dst_col = col_offset + in_col
+                if 0 <= dst_col < tensor_desc.shape[1]:
+                    dst[int(dst_row), dst_col] = values[in_row, in_col]
         return None
 
     def create_clc_try_cancel(self, result: Any, barrier: Any):
@@ -1540,26 +1631,24 @@ class Builder(interpreter_builder.__class__):
     def create_async_tdm_copy_global_to_local(
         self,
         src: TensorDescriptor,
-        offsets: list[TensorHandle],
         dest: SharedMemoryHandle,
-        pred: TensorHandle,
-        *args: Any,
+        mbarrier: Any = None,
+        cache_modifier: Any = None,
+        warp_used_hint: Any = None,
     ):
-        if bool(np.asarray(pred.data).reshape(-1)[0]):
-            coord = tuple(_to_int(offset) for offset in offsets)
-            dest.data[...] = src.load_block(coord)
+        dest.data[...] = src.load_block([0] * len(src.shape))
+        if mbarrier is not None:
+            self._signal_barrier(mbarrier)
         return None
 
     def create_async_tdm_copy_local_to_global(
         self,
         dest: TensorDescriptor,
-        offsets: list[TensorHandle],
         src: SharedMemoryHandle,
         mbarrier: Any = None,
-        *args: Any,
+        cache_modifier: Any = None,
     ):
-        coord = tuple(_to_int(offset) for offset in offsets)
-        dest.store_block(coord, np.asarray(src.data))
+        dest.store_block([0] * len(dest.shape), np.asarray(src.data))
         if mbarrier is not None:
             self._signal_barrier(mbarrier)
         return None
@@ -1573,10 +1662,23 @@ class Builder(interpreter_builder.__class__):
         row_indices: TensorHandle,
         col_offset: TensorHandle,
         src: SharedMemoryHandle,
-        *args: Any,
+        mbarrier: Any = None,
     ):
-        for row, row_index in enumerate(np.asarray(row_indices.data).reshape(-1)):
-            desc.store_block((int(row_index), _to_int(col_offset)), src.data[row])
+        rows = np.asarray(row_indices.data).astype(np.int64).reshape(-1)
+        offset = _to_int(col_offset)
+        if offset < 0 or np.any(rows < 0):
+            raise ValueError("async_scatter offsets must be non-negative")
+        dst = desc._array
+        values = np.asarray(src.data, dtype=_get_np_dtype(desc.dtype))
+        for in_row, dst_row in enumerate(rows):
+            if dst_row >= desc.shape[0]:
+                continue
+            for in_col in range(values.shape[1]):
+                dst_col = offset + in_col
+                if 0 <= dst_col < desc.shape[1]:
+                    dst[int(dst_row), dst_col] = values[in_row, in_col]
+        if mbarrier is not None:
+            self._signal_barrier(mbarrier)
         return None
 
     def create_async_tdm_gather(
@@ -1585,10 +1687,22 @@ class Builder(interpreter_builder.__class__):
         row_indices: TensorHandle,
         col_offset: TensorHandle,
         dst: SharedMemoryHandle,
-        *args: Any,
+        pred: TensorHandle,
+        mbarrier: Any = None,
     ):
-        for row, row_index in enumerate(np.asarray(row_indices.data).reshape(-1)):
-            dst.data[row] = desc.load_block((int(row_index), _to_int(col_offset)))
+        if not bool(np.asarray(pred.data).reshape(-1)[0]):
+            return None
+        rows = np.asarray(row_indices.data).astype(np.int64).reshape(-1)
+        offset = _to_int(col_offset)
+        dst.data.fill(0)
+        src = desc._array
+        for out_row, src_row in enumerate(rows):
+            for out_col in range(dst.data.shape[1]):
+                src_col = offset + out_col
+                if 0 <= src_row < desc.shape[0] and 0 <= src_col < desc.shape[1]:
+                    dst.data[out_row, out_col] = src[int(src_row), src_col]
+        if mbarrier is not None:
+            self._signal_barrier(mbarrier)
         return None
 
     def create_tdm_prefetch(self, *args: Any):
