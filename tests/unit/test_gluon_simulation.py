@@ -31,6 +31,13 @@ def test_gluon_patch_lang_restores_module_and_class_builtins():
     assert gluon_core.shared_memory_descriptor.scatter is original_scatter
 
 
+def test_gluon_clc_result_uses_interpreter_tensors():
+    result = gluon.CLCResult()
+
+    assert result.is_canceled().handle.data.tolist() == [False]
+    assert result.program_id(0).handle.data.tolist() == [0]
+
+
 def test_gluon_shared_scatter_routes_through_builder():
     scope = gluon.patch_lang(_dummy_kernel)
     calls = []

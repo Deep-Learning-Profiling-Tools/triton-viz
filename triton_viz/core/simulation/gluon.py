@@ -8,7 +8,6 @@ signatures to Triton's interpreter semantic layer.
 from __future__ import annotations
 
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 import inspect
 import threading
 from typing import Any
@@ -16,7 +15,6 @@ from typing import Any
 import numpy as np
 import triton
 import triton.language as tl
-import triton.language.extra.libdevice as triton_libdevice  # type: ignore
 from triton.experimental.gluon import language as gl  # type: ignore
 from triton.experimental.gluon.language import _core as gluon_core  # type: ignore
 from triton.experimental.gluon.language import _layouts as gluon_layouts  # type: ignore
@@ -60,12 +58,7 @@ from triton.experimental.gluon.language.nvidia.hopper import (  # type: ignore
     tma as gluon_hopper_tma,
 )
 from triton.runtime.interpreter import (  # type: ignore
-    GridExecutor,
-    InterpreterError,
     TensorHandle,
-    _convert_float,
-    _mxfp_value_handle_to_float32,
-    _implicit_cvt,
     _get_np_dtype,
     _patch_lang_core,
     _patch_lang_tensor,
@@ -73,15 +66,8 @@ from triton.runtime.interpreter import (  # type: ignore
     interpreter_builder,
 )
 
-from ..frontend.base import AdapterResult, _LangPatchScope
-from ..symbolic_metadata import TensorDescriptorAccess
+from ..frontend.base import _LangPatchScope
 
-_POINTER_TENSORS: dict[int, Any] = {}
-_CURRENT_NUM_WARPS: int | None = None
-_CURRENT_NUM_CTAS: int | None = None
-_CURRENT_GRID_DIM: tuple[int, int, int] | None = None
-_CURRENT_GRID_IDX: tuple[int, int, int] | None = None
-_HOST_TENSOR_DESCRIPTOR_TYPES = {"TensorDescriptor", "TensorDescriptorIm2Col"}
 _MISSING = object()
 _MBARRIER_STATES: dict[int, "_MBarrierState"] = {}
 _PENDING_CLC_BARRIERS: set[int] = set()
@@ -93,46 +79,6 @@ class _MBarrierState:
         self.phase = phase
         self.pending_bytes = 0
         self.condition = threading.Condition()
-
-
-class _WarpSpecializeScheduler:
-    def __init__(self, count: int) -> None:
-        self._active = list(range(count))
-        self._turn_index = 0
-        self._condition = threading.Condition()
-        self._local = threading.local()
-
-    def bind(self, partition_id: int) -> None:
-        self._local.partition_id = partition_id
-
-    def yield_point(self) -> None:
-        partition_id = getattr(self._local, "partition_id", None)
-        if partition_id is None:
-            return
-        with self._condition:
-            while (
-                partition_id in self._active
-                and self._active
-                and self._active[self._turn_index] != partition_id
-            ):
-                self._condition.wait()
-            if partition_id not in self._active or not self._active:
-                return
-            self._turn_index = (self._turn_index + 1) % len(self._active)
-            self._condition.notify_all()
-
-    def finish(self, partition_id: int) -> None:
-        with self._condition:
-            if partition_id in self._active:
-                removed_index = self._active.index(partition_id)
-                self._active.pop(removed_index)
-                if self._active:
-                    if removed_index < self._turn_index:
-                        self._turn_index -= 1
-                    self._turn_index %= len(self._active)
-                else:
-                    self._turn_index = 0
-            self._condition.notify_all()
 
 
 class GluonSemantic(gluon_semantic_module.GluonSemantic):
@@ -173,30 +119,6 @@ def _to_python_scalar(value: Any) -> Any:
 
 def _to_int(value: Any) -> int:
     return int(_to_python_scalar(value))
-
-
-def _dtype_from_base(base: Any) -> tl.dtype:
-    if isinstance(base, tl.tensor):
-        dtype = base.dtype
-        return dtype.element_ty if isinstance(dtype, tl.pointer_type) else dtype
-    if isinstance(base, TensorHandle):
-        dtype = base.dtype
-        return dtype.element_ty if isinstance(dtype, tl.pointer_type) else dtype
-    if getattr(base, "dtype", _MISSING) is not _MISSING:
-        dtype = tl.str_to_ty(triton.runtime.jit.mangle_type(base), None)
-        return dtype.element_ty if isinstance(dtype, tl.pointer_type) else dtype
-    raise TypeError(f"Cannot infer descriptor dtype from {type(base)}")
-
-
-def _numpy_array(base: Any) -> np.ndarray:
-    detach = getattr(base, "detach", None)
-    cpu = getattr(base, "cpu", None)
-    if callable(detach) and callable(cpu):
-        return detach().cpu().numpy()
-    numpy = getattr(base, "numpy", None)
-    if callable(numpy):
-        return numpy()
-    return np.asarray(base)
 
 
 class BlockType:
@@ -293,7 +215,15 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
             if origin is not None
             else tuple(0 for _ in self.shape)
         )
-        self.dtype = _dtype_from_base(base)
+        if isinstance(base, tl.tensor):
+            dtype = base.dtype
+        elif isinstance(base, TensorHandle):
+            dtype = base.dtype
+        elif getattr(base, "dtype", _MISSING) is not _MISSING:
+            dtype = tl.str_to_ty(triton.runtime.jit.mangle_type(base), None)
+        else:
+            raise TypeError(f"Cannot infer descriptor dtype from {type(base)}")
+        self.dtype = dtype.element_ty if isinstance(dtype, tl.pointer_type) else dtype
         self.block_type = BlockType(self.dtype, list(self.block_shape))
         self.type = TensorDescriptorType(self.block_type)
         self.nbytes_per_cta = self.block_type.nbytes
@@ -341,7 +271,14 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
 
     @property
     def _array(self) -> np.ndarray:
-        return _numpy_array(self.base)
+        detach = getattr(self.base, "detach", None)
+        cpu = getattr(self.base, "cpu", None)
+        if callable(detach) and callable(cpu):
+            return detach().cpu().numpy()
+        numpy = getattr(self.base, "numpy", None)
+        if callable(numpy):
+            return numpy()
+        return np.asarray(self.base)
 
     @property
     def data(self) -> np.ndarray:
@@ -451,10 +388,10 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
 
 class CLCResult:
     def is_canceled(self, _semantic: Any = None):
-        return _to_tensor(False)
+        return gluon_semantic.to_tensor(False)
 
     def program_id(self, dim: Any, _semantic: Any = None):
-        return _to_tensor(0)
+        return gluon_semantic.to_tensor(0)
 
 
 def _normalize_coord(coord: Any, ndim: int) -> tuple[int, ...]:
@@ -466,34 +403,6 @@ def _normalize_coord(coord: Any, ndim: int) -> tuple[int, ...]:
     if len(values) != ndim:
         raise ValueError(f"Expected {ndim} TMA coordinates, got {len(values)}")
     return values
-
-
-def _descriptor_from_host(value: Any) -> TensorDescriptor:
-    if isinstance(value, TensorDescriptor):
-        return value
-    if type(value).__name__ in _HOST_TENSOR_DESCRIPTOR_TYPES:
-        return TensorDescriptor(
-            value.base,
-            list(value.shape),
-            list(value.strides),
-            list(value.block_shape),
-            value.layout,
-            getattr(value, "padding", "zero"),
-            getattr(value, "element_strides", None),
-            getattr(value, "pixel_box_lower_corner", None),
-            getattr(value, "pixel_box_upper_corner", None),
-        )
-    raise TypeError(f"Unsupported TMA descriptor type: {type(value)}")
-
-
-def _implicit_gluon_cvt(name: str, value: Any, constexprs: set[str]) -> Any:
-    if name in constexprs:
-        return value
-    if isinstance(value, TensorDescriptor) or (
-        type(value).__name__ in _HOST_TENSOR_DESCRIPTOR_TYPES
-    ):
-        return _descriptor_from_host(value)
-    return _implicit_cvt(value)
 
 
 class SharedMemoryHandle(TensorHandle, gluon_core.shared_memory_descriptor):
@@ -836,21 +745,14 @@ class TensorMemoryHandle(TensorHandle, gluon_blackwell.tensor_memory_descriptor)
         )
 
 
-def _as_shape(value: Any) -> tuple[int, ...]:
-    return tuple(int(_unwrap_constexpr(dim)) for dim in _unwrap_constexpr(value))
-
-
-def _set_handle_layout(handle: TensorHandle, layout: Any) -> TensorHandle:
-    handle.set_attr("gluon.layout", layout)
-    return handle
-
-
 def _get_handle_layout(handle: TensorHandle) -> Any:
     return handle.attr.get("gluon.layout", gluon_layouts.AutoLayout())
 
 
 def _tensor_result(data: np.ndarray, dtype: tl.dtype, layout: Any = None) -> TensorHandle:
-    return _set_handle_layout(TensorHandle(data, dtype), layout or gluon_layouts.AutoLayout())
+    handle = TensorHandle(data, dtype)
+    handle.set_attr("gluon.layout", layout or gluon_layouts.AutoLayout())
+    return handle
 
 
 def _local_indices(indices: np.ndarray, axis: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -1202,7 +1104,7 @@ class Builder(interpreter_builder.__class__):
         )
 
     def create_memdesc_reshape(self, mem_desc: SharedMemoryHandle, shape: Any):
-        shape = list(_as_shape(shape))
+        shape = [int(_unwrap_constexpr(dim)) for dim in _unwrap_constexpr(shape)]
         return SharedMemoryHandle(
             mem_desc.element_ty,
             shape,
@@ -1653,17 +1555,6 @@ def _mbarrier_signal(barrier: Any) -> None:
         state.condition.notify_all()
 
 
-def _mbarrier_complete_bytes(barrier: Any, nbytes: int) -> None:
-    state = _mbarrier_state(barrier)
-    with state.condition:
-        if state.pending_bytes > 0:
-            state.pending_bytes -= int(nbytes)
-            if state.pending_bytes > 0:
-                return
-        state.pending_bytes = 0
-    _mbarrier_signal(barrier)
-
-
 def _mbarrier_init(barrier: Any, *args: Any, **kwargs: Any) -> None:
     state = _mbarrier_state(barrier)
     with state.condition:
@@ -1745,30 +1636,21 @@ _GLUON_BUILTIN_CLASSES: tuple[Any, ...] = (
 )
 
 
-def _is_gluon_builtin(member: Any) -> bool:
-    return callable(member) and bool(
-        getattr(member, gluon_core.GLUON_BUILTIN, False)
-        or tl.core.is_builtin(member)
-    )
-
-
-def _patch_gluon_attr(
-    obj: Any,
-    name: str,
-    member: Callable,
-    scope: _LangPatchScope,
-) -> None:
-    def new_member(*args: Any, member: Callable = member, **kwargs: Any):
-        kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
-        return member(*args, **kwargs, _semantic=gluon_semantic)
-
-    scope.set_attr(obj, name, new_member)
-
-
 def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
     for name, member in inspect.getmembers(pkg):
-        if _is_gluon_builtin(member):
-            _patch_gluon_attr(pkg, name, member, scope)
+        if not callable(member):
+            continue
+        if not (
+            getattr(member, gluon_core.GLUON_BUILTIN, False)
+            or tl.core.is_builtin(member)
+        ):
+            continue
+
+        def new_member(*args: Any, member: Callable = member, **kwargs: Any):
+            kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
+            return member(*args, **kwargs, _semantic=gluon_semantic)
+
+        scope.set_attr(pkg, name, new_member)
 
 
 def patch_lang(fn: Callable) -> _LangPatchScope:
