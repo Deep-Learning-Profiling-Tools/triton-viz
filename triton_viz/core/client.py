@@ -171,8 +171,10 @@ class ClientManager:
 
     @contextmanager
     def patch_run(self, fn, frontend_name: str):
-        namespaces = get_frontend(frontend_name).namespaces
+        frontend = get_frontend(frontend_name)
+        namespaces = frontend.namespaces
         with patch_calls(frontend_name):
+            patch_lang(fn, frontend_name, client_manager=self)
             # Collect all for-loop callbacks from clients
             all_loop_callbacks = []
             for client in self.clients.values():
@@ -189,16 +191,15 @@ class ClientManager:
 
             self._populate_loop_hooks(all_loop_callbacks)
             patch_for_loop(frontend_name)
-            patch_lang(fn, frontend_name, client_manager=self)
             try:
                 yield
             finally:
                 for namespace, attrs in namespaces.items():
                     for attr, op in attrs.items():
                         unpatch_op(namespace, attr, frontend_name)
+                unpatch_lang(frontend_name)
                 unpatch_for_loop(frontend_name)
                 self._clear_loop_hooks()
-                unpatch_lang(frontend_name)
 
     def pre_run_callback(self, fn: Callable) -> bool:
         with self._lock_context():
