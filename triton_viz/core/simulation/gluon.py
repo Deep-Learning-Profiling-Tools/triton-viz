@@ -1722,3 +1722,513 @@ _register_simulated_callable_adapter(
     _tdm_async_store,
     _descriptor_symbolic_store_adapter(coord_index=1),
 )
+
+
+def _make_gluon_wrapper(member: Callable) -> Callable:
+    def wrapped(*args: Any, **kwargs: Any):
+        _yield_warp_specialize()
+        kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
+        return member(*args, **kwargs, _semantic=gluon_semantic)
+
+    wrapped.__name__ = getattr(member, "__name__", "wrapped_gluon_builtin")
+    wrapped.__doc__ = getattr(member, "__doc__", None)
+    wrapped.__triton_viz_simulated__ = True  # type: ignore[attr-defined]
+    _register_replay_callable(wrapped)
+    return wrapped
+
+
+def _yield_warp_specialize() -> None:
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    gluon_frontend._maybe_yield_warp_specialize()
+
+
+def _program_id(axis: Any, _semantic: Any = None):
+    return gluon_semantic.program_id(int(_unwrap_constexpr(axis)))
+
+
+def _arange(start: Any, end: Any, layout: Any = None, _semantic: Any = None):
+    return gluon_semantic.arange(
+        int(_unwrap_constexpr(start)), int(_unwrap_constexpr(end))
+    )
+
+
+def _full(
+    shape: Any,
+    value: Any,
+    dtype: tl.dtype,
+    layout: Any = None,
+    _semantic: Any = None,
+):
+    shape = tuple(int(_unwrap_constexpr(dim)) for dim in shape)
+    return gluon_semantic.full(
+        list(shape), _unwrap_constexpr(value), _unwrap_constexpr(dtype)
+    )
+
+
+def _full_like(
+    input: Any,
+    value: Any,
+    shape: Any = None,
+    dtype: tl.dtype | None = None,
+    layout: Any = None,
+    _semantic: Any = None,
+):
+    del layout, _semantic
+    input_tensor = gluon_semantic.to_tensor(input)
+    dtype = input_tensor.dtype if dtype is None else _unwrap_constexpr(dtype)
+    target_shape = input_tensor.shape if shape is None else _unwrap_constexpr(shape)
+    target_shape = tuple(int(_unwrap_constexpr(dim)) for dim in target_shape)
+    value_data = np.asarray(_to_python_scalar(value), dtype=_get_np_dtype(dtype))
+    if value_data.shape:
+        data = np.broadcast_to(value_data, target_shape).astype(
+            _get_np_dtype(dtype), copy=True
+        )
+    else:
+        data = np.full(target_shape, value_data.item(), dtype=_get_np_dtype(dtype))
+    ret_ty = tl.block_type(dtype, list(data.shape)) if data.shape else dtype
+    return tl.tensor(TensorHandle(data, dtype), ret_ty)
+
+
+def _cdiv(x: Any, div: Any, _semantic: Any = None):
+    x = _unwrap_constexpr(x)
+    div = _unwrap_constexpr(div)
+    return (x + div - 1) // div
+
+
+def _to_tensor(x: Any, _semantic: Any = None):
+    return gluon_semantic.to_tensor(_unwrap_constexpr(x))
+
+
+def _num_programs(axis: Any, _semantic: Any = None):
+    return gluon_semantic.num_programs(int(_unwrap_constexpr(axis)))
+
+
+def _num_ctas(_semantic: Any = None):
+    return 1 if _CURRENT_NUM_CTAS is None else _CURRENT_NUM_CTAS
+
+
+def _barrier(*_args: Any, **_kwargs: Any) -> None:
+    return None
+
+
+def _static_print(
+    *values: Any,
+    sep: str = " ",
+    end: str = "\n",
+    file: Any = None,
+    flush: bool = False,
+    _semantic: Any = None,
+) -> None:
+    del _semantic
+    values = tuple(_unwrap_constexpr(value) for value in values)
+    print(*values, sep=sep, end=end, file=file, flush=flush)
+
+
+def _set_auto_layout(value: Any, layout: Any, _semantic: Any = None):
+    del layout
+    return value
+
+
+def _load(
+    pointer: Any,
+    mask: Any = None,
+    other: Any = None,
+    boundary_check: Any = (),
+    padding_option: Any = "",
+    cache_modifier: Any = "",
+    eviction_policy: Any = "",
+    volatile: Any = False,
+    _semantic: Any = None,
+):
+    del _semantic
+    _yield_warp_specialize()
+    pointer = gluon_semantic.to_tensor(pointer)
+    mask = _unwrap_constexpr(mask)
+    other = _unwrap_constexpr(other)
+    if mask is not None:
+        mask = gluon_semantic.to_tensor(mask)
+    if other is not None:
+        other = gluon_semantic.to_tensor(other)
+    return gluon_semantic.load(
+        pointer,
+        mask,
+        other,
+        _unwrap_constexpr(boundary_check),
+        _unwrap_constexpr(padding_option),
+        _unwrap_constexpr(cache_modifier),
+        _unwrap_constexpr(eviction_policy),
+        bool(_unwrap_constexpr(volatile)),
+    )
+
+
+def _store(
+    pointer: Any,
+    value: Any,
+    mask: Any = None,
+    boundary_check: Any = (),
+    cache_modifier: Any = "",
+    eviction_policy: Any = "",
+    _semantic: Any = None,
+):
+    del _semantic
+    _yield_warp_specialize()
+    pointer = gluon_semantic.to_tensor(pointer)
+    value = gluon_semantic.to_tensor(value)
+    mask = _unwrap_constexpr(mask)
+    if mask is not None:
+        mask = gluon_semantic.to_tensor(mask)
+    return gluon_semantic.store(
+        pointer,
+        value,
+        mask,
+        _unwrap_constexpr(boundary_check),
+        _unwrap_constexpr(cache_modifier),
+        _unwrap_constexpr(eviction_policy),
+    )
+
+
+def _split(a: Any, _semantic: Any = None, _generator: Any = None):
+    del _semantic, _generator
+    _yield_warp_specialize()
+    return gluon_semantic.split(gluon_semantic.to_tensor(a))
+
+
+def _shape_args(values: tuple[Any, ...]) -> list[int]:
+    if len(values) == 1:
+        first = _unwrap_constexpr(values[0])
+        if isinstance(first, (tuple, list)):
+            values = tuple(first)
+    return [int(_unwrap_constexpr(value)) for value in values]
+
+
+def _reshape(
+    input: Any,
+    *shape: Any,
+    can_reorder: Any = False,
+    _semantic: Any = None,
+    _generator: Any = None,
+):
+    del _semantic, _generator
+    _yield_warp_specialize()
+    return gluon_semantic.reshape(
+        gluon_semantic.to_tensor(input),
+        _shape_args(shape),
+        bool(_unwrap_constexpr(can_reorder)),
+    )
+
+
+def _permute(input: Any, *dims: Any, _semantic: Any = None):
+    del _semantic
+    _yield_warp_specialize()
+    return gluon_semantic.permute(
+        gluon_semantic.to_tensor(input),
+        tuple(_shape_args(dims)),
+    )
+
+
+def _convert_layout(
+    value: Any,
+    layout: Any,
+    assert_trivial: Any = False,
+    _semantic: Any = None,
+):
+    del _semantic
+    _yield_warp_specialize()
+    return gluon_semantic.convert_layout(
+        gluon_semantic.to_tensor(value),
+        _unwrap_constexpr(layout),
+        bool(_unwrap_constexpr(assert_trivial)),
+    )
+
+
+def _cast(
+    input: Any,
+    dtype: Any,
+    fp_downcast_rounding: Any = None,
+    bitcast: Any = False,
+    _semantic: Any = None,
+):
+    del _semantic
+    _yield_warp_specialize()
+    input = gluon_semantic.to_tensor(input)
+    dtype = _unwrap_constexpr(dtype)
+    fp_downcast_rounding = _unwrap_constexpr(fp_downcast_rounding)
+    if bool(_unwrap_constexpr(bitcast)):
+        return gluon_semantic.bitcast(input, dtype)
+    return gluon_semantic.cast(input, dtype, fp_downcast_rounding)
+
+
+def _tensor_to(
+    input: Any,
+    dtype: Any,
+    fp_downcast_rounding: Any = None,
+    bitcast: Any = False,
+    _semantic: Any = None,
+):
+    return _cast(input, dtype, fp_downcast_rounding, bitcast, _semantic=_semantic)
+
+
+def _where(condition: Any, x: Any, y: Any, _semantic: Any = None):
+    return gluon_semantic.where(
+        gluon_semantic.to_tensor(condition),
+        gluon_semantic.to_tensor(x),
+        gluon_semantic.to_tensor(y),
+    )
+
+
+def _minimum(
+    x: Any,
+    y: Any,
+    propagate_nan: Any = tl.PropagateNan.NONE,
+    _semantic: Any = None,
+):
+    return gluon_semantic.minimum(
+        gluon_semantic.to_tensor(x),
+        gluon_semantic.to_tensor(y),
+        _unwrap_constexpr(propagate_nan),
+    )
+
+
+def _maximum(
+    x: Any,
+    y: Any,
+    propagate_nan: Any = tl.PropagateNan.NONE,
+    _semantic: Any = None,
+):
+    return gluon_semantic.maximum(
+        gluon_semantic.to_tensor(x),
+        gluon_semantic.to_tensor(y),
+        _unwrap_constexpr(propagate_nan),
+    )
+
+
+def _clamp(
+    x: Any,
+    min: Any,
+    max: Any,
+    propagate_nan: Any = tl.PropagateNan.NONE,
+    _semantic: Any = None,
+):
+    return gluon_semantic.clamp(
+        gluon_semantic.to_tensor(x),
+        gluon_semantic.to_tensor(min),
+        gluon_semantic.to_tensor(max),
+        _unwrap_constexpr(propagate_nan),
+    )
+
+
+def _zeros(
+    shape: Any,
+    dtype: tl.dtype,
+    layout: Any = None,
+    _semantic: Any = None,
+):
+    return _full(shape, 0, dtype, layout)
+
+
+def _reduction_tensor(
+    value: Any, np_func: Callable, axis: Any = None, keep_dims: bool = False
+):
+    tensor = gluon_semantic.to_tensor(value)
+    axis = _unwrap_constexpr(axis)
+    keep_dims = bool(_unwrap_constexpr(keep_dims))
+    data = np_func(tensor.handle.data, axis=axis, keepdims=keep_dims)
+    data = np.asarray(data, dtype=tensor.handle.data.dtype)
+    ret_ty = (
+        tl.block_type(tensor.dtype, list(data.shape)) if data.shape else tensor.dtype
+    )
+    return tl.tensor(TensorHandle(data, tensor.dtype), ret_ty)
+
+
+def _sum(value: Any, axis: Any = None, keep_dims: bool = False, _semantic: Any = None):
+    return _reduction_tensor(value, np.sum, axis, keep_dims)
+
+
+def _max(value: Any, axis: Any = None, keep_dims: bool = False, _semantic: Any = None):
+    return _reduction_tensor(value, np.max, axis, keep_dims)
+
+
+def _broadcast(input: Any, other: Any, _semantic: Any = None):
+    input = gluon_semantic.to_tensor(input)
+    other = gluon_semantic.to_tensor(other)
+    lhs, rhs = gluon_semantic.broadcast_impl_value(input, other)
+    return lhs, rhs
+
+
+def _broadcast_to(input: Any, *shape: Any, _semantic: Any = None):
+    del _semantic
+    _yield_warp_specialize()
+    return gluon_semantic.broadcast_impl_shape(
+        gluon_semantic.to_tensor(input),
+        _shape_args(shape),
+    )
+
+
+def _join(a: Any, b: Any, _semantic: Any = None):
+    return gluon_semantic.join(gluon_semantic.to_tensor(a), gluon_semantic.to_tensor(b))
+
+
+def _dot_fma(a: Any, b: Any, acc: Any, _semantic: Any = None):
+    return gluon_semantic.dot_fma(
+        gluon_semantic.to_tensor(a),
+        gluon_semantic.to_tensor(b),
+        gluon_semantic.to_tensor(acc),
+    )
+
+
+def _scalar_tensor(value: Any, dtype: tl.dtype):
+    data = np.asarray(value, dtype=_get_np_dtype(dtype))
+    return tl.tensor(TensorHandle(data, dtype), dtype)
+
+
+def _tensor_from_data(data: Any, dtype: tl.dtype, keep_scalar: bool = False):
+    data = np.asarray(data, dtype=_get_np_dtype(dtype))
+    if data.shape or keep_scalar:
+        ret_ty = tl.block_type(dtype, list(data.shape)) if data.shape else dtype
+        return tl.tensor(TensorHandle(data, dtype), ret_ty)
+    return _scalar_tensor(data.item(), dtype)
+
+
+def _reduce(
+    input: Any,
+    axis: Any,
+    combine_fn: Callable,
+    keep_dims: Any = False,
+    _semantic: Any = None,
+    _generator: Any = None,
+):
+    del _semantic, _generator
+    single_input = isinstance(input, tl.tensor)
+    inputs = (input,) if single_input else tuple(input)
+    tensors = tuple(gluon_semantic.to_tensor(item) for item in inputs)
+    axis = _unwrap_constexpr(axis)
+    keep_dims = bool(_unwrap_constexpr(keep_dims))
+    data_inputs = [np.asarray(tensor.handle.data) for tensor in tensors]
+    if axis is None:
+        data_inputs = [data.reshape(-1) for data in data_inputs]
+        axis = 0
+        original_axis_none = True
+    else:
+        axis = int(_unwrap_constexpr(axis))
+        if axis < 0:
+            axis += len(data_inputs[0].shape)
+        original_axis_none = False
+    input_shape = data_inputs[0].shape
+    output_shape = input_shape[:axis] + input_shape[axis + 1 :]
+    outputs = [np.zeros(output_shape, dtype=data.dtype) for data in data_inputs]
+    reducer = (
+        _device_function_wrapper(combine_fn)
+        if _is_gluon_jit_function(combine_fn)
+        else combine_fn
+    )
+
+    for flat_index in range(data_inputs[0].size):
+        input_index = np.unravel_index(flat_index, input_shape)
+        output_index = input_index[:axis] + input_index[axis + 1 :]
+        values = tuple(
+            _scalar_tensor(data[input_index], tensors[index].dtype)
+            for index, data in enumerate(data_inputs)
+        )
+        if input_index[axis] == 0:
+            for out_index, value in enumerate(values):
+                outputs[out_index][output_index] = value.handle.data.item()
+            continue
+        acc = tuple(
+            _scalar_tensor(output[output_index], tensors[index].dtype)
+            for index, output in enumerate(outputs)
+        )
+        reduced = reducer(*acc, *values)
+        reduced_values = reduced if isinstance(reduced, tuple) else (reduced,)
+        for out_index, value in enumerate(reduced_values):
+            if isinstance(value, tl.tensor):
+                outputs[out_index][output_index] = value.handle.data.item()
+            else:
+                outputs[out_index][output_index] = value
+
+    result = []
+    for index, output in enumerate(outputs):
+        if keep_dims:
+            if original_axis_none:
+                for _ in range(len(input_shape)):
+                    output = np.expand_dims(output, 0)
+            else:
+                output = np.expand_dims(output, axis)
+        elif original_axis_none:
+            output = output.item()
+        result.append(_tensor_from_data(output, tensors[index].dtype))
+    return result[0] if single_input else tuple(result)
+
+
+def _map_elementwise(
+    scalar_fn: Callable,
+    *args: Any,
+    pack: Any = 1,
+    _semantic: Any = None,
+    _generator: Any = None,
+):
+    del pack, _semantic, _generator
+    arrays = []
+    tensor_dtypes = []
+    has_tensor = False
+    for arg in args:
+        if isinstance(arg, tl.tensor):
+            arrays.append(np.asarray(arg.handle.data))
+            tensor_dtypes.append(arg.dtype)
+            has_tensor = True
+        elif isinstance(arg, TensorHandle):
+            arrays.append(np.asarray(arg.data))
+            tensor_dtypes.append(arg.dtype)
+            has_tensor = True
+        else:
+            arrays.append(np.asarray(_unwrap_constexpr(arg)))
+    if not has_tensor:
+        return scalar_fn(*args)
+
+    broadcasted = np.broadcast_arrays(*arrays)
+    out_shape = broadcasted[0].shape
+    flat_results: list[list[Any]] = []
+    first_result = None
+    for idx in np.ndindex(out_shape):
+        call_args = [array[idx].item() for array in broadcasted]
+        result = scalar_fn(*call_args)
+        if not isinstance(result, tuple):
+            result = (result,)
+        if first_result is None:
+            first_result = result
+            flat_results = [[] for _ in result]
+        for result_idx, item in enumerate(result):
+            flat_results[result_idx].append(_to_python_scalar(item))
+
+    if first_result is None:
+        return ()
+
+    tensors = []
+    for result_idx, values in enumerate(flat_results):
+        first_item = first_result[result_idx]
+        if isinstance(first_item, tl.tensor):
+            dtype = first_item.dtype
+        elif isinstance(first_item, TensorHandle):
+            dtype = first_item.dtype
+        else:
+            dtype = tensor_dtypes[0]
+        data = np.asarray(values, dtype=_get_np_dtype(dtype)).reshape(out_shape)
+        tensors.append(
+            tl.tensor(
+                TensorHandle(data, dtype),
+                tl.block_type(dtype, list(out_shape)),
+            )
+        )
+    return tensors[0] if len(tensors) == 1 else tuple(tensors)
+
+
+def _as_numpy_operand(value: Any) -> np.ndarray:
+    if isinstance(value, SharedMemoryHandle):
+        return value.data
+    if isinstance(value, TensorMemoryHandle):
+        return value.data
+    if isinstance(value, tl.tensor):
+        return np.asarray(value.handle.data)
+    if isinstance(value, TensorHandle):
+        return np.asarray(value.data)
+    return np.asarray(value)
