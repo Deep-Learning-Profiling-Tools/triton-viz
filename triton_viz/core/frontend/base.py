@@ -1,8 +1,8 @@
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, cast
+from typing import Any
 
 from triton_viz.core.data import Op
 
@@ -14,7 +14,7 @@ class _LangPatchScope:
     """Tracks patched attributes and mapping items so they can be restored."""
 
     def __init__(self) -> None:
-        self._changes: list[tuple[str, object, str, object]] = []
+        self._changes: list[tuple[str, Any, str, object]] = []
 
     def set_attr(self, obj: object, name: str, value: object) -> None:
         original = getattr(obj, name, _MISSING)
@@ -34,7 +34,7 @@ class _LangPatchScope:
         while self._changes:
             kind, obj, name, original = self._changes.pop()
             if kind == "item":
-                mapping = cast(MutableMapping[str, Any], obj)
+                mapping = obj
                 if original is _MISSING:
                     del mapping[name]
                 else:
@@ -87,6 +87,8 @@ class Frontend:
     name: str
     builder: Any
     original_ops: dict[Any, dict[str, Callable]]
+    # Default adapters keyed by operation type. These handle the common
+    # signature for all callables that map to the same normalized Op.
     adapters: dict[type[Op], Callable[..., AdapterResult]]
     namespaces: dict[Any, dict[str, type[Op]]]
 
