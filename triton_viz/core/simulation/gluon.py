@@ -2851,3 +2851,406 @@ for _simulated, _original in (
 ):
     _simulated.__triton_viz_simulated__ = True  # type: ignore[attr-defined]
     _register_replay_callable(_simulated)
+
+
+def _patch_attr(obj: Any, name: str, value: Callable, scope: _LangPatchScope) -> None:
+    scope.set_attr(obj, name, value)
+
+
+def _patch_namespace_overrides(
+    namespace: Any,
+    overrides: dict[str, Callable],
+    scope: _LangPatchScope,
+    original_to_patched: dict[int, Callable] | None = None,
+) -> None:
+    namespace_attrs = vars(namespace)
+    for name, value in overrides.items():
+        if name in namespace_attrs:
+            current = namespace_attrs[name]
+            if original_to_patched is not None:
+                original_to_patched[id(current)] = value
+            _patch_attr(namespace, name, value, scope)
+
+
+def _patch_builtin_namespace(
+    obj: Any,
+    scope: _LangPatchScope,
+    original_to_patched: dict[int, Callable] | None = None,
+) -> None:
+    for name, member in inspect.getmembers(obj):
+        if tl.core.is_builtin(member):
+            wrapped = _make_gluon_wrapper(member)
+            if original_to_patched is not None:
+                original_to_patched[id(member)] = wrapped
+            _patch_attr(obj, name, wrapped, scope)
+
+
+def _patch_jit_namespace(obj: Any, scope: _LangPatchScope) -> None:
+    for name, member in inspect.getmembers(obj):
+        if _is_gluon_jit_function(member):
+            _patch_jit_function_globals(member, scope)
+            _patch_attr(obj, name, _device_function_wrapper(member), scope)
+            continue
+        _patch_aggregate_jit_methods(member, scope)
+
+
+_ORIGINAL_CONSTEXPR_MUL = tl.constexpr.__mul__
+_ORIGINAL_CONSTEXPR_GETATTR = getattr(tl.constexpr, "__getattr__", None)
+
+
+def _constexpr_mul(self: tl.constexpr, other: Any):
+    if isinstance(other, tl.tensor):
+        return other * self.value
+    return _ORIGINAL_CONSTEXPR_MUL(self, other)
+
+
+def _constexpr_getattr(self: tl.constexpr, name: str):
+    if _ORIGINAL_CONSTEXPR_GETATTR is not None:
+        try:
+            return _ORIGINAL_CONSTEXPR_GETATTR(self, name)
+        except AttributeError:
+            pass
+    return getattr(self.value, name)
+
+
+def _block_type_layout(self: tl.block_type):
+    return getattr(self, "_triton_viz_layout", None)
+
+
+def gluon_patch_lang(
+    fn: Callable, scope: _LangPatchScope | None = None
+) -> _LangPatchScope:
+    """Patch Gluon language symbols used by ``fn`` for interpreter execution."""
+
+    if scope is None:
+        scope = _LangPatchScope()
+
+    core_overrides: dict[str, Callable] = {
+        "program_id": _program_id,
+        "arange": _arange,
+        "full": _full,
+        "cdiv": _cdiv,
+        "to_tensor": _to_tensor,
+        "num_programs": _num_programs,
+        "num_ctas": _num_ctas,
+        "barrier": _barrier,
+        "static_print": _static_print,
+        "set_auto_layout": _set_auto_layout,
+        "load": _load,
+        "store": _store,
+        "split": _split,
+        "reshape": _reshape,
+        "permute": _permute,
+        "convert_layout": _convert_layout,
+        "cast": _cast,
+        "where": _where,
+        "minimum": _minimum,
+        "maximum": _maximum,
+        "clamp": _clamp,
+        "zeros": _zeros,
+        "sum": _sum,
+        "max": _max,
+        "allocate_shared_memory": _allocate_shared_memory,
+        "broadcast": _broadcast,
+        "join": _join,
+        "dot_fma": _dot_fma,
+        "reduce": _reduce,
+        "map_elementwise": _map_elementwise,
+        "num_warps": _num_warps,
+        "inline_asm_elementwise": _inline_asm_elementwise,
+        "exp": _exp,
+        "expand_dims": _expand_dims,
+        "fp4_to_fp": _fp4_to_fp,
+        "atomic_add": _atomic_add,
+        "atomic_xchg": _atomic_xchg,
+    }
+    math_overrides: dict[str, Callable] = {
+        "exp": _exp,
+        "exp2": _exp2,
+        "log2": _log2,
+        "fma": _fma,
+        "rsqrt": _rsqrt,
+    }
+    standard_overrides: dict[str, Callable] = {
+        "full_like": _full_like,
+    }
+    libdevice_overrides: dict[str, Callable] = {
+        "exp": _libdevice_exp,
+        "fast_expf": _libdevice_fast_expf,
+        "fast_dividef": _libdevice_fast_dividef,
+    }
+    tma_overrides: dict[str, Callable] = {
+        "make_tensor_descriptor": _make_tensor_descriptor,
+        "async_load": _tma_async_load,
+        "async_copy_global_to_shared": _tma_async_load,
+        "async_load_im2col": _tma_async_load_im2col,
+        "async_copy_global_to_shared_im2col": _tma_async_load_im2col,
+        "async_copy_shared_to_global": _tma_async_store,
+        "async_store": _tma_async_store,
+        "async_atomic_add": _tma_async_atomic_add,
+        "async_atomic_min": _tma_async_atomic_min,
+        "async_atomic_max": _tma_async_atomic_max,
+        "async_atomic_and": _tma_async_atomic_and,
+        "async_atomic_or": _tma_async_atomic_or,
+        "async_atomic_xor": _tma_async_atomic_xor,
+        "store_wait": _noop,
+    }
+    mbarrier_overrides: dict[str, Callable] = {
+        "allocate_mbarrier": _allocate_mbarrier,
+        "arrive": _mbarrier_arrive,
+        "init": _mbarrier_init,
+        "expect": _mbarrier_expect,
+        "wait": _mbarrier_wait,
+        "invalidate": _mbarrier_invalidate,
+    }
+    module_overrides: dict[Any, dict[str, Callable]] = {
+        gl: core_overrides,
+        gluon_core: core_overrides,
+        gluon_math: math_overrides,
+        gluon_standard: standard_overrides,
+        triton_libdevice: libdevice_overrides,
+        gluon_hopper_tma: tma_overrides,
+        gluon_hopper_mbarrier: mbarrier_overrides,
+    }
+    jit_modules: tuple[Any, ...] = ()
+
+    original_to_patched: dict[int, Callable] = {}
+    for module in (
+        gl,
+        gluon_core,
+        gluon_math,
+        gluon_standard,
+        gluon_hopper,
+        gluon_blackwell,
+        gluon_clc,
+        triton_libdevice,
+        gluon_amd,
+        gluon_hopper_tma,
+        gluon_blackwell_tma,
+        gluon_hopper_mbarrier,
+        gluon_ampere_async_copy,
+        gluon_amd_cdna4_async_copy,
+        gluon_amd_async_copy,
+        gluon_amd_mbarrier,
+        gluon_amd_cluster,
+        gluon_amd_cdna3,
+        gluon_amd_cdna4,
+        gluon_amd_rdna3,
+        gluon_amd_rdna4,
+        gluon_amd_gfx1250,
+        gluon_amd_tdm,
+        gl.tensor,
+        *jit_modules,
+    ):
+        for name, value in inspect.getmembers(module):
+            if callable(value):
+                original_to_patched[id(value)] = value
+
+    _patch_builtin_namespace(gl, scope, original_to_patched)
+    _patch_builtin_namespace(gluon_core, scope, original_to_patched)
+    _patch_builtin_namespace(gluon_math, scope, original_to_patched)
+    _patch_builtin_namespace(gl.tensor, scope, original_to_patched)
+    scope.set_attr(tl.constexpr, "__mul__", _constexpr_mul)
+    scope.set_attr(tl.constexpr, "__getattr__", _constexpr_getattr)
+    scope.set_attr(tl.block_type, "layout", property(_block_type_layout))
+    for module, overrides in module_overrides.items():
+        _patch_namespace_overrides(module, overrides, scope, original_to_patched)
+    for module in jit_modules:
+        _patch_jit_namespace(module, scope)
+
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    for namespace, attrs in gluon_frontend.frontend.original_ops.items():
+        for attr, original in list(attrs.items()):
+            patched = getattr(namespace, attr, None)
+            if patched is not None:
+                op_type = gluon_frontend.frontend.namespaces[namespace][attr]
+                default_adapter = gluon_frontend.frontend.adapters[op_type]
+                _register_symbolic_adapter_for_attr(patched, attr, default_adapter)
+                scope.set_item(attrs, attr, patched)
+                original_to_patched[id(original)] = patched
+
+    _patch_lang_tensor(gl.tensor, scope)
+    _patch_attr(gl.tensor, "broadcast_to", _broadcast_to, scope)
+    _patch_attr(gl.tensor, "cast", _cast, scope)
+    _patch_attr(gl.tensor, "to", _tensor_to, scope)
+    _patch_lang_core(gl, scope)
+
+    globals_dict = getattr(fn, "__globals__", {})
+    patched_modules = {
+        gl,
+        gluon_core,
+        gluon_math,
+        gluon_standard,
+        gluon_hopper,
+        gluon_blackwell,
+        gluon_clc,
+        triton_libdevice,
+        gluon_amd,
+        gluon_hopper_tma,
+        gluon_blackwell_tma,
+        gluon_hopper_mbarrier,
+        gluon_ampere_async_copy,
+        gluon_amd_cdna4_async_copy,
+        gluon_amd_async_copy,
+        gluon_amd_mbarrier,
+        gluon_amd_cluster,
+        gluon_amd_cdna3,
+        gluon_amd_cdna4,
+        gluon_amd_rdna3,
+        gluon_amd_rdna4,
+        gluon_amd_gfx1250,
+        gluon_amd_tdm,
+        *jit_modules,
+    }
+    for name, value in list(globals_dict.items()):
+        if name == "fence_async_shared":
+            scope.set_item(globals_dict, name, _noop)
+            continue
+        if inspect.ismodule(value) and value in patched_modules:
+            continue
+        if _is_gluon_jit_function(value):
+            _patch_jit_function_globals(value, scope)
+            scope.set_item(globals_dict, name, _device_function_wrapper(value))
+            continue
+        if _patch_aggregate_jit_methods(value, scope):
+            continue
+        if inspect.ismodule(value):
+            module_override = module_overrides.get(value)
+            if module_override is not None:
+                _patch_namespace_overrides(
+                    value,
+                    module_override,
+                    scope,
+                    original_to_patched,
+                )
+            continue
+        if not callable(value):
+            continue
+        patched = original_to_patched.get(id(value))
+        if patched is not None:
+            scope.set_item(globals_dict, name, patched)
+
+    return scope
+
+
+class GluonInterpretedFunction:
+    """Callable wrapper that executes a Gluon kernel on CPU through NumPy."""
+
+    def __init__(self, fn: Callable, arg_names: list[str] | None = None) -> None:
+        self.fn = fn
+        signature = inspect.signature(fn)
+        self.arg_names = arg_names or [v.name for v in signature.parameters.values()]
+        annotations = fn.__annotations__
+        self.constexprs = {
+            name
+            for name in self.arg_names
+            if annotations.get(name) in ("constexpr", tl.constexpr)
+        }
+
+    def _call_args(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        argspec = inspect.getfullargspec(self.fn)
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in argspec.args}
+        return inspect.getcallargs(self.fn, *args, **filtered_kwargs)
+
+    @staticmethod
+    def _canonical_grid(grid: Any, call_args: dict[str, Any]) -> tuple[int, int, int]:
+        if callable(grid):
+            grid = grid(call_args)
+        if isinstance(grid, int):
+            grid = (grid,)
+        grid = tuple(int(dim) for dim in grid)
+        if len(grid) > 3:
+            raise ValueError(f"grid must have at most 3 dimensions, got {grid}")
+        return grid + (1,) * (3 - len(grid))
+
+    def run(self, *args_dev: Any, grid: Any, warmup: bool = False, **kwargs: Any):
+        if warmup:
+            return None
+
+        client_manager = kwargs.pop("client_manager", None)
+        num_warps = kwargs.get("num_warps")
+        num_ctas = kwargs.get("num_ctas")
+        if "num_warps" not in self.arg_names:
+            kwargs.pop("num_warps", None)
+        if "num_ctas" not in self.arg_names:
+            kwargs.pop("num_ctas", None)
+        patch_lang = kwargs.pop("_patch_lang", True)
+        grid_helper = GridExecutor(self.fn, self.arg_names, grid)
+        args_hst, kwargs_hst = grid_helper._init_args_hst(args_dev, kwargs)
+        raw_call_args = self._call_args(tuple(args_hst), kwargs_hst)
+        previous_pointer_tensors = dict(_POINTER_TENSORS)
+        for arg in raw_call_args.values():
+            data_ptr = getattr(arg, "data_ptr", None)
+            if callable(data_ptr):
+                _POINTER_TENSORS[int(data_ptr())] = arg
+        call_args = {
+            name: _implicit_gluon_cvt(name, value, self.constexprs)
+            for name, value in raw_call_args.items()
+        }
+        canonical_grid = self._canonical_grid(grid, raw_call_args)
+        interpreter_builder.set_grid_dim(*canonical_grid)
+        previous_num_warps = _CURRENT_NUM_WARPS
+        previous_num_ctas = _CURRENT_NUM_CTAS
+        previous_grid_dim = _CURRENT_GRID_DIM
+        previous_grid_idx = _CURRENT_GRID_IDX
+
+        if client_manager is not None:
+            for name, arg in raw_call_args.items():
+                client_manager.arg_callback(name, arg, call_args[name])
+                base = getattr(arg, "base", None)
+                data_ptr = getattr(base, "data_ptr", None)
+                if callable(data_ptr):
+                    client_manager.arg_callback(f"{name}.base", base, base)
+            client_manager.grid_callback(canonical_grid)
+
+        patch_scope = gluon_patch_lang(self.fn) if patch_lang else _LangPatchScope()
+        for value in call_args.values():
+            _patch_aggregate_jit_methods(value, patch_scope)
+        try:
+            globals()["_CURRENT_NUM_WARPS"] = (
+                int(_unwrap_constexpr(num_warps)) if num_warps is not None else None
+            )
+            globals()["_CURRENT_NUM_CTAS"] = (
+                int(_unwrap_constexpr(num_ctas)) if num_ctas is not None else None
+            )
+            globals()["_CURRENT_GRID_DIM"] = canonical_grid
+            should_stop = False
+            for x in range(canonical_grid[0]):
+                for y in range(canonical_grid[1]):
+                    for z in range(canonical_grid[2]):
+                        interpreter_builder.set_grid_idx(x, y, z)
+                        globals()["_CURRENT_GRID_IDX"] = (x, y, z)
+                        if client_manager is not None:
+                            client_manager.grid_idx_callback((x, y, z))
+                            if not client_manager.pre_run_callback(self.fn):
+                                should_stop = True
+                                break
+                        self.fn(**call_args)
+                        if (
+                            client_manager is not None
+                            and not client_manager.post_run_callback(self.fn)
+                        ):
+                            should_stop = True
+                            break
+                    if should_stop:
+                        break
+                if should_stop:
+                    break
+        except Exception as exc:
+            if triton.knobs.compilation.front_end_debugging:
+                raise
+            raise InterpreterError(repr(exc)) from exc
+        finally:
+            patch_scope.restore()
+            globals()["_CURRENT_NUM_WARPS"] = previous_num_warps
+            globals()["_CURRENT_NUM_CTAS"] = previous_num_ctas
+            globals()["_CURRENT_GRID_DIM"] = previous_grid_dim
+            globals()["_CURRENT_GRID_IDX"] = previous_grid_idx
+            _POINTER_TENSORS.clear()
+            _POINTER_TENSORS.update(previous_pointer_tensors)
+
+        grid_helper._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
+        return None
