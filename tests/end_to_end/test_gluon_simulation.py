@@ -672,6 +672,81 @@ def _tma_im2col_kernel(
 
 
 @gluon.jit
+def _conv2d_im2col_wgmma_kernel(
+    in_desc,
+    weight_desc,
+    out_desc,
+    R: gl.constexpr,
+    S: gl.constexpr,
+    Ci: gl.constexpr,
+    out_h: gl.constexpr,
+    out_w: gl.constexpr,
+    pad_h: gl.constexpr,
+    pad_w: gl.constexpr,
+    stride_h: gl.constexpr,
+    stride_w: gl.constexpr,
+    BLOCK_M: gl.constexpr,
+    BLOCK_N: gl.constexpr,
+    BLOCK_K: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    dtype: gl.constexpr = in_desc.dtype
+    pid_m = gl.program_id(0)
+    pid_n = gl.program_id(1)
+    offs_m = pid_m * BLOCK_M
+    batch_id = offs_m // (out_h * out_w)
+    m_residual = offs_m % (out_h * out_w)
+    out_y = m_residual // out_w
+    out_x = m_residual % out_w
+
+    a_smem = gl.allocate_shared_memory(dtype, in_desc.block_shape, in_desc.layout)
+    b_smem = gl.allocate_shared_memory(
+        dtype, weight_desc.block_shape, weight_desc.layout
+    )
+    mma_layout: gl.constexpr = _wgmma_layout(dtype, BLOCK_M, BLOCK_N, num_warps)
+    acc = gl.zeros((BLOCK_M, BLOCK_N), dtype=gl.float32, layout=mma_layout)
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    phase = 0
+
+    ci_num_blocks: gl.constexpr = gl.cdiv(Ci, BLOCK_K)
+    total_k_iters: gl.constexpr = R * S * ci_num_blocks
+    for k_iter in range(total_k_iters):
+        ci_block: gl.constexpr = k_iter % ci_num_blocks
+        rs_idx: gl.constexpr = k_iter // ci_num_blocks
+        r: gl.constexpr = rs_idx // S
+        s: gl.constexpr = rs_idx % S
+        mbarrier.expect(bar, in_desc.block_type.nbytes + weight_desc.block_type.nbytes)
+        tma.async_load_im2col(
+            in_desc,
+            [
+                batch_id,
+                out_y * stride_h - pad_h,
+                out_x * stride_w - pad_w,
+                ci_block * BLOCK_K,
+            ],
+            [r, s],
+            bar,
+            a_smem,
+        )
+        k_offset: gl.constexpr = r * S * Ci + s * Ci + ci_block * BLOCK_K
+        tma.async_load(weight_desc, [pid_n * BLOCK_N, k_offset], bar, b_smem)
+        mbarrier.wait(bar, phase=phase)
+        phase ^= 1
+        acc = warpgroup_mma(a_smem, b_smem.permute((1, 0)), acc, is_async=True)
+        acc = warpgroup_mma_wait(num_outstanding=0, deps=(acc,))
+
+    mbarrier.invalidate(bar)
+    out_smem = gl.allocate_shared_memory(
+        out_desc.dtype, out_desc.block_shape, out_desc.layout
+    )
+    out_smem.store(acc.to(out_desc.dtype))
+    fence_async_shared()
+    tma.async_copy_shared_to_global(out_desc, [offs_m, pid_n * BLOCK_N], out_smem)
+    tma.store_wait(pendings=0)
+
+
+@gluon.jit
 def _tma_oob_kernel(
     x,
     m: gl.constexpr,
@@ -694,6 +769,78 @@ def _tma_oob_kernel(
     tma.async_load(desc, [m, 0], bar, smem)
 
 
+@gluon.aggregate
+class _PersistentTileScheduler:
+    pid_start: gl.tensor
+    pid_end: gl.tensor
+    num_pid_m: gl.tensor
+
+    @gluon.jit
+    def initialize(M, N, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
+        kernel_id = gl.program_id(axis=0)
+        num_kernels = gl.num_programs(axis=0)
+        num_pid_m = gl.cdiv(M, BLOCK_M)
+        num_pid_n = gl.cdiv(N, BLOCK_N)
+        num_pid = num_pid_m * num_pid_n
+        pid_per_kernel = gl.cdiv(num_pid, num_kernels)
+        pid_start = kernel_id * pid_per_kernel
+        pid_end = gl.minimum(pid_start + pid_per_kernel, num_pid)
+        return _PersistentTileScheduler(pid_start, pid_end, num_pid_m)
+
+    @gluon.jit
+    def get_num_tiles(self):
+        return self.pid_end - self.pid_start
+
+    @gluon.jit
+    def get_tile(self, idx):
+        pid = self.pid_start + idx
+        pid_m = pid % self.num_pid_m
+        pid_n = pid // self.num_pid_m
+        return pid_m, pid_n
+
+
+def _GroupedPersistentTileScheduler(GROUP_SIZE_M):
+    GROUP_SIZE_M = gl.constexpr(GROUP_SIZE_M)
+
+    @gluon.aggregate
+    class _GroupedPersistentTileSchedulerImpl:
+        start_pid: gl.tensor
+        num_pid_m: gl.tensor
+        num_pid_in_group: gl.tensor
+        num_pid: gl.tensor
+
+        @gluon.jit
+        def initialize(M, N, BLOCK_M: gl.constexpr, BLOCK_N: gl.constexpr):
+            start_pid = gl.program_id(axis=0)
+            num_pid_m = gl.cdiv(M, BLOCK_M)
+            num_pid_n = gl.cdiv(N, BLOCK_N)
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            num_pid = num_pid_m * num_pid_n
+            return _GroupedPersistentTileSchedulerImpl(
+                start_pid,
+                num_pid_m,
+                num_pid_in_group,
+                num_pid,
+            )
+
+        @gluon.jit
+        def get_num_tiles(self):
+            remaining_tiles = self.num_pid - self.start_pid
+            return gl.cdiv(remaining_tiles, gl.num_programs(axis=0))
+
+        @gluon.jit
+        def get_tile(self, idx):
+            tile_id = self.start_pid + idx * gl.num_programs(axis=0)
+            group_id = tile_id // self.num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = gl.minimum(self.num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + (tile_id % group_size_m)
+            pid_n = (tile_id % self.num_pid_in_group) // group_size_m
+            return pid_m, pid_n
+
+    return _GroupedPersistentTileSchedulerImpl
+
+
 @gluon.jit
 def _layout_anchor_and_barrier_kernel(in_ptr, out_ptr, N: gl.constexpr):
     layout: gl.constexpr = gl.BlockedLayout([1], [32], [1], [0])
@@ -702,6 +849,533 @@ def _layout_anchor_and_barrier_kernel(in_ptr, out_ptr, N: gl.constexpr):
     values = gl.set_auto_layout(values, layout)
     gl.barrier()
     gl.store(out_ptr + offsets, values + 1.0)
+
+
+@gluon.constexpr_function
+def _wgmma_layout(dtype, BLOCK_M, BLOCK_N, num_warps):
+    m = 16
+    n = min(BLOCK_N, 64)
+    while BLOCK_N % n != 0:
+        n -= 8
+    return gl.NVMMADistributedLayout(
+        version=[3, 0],
+        warps_per_cta=[num_warps, 1],
+        instr_shape=[m, n, 256 // dtype.primitive_bitwidth],
+    )
+
+
+@gluon.aggregate
+class _PersistentWGMMA:
+    acc: gl.tensor
+    use_acc: gl.tensor
+
+    @gluon.jit
+    def initialize(
+        dtype: gl.constexpr,
+        BLOCK_M: gl.constexpr,
+        BLOCK_N: gl.constexpr,
+        num_warps: gl.constexpr,
+    ):
+        layout: gl.constexpr = _wgmma_layout(dtype, BLOCK_M, BLOCK_N, num_warps)
+        acc = gl.zeros((BLOCK_M, BLOCK_N), dtype=gl.float32, layout=layout)
+        return _PersistentWGMMA(acc, gl.to_tensor(False))
+
+    @gluon.jit
+    def issue_async_mma(self, a, b):
+        acc = warpgroup_mma(
+            a,
+            b,
+            self.acc,
+            is_async=True,
+            use_acc=self.use_acc,
+        )
+        return _PersistentWGMMA(acc, gl.to_tensor(True))
+
+    @gluon.jit
+    def wait_num_outstanding(self, num_outstanding: gl.constexpr):
+        acc = warpgroup_mma_wait(num_outstanding, (self.acc,))
+        return _PersistentWGMMA(acc, self.use_acc)
+
+    @gluon.jit
+    def take_result(self, splitn: gl.constexpr = False):
+        del splitn
+        return self.acc, _PersistentWGMMA(self.acc, gl.to_tensor(False))
+
+
+@gluon.jit
+def _small_wgmma_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    d_desc,
+    LHS_IN_REG: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    a_smem = gl.allocate_shared_memory(
+        a_desc.dtype,
+        a_desc.block_type.shape,
+        a_desc.layout,
+    )
+    b_smem = gl.allocate_shared_memory(
+        b_desc.dtype,
+        b_desc.block_type.shape,
+        b_desc.layout,
+    )
+    c_smem = gl.allocate_shared_memory(
+        c_desc.dtype,
+        c_desc.block_type.shape,
+        c_desc.layout,
+    )
+    mbarrier.expect(
+        bar,
+        a_desc.block_type.nbytes + b_desc.block_type.nbytes + c_desc.block_type.nbytes,
+    )
+    tma.async_load(a_desc, [0, 0], bar, a_smem)
+    tma.async_load(b_desc, [0, 0], bar, b_smem)
+    tma.async_load(c_desc, [0, 0], bar, c_smem)
+    mbarrier.wait(bar, phase=0)
+    mbarrier.invalidate(bar)
+
+    c_layout: gl.constexpr = _wgmma_layout(
+        a_desc.dtype,
+        d_desc.block_type.shape[0],
+        d_desc.block_type.shape[1],
+        num_warps,
+    )
+    a_reg_layout: gl.constexpr = gl.DotOperandLayout(
+        operand_index=0,
+        parent=c_layout,
+        k_width=32 // a_desc.dtype.primitive_bitwidth,
+    )
+    gl.static_assert(isinstance(a_smem.type.layout, gl.NVMMASharedLayout))
+    gl.static_assert(isinstance(b_smem.type.layout, gl.NVMMASharedLayout))
+    a = a_smem.load(a_reg_layout) if LHS_IN_REG else a_smem
+    c = c_smem.load(c_layout)
+    d = warpgroup_mma(a, b_smem, c, is_async=True, use_acc=True)
+    d = warpgroup_mma_wait(num_outstanding=0, deps=(d,))
+
+    d_smem = gl.allocate_shared_memory(
+        d_desc.dtype,
+        d_desc.block_type.shape,
+        d_desc.layout,
+    )
+    d_smem.store(d)
+    fence_async_shared()
+    tma.async_copy_shared_to_global(d_desc, [0, 0], d_smem)
+    tma.store_wait(pendings=0)
+
+
+@gluon.jit
+def _blocked_wgmma_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    TRANSPOSE_B: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    BLOCK_M: gl.constexpr = c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = c_desc.block_type.shape[1]
+    BLOCK_K: gl.constexpr = a_desc.block_type.shape[1]
+    K = a_desc.shape[1]
+    dtype: gl.constexpr = a_desc.dtype
+
+    a_smem = gl.allocate_shared_memory(dtype, a_desc.block_type.shape, a_desc.layout)
+    b_smem = gl.allocate_shared_memory(dtype, b_desc.block_type.shape, b_desc.layout)
+    pid_m = gl.program_id(axis=0)
+    pid_n = gl.program_id(axis=1)
+    off_m = pid_m * BLOCK_M
+    off_n = pid_n * BLOCK_N
+    mma_layout: gl.constexpr = _wgmma_layout(dtype, BLOCK_M, BLOCK_N, num_warps)
+    acc = gl.zeros((BLOCK_M, BLOCK_N), dtype=gl.float32, layout=mma_layout)
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    phase = 0
+
+    for k in range(0, K, BLOCK_K):
+        mbarrier.expect(bar, a_desc.block_type.nbytes + b_desc.block_type.nbytes)
+        tma.async_load(a_desc, [off_m, k], bar, a_smem)
+        if TRANSPOSE_B:
+            tma.async_load(b_desc, [off_n, k], bar, b_smem)
+            b = b_smem.permute((1, 0))
+        else:
+            tma.async_load(b_desc, [k, off_n], bar, b_smem)
+            b = b_smem
+        mbarrier.wait(bar, phase=phase)
+        phase ^= 1
+        acc = warpgroup_mma(a_smem, b, acc, is_async=True)
+        acc = warpgroup_mma_wait(num_outstanding=0, deps=(acc,))
+
+    mbarrier.invalidate(bar)
+    c_smem = gl.allocate_shared_memory(dtype, c_desc.block_type.shape, c_desc.layout)
+    c_smem.store(acc.to(dtype))
+    fence_async_shared()
+    tma.async_copy_shared_to_global(c_desc, [off_m, off_n], c_smem)
+    tma.store_wait(pendings=0)
+
+
+@gluon.jit
+def _pipelined_wgmma_kernel(a_desc, b_desc, c_desc, num_warps: gl.constexpr):
+    BLOCK_M: gl.constexpr = c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = c_desc.block_type.shape[1]
+    BLOCK_K: gl.constexpr = a_desc.block_type.shape[1]
+    K = a_desc.shape[1]
+    dtype: gl.constexpr = a_desc.dtype
+    a_smem = gl.allocate_shared_memory(
+        dtype, [2] + a_desc.block_type.shape, a_desc.layout
+    )
+    b_smem = gl.allocate_shared_memory(
+        dtype, [2] + b_desc.block_type.shape, b_desc.layout
+    )
+    index = 0
+    pid_m = gl.program_id(axis=0)
+    pid_n = gl.program_id(axis=1)
+    off_m = pid_m * BLOCK_M
+    off_n = pid_n * BLOCK_N
+    mma_layout: gl.constexpr = _wgmma_layout(dtype, BLOCK_M, BLOCK_N, num_warps)
+    acc = warpgroup_mma_init(
+        gl.zeros((BLOCK_M, BLOCK_N), dtype=gl.float32, layout=mma_layout)
+    )
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    phase = 0
+
+    for k in range(0, K, BLOCK_K):
+        a = a_smem.index(index)
+        b = b_smem.index(index)
+        mbarrier.expect(bar, a_desc.block_type.nbytes + b_desc.block_type.nbytes)
+        tma.async_load(a_desc, [off_m, k], bar, a)
+        tma.async_load(b_desc, [k, off_n], bar, b)
+        mbarrier.wait(bar, phase=phase)
+        phase ^= 1
+        acc = warpgroup_mma_wait(num_outstanding=0, deps=(acc,))
+        acc = warpgroup_mma(a, b, acc, is_async=True)
+        index ^= 1
+
+    acc = warpgroup_mma_wait(num_outstanding=0, deps=(acc,))
+    mbarrier.invalidate(bar)
+    c_smem = gl.allocate_shared_memory(dtype, c_desc.block_type.shape, c_desc.layout)
+    c_smem.store(acc.to(dtype))
+    fence_async_shared()
+    tma.async_copy_shared_to_global(c_desc, [off_m, off_n], c_smem)
+    tma.store_wait(pendings=0)
+
+
+@gluon.jit
+def _persistent_wgmma_matmul_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    M,
+    N,
+    SchedulerImpl: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    BLOCK_M: gl.constexpr = c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = c_desc.block_type.shape[1]
+    BLOCK_K: gl.constexpr = a_desc.block_type.shape[1]
+    K = a_desc.shape[1]
+    dtype: gl.constexpr = a_desc.dtype
+
+    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar, count=1)
+    mma = _PersistentWGMMA.initialize(dtype, BLOCK_M, BLOCK_N, num_warps)
+    scheduler = SchedulerImpl.initialize(M, N, BLOCK_M, BLOCK_N)
+    phase = 0
+    for idx in range(scheduler.get_num_tiles()):
+        pid_m, pid_n = scheduler.get_tile(idx)
+        off_m = pid_m * BLOCK_M
+        off_n = pid_n * BLOCK_N
+        a_smem = gl.allocate_shared_memory(
+            dtype, a_desc.block_type.shape, a_desc.layout
+        )
+        b_smem = gl.allocate_shared_memory(
+            dtype, b_desc.block_type.shape, b_desc.layout
+        )
+        for k in range(0, K, BLOCK_K):
+            mbarrier.expect(bar, a_desc.block_type.nbytes + b_desc.block_type.nbytes)
+            tma.async_load(a_desc, [off_m, k], bar, a_smem)
+            tma.async_load(b_desc, [k, off_n], bar, b_smem)
+            mbarrier.wait(bar, phase=phase)
+            phase ^= 1
+            mma = mma.wait_num_outstanding(0)
+            mma = mma.issue_async_mma(a_smem, b_smem)
+
+        mma = mma.wait_num_outstanding(0)
+        c_smem = gl.allocate_shared_memory(
+            dtype, c_desc.block_type.shape, c_desc.layout
+        )
+        c, mma = mma.take_result()
+        c_smem.store(c.to(dtype))
+        fence_async_shared()
+        tma.async_copy_shared_to_global(c_desc, [off_m, off_n], c_smem)
+        tma.store_wait(pendings=0)
+    mbarrier.invalidate(bar)
+
+
+@gluon.jit
+def _issue_loads_stealb(
+    producer,
+    a_desc,
+    b_desc,
+    off_m,
+    off_n,
+    k,
+    bars,
+    a_bufs,
+    b_bufs,
+    STEALB: gl.constexpr,
+    num_buffers: gl.constexpr,
+    pred=True,
+):
+    index = producer % num_buffers
+    b_index = producer % (num_buffers + STEALB)
+    producer += 1
+    bar = bars.index(index)
+    mbarrier.expect(
+        bar,
+        a_desc.block_type.nbytes + b_desc.block_type.nbytes,
+        pred=pred,
+    )
+    tma.async_load(a_desc, [off_m, k], bar, a_bufs.index(index), pred)
+    tma.async_load(b_desc, [k, off_n], bar, b_bufs.index(b_index), pred)
+    return producer
+
+
+@gluon.jit
+def _issue_mma_stealb(
+    consumer,
+    mma,
+    bars,
+    a_bufs,
+    b_bufs,
+    STEALB: gl.constexpr,
+    num_buffers: gl.constexpr,
+):
+    index = consumer % num_buffers
+    b_index = consumer % (num_buffers + STEALB)
+    phase = consumer // num_buffers & 1
+    consumer += 1
+    mbarrier.wait(bars.index(index), phase)
+    mma = mma.wait_num_outstanding(0)
+    mma = mma.issue_async_mma(a_bufs.index(index), b_bufs.index(b_index))
+    return consumer, mma
+
+
+@gluon.jit
+def _persistent_wgmma_pipelined_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    c_half_desc,
+    M,
+    N,
+    SchedulerImpl: gl.constexpr,
+    num_buffers: gl.constexpr,
+    STEALB: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    BLOCK_M: gl.constexpr = c_desc.block_type.shape[0]
+    BLOCK_N: gl.constexpr = c_desc.block_type.shape[1]
+    BLOCK_K: gl.constexpr = a_desc.block_type.shape[1]
+    K = a_desc.shape[1]
+    dtype: gl.constexpr = a_desc.dtype
+    use_split_n_load: gl.constexpr = STEALB and BLOCK_M != BLOCK_K
+    gl.static_assert(num_buffers >= 3, "expected at least 3 buffers")
+    gl.static_assert(
+        not use_split_n_load or BLOCK_M == BLOCK_K * 2,
+        "split-N epilogue expects a B tile to hold one C half",
+    )
+
+    a_bufs = gl.allocate_shared_memory(
+        dtype,
+        [num_buffers] + a_desc.block_type.shape,
+        a_desc.layout,
+    )
+    b_bufs = gl.allocate_shared_memory(
+        dtype,
+        [num_buffers + STEALB] + b_desc.block_type.shape,
+        b_desc.layout,
+    )
+    if not STEALB:
+        c_smem = gl.allocate_shared_memory(
+            dtype, c_desc.block_type.shape, c_desc.layout
+        )
+    bars = gl.allocate_shared_memory(
+        gl.int64, [num_buffers, 1], mbarrier.MBarrierLayout()
+    )
+    for i in gl.static_range(num_buffers):
+        mbarrier.init(bars.index(i), count=1)
+
+    producer = 0
+    consumer = 0
+    mma = _PersistentWGMMA.initialize(dtype, BLOCK_M, BLOCK_N, num_warps)
+    scheduler = SchedulerImpl.initialize(M, N, BLOCK_M, BLOCK_N)
+    num_tiles = scheduler.get_num_tiles()
+
+    idx = 0
+    pid_m, pid_n = scheduler.get_tile(idx)
+    off_m = pid_m * BLOCK_M
+    off_n = pid_n * BLOCK_N
+    for ki in gl.static_range(0, BLOCK_K * (num_buffers - 2), BLOCK_K):
+        producer = _issue_loads_stealb(
+            producer,
+            a_desc,
+            b_desc,
+            off_m,
+            off_n,
+            ki,
+            bars,
+            a_bufs,
+            b_bufs,
+            STEALB,
+            num_buffers,
+        )
+    k = BLOCK_K * (num_buffers - 2)
+    producer = _issue_loads_stealb(
+        producer,
+        a_desc,
+        b_desc,
+        off_m,
+        off_n,
+        k,
+        bars,
+        a_bufs,
+        b_bufs,
+        STEALB,
+        num_buffers,
+    )
+
+    for _ in range(num_tiles):
+        consumer, mma = _issue_mma_stealb(
+            consumer,
+            mma,
+            bars,
+            a_bufs,
+            b_bufs,
+            STEALB,
+            num_buffers,
+        )
+        if STEALB:
+            tma.store_wait(pendings=0)
+        for k in range(BLOCK_K * (num_buffers - 1), K, BLOCK_K):
+            producer = _issue_loads_stealb(
+                producer,
+                a_desc,
+                b_desc,
+                off_m,
+                off_n,
+                k,
+                bars,
+                a_bufs,
+                b_bufs,
+                STEALB,
+                num_buffers,
+            )
+            consumer, mma = _issue_mma_stealb(
+                consumer,
+                mma,
+                bars,
+                a_bufs,
+                b_bufs,
+                STEALB,
+                num_buffers,
+            )
+
+        epilogue_off_m = off_m
+        epilogue_off_n = off_n
+        idx += 1
+        pid_m, pid_n = scheduler.get_tile(idx)
+        off_m = pid_m * BLOCK_M
+        off_n = pid_n * BLOCK_N
+        pred = idx < num_tiles
+        for ki in gl.static_range(0, BLOCK_K * (num_buffers - 2), BLOCK_K):
+            producer = _issue_loads_stealb(
+                producer,
+                a_desc,
+                b_desc,
+                off_m,
+                off_n,
+                ki,
+                bars,
+                a_bufs,
+                b_bufs,
+                STEALB,
+                num_buffers,
+                pred,
+            )
+            consumer, mma = _issue_mma_stealb(
+                consumer,
+                mma,
+                bars,
+                a_bufs,
+                b_bufs,
+                STEALB,
+                num_buffers,
+            )
+        k = BLOCK_K * (num_buffers - 2)
+        producer = _issue_loads_stealb(
+            producer,
+            a_desc,
+            b_desc,
+            off_m,
+            off_n,
+            k,
+            bars,
+            a_bufs,
+            b_bufs,
+            STEALB,
+            num_buffers,
+            pred,
+        )
+
+        mma = mma.wait_num_outstanding(0)
+        c, mma = mma.take_result(splitn=use_split_n_load)
+        c = c.to(dtype)
+        if not STEALB:
+            c_buf = c_smem
+            tma.store_wait(pendings=0)
+            c_buf.store(c)
+            fence_async_shared()
+            tma.async_copy_shared_to_global(
+                c_desc,
+                [epilogue_off_m, epilogue_off_n],
+                c_buf,
+            )
+        elif use_split_n_load:
+            c0, c1 = c.reshape((BLOCK_M, 2, BLOCK_N // 2)).permute(0, 2, 1).split()
+            c0_buf = b_bufs.index(producer % (num_buffers + STEALB))._reinterpret(
+                shape=c_half_desc.block_type.shape,
+                layout=c_half_desc.layout,
+            )
+            c1_buf = b_bufs.index((producer + 1) % (num_buffers + STEALB))._reinterpret(
+                shape=c_half_desc.block_type.shape,
+                layout=c_half_desc.layout,
+            )
+            c0_buf.store(c0)
+            c1_buf.store(c1)
+            fence_async_shared()
+            tma.async_copy_shared_to_global(
+                c_half_desc,
+                [epilogue_off_m, epilogue_off_n],
+                c0_buf,
+            )
+            tma.async_copy_shared_to_global(
+                c_half_desc,
+                [epilogue_off_m, epilogue_off_n + BLOCK_N // 2],
+                c1_buf,
+            )
+        else:
+            c_buf = b_bufs.index(producer % (num_buffers + STEALB))
+            c_buf.store(c)
+            fence_async_shared()
+            tma.async_copy_shared_to_global(
+                c_desc,
+                [epilogue_off_m, epilogue_off_n],
+                c_buf,
+            )
+    tma.store_wait(pendings=0)
 
 
 def test_gluon_simulator_runs_intro_scalar_range_memcpy_on_cpu():
@@ -1020,6 +1694,346 @@ def test_gluon_simulator_runs_tma_im2col_multi_batch_on_cpu():
         dtype=torch.float32,
     )
     torch.testing.assert_close(padded[:, 0], expected_padded, atol=0, rtol=0)
+
+
+def test_gluon_simulator_runs_conv2d_tma_im2col_wgmma_on_cpu():
+    torch.manual_seed(14)
+    input_nhwc = torch.randn((1, 4, 4, 16), dtype=torch.float16) / 4
+    weight = torch.randn((16, 3, 3, 16), dtype=torch.float16) / 4
+    stride = 1
+    padding = 1
+    block_m, block_n, block_k = 16, 16, 16
+    n, h, w, ci = input_nhwc.shape
+    co, r, s, ci_w = weight.shape
+    assert ci == ci_w
+    out_h = (h + 2 * padding - r) // stride + 1
+    out_w = (w + 2 * padding - s) // stride + 1
+    output = torch.empty((n * out_h * out_w, co), dtype=torch.float16)
+
+    upper_h = (out_h - 1) * stride + 1 - h - padding
+    upper_w = (out_w - 1) * stride + 1 - w - padding
+    input_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    in_desc = TensorDescriptorIm2Col.from_tensor(
+        input_nhwc,
+        [block_m, block_k],
+        input_layout,
+        padding="zero",
+        element_strides=[1, stride, stride, 1],
+        pixel_box_lower_corner=[-padding, -padding],
+        pixel_box_upper_corner=[upper_h, upper_w],
+    )
+    weight_2d = weight.reshape(co, r * s * ci)
+    weight_layout = gl.NVMMASharedLayout.get_default_for([block_n, block_k], gl.float16)
+    weight_desc = TensorDescriptor.from_tensor(
+        weight_2d, [block_n, block_k], weight_layout
+    )
+    out_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    out_desc = TensorDescriptor.from_tensor(output, [block_m, block_n], out_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_conv2d_im2col_wgmma_kernel)
+
+    kernel[(1, 1)](
+        in_desc,
+        weight_desc,
+        out_desc,
+        r,
+        s,
+        ci,
+        out_h,
+        out_w,
+        padding,
+        padding,
+        stride,
+        stride,
+        block_m,
+        block_n,
+        block_k,
+        num_warps=4,
+    )
+
+    expected = torch.nn.functional.conv2d(
+        input_nhwc.permute(0, 3, 1, 2).float(),
+        weight.permute(0, 3, 1, 2).float(),
+        padding=padding,
+        stride=stride,
+    ).permute(0, 2, 3, 1)
+    actual = output.reshape(n, out_h, out_w, co).float()
+    torch.testing.assert_close(actual, expected.half().float(), atol=1e-2, rtol=1e-2)
+
+
+def test_gluon_simulator_runs_small_wgmma_on_cpu():
+    torch.manual_seed(0)
+    a = torch.randn(64, 32, dtype=torch.float16) / 4
+    b = torch.randn(32, 32, dtype=torch.float16) / 4
+    c = torch.randn(64, 32, dtype=torch.float32) / 4
+    d = torch.empty_like(c)
+    a_layout = gl.NVMMASharedLayout.get_default_for(a.shape, gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for(b.shape, gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for(c.shape, gl.float32)
+    a_desc = TensorDescriptor.from_tensor(a, a.shape, a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, b.shape, b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, c.shape, c_layout)
+    d_desc = TensorDescriptor.from_tensor(d, d.shape, c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_small_wgmma_kernel)
+
+    kernel[(1,)](a_desc, b_desc, c_desc, d_desc, False, num_warps=4)
+
+    torch.testing.assert_close(d, a.float() @ b.float() + c, atol=1e-2, rtol=1e-2)
+
+
+def test_gluon_simulator_runs_small_wgmma_with_lhs_registers_on_cpu():
+    torch.manual_seed(1)
+    a = torch.randn(64, 32, dtype=torch.float16) / 4
+    b = torch.randn(32, 32, dtype=torch.float16) / 4
+    c = torch.randn(64, 32, dtype=torch.float32) / 4
+    d = torch.empty_like(c)
+    a_layout = gl.NVMMASharedLayout.get_default_for(a.shape, gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for(b.shape, gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for(c.shape, gl.float32)
+    a_desc = TensorDescriptor.from_tensor(a, a.shape, a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, b.shape, b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, c.shape, c_layout)
+    d_desc = TensorDescriptor.from_tensor(d, d.shape, c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_small_wgmma_kernel)
+
+    kernel[(1,)](a_desc, b_desc, c_desc, d_desc, True, num_warps=4)
+
+    torch.testing.assert_close(d, a.float() @ b.float() + c, atol=1e-2, rtol=1e-2)
+
+
+def test_gluon_simulator_runs_blocked_wgmma_matmul_on_cpu():
+    torch.manual_seed(2)
+    a = torch.randn(96, 64, dtype=torch.float16) / 4
+    b = torch.randn(64, 64, dtype=torch.float16) / 4
+    c = torch.empty((96, 64), dtype=torch.float16)
+    block_m, block_n, block_k = 64, 32, 32
+    a_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for([block_k, block_n], gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_k, block_n], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_blocked_wgmma_kernel)
+
+    kernel[(triton.cdiv(c.shape[0], block_m), triton.cdiv(c.shape[1], block_n))](
+        a_desc,
+        b_desc,
+        c_desc,
+        False,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+
+
+def test_gluon_simulator_runs_blocked_wgmma_with_transposed_b_on_cpu():
+    torch.manual_seed(3)
+    a = torch.randn(96, 64, dtype=torch.float16) / 4
+    b = torch.randn(64, 64, dtype=torch.float16) / 4
+    c = torch.empty((96, 64), dtype=torch.float16)
+    block_m, block_n, block_k = 64, 32, 32
+    a_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for([block_n, block_k], gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_n, block_k], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_blocked_wgmma_kernel)
+
+    kernel[(triton.cdiv(c.shape[0], block_m), triton.cdiv(c.shape[1], block_n))](
+        a_desc,
+        b_desc,
+        c_desc,
+        True,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.T.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+
+
+def test_gluon_simulator_runs_pipelined_wgmma_matmul_on_cpu():
+    torch.manual_seed(4)
+    a = torch.randn(96, 64, dtype=torch.float16) / 4
+    b = torch.randn(64, 64, dtype=torch.float16) / 4
+    c = torch.empty((96, 64), dtype=torch.float16)
+    block_m, block_n, block_k = 64, 32, 32
+    a_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for([block_k, block_n], gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_k, block_n], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(_pipelined_wgmma_kernel)
+
+    kernel[(triton.cdiv(c.shape[0], block_m), triton.cdiv(c.shape[1], block_n))](
+        a_desc,
+        b_desc,
+        c_desc,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+
+
+def test_gluon_simulator_runs_persistent_wgmma_matmul_on_cpu():
+    torch.manual_seed(14)
+    a = torch.randn(32, 16, dtype=torch.float16) / 4
+    b = torch.randn(16, 32, dtype=torch.float16) / 4
+    c = torch.empty((32, 32), dtype=torch.float16)
+    block_m, block_n, block_k = 16, 16, 16
+    a_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for([block_k, block_n], gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_k, block_n], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _persistent_wgmma_matmul_kernel
+    )
+
+    kernel[(2,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        *c.shape,
+        _PersistentTileScheduler,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+
+
+def test_gluon_simulator_runs_grouped_persistent_wgmma_matmul_on_cpu():
+    torch.manual_seed(15)
+    a = torch.randn(48, 16, dtype=torch.float16) / 4
+    b = torch.randn(16, 32, dtype=torch.float16) / 4
+    c = torch.empty((48, 32), dtype=torch.float16)
+    block_m, block_n, block_k = 16, 16, 16
+    a_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for([block_k, block_n], gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_k, block_n], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _persistent_wgmma_matmul_kernel
+    )
+
+    kernel[(2,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        *c.shape,
+        _GroupedPersistentTileScheduler(2),
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+
+
+def test_gluon_simulator_runs_pipelined_persistent_wgmma_matmul_on_cpu():
+    torch.manual_seed(20)
+    a = torch.randn(32, 64, dtype=torch.float16) / 4
+    b = torch.randn(64, 32, dtype=torch.float16) / 4
+    c = torch.empty((32, 32), dtype=torch.float16)
+    block_m, block_n, block_k = 16, 16, 16
+    a_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for([block_k, block_n], gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_k, block_n], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _persistent_wgmma_pipelined_kernel
+    )
+
+    kernel[(2,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        c_desc,
+        *c.shape,
+        _PersistentTileScheduler,
+        3,
+        1,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
+
+
+def test_gluon_simulator_runs_splitn_pipelined_persistent_wgmma_matmul_on_cpu():
+    torch.manual_seed(21)
+    a = torch.randn(32, 64, dtype=torch.float16) / 4
+    b = torch.randn(64, 32, dtype=torch.float16) / 4
+    c = torch.empty((32, 32), dtype=torch.float16)
+    block_m, block_n, block_k = 32, 32, 16
+    a_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_k], gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for([block_k, block_n], gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.float16)
+    c_half_layout = gl.NVMMASharedLayout.get_default_for(
+        [block_m, block_n // 2],
+        gl.float16,
+    )
+    a_desc = TensorDescriptor.from_tensor(a, [block_m, block_k], a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, [block_k, block_n], b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, [block_m, block_n], c_layout)
+    c_half_desc = TensorDescriptor.from_tensor(
+        c,
+        [block_m, block_n // 2],
+        c_half_layout,
+    )
+    kernel = triton_viz.trace("tracer", frontend="gluon")(
+        _persistent_wgmma_pipelined_kernel
+    )
+
+    kernel[(1,)](
+        a_desc,
+        b_desc,
+        c_desc,
+        c_half_desc,
+        *c.shape,
+        _PersistentTileScheduler,
+        3,
+        2,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(
+        c.float(),
+        (a.float() @ b.float()).half().float(),
+        atol=1e-3,
+        rtol=1e-3,
+    )
 
 
 def test_gluon_simulator_sanitizer_reports_tma_descriptor_oob_on_cpu():
