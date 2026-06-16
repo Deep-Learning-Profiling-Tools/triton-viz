@@ -199,7 +199,7 @@ def _numpy_array(base: Any) -> np.ndarray:
     return np.asarray(base)
 
 
-class SimulatedBlockType:
+class BlockType:
     def __init__(self, element_ty: tl.dtype, shape: list[int]) -> None:
         self.element_ty = element_ty
         self.shape = [int(dim) for dim in shape]
@@ -211,26 +211,26 @@ class SimulatedBlockType:
 
     def __eq__(self, other: object) -> bool:
         return (
-            isinstance(other, SimulatedBlockType)
+            isinstance(other, BlockType)
             and self.element_ty == other.element_ty
             and self.shape == list(other.shape)
         )
 
 
-class SimulatedTensorDescriptorType:
-    def __init__(self, block_type: SimulatedBlockType, layout: Any = None) -> None:
+class TensorDescriptorType:
+    def __init__(self, block_type: BlockType, layout: Any = None) -> None:
         self.block_type = block_type
         self.layout = layout
 
 
-class SimulatedTensorDescriptorLayoutType:
+class TensorDescriptorLayoutType:
     def __init__(self, block_type: tl.block_type, is_signed: bool, layout: Any) -> None:
         self.block_type = block_type
         self.is_signed = is_signed
         self.layout = layout
 
 
-class SimulatedSharedMemoryDescriptorType:
+class SharedMemoryDescriptorType:
     def __init__(
         self,
         element_ty: tl.dtype,
@@ -253,7 +253,7 @@ class SimulatedSharedMemoryDescriptorType:
         return int(np.prod(self.shape, dtype=np.int64)) * max(1, int(bitwidth) // 8)
 
 
-class SimulatedTensorDescriptor(gluon_hopper_tma.tensor_descriptor):
+class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
     def __init__(
         self,
         base: Any,
@@ -294,8 +294,8 @@ class SimulatedTensorDescriptor(gluon_hopper_tma.tensor_descriptor):
             else tuple(0 for _ in self.shape)
         )
         self.dtype = _dtype_from_base(base)
-        self.block_type = SimulatedBlockType(self.dtype, list(self.block_shape))
-        self.type = SimulatedTensorDescriptorType(self.block_type)
+        self.block_type = BlockType(self.dtype, list(self.block_shape))
+        self.type = TensorDescriptorType(self.block_type)
         self.nbytes_per_cta = self.block_type.nbytes
         self.mode = "im2col" if self.pixel_box_lower_corner is not None else "tiled"
 
@@ -408,7 +408,7 @@ class SimulatedTensorDescriptor(gluon_hopper_tma.tensor_descriptor):
     def load_im2col_block(self, coord: Any, offsets: Any) -> np.ndarray:
         if len(self.shape) != 4:
             raise NotImplementedError(
-                "Simulated TMA im2col currently supports rank-4 NHWC"
+                "TMA im2col currently supports rank-4 NHWC"
             )
         if self.pixel_box_lower_corner is None or self.pixel_box_upper_corner is None:
             raise TypeError("TMA im2col descriptor requires pixel box corners")
@@ -449,12 +449,11 @@ class SimulatedTensorDescriptor(gluon_hopper_tma.tensor_descriptor):
         return result
 
 
-class SimulatedCLCResult:
+class CLCResult:
     def is_canceled(self, _semantic: Any = None):
         return _to_tensor(False)
 
     def program_id(self, dim: Any, _semantic: Any = None):
-        del dim
         return _to_tensor(0)
 
 
@@ -469,11 +468,11 @@ def _normalize_coord(coord: Any, ndim: int) -> tuple[int, ...]:
     return values
 
 
-def _descriptor_from_host(value: Any) -> SimulatedTensorDescriptor:
-    if isinstance(value, SimulatedTensorDescriptor):
+def _descriptor_from_host(value: Any) -> TensorDescriptor:
+    if isinstance(value, TensorDescriptor):
         return value
     if type(value).__name__ in _HOST_TENSOR_DESCRIPTOR_TYPES:
-        return SimulatedTensorDescriptor(
+        return TensorDescriptor(
             value.base,
             list(value.shape),
             list(value.strides),
@@ -490,7 +489,7 @@ def _descriptor_from_host(value: Any) -> SimulatedTensorDescriptor:
 def _implicit_gluon_cvt(name: str, value: Any, constexprs: set[str]) -> Any:
     if name in constexprs:
         return value
-    if isinstance(value, SimulatedTensorDescriptor) or (
+    if isinstance(value, TensorDescriptor) or (
         type(value).__name__ in _HOST_TENSOR_DESCRIPTOR_TYPES
     ):
         return _descriptor_from_host(value)
@@ -514,7 +513,7 @@ class SharedMemoryHandle(TensorHandle, gluon_core.shared_memory_descriptor):
             else data
         )
         TensorHandle.__init__(self, data, element_ty)
-        self.type = SimulatedSharedMemoryDescriptorType(
+        self.type = SharedMemoryDescriptorType(
             self.element_ty,
             list(self.shape),
             self.layout,
@@ -625,7 +624,6 @@ class SharedMemoryHandle(TensorHandle, gluon_core.shared_memory_descriptor):
         _semantic: Any = None,
         _generator: Any = None,
     ) -> "SharedMemoryHandle":
-        del _semantic, _generator
         shape = tuple(int(_unwrap_constexpr(dim)) for dim in _unwrap_constexpr(shape))
         return SharedMemoryHandle(
             self.element_ty,
@@ -644,7 +642,7 @@ class SharedMemoryHandle(TensorHandle, gluon_core.shared_memory_descriptor):
         )
 
 
-class SimulatedTensorMemoryDescriptorType:
+class TensorMemoryDescriptorType:
     def __init__(
         self,
         element_ty: tl.dtype,
@@ -660,7 +658,6 @@ class SimulatedTensorMemoryDescriptorType:
         )
 
     def get_reg_layout(self, num_warps: Any = None, instr_variant: str = "32x32b"):
-        del num_warps, instr_variant
         return self.layout
 
 
@@ -681,7 +678,7 @@ class TensorMemoryHandle(TensorHandle, gluon_blackwell.tensor_memory_descriptor)
             else data
         )
         TensorHandle.__init__(self, data, element_ty)
-        self.type = SimulatedTensorMemoryDescriptorType(
+        self.type = TensorMemoryDescriptorType(
             self.element_ty,
             self.shape,
             self.layout,
@@ -726,7 +723,6 @@ class TensorMemoryHandle(TensorHandle, gluon_blackwell.tensor_memory_descriptor)
         _semantic: Any = None,
         _generator: Any = None,
     ):
-        del _semantic, _generator
         return self.type.get_reg_layout(num_warps, instr_variant)
 
     def load(
@@ -735,7 +731,6 @@ class TensorMemoryHandle(TensorHandle, gluon_blackwell.tensor_memory_descriptor)
         _semantic: Any = None,
         _generator: Any = None,
     ) -> tl.tensor:
-        del layout, _semantic, _generator
         return tl.tensor(
             TensorHandle(self.data.copy(), self.element_ty),
             tl.block_type(self.element_ty, list(self.shape)),
@@ -750,7 +745,6 @@ class TensorMemoryHandle(TensorHandle, gluon_blackwell.tensor_memory_descriptor)
         _semantic: Any = None,
         _generator: Any = None,
     ) -> tuple[tl.tensor, tl.tensor]:
-        del propagate_nan
         values = self.load(layout, _semantic, _generator)
         data = np.asarray(self.data)
         if bool(_unwrap_constexpr(abs)):
@@ -1031,7 +1025,6 @@ class Builder(interpreter_builder.__class__):
         )
 
     def get_distributed_ty(self, element_ty: tl.dtype, shape: Any, layout: Any):
-        del layout
         return tl.block_type(element_ty, list(shape))
 
     def get_shared_mem_desc_ty(
@@ -1041,7 +1034,7 @@ class Builder(interpreter_builder.__class__):
         layout: Any,
         alloc_shape: Any,
     ):
-        return SimulatedSharedMemoryDescriptorType(
+        return SharedMemoryDescriptorType(
             element_ty,
             list(shape),
             layout,
@@ -1055,7 +1048,7 @@ class Builder(interpreter_builder.__class__):
         layout: Any,
         alloc_shape: Any,
     ):
-        return SimulatedTensorMemoryDescriptorType(
+        return TensorMemoryDescriptorType(
             element_ty,
             list(shape),
             layout,
@@ -1068,7 +1061,7 @@ class Builder(interpreter_builder.__class__):
         is_signed: bool,
         layout: Any,
     ):
-        return SimulatedTensorDescriptorLayoutType(block_type, bool(is_signed), layout)
+        return TensorDescriptorLayoutType(block_type, bool(is_signed), layout)
 
     def get_tensor_descriptor_im2col_layout_type(
         self,
@@ -1076,7 +1069,7 @@ class Builder(interpreter_builder.__class__):
         is_signed: bool,
         layout: Any,
     ):
-        return SimulatedTensorDescriptorLayoutType(block_type, bool(is_signed), layout)
+        return TensorDescriptorLayoutType(block_type, bool(is_signed), layout)
 
     def get_gluon_layout_from_tensor(self, handle: TensorHandle):
         return _get_handle_layout(handle)
@@ -1093,7 +1086,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_local_alloc(
         self,
-        desc_ty: SimulatedSharedMemoryDescriptorType,
+        desc_ty: SharedMemoryDescriptorType,
         value: TensorHandle | None = None,
     ):
         data = np.zeros(desc_ty.alloc_shape, dtype=_get_np_dtype(desc_ty.element_ty))
@@ -1169,7 +1162,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_memdesc_subslice(
         self,
-        ret_ty: SimulatedSharedMemoryDescriptorType,
+        ret_ty: SharedMemoryDescriptorType,
         mem_desc: SharedMemoryHandle,
         offsets: Any,
     ):
@@ -1187,7 +1180,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_memdesc_index(
         self,
-        ret_ty: SimulatedSharedMemoryDescriptorType,
+        ret_ty: SharedMemoryDescriptorType,
         mem_desc: SharedMemoryHandle,
         index: TensorHandle,
     ):
@@ -1219,7 +1212,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_memdesc_reinterpret(
         self,
-        ret_ty: SimulatedSharedMemoryDescriptorType,
+        ret_ty: SharedMemoryDescriptorType,
         mem_desc: SharedMemoryHandle,
     ):
         data = mem_desc.data.view(_get_np_dtype(ret_ty.element_ty)).reshape(ret_ty.shape)
@@ -1227,7 +1220,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_tmem_alloc(
         self,
-        desc_ty: SimulatedTensorMemoryDescriptorType,
+        desc_ty: TensorMemoryDescriptorType,
         value: TensorHandle | None = None,
     ):
         data = np.zeros(desc_ty.alloc_shape, dtype=_get_np_dtype(desc_ty.element_ty))
@@ -1263,7 +1256,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_tmem_subslice(
         self,
-        ret_ty: SimulatedTensorMemoryDescriptorType,
+        ret_ty: TensorMemoryDescriptorType,
         desc: TensorMemoryHandle,
         start: Any,
     ):
@@ -1277,7 +1270,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_make_tensor_descriptor(
         self,
-        desc_ty: SimulatedTensorDescriptorLayoutType,
+        desc_ty: TensorDescriptorLayoutType,
         base_handle: TensorHandle,
         shape_handles: list[TensorHandle],
         stride_handles: list[TensorHandle],
@@ -1286,7 +1279,7 @@ class Builder(interpreter_builder.__class__):
         shape = [_to_int(handle) for handle in shape_handles]
         strides = [_to_int(handle) for handle in stride_handles]
         block_shape = list(desc_ty.block_type.shape)
-        return SimulatedTensorDescriptor(
+        return TensorDescriptor(
             base_handle,
             shape,
             strides,
@@ -1297,14 +1290,13 @@ class Builder(interpreter_builder.__class__):
 
     def create_async_tma_copy_global_to_local(
         self,
-        tensor_desc: SimulatedTensorDescriptor,
+        tensor_desc: TensorDescriptor,
         coord: Any,
         barrier: Any,
         result: SharedMemoryHandle,
         pred: TensorHandle,
         *args: Any,
     ):
-        del barrier, args
         if not bool(np.asarray(pred.data).reshape(-1)[0]):
             return None
         result.data[...] = tensor_desc.load_block(coord)
@@ -1312,7 +1304,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_async_tma_copy_local_to_global(
         self,
-        tensor_desc: SimulatedTensorDescriptor,
+        tensor_desc: TensorDescriptor,
         coord: Any,
         src: SharedMemoryHandle,
     ):
@@ -1322,7 +1314,7 @@ class Builder(interpreter_builder.__class__):
     def create_async_tma_reduce(
         self,
         kind: Any,
-        tensor_desc: SimulatedTensorDescriptor,
+        tensor_desc: TensorDescriptor,
         coord: Any,
         src: SharedMemoryHandle,
     ):
@@ -1331,17 +1323,16 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_clc_try_cancel(self, result: Any, barrier: Any):
-        del result
         _PENDING_CLC_BARRIERS.add(_mbarrier_key(barrier))
         return None
 
     def create_clc_load_result(self, _src: Any):
-        return SimulatedCLCResult()
+        return CLCResult()
 
-    def create_clc_is_canceled(self, result: SimulatedCLCResult):
+    def create_clc_is_canceled(self, result: CLCResult):
         return result.is_canceled().handle
 
-    def create_clc_get_program_id(self, result: SimulatedCLCResult, dim: Any):
+    def create_clc_get_program_id(self, result: CLCResult, dim: Any):
         return result.program_id(dim).handle
 
     def get_int128_ty(self):
@@ -1360,7 +1351,6 @@ class Builder(interpreter_builder.__class__):
         return super().create_histogram(data, bins, mask)
 
     def create_fp4_to_fp(self, src: TensorHandle, elem_type: tl.dtype, axis: int):
-        del axis
         return TensorHandle(
             _unpack_e2m1(src.data).astype(_get_np_dtype(elem_type)),
             elem_type,
@@ -1381,7 +1371,6 @@ class Builder(interpreter_builder.__class__):
         elem_type: tl.dtype,
         axis: int,
     ):
-        del axis
         return TensorHandle(
             _unpack_e2m1(src.data).astype(_get_np_dtype(elem_type)) * scale.data,
             elem_type,
@@ -1399,7 +1388,6 @@ class Builder(interpreter_builder.__class__):
         other: TensorHandle | None,
         cache_modifier: Any = None,
     ):
-        del cache_modifier
         ptrs = self._buffer_ptrs(ptr, offsets)
         if mask is None:
             mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
@@ -1413,7 +1401,6 @@ class Builder(interpreter_builder.__class__):
         mask: TensorHandle | None,
         cache_modifier: Any = None,
     ):
-        del cache_modifier
         ptrs = self._buffer_ptrs(ptr, offsets)
         if mask is None:
             mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
@@ -1429,7 +1416,6 @@ class Builder(interpreter_builder.__class__):
         scope: Any,
         mask: TensorHandle | None,
     ):
-        del sem, scope
         ptrs = self._buffer_ptrs(ptr, offsets)
         if mask is None:
             mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
@@ -1448,7 +1434,6 @@ class Builder(interpreter_builder.__class__):
         other: TensorHandle | None,
         *args: Any,
     ):
-        del args
         value = self.create_buffer_load(None, ptr, offsets, mask, other)
         dest.data[...] = np.asarray(value.data, dtype=dest.data.dtype)
         return None
@@ -1461,7 +1446,6 @@ class Builder(interpreter_builder.__class__):
         other: TensorHandle | None = None,
         *args: Any,
     ):
-        del args
         value = self.create_buffer_load(None, ptr, TensorHandle(np.array([0]), tl.int32), mask, other)
         dest.data[...] = np.asarray(value.data, dtype=dest.data.dtype)
         return None
@@ -1473,14 +1457,12 @@ class Builder(interpreter_builder.__class__):
         mask: TensorHandle | None,
         *args: Any,
     ):
-        del args
         value = TensorHandle(np.asarray(src.data), src.element_ty)
         if mask is None:
             mask = TensorHandle(np.ones_like(value.data, dtype=bool), tl.int1)
         return self.create_masked_store(ptr, value, mask, None, None)
 
     def create_async_copy_mbarrier_arrive(self, mbarrier: Any, *args: Any):
-        del args
         _mbarrier_signal(mbarrier)
         return None
 
@@ -1492,7 +1474,6 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_async_wait_group(self, num_outstanding: Any = 0):
-        del num_outstanding
         return None
 
     def create_mbarrier_init(self, barrier: Any, *args: Any):
@@ -1512,7 +1493,6 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_mbarrier_wait(self, barrier: Any, phase: Any = None, pred: Any = True, *args: Any):
-        del args
         _mbarrier_wait(barrier, phase, pred=pred)
         return None
 
@@ -1530,7 +1510,6 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_fence_async_shared(self, cluster: Any = False):
-        del cluster
         return None
 
     def create_async_shared_store(
@@ -1544,14 +1523,12 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_cluster_arrive(self, *args: Any):
-        del args
         return None
 
     def create_cluster_wait(self):
         return None
 
     def create_cluster_barrier(self, *args: Any):
-        del args
         return None
 
     def create_amd_cluster_arrive(self):
@@ -1562,13 +1539,12 @@ class Builder(interpreter_builder.__class__):
 
     def create_async_tdm_copy_global_to_local(
         self,
-        src: SimulatedTensorDescriptor,
+        src: TensorDescriptor,
         offsets: list[TensorHandle],
         dest: SharedMemoryHandle,
         pred: TensorHandle,
         *args: Any,
     ):
-        del args
         if bool(np.asarray(pred.data).reshape(-1)[0]):
             coord = tuple(_to_int(offset) for offset in offsets)
             dest.data[...] = src.load_block(coord)
@@ -1576,13 +1552,12 @@ class Builder(interpreter_builder.__class__):
 
     def create_async_tdm_copy_local_to_global(
         self,
-        dest: SimulatedTensorDescriptor,
+        dest: TensorDescriptor,
         offsets: list[TensorHandle],
         src: SharedMemoryHandle,
         mbarrier: Any = None,
         *args: Any,
     ):
-        del args
         coord = tuple(_to_int(offset) for offset in offsets)
         dest.store_block(coord, np.asarray(src.data))
         if mbarrier is not None:
@@ -1590,67 +1565,57 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_async_tdm_wait(self, num_outstanding: Any = 0):
-        del num_outstanding
         return None
 
     def create_async_tdm_scatter(
         self,
-        desc: SimulatedTensorDescriptor,
+        desc: TensorDescriptor,
         row_indices: TensorHandle,
         col_offset: TensorHandle,
         src: SharedMemoryHandle,
         *args: Any,
     ):
-        del args
         for row, row_index in enumerate(np.asarray(row_indices.data).reshape(-1)):
             desc.store_block((int(row_index), _to_int(col_offset)), src.data[row])
         return None
 
     def create_async_tdm_gather(
         self,
-        desc: SimulatedTensorDescriptor,
+        desc: TensorDescriptor,
         row_indices: TensorHandle,
         col_offset: TensorHandle,
         dst: SharedMemoryHandle,
         *args: Any,
     ):
-        del args
         for row, row_index in enumerate(np.asarray(row_indices.data).reshape(-1)):
             dst.data[row] = desc.load_block((int(row_index), _to_int(col_offset)))
         return None
 
     def create_tdm_prefetch(self, *args: Any):
-        del args
-        return SimulatedCLCResult()
+        return CLCResult()
 
     def create_tmem_copy(self, src: SharedMemoryHandle, dst: TensorMemoryHandle):
         dst.data[...] = np.asarray(src.data, dtype=dst.data.dtype)
         return None
 
     def create_tcgen05_mma(self, *args: Any):
-        del args
         return None
 
     def create_tcgen05_mma_scaled(self, *args: Any):
-        del args
         return None
 
     def create_tcgen05_commit(self, barrier: Any, pred: TensorHandle, *args: Any):
-        del args
         if bool(np.asarray(pred.data).reshape(-1)[0]):
             _mbarrier_signal(barrier)
         return None
 
     def create_warpgroup_mma(self, a: Any, b: Any, acc: TensorHandle, *args: Any):
-        del a, b, args
         return acc
 
     def create_warpgroup_mma_wait(self, deps: list[TensorHandle], num_outstanding: Any):
-        del num_outstanding
         return deps
 
     def create_warp_pipeline_border(self, marker: Any, priority: Any):
-        del marker, priority
         return None
 
     def create_warp_yield(self, values: list[Any]):
@@ -1700,7 +1665,6 @@ def _mbarrier_complete_bytes(barrier: Any, nbytes: int) -> None:
 
 
 def _mbarrier_init(barrier: Any, *args: Any, **kwargs: Any) -> None:
-    del args, kwargs
     state = _mbarrier_state(barrier)
     with state.condition:
         state.pending_bytes = 0
@@ -1711,7 +1675,6 @@ def _mbarrier_init(barrier: Any, *args: Any, **kwargs: Any) -> None:
 
 def _mbarrier_expect(barrier: Any, *args: Any, **kwargs: Any) -> None:
     expected = args[0] if args else kwargs.get("bytes", kwargs.get("tx_count", 0))
-    del args, kwargs
     key = _mbarrier_key(barrier)
     state = _mbarrier_state(barrier)
     with state.condition:
@@ -1724,7 +1687,6 @@ def _mbarrier_expect(barrier: Any, *args: Any, **kwargs: Any) -> None:
 
 def _mbarrier_arrive(barrier: Any, *args: Any, **kwargs: Any) -> None:
     pred = kwargs.get("pred", True)
-    del args, kwargs
     if bool(_to_python_scalar(pred)):
         _mbarrier_signal(barrier)
 
@@ -1734,7 +1696,6 @@ def _mbarrier_wait(barrier: Any, *args: Any, **kwargs: Any) -> None:
 
     pred = kwargs.get("pred", True)
     phase = kwargs.get("phase", args[0] if args else None)
-    del args, kwargs
     if not bool(_to_python_scalar(pred)):
         return None
     phase_value = None if phase is None else (_to_int(phase) & 1)
@@ -1748,7 +1709,6 @@ def _mbarrier_wait(barrier: Any, *args: Any, **kwargs: Any) -> None:
 
 
 def _mbarrier_invalidate(barrier: Any, *args: Any, **kwargs: Any) -> None:
-    del args, kwargs
     _mbarrier_signal(barrier)
 
 
