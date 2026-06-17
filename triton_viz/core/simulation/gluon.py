@@ -7,7 +7,7 @@ signatures to Triton's interpreter semantic layer.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 import inspect
 import threading
 from typing import Any
@@ -86,8 +86,12 @@ class GluonSemantic(gluon_semantic_module.GluonSemantic):
         ty = value.type
         if not isinstance(ty, gluon_core.distributed_type):
             return value
+        # Triton's interpreter only changes the handle metadata here; Gluon still
+        # expects a distributed_type wrapper carrying the requested layout.
         ret_ty = gluon_core.distributed_type(ty.element_ty, ty.shape, layout)
-        handle = self.builder.create_convert_layout(ret_ty.to_ir(self.builder), value.handle)
+        handle = self.builder.create_convert_layout(
+            ret_ty.to_ir(self.builder), value.handle
+        )
         return gluon_core.tensor(handle, ret_ty)
 
 
@@ -213,6 +217,8 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
             if origin is not None
             else tuple(0 for _ in self.shape)
         )
+        # Host descriptors may be built from interpreter handles, Gluon tensors,
+        # or torch tensors. Infer the element dtype before normalizing pointers.
         if isinstance(base, tl.tensor):
             dtype = base.dtype
         elif isinstance(base, TensorHandle):
@@ -269,6 +275,8 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
 
     @property
     def _array(self) -> np.ndarray:
+        # Torch CUDA inputs are copied to host by Triton's interpreter before the
+        # builder sees them, but keep the torch-style path for descriptor inputs.
         detach = getattr(self.base, "detach", None)
         cpu = getattr(self.base, "cpu", None)
         if callable(detach) and callable(cpu):
@@ -342,9 +350,7 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
 
     def load_im2col_block(self, coord: Any, offsets: Any) -> np.ndarray:
         if len(self.shape) != 4:
-            raise NotImplementedError(
-                "TMA im2col currently supports rank-4 NHWC"
-            )
+            raise NotImplementedError("TMA im2col currently supports rank-4 NHWC")
         if self.pixel_box_lower_corner is None or self.pixel_box_upper_corner is None:
             raise TypeError("TMA im2col descriptor requires pixel box corners")
         coord = _normalize_coord(coord, len(self.shape))
@@ -360,6 +366,8 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
         upper_w = w_dim - 1 + self.pixel_box_upper_corner[1] + offsets[1]
         box_h = upper_h - lower_h + 1
         box_w = upper_w - lower_w + 1
+        # Gluon im2col flattens the sliding image box into the first block axis;
+        # reconstruct NHWC coordinates so OOB pixels keep the padding value.
         start_h = self.origin[1] + coord[1] + offsets[0]
         start_w = self.origin[2] + coord[2] + offsets[1]
         start_linear = (start_h - lower_h) * box_w + (start_w - lower_w)
@@ -747,13 +755,17 @@ def _get_handle_layout(handle: TensorHandle) -> Any:
     return handle.attr.get("gluon.layout", gluon_layouts.AutoLayout())
 
 
-def _tensor_result(data: np.ndarray, dtype: tl.dtype, layout: Any = None) -> TensorHandle:
+def _tensor_result(
+    data: np.ndarray, dtype: tl.dtype, layout: Any = None
+) -> TensorHandle:
     handle = TensorHandle(data, dtype)
     handle.set_attr("gluon.layout", layout or gluon_layouts.AutoLayout())
     return handle
 
 
-def _local_indices(indices: np.ndarray, axis: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
+def _local_indices(
+    indices: np.ndarray, axis: int
+) -> Iterator[tuple[tuple[int, ...], tuple[int, ...]]]:
     for output_index in np.ndindex(indices.shape):
         memory_index = list(output_index)
         memory_index[axis] = int(indices[output_index])
@@ -804,11 +816,15 @@ class Builder(interpreter_builder.__class__):
         super().__init__()
         if not hasattr(self.options, "enable_iisan"):
             object.__setattr__(self.options, "enable_iisan", False)
+        # Barrier state is builder-scoped so repeated patch scopes do not share
+        # stale ids from previous simulated launches.
         self._barrier_states: dict[int, _MBarrierState] = {}
         self._pending_clc_barriers: set[int] = set()
 
     def _barrier_key(self, barrier: Any) -> int:
         if isinstance(barrier, SharedMemoryHandle):
+            # Shared memory descriptors can be rewrapped; the backing buffer is
+            # the stable identity for matching expect/arrive/wait calls.
             return int(barrier.data.__array_interface__["data"][0])
         return id(barrier)
 
@@ -1015,7 +1031,9 @@ class Builder(interpreter_builder.__class__):
         data = np.zeros(desc_ty.alloc_shape, dtype=_get_np_dtype(desc_ty.element_ty))
         if value is not None:
             data[...] = np.asarray(value.data, dtype=data.dtype)
-        return SharedMemoryHandle(desc_ty.element_ty, list(desc_ty.shape), desc_ty.layout, data)
+        return SharedMemoryHandle(
+            desc_ty.element_ty, list(desc_ty.shape), desc_ty.layout, data
+        )
 
     def create_local_load(self, _ret_ty: Any, mem_desc: SharedMemoryHandle):
         return _tensor_result(
@@ -1037,6 +1055,8 @@ class Builder(interpreter_builder.__class__):
     ):
         indices_data = np.asarray(indices.data)
         result = np.empty(indices_data.shape, dtype=mem_desc.data.dtype)
+        # Gluon scatter/gather indices describe one logical axis while the
+        # remaining coordinates come from the output tensor position.
         for output_index, memory_index in _local_indices(indices_data, int(axis)):
             result[output_index] = mem_desc.data[memory_index]
         return _tensor_result(result, mem_desc.element_ty, _get_handle_layout(indices))
@@ -1078,7 +1098,9 @@ class Builder(interpreter_builder.__class__):
                 old,
                 values_data[output_index],
             )
-        return _tensor_result(old_values, mem_desc.element_ty, _get_handle_layout(values))
+        return _tensor_result(
+            old_values, mem_desc.element_ty, _get_handle_layout(values)
+        )
 
     def create_local_dealloc(self, _mem_desc: SharedMemoryHandle):
         return None
@@ -1138,8 +1160,12 @@ class Builder(interpreter_builder.__class__):
         ret_ty: SharedMemoryDescriptorType,
         mem_desc: SharedMemoryHandle,
     ):
-        data = mem_desc.data.view(_get_np_dtype(ret_ty.element_ty)).reshape(ret_ty.shape)
-        return SharedMemoryHandle(ret_ty.element_ty, list(ret_ty.shape), ret_ty.layout, data)
+        data = mem_desc.data.view(_get_np_dtype(ret_ty.element_ty)).reshape(
+            ret_ty.shape
+        )
+        return SharedMemoryHandle(
+            ret_ty.element_ty, list(ret_ty.shape), ret_ty.layout, data
+        )
 
     def create_tmem_alloc(
         self,
@@ -1149,11 +1175,15 @@ class Builder(interpreter_builder.__class__):
         data = np.zeros(desc_ty.alloc_shape, dtype=_get_np_dtype(desc_ty.element_ty))
         if value is not None:
             data[...] = np.asarray(value.data, dtype=data.dtype)
-        return TensorMemoryHandle(desc_ty.element_ty, list(desc_ty.shape), desc_ty.layout, data)
+        return TensorMemoryHandle(
+            desc_ty.element_ty, list(desc_ty.shape), desc_ty.layout, data
+        )
 
     def create_tmem_load(self, _ret_ty: Any, desc: TensorMemoryHandle, *args: Any):
         if not args:
-            return _tensor_result(np.asarray(desc.data).copy(), desc.element_ty, desc.layout)
+            return _tensor_result(
+                np.asarray(desc.data).copy(), desc.element_ty, desc.layout
+            )
         red_op = args[0]
         abs_flag = args[1] if len(args) > 1 else False
         data = np.asarray(desc.data)
@@ -1163,7 +1193,9 @@ class Builder(interpreter_builder.__class__):
         reduced_data = np.min(data, axis=1) if "min" in name else np.max(data, axis=1)
         return (
             _tensor_result(np.asarray(desc.data).copy(), desc.element_ty, desc.layout),
-            _tensor_result(np.asarray(reduced_data, dtype=data.dtype), desc.element_ty, desc.layout),
+            _tensor_result(
+                np.asarray(reduced_data, dtype=data.dtype), desc.element_ty, desc.layout
+            ),
             desc.layout,
         )
 
@@ -1369,7 +1401,9 @@ class Builder(interpreter_builder.__class__):
         other: TensorHandle | None = None,
         *args: Any,
     ):
-        value = self.create_buffer_load(None, ptr, TensorHandle(np.array([0]), tl.int32), mask, other)
+        value = self.create_buffer_load(
+            None, ptr, TensorHandle(np.array([0]), tl.int32), mask, other
+        )
         dest.data[...] = np.asarray(value.data, dtype=dest.data.dtype)
         return None
 
@@ -1420,6 +1454,8 @@ class Builder(interpreter_builder.__class__):
             state.pending_bytes = max(0, _to_int(expected))
             state.ready = False
         if key in self._pending_clc_barriers:
+            # The CLC try_cancel path records the barrier before expect(); once
+            # expect arrives, complete the simulated transaction immediately.
             self._pending_clc_barriers.remove(key)
             self._signal_barrier(barrier)
         return None
@@ -1430,9 +1466,9 @@ class Builder(interpreter_builder.__class__):
             self._signal_barrier(barrier)
         return None
 
-    def create_mbarrier_wait(self, barrier: Any, phase: Any = None, pred: Any = True, *args: Any):
-        from triton_viz.core.frontend import gluon as gluon_frontend
-
+    def create_mbarrier_wait(
+        self, barrier: Any, phase: Any = None, pred: Any = True, *args: Any
+    ):
         if not bool(_to_python_scalar(pred)):
             return None
         phase_value = None if phase is None else (_to_int(phase) & 1)
@@ -1441,8 +1477,9 @@ class Builder(interpreter_builder.__class__):
             with state.condition:
                 if state.ready and (phase_value is None or state.phase == phase_value):
                     return None
+                # There is no frontend warp-specialization yield hook for Gluon;
+                # use a short timed wait so another simulated partition can run.
                 state.condition.wait(timeout=0.001)
-            gluon_frontend._maybe_yield_warp_specialize()
         return None
 
     def create_lds_barrier_init(self, barrier: Any, *args: Any):
@@ -1624,6 +1661,8 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
             continue
 
         def new_member(*args: Any, member: Callable = member, **kwargs: Any):
+            # Gluon builtins may pass a compile-time semantic object; replace it
+            # with this builder-backed semantic while preserving user arguments.
             kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
             return member(*args, **kwargs, _semantic=gluon_semantic)
 
