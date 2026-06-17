@@ -47,14 +47,40 @@ jobs:
       run: |
         cd main-branch
         uv sync --extra test
-        uv pip install --pre -U --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
+        uv pip uninstall -y triton pytorch-triton || true
+        uv pip install --pre -U --force-reinstall --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
+        uv run python - <<'PY'
+        import importlib.metadata as md
+        import triton
+        import triton.language.target_info as target_info
+
+        print("triton version:", triton.__version__)
+        print("triton file:", triton.__file__)
+        print("target_info file:", target_info.__file__)
+        print("triton distributions:", md.packages_distributions().get("triton"))
+        print("has is_hip_gfx1250:", hasattr(target_info, "is_hip_gfx1250"))
+        assert hasattr(target_info, "is_hip_gfx1250")
+        PY
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Install PR dependencies
       run: |
         cd pr-branch
         uv sync --extra test
-        uv pip install --pre -U --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
+        uv pip uninstall -y triton pytorch-triton || true
+        uv pip install --pre -U --force-reinstall --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
+        uv run python - <<'PY'
+        import importlib.metadata as md
+        import triton
+        import triton.language.target_info as target_info
+
+        print("triton version:", triton.__version__)
+        print("triton file:", triton.__file__)
+        print("target_info file:", target_info.__file__)
+        print("triton distributions:", md.packages_distributions().get("triton"))
+        print("has is_hip_gfx1250:", hasattr(target_info, "is_hip_gfx1250"))
+        assert hasattr(target_info, "is_hip_gfx1250")
+        PY
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Run interleaved A/B benchmarks
