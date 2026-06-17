@@ -77,6 +77,37 @@ def _assert_equal(ref, tri):
     testing.assert_equal(ref, tri)
 
 
+def _masked_compaction_torch(yv, yi, bitmask, sentinel=-1):
+    weights = 1 << torch.arange(32, device=yi.device, dtype=bitmask.dtype)
+    mask = (bitmask.unsqueeze(-1) & weights) != 0
+    keep = mask.flatten(start_dim=-2).gather(1, yi.long())
+    order = (~keep).to(torch.int).argsort(dim=1, stable=True)
+    yi_sorted = yi.gather(1, order)
+    yv_sorted = yv.gather(1, order)
+    keep_sorted = keep.gather(1, order)
+    yi_sorted[~keep_sorted] = sentinel
+    yv_sorted[~keep_sorted] = sentinel
+    return yv_sorted, yi_sorted
+
+
+def _run_masked_compaction(kernel, yv, yi, bitmask, sentinel=-1):
+    n_rows, n_cols = yi.shape
+    ret_yv = torch.empty_like(yv)
+    ret_yi = torch.empty_like(yi)
+    kernel[(n_rows,)](
+        yv,
+        yi,
+        bitmask,
+        bitmask.stride(0),
+        bitmask.stride(1),
+        ret_yv,
+        ret_yi,
+        sentinel,
+        K=n_cols,
+    )
+    return ret_yv, ret_yi
+
+
 @pytest.mark.parametrize(
     ("n_tokens", "n_cols", "k", "keep_prob"),
     COMPACTION_CASES,
@@ -84,7 +115,9 @@ def _assert_equal(ref, tri):
 def test_triton_viz_sanitizer_masked_compaction(
     monkeypatch, device, sanitizer_only, assert_outputs, n_tokens, n_cols, k, keep_prob
 ):
-    compaction_mod = pytest.importorskip("triton_kernels.compaction")
+    compaction_mod = pytest.importorskip(
+        "triton_kernels.compaction_details._masked_compaction"
+    )
 
     torch.manual_seed(0)
     yi = (
@@ -104,14 +137,18 @@ def test_triton_viz_sanitizer_masked_compaction(
     bitmask = (chunks * weights).sum(dim=-1)
 
     if assert_outputs:
-        yv_tri, yi_tri = compaction_mod.compaction(yv, yi, bitmask)
-        yv_ref, yi_ref = compaction_mod.compaction_torch(yv, yi, bitmask)
+        yv_tri, yi_tri = _run_masked_compaction(
+            compaction_mod._masked_compaction, yv, yi, bitmask
+        )
+        yv_ref, yi_ref = _masked_compaction_torch(yv, yi, bitmask)
         _assert_equal(yi_ref, yi_tri)
         _assert_close(yv_ref, yv_tri)
 
     sanitizer = _new_sanitizer()
-    _trace_kernel(monkeypatch, compaction_mod, "_masked_compaction", sanitizer)
-    compaction_mod.compaction(yv, yi, bitmask)
+    traced = pytest.importorskip("triton_viz").trace(client=sanitizer)(
+        compaction_mod._masked_compaction
+    )
+    _run_masked_compaction(traced, yv, yi, bitmask)
     assert len(sanitizer.records) == 0
 
 
