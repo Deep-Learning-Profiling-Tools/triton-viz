@@ -278,6 +278,12 @@ def test_triton_viz_sanitizer_masked_compaction(
     traced = pytest.importorskip("triton_viz").trace(client=sanitizer)(
         compaction_mod._masked_compaction
     )
+    if sanitizer_only and n_tokens > 512:
+        # Trace-mode execution visits every program id in Python. Keep CPU-only
+        # sanitizer coverage representative without spending CI time on 8192 rows.
+        yv = yv[:512]
+        yi = yi[:512]
+        bitmask = bitmask[:512]
     _run_masked_compaction(traced, yv, yi, bitmask)
     assert len(sanitizer.records) == 0
 
