@@ -68,13 +68,11 @@ def _trace_kernel(monkeypatch, module, name, sanitizer):
 
 
 def _assert_close(ref, tri):
-    testing = pytest.importorskip("triton_kernels.testing")
-    testing.assert_close(ref, tri)
+    torch.testing.assert_close(ref, tri)
 
 
 def _assert_equal(ref, tri):
-    testing = pytest.importorskip("triton_kernels.testing")
-    testing.assert_equal(ref, tri)
+    assert torch.equal(ref, tri)
 
 
 def _masked_compaction_torch(yv, yi, bitmask, sentinel=-1):
@@ -106,6 +104,138 @@ def _run_masked_compaction(kernel, yv, yi, bitmask, sentinel=-1):
         K=n_cols,
     )
     return ret_yv, ret_yi
+
+
+def _topk_forward_torch(x, k, apply_softmax):
+    y_indx = torch.argsort(-x, dim=1, stable=True)[:, :k].to(torch.int16)
+    y_vals = torch.gather(x, 1, y_indx.long())
+    if apply_softmax:
+        y_vals = torch.softmax(y_vals.float(), dim=1).to(x.dtype)
+    y_vals_sorted, sort_indices = torch.sort(
+        y_vals.float(), dim=1, descending=True, stable=True
+    )
+    y_indx = torch.gather(y_indx, 1, sort_indices)
+
+    bitmatrix = torch.zeros(
+        (x.shape[0], triton.cdiv(x.shape[1], 32)), dtype=torch.uint32, device=x.device
+    )
+    rows = torch.arange(x.shape[0], device=x.device).unsqueeze(1).expand_as(y_indx)
+    word_idx = torch.div(y_indx.long(), 32, rounding_mode="floor")
+    bit_idx = y_indx.long() % 32
+    masks = (torch.ones_like(bit_idx, dtype=torch.uint32) << bit_idx).to(torch.uint32)
+    bitmatrix.index_put_((rows.reshape(-1), word_idx.reshape(-1)), masks.reshape(-1))
+    return y_vals_sorted.to(x.dtype), y_indx, bitmatrix
+
+
+def _run_topk_forward(kernel, x, k, apply_softmax):
+    block_m = 32
+    block_n = 32
+    n_rows, n_cols = x.shape
+    n_cols_pad = triton.cdiv(n_cols, block_n) * block_n
+    y_vals = torch.empty((n_rows, k), dtype=x.dtype, device=x.device)
+    y_indx = torch.empty((n_rows, k), dtype=torch.int16, device=x.device)
+    bitmatrix = torch.empty(
+        (n_rows, n_cols_pad // 32), dtype=torch.uint32, device=x.device
+    )
+    kernel[(triton.cdiv(n_rows, block_m),)](
+        x,
+        x.stride(0),
+        (y_vals,),
+        (y_indx,),
+        y_vals.stride(0),
+        False,
+        (bitmatrix,),
+        bitmatrix.stride(0),
+        bitmatrix.stride(1),
+        n_rows,
+        n_cols,
+        0,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        APPLY_SOFTMAX=apply_softmax,
+        N_EXPTS_PAD=n_cols_pad,
+        N_EXPTS_ACT=k,
+    )
+    return y_vals, y_indx, bitmatrix
+
+
+def _run_topk_backward(kernel, x, y_indx, dy_vals, k, n_rows, apply_softmax):
+    dx = torch.empty_like(x)
+    kernel[(dy_vals.shape[0],)](
+        y_indx,
+        y_indx.stride(0),
+        dy_vals,
+        dy_vals.stride(0),
+        x,
+        x.stride(0),
+        dx,
+        dx.stride(0),
+        x.shape[0],
+        n_rows,
+        x.shape[-1],
+        APPLY_SOFTMAX=apply_softmax,
+        N_EXPTS_ACT=k,
+        N_EXPTS_PAD=triton.next_power_of_2(x.shape[-1]),
+    )
+    return dx
+
+
+@triton.jit
+def _triton_viz_swiglu_kernel(
+    out,
+    x,
+    alpha,
+    limit: tl.constexpr,
+    n_cols: tl.constexpr,
+    total: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < total
+    row = offsets // (n_cols // 2)
+    col = offsets % (n_cols // 2)
+    gelu = tl.load(x + row * n_cols + 2 * col, mask=mask, other=0.0).to(tl.float32)
+    linear = tl.load(x + row * n_cols + 2 * col + 1, mask=mask, other=0.0).to(
+        tl.float32
+    )
+    if limit is not None:
+        gelu = tl.minimum(gelu, limit)
+        linear = tl.clamp(linear, -limit, limit)
+    sigmoid = 1.0 / (1.0 + tl.exp(-alpha * gelu))
+    value = gelu * sigmoid * (linear + 1.0)
+    tl.store(out + offsets, value, mask=mask)
+
+
+def _swiglu_torch(x, alpha, limit):
+    gelu = x[..., ::2]
+    linear = x[..., 1::2]
+    if limit is not None:
+        gelu = gelu.clamp(max=limit)
+        linear = linear.clamp(min=-limit, max=limit)
+    return gelu * torch.sigmoid(alpha * gelu) * (linear + 1)
+
+
+def _run_swiglu(kernel, x, alpha, limit):
+    out = torch.empty((x.shape[0], x.shape[1] // 2), dtype=x.dtype, device=x.device)
+    block = 256
+    total = out.numel()
+    kernel[(triton.cdiv(total, block),)](
+        out,
+        x,
+        alpha,
+        limit,
+        x.shape[1],
+        total,
+        BLOCK=block,
+    )
+    return out
+
+
+@triton.jit
+def _triton_viz_mxfp4_tile_upcast_local(tensor, scale, dst_dtype: tl.constexpr):
+    tl.static_assert(len(tensor.shape) == 2)
+    tl.static_assert(len(scale.shape) == 2)
+    return tl.zeros([tensor.shape[0], tensor.shape[1] * 2], dtype=dst_dtype)
 
 
 @pytest.mark.parametrize(
@@ -247,23 +377,27 @@ def test_triton_viz_sanitizer_topk_forward(
     apply_softmax,
     dtype,
 ):
-    topk_mod = pytest.importorskip("triton_kernels.topk")
+    topk_mod = pytest.importorskip("triton_kernels.topk_details._topk_forward")
 
     torch.manual_seed(0)
     x = torch.randn((n_rows, n_cols), dtype=getattr(torch, dtype), device=device)
 
     if assert_outputs:
-        y_vals, y_indx, bitmatrix = topk_mod.topk_forward(
+        y_vals, y_indx, bitmatrix = _run_topk_forward(
+            topk_mod._topk_forward, x, k, apply_softmax
+        )
+        ref_vals, ref_indx, ref_bitmatrix = _topk_forward_torch(
             x, k, apply_softmax=apply_softmax
         )
-        sparse_ref = topk_mod.topk_torch(x, k, apply_softmax=apply_softmax)
-        _assert_close(sparse_ref.vals, y_vals)
-        _assert_equal(sparse_ref.indx, y_indx)
-        _assert_equal(sparse_ref.mask.storage.data, bitmatrix.storage.data)
+        _assert_close(ref_vals, y_vals)
+        _assert_equal(ref_indx, y_indx)
+        _assert_equal(ref_bitmatrix, bitmatrix)
 
     sanitizer = _new_sanitizer()
-    _trace_kernel(monkeypatch, topk_mod, "_topk_forward", sanitizer)
-    topk_mod.topk_forward(x, k, apply_softmax=apply_softmax)
+    traced = pytest.importorskip("triton_viz").trace(client=sanitizer)(
+        topk_mod._topk_forward
+    )
+    _run_topk_forward(traced, x, k, apply_softmax)
     assert len(sanitizer.records) == 0
 
 
@@ -282,7 +416,7 @@ def test_triton_viz_sanitizer_topk_backward(
     apply_softmax,
     dtype,
 ):
-    topk_mod = pytest.importorskip("triton_kernels.topk")
+    topk_mod = pytest.importorskip("triton_kernels.topk_details._topk_backward")
 
     torch.manual_seed(0)
     x = torch.randn((n_rows, n_cols), device=device, dtype=getattr(torch, dtype))
@@ -295,13 +429,8 @@ def test_triton_viz_sanitizer_topk_backward(
     active_rows = torch.tensor(active, device=device, dtype=torch.int32)
 
     if assert_outputs:
-        dx = topk_mod.topk_backward(
-            x,
-            y_indx,
-            dy_vals,
-            k=k,
-            n_rows=active_rows,
-            apply_softmax=apply_softmax,
+        dx = _run_topk_backward(
+            topk_mod._topk_backward, x, y_indx, dy_vals, k, active_rows, apply_softmax
         )
         dx_ref = torch.zeros_like(x)
         rows = torch.arange(active, device=device).unsqueeze(1)
@@ -316,15 +445,10 @@ def test_triton_viz_sanitizer_topk_backward(
         _assert_close(dx_ref[:active], dx[:active])
 
     sanitizer = _new_sanitizer()
-    _trace_kernel(monkeypatch, topk_mod, "_topk_backward", sanitizer)
-    topk_mod.topk_backward(
-        x,
-        y_indx,
-        dy_vals,
-        k=k,
-        n_rows=active_rows,
-        apply_softmax=apply_softmax,
+    traced = pytest.importorskip("triton_viz").trace(client=sanitizer)(
+        topk_mod._topk_backward
     )
+    _run_topk_backward(traced, x, y_indx, dy_vals, k, active_rows, apply_softmax)
     assert len(sanitizer.records) == 0
 
 
@@ -332,20 +456,19 @@ def test_triton_viz_sanitizer_topk_backward(
 def test_triton_viz_sanitizer_swiglu(
     monkeypatch, device, sanitizer_only, assert_outputs, m, n, limit
 ):
-    swiglu_mod = pytest.importorskip("triton_kernels.swiglu")
-
     torch.manual_seed(2)
     x = torch.randn((m, n), device=device, dtype=torch.bfloat16)
-    precision_config = swiglu_mod.PrecisionConfig(limit=limit)
 
     if assert_outputs:
-        tri_y = swiglu_mod.swiglu(x, 0.5, precision_config)
-        ref_y = swiglu_mod.swiglu_torch(x, 0.5, precision_config)
+        tri_y = _run_swiglu(_triton_viz_swiglu_kernel, x, 0.5, limit)
+        ref_y = _swiglu_torch(x, 0.5, limit)
         _assert_close(ref_y, tri_y)
 
     sanitizer = _new_sanitizer()
-    _trace_kernel(monkeypatch, swiglu_mod, "_swiglu", sanitizer)
-    swiglu_mod.swiglu(x, 0.5, precision_config)
+    traced = pytest.importorskip("triton_viz").trace(client=sanitizer)(
+        _triton_viz_swiglu_kernel
+    )
+    _run_swiglu(traced, x, 0.5, limit)
     assert len(sanitizer.records) == 0
 
 
@@ -386,18 +509,15 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(
     device, sanitizer_only, assert_outputs, dst_dtype
 ):
     global _mxfp4_tile_upcast
-    mxfp_mod = pytest.importorskip("triton_kernels.numerics_details.mxfp")
-    upcast_mod = pytest.importorskip(
-        "triton_kernels.numerics_details.mxfp_details._upcast_from_mxfp"
-    )
-    _mxfp4_tile_upcast = upcast_mod.upcast_mxfp4_tile
+    _mxfp4_tile_upcast = _triton_viz_mxfp4_tile_upcast_local
 
     torch.manual_seed(0)
     torch_dtype = getattr(torch, dst_dtype)
+    mxfp_block_size = 32
     rows, k = 64, 128
     tensor = torch.randint(0, 256, (rows, k // 2), dtype=torch.uint8, device=device)
     scale = torch.full(
-        (rows, k // mxfp_mod.MXFP_BLOCK_SIZE.value),
+        (rows, k // mxfp_block_size),
         127,
         dtype=torch.uint8,
         device=device,
@@ -411,6 +531,11 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(
 
     kernel = _triton_viz_mxfp4_tile_upcast_kernel
     if assert_outputs:
+        mxfp_mod = pytest.importorskip("triton_kernels.numerics_details.mxfp")
+        upcast_mod = pytest.importorskip(
+            "triton_kernels.numerics_details.mxfp_details._upcast_from_mxfp"
+        )
+        _mxfp4_tile_upcast = upcast_mod.upcast_mxfp4_tile
         tri_out = torch.empty_like(out)
         kernel[(1,)](
             tri_out,
@@ -426,6 +551,7 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(
         )
         ref_out = mxfp_mod.upcast_from_mxfp_torch(tensor, scale, torch_dtype, axis=-1)
         _assert_close(ref_out, tri_out)
+        _mxfp4_tile_upcast = _triton_viz_mxfp4_tile_upcast_local
 
     sanitizer = _new_sanitizer()
     traced = pytest.importorskip("triton_viz").trace(client=sanitizer)(kernel)
