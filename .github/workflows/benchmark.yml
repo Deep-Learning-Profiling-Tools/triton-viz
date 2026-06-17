@@ -9,9 +9,6 @@ permissions:
   contents: read
   pull-requests: write
 
-env:
-  TRITON_NIGHTLY_INDEX_URL: https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
-
 concurrency:
   group: benchmark-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -47,38 +44,14 @@ jobs:
       run: |
         cd main-branch
         uv sync --extra test
-        uv pip uninstall -y triton pytorch-triton || true
-        uv pip install --pre -U --force-reinstall --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
-        uv run python - <<'PY'
-        import importlib.metadata as md
-        import triton
-        import triton.language.target_info as target_info
-
-        print("triton version:", triton.__version__)
-        print("triton file:", triton.__file__)
-        print("target_info file:", target_info.__file__)
-        print("triton distributions:", md.packages_distributions().get("triton"))
-        print("has is_hip_gfx1250:", hasattr(target_info, "is_hip_gfx1250"))
-        PY
+        uv pip install --pre -U triton
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Install PR dependencies
       run: |
         cd pr-branch
         uv sync --extra test
-        uv pip uninstall -y triton pytorch-triton || true
-        uv pip install --pre -U --force-reinstall --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
-        uv run python - <<'PY'
-        import importlib.metadata as md
-        import triton
-        import triton.language.target_info as target_info
-
-        print("triton version:", triton.__version__)
-        print("triton file:", triton.__file__)
-        print("target_info file:", target_info.__file__)
-        print("triton distributions:", md.packages_distributions().get("triton"))
-        print("has is_hip_gfx1250:", hasattr(target_info, "is_hip_gfx1250"))
-        PY
+        uv pip install --pre -U triton
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Run interleaved A/B benchmarks
@@ -88,7 +61,7 @@ jobs:
         #   main PR main PR main PR ...  (4 rounds x 5 iters = 20 total)
         ROUNDS=4
         ITERS=5
-        TRITON_KERNEL_ROUNDS=1
+        TRITON_KERNEL_ROUNDS=0
         MAIN_HAS_BENCH=false
         if [ -f main-branch/benchmarks/bench_sanitizer.py ]; then
           MAIN_HAS_BENCH=true
