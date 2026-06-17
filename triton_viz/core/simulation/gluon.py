@@ -69,8 +69,6 @@ from triton.runtime.interpreter import (  # type: ignore
 from ..frontend.base import _LangPatchScope
 
 _MISSING = object()
-_MBARRIER_STATES: dict[int, "_MBarrierState"] = {}
-_PENDING_CLC_BARRIERS: set[int] = set()
 
 
 class _MBarrierState:
@@ -806,6 +804,8 @@ class Builder(interpreter_builder.__class__):
         super().__init__()
         if not hasattr(self.options, "enable_iisan"):
             object.__setattr__(self.options, "enable_iisan", False)
+        self._barrier_states: dict[int, _MBarrierState] = {}
+        self._pending_clc_barriers: set[int] = set()
 
     def _barrier_key(self, barrier: Any) -> int:
         if isinstance(barrier, SharedMemoryHandle):
@@ -814,10 +814,10 @@ class Builder(interpreter_builder.__class__):
 
     def _barrier_state(self, barrier: Any) -> _MBarrierState:
         key = self._barrier_key(barrier)
-        state = _MBARRIER_STATES.get(key)
+        state = self._barrier_states.get(key)
         if state is None:
             state = _MBarrierState()
-            _MBARRIER_STATES[key] = state
+            self._barrier_states[key] = state
         return state
 
     def _signal_barrier(self, barrier: Any) -> None:
@@ -1246,7 +1246,7 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_clc_try_cancel(self, result: Any, barrier: Any):
-        _PENDING_CLC_BARRIERS.add(self._barrier_key(barrier))
+        self._pending_clc_barriers.add(self._barrier_key(barrier))
         return None
 
     def create_clc_load_result(self, _src: Any):
@@ -1419,8 +1419,8 @@ class Builder(interpreter_builder.__class__):
         with state.condition:
             state.pending_bytes = max(0, _to_int(expected))
             state.ready = False
-        if key in _PENDING_CLC_BARRIERS:
-            _PENDING_CLC_BARRIERS.remove(key)
+        if key in self._pending_clc_barriers:
+            self._pending_clc_barriers.remove(key)
             self._signal_barrier(barrier)
         return None
 
