@@ -46,7 +46,9 @@ from triton.experimental.gluon.language.nvidia.hopper import (  # type: ignore
 )
 from triton.runtime.interpreter import (  # type: ignore
     TensorHandle,
+    _convert_float,
     _get_np_dtype,
+    _mxfp_value_handle_to_float32,
     _patch_lang_core,
     _patch_lang_tensor,
     _unpack_e2m1,
@@ -289,6 +291,8 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
     def _array(self) -> np.ndarray:
         # Torch CUDA inputs are copied to host by Triton's interpreter before the
         # builder sees them, but keep the torch-style path for descriptor inputs.
+        if isinstance(self.base, TensorHandle):
+            return np.asarray(self.base.data)
         detach = getattr(self.base, "detach", None)
         cpu = getattr(self.base, "cpu", None)
         if callable(detach) and callable(cpu):
@@ -821,6 +825,33 @@ def _apply_rmw(kind: str, old: Any, value: Any) -> Any:
     raise ValueError(f"Unsupported local atomic scatter RMW kind: {kind}")
 
 
+def _scale_values(scale: np.ndarray) -> np.ndarray:
+    if np.issubdtype(scale.dtype, np.integer):
+        raw = scale.astype(np.uint8, copy=False)
+        values = np.exp2(raw.astype(np.int16) - 127).astype(np.float32)
+        return np.where(raw == 255, np.nan, values)
+    return scale.astype(np.float32)
+
+
+def _expand_scale_groups(scale: np.ndarray, rows: int, k: int) -> np.ndarray:
+    scale = _scale_values(np.asarray(scale))
+    if scale.ndim == 0:
+        return np.full((rows, k), scale.item(), dtype=np.float32)
+    if scale.ndim == 1:
+        scale = scale.reshape(1, -1)
+    scale = np.broadcast_to(scale, (rows, scale.shape[1]))
+    repeats = max(1, int(np.ceil(k / scale.shape[1])))
+    return np.repeat(scale, repeats, axis=1)[:, :k]
+
+
+def _convert_float_result(data: np.ndarray, dtype: tl.dtype) -> np.ndarray:
+    if dtype == tl.bfloat16:
+        return _convert_float(data, tl.float32, tl.bfloat16, None).view(
+            _get_np_dtype(tl.bfloat16)
+        )
+    return data.astype(_get_np_dtype(dtype), copy=False)
+
+
 class Builder(interpreter_builder.__class__):
     """Interpreter builder with the Gluon-specific methods used by semantics."""
 
@@ -963,6 +994,22 @@ class Builder(interpreter_builder.__class__):
             list(shape),
         )
 
+    def get_partitioned_shared_layout(
+        self,
+        num_partitions: int,
+        num_groups: int,
+        partition_dim: int,
+        partition_layout: Any,
+    ):
+        if gluon_amd_tdm is None:
+            return partition_layout
+        return gluon_amd_tdm.PartitionedSharedLayout(
+            int(num_partitions),
+            int(num_groups),
+            int(partition_dim),
+            partition_layout,
+        )
+
     def get_shared_linear_layout(
         self,
         offset_bases: Any,
@@ -973,6 +1020,67 @@ class Builder(interpreter_builder.__class__):
             list(offset_bases),
             [] if block_bases is None else list(block_bases),
             int(alignment),
+        )
+
+    def get_amd_mfma_layout(
+        self,
+        version: Any,
+        warps_per_cta: Any,
+        instr_shape: Any,
+        transposed: Any,
+        cga_layout: Any,
+        tiles_per_warp: Any,
+        element_bitwidth: Any,
+    ):
+        return gluon_amd.AMDMFMALayout(
+            int(version),
+            list(instr_shape),
+            bool(transposed),
+            list(warps_per_cta),
+            None if element_bitwidth is None else int(element_bitwidth),
+            None if tiles_per_warp is None else list(tiles_per_warp),
+            [] if cga_layout is None else list(cga_layout),
+        )
+
+    def get_amd_wmma_layout(
+        self,
+        version: Any,
+        transposed: Any,
+        warp_bases: Any,
+        reg_bases: Any,
+        cga_layout: Any,
+        instr_shape: Any,
+        rank: Any,
+    ):
+        return gluon_amd.AMDWMMALayout(
+            int(version),
+            bool(transposed),
+            [list(basis) for basis in warp_bases],
+            None if reg_bases is None else [list(basis) for basis in reg_bases],
+            None if instr_shape is None else list(instr_shape),
+            [] if cga_layout is None else [list(basis) for basis in cga_layout],
+            None if rank is None else int(rank),
+        )
+
+    def get_tensor_memory_layout(
+        self,
+        block: Any,
+        col_stride: Any,
+        cga_layout: Any,
+        two_ctas: Any,
+        fp4_padded: Any,
+    ):
+        return gluon_blackwell.TensorMemoryLayout(
+            tuple(block),
+            int(col_stride),
+            [] if cga_layout is None else [list(basis) for basis in cga_layout],
+            bool(two_ctas),
+            bool(fp4_padded),
+        )
+
+    def get_tensor_memory_scales_layout(self, cga_layout: Any):
+        return gluon_blackwell.TensorMemoryScalesLayout(
+            [] if cga_layout is None else [list(basis) for basis in cga_layout]
         )
 
     def get_distributed_ty(self, element_ty: tl.dtype, shape: Any, layout: Any):
@@ -1034,6 +1142,21 @@ class Builder(interpreter_builder.__class__):
     def create_convert_layout(self, ret_ty: Any, value: TensorHandle):
         layout = getattr(ret_ty, "layout", gluon_layouts.AutoLayout())
         return _tensor_result(np.asarray(value.data).copy(), value.dtype, layout)
+
+    def create_extract_slice(
+        self,
+        ret_ty: Any,
+        source: TensorHandle,
+        offsets: Any,
+    ):
+        shape = list(getattr(ret_ty, "shape", np.asarray(source.data).shape))
+        starts = [int(_unwrap_constexpr(offset)) for offset in offsets]
+        slices = tuple(slice(start, start + dim) for start, dim in zip(starts, shape))
+        return _tensor_result(
+            np.asarray(source.data)[slices].copy(),
+            source.dtype,
+            getattr(ret_ty, "layout", _get_handle_layout(source)),
+        )
 
     def create_local_alloc(
         self,
@@ -1410,7 +1533,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_fp4_to_fp(self, src: TensorHandle, elem_type: tl.dtype, axis: int):
         return TensorHandle(
-            _unpack_e2m1(src.data).astype(_get_np_dtype(elem_type)),
+            _convert_float_result(_unpack_e2m1(src.data, int(axis)), elem_type),
             elem_type,
         )
 
@@ -1420,7 +1543,14 @@ class Builder(interpreter_builder.__class__):
         src: TensorHandle,
         scale: TensorHandle,
     ):
-        return TensorHandle(src.data.astype(np.float32) * scale.data, tl.float32)
+        if src.dtype in (tl.float8e4nv, tl.float8e5):
+            values = _mxfp_value_handle_to_float32(src)
+        else:
+            values = np.asarray(src.data, dtype=np.float32)
+        return TensorHandle(
+            values * np.broadcast_to(_scale_values(scale.data), values.shape),
+            tl.float32,
+        )
 
     def create_scaled_upcast_fp4(
         self,
@@ -1429,8 +1559,12 @@ class Builder(interpreter_builder.__class__):
         elem_type: tl.dtype,
         axis: int,
     ):
+        values = _unpack_e2m1(src.data, int(axis)).astype(np.float32)
         return TensorHandle(
-            _unpack_e2m1(src.data).astype(_get_np_dtype(elem_type)) * scale.data,
+            _convert_float_result(
+                values * np.broadcast_to(_scale_values(scale.data), values.shape),
+                elem_type,
+            ),
             elem_type,
         )
 
@@ -1631,12 +1765,26 @@ class Builder(interpreter_builder.__class__):
     def create_async_tdm_copy_global_to_local(
         self,
         src: TensorDescriptor,
-        dest: SharedMemoryHandle,
-        mbarrier: Any = None,
-        cache_modifier: Any = None,
-        warp_used_hint: Any = None,
+        offsets_or_dest: Any,
+        dest_or_mbarrier: Any = None,
+        pred_or_cache_modifier: Any = None,
+        mbarrier_or_warp_used_hint: Any = None,
+        *args: Any,
     ):
-        dest.data[...] = src.load_block([0] * len(src.shape))
+        if isinstance(offsets_or_dest, SharedMemoryHandle):
+            offsets = None
+            dest = offsets_or_dest
+            pred = True
+            mbarrier = dest_or_mbarrier
+        else:
+            offsets = offsets_or_dest
+            dest = dest_or_mbarrier
+            pred = pred_or_cache_modifier
+            mbarrier = mbarrier_or_warp_used_hint
+        if pred is not None and not bool(_to_python_scalar(pred)):
+            return None
+        coord = [0] * len(src.shape) if offsets is None else offsets
+        dest.data[...] = src.load_block(coord)
         if mbarrier is not None:
             self._signal_barrier(mbarrier)
         return None
@@ -1644,11 +1792,21 @@ class Builder(interpreter_builder.__class__):
     def create_async_tdm_copy_local_to_global(
         self,
         dest: TensorDescriptor,
-        src: SharedMemoryHandle,
-        mbarrier: Any = None,
-        cache_modifier: Any = None,
+        offsets_or_src: Any,
+        src_or_mbarrier: Any = None,
+        mbarrier_or_cache_modifier: Any = None,
+        *args: Any,
     ):
-        dest.store_block([0] * len(dest.shape), np.asarray(src.data))
+        if isinstance(offsets_or_src, SharedMemoryHandle):
+            offsets = None
+            src = offsets_or_src
+            mbarrier = src_or_mbarrier
+        else:
+            offsets = offsets_or_src
+            src = src_or_mbarrier
+            mbarrier = mbarrier_or_cache_modifier
+        coord = [0] * len(dest.shape) if offsets is None else offsets
+        dest.store_block(coord, np.asarray(src.data))
         if mbarrier is not None:
             self._signal_barrier(mbarrier)
         return None
@@ -1687,10 +1845,13 @@ class Builder(interpreter_builder.__class__):
         row_indices: TensorHandle,
         col_offset: TensorHandle,
         dst: SharedMemoryHandle,
-        pred: TensorHandle,
+        pred: TensorHandle | bool | None = True,
         mbarrier: Any = None,
     ):
-        if not bool(np.asarray(pred.data).reshape(-1)[0]):
+        if isinstance(pred, SharedMemoryHandle) and mbarrier is None:
+            mbarrier = pred
+            pred = True
+        if pred is not None and not bool(_to_python_scalar(pred)):
             return None
         rows = np.asarray(row_indices.data).astype(np.int64).reshape(-1)
         offset = _to_int(col_offset)
@@ -1712,10 +1873,82 @@ class Builder(interpreter_builder.__class__):
         dst.data[...] = np.asarray(src.data, dtype=dst.data.dtype)
         return None
 
-    def create_tcgen05_mma(self, *args: Any):
+    def _signal_mbarriers(self, mbarriers: Any, preds: Any = None) -> None:
+        if mbarriers is None:
+            return
+        barriers = mbarriers if isinstance(mbarriers, (list, tuple)) else (mbarriers,)
+        if preds is None:
+            pred_values = (True,) * len(barriers)
+        elif isinstance(preds, (list, tuple)):
+            pred_values = tuple(preds)
+        else:
+            pred_values = (preds,)
+        for index, barrier in enumerate(barriers):
+            pred = pred_values[index] if index < len(pred_values) else True
+            if bool(_to_python_scalar(pred)):
+                self._signal_barrier(barrier)
+
+    def create_tcgen05_mma(
+        self,
+        a: Any,
+        b: Any,
+        acc: TensorMemoryHandle,
+        use_acc: Any = True,
+        pred: Any = True,
+        multicast: Any = False,
+        mbarriers: Any = None,
+        mbarrier_preds: Any = None,
+    ):
+        if not bool(_to_python_scalar(pred)):
+            return None
+        result = np.matmul(
+            np.asarray(a.data).astype(np.float32),
+            np.asarray(b.data).astype(np.float32),
+        )
+        if bool(_to_python_scalar(use_acc)):
+            result = result + acc.data.astype(np.float32)
+        acc.data[...] = result.astype(acc.data.dtype, copy=False)
+        self._signal_mbarriers(mbarriers, mbarrier_preds)
         return None
 
-    def create_tcgen05_mma_scaled(self, *args: Any):
+    def create_tcgen05_mma_scaled(
+        self,
+        a: Any,
+        b: Any,
+        acc: TensorMemoryHandle,
+        a_scale: Any,
+        b_scale: Any,
+        a_type: Any,
+        b_type: Any,
+        use_acc: Any = True,
+        pred: Any = True,
+        multicast: Any = False,
+        mbarriers: Any = None,
+        mbarrier_preds: Any = None,
+    ):
+        if not bool(_to_python_scalar(pred)):
+            return None
+        a_data = np.asarray(a.data).astype(np.float32)
+        b_data = np.asarray(b.data).astype(np.float32)
+        k_dim = a_data.shape[1]
+        lhs = a_data * _expand_scale_groups(
+            np.asarray(a_scale.data), a_data.shape[0], k_dim
+        )
+        if b_data.shape[0] == k_dim:
+            rhs_scales = _expand_scale_groups(
+                np.asarray(b_scale.data), b_data.shape[1], k_dim
+            )
+            rhs = b_data * rhs_scales.T
+        else:
+            rhs_scales = _expand_scale_groups(
+                np.asarray(b_scale.data), b_data.shape[0], k_dim
+            )
+            rhs = (b_data * rhs_scales).T
+        result = np.matmul(lhs, rhs)
+        if bool(_to_python_scalar(use_acc)):
+            result = result + acc.data.astype(np.float32)
+        acc.data[...] = result.astype(acc.data.dtype, copy=False)
+        self._signal_mbarriers(mbarriers, mbarrier_preds)
         return None
 
     def create_tcgen05_commit(self, barrier: Any, pred: TensorHandle, *args: Any):
@@ -1723,11 +1956,29 @@ class Builder(interpreter_builder.__class__):
             self._signal_barrier(barrier)
         return None
 
-    def create_warpgroup_mma(self, a: Any, b: Any, acc: TensorHandle, *args: Any):
-        return acc
+    def create_warpgroup_mma(
+        self,
+        a: Any,
+        b: Any,
+        acc: TensorHandle,
+        use_acc: Any = True,
+        precision: Any = None,
+        max_num_imprecise_acc: Any = None,
+        is_async: Any = False,
+    ):
+        result = np.matmul(
+            np.asarray(a.data).astype(np.float32),
+            np.asarray(b.data).astype(np.float32),
+        )
+        if bool(_to_python_scalar(use_acc)):
+            result = result + np.asarray(acc.data, dtype=np.float32)
+        return TensorHandle(
+            result.astype(_get_np_dtype(acc.dtype), copy=False),
+            acc.dtype,
+        )
 
     def create_warpgroup_mma_wait(self, deps: list[TensorHandle], num_outstanding: Any):
-        return deps
+        return deps[0] if len(deps) == 1 else deps
 
     def create_warp_pipeline_border(self, marker: Any, priority: Any):
         return None
