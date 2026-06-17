@@ -14,6 +14,9 @@ on:
 permissions:
   contents: read
 
+env:
+  TRITON_NIGHTLY_INDEX_URL: https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
+
 concurrency:
   group: ${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -48,10 +51,10 @@ jobs:
         cd triton_viz
         uv sync --extra test
 
-    - name: Upgrade Triton to latest from main
+    - name: Upgrade Triton to nightly
       run: |
         cd triton_viz
-        uv pip install --pre -U triton
+        uv pip install --pre -U --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Run frontend tests
@@ -70,10 +73,10 @@ jobs:
         cd triton_viz
         uv sync --extra test --extra nki
 
-    - name: Upgrade Triton to latest from main (NKI)
+    - name: Upgrade Triton to nightly (NKI)
       run: |
         cd triton_viz
-        uv pip install --pre -U triton
+        uv pip install --pre -U --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Run full (Triton + NKI) pytest suite

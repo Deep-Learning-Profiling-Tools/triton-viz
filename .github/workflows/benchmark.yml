@@ -9,6 +9,9 @@ permissions:
   contents: read
   pull-requests: write
 
+env:
+  TRITON_NIGHTLY_INDEX_URL: https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
+
 concurrency:
   group: benchmark-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -44,14 +47,14 @@ jobs:
       run: |
         cd main-branch
         uv sync --extra test
-        uv pip install --pre -U triton
+        uv pip install --pre -U --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Install PR dependencies
       run: |
         cd pr-branch
         uv sync --extra test
-        uv pip install --pre -U triton
+        uv pip install --pre -U --index-url "$TRITON_NIGHTLY_INDEX_URL" triton
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Run interleaved A/B benchmarks
