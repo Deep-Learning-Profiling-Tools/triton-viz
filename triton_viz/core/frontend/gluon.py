@@ -7,9 +7,6 @@ import triton.experimental.gluon.language as gluon_lang  # type: ignore
 from triton.experimental.gluon.language import _core as gluon_core  # type: ignore
 from triton.experimental.gluon.language import _math as gluon_math  # type: ignore
 from triton.experimental.gluon.language import _semantic as gluon_semantic  # type: ignore
-from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
-    tdm as gluon_amd_tdm,
-)
 from triton.experimental.gluon.language.nvidia.blackwell import (  # type: ignore
     tma as gluon_blackwell_tma,
 )
@@ -46,6 +43,17 @@ from ..symbolic_metadata import (
 
 from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
 from .triton import TritonFrontend
+
+try:
+    from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
+        tdm as gluon_amd_tdm,
+    )
+except ImportError as exc:
+    if "is_hip_gfx1250" not in str(exc) or "triton.language.target_info" not in str(
+        exc
+    ):
+        raise
+    gluon_amd_tdm = None
 
 
 def _gluon_load_adapter(
