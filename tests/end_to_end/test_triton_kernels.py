@@ -200,7 +200,7 @@ def _triton_viz_swiglu_kernel(
     )
     if limit is not None:
         gelu = tl.minimum(gelu, limit)
-        linear = tl.clamp(linear, -limit, limit)
+        linear = tl.minimum(tl.maximum(linear, -limit), limit)
     sigmoid = 1.0 / (1.0 + tl.exp(-alpha * gelu))
     value = gelu * sigmoid * (linear + 1.0)
     tl.store(out + offsets, value, mask=mask)
