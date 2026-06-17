@@ -29,21 +29,8 @@ from triton.experimental.gluon.language.amd import rdna4 as gluon_amd_rdna4  # t
 from triton.experimental.gluon.language.amd.cdna4 import (  # type: ignore
     async_copy as gluon_amd_cdna4_async_copy,
 )
-from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
-    async_copy as gluon_amd_async_copy,
-)
-from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
-    cluster as gluon_amd_cluster,
-)
-from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
-    mbarrier as gluon_amd_mbarrier,
-)
-from triton.experimental.gluon.language.amd import gfx1250 as gluon_amd_gfx1250  # type: ignore
 from triton.experimental.gluon.language.nvidia.ampere import (  # type: ignore
     async_copy as gluon_ampere_async_copy,
-)
-from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
-    tdm as gluon_amd_tdm,
 )
 from triton.experimental.gluon.language.nvidia import blackwell as gluon_blackwell  # type: ignore
 from triton.experimental.gluon.language.nvidia import hopper as gluon_hopper  # type: ignore
@@ -67,6 +54,31 @@ from triton.runtime.interpreter import (  # type: ignore
 )
 
 from ..frontend.base import _LangPatchScope
+
+try:
+    from triton.experimental.gluon.language.amd import gfx1250 as gluon_amd_gfx1250  # type: ignore
+    from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
+        async_copy as gluon_amd_async_copy,
+    )
+    from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
+        cluster as gluon_amd_cluster,
+    )
+    from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
+        mbarrier as gluon_amd_mbarrier,
+    )
+    from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
+        tdm as gluon_amd_tdm,
+    )
+except ImportError as exc:
+    if "is_hip_gfx1250" not in str(exc) or "triton.language.target_info" not in str(
+        exc
+    ):
+        raise
+    gluon_amd_gfx1250 = None
+    gluon_amd_async_copy = None
+    gluon_amd_cluster = None
+    gluon_amd_mbarrier = None
+    gluon_amd_tdm = None
 
 _MISSING = object()
 
@@ -1617,29 +1629,33 @@ gluon_builder = Builder()
 gluon_semantic = GluonSemantic(gluon_builder)
 
 
-_GLUON_BUILTIN_MODULES: tuple[Any, ...] = (
-    gluon_core,
-    gl,
-    gluon_math,
-    gluon_standard,
-    gluon_amd,
-    gluon_amd_cdna3,
-    gluon_amd_cdna4,
-    gluon_amd_cdna4_async_copy,
-    gluon_amd_gfx1250,
-    gluon_amd_async_copy,
-    gluon_amd_cluster,
-    gluon_amd_mbarrier,
-    gluon_amd_tdm,
-    gluon_amd_rdna3,
-    gluon_amd_rdna4,
-    gluon_ampere_async_copy,
-    gluon_blackwell,
-    gluon_blackwell_tma,
-    gluon_clc,
-    gluon_hopper,
-    gluon_hopper_mbarrier,
-    gluon_hopper_tma,
+_GLUON_BUILTIN_MODULES: tuple[Any, ...] = tuple(
+    module
+    for module in (
+        gluon_core,
+        gl,
+        gluon_math,
+        gluon_standard,
+        gluon_amd,
+        gluon_amd_cdna3,
+        gluon_amd_cdna4,
+        gluon_amd_cdna4_async_copy,
+        gluon_amd_gfx1250,
+        gluon_amd_async_copy,
+        gluon_amd_cluster,
+        gluon_amd_mbarrier,
+        gluon_amd_tdm,
+        gluon_amd_rdna3,
+        gluon_amd_rdna4,
+        gluon_ampere_async_copy,
+        gluon_blackwell,
+        gluon_blackwell_tma,
+        gluon_clc,
+        gluon_hopper,
+        gluon_hopper_mbarrier,
+        gluon_hopper_tma,
+    )
+    if module is not None
 )
 
 

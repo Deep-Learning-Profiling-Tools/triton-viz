@@ -1,6 +1,3 @@
-import importlib
-from typing import Any
-
 import pytest
 import torch
 import triton
@@ -26,21 +23,6 @@ TOPK_BACKWARD_CASES = [
 SWIGLU_CASES = [(1311, 4352, 1e-2), (1311, 4352, 10)]
 MXFP4_TILE_UPCAST_CASES = ["float16", "bfloat16", "float32"]
 _mxfp4_tile_upcast = None
-
-
-def _import_triton_kernels(module_name: str) -> Any:
-    try:
-        return importlib.import_module(module_name)
-    except ImportError as exc:
-        if "is_hip_gfx1250" in str(exc) and "triton.language.target_info" in str(exc):
-            pytest.skip(
-                "triton_kernels requires "
-                "triton.language.target_info.is_hip_gfx1250, which is not "
-                "available in this Triton version"
-            )
-        if module_name.startswith("triton_kernels"):
-            pytest.skip(f"{module_name} is not importable: {exc}")
-        raise
 
 
 @pytest.fixture
@@ -86,12 +68,12 @@ def _trace_kernel(monkeypatch, module, name, sanitizer):
 
 
 def _assert_close(ref, tri):
-    testing = _import_triton_kernels("triton_kernels.testing")
+    testing = pytest.importorskip("triton_kernels.testing")
     testing.assert_close(ref, tri)
 
 
 def _assert_equal(ref, tri):
-    testing = _import_triton_kernels("triton_kernels.testing")
+    testing = pytest.importorskip("triton_kernels.testing")
     testing.assert_equal(ref, tri)
 
 
@@ -102,7 +84,7 @@ def _assert_equal(ref, tri):
 def test_triton_viz_sanitizer_masked_compaction(
     monkeypatch, device, sanitizer_only, assert_outputs, n_tokens, n_cols, k, keep_prob
 ):
-    compaction_mod = _import_triton_kernels("triton_kernels.compaction")
+    compaction_mod = pytest.importorskip("triton_kernels.compaction")
 
     torch.manual_seed(0)
     yi = (
@@ -142,7 +124,7 @@ def test_triton_viz_sanitizer_masked_compaction(
 def test_triton_viz_sanitizer_make_ragged_tensor_metadata(
     monkeypatch, device, sanitizer_only, assert_outputs, n_slices
 ):
-    ragged_mod = _import_triton_kernels("triton_kernels.tensor_details.ragged_tensor")
+    ragged_mod = pytest.importorskip("triton_kernels.tensor_details.ragged_tensor")
 
     torch.manual_seed(0)
     max_slice_size = 200
@@ -176,7 +158,7 @@ def test_triton_viz_sanitizer_make_ragged_tensor_metadata(
 def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
     monkeypatch, device, sanitizer_only, assert_outputs, n_slices
 ):
-    ragged_mod = _import_triton_kernels("triton_kernels.tensor_details.ragged_tensor")
+    ragged_mod = pytest.importorskip("triton_kernels.tensor_details.ragged_tensor")
 
     torch.manual_seed(0)
     max_slice_size = 200
@@ -228,7 +210,7 @@ def test_triton_viz_sanitizer_topk_forward(
     apply_softmax,
     dtype,
 ):
-    topk_mod = _import_triton_kernels("triton_kernels.topk")
+    topk_mod = pytest.importorskip("triton_kernels.topk")
 
     torch.manual_seed(0)
     x = torch.randn((n_rows, n_cols), dtype=getattr(torch, dtype), device=device)
@@ -263,7 +245,7 @@ def test_triton_viz_sanitizer_topk_backward(
     apply_softmax,
     dtype,
 ):
-    topk_mod = _import_triton_kernels("triton_kernels.topk")
+    topk_mod = pytest.importorskip("triton_kernels.topk")
 
     torch.manual_seed(0)
     x = torch.randn((n_rows, n_cols), device=device, dtype=getattr(torch, dtype))
@@ -313,7 +295,7 @@ def test_triton_viz_sanitizer_topk_backward(
 def test_triton_viz_sanitizer_swiglu(
     monkeypatch, device, sanitizer_only, assert_outputs, m, n, limit
 ):
-    swiglu_mod = _import_triton_kernels("triton_kernels.swiglu")
+    swiglu_mod = pytest.importorskip("triton_kernels.swiglu")
 
     torch.manual_seed(2)
     x = torch.randn((m, n), device=device, dtype=torch.bfloat16)
@@ -367,8 +349,8 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(
     device, sanitizer_only, assert_outputs, dst_dtype
 ):
     global _mxfp4_tile_upcast
-    mxfp_mod = _import_triton_kernels("triton_kernels.numerics_details.mxfp")
-    upcast_mod = _import_triton_kernels(
+    mxfp_mod = pytest.importorskip("triton_kernels.numerics_details.mxfp")
+    upcast_mod = pytest.importorskip(
         "triton_kernels.numerics_details.mxfp_details._upcast_from_mxfp"
     )
     _mxfp4_tile_upcast = upcast_mod.upcast_mxfp4_tile
