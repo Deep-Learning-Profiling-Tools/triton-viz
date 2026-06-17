@@ -1136,12 +1136,6 @@ class Builder(interpreter_builder.__class__):
     def get_gluon_layout_from_memdesc(self, handle: Any):
         return getattr(handle, "layout", gluon_layouts.AutoLayout())
 
-    def get_shape_from_tensor(self, handle: TensorHandle):
-        return list(np.asarray(handle.data).shape)
-
-    def create_name_loc(self, *_args: Any):
-        return None
-
     def is_convert_layout_trivial(self, _ret_ty: Any, _value: Any) -> bool:
         return True
 
