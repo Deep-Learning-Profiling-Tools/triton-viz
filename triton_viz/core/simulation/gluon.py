@@ -807,6 +807,27 @@ class Builder(interpreter_builder.__class__):
         if not hasattr(self.options, "enable_iisan"):
             object.__setattr__(self.options, "enable_iisan", False)
 
+    def _barrier_key(self, barrier: Any) -> int:
+        if isinstance(barrier, SharedMemoryHandle):
+            return int(barrier.data.__array_interface__["data"][0])
+        return id(barrier)
+
+    def _barrier_state(self, barrier: Any) -> _MBarrierState:
+        key = self._barrier_key(barrier)
+        state = _MBARRIER_STATES.get(key)
+        if state is None:
+            state = _MBarrierState()
+            _MBARRIER_STATES[key] = state
+        return state
+
+    def _signal_barrier(self, barrier: Any) -> None:
+        state = self._barrier_state(barrier)
+        with state.condition:
+            state.pending_bytes = 0
+            state.phase ^= 1
+            state.ready = True
+            state.condition.notify_all()
+
     def get_auto_layout(self):
         return gluon_layouts.AutoLayout()
 
@@ -1225,7 +1246,7 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_clc_try_cancel(self, result: Any, barrier: Any):
-        _PENDING_CLC_BARRIERS.add(_mbarrier_key(barrier))
+        _PENDING_CLC_BARRIERS.add(self._barrier_key(barrier))
         return None
 
     def create_clc_load_result(self, _src: Any):
@@ -1365,7 +1386,7 @@ class Builder(interpreter_builder.__class__):
         return self.create_masked_store(ptr, value, mask, None, None)
 
     def create_async_copy_mbarrier_arrive(self, mbarrier: Any, *args: Any):
-        _mbarrier_signal(mbarrier)
+        self._signal_barrier(mbarrier)
         return None
 
     def create_async_copy_lds_barrier_arrive(self, mbarrier: Any, *args: Any):
@@ -1379,23 +1400,49 @@ class Builder(interpreter_builder.__class__):
         return None
 
     def create_mbarrier_init(self, barrier: Any, *args: Any):
-        _mbarrier_init(barrier, *args)
+        state = self._barrier_state(barrier)
+        with state.condition:
+            state.pending_bytes = 0
+            state.phase = 1
+            state.ready = True
+            state.condition.notify_all()
         return None
 
     def create_mbarrier_inval(self, barrier: Any):
-        _mbarrier_invalidate(barrier)
+        self._signal_barrier(barrier)
         return None
 
     def create_mbarrier_expect(self, barrier: Any, *args: Any):
-        _mbarrier_expect(barrier, *args)
+        expected = args[0] if args else 0
+        key = self._barrier_key(barrier)
+        state = self._barrier_state(barrier)
+        with state.condition:
+            state.pending_bytes = max(0, _to_int(expected))
+            state.ready = False
+        if key in _PENDING_CLC_BARRIERS:
+            _PENDING_CLC_BARRIERS.remove(key)
+            self._signal_barrier(barrier)
         return None
 
     def create_mbarrier_arrive(self, barrier: Any, *args: Any):
-        _mbarrier_arrive(barrier, *args)
+        pred = args[0] if args else True
+        if bool(_to_python_scalar(pred)):
+            self._signal_barrier(barrier)
         return None
 
     def create_mbarrier_wait(self, barrier: Any, phase: Any = None, pred: Any = True, *args: Any):
-        _mbarrier_wait(barrier, phase, pred=pred)
+        from triton_viz.core.frontend import gluon as gluon_frontend
+
+        if not bool(_to_python_scalar(pred)):
+            return None
+        phase_value = None if phase is None else (_to_int(phase) & 1)
+        state = self._barrier_state(barrier)
+        while True:
+            with state.condition:
+                if state.ready and (phase_value is None or state.phase == phase_value):
+                    return None
+                state.condition.wait(timeout=0.001)
+            gluon_frontend._maybe_yield_warp_specialize()
         return None
 
     def create_lds_barrier_init(self, barrier: Any, *args: Any):
@@ -1405,7 +1452,9 @@ class Builder(interpreter_builder.__class__):
         return self.create_mbarrier_wait(barrier, phase, *args)
 
     def create_lds_barrier_arrive(self, barrier: Any, *args: Any):
-        _mbarrier_arrive(barrier, *args)
+        pred = args[0] if args else True
+        if bool(_to_python_scalar(pred)):
+            self._signal_barrier(barrier)
         return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
 
     def create_fence_mbarrier_init_release_cluster(self):
@@ -1421,7 +1470,7 @@ class Builder(interpreter_builder.__class__):
         mbarrier: Any,
     ):
         dst.data[...] = np.asarray(value.data, dtype=dst.data.dtype)
-        _mbarrier_signal(mbarrier)
+        self._signal_barrier(mbarrier)
         return None
 
     def create_cluster_arrive(self, *args: Any):
@@ -1463,7 +1512,7 @@ class Builder(interpreter_builder.__class__):
         coord = tuple(_to_int(offset) for offset in offsets)
         dest.store_block(coord, np.asarray(src.data))
         if mbarrier is not None:
-            _mbarrier_signal(mbarrier)
+            self._signal_barrier(mbarrier)
         return None
 
     def create_async_tdm_wait(self, num_outstanding: Any = 0):
@@ -1508,7 +1557,7 @@ class Builder(interpreter_builder.__class__):
 
     def create_tcgen05_commit(self, barrier: Any, pred: TensorHandle, *args: Any):
         if bool(np.asarray(pred.data).reshape(-1)[0]):
-            _mbarrier_signal(barrier)
+            self._signal_barrier(barrier)
         return None
 
     def create_warpgroup_mma(self, a: Any, b: Any, acc: TensorHandle, *args: Any):
@@ -1529,78 +1578,6 @@ class Builder(interpreter_builder.__class__):
 
 gluon_builder = Builder()
 gluon_semantic = GluonSemantic(gluon_builder)
-
-
-def _mbarrier_key(barrier: Any) -> int:
-    if isinstance(barrier, SharedMemoryHandle):
-        return int(barrier.data.__array_interface__["data"][0])
-    return id(barrier)
-
-
-def _mbarrier_state(barrier: Any) -> _MBarrierState:
-    key = _mbarrier_key(barrier)
-    state = _MBARRIER_STATES.get(key)
-    if state is None:
-        state = _MBarrierState()
-        _MBARRIER_STATES[key] = state
-    return state
-
-
-def _mbarrier_signal(barrier: Any) -> None:
-    state = _mbarrier_state(barrier)
-    with state.condition:
-        state.pending_bytes = 0
-        state.phase ^= 1
-        state.ready = True
-        state.condition.notify_all()
-
-
-def _mbarrier_init(barrier: Any, *args: Any, **kwargs: Any) -> None:
-    state = _mbarrier_state(barrier)
-    with state.condition:
-        state.pending_bytes = 0
-        state.phase = 1
-        state.ready = True
-        state.condition.notify_all()
-
-
-def _mbarrier_expect(barrier: Any, *args: Any, **kwargs: Any) -> None:
-    expected = args[0] if args else kwargs.get("bytes", kwargs.get("tx_count", 0))
-    key = _mbarrier_key(barrier)
-    state = _mbarrier_state(barrier)
-    with state.condition:
-        state.pending_bytes = max(0, _to_int(expected))
-        state.ready = False
-    if key in _PENDING_CLC_BARRIERS:
-        _PENDING_CLC_BARRIERS.remove(key)
-        _mbarrier_signal(barrier)
-
-
-def _mbarrier_arrive(barrier: Any, *args: Any, **kwargs: Any) -> None:
-    pred = kwargs.get("pred", True)
-    if bool(_to_python_scalar(pred)):
-        _mbarrier_signal(barrier)
-
-
-def _mbarrier_wait(barrier: Any, *args: Any, **kwargs: Any) -> None:
-    from triton_viz.core.frontend import gluon as gluon_frontend
-
-    pred = kwargs.get("pred", True)
-    phase = kwargs.get("phase", args[0] if args else None)
-    if not bool(_to_python_scalar(pred)):
-        return None
-    phase_value = None if phase is None else (_to_int(phase) & 1)
-    state = _mbarrier_state(barrier)
-    while True:
-        with state.condition:
-            if state.ready and (phase_value is None or state.phase == phase_value):
-                return None
-            state.condition.wait(timeout=0.001)
-        gluon_frontend._maybe_yield_warp_specialize()
-
-
-def _mbarrier_invalidate(barrier: Any, *args: Any, **kwargs: Any) -> None:
-    _mbarrier_signal(barrier)
 
 
 _GLUON_BUILTIN_MODULES: tuple[Any, ...] = (
