@@ -337,7 +337,6 @@ class GluonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
                     *args,
                     **kwargs,
                     client_manager=self.client_manager,
-                    _lifecycle_callbacks=False,
                 )
             finally:
                 self.client_manager.post_run_callback(self.base_fn)

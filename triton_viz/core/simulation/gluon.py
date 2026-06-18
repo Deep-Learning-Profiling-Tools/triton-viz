@@ -2171,72 +2171,6 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
         scope.set_attr(pkg, name, new_member)
 
 
-def _patch_mbarrier_module(module: Any, scope: _LangPatchScope) -> None:
-    if module is None:
-        return
-
-    if hasattr(module, "allocate_mbarrier"):
-
-        def allocate_mbarrier(*_args: Any, **_kwargs: Any):
-            return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
-
-        scope.set_attr(module, "allocate_mbarrier", allocate_mbarrier)
-
-    if hasattr(module, "init"):
-
-        def init(mbarrier: Any, count: Any = 1, **_kwargs: Any):
-            return gluon_builder.create_mbarrier_init(mbarrier, count)
-
-        scope.set_attr(module, "init", init)
-
-    if hasattr(module, "expect"):
-
-        def expect(
-            mbarrier: Any,
-            bytes_per_cta: Any = None,
-            pred: Any = True,
-            **_kwargs: Any,
-        ):
-            if bool(_to_python_scalar(pred)):
-                return gluon_builder.create_mbarrier_expect(mbarrier, bytes_per_cta)
-            return None
-
-        scope.set_attr(module, "expect", expect)
-
-    if hasattr(module, "arrive"):
-
-        def arrive(
-            mbarrier: Any,
-            *,
-            count: Any = 1,
-            pred: Any = True,
-            **_kwargs: Any,
-        ):
-            return gluon_builder.create_mbarrier_arrive(mbarrier, pred, count)
-
-        scope.set_attr(module, "arrive", arrive)
-
-    if hasattr(module, "wait"):
-
-        def wait(
-            mbarrier: Any,
-            phase: Any,
-            pred: Any = True,
-            deps: Any = (),
-            **_kwargs: Any,
-        ):
-            return gluon_builder.create_mbarrier_wait(mbarrier, phase, pred, deps)
-
-        scope.set_attr(module, "wait", wait)
-
-    if hasattr(module, "invalidate"):
-
-        def invalidate(mbarrier: Any, **_kwargs: Any):
-            return gluon_builder.create_mbarrier_inval(mbarrier)
-
-        scope.set_attr(module, "invalidate", invalidate)
-
-
 def patch_lang(fn: Callable) -> _LangPatchScope:
     """Patch Gluon builtins to execute through the NumPy interpreter builder."""
 
@@ -2245,10 +2179,61 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
         _patch_gluon_builtins(module, scope)
     for cls in _GLUON_BUILTIN_CLASSES:
         _patch_gluon_builtins(cls, scope)
-    _patch_mbarrier_module(gluon_ampere_mbarrier, scope)
-    _patch_mbarrier_module(gluon_hopper_mbarrier, scope)
+
+    def allocate_mbarrier(*_args: Any, **_kwargs: Any):
+        return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
+
+    def init_mbarrier(mbarrier: Any, count: Any = 1, **_kwargs: Any):
+        return gluon_builder.create_mbarrier_init(mbarrier, count)
+
+    def expect_mbarrier(
+        mbarrier: Any,
+        bytes_per_cta: Any = None,
+        pred: Any = True,
+        **_kwargs: Any,
+    ):
+        if bool(_to_python_scalar(pred)):
+            return gluon_builder.create_mbarrier_expect(mbarrier, bytes_per_cta)
+        return None
+
+    def arrive_mbarrier(
+        mbarrier: Any,
+        *,
+        count: Any = 1,
+        pred: Any = True,
+        **_kwargs: Any,
+    ):
+        return gluon_builder.create_mbarrier_arrive(mbarrier, pred, count)
+
+    def wait_mbarrier(
+        mbarrier: Any,
+        phase: Any,
+        pred: Any = True,
+        deps: Any = (),
+        **_kwargs: Any,
+    ):
+        return gluon_builder.create_mbarrier_wait(mbarrier, phase, pred, deps)
+
+    def invalidate_mbarrier(mbarrier: Any, **_kwargs: Any):
+        return gluon_builder.create_mbarrier_inval(mbarrier)
+
+    if gluon_ampere_mbarrier is not None:
+        scope.set_attr(gluon_ampere_mbarrier, "allocate_mbarrier", allocate_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "init", init_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "expect", expect_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "arrive", arrive_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "wait", wait_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "invalidate", invalidate_mbarrier)
+
+    if gluon_hopper_mbarrier is not None:
+        scope.set_attr(gluon_hopper_mbarrier, "allocate_mbarrier", allocate_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "init", init_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "expect", expect_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "arrive", arrive_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "wait", wait_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "invalidate", invalidate_mbarrier)
+
     _patch_lang_tensor(gluon_core.tensor, scope)
-    _patch_lang_core(tl.core, scope)
     _patch_lang_core(gluon_core, scope)
     return scope
 
@@ -2293,7 +2278,6 @@ class GluonInterpretedFunction:
 
         client_manager = kwargs.pop("client_manager", None)
         should_patch_lang = kwargs.pop("_patch_lang", True)
-        run_lifecycle_callbacks = kwargs.pop("_lifecycle_callbacks", True)
         if "num_warps" not in self.arg_names:
             kwargs.pop("num_warps", None)
         if "num_ctas" not in self.arg_names:
@@ -2328,18 +2312,7 @@ class GluonInterpretedFunction:
                             interpreter_builder.set_grid_idx(x, y, z)
                             if client_manager is not None:
                                 client_manager.grid_idx_callback((x, y, z))
-                                if (
-                                    run_lifecycle_callbacks
-                                    and not client_manager.pre_run_callback(self.fn)
-                                ):
-                                    return
                             self.fn(**call_args)
-                            if (
-                                run_lifecycle_callbacks
-                                and client_manager is not None
-                                and not client_manager.post_run_callback(self.fn)
-                            ):
-                                return
 
             run_grid()
         except Exception as exc:
