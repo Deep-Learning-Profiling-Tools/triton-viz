@@ -79,7 +79,7 @@ class KernelTraceSupport:
         return isinstance(runner, Heuristics)
 
     @staticmethod
-    def _dummy_benchmarker(fn, quantiles):
+    def dummy_benchmarker(fn, quantiles):
         fn()
         return (1.0, 1.0, 1.0)
 
@@ -87,7 +87,7 @@ class KernelTraceSupport:
         if self._is_autotuner(runner):
             runner.fn = interpreted_fn
             # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
-            runner._do_bench = self._dummy_benchmarker
+            runner._do_bench = self.dummy_benchmarker
             return runner
         if self._is_heuristics(runner):
             runner.fn = interpreted_fn
