@@ -525,7 +525,6 @@ class GluonFrontend(Frontend):
             adapters=definition.adapters,
             namespaces=definition.namespaces,
         )
-        self.patch_lang_before_ops = True
 
     @staticmethod
     def symbolic_ops_for_op_type(op_type: type[Op]) -> tuple[str, ...]:
@@ -533,14 +532,6 @@ class GluonFrontend(Frontend):
 
     def maybe_yield_for_multism(self) -> None:
         _maybe_yield_warp_specialize()
-
-    def op_for_patch(self, namespace: Any, attr: str) -> Callable:
-        current_op = getattr(namespace, attr)
-        original_op = self.original_ops[namespace][attr]
-        adapter = GLUON_CALLABLE_ADAPTERS.get(original_op)
-        if adapter is not None:
-            GLUON_CALLABLE_ADAPTERS[current_op] = adapter
-        return current_op
 
     def run_op_overrider(
         self,

@@ -91,7 +91,6 @@ class Frontend:
     # signature for all callables that map to the same normalized Op.
     adapters: dict[type[Op], Callable[..., AdapterResult]]
     namespaces: dict[Any, dict[str, type[Op]]]
-    patch_lang_before_ops: bool = False
 
     @classmethod
     def from_namespaces(
@@ -136,9 +135,6 @@ class Frontend:
         kwargs: dict[str, Any],
     ):
         return op_overrider(*args, **kwargs)
-
-    def op_for_patch(self, namespace: Any, attr: str) -> Callable:
-        return self.original_ops[namespace][attr]
 
     @staticmethod
     def concrete_fn_for_op_type(

@@ -279,6 +279,8 @@ class NKITrace(LaunchInterface, TraceInterface):
 class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
     def __init__(self, runner: Any, client: str | Client) -> None:
         from triton.experimental import gluon
+        from triton.runtime import Autotuner
+        from triton.runtime.autotuner import Heuristics
         from .simulation.gluon import GluonInterpretedFunction
 
         # Gluon has exposed different JIT class names across Triton versions.
@@ -287,26 +289,39 @@ class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
         if not all(hasattr(runner, attr) for attr in ("fn", "run", "arg_names")):
             runner = gluon.jit(runner)
 
+        def unpack_kernel(source: Any) -> tuple[Callable, Any]:
+            if isinstance(source, GluonTrace):
+                return source.base_fn, source.interpreted_fn
+            if isinstance(source, Heuristics):
+                return unpack_kernel(source.fn)
+            if all(hasattr(source, attr) for attr in ("fn", "arg_names")):
+                base_fn = source.fn
+                return base_fn, GluonInterpretedFunction(base_fn, source.arg_names)
+            raise TypeError(f"Unsupported runner type: {type(source)}")
+
+        self.base_fn, self.interpreted_fn = unpack_kernel(
+            runner.fn if isinstance(runner, Autotuner) else runner
+        )
         self.fn = runner
-        self.base_fn = runner.fn
         self.arg_names = runner.arg_names
-        self.interpreted_fn = GluonInterpretedFunction(self.base_fn, self.arg_names)
-        self.runner = self.interpreted_fn
+
+        if isinstance(runner, Autotuner):
+            runner.fn = self.interpreted_fn
+
+            def dummy_benchmarker(fn, quantiles):
+                fn()
+                return (1.0, 1.0, 1.0)
+
+            runner._do_bench = dummy_benchmarker
+            self.runner = runner
+        elif isinstance(runner, Heuristics):
+            runner.fn = self.interpreted_fn
+            self.runner = runner
+        else:
+            self.runner = self.interpreted_fn
 
         TraceInterface.__init__(self, client)
         self._copy_callable_attrs(runner, self.base_fn)
-
-    def _refresh_runner(self) -> None:
-        from .simulation.gluon import GluonInterpretedFunction
-
-        base_fn = self.fn.fn
-        arg_names = list(self.fn.arg_names)
-        if self.base_fn is base_fn and self.arg_names == arg_names:
-            return
-        self.base_fn = base_fn
-        self.arg_names = arg_names
-        self.interpreted_fn = GluonInterpretedFunction(base_fn, arg_names)
-        self.runner = self.interpreted_fn
 
     def run(self, *args, **kwargs):
         grid = kwargs.get("grid")
@@ -314,8 +329,6 @@ class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
             raise TypeError(
                 "GluonTrace.run() missing required keyword argument: 'grid'"
             )
-
-        self._refresh_runner()
 
         with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
             try:

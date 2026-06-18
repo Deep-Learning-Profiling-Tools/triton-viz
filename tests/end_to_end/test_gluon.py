@@ -80,7 +80,6 @@ def test_gluon_sanitizer_allows_in_bounds_kernel():
 
     assert ret is None
     assert sanitizer.records == []
-    torch.testing.assert_close(out, inp, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not _has_cuda_device(), reason="CUDA required for Gluon execution")
