@@ -219,11 +219,19 @@ def _gluon_tensor_handle(value: Any) -> Any:
 def _gluon_binary_adapter(
     lhs: Any,
     rhs: Any,
-    *args: Any,
+    *_args: Any,
     **_kwargs: Any,
 ) -> AdapterResult:
-    if isinstance(lhs, gluon_semantic.GluonSemantic) and args:
-        lhs, rhs = rhs, args[0]
+    return AdapterResult(lhs, rhs)
+
+
+def _gluon_semantic_binary_adapter(
+    _semantic: Any,
+    lhs: Any,
+    rhs: Any,
+    *_args: Any,
+    **_kwargs: Any,
+) -> AdapterResult:
     return AdapterResult(lhs, rhs)
 
 
@@ -485,7 +493,9 @@ GLUON_CALLABLE_ADAPTERS: dict[Callable, Callable[..., AdapterResult]] = {}
 for namespace, attrs in GLUON_NAMESPACES.items():
     for attr, op_type in attrs.items():
         original = getattr(namespace, attr)
-        if op_type is BinaryOp and attr in _GLUON_BINARY_NUMPY_OPS:
+        if namespace is gluon_semantic.GluonSemantic and op_type in (AddPtr, BinaryOp):
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_semantic_binary_adapter
+        elif op_type is BinaryOp and attr in _GLUON_BINARY_NUMPY_OPS:
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_binary_op_adapter(
                 _GLUON_BINARY_NUMPY_OPS[attr]
             )

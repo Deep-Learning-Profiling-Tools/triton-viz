@@ -451,6 +451,27 @@ def test_gluon_unary_op_adapter_binds_original_callable():
     assert calls == [("arg", np.exp)]
 
 
+def test_gluon_semantic_binary_adapter_drops_bound_semantic():
+    from triton.experimental.gluon.language import _semantic as gluon_semantic
+
+    calls = []
+
+    def overrider(lhs, rhs):
+        calls.append((lhs, rhs))
+        return "overridden"
+
+    result = GLUON_FRONTEND.run_op_overrider(
+        gluon_semantic.GluonSemantic.add,
+        AddPtr,
+        overrider,
+        (object(), "lhs", "rhs", True),
+        {},
+    )
+
+    assert result == "overridden"
+    assert calls == [("lhs", "rhs")]
+
+
 def test_gluon_frontend_wraps_symbolic_concrete_fn():
     calls = []
 
@@ -468,6 +489,7 @@ def test_gluon_frontend_wraps_symbolic_concrete_fn():
 
 def test_gluon_language_ops_patch_and_use_simulation_callable():
     from triton.experimental.gluon import language as ttgl
+    from triton_viz.core.simulation import gluon as gluon_sim
 
     seen_axes = []
     original_program_id = ttgl.program_id
@@ -512,6 +534,8 @@ def test_gluon_language_ops_patch_and_use_simulation_callable():
     def kernel():
         pass
 
+    gluon_sim.gluon_builder.set_grid_dim(1, 1, 1)
+    gluon_sim.gluon_builder.set_grid_idx(0, 0, 0)
     manager = ClientManager([RecordingClient()])
     with manager.patch_run(kernel, frontend_name="gluon"):
         assert ttgl.program_id is not original_program_id
