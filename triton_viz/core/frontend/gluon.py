@@ -104,7 +104,6 @@ def _gluon_pointer_load_adapter(
     other: Any = None,
     **_kwargs: Any,
 ) -> AdapterResult:
-    del other
     if mask is None and _args:
         mask = _args[0]
     ptr = _gluon_tensor_handle(ptr)
@@ -172,7 +171,6 @@ def _gluon_buffer_load_to_shared_adapter(
     *args: Any,
     **kwargs: Any,
 ) -> AdapterResult:
-    del smem
     # CDNA4 buffer_load_to_shared receives base pointer plus vector offsets.
     # Rebuild the effective pointer so clients see a normal masked load.
     return _gluon_pointer_load_adapter(
@@ -190,7 +188,6 @@ def _gluon_pointer_store_adapter(
 ) -> AdapterResult:
     if _is_global_tensor_descriptor_like(ptr) and value is not None:
         return AdapterResult(TensorDescriptorAccess(ptr, value, mask), mask, None)
-    del value
     if mask is None and _args:
         mask = _args[0]
     ptr = _gluon_tensor_handle(ptr)
