@@ -45,9 +45,12 @@ from triton.experimental.gluon.language.nvidia.hopper import (  # type: ignore
     tma as gluon_hopper_tma,
 )
 from triton.runtime.interpreter import (  # type: ignore
+    GridExecutor,
+    InterpreterError,
     TensorHandle,
     _convert_float,
     _get_np_dtype,
+    _implicit_cvt,
     _mxfp_value_handle_to_float32,
     _patch_lang_core,
     _patch_lang_tensor,
@@ -83,6 +86,7 @@ except ImportError as exc:
     gluon_amd_tdm = None
 
 _MISSING = object()
+_HOST_TENSOR_DESCRIPTOR_TYPES = {"TensorDescriptor", "TensorDescriptorIm2Col"}
 
 
 class _MBarrierState:
@@ -95,6 +99,12 @@ class _MBarrierState:
 
 class GluonSemantic(gluon_semantic_module.GluonSemantic):
     """Triton interpreter semantic with Gluon-compatible builtin signatures."""
+
+    def num_warps(self, _generator: Any = None):
+        return 1
+
+    def num_ctas(self):
+        return 1
 
     def convert_layout(self, value: Any, layout: Any, assert_trivial: bool = False):
         ty = value.type
@@ -135,6 +145,17 @@ def _to_python_scalar(value: Any) -> Any:
 
 def _to_int(value: Any) -> int:
     return int(_to_python_scalar(value))
+
+
+def _host_array(base: Any) -> np.ndarray:
+    detach = getattr(base, "detach", None)
+    cpu = getattr(base, "cpu", None)
+    if callable(detach) and callable(cpu):
+        return detach().cpu().numpy()
+    numpy = getattr(base, "numpy", None)
+    if callable(numpy):
+        return numpy()
+    return np.asarray(base)
 
 
 class BlockType:
@@ -289,18 +310,14 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
 
     @property
     def _array(self) -> np.ndarray:
-        # Torch CUDA inputs are copied to host by Triton's interpreter before the
-        # builder sees them, but keep the torch-style path for descriptor inputs.
+        # Descriptors created inside a kernel hold an interpreter pointer handle.
+        # Resolve it back to the CPU tensor copied by GridExecutor before loads.
         if isinstance(self.base, TensorHandle):
+            host_tensor = getattr(self.base, "attr", {}).get("gluon.host_tensor")
+            if host_tensor is not None:
+                return _host_array(host_tensor)
             return np.asarray(self.base.data)
-        detach = getattr(self.base, "detach", None)
-        cpu = getattr(self.base, "cpu", None)
-        if callable(detach) and callable(cpu):
-            return detach().cpu().numpy()
-        numpy = getattr(self.base, "numpy", None)
-        if callable(numpy):
-            return numpy()
-        return np.asarray(self.base)
+        return _host_array(self.base)
 
     @property
     def data(self) -> np.ndarray:
@@ -425,6 +442,38 @@ def _normalize_coord(coord: Any, ndim: int) -> tuple[int, ...]:
     if len(values) != ndim:
         raise ValueError(f"Expected {ndim} TMA coordinates, got {len(values)}")
     return values
+
+
+def _descriptor_from_host(value: Any) -> TensorDescriptor:
+    if isinstance(value, TensorDescriptor):
+        return value
+    if type(value).__name__ in _HOST_TENSOR_DESCRIPTOR_TYPES:
+        return TensorDescriptor(
+            value.base,
+            list(value.shape),
+            list(value.strides),
+            list(value.block_shape),
+            value.layout,
+            getattr(value, "padding", "zero"),
+            getattr(value, "element_strides", None),
+            getattr(value, "pixel_box_lower_corner", None),
+            getattr(value, "pixel_box_upper_corner", None),
+        )
+    raise TypeError(f"Unsupported TMA descriptor type: {type(value)}")
+
+
+def _implicit_gluon_cvt(name: str, value: Any, constexprs: set[str]) -> Any:
+    if name in constexprs:
+        return value
+    if isinstance(value, TensorDescriptor) or (
+        type(value).__name__ in _HOST_TENSOR_DESCRIPTOR_TYPES
+    ):
+        return _descriptor_from_host(value)
+    converted = _implicit_cvt(value)
+    data_ptr = getattr(value, "data_ptr", None)
+    if callable(data_ptr) and isinstance(converted, tl.tensor):
+        converted.handle.set_attr("gluon.host_tensor", value)
+    return converted
 
 
 class SharedMemoryHandle(TensorHandle, gluon_core.shared_memory_descriptor):
@@ -1895,9 +1944,10 @@ class Builder(interpreter_builder.__class__):
         acc: TensorMemoryHandle,
         use_acc: Any = True,
         pred: Any = True,
-        multicast: Any = False,
         mbarriers: Any = None,
         mbarrier_preds: Any = None,
+        two_ctas: Any = False,
+        multicast: Any = False,
     ):
         if not bool(_to_python_scalar(pred)):
             return None
@@ -1922,9 +1972,10 @@ class Builder(interpreter_builder.__class__):
         b_type: Any,
         use_acc: Any = True,
         pred: Any = True,
-        multicast: Any = False,
         mbarriers: Any = None,
         mbarrier_preds: Any = None,
+        two_ctas: Any = False,
+        multicast: Any = False,
     ):
         if not bool(_to_python_scalar(pred)):
             return None
@@ -1978,7 +2029,7 @@ class Builder(interpreter_builder.__class__):
         )
 
     def create_warpgroup_mma_wait(self, deps: list[TensorHandle], num_outstanding: Any):
-        return deps[0] if len(deps) == 1 else deps
+        return deps
 
     def create_warp_pipeline_border(self, marker: Any, priority: Any):
         return None
@@ -2061,3 +2112,98 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
     _patch_lang_tensor(gluon_core.tensor, scope)
     _patch_lang_core(gluon_core, scope)
     return scope
+
+
+class GluonInterpretedFunction:
+    """Callable wrapper that executes a Gluon kernel on CPU through NumPy."""
+
+    def __init__(self, fn: Callable, arg_names: list[str] | None = None) -> None:
+        self.fn = fn
+        signature = inspect.signature(fn)
+        self.arg_names = arg_names or [v.name for v in signature.parameters.values()]
+        annotations = fn.__annotations__
+        self.constexprs = {
+            name
+            for name in self.arg_names
+            if annotations.get(name) in ("constexpr", tl.constexpr)
+        }
+
+    def _call_args(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        argspec = inspect.getfullargspec(self.fn)
+        filtered_kwargs = {
+            key: value for key, value in kwargs.items() if key in argspec.args
+        }
+        return inspect.getcallargs(self.fn, *args, **filtered_kwargs)
+
+    @staticmethod
+    def _canonical_grid(grid: Any, call_args: dict[str, Any]) -> tuple[int, int, int]:
+        if callable(grid):
+            grid = grid(call_args)
+        if isinstance(grid, int):
+            grid = (grid,)
+        grid = tuple(int(dim) for dim in grid)
+        if len(grid) > 3:
+            raise ValueError(f"grid must have at most 3 dimensions, got {grid}")
+        return grid + (1,) * (3 - len(grid))
+
+    def run(self, *args_dev: Any, grid: Any, warmup: bool = False, **kwargs: Any):
+        if warmup:
+            return None
+
+        client_manager = kwargs.pop("client_manager", None)
+        should_patch_lang = kwargs.pop("_patch_lang", True)
+        if "num_warps" not in self.arg_names:
+            kwargs.pop("num_warps", None)
+        if "num_ctas" not in self.arg_names:
+            kwargs.pop("num_ctas", None)
+
+        grid_helper = GridExecutor(self.fn, self.arg_names, grid)
+        args_hst, kwargs_hst = grid_helper._init_args_hst(args_dev, kwargs)
+        raw_call_args = self._call_args(tuple(args_hst), kwargs_hst)
+        call_args = {
+            name: _implicit_gluon_cvt(name, value, self.constexprs)
+            for name, value in raw_call_args.items()
+        }
+        canonical_grid = self._canonical_grid(grid, raw_call_args)
+        interpreter_builder.set_grid_dim(*canonical_grid)
+
+        if client_manager is not None:
+            for name, arg in raw_call_args.items():
+                client_manager.arg_callback(name, arg, call_args[name])
+                base = getattr(arg, "base", None)
+                data_ptr = getattr(base, "data_ptr", None)
+                if callable(data_ptr):
+                    client_manager.arg_callback(f"{name}.base", base, base)
+            client_manager.grid_callback(canonical_grid)
+
+        patch_scope = patch_lang(self.fn) if should_patch_lang else _LangPatchScope()
+        try:
+
+            def run_grid() -> None:
+                for x in range(canonical_grid[0]):
+                    for y in range(canonical_grid[1]):
+                        for z in range(canonical_grid[2]):
+                            interpreter_builder.set_grid_idx(x, y, z)
+                            if client_manager is not None:
+                                client_manager.grid_idx_callback((x, y, z))
+                                if not client_manager.pre_run_callback(self.fn):
+                                    return
+                            self.fn(**call_args)
+                            if (
+                                client_manager is not None
+                                and not client_manager.post_run_callback(self.fn)
+                            ):
+                                return
+
+            run_grid()
+        except Exception as exc:
+            if triton.knobs.compilation.front_end_debugging:
+                raise
+            raise InterpreterError(repr(exc)) from exc
+        finally:
+            patch_scope.restore()
+
+        grid_helper._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
+        return None
