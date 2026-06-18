@@ -304,14 +304,14 @@ class Profiler(Client):
             if not self.disable_buffer_load_check:
                 self._check_32bit_range(byte_offset, element_bytewidth, offset_data)
 
-        if issubclass(op_type, Load):
+        if op_type is Load:
             if self.disable_load_store_skipping:
                 return OpCallbacks(before_callback=pre_load_callback)
             else:
                 return OpCallbacks(
                     before_callback=pre_load_callback, op_overrider=load_overrider
                 )
-        elif issubclass(op_type, Store):
+        elif op_type is Store:
             if self.disable_load_store_skipping:
                 return OpCallbacks(before_callback=pre_store_callback)
             else:
