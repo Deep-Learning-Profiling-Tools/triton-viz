@@ -84,8 +84,7 @@ class Tracer(Client):
         self.tensors = sorted(self.tensors, key=lambda x: x.data_ptr())
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        def post_allocate_callback(ret):
-            assert hasattr(ret, "data")
+        def post_allocate_callback(ret, *_args):
             self.tensors.append(ret)
 
         def _convert_keys_to_numpy(keys):
@@ -206,15 +205,19 @@ class Tracer(Client):
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
-        callbacks = {
-            Allocate: OpCallbacks(after_callback=post_allocate_callback),
-            Load: OpCallbacks(before_callback=pre_load_callback),
-            Store: OpCallbacks(before_callback=pre_store_callback),
-            Transfer: OpCallbacks(before_callback=pre_transfer_callback),
-            ReduceSum: OpCallbacks(after_callback=post_reduce_sum_callback),
-            Dot: OpCallbacks(after_callback=post_dot_callback),
-        }
-        return callbacks.get(op_type, OpCallbacks())
+        if op_type is Allocate:
+            return OpCallbacks(after_callback=post_allocate_callback)
+        if issubclass(op_type, Load):
+            return OpCallbacks(before_callback=pre_load_callback)
+        if issubclass(op_type, Store):
+            return OpCallbacks(before_callback=pre_store_callback)
+        if op_type is Transfer:
+            return OpCallbacks(before_callback=pre_transfer_callback)
+        if op_type is ReduceSum:
+            return OpCallbacks(after_callback=post_reduce_sum_callback)
+        if op_type is Dot:
+            return OpCallbacks(after_callback=post_dot_callback)
+        return OpCallbacks()
 
     def register_for_loop_callback(self):
         return ForLoopCallbacks()
