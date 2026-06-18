@@ -86,7 +86,6 @@ except ImportError as exc:
     gluon_amd_tdm = None
 
 _MISSING = object()
-_POINTER_TENSORS: dict[int, Any] = {}
 _HOST_TENSOR_DESCRIPTOR_TYPES = {"TensorDescriptor", "TensorDescriptorIm2Col"}
 
 
@@ -314,12 +313,10 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
         # Descriptors created inside a kernel hold an interpreter pointer handle.
         # Resolve it back to the CPU tensor copied by GridExecutor before loads.
         if isinstance(self.base, TensorHandle):
-            data = np.asarray(self.base.data)
-            if data.size == 1:
-                host_tensor = _POINTER_TENSORS.get(int(data.reshape(-1)[0]))
-                if host_tensor is not None:
-                    return _host_array(host_tensor)
-            return data
+            host_tensor = getattr(self.base, "attr", {}).get("gluon.host_tensor")
+            if host_tensor is not None:
+                return _host_array(host_tensor)
+            return np.asarray(self.base.data)
         return _host_array(self.base)
 
     @property
@@ -472,7 +469,11 @@ def _implicit_gluon_cvt(name: str, value: Any, constexprs: set[str]) -> Any:
         type(value).__name__ in _HOST_TENSOR_DESCRIPTOR_TYPES
     ):
         return _descriptor_from_host(value)
-    return _implicit_cvt(value)
+    converted = _implicit_cvt(value)
+    data_ptr = getattr(value, "data_ptr", None)
+    if callable(data_ptr) and isinstance(converted, tl.tensor):
+        converted.handle.set_attr("gluon.host_tensor", value)
+    return converted
 
 
 class SharedMemoryHandle(TensorHandle, gluon_core.shared_memory_descriptor):
@@ -1943,9 +1944,10 @@ class Builder(interpreter_builder.__class__):
         acc: TensorMemoryHandle,
         use_acc: Any = True,
         pred: Any = True,
-        multicast: Any = False,
         mbarriers: Any = None,
         mbarrier_preds: Any = None,
+        two_ctas: Any = False,
+        multicast: Any = False,
     ):
         if not bool(_to_python_scalar(pred)):
             return None
@@ -1970,9 +1972,10 @@ class Builder(interpreter_builder.__class__):
         b_type: Any,
         use_acc: Any = True,
         pred: Any = True,
-        multicast: Any = False,
         mbarriers: Any = None,
         mbarrier_preds: Any = None,
+        two_ctas: Any = False,
+        multicast: Any = False,
     ):
         if not bool(_to_python_scalar(pred)):
             return None
@@ -2026,7 +2029,7 @@ class Builder(interpreter_builder.__class__):
         )
 
     def create_warpgroup_mma_wait(self, deps: list[TensorHandle], num_outstanding: Any):
-        return deps[0] if len(deps) == 1 else deps
+        return deps
 
     def create_warp_pipeline_border(self, marker: Any, priority: Any):
         return None
@@ -2175,43 +2178,32 @@ class GluonInterpretedFunction:
                     client_manager.arg_callback(f"{name}.base", base, base)
             client_manager.grid_callback(canonical_grid)
 
-        previous_pointer_tensors = dict(_POINTER_TENSORS)
-        for arg in raw_call_args.values():
-            data_ptr = getattr(arg, "data_ptr", None)
-            if callable(data_ptr):
-                _POINTER_TENSORS[int(data_ptr())] = arg
-
         patch_scope = patch_lang(self.fn) if should_patch_lang else _LangPatchScope()
         try:
-            should_stop = False
-            for x in range(canonical_grid[0]):
-                for y in range(canonical_grid[1]):
-                    for z in range(canonical_grid[2]):
-                        interpreter_builder.set_grid_idx(x, y, z)
-                        if client_manager is not None:
-                            client_manager.grid_idx_callback((x, y, z))
-                            if not client_manager.pre_run_callback(self.fn):
-                                should_stop = True
-                                break
-                        self.fn(**call_args)
-                        if (
-                            client_manager is not None
-                            and not client_manager.post_run_callback(self.fn)
-                        ):
-                            should_stop = True
-                            break
-                    if should_stop:
-                        break
-                if should_stop:
-                    break
+
+            def run_grid() -> None:
+                for x in range(canonical_grid[0]):
+                    for y in range(canonical_grid[1]):
+                        for z in range(canonical_grid[2]):
+                            interpreter_builder.set_grid_idx(x, y, z)
+                            if client_manager is not None:
+                                client_manager.grid_idx_callback((x, y, z))
+                                if not client_manager.pre_run_callback(self.fn):
+                                    return
+                            self.fn(**call_args)
+                            if (
+                                client_manager is not None
+                                and not client_manager.post_run_callback(self.fn)
+                            ):
+                                return
+
+            run_grid()
         except Exception as exc:
             if triton.knobs.compilation.front_end_debugging:
                 raise
             raise InterpreterError(repr(exc)) from exc
         finally:
             patch_scope.restore()
-            _POINTER_TENSORS.clear()
-            _POINTER_TENSORS.update(previous_pointer_tensors)
 
         grid_helper._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
         return None
