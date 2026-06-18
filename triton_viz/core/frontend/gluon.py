@@ -109,6 +109,8 @@ def _gluon_pointer_load_adapter(
         mask = _args[0]
     ptr = _gluon_tensor_handle(ptr)
     mask = _gluon_tensor_handle(mask)
+    if mask is None and isinstance(ptr, TensorHandle):
+        mask = TensorHandle(np.ones_like(ptr.data, dtype=bool), tl.int1)
     return AdapterResult(ptr, mask, None)
 
 
@@ -193,6 +195,8 @@ def _gluon_pointer_store_adapter(
         mask = _args[0]
     ptr = _gluon_tensor_handle(ptr)
     mask = _gluon_tensor_handle(mask)
+    if mask is None and isinstance(ptr, TensorHandle):
+        mask = TensorHandle(np.ones_like(ptr.data, dtype=bool), tl.int1)
     return AdapterResult(ptr, mask, None)
 
 
@@ -504,7 +508,6 @@ for namespace, attrs in GLUON_NAMESPACES.items():
                 descriptor_kwarg="tensor_desc",
                 coords_kwarg="coord",
             )
-GLUON_REPLAY_CALLABLES: set[Callable] = set()
 
 
 class GluonFrontend(Frontend):
@@ -522,6 +525,7 @@ class GluonFrontend(Frontend):
             adapters=definition.adapters,
             namespaces=definition.namespaces,
         )
+        self.patch_lang_before_ops = True
 
     @staticmethod
     def symbolic_ops_for_op_type(op_type: type[Op]) -> tuple[str, ...]:
@@ -529,6 +533,14 @@ class GluonFrontend(Frontend):
 
     def maybe_yield_for_multism(self) -> None:
         _maybe_yield_warp_specialize()
+
+    def op_for_patch(self, namespace: Any, attr: str) -> Callable:
+        current_op = getattr(namespace, attr)
+        original_op = self.original_ops[namespace][attr]
+        adapter = GLUON_CALLABLE_ADAPTERS.get(original_op)
+        if adapter is not None:
+            GLUON_CALLABLE_ADAPTERS[current_op] = adapter
+        return current_op
 
     def run_op_overrider(
         self,
@@ -540,12 +552,6 @@ class GluonFrontend(Frontend):
     ):
         adapter = GLUON_CALLABLE_ADAPTERS.get(op, self.adapters[op_type])
         adapter_result = adapter(*args, **kwargs)
-        if op in GLUON_REPLAY_CALLABLES:
-            try:
-                op_overrider(*adapter_result.args, **adapter_result.kwargs)
-            except (NotImplementedError, TypeError, ValueError):
-                pass
-            return op(*args, **kwargs)
         return op_overrider(*adapter_result.args, **adapter_result.kwargs)
 
     def normalize_symbolic_value(self, value: Any) -> Any:

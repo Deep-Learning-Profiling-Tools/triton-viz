@@ -32,6 +32,9 @@ from triton.experimental.gluon.language.amd.cdna4 import (  # type: ignore
 from triton.experimental.gluon.language.nvidia.ampere import (  # type: ignore
     async_copy as gluon_ampere_async_copy,
 )
+from triton.experimental.gluon.language.nvidia.ampere import (  # type: ignore
+    mbarrier as gluon_ampere_mbarrier,
+)
 from triton.experimental.gluon.language.nvidia import blackwell as gluon_blackwell  # type: ignore
 from triton.experimental.gluon.language.nvidia import hopper as gluon_hopper  # type: ignore
 from triton.experimental.gluon.language.nvidia.blackwell import (  # type: ignore
@@ -2108,6 +2111,7 @@ gluon_semantic = GluonSemantic(gluon_builder)
 _GLUON_BUILTIN_MODULES: tuple[Any, ...] = tuple(
     module
     for module in (
+        tl.core,
         gluon_core,
         gl,
         gluon_math,
@@ -2124,6 +2128,7 @@ _GLUON_BUILTIN_MODULES: tuple[Any, ...] = tuple(
         gluon_amd_rdna3,
         gluon_amd_rdna4,
         gluon_ampere_async_copy,
+        gluon_ampere_mbarrier,
         gluon_blackwell,
         gluon_blackwell_tma,
         gluon_clc,
@@ -2138,6 +2143,7 @@ _GLUON_BUILTIN_MODULES: tuple[Any, ...] = tuple(
 _GLUON_BUILTIN_CLASSES: tuple[Any, ...] = tuple(
     cls
     for cls in (
+        gluon_core.tensor,
         gluon_core.shared_memory_descriptor,
         gluon_blackwell.tensor_memory_descriptor,
         None if gluon_clc is None else gluon_clc.clc_result,
@@ -2165,6 +2171,72 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
         scope.set_attr(pkg, name, new_member)
 
 
+def _patch_mbarrier_module(module: Any, scope: _LangPatchScope) -> None:
+    if module is None:
+        return
+
+    if hasattr(module, "allocate_mbarrier"):
+
+        def allocate_mbarrier(*_args: Any, **_kwargs: Any):
+            return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
+
+        scope.set_attr(module, "allocate_mbarrier", allocate_mbarrier)
+
+    if hasattr(module, "init"):
+
+        def init(mbarrier: Any, count: Any = 1, **_kwargs: Any):
+            return gluon_builder.create_mbarrier_init(mbarrier, count)
+
+        scope.set_attr(module, "init", init)
+
+    if hasattr(module, "expect"):
+
+        def expect(
+            mbarrier: Any,
+            bytes_per_cta: Any = None,
+            pred: Any = True,
+            **_kwargs: Any,
+        ):
+            if bool(_to_python_scalar(pred)):
+                return gluon_builder.create_mbarrier_expect(mbarrier, bytes_per_cta)
+            return None
+
+        scope.set_attr(module, "expect", expect)
+
+    if hasattr(module, "arrive"):
+
+        def arrive(
+            mbarrier: Any,
+            *,
+            count: Any = 1,
+            pred: Any = True,
+            **_kwargs: Any,
+        ):
+            return gluon_builder.create_mbarrier_arrive(mbarrier, pred, count)
+
+        scope.set_attr(module, "arrive", arrive)
+
+    if hasattr(module, "wait"):
+
+        def wait(
+            mbarrier: Any,
+            phase: Any,
+            pred: Any = True,
+            deps: Any = (),
+            **_kwargs: Any,
+        ):
+            return gluon_builder.create_mbarrier_wait(mbarrier, phase, pred, deps)
+
+        scope.set_attr(module, "wait", wait)
+
+    if hasattr(module, "invalidate"):
+
+        def invalidate(mbarrier: Any, **_kwargs: Any):
+            return gluon_builder.create_mbarrier_inval(mbarrier)
+
+        scope.set_attr(module, "invalidate", invalidate)
+
+
 def patch_lang(fn: Callable) -> _LangPatchScope:
     """Patch Gluon builtins to execute through the NumPy interpreter builder."""
 
@@ -2173,7 +2245,10 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
         _patch_gluon_builtins(module, scope)
     for cls in _GLUON_BUILTIN_CLASSES:
         _patch_gluon_builtins(cls, scope)
+    _patch_mbarrier_module(gluon_ampere_mbarrier, scope)
+    _patch_mbarrier_module(gluon_hopper_mbarrier, scope)
     _patch_lang_tensor(gluon_core.tensor, scope)
+    _patch_lang_core(tl.core, scope)
     _patch_lang_core(gluon_core, scope)
     return scope
 

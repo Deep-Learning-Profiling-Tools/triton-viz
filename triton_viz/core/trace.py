@@ -1,7 +1,6 @@
 from copy import deepcopy
 from collections.abc import Callable
 from typing import Any
-from triton.runtime.interpreter import InterpreterError
 from ..utils.traceback_utils import CODE_KEYS, get_code_key
 
 from .config import config as cfg
@@ -280,6 +279,7 @@ class NKITrace(LaunchInterface, TraceInterface):
 class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
     def __init__(self, runner: Any, client: str | Client) -> None:
         from triton.experimental import gluon
+        from .simulation.gluon import GluonInterpretedFunction
 
         # Gluon has exposed different JIT class names across Triton versions.
         # Treat an object that already has the JIT runner protocol as compiled,
@@ -287,26 +287,26 @@ class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
         if not all(hasattr(runner, attr) for attr in ("fn", "run", "arg_names")):
             runner = gluon.jit(runner)
 
-        self.runner = runner
         self.fn = runner
         self.base_fn = runner.fn
         self.arg_names = runner.arg_names
+        self.interpreted_fn = GluonInterpretedFunction(self.base_fn, self.arg_names)
+        self.runner = self.interpreted_fn
 
         TraceInterface.__init__(self, client)
         self._copy_callable_attrs(runner, self.base_fn)
 
-    def _current_base_fn(self) -> Callable:
-        return self.runner.fn
-
-    def _current_arg_names(self) -> list[str]:
-        return list(self.runner.arg_names)
-
-    def _current_interpreter_fn(self):
+    def _refresh_runner(self) -> None:
         from .simulation.gluon import GluonInterpretedFunction
 
-        return GluonInterpretedFunction(
-            self._current_base_fn(), self._current_arg_names()
-        )
+        base_fn = self.fn.fn
+        arg_names = list(self.fn.arg_names)
+        if self.base_fn is base_fn and self.arg_names == arg_names:
+            return
+        self.base_fn = base_fn
+        self.arg_names = arg_names
+        self.interpreted_fn = GluonInterpretedFunction(base_fn, arg_names)
+        self.runner = self.interpreted_fn
 
     def run(self, *args, **kwargs):
         grid = kwargs.get("grid")
@@ -315,31 +315,23 @@ class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
                 "GluonTrace.run() missing required keyword argument: 'grid'"
             )
 
-        base_fn = self._current_base_fn()
-        arg_names = self._current_arg_names()
-        interpreter_fn = self._current_interpreter_fn()
-        self.base_fn = base_fn
-        self.arg_names = arg_names
+        self._refresh_runner()
 
-        with self.client_manager.patch_run(base_fn, frontend_name="gluon"):
+        with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
             try:
-                try:
-                    ret = interpreter_fn.run(
-                        *args,
-                        **kwargs,
-                        client_manager=self.client_manager,
-                        _patch_lang=False,
-                        _lifecycle_callbacks=False,
-                    )
-                except InterpreterError:
-                    ret = self.runner.run(*args, **kwargs)
+                ret = self.runner.run(
+                    *args,
+                    **kwargs,
+                    client_manager=self.client_manager,
+                    _lifecycle_callbacks=False,
+                )
             finally:
-                self.client_manager.post_run_callback(base_fn)
+                self.client_manager.post_run_callback(self.base_fn)
             self.finalize()
             return ret
 
     def __call__(self, *args, **kwargs):
-        return self.runner(*args, **kwargs)
+        return self.fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
         return self.run(*args, warmup=True, **kwargs)

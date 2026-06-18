@@ -466,7 +466,7 @@ def test_gluon_frontend_wraps_symbolic_concrete_fn():
     assert calls == [(arg, named)]
 
 
-def test_gluon_language_ops_patch_and_delegate_to_semantics():
+def test_gluon_language_ops_patch_and_use_simulation_callable():
     from triton.experimental.gluon import language as ttgl
 
     seen_axes = []
@@ -509,20 +509,17 @@ def test_gluon_language_ops_patch_and_delegate_to_semantics():
         def post_warmup_callback(self, jit_fn, ret):
             pass
 
-    class FakeSemantic:
-        def program_id(self, axis):
-            return ("pid", axis)
-
     def kernel():
         pass
 
     manager = ClientManager([RecordingClient()])
     with manager.patch_run(kernel, frontend_name="gluon"):
         assert ttgl.program_id is not original_program_id
-        assert ttgl.program_id(2, _semantic=FakeSemantic()) == ("pid", 2)
+        result = ttgl.program_id(2)
 
     assert ttgl.program_id is original_program_id
     assert seen_axes == [2]
+    assert result.handle.data.tolist() == [0]
 
 
 def test_triton_pointer_cast_aliases_have_distinct_op_types():

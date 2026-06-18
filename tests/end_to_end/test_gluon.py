@@ -78,7 +78,7 @@ def test_gluon_sanitizer_allows_in_bounds_kernel():
     ret = kernel[(1,)](inp, out, num_warps=1)
     torch.cuda.synchronize()
 
-    assert ret is not None
+    assert ret is None
     assert sanitizer.records == []
     torch.testing.assert_close(out, inp, atol=0, rtol=0)
 
@@ -91,17 +91,20 @@ def test_gluon_sanitizer_reports_real_oob_load_kernel(monkeypatch):
         client=sanitizer,
         frontend="gluon",
     )(_oob_scalar_offset_kernel)
-    kernel.runner.device_caches.clear()
+    kernel.fn.device_caches.clear()
 
     inp = torch.tensor([42.0], device="cuda")
     out = torch.empty_like(inp)
     ret = kernel[(1,)](inp, out, num_warps=1)
     torch.cuda.synchronize()
 
-    assert ret is not None
+    assert ret is None
     assert sanitizer.records
     assert sanitizer.records[0].op_type is Load
-    assert sanitizer.records[0].violation_address == inp.data_ptr() + inp.element_size()
+    assert (
+        sanitizer.records[0].violation_address
+        == sanitizer.records[0].tensor.data_ptr() + inp.element_size()
+    )
 
 
 @pytest.mark.skipif(not _has_cuda_device(), reason="CUDA required for Gluon execution")
@@ -118,7 +121,7 @@ def test_gluon_sanitizer_allows_masked_in_bounds_kernel():
     ret = kernel[(1,)](inp, out, 4, 8, layout, num_warps=1)
     torch.cuda.synchronize()
 
-    assert ret is not None
+    assert ret is None
     assert sanitizer.records == []
 
 

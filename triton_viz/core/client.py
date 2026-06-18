@@ -174,8 +174,7 @@ class ClientManager:
         frontend = get_frontend(frontend_name)
         namespaces = frontend.namespaces
         with patch_calls(frontend_name):
-            lang_patched_early = frontend_name == "gluon"
-            if lang_patched_early:
+            if frontend.patch_lang_before_ops:
                 patch_lang(fn, frontend_name, client_manager=self)
             # Collect all for-loop callbacks from clients
             all_loop_callbacks = []
@@ -193,7 +192,7 @@ class ClientManager:
 
             self._populate_loop_hooks(all_loop_callbacks)
             patch_for_loop(frontend_name)
-            if not lang_patched_early:
+            if not frontend.patch_lang_before_ops:
                 # NKI/Triton language shims may copy builder callables, so install
                 # them after patch_op has wrapped the builder namespace.
                 patch_lang(fn, frontend_name, client_manager=self)
@@ -203,11 +202,11 @@ class ClientManager:
                 for namespace, attrs in namespaces.items():
                     for attr, op in attrs.items():
                         unpatch_op(namespace, attr, frontend_name)
-                if lang_patched_early:
+                if frontend.patch_lang_before_ops:
                     unpatch_lang(frontend_name)
                 unpatch_for_loop(frontend_name)
                 self._clear_loop_hooks()
-                if not lang_patched_early:
+                if not frontend.patch_lang_before_ops:
                     unpatch_lang(frontend_name)
 
     def pre_run_callback(self, fn: Callable) -> bool:
