@@ -34,7 +34,6 @@ from triton.experimental.gluon.language.nvidia.ampere import (  # type: ignore
 )
 from triton.experimental.gluon.language.nvidia import blackwell as gluon_blackwell  # type: ignore
 from triton.experimental.gluon.language.nvidia import hopper as gluon_hopper  # type: ignore
-from triton.experimental.gluon.language.nvidia.blackwell import clc as gluon_clc  # type: ignore
 from triton.experimental.gluon.language.nvidia.blackwell import (  # type: ignore
     tma as gluon_blackwell_tma,
 )
@@ -84,6 +83,11 @@ except ImportError as exc:
     gluon_amd_cluster = None
     gluon_amd_mbarrier = None
     gluon_amd_tdm = None
+
+try:
+    from triton.experimental.gluon.language.nvidia.blackwell import clc as gluon_clc  # type: ignore
+except ImportError:
+    gluon_clc = None
 
 _MISSING = object()
 _HOST_TENSOR_DESCRIPTOR_TYPES = {"TensorDescriptor", "TensorDescriptorIm2Col"}
@@ -2075,10 +2079,14 @@ _GLUON_BUILTIN_MODULES: tuple[Any, ...] = tuple(
 )
 
 
-_GLUON_BUILTIN_CLASSES: tuple[Any, ...] = (
-    gluon_core.shared_memory_descriptor,
-    gluon_blackwell.tensor_memory_descriptor,
-    gluon_clc.clc_result,
+_GLUON_BUILTIN_CLASSES: tuple[Any, ...] = tuple(
+    cls
+    for cls in (
+        gluon_core.shared_memory_descriptor,
+        gluon_blackwell.tensor_memory_descriptor,
+        None if gluon_clc is None else gluon_clc.clc_result,
+    )
+    if cls is not None
 )
 
 
@@ -2154,6 +2162,7 @@ class GluonInterpretedFunction:
 
         client_manager = kwargs.pop("client_manager", None)
         should_patch_lang = kwargs.pop("_patch_lang", True)
+        run_lifecycle_callbacks = kwargs.pop("_lifecycle_callbacks", True)
         if "num_warps" not in self.arg_names:
             kwargs.pop("num_warps", None)
         if "num_ctas" not in self.arg_names:
@@ -2188,11 +2197,15 @@ class GluonInterpretedFunction:
                             interpreter_builder.set_grid_idx(x, y, z)
                             if client_manager is not None:
                                 client_manager.grid_idx_callback((x, y, z))
-                                if not client_manager.pre_run_callback(self.fn):
+                                if (
+                                    run_lifecycle_callbacks
+                                    and not client_manager.pre_run_callback(self.fn)
+                                ):
                                     return
                             self.fn(**call_args)
                             if (
-                                client_manager is not None
+                                run_lifecycle_callbacks
+                                and client_manager is not None
                                 and not client_manager.post_run_callback(self.fn)
                             ):
                                 return

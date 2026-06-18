@@ -1,6 +1,7 @@
 from copy import deepcopy
 from collections.abc import Callable
 from typing import Any
+from triton.runtime.interpreter import InterpreterError
 from ..utils.traceback_utils import CODE_KEYS, get_code_key
 
 from .config import config as cfg
@@ -342,12 +343,19 @@ class GluonTrace(LaunchInterface, TraceInterface):
             )
 
         with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
-            ret = self.interpreter_fn.run(
-                *args,
-                **kwargs,
-                client_manager=self.client_manager,
-                _patch_lang=False,
-            )
+            try:
+                try:
+                    ret = self.interpreter_fn.run(
+                        *args,
+                        **kwargs,
+                        client_manager=self.client_manager,
+                        _patch_lang=False,
+                        _lifecycle_callbacks=False,
+                    )
+                except InterpreterError:
+                    ret = self.runner.run(*args, **kwargs)
+            finally:
+                self.client_manager.post_run_callback(self.base_fn)
             self.finalize()
             return ret
 
