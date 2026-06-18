@@ -10,7 +10,6 @@ from ..clients.race_detector.race_detector import NullRaceDetector
 from .client import ClientManager, Client
 from .data import Launch
 import types
-import inspect
 
 
 launches: list[Launch] = []
@@ -67,7 +66,30 @@ class LaunchInterface:
         )
 
 
-class TritonTrace(LaunchInterface, TraceInterface):
+class KernelTraceMixin:
+    def _copy_callable_attrs(
+        self,
+        runner: Any,
+        base_fn: Callable | None = None,
+        *,
+        src_fallback: Any = None,
+    ) -> None:
+        for attr in ("__name__", "__module__", "__doc__", "__qualname__"):
+            if hasattr(runner, attr):
+                setattr(self, attr, getattr(runner, attr))
+            elif base_fn is not None and hasattr(base_fn, attr):
+                setattr(self, attr, getattr(base_fn, attr))
+
+        if not hasattr(self, "__name__"):
+            self.__name__ = "<unknown>"
+
+        if hasattr(runner, "src"):
+            self.src = runner.src
+        elif src_fallback is not None and hasattr(src_fallback, "src"):
+            self.src = src_fallback.src
+
+
+class TritonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
     def __init__(
         self,
         runner: Any,
@@ -132,35 +154,7 @@ class TritonTrace(LaunchInterface, TraceInterface):
 
         TraceInterface.__init__(self, client)
 
-        # Preserve common function attributes for compatibility
-        # with code that expects to access these attributes on the kernel
-        if hasattr(runner, "__name__"):
-            self.__name__ = runner.__name__
-        elif self.base_fn and hasattr(self.base_fn, "__name__"):
-            self.__name__ = self.base_fn.__name__
-        else:
-            self.__name__ = "<unknown>"
-
-        if hasattr(runner, "__module__"):
-            self.__module__ = runner.__module__
-        elif self.base_fn and hasattr(self.base_fn, "__module__"):
-            self.__module__ = self.base_fn.__module__
-
-        if hasattr(runner, "__doc__"):
-            self.__doc__ = runner.__doc__
-        elif self.base_fn and hasattr(self.base_fn, "__doc__"):
-            self.__doc__ = self.base_fn.__doc__
-
-        if hasattr(runner, "__qualname__"):
-            self.__qualname__ = runner.__qualname__
-        elif self.base_fn and hasattr(self.base_fn, "__qualname__"):
-            self.__qualname__ = self.base_fn.__qualname__
-
-        # Preserve Triton-specific attributes (like src for JITFunction)
-        if hasattr(runner, "src"):
-            self.src = runner.src
-        elif self.jit_fn and hasattr(self.jit_fn, "src"):
-            self.src = self.jit_fn.src
+        self._copy_callable_attrs(runner, self.base_fn, src_fallback=self.jit_fn)
 
     def run(self, *args, **kwargs):
         with self.client_manager.patch_warmup(self.jit_fn):
@@ -283,7 +277,7 @@ class NKITrace(LaunchInterface, TraceInterface):
             return ret
 
 
-class GluonTrace(LaunchInterface, TraceInterface):
+class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
     def __init__(self, runner: Any, client: str | Client) -> None:
         from triton.experimental import gluon
 
@@ -297,43 +291,22 @@ class GluonTrace(LaunchInterface, TraceInterface):
         self.fn = runner
         self.base_fn = runner.fn
         self.arg_names = runner.arg_names
-        from .simulation.gluon import GluonInterpretedFunction
-
-        self.interpreter_fn = GluonInterpretedFunction(self.base_fn, self.arg_names)
 
         TraceInterface.__init__(self, client)
+        self._copy_callable_attrs(runner, self.base_fn)
 
-        for attr in ("__name__", "__module__", "__doc__", "__qualname__"):
-            if hasattr(runner, attr):
-                setattr(self, attr, getattr(runner, attr))
-            elif hasattr(self.base_fn, attr):
-                setattr(self, attr, getattr(self.base_fn, attr))
+    def _current_base_fn(self) -> Callable:
+        return self.runner.fn
 
-        if hasattr(runner, "src"):
-            self.src = runner.src
+    def _current_arg_names(self) -> list[str]:
+        return list(self.runner.arg_names)
 
-    def _bound_call_args(
-        self, args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> dict[str, Any]:
-        try:
-            return inspect.getcallargs(self.base_fn, *args, **kwargs)
-        except TypeError:
-            bound = {name: arg for name, arg in zip(self.arg_names, args)}
-            bound.update(kwargs)
-            return bound
+    def _current_interpreter_fn(self):
+        from .simulation.gluon import GluonInterpretedFunction
 
-    @staticmethod
-    def _canonical_grid(grid: Any, bound_args: dict[str, Any]) -> tuple[int, int, int]:
-        if callable(grid):
-            grid = grid(bound_args)
-        if isinstance(grid, int):
-            grid = (grid,)
-        grid = tuple(int(dim) for dim in grid)
-        if len(grid) > 3:
-            raise ValueError(
-                f"Expected Gluon launch grid with at most 3 dims, got {grid}"
-            )
-        return grid + (1,) * (3 - len(grid))
+        return GluonInterpretedFunction(
+            self._current_base_fn(), self._current_arg_names()
+        )
 
     def run(self, *args, **kwargs):
         grid = kwargs.get("grid")
@@ -342,10 +315,16 @@ class GluonTrace(LaunchInterface, TraceInterface):
                 "GluonTrace.run() missing required keyword argument: 'grid'"
             )
 
-        with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
+        base_fn = self._current_base_fn()
+        arg_names = self._current_arg_names()
+        interpreter_fn = self._current_interpreter_fn()
+        self.base_fn = base_fn
+        self.arg_names = arg_names
+
+        with self.client_manager.patch_run(base_fn, frontend_name="gluon"):
             try:
                 try:
-                    ret = self.interpreter_fn.run(
+                    ret = interpreter_fn.run(
                         *args,
                         **kwargs,
                         client_manager=self.client_manager,
@@ -355,7 +334,7 @@ class GluonTrace(LaunchInterface, TraceInterface):
                 except InterpreterError:
                     ret = self.runner.run(*args, **kwargs)
             finally:
-                self.client_manager.post_run_callback(self.base_fn)
+                self.client_manager.post_run_callback(base_fn)
             self.finalize()
             return ret
 

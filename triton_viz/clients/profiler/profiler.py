@@ -156,16 +156,12 @@ class Profiler(Client):
             self.sampled_blocks = None
 
     def _report_load_store_bytes(
-        self, type, ptr: TensorHandle, mask: TensorHandle | None
+        self, type, ptr: TensorHandle, mask: TensorHandle
     ):  # internal methods assumed to be called under the lock
         dtype_tt = ptr.get_element_ty()
         dtype_np: np.dtype = _get_np_dtype(dtype_tt)
-        if mask is None:
-            mask_true = ptr.data.size
-            mask_false = 0
-        else:
-            mask_true = np.count_nonzero(mask.data)
-            mask_false = np.count_nonzero(np.logical_not(mask.data))
+        mask_true = np.count_nonzero(mask.data)
+        mask_false = np.count_nonzero(np.logical_not(mask.data))
         total_bytes_true = mask_true * dtype_np.itemsize
         total_bytes_attempted = (mask_true + mask_false) * dtype_np.itemsize
         if type == "load":
@@ -203,20 +199,15 @@ class Profiler(Client):
                 self.potential_buffer_load_issue_found = True
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
-        def _get_mask_stats(
-            ptr: TensorHandle, mask: TensorHandle | None
-        ) -> tuple[int, int]:
+        def _get_mask_stats(mask: TensorHandle) -> tuple[int, int]:
             """Get mask statistics: total count and false count.
 
             Args:
-                ptr: TensorHandle containing pointer data
                 mask: TensorHandle containing boolean mask data
 
             Returns:
                 Tuple of (total_count, false_count)
             """
-            if mask is None:
-                return ptr.data.size, 0
             total_count = mask.data.size
             false_count = np.count_nonzero(np.logical_not(mask.data))
             return total_count, false_count
@@ -225,7 +216,7 @@ class Profiler(Client):
         def pre_load_callback(ptr, mask, keys):
             self._report_load_store_bytes("load", ptr, mask)
             if not self.disable_load_mask_percentage_check:
-                total_count, false_count = _get_mask_stats(ptr, mask)
+                total_count, false_count = _get_mask_stats(mask)
                 self.load_mask_total_count += total_count
                 self.load_mask_false_count += false_count
 
@@ -262,7 +253,7 @@ class Profiler(Client):
         def pre_store_callback(ptr, mask, keys):
             self._report_load_store_bytes("store", ptr, mask)
             if not self.disable_load_mask_percentage_check:
-                total_count, false_count = _get_mask_stats(ptr, mask)
+                total_count, false_count = _get_mask_stats(mask)
                 self.store_mask_total_count += total_count
                 self.store_mask_false_count += false_count
 
@@ -313,14 +304,14 @@ class Profiler(Client):
             if not self.disable_buffer_load_check:
                 self._check_32bit_range(byte_offset, element_bytewidth, offset_data)
 
-        if issubclass(op_type, Load):
+        if op_type is Load:
             if self.disable_load_store_skipping:
                 return OpCallbacks(before_callback=pre_load_callback)
             else:
                 return OpCallbacks(
                     before_callback=pre_load_callback, op_overrider=load_overrider
                 )
-        elif issubclass(op_type, Store):
+        elif op_type is Store:
             if self.disable_load_store_skipping:
                 return OpCallbacks(before_callback=pre_store_callback)
             else:
