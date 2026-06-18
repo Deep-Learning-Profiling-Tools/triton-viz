@@ -65,7 +65,44 @@ class LaunchInterface:
         )
 
 
-class KernelTraceMixin:
+class TritonMetadataInterface:
+    @staticmethod
+    def _is_autotuner(runner: Any) -> bool:
+        from triton.runtime import Autotuner
+
+        return isinstance(runner, Autotuner)
+
+    @staticmethod
+    def _is_heuristics(runner: Any) -> bool:
+        from triton.runtime.autotuner import Heuristics
+
+        return isinstance(runner, Heuristics)
+
+    @staticmethod
+    def _dummy_benchmarker(fn, quantiles):
+        fn()
+        return (1.0, 1.0, 1.0)
+
+    def _interpreter_runner(self, runner: Any, interpreted_fn: Any) -> Any:
+        if self._is_autotuner(runner):
+            runner.fn = interpreted_fn
+            # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
+            runner._do_bench = self._dummy_benchmarker
+            return runner
+        if self._is_heuristics(runner):
+            runner.fn = interpreted_fn
+            return runner
+        return interpreted_fn
+
+    def _warmup_runner(self, runner: Any, jit_fn: Any | None) -> Any | None:
+        if not (self._is_autotuner(runner) or self._is_heuristics(runner)):
+            return jit_fn
+        if jit_fn is None:
+            return None
+        warmup_runner = deepcopy(runner)
+        warmup_runner.fn = jit_fn
+        return warmup_runner
+
     def _copy_callable_attrs(
         self,
         runner: Any,
@@ -88,14 +125,13 @@ class KernelTraceMixin:
             self.src = src_fallback.src
 
 
-class TritonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
+class TritonTrace(LaunchInterface, TraceInterface, TritonMetadataInterface):
     def __init__(
         self,
         runner: Any,
         client: str | Client,
     ) -> None:
         from triton import JITFunction
-        from triton.runtime import Autotuner
         from triton.runtime.autotuner import Heuristics
         from triton.runtime.interpreter import InterpretedFunction
 
@@ -118,34 +154,14 @@ class TritonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
                 return unpack_kernel(source.fn)
             raise TypeError(f"Unsupported runner type: {type(source)}")
 
-        if isinstance(runner, Autotuner):
+        if self._is_autotuner(runner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
-
-            # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
-            def dummy_benchmarker(fn, quantiles):
-                fn()
-                return (1.0, 1.0, 1.0)
-
-            runner._do_bench = dummy_benchmarker
-            runner.fn = self.interpreted_fn
-            self.runner = runner
-        elif isinstance(runner, Heuristics):
+        elif self._is_heuristics(runner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
-            runner.fn = self.interpreted_fn
-            self.runner = runner
         else:
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner)
-            self.runner = self.interpreted_fn
-
-        if isinstance(runner, (Autotuner, Heuristics)):
-            if self.jit_fn is not None:
-                warmup_runner = deepcopy(runner)
-                warmup_runner.fn = self.jit_fn
-                self.warmup_runner = warmup_runner
-            else:
-                self.warmup_runner = None
-        else:
-            self.warmup_runner = self.jit_fn
+        self.runner = self._interpreter_runner(runner, self.interpreted_fn)
+        self.warmup_runner = self._warmup_runner(runner, self.jit_fn)
 
         self.arg_names = runner.arg_names
 
@@ -276,10 +292,9 @@ class NKITrace(LaunchInterface, TraceInterface):
             return ret
 
 
-class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
+class GluonTrace(LaunchInterface, TraceInterface, TritonMetadataInterface):
     def __init__(self, runner: Any, client: str | Client) -> None:
         from triton.experimental import gluon
-        from triton.runtime import Autotuner
         from triton.runtime.autotuner import Heuristics
         from .simulation.gluon import GluonInterpretedFunction
 
@@ -300,25 +315,11 @@ class GluonTrace(LaunchInterface, TraceInterface, KernelTraceMixin):
             raise TypeError(f"Unsupported runner type: {type(source)}")
 
         self.base_fn, self.interpreted_fn = unpack_kernel(
-            runner.fn if isinstance(runner, Autotuner) else runner
+            runner.fn if self._is_autotuner(runner) else runner
         )
         self.fn = runner
         self.arg_names = runner.arg_names
-
-        if isinstance(runner, Autotuner):
-            runner.fn = self.interpreted_fn
-
-            def dummy_benchmarker(fn, quantiles):
-                fn()
-                return (1.0, 1.0, 1.0)
-
-            runner._do_bench = dummy_benchmarker
-            self.runner = runner
-        elif isinstance(runner, Heuristics):
-            runner.fn = self.interpreted_fn
-            self.runner = runner
-        else:
-            self.runner = self.interpreted_fn
+        self.runner = self._interpreter_runner(runner, self.interpreted_fn)
 
         TraceInterface.__init__(self, client)
         self._copy_callable_attrs(runner, self.base_fn)
