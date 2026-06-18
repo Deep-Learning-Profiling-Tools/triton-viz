@@ -190,8 +190,6 @@ class ClientManager:
 
             self._populate_loop_hooks(all_loop_callbacks)
             patch_for_loop(frontend_name)
-            # Language shims may copy or wrap namespace callables, so install
-            # them after patch_op has wrapped frontend operation namespaces.
             patch_lang(fn, frontend_name, client_manager=self)
             try:
                 yield

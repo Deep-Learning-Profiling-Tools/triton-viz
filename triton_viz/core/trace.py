@@ -65,7 +65,7 @@ class LaunchInterface:
         )
 
 
-class TritonMetadataInterface:
+class KernelTraceSupport:
     @staticmethod
     def _is_autotuner(runner: Any) -> bool:
         from triton.runtime import Autotuner
@@ -125,7 +125,7 @@ class TritonMetadataInterface:
             self.src = src_fallback.src
 
 
-class TritonTrace(LaunchInterface, TraceInterface, TritonMetadataInterface):
+class TritonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
     def __init__(
         self,
         runner: Any,
@@ -292,7 +292,7 @@ class NKITrace(LaunchInterface, TraceInterface):
             return ret
 
 
-class GluonTrace(LaunchInterface, TraceInterface, TritonMetadataInterface):
+class GluonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
     def __init__(self, runner: Any, client: str | Client) -> None:
         from triton.experimental import gluon
         from triton.runtime.autotuner import Heuristics
