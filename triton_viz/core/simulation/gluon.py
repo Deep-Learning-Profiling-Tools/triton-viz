@@ -52,7 +52,6 @@ from triton.runtime.interpreter import (  # type: ignore
     _implicit_cvt,
     _patch_lang_core,
     _patch_lang_tensor,
-    _unpack_e2m1,
     interpreter_builder,
 )
 
@@ -123,6 +122,27 @@ except ImportError:
             nan_mask = (value_handle.data & np.uint8(0x7F)) == np.uint8(0x7F)
             value_float = np.where(nan_mask, np.float32("nan"), value_float)
         return value_float
+
+
+try:
+    from triton.runtime.interpreter import _unpack_e2m1  # type: ignore
+except ImportError:
+
+    def _unpack_e2m1(data: np.ndarray, axis: int) -> np.ndarray:
+        data = np.moveaxis(data, axis, -1)
+        low = data & np.uint8(0x0F)
+        high = data >> np.uint8(4)
+        unpacked_shape = data.shape[:-1] + (data.shape[-1] * 2,)
+        unpacked = np.empty(unpacked_shape, dtype=np.uint8)
+        unpacked[..., 0::2] = low
+        unpacked[..., 1::2] = high
+        positive_lut = np.array(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+            dtype=np.float32,
+        )
+        values = positive_lut[unpacked & np.uint8(0x07)]
+        signs = (unpacked & np.uint8(0x08)) != 0
+        return np.moveaxis(np.where(signs, -values, values), -1, axis)
 
 
 _MISSING = object()
