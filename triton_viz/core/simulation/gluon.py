@@ -50,7 +50,6 @@ from triton.runtime.interpreter import (  # type: ignore
     _convert_float,
     _get_np_dtype,
     _implicit_cvt,
-    _mxfp_value_handle_to_float32,
     _patch_lang_core,
     _patch_lang_tensor,
     _unpack_e2m1,
@@ -88,6 +87,43 @@ try:
     from triton.experimental.gluon.language.nvidia.blackwell import clc as gluon_clc  # type: ignore
 except ImportError:
     gluon_clc = None
+
+try:
+    from triton.runtime.interpreter import _mxfp_value_handle_to_float32  # type: ignore
+except ImportError:
+
+    def _mxfp_value_handle_to_float32(value_handle: TensorHandle) -> np.ndarray:
+        value_float = (
+            _convert_float(
+                value_handle.data,
+                value_handle.dtype,
+                tl.float16,
+                None,
+            )
+            .view(np.float16)
+            .astype(np.float32)
+        )
+        if value_handle.dtype == tl.float8e5:
+            value_float = np.where(
+                value_handle.data == np.uint8(0x7C),
+                np.float32("inf"),
+                value_float,
+            )
+            value_float = np.where(
+                value_handle.data == np.uint8(0xFC),
+                -np.float32("inf"),
+                value_float,
+            )
+            nan_mask = np.logical_and(
+                (value_handle.data & np.uint8(0x7C)) == np.uint8(0x7C),
+                (value_handle.data & np.uint8(3)) != np.uint8(0),
+            )
+            value_float = np.where(nan_mask, np.float32("nan"), value_float)
+        elif value_handle.dtype == tl.float8e4nv:
+            nan_mask = (value_handle.data & np.uint8(0x7F)) == np.uint8(0x7F)
+            value_float = np.where(nan_mask, np.float32("nan"), value_float)
+        return value_float
+
 
 _MISSING = object()
 _HOST_TENSOR_DESCRIPTOR_TYPES = {"TensorDescriptor", "TensorDescriptorIm2Col"}
