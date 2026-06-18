@@ -260,7 +260,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         pending: PendingCheck,
         iter_constraints: list[BoolRef],
     ) -> None:
-        del ctx, iter_constraints  # verbose logging is handled by the base
         # Items enqueued by _handle_access_check are PendingEvent instances
         # (subclass of PendingCheck) — narrow so attribute accesses are
         # type-safe under Literal["read", "write"].

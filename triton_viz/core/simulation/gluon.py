@@ -32,9 +32,11 @@ from triton.experimental.gluon.language.amd.cdna4 import (  # type: ignore
 from triton.experimental.gluon.language.nvidia.ampere import (  # type: ignore
     async_copy as gluon_ampere_async_copy,
 )
+from triton.experimental.gluon.language.nvidia.ampere import (  # type: ignore
+    mbarrier as gluon_ampere_mbarrier,
+)
 from triton.experimental.gluon.language.nvidia import blackwell as gluon_blackwell  # type: ignore
 from triton.experimental.gluon.language.nvidia import hopper as gluon_hopper  # type: ignore
-from triton.experimental.gluon.language.nvidia.blackwell import clc as gluon_clc  # type: ignore
 from triton.experimental.gluon.language.nvidia.blackwell import (  # type: ignore
     tma as gluon_blackwell_tma,
 )
@@ -51,10 +53,8 @@ from triton.runtime.interpreter import (  # type: ignore
     _convert_float,
     _get_np_dtype,
     _implicit_cvt,
-    _mxfp_value_handle_to_float32,
     _patch_lang_core,
     _patch_lang_tensor,
-    _unpack_e2m1,
     interpreter_builder,
 )
 
@@ -84,6 +84,69 @@ except ImportError as exc:
     gluon_amd_cluster = None
     gluon_amd_mbarrier = None
     gluon_amd_tdm = None
+
+try:
+    from triton.experimental.gluon.language.nvidia.blackwell import clc as gluon_clc  # type: ignore
+except ImportError:
+    gluon_clc = None
+
+try:
+    from triton.runtime.interpreter import _mxfp_value_handle_to_float32  # type: ignore
+except ImportError:
+
+    def _mxfp_value_handle_to_float32(value_handle: TensorHandle) -> np.ndarray:
+        value_float = (
+            _convert_float(
+                value_handle.data,
+                value_handle.dtype,
+                tl.float16,
+                None,
+            )
+            .view(np.float16)
+            .astype(np.float32)
+        )
+        if value_handle.dtype == tl.float8e5:
+            value_float = np.where(
+                value_handle.data == np.uint8(0x7C),
+                np.float32("inf"),
+                value_float,
+            )
+            value_float = np.where(
+                value_handle.data == np.uint8(0xFC),
+                -np.float32("inf"),
+                value_float,
+            )
+            nan_mask = np.logical_and(
+                (value_handle.data & np.uint8(0x7C)) == np.uint8(0x7C),
+                (value_handle.data & np.uint8(3)) != np.uint8(0),
+            )
+            value_float = np.where(nan_mask, np.float32("nan"), value_float)
+        elif value_handle.dtype == tl.float8e4nv:
+            nan_mask = (value_handle.data & np.uint8(0x7F)) == np.uint8(0x7F)
+            value_float = np.where(nan_mask, np.float32("nan"), value_float)
+        return value_float
+
+
+try:
+    from triton.runtime.interpreter import _unpack_e2m1  # type: ignore
+except ImportError:
+
+    def _unpack_e2m1(data: np.ndarray, axis: int) -> np.ndarray:
+        data = np.moveaxis(data, axis, -1)
+        low = data & np.uint8(0x0F)
+        high = data >> np.uint8(4)
+        unpacked_shape = data.shape[:-1] + (data.shape[-1] * 2,)
+        unpacked = np.empty(unpacked_shape, dtype=np.uint8)
+        unpacked[..., 0::2] = low
+        unpacked[..., 1::2] = high
+        positive_lut = np.array(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+            dtype=np.float32,
+        )
+        values = positive_lut[unpacked & np.uint8(0x07)]
+        signs = (unpacked & np.uint8(0x08)) != 0
+        return np.moveaxis(np.where(signs, -values, values), -1, axis)
+
 
 _MISSING = object()
 _HOST_TENSOR_DESCRIPTOR_TYPES = {"TensorDescriptor", "TensorDescriptorIm2Col"}
@@ -2048,6 +2111,7 @@ gluon_semantic = GluonSemantic(gluon_builder)
 _GLUON_BUILTIN_MODULES: tuple[Any, ...] = tuple(
     module
     for module in (
+        tl.core,
         gluon_core,
         gl,
         gluon_math,
@@ -2064,6 +2128,7 @@ _GLUON_BUILTIN_MODULES: tuple[Any, ...] = tuple(
         gluon_amd_rdna3,
         gluon_amd_rdna4,
         gluon_ampere_async_copy,
+        gluon_ampere_mbarrier,
         gluon_blackwell,
         gluon_blackwell_tma,
         gluon_clc,
@@ -2075,10 +2140,15 @@ _GLUON_BUILTIN_MODULES: tuple[Any, ...] = tuple(
 )
 
 
-_GLUON_BUILTIN_CLASSES: tuple[Any, ...] = (
-    gluon_core.shared_memory_descriptor,
-    gluon_blackwell.tensor_memory_descriptor,
-    gluon_clc.clc_result,
+_GLUON_BUILTIN_CLASSES: tuple[Any, ...] = tuple(
+    cls
+    for cls in (
+        gluon_core.tensor,
+        gluon_core.shared_memory_descriptor,
+        gluon_blackwell.tensor_memory_descriptor,
+        None if gluon_clc is None else gluon_clc.clc_result,
+    )
+    if cls is not None
 )
 
 
@@ -2109,6 +2179,60 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
         _patch_gluon_builtins(module, scope)
     for cls in _GLUON_BUILTIN_CLASSES:
         _patch_gluon_builtins(cls, scope)
+
+    def allocate_mbarrier(*_args: Any, **_kwargs: Any):
+        return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
+
+    def init_mbarrier(mbarrier: Any, count: Any = 1, **_kwargs: Any):
+        return gluon_builder.create_mbarrier_init(mbarrier, count)
+
+    def expect_mbarrier(
+        mbarrier: Any,
+        bytes_per_cta: Any = None,
+        pred: Any = True,
+        **_kwargs: Any,
+    ):
+        if bool(_to_python_scalar(pred)):
+            return gluon_builder.create_mbarrier_expect(mbarrier, bytes_per_cta)
+        return None
+
+    def arrive_mbarrier(
+        mbarrier: Any,
+        *,
+        count: Any = 1,
+        pred: Any = True,
+        **_kwargs: Any,
+    ):
+        return gluon_builder.create_mbarrier_arrive(mbarrier, pred, count)
+
+    def wait_mbarrier(
+        mbarrier: Any,
+        phase: Any,
+        pred: Any = True,
+        deps: Any = (),
+        **_kwargs: Any,
+    ):
+        return gluon_builder.create_mbarrier_wait(mbarrier, phase, pred, deps)
+
+    def invalidate_mbarrier(mbarrier: Any, **_kwargs: Any):
+        return gluon_builder.create_mbarrier_inval(mbarrier)
+
+    if gluon_ampere_mbarrier is not None:
+        scope.set_attr(gluon_ampere_mbarrier, "allocate_mbarrier", allocate_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "init", init_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "expect", expect_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "arrive", arrive_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "wait", wait_mbarrier)
+        scope.set_attr(gluon_ampere_mbarrier, "invalidate", invalidate_mbarrier)
+
+    if gluon_hopper_mbarrier is not None:
+        scope.set_attr(gluon_hopper_mbarrier, "allocate_mbarrier", allocate_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "init", init_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "expect", expect_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "arrive", arrive_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "wait", wait_mbarrier)
+        scope.set_attr(gluon_hopper_mbarrier, "invalidate", invalidate_mbarrier)
+
     _patch_lang_tensor(gluon_core.tensor, scope)
     _patch_lang_core(gluon_core, scope)
     return scope
@@ -2188,14 +2312,7 @@ class GluonInterpretedFunction:
                             interpreter_builder.set_grid_idx(x, y, z)
                             if client_manager is not None:
                                 client_manager.grid_idx_callback((x, y, z))
-                                if not client_manager.pre_run_callback(self.fn):
-                                    return
                             self.fn(**call_args)
-                            if (
-                                client_manager is not None
-                                and not client_manager.post_run_callback(self.fn)
-                            ):
-                                return
 
             run_grid()
         except Exception as exc:

@@ -63,6 +63,46 @@ def test_trace_decorator_supports_gluon_frontend():
     assert my_gluon_kernel.client_manager.get_client("tracer") is not None
 
 
+def test_gluon_trace_handles_autotuner_wrapper():
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as ttgl
+    from triton.runtime import Autotuner
+    from triton_viz.core.simulation.gluon import GluonInterpretedFunction
+    from triton_viz.core.trace import GluonTrace
+
+    @triton_viz.trace("tracer", frontend="gluon")
+    @triton.autotune(configs=[triton.Config({"BLOCK": 1})], key=[])
+    @gluon.jit
+    def my_gluon_kernel(out, BLOCK: ttgl.constexpr):
+        pid = ttgl.program_id(0)
+        ttgl.store(out + pid, pid)
+
+    assert isinstance(my_gluon_kernel, GluonTrace)
+    assert isinstance(my_gluon_kernel.runner, Autotuner)
+    assert isinstance(my_gluon_kernel.runner.fn, GluonInterpretedFunction)
+    assert my_gluon_kernel.runner.fn.fn is my_gluon_kernel.base_fn
+
+
+def test_gluon_trace_handles_heuristics_wrapper():
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as ttgl
+    from triton.runtime.autotuner import Heuristics
+    from triton_viz.core.simulation.gluon import GluonInterpretedFunction
+    from triton_viz.core.trace import GluonTrace
+
+    @triton_viz.trace("tracer", frontend="gluon")
+    @triton.heuristics({"BLOCK": lambda args: 1})
+    @gluon.jit
+    def my_gluon_kernel(out, BLOCK: ttgl.constexpr):
+        pid = ttgl.program_id(0)
+        ttgl.store(out + pid, pid)
+
+    assert isinstance(my_gluon_kernel, GluonTrace)
+    assert isinstance(my_gluon_kernel.runner, Heuristics)
+    assert isinstance(my_gluon_kernel.runner.fn, GluonInterpretedFunction)
+    assert my_gluon_kernel.runner.fn.fn is my_gluon_kernel.base_fn
+
+
 def test_gluon_sanitizer_run_preserves_instrumentation_mode(monkeypatch):
     from triton import knobs
     from triton.experimental import gluon
