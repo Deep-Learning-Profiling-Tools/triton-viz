@@ -1,3 +1,6 @@
+import importlib.util
+from pathlib import Path
+
 import pytest
 import torch
 from triton import knobs
@@ -7,22 +10,6 @@ from triton.experimental.gluon import language as gl
 import triton_viz
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.core.data import Load
-
-
-def _has_cuda_device() -> bool:
-    try:
-        return torch.cuda.is_available()
-    except RuntimeError:
-        return False
-
-
-def _has_tma_device() -> bool:
-    if not _has_cuda_device():
-        return False
-    try:
-        return torch.cuda.get_device_capability()[0] >= 9
-    except RuntimeError:
-        return False
 
 
 @gluon.jit
@@ -51,21 +38,18 @@ def _masked_safe_kernel(
     gl.store(out_ptr + offs, value, mask=mask)
 
 
-@pytest.mark.skipif(not _has_cuda_device(), reason="CUDA required for Gluon execution")
 def test_gluon_trace_runs_copy_scalar_kernel():
     kernel = triton_viz.trace("tracer", frontend="gluon")(_copy_scalar_kernel)
 
-    inp = torch.tensor([42.0], device="cuda")
+    inp = torch.tensor([42.0])
     out = torch.empty_like(inp)
     kernel[(1,)](inp, out, num_warps=1)
-    torch.cuda.synchronize()
 
     torch.testing.assert_close(out, inp, atol=0, rtol=0)
     assert kernel.client_manager.launch.grid == (1, 1, 1)
     assert len(kernel.client_manager.launch.records) >= 1
 
 
-@pytest.mark.skipif(not _has_cuda_device(), reason="CUDA required for Gluon execution")
 def test_gluon_sanitizer_allows_in_bounds_kernel():
     sanitizer = SymbolicSanitizer(abort_on_error=False)
     kernel = triton_viz.trace(
@@ -73,16 +57,14 @@ def test_gluon_sanitizer_allows_in_bounds_kernel():
         frontend="gluon",
     )(_copy_scalar_kernel)
 
-    inp = torch.tensor([42.0], device="cuda")
+    inp = torch.tensor([42.0])
     out = torch.empty_like(inp)
     ret = kernel[(1,)](inp, out, num_warps=1)
-    torch.cuda.synchronize()
 
     assert ret is None
     assert sanitizer.records == []
 
 
-@pytest.mark.skipif(not _has_cuda_device(), reason="CUDA required for Gluon execution")
 def test_gluon_sanitizer_reports_real_oob_load_kernel(monkeypatch):
     monkeypatch.setattr(knobs.compilation, "always_compile", True)
     sanitizer = SymbolicSanitizer(abort_on_error=False)
@@ -92,10 +74,9 @@ def test_gluon_sanitizer_reports_real_oob_load_kernel(monkeypatch):
     )(_oob_scalar_offset_kernel)
     kernel.fn.device_caches.clear()
 
-    inp = torch.tensor([42.0], device="cuda")
+    inp = torch.tensor([42.0])
     out = torch.empty_like(inp)
     ret = kernel[(1,)](inp, out, num_warps=1)
-    torch.cuda.synchronize()
 
     assert ret is None
     assert sanitizer.records
@@ -106,7 +87,6 @@ def test_gluon_sanitizer_reports_real_oob_load_kernel(monkeypatch):
     )
 
 
-@pytest.mark.skipif(not _has_cuda_device(), reason="CUDA required for Gluon execution")
 def test_gluon_sanitizer_allows_masked_in_bounds_kernel():
     sanitizer = SymbolicSanitizer(abort_on_error=False)
     kernel = triton_viz.trace(
@@ -114,19 +94,27 @@ def test_gluon_sanitizer_allows_masked_in_bounds_kernel():
         frontend="gluon",
     )(_masked_safe_kernel)
 
-    inp = torch.arange(4, dtype=torch.float32, device="cuda")
-    out = torch.empty((8,), dtype=torch.float32, device="cuda")
+    inp = torch.arange(4, dtype=torch.float32)
+    out = torch.empty((8,), dtype=torch.float32)
     layout = gl.BlockedLayout([1], [32], [1], [0])
     ret = kernel[(1,)](inp, out, 4, 8, layout, num_warps=1)
-    torch.cuda.synchronize()
 
     assert ret is None
     assert sanitizer.records == []
 
 
-@pytest.mark.skipif(not _has_tma_device(), reason="CUDA TMA device required")
 def test_gluon_tma_oob_example_reports(capsys):
-    from examples.sanitizer import gluon_tma_oob
+    example_path = (
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "sanitizer"
+        / "gluon_tma_oob.py"
+    )
+    spec = importlib.util.spec_from_file_location("gluon_tma_oob_example", example_path)
+    assert spec is not None
+    assert spec.loader is not None
+    gluon_tma_oob = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gluon_tma_oob)
 
     with pytest.raises(SystemExit):
         gluon_tma_oob.run()

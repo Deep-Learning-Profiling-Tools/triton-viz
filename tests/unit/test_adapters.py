@@ -9,12 +9,14 @@ from triton_viz.core.data import (
     AddPtr,
     BinaryOp,
     CastImpl,
+    Dot,
     IntToPtr,
     Load,
     ProgramId,
     PtrToInt,
     ReduceSum,
     Store,
+    TernaryOp,
     UnaryOp,
 )
 
@@ -470,6 +472,69 @@ def test_gluon_semantic_binary_adapter_drops_bound_semantic():
 
     assert result == "overridden"
     assert calls == [("lhs", "rhs")]
+
+
+def test_gluon_semantic_comparison_adapter_binds_original_callable():
+    from triton.experimental.gluon.language import _semantic as gluon_semantic
+
+    calls = []
+
+    def overrider(lhs, rhs, op):
+        calls.append((lhs, rhs, op))
+        return "overridden"
+
+    result = GLUON_FRONTEND.run_op_overrider(
+        gluon_semantic.GluonSemantic.less_than,
+        BinaryOp,
+        overrider,
+        (object(), "lhs", "rhs"),
+        {},
+    )
+
+    assert result == "overridden"
+    assert calls == [("lhs", "rhs", np.less)]
+
+
+def test_gluon_where_adapter_binds_original_callable():
+    from triton.experimental.gluon import language as ttgl
+
+    calls = []
+
+    def overrider(condition, lhs, rhs, op):
+        calls.append((condition, lhs, rhs, op))
+        return "overridden"
+
+    result = GLUON_FRONTEND.run_op_overrider(
+        ttgl.where,
+        TernaryOp,
+        overrider,
+        ("condition", "lhs", "rhs"),
+        {},
+    )
+
+    assert result == "overridden"
+    assert calls == [("condition", "lhs", "rhs", np.where)]
+
+
+def test_gluon_dot_adapter_preserves_accumulator_for_overriders():
+    from triton.experimental.gluon import language as ttgl
+
+    calls = []
+
+    def overrider(a, b, acc, input_precision, max_num_imprecise_acc):
+        calls.append((a, b, acc, input_precision, max_num_imprecise_acc))
+        return "overridden"
+
+    result = GLUON_FRONTEND.run_op_overrider(
+        ttgl.dot_fma,
+        Dot,
+        overrider,
+        ("a", "b", "acc"),
+        {},
+    )
+
+    assert result == "overridden"
+    assert calls == [("a", "b", "acc", None, None)]
 
 
 def test_gluon_frontend_wraps_symbolic_concrete_fn():

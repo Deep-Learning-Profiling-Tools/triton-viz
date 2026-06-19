@@ -246,6 +246,19 @@ def _gluon_binary_op_adapter(op: Callable) -> Callable[..., AdapterResult]:
     return adapter
 
 
+def _gluon_semantic_binary_op_adapter(op: Callable) -> Callable[..., AdapterResult]:
+    def adapter(
+        _semantic: Any,
+        lhs: Any,
+        rhs: Any,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> AdapterResult:
+        return AdapterResult(lhs, rhs, op)
+
+    return adapter
+
+
 def _gluon_unary_op_adapter(op: Callable) -> Callable[..., AdapterResult]:
     def adapter(arg: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
         return AdapterResult(arg, op)
@@ -260,11 +273,27 @@ def _gluon_where_adapter(
     *_args: Any,
     **_kwargs: Any,
 ) -> AdapterResult:
-    return AdapterResult(condition, x, y)
+    return AdapterResult(condition, x, y, np.where)
 
 
 def _gluon_dot_adapter(a: Any, b: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
     return AdapterResult(_gluon_tensor_handle(a), _gluon_tensor_handle(b))
+
+
+def _gluon_dot_overrider_adapter(
+    a: Any,
+    b: Any,
+    acc: Any,
+    *_args: Any,
+    **_kwargs: Any,
+) -> AdapterResult:
+    return AdapterResult(
+        _gluon_tensor_handle(a),
+        _gluon_tensor_handle(b),
+        _gluon_tensor_handle(acc),
+        None,
+        None,
+    )
 
 
 def _gluon_allocate_adapter(*args: Any, **_kwargs: Any) -> AdapterResult:
@@ -471,6 +500,12 @@ _GLUON_BINARY_NUMPY_OPS: dict[str, Callable] = {
     "sub": np.subtract,
     "mul": np.multiply,
 }
+_GLUON_SEMANTIC_BINARY_NUMPY_OPS: dict[str, Callable] = {
+    "less_than": np.less,
+    "less_equal": np.less_equal,
+    "greater_than": np.greater,
+    "greater_equal": np.greater_equal,
+}
 _GLUON_UNARY_NUMPY_OPS: dict[str, Callable] = {
     "abs": np.abs,
     "ceil": np.ceil,
@@ -493,12 +528,22 @@ GLUON_CALLABLE_ADAPTERS: dict[Callable, Callable[..., AdapterResult]] = {}
 for namespace, attrs in GLUON_NAMESPACES.items():
     for attr, op_type in attrs.items():
         original = getattr(namespace, attr)
-        if namespace is gluon_semantic.GluonSemantic and op_type in (AddPtr, BinaryOp):
+        if namespace is gluon_semantic.GluonSemantic and op_type is AddPtr:
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_semantic_binary_adapter
+        elif (
+            namespace is gluon_semantic.GluonSemantic
+            and op_type is BinaryOp
+            and attr in _GLUON_SEMANTIC_BINARY_NUMPY_OPS
+        ):
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_semantic_binary_op_adapter(
+                _GLUON_SEMANTIC_BINARY_NUMPY_OPS[attr]
+            )
         elif op_type is BinaryOp and attr in _GLUON_BINARY_NUMPY_OPS:
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_binary_op_adapter(
                 _GLUON_BINARY_NUMPY_OPS[attr]
             )
+        elif op_type is Dot:
+            GLUON_CALLABLE_ADAPTERS[original] = _gluon_dot_overrider_adapter
         elif op_type is UnaryOp and attr in _GLUON_UNARY_NUMPY_OPS:
             GLUON_CALLABLE_ADAPTERS[original] = _gluon_unary_op_adapter(
                 _GLUON_UNARY_NUMPY_OPS[attr]

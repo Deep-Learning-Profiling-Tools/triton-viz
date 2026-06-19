@@ -31,11 +31,14 @@ def gluon_tma_oob_kernel(
     bar = mbarrier.allocate_mbarrier()
     mbarrier.init(bar, count=1)
     mbarrier.expect(bar, desc.nbytes_per_cta)
-    tma.async_load(desc, [m, 0], bar, smem)  # OOB: row coordinate starts past x.
+    if hasattr(tma, "async_load"):
+        tma.async_load(desc, [m, 0], bar, smem)  # OOB: row coordinate starts past x.
+    else:
+        tma.async_copy_global_to_shared(desc, [m, 0], bar, smem)
 
 
 def run(abort_on_error: bool = True):
-    x = torch.zeros((BLOCK_M, BLOCK_N), device="cuda", dtype=torch.float32)
+    x = torch.zeros((BLOCK_M, BLOCK_N), dtype=torch.float32)
     layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], gl.float32)
     kernel = triton_viz.trace(
         client=Sanitizer(abort_on_error=abort_on_error),
