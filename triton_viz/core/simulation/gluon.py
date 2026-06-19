@@ -8,6 +8,7 @@ signatures to Triton's interpreter semantic layer.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 import inspect
 import threading
 from typing import Any
@@ -160,6 +161,54 @@ class _MBarrierState:
         self.condition = threading.Condition()
 
 
+class _WarpSpecializeScheduler:
+    """Round-robin scheduler for CPU threads simulating Gluon partitions."""
+
+    def __init__(self, count: int) -> None:
+        self._active = list(range(count))
+        self._turn_index = 0
+        self._condition = threading.Condition()
+        self._local = threading.local()
+
+    def bind(self, partition_id: int) -> None:
+        self._local.partition_id = partition_id
+
+    def yield_point(self) -> None:
+        partition_id = getattr(self._local, "partition_id", None)
+        if partition_id is None:
+            return
+        with self._condition:
+            # Patched Gluon builtins call this before executing. Only the
+            # partition whose turn is active may proceed; the rest park until a
+            # later builtin advances the simulated warp-specialized region.
+            while (
+                partition_id in self._active
+                and self._active
+                and self._active[self._turn_index] != partition_id
+            ):
+                self._condition.wait()
+            if partition_id not in self._active or not self._active:
+                return
+            self._turn_index = (self._turn_index + 1) % len(self._active)
+            self._condition.notify_all()
+
+    def finish(self, partition_id: int) -> None:
+        with self._condition:
+            if partition_id in self._active:
+                # Finished partitions no longer participate in the round-robin.
+                # Keep the current turn pointing at the same logical successor
+                # after removing an earlier list element.
+                removed_index = self._active.index(partition_id)
+                self._active.pop(removed_index)
+                if self._active:
+                    if removed_index < self._turn_index:
+                        self._turn_index -= 1
+                    self._turn_index %= len(self._active)
+                else:
+                    self._turn_index = 0
+            self._condition.notify_all()
+
+
 class GluonSemantic(gluon_semantic_module.GluonSemantic):
     """Triton interpreter semantic with Gluon-compatible builtin signatures."""
 
@@ -180,6 +229,51 @@ class GluonSemantic(gluon_semantic_module.GluonSemantic):
             ret_ty.to_ir(self.builder), value.handle
         )
         return gluon_core.tensor(handle, ret_ty)
+
+    def warp_specialize(
+        self,
+        functions_and_args: Any,
+        worker_num_warps: Any,
+        worker_num_regs: Any = None,
+        generator: Any = None,
+    ):
+        functions_and_args = list(functions_and_args)
+        if len(functions_and_args) <= 1:
+            result = None
+            for fn, args in functions_and_args:
+                result = fn(*tuple(args))
+            return result
+
+        from triton_viz.core.frontend import gluon as gluon_frontend
+
+        scheduler = _WarpSpecializeScheduler(len(functions_and_args))
+        gluon_frontend._set_warp_specialize_scheduler(scheduler)
+        grid_dim = self.builder.grid_dim
+        grid_idx = self.builder.grid_idx
+        results = [None] * len(functions_and_args)
+
+        def run_partition(partition_id: int, fn: Callable, args: Any) -> None:
+            if grid_dim is not None:
+                self.builder.set_grid_dim(*grid_dim)
+            if grid_idx is not None:
+                self.builder.set_grid_idx(*grid_idx)
+            scheduler.bind(partition_id)
+            try:
+                results[partition_id] = fn(*tuple(args))
+            finally:
+                scheduler.finish(partition_id)
+
+        try:
+            with ThreadPoolExecutor(max_workers=len(functions_and_args)) as executor:
+                futures = [
+                    executor.submit(run_partition, partition_id, fn, args)
+                    for partition_id, (fn, args) in enumerate(functions_and_args)
+                ]
+                for future in futures:
+                    future.result()
+        finally:
+            gluon_frontend._set_warp_specialize_scheduler(None)
+        return results[0]
 
 
 gluon_semantic: GluonSemantic
@@ -2152,6 +2246,12 @@ _GLUON_BUILTIN_CLASSES: tuple[Any, ...] = tuple(
 )
 
 
+def _yield_warp_specialize() -> None:
+    from triton_viz.core.frontend import gluon as gluon_frontend
+
+    gluon_frontend._maybe_yield_warp_specialize()
+
+
 def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
     for name, member in inspect.getmembers(pkg):
         if not callable(member):
@@ -2163,6 +2263,7 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
             continue
 
         def new_member(*args: Any, member: Callable = member, **kwargs: Any):
+            _yield_warp_specialize()
             # Gluon builtins may pass a compile-time semantic object; replace it
             # with this builder-backed semantic while preserving user arguments.
             kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
@@ -2292,6 +2393,7 @@ class GluonInterpretedFunction:
         }
         canonical_grid = self._canonical_grid(grid, raw_call_args)
         interpreter_builder.set_grid_dim(*canonical_grid)
+        gluon_builder.set_grid_dim(*canonical_grid)
 
         if client_manager is not None:
             for name, arg in raw_call_args.items():
@@ -2310,6 +2412,7 @@ class GluonInterpretedFunction:
                     for y in range(canonical_grid[1]):
                         for z in range(canonical_grid[2]):
                             interpreter_builder.set_grid_idx(x, y, z)
+                            gluon_builder.set_grid_idx(x, y, z)
                             if client_manager is not None:
                                 client_manager.grid_idx_callback((x, y, z))
                             self.fn(**call_args)
