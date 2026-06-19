@@ -1,3 +1,6 @@
+import importlib.util
+from pathlib import Path
+
 import pytest
 import torch
 from triton import knobs
@@ -101,7 +104,17 @@ def test_gluon_sanitizer_allows_masked_in_bounds_kernel():
 
 
 def test_gluon_tma_oob_example_reports(capsys):
-    from examples.sanitizer import gluon_tma_oob
+    example_path = (
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "sanitizer"
+        / "gluon_tma_oob.py"
+    )
+    spec = importlib.util.spec_from_file_location("gluon_tma_oob_example", example_path)
+    assert spec is not None
+    assert spec.loader is not None
+    gluon_tma_oob = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gluon_tma_oob)
 
     with pytest.raises(SystemExit):
         gluon_tma_oob.run()
