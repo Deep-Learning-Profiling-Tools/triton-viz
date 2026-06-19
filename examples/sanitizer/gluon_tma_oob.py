@@ -35,7 +35,7 @@ def gluon_tma_oob_kernel(
 
 
 def run(abort_on_error: bool = True):
-    x = torch.zeros((BLOCK_M, BLOCK_N), device="cuda", dtype=torch.float32)
+    x = torch.zeros((BLOCK_M, BLOCK_N), dtype=torch.float32)
     layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], gl.float32)
     kernel = triton_viz.trace(
         client=Sanitizer(abort_on_error=abort_on_error),
