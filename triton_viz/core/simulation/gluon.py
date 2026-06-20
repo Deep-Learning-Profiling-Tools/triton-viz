@@ -1060,6 +1060,14 @@ def _scale_values(scale: np.ndarray) -> np.ndarray:
     return scale.astype(np.float32)
 
 
+def _scale_values_from_handle(scale: TensorHandle) -> np.ndarray:
+    if scale.dtype == tl.bfloat16:
+        return _convert_float(scale.data, tl.bfloat16, tl.float32, None).view(
+            np.float32
+        )
+    return _scale_values(scale.data)
+
+
 def _expand_scale_groups(scale: np.ndarray, rows: int, k: int) -> np.ndarray:
     scale = _scale_values(np.asarray(scale))
     if scale.ndim == 0:
@@ -1366,6 +1374,9 @@ class Builder(interpreter_builder.__class__):
 
     def get_gluon_layout_from_tensor(self, handle: TensorHandle):
         return _get_handle_layout(handle)
+
+    def get_shape_from_tensor(self, handle: TensorHandle):
+        return list(np.asarray(handle.data).shape)
 
     def get_gluon_layout_from_memdesc(self, handle: Any):
         return getattr(handle, "layout", gluon_layouts.AutoLayout())
@@ -1798,7 +1809,7 @@ class Builder(interpreter_builder.__class__):
         else:
             values = np.asarray(src.data, dtype=np.float32)
         return TensorHandle(
-            values * np.broadcast_to(_scale_values(scale.data), values.shape),
+            values * np.broadcast_to(_scale_values_from_handle(scale), values.shape),
             tl.float32,
         )
 
@@ -1812,7 +1823,8 @@ class Builder(interpreter_builder.__class__):
         values = _unpack_e2m1(src.data, int(axis)).astype(np.float32)
         return TensorHandle(
             _convert_float_result(
-                values * np.broadcast_to(_scale_values(scale.data), values.shape),
+                values
+                * np.broadcast_to(_scale_values_from_handle(scale), values.shape),
                 elem_type,
             ),
             elem_type,
