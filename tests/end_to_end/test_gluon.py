@@ -434,6 +434,33 @@ def _blackwell_tma_scatter_kernel(
     blackwell_tma.store_wait(0)
 
 
+@gluon.jit
+def _blackwell_tma_bitwise_atomic_kernel(
+    and_desc,
+    or_desc,
+    xor_desc,
+    src_ptr,
+    BLOCK_M: gl.constexpr,
+    BLOCK_N: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1],
+        [1, 32],
+        [1, gl.num_warps()],
+        [1, 0],
+    )
+    offs_m = gl.arange(0, BLOCK_M, gl.SliceLayout(1, layout))
+    offs_n = gl.arange(0, BLOCK_N, gl.SliceLayout(0, layout))
+    src = gl.load(src_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :])
+    smem = gl.allocate_shared_memory(src.dtype, [BLOCK_M, BLOCK_N], and_desc.layout)
+    smem.store(src)
+    hopper.fence_async_shared()
+    blackwell_tma.async_atomic_and(and_desc, [1, 1], smem)
+    blackwell_tma.async_atomic_or(or_desc, [1, 1], smem)
+    blackwell_tma.async_atomic_xor(xor_desc, [1, 1], smem)
+    blackwell_tma.store_wait(0)
+
+
 def test_gluon_trace_runs_copy_scalar_kernel():
     kernel = triton_viz.trace("tracer", frontend="gluon")(_copy_scalar_kernel)
 
@@ -717,6 +744,39 @@ def test_gluon_blackwell_tma_runs_gather_on_cpu():
             if 0 <= src_row < inp.shape[0] and 0 <= src_col < inp.shape[1]:
                 expected[out_row, out_col] = inp[src_row, src_col]
     torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+
+def test_gluon_blackwell_tma_runs_bitwise_atomics_on_cpu():
+    block_m = 2
+    block_n = 4
+    src = torch.tensor(
+        [[0x0F, 0x33, 0x55, 0xAA], [0xF0, 0xCC, 0x5A, 0xA5]],
+        dtype=torch.int32,
+    )
+    base = torch.arange(40, dtype=torch.int32).reshape(5, 8) + 0x80
+    and_dst = base.clone()
+    or_dst = base.clone()
+    xor_dst = base.clone()
+    layout = gl.NVMMASharedLayout.get_default_for([block_m, block_n], gl.int32)
+    and_desc = TensorDescriptor.from_tensor(and_dst, [block_m, block_n], layout)
+    or_desc = TensorDescriptor.from_tensor(or_dst, [block_m, block_n], layout)
+    xor_desc = TensorDescriptor.from_tensor(xor_dst, [block_m, block_n], layout)
+    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(
+        _blackwell_tma_bitwise_atomic_kernel
+    )
+
+    expected_and = and_dst.clone()
+    expected_or = or_dst.clone()
+    expected_xor = xor_dst.clone()
+    expected_and[1:3, 1:5] = torch.bitwise_and(expected_and[1:3, 1:5], src)
+    expected_or[1:3, 1:5] = torch.bitwise_or(expected_or[1:3, 1:5], src)
+    expected_xor[1:3, 1:5] = torch.bitwise_xor(expected_xor[1:3, 1:5], src)
+
+    kernel[(1,)](and_desc, or_desc, xor_desc, src, block_m, block_n, num_warps=4)
+
+    torch.testing.assert_close(and_dst, expected_and, atol=0, rtol=0)
+    torch.testing.assert_close(or_dst, expected_or, atol=0, rtol=0)
+    torch.testing.assert_close(xor_dst, expected_xor, atol=0, rtol=0)
 
 
 def test_gluon_blackwell_tma_runs_scatter_on_cpu():
