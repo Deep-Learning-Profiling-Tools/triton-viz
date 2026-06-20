@@ -1848,8 +1848,14 @@ class Builder(interpreter_builder.__class__):
         other: TensorHandle | None = None,
         *args: Any,
     ):
+        if not isinstance(other, TensorHandle):
+            other = None
         value = self.create_buffer_load(
-            None, ptr, TensorHandle(np.array([0]), tl.int32), mask, other
+            None,
+            ptr,
+            TensorHandle(np.array([0], dtype=np.int32), tl.int32),
+            mask,
+            other,
         )
         dest.data[...] = np.asarray(value.data, dtype=dest.data.dtype)
         return None
