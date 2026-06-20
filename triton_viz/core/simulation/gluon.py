@@ -2362,6 +2362,17 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
     for cls in _GLUON_BUILTIN_CLASSES:
         _patch_gluon_builtins(cls, scope)
 
+    original_warp_pipeline_stage = getattr(gluon_amd, "warp_pipeline_stage", None)
+    if original_warp_pipeline_stage is not None:
+
+        def warp_pipeline_stage(*args: Any, **kwargs: Any):
+            kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
+            return original_warp_pipeline_stage(
+                *args, **kwargs, _semantic=gluon_semantic
+            )
+
+        scope.set_attr(gluon_amd, "warp_pipeline_stage", warp_pipeline_stage)
+
     def allocate_mbarrier(*_args: Any, **_kwargs: Any):
         return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
 
