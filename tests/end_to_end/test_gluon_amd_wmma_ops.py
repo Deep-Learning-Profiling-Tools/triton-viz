@@ -67,27 +67,47 @@ def _amd_wmma_kernel(
     K: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 1], [0, 1])
+    gfx1250_layout: gl.constexpr = gl.amd.AMDWMMALayout(
+        3, True, [[2, 1], [1, 0]], [[2, 0]]
+    )
+    rdna3_layout: gl.constexpr = gl.amd.AMDWMMALayout(
+        1, True, [[2, 1], [1, 0]], [[2, 0]]
+    )
+    rdna4_layout: gl.constexpr = gl.amd.AMDWMMALayout(
+        2, True, [[2, 1], [1, 0]], [[2, 0]]
+    )
     offs_m = gl.arange(0, M, gl.SliceLayout(1, layout))
     offs_n = gl.arange(0, N, gl.SliceLayout(0, layout))
     offs_k = gl.arange(0, K, gl.SliceLayout(0, layout))
     offs_k_rows = gl.arange(0, K, gl.SliceLayout(1, layout))
     a = gl.load(a_ptr + offs_m[:, None] * K + offs_k[None, :])
     b = gl.load(b_ptr + offs_k_rows[:, None] * N + offs_n[None, :])
-    acc = gl.zeros((M, N), dtype=gl.float32, layout=layout)
-    gfx1250_result = gl.amd.gfx1250.wmma(a, b, acc)
-    rdna3_result = gl.amd.rdna3.wmma(a, b, acc)
-    rdna4_result = gl.amd.rdna4.wmma(a, b, acc)
+    gfx1250_result = gl.amd.gfx1250.wmma(
+        gl.convert_layout(a, gl.DotOperandLayout(0, gfx1250_layout, 2)),
+        gl.convert_layout(b, gl.DotOperandLayout(1, gfx1250_layout, 2)),
+        gl.full((M, N), 0.0, gl.float32, layout=gfx1250_layout),
+    )
+    rdna3_result = gl.amd.rdna3.wmma(
+        gl.convert_layout(a, gl.DotOperandLayout(0, rdna3_layout, 2)),
+        gl.convert_layout(b, gl.DotOperandLayout(1, rdna3_layout, 2)),
+        gl.full((M, N), 0.0, gl.float32, layout=rdna3_layout),
+    )
+    rdna4_result = gl.amd.rdna4.wmma(
+        gl.convert_layout(a, gl.DotOperandLayout(0, rdna4_layout, 2)),
+        gl.convert_layout(b, gl.DotOperandLayout(1, rdna4_layout, 2)),
+        gl.full((M, N), 0.0, gl.float32, layout=rdna4_layout),
+    )
     gl.store(out_gfx1250 + offs_m[:, None] * N + offs_n[None, :], gfx1250_result)
     gl.store(out_rdna3 + offs_m[:, None] * N + offs_n[None, :], rdna3_result)
     gl.store(out_rdna4 + offs_m[:, None] * N + offs_n[None, :], rdna4_result)
 
 
 def test_gluon_amd_wmma_ops_match_cpu_results():
-    a = torch.arange(8, dtype=torch.float32).reshape(2, 4) + 1
-    b = torch.arange(8, dtype=torch.float32).reshape(4, 2) - 2
-    out_gfx1250 = torch.empty((2, 2), dtype=torch.float32)
-    out_rdna3 = torch.empty((2, 2), dtype=torch.float32)
-    out_rdna4 = torch.empty((2, 2), dtype=torch.float32)
+    a = torch.arange(256, dtype=torch.float16).reshape(16, 16) / 32
+    b = (torch.arange(256, dtype=torch.float16).reshape(16, 16) - 64) / 64
+    out_gfx1250 = torch.empty((16, 16), dtype=torch.float32)
+    out_rdna3 = torch.empty((16, 16), dtype=torch.float32)
+    out_rdna4 = torch.empty((16, 16), dtype=torch.float32)
     kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(_amd_wmma_kernel)
 
     kernel[(1,)](
@@ -96,13 +116,13 @@ def test_gluon_amd_wmma_ops_match_cpu_results():
         out_gfx1250,
         out_rdna3,
         out_rdna4,
-        2,
-        2,
-        4,
+        16,
+        16,
+        16,
         num_warps=1,
     )
 
-    expected = a @ b
-    torch.testing.assert_close(out_gfx1250, expected, atol=0, rtol=0)
-    torch.testing.assert_close(out_rdna3, expected, atol=0, rtol=0)
-    torch.testing.assert_close(out_rdna4, expected, atol=0, rtol=0)
+    expected = a.float() @ b.float()
+    torch.testing.assert_close(out_gfx1250, expected, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(out_rdna3, expected, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(out_rdna4, expected, atol=1e-3, rtol=1e-3)
