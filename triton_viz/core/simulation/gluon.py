@@ -1345,6 +1345,10 @@ class Builder(interpreter_builder.__class__):
     def is_convert_layout_trivial(self, _ret_ty: Any, _value: Any) -> bool:
         return True
 
+    def create_broadcast(self, arg: TensorHandle, ret_ty: Any):
+        shape = getattr(ret_ty, "shape", ret_ty)
+        return TensorHandle(np.broadcast_to(arg.data, shape), arg.dtype.scalar)
+
     def create_convert_layout(self, ret_ty: Any, value: TensorHandle):
         layout = getattr(ret_ty, "layout", gluon_layouts.AutoLayout())
         return _tensor_result(np.asarray(value.data).copy(), value.dtype, layout)
