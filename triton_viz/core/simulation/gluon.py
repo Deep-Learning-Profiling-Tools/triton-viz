@@ -1124,6 +1124,9 @@ class Builder(interpreter_builder.__class__):
     def get_coalesced_layout(self):
         return gluon_layouts.CoalescedLayout()
 
+    def get_bool_attr(self, value: Any) -> bool:
+        return bool(value)
+
     def get_blocked_layout(
         self,
         size_per_thread: Any,
@@ -1828,6 +1831,10 @@ class Builder(interpreter_builder.__class__):
         cache_modifier: Any = None,
     ):
         ptrs = self._buffer_ptrs(ptr, offsets)
+        if not isinstance(mask, TensorHandle):
+            mask = None
+        if not isinstance(other, TensorHandle):
+            other = None
         if mask is None:
             mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
         return self.create_masked_load(ptrs, mask, other, None, None, False)
@@ -1841,6 +1848,8 @@ class Builder(interpreter_builder.__class__):
         cache_modifier: Any = None,
     ):
         ptrs = self._buffer_ptrs(ptr, offsets)
+        if not isinstance(mask, TensorHandle):
+            mask = None
         if mask is None:
             mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
         return self.create_masked_store(ptrs, stored_value, mask, None, None)
@@ -1856,6 +1865,8 @@ class Builder(interpreter_builder.__class__):
         mask: TensorHandle | None,
     ):
         ptrs = self._buffer_ptrs(ptr, offsets)
+        if not isinstance(mask, TensorHandle):
+            mask = None
         if mask is None:
             mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
         old = self.create_masked_load(ptrs, mask, None, None, None, False)
@@ -1885,8 +1896,6 @@ class Builder(interpreter_builder.__class__):
         other: TensorHandle | None = None,
         *args: Any,
     ):
-        if not isinstance(other, TensorHandle):
-            other = None
         value = self.create_buffer_load(
             None,
             ptr,
@@ -1905,6 +1914,8 @@ class Builder(interpreter_builder.__class__):
         *args: Any,
     ):
         value = TensorHandle(np.asarray(src.data), src.element_ty)
+        if not isinstance(mask, TensorHandle):
+            mask = None
         if mask is None:
             mask = TensorHandle(np.ones_like(value.data, dtype=bool), tl.int1)
         return self.create_masked_store(ptr, value, mask, None, None)
