@@ -1545,12 +1545,13 @@ class Builder(interpreter_builder.__class__):
             data = np.abs(data)
         name = getattr(red_op, "name", str(red_op)).lower()
         reduced_data = np.min(data, axis=1) if "min" in name else np.max(data, axis=1)
+        red_layout = gluon_layouts.AutoLayout()
         return (
             _tensor_result(np.asarray(desc.data).copy(), desc.element_ty, desc.layout),
             _tensor_result(
-                np.asarray(reduced_data, dtype=data.dtype), desc.element_ty, desc.layout
+                np.asarray(reduced_data, dtype=data.dtype), desc.element_ty, red_layout
             ),
-            desc.layout,
+            red_layout,
         )
 
     def create_tmem_store(
