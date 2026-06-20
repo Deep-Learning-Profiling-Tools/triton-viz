@@ -62,6 +62,11 @@ from triton.runtime.interpreter import (  # type: ignore
 from ..frontend.base import _LangPatchScope
 
 try:
+    import triton.language.extra.libdevice as triton_libdevice
+except ImportError:
+    triton_libdevice = None
+
+try:
     from triton.experimental.gluon.language.amd import gfx1250 as gluon_amd_gfx1250  # type: ignore
     from triton.experimental.gluon.language.amd.gfx1250 import (  # type: ignore
         async_copy as gluon_amd_async_copy,
@@ -2423,6 +2428,37 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
     for module in (gl, gluon_standard):
         scope.set_attr(module, "sum", reduce_sum)
         scope.set_attr(module, "max", reduce_max)
+
+    if triton_libdevice is not None:
+        # Triton's Python libdevice helpers are declaration stubs; install CPU
+        # equivalents before Gluon kernels call them in interpreter mode.
+
+        def libdevice_exp(input: Any):
+            input = gluon_semantic.to_tensor(input)
+            result = np.exp(np.asarray(input.handle.data, dtype=np.float32))
+            ret_ty = gluon_core.distributed_type(
+                tl.float32, input.type.shape, input.type.layout
+            )
+            return gluon_core.tensor(
+                _tensor_result(result, tl.float32, input.type.layout), ret_ty
+            )
+
+        def libdevice_fast_dividef(lhs: Any, rhs: Any):
+            lhs = gluon_semantic.to_tensor(lhs)
+            rhs = gluon_semantic.to_tensor(rhs)
+            result = np.asarray(lhs.handle.data, dtype=np.float32) / np.asarray(
+                rhs.handle.data, dtype=np.float32
+            )
+            ret_ty = gluon_core.distributed_type(
+                tl.float32, lhs.type.shape, lhs.type.layout
+            )
+            return gluon_core.tensor(
+                _tensor_result(result, tl.float32, lhs.type.layout), ret_ty
+            )
+
+        scope.set_attr(triton_libdevice, "exp", libdevice_exp)
+        scope.set_attr(triton_libdevice, "fast_expf", libdevice_exp)
+        scope.set_attr(triton_libdevice, "fast_dividef", libdevice_fast_dividef)
 
     if gluon_ampere_mbarrier is not None:
         scope.set_attr(gluon_ampere_mbarrier, "allocate_mbarrier", allocate_mbarrier)
