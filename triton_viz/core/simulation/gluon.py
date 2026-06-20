@@ -654,6 +654,8 @@ def _descriptor_from_host(value: Any) -> TensorDescriptor:
 
 def _implicit_gluon_cvt(name: str, value: Any, constexprs: set[str]) -> Any:
     if name in constexprs:
+        if isinstance(value, str):
+            return tl.constexpr(value)
         return value
     if isinstance(value, TensorDescriptor) or (
         type(value).__name__ in _HOST_TENSOR_DESCRIPTOR_TYPES
@@ -2628,7 +2630,7 @@ class GluonInterpretedFunction:
         self.fn = fn
         signature = inspect.signature(fn)
         self.arg_names = arg_names or [v.name for v in signature.parameters.values()]
-        annotations = fn.__annotations__
+        annotations = getattr(fn, "fn", fn).__annotations__
         self.constexprs = {
             name
             for name in self.arg_names
