@@ -509,6 +509,10 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
     def data(self) -> np.ndarray:
         return self._array
 
+    @property
+    def handle(self):
+        return self
+
     def data_ptr(self) -> int:
         data_ptr = getattr(self.base, "data_ptr", None)
         if callable(data_ptr):
@@ -1103,6 +1107,9 @@ class Builder(interpreter_builder.__class__):
         self._pending_clc_barriers: set[int] = set()
 
     def _barrier_key(self, barrier: Any) -> int:
+        handle = getattr(barrier, "handle", None)
+        if isinstance(handle, SharedMemoryHandle):
+            barrier = handle
         if isinstance(barrier, SharedMemoryHandle):
             # Shared memory descriptors can be rewrapped; the backing buffer is
             # the stable identity for matching expect/arrive/wait calls.
@@ -1762,7 +1769,15 @@ class Builder(interpreter_builder.__class__):
             result.data[...] = tensor_desc.load_block(coord)
         else:
             result.data[...] = tensor_desc.load_im2col_block(coord, offsets)
-        self._signal_barrier(barrier)
+        state = self._barrier_state(barrier)
+        nbytes = tensor_desc.block_type.nbytes
+        should_signal = True
+        with state.condition:
+            if state.pending_bytes > nbytes:
+                state.pending_bytes -= nbytes
+                should_signal = False
+        if should_signal:
+            self._signal_barrier(barrier)
         return None
 
     def create_async_tma_copy_local_to_global(
@@ -1783,6 +1798,9 @@ class Builder(interpreter_builder.__class__):
     ):
         kind_name = str(kind).split(".")[-1].lower()
         tensor_desc.reduce_block(coord, np.asarray(src.data), kind_name)
+        return None
+
+    def create_async_tma_store_wait(self, pendings: Any = 0, read_only: Any = True):
         return None
 
     def create_async_tma_gather(
@@ -2413,6 +2431,48 @@ _GLUON_BUILTIN_CLASSES: tuple[Any, ...] = tuple(
 )
 
 
+def _make_tma_atomic_reduce(kind: Any) -> Callable:
+    @gluon_core.builtin
+    def async_atomic_reduce(tensor_desc, coord, src, _semantic=None):
+        semantic = gluon_semantic if _semantic is None else _semantic
+        coord = semantic._convert_to_ir_values(coord, require_i64=False)
+        semantic.builder.create_async_tma_reduce(
+            kind,
+            tensor_desc.handle,
+            coord,
+            src.handle,
+        )
+
+    return async_atomic_reduce
+
+
+def _patch_tma_compat_aliases(module: Any, scope: _LangPatchScope) -> None:
+    if module is None:
+        return
+
+    for new_name, old_name in (
+        ("async_load", "async_copy_global_to_shared"),
+        ("async_load_im2col", "async_copy_global_to_shared_im2col"),
+        ("async_store", "async_copy_shared_to_global"),
+    ):
+        if not hasattr(module, new_name) and hasattr(module, old_name):
+            scope.set_attr(module, new_name, getattr(module, old_name))
+
+    reduce_kind = getattr(gluon_core.ir, "DESCRIPTOR_REDUCE_KIND", None)
+    if reduce_kind is None:
+        return
+    for name, kind in (
+        ("async_atomic_add", reduce_kind.ADD),
+        ("async_atomic_min", reduce_kind.MIN),
+        ("async_atomic_max", reduce_kind.MAX),
+        ("async_atomic_and", reduce_kind.AND),
+        ("async_atomic_or", reduce_kind.OR),
+        ("async_atomic_xor", reduce_kind.XOR),
+    ):
+        if not hasattr(module, name):
+            scope.set_attr(module, name, _make_tma_atomic_reduce(kind))
+
+
 def _yield_warp_specialize() -> None:
     from triton_viz.core.frontend import gluon as gluon_frontend
 
@@ -2443,6 +2503,8 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
     """Patch Gluon builtins to execute through the NumPy interpreter builder."""
 
     scope = _LangPatchScope()
+    _patch_tma_compat_aliases(gluon_hopper_tma, scope)
+    _patch_tma_compat_aliases(gluon_blackwell_tma, scope)
     for module in _GLUON_BUILTIN_MODULES:
         _patch_gluon_builtins(module, scope)
     for cls in _GLUON_BUILTIN_CLASSES:
