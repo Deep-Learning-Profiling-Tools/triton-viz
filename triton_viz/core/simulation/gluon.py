@@ -480,6 +480,10 @@ class TensorDescriptor(gluon_hopper_tma.tensor_descriptor):
     def data(self) -> np.ndarray:
         return self._array
 
+    @property
+    def handle(self):
+        return self
+
     def data_ptr(self) -> int:
         data_ptr = getattr(self.base, "data_ptr", None)
         if callable(data_ptr):
@@ -1071,6 +1075,9 @@ class Builder(interpreter_builder.__class__):
         self._pending_clc_barriers: set[int] = set()
 
     def _barrier_key(self, barrier: Any) -> int:
+        handle = getattr(barrier, "handle", None)
+        if isinstance(handle, SharedMemoryHandle):
+            barrier = handle
         if isinstance(barrier, SharedMemoryHandle):
             # Shared memory descriptors can be rewrapped; the backing buffer is
             # the stable identity for matching expect/arrive/wait calls.
@@ -1641,7 +1648,15 @@ class Builder(interpreter_builder.__class__):
             result.data[...] = tensor_desc.load_block(coord)
         else:
             result.data[...] = tensor_desc.load_im2col_block(coord, offsets)
-        self._signal_barrier(barrier)
+        state = self._barrier_state(barrier)
+        nbytes = tensor_desc.block_type.nbytes
+        should_signal = True
+        with state.condition:
+            if state.pending_bytes > nbytes:
+                state.pending_bytes -= nbytes
+                should_signal = False
+        if should_signal:
+            self._signal_barrier(barrier)
         return None
 
     def create_async_tma_copy_local_to_global(
@@ -1662,6 +1677,9 @@ class Builder(interpreter_builder.__class__):
     ):
         kind_name = str(kind).split(".")[-1].lower()
         tensor_desc.reduce_block(coord, np.asarray(src.data), kind_name)
+        return None
+
+    def create_async_tma_store_wait(self, pendings: Any = 0, read_only: Any = True):
         return None
 
     def create_async_tma_gather(
