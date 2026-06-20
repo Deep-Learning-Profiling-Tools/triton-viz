@@ -332,7 +332,82 @@ def test_tl_range_load_store_cross_iteration_race():
     assert {r.race_type for r in detector.last_reports} == {RaceType.WAW}
 
 
-# ======== Loop Lifecycle — nested re-entry ========
+# ======== Loop Lifecycle — break / abort / nested re-entry / file identity ==
+
+
+def test_loop_break_marks_unsupported_and_next_launch_recovers():
+    """A `break` exits the loop without exhausting it, so the deferred
+    accesses are never flushed. Regression test: LoopIter only fired
+    after_loop on StopIteration, so the pending WAW store was silently
+    dropped (last_status == 'ok' with no reports) and the dead LoopContext
+    stayed on loop_stack, swallowing every access of subsequent launches on
+    the same detector instance."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def break_kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(4):
+            tl.store(out_ptr + pid, 1.0)
+            break
+
+    out = torch.zeros(8, dtype=torch.float32)
+    break_kernel[(2,)](out)
+
+    # Never a silent clean verdict for an early-exited loop.
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "loop exited early" in detector.unsupported_reason
+    assert detector.loop_stack == []
+
+    # The next launch on the same detector instance must be unaffected:
+    # both blocks write out[0] — a real WAW race.
+    @triton_viz.trace(detector)
+    @triton.jit
+    def racy_kernel(out_ptr):
+        tl.store(out_ptr, 1.0)
+
+    racy_kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
+    assert detector.loop_stack == []
+
+
+def test_abort_mid_loop_does_not_poison_next_launch():
+    """abort_on_error raising from inside a loop body (atomic-in-loop)
+    bypasses the StopIteration flush. Regression test: the stale LoopContext
+    survived _clear_launch_runtime/grid_callback, so the next launch's
+    accesses were deferred into the dead context and a genuinely racy
+    kernel finished with last_status == 'ok' and zero reports."""
+
+    detector = SymbolicRaceDetector(abort_on_error=True)
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def atomic_in_loop_kernel(out_ptr):
+        for _i in range(4):
+            tl.atomic_add(out_ptr, 1)
+
+    flag = torch.zeros(4, dtype=torch.int32)
+    with pytest.raises(UnsupportedSymbolicRaceQuery, match="atomic_rmw inside loop"):
+        atomic_in_loop_kernel[(2,)](flag)
+    assert detector.loop_stack == []
+    # The aborted launch must not read as a clean verdict.
+    assert detector.last_status == "unsupported"
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def racy_kernel(out_ptr):
+        tl.store(out_ptr, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    racy_kernel[(2,)](out)
+
+    assert detector.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in detector.last_reports)
 
 
 def test_nested_loop_records_do_not_scale_with_outer_trip_count():
@@ -1404,6 +1479,66 @@ def test_clamp_on_symbolic_values_is_supported():
     racy_kernel[(2,)](x, out, 4)
     assert racy.last_status == "ok"
     assert any(r.race_type == RaceType.WAW for r in racy.last_reports)
+
+
+# ======== tl.assume — conditions constrain the two-copy model ========
+
+
+def test_assume_constrains_the_model():
+    """tl.assume conditions hold on every feasible execution, so they are
+    sound solver assumptions (instantiated per program copy). Regression
+    test: the interpreter's `assert condition` was object-truthy on the
+    symbolic condition and silently dropped it."""
+
+    restricting = SymbolicRaceDetector()
+
+    @triton_viz.trace(restricting)
+    @triton.jit
+    def assumed(out_ptr):
+        pid = tl.program_id(0)
+        tl.assume(pid < 1)
+        tl.store(out_ptr, pid.to(tl.float32))
+
+    out = torch.zeros(4, dtype=torch.float32)
+    assumed[(2,)](out)
+    assert restricting.last_status == "ok"
+    assert restricting.last_reports == []
+
+    loose = SymbolicRaceDetector()
+
+    @triton_viz.trace(loose)
+    @triton.jit
+    def assumed_loose(out_ptr):
+        pid = tl.program_id(0)
+        tl.assume(pid >= 0)
+        tl.store(out_ptr, pid.to(tl.float32))
+
+    assumed_loose[(2,)](out)
+    assert loose.last_status == "ok"
+    assert any(r.race_type == RaceType.WAW for r in loose.last_reports)
+
+
+def test_assume_inside_loop_is_unsupported():
+    """Loop-body assumptions are per-iteration path conditions the one-shot
+    capture cannot attribute; mark unsupported instead of misapplying them
+    launch-wide."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(out_ptr):
+        pid = tl.program_id(0)
+        for i in range(2):
+            tl.assume(pid >= 0)
+            tl.store(out_ptr + pid + i, 1.0)
+
+    out = torch.zeros(8, dtype=torch.float32)
+    kernel[(2,)](out)
+
+    assert detector.last_status == "unsupported"
+    assert detector.unsupported_reason is not None
+    assert "inside a loop" in detector.unsupported_reason
 
 
 # ======== Atomic scope — cta atomics are not cross-CTA atomic ========
