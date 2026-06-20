@@ -991,6 +991,16 @@ def _tensor_result(
     return handle
 
 
+def _language_tensor_result(data: np.ndarray, dtype: tl.dtype) -> tl.tensor:
+    data = np.asarray(data, dtype=_get_np_dtype(dtype))
+    if data.shape:
+        ty = tl.block_type(dtype, list(data.shape))
+    else:
+        data = data.reshape(1)
+        ty = dtype
+    return tl.tensor(TensorHandle(data, dtype), ty)
+
+
 def _local_indices(
     indices: np.ndarray, axis: int
 ) -> Iterator[tuple[tuple[int, ...], tuple[int, ...]]]:
@@ -2376,6 +2386,43 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
         )
 
     scope.set_attr(gluon_core.shared_memory_descriptor, "slice", slice_shared_memory)
+
+    def reduce_sum(
+        input: Any,
+        axis: Any = None,
+        keep_dims: Any = False,
+        dtype: Any = None,
+    ):
+        input = gluon_semantic.to_tensor(input)
+        result_dtype = input.dtype if dtype is None else _unwrap_constexpr(dtype)
+        data = np.asarray(input.handle.data, dtype=_get_np_dtype(result_dtype))
+        axis_value = None if axis is None else int(_unwrap_constexpr(axis))
+        result = np.sum(
+            data, axis=axis_value, keepdims=bool(_unwrap_constexpr(keep_dims))
+        )
+        return _language_tensor_result(result, result_dtype)
+
+    def reduce_max(
+        input: Any,
+        axis: Any = None,
+        return_indices: Any = False,
+        return_indices_tie_break_left: Any = True,
+        keep_dims: Any = False,
+    ):
+        if bool(_unwrap_constexpr(return_indices)):
+            raise NotImplementedError("Gluon interpreter max indices are unsupported")
+        input = gluon_semantic.to_tensor(input)
+        axis_value = None if axis is None else int(_unwrap_constexpr(axis))
+        result = np.max(
+            np.asarray(input.handle.data),
+            axis=axis_value,
+            keepdims=bool(_unwrap_constexpr(keep_dims)),
+        )
+        return _language_tensor_result(result, input.dtype)
+
+    for module in (gl, gluon_standard):
+        scope.set_attr(module, "sum", reduce_sum)
+        scope.set_attr(module, "max", reduce_max)
 
     if gluon_ampere_mbarrier is not None:
         scope.set_attr(gluon_ampere_mbarrier, "allocate_mbarrier", allocate_mbarrier)
