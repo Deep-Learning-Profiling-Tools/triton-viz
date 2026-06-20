@@ -2488,13 +2488,24 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
             or tl.core.is_builtin(member)
         ):
             continue
+        try:
+            accepts_semantic = "_semantic" in inspect.signature(member).parameters
+        except (TypeError, ValueError):
+            accepts_semantic = True
 
-        def new_member(*args: Any, member: Callable = member, **kwargs: Any):
+        def new_member(
+            *args: Any,
+            member: Callable = member,
+            accepts_semantic: bool = accepts_semantic,
+            **kwargs: Any,
+        ):
             _yield_warp_specialize()
             # Gluon builtins may pass a compile-time semantic object; replace it
             # with this builder-backed semantic while preserving user arguments.
             kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
-            return member(*args, **kwargs, _semantic=gluon_semantic)
+            if accepts_semantic:
+                return member(*args, **kwargs, _semantic=gluon_semantic)
+            return member(*args, **kwargs)
 
         scope.set_attr(pkg, name, new_member)
 
