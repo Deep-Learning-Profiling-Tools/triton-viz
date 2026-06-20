@@ -2361,6 +2361,22 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
     def invalidate_mbarrier(mbarrier: Any, **_kwargs: Any):
         return gluon_builder.create_mbarrier_inval(mbarrier)
 
+    def slice_shared_memory(
+        mem_desc: Any,
+        start: Any,
+        length: Any,
+        dim: Any = 0,
+        **_kwargs: Any,
+    ):
+        return gluon_semantic.memdesc_slice(
+            mem_desc,
+            _unwrap_constexpr(start),
+            _unwrap_constexpr(length),
+            _unwrap_constexpr(dim),
+        )
+
+    scope.set_attr(gluon_core.shared_memory_descriptor, "slice", slice_shared_memory)
+
     if gluon_ampere_mbarrier is not None:
         scope.set_attr(gluon_ampere_mbarrier, "allocate_mbarrier", allocate_mbarrier)
         scope.set_attr(gluon_ampere_mbarrier, "init", init_mbarrier)
