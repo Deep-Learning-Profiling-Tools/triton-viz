@@ -2429,6 +2429,41 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
         scope.set_attr(module, "sum", reduce_sum)
         scope.set_attr(module, "max", reduce_max)
 
+    # Public gl.* hint functions are copies of gluon_core functions, so patch
+    # both namespaces to accept ordinary Python values in interpreter mode.
+    def set_tensor_attr(input: Any, values: Any, name: str):
+        if not isinstance(input, gluon_core.tensor):
+            return input
+        values = [values] if not isinstance(values, (list, tuple)) else values
+        values = [_unwrap_constexpr(value) for value in values]
+        if len(values) != max(1, len(input.type.shape)):
+            raise ValueError(f"len(values) != len(input.shape) for {name}")
+        input.handle.set_attr(name, values)
+        return input
+
+    for module in (gl, gluon_core):
+        scope.set_attr(
+            module,
+            "multiple_of",
+            lambda input, values, _semantic=None: set_tensor_attr(
+                input, values, "tt.divisibility"
+            ),
+        )
+        scope.set_attr(
+            module,
+            "max_contiguous",
+            lambda input, values, _semantic=None: set_tensor_attr(
+                input, values, "tt.contiguity"
+            ),
+        )
+        scope.set_attr(
+            module,
+            "max_constancy",
+            lambda input, values, _semantic=None: set_tensor_attr(
+                input, values, "tt.constancy"
+            ),
+        )
+
     if triton_libdevice is not None:
         # Triton's Python libdevice helpers are declaration stubs; install CPU
         # equivalents before Gluon kernels call them in interpreter mode.
