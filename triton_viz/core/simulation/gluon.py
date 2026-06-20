@@ -216,7 +216,7 @@ class GluonSemantic(gluon_semantic_module.GluonSemantic):
         return 1
 
     def num_ctas(self):
-        return 1
+        return self.builder.num_ctas
 
     def convert_layout(self, value: Any, layout: Any, assert_trivial: bool = False):
         ty = value.type
@@ -1075,6 +1075,7 @@ class Builder(interpreter_builder.__class__):
         # stale ids from previous simulated launches.
         self._barrier_states: dict[int, _MBarrierState] = {}
         self._pending_clc_barriers: set[int] = set()
+        self.num_ctas = 1
 
     def _barrier_key(self, barrier: Any) -> int:
         handle = getattr(barrier, "handle", None)
@@ -2421,6 +2422,7 @@ class GluonInterpretedFunction:
 
         client_manager = kwargs.pop("client_manager", None)
         should_patch_lang = kwargs.pop("_patch_lang", True)
+        launch_num_ctas = int(kwargs.get("num_ctas", 1))
         if "num_warps" not in self.arg_names:
             kwargs.pop("num_warps", None)
         if "num_ctas" not in self.arg_names:
@@ -2436,6 +2438,8 @@ class GluonInterpretedFunction:
         canonical_grid = self._canonical_grid(grid, raw_call_args)
         interpreter_builder.set_grid_dim(*canonical_grid)
         gluon_builder.set_grid_dim(*canonical_grid)
+        previous_num_ctas = gluon_builder.num_ctas
+        gluon_builder.num_ctas = launch_num_ctas
 
         if client_manager is not None:
             for name, arg in raw_call_args.items():
@@ -2465,6 +2469,7 @@ class GluonInterpretedFunction:
                 raise
             raise InterpreterError(repr(exc)) from exc
         finally:
+            gluon_builder.num_ctas = previous_num_ctas
             patch_scope.restore()
 
         grid_helper._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
