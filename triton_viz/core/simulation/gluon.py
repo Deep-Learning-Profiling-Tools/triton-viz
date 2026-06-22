@@ -230,6 +230,35 @@ class GluonSemantic(gluon_semantic_module.GluonSemantic):
         )
         return gluon_core.tensor(handle, ret_ty)
 
+    def _with_auto_layout(self, value: Any) -> Any:
+        ty = getattr(value, "type", None)
+        if not isinstance(ty, gluon_core.distributed_type):
+            return value
+        ret_ty = gluon_core.distributed_type(
+            ty.element_ty,
+            ty.shape,
+            gluon_layouts.AutoLayout(),
+        )
+        return gluon_core.tensor(value.handle, ret_ty)
+
+    def store(
+        self,
+        pointer: Any,
+        value: Any,
+        mask: Any,
+        boundary_check: Any,
+        cache_modifier: Any,
+        eviction_policy: Any,
+    ):
+        return super().store(
+            self._with_auto_layout(pointer),
+            value,
+            self._with_auto_layout(mask),
+            boundary_check,
+            cache_modifier,
+            eviction_policy,
+        )
+
     def warp_specialize(
         self,
         functions_and_args: Any,
@@ -701,8 +730,9 @@ class SharedMemoryHandle(TensorHandle, gluon_core.shared_memory_descriptor):
         return int(self.data.__array_interface__["data"][0])
 
     def load(self, layout: Any = None, _semantic: Any = None) -> tl.tensor:
+        layout = self.layout if layout is None else layout
         return tl.tensor(
-            TensorHandle(self.data.copy(), self.element_ty),
+            _tensor_result(self.data.copy(), self.element_ty, layout),
             tl.block_type(self.element_ty, list(self.shape)),
         )
 
@@ -868,8 +898,9 @@ class TensorMemoryHandle(TensorHandle, gluon_blackwell.tensor_memory_descriptor)
         _semantic: Any = None,
         _generator: Any = None,
     ) -> tl.tensor:
+        layout = self.layout if layout is None else layout
         return tl.tensor(
-            TensorHandle(self.data.copy(), self.element_ty),
+            _tensor_result(self.data.copy(), self.element_ty, layout),
             tl.block_type(self.element_ty, list(self.shape)),
         )
 
@@ -888,8 +919,9 @@ class TensorMemoryHandle(TensorHandle, gluon_blackwell.tensor_memory_descriptor)
             data = np.abs(data)
         reduced_data = np_func(data, axis=1)
         reduced_data = np.asarray(reduced_data, dtype=data.dtype)
+        layout = self.layout if layout is None else layout
         reduced = tl.tensor(
-            TensorHandle(reduced_data, self.element_ty),
+            _tensor_result(reduced_data, self.element_ty, layout),
             tl.block_type(self.element_ty, list(reduced_data.shape)),
         )
         return values, reduced
@@ -1093,6 +1125,82 @@ class Builder(interpreter_builder.__class__):
             state.ready = True
             state.condition.notify_all()
 
+    _WRAPPED_LAYOUT_OPS: dict[str, tuple[str, int | None]] = {
+        "binary_op": ("arg", 0),
+        "cast_impl": ("arg", 0),
+        "create_make_range": ("ret_ty", 0),
+        "create_get_program_id": ("auto", None),
+        "create_get_num_programs": ("auto", None),
+        "create_addptr": ("auto", None),
+        "create_masked_load": ("arg", 0),
+        "create_splat": ("ret_ty", 0),
+        "create_reshape": ("arg", 0),
+        "create_trans": ("arg", 0),
+        "create_cat": ("arg", 0),
+        "create_join": ("arg", 0),
+        "create_split": ("arg", 0),
+        "create_unsplat": ("arg", 0),
+        "create_gather": ("arg", 0),
+        "create_fabs": ("arg", 0),
+        "create_erf": ("arg", 0),
+        "create_rsqrt": ("arg", 0),
+        "create_fma": ("arg", 2),
+        "create_idiv": ("arg", 0),
+        "create_umulhi": ("arg", 0),
+        "create_ashr": ("arg", 0),
+        "create_fp_to_fp": ("arg", 0),
+        "create_bitcast": ("arg", 0),
+        "create_atomic_cas": ("arg", 0),
+        "create_atomic_rmw": ("arg", 1),
+        "create_dot": ("arg", 2),
+        "create_dot_scaled": ("arg", 9),
+        "create_descriptor_gather": ("arg", 1),
+    }
+
+    def __getattribute__(self, name: str):
+        attr = super().__getattribute__(name)
+        layout_source = type(self)._WRAPPED_LAYOUT_OPS.get(name)
+        if layout_source is None or not callable(attr):
+            return attr
+
+        def wrapped(*args: Any, **kwargs: Any):
+            result = attr(*args, **kwargs)
+            layout = self._layout_from_source(layout_source, args)
+            return self._attach_layout(result, layout)
+
+        return wrapped
+
+    def _ret_layout(self, ret_ty: Any, fallback: Any = None) -> Any:
+        return getattr(
+            ret_ty,
+            "gluon_layout",
+            getattr(ret_ty, "layout", fallback or gluon_layouts.AutoLayout()),
+        )
+
+    def _layout_from_source(
+        self,
+        source: tuple[str, int | None],
+        args: tuple[Any, ...],
+    ) -> Any:
+        kind, index = source
+        if kind == "auto":
+            return gluon_layouts.AutoLayout()
+        if index is None or index >= len(args):
+            return gluon_layouts.AutoLayout()
+        value = args[index]
+        if kind == "ret_ty":
+            return self._ret_layout(value)
+        if isinstance(value, TensorHandle):
+            return _get_handle_layout(value)
+        return gluon_layouts.AutoLayout()
+
+    def _attach_layout(self, value: Any, layout: Any) -> Any:
+        if isinstance(value, TensorHandle):
+            return _tensor_result(value.data, value.dtype, layout)
+        if isinstance(value, tuple):
+            return tuple(self._attach_layout(item, layout) for item in value)
+        return value
+
     def get_auto_layout(self):
         return gluon_layouts.AutoLayout()
 
@@ -1290,7 +1398,9 @@ class Builder(interpreter_builder.__class__):
         )
 
     def get_distributed_ty(self, element_ty: tl.dtype, shape: Any, layout: Any):
-        return tl.block_type(element_ty, list(shape))
+        block_ty = tl.block_type(element_ty, list(shape))
+        block_ty.gluon_layout = layout
+        return block_ty
 
     def get_shared_mem_desc_ty(
         self,
@@ -1344,6 +1454,21 @@ class Builder(interpreter_builder.__class__):
 
     def is_convert_layout_trivial(self, _ret_ty: Any, _value: Any) -> bool:
         return True
+
+    def create_broadcast(self, arg: TensorHandle, ret_ty: Any):
+        result = super().create_broadcast(arg, getattr(ret_ty, "shape", ret_ty))
+        return _tensor_result(
+            result.data,
+            result.dtype,
+            self._ret_layout(ret_ty, _get_handle_layout(arg)),
+        )
+
+    def create_expand_dims(self, arg: TensorHandle, axis: int):
+        result = super().create_expand_dims(arg, axis)
+        layout = _get_handle_layout(arg)
+        if isinstance(layout, gluon_layouts.SliceLayout):
+            layout = layout.parent
+        return _tensor_result(result.data, result.dtype, layout)
 
     def create_convert_layout(self, ret_ty: Any, value: TensorHandle):
         layout = getattr(ret_ty, "layout", gluon_layouts.AutoLayout())
@@ -1735,12 +1860,18 @@ class Builder(interpreter_builder.__class__):
         mask: TensorHandle | None,
         _layout: Any = None,
     ):
-        return super().create_histogram(data, bins, mask)
+        result = super().create_histogram(data, bins, mask)
+        return _tensor_result(
+            result.data,
+            result.dtype,
+            _layout or _get_handle_layout(data),
+        )
 
     def create_fp4_to_fp(self, src: TensorHandle, elem_type: tl.dtype, axis: int):
-        return TensorHandle(
+        return _tensor_result(
             _convert_float_result(_unpack_e2m1(src.data, int(axis)), elem_type),
             elem_type,
+            _get_handle_layout(src),
         )
 
     def create_scaled_upcast_fp8(
@@ -1753,9 +1884,10 @@ class Builder(interpreter_builder.__class__):
             values = _mxfp_value_handle_to_float32(src)
         else:
             values = np.asarray(src.data, dtype=np.float32)
-        return TensorHandle(
+        return _tensor_result(
             values * np.broadcast_to(_scale_values(scale.data), values.shape),
             tl.float32,
+            _get_handle_layout(src),
         )
 
     def create_scaled_upcast_fp4(
@@ -1766,12 +1898,13 @@ class Builder(interpreter_builder.__class__):
         axis: int,
     ):
         values = _unpack_e2m1(src.data, int(axis)).astype(np.float32)
-        return TensorHandle(
+        return _tensor_result(
             _convert_float_result(
                 values * np.broadcast_to(_scale_values(scale.data), values.shape),
                 elem_type,
             ),
             elem_type,
+            _get_handle_layout(scale),
         )
 
     def _buffer_ptrs(self, ptr: TensorHandle, offsets: TensorHandle):
@@ -1788,7 +1921,11 @@ class Builder(interpreter_builder.__class__):
     ):
         ptrs = self._buffer_ptrs(ptr, offsets)
         if mask is None:
-            mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
+            mask = _tensor_result(
+                np.ones_like(ptrs.data, dtype=bool),
+                tl.int1,
+                _get_handle_layout(ptrs),
+            )
         return self.create_masked_load(ptrs, mask, other, None, None, False)
 
     def create_buffer_store(
@@ -1801,7 +1938,11 @@ class Builder(interpreter_builder.__class__):
     ):
         ptrs = self._buffer_ptrs(ptr, offsets)
         if mask is None:
-            mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
+            mask = _tensor_result(
+                np.ones_like(ptrs.data, dtype=bool),
+                tl.int1,
+                _get_handle_layout(ptrs),
+            )
         return self.create_masked_store(ptrs, stored_value, mask, None, None)
 
     def create_buffer_atomic_rmw(
@@ -1816,10 +1957,18 @@ class Builder(interpreter_builder.__class__):
     ):
         ptrs = self._buffer_ptrs(ptr, offsets)
         if mask is None:
-            mask = TensorHandle(np.ones_like(ptrs.data, dtype=bool), tl.int1)
+            mask = _tensor_result(
+                np.ones_like(ptrs.data, dtype=bool),
+                tl.int1,
+                _get_handle_layout(ptrs),
+            )
         old = self.create_masked_load(ptrs, mask, None, None, None, False)
         new_data = _apply_rmw(_rmw_kind(rmw_op), old.data, value.data)
-        new_value = TensorHandle(new_data.astype(old.data.dtype), old.dtype)
+        new_value = _tensor_result(
+            new_data.astype(old.data.dtype),
+            old.dtype,
+            _get_handle_layout(old),
+        )
         self.create_masked_store(ptrs, new_value, mask, None, None)
         return old
 
@@ -1845,7 +1994,11 @@ class Builder(interpreter_builder.__class__):
         *args: Any,
     ):
         value = self.create_buffer_load(
-            None, ptr, TensorHandle(np.array([0]), tl.int32), mask, other
+            None,
+            ptr,
+            _tensor_result(np.array([0]), tl.int32),
+            mask,
+            other,
         )
         dest.data[...] = np.asarray(value.data, dtype=dest.data.dtype)
         return None
@@ -1857,9 +2010,13 @@ class Builder(interpreter_builder.__class__):
         mask: TensorHandle | None,
         *args: Any,
     ):
-        value = TensorHandle(np.asarray(src.data), src.element_ty)
+        value = _tensor_result(np.asarray(src.data), src.element_ty, src.layout)
         if mask is None:
-            mask = TensorHandle(np.ones_like(value.data, dtype=bool), tl.int1)
+            mask = _tensor_result(
+                np.ones_like(value.data, dtype=bool),
+                tl.int1,
+                _get_handle_layout(value),
+            )
         return self.create_masked_store(ptr, value, mask, None, None)
 
     def create_async_copy_mbarrier_arrive(self, mbarrier: Any, *args: Any):
@@ -1935,7 +2092,7 @@ class Builder(interpreter_builder.__class__):
         pred = args[0] if args else True
         if bool(_to_python_scalar(pred)):
             self._signal_barrier(barrier)
-        return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
+        return _tensor_result(np.array([0], dtype=np.int32), tl.int32)
 
     def create_fence_mbarrier_init_release_cluster(self):
         return None
@@ -2180,9 +2337,10 @@ class Builder(interpreter_builder.__class__):
         )
         if bool(_to_python_scalar(use_acc)):
             result = result + np.asarray(acc.data, dtype=np.float32)
-        return TensorHandle(
+        return _tensor_result(
             result.astype(_get_np_dtype(acc.dtype), copy=False),
             acc.dtype,
+            _get_handle_layout(acc),
         )
 
     def create_warpgroup_mma_wait(self, deps: list[TensorHandle], num_outstanding: Any):
@@ -2282,7 +2440,7 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
         _patch_gluon_builtins(cls, scope)
 
     def allocate_mbarrier(*_args: Any, **_kwargs: Any):
-        return TensorHandle(np.array([0], dtype=np.int32), tl.int32)
+        return _tensor_result(np.array([0], dtype=np.int32), tl.int32)
 
     def init_mbarrier(mbarrier: Any, count: Any = 1, **_kwargs: Any):
         return gluon_builder.create_mbarrier_init(mbarrier, count)
