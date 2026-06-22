@@ -1134,7 +1134,6 @@ class Builder(interpreter_builder.__class__):
         "create_addptr": ("auto", None),
         "create_masked_load": ("arg", 0),
         "create_splat": ("ret_ty", 0),
-        "create_expand_dims": ("arg", 0),
         "create_reshape": ("arg", 0),
         "create_trans": ("arg", 0),
         "create_cat": ("arg", 0),
@@ -1197,27 +1196,10 @@ class Builder(interpreter_builder.__class__):
 
     def _attach_layout(self, value: Any, layout: Any) -> Any:
         if isinstance(value, TensorHandle):
-            layout = self._normalize_result_layout(value, layout)
             return _tensor_result(value.data, value.dtype, layout)
         if isinstance(value, tuple):
             return tuple(self._attach_layout(item, layout) for item in value)
         return value
-
-    def _normalize_result_layout(self, value: TensorHandle, layout: Any) -> Any:
-        if value.dtype == tl.int1:
-            return gluon_layouts.AutoLayout()
-        result_rank = np.asarray(value.data).ndim
-        if isinstance(layout, gluon_layouts.SliceLayout):
-            parent = layout.parent
-            if getattr(parent, "rank", None) == result_rank:
-                return parent
-        if isinstance(
-            layout, (gluon_layouts.AutoLayout, gluon_layouts.CoalescedLayout)
-        ):
-            return layout
-        if getattr(layout, "rank", result_rank) != result_rank:
-            return gluon_layouts.AutoLayout()
-        return layout
 
     def get_auto_layout(self):
         return gluon_layouts.AutoLayout()
@@ -1474,12 +1456,19 @@ class Builder(interpreter_builder.__class__):
         return True
 
     def create_broadcast(self, arg: TensorHandle, ret_ty: Any):
-        shape = getattr(ret_ty, "shape", ret_ty)
+        result = super().create_broadcast(arg, getattr(ret_ty, "shape", ret_ty))
         return _tensor_result(
-            np.broadcast_to(arg.data, shape),
-            arg.dtype.scalar,
+            result.data,
+            result.dtype,
             self._ret_layout(ret_ty, _get_handle_layout(arg)),
         )
+
+    def create_expand_dims(self, arg: TensorHandle, axis: int):
+        result = super().create_expand_dims(arg, axis)
+        layout = _get_handle_layout(arg)
+        if isinstance(layout, gluon_layouts.SliceLayout):
+            layout = layout.parent
+        return _tensor_result(result.data, result.dtype, layout)
 
     def create_convert_layout(self, ret_ty: Any, value: TensorHandle):
         layout = getattr(ret_ty, "layout", gluon_layouts.AutoLayout())
