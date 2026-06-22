@@ -1991,14 +1991,23 @@ class Builder(interpreter_builder.__class__):
         ptr: TensorHandle,
         mask: TensorHandle | None,
         other: TensorHandle | None = None,
-        *args: Any,
+        cache_modifier: Any = None,
+        eviction_policy: Any = None,
+        is_volatile: Any = False,
     ):
-        value = self.create_buffer_load(
-            None,
+        if not isinstance(mask, TensorHandle):
+            mask = _tensor_result(
+                np.ones_like(ptr.data, dtype=bool),
+                tl.int1,
+                _get_handle_layout(ptr),
+            )
+        value = self.create_masked_load(
             ptr,
-            _tensor_result(np.array([0]), tl.int32),
             mask,
-            other,
+            other if isinstance(other, TensorHandle) else None,
+            cache_modifier,
+            eviction_policy,
+            bool(_unwrap_constexpr(is_volatile)),
         )
         dest.data[...] = np.asarray(value.data, dtype=dest.data.dtype)
         return None
