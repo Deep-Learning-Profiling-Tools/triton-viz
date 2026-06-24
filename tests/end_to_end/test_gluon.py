@@ -28,6 +28,11 @@ except ImportError:
     amd_cdna4_cp = None
 
 try:
+    from triton.experimental.gluon.nvidia.hopper import TensorDescriptorIm2Col
+except ImportError:
+    TensorDescriptorIm2Col = None
+
+try:
     from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 except ImportError:
     cp = None
@@ -39,6 +44,7 @@ _HAS_AMD_CDNA4_ASYNC_COPY = (
     amd_cdna4_cp is not None
     and getattr(amd_cdna4_cp, "global_load_to_shared", None) is not None
 )
+_HAS_TMA_IM2COL = TensorDescriptorIm2Col is not None
 
 
 class _NoOpClient(Client):
@@ -461,6 +467,64 @@ def _blackwell_tma_bitwise_atomic_kernel(
     blackwell_tma.store_wait(0)
 
 
+@gluon.jit
+def _tma_im2col_kernel(
+    in_desc,
+    out_desc,
+    coord_n,
+    coord_h,
+    coord_w,
+    coord_c,
+    offset_h: gl.constexpr,
+    offset_w: gl.constexpr,
+):
+    smem = gl.allocate_shared_memory(in_desc.dtype, in_desc.block_shape, in_desc.layout)
+    barrier = gl.allocate_shared_memory(gl.int64, [1], in_desc.layout)
+    mbarrier.init(barrier, count=1)
+    mbarrier.expect(barrier, in_desc.block_type.nbytes)
+    tma.async_load_im2col(
+        in_desc,
+        [coord_n, coord_h, coord_w, coord_c],
+        [offset_h, offset_w],
+        barrier,
+        smem,
+    )
+    mbarrier.wait(barrier, phase=0)
+    mbarrier.invalidate(barrier)
+    tma.async_store(out_desc, [0, 0], smem)
+    tma.store_wait(0)
+
+
+def _run_im2col_case(
+    inp,
+    pixel_box_lower_corner,
+    pixel_box_upper_corner,
+    coord,
+    offsets,
+):
+    out = torch.zeros((16, 32), dtype=torch.float32)
+    layout = gl.NVMMASharedLayout(
+        swizzle_byte_width=128,
+        element_bitwidth=32,
+        rank=2,
+    )
+    in_desc = TensorDescriptorIm2Col.from_tensor(
+        inp,
+        [16, 32],
+        layout,
+        padding="zero",
+        element_strides=[1, 1, 1, 1],
+        pixel_box_lower_corner=pixel_box_lower_corner,
+        pixel_box_upper_corner=pixel_box_upper_corner,
+    )
+    out_desc = TensorDescriptor.from_tensor(out, [16, 32], layout)
+    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(_tma_im2col_kernel)
+
+    kernel[(1,)](in_desc, out_desc, *coord, *offsets, num_warps=1)
+
+    return out
+
+
 def test_gluon_trace_runs_copy_scalar_kernel():
     kernel = triton_viz.trace("tracer", frontend="gluon")(_copy_scalar_kernel)
 
@@ -712,6 +776,49 @@ def test_gluon_tma_runs_float_atomics_on_cpu():
     torch.testing.assert_close(add_dst, expected_add, atol=0, rtol=0)
     torch.testing.assert_close(min_dst, expected_min, atol=0, rtol=0)
     torch.testing.assert_close(max_dst, expected_max, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not _HAS_TMA_IM2COL,
+    reason="Gluon TensorDescriptorIm2Col is unavailable in this Triton build",
+)
+def test_gluon_tma_im2col_runs_simple_tile_on_cpu():
+    inp = torch.arange(1, 17, dtype=torch.float32).unsqueeze(1).repeat(1, 32)
+    inp = inp.reshape(1, 4, 4, 32)
+
+    out = _run_im2col_case(inp, [0, 0], [0, 0], [0, 0, 0, 0], [0, 0])
+
+    torch.testing.assert_close(out, inp.reshape(16, 32), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not _HAS_TMA_IM2COL,
+    reason="Gluon TensorDescriptorIm2Col is unavailable in this Triton build",
+)
+def test_gluon_tma_im2col_zero_fills_padded_pixels_on_cpu():
+    inp = torch.arange(1, 17, dtype=torch.float32).unsqueeze(1).repeat(1, 32)
+    inp = inp.reshape(1, 4, 4, 32)
+
+    out = _run_im2col_case(inp, [-1, -1], [-1, -1], [0, -1, -1, 0], [0, 0])
+
+    expected_first_channel = torch.tensor(
+        [0, 0, 0, 0, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(out[:, 0], expected_first_channel, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not _HAS_TMA_IM2COL,
+    reason="Gluon TensorDescriptorIm2Col is unavailable in this Triton build",
+)
+def test_gluon_tma_im2col_honors_runtime_offsets_on_cpu():
+    inp = torch.arange(1, 17, dtype=torch.float32).unsqueeze(1).repeat(1, 32)
+    inp = inp.reshape(1, 4, 4, 32)
+
+    out = _run_im2col_case(inp, [-1, -1], [-1, -1], [0, -1, -1, 0], [1, 1])
+
+    torch.testing.assert_close(out, inp.reshape(16, 32), atol=0, rtol=0)
 
 
 def test_gluon_blackwell_tma_runs_gather_on_cpu():
