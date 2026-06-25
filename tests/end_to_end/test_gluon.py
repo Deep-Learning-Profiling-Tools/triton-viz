@@ -6,7 +6,7 @@ import torch
 from triton import knobs
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language.nvidia import hopper
+from triton.experimental.gluon.language.nvidia import blackwell, hopper
 from triton.experimental.gluon.language.nvidia.blackwell import tma as blackwell_tma
 from triton.experimental.gluon.language.nvidia.hopper import (
     mbarrier,
@@ -15,10 +15,9 @@ from triton.experimental.gluon.language.nvidia.hopper import (
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
 import triton_viz
-from triton_viz.core.callbacks import ForLoopCallbacks, OpCallbacks
-from triton_viz.core.client import Client
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.core.data import Load
+from triton_viz.core.simulation.gluon import GluonInterpretedFunction
 
 try:
     from triton.experimental.gluon.language.amd.cdna4 import (
@@ -47,38 +46,8 @@ _HAS_AMD_CDNA4_ASYNC_COPY = (
 _HAS_TMA_IM2COL = TensorDescriptorIm2Col is not None
 
 
-class _NoOpClient(Client):
-    NAME = "noop"
-
-    def pre_run_callback(self, fn):
-        return True
-
-    def post_run_callback(self, fn):
-        return True
-
-    def arg_callback(self, name, arg, arg_cvt):
-        pass
-
-    def grid_callback(self, grid):
-        pass
-
-    def grid_idx_callback(self, grid_idx):
-        pass
-
-    def register_op_callback(self, op_type, *args, **kwargs):
-        return OpCallbacks()
-
-    def register_for_loop_callback(self):
-        return ForLoopCallbacks()
-
-    def finalize(self):
-        return []
-
-    def pre_warmup_callback(self, jit_fn, *args, **kwargs):
-        return True
-
-    def post_warmup_callback(self, jit_fn, ret):
-        pass
+def _run_gluon_on_cpu(fn, grid, *args, **kwargs):
+    GluonInterpretedFunction(fn.fn).run(*args, grid=grid, **kwargs)
 
 
 @gluon.jit
@@ -518,9 +487,9 @@ def _run_im2col_case(
         pixel_box_upper_corner=pixel_box_upper_corner,
     )
     out_desc = TensorDescriptor.from_tensor(out, [16, 32], layout)
-    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(_tma_im2col_kernel)
-
-    kernel[(1,)](in_desc, out_desc, *coord, *offsets, num_warps=1)
+    _run_gluon_on_cpu(
+        _tma_im2col_kernel, (1,), in_desc, out_desc, *coord, *offsets, num_warps=1
+    )
 
     return out
 
@@ -614,11 +583,52 @@ def _run_small_wgmma_case(seed: int, lhs_in_reg: bool):
     b_desc = TensorDescriptor.from_tensor(b, list(b.shape), b_layout)
     c_desc = TensorDescriptor.from_tensor(c, list(c.shape), c_layout)
     out_desc = TensorDescriptor.from_tensor(out, list(out.shape), c_layout)
-    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(_small_wgmma_kernel)
-
-    kernel[(1,)](a_desc, b_desc, c_desc, out_desc, lhs_in_reg, num_warps=4)
+    _run_gluon_on_cpu(
+        _small_wgmma_kernel,
+        (1,),
+        a_desc,
+        b_desc,
+        c_desc,
+        out_desc,
+        lhs_in_reg,
+        num_warps=4,
+    )
 
     torch.testing.assert_close(out, a.float() @ b.float() + c, atol=1e-2, rtol=1e-2)
+
+
+@gluon.jit
+def _tensor_memory_roundtrip_kernel(
+    in_ptr,
+    out_ptr,
+    M: gl.constexpr,
+    N: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    global_layout: gl.constexpr = gl.BlockedLayout(
+        [1, 1],
+        [1, 32],
+        [1, num_warps],
+        [1, 0],
+    )
+    offs_m = gl.arange(0, M, gl.SliceLayout(1, global_layout))
+    offs_n = gl.arange(0, N, gl.SliceLayout(0, global_layout))
+    offsets = offs_m[:, None] * N + offs_n[None, :]
+    value = gl.load(in_ptr + offsets)
+    tmem_layout: gl.constexpr = blackwell.TensorMemoryLayout(
+        block=(64, 64),
+        col_stride=32 // in_ptr.dtype.element_ty.primitive_bitwidth,
+    )
+    tmem = blackwell.allocate_tensor_memory(
+        element_ty=in_ptr.dtype.element_ty,
+        shape=[M, N],
+        layout=tmem_layout,
+    )
+    reg_layout: gl.constexpr = tmem.get_reg_layout(num_warps=num_warps)
+    value = gl.convert_layout(value, reg_layout)
+    tmem.store(value)
+    out = gl.convert_layout(tmem.load(reg_layout), global_layout)
+    gl.store(out_ptr + offsets, out)
 
 
 def test_gluon_trace_runs_copy_scalar_kernel():
@@ -820,9 +830,7 @@ def test_gluon_tma_runs_1d_copy_on_cpu():
     layout = gl.NVMMASharedLayout.get_default_for([64], gl.float32)
     in_desc = TensorDescriptor.from_tensor(inp, [64], layout)
     out_desc = TensorDescriptor.from_tensor(out, [64], layout)
-    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(_tma_copy_1d_kernel)
-
-    kernel[(1,)](in_desc, out_desc, 64, num_warps=1)
+    _run_gluon_on_cpu(_tma_copy_1d_kernel, (1,), in_desc, out_desc, 64, num_warps=1)
 
     torch.testing.assert_close(out, inp, atol=0, rtol=0)
 
@@ -835,11 +843,17 @@ def test_gluon_tma_runs_staged_elementwise_add_on_cpu():
     a_desc = TensorDescriptor.from_tensor(a, [4, 8], layout)
     b_desc = TensorDescriptor.from_tensor(b, [4, 8], layout)
     out_desc = TensorDescriptor.from_tensor(out, [4, 8], layout)
-    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(
-        _tma_elementwise_add_kernel
+    _run_gluon_on_cpu(
+        _tma_elementwise_add_kernel,
+        (1,),
+        a_desc,
+        b_desc,
+        out_desc,
+        *a.shape,
+        4,
+        8,
+        num_warps=4,
     )
-
-    kernel[(1,)](a_desc, b_desc, out_desc, *a.shape, 4, 8, num_warps=4)
 
     torch.testing.assert_close(out, a + b, atol=0, rtol=0)
 
@@ -858,16 +872,23 @@ def test_gluon_tma_runs_float_atomics_on_cpu():
     add_desc = TensorDescriptor.from_tensor(add_dst, [block_m, block_n], layout)
     min_desc = TensorDescriptor.from_tensor(min_dst, [block_m, block_n], layout)
     max_desc = TensorDescriptor.from_tensor(max_dst, [block_m, block_n], layout)
-    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(_tma_atomic_float_kernel)
-
     expected_add = add_dst.clone()
     expected_min = min_dst.clone()
     expected_max = max_dst.clone()
     expected_add[1:3, 2:6] += src
     expected_min[1:3, 2:6] = torch.minimum(expected_min[1:3, 2:6], src)
     expected_max[1:3, 2:6] = torch.maximum(expected_max[1:3, 2:6], src)
-
-    kernel[(1,)](add_desc, min_desc, max_desc, src, block_m, block_n, num_warps=4)
+    _run_gluon_on_cpu(
+        _tma_atomic_float_kernel,
+        (1,),
+        add_desc,
+        min_desc,
+        max_desc,
+        src,
+        block_m,
+        block_n,
+        num_warps=4,
+    )
 
     torch.testing.assert_close(add_dst, expected_add, atol=0, rtol=0)
     torch.testing.assert_close(min_dst, expected_min, atol=0, rtol=0)
@@ -925,6 +946,16 @@ def test_gluon_wgmma_runs_small_mma_with_lhs_registers_on_cpu():
     _run_small_wgmma_case(seed=1, lhs_in_reg=True)
 
 
+def test_gluon_blackwell_tensor_memory_roundtrips_tile_on_cpu():
+    inp = torch.arange(64 * 64, dtype=torch.float32).reshape(64, 64)
+    out = torch.empty_like(inp)
+    _run_gluon_on_cpu(
+        _tensor_memory_roundtrip_kernel, (1,), inp, out, *inp.shape, num_warps=4
+    )
+
+    torch.testing.assert_close(out, inp, atol=0, rtol=0)
+
+
 def test_gluon_blackwell_tma_runs_gather_on_cpu():
     block_x = 8
     block_y = 8
@@ -934,11 +965,9 @@ def test_gluon_blackwell_tma_runs_gather_on_cpu():
     out = torch.full((block_x, block_y), -1.0)
     layout = gl.NVMMASharedLayout.get_default_for([block_x, block_y], gl.float32)
     desc = TensorDescriptor.from_tensor(inp, [1, block_y], layout)
-    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(
-        _blackwell_tma_gather_kernel
-    )
-
-    kernel[(1,)](
+    _run_gluon_on_cpu(
+        _blackwell_tma_gather_kernel,
+        (1,),
         out,
         *out.stride(),
         desc,
@@ -972,18 +1001,23 @@ def test_gluon_blackwell_tma_runs_bitwise_atomics_on_cpu():
     and_desc = TensorDescriptor.from_tensor(and_dst, [block_m, block_n], layout)
     or_desc = TensorDescriptor.from_tensor(or_dst, [block_m, block_n], layout)
     xor_desc = TensorDescriptor.from_tensor(xor_dst, [block_m, block_n], layout)
-    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(
-        _blackwell_tma_bitwise_atomic_kernel
-    )
-
     expected_and = and_dst.clone()
     expected_or = or_dst.clone()
     expected_xor = xor_dst.clone()
     expected_and[1:3, 1:5] = torch.bitwise_and(expected_and[1:3, 1:5], src)
     expected_or[1:3, 1:5] = torch.bitwise_or(expected_or[1:3, 1:5], src)
     expected_xor[1:3, 1:5] = torch.bitwise_xor(expected_xor[1:3, 1:5], src)
-
-    kernel[(1,)](and_desc, or_desc, xor_desc, src, block_m, block_n, num_warps=4)
+    _run_gluon_on_cpu(
+        _blackwell_tma_bitwise_atomic_kernel,
+        (1,),
+        and_desc,
+        or_desc,
+        xor_desc,
+        src,
+        block_m,
+        block_n,
+        num_warps=4,
+    )
 
     torch.testing.assert_close(and_dst, expected_and, atol=0, rtol=0)
     torch.testing.assert_close(or_dst, expected_or, atol=0, rtol=0)
@@ -1002,11 +1036,9 @@ def test_gluon_blackwell_tma_runs_scatter_on_cpu():
     )
     layout = gl.NVMMASharedLayout.get_default_for([block_x, block_y], gl.float32)
     desc = TensorDescriptor.from_tensor(out, [1, block_y], layout)
-    kernel = triton_viz.trace(_NoOpClient(), frontend="gluon")(
-        _blackwell_tma_scatter_kernel
-    )
-
-    kernel[(1,)](
+    _run_gluon_on_cpu(
+        _blackwell_tma_scatter_kernel,
+        (1,),
         desc,
         x_offsets,
         y_offset,
