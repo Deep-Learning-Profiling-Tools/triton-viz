@@ -1387,14 +1387,36 @@ class Builder(interpreter_builder.__class__):
         self,
         block: Any,
         col_stride: Any,
-        cga_layout: Any,
-        two_ctas: Any,
+        cga_layout: Any = None,
+        two_ctas: Any = False,
         fp4_padded: Any = False,
     ):
+        cga_bases = [] if cga_layout is None else [list(basis) for basis in cga_layout]
+        layout_fields = getattr(
+            gluon_blackwell.TensorMemoryLayout,
+            "__dataclass_fields__",
+            {},
+        )
+        # Older Gluon builds used cta_split_num and had no FP4 padding field.
+        if "fp4_padded" in layout_fields:
+            return gluon_blackwell.TensorMemoryLayout(
+                tuple(block),
+                int(col_stride),
+                cga_bases,
+                bool(two_ctas),
+                bool(fp4_padded),
+            )
+        if "cta_split_num" in layout_fields:
+            return gluon_blackwell.TensorMemoryLayout(
+                tuple(block),
+                int(col_stride),
+                cga_bases or None,
+                bool(two_ctas),
+            )
         return gluon_blackwell.TensorMemoryLayout(
             tuple(block),
             int(col_stride),
-            [] if cga_layout is None else [list(basis) for basis in cga_layout],
+            cga_bases,
             bool(two_ctas),
         )
 

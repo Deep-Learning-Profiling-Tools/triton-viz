@@ -17,7 +17,7 @@ from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 import triton_viz
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.core.data import Load
-from triton_viz.core.simulation.gluon import GluonInterpretedFunction
+from triton_viz.core.simulation.gluon import GluonInterpretedFunction, gluon_builder
 
 try:
     from triton.experimental.gluon.language.amd.cdna4 import (
@@ -48,6 +48,38 @@ _HAS_TMA_IM2COL = TensorDescriptorIm2Col is not None
 
 def _run_gluon_on_cpu(fn, grid, *args, **kwargs):
     GluonInterpretedFunction(fn.fn).run(*args, grid=grid, **kwargs)
+
+
+# CI can run against Gluon versions whose TensorMemoryLayout._to_ir uses older
+# builder argument order; keep this CPU accuracy test on the current builder shape.
+class _TensorMemoryLayoutForCpuRoundtrip(blackwell.TensorMemoryLayout):
+    def __init__(self, block, col_stride, cga_layout=None, two_ctas=False):
+        object.__setattr__(self, "block", tuple(block))
+        object.__setattr__(self, "col_stride", int(col_stride))
+        object.__setattr__(
+            self,
+            "cga_layout",
+            [] if cga_layout is None else [list(basis) for basis in cga_layout],
+        )
+        object.__setattr__(self, "two_ctas", bool(two_ctas))
+        object.__setattr__(self, "fp4_padded", False)
+        object.__setattr__(self, "cta_split_num", None)
+
+    def _to_ir(self, builder):
+        return builder.get_tensor_memory_layout(
+            self.block,
+            self.col_stride,
+            self.cga_layout,
+            self.two_ctas,
+            False,
+        )
+
+    def mangle(self):
+        cga_layout_str = "_".join(
+            "~".join(map(str, basis)) for basis in self.cga_layout
+        )
+        two_ctas_str = "2CT" if self.two_ctas else ""
+        return f"TL{self.block[0]}x{self.block[1]}C{self.col_stride}{cga_layout_str}{two_ctas_str}TL"
 
 
 @gluon.jit
@@ -615,19 +647,18 @@ def _tensor_memory_roundtrip_kernel(
     offs_n = gl.arange(0, N, gl.SliceLayout(0, global_layout))
     offsets = offs_m[:, None] * N + offs_n[None, :]
     value = gl.load(in_ptr + offsets)
-    tmem_layout: gl.constexpr = blackwell.TensorMemoryLayout(
+    tmem_layout: gl.constexpr = _TensorMemoryLayoutForCpuRoundtrip(
         block=(64, 64),
         col_stride=32 // in_ptr.dtype.element_ty.primitive_bitwidth,
+        cga_layout=[[1, 0], [0, 1]],
     )
     tmem = blackwell.allocate_tensor_memory(
         element_ty=in_ptr.dtype.element_ty,
         shape=[M, N],
         layout=tmem_layout,
     )
-    reg_layout: gl.constexpr = tmem.get_reg_layout(num_warps=num_warps)
-    value = gl.convert_layout(value, reg_layout)
     tmem.store(value)
-    out = gl.convert_layout(tmem.load(reg_layout), global_layout)
+    out = tmem.load(global_layout)
     gl.store(out_ptr + offsets, out)
 
 
@@ -944,6 +975,19 @@ def test_gluon_wgmma_runs_small_mma_on_cpu():
 
 def test_gluon_wgmma_runs_small_mma_with_lhs_registers_on_cpu():
     _run_small_wgmma_case(seed=1, lhs_in_reg=True)
+
+
+def test_gluon_builder_preserves_tensor_memory_fp4_padding():
+    layout = gluon_builder.get_tensor_memory_layout(
+        (64, 64),
+        1,
+        [[1, 0], [0, 1]],
+        False,
+        True,
+    )
+    if not hasattr(layout, "fp4_padded"):
+        pytest.skip("Gluon TensorMemoryLayout has no fp4_padded field")
+    assert layout.fp4_padded is True
 
 
 def test_gluon_blackwell_tensor_memory_roundtrips_tile_on_cpu():
