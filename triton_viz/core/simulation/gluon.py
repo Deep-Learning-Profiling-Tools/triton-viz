@@ -1389,14 +1389,13 @@ class Builder(interpreter_builder.__class__):
         col_stride: Any,
         cga_layout: Any,
         two_ctas: Any,
-        fp4_padded: Any,
+        fp4_padded: Any = False,
     ):
         return gluon_blackwell.TensorMemoryLayout(
             tuple(block),
             int(col_stride),
             [] if cga_layout is None else [list(basis) for basis in cga_layout],
             bool(two_ctas),
-            bool(fp4_padded),
         )
 
     def get_tensor_memory_scales_layout(self, cga_layout: Any):
