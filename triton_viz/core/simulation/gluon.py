@@ -2430,6 +2430,18 @@ _GLUON_BUILTIN_CLASSES: tuple[Any, ...] = tuple(
 )
 
 
+_GLUON_NON_SEMANTIC_BUILTINS: tuple[tuple[Any, str, Callable], ...] = tuple(
+    (module, name, getattr(module, name))
+    for module, name in (
+        (gluon_amd_cdna4, "_compute_efficient_padded_shared_layout_impl"),
+        (gluon_amd_cdna4, "_get_mfma_scale_layout_impl"),
+        (gluon_amd_gfx1250, "_get_wmma_scale_layout_impl"),
+        (gluon_blackwell, "_compute_tmem_reg_layout"),
+    )
+    if module is not None and hasattr(module, name)
+)
+
+
 def _make_tma_atomic_reduce(kind: Any) -> Callable:
     @gluon_core.builtin
     def async_atomic_reduce(tensor_desc, coord, src, _semantic=None):
@@ -2478,6 +2490,21 @@ def _yield_warp_specialize() -> None:
     gluon_frontend._maybe_yield_warp_specialize()
 
 
+def _patch_gluon_non_semantic_builtins(scope: _LangPatchScope) -> None:
+    for module, name, member in _GLUON_NON_SEMANTIC_BUILTINS:
+
+        def new_member(
+            *args: Any,
+            member: Callable = member,
+            **kwargs: Any,
+        ):
+            _yield_warp_specialize()
+            kwargs.pop("_semantic", None)
+            return member(*args, **kwargs)
+
+        scope.set_attr(module, name, new_member)
+
+
 def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
     for name, member in inspect.getmembers(pkg):
         if not callable(member):
@@ -2487,24 +2514,17 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
             or tl.core.is_builtin(member)
         ):
             continue
-        try:
-            accepts_semantic = "_semantic" in inspect.signature(member).parameters
-        except (TypeError, ValueError):
-            accepts_semantic = True
 
         def new_member(
             *args: Any,
             member: Callable = member,
-            accepts_semantic: bool = accepts_semantic,
             **kwargs: Any,
         ):
             _yield_warp_specialize()
             # Gluon builtins may pass a compile-time semantic object; replace it
             # with this builder-backed semantic while preserving user arguments.
             kwargs = {key: value for key, value in kwargs.items() if key != "_semantic"}
-            if accepts_semantic:
-                return member(*args, **kwargs, _semantic=gluon_semantic)
-            return member(*args, **kwargs)
+            return member(*args, **kwargs, _semantic=gluon_semantic)
 
         scope.set_attr(pkg, name, new_member)
 
@@ -2519,6 +2539,7 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
         _patch_gluon_builtins(module, scope)
     for cls in _GLUON_BUILTIN_CLASSES:
         _patch_gluon_builtins(cls, scope)
+    _patch_gluon_non_semantic_builtins(scope)
 
     def allocate_mbarrier(*_args: Any, **_kwargs: Any):
         return _tensor_result(np.array([0], dtype=np.int32), tl.int32)
