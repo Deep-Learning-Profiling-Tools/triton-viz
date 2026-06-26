@@ -52,7 +52,7 @@ def _run_gluon_on_cpu(fn, grid, *args, **kwargs):
 
 # CI can run against Gluon versions whose TensorMemoryLayout._to_ir uses older
 # builder argument order; keep this CPU accuracy test on the current builder shape.
-class _TensorMemoryLayoutForCpuRoundtrip(blackwell.TensorMemoryLayout):
+class _TensorMemoryLayoutForCpu(blackwell.TensorMemoryLayout):
     def __init__(self, block, col_stride, cga_layout=None, two_ctas=False):
         object.__setattr__(self, "block", tuple(block))
         object.__setattr__(self, "col_stride", int(col_stride))
@@ -630,6 +630,138 @@ def _run_small_wgmma_case(seed: int, lhs_in_reg: bool):
 
 
 @gluon.jit
+def _tcgen05_small_mma_kernel(
+    a_desc,
+    b_desc,
+    c_desc,
+    out_desc,
+    tmem_block: gl.constexpr,
+    LHS_IN_TMEM: gl.constexpr,
+    USE_COMMIT: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    barrier = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(barrier, count=1)
+    a_smem = gl.allocate_shared_memory(
+        a_desc.dtype,
+        a_desc.block_type.shape,
+        a_desc.layout,
+    )
+    b_smem = gl.allocate_shared_memory(
+        b_desc.dtype,
+        b_desc.block_type.shape,
+        b_desc.layout,
+    )
+    c_smem = gl.allocate_shared_memory(
+        c_desc.dtype,
+        c_desc.block_type.shape,
+        c_desc.layout,
+    )
+    mbarrier.expect(
+        barrier,
+        a_desc.block_type.nbytes + b_desc.block_type.nbytes + c_desc.block_type.nbytes,
+    )
+    tma.async_load(a_desc, [0, 0], barrier, a_smem)
+    tma.async_load(b_desc, [0, 0], barrier, b_smem)
+    tma.async_load(c_desc, [0, 0], barrier, c_smem)
+    mbarrier.wait(barrier, phase=0)
+    mbarrier.invalidate(barrier)
+    mbarrier.init(barrier, count=1)
+
+    M: gl.constexpr = out_desc.block_type.shape[0]
+    N: gl.constexpr = out_desc.block_type.shape[1]
+    K: gl.constexpr = a_desc.block_type.shape[1]
+    acc_tmem_layout: gl.constexpr = _TensorMemoryLayoutForCpu(
+        tmem_block,
+        col_stride=32 // out_desc.dtype.primitive_bitwidth,
+        cga_layout=[[1, 0], [0, 1]],
+    )
+    acc_tmem = blackwell.allocate_tensor_memory(
+        out_desc.dtype,
+        [M, N],
+        acc_tmem_layout,
+    )
+    acc_layout: gl.constexpr = _wgmma_layout(out_desc.dtype, M, N, num_warps)
+    acc = c_smem.load(acc_layout)
+    acc_tmem.store(acc)
+
+    if LHS_IN_TMEM:
+        lhs_tmem_layout: gl.constexpr = _TensorMemoryLayoutForCpu(
+            tmem_block,
+            col_stride=1,
+            cga_layout=[[1, 0], [0, 1]],
+        )
+        lhs_tmem = blackwell.allocate_tensor_memory(
+            a_desc.dtype,
+            [M, K],
+            lhs_tmem_layout,
+        )
+        lhs_layout: gl.constexpr = gl.DotOperandLayout(
+            operand_index=0,
+            parent=acc_layout,
+            k_width=32 // a_desc.dtype.primitive_bitwidth,
+        )
+        lhs = a_smem.load(lhs_layout)
+        lhs_tmem.store(lhs)
+        a = lhs_tmem
+    else:
+        a = a_smem
+
+    if USE_COMMIT:
+        blackwell.tcgen05_mma(a, b_smem, acc_tmem)
+        blackwell.tcgen05_commit(barrier)
+    else:
+        blackwell.tcgen05_mma(
+            a,
+            b_smem,
+            acc_tmem,
+            mbarriers=[barrier],
+            mbarrier_preds=[True],
+        )
+    mbarrier.wait(barrier, phase=0)
+    mbarrier.invalidate(barrier)
+
+    out_smem = gl.allocate_shared_memory(
+        out_desc.dtype,
+        out_desc.block_type.shape,
+        out_desc.layout,
+    )
+    out_smem.store(acc_tmem.load(acc_layout))
+    hopper.fence_async_shared()
+    tma.async_store(out_desc, [0, 0], out_smem)
+    tma.store_wait(0)
+
+
+def _run_tcgen05_small_mma_case(seed: int, lhs_in_tmem: bool, use_commit: bool):
+    torch.manual_seed(seed)
+    a = torch.randn(64, 32, dtype=torch.float16) / 4
+    b = torch.randn(32, 64, dtype=torch.float16) / 4
+    c = torch.randn(64, 64, dtype=torch.float32) / 4
+    out = torch.empty_like(c)
+    a_layout = gl.NVMMASharedLayout.get_default_for(a.shape, gl.float16)
+    b_layout = gl.NVMMASharedLayout.get_default_for(b.shape, gl.float16)
+    c_layout = gl.NVMMASharedLayout.get_default_for(c.shape, gl.float32)
+    a_desc = TensorDescriptor.from_tensor(a, list(a.shape), a_layout)
+    b_desc = TensorDescriptor.from_tensor(b, list(b.shape), b_layout)
+    c_desc = TensorDescriptor.from_tensor(c, list(c.shape), c_layout)
+    out_desc = TensorDescriptor.from_tensor(out, list(out.shape), c_layout)
+    _run_gluon_on_cpu(
+        _tcgen05_small_mma_kernel,
+        (1,),
+        a_desc,
+        b_desc,
+        c_desc,
+        out_desc,
+        (64, 64),
+        lhs_in_tmem,
+        use_commit,
+        num_warps=4,
+    )
+
+    torch.testing.assert_close(out, a.float() @ b.float() + c, atol=1e-2, rtol=1e-2)
+
+
+@gluon.jit
 def _tensor_memory_roundtrip_kernel(
     in_ptr,
     out_ptr,
@@ -647,7 +779,7 @@ def _tensor_memory_roundtrip_kernel(
     offs_n = gl.arange(0, N, gl.SliceLayout(0, global_layout))
     offsets = offs_m[:, None] * N + offs_n[None, :]
     value = gl.load(in_ptr + offsets)
-    tmem_layout: gl.constexpr = _TensorMemoryLayoutForCpuRoundtrip(
+    tmem_layout: gl.constexpr = _TensorMemoryLayoutForCpu(
         block=(64, 64),
         col_stride=32 // in_ptr.dtype.element_ty.primitive_bitwidth,
         cga_layout=[[1, 0], [0, 1]],
@@ -975,6 +1107,14 @@ def test_gluon_wgmma_runs_small_mma_on_cpu():
 
 def test_gluon_wgmma_runs_small_mma_with_lhs_registers_on_cpu():
     _run_small_wgmma_case(seed=1, lhs_in_reg=True)
+
+
+def test_gluon_blackwell_tcgen05_runs_small_mma_on_cpu():
+    _run_tcgen05_small_mma_case(seed=5, lhs_in_tmem=False, use_commit=True)
+
+
+def test_gluon_blackwell_tcgen05_runs_small_mma_with_lhs_tensor_memory_on_cpu():
+    _run_tcgen05_small_mma_case(seed=6, lhs_in_tmem=True, use_commit=False)
 
 
 def test_gluon_builder_preserves_tensor_memory_fp4_padding():
