@@ -6,6 +6,7 @@ from functools import partial
 import ast
 import inspect
 from queue import Empty, SimpleQueue
+import sys
 import threading
 import time
 from typing import Any, ClassVar, cast
@@ -107,6 +108,7 @@ from ..symbolic_metadata import (
     dtype_to_numpy,
     pointer_type as symbolic_pointer_type,
 )
+from ..patch import LoopSite, loop_file_token
 from .base import (
     AdapterResult,
     Frontend,
@@ -384,11 +386,17 @@ class TritonFrontend(Frontend):
             args = tuple(iter_args) if iter_args is not None else ()
             kwargs = dict(iter_kwargs) if iter_kwargs is not None else {}
             return iterable_callable(*args, **kwargs)
+        # The rewritten lineno is function-relative (Triton parses the kernel
+        # source with `def` at line 1), so loops in different files can share
+        # it. The caller frame is the rewritten kernel, compiled under the
+        # kernel's real filename; combine both pieces into the loop identity.
+        caller_file = sys._getframe(1).f_code.co_filename
+        loop_site = LoopSite(lineno, loop_file_token(caller_file))
         return client_manager.loop_iter_wrapper(
             iterable_callable,
             iter_args,
             iter_kwargs,
-            lineno,
+            loop_site,
             range_type,
         )
 

@@ -39,6 +39,7 @@ from z3.z3 import BoolRef, ArithRef, IntNumRef, ExprRef, Tactic, Probe
 from ..core.client import Client
 from ..core.callbacks import OpCallbacks, ForLoopCallbacks
 from ..core.config import config as cfg
+from ..core.patch import LoopSite
 from ..core.data import (
     Op,
     UnaryOp,
@@ -216,7 +217,10 @@ class PendingCheck:
 
 @dataclass
 class LoopContext:
-    lineno: int
+    # Loop identity delivered by the loop hooks. Newer frontends pass a
+    # LoopSite so loops at the same function-relative line in different files
+    # do not share iterator state; int is kept for older hook callers.
+    lineno: LoopSite | int
     length: int
     idx: Any
     idx_z3: ArithRef
@@ -2619,7 +2623,7 @@ class SymbolicClient(Client):
         self.addr_sym: ArithRef | None = Int("addr")
         self.addr_ok_cache: dict[int, BoolRef] = {}
         self.loop_iterator_constraint_cache: dict[
-            tuple[int, int, int, int], BoolRef
+            tuple[LoopSite | int, int, int, int], BoolRef
         ] = {}
         self.access_check_cache: set[int] = set()
         self.op_overrider_map = self._build_op_overrider_map()
@@ -3032,6 +3036,9 @@ class SymbolicClient(Client):
                 print("not a range wrapper, skipping for-loop iterator association.")
             return
 
+        # `lineno` may be a LoopSite. Its string form embeds both the
+        # function-relative line and file token, keeping symbolic iterator vars
+        # distinct for loops at the same relative line in different files.
         idx_z3 = Int(f"loop_i_{lineno}")
         sym = SymbolicExpr.create("const", idx_z3, INT32)
         idx = SymbolicExpr.wrap_loop_index(sym, INT32)
