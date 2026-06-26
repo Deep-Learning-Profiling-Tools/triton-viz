@@ -1387,16 +1387,37 @@ class Builder(interpreter_builder.__class__):
         self,
         block: Any,
         col_stride: Any,
-        cga_layout: Any,
-        two_ctas: Any,
-        fp4_padded: Any,
+        cga_layout: Any = None,
+        two_ctas: Any = False,
+        fp4_padded: Any = False,
     ):
+        cga_bases = [] if cga_layout is None else [list(basis) for basis in cga_layout]
+        layout_fields = getattr(
+            gluon_blackwell.TensorMemoryLayout,
+            "__dataclass_fields__",
+            {},
+        )
+        # Older Gluon builds used cta_split_num and had no FP4 padding field.
+        if "fp4_padded" in layout_fields:
+            return gluon_blackwell.TensorMemoryLayout(
+                tuple(block),
+                int(col_stride),
+                cga_bases,
+                bool(two_ctas),
+                bool(fp4_padded),
+            )
+        if "cta_split_num" in layout_fields:
+            return gluon_blackwell.TensorMemoryLayout(
+                tuple(block),
+                int(col_stride),
+                cga_bases or None,
+                bool(two_ctas),
+            )
         return gluon_blackwell.TensorMemoryLayout(
             tuple(block),
             int(col_stride),
-            [] if cga_layout is None else [list(basis) for basis in cga_layout],
+            cga_bases,
             bool(two_ctas),
-            bool(fp4_padded),
         )
 
     def get_tensor_memory_scales_layout(self, cga_layout: Any):
@@ -2431,6 +2452,18 @@ _GLUON_BUILTIN_CLASSES: tuple[Any, ...] = tuple(
 )
 
 
+_GLUON_NON_SEMANTIC_BUILTINS: tuple[tuple[Any, str, Callable], ...] = tuple(
+    (module, name, getattr(module, name))
+    for module, name in (
+        (gluon_amd_cdna4, "_compute_efficient_padded_shared_layout_impl"),
+        (gluon_amd_cdna4, "_get_mfma_scale_layout_impl"),
+        (gluon_amd_gfx1250, "_get_wmma_scale_layout_impl"),
+        (gluon_blackwell, "_compute_tmem_reg_layout"),
+    )
+    if module is not None and hasattr(module, name)
+)
+
+
 def _make_tma_atomic_reduce(kind: Any) -> Callable:
     @gluon_core.builtin
     def async_atomic_reduce(tensor_desc, coord, src, _semantic=None):
@@ -2479,6 +2512,21 @@ def _yield_warp_specialize() -> None:
     gluon_frontend._maybe_yield_warp_specialize()
 
 
+def _patch_gluon_non_semantic_builtins(scope: _LangPatchScope) -> None:
+    for module, name, member in _GLUON_NON_SEMANTIC_BUILTINS:
+
+        def new_member(
+            *args: Any,
+            member: Callable = member,
+            **kwargs: Any,
+        ):
+            _yield_warp_specialize()
+            kwargs.pop("_semantic", None)
+            return member(*args, **kwargs)
+
+        scope.set_attr(module, name, new_member)
+
+
 def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
     for name, member in inspect.getmembers(pkg):
         if not callable(member):
@@ -2489,7 +2537,11 @@ def _patch_gluon_builtins(pkg: Any, scope: _LangPatchScope) -> None:
         ):
             continue
 
-        def new_member(*args: Any, member: Callable = member, **kwargs: Any):
+        def new_member(
+            *args: Any,
+            member: Callable = member,
+            **kwargs: Any,
+        ):
             _yield_warp_specialize()
             # Gluon builtins may pass a compile-time semantic object; replace it
             # with this builder-backed semantic while preserving user arguments.
@@ -2509,6 +2561,7 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
         _patch_gluon_builtins(module, scope)
     for cls in _GLUON_BUILTIN_CLASSES:
         _patch_gluon_builtins(cls, scope)
+    _patch_gluon_non_semantic_builtins(scope)
 
     def allocate_mbarrier(*_args: Any, **_kwargs: Any):
         return _tensor_result(np.array([0], dtype=np.int32), tl.int32)
