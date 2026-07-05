@@ -150,6 +150,11 @@ class RaceDetector(Client):
     #   "unsupported" — a feature the solver doesn't model fired during
     #                   capture (atomic-in-loop, RMW return downstream,
     #                   data-dependent address, etc.); see unsupported_reason
+    #   "aborted"     — no verdict exists: set pessimistically at
+    #                   construction and re-armed at every launch's
+    #                   arg_callback/grid_callback; only finalize() upgrades
+    #                   it, so a launch that dies before finalize runs can
+    #                   never be read as a clean "ok"
     #   "disabled"    — race detector backend is off (NullRaceDetector)
     last_reports: list[Any]
     last_status: str
@@ -231,10 +236,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # Status of the most recent finalize(): "ok" means the solver ran;
         # "unsupported" means the launch hit a feature the solver doesn't
         # model (atomic-in-loop, RMW return downstream, data-dependent
-        # address, etc.); "aborted" means an exception cut the launch short
-        # before any analysis ran. last_reports being empty does NOT imply
-        # "no race" unless last_status == "ok".
-        self.last_status: str = "ok"
+        # address, etc.); "aborted" means the launch produced no verdict.
+        # Initialized pessimistically and re-armed to "aborted" at every
+        # launch's arg_callback/grid_callback; only finalize() upgrades it,
+        # so neither a never-launched detector nor a launch that dies
+        # mid-kernel can ever be read as clean. last_reports being empty
+        # does NOT imply "no race" unless last_status == "ok".
+        self.last_status: str = "aborted"
         self._program_seq: int = 0
         self._event_seq: int = 0
         self._launch_grid: tuple[int, int, int] = (1, 1, 1)
@@ -531,9 +539,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         return max(a[0], b[0]) < min(a[1], b[1])
 
     def _raise_or_mark(self, reason: str) -> None:
-        # Mark before raising: the abort_on_error exception unwinds through
-        # trace.py's finalize-on-error path, and without the mark that path
-        # could not tell an unsupported launch from a clean one.
+        # Mark before raising: the abort_on_error exception unwinds out of
+        # the launch, and any finalize() that runs afterwards — whether the
+        # harness routes the abort through it or the caller invokes it —
+        # could not otherwise tell an unsupported launch from a clean one.
         self._mark_unsupported(reason)
         if self.abort_on_error:
             raise UnsupportedSymbolicRaceQuery(reason)
@@ -807,9 +816,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     self.last_status = "unsupported"
                 else:
                     # The capture was never sealed: an exception aborted the
-                    # launch mid-block (trace.py routes it through finalize
-                    # before re-raising). No analysis ran, so reporting "ok"
-                    # here would be a silent false no-race verdict.
+                    # launch mid-block. No analysis ran, so reporting "ok"
+                    # here would be a silent false no-race verdict. This
+                    # matches the pessimistic "aborted" grid_callback set at
+                    # launch start, whether or not the harness routed the
+                    # abort through finalize.
                     self.last_status = "aborted"
                 return []
             try:
@@ -827,8 +838,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 reports = []  # NO concrete fallback
             except BaseException:
                 # Solver-internal failures (z3 errors, lowering bugs) abort
-                # the analysis; the "ok" pre-set by grid_callback must not
-                # survive as a clean verdict.
+                # the analysis; re-assert the launch-start "aborted" so no
+                # partial upgrade can ever read as a clean verdict.
                 self.last_reports = []
                 self.last_status = "aborted"
                 raise
@@ -845,12 +856,24 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         return SymbolicClient.register_for_loop_callback(self)
 
     def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
+        # Arm the pessimistic verdict as early as the launch becomes
+        # observable: arg conversion and the user's grid lambda run BEFORE
+        # grid_callback (core/frontend/triton.py), and a crash there must
+        # not leave the previous launch's "ok" readable as this launch's
+        # verdict. Idempotent across the per-argument calls.
+        self.last_status = "aborted"
+        self.last_reports = []
         SymbolicClient.arg_callback(self, name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         self.records = []
         self.last_reports = []
-        self.last_status = "ok"
+        # Pessimistic until finalize() proves otherwise: if the launch dies
+        # before finalize runs (a mid-kernel exception with no
+        # finalize-on-error routing in the harness), a pre-set "ok" here
+        # would read as a clean no-race verdict. Every finalize() path
+        # overwrites this with the real outcome.
+        self.last_status = "aborted"
         self._program_seq = 0
         self._event_seq = 0
         normalized = tuple(int(dim) for dim in grid)

@@ -471,8 +471,7 @@ class TritonFrontend(Frontend):
             for name in builtin_names:
                 scope.set_attr(obj, name, getattr(obj, name))
             for attr in attrs:
-                if hasattr(obj, attr):
-                    scope.set_attr(obj, attr, getattr(obj, attr))
+                scope.save_attr(obj, attr)
 
         return scope
 
