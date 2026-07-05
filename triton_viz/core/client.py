@@ -13,6 +13,7 @@ from .patch import (
     unpatch_for_loop,
     patch_calls,
     LoopIter,
+    LoopSite,
 )
 from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -267,15 +268,15 @@ class ClientManager:
             if cb.after_loop_callback is not None:
                 self._after.append(cb.after_loop_callback)
 
-    def range_type(self, loop_site, range_type: str) -> None:
+    def range_type(self, loop_site: LoopSite, range_type: str) -> None:
         for hook in self._range_type_hooks:
             hook(loop_site, range_type)
 
-    def before_loop(self, loop_site, iterable: Any) -> None:
+    def before_loop(self, loop_site: LoopSite, iterable: Any) -> None:
         for hook in self._before:
             hook(loop_site, iterable)
 
-    def loop_iter(self, loop_site, idx: Any) -> Any:
+    def loop_iter(self, loop_site: LoopSite, idx: Any) -> Any:
         if self._iter_overrider is not None:
             new_idx = self._iter_overrider(loop_site, idx)
             if new_idx is not None:
@@ -286,7 +287,7 @@ class ClientManager:
 
         return idx
 
-    def after_loop(self, loop_site) -> None:
+    def after_loop(self, loop_site: LoopSite) -> None:
         for hook in self._after:
             hook(loop_site)
 
@@ -295,7 +296,7 @@ class ClientManager:
         iterable_callable: Callable,
         iter_args,
         iter_kwargs,
-        loop_site,
+        loop_site: LoopSite,
         range_type: str,
     ) -> "LoopIter":
         args = tuple(iter_args) if iter_args is not None else ()

@@ -131,9 +131,9 @@ class LoopBoundsChecker(SymbolicSanitizer):
         callbacks = super().register_for_loop_callback()
         orig_before = callbacks.before_loop_callback
 
-        def _before_loop(lineno, iterable):
+        def _before_loop(loop_site, iterable):
             if orig_before is not None:
-                orig_before(lineno, iterable)
+                orig_before(loop_site, iterable)
             if isinstance(iterable, RangeWrapper):
                 self._bounds.append((iterable.start, iterable.stop, iterable.step))
 
@@ -177,9 +177,9 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
         callbacks = super().register_for_loop_callback()
         orig_after = callbacks.after_loop_callback
 
-        def _after_loop(lineno: int) -> None:
+        def _after_loop(loop_site: LoopSite) -> None:
             pending = 0
-            if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            if self.loop_stack and self.loop_stack[-1].loop_site == loop_site:
                 ctx = self.loop_stack[-1]
                 pending = len(ctx.pending_checks)
                 self.iterator_constraints.append(
@@ -188,7 +188,7 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
                     )
                 )
             if orig_after is not None:
-                orig_after(lineno)
+                orig_after(loop_site)
             self.after_loop_pending.append(pending)
 
         return ForLoopCallbacks(

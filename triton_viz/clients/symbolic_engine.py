@@ -217,10 +217,7 @@ class PendingCheck:
 
 @dataclass
 class LoopContext:
-    # Loop identity delivered by the loop hooks. Newer frontends pass a
-    # LoopSite so loops at the same function-relative line in different files
-    # do not share iterator state; int is kept for older hook callers.
-    lineno: LoopSite | int
+    loop_site: LoopSite
     length: int
     idx: Any
     idx_z3: ArithRef
@@ -2623,7 +2620,7 @@ class SymbolicClient(Client):
         self.addr_sym: ArithRef | None = Int("addr")
         self.addr_ok_cache: dict[int, BoolRef] = {}
         self.loop_iterator_constraint_cache: dict[
-            tuple[LoopSite | int, int, int, int], BoolRef
+            tuple[LoopSite, int, int, int], BoolRef
         ] = {}
         self.access_check_cache: set[int] = set()
         self.op_overrider_map = self._build_op_overrider_map()
@@ -2969,7 +2966,7 @@ class SymbolicClient(Client):
     def _wrap_range(
         self,
         iterable,
-        _lineno,
+        _loop_site,
         _range_type,
         iter_args=None,
         iter_kwargs=None,
@@ -3028,7 +3025,7 @@ class SymbolicClient(Client):
             concrete_range, length=length, start=start, stop=stop, step=step
         )
 
-    def _loop_hook_before(self, lineno, iterable):
+    def _loop_hook_before(self, loop_site: LoopSite, iterable):
         if self._should_skip_loop_hooks():
             return
         if not isinstance(iterable, RangeWrapper):
@@ -3036,13 +3033,13 @@ class SymbolicClient(Client):
                 print("not a range wrapper, skipping for-loop iterator association.")
             return
 
-        # `lineno` may be a LoopSite. Its string form embeds both the
-        # function-relative line and file token, keeping symbolic iterator vars
-        # distinct for loops at the same relative line in different files.
-        idx_z3 = Int(f"loop_i_{lineno}")
+        # LoopSite's string form embeds both the function-relative line and
+        # file token, keeping symbolic iterator vars distinct for loops at the
+        # same relative line in different files.
+        idx_z3 = Int(f"loop_i_{loop_site}")
         sym = SymbolicExpr.create("const", idx_z3, INT32)
         idx = SymbolicExpr.wrap_loop_index(sym, INT32)
-        constraint_key = (lineno, iterable.start, iterable.stop, iterable.step)
+        constraint_key = (loop_site, iterable.start, iterable.stop, iterable.step)
         iterator_constraint = self.loop_iterator_constraint_cache.get(constraint_key)
         if iterator_constraint is None:
             iterator_constraint = _range_to_iterator_constraint(
@@ -3053,7 +3050,7 @@ class SymbolicClient(Client):
             )
             self.loop_iterator_constraint_cache[constraint_key] = iterator_constraint
         ctx = LoopContext(
-            lineno,
+            loop_site,
             iterable.length,
             idx,
             idx_z3,
@@ -3066,20 +3063,20 @@ class SymbolicClient(Client):
         self.loop_stack.append(ctx)
 
         if cfg.verbose:
-            print(f"[{self.LOG_TAG}] ▶ enter loop@{lineno}, len={iterable.length}")
+            print(f"[{self.LOG_TAG}] ▶ enter loop@{loop_site}, len={iterable.length}")
 
-    def _loop_hook_iter_overrider(self, lineno, idx):
+    def _loop_hook_iter_overrider(self, loop_site: LoopSite, idx):
         if self._should_skip_loop_hooks():
             return idx
-        if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+        if self.loop_stack and self.loop_stack[-1].loop_site == loop_site:
             self.loop_stack[-1].current_value = int(idx)
             return self.loop_stack[-1].idx
         return idx
 
-    def _loop_hook_after(self, lineno: int) -> None:
+    def _loop_hook_after(self, loop_site: LoopSite) -> None:
         if self._should_skip_loop_hooks():
             return
-        if not self.loop_stack or self.loop_stack[-1].lineno != lineno:
+        if not self.loop_stack or self.loop_stack[-1].loop_site != loop_site:
             return
         ctx = self.loop_stack.pop()
 
@@ -3118,7 +3115,7 @@ class SymbolicClient(Client):
 
         if cfg.verbose:
             print(
-                f"[{self.LOG_TAG}] ▶ leave loop@{lineno} end. "
+                f"[{self.LOG_TAG}] ▶ leave loop@{loop_site} end. "
                 f"(processed {len(ctx.pending_checks)} unique addr patterns)"
             )
 

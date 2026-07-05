@@ -196,6 +196,12 @@ class LoopIter:
     """
 
     def __init__(self, hooks, iterable, loop_site, range_type):
+        if not isinstance(loop_site, LoopSite):
+            raise NotImplementedError(
+                "loop hooks are keyed by LoopSite; bare line numbers are not "
+                "supported because loops in different files can share a "
+                "function-relative lineno"
+            )
         self._it = iter(iterable)
         self._loop_site = loop_site
         self._hooks = hooks
