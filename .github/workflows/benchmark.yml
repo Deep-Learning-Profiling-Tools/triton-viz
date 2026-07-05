@@ -61,7 +61,7 @@ jobs:
         #   main PR main PR main PR ...  (4 rounds x 5 iters = 20 total)
         ROUNDS=4
         ITERS=5
-        TRITON_KERNEL_ROUNDS=1
+        TRITON_KERNEL_ROUNDS=0
         MAIN_HAS_BENCH=false
         if [ -f main-branch/benchmarks/bench_sanitizer.py ]; then
           MAIN_HAS_BENCH=true

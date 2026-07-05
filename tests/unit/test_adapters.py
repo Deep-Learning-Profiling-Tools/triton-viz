@@ -9,12 +9,14 @@ from triton_viz.core.data import (
     AddPtr,
     BinaryOp,
     CastImpl,
+    Dot,
     IntToPtr,
     Load,
     ProgramId,
     PtrToInt,
     ReduceSum,
     Store,
+    TernaryOp,
     UnaryOp,
 )
 
@@ -451,6 +453,90 @@ def test_gluon_unary_op_adapter_binds_original_callable():
     assert calls == [("arg", np.exp)]
 
 
+def test_gluon_semantic_binary_adapter_drops_bound_semantic():
+    from triton.experimental.gluon.language import _semantic as gluon_semantic
+
+    calls = []
+
+    def overrider(lhs, rhs):
+        calls.append((lhs, rhs))
+        return "overridden"
+
+    result = GLUON_FRONTEND.run_op_overrider(
+        gluon_semantic.GluonSemantic.add,
+        AddPtr,
+        overrider,
+        (object(), "lhs", "rhs", True),
+        {},
+    )
+
+    assert result == "overridden"
+    assert calls == [("lhs", "rhs")]
+
+
+def test_gluon_semantic_comparison_adapter_binds_original_callable():
+    from triton.experimental.gluon.language import _semantic as gluon_semantic
+
+    calls = []
+
+    def overrider(lhs, rhs, op):
+        calls.append((lhs, rhs, op))
+        return "overridden"
+
+    result = GLUON_FRONTEND.run_op_overrider(
+        gluon_semantic.GluonSemantic.less_than,
+        BinaryOp,
+        overrider,
+        (object(), "lhs", "rhs"),
+        {},
+    )
+
+    assert result == "overridden"
+    assert calls == [("lhs", "rhs", np.less)]
+
+
+def test_gluon_where_adapter_binds_original_callable():
+    from triton.experimental.gluon import language as ttgl
+
+    calls = []
+
+    def overrider(condition, lhs, rhs, op):
+        calls.append((condition, lhs, rhs, op))
+        return "overridden"
+
+    result = GLUON_FRONTEND.run_op_overrider(
+        ttgl.where,
+        TernaryOp,
+        overrider,
+        ("condition", "lhs", "rhs"),
+        {},
+    )
+
+    assert result == "overridden"
+    assert calls == [("condition", "lhs", "rhs", np.where)]
+
+
+def test_gluon_dot_adapter_preserves_accumulator_for_overriders():
+    from triton.experimental.gluon import language as ttgl
+
+    calls = []
+
+    def overrider(a, b, acc, input_precision, max_num_imprecise_acc):
+        calls.append((a, b, acc, input_precision, max_num_imprecise_acc))
+        return "overridden"
+
+    result = GLUON_FRONTEND.run_op_overrider(
+        ttgl.dot_fma,
+        Dot,
+        overrider,
+        ("a", "b", "acc"),
+        {},
+    )
+
+    assert result == "overridden"
+    assert calls == [("a", "b", "acc", None, None)]
+
+
 def test_gluon_frontend_wraps_symbolic_concrete_fn():
     calls = []
 
@@ -466,8 +552,9 @@ def test_gluon_frontend_wraps_symbolic_concrete_fn():
     assert calls == [(arg, named)]
 
 
-def test_gluon_language_ops_patch_and_delegate_to_semantics():
+def test_gluon_language_ops_patch_and_use_simulation_callable():
     from triton.experimental.gluon import language as ttgl
+    from triton_viz.core.simulation import gluon as gluon_sim
 
     seen_axes = []
     original_program_id = ttgl.program_id
@@ -509,20 +596,19 @@ def test_gluon_language_ops_patch_and_delegate_to_semantics():
         def post_warmup_callback(self, jit_fn, ret):
             pass
 
-    class FakeSemantic:
-        def program_id(self, axis):
-            return ("pid", axis)
-
     def kernel():
         pass
 
+    gluon_sim.gluon_builder.set_grid_dim(1, 1, 1)
+    gluon_sim.gluon_builder.set_grid_idx(0, 0, 0)
     manager = ClientManager([RecordingClient()])
     with manager.patch_run(kernel, frontend_name="gluon"):
         assert ttgl.program_id is not original_program_id
-        assert ttgl.program_id(2, _semantic=FakeSemantic()) == ("pid", 2)
+        result = ttgl.program_id(2)
 
     assert ttgl.program_id is original_program_id
     assert seen_axes == [2]
+    assert result.handle.data.tolist() == [0]
 
 
 def test_triton_pointer_cast_aliases_have_distinct_op_types():
