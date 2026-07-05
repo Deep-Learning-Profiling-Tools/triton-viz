@@ -8,6 +8,8 @@ Two layers:
     warmup-acquired TTGIR (requires a CUDA driver; skipped without one).
 """
 
+import linecache
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -334,9 +336,9 @@ def test_trace_pipelined_matmul_proves_race_free(_enable_race_detector):
         tl.store(c_ptrs, acc.to(tl.float16), mask=c_mask)
 
     M = N = K = 128
-    a = torch.randn(M, K, dtype=torch.float16)
-    b = torch.randn(K, N, dtype=torch.float16)
-    c = torch.empty(M, N, dtype=torch.float16)
+    a = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    b = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    c = torch.empty(M, N, dtype=torch.float16, device="cuda")
     grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
     kernel[grid](
         a,
@@ -381,10 +383,131 @@ def test_trace_elementwise_kernel_is_ok(_enable_race_detector):
         tl.store(out_ptr + offs, x + y, mask=mask)
 
     n = 1024
-    x = torch.randn(n)
-    y = torch.randn(n)
-    out = torch.empty(n)
+    x = torch.randn(n, device="cuda")
+    y = torch.randn(n, device="cuda")
+    out = torch.empty(n, device="cuda")
     add_kernel[(triton.cdiv(n, 256),)](x, y, out, n, BLOCK=256)
 
     assert detector.last_status == "ok"
     assert detector.last_reports == []
+    # Warmup-only trace executes the REAL kernel — outputs must be live.
+    torch.testing.assert_close(out, x + y)
+
+
+@requires_cuda
+def test_trace_two_kernels_second_real_compile_survives(_enable_race_detector):
+    """Regression: a traced launch followed by a REAL compile of a second
+    kernel in the same process. Triton's interpreter patches tl.core.tensor
+    dunders in place; the snapshot/restore around the interpreted run leaks
+    them, breaking semantic._load_legacy's ``other.handle if other else
+    None`` on the next real compile of any kernel using a masked load with
+    ``other``. The warmup-only path never engages the interpreter, so both
+    kernels must compile, analyze, and EXECUTE for real. always_compile
+    forces real make_ir so a warm disk cache cannot mask the regression."""
+    from triton import knobs
+
+    saved = knobs.compilation.always_compile
+    knobs.compilation.always_compile = True
+    try:
+        det1 = RaceDetector(compile=True)
+
+        @triton_viz.trace(det1)
+        @triton.jit
+        def first_kernel(x_ptr, o_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            m = offs < n
+            x = tl.load(x_ptr + offs, mask=m)
+            tl.store(o_ptr + offs, x * 2.0, mask=m)
+
+        n = 512
+        x = torch.randn(n, device="cuda")
+        o = torch.empty(n, device="cuda")
+        first_kernel[(triton.cdiv(n, 256),)](x, o, n, BLOCK=256)
+        assert det1.last_status == "ok"
+        torch.testing.assert_close(o, x * 2.0)
+
+        det2 = RaceDetector(compile=True)
+
+        @triton_viz.trace(det2)
+        @triton.jit
+        def second_kernel(x_ptr, o_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            m = offs < n
+            # masked load WITH other: real compile evaluates `if other` on a
+            # tl.tensor — the construct the leaked interpreter __bool__ broke.
+            x = tl.load(x_ptr + offs, mask=m, other=0.0)
+            tl.store(o_ptr + offs, x + 1.0, mask=m)
+
+        o2 = torch.empty(n, device="cuda")
+        second_kernel[(triton.cdiv(n, 256),)](x, o2, n, BLOCK=256)
+        assert det2.last_status == "ok"
+        torch.testing.assert_close(o2, x + 1.0)
+    finally:
+        knobs.compilation.always_compile = saved
+
+
+@requires_cuda
+def test_trace_kernel_calling_wrapped_device_fn(_enable_race_detector):
+    """Regression: under the CLI wrapper every @triton.jit function is
+    wrapped — including DEVICE functions. The real code generator resolves a
+    callee through the caller's __globals__ and only accepts JITFunctions
+    there; a TritonTrace global used to die with "Unsupported function
+    referenced". The warmup-only path must unwind trace globals to the raw
+    JITFunction for the real-compile window (and restore them after).
+
+    The kernels are exec'd into a synthetic module namespace because that is
+    the shape the CLI produces: both functions live at module level, so the
+    caller references the device fn as a true GLOBAL. Defining them inside
+    this test function would instead capture the device fn as a closure
+    freevar, and Triton's get_capture_scope() overlays nonlocals on top of
+    __globals__ — a scope the global-swap window does not touch."""
+    src = textwrap.dedent(
+        """
+        import triton
+        import triton.language as tl
+
+        import triton_viz
+        from triton_viz.clients import RaceDetector
+
+        detector = RaceDetector(compile=True)
+
+
+        # Wrap the device function too, exactly as the CLI's patched
+        # triton.jit would. It is never launched by the host; it only exists
+        # as a wrapped module global the top kernel references.
+        @triton_viz.trace(RaceDetector(compile=True))
+        @triton.jit
+        def _device_double(x):
+            return x * 2.0
+
+
+        @triton_viz.trace(detector)
+        @triton.jit
+        def caller_kernel(x_ptr, o_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            m = offs < n
+            x = tl.load(x_ptr + offs, mask=m, other=0.0)
+            tl.store(o_ptr + offs, _device_double(x), mask=m)
+        """
+    )
+    # Seed linecache so triton's inspect.getsource() can read the exec'd
+    # defs; mtime=None makes the entry immune to linecache.checkcache().
+    filename = "<compiled_race_detector_device_fn_module>"
+    linecache.cache[filename] = (len(src), None, src.splitlines(True), filename)
+    ns: dict = {"__name__": "_compiled_race_device_fn_mod"}
+    try:
+        exec(compile(src, filename, "exec"), ns)
+
+        n = 512
+        x = torch.randn(n, device="cuda")
+        o = torch.empty(n, device="cuda")
+        ns["caller_kernel"][(triton.cdiv(n, 256),)](x, o, n, BLOCK=256)
+        assert ns["detector"].last_status == "ok"
+        torch.testing.assert_close(o, x * 2.0)
+        # The swap window must have restored the wrapped module global.
+        assert isinstance(ns["_device_double"], triton_viz.core.trace.TritonTrace)
+    finally:
+        linecache.cache.pop(filename, None)

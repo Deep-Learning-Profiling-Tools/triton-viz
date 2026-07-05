@@ -19,13 +19,22 @@ separate ``@triton_viz.trace`` decorations.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable
 from typing import Any, ClassVar
 
 from ....core.callbacks import ForLoopCallbacks, OpCallbacks
 from ....core.client import Client
+from ....core.config import config as cfg
 from ....core.data import Op
 from .smt_encoder import AnalysisResult, analyze_ttgir
+
+_RE_TTGIR_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\(")
+
+
+def _kernel_name(ttgir: str) -> str:
+    m = _RE_TTGIR_FUNC.search(ttgir)
+    return m.group(1) if m else "<kernel>"
 
 
 class CompiledRaceDetector(Client):
@@ -49,6 +58,10 @@ class CompiledRaceDetector(Client):
     # Skips the interpreted run via pre_run_callback() == False; ClientManager
     # enforces that this is the only client in the trace.
     STANDALONE: ClassVar[bool] = True
+    # The analysis consumes only the warmup compilation artifact (TTGIR), so
+    # TritonTrace.run skips the interpreter machinery entirely and executes
+    # the real kernel — the host script keeps its true semantics.
+    WARMUP_ONLY: ClassVar[bool] = True
 
     def __init__(self, collect_smtlib: bool = False) -> None:
         super().__init__()
@@ -123,6 +136,8 @@ class CompiledRaceDetector(Client):
                 "no TTGIR captured from warmup; compiled-mode analysis " "did not run"
             )
             self.last_reports = []
+            if cfg.cli_active:
+                print(f"[{self.LOG_TAG}] no TTGIR captured from warmup")
             return []
 
         reports: list[Any] = []
@@ -139,9 +154,22 @@ class CompiledRaceDetector(Client):
                 reason = result.unsupported_reason
             reports.extend(result.reports)
             self.smtlib.extend(result.smtlib)
+            if cfg.cli_active:
+                self._report_cli(_kernel_name(text), result)
         self._pending_ttgir = []
 
         self.last_reports = reports
         self.last_status = status
         self.unsupported_reason = reason
         return list(reports)
+
+    def _report_cli(self, name: str, result: AnalysisResult) -> None:
+        """Print a one-line verdict per analyzed kernel for the CLI tool."""
+        if result.status == "unsupported":
+            print(f"[{self.LOG_TAG}] {name}: UNSUPPORTED — {result.unsupported_reason}")
+        elif result.reports:
+            print(f"[{self.LOG_TAG}] {name}: RACE — {len(result.reports)} report(s)")
+            for rep in result.reports:
+                print(f"    {rep.render()}")
+        else:
+            print(f"[{self.LOG_TAG}] {name}: race-free (proof)")
