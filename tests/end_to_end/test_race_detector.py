@@ -2033,11 +2033,12 @@ def test_concurrent_workers_capture_exactly_once():
 
 
 def test_mid_capture_exception_reports_aborted_not_ok():
-    """An exception escaping the kernel mid-capture is routed through
-    finalize by trace.py before re-raising. Regression test: finalize's
-    early path reported last_status == 'ok' with empty reports —
-    indistinguishable from a clean no-race verdict even though no analysis
-    ran."""
+    """An exception escaping the kernel mid-capture must never be readable
+    as a clean verdict, even when the harness has no finalize-on-error
+    routing: grid_callback arms last_status = 'aborted' at launch start and
+    only finalize() upgrades it. Regression test: the status was pre-set to
+    'ok' at launch start, so a mid-kernel crash left 'ok' with empty
+    reports — indistinguishable from a clean no-race verdict."""
 
     detector = SymbolicRaceDetector()
 
@@ -2054,6 +2055,82 @@ def test_mid_capture_exception_reports_aborted_not_ok():
 
     assert detector.last_status == "aborted"
     assert detector.last_reports == []
+
+
+def test_pre_grid_exception_does_not_read_previous_ok():
+    """A launch that dies BEFORE grid_callback (user grid lambda, arg
+    conversion) must not leave the previous launch's clean verdict readable
+    as this launch's: arg_callback re-arms the pessimistic 'aborted' first.
+    Also covers the never-launched detector, which reads 'aborted' too."""
+
+    detector = SymbolicRaceDetector()
+    assert detector.last_status == "aborted"
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def racy_kernel(out_ptr):
+        tl.store(out_ptr, 1.0)
+
+    out = torch.zeros(4, dtype=torch.float32)
+    racy_kernel[(2,)](out)
+    assert detector.last_status == "ok"
+    assert len(detector.last_reports) >= 1
+
+    with pytest.raises(ZeroDivisionError):
+        racy_kernel[lambda META: (1 // 0,)](out)
+
+    assert detector.last_status == "aborted"
+    assert detector.last_reports == []
+
+
+def test_mid_capture_exception_does_not_leak_observer_into_next_client():
+    """A launch that dies before finalize() cannot uninstall its class-level
+    scalar-concretize observer; the next launch's SymbolicClient
+    grid_callback must reclaim the slot. Regression test: the stale detector
+    observer fired inside a later Sanitizer launch and crashed it with
+    UnsupportedSymbolicRaceQuery on a pid-dependent branch the sanitizer
+    handles fine on its own."""
+
+    detector = SymbolicRaceDetector()
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def crashing_kernel(out_ptr):
+        pid = tl.program_id(0)
+        tl.store(out_ptr + pid, 1.0)
+        x = 1 // 0  # noqa: F841 — host-side crash mid-capture
+
+    out = torch.zeros(4, dtype=torch.float32)
+    with pytest.raises(ZeroDivisionError):
+        crashing_kernel[(2,)](out)
+
+    # finalize() never ran, so the dead launch's observer may still occupy
+    # the class-level slot here; the next launch must self-heal regardless.
+    sanitizer = Sanitizer(abort_on_error=True)
+
+    @triton_viz.trace(sanitizer)
+    @triton.jit
+    def branching_kernel(out_ptr):
+        pid = tl.program_id(0)
+        if pid == 0:
+            tl.store(out_ptr, 1.0)
+
+    out2 = torch.zeros(4, dtype=torch.float32)
+    branching_kernel[(2,)](out2)
+
+    assert SymbolicExpr._scalar_concretize_observer is None
+    assert SymbolicExpr._scalar_concretize_observer_owner is None
+
+    # The detector itself must also recover on its next launch.
+    @triton_viz.trace(detector)
+    @triton.jit
+    def racy_kernel(out_ptr):
+        tl.store(out_ptr, 1.0)
+
+    out3 = torch.zeros(4, dtype=torch.float32)
+    racy_kernel[(2,)](out3)
+    assert detector.last_status == "ok"
+    assert len(detector.last_reports) >= 1
 
 
 def test_abort_on_error_status_survives_raise():

@@ -3614,6 +3614,13 @@ class SymbolicClient(Client):
         # contexts into this launch — a stale context would swallow every
         # access into a pending queue that is never flushed.
         self.loop_stack.clear()
+        # Same invariant for the class-level scalar-concretize observer: only
+        # one symbolic client runs per launch, so any observer still installed
+        # at launch start belongs to a launch that died before finalize()
+        # could uninstall it. Reclaim the slot unconditionally; the owning
+        # client re-installs its own hook after this base call.
+        SymbolicExpr._scalar_concretize_observer = None
+        SymbolicExpr._scalar_concretize_observer_owner = None
         self.addr_ok = None
         self.pid_ok = cast(
             BoolRef,
