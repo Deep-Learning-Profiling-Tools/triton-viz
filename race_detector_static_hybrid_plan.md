@@ -1,16 +1,138 @@
-# Compiled-Mode Race Detector: Implementation Plan
+# Race Detector: Static & Hybrid Modes — Implementation Plan
+
+**Scope of this document**: the static (compiled-mode) race-detection tracks and the
+hybrid dispatch layer that unifies them with the existing dynamic (interpreter-driven)
+mode.
+
+- **Part I** — the conceptual skeleton: one solver, one claim ladder, hybrid as a
+  concretization policy. Read this first; Parts II/III are instances of it.
+- **Part II** — Track 1: shared-memory races over TTGIR. **Shipped** (PR #476 and
+  follow-ups); kept as reference, including the model boundary of the shipped v1.
+- **Part III** — Track 2: global-memory races over TTIR + the tier selector.
+  **Planned** (~5 weeks).
+
+This file supersedes `race_detector_compiled_mode_plan.md` (renamed): Track 1 content is
+carried over near-verbatim; its "later extensions" bullet on global memory graduates to
+Track 2 here.
+
+---
+
+# Part I — Conceptual skeleton: one solver, one claim ladder
+
+## I.1 Hybrid is a concretization policy, not a fallback arrow
+
+The system has **one solver** (`TwoCopySymbolicHBSolver`) and multiple **capture
+front-ends** (interpreter-driven, IR-driven). "Hybrid" is not a static box and a dynamic
+box joined by a failure→fallback arrow; it is a per-kernel — and per-term — policy:
+
+> **Choose the least concretization that makes the query decidable, and report the
+> strongest claim that survives.**
+
+Proof rungs (UNSAT side, ∀-claims):
+
+- **T0 — everything symbolic** (scalar params, grid, pid, loop iterations, trip
+  counts): *"no race for any input, any grid"* (per kernel specialization). Track 1
+  already delivers T0 for its domain — its shipped guarantee is exactly "all inputs,
+  all grids, symbolic trip counts". For global memory, T0 is opportunistic (see the
+  nonlinearity gate, §I.3).
+- **T1 — params concrete, threads symbolic** (scalar params taken from a real launch;
+  pid, grid, loop iterations symbolic): *"no race for this input shape, for any grid
+  and any pair of program instances."* Strictly stronger than what the dynamic mode
+  alone claims today (concrete grid, executed path only).
+
+A SAT result is **not** a rung: T0/T1 are universal claims, a SAT is an existential one
+("this specific witness races"), and it gets its own **confirmation channel** (witness
+replay, §I.4-C2). Earlier drafts numbered the replay "T2" — retired; it is not a proof
+tier. Every query therefore terminates in exactly one of **five states**:
+
+| terminal state | meaning |
+|---|---|
+| `proved@T0` | no race for any input, any grid (per specialization) |
+| `proved@T1` | no race for this input, for any grid / pid pair |
+| `race-confirmed` | SAT witness reproduced concretely by the interpreter |
+| `race-unconfirmed` | SAT, but replay did not reproduce it — potential over-approximation FP, reported as *potential* |
+| `unsupported` | outside every front-end's decidable region; reason recorded (unsupported-not-race policy, as always) |
+
+These five states are the report vocabulary, the provenance labels, and the columns of
+the evaluation tables (§III S5).
+
+## I.2 Front-ends have reachable regions
+
+The two capture front-ends differ in **what they are able to concretize**, and the
+boundary is principled, not an implementation accident:
+
+| | IR front-end (TTIR reader) | interpreter front-end (dynamic mode) |
+|---|---|---|
+| scalar params | symbolic **or** concrete | concrete (from the launch) |
+| pid / grid | symbolic | pid symbolic (SymbolicExpr, alpha-renamed in the solver), grid concrete |
+| control-flow paths | **both branches encoded** with path conditions | forced concrete — one executed path (why pid-dependent branches are its largest unsupported source) |
+| memory contents (indirect indexing) | **unreachable** | concrete; loaded values modeled as Z3 arrays over concrete address tables (`race_detector.py:298-300`) |
+
+The IR front-end can never concretize memory contents: doing so means executing load
+semantics, which *is* the interpreter. Conversely the interpreter cannot avoid
+concretizing paths. Hence at T1 **neither front-end dominates**: the IR front-end is
+strictly stronger on path coverage, the interpreter strictly stronger on memory
+dependence. That asymmetry — not "static failed" — is why both front-ends exist, and it
+makes the dispatcher's job a one-liner: *within each front-end's reachable region, pick
+the point with the least concretization whose query is decidable.*
+
+The paper's core figure is the resulting 2-D map — axis 1: what is concretized
+(nothing / scalar params / memory contents / paths); axis 2: what stays symbolic (pid,
+grid, loop iteration, trip count). Every component is a point on the map; the dispatcher
+is a policy that walks it; every benchmark kernel lands on a point (§III S5).
+
+## I.3 The tier selector (per kernel, per term)
+
+1. **Linearity gate for T0.** After encoding, a cheap syntactic scan of the term tree
+   for symbolic×symbolic products (`pid × sym_stride`, `sym_param × sym_param`) decides
+   whether a T0 attempt is worth a solver call at all; a short Z3 timeout is the
+   backstop. Nonlinear → skip straight to T1, where params are concrete and every
+   query is linear.
+2. **DataDep placement rule** (per term, not per kernel):
+   - loaded value in an **address** chain → a free address makes the query meaningless
+     (nearly always SAT) → route the kernel to the interpreter front-end;
+   - loaded value in a **mask** chain only → stay on the IR front-end and encode it as
+     a **free variable**. The over-approximation is sound for the proof direction
+     (UNSAT under an unconstrained mask is a real proof); a spurious SAT is caught by
+     the confirmation channel. This converts a chunk of "indirect → unsupported" into
+     `proved@T1` or `race-unconfirmed`.
+3. **Any SAT → confirmation channel** (C2).
+
+## I.4 The three information channels (the "strong hybrid")
+
+- **C1 — concrete injection (dynamic → static).** The T1 rung itself: launch-captured
+  scalar args populate the `LaunchContext` of the symbolic query while pid/grid stay
+  symbolic — concolic *within a single SMT query*, not between two tools. Already free:
+  args flow through the existing arg/grid callbacks.
+- **C2 — witness replay (static → dynamic).** A SAT model (pid pair, loop iterations,
+  params) is replayed under the interpreter: run with the witness grid dims and the
+  captured args, executing only the two witness program ids (the designated-block
+  capture slot, `race_detector.py:288-292`, pointed at them), then intersect the two
+  concrete footprints. Role: **the soundness patch for over-approximated free
+  variables** (the DataDep-in-mask rule) and a detector for encoding bugs — load-
+  bearing, not a DART/CUTE homage. v1 replays T1 witnesses (params already real); T0
+  witnesses would require materializing tensors of witness shapes — stretch.
+- **C3 — differential cross-check (both directions).** Instantiate the static symbolic
+  footprint at the dynamic launch's concrete params; it must match the dynamic records
+  one-to-one. Each side is the other's oracle: divergence exposes either a compiler
+  lowering the IR reader misread or an interpreter semantics deviation. Precondition:
+  align the masked-lane convention (whether masked-off lanes appear in records) before
+  comparing, or the diff is pure noise.
+
+---
+
+# Part II — Track 1 (shipped): shared-memory races over TTGIR
 
 **Target**: shared-memory (and later tensor-memory) data races, detected statically from
-TritonGPU IR (TTGIR) via an SMT encoding — the "compile mode" counterpart to the existing
-interpreter-driven dynamic mode (global memory).
+TritonGPU IR (TTGIR) via an SMT encoding — the "compile mode" counterpart to the
+interpreter-driven dynamic mode. In the ladder of Part I this track proves at **T0** for
+its domain (intra-CTA shared memory, per specialization).
 
 Every load-bearing claim below was verified empirically on this machine
 (triton 3.6.0 wheel, z3-solver 4.15.3, host-only compilation with
 `GPUTarget("cuda", 80/90, 32)`); probe scripts and golden TTGIR dumps live in `/tmp`
 (`dump_ttgir.py`, `probe_ir_bindings.py`, `ll_probe*.py`, `ttgir_pipeline.py`,
 `matmul_s{1,3}_sm{80,90}.ttgir`).
-
----
 
 ## 1. Scope
 
@@ -57,9 +179,8 @@ Every load-bearing claim below was verified empirically on this machine
   the v1 op vocabulary; M4.
 - Multi-CTA CGA layouts (`CTAsPerCGA > 1`), non-power-of-two shapes: assert-unsupported
   (mirrors the dynamic mode's unsupported-not-race policy).
-- Global-memory static checking: a later bonus (§8), not v1.
-
----
+- Global-memory static checking: **Track 2 — Part III of this document**, not this
+  track.
 
 ## 2. Architecture
 
@@ -132,8 +253,6 @@ tests/golden/ttgir/*.ttgir          # checked-in dumps + mutants
 - **NKI**: `NKITrace` never calls `patch_warmup` → compiled mode is Triton-only by
   construction, no frontend changes needed.
 
----
-
 ## 3. IR reading: hybrid binding walk + text layer
 
 Verified capabilities of `triton._C.libtriton.ir`:
@@ -173,8 +292,6 @@ The v1 op vocabulary (complete catalogue from the dumps):
 
 Anything outside the vocabulary that touches a memdesc → `last_status="unsupported"`
 with the op name (never silently wrong — same policy as dynamic mode).
-
----
 
 ## 4. Address function: layouts → QF_BV
 
@@ -219,8 +336,6 @@ Differential testing: the python `LinearLayout` API (`from_bases/apply`) is the 
 unit tests enumerate every (tid, reg) for small shapes and compare against the closed
 forms, for randomized pow2 configs plus the five real configs from the dumps.
 
----
-
 ## 5. Happens-before at TTGIR (no barriers!)
 
 TTGIR has **no CTA barrier ops** — ordering is carried by:
@@ -249,8 +364,6 @@ through `k mod N`, and counting-HB depends only on the distance `d = k_b − k_a
 `d > ⌈(N_wait + g)/g⌉` every pair is HB-ordered by the wait counting; so the query
 quantifies over symbolic `k_a` (bounded by the symbolic trip count) and a *finite* set
 of distances `d ∈ [0, depth + 1]`. No loop unrolling, trip count stays symbolic.
-
----
 
 ## 6. The query: two-copy over agents
 
@@ -281,36 +394,10 @@ overriders), HB edge generators (tokens/counting instead of CAS rf + acq/rel), a
 sort (BV instead of Int). What is reused verbatim: two-copy alpha-renaming discipline,
 HB transitive closure, conflict predicate, report plumbing, unsupported-not-race policy.
 
----
+## 7. Milestones — status
 
-## 7. Milestones
-
-**M0 — skeleton + IR capture (≈1 week)**
-Client with warmup hook, spec cache, golden TTGIR check-ins (matmul s1/s3 × sm80/sm90 +
-elementwise), `ttgir_reader` producing the EventGraph with locs.
-*Exit*: structured dump of the matmul EventGraph matches a hand-checked YAML; reader
-marks an unknown-op kernel unsupported.
-
-**M1 — layouts → BV (≈1 week)**
-`layouts.py` closed forms + generic XOR-linear encoder; differential tests vs. python
-`LinearLayout` (distributed) and vs. the transcribed bases construction (shared).
-*Exit*: oracle parity, exhaustive on small shapes, on ≥20 random pow2 configs + the 5
-real configs; broadcast whitelist behavior covered.
-
-**M2 — HB + solver, sm80 cp.async (≈2 weeks)** ← the heart
-Token/counting HB, rotation closed-form + induction lemma, window theorem, two-copy BV
-query, RaceReport mapping, SMT-LIB2 export.
-*Exit*: stock matmul s2/s3/s4 → UNSAT (proof). **Mutation suite** (hand-edited golden
-TTGIR) each → SAT with the right witness: (a) `async_wait num` too large, (b) wait
-deleted, (c) stage dim shrunk (`2x…` → `1x…`), (d) rotation init off-by-one,
-(e) commit-group dropped. Plus a `tl.static_range` hand-pipelined kernel written at the
-source level both correctly and buggy.
-
-**M3 — productization (≈1 week)**
-`cfg.race_detector_mode`, factory wiring, `both` mode composition (verified callback
-rules), CLI wrapper, docs; perf budget: ≤ a few seconds per specialization (events are
-few; queries are per-pair like dynamic mode).
-*Exit*: e2e tests through `triton_viz.trace`; dynamic suite untouched.
+**M0–M3 landed** (skeleton + IR capture, layouts → BV, HB + solver for sm80 cp.async,
+productization — shipped via PR #476 and follow-up commits). Outstanding:
 
 **M4 — sm90/Hopper (≈2 weeks)**
 `warp_group_dot_wait {pendings}` agent, `fence_async_shared`, nvmma layouts (formula
@@ -326,19 +413,14 @@ from-source triton/MLIR build — none of the needed bits ship in the wheel, ver
 Evaluation sweep: triton tutorials × `num_stages ∈ {1..4}` × {sm80, sm90}: proofs,
 solve times, mutation-detection matrix; case studies from historical pipeliner bugs.
 
----
-
-## 8. Later extensions
-- **Static global-memory mode**: same encoder over `tt.load/tt.store` with grid-symbolic
-  pids when no indirect loads exist; falls back to dynamic mode on indirection — the
-  clean hybrid story (torch eager/compile analogy).
+## 8. Later extensions (Track 1)
 - **Membar verification (v2)**: re-implement the Membar aliasing analysis as constraints
   and check generic-proxy pairs too — turns the v1 assumption into a checked theorem.
 - **Gluon kernels**: Gluon IR uses the same ttg dialect with explicit layouts — the
   reader should work nearly unchanged; valuable because Gluon authors hand-write the
   pipelining that the compiler normally gets right.
 
-## 9. Risks
+## 9. Risks (Track 1)
 
 | Risk | Mitigation |
 |---|---|
@@ -350,3 +432,154 @@ solve times, mutation-detection matrix; case studies from historical pipeliner b
 | autotuner: TTGIR is whatever config ran last | analyze per config via `compute_cache_key` (options are part of the key) |
 | mbarrier phase parity (M4) | start with structural arrive/wait matching; data-dependent phases → unsupported |
 | driverless CI | direct `triton.compile(ASTSource, target=…)` fallback (verified working host-only) |
+
+---
+
+# Part III — Track 2 (planned): global-memory races over TTIR + tier selector
+
+## III.0 Design decisions
+
+- **D1 — IR layer: TTIR, not TTGIR.** Global addresses at TTIR are complete
+  `tt.addptr`/`arith` chains with no layout attributes to interpret; the vocabulary is
+  far smaller; and software pipelining does not change the *set* of global accesses, so
+  nothing is gained by waiting for TTGIR. (Track 1 stays on TTGIR because shared-memory
+  ops exist only there — two readers on two IR levels is deliberate; the provenance
+  labels carry the track dimension so merged reports stay distinguishable.)
+- **D2 — solver: reuse `TwoCopySymbolicHBSolver`, skeleton unchanged.** It already
+  consumes records of Z3 address expressions + constraints, with pid alpha-renaming,
+  mutual atomicity, intra-lane queries and report plumbing. "Same encoder" concretely
+  means: one solver, two capture front-ends — one driven by the interpreter, one by the
+  IR.
+- **D3 — primary target is T1; T0 is opportunistic.** Any 2-D kernel has
+  `pid × stride`; with symbolic strides that product is nonlinear and Z3 `unknown`
+  becomes the norm, not the exception. With params concrete: strides are constants →
+  every query is linear; loop bounds concretize through the existing `_loop_bounds`;
+  the symbolic-trip-count work is deferred to the T0 stretch (S5). The T1 claim
+  already strictly dominates the dynamic mode's per-launch claim, so the paper
+  narrative stands without T0.
+
+## III.1 Existing assets (verified in-tree — do not rebuild these)
+
+- **`triton_viz/clients/sanitizer/compiled/ttir_reader.py`** (~760 lines): `parse_ttir`
+  → `AccessGraph` with per-access Term chains (offset, mask), source locs, `DataDep`
+  markers for loaded values (the indirect-indexing signal, ready-made), and `guarded`
+  flags for scf.if regions. The vocabulary already covers `tt.load/store/atomic_*`,
+  `tt.addptr/splat/broadcast/expand_dims/make_range/get_program_id`, `arith.*`,
+  `scf.for/if/yield`. Nested/multiple loops → `UnsupportedTTIR`
+  (`ttir_reader.py:396`).
+- **`triton_viz/clients/sanitizer/compiled/oob.py`**: `_eval` Term→Z3 evaluator;
+  `LoopVar` is already a free variable over `[lower, upper)` — **no unrolling is the
+  status quo**, not a work item; `_loop_bounds` concretizes bounds at launch (raises
+  on non-constants — exactly the T1 behaviour).
+- **TTIR acquisition + parse cache**: sanitizer `client.py:87-90` (`asm["ttir"]` from
+  `post_warmup_callback`) and `client.py:149-158` (`_graph_cache` keyed on the TTIR
+  text hash).
+- **Solver channels, all present**: `copy_local_vars` (per-copy loop variables),
+  `local_constraints`/`premises` (per-record constraints — path conditions ride here),
+  arange substitution (`_make_arange_subs_and_constraints`), `_exact_atomic_addr` +
+  the scope/width-aware mutual-atomicity rule. Grid concreteness lives in exactly one
+  place: the `int(d)` cast in `_normalize_grid`
+  (`two_copy_symbolic_hb_solver.py:404`), and the grid constraints are already written
+  in the shape `0 ≤ pid_x[i] < grid[i]`.
+- **Dynamic front-end facts the channels rely on**: records are captured from one
+  designated block's symbolic execution and alpha-renamed in the solver
+  (`race_detector.py:288-292`); loaded values are modeled per-launch as Z3 arrays over
+  concrete address tables (`race_detector.py:298-300`).
+
+Net effect: "write a TTIR reader" and "write a symbolic evaluator" collapse into
+"promote, extend, generalize". The only component with no existing code is scf.if
+condition modeling (S2).
+
+## III.2 Steps
+
+### S1 — reader promotion + atomic semantics (≈3–4 days)
+
+- Promote `ttir_reader` to a shared module (shared code stays mechanism-only, each
+  client owns its policy — the same narrow-hooks rule as Track 1); the sanitizer path
+  keeps a re-export for compatibility.
+- The race-detector compiled client captures `asm["ttir"]` alongside its existing TTGIR
+  capture; parse cache copied from the sanitizer pattern.
+- Atomics get race semantics: `tt.atomic_*` (currently recorded as a plain access)
+  becomes RMW = read event + write event + atomicity flag; the solver side
+  (`_exact_atomic_addr`, mutual atomicity) is reused untouched.
+- The single-loop limitation stays and is **written into the support matrix**, so S5's
+  numbers aren't a surprise.
+
+*Exit*: the race-detector client parses a stock kernel's TTIR into an `AccessGraph`
+with atomic RMW events; the sanitizer suite stays green.
+
+### S2 — scf.if condition modeling + per-term DataDep policy (≈1 week — the core new work)
+
+- Capture the branch condition's Term chain; every access in the region carries a path
+  condition (conjunction across nested ifs); **both branches are encoded**.
+- scf.if results upgrade from `DataDep` to ite Terms when the condition is modelable
+  (condition itself a `DataDep` → status quo).
+- Per-term DataDep policy (feeds the selector, §I.3): `DataDep` in a mask chain →
+  free variable; `DataDep` in an address chain → marker that routes the kernel to the
+  interpreter front-end.
+- Side benefit, landed and tested separately: the sanitizer's `guarded` accesses become
+  provable instead of pessimistic — this step edits the shared reader, both clients
+  gain.
+
+*Exit (headline acceptance)*: kernels the dynamic mode marks unsupported for
+pid-dependent branches now encode completely.
+
+### S3 — T1 evaluation + solver hookup (≈1 week)
+
+- Evaluation side: reuse `_eval`; `LaunchContext` keeps concrete scalar params; pid
+  becomes symbolic; `make_range` rides the existing arange machinery; `_loop_bounds`
+  unchanged (induction variable keeps its `[lower, upper)` free-variable semantics).
+- Solver side: relax `_normalize_grid` — grid dims become Z3 Ints with `grid_i ≥ 1`
+  and `0 ≤ pid < grid_i`; loop variables travel via `copy_local_vars`; path conditions
+  via `local_constraints`.
+- Audit every concrete-grid short-circuit for symbolic-grid safety (e.g. the
+  vacuous-unsat shortcut noted in `_find_intra_instance_candidates`).
+- Atomics v1 kept simple: mutual atomicity only, no static CAS synchronizes-with
+  modeling; a detected cross-CTA synchronization pattern → unsupported → interpreter
+  route.
+
+*Exit*: end-to-end `proved@T1` on a stock elementwise kernel and a masked 2-D kernel;
+a mutated pid stride → SAT. **This is the point the system is usable end-to-end
+(~2.5 weeks in), so evaluation starts here, not after S4.**
+
+### S4 — tier selector + the three channels (≈1 week)
+
+- Selector per §I.3: linearity gate for T0, DataDep placement rule, every SAT → C2.
+- **C1** is already free (launch args → `LaunchContext`).
+- **C2**: interpreter replay with the witness grid dims and captured args, executing
+  only the two witness program ids via the designated-block slot; intersect the
+  concrete footprints → `race-confirmed` / `race-unconfirmed`.
+- **C3**: footprint diff against the dynamic launch's records, after aligning the
+  masked-lane convention.
+- Provenance on every report and status: terminal state (five states, §I.1) × track
+  (global/TTIR vs shared/TTGIR).
+- Mutation suite: wrong pid stride, dropped mask term, atomic → plain store — each must
+  go SAT with the correct witness **and** come back `race-confirmed` through C2.
+
+### S5 — evaluation + T0 stretch (≈1.5–2 weeks, overlapping from S3)
+
+- Tutorials + real kernel libraries: distribution over the five terminal states;
+  unsupported reasons split by cause (indirect address / nested loop /
+  out-of-vocabulary / unmodelable condition).
+- Headline numbers: (a) kernels rescued from dynamic-unsupported by pid-branch
+  modeling (S2's acceptance, quantified); (b) kernels with all-grid `proved@T1` — a
+  claim the dynamic mode cannot make at all.
+- The 2-D concretization map (§I.2) with every benchmark kernel plotted on it — the
+  paper's core figure; the evaluation data fills the conceptual frame directly.
+- **T0 stretch, off the critical path**: symbolic loop bounds (`lower ≤ i < upper` plus
+  step-divisibility constraint), accept nonlinear `unknown` → the kernel simply lands
+  on T1 per the ladder; whatever reaches T0 becomes the paper's "upper bound" section.
+
+## III.3 Timeline & risks
+
+Total ≈4.5–5.5 weeks; end-to-end capability lands at S3 (~2.5 weeks) so evaluation and
+implementation overlap rather than serialize.
+
+| Risk | Mitigation |
+|---|---|
+| T0 nonlinearity (`pid × sym_stride`) → Z3 `unknown` | linearity gate skips hopeless T0 attempts; the T1 primary target is all-linear; the ladder guarantees every kernel lands on some rung |
+| S2 edits the shared reader the sanitizer depends on | sanitizer suite in CI must stay green; reader stays mechanism-only, policy differences live in the clients |
+| Z3 `unknown`/timeout at any rung | unsupported-not-race policy — never report an unsat that wasn't proven |
+| C3 diff noise from masked lanes | align the record convention before enabling the check |
+| C2 replay of a symbolic-grid witness | replay uses the witness grid dims + captured args, executing only the two witness pids; T0-witness replay (materializing witness-shaped tensors) is stretch |
+| free-variable masks flood reports with spurious races | every SAT passes through C2; `race-unconfirmed` is a distinct terminal state, reported as *potential*, never as confirmed |

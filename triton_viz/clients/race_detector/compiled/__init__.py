@@ -15,8 +15,8 @@ direction only, whole-tile slots, lockstep/Membar-barrier assumption). It is
 that wait-coverage proof, not a full byte-level data-race proof; the per-report
 ``byte_offset`` is a representative witness byte, not part of the solved query.
 
-See ``race_detector_compiled_mode_plan.md`` at the repository root for the
-full design, scope and model boundary.
+See ``race_detector_static_hybrid_plan.md`` (Part II) at the repository root
+for the full design, scope and model boundary.
 """
 
 from .client import CompiledRaceDetector

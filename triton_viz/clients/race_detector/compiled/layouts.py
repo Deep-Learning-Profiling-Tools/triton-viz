@@ -4,7 +4,7 @@ Triton maps tensor elements to threads and shared-memory offsets via
 XOR-linear maps over GF(2) (LinearLayout). The closed forms below were
 transcribed from the triton 3.6.x C++ sources and verified exhaustively
 against the ``LinearLayout`` ground truth during the design recon (see
-``race_detector_compiled_mode_plan.md`` §4):
+``race_detector_static_hybrid_plan.md`` Part II §4):
 
   * blocked (distributed): which tensor element does (warp, lane, register)
     own — affine decomposition along ``order`` with repetition bits when the
