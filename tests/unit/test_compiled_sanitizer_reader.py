@@ -6,6 +6,7 @@ import pytest
 
 from triton_viz.clients.sanitizer.compiled.ttir_reader import (
     Arange,
+    Bin,
     IterArgOffset,
     UnsupportedTTIR,
     parse_ttir,
@@ -123,6 +124,70 @@ def test_unrecognized_store_syntax_fails_closed():
     )
     with pytest.raises(UnsupportedTTIR, match="unsupported memory op"):
         parse_ttir(text)
+
+
+def test_min_max_rem_arith_are_modeled():
+    """The tutorial-matmul grouped swizzle lowers to arith.minsi / arith.remsi
+    over the program id. These are launch-affine, not data-dependent: they
+    must parse into Bin terms, not poison every downstream address as DataDep
+    (which made fully-affine kernels like TritonBench's matmul_triton2 abstain
+    as unsupported instead of catching their real OOB)."""
+    text = _read("add_sm80.ttir").replace(
+        "%offs = arith.muli %pid, %c1024_i32 : i32 loc(#loc20)",
+        "%g = arith.remsi %pid, %c1024_i32 : i32 loc(#loc20)\n"
+        "    %h = arith.minsi %g, %c1024_i32 : i32 loc(#loc20)\n"
+        "    %i = arith.maxsi %h, %c1024_i32 : i32 loc(#loc20)\n"
+        "    %offs = arith.muli %i, %c1024_i32 : i32 loc(#loc20)",
+    )
+    g = parse_ttir(text)
+    ops = set()
+
+    def walk(t):
+        if isinstance(t, Bin):
+            ops.add(t.op)
+        for f in ("a", "b", "cond", "t", "f"):
+            if hasattr(t, f):
+                walk(getattr(t, f))
+
+    walk(g.accesses[0].offset)
+    assert {"%", "min", "max"} <= ops, f"swizzle ops lost in parsing: {ops}"
+
+
+def test_scf_if_marks_accesses_guarded():
+    """An access inside an scf.if region executes only when the branch is
+    taken. The condition is not modeled, so the access must be tagged
+    ``guarded`` — check_graph may then use it for a proof but never as a SAT
+    witness (TritonBench's diag_ssm guards `load(y + offs - B*D)` behind
+    `if t > 0`; an unguarded scan would "witness" the unreachable t == 0 at
+    offset -1). Accesses outside the region keep full witness validity."""
+    text = _read("add_sm80.ttir").replace(
+        "%x_5 = tt.load %x_4, %mask_3 : tensor<1024x!tt.ptr<f32>> loc(#loc25)",
+        "%c = arith.cmpi sgt, %offs, %c1024_i32 : i32 loc(#loc25)\n"
+        "    %x_5 = scf.if %c -> (tensor<1024xf32>) { loc(#loc25)\n"
+        "      %inner = tt.load %x_4, %mask_3 : tensor<1024x!tt.ptr<f32>> loc(#loc25)\n"
+        "      scf.yield %inner : tensor<1024xf32> loc(#loc25)\n"
+        "    } loc(#loc25)",
+    )
+    g = parse_ttir(text)
+    by_param = {(a.base_param, a.kind): a.guarded for a in g.accesses}
+    assert by_param[("x_ptr", "load")] is True  # inside the scf.if
+    assert by_param[("y_ptr", "load")] is False  # after the region closed
+    assert by_param[("out_ptr", "store")] is False
+
+
+def test_store_of_multi_result_value_is_recorded():
+    """`tt.store %ptrs, %acc#2, %mask` stores the third result of a
+    multi-result scf.for (a matmul accumulator stored without a truncf in
+    between). The stored VALUE plays no part in address math, so the store
+    must be recorded and checked — not fail closed on the `#2` token."""
+    text = _read("add_sm80.ttir").replace(
+        "tt.store %1, %2, %mask_3 :",
+        "tt.store %1, %acc#2, %mask_3 :",
+    )
+    g = parse_ttir(text)
+    store = next(a for a in g.accesses if a.kind == "store")
+    assert store.base_param == "out_ptr"
+    assert store.mask is not None  # the mask operand still parsed
 
 
 def test_atomic_op_fails_closed():

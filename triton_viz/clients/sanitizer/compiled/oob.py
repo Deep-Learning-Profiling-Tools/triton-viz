@@ -133,6 +133,16 @@ class _Env:
         return lower + it * step
 
 
+def _trunc_div(a: ArithRef, b: ArithRef) -> ArithRef:
+    """arith.divsi rounds toward zero, but Z3's Int `/` is Euclidean (floor
+    for a positive divisor) — they disagree on negative dividends. Divide the
+    magnitudes, where the two definitions coincide, and re-apply the sign."""
+    aa = If(a >= 0, a, -a)
+    ab = If(b >= 0, b, -b)
+    q = aa / ab
+    return If((a >= 0) == (b >= 0), q, -q)
+
+
 def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
     """Lower an integer/bool address term to Z3 under the launch context."""
     if isinstance(term, Const):
@@ -162,9 +172,14 @@ def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
         if term.op == "*":
             return a * b
         if term.op == "//":
-            # Signed division by a positive constant (cdiv lowering). Z3 `/`
-            # on Int is integer division; guard divide-by-zero.
-            return a / b
+            return _trunc_div(a, b)
+        if term.op == "%":
+            # arith.remsi: remainder carries the dividend's sign.
+            return a - b * _trunc_div(a, b)
+        if term.op == "min":
+            return If(a <= b, a, b)
+        if term.op == "max":
+            return If(a >= b, a, b)
         raise UnsupportedTTIR(f"unknown arith op {term.op}")
     if isinstance(term, Cmp):
         a, b = _eval(term.a, env, graph), _eval(term.b, env, graph)
@@ -274,10 +289,28 @@ def check_access(
 def check_graph(graph: AccessGraph, ctx: LaunchContext) -> list[CompiledOOB]:
     """Check every access; raises UnsupportedTTIR if any access can't be
     modeled (the client converts that into an ``unsupported`` verdict with
-    empty records — it does not auto-fall back to interpreted checking)."""
+    empty records — it does not auto-fall back to interpreted checking).
+
+    Branch-guarded accesses (inside an scf.if region) are checked as if
+    unconditional: UNSAT on that over-approximation is still a sound proof.
+    A SAT hit on one, however, may sit in a branch the launch never takes —
+    not a certifiable witness — so it raises ``unsupported`` instead of
+    being reported. SAT on an unguarded access is always a real witness and
+    takes precedence over guarded uncertainty."""
     out: list[CompiledOOB] = []
+    uncertain: AccessEvent | None = None
     for access in graph.accesses:
         v = check_access(access, graph, ctx)
-        if v is not None:
-            out.append(v)
+        if v is None:
+            continue
+        if access.guarded:
+            uncertain = uncertain or access
+            continue
+        out.append(v)
+    if not out and uncertain is not None:
+        raise UnsupportedTTIR(
+            f"line {uncertain.line_no}: possible OOB on a branch-guarded "
+            "access — the branch condition is not modeled, so the witness "
+            "may not be reachable"
+        )
     return out

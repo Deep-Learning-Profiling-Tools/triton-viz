@@ -88,7 +88,7 @@ class LoopVar:
 
 @dataclass(frozen=True)
 class Bin:
-    op: str  # + - * // (// = signed divide, matching arith.divsi)
+    op: str  # + - * // % min max (// and % truncate toward zero: divsi/remsi)
     a: "Term"
     b: "Term"
 
@@ -173,6 +173,12 @@ class AccessEvent:
     elem_bits: int
     loc: SourceLoc | None
     line_no: int
+    # True when the access sits inside an scf.if region. The branch condition
+    # is not modeled: checking the access as unconditional over-approximates
+    # the reachable states, so UNSAT is still a sound proof — but a SAT model
+    # may sit in a branch the launch never takes, so it must not be reported
+    # as a witness (check_graph turns it into ``unsupported``).
+    guarded: bool = False
 
 
 @dataclass(frozen=True)
@@ -209,7 +215,13 @@ class AccessGraph:
 
 # ─────────────────────────── regexes ───────────────────────────
 
-_SSA = r"%[\w.]+"
+# `#N` is a result index into a multi-result op (`%acc#2` = third result of
+# `%acc:3 = scf.for ...`). It must be part of the operand token or lines like
+# `tt.store %ptrs, %acc#2, %mask` fail to match the store regex and fail
+# closed even though the stored VALUE plays no part in address math. The env
+# never defines `%x#N` names, so val() resolves them to DataDep("unresolved
+# SSA") — sound in every consuming position (mask/addptr → unsupported).
+_SSA = r"%[\w.]+(?:#\d+)?"
 _DTYPE_BITS = {
     "f64": 64, "f32": 32, "f16": 16, "bf16": 16, "f8": 8,
     "i64": 64, "i32": 32, "i16": 16, "i8": 8, "i1": 1,
@@ -231,7 +243,9 @@ _RE_SPLAT = re.compile(rf"^tt\.splat ({_SSA}) : ([^-]+)->")
 _RE_EXPAND = re.compile(rf"^tt\.expand_dims ({_SSA}) \{{axis = (\d+)")
 _RE_BROADCAST = re.compile(rf"^tt\.broadcast ({_SSA})")
 _RE_ADDPTR = re.compile(rf"^tt\.addptr ({_SSA}), ({_SSA})")
-_RE_BIN = re.compile(rf"^arith\.(muli|addi|subi|divsi) ({_SSA}), ({_SSA})")
+_RE_BIN = re.compile(
+    rf"^arith\.(muli|addi|subi|divsi|remsi|minsi|maxsi) ({_SSA}), ({_SSA})"
+)
 _RE_CMPI = re.compile(rf"^arith\.cmpi (\w+), ({_SSA}), ({_SSA})")
 _RE_BOOLBIN = re.compile(rf"^arith\.(andi|ori) ({_SSA}), ({_SSA})")
 _RE_SELECT = re.compile(rf"^arith\.select ({_SSA}), ({_SSA}), ({_SSA})")
@@ -340,7 +354,11 @@ def parse_ttir(text: str) -> AccessGraph:
         return fa.elem_bits if fa else 0
 
     # ── body parse (single function; loop handled inline) ──
-    in_loop = False
+    # Region stack: "for" | "if". Tracking scf.if frames keeps the walker's
+    # brace accounting honest (an if's closing brace inside a loop must not
+    # be mistaken for the loop's close, nor its scf.yield for the loop's
+    # yield) and marks the accesses inside as ``guarded``.
+    frames: list[str] = []
     loop_body_yields: list[str] = []
     loop_iter_arg_ssa: list[tuple[str, str]] = []  # (arg_ssa, init_ssa)
     loop_meta: dict[str, object] = {}
@@ -370,10 +388,11 @@ def parse_ttir(text: str) -> AccessGraph:
             # ``loop`` is only set at the closing brace, so a second
             # SEQUENTIAL loop is caught by it — but a NESTED loop opens while
             # the outer one is still in flight (loop is still None), so guard
-            # on in_loop too. Nested loops carry independent induction
-            # variables the single-loop model cannot represent; reject rather
-            # than silently mis-bound the outer var to the inner's range.
-            if loop is not None or in_loop:
+            # on open frames too. Nested loops carry independent induction
+            # variables the single-loop model cannot represent, and a loop
+            # under an scf.if runs a condition-dependent iteration count;
+            # reject rather than silently mis-bound the induction var.
+            if loop is not None or frames:
                 raise UnsupportedTTIR(f"line {line_no}: multiple/nested loops")
             ind, lo, up, st, iters = fm.groups()
             pairs: list[tuple[str, str]] = []
@@ -405,12 +424,28 @@ def parse_ttir(text: str) -> AccessGraph:
                 else:
                     env[arg_ssa] = DataDep("loop accumulator")
                     loop_iter_arg_ssa.append((arg_ssa, init_ssa))
-            in_loop = True
+            frames.append("for")
             continue
 
-        if in_loop and (line == "}" or line.startswith("} loc")):
-            in_loop = False
-            # Resolve deltas from the yields, positionally.
+        # ---- scf.if: track the region, do not model the condition ----
+        if body.startswith("scf.if"):
+            frames.append("if")
+            if res is not None:
+                env[res] = DataDep("scf.if result")
+            continue
+
+        if frames and (
+            line == "}" or line.startswith("} loc") or line.startswith("} else")
+        ):
+            if line.startswith("} else"):
+                # The then-region closes and the else-region opens: the same
+                # if frame stays on the stack (else is just as guarded).
+                if frames[-1] != "if":
+                    raise UnsupportedTTIR(f"line {line_no}: unexpected `else`")
+                continue
+            if frames.pop() == "if":
+                continue
+            # A "for" frame closed: resolve deltas from the yields, positionally.
             ptr_idx = 0
             for pos, (arg_ssa, _init) in enumerate(loop_iter_arg_ssa):
                 if not isinstance(env.get(arg_ssa), PtrValue):
@@ -442,9 +477,23 @@ def parse_ttir(text: str) -> AccessGraph:
             continue
 
         ym = _RE_SCF_YIELD.match(body)
-        if ym and in_loop:
+        if ym and frames and frames[-1] == "for":
+            # Only the loop's own yield resolves iter-arg deltas; an scf.if's
+            # yield inside the loop body must not clobber it.
             loop_body_yields = _split_ssa(ym.group(1))
             continue
+
+        # ---- other control flow: fail closed ----
+        # scf.for and scf.if are region-tracked above. Anything else that
+        # steers control flow (scf.while spin loops, unstructured cf.*)
+        # would be flat-scanned as if it executed unconditionally — reject
+        # the kernel instead.
+        if body.startswith(("scf.", "cf.")) and not body.startswith(
+            ("scf.for", "scf.if", "scf.yield")
+        ):
+            raise UnsupportedTTIR(
+                f"line {line_no}: control flow {body.split(' ', 1)[0]} is unsupported"
+            )
 
         # ---- value-producing ops ----
         handled = _parse_value_op(body, res, env, val, as_term, base_elem_bits)
@@ -458,7 +507,7 @@ def parse_ttir(text: str) -> AccessGraph:
                 "load",
                 lm.group(1),
                 lm.group(2),
-                None,
+                "if" in frames,
                 env,
                 val,
                 accesses,
@@ -475,7 +524,7 @@ def parse_ttir(text: str) -> AccessGraph:
                 "store",
                 sm.group(1),
                 sm.group(3),
-                None,
+                "if" in frames,
                 env,
                 val,
                 accesses,
@@ -624,7 +673,15 @@ def _parse_value_op(body, res, env, val, as_term, base_elem_bits) -> bool:
         return True
     m = _RE_BIN.match(body)
     if m:
-        op = {"muli": "*", "addi": "+", "subi": "-", "divsi": "//"}[m.group(1)]
+        op = {
+            "muli": "*",
+            "addi": "+",
+            "subi": "-",
+            "divsi": "//",
+            "remsi": "%",
+            "minsi": "min",
+            "maxsi": "max",
+        }[m.group(1)]
         a, b = val(m.group(2)), val(m.group(3))
         if isinstance(a, DataDep) or isinstance(b, DataDep):
             env[res] = DataDep("arith over loaded data")
@@ -668,7 +725,7 @@ def _record_access(
     kind,
     ptr_ssa,
     extra_ops,
-    _unused,
+    guarded,
     env,
     val,
     accesses,
@@ -701,5 +758,6 @@ def _record_access(
             elem_bits=base_elem_bits(ptr.base_param),
             loc=loc,
             line_no=line_no,
+            guarded=guarded,
         )
     )

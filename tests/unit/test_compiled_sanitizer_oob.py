@@ -19,6 +19,7 @@ from triton_viz.clients.sanitizer.compiled.ttir_reader import (
     LoopInfo,
     LoopVar,
     Param,
+    Pid,
     UnsupportedTTIR,
     parse_ttir,
 )
@@ -184,6 +185,118 @@ def test_descending_loop_is_unsupported():
     ctx = LaunchContext(grid=(1, 1, 1), params={}, tensors={"out": _meta(16)})
     with pytest.raises(UnsupportedTTIR, match="step"):
         check_graph(g, ctx)
+
+
+# ──────────── min / max / signed remainder (swizzle arithmetic) ────────────
+
+
+def _flat_load(offset, numel, grid_x):
+    g = AccessGraph(
+        kernel_name="synthetic",
+        func_args=[FuncArg("p", True, 32)],
+        accesses=[AccessEvent("load", "p", offset, None, 32, None, 1)],
+        loop=None,
+    )
+    ctx = LaunchContext(grid=(grid_x, 1, 1), params={}, tensors={"p": _meta(numel)})
+    return g, ctx
+
+
+def test_remainder_wraps_offsets_in_bounds():
+    """offset = pid % 8 stays in [0, 8) for any grid — a proof, not an OOB.
+    This is the `pid % group_size_m` shape of the grouped-swizzle matmul."""
+    g, ctx = _flat_load(Bin("%", Pid(0), Const(8)), numel=8, grid_x=64)
+    assert check_graph(g, ctx) == []
+    # The same wrap against a smaller tensor is a genuine OOB at offset 7.
+    g, ctx = _flat_load(Bin("%", Pid(0), Const(8)), numel=7, grid_x=64)
+    v = check_graph(g, ctx)
+    assert len(v) == 1 and v[0].violation_offset == 7
+
+
+def test_min_clamp_proves_in_bounds():
+    """offset = min(pid, 9) never escapes [0, 10) however large the grid."""
+    g, ctx = _flat_load(Bin("min", Pid(0), Const(9)), numel=10, grid_x=1000)
+    assert check_graph(g, ctx) == []
+    g, ctx = _flat_load(Bin("min", Pid(0), Const(9)), numel=9, grid_x=1000)
+    v = check_graph(g, ctx)
+    assert len(v) == 1 and v[0].violation_offset == 9
+
+
+def test_max_floor_detects_oob():
+    """offset = max(pid, 5) pins the floor at 5: numel=6 is a proof, numel=5
+    overflows even at pid=0."""
+    g, ctx = _flat_load(Bin("max", Pid(0), Const(5)), numel=6, grid_x=4)
+    assert check_graph(g, ctx) == []
+    g, ctx = _flat_load(Bin("max", Pid(0), Const(5)), numel=5, grid_x=4)
+    v = check_graph(g, ctx)
+    assert len(v) == 1 and v[0].violation_offset >= 5
+
+
+def test_division_truncates_toward_zero_no_false_positive():
+    """offset = (0 - pid) // 2 with pid in {0, 1}: arith.divsi truncates, so
+    (-1) // 2 == 0 and both offsets are 0 — in bounds. Z3's Euclidean Int
+    division would give -1, a false OOB; this pins the trunc encoding."""
+    off = Bin("//", Bin("-", Const(0), Pid(0)), Const(2))
+    g, ctx = _flat_load(off, numel=4, grid_x=2)
+    assert check_graph(g, ctx) == []
+
+
+def test_remainder_keeps_dividend_sign():
+    """offset = (0 - pid) % 2 with pid in {0, 1}: arith.remsi carries the
+    dividend's sign, so pid=1 gives -1 — a real negative-offset OOB. A naive
+    Euclidean mod would fold it to +1 and silently prove the access safe."""
+    off = Bin("%", Bin("-", Const(0), Pid(0)), Const(2))
+    g, ctx = _flat_load(off, numel=2, grid_x=2)
+    v = check_graph(g, ctx)
+    assert len(v) == 1 and v[0].violation_offset == -1
+
+
+# ──────────── branch-guarded accesses (scf.if witness policy) ────────────
+
+
+def _two_access_graph(guarded_offset, unguarded_offset=None):
+    accesses = [
+        AccessEvent("load", "p", guarded_offset, None, 32, None, 1, guarded=True)
+    ]
+    if unguarded_offset is not None:
+        accesses.append(AccessEvent("load", "p", unguarded_offset, None, 32, None, 2))
+    return AccessGraph(
+        kernel_name="synthetic",
+        func_args=[FuncArg("p", True, 32)],
+        accesses=accesses,
+        loop=None,
+    )
+
+
+def test_guarded_access_unsat_is_still_a_proof():
+    """Checking a guarded access as unconditional over-approximates its
+    reachable states; UNSAT on the superset proves the real access too."""
+    g = _two_access_graph(Pid(0))
+    ctx = LaunchContext(grid=(4, 1, 1), params={}, tensors={"p": _meta(4)})
+    assert check_graph(g, ctx) == []
+
+
+def test_guarded_access_sat_is_unsupported_not_witnessed():
+    """SAT on a guarded access may sit in a branch the launch never takes
+    (diag_ssm's `if t > 0` shape) — report unsupported, never a witness."""
+    g = _two_access_graph(Bin("-", Pid(0), Const(1)))  # pid=0 -> offset -1
+    ctx = LaunchContext(grid=(4, 1, 1), params={}, tensors={"p": _meta(4)})
+    with pytest.raises(UnsupportedTTIR, match="branch-guarded"):
+        check_graph(g, ctx)
+
+
+def test_unguarded_witness_beats_guarded_uncertainty():
+    """A SAT unguarded access is a real, reachable violation; it must be
+    reported even when a guarded access is also SAT (chunk_gla_fwd's OOB
+    load sits before the scf.if in the same kernel)."""
+    g = _two_access_graph(
+        Bin("-", Pid(0), Const(1)),  # guarded, SAT (possible false alarm)
+        Bin("+", Pid(0), Const(100)),  # unguarded, SAT (real witness)
+    )
+    ctx = LaunchContext(grid=(4, 1, 1), params={}, tensors={"p": _meta(4)})
+    v = check_graph(g, ctx)
+    assert len(v) == 1
+    assert v[0].violation_offset >= 100  # the unguarded access, line 2
+    assert v[0].line_no == 2
 
 
 # ──────────────── completeness: no skipped access ────────────────

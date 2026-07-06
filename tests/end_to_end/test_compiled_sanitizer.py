@@ -296,3 +296,136 @@ def test_second_launch_recomputes_per_launch_metadata():
     add_nomask[(triton.cdiv(n2, 1024),)](x2, out2, n2, BLOCK=1024)
     assert det.last_status == "ok"
     assert len(det.records) >= 1
+
+
+@requires_cuda
+def test_branch_guarded_access_abstains_no_false_witness():
+    """`if t > 0: load(p + offs - B)` never reads offset -1: the t == 0
+    iteration takes the other branch. The line-based reader cannot attach the
+    branch condition to the access, so it must abstain (unsupported) — NOT
+    report a SAT "witness" at an unreachable t == 0 state. This is the
+    TritonBench diag_ssm_triton backward-kernel shape."""
+    det = Sanitizer(compile=True, abort_on_error=False)
+
+    @triton_viz.trace(det)
+    @triton.jit
+    def guarded_scan(x_ptr, out_ptr, n_steps, n_cols, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        mask = offs < n_cols
+        acc = tl.zeros((BLOCK,), tl.float32)
+        for i in range(n_steps):
+            t = n_steps - 1 - i
+            if t > 0:
+                prev = tl.load(x_ptr + t * n_cols + offs - n_cols, mask=mask, other=0)
+            else:
+                prev = tl.zeros((BLOCK,), tl.float32)
+            acc += prev
+        tl.store(out_ptr + offs, acc, mask=mask)
+
+    n_steps, n_cols = 5, 8
+    x = torch.randn(n_steps * n_cols, device="cuda")
+    out = torch.empty(n_cols, device="cuda")
+    guarded_scan[(1,)](x, out, n_steps, n_cols, BLOCK=8)
+    assert det.last_status == "unsupported"
+    assert "branch-guarded" in (det.unsupported_reason or "")
+    assert det.records == []  # no false witness from the untaken branch
+
+
+@requires_cuda
+def test_unguarded_oob_reported_despite_branch_in_kernel():
+    """A kernel may mix a branch (whose accesses can only be proven, not
+    witnessed) with plain accesses. A real OOB on a plain access is a
+    reachable violation and must still be reported — the mere presence of an
+    scf.if must not blind the analyzer (chunk_gla_fwd's OOB h-load sits
+    before an scf.if in the same loop body)."""
+    det = Sanitizer(compile=True, abort_on_error=False)
+
+    @triton_viz.trace(det)
+    @triton.jit
+    def mixed(x_ptr, out_ptr, n, flag, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        x = tl.load(x_ptr + offs)  # unguarded; OOB when numel < BLOCK
+        if flag > 0:
+            x += tl.load(x_ptr + offs, mask=offs < n, other=0)  # guarded, safe
+        tl.store(out_ptr + offs, x, mask=offs < n)
+
+    n = 8
+    x = torch.randn(n, device="cuda")
+    out = torch.empty(n, device="cuda")
+    mixed[(1,)](x, out, n, 1, BLOCK=16)  # BLOCK 16 > numel 8
+    assert det.last_status == "ok", det.unsupported_reason
+    assert len(det.records) >= 1
+    assert det.records[0].op_type.__name__ == "Load"
+
+
+@requires_cuda
+def test_grouped_swizzle_matmul_min_rem_modeled():
+    """The tutorial-03 grouped swizzle (pid // and % over launch quantities,
+    min() for the last partial group) lowers to arith.divsi/remsi/minsi —
+    all launch-affine. The analyzer must see through it: TritonBench's
+    matmul_triton2 (this swizzle with the `% M`/`% N` row clamps removed)
+    used to abstain as "data-dependent" instead of catching a real OOB."""
+
+    @triton.jit
+    def swizzle_matmul(
+        a_ptr, b_ptr, c_ptr, M, N, K,
+        stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        GROUP_M: tl.constexpr,
+    ):  # fmt: skip
+        pid = tl.program_id(0)
+        num_pid_m = tl.cdiv(M, BLOCK_M)
+        num_pid_n = tl.cdiv(N, BLOCK_N)
+        num_pid_in_group = GROUP_M * num_pid_n
+        group_id = pid // num_pid_in_group
+        first_pid_m = group_id * GROUP_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_M)
+        pid_m = first_pid_m + (pid % group_size_m)
+        pid_n = (pid % num_pid_in_group) // group_size_m
+        offs_am = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)  # no `% M` clamp
+        offs_bn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)  # no `% N` clamp
+        offs_k = tl.arange(0, BLOCK_K)
+        a_ptrs = a_ptr + offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
+        b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k in range(0, tl.cdiv(K, BLOCK_K)):
+            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+            acc += tl.dot(a, b)
+            a_ptrs += BLOCK_K * stride_ak
+            b_ptrs += BLOCK_K * stride_bk
+        offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+        c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+        tl.store(c_ptrs, acc, mask=c_mask)
+
+    def launch(det, m, n, k):
+        traced = triton_viz.trace(det)(swizzle_matmul)
+        a = torch.randn(m, k, device="cuda")
+        b = torch.randn(k, n, device="cuda")
+        c = torch.empty(m, n, device="cuda")
+        grid = (triton.cdiv(m, 32) * triton.cdiv(n, 32),)
+        traced[grid](
+            a, b, c, m, n, k,
+            a.stride(0), a.stride(1), b.stride(0), b.stride(1),
+            c.stride(0), c.stride(1),
+            BLOCK_M=32, BLOCK_N=32, BLOCK_K=32, GROUP_M=8,
+        )  # fmt: skip
+
+    # M = N = K = 64: every block index stays inside both operands — a proof,
+    # despite the divsi/remsi/minsi swizzle in every address.
+    clean = Sanitizer(compile=True, abort_on_error=False)
+    launch(clean, 64, 64, 64)
+    assert clean.last_status == "ok", clean.unsupported_reason
+    assert clean.records == []
+
+    # M = N = K = 16 < BLOCK: the K-only masks leave rows 16..31 of A (and
+    # cols 16..31 of B) unguarded — the real OOB compute-sanitizer flags on
+    # TritonBench's matmul_triton2.
+    buggy = Sanitizer(compile=True, abort_on_error=False)
+    launch(buggy, 16, 16, 16)
+    assert buggy.last_status == "ok", buggy.unsupported_reason
+    assert len(buggy.records) >= 1
+    kinds = {r.op_type.__name__ for r in buggy.records}
+    assert "Load" in kinds
