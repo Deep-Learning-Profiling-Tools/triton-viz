@@ -609,7 +609,13 @@ def test_block_pointer_access_records_tile_footprint():
             (0,),
         )
         detector._handle_access_check(store, TensorPointerStore, "write")
-        assert detector.last_status == "ok", detector.unsupported_reason
+        # last_status is pessimistically "aborted" from grid_callback until
+        # finalize() produces a verdict (which this unit test never reaches —
+        # no block runs, so the capture is never sealed). A healthy
+        # _handle_access_check must leave that launch-start value untouched:
+        # not degraded to "unsupported" (the block-ptr lowering regression)
+        # and not prematurely upgraded to "ok".
+        assert detector.last_status == "aborted", detector.unsupported_reason
         assert len(detector.records) == 1
         record = detector.records[0]
         assert "blk_k_0" in str(record.addr_expr)
