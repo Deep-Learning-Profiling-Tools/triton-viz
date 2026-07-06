@@ -121,8 +121,28 @@ class PendingEvent(PendingCheck):
 
 
 class RaceDetector(Client):
-    """Factory class that returns the concrete race-detector implementation
-    based on the value of ``cfg.enable_race_detector``.
+    """Factory class that returns the concrete race-detector implementation.
+
+    Backend selection (only when the public ``RaceDetector(...)`` factory is
+    instantiated directly — explicit subclass instances bypass this):
+
+      * ``cfg.enable_race_detector`` off  → :class:`NullRaceDetector`
+      * ``compile=True``                  → ``CompiledRaceDetector`` (static
+        shared-memory analysis over the compiled TTGIR)
+      * otherwise                         → :class:`SymbolicRaceDetector`
+        (dynamic cross-CTA global-memory analysis)
+
+    The two backends are complementary: the dynamic one reasons about global
+    memory from an interpreter-driven symbolic capture, the compiled one about
+    shared memory introduced by the TritonGPU pipeliner. Pick the compiled
+    backend with ``RaceDetector(compile=True)``; extra keywords flow to the
+    chosen backend's ``__init__`` (e.g. ``RaceDetector(compile=True,
+    collect_smtlib=True)``).
+
+    Note: the compiled backend runs STANDALONE — it skips the interpreted run,
+    so it cannot be composed with other clients (Tracer, the dynamic detector,
+    Profiler) in one ``@triton_viz.trace``; ClientManager raises if you try.
+    Trace the dynamic and compiled detectors as separate decorations.
     """
 
     NAME = "race_detector"
@@ -131,10 +151,21 @@ class RaceDetector(Client):
 
     def __new__(cls: type[RaceDetectorT], *args: Any, **kwargs: Any) -> RaceDetectorT:
         if cls is RaceDetector:
-            target_cls = cast(
-                type["RaceDetector"],
-                SymbolicRaceDetector if cfg.enable_race_detector else NullRaceDetector,
-            )
+            # ``compile`` selects the backend here; pop it so it does not reach
+            # the backend __init__ via the manual call below. (It still reaches
+            # SymbolicRaceDetector via Python re-invoking __init__ on the
+            # factory-returned instance, which is why that __init__ tolerates
+            # it. The compiled backend is not a RaceDetector subclass, so no
+            # such re-invocation happens for it.)
+            compiled = bool(kwargs.pop("compile", False))
+            if not cfg.enable_race_detector:
+                target_cls: type[RaceDetector] = NullRaceDetector
+            elif compiled:
+                from .compiled import CompiledRaceDetector
+
+                target_cls = cast(type["RaceDetector"], CompiledRaceDetector)
+            else:
+                target_cls = SymbolicRaceDetector
             obj = object.__new__(target_cls)
             cast(Any, target_cls).__init__(obj, *args, **kwargs)
             return cast(RaceDetectorT, obj)
@@ -229,7 +260,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     # array snapshot.
     _MAX_LOAD_SOURCE_ELEMENTS: ClassVar[int] = 1024
 
-    def __init__(self, abort_on_error: bool = False):
+    def __init__(self, abort_on_error: bool = False, *, compile: bool = False):
+        # ``compile`` is consumed by the RaceDetector factory (__new__) to pick
+        # the backend; it only reaches this __init__ because Python re-invokes
+        # __init__ on the factory-returned instance with the original kwargs.
+        # The symbolic backend ignores it (compile=True dispatches to
+        # CompiledRaceDetector instead).
+        del compile
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[AccessEventRecord] = []
         self.last_reports: list[Any] = []

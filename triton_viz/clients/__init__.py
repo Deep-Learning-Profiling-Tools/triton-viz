@@ -10,6 +10,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "OpTypeCounts": ("triton_viz.clients.profiler.data", "OpTypeCounts"),
     "RaceDetector": ("triton_viz.clients.race_detector.race_detector", "RaceDetector"),
     "RaceType": ("triton_viz.clients.race_detector.data", "RaceType"),
+    "CompiledRaceDetector": (
+        "triton_viz.clients.race_detector.compiled",
+        "CompiledRaceDetector",
+    ),
     "Sanitizer": ("triton_viz.clients.sanitizer.sanitizer", "Sanitizer"),
     "OutOfBoundsRecord": ("triton_viz.clients.sanitizer.data", "OutOfBoundsRecord"),
     "SymbolicExpr": ("triton_viz.clients.symbolic_engine", "SymbolicExpr"),

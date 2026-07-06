@@ -1,3 +1,5 @@
+import weakref
+from contextlib import contextmanager
 from copy import deepcopy
 from collections.abc import Callable
 from typing import Any
@@ -13,6 +15,44 @@ import inspect
 
 
 launches: list[Launch] = []
+
+# Every live TritonTrace, so real-compile windows can present the underlying
+# JITFunction to Triton's code generator (see _unwrapped_jit_globals).
+_all_traces: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+@contextmanager
+def _unwrapped_jit_globals():
+    """Temporarily swap module globals holding a TritonTrace back to the
+    wrapped JITFunction.
+
+    Under the CLI wrappers every ``@triton.jit`` function — including DEVICE
+    functions — is wrapped into a TritonTrace. Triton's real code generator
+    resolves a callee through the caller's ``__globals__`` and only accepts
+    JITFunctions there ("Unsupported function referenced" otherwise). The
+    interpreter path tolerates the wrapper via ``TritonTrace.__call__``; a
+    real compile (the warmup-only path) does not, so for the duration of a
+    real-compile window each trace's global binding is unwound to its
+    ``jit_fn`` and restored afterwards.
+    """
+    swapped: list[tuple[dict, str, Any]] = []
+    for trace in list(_all_traces):
+        jit_fn = trace.jit_fn
+        base_fn = trace.base_fn
+        if jit_fn is None or base_fn is None:
+            continue
+        module_globals = getattr(base_fn, "__globals__", None)
+        if module_globals is None:
+            continue
+        for name, value in list(module_globals.items()):
+            if value is trace:
+                module_globals[name] = jit_fn
+                swapped.append((module_globals, name, trace))
+    try:
+        yield
+    finally:
+        for module_globals, name, trace in swapped:
+            module_globals[name] = trace
 
 
 class TraceInterface:
@@ -161,7 +201,50 @@ class TritonTrace(LaunchInterface, TraceInterface):
         elif self.jit_fn and hasattr(self.jit_fn, "src"):
             self.src = self.jit_fn.src
 
+        # Register for _unwrapped_jit_globals: real-compile windows unwind
+        # this trace's module-global binding to the raw JITFunction so the
+        # code generator can resolve it as a device-function callee.
+        _all_traces.add(self)
+
     def run(self, *args, **kwargs):
+        clients = self.client_manager.clients
+        warmup_only = (
+            bool(clients)
+            and self.warmup_runner is not None
+            and all(getattr(c, "WARMUP_ONLY", False) for c in clients.values())
+        )
+
+        if warmup_only:
+            # Warmup-only clients (e.g. the compiled-mode race detector)
+            # consume nothing from the interpreted run: their whole analysis
+            # input is the warmup compilation artifact. Skip the interpreter
+            # entirely — no language patching, no grid loop — and execute the
+            # REAL kernel instead, so the host script keeps its true semantics
+            # (outputs, asserts, autotuning). This is load-bearing, not just
+            # an optimization: Triton's interpreter patches tl.core.tensor
+            # dunders in place and the snapshot/restore around it does not
+            # survive a traced launch followed by a REAL compile of a second
+            # kernel in the same process (the leaked interpreter __bool__
+            # breaks semantic._load_legacy's `other.handle if other else
+            # None`). Warmup-only clients never need that machinery, so they
+            # never engage it. NOTE: the real handle is warmup_runner —
+            # self.runner is the InterpretedFunction (or an Autotuner whose
+            # fn was swapped to it); warmup_runner is the raw JITFunction, or
+            # for Autotuner/Heuristics a deepcopy still bound to the real
+            # kernel. The whole window (warmup compile + real launch, which
+            # may compile further specializations) runs with TritonTrace
+            # globals unwound so device-function callees resolve to real
+            # JITFunctions in the code generator.
+            with _unwrapped_jit_globals():
+                with self.client_manager.patch_warmup(self.jit_fn):
+                    if self.warmup_runner:
+                        self.warmup_runner.warmup(*args, **kwargs)
+                try:
+                    ret = self.warmup_runner.run(*args, **kwargs)
+                finally:
+                    self.finalize()
+                return ret
+
         with self.client_manager.patch_warmup(self.jit_fn):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)

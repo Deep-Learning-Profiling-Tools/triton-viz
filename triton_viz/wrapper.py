@@ -14,6 +14,7 @@ from triton_viz.core.config import config as cfg
 SANITIZER_COMMAND = "triton-sanitizer"
 PROFILER_COMMAND = "triton-profiler"
 RACE_DETECTOR_COMMAND = "triton-race-detector"
+COMPILED_RACE_DETECTOR_COMMAND = "triton-compiled-race-detector"
 
 # store the original triton.jit
 _original_jit = triton.jit
@@ -37,6 +38,13 @@ def profiler_wrapper(kernel, *, frontend: str = "triton"):
 
 def race_detector_wrapper(kernel, *, frontend: str = "triton"):
     tracer = triton_viz.trace(client=RaceDetector(), frontend=frontend)
+    return tracer(kernel)
+
+
+def compiled_race_detector_wrapper(kernel, *, frontend: str = "triton"):
+    # Compiled mode: static shared-memory race analysis over the warmup TTGIR.
+    # Standalone — runs on its own trace (ClientManager rejects composition).
+    tracer = triton_viz.trace(client=RaceDetector(compile=True), frontend=frontend)
     return tracer(kernel)
 
 
@@ -166,4 +174,18 @@ def apply_race_detector():
         race_detector_wrapper,
         RACE_DETECTOR_COMMAND,
         f"Usage: {RACE_DETECTOR_COMMAND} <script.py> [args...]",
+    )
+
+
+def apply_compiled_race_detector():
+    """
+    Apply the compiled-mode race detector wrapper to triton.jit and run the
+    user script. Acquires each kernel specialization's TTGIR through the real
+    compilation warmup and statically checks the cp.async shared-memory
+    pipeline for races (proof / witness / unsupported per kernel).
+    """
+    _apply_wrapper(
+        compiled_race_detector_wrapper,
+        COMPILED_RACE_DETECTOR_COMMAND,
+        f"Usage: {COMPILED_RACE_DETECTOR_COMMAND} <script.py> [args...]",
     )
