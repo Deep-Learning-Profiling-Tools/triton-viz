@@ -136,6 +136,10 @@ def test_loop_sites_in_different_files_get_distinct_iterator_state():
     assert ctx_a.idx_z3.decl().name() != ctx_b.idx_z3.decl().name()
     assert (site_a, 0, 3, 1) in client.loop_iterator_constraint_cache
     assert (site_b, 0, 3, 1) in client.loop_iterator_constraint_cache
+    # A cache keyed by lineno alone would hand site_b the constraint built
+    # for site_a's variable, leaving site_b's own iterator unconstrained.
+    assert f"loop_i_{site_a}" in str(ctx_a.iterator_constraint)
+    assert f"loop_i_{site_b}" in str(ctx_b.iterator_constraint)
 
 
 # ======== Reduce Operations Tests =========

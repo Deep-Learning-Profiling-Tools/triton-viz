@@ -20,6 +20,11 @@ from triton_viz.core.config import config
 from triton_viz.core.patch import LoopSite, loop_file_token
 from z3.z3 import BoolRef
 
+from .loop_site_cross_file_kernel import (
+    cross_file_loop_sanitizer,
+    cross_file_outer_loop_kernel,
+)
+
 
 def _loop_var_name(lineno: int) -> str:
     """Expected symbolic iterator name for a loop in this test file."""
@@ -360,6 +365,33 @@ def test_loop_deferred_checks_after_context():
     assert f"{loop_var} >= 0" in iterator_constraints_str
     assert f"{loop_var} < 4" in iterator_constraints_str
     assert loop_deferred_check_recorder.records
+
+
+def test_cross_file_same_relative_lineno_loops_detect_oob():
+    """A cross-file nested-loop OOB must be reported regardless of how loop
+    identity is keyed.
+
+    The outer loop (i in [0, 8), kernel file) and the inner loop (j in [0, 2),
+    helper file) both sit at function-relative line 2. The store touches
+    elements 2*i + j, up to 15, while ``out`` has only 8 elements — a real
+    OOB.
+
+    Today device jit functions run un-rewritten (``_jit_function_call``
+    executes the raw fn), so j stays concrete and each unrolled address is
+    checked against the outer iterator alone — the OOB is found. If device
+    function loops are ever wired into the symbolic loop hooks, bare-lineno
+    identity would collapse both iterators into one variable v < 2, turning
+    the address into 3*v (max element 3) and silently missing the OOB;
+    LoopSite identity keeps the iterators distinct. Either way this test must
+    keep reporting the OOB.
+    """
+    cross_file_loop_sanitizer.records.clear()
+
+    out = torch.empty((8,), dtype=torch.int32)
+
+    cross_file_outer_loop_kernel[(1,)](out)
+
+    assert cross_file_loop_sanitizer.records
 
 
 def test_loop_deferred_checks_simplify():
