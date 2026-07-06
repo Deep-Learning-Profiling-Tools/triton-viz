@@ -41,6 +41,22 @@ def test_sanitizer_wrapper_applies_trace():
         assert result == "wrapped_kernel"
 
 
+def test_sanitizer_wrapper_accepts_frontend():
+    mock_kernel = MagicMock()
+    mock_kernel.__name__ = "test_kernel"
+
+    with patch("triton_viz.wrapper.triton_viz.trace") as mock_trace:
+        mock_decorator = MagicMock()
+        mock_trace.return_value = mock_decorator
+        mock_decorator.return_value = "wrapped_kernel"
+
+        result = sanitizer_wrapper(mock_kernel, frontend="gluon")
+
+        assert mock_trace.call_args.kwargs["frontend"] == "gluon"
+        mock_decorator.assert_called_once_with(mock_kernel)
+        assert result == "wrapped_kernel"
+
+
 def test_profiler_wrapper_applies_trace():
     mock_kernel = MagicMock()
     mock_kernel.__name__ = "test_kernel"
@@ -65,15 +81,18 @@ def test_create_patched_jit_direct_decorator():
     mock_wrapper = MagicMock(return_value="final_kernel")
     mock_original_jit = MagicMock(return_value="jit_kernel")
 
-    with patch("triton_viz.wrapper._original_jit", mock_original_jit):
-        patched_jit = create_patched_jit(mock_wrapper)
+    patched_jit = create_patched_jit(
+        mock_wrapper,
+        mock_original_jit,
+        frontend="triton",
+    )
 
-        mock_fn = MagicMock()
-        result = patched_jit(mock_fn)
+    mock_fn = MagicMock()
+    result = patched_jit(mock_fn)
 
-        mock_original_jit.assert_called_once_with(mock_fn)
-        mock_wrapper.assert_called_once_with("jit_kernel")
-        assert result == "final_kernel"
+    mock_original_jit.assert_called_once_with(mock_fn)
+    mock_wrapper.assert_called_once_with("jit_kernel", frontend="triton")
+    assert result == "final_kernel"
 
 
 def test_create_patched_jit_with_kwargs():
@@ -82,19 +101,63 @@ def test_create_patched_jit_with_kwargs():
     mock_jit_decorator = MagicMock(return_value="jit_kernel")
     mock_original_jit = MagicMock(return_value=mock_jit_decorator)
 
-    with patch("triton_viz.wrapper._original_jit", mock_original_jit):
-        patched_jit = create_patched_jit(mock_wrapper)
+    patched_jit = create_patched_jit(
+        mock_wrapper,
+        mock_original_jit,
+        frontend="triton",
+    )
 
-        decorator = patched_jit(do_not_specialize=["n"])
-        assert callable(decorator)
+    decorator = patched_jit(do_not_specialize=["n"])
+    assert callable(decorator)
 
-        mock_fn = MagicMock()
-        result = decorator(mock_fn)
+    mock_fn = MagicMock()
+    result = decorator(mock_fn)
 
-        mock_original_jit.assert_called_once_with(do_not_specialize=["n"])
-        mock_jit_decorator.assert_called_once_with(mock_fn)
-        mock_wrapper.assert_called_once_with("jit_kernel")
-        assert result == "final_kernel"
+    mock_original_jit.assert_called_once_with(do_not_specialize=["n"])
+    mock_jit_decorator.assert_called_once_with(mock_fn)
+    mock_wrapper.assert_called_once_with("jit_kernel", frontend="triton")
+    assert result == "final_kernel"
+
+
+def test_create_patched_jit_direct_decorator_with_custom_original_jit():
+    mock_wrapper = MagicMock(return_value="final_kernel")
+    mock_original_jit = MagicMock(return_value="custom_jit_kernel")
+
+    patched_jit = create_patched_jit(
+        mock_wrapper,
+        mock_original_jit,
+        frontend="gluon",
+    )
+
+    mock_fn = MagicMock()
+    result = patched_jit(mock_fn)
+
+    mock_original_jit.assert_called_once_with(mock_fn)
+    mock_wrapper.assert_called_once_with("custom_jit_kernel", frontend="gluon")
+    assert result == "final_kernel"
+
+
+def test_create_patched_jit_with_kwargs_and_custom_original_jit():
+    mock_wrapper = MagicMock(return_value="final_kernel")
+    mock_jit_decorator = MagicMock(return_value="custom_jit_kernel")
+    mock_original_jit = MagicMock(return_value=mock_jit_decorator)
+
+    patched_jit = create_patched_jit(
+        mock_wrapper,
+        mock_original_jit,
+        frontend="gluon",
+    )
+
+    decorator = patched_jit(debug=True)
+    assert callable(decorator)
+
+    mock_fn = MagicMock()
+    result = decorator(mock_fn)
+
+    mock_original_jit.assert_called_once_with(debug=True)
+    mock_jit_decorator.assert_called_once_with(mock_fn)
+    mock_wrapper.assert_called_once_with("custom_jit_kernel", frontend="gluon")
+    assert result == "final_kernel"
 
 
 # ======== create_patched_autotune Tests ===========

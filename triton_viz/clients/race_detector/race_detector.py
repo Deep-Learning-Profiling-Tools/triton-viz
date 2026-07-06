@@ -1,4 +1,6 @@
+import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -34,6 +36,7 @@ from ..symbolic_engine import (
     LoadSymbolicExpr,
     AtomicCasSymbolicExpr,
     AtomicRmwSymbolicExpr,
+    TensorPointerSymbolicExpr,
     SymbolicClient,
     NullSymbolicClient,
     PendingCheck,
@@ -58,6 +61,19 @@ from ...core.config import config as cfg
 RaceDetectorT = TypeVar("RaceDetectorT", bound="RaceDetector")
 
 
+def _hash_signature_part(x: Any) -> int:
+    """Hash one component of an event signature, tolerating Z3 expressions,
+    nested lists/tuples, and unhashable values."""
+    if isinstance(x, (list, tuple)):
+        return hash(tuple(_hash_signature_part(v) for v in x))
+    if x is None:
+        return 0
+    try:
+        return hash(x)
+    except TypeError:
+        return hash(repr(x))
+
+
 def _make_event_signature(
     access_mode: AccessMode,
     source_location: tuple[str, int, str] | None,
@@ -75,24 +91,13 @@ def _make_event_signature(
     of ``local_constraints``; without it, two iterations with the same
     address but different masks would collide.
     """
-
-    def h(x: Any) -> int:
-        if isinstance(x, (list, tuple)):
-            return hash(tuple(h(v) for v in x))
-        if x is None:
-            return 0
-        try:
-            return hash(x)
-        except TypeError:
-            return hash(repr(x))
-
     return hash(
         (
             access_mode,
             source_location,
-            h(addr_expr),
-            h(local_constraints),
-            h(active_expr),
+            _hash_signature_part(addr_expr),
+            _hash_signature_part(local_constraints),
+            _hash_signature_part(active_expr),
         )
     )
 
@@ -109,6 +114,10 @@ class PendingEvent(PendingCheck):
     access_mode: AccessMode = "read"
     op_type: type[Op] = Load
     active: Any = True
+    # Event-local Z3 vars the two-copy solver must alpha-rename per program
+    # copy (block-pointer tile index vars); the flushed loop's iterators are
+    # appended at flush time by _process_pending_check.
+    copy_local_vars: tuple[Any, ...] = ()
 
 
 class RaceDetector(Client):
@@ -172,6 +181,11 @@ class RaceDetector(Client):
     #   "unsupported" — a feature the solver doesn't model fired during
     #                   capture (atomic-in-loop, RMW return downstream,
     #                   data-dependent address, etc.); see unsupported_reason
+    #   "aborted"     — no verdict exists: set pessimistically at
+    #                   construction and re-armed at every launch's
+    #                   arg_callback/grid_callback; only finalize() upgrades
+    #                   it, so a launch that dies before finalize runs can
+    #                   never be read as a clean "ok"
     #   "disabled"    — race detector backend is off (NullRaceDetector)
     last_reports: list[Any]
     last_status: str
@@ -259,13 +273,25 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # Status of the most recent finalize(): "ok" means the solver ran;
         # "unsupported" means the launch hit a feature the solver doesn't
         # model (atomic-in-loop, RMW return downstream, data-dependent
-        # address, etc.). last_reports being empty does NOT imply "no race"
-        # unless last_status == "ok".
-        self.last_status: str = "ok"
+        # address, etc.); "aborted" means the launch produced no verdict.
+        # Initialized pessimistically and re-armed to "aborted" at every
+        # launch's arg_callback/grid_callback; only finalize() upgrades it,
+        # so neither a never-launched detector nor a launch that dies
+        # mid-kernel can ever be read as clean. last_reports being empty
+        # does NOT imply "no race" unless last_status == "ok".
+        self.last_status: str = "aborted"
         self._program_seq: int = 0
         self._event_seq: int = 0
         self._launch_grid: tuple[int, int, int] = (1, 1, 1)
         self._captured_symbolic_template: bool = False
+        # One-shot capture slot: claimed atomically by the first admitted
+        # block in pre_run_callback, sealed by that block's
+        # post_run_callback. Blocks running outside the slot (need_full_grid
+        # reruns for a co-attached client, sibling workers under
+        # TRITON_VIZ_NUM_SMS >= 2) execute the kernel but must not mutate
+        # the shared per-launch record state.
+        self._capture_claimed: bool = False
+        self._capture_thread_id: int | None = None
         self._unsupported_capture: bool = False
         self.unsupported_reason: str | None = None
         self._arange_dict_snapshot: dict[Any, Any] = {}
@@ -281,23 +307,25 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # load-value provider raises unsupported on subsequent loads because
         # the unknown write may alias a snapshotted load source.
         self._unknown_written_region_seen: bool = False
-        # Finished-loop iterator substitutions, keyed by loop lineno:
-        # (idx_z3, IntVal(final iteration value)). See
-        # _apply_finished_iter_subs for why leftover iterator references
-        # must be concretized at record time.
-        self._finished_loop_iter_subs: dict[int, tuple[Any, Any]] = {}
-        # tl.assume / tl.device_assert conditions captured this launch,
-        # fed to the two-copy solver as per-copy assumption templates.
-        self._launch_assumptions: list[Any] = []
+        # Finished-loop iterator substitutions, keyed by loop hook lineno:
+        # (idx_z3, IntVal(final iteration value)). See _apply_finished_iter_subs
+        # for why leftover iterator references must be concretized at record time.
+        self._finished_loop_iter_subs: dict[Any, tuple[Any, Any]] = {}
         # Stash of the substitution entry popped when a loop re-enters,
         # restored on a zero-iteration exit (a zero-trip loop leaves the
         # leftover Python variable — and thus its final value — unchanged).
-        self._suspended_iter_subs: list[tuple[int, tuple[Any, Any] | None]] = []
+        self._suspended_iter_subs: list[tuple[Any, tuple[Any, Any] | None]] = []
         # Every iterator var created this launch, plus the ones whose final
         # value varied across activations under an active outer loop
         # (substituting any single constant for those would be wrong).
         self._known_iter_var_keys: set[tuple[int, str, str]] = set()
         self._unstable_iter_var_keys: set[tuple[int, str, str]] = set()
+        # Launch-level signatures of records flushed from loops. A loop
+        # nested under an outer loop re-enters once per outer iteration with
+        # a fresh LoopContext, so its per-activation signature_cache cannot
+        # dedupe across activations; without this cache every outer iteration
+        # appends another structurally identical record.
+        self._loop_flush_signatures: set[int] = set()
 
     # ── Unsupported-launch plumbing ──────────────────────────────────────
 
@@ -315,17 +343,57 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.last_status = "unsupported"
         self.records = []
 
+    @contextmanager
+    def _load_value_semantics(self):
+        """Install the ``tl.load`` value provider around one detector-
+        triggered evaluation.
+
+        The provider slot is class-global on ``SymbolicExpr``; leaving it
+        installed for the whole launch (as ``grid_callback`` once did)
+        hijacks every other client's ``expr.eval()`` — a co-attached
+        sanitizer's masked load without ``other`` would raise
+        :class:`UnsupportedSymbolicRaceQuery` inside sanitizer code, and its
+        unmasked loads would silently get ``Select(arr, addr)`` value
+        semantics instead of the pointer-as-value lowering its OOB checks
+        expect. Save/restore keeps nested detector evaluations re-entrant
+        and exception-safe.
+        """
+        prev = SymbolicExpr._load_value_provider
+        prev_owner = SymbolicExpr._load_value_provider_owner
+        SymbolicExpr._load_value_provider = self._load_value_provider_impl
+        SymbolicExpr._load_value_provider_owner = id(self)
+        try:
+            yield
+        finally:
+            SymbolicExpr._load_value_provider = prev
+            SymbolicExpr._load_value_provider_owner = prev_owner
+
     def _safe_eval(self, expr: "SymbolicExpr", reason: str) -> tuple[Any, Any] | None:
-        """Eval a SymbolicExpr, marking the launch unsupported on
+        """Eval a SymbolicExpr under the detector's load-value semantics,
+        marking the launch unsupported on
         :class:`UnsupportedSymbolicRaceQuery`. Returns ``None`` when
-        unsupported so callers can ``if result is None: return``.
+        unsupported so callers can ``if result is None: return``. The mark
+        is recorded even when re-raising under ``abort_on_error`` so the
+        aborted launch never reads as a clean verdict.
+
+        ``NotImplementedError`` is how the symbolic engine signals a missing
+        Z3 lowering (cumsum, dot, block-pointer descriptors, ...); it gets
+        the same unsupported treatment so a lowering gap surfaces as a
+        verdict instead of crashing the launch.
         """
         try:
-            return expr.eval()
+            with self._load_value_semantics():
+                return expr.eval()
         except UnsupportedSymbolicRaceQuery as exc:
+            self._mark_unsupported(str(exc) or reason)
             if self.abort_on_error:
                 raise
-            self._mark_unsupported(str(exc) or reason)
+            return None
+        except NotImplementedError as exc:
+            message = f"{reason}: {exc}" if str(exc) else reason
+            self._mark_unsupported(message)
+            if self.abort_on_error:
+                raise UnsupportedSymbolicRaceQuery(message) from exc
             return None
 
     @staticmethod
@@ -335,36 +403,49 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         """
         return tuple(c for c in constraints if c is not None)
 
-    @staticmethod
-    def _expr_contains_load(expr: SymbolicExpr | None) -> bool:
-        """True when ``expr`` (typically a pointer expression) embeds
-        ``tl.load``. Such expressions encode data-dependent addressing —
-        scatter/histogram patterns where the destination index comes from a
-        loaded value — which the current symbolic model conflates with the
-        load's pointer rather than its loaded value. Flag these as
-        unsupported until value semantics are properly modeled.
+    # Ops whose Z3 lowering depends on runtime memory contents or is not
+    # value-faithful: loads/atomics conflate the pointer with the loaded
+    # value, cumsum/sort are scans over runtime data (sort even lowers as
+    # the identity of its input). An address embedding any of these would
+    # record a wrong or unmodelable footprint — scatter/histogram patterns
+    # where the destination index comes from a runtime value. Flag these as
+    # unsupported until value semantics are properly modeled.
+    _VALUE_DEPENDENT_ADDRESS_OPS: ClassVar[tuple[str, ...]] = (
+        "load",
+        "tensor_pointer_load",
+        "atomic_cas",
+        "atomic_rmw",
+        "sort",
+        "cumsum",
+    )
+
+    @classmethod
+    def _find_value_dependent_op(cls, expr: SymbolicExpr | None) -> str | None:
+        """Name of the first value-dependent op embedded in ``expr`` (a
+        pointer expression), or None when the address is value-independent.
         """
         if expr is None:
-            return False
-        try:
-            return bool(expr.has_op("load"))
-        except Exception:
-            return False
+            return None
+        for op in cls._VALUE_DEPENDENT_ADDRESS_OPS:
+            try:
+                if expr.has_op(op):
+                    return op
+            except Exception:
+                continue
+        return None
 
     def _reject_data_dependent_address(self, ptr_expr: SymbolicExpr | None) -> bool:
-        """If ``ptr_expr`` depends on a loaded value, mark the launch
+        """If ``ptr_expr`` depends on a runtime value, mark the launch
         unsupported (or raise under abort_on_error) and return True; callers
         should ``return`` immediately on True.
         """
-        if not self._expr_contains_load(ptr_expr):
+        op = self._find_value_dependent_op(ptr_expr)
+        if op is None:
             return False
-        reason = (
-            "data-dependent memory address through tl.load is unsupported "
+        self._raise_or_mark(
+            f"data-dependent memory address through {op} is unsupported "
             "by the current symbolic race detector"
         )
-        if self.abort_on_error:
-            raise UnsupportedSymbolicRaceQuery(reason)
-        self._mark_unsupported(reason)
         return True
 
     # Ops whose value differs across program instances (pid, arange lanes)
@@ -416,44 +497,6 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             "unsupported by one-shot symbolic capture"
         )
 
-    def _handle_assumption(self, condition: Any) -> None:
-        """Collect ``tl.assume`` / ``tl.device_assert`` conditions.
-
-        Every feasible real execution satisfies these, so they are sound
-        constraints on the two-copy model (instantiated once per program
-        copy by the solver). Without this the interpreter's ``assert`` was
-        object-truthy on the symbolic condition and the hint/check was
-        silently dropped.
-        """
-        if self._unsupported_capture:
-            return
-        if self.loop_stack:
-            self._raise_or_mark(
-                "tl.assume / tl.device_assert inside a loop is unsupported "
-                "by one-shot symbolic capture"
-            )
-            return
-        cond_sym = SymbolicExpr.from_value(condition)
-        if not isinstance(cond_sym, SymbolicExpr):
-            self._raise_or_mark(
-                "tl.assume / tl.device_assert on a non-tensor condition is "
-                "unsupported"
-            )
-            return
-        result = self._safe_eval(cond_sym, "assumption eval")
-        if result is None:
-            return
-        z3_cond, _ = result
-        z3_cond = self._apply_finished_iter_subs(z3_cond)
-        if self._refs_unresolved_iter_var((z3_cond,), ()):
-            self._raise_or_mark(
-                "assumption references a finished loop iterator with no "
-                "stable final value"
-            )
-            return
-        lanes = z3_cond if isinstance(z3_cond, list) else [z3_cond]
-        self._launch_assumptions.extend(_constraint_to_bool(lane) for lane in lanes)
-
     def _on_data_dependent_value(self, expr: Any = None) -> None:
         """Loop bounds / materialized operands that depend on loads or pids
         are concretized to the capture block's values (the sanitizer
@@ -492,9 +535,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         return max(a[0], b[0]) < min(a[1], b[1])
 
     def _raise_or_mark(self, reason: str) -> None:
+        # Mark before raising: the abort_on_error exception unwinds out of
+        # the launch, and any finalize() that runs afterwards — whether the
+        # harness routes the abort through it or the caller invokes it —
+        # could not otherwise tell an unsupported launch from a clean one.
+        self._mark_unsupported(reason)
         if self.abort_on_error:
             raise UnsupportedSymbolicRaceQuery(reason)
-        self._mark_unsupported(reason)
 
     def _note_written_tensor(self, tensor: Any) -> bool:
         """Register a write target. Returns True if the caller may proceed
@@ -736,9 +783,12 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         Returns an empty list when the launch was marked unsupported during
         tracing (e.g. atomic CAS/RMW inside a loop, AtomicRMW return used
         downstream). Callers that need to distinguish "no race" from
-        "unsupported" / "disabled" should read :attr:`last_status` and
-        :attr:`unsupported_reason`. ``last_status == "disabled"`` is set by
-        :class:`NullRaceDetector` when the backend is off.
+        "unsupported" / "aborted" / "disabled" should read
+        :attr:`last_status` and :attr:`unsupported_reason`.
+        ``last_status == "aborted"`` means an exception cut the launch short
+        before the capture (or the solver) completed, so no verdict exists.
+        ``last_status == "disabled"`` is set by :class:`NullRaceDetector`
+        when the backend is off.
 
         Limitations carried by the underlying ``TwoCopySymbolicHBSolver``:
           - Initial atomic source covers scalar tensors and small contiguous
@@ -750,43 +800,75 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
           - Atomic CAS/RMW inside loops are not modeled — the launch is
             marked unsupported instead of recording phantom events.
         """
-        if not self._captured_symbolic_template or self._unsupported_capture:
-            if self._unsupported_capture and cfg.verbose:
-                print(
-                    f"[{self.LOG_TAG}] launch unsupported by two-copy solver: "
-                    f"{self.unsupported_reason}"
-                )
-            self.last_reports = []
-            self.last_status = "unsupported" if self._unsupported_capture else "ok"
-            self._clear_launch_runtime()
-            return []
         try:
-            reports = TwoCopySymbolicHBSolver(
-                self.records,
-                grid=self._launch_grid,
-                arange_dict=self._arange_dict_snapshot,
-                extra_assumptions=tuple(self._launch_assumptions),
-            ).find_races()
-            self.last_status = "ok"
-        except UnsupportedSymbolicRaceQuery as exc:
-            if self.abort_on_error:
+            if not self._captured_symbolic_template or self._unsupported_capture:
+                if self._unsupported_capture and cfg.verbose:
+                    print(
+                        f"[{self.LOG_TAG}] launch unsupported by two-copy solver: "
+                        f"{self.unsupported_reason}"
+                    )
+                self.last_reports = []
+                if self._unsupported_capture:
+                    self.last_status = "unsupported"
+                else:
+                    # The capture was never sealed: an exception aborted the
+                    # launch mid-block. No analysis ran, so reporting "ok"
+                    # here would be a silent false no-race verdict. This
+                    # matches the pessimistic "aborted" grid_callback set at
+                    # launch start, whether or not the harness routed the
+                    # abort through finalize.
+                    self.last_status = "aborted"
+                return []
+            try:
+                reports = TwoCopySymbolicHBSolver(
+                    self.records,
+                    grid=self._launch_grid,
+                    arange_dict=self._arange_dict_snapshot,
+                ).find_races()
+                self.last_status = "ok"
+            except UnsupportedSymbolicRaceQuery as exc:
+                self._mark_unsupported(str(exc))
+                if self.abort_on_error:
+                    raise
+                reports = []  # NO concrete fallback
+            except BaseException:
+                # Solver-internal failures (z3 errors, lowering bugs) abort
+                # the analysis; re-assert the launch-start "aborted" so no
+                # partial upgrade can ever read as a clean verdict.
+                self.last_reports = []
+                self.last_status = "aborted"
                 raise
-            self._mark_unsupported(str(exc))
-            reports = []  # NO concrete fallback
-        self.last_reports = reports
-        self._clear_launch_runtime()
-        return reports
+            self.last_reports = reports
+            return reports
+        finally:
+            # Unconditional: an exception escaping finalize (abort_on_error
+            # re-raise, z3 error) must still release the launch runtime —
+            # the class-level scalar-concretize observer would otherwise
+            # leak into later launches of other clients.
+            self._clear_launch_runtime()
 
     def register_for_loop_callback(self) -> ForLoopCallbacks:
         return SymbolicClient.register_for_loop_callback(self)
 
     def arg_callback(self, name: str, arg: Any, arg_cvt: Any) -> None:
+        # Arm the pessimistic verdict as early as the launch becomes
+        # observable: arg conversion and the user's grid lambda run BEFORE
+        # grid_callback (core/frontend/triton.py), and a crash there must
+        # not leave the previous launch's "ok" readable as this launch's
+        # verdict. Idempotent across the per-argument calls.
+        self.last_status = "aborted"
+        self.last_reports = []
         SymbolicClient.arg_callback(self, name, arg, arg_cvt)
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         self.records = []
         self.last_reports = []
-        self.last_status = "ok"
+        # Pessimistic until finalize() proves otherwise: if the launch dies
+        # before finalize runs (a mid-kernel exception with no
+        # finalize-on-error routing in the harness), a pre-set "ok" here
+        # would read as a clean no-race verdict. Every finalize() path
+        # overwrites this with the real outcome.
+        self.last_status = "aborted"
         self._program_seq = 0
         self._event_seq = 0
         normalized = tuple(int(dim) for dim in grid)
@@ -794,6 +876,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             normalized = normalized + (1,)
         self._launch_grid = cast(tuple[int, int, int], normalized[:3])
         self._captured_symbolic_template = False
+        self._capture_claimed = False
+        self._capture_thread_id = None
         # Reset of unsupported state lives ONLY in grid_callback. post_run_callback
         # must NOT zero these — handlers within the same launch may have set them.
         self._unsupported_capture = False
@@ -807,15 +891,18 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._suspended_iter_subs = []
         self._known_iter_var_keys = set()
         self._unstable_iter_var_keys = set()
-        self._launch_assumptions = []
+        self._loop_flush_signatures = set()
         SymbolicExpr.ARANGE_DICT.clear()
+        # SymbolicClient.grid_callback also clears loop_stack, so a launch
+        # that aborted mid-loop cannot poison this one.
         SymbolicClient.grid_callback(self, grid)
-        # Install the load-value provider with an owner token so a stale
-        # provider from a crashed peer detector instance never leaks across
-        # launches. _clear_launch_runtime only uninstalls when we still own
-        # the slot.
-        SymbolicExpr._load_value_provider = self._load_value_provider_impl
-        SymbolicExpr._load_value_provider_owner = id(self)
+        # The scalar-concretize observer must span the whole kernel run
+        # (host-side truthiness fires from interpreter code, not from
+        # detector-triggered evals), so it is installed launch-wide with an
+        # owner token; _clear_launch_runtime only uninstalls while we still
+        # own the slot. The load-value provider is NOT installed here — it
+        # is scoped to the detector's own evaluations via
+        # _load_value_semantics so other clients' expr.eval() never sees it.
         SymbolicExpr._scalar_concretize_observer = self._scalar_concretize_observer_impl
         SymbolicExpr._scalar_concretize_observer_owner = id(self)
 
@@ -850,27 +937,80 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         return ret
 
     def pre_run_callback(self, fn: Callable) -> bool:
-        # One-shot capture: capture symbolic templates from a single
-        # representative block; the two-copy solver reasons over all blocks.
-        return not self._captured_symbolic_template
+        # Block scheduling stays with the shared SymbolicClient machinery:
+        # it honors need_full_grid (so a co-attached client is not starved
+        # of blocks when the engine concretized per-block values) and counts
+        # _active_blocks for the deferred launch-state clear. One-shot
+        # capture is layered on top: the first admitted block claims the
+        # capture slot atomically, so sibling workers under
+        # TRITON_VIZ_NUM_SMS >= 2 never interleave captures into the shared
+        # per-launch record state.
+        with self._lock_context():
+            should_run = SymbolicClient.pre_run_callback(self, fn)
+            if should_run and not self._capture_claimed:
+                self._capture_claimed = True
+                self._capture_thread_id = threading.get_ident()
+            return should_run
 
     def post_run_callback(self, fn: Callable) -> bool:
-        # If a handler already marked the launch unsupported, don't try to
-        # force-eval half-baked record state — short-circuit cleanly.
-        if self._unsupported_capture:
-            self._captured_symbolic_template = True
+        with self._lock_context():
+            if self._capture_thread_id == threading.get_ident():
+                try:
+                    self._seal_capture()
+                finally:
+                    self._capture_thread_id = None
+            return SymbolicClient.post_run_callback(self, fn)
+
+    def _capture_active(self) -> bool:
+        """True when events observed on the current thread belong to the
+        one-shot capture.
+
+        Blocks executed outside the capture slot (need_full_grid reruns for
+        a co-attached client, sibling workers under TRITON_VIZ_NUM_SMS >= 2)
+        still run the kernel, but their events must not reach the shared
+        per-launch record/loop state — the two-copy solver already reasons
+        over all blocks from the single captured template. Direct handler
+        calls with no claimed slot (unit-level use) count as capturing.
+        """
+        if self._captured_symbolic_template:
             return False
+        tid = self._capture_thread_id
+        return tid is None or tid == threading.get_ident()
+
+    def _seal_capture(self) -> None:
+        """Seal the one-shot capture once the capturing block finishes.
+
+        Runs exactly once per launch, on the thread that claimed the capture
+        slot in pre_run_callback. The seal flag is set even on the
+        unsupported/raising paths so finalize() can tell a completed capture
+        from a launch aborted mid-block.
+        """
         try:
-            self._force_eval_record_templates()
-        except UnsupportedSymbolicRaceQuery as exc:
-            if self.abort_on_error:
-                raise
-            self._mark_unsupported(str(exc))
-        # Defensive sweep: load-side / write-side checks at record time
-        # should already catch overlaps, but loop-deferred events can
-        # re-order tensors through `_process_pending_check`. Cross-product
-        # check the two region lists once before sealing the launch.
-        if not self._unsupported_capture:
+            # If a handler already marked the launch unsupported, don't try
+            # to force-eval half-baked record state — short-circuit cleanly.
+            if self._unsupported_capture:
+                return
+            # Defense in depth: a LoopContext that survives to launch end
+            # was never flushed (its teardown hook did not fire), so its
+            # deferred accesses are missing from the records — the capture
+            # is incomplete and an "ok" verdict would be silently wrong.
+            if self.loop_stack:
+                self._raise_or_mark(
+                    "loop context left open at launch end; loop-deferred "
+                    "accesses were never recorded"
+                )
+                return
+            try:
+                self._force_eval_record_templates()
+            except UnsupportedSymbolicRaceQuery as exc:
+                self._mark_unsupported(str(exc))
+                if self.abort_on_error:
+                    raise
+                return
+            # Defensive sweep: load-side / write-side checks at record time
+            # should already catch overlaps, but loop-deferred events can
+            # re-order tensors through `_process_pending_check`. Cross-
+            # product check the two region lists once before sealing.
             for src in self._load_value_regions:
                 for dst in self._written_regions:
                     if self._regions_overlap(src, dst):
@@ -878,14 +1018,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                             "tl.load value source overlaps a tensor written "
                             "by this kernel"
                         )
-                        break
-                if self._unsupported_capture:
-                    break
-        # Snapshot ARANGE_DICT after templates are evaluated so the two-copy
-        # solver's arange substitutions are independent of subsequent launches.
-        self._arange_dict_snapshot = dict(SymbolicExpr.ARANGE_DICT)
-        self._captured_symbolic_template = True
-        return False
+                        return
+            # Snapshot ARANGE_DICT after templates are evaluated so the
+            # two-copy solver's arange substitutions are independent of
+            # subsequent launches.
+            self._arange_dict_snapshot = dict(SymbolicExpr.ARANGE_DICT)
+        finally:
+            self._captured_symbolic_template = True
 
     # ── Event recording ───────────────────────────────────────────────────
 
@@ -903,6 +1042,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.grid = None
         self.grid_idx = None
         self.last_grid = None
+        self._capture_claimed = False
+        self._capture_thread_id = None
         self._program_seq = 0
         self._event_seq = 0
         self._load_array_cache = {}
@@ -913,7 +1054,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._suspended_iter_subs = []
         self._known_iter_var_keys = set()
         self._unstable_iter_var_keys = set()
-        self._launch_assumptions = []
+        self._loop_flush_signatures = set()
         if SymbolicExpr._load_value_provider_owner == id(self):
             SymbolicExpr._load_value_provider = None
             SymbolicExpr._load_value_provider_owner = None
@@ -1017,7 +1158,22 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     #     and any record still referencing it is rejected as unsupported by
     #     _refs_unresolved_iter_var.
 
+    # The loop hooks fire for every executed block, but the loop bookkeeping
+    # (loop_stack, suspended/finished iterator substitutions) belongs to the
+    # one-shot capture: blocks running outside the capture slot iterate
+    # concretely and must not touch it — a sibling worker popping the
+    # capture thread's stash is exactly the kind of corruption the slot
+    # exists to prevent. _wrap_range stays ungated: every running block
+    # still needs its loop bounds materialized.
+
+    def _loop_hook_iter_overrider(self, lineno: Any, idx: Any) -> Any:
+        if not self._capture_active():
+            return idx
+        return SymbolicClient._loop_hook_iter_overrider(self, lineno, idx)
+
     def _loop_hook_before(self, lineno: int, iterable: Any) -> None:
+        if not self._capture_active():
+            return
         SymbolicClient._loop_hook_before(self, lineno, iterable)
         if self.loop_stack and self.loop_stack[-1].lineno == lineno:
             ctx = self.loop_stack[-1]
@@ -1030,6 +1186,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             )
 
     def _loop_hook_after(self, lineno: int) -> None:
+        if not self._capture_active():
+            return
         ctx = (
             self.loop_stack[-1]
             if self.loop_stack and self.loop_stack[-1].lineno == lineno
@@ -1133,21 +1291,24 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 return z3_value
             return value
 
-        for record in self.records:
-            try:
-                record.addr_expr = force(record.addr_expr)
-                record.local_constraints = self._normalize_constraints(
-                    force(record.local_constraints)
-                )
-                record.premises = self._normalize_constraints(force(record.premises))
-                if record.cas_cmp_value is not None:
-                    record.cas_cmp_value = force(record.cas_cmp_value)
-                if record.cas_new_value is not None:
-                    record.cas_new_value = force(record.cas_new_value)
-            except Exception as exc:  # pragma: no cover - defensive
-                raise UnsupportedSymbolicRaceQuery(
-                    f"failed to normalize record templates: {exc}"
-                ) from exc
+        with self._load_value_semantics():
+            for record in self.records:
+                try:
+                    record.addr_expr = force(record.addr_expr)
+                    record.local_constraints = self._normalize_constraints(
+                        force(record.local_constraints)
+                    )
+                    record.premises = self._normalize_constraints(
+                        force(record.premises)
+                    )
+                    if record.cas_cmp_value is not None:
+                        record.cas_cmp_value = force(record.cas_cmp_value)
+                    if record.cas_new_value is not None:
+                        record.cas_new_value = force(record.cas_new_value)
+                except Exception as exc:  # pragma: no cover - defensive
+                    raise UnsupportedSymbolicRaceQuery(
+                        f"failed to normalize record templates: {exc}"
+                    ) from exc
 
     def _record_access_event(
         self,
@@ -1161,6 +1322,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         semantic_constraints: tuple[Any, ...] = (),
         copy_local_vars: tuple[Any, ...] = (),
         active: Any = True,
+        loop_flush: bool = False,
     ) -> None:
         if self._unsupported_capture:
             return
@@ -1199,6 +1361,30 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             )
             return
 
+        normalized_copy_vars = normalize_copy_local_vars(copy_local_vars)
+        if loop_flush:
+            # A loop nested under another loop re-enters once per outer
+            # iteration, re-flushing structurally identical pending events
+            # each time (fresh LoopContext, fresh signature_cache). One
+            # record already covers every iteration pair through its symbolic
+            # iterators, so dedupe at launch scope — AFTER the finished-
+            # iterator substitutions and the unresolved-var rejection above,
+            # which are the parts that can legitimately differ (or become
+            # unsupported) across activations.
+            signature = hash(
+                (
+                    _make_event_signature(
+                        access_mode, source_location, access_addr, local, active
+                    ),
+                    op_type.__name__,
+                    _hash_signature_part(premises),
+                    tuple(self._iter_var_key(v) for v in normalized_copy_vars),
+                )
+            )
+            if signature in self._loop_flush_signatures:
+                return
+            self._loop_flush_signatures.add(signature)
+
         self.records.append(
             AccessEventRecord(
                 op_type=op_type,
@@ -1218,7 +1404,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 writes=access_mode == "write",
                 event_id=self._next_event_id(),
                 elem_size=self._infer_elem_size(symbolic_expr),
-                copy_local_vars=normalize_copy_local_vars(copy_local_vars),
+                copy_local_vars=normalized_copy_vars,
             )
         )
 
@@ -1413,19 +1599,34 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         load-value provider that may give ``LoadSymbolicExpr`` value
         semantics), and the mask becomes the event's ``active`` condition so
         ``_lower_record`` can take per-lane lane-values rather than ``And``-
-        collapsing a vector mask into a scalar local constraint.
+        collapsing a vector mask into a scalar local constraint. Block-
+        pointer accesses are the exception: their ``ptr`` is an unlowerable
+        descriptor, so the access expr itself supplies the tile footprint.
         """
-        if self._unsupported_capture:
+        if self._unsupported_capture or not self._capture_active():
             return
         # Reject scatter/histogram-style addressing where the pointer itself
-        # depends on a loaded value — the current model conflates the load's
-        # pointer with its loaded value.
+        # depends on a runtime value — the current model conflates e.g. a
+        # load's pointer with its loaded value.
         ptr_attr = getattr(expr, "ptr", None)
         if self._reject_data_dependent_address(ptr_attr):
             return
         if ptr_attr is None:
             return
-        ptr_result = self._safe_eval(ptr_attr, f"{op_type.__name__} ptr eval")
+        if isinstance(expr, TensorPointerSymbolicExpr):
+            # Block pointers: expr.ptr is a make_block_ptr/advance descriptor
+            # with no address lowering of its own — the access expr itself
+            # lowers the tile footprint (base + (offset_d + k_d) * stride_d
+            # with each k_d range-bound in the constraints). The k_d vars are
+            # copy-local: without per-copy renaming the two program copies
+            # would share one tile coordinate and overlapping tiles could
+            # only collide at equal k.
+            addr_attr: SymbolicExpr = expr
+            tile_vars = expr.tile_index_vars()
+        else:
+            addr_attr = ptr_attr
+            tile_vars = ()
+        ptr_result = self._safe_eval(addr_attr, f"{op_type.__name__} ptr eval")
         if ptr_result is None:
             return
         z3_addr, ptr_constraints = ptr_result
@@ -1450,6 +1651,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 z3_constraints,
                 expr,
                 source_location,
+                copy_local_vars=tile_vars,
                 active=active_expr,
             )
             return
@@ -1470,6 +1672,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     access_mode=access_mode,
                     op_type=op_type,
                     active=active_expr,
+                    copy_local_vars=tile_vars,
                 )
             )
         else:
@@ -1482,16 +1685,12 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         sem: str | None,
         scope: str | None,
     ) -> None:
-        if self._unsupported_capture:
+        if self._unsupported_capture or not self._capture_active():
             return
         # Loop check FIRST — before any .eval() can produce side effects
         # (ARANGE_DICT entries, fresh CAS-old vars, downstream sentinels).
         if self.loop_stack:
-            if self.abort_on_error:
-                raise UnsupportedSymbolicRaceQuery(
-                    "atomic_cas inside loop is unsupported by the two-copy solver"
-                )
-            self._mark_unsupported(
+            self._raise_or_mark(
                 "atomic_cas inside loop is unsupported by the two-copy solver"
             )
             return
@@ -1552,15 +1751,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         sem: str | None,
         scope: str | None,
     ) -> None:
-        if self._unsupported_capture:
+        if self._unsupported_capture or not self._capture_active():
             return
         # Loop check FIRST — see _handle_atomic_cas_check for rationale.
         if self.loop_stack:
-            if self.abort_on_error:
-                raise UnsupportedSymbolicRaceQuery(
-                    "atomic_rmw inside loop is unsupported by the two-copy solver"
-                )
-            self._mark_unsupported(
+            self._raise_or_mark(
                 "atomic_rmw inside loop is unsupported by the two-copy solver"
             )
             return
@@ -1661,8 +1856,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             pending.symbolic_expr,
             pending.source_location,
             semantic_constraints=tuple(iter_constraints),
-            copy_local_vars=(*self._current_loop_iter_vars(), ctx.idx_z3),
+            copy_local_vars=(
+                *pending.copy_local_vars,
+                *self._current_loop_iter_vars(),
+                ctx.idx_z3,
+            ),
             active=pending.active,
+            loop_flush=True,
         )
 
 

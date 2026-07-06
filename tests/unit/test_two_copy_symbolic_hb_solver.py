@@ -6,6 +6,7 @@ solver's invariants in isolation from the (Triton-dependent) capture pipeline.
 
 from __future__ import annotations
 
+import pytest
 import torch
 from z3 import (
     And,
@@ -14,12 +15,15 @@ from z3 import (
     IntVal,
     Solver,
     sat,
+    unknown,
 )
 
+import triton_viz.clients.race_detector.two_copy_symbolic_hb_solver as tc_module
 from triton_viz.clients.race_detector.data import (
     AccessEventRecord,
     RaceType,
 )
+from triton_viz.clients.race_detector.hb_common import UnsupportedSymbolicRaceQuery
 from triton_viz.clients.race_detector.two_copy_symbolic_hb_solver import (
     TwoCopySymbolicHBSolver,
 )
@@ -725,3 +729,239 @@ def test_partially_overlapping_same_width_atomics_race():
 
     reports = _solve([a, b], grid=(2, 1, 1)).find_races()
     assert reports, "expected partially overlapping atomics to race"
+
+
+# ──────────────────────── Intra-instance duplicate lanes ────────────────────
+
+
+def test_single_block_duplicate_lane_store_races():
+    """grid=(1,) makes different_blocks UNSAT, so every cross-copy query is
+    vacuous. The intra-instance query must still flag two lanes of one
+    store (arange % 2) writing the same byte address.
+    """
+    ar = Int("dup_lane_ar")
+    arange_dict = {(0, 4): (ar, And(ar >= 0, ar < 4))}
+    addr = IntVal(10_000_000) + 4 * (ar % 2)
+    rec = _scalar_store(addr, event_id=0, program_seq=0, elem_size=4)
+
+    reports = _solve([rec], grid=(1, 1, 1), arange_dict=arange_dict).find_races()
+    assert len(reports) == 1
+    assert reports[0].race_type == RaceType.WAW
+    assert reports[0].witness_grid_a == reports[0].witness_grid_b
+
+
+def test_multi_block_intra_instance_duplicate_detected():
+    """Per-block duplicate lanes with block-disjoint footprints: the
+    different_blocks query is unsat, so only the intra-instance query can
+    see the conflict.
+    """
+    ar = Int("dup_lane_ar_multi")
+    arange_dict = {(0, 4): (ar, And(ar >= 0, ar < 4))}
+    addr = IntVal(11_000_000) + 4 * (ar % 2) + 100 * SymbolicExpr.PID0
+    rec = _scalar_store(addr, event_id=0, program_seq=0, elem_size=4)
+
+    reports = _solve([rec], grid=(2, 1, 1), arange_dict=arange_dict).find_races()
+    assert len(reports) == 1
+    assert reports[0].witness_grid_a == reports[0].witness_grid_b
+
+
+def test_injective_lane_addresses_single_block_no_race():
+    ar = Int("inj_lane_ar")
+    arange_dict = {(0, 4): (ar, And(ar >= 0, ar < 4))}
+    addr = IntVal(12_000_000) + 4 * ar
+    rec = _scalar_store(addr, event_id=0, program_seq=0, elem_size=4)
+
+    assert _solve([rec], grid=(1, 1, 1), arange_dict=arange_dict).find_races() == []
+
+
+def test_explicit_duplicate_lane_list_store_races():
+    """Per-lane list addresses with two lanes at the same byte address."""
+    rec = _scalar_store(
+        [IntVal(13_000_000), IntVal(13_000_000)],
+        event_id=0,
+        program_seq=0,
+        elem_size=4,
+    )
+    reports = _solve([rec], grid=(1, 1, 1)).find_races()
+    assert len(reports) == 1
+    assert reports[0].race_type == RaceType.WAW
+
+
+def test_duplicate_lane_atomic_rmw_serializes_no_race():
+    """Lanes of one atomic op serialize against each other."""
+    rec = _rmw_record(
+        [IntVal(14_000_000), IntVal(14_000_000)], event_id=0, program_seq=0
+    )
+    assert _solve([rec], grid=(1, 1, 1)).find_races() == []
+
+
+def test_masked_constant_addr_store_lane_count_decides_race():
+    """A store whose address ignores the lane is a duplicate-lane WAW only
+    when the mask leaves at least two lanes active."""
+    ar = Int("masked_const_ar")
+    arange_dict = {(0, 4): (ar, And(ar >= 0, ar < 4))}
+    addr = IntVal(15_000_000) + 0 * ar
+
+    one_lane = _scalar_store(
+        addr, event_id=0, program_seq=0, elem_size=4, mask=(ar == 3)
+    )
+    assert (
+        _solve([one_lane], grid=(1, 1, 1), arange_dict=arange_dict).find_races() == []
+    )
+
+    two_lanes = _scalar_store(
+        addr, event_id=0, program_seq=0, elem_size=4, mask=(ar < 2)
+    )
+    reports = _solve([two_lanes], grid=(1, 1, 1), arange_dict=arange_dict).find_races()
+    assert len(reports) == 1
+
+
+def test_scalar_store_does_not_self_race_within_instance():
+    """A true scalar store has no second lane — pinning pid_a == pid_b must
+    not let the a/b copies of the same access race against themselves."""
+    addr = IntVal(16_000_000) + 4 * SymbolicExpr.PID0
+    rec = _scalar_store(addr, event_id=0, program_seq=0, elem_size=4)
+    assert _solve([rec], grid=(1, 1, 1)).find_races() == []
+
+
+# ──────────────────────── Float-valued atomic flags ──────────────────────────
+
+
+def test_float_flag_initial_source_falls_back_to_rf_unknown():
+    """A float-valued flag must not be truncated into a closed-world initial
+    source (int(0.7) == 0 models a CAS success the real execution never
+    takes); it falls back to the rf_unknown escape like other
+    unidentifiable sources."""
+    flag = torch.full((1,), 0.7, dtype=torch.float32)
+    cas_old = Int("cas_float_flag_old")
+    cas = _cas_record(
+        IntVal(int(flag.data_ptr())),
+        IntVal(0),
+        IntVal(1),
+        cas_old,
+        event_id=0,
+        program_seq=0,
+        tensor=flag,
+    )
+    solver = _solve([cas], grid=(2, 1, 1))
+    reader_a = next(e for e in solver.events if e.copy == "a")
+    assert reader_a.idx in solver.rf_unknown_source
+    assert reader_a.idx not in solver.rf_init_source
+
+
+def test_float_flag_guarded_waw_not_masked_by_truncated_init():
+    """Real behavior: the flag holds 0.7, so CAS(0 -> 1) fails in EVERY
+    program instance and the old != 0 guard passes everywhere — a genuine
+    WAW. Truncating the initial value to 0 modeled the guard as a
+    single-winner try-lock and silently masked the race."""
+    flag = torch.full((1,), 0.7, dtype=torch.float32)
+    cas_old = Int("cas_float_guard_old")
+    cas = _cas_record(
+        IntVal(int(flag.data_ptr())),
+        IntVal(0),
+        IntVal(1),
+        cas_old,
+        event_id=0,
+        program_seq=0,
+        tensor=flag,
+    )
+    guarded_store = _scalar_store(
+        IntVal(17_000_000),
+        event_id=1,
+        program_seq=1,
+        elem_size=4,
+        mask=(cas_old != 0),
+    )
+    reports = _solve([cas, guarded_store], grid=(2, 1, 1)).find_races()
+    assert reports, "float-valued flag must not fabricate a closed-world lock"
+
+
+def test_integral_flag_keeps_closed_world_initial_source():
+    """Integer flags keep the rf_init closed world (the try-lock no-race
+    verdict depends on it)."""
+    flag = torch.zeros(1, dtype=torch.int32)
+    cas_old = Int("cas_int_flag_old")
+    cas = _cas_record(
+        IntVal(int(flag.data_ptr())),
+        IntVal(0),
+        IntVal(1),
+        cas_old,
+        event_id=0,
+        program_seq=0,
+        tensor=flag,
+    )
+    solver = _solve([cas], grid=(2, 1, 1))
+    reader_a = next(e for e in solver.events if e.copy == "a")
+    assert reader_a.idx in solver.rf_init_source
+    assert reader_a.idx not in solver.rf_unknown_source
+
+
+# ──────────────────────── Z3 unknown is conservative ────────────────────────
+
+
+class _UnknownSolver:
+    """Stub standing in for z3.Solver whose every query is undecided."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def add(self, *args, **kwargs):
+        pass
+
+    def push(self):
+        pass
+
+    def pop(self):
+        pass
+
+    def check(self):
+        return unknown
+
+    def reason_unknown(self):
+        return "stubbed unknown"
+
+    def model(self):
+        raise AssertionError("model() must not be read on an unknown result")
+
+
+def test_unknown_race_query_raises_unsupported(monkeypatch):
+    """An undecided race query must not collapse into a silent clean 'ok';
+    find_races escalates to UnsupportedSymbolicRaceQuery, which finalize
+    turns into last_status == 'unsupported'."""
+    rec = _scalar_store(
+        IntVal(18_000_000) + 4 * SymbolicExpr.PID0,
+        event_id=0,
+        program_seq=0,
+        elem_size=4,
+    )
+    solver = _solve([rec], grid=(2, 1, 1))
+    monkeypatch.setattr(tc_module, "Solver", _UnknownSolver)
+    with pytest.raises(UnsupportedSymbolicRaceQuery, match="stubbed unknown"):
+        solver.find_races()
+
+
+def test_unknown_overlap_check_opens_rf_unknown_escape(monkeypatch):
+    """_has_unmodeled_overlapping_writer must treat unknown like sat: an
+    undecided overlap keeps the closed world only at the price of
+    over-constraining the reader's old value and hiding every conflict
+    gated on it."""
+    flag = torch.zeros(1, dtype=torch.int32)
+    cas_old = Int("cas_unknown_escape_old")
+    cas = _cas_record(
+        IntVal(int(flag.data_ptr())),
+        IntVal(0),
+        IntVal(1),
+        cas_old,
+        event_id=0,
+        program_seq=0,
+        tensor=flag,
+    )
+    plain_store = _scalar_store(
+        IntVal(19_000_000), event_id=1, program_seq=1, elem_size=4
+    )
+    monkeypatch.setattr(tc_module, "Solver", _UnknownSolver)
+    solver = _solve([cas, plain_store], grid=(2, 1, 1))
+    reader_a = next(
+        e for e in solver.events if e.copy == "a" and e.atomic_kind == "cas"
+    )
+    assert reader_a.idx in solver.rf_unknown_source

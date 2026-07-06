@@ -11,6 +11,7 @@ from ..clients.race_detector.race_detector import NullRaceDetector
 from .client import ClientManager, Client
 from .data import Launch
 import types
+import inspect
 
 
 launches: list[Launch] = []
@@ -251,21 +252,7 @@ class TritonTrace(LaunchInterface, TraceInterface):
         with self.client_manager.patch_run(self.base_fn, frontend_name="triton"):
             kwargs.update({"client_manager": self.client_manager})
             kwargs.update({"jit_fn": self.jit_fn})
-            try:
-                ret = self.runner.run(*args, **kwargs)
-            except BaseException:
-                # A mid-launch abort (e.g. a client raising under
-                # abort_on_error) must still release per-launch state —
-                # clients install class-level hooks (load-value provider,
-                # scalar-concretize observer) that would otherwise leak into
-                # the next launch of a different client. finalize() is the
-                # only place that clears them; best-effort, never masking
-                # the original exception.
-                try:
-                    self.finalize()
-                except Exception:
-                    pass
-                raise
+            ret = self.runner.run(*args, **kwargs)
             self.finalize()
             return ret
 
@@ -378,6 +365,88 @@ class NKITrace(LaunchInterface, TraceInterface):
             return ret
 
 
+class GluonTrace(LaunchInterface, TraceInterface):
+    def __init__(self, runner: Any, client: str | Client) -> None:
+        from triton.experimental import gluon
+
+        # Gluon has exposed different JIT class names across Triton versions.
+        # Treat an object that already has the JIT runner protocol as compiled,
+        # and only call gluon.jit for raw Python functions.
+        if not all(hasattr(runner, attr) for attr in ("fn", "run", "arg_names")):
+            runner = gluon.jit(runner)
+
+        self.runner = runner
+        self.fn = runner
+        self.base_fn = runner.fn
+        self.arg_names = runner.arg_names
+
+        TraceInterface.__init__(self, client)
+
+        for attr in ("__name__", "__module__", "__doc__", "__qualname__"):
+            if hasattr(runner, attr):
+                setattr(self, attr, getattr(runner, attr))
+            elif hasattr(self.base_fn, attr):
+                setattr(self, attr, getattr(self.base_fn, attr))
+
+        if hasattr(runner, "src"):
+            self.src = runner.src
+
+    def _bound_call_args(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            return inspect.getcallargs(self.base_fn, *args, **kwargs)
+        except TypeError:
+            bound = {name: arg for name, arg in zip(self.arg_names, args)}
+            bound.update(kwargs)
+            return bound
+
+    @staticmethod
+    def _canonical_grid(grid: Any, bound_args: dict[str, Any]) -> tuple[int, int, int]:
+        if callable(grid):
+            grid = grid(bound_args)
+        if isinstance(grid, int):
+            grid = (grid,)
+        grid = tuple(int(dim) for dim in grid)
+        if len(grid) > 3:
+            raise ValueError(
+                f"Expected Gluon launch grid with at most 3 dims, got {grid}"
+            )
+        return grid + (1,) * (3 - len(grid))
+
+    def run(self, *args, **kwargs):
+        grid = kwargs.get("grid")
+        if grid is None:
+            raise TypeError(
+                "GluonTrace.run() missing required keyword argument: 'grid'"
+            )
+
+        launch_kwargs = dict(kwargs)
+        launch_kwargs.pop("warmup", None)
+        launch_kwargs.pop("grid", None)
+        bound_args = self._bound_call_args(args, launch_kwargs)
+        canonical_grid = self._canonical_grid(grid, bound_args)
+
+        for name, arg in bound_args.items():
+            self.client_manager.arg_callback(name, arg, None)
+        self.client_manager.grid_callback(canonical_grid)
+        self.client_manager.grid_idx_callback((0, 0, 0))
+
+        with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
+            try:
+                ret = self.runner.run(*args, **kwargs)
+            finally:
+                self.client_manager.post_run_callback(self.base_fn)
+            self.finalize()
+            return ret
+
+    def __call__(self, *args, **kwargs):
+        return self.runner(*args, **kwargs)
+
+    def warmup(self, *args, **kwargs):
+        return self.run(*args, warmup=True, **kwargs)
+
+
 def trace_source(kernel):
     """
     Add the kernel code to be traceable within stack traces for clients
@@ -423,7 +492,7 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
         # test_flag_off_does_not_swallow_explicit_instance.
         return isinstance(selected, NullRaceDetector)
 
-    def decorator(kernel) -> TritonTrace | NKITrace | Any:
+    def decorator(kernel) -> TritonTrace | NKITrace | GluonTrace | Any:
         if cfg.cli_active and isinstance(kernel, TraceInterface):
             raise RuntimeError(
                 "@triton_viz.trace() decorator cannot be used together with "
@@ -453,6 +522,8 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
         # First-time wrapping
         if frontend in ("nki", "nki_beta2"):
             return NKITrace(kernel, client, beta2=("beta2" in frontend))
+        elif frontend == "gluon":
+            return GluonTrace(kernel, client)
         elif frontend == "triton":
             return TritonTrace(kernel, client)
         else:

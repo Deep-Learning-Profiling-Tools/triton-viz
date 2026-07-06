@@ -10,6 +10,7 @@ from triton_viz.core.symbolic_metadata import (
     INT1,
     INT32,
     SymbolicTensorValue,
+    TensorDescriptorAccess,
     pointer_type,
     type_spec,
 )
@@ -22,6 +23,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
 )
 from triton_viz.clients.sanitizer.range_summary import IntRange, access_interval_summary
 from triton_viz.clients.symbolic_engine import LoopContext, PendingCheck, SymbolicExpr
+from triton_viz.clients.symbolic_engine import symbolic_tensor_descriptor_access
 
 
 # ======== Init Tests ===========
@@ -236,6 +238,122 @@ def test_concrete_ptr_router_uses_symbolic_path_inside_loops():
     sanitizer._op_load_overrider(ptr_sym, mask_sym, None)
 
     assert calls == [("load", Load, "read")]
+    assert sanitizer.records == []
+
+
+class _HostTensorDescriptor:
+    def __init__(self, base, shape, strides, block_shape):
+        self.base = base
+        self.shape = shape
+        self.strides = strides
+        self.block_shape = block_shape
+
+
+def test_symbolic_tensor_descriptor_access_reports_block_oob():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty((4, 4), dtype=torch.int32)
+    desc = _HostTensorDescriptor(
+        tensor,
+        shape=(4, 4),
+        strides=(4, 1),
+        block_shape=(2, 2),
+    )
+    sanitizer.arg_callback("input_desc", desc, None)
+    sanitizer.grid_callback((1, 1, 1))
+
+    ptr = symbolic_tensor_descriptor_access(desc, (3, 0))
+    assert ptr.op == "descriptor_access"
+    assert not ptr.has_op("addptr")
+    sanitizer._op_load_overrider(ptr, None, None)
+
+    assert len(sanitizer.records) == 1
+    assert sanitizer.records[0].op_type is Load
+    assert sanitizer.records[0].tensor is tensor
+    assert sanitizer.records[0].violation_address == (
+        tensor.data_ptr() + 12 * tensor.element_size()
+    )
+
+
+def test_tensor_descriptor_access_record_reports_block_oob():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty((4, 4), dtype=torch.int32)
+    desc = _HostTensorDescriptor(
+        tensor,
+        shape=(4, 4),
+        strides=(4, 1),
+        block_shape=(2, 2),
+    )
+    sanitizer.arg_callback("input_desc", desc, None)
+    sanitizer.grid_callback((1, 1, 1))
+
+    sanitizer._op_load_overrider(TensorDescriptorAccess(desc, (3, 0)), None, None)
+
+    assert len(sanitizer.records) == 1
+    assert sanitizer.records[0].op_type is Load
+    assert sanitizer.records[0].tensor is tensor
+
+
+def test_tensor_descriptor_created_in_kernel_reports_block_oob():
+    class _GluonDescriptor:
+        pass
+
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty((4, 4), dtype=torch.int32)
+    desc = _GluonDescriptor()
+    sanitizer.arg_callback("input_desc", tensor, None)
+    sanitizer.grid_callback((1, 1, 1))
+    sanitizer._op_allocate_after_callback(
+        desc,
+        tensor,
+        (4, 4),
+        (4, 1),
+        (2, 2),
+    )
+
+    sanitizer._op_load_overrider(TensorDescriptorAccess(desc, (3, 0)), None, None)
+
+    assert len(sanitizer.records) == 1
+    assert sanitizer.records[0].op_type is Load
+    assert sanitizer.records[0].tensor is tensor
+
+
+def test_tensor_descriptor_access_record_ignores_inactive_predicate():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty((4, 4), dtype=torch.int32)
+    desc = _HostTensorDescriptor(
+        tensor,
+        shape=(4, 4),
+        strides=(4, 1),
+        block_shape=(2, 2),
+    )
+    sanitizer.arg_callback("input_desc", desc, None)
+    sanitizer.grid_callback((1, 1, 1))
+
+    ret = sanitizer._op_load_overrider(
+        TensorDescriptorAccess(desc, (3, 0), pred=False),
+        False,
+        None,
+    )
+
+    assert ret.op == "load"
+    assert sanitizer.records == []
+
+
+def test_symbolic_tensor_descriptor_access_allows_in_bounds_block():
+    sanitizer = SymbolicSanitizer(abort_on_error=False)
+    tensor = torch.empty((4, 4), dtype=torch.int32)
+    desc = _HostTensorDescriptor(
+        tensor,
+        shape=(4, 4),
+        strides=(4, 1),
+        block_shape=(2, 2),
+    )
+    sanitizer.arg_callback("input_desc", desc, None)
+    sanitizer.grid_callback((1, 1, 1))
+
+    ptr = symbolic_tensor_descriptor_access(desc, (2, 2))
+    sanitizer._op_load_overrider(ptr, None, None)
+
     assert sanitizer.records == []
 
 

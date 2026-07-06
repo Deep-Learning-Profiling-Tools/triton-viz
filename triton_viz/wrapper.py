@@ -5,7 +5,8 @@ import sys
 import pytest
 import triton
 import triton_viz
-from triton_viz.clients import Sanitizer, Profiler, RaceDetector
+from triton.experimental import gluon as _gluon
+from triton_viz.clients import Profiler, RaceDetector, Sanitizer
 from triton_viz.core.config import config as cfg
 
 
@@ -18,43 +19,47 @@ COMPILED_RACE_DETECTOR_COMMAND = "triton-compiled-race-detector"
 # store the original triton.jit
 _original_jit = triton.jit
 _original_autotune = triton.autotune
+_original_gluon_jit = _gluon.jit
 
 
-def sanitizer_wrapper(kernel):
+def sanitizer_wrapper(kernel, *, frontend: str = "triton"):
     abort_on_error = True
-    tracer = triton_viz.trace(client=Sanitizer(abort_on_error=abort_on_error))
+    tracer = triton_viz.trace(
+        client=Sanitizer(abort_on_error=abort_on_error),
+        frontend=frontend,
+    )
     return tracer(kernel)
 
 
-def profiler_wrapper(kernel):
-    tracer = triton_viz.trace(client=Profiler())
+def profiler_wrapper(kernel, *, frontend: str = "triton"):
+    tracer = triton_viz.trace(client=Profiler(), frontend=frontend)
     return tracer(kernel)
 
 
-def race_detector_wrapper(kernel):
-    tracer = triton_viz.trace(client=RaceDetector())
+def race_detector_wrapper(kernel, *, frontend: str = "triton"):
+    tracer = triton_viz.trace(client=RaceDetector(), frontend=frontend)
     return tracer(kernel)
 
 
-def compiled_race_detector_wrapper(kernel):
+def compiled_race_detector_wrapper(kernel, *, frontend: str = "triton"):
     # Compiled mode: static shared-memory race analysis over the warmup TTGIR.
     # Standalone — runs on its own trace (ClientManager rejects composition).
-    tracer = triton_viz.trace(client=RaceDetector(compile=True))
+    tracer = triton_viz.trace(client=RaceDetector(compile=True), frontend=frontend)
     return tracer(kernel)
 
 
-def create_patched_jit(wrapper_func):
+def create_patched_jit(wrapper_func, original_jit, *, frontend: str):
     def _patched_jit(fn=None, **jit_kw):
         if fn is None:  # @triton.jit(**opts)
 
             def _decorator(f):
-                k = _original_jit(**jit_kw)(f)
-                return wrapper_func(k)
+                k = original_jit(**jit_kw)(f)
+                return wrapper_func(k, frontend=frontend)
 
             return _decorator
         else:  # @triton.jit
-            k = _original_jit(fn)
-            return wrapper_func(k)
+            k = original_jit(fn)
+            return wrapper_func(k, frontend=frontend)
 
     return _patched_jit
 
@@ -87,19 +92,27 @@ def _apply_wrapper(wrapper_func, command_name, usage_msg):
 
     cfg.cli_active = True
 
-    # Create patched functions with the specific wrapper
-    _patched_jit = create_patched_jit(wrapper_func)
+    # Patch Triton kernels with the Triton frontend.
+    _patched_jit = create_patched_jit(
+        wrapper_func,
+        _original_jit,
+        frontend="triton",
+    )
     _patched_autotune = create_patched_autotune(wrapper_func)
 
-    # patching the original triton.jit
     triton.jit = _patched_jit
     triton.language.jit = _patched_jit
     import triton.runtime.interpreter as _interp
 
     _interp.jit = _patched_jit
-
-    # patching triton.autotune
     triton.autotune = _patched_autotune
+
+    # Patch Gluon kernels with the Gluon frontend.
+    _gluon.jit = create_patched_jit(
+        wrapper_func,
+        _original_gluon_jit,
+        frontend="gluon",
+    )
 
     # run user script
     if len(sys.argv) < 2:
