@@ -114,6 +114,33 @@ def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     tl.store(out_ptr + offs, x + y, mask=mask)
 
 
+@triton.jit
+def tile2d_kernel(in_ptr, out_ptr, M, N, stride_m, stride_n,
+                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):  # fmt: skip
+    """2D tile copy: independent row/col arange instances, per-axis masks ANDed."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    ptrs = in_ptr + offs_m[:, None] * stride_m + offs_n[None, :] * stride_n
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    vals = tl.load(ptrs, mask=mask, other=0.0)
+    optrs = out_ptr + offs_m[:, None] * stride_m + offs_n[None, :] * stride_n
+    tl.store(optrs, vals * 2.0, mask=mask)
+
+
+@triton.jit
+def gather_kernel(idx_ptr, src_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
+    """Indirect/gather: a loaded value feeds the second load's address —
+    the data-dependent pattern the compiled sanitizer marks unsupported."""
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    idx = tl.load(idx_ptr + offs, mask=mask, other=0)
+    vals = tl.load(src_ptr + idx, mask=mask, other=0.0)
+    tl.store(out_ptr + offs, vals, mask=mask)
+
+
 # ----------------------------------------------------------------------------
 # Compile helpers
 # ----------------------------------------------------------------------------
@@ -202,4 +229,37 @@ if __name__ == "__main__":
         num_warps=4,
     )
     dump("add", add_kernel, ADD_SIG, ADD_CONST, ADD_ATTRS, num_stages=3, num_warps=4)
+    dump(
+        "tile2d",
+        tile2d_kernel,
+        {
+            "in_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "M": "i32",
+            "N": "i32",
+            "stride_m": "i32",
+            "stride_n": "i32",
+            "BLOCK_M": "constexpr",
+            "BLOCK_N": "constexpr",
+        },  # fmt: skip
+        {"BLOCK_M": 32, "BLOCK_N": 32},
+        {(i,): [["tt.divisibility", 16]] for i in range(6)},
+        num_stages=1,
+        num_warps=4,
+    )
+    dump(
+        "gather",
+        gather_kernel,
+        {
+            "idx_ptr": "*i32",
+            "src_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n_elements": "i32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 256},
+        {(i,): [["tt.divisibility", 16]] for i in range(4)},
+        num_stages=1,
+        num_warps=4,
+    )
     print("done")

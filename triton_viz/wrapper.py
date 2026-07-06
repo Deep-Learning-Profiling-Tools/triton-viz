@@ -12,6 +12,7 @@ from triton_viz.core.config import config as cfg
 
 # Command names
 SANITIZER_COMMAND = "triton-sanitizer"
+SANITIZER_COMPILED_COMMAND = "triton-sanitizer-compiled"
 PROFILER_COMMAND = "triton-profiler"
 RACE_DETECTOR_COMMAND = "triton-race-detector"
 COMPILED_RACE_DETECTOR_COMMAND = "triton-compiled-race-detector"
@@ -26,6 +27,20 @@ def sanitizer_wrapper(kernel, *, frontend: str = "triton"):
     abort_on_error = True
     tracer = triton_viz.trace(
         client=Sanitizer(abort_on_error=abort_on_error),
+        frontend=frontend,
+    )
+    return tracer(kernel)
+
+
+def sanitizer_compiled_wrapper(kernel, *, frontend: str = "triton"):
+    # Compiled-mode sanitizer: statically checks out-of-bounds from the
+    # kernel's TTIR (captured via the real compilation warmup) instead of
+    # interpreting the kernel. A SAT witness aborts like the eager sanitizer;
+    # unsupported constructs (data-dependent addressing, block pointers,
+    # nested loops, ...) are reported as unsupported rather than aborting.
+    abort_on_error = True
+    tracer = triton_viz.trace(
+        client=Sanitizer(compile=True, abort_on_error=abort_on_error),
         frontend=frontend,
     )
     return tracer(kernel)
@@ -152,6 +167,20 @@ def apply_sanitizer():
         sanitizer_wrapper,
         SANITIZER_COMMAND,
         f"Usage: {SANITIZER_COMMAND} <script.py> [args...]",
+    )
+
+
+def apply_sanitizer_compiled():
+    """
+    Apply the compiled-mode sanitizer wrapper to triton.jit and run the user
+    script. Unlike triton-sanitizer (which interprets the kernel), this warms
+    up the real compilation to capture TTIR and checks out-of-bounds
+    statically.
+    """
+    _apply_wrapper(
+        sanitizer_compiled_wrapper,
+        SANITIZER_COMPILED_COMMAND,
+        f"Usage: {SANITIZER_COMPILED_COMMAND} <script.py> [args...]",
     )
 
 

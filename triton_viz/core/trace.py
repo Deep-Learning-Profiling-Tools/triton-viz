@@ -247,7 +247,16 @@ class TritonTrace(LaunchInterface, TraceInterface):
 
         with self.client_manager.patch_warmup(self.jit_fn):
             if self.warmup_runner:
-                self.warmup_runner.warmup(*args, **kwargs)
+                # Real warmup compilation walks the kernel AST to hash and
+                # inline referenced device functions. When a kernel calls a
+                # `@triton.jit` helper that we have also wrapped in trace()
+                # (the CLI / "wrap every jit" pattern), that helper global is a
+                # TritonTrace, which triton's dependency walker rejects
+                # ("Unsupported function referenced"). Only compiled-mode
+                # clients trigger this warmup; eager traces skip it. Present the
+                # raw jit_fns to the compiler, then restore the wrappers.
+                with _unwrap_traced_globals(self.base_fn):
+                    self.warmup_runner.warmup(*args, **kwargs)
 
         with self.client_manager.patch_run(self.base_fn, frontend_name="triton"):
             kwargs.update({"client_manager": self.client_manager})
@@ -279,6 +288,45 @@ class TritonTrace(LaunchInterface, TraceInterface):
         with self.client_manager.patch_warmup(self.jit_fn):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
+
+
+@contextmanager
+def _unwrap_traced_globals(base_fn: Callable | None):
+    """Temporarily replace any TritonTrace in the kernel's reachable globals
+    with its underlying jit_fn, for the duration of a real warmup compilation.
+
+    A device function (``@triton.jit`` helper called from inside another
+    kernel) wrapped in trace() appears as a TritonTrace. triton's dependency
+    walker and codegen only accept JITCallables, so they raise "Unsupported
+    function referenced" on the wrapper. Kernel and same-module helpers share
+    one module dict, so swapping every TritonTrace there resolves the common
+    case; a helper imported from another module is reached as ``mod.helper``,
+    so we also descend one level into module objects in the kernel's globals
+    (only TritonTrace entries are touched, and everything is restored).
+    """
+    g = getattr(base_fn, "__globals__", None)
+    if g is None:
+        yield
+        return
+    saved: list[tuple[dict, str, Any]] = []
+
+    def unwrap(container: dict) -> None:
+        for name, val in list(container.items()):
+            if isinstance(val, TritonTrace) and val.jit_fn is not None:
+                saved.append((container, name, val))
+                container[name] = val.jit_fn
+
+    unwrap(g)
+    for val in list(g.values()):
+        if isinstance(val, types.ModuleType):
+            mod_dict = getattr(val, "__dict__", None)
+            if isinstance(mod_dict, dict):
+                unwrap(mod_dict)
+    try:
+        yield
+    finally:
+        for container, name, val in saved:
+            container[name] = val
 
 
 class NKITrace(LaunchInterface, TraceInterface):
