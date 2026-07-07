@@ -24,10 +24,11 @@ a violation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
-from z3 import And, ArithRef, BoolRef, If, Int, IntVal, Or, Solver, sat
+from z3 import And, ArithRef, BoolRef, If, Int, IntVal, Or, Solver, is_bool, sat
 
-from .ttir_reader import (
+from ...common.ttir_reader import (
     AccessEvent,
     AccessGraph,
     Arange,
@@ -63,7 +64,7 @@ class LaunchContext:
 
 @dataclass(frozen=True)
 class CompiledOOB:
-    kind: str  # "load" | "store"
+    kind: str  # "load" | "store" | "atomic_rmw" | "atomic_cas"
     base_param: str
     violation_offset: int
     violation_address: int
@@ -143,6 +144,13 @@ def _trunc_div(a: ArithRef, b: ArithRef) -> ArithRef:
     return If((a >= 0) == (b >= 0), q, -q)
 
 
+def _as_bool(e: Any) -> Any:
+    """Coerce an evaluated term into a Z3 Bool. Integer i1 constants (e.g.
+    the dense<true> mask of an unmasked atomic parse to Const(1)) arrive as
+    Int sort; a boolean position needs ``e != 0`` instead."""
+    return e if is_bool(e) else e != 0
+
+
 def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
     """Lower an integer/bool address term to Z3 under the launch context."""
     if isinstance(term, Const):
@@ -191,10 +199,10 @@ def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
             raise UnsupportedTTIR(f"unknown cmp predicate {term.pred}")
         return table[term.pred]
     if isinstance(term, BoolBin):
-        a, b = _eval(term.a, env, graph), _eval(term.b, env, graph)
+        a, b = _as_bool(_eval(term.a, env, graph)), _as_bool(_eval(term.b, env, graph))
         return And(a, b) if term.op == "and" else Or(a, b)
     if isinstance(term, Select):
-        return If(_eval(term.cond, env, graph), _eval(term.t, env, graph),
+        return If(_as_bool(_eval(term.cond, env, graph)), _eval(term.t, env, graph),
                   _eval(term.f, env, graph))  # fmt: skip
     if isinstance(term, DataDep):
         raise UnsupportedTTIR(f"data-dependent term ({term.why})")
@@ -253,7 +261,7 @@ def check_access(
     for c in env.constraints:
         solver.add(c)
     if access.mask is not None:
-        solver.add(_eval(access.mask, env, graph))
+        solver.add(_as_bool(_eval(access.mask, env, graph)))
     # OOB: element offset escapes [0, numel-1].
     solver.add(Or(offset < 0, offset >= meta.numel))
 

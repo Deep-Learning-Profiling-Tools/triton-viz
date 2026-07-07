@@ -460,13 +460,15 @@ solve times, mutation-detection matrix; case studies from historical pipeliner b
 
 ## III.1 Existing assets (verified in-tree — do not rebuild these)
 
-- **`triton_viz/clients/sanitizer/compiled/ttir_reader.py`** (~760 lines): `parse_ttir`
+- **`triton_viz/clients/common/ttir_reader.py`** (~760 lines; promoted from
+  `clients/sanitizer/compiled/` in S1, old path kept as a re-export shim): `parse_ttir`
   → `AccessGraph` with per-access Term chains (offset, mask), source locs, `DataDep`
   markers for loaded values (the indirect-indexing signal, ready-made), and `guarded`
-  flags for scf.if regions. The vocabulary already covers `tt.load/store/atomic_*`,
-  `tt.addptr/splat/broadcast/expand_dims/make_range/get_program_id`, `arith.*`,
-  `scf.for/if/yield`. Nested/multiple loops → `UnsupportedTTIR`
-  (`ttir_reader.py:396`).
+  flags for scf.if regions. The vocabulary covers `tt.load/store`,
+  `tt.atomic_rmw/atomic_cas` (added in S1; float atomic max/min's sign-trick lowering
+  stays fail-closed), `tt.addptr/splat/broadcast/expand_dims/make_range/get_program_id`,
+  `arith.*`, `scf.for/if/yield`. Nested/multiple loops → `UnsupportedTTIR`
+  (`ttir_reader.py:399`).
 - **`triton_viz/clients/sanitizer/compiled/oob.py`**: `_eval` Term→Z3 evaluator;
   `LoopVar` is already a free variable over `[lower, upper)` — **no unrolling is the
   status quo**, not a work item; `_loop_bounds` concretizes bounds at launch (raises
@@ -496,17 +498,28 @@ condition modeling (S2).
 
 - Promote `ttir_reader` to a shared module (shared code stays mechanism-only, each
   client owns its policy — the same narrow-hooks rule as Track 1); the sanitizer path
-  keeps a re-export for compatibility.
+  keeps a re-export for compatibility. **Done** → `triton_viz/clients/common/ttir_reader.py`.
 - The race-detector compiled client captures `asm["ttir"]` alongside its existing TTGIR
-  capture; parse cache copied from the sanitizer pattern.
-- Atomics get race semantics: `tt.atomic_*` (currently recorded as a plain access)
-  becomes RMW = read event + write event + atomicity flag; the solver side
-  (`_exact_atomic_addr`, mutual atomicity) is reused untouched.
+  capture; parse cache copied from the sanitizer pattern. **Done** —
+  `_consume_pending_ttir` in `race_detector/compiled/client.py`; parse failures are
+  recorded per kernel (`last_ttir_unsupported`) and never touch the TTGIR verdict.
+- Atomics get race semantics. **Done, with two corrections to the original premise**:
+  (a) `tt.atomic_*` was not "recorded as a plain access" before — it FAILED CLOSED in
+  the reader; (b) rather than emitting two reader events, an atomic parses into a
+  single `AccessEvent` with `kind="atomic_rmw"|"atomic_cas"`,
+  `AtomicInfo(rmw_op, sem, scope)` and `is_read`/`is_write` both true — the expansion
+  into separate read+write solver events belongs to the S3 record builder (two reader
+  events would double-report sanitizer OOB). Float `tl.atomic_max/min` lower to a
+  sign-trick dance (pointer `tt.bitcast`, masks derived from the loaded value) and
+  correctly stay fail-closed — golden `atomic_fmax_*.ttir` pins this. The solver side
+  (`_exact_atomic_addr`, mutual atomicity) is untouched, as planned.
 - The single-loop limitation stays and is **written into the support matrix**, so S5's
   numbers aren't a surprise.
 
-*Exit*: the race-detector client parses a stock kernel's TTIR into an `AccessGraph`
-with atomic RMW events; the sanitizer suite stays green.
+*Exit*: **met** — the race-detector client parses stock TTIR into `AccessGraph`s with
+atomic RMW events (`tests/unit/test_compiled_race_detector_ttir.py`,
+`tests/unit/test_ttir_reader_atomics.py`; goldens `atomic`/`atomic_fmax`/`cas`);
+sanitizer OOB now also checks atomics (side benefit) and its suite stays green.
 
 ### S2 — scf.if condition modeling + per-term DataDep policy (≈1 week — the core new work)
 

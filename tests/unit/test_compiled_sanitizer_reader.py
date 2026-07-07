@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+# Deliberately imports via the back-compat shim (the reader lives in
+# triton_viz.clients.common.ttir_reader) so the shim surface stays covered.
 from triton_viz.clients.sanitizer.compiled.ttir_reader import (
     Arange,
     Bin,
@@ -17,6 +19,20 @@ GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "ttgir"
 
 def _read(name):
     return (GOLDEN / name).read_text()
+
+
+def _mini(*body_lines):
+    """Wrap op lines in a minimal parseable TTIR module."""
+    body = "\n    ".join(body_lines)
+    return (
+        "module {\n"
+        "  tt.func public @k(%x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>)"
+        " attributes {noinline = false} {\n"
+        f"    {body}\n"
+        "    tt.return\n"
+        "  }\n"
+        "}\n"
+    )
 
 
 def test_add_kernel_access_graph():
@@ -190,13 +206,51 @@ def test_store_of_multi_result_value_is_recorded():
     assert store.mask is not None  # the mask operand still parsed
 
 
-def test_atomic_op_fails_closed():
-    """Atomics are real memory accesses the v1 model does not check. They must
-    be reported unsupported, not become an unchecked DataDep result that lets
-    the rest of the kernel still prove in-bounds."""
+def test_malformed_atomic_syntax_fails_closed():
+    """Well-formed tt.atomic_rmw/cas parse into AccessEvents (see
+    test_ttir_reader_atomics.py); an atomic line the regexes do NOT match
+    (here: missing sem/scope operands) must still be reported unsupported,
+    not become an unchecked DataDep result that lets the rest of the kernel
+    prove in-bounds."""
     text = _read("add_sm80.ttir").replace(
         "tt.store %1, %2, %mask_3 : tensor<1024x!tt.ptr<f32>> loc(#loc13)",
         "%atom = tt.atomic_rmw fadd, %1, %2, %mask_3 : tensor<1024xf32> loc(#loc13)",
     )
     with pytest.raises(UnsupportedTTIR, match="unsupported memory op"):
+        parse_ttir(text)
+
+
+def test_bitwise_andi_on_wide_ints_fails_closed_in_addresses():
+    """arith.andi on non-i1 integers is BITWISE math, not boolean logic;
+    modeled as And/Or it would collapse ``offs & 8`` (footprint {0, 8}) to a
+    {0, 1} truth value — a false in-bounds proof. It must degrade to DataDep
+    so an address use fails closed."""
+    text = _mini(
+        "%c8 = arith.constant dense<8> : tensor<64xi32>",
+        "%r = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32>",
+        "%a = arith.andi %r, %c8 : tensor<64xi32>",
+        "%p = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<64x!tt.ptr<f32>>",
+        "%q = tt.addptr %p, %a : tensor<64x!tt.ptr<f32>>, tensor<64xi32>",
+        "%s = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<64x!tt.ptr<f32>>",
+        "%v = tt.load %s : tensor<64x!tt.ptr<f32>>",
+        "tt.store %q, %v : tensor<64x!tt.ptr<f32>>",
+    )
+    with pytest.raises(UnsupportedTTIR):
+        parse_ttir(text)
+
+
+def test_descriptor_memory_ops_fail_closed():
+    """tt.descriptor_* are real global accesses outside the vocabulary; they
+    must not fall through as an unmodeled-op DataDep while check_graph proves
+    'ok' without having checked them."""
+    text = _mini("%w = tt.descriptor_load %x_ptr : !tt.whatever")
+    with pytest.raises(UnsupportedTTIR, match="unsupported memory op"):
+        parse_ttir(text)
+
+
+def test_unknown_program_id_axis_fails_closed():
+    """Printer drift in the pid axis must surface as UnsupportedTTIR, not a
+    bare KeyError escaping into the client's launch teardown."""
+    text = _mini("%pid = tt.get_program_id q : i32")
+    with pytest.raises(UnsupportedTTIR, match="program-id axis"):
         parse_ttir(text)

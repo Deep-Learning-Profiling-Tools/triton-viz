@@ -9,6 +9,8 @@ from triton_viz.clients.sanitizer.compiled.oob import (
 )
 import pytest
 
+# Deliberately imports via the back-compat shim (the reader lives in
+# triton_viz.clients.common.ttir_reader) so the shim surface stays covered.
 from triton_viz.clients.sanitizer.compiled.ttir_reader import (
     AccessEvent,
     AccessGraph,

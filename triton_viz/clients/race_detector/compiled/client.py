@@ -6,6 +6,13 @@ returns True; ``post_warmup_callback`` receives the ``CompiledKernel`` whose
 ASTSource, which would miss the divisibility specialization and silently
 analyze unpipelined IR). Analysis is cached per compiled-kernel hash.
 
+The same warmup also captures ``.asm["ttir"]`` and parses it into the shared
+:class:`AccessGraph` (global-memory access footprints, atomic RMW metadata).
+This is the Track 2 capture front-end: graphs are parsed and cached per
+specialization but not yet encoded — the global-memory race queries land in
+a later step, and a TTIR parse failure never affects the TTGIR shared-memory
+verdict (``last_status``).
+
 The client registers no op overriders and needs nothing from the interpreted
 grid run: ``pre_run_callback`` returns False to skip each block's body
 entirely (the static analysis works off the warmup TTGIR alone). Because
@@ -27,6 +34,7 @@ from ....core.callbacks import ForLoopCallbacks, OpCallbacks
 from ....core.client import Client
 from ....core.config import config as cfg
 from ....core.data import Op
+from ...common.ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
 from .smt_encoder import AnalysisResult, analyze_ttgir
 
 _RE_TTGIR_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\(")
@@ -77,6 +85,14 @@ class CompiledRaceDetector(Client):
         # (a soundness boundary), so it must be collision-resistant and
         # reproducible, not process-randomized.
         self._analysis_cache: dict[str, AnalysisResult] = {}
+        # Track 2 (global memory over TTIR) capture: per-launch pending texts,
+        # a per-specialization parse cache (same SHA-256 rationale — parsed
+        # footprints will back race verdicts), and the last launch's parse
+        # results as parallel lists (graph, or None + the unsupported reason).
+        self._pending_ttir: list[str] = []
+        self._ttir_graph_cache: dict[str, tuple[AccessGraph | None, str | None]] = {}
+        self.last_ttir_graphs: list[AccessGraph | None] = []
+        self.last_ttir_unsupported: list[str | None] = []
 
     # ── compilation hooks ─────────────────────────────────────────────
 
@@ -85,9 +101,12 @@ class CompiledRaceDetector(Client):
 
     def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
         asm = getattr(ret, "asm", None)
-        if not asm or "ttgir" not in asm:
+        if not asm:
             return
-        self._pending_ttgir.append(asm["ttgir"])
+        if "ttgir" in asm:
+            self._pending_ttgir.append(asm["ttgir"])
+        if "ttir" in asm:
+            self._pending_ttir.append(asm["ttir"])
 
     # ── interpreted-run hooks (analysis needs none of this) ───────────
 
@@ -95,10 +114,13 @@ class CompiledRaceDetector(Client):
         pass
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
+        # NOTE: the warmup-only production path never runs the interpreted
+        # grid loop, so this callback is NOT a reliable per-launch reset
+        # point — finalize() owns the resets. These stay only for the
+        # composed/interpreted path's mid-launch consistency.
         self.last_reports = []
         self.last_status = "ok"
         self.unsupported_reason = None
-        self.smtlib = []
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
         pass
@@ -126,7 +148,41 @@ class CompiledRaceDetector(Client):
 
     # ── analysis ──────────────────────────────────────────────────────
 
+    def _consume_pending_ttir(self) -> None:
+        """Parse this launch's TTIR into AccessGraphs (Track 2 capture).
+
+        Resets ``last_ttir_*`` first: finalize() is the per-launch reset
+        point (grid_callback never fires on the warmup-only path). Failures
+        are recorded per kernel in ``last_ttir_unsupported`` and never
+        escalate to ``last_status`` — the TTGIR shared-memory verdict is
+        independent of the global-memory front-end. Nothing raised here may
+        escape: finalize runs in the trace teardown of the user's real
+        launch.
+        """
+        self.last_ttir_graphs = []
+        self.last_ttir_unsupported = []
+        for text in self._pending_ttir:
+            key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if key not in self._ttir_graph_cache:
+                try:
+                    self._ttir_graph_cache[key] = (parse_ttir(text), None)
+                except UnsupportedTTIR as e:
+                    self._ttir_graph_cache[key] = (None, str(e))
+                except Exception as e:  # noqa: BLE001
+                    # Reader bug or printer drift: degrade to unsupported,
+                    # never crash the launch.
+                    self._ttir_graph_cache[key] = (None, f"{type(e).__name__}: {e}")
+            graph, reason = self._ttir_graph_cache[key]
+            self.last_ttir_graphs.append(graph)
+            self.last_ttir_unsupported.append(reason)
+        self._pending_ttir = []
+
     def finalize(self) -> list:
+        # Per-launch reset point (see grid_callback note): smtlib is extended
+        # below, so it must be cleared here or it accumulates across launches
+        # on the warmup-only path.
+        self.smtlib = []
+        self._consume_pending_ttir()
         if not self._pending_ttgir:
             # Warmup never delivered IR (e.g. driverless environment where
             # JITFunction.run could not bind a device). Distinguish from a

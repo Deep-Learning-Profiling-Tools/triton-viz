@@ -14,9 +14,9 @@ interpretation automatically; run the eager ``Sanitizer()`` to check an
 unsupported kernel.
 """
 
+from ...common.ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
 from .client import CompiledSanitizer
 from .oob import CompiledOOB, LaunchContext, TensorMeta, check_graph
-from .ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
 
 __all__ = [
     "AccessGraph",

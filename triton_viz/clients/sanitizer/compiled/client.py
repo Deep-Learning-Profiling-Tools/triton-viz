@@ -29,10 +29,10 @@ from ....core.client import Client
 from ....core.config import config as cfg
 from ....core.data import Load, Op, Store
 from ....utils.traceback_utils import location_to_traceback_info
+from ...common.ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
 from ..data import OutOfBoundsRecordZ3
 from ..report import print_oob_record
 from .oob import LaunchContext, TensorMeta, check_graph
-from .ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
 
 
 class CompiledSanitizer(Client):
@@ -195,7 +195,9 @@ class CompiledSanitizer(Client):
         return list(self.records)
 
     def _emit(self, graph: AccessGraph, v: Any) -> None:
-        op_type: type[Load] | type[Store] = Store if v.kind == "store" else Load
+        # Atomics are RMW; report them on the write side (the hazardous
+        # direction for an out-of-bounds address).
+        op_type: type[Load] | type[Store] = Load if v.kind == "load" else Store
         tensor = self._tensor_obj.get(v.base_param)
         if v.loc_file is not None and v.loc_line is not None:
             tb = [

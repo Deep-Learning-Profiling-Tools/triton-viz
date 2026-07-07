@@ -130,6 +130,39 @@ def tile2d_kernel(in_ptr, out_ptr, M, N, stride_m, stride_n,
 
 
 @triton.jit
+def atomic_kernel(x_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
+    """Atomic RMW coverage: a masked tl.atomic_add plus an unmasked
+    tl.atomic_xchg (its mask prints as a dense<true> constant) whose
+    result feeds a plain store."""
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    v = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    tl.atomic_add(out_ptr + offs, v, mask=mask)
+    old = tl.atomic_xchg(out_ptr + offs, v)
+    tl.store(x_ptr + offs, old, mask=mask)
+
+
+@triton.jit
+def atomic_fmax_kernel(x_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
+    """Float tl.atomic_max: lowers to a sign-trick dance — the pointer is
+    tt.bitcast to i32 and the two RMWs' masks derive from the loaded value —
+    so the TTIR reader must fail closed (data-dependent pointer/mask)."""
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    v = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    tl.atomic_max(out_ptr + offs, v, mask=mask)
+
+
+@triton.jit
+def cas_kernel(lock_ptr, out_ptr):
+    """Scalar tt.atomic_cas (no mask operand) on a raw pointer argument."""
+    old = tl.atomic_cas(lock_ptr, 0, 1)
+    tl.store(out_ptr, old)
+
+
+@triton.jit
 def gather_kernel(idx_ptr, src_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
     """Indirect/gather: a loaded value feeds the second load's address —
     the data-dependent pattern the compiled sanitizer marks unsupported."""
@@ -244,6 +277,43 @@ if __name__ == "__main__":
         },  # fmt: skip
         {"BLOCK_M": 32, "BLOCK_N": 32},
         {(i,): [["tt.divisibility", 16]] for i in range(6)},
+        num_stages=1,
+        num_warps=4,
+    )
+    dump(
+        "atomic",
+        atomic_kernel,
+        {
+            "x_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n_elements": "i32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 256},
+        {(i,): [["tt.divisibility", 16]] for i in range(3)},
+        num_stages=1,
+        num_warps=4,
+    )
+    dump(
+        "atomic_fmax",
+        atomic_fmax_kernel,
+        {
+            "x_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n_elements": "i32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 256},
+        {(i,): [["tt.divisibility", 16]] for i in range(3)},
+        num_stages=1,
+        num_warps=4,
+    )
+    dump(
+        "cas",
+        cas_kernel,
+        {"lock_ptr": "*i32", "out_ptr": "*i32"},
+        {},
+        {(i,): [["tt.divisibility", 16]] for i in range(2)},
         num_stages=1,
         num_warps=4,
     )
