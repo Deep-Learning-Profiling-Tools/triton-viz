@@ -9,9 +9,11 @@ interpreted execution. Selected via ``Sanitizer(compile=True)``.
 
 Data-dependent (gather/indirect) addressing, block pointers,
 non-contiguous tensors, and nested loops are reported as ``unsupported``
-(empty records, ``last_status="unsupported"``). v1 does not fall back to
-interpretation automatically; run the eager ``Sanitizer()`` to check an
-unsupported kernel.
+(empty records, ``last_status="unsupported"``). A data-dependent MASK is
+over-approximated as free instead: proofs still land, and a potential OOB
+behind one abstains rather than reporting an uncertain witness. v1 does
+not fall back to interpretation automatically; run the eager
+``Sanitizer()`` to check an unsupported kernel.
 """
 
 from ...common.ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir

@@ -162,12 +162,17 @@ class CompiledRaceDetector(Client):
         self.last_ttir_graphs = []
         self.last_ttir_unsupported = []
         for text in self._pending_ttir:
-            key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            # errors="replace": a hash key must never raise (lone surrogates
+            # in a hostile string would otherwise escape finalize).
+            key = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
             if key not in self._ttir_graph_cache:
                 try:
                     self._ttir_graph_cache[key] = (parse_ttir(text), None)
                 except UnsupportedTTIR as e:
-                    self._ttir_graph_cache[key] = (None, str(e))
+                    # "kind: message" — the stable kind prefix is what the
+                    # hybrid tier selector will route on (indirect-address →
+                    # interpreter front-end) and what the evaluation buckets.
+                    self._ttir_graph_cache[key] = (None, f"{e.kind}: {e}")
                 except Exception as e:  # noqa: BLE001
                     # Reader bug or printer drift: degrade to unsupported,
                     # never crash the launch.

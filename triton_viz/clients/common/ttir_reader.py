@@ -32,11 +32,23 @@ from dataclasses import dataclass, field
 
 
 class UnsupportedTTIR(Exception):
-    """Raised for constructs outside the compiled sanitizer's v1 model
+    """Raised for constructs outside the compiled-mode v1 model
     (indirect/data-dependent addressing, block pointers, nested loops, ...).
     The client converts this into an ``unsupported`` status (empty records) —
     never a silent wrong verdict. v1 does not auto-fall back to interpreted
-    checking; run the eager ``Sanitizer()`` to check an unsupported kernel."""
+    checking; run the eager ``Sanitizer()`` to check an unsupported kernel.
+
+    ``kind`` is a stable, machine-readable class of the limitation — the
+    hybrid tier selector routes on it (an "indirect-address" kernel goes to
+    the interpreter front-end) and the evaluation reports its distribution:
+    "indirect-address" | "data-dependent-bound" | "nested-loop" |
+    "out-of-vocabulary" | "control-flow" | "block-pointer" |
+    "unmodelable-condition" | "data-dependent-mask" | "other".
+    """
+
+    def __init__(self, msg: str, kind: str = "other") -> None:
+        super().__init__(msg)
+        self.kind = kind
 
 
 # ─────────────────────────── address-expression terms ───────────────────────────
@@ -133,6 +145,26 @@ class DataDep:
     why: str = "value derived from loaded data"
 
 
+# DataDep is also the generic unknown-value top (unresolved SSA, loop
+# accumulators, unmodeled ops, ...). Only these ``why`` prefixes mean the
+# value truly derives from MEMORY CONTENTS — the per-term policy classifies
+# just those as indirection (the interpreter-front-end route); the rest are
+# modeling gaps and keep the default kind.
+_MEMORY_WHYS = (
+    "loaded value",
+    "atomic result",
+    "arith over loaded data",
+    "cmpi over loaded data",
+    "select over loaded data",
+    "bool op over loaded data",
+    "float/reduction value",
+)
+
+
+def _from_memory(v: object) -> bool:
+    return isinstance(v, DataDep) and v.why.startswith(_MEMORY_WHYS)
+
+
 Term = (
     Const
     | Pid
@@ -209,6 +241,12 @@ class AccessEvent:
     # footprint (RMW), which is what is_read/is_write encode for consumers
     # that build read/write event pairs (the race detector front-end).
     atomic: AtomicInfo | None = None
+    # True when the printed mask operand derived from loaded data and was
+    # over-approximated as FREE (mask=None): dropping a constraint only
+    # widens the modeled footprint, so UNSAT stays a sound proof — but a SAT
+    # model may pick a lane the real mask disables, so it follows the same
+    # uncertainty discipline as ``guarded`` (never reported as a witness).
+    mask_dropped: bool = False
 
     @property
     def is_read(self) -> bool:
@@ -258,7 +296,8 @@ class AccessGraph:
 # `tt.store %ptrs, %acc#2, %mask` fail to match the store regex and fail
 # closed even though the stored VALUE plays no part in address math. The env
 # never defines `%x#N` names, so val() resolves them to DataDep("unresolved
-# SSA") — sound in every consuming position (mask/addptr → unsupported).
+# SSA") — sound in every consuming position (mask → dropped and flagged
+# ``mask_dropped``, i.e. proof-only; addptr/ptr → unsupported).
 _SSA = r"%[\w.]+(?:#\d+)?"
 _DTYPE_BITS = {
     "f64": 64, "f32": 32, "f16": 16, "bf16": 16, "f8": 8,
@@ -478,17 +517,37 @@ def parse_ttir(text: str) -> AccessGraph:
             # under an scf.if runs a condition-dependent iteration count;
             # reject rather than silently mis-bound the induction var.
             if loop is not None or frames:
-                raise UnsupportedTTIR(f"line {line_no}: multiple/nested loops")
+                raise UnsupportedTTIR(
+                    f"line {line_no}: multiple/nested loops",
+                    # A loop under an scf.if runs a branch-dependent
+                    # iteration count — a control-flow limitation, not one
+                    # more induction variable.
+                    kind=(
+                        "control-flow"
+                        if any(isinstance(f, _IfFrame) for f in frames)
+                        else "nested-loop"
+                    ),
+                )
             ind, lo, up, st, iters = fm.groups()
             pairs: list[tuple[str, str]] = []
             if iters:
                 pairs = list(re.findall(rf"({_SSA}) = ({_SSA})", iters))
+            bound_terms: dict[str, Term] = {}
+            for label, ssa in (("lower", lo), ("upper", up), ("step", st)):
+                bv = val(ssa)
+                if isinstance(bv, DataDep):
+                    # The CSR shape: for k in range(loaded_start, loaded_end).
+                    raise UnsupportedTTIR(
+                        f"loop {label} bound: data-dependent ({bv.why})",
+                        kind="data-dependent-bound" if _from_memory(bv) else "other",
+                    )
+                bound_terms[label] = as_term(bv, f"loop {label}")
             loop_meta = {
                 "ssa": res or "%loop",
                 "ind": ind,
-                "lower": as_term(val(lo), "loop lower"),
-                "upper": as_term(val(up), "loop upper"),
-                "step": as_term(val(st), "loop step"),
+                "lower": bound_terms["lower"],
+                "upper": bound_terms["upper"],
+                "step": bound_terms["step"],
             }
             # Bind induction var as a loop free variable.
             env[ind] = LoopVar(res or "%loop")
@@ -621,7 +680,8 @@ def parse_ttir(text: str) -> AccessGraph:
             ("scf.for", "scf.if", "scf.yield")
         ):
             raise UnsupportedTTIR(
-                f"line {line_no}: control flow {body.split(' ', 1)[0]} is unsupported"
+                f"line {line_no}: control flow {body.split(' ', 1)[0]} is unsupported",
+                kind="control-flow",
             )
 
         # ---- value-producing ops ----
@@ -725,7 +785,8 @@ def parse_ttir(text: str) -> AccessGraph:
             )
         ):
             raise UnsupportedTTIR(
-                f"line {line_no}: unsupported memory op syntax: {body[:60]}"
+                f"line {line_no}: unsupported memory op syntax: {body[:60]}",
+                kind="out-of-vocabulary",
             )
 
         # ---- ops whose result is just data (ignored) ----
@@ -751,7 +812,10 @@ def parse_ttir(text: str) -> AccessGraph:
         if body.startswith(("tt.return", "tt.reduce.return")):
             continue
         if body.startswith("tt.make_block_ptr") or body.startswith("tt.advance"):
-            raise UnsupportedTTIR(f"line {line_no}: block pointers are unsupported")
+            raise UnsupportedTTIR(
+                f"line {line_no}: block pointers are unsupported",
+                kind="block-pointer",
+            )
         # Unknown op producing a value used downstream → conservative DataDep.
         if res is not None:
             env[res] = DataDep(f"unmodeled op at line {line_no}")
@@ -814,7 +878,10 @@ def _parse_value_op(body, res, env, val, as_term, base_elem_bits) -> bool:
         if axis is None:
             # Printer drift must surface as the designed error, not a bare
             # KeyError escaping into the client's launch teardown.
-            raise UnsupportedTTIR(f"unknown program-id axis {m.group(1)!r}")
+            raise UnsupportedTTIR(
+                f"unknown program-id axis {m.group(1)!r}",
+                kind="out-of-vocabulary",
+            )
         env[res] = Pid(axis)
         return True
     m = _RE_MAKE_RANGE.match(body)
@@ -861,8 +928,22 @@ def _parse_value_op(body, res, env, val, as_term, base_elem_bits) -> bool:
     if m:
         base, off = val(m.group(1)), val(m.group(2))
         if not isinstance(base, PtrValue):
-            raise UnsupportedTTIR("addptr base is not a pointer")
-        off_t = as_term(off, "addptr offset")  # DataDep here → indirect → unsupported
+            raise UnsupportedTTIR(
+                "addptr base is not a pointer",
+                kind="indirect-address" if _from_memory(base) else "other",
+            )
+        if isinstance(off, DataDep):
+            # A value in an address chain that cannot be modeled: a free
+            # address makes the query meaningless, so this stays
+            # whole-kernel unsupported. Only offsets truly derived from
+            # MEMORY CONTENTS classify as indirection (the interpreter
+            # front-end route); modeling gaps (loop accumulators, unmodeled
+            # ops, ...) keep the default kind so the buckets stay honest.
+            raise UnsupportedTTIR(
+                f"addptr offset: data-dependent ({off.why})",
+                kind="indirect-address" if _from_memory(off) else "other",
+            )
+        off_t = as_term(off, "addptr offset")
         env[res] = PtrValue(base.base_param, Bin("+", base.offset, off_t))
         return True
     m = _RE_BIN.match(body)
@@ -939,20 +1020,27 @@ def _record_access(
 ) -> None:
     ptr = val(ptr_ssa)
     if not isinstance(ptr, PtrValue):
-        raise UnsupportedTTIR(f"line {line_no}: {kind} of a non-pointer value")
+        raise UnsupportedTTIR(
+            f"line {line_no}: {kind} of a non-pointer value",
+            kind="indirect-address" if _from_memory(ptr) else "other",
+        )
     # Mask: for load it's the first trailing operand; for store the operand
     # after value. _RE_LOAD captures trailing ", %x" groups; for store the
     # caller passed the post-value trailing operands.
     mask: Term | None = None
+    mask_dropped = False
     trailing = _split_ssa(extra_ops) if extra_ops else []
     if trailing:
         mv = val(trailing[0])
         if isinstance(mv, DataDep):
-            # Mask derived from loaded data — can't reason statically.
-            raise UnsupportedTTIR(f"line {line_no}: data-dependent mask")
-        if isinstance(mv, PtrValue):
+            # Mask derived from loaded data: over-approximate it as free
+            # (any lane may be active) instead of failing the whole kernel.
+            # See AccessEvent.mask_dropped for the soundness discipline.
+            mask_dropped = True
+        elif isinstance(mv, PtrValue):
             raise UnsupportedTTIR(f"line {line_no}: pointer as mask")
-        mask = mv  # type: ignore[assignment]
+        else:
+            mask = mv  # type: ignore[assignment]
     accesses.append(
         AccessEvent(
             kind=kind,
@@ -965,5 +1053,6 @@ def _record_access(
             guarded=guarded,
             atomic=atomic,
             path=path,
+            mask_dropped=mask_dropped,
         )
     )

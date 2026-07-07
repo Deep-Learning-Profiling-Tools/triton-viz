@@ -309,27 +309,42 @@ def check_graph(graph: AccessGraph, ctx: LaunchContext) -> list[CompiledOOB]:
 
     An access under a MODELED scf.if condition carries it as ``path`` and is
     checked precisely (the path constrains the query, so SAT is a real,
-    reachable witness). ``guarded`` now only marks accesses under an
-    UNMODELABLE condition (derived from loaded data): those are checked as
-    if unconditional — UNSAT on that over-approximation is still a sound
-    proof, but a SAT hit may sit in a branch the launch never takes, so it
-    raises ``unsupported`` instead of being reported. SAT on an unguarded
-    access is always a real witness and takes precedence over guarded
-    uncertainty."""
+    reachable witness). Two over-approximations follow the same uncertainty
+    discipline: ``guarded`` (an UNMODELABLE branch condition — checked as if
+    unconditional) and ``mask_dropped`` (a data-dependent mask widened to
+    free). For both, UNSAT is still a sound proof — dropping constraints
+    only widens the footprint — but a SAT hit may sit in a state the launch
+    never reaches, so it raises ``unsupported`` instead of being reported.
+    SAT on an exact access is always a real witness and takes precedence
+    over any uncertainty."""
     out: list[CompiledOOB] = []
     uncertain: AccessEvent | None = None
     for access in graph.accesses:
         v = check_access(access, graph, ctx)
         if v is None:
             continue
-        if access.guarded:
+        if access.guarded or access.mask_dropped:
             uncertain = uncertain or access
             continue
         out.append(v)
     if not out and uncertain is not None:
+        # Point the user at their source line when the loc resolved; the raw
+        # TTIR line number means nothing to a CLI/API reader.
+        if uncertain.loc is not None:
+            where = f"{uncertain.loc.file}:{uncertain.loc.line}"
+        else:
+            where = f"TTIR line {uncertain.line_no}"
+        if uncertain.guarded:
+            raise UnsupportedTTIR(
+                f"{where}: possible OOB on a branch-guarded "
+                "access — the branch condition is not modeled, so the "
+                "witness may not be reachable",
+                kind="unmodelable-condition",
+            )
         raise UnsupportedTTIR(
-            f"line {uncertain.line_no}: possible OOB on a branch-guarded "
-            "access — the branch condition is not modeled, so the witness "
-            "may not be reachable"
+            f"{where}: possible OOB behind a data-dependent "
+            "mask — the mask was over-approximated as free, so the witness "
+            "may not be reachable",
+            kind="data-dependent-mask",
         )
     return out

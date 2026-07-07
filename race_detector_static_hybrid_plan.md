@@ -535,17 +535,34 @@ sanitizer OOB now also checks atomics (side benefit) and its suite stays green.
   correctly left as `DataDep`. The Select upgrade covers the remaining single-result
   case; yields are resolved at the yield line because then/else regions legally reuse
   SSA names. Multi-result ifs stay fail-closed.
-- Per-term DataDep policy (feeds the selector, §I.3): `DataDep` in a mask chain →
-  free variable; `DataDep` in an address chain → marker that routes the kernel to the
-  interpreter front-end. **(open — next in S2)**
+- Per-term DataDep policy (feeds the selector, §I.3). **Done** —
+  (a) mask chain: the mask is dropped (widened to free) and the access flagged
+  `mask_dropped`; UNSAT stays a sound proof (dropping constraints only widens the
+  footprint), SAT follows the same never-a-witness discipline as `guarded`
+  (sanitizer: abstain with kind `data-dependent-mask`; race records at S3 consume the
+  flag, C2 replay confirms SATs at S4). Refinement deferred: splitting a
+  `modelable ∧ DataDep` mask to keep the modelable conjunct — precision, not
+  soundness.
+  (b) address chain: stays whole-kernel unsupported (a free address makes the query
+  meaningless), now classified — `UnsupportedTTIR.kind` carries a stable taxonomy
+  (`indirect-address` / `data-dependent-bound` / `nested-loop` / `out-of-vocabulary` /
+  `control-flow` / `block-pointer` / `unmodelable-condition` / `data-dependent-mask` /
+  `other`) that the tier selector routes on and S5 buckets; the race client's
+  `last_ttir_unsupported` reasons are prefixed with it. Classification precision:
+  only a `DataDep` whose provenance is MEMORY CONTENTS counts as
+  `indirect-address`/`data-dependent-bound` (the interpreter-route family);
+  modeling gaps (loop accumulators, unmodeled ops, unresolved SSA) stay `other`
+  so the buckets don't overstate permanent indirection.
 - Side benefit: **done in the same change** (not separately) — `check_access` adds the
   path constraint, so sanitizer accesses under modelable conditions are proved
   precisely and a SAT under the path is a real, reachable witness.
 
-*Exit (headline acceptance)*: **met for the condition-modeling part** — the
-`pid_branch` golden (a store only block 0 executes, the dynamic mode's classic
-unsupported case) now gets a path-precise proof, and the too-small-tensor variant a
-witness pinned to pid 0 (`tests/unit/test_ttir_reader_scf_if.py`).
+*Exit (headline acceptance)*: **met — S2 complete.** The `pid_branch` golden (a store
+only block 0 executes, the dynamic mode's classic unsupported case) gets a
+path-precise proof and, for the too-small-tensor variant, a witness pinned to pid 0
+(`tests/unit/test_ttir_reader_scf_if.py`); data-dependent-mask kernels that
+previously died at parse now prove or abstain
+(`tests/unit/test_ttir_reader_datadep_policy.py`).
 
 ### S3 — T1 evaluation + solver hookup (≈1 week)
 
