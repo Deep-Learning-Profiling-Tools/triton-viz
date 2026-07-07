@@ -21,12 +21,14 @@ from triton_viz.clients.symbolic_engine import (
     SymbolicClient,
     SymbolicExpr,
     ConstSymbolicExpr,
+    RangeWrapper,
     ReduceSymbolicExpr,
     LoadSymbolicExpr,
     StoreSymbolicExpr,
     _range_to_iterator_constraint,
 )
 from triton_viz.core.data import Sort
+from triton_viz.core.patch import LoopSite, loop_file_token
 from triton_viz.core.symbolic_metadata import (
     FLOAT16,
     FLOAT32,
@@ -40,6 +42,16 @@ from triton_viz.core.symbolic_metadata import (
 )
 from z3.z3 import ArithRef, BoolRef, IntNumRef
 from z3 import Solver, Int, sat
+
+
+class _LoopSiteSymbolicClient(SymbolicClient):
+    NAME = "loop_site_symbolic_client"
+
+    def pre_warmup_callback(self, jit_fn, *args, **kwargs) -> bool:
+        return True
+
+    def post_warmup_callback(self, jit_fn, ret) -> None:
+        pass
 
 
 # ======== Range Constraint Tests ===========
@@ -103,6 +115,31 @@ def test_range_to_iterator_constraint():
     assert_constraint_allows(constraint, i, 0)
     assert_constraint_forbids(constraint, i, 1)
     assert_constraint_forbids(constraint, i, -1)
+
+
+def test_loop_sites_in_different_files_get_distinct_iterator_state():
+    client = _LoopSiteSymbolicClient()
+    iterable = RangeWrapper(range(3), length=3, start=0, stop=3, step=1)
+    site_a = LoopSite(5, loop_file_token("/src/kernel_a.py"))
+    site_b = LoopSite(5, loop_file_token("/src/helper_b.py"))
+
+    client._loop_hook_before(site_a, iterable)
+    ctx_a = client.loop_stack[-1]
+    client._loop_hook_after(site_a)
+
+    client._loop_hook_before(site_b, iterable)
+    ctx_b = client.loop_stack[-1]
+    client._loop_hook_after(site_b)
+
+    assert ctx_a.idx_z3.decl().name() == f"loop_i_{site_a}"
+    assert ctx_b.idx_z3.decl().name() == f"loop_i_{site_b}"
+    assert ctx_a.idx_z3.decl().name() != ctx_b.idx_z3.decl().name()
+    assert (site_a, 0, 3, 1) in client.loop_iterator_constraint_cache
+    assert (site_b, 0, 3, 1) in client.loop_iterator_constraint_cache
+    # A cache keyed by lineno alone would hand site_b the constraint built
+    # for site_a's variable, leaving site_b's own iterator unconstrained.
+    assert f"loop_i_{site_a}" in str(ctx_a.iterator_constraint)
+    assert f"loop_i_{site_b}" in str(ctx_b.iterator_constraint)
 
 
 # ======== Reduce Operations Tests =========

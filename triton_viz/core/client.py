@@ -13,6 +13,7 @@ from .patch import (
     unpatch_for_loop,
     patch_calls,
     LoopIter,
+    LoopSite,
 )
 from functools import wraps
 from .callbacks import OpCallbacks, ForLoopCallbacks
@@ -267,35 +268,35 @@ class ClientManager:
             if cb.after_loop_callback is not None:
                 self._after.append(cb.after_loop_callback)
 
-    def range_type(self, lineno: int, range_type: str) -> None:
+    def range_type(self, loop_site: LoopSite, range_type: str) -> None:
         for hook in self._range_type_hooks:
-            hook(lineno, range_type)
+            hook(loop_site, range_type)
 
-    def before_loop(self, lineno: int, iterable: Any) -> None:
+    def before_loop(self, loop_site: LoopSite, iterable: Any) -> None:
         for hook in self._before:
-            hook(lineno, iterable)
+            hook(loop_site, iterable)
 
-    def loop_iter(self, lineno: int, idx: Any) -> Any:
+    def loop_iter(self, loop_site: LoopSite, idx: Any) -> Any:
         if self._iter_overrider is not None:
-            new_idx = self._iter_overrider(lineno, idx)
+            new_idx = self._iter_overrider(loop_site, idx)
             if new_idx is not None:
                 idx = new_idx
 
         for hook in self._iter_listeners:
-            hook(lineno, idx)
+            hook(loop_site, idx)
 
         return idx
 
-    def after_loop(self, lineno: int) -> None:
+    def after_loop(self, loop_site: LoopSite) -> None:
         for hook in self._after:
-            hook(lineno)
+            hook(loop_site)
 
     def loop_iter_wrapper(
         self,
         iterable_callable: Callable,
         iter_args,
         iter_kwargs,
-        lineno: int,
+        loop_site: LoopSite,
         range_type: str,
     ) -> "LoopIter":
         args = tuple(iter_args) if iter_args is not None else ()
@@ -303,7 +304,7 @@ class ClientManager:
 
         if self._range_wrapper_factory is not None:
             wrapped = self._range_wrapper_factory(
-                None, lineno, range_type, args, kwargs, iterable_callable
+                None, loop_site, range_type, args, kwargs, iterable_callable
             )
             if wrapped is not None:
                 iterable = wrapped
@@ -311,4 +312,4 @@ class ClientManager:
                 iterable = iterable_callable(*args, **kwargs)
         else:
             iterable = iterable_callable(*args, **kwargs)
-        return LoopIter(self, iterable, lineno, range_type)
+        return LoopIter(self, iterable, loop_site, range_type)

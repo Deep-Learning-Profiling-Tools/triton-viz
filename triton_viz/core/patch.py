@@ -1,7 +1,8 @@
 from collections.abc import Callable
 from contextlib import contextmanager
+import hashlib
 from functools import wraps
-from typing import Any
+from typing import Any, NamedTuple
 
 from .frontend.base import AdapterResult, LANG_PATCH_SCOPES
 from .frontend.base import get_frontend
@@ -150,6 +151,35 @@ def unpatch_op(namespace: Any, attr: str, frontend_name: str):
     setattr(namespace, attr, original_op)
 
 
+class LoopSite(NamedTuple):
+    """Identity of one rewritten for-loop.
+
+    The loop rewrite records function-relative line numbers because Triton
+    parses the kernel source with ``def`` at line 1. Two loops in different
+    source files can therefore share a line number, so hook bookkeeping should
+    key per-loop state by ``(lineno, file_token)`` rather than lineno alone.
+    """
+
+    lineno: int
+    file_token: str
+
+    def __str__(self) -> str:
+        # Embedded in symbolic iterator var names, so keep it deterministic.
+        return f"{self.lineno}_{self.file_token}"
+
+
+_FILE_TOKEN_CACHE: dict[str, str] = {}
+
+
+def loop_file_token(filename: str) -> str:
+    """Short stable token identifying a source file inside a LoopSite."""
+    token = _FILE_TOKEN_CACHE.get(filename)
+    if token is None:
+        token = hashlib.blake2s(filename.encode(), digest_size=4).hexdigest()
+        _FILE_TOKEN_CACHE[filename] = token
+    return token
+
+
 class LoopIter:
     """
     Purpose:
@@ -158,22 +188,28 @@ class LoopIter:
     Args:
         hooks: Object that owns range_type, before_loop, loop_iter, and after_loop hooks.
         iterable: Iterable produced by the patched loop expression.
-        lineno: Source line number for the loop.
+        loop_site: LoopSite identifying the loop's source location.
         range_type: Frontend-specific classification of the loop iterable.
 
     Returns:
         Iterator that yields possibly overridden loop indices.
     """
 
-    def __init__(self, hooks, iterable, lineno, range_type):
+    def __init__(self, hooks, iterable, loop_site, range_type):
+        if not isinstance(loop_site, LoopSite):
+            raise NotImplementedError(
+                "loop hooks are keyed by LoopSite; bare line numbers are not "
+                "supported because loops in different files can share a "
+                "function-relative lineno"
+            )
         self._it = iter(iterable)
-        self._lineno = lineno
+        self._loop_site = loop_site
         self._hooks = hooks
         # triggering range_type
-        self._hooks.range_type(self._lineno, range_type)
+        self._hooks.range_type(self._loop_site, range_type)
         # triggering before_loop
         if self._hooks.before_loop:
-            self._hooks.before_loop(self._lineno, iterable)
+            self._hooks.before_loop(self._loop_site, iterable)
 
     def __iter__(self):
         return self
@@ -185,11 +221,11 @@ class LoopIter:
         except StopIteration:
             # Exiting the loop and triggering after_loop
             if self._hooks.after_loop:
-                self._hooks.after_loop(self._lineno)
+                self._hooks.after_loop(self._loop_site)
             raise
 
         # trigger loop overriders and loop listeners
-        idx = self._hooks.loop_iter(self._lineno, idx)
+        idx = self._hooks.loop_iter(self._loop_site, idx)
         return idx
 
 
