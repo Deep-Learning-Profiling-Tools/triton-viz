@@ -43,7 +43,8 @@ class UnsupportedTTIR(Exception):
     the interpreter front-end) and the evaluation reports its distribution:
     "indirect-address" | "data-dependent-bound" | "nested-loop" |
     "out-of-vocabulary" | "control-flow" | "block-pointer" |
-    "unmodelable-condition" | "data-dependent-mask" | "other".
+    "unmodelable-condition" | "data-dependent-mask" |
+    "cas-synchronization" | "other".
     """
 
     def __init__(self, msg: str, kind: str = "other") -> None:
@@ -237,6 +238,10 @@ class AccessEvent:
     # else-regions negated (Not). The access executes iff path ∧ mask, so a
     # SAT model under both constraints is a real, reachable witness.
     path: Term | None = None
+    # True when the access sits inside the scf.for body: it executes once
+    # per iteration — and NOT AT ALL when the launch's trip count is zero,
+    # which consumers must model (a zero-trip loop has no footprint).
+    in_loop: bool = False
     # Present iff kind is atomic_*: an atomic is a read AND a write of its
     # footprint (RMW), which is what is_read/is_write encode for consumers
     # that build read/write event pairs (the race detector front-end).
@@ -281,6 +286,12 @@ class AccessGraph:
     accesses: list[AccessEvent]
     loop: LoopInfo | None
     iter_args: dict[int, IterArgInfo] = field(default_factory=dict)
+    # Every pid axis with a parsed tt.get_program_id — recorded at PARSE
+    # time, before any DataDep swallowing. Consumers deciding grid coverage
+    # must use THIS set, not the axes that happen to survive into modeled
+    # address/mask terms: a pid read into a stored value, a dropped mask, or
+    # an unmodeled branch condition still distinguishes the blocks' behavior.
+    pid_axes: set[int] = field(default_factory=set)
 
     def arg(self, name: str) -> FuncArg | None:
         for a in self.func_args:
@@ -369,13 +380,18 @@ class _IfFrame:
     else_vals: "list[object] | None" = None
 
 
-def _branch_state(frames: list) -> "tuple[bool, Term | None]":
-    """(guarded, path) for an access under the currently open frames:
+def _branch_state(frames: list) -> "tuple[bool, Term | None, bool]":
+    """(guarded, path, in_loop) for an access under the open frames:
     ``guarded`` if any enclosing condition is unmodeled; ``path`` is the
-    conjunction of the modeled ones (else-regions negated)."""
+    conjunction of the modeled ones (else-regions negated); ``in_loop`` when
+    an scf.for body encloses the access."""
     guarded = False
     path: Term | None = None
+    in_loop = False
     for f in frames:
+        if f == "for":
+            in_loop = True
+            continue
         if not isinstance(f, _IfFrame):
             continue
         if f.cond is None:
@@ -383,7 +399,7 @@ def _branch_state(frames: list) -> "tuple[bool, Term | None]":
             continue
         c: Term = f.cond if f.branch == "then" else Not(f.cond)
         path = c if path is None else BoolBin("and", path, c)
-    return guarded, path
+    return guarded, path, in_loop
 
 
 def _elem_bits(type_str: str) -> int:
@@ -486,6 +502,7 @@ def parse_ttir(text: str) -> AccessGraph:
     loop_body_yields: list[str] = []
     loop_iter_arg_ssa: list[tuple[str, str]] = []  # (arg_ssa, init_ssa)
     loop_meta: dict[str, object] = {}
+    pid_axes: set[int] = set()
 
     for line_no, raw in enumerate(lines, start=1):
         line = raw.strip()
@@ -685,14 +702,16 @@ def parse_ttir(text: str) -> AccessGraph:
             )
 
         # ---- value-producing ops ----
-        handled = _parse_value_op(body, res, env, val, as_term, base_elem_bits)
+        handled = _parse_value_op(
+            body, res, env, val, as_term, base_elem_bits, pid_axes
+        )
         if handled:
             continue
 
         # ---- accesses ----
         lm = _RE_LOAD.match(body)
         if lm:
-            guarded, path = _branch_state(frames)
+            guarded, path, in_loop = _branch_state(frames)
             _record_access(
                 "load",
                 lm.group(1),
@@ -705,13 +724,14 @@ def parse_ttir(text: str) -> AccessGraph:
                 loc,
                 line_no,
                 path=path,
+                in_loop=in_loop,
             )
             if res is not None:
                 env[res] = DataDep("loaded value")
             continue
         sm = _RE_STORE.match(body)
         if sm:
-            guarded, path = _branch_state(frames)
+            guarded, path, in_loop = _branch_state(frames)
             _record_access(
                 "store",
                 sm.group(1),
@@ -724,11 +744,12 @@ def parse_ttir(text: str) -> AccessGraph:
                 loc,
                 line_no,
                 path=path,
+                in_loop=in_loop,
             )
             continue
         am = _RE_ATOMIC_RMW.match(body)
         if am:
-            guarded, path = _branch_state(frames)
+            guarded, path, in_loop = _branch_state(frames)
             _record_access(
                 "atomic_rmw",
                 am.group(4),
@@ -742,13 +763,14 @@ def parse_ttir(text: str) -> AccessGraph:
                 line_no,
                 atomic=AtomicInfo(am.group(1), am.group(2), am.group(3)),
                 path=path,
+                in_loop=in_loop,
             )
             if res is not None:
                 env[res] = DataDep("atomic result")
             continue
         am = _RE_ATOMIC_CAS.match(body)
         if am:
-            guarded, path = _branch_state(frames)
+            guarded, path, in_loop = _branch_state(frames)
             _record_access(
                 "atomic_cas",
                 am.group(3),
@@ -762,6 +784,7 @@ def parse_ttir(text: str) -> AccessGraph:
                 line_no,
                 atomic=AtomicInfo(None, am.group(1), am.group(2)),
                 path=path,
+                in_loop=in_loop,
             )
             if res is not None:
                 env[res] = DataDep("atomic result")
@@ -829,6 +852,7 @@ def parse_ttir(text: str) -> AccessGraph:
         accesses=accesses,
         loop=loop,
         iter_args=iter_args,
+        pid_axes=pid_axes,
     )
 
 
@@ -867,7 +891,7 @@ def _extract_loop_delta(offset: Term, arg_id: int) -> Term | None:
     return None
 
 
-def _parse_value_op(body, res, env, val, as_term, base_elem_bits) -> bool:
+def _parse_value_op(body, res, env, val, as_term, base_elem_bits, pid_axes) -> bool:
     """Parse one address-structure value op into env. Returns True if handled."""
     if res is None:
         return False
@@ -882,6 +906,9 @@ def _parse_value_op(body, res, env, val, as_term, base_elem_bits) -> bool:
                 f"unknown program-id axis {m.group(1)!r}",
                 kind="out-of-vocabulary",
             )
+        # Parse-time record (see AccessGraph.pid_axes): the read counts even
+        # if this value never survives into a modeled term.
+        pid_axes.add(axis)
         env[res] = Pid(axis)
         return True
     m = _RE_MAKE_RANGE.match(body)
@@ -1017,6 +1044,7 @@ def _record_access(
     line_no,
     atomic=None,
     path=None,
+    in_loop=False,
 ) -> None:
     ptr = val(ptr_ssa)
     if not isinstance(ptr, PtrValue):
@@ -1054,5 +1082,6 @@ def _record_access(
             atomic=atomic,
             path=path,
             mask_dropped=mask_dropped,
+            in_loop=in_loop,
         )
     )

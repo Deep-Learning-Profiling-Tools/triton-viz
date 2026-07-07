@@ -35,6 +35,9 @@ from ....core.client import Client
 from ....core.config import config as cfg
 from ....core.data import Op
 from ...common.ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
+from ..hb_common import UnsupportedSymbolicRaceQuery
+from ..two_copy_symbolic_hb_solver import TwoCopySymbolicHBSolver
+from .global_records import GlobalTensor, encode_graph, t1_grid
 from .smt_encoder import AnalysisResult, analyze_ttgir
 
 _RE_TTGIR_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\(")
@@ -93,11 +96,59 @@ class CompiledRaceDetector(Client):
         self._ttir_graph_cache: dict[str, tuple[AccessGraph | None, str | None]] = {}
         self.last_ttir_graphs: list[AccessGraph | None] = []
         self.last_ttir_unsupported: list[str | None] = []
+        # T1 global-memory verdict (independent of the TTGIR shared-memory
+        # last_status): "ok" = proved race-free for THIS launch's params on
+        # EVERY grid; "races" = definite reports in last_global_reports;
+        # "unsupported"; "no_ttir".
+        self.last_global_status: str = "ok"
+        self.last_global_reason: str | None = None
+        self.last_global_reports: list[Any] = []
+        # Concrete launch capture (pre_warmup is the only hook that sees the
+        # real args on the warmup-only path).
+        self._launch_params: dict[str, int] = {}
+        self._launch_tensors: dict[str, GlobalTensor] = {}
+        self._launch_grid: tuple[Any, ...] | None = None
+        self._warmup_count: int = 0
+        self._capture_error: str | None = None
 
     # ── compilation hooks ─────────────────────────────────────────────
 
     def pre_warmup_callback(self, jit_fn: Callable, *args: Any, **kwargs: Any) -> bool:
-        return True  # force the real compile so TTGIR exists
+        # The warmup-only path never runs arg_callback/grid_callback, so this
+        # is the only hook that sees the concrete launch — capture the scalar
+        # params and tensor bases the T1 global-memory encoder needs.
+        self._capture_launch(jit_fn, args, kwargs)
+        return True  # force the real compile so TTGIR/TTIR exist
+
+    def _capture_launch(self, jit_fn: Any, args: tuple, kwargs: dict) -> None:
+        self._warmup_count += 1
+        if self._warmup_count > 1:
+            return  # ambiguous params; _analyze_global abstains
+        try:
+            names = list(getattr(jit_fn, "arg_names", None) or [])
+            bound: list[tuple[str, Any]] = list(zip(names, args))
+            bound += [(k, v) for k, v in kwargs.items() if k in names]
+            self._launch_grid = kwargs.get("grid")
+            for name, value in bound:
+                if hasattr(value, "data_ptr"):
+                    # contiguous defaults to False when unverifiable: the
+                    # in-bounds premise is only sound for contiguous storage
+                    # (numel·elem understates a strided view's extent).
+                    is_contig = getattr(value, "is_contiguous", None)
+                    self._launch_tensors[name] = GlobalTensor(
+                        data_ptr=int(value.data_ptr()),
+                        elem_size=int(value.element_size()),
+                        numel=int(value.numel()),
+                        contiguous=bool(is_contig()) if is_contig else False,
+                    )
+                elif isinstance(value, bool):
+                    self._launch_params[name] = int(value)
+                elif isinstance(value, int):
+                    self._launch_params[name] = value
+                # floats / other objects: not representable in the integer
+                # model; a Param lookup on one aborts to unsupported.
+        except Exception as e:  # noqa: BLE001
+            self._capture_error = f"{type(e).__name__}: {e}"
 
     def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
         asm = getattr(ret, "asm", None)
@@ -182,12 +233,122 @@ class CompiledRaceDetector(Client):
             self.last_ttir_unsupported.append(reason)
         self._pending_ttir = []
 
+    def _analyze_global(self) -> None:
+        """T1 global-memory race verdict over this launch's parsed TTIR.
+
+        One solver, second capture front-end: the graphs lower to the same
+        record shape the dynamic mode produces, pid/grid/arange/loop stay
+        symbolic, and only the scalar params + tensor bases are concrete —
+        so "ok" here means race-free for THIS input on EVERY grid. Nothing
+        raised in here may escape (finalize runs in the launch teardown).
+        Consumes and resets the per-launch capture state.
+        """
+        params, tensors = self._launch_params, self._launch_tensors
+        warmups, capture_error = self._warmup_count, self._capture_error
+        self._launch_params, self._launch_tensors = {}, {}
+        self._launch_grid = None
+        self._warmup_count, self._capture_error = 0, None
+
+        self.last_global_reports = []
+        self.last_global_status = "ok"
+        self.last_global_reason = None
+        if not self.last_ttir_graphs:
+            self.last_global_status = "no_ttir"
+            self.last_global_reason = "no TTIR captured from warmup"
+            return
+        if warmups > 1:
+            self.last_global_status = "unsupported"
+            self.last_global_reason = (
+                f"{warmups} warmups in one launch: parameter capture is " "ambiguous"
+            )
+            return
+        if capture_error is not None:
+            self.last_global_status = "unsupported"
+            self.last_global_reason = f"launch capture failed: {capture_error}"
+            return
+
+        reports: list[Any] = []
+        status, reason = "ok", None
+        total_widened = 0
+        for graph, parse_reason in zip(
+            self.last_ttir_graphs, self.last_ttir_unsupported
+        ):
+            if graph is None:
+                status, reason = "unsupported", parse_reason
+                continue
+            try:
+                enc = encode_graph(graph, params, tensors)
+                solver = TwoCopySymbolicHBSolver(
+                    enc.records, grid=t1_grid(enc), arange_dict=enc.arange_dict
+                )
+                found = solver.find_races()
+            except UnsupportedTTIR as e:
+                status, reason = "unsupported", f"{e.kind}: {e}"
+                continue
+            except UnsupportedSymbolicRaceQuery as e:
+                status, reason = "unsupported", f"solver: {e}"
+                continue
+            except Exception as e:  # noqa: BLE001
+                status, reason = "unsupported", f"{type(e).__name__}: {e}"
+                continue
+            # Uncertainty discipline: a report touching a widened record
+            # (dropped mask / unmodeled branch) is not a certifiable
+            # witness — same rule as the sanitizer's check_graph.
+            exact = []
+            widened = 0
+            for rep in found:
+                ids = {rep.first.event_id, rep.second.event_id}
+                if ids & enc.uncertain_event_ids:
+                    widened += 1
+                else:
+                    exact.append(rep)
+            reports.extend(exact)
+            total_widened += widened
+            if widened and not exact:
+                status = "unsupported"
+                reason = (
+                    "possible race under over-approximation (data-dependent "
+                    "mask / unmodeled branch) — not a certifiable witness"
+                )
+
+        self.last_global_reports = reports
+        if reports:
+            self.last_global_status = "races"
+            # Never leak an unsupported-branch reason onto a definite-races
+            # verdict; note withheld uncertain possibilities instead.
+            self.last_global_reason = (
+                "additional possible races under over-approximation were " "withheld"
+                if total_widened
+                else None
+            )
+        elif status != "ok":
+            self.last_global_status = status
+            self.last_global_reason = reason
+        if cfg.cli_active:
+            self._report_global_cli()
+
+    def _report_global_cli(self) -> None:
+        s = self.last_global_status
+        if s == "races":
+            print(
+                f"[{self.LOG_TAG}] global memory: RACE — "
+                f"{len(self.last_global_reports)} report(s)"
+            )
+        elif s == "ok":
+            print(
+                f"[{self.LOG_TAG}] global memory: race-free for this input "
+                "on every grid (T1 proof)"
+            )
+        else:
+            print(f"[{self.LOG_TAG}] global memory: {s} — {self.last_global_reason}")
+
     def finalize(self) -> list:
         # Per-launch reset point (see grid_callback note): smtlib is extended
         # below, so it must be cleared here or it accumulates across launches
         # on the warmup-only path.
         self.smtlib = []
         self._consume_pending_ttir()
+        self._analyze_global()
         if not self._pending_ttgir:
             # Warmup never delivered IR (e.g. driverless environment where
             # JITFunction.run could not bind a device). Distinguish from a

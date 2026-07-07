@@ -564,23 +564,57 @@ path-precise proof and, for the too-small-tensor variant, a witness pinned to pi
 previously died at parse now prove or abstain
 (`tests/unit/test_ttir_reader_datadep_policy.py`).
 
-### S3 — T1 evaluation + solver hookup (≈1 week)
+### S3 — T1 evaluation + solver hookup — **done**
 
-- Evaluation side: reuse `_eval`; `LaunchContext` keeps concrete scalar params; pid
-  becomes symbolic; `make_range` rides the existing arange machinery; `_loop_bounds`
-  unchanged (induction variable keeps its `[lower, upper)` free-variable semantics).
-- Solver side: relax `_normalize_grid` — grid dims become Z3 Ints with `grid_i ≥ 1`
-  and `0 ≤ pid < grid_i`; loop variables travel via `copy_local_vars`; path conditions
-  via `local_constraints`.
-- Audit every concrete-grid short-circuit for symbolic-grid safety (e.g. the
-  vacuous-unsat shortcut noted in `_find_intra_instance_candidates`).
-- Atomics v1 kept simple: mutual atomicity only, no static CAS synchronizes-with
-  modeling; a detected cross-CTA synchronization pattern → unsupported → interpreter
-  route.
+- **Record builder** (`race_detector/compiled/global_records.py`): lowers the shared
+  `AccessGraph` under one launch's concrete params into the exact record shape the
+  dynamic mode produces — byte addresses on the launch's `data_ptr` bases, pids as
+  the shared `SymbolicExpr.PID0/1/2` consts, one interned arange summary var per
+  (make_range, dim) in an `ARANGE_DICT`-shaped registry, the scf.for iteration as
+  ONE symbolic index in `copy_local_vars` with its range in `premises`,
+  `mask ∧ path` in `active`. Launch capture lives in `pre_warmup_callback` (the only
+  hook that sees real args on the warmup-only path). New client surface:
+  `last_global_status` / `last_global_reason` / `last_global_reports`, independent
+  of the TTGIR shared-memory verdict.
+- **Solver**: `_normalize_grid` accepts Z3 dims (symbolic dims get `≥ 1` in the grid
+  constraints); nothing else needed changing — the audit found no concrete-grid
+  short-circuits in code (the vacuous-unsat "shortcut" was semantics, not code).
+- **Two modeling discoveries** (both surfaced by the pipeline itself on stock
+  goldens):
+  1. *Unused grid axes are pinned to 1.* Under a fully symbolic grid every 1-D
+     kernel "races" on a 2-D grid it never reads (two blocks differing only in an
+     ignored axis compute identical addresses). The honest T1 claim is "race-free
+     for every grid **along the axes the kernel reads**" — where "reads" is the
+     PARSE-time set of `tt.get_program_id` axes (`AccessGraph.pid_axes`), never
+     the axes that survive into modeled terms: the adversarial round produced
+     three false-proof families from eval-time collection (pid in a stored
+     VALUE, pid inside a dropped mask, pid inside an unmodeled condition — all
+     distinguish block behavior without entering address math). Two more holes
+     from that round, also fixed with their repros as regression tests: a
+     zero-trip loop was modeled as one phantom iteration (spurious definite
+     reports; in-loop accesses are now skipped when the launch's trip count is
+     zero, and the iteration premise attaches only to in-loop records), and a
+     non-contiguous tensor's `numel` understates its strided extent (the
+     in-bounds premise would deactivate legal accesses — non-contiguous now
+     fails closed, like the sanitizer).
+  2. *The in-bounds premise.* Unbounded symbolic pids let offsets stray
+     arithmetically into other tensors' address ranges, fabricating cross-tensor
+     races no launch produces. Every record carries its allocation bounds
+     (`base ≤ addr < base + numel·elem`); real aliasing still surfaces (the bounds
+     are the launch's actual intervals). Composition: the compiled sanitizer's OOB
+     verdict proves exactly the premise the race verdict assumes.
+- **Atomics**: RMW = one record (`is_atomic`, `atomic_kind="rmw"`; the solver's own
+  lowering makes it read∧write); mutual atomicity/scope/width reused verbatim —
+  including atomics inside loops, which the dynamic mode marks unsupported. CAS →
+  classified unsupported (`cas-synchronization`) → interpreter route, as planned.
+- **Uncertainty discipline honored** (the S2 invariant): reports touching a
+  `mask_dropped`/`guarded` record are never definite races; only-widened SATs make
+  the launch `unsupported ("possible race under over-approximation")`.
 
-*Exit*: end-to-end `proved@T1` on a stock elementwise kernel and a masked 2-D kernel;
-a mutated pid stride → SAT. **This is the point the system is usable end-to-end
-(~2.5 weeks in), so evaluation starts here, not after S4.**
+*Exit*: **met** — `proved@T1` on stock add (1 symbolic grid axis), masked 2-D tile2d
+(2 symbolic axes), and the matmul K-loop (full loop machinery); pid-stride mutation
+→ definite WAW with a cross-block witness (`tests/unit/test_t1_global_races.py`,
+15 cases). The system is usable end-to-end; evaluation can start.
 
 ### S4 — tier selector + the three channels (≈1 week)
 

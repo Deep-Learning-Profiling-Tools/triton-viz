@@ -69,6 +69,7 @@ from z3 import (
     Bool,
     BoolVal,
     Const,
+    ExprRef,
     If,
     Implies,
     Int,
@@ -139,6 +140,15 @@ def _import_symbolic_expr_pids():
     return (SymbolicExpr.PID0, SymbolicExpr.PID1, SymbolicExpr.PID2)
 
 
+def _is_symbolic_dim(d: Any) -> bool:
+    """A grid dim that is a Z3 expression rather than a Python int.
+
+    Must be an isinstance check: duck-typing on ``sort`` misfires on numpy
+    scalars (ndarray.sort) and would leave them un-coerced where the old
+    ``int(d)`` handled them."""
+    return isinstance(d, ExprRef)
+
+
 def _z3_var_key(v: Any) -> tuple[int, str, str]:
     # Mirrors the dedup key used by hb_common.normalize_copy_local_vars.
     return (v.hash(), str(v.sort()), v.decl().name())
@@ -179,7 +189,7 @@ class TwoCopySymbolicHBSolver:
         self,
         records: list[AccessEventRecord],
         *,
-        grid: tuple[int, ...],
+        grid: tuple[Any, ...],
         arange_dict: dict[Any, Any] | None = None,
         extra_assumptions: tuple[Any, ...] = (),
     ) -> None:
@@ -401,8 +411,11 @@ class TwoCopySymbolicHBSolver:
     # ──────────────────────── Construction ────────────────────────
 
     @staticmethod
-    def _normalize_grid(grid: tuple[int, ...]) -> tuple[int, int, int]:
-        dims = [int(d) for d in grid]
+    def _normalize_grid(grid: tuple[Any, ...]) -> tuple[Any, Any, Any]:
+        """Concrete launches pass ints; the T1 static front-end passes Z3
+        Ints so the verdict covers EVERY grid (each symbolic dim gets a
+        ``>= 1`` bound in the grid constraints)."""
+        dims = [d if _is_symbolic_dim(d) else int(d) for d in grid]
         while len(dims) < 3:
             dims.append(1)
         return (dims[0], dims[1], dims[2])
@@ -424,6 +437,10 @@ class TwoCopySymbolicHBSolver:
         grid_constraints = And(
             *[And(pid_a[i] >= 0, pid_a[i] < self.grid[i]) for i in range(3)],
             *[And(pid_b[i] >= 0, pid_b[i] < self.grid[i]) for i in range(3)],
+            # A symbolic dim needs its own lower bound or a zero/negative
+            # grid would make every pid constraint vacuously unsat and turn
+            # any query into a false proof.
+            *[d >= 1 for d in self.grid if _is_symbolic_dim(d)],
         )
         different_blocks = Or(
             pid_a[0] != pid_b[0],
