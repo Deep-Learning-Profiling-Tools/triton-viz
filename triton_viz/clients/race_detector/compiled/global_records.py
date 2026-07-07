@@ -104,14 +104,28 @@ class GlobalEncoding:
 
 class _RaceEnv:
     """Term → Z3 in the solver's vocabulary (shared pid consts, interned
-    arange summary vars, one symbolic loop index)."""
+    arange summary vars, one symbolic loop index).
 
-    def __init__(self, graph: AccessGraph, params: dict[str, int]) -> None:
+    ``symbolic_params=True`` is the T0 mode: scalar params become shared
+    free Ints (NOT copy-local — both program copies live in one launch, so
+    they see the same parameter values). Loop bounds that reference a param
+    then fail to concretize and raise, which the tier selector catches to
+    fall back to T1."""
+
+    def __init__(
+        self,
+        graph: AccessGraph,
+        params: dict[str, int],
+        *,
+        symbolic_params: bool = False,
+    ) -> None:
         from ...symbolic_engine import SymbolicExpr
 
         self._pids = (SymbolicExpr.PID0, SymbolicExpr.PID1, SymbolicExpr.PID2)
         self.graph = graph
         self.params = params
+        self.symbolic_params = symbolic_params
+        self._param_vars: dict[str, Any] = {}
         self.arange_dict: dict[Any, Any] = {}
         self._arange_vars: dict[tuple[str, int], Any] = {}
         self.loop_var: Any = None  # the symbolic iteration INDEX k
@@ -173,6 +187,14 @@ class _RaceEnv:
         if isinstance(term, Const):
             return IntVal(term.value)
         if isinstance(term, Param):
+            if self.symbolic_params:
+                from z3 import Int
+
+                var = self._param_vars.get(term.name)
+                if var is None:
+                    var = Int(f"ttir_param_{term.name}")
+                    self._param_vars[term.name] = var
+                return var
             if term.name not in self.params:
                 raise UnsupportedTTIR(
                     f"scalar param {term.name!r} not captured at launch"
@@ -247,41 +269,37 @@ def _record_for(
     access: AccessEvent,
     seq: int,
     env: _RaceEnv,
-    tensors: dict[str, GlobalTensor],
     kernel_name: str,
+    meta: GlobalTensor | None,
 ) -> Any:
+    """One solver record. ``meta`` present = T1 (real base address and the
+    in-bounds premise); ``meta=None`` = T0, where addresses are byte offsets
+    from the tensor's own base and conflicts are confined to that tensor's
+    group by construction (see encode_graph_t0)."""
     from ..data import AccessEventRecord
 
-    meta = tensors.get(access.base_param)
-    if meta is None:
-        # Every access must be modeled or the verdict is a false proof —
-        # same fail-closed rule as the compiled sanitizer.
-        raise UnsupportedTTIR(
-            f"missing tensor metadata for base pointer {access.base_param!r}"
-        )
-    if not meta.contiguous:
-        raise UnsupportedTTIR(
-            f"non-contiguous tensor {access.base_param!r}: the in-bounds "
-            "premise needs the allocation extent (v1 assumes contiguous)"
-        )
     elem = access.elem_bits // 8
     if elem <= 0:
         raise UnsupportedTTIR(
             f"unknown element width for {access.base_param!r} "
             f"(elem_bits={access.elem_bits})"
         )
-    if meta.elem_size != elem:
-        raise UnsupportedTTIR(
-            f"element width mismatch for {access.base_param!r}: TTIR says "
-            f"{elem} bytes, the launch tensor says {meta.elem_size}"
+    bounds: tuple[Any, ...]
+    if meta is not None:
+        if meta.elem_size != elem:
+            raise UnsupportedTTIR(
+                f"element width mismatch for {access.base_param!r}: TTIR says "
+                f"{elem} bytes, the launch tensor says {meta.elem_size}"
+            )
+        addr = IntVal(meta.data_ptr) + env.eval(access.offset) * IntVal(elem)
+        # The in-bounds premise (see the module docstring's model boundary).
+        bounds = (
+            addr >= IntVal(meta.data_ptr),
+            addr < IntVal(meta.data_ptr + meta.numel * meta.elem_size),
         )
-
-    addr = IntVal(meta.data_ptr) + env.eval(access.offset) * IntVal(elem)
-    # The in-bounds premise (see the module docstring's model boundary).
-    bounds = (
-        addr >= IntVal(meta.data_ptr),
-        addr < IntVal(meta.data_ptr + meta.numel * meta.elem_size),
-    )
+    else:
+        addr = env.eval(access.offset) * IntVal(elem)
+        bounds = ()
 
     active: Any = True
     if access.mask is not None:
@@ -373,7 +391,19 @@ def encode_graph(
         if access.in_loop and env.zero_trip:
             # The launch's trip count is zero: these accesses never execute.
             continue
-        records.append(_record_for(access, seq, env, tensors, graph.kernel_name))
+        meta = tensors.get(access.base_param)
+        if meta is None:
+            # Every access must be modeled or the verdict is a false proof —
+            # same fail-closed rule as the compiled sanitizer.
+            raise UnsupportedTTIR(
+                f"missing tensor metadata for base pointer {access.base_param!r}"
+            )
+        if not meta.contiguous:
+            raise UnsupportedTTIR(
+                f"non-contiguous tensor {access.base_param!r}: the in-bounds "
+                "premise needs the allocation extent (v1 assumes contiguous)"
+            )
+        records.append(_record_for(access, seq, env, graph.kernel_name, meta))
         if access.mask_dropped or access.guarded:
             uncertain.add(seq)
     return GlobalEncoding(
@@ -384,11 +414,115 @@ def encode_graph(
     )
 
 
-def t1_grid(encoding: GlobalEncoding) -> tuple[Any, Any, Any]:
-    """The T1 grid: symbolic (all sizes ≥ 1) along the pid axes the kernel
-    reads, pinned to 1 along the axes it ignores (see used_pid_axes)."""
+def symbolic_grid(encoding: GlobalEncoding) -> tuple[Any, Any, Any]:
+    """The T0/T1 grid: symbolic (all sizes ≥ 1) along the pid axes the
+    kernel reads, pinned to 1 along the axes it ignores (used_pid_axes)."""
     from z3 import Int
 
     return tuple(  # type: ignore[return-value]
         Int(f"grid_{i}") if i in encoding.used_pid_axes else 1 for i in range(3)
     )
+
+
+# ───────────────────── tier selector support (§I.3) ─────────────────────
+
+_SYMBOLIC_LEAVES = (Pid, Param, Arange, LoopVar, IterArgOffset)
+
+
+def _has_t0_symbols(term: Term) -> bool:
+    if isinstance(term, _SYMBOLIC_LEAVES):
+        return True
+    for attr in ("a", "b", "cond", "t", "f"):
+        sub = getattr(term, attr, None)
+        if sub is not None and _has_t0_symbols(sub):
+            return True
+    return False
+
+
+def _linear_at_t0(term: Term, graph: AccessGraph) -> bool:
+    if isinstance(term, Bin):
+        if term.op == "*":
+            if _has_t0_symbols(term.a) and _has_t0_symbols(term.b):
+                return False
+        elif term.op in ("//", "%"):
+            if _has_t0_symbols(term.b):
+                return False
+        return _linear_at_t0(term.a, graph) and _linear_at_t0(term.b, graph)
+    if isinstance(term, IterArgOffset):
+        info = graph.iter_args.get(term.arg_id)
+        if info is None:
+            return False
+        # Expands to offset0 + k·delta: linear only for a T0-constant delta.
+        if _has_t0_symbols(info.delta):
+            return False
+        return _linear_at_t0(info.offset0, graph)
+    for attr in ("a", "b", "cond", "t", "f"):
+        sub = getattr(term, attr, None)
+        if sub is not None and not _linear_at_t0(sub, graph):
+            return False
+    return True
+
+
+def t0_linearity_gate(graph: AccessGraph) -> bool:
+    """The tier selector's cheap syntactic gate: attempt T0 only when every
+    address/mask/path term stays LINEAR once the scalar params go symbolic
+    (no symbolic×symbolic product, no symbolic divisor — Z3-unknown bait).
+    T1, with params concrete, is linear again for the same terms."""
+    terms: list[Term] = []
+    for a in graph.accesses:
+        terms.append(a.offset)
+        if a.mask is not None:
+            terms.append(a.mask)
+        if a.path is not None:
+            terms.append(a.path)
+    return all(_linear_at_t0(t, graph) for t in terms)
+
+
+def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
+    """The T0 encoding: scalar params symbolic, one encoding PER TENSOR.
+
+    T0 has no launch, hence no base addresses or extents. The non-aliasing
+    premise (distinct pointer arguments are distinct allocations) is
+    realized by PARTITIONING: accesses can only conflict within one base
+    pointer's group, and addresses are byte offsets from that base.
+    Aliased-argument launches sit outside the T0 claim — T1 covers them
+    with the real bases. Read-only groups are skipped (read/read cannot
+    conflict). Raises UnsupportedTTIR when the kernel cannot be encoded at
+    T0 (e.g. a loop bound referencing a scalar param)."""
+    for access in graph.accesses:
+        if access.kind == "atomic_cas":
+            raise UnsupportedTTIR(
+                f"line {access.line_no}: atomic_cas synchronization is not "
+                "modeled statically",
+                kind="cas-synchronization",
+            )
+
+    env = _RaceEnv(graph, {}, symbolic_params=True)
+    groups: dict[str, list[tuple[int, AccessEvent]]] = {}
+    for seq, access in enumerate(graph.accesses):
+        if access.in_loop and env.zero_trip:
+            continue
+        groups.setdefault(access.base_param, []).append((seq, access))
+
+    out: list[tuple[str, GlobalEncoding]] = []
+    for name, items in groups.items():
+        if all(a.kind == "load" for _, a in items):
+            continue
+        records = []
+        uncertain: set[int] = set()
+        for seq, access in items:
+            records.append(_record_for(access, seq, env, graph.kernel_name, None))
+            if access.mask_dropped or access.guarded:
+                uncertain.add(seq)
+        out.append(
+            (
+                name,
+                GlobalEncoding(
+                    records=records,
+                    arange_dict=env.arange_dict,
+                    uncertain_event_ids=uncertain,
+                    used_pid_axes=set(graph.pid_axes),
+                ),
+            )
+        )
+    return out

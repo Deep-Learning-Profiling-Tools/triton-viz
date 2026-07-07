@@ -619,6 +619,34 @@ previously died at parse now prove or abstain
 ### S4 — tier selector + the three channels (≈1 week)
 
 - Selector per §I.3: linearity gate for T0, DataDep placement rule, every SAT → C2.
+  **Selector done** (`_solve_one_graph` / `_try_t0` in the compiled client;
+  `t0_linearity_gate` + `encode_graph_t0` in `global_records.py`):
+  - T0 = scalar params as SHARED symbolic Ints (not copy-local — one launch, two
+    blocks) behind the syntactic linearity gate (no symbolic×symbolic product, no
+    symbolic divisor; iter-arg deltas count). Z3 timeout as backstop.
+  - T0 has no launch, so the non-aliasing premise is realized by PARTITIONING: one
+    solver run per base pointer, addresses are byte offsets from that base;
+    read-only groups skipped. Loop bounds referencing a param fail to concretize →
+    automatic T1 fallback.
+  - **Any T0 SAT falls through to T1** — a T0 witness carries parameter values that
+    need not match this launch (this also subsumes the widened-record discipline at
+    T0: only UNSAT matters there).
+  - **The T0 proof only stands in for a launch that PROVES the non-aliasing
+    premise** (adversarial round): the partition assumes distinct args are
+    distinct allocations, but an in-place launch (same tensor twice) really
+    races — and a bare T0 accept short-circuited exactly the T1 run whose real
+    bases would report it. The selector now requires captured, contiguous
+    metadata for every accessed base and pairwise-disjoint
+    `[data_ptr, data_ptr+numel·elem)` intervals before accepting T0; aliased or
+    unverifiable captures fall to T1 (report or fail closed). The gate walk is
+    also exception-guarded (deep-but-legal term chains must degrade to
+    unsupported, not crash the launch teardown).
+  - Provenance surfaced: `last_global_provenance` = `proved@T0` ("race-free for ANY
+    scalar params — this specialization, non-aliased args — on every grid along
+    the read axes"; the claim neither the dynamic mode nor T1 can make) or
+    `proved@T1`. The stock add kernel (folded-constant stride) proves at T0;
+    param-stride kernels (tile2d, matmul) gate to T1
+    (`tests/unit/test_t1_global_races.py`, 26 cases).
 - **C1** is already free (launch args → `LaunchContext`).
 - **C2**: interpreter replay with the witness grid dims and captured args, executing
   only the two witness program ids via the designated-block slot; intersect the

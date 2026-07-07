@@ -16,7 +16,9 @@ from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetecto
 from triton_viz.clients.race_detector.compiled.global_records import (
     GlobalTensor,
     encode_graph,
-    t1_grid,
+    encode_graph_t0,
+    symbolic_grid,
+    t0_linearity_gate,
 )
 from triton_viz.clients.race_detector.two_copy_symbolic_hb_solver import (
     TwoCopySymbolicHBSolver,
@@ -36,7 +38,7 @@ def _t(ptr, numel=4096, elem=4):
 def _solve(graph, params, tensors):
     enc = encode_graph(graph, params, tensors)
     solver = TwoCopySymbolicHBSolver(
-        enc.records, grid=t1_grid(enc), arange_dict=enc.arange_dict
+        enc.records, grid=symbolic_grid(enc), arange_dict=enc.arange_dict
     )
     return enc, solver.find_races()
 
@@ -118,7 +120,7 @@ def test_matmul_loop_proved_t1():
     assert any(r.copy_local_vars for r in enc.records)  # the loop var
     assert any(r.premises for r in enc.records)  # its range
     solver = TwoCopySymbolicHBSolver(
-        enc.records, grid=t1_grid(enc), arange_dict=enc.arange_dict
+        enc.records, grid=symbolic_grid(enc), arange_dict=enc.arange_dict
     )
     assert solver.find_races() == []
 
@@ -346,6 +348,180 @@ def test_numpy_grid_dims_still_coerce():
     assert TwoCopySymbolicHBSolver._normalize_grid((np.int64(4),)) == (4, 1, 1)
 
 
+# ─────────────────────── tier selector (S4) ───────────────────────
+
+
+def test_add_passes_the_gate_and_proves_t0():
+    """The add kernel's stride is a folded constant, so the encoding stays
+    linear with symbolic params: T0 proves race-freedom for ANY n_elements,
+    any 1-D grid — a strictly stronger claim than T1."""
+    g = parse_ttir(_read("add_sm80.ttir"))
+    assert t0_linearity_gate(g)
+    groups = dict(encode_graph_t0(g))
+    assert set(groups) == {"out_ptr"}  # read-only x/y groups are skipped
+    enc = groups["out_ptr"]
+    solver = TwoCopySymbolicHBSolver(
+        enc.records, grid=symbolic_grid(enc), arange_dict=enc.arange_dict
+    )
+    assert solver.find_races() == []
+
+
+def test_param_stride_kernels_fail_the_gate():
+    """tile2d multiplies an arange by a Param stride, matmul advances its
+    iter-arg pointers by Param deltas: both are symbolic×symbolic at T0."""
+    assert not t0_linearity_gate(parse_ttir(_read("tile2d_sm80.ttir")))
+    assert not t0_linearity_gate(parse_ttir(_read("matmul_s3_sm80.ttir")))
+
+
+# A store to out[0..63] masked by r < n, plus a pid-dependent load keeping
+# the grid symbolic. At T0 (n symbolic) the cross-block WAW is SAT — but a
+# T0 witness picks its own n, so the selector must fall to T1 and judge
+# THIS launch's n.
+_INPUT_DEPENDENT_RACE = _mini(
+    "%pid = tt.get_program_id x : i32",
+    "%c64 = arith.constant 64 : i32",
+    "%b = arith.muli %pid, %c64 : i32",
+    "%r = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32>",
+    "%bs = tt.splat %b : i32 -> tensor<64xi32>",
+    "%off = arith.addi %bs, %r : tensor<64xi32>",
+    "%sx = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<64x!tt.ptr<f32>>",
+    "%px = tt.addptr %sx, %off : tensor<64x!tt.ptr<f32>>, tensor<64xi32>",
+    "%l = tt.load %px : tensor<64x!tt.ptr<f32>>",
+    "%nb = tt.splat %n : i32 -> tensor<64xi32>",
+    "%m = arith.cmpi slt, %r, %nb : tensor<64xi32>",
+    "%p = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<64x!tt.ptr<f32>>",
+    "%q = tt.addptr %p, %r : tensor<64x!tt.ptr<f32>>, tensor<64xi32>",
+    "tt.store %q, %l, %m : tensor<64x!tt.ptr<f32>>",
+).replace(
+    "%x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>",
+    "%x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32",
+)
+
+
+def test_t0_sat_falls_to_t1_and_judges_this_launch():
+    g = parse_ttir(_INPUT_DEPENDENT_RACE)
+    assert t0_linearity_gate(g)  # linear: r < n is a symbolic COMPARISON
+    args = (
+        torch.zeros(4096, dtype=torch.float32),
+        torch.zeros(4096, dtype=torch.float32),
+    )
+    # n=0: the mask kills every lane — this launch is race-free, but only
+    # at T1 (T0's symbolic n admits a witness). Rung must be T1.
+    det = CompiledRaceDetector()
+    _launch(
+        det,
+        ["x_ptr", "out_ptr", "n"],
+        (*args, 0),
+        {"grid": (4,)},
+        _INPUT_DEPENDENT_RACE,
+    )
+    assert det.last_global_status == "ok"
+    assert det.last_global_provenance == "proved@T1"
+    # n=5: the same kernel really races on this launch.
+    det2 = CompiledRaceDetector()
+    _launch(
+        det2,
+        ["x_ptr", "out_ptr", "n"],
+        (*args, 5),
+        {"grid": (4,)},
+        _INPUT_DEPENDENT_RACE,
+    )
+    assert det2.last_global_status == "races"
+    assert det2.last_global_provenance is None
+
+
+# Shift-by-one-block kernel: block p loads [64p, 64p+64) of x and stores
+# [64p+64, 64p+128) of out. Non-aliased: provable at T0 (store footprints
+# disjoint per pid; the load-only group is skipped). Aliased in-place
+# (x_ptr is out_ptr): block p's store overlaps block p+1's load — a real
+# cross-block RAW that only T1's real bases can see.
+_SHIFT_KERNEL = _mini(
+    "%pid = tt.get_program_id x : i32",
+    "%c64 = arith.constant 64 : i32",
+    "%b = arith.muli %pid, %c64 : i32",
+    "%r = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32>",
+    "%bs = tt.splat %b : i32 -> tensor<64xi32>",
+    "%off = arith.addi %bs, %r : tensor<64xi32>",
+    "%sx = tt.splat %x_ptr : !tt.ptr<f32> -> tensor<64x!tt.ptr<f32>>",
+    "%px = tt.addptr %sx, %off : tensor<64x!tt.ptr<f32>>, tensor<64xi32>",
+    "%l = tt.load %px : tensor<64x!tt.ptr<f32>>",
+    "%c64t = tt.splat %c64 : i32 -> tensor<64xi32>",
+    "%off2 = arith.addi %off, %c64t : tensor<64xi32>",
+    "%p = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<64x!tt.ptr<f32>>",
+    "%q = tt.addptr %p, %off2 : tensor<64x!tt.ptr<f32>>, tensor<64xi32>",
+    "tt.store %q, %l : tensor<64x!tt.ptr<f32>>",
+)
+
+
+def test_aliased_launch_never_proves_t0():
+    """The T0 partition assumes non-aliased args; the selector may accept a
+    T0 proof only when THIS launch's captured intervals are disjoint. An
+    in-place launch must fall to T1 and report the cross-block RAW."""
+    shared = torch.zeros(4096, dtype=torch.float32)
+    det = CompiledRaceDetector()
+    _launch(det, ["x_ptr", "out_ptr"], (shared, shared), {"grid": (4,)}, _SHIFT_KERNEL)
+    assert det.last_global_status == "races"
+    assert det.last_global_provenance is None
+    # Non-aliased: same kernel proves at T0.
+    det2 = CompiledRaceDetector()
+    _launch(
+        det2,
+        ["x_ptr", "out_ptr"],
+        (
+            torch.zeros(4096, dtype=torch.float32),
+            torch.zeros(4096, dtype=torch.float32),
+        ),
+        {"grid": (4,)},
+        _SHIFT_KERNEL,
+    )
+    assert det2.last_global_status == "ok"
+    assert det2.last_global_provenance == "proved@T0"
+
+
+def test_unverifiable_capture_blocks_t0():
+    """A pointer passed as a raw int leaves no tensor metadata: the
+    non-aliasing premise is unverifiable, so T0 must not stand in — T1
+    fails closed instead of a blind 'proved@T0'."""
+    det = CompiledRaceDetector()
+    _launch(
+        det,
+        ["x_ptr", "out_ptr"],
+        (0x1000, 0x11000),  # raw addresses, no metadata
+        {"grid": (4,)},
+        _SHIFT_KERNEL,
+    )
+    assert det.last_global_status == "unsupported"
+    assert "missing tensor metadata" in (det.last_global_reason or "")
+
+
+def test_deep_term_chain_never_escapes_finalize():
+    """A legal TTIR with a very deep offset chain exhausts recursion in the
+    gate/eval walks; that must degrade to 'unsupported', never crash the
+    user's launch teardown."""
+    lines = [
+        "%pid = tt.get_program_id x : i32",
+        "%r = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32>",
+        "%c1 = arith.constant dense<1> : tensor<64xi32>",
+        "%v0 = arith.addi %r, %c1 : tensor<64xi32>",
+    ]
+    for i in range(1500):
+        lines.append(f"%v{i + 1} = arith.addi %v{i}, %c1 : tensor<64xi32>")
+    lines += [
+        "%p = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<64x!tt.ptr<f32>>",
+        "%q = tt.addptr %p, %v1500 : tensor<64x!tt.ptr<f32>>, tensor<64xi32>",
+        "tt.store %q, %c1 : tensor<64x!tt.ptr<f32>>",
+    ]
+    det = CompiledRaceDetector()
+    _launch(
+        det,
+        ["x_ptr", "out_ptr"],
+        (torch.zeros(64, dtype=torch.float32), torch.zeros(4096, dtype=torch.float32)),
+        {"grid": (2,)},
+        _mini(*lines),
+    )  # must not raise
+    assert det.last_global_status == "unsupported"
+
+
 # ─────────────────────── client end-to-end ───────────────────────
 
 
@@ -382,6 +558,8 @@ def test_client_t1_proof_end_to_end():
     )
     assert det.last_global_status == "ok"
     assert det.last_global_reports == []
+    # add's stride is a folded constant → the selector reaches T0.
+    assert det.last_global_provenance == "proved@T0"
     assert det.last_status == "no_ttgir"  # TTGIR verdict independent
 
 

@@ -37,7 +37,13 @@ from ....core.data import Op
 from ...common.ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
 from ..hb_common import UnsupportedSymbolicRaceQuery
 from ..two_copy_symbolic_hb_solver import TwoCopySymbolicHBSolver
-from .global_records import GlobalTensor, encode_graph, t1_grid
+from .global_records import (
+    GlobalTensor,
+    encode_graph,
+    encode_graph_t0,
+    symbolic_grid,
+    t0_linearity_gate,
+)
 from .smt_encoder import AnalysisResult, analyze_ttgir
 
 _RE_TTGIR_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\(")
@@ -96,13 +102,19 @@ class CompiledRaceDetector(Client):
         self._ttir_graph_cache: dict[str, tuple[AccessGraph | None, str | None]] = {}
         self.last_ttir_graphs: list[AccessGraph | None] = []
         self.last_ttir_unsupported: list[str | None] = []
-        # T1 global-memory verdict (independent of the TTGIR shared-memory
-        # last_status): "ok" = proved race-free for THIS launch's params on
-        # EVERY grid; "races" = definite reports in last_global_reports;
+        # Global-memory verdict (independent of the TTGIR shared-memory
+        # last_status): "ok" = proved race-free (see last_global_provenance
+        # for the rung); "races" = definite reports in last_global_reports;
         # "unsupported"; "no_ttir".
         self.last_global_status: str = "ok"
         self.last_global_reason: str | None = None
         self.last_global_reports: list[Any] = []
+        # The proof rung when status is "ok": "proved@T0" = for ANY scalar
+        # params, any grid along the read axes — scoped to this
+        # specialization and accepted only after the launch's captured
+        # tensor intervals verified the non-aliasing premise;
+        # "proved@T1" = for this launch's params, any grid.
+        self.last_global_provenance: str | None = None
         # Concrete launch capture (pre_warmup is the only hook that sees the
         # real args on the warmup-only path).
         self._launch_params: dict[str, int] = {}
@@ -234,14 +246,16 @@ class CompiledRaceDetector(Client):
         self._pending_ttir = []
 
     def _analyze_global(self) -> None:
-        """T1 global-memory race verdict over this launch's parsed TTIR.
+        """Global-memory race verdict over this launch's parsed TTIR.
 
-        One solver, second capture front-end: the graphs lower to the same
-        record shape the dynamic mode produces, pid/grid/arange/loop stay
-        symbolic, and only the scalar params + tensor bases are concrete —
-        so "ok" here means race-free for THIS input on EVERY grid. Nothing
-        raised in here may escape (finalize runs in the launch teardown).
-        Consumes and resets the per-launch capture state.
+        One solver, second capture front-end: graphs lower to the same
+        record shape the dynamic mode produces; pid/grid/arange/loop stay
+        symbolic. The tier selector (_solve_one_graph) picks the least
+        concretization per kernel: T0 (params symbolic too — race-free for
+        ANY input) behind the linearity gate, else T1 (this launch's
+        params); the rung lands in last_global_provenance. Nothing raised
+        in here may escape (finalize runs in the launch teardown). Consumes
+        and resets the per-launch capture state.
         """
         params, tensors = self._launch_params, self._launch_tensors
         warmups, capture_error = self._warmup_count, self._capture_error
@@ -252,6 +266,7 @@ class CompiledRaceDetector(Client):
         self.last_global_reports = []
         self.last_global_status = "ok"
         self.last_global_reason = None
+        self.last_global_provenance = None
         if not self.last_ttir_graphs:
             self.last_global_status = "no_ttir"
             self.last_global_reason = "no TTIR captured from warmup"
@@ -270,46 +285,29 @@ class CompiledRaceDetector(Client):
         reports: list[Any] = []
         status, reason = "ok", None
         total_widened = 0
+        rungs: list[str] = []
         for graph, parse_reason in zip(
             self.last_ttir_graphs, self.last_ttir_unsupported
         ):
             if graph is None:
                 status, reason = "unsupported", parse_reason
                 continue
-            try:
-                enc = encode_graph(graph, params, tensors)
-                solver = TwoCopySymbolicHBSolver(
-                    enc.records, grid=t1_grid(enc), arange_dict=enc.arange_dict
-                )
-                found = solver.find_races()
-            except UnsupportedTTIR as e:
-                status, reason = "unsupported", f"{e.kind}: {e}"
-                continue
-            except UnsupportedSymbolicRaceQuery as e:
-                status, reason = "unsupported", f"solver: {e}"
-                continue
-            except Exception as e:  # noqa: BLE001
-                status, reason = "unsupported", f"{type(e).__name__}: {e}"
-                continue
-            # Uncertainty discipline: a report touching a widened record
-            # (dropped mask / unmodeled branch) is not a certifiable
-            # witness — same rule as the sanitizer's check_graph.
-            exact = []
-            widened = 0
-            for rep in found:
-                ids = {rep.first.event_id, rep.second.event_id}
-                if ids & enc.uncertain_event_ids:
-                    widened += 1
-                else:
-                    exact.append(rep)
-            reports.extend(exact)
-            total_widened += widened
-            if widened and not exact:
-                status = "unsupported"
-                reason = (
-                    "possible race under over-approximation (data-dependent "
-                    "mask / unmodeled branch) — not a certifiable witness"
-                )
+            outcome = self._solve_one_graph(graph, params, tensors)
+            if outcome[0] == "proved":
+                rungs.append(outcome[1])
+            elif outcome[0] == "races":
+                _, exact, widened = outcome
+                reports.extend(exact)
+                total_widened += widened
+                if widened and not exact:
+                    status = "unsupported"
+                    reason = (
+                        "possible race under over-approximation "
+                        "(data-dependent mask / unmodeled branch) — not a "
+                        "certifiable witness"
+                    )
+            else:
+                status, reason = "unsupported", outcome[1]
 
         self.last_global_reports = reports
         if reports:
@@ -324,8 +322,108 @@ class CompiledRaceDetector(Client):
         elif status != "ok":
             self.last_global_status = status
             self.last_global_reason = reason
+        else:
+            self.last_global_provenance = (
+                "proved@T0" if rungs and all(r == "T0" for r in rungs) else "proved@T1"
+            )
         if cfg.cli_active:
             self._report_global_cli()
+
+    # T0 backstop: the linearity gate should keep queries decidable, but an
+    # unexpected hard query must cost bounded time before falling to T1.
+    T0_TIMEOUT_MS: ClassVar[int] = 10_000
+    _Z3_DEFAULT_TIMEOUT: ClassVar[int] = 4294967295  # z3's own default
+
+    def _solve_one_graph(self, graph: AccessGraph, params: dict, tensors: dict):
+        """The tier selector (plan §I.3) for one kernel specialization.
+
+        Returns ``("proved", "T0"|"T1")``, ``("races", exact, widened)``, or
+        ``("unsupported", reason)``. T0 (params symbolic — race-free for ANY
+        input) is attempted only behind the syntactic linearity gate; any T0
+        SAT falls through to T1 because a T0 witness carries parameter
+        values that need not match this launch."""
+        try:
+            t0_proved = (
+                self._t0_premises_hold_for_launch(graph, tensors)
+                and t0_linearity_gate(graph)
+                and self._try_t0(graph)
+            )
+        except Exception:  # noqa: BLE001
+            # Even the gate walk must not escape finalize (deep-but-legal
+            # term chains can exhaust recursion); T1 has its own guards.
+            t0_proved = False
+        if t0_proved:
+            return ("proved", "T0")
+        try:
+            enc = encode_graph(graph, params, tensors)
+            solver = TwoCopySymbolicHBSolver(
+                enc.records, grid=symbolic_grid(enc), arange_dict=enc.arange_dict
+            )
+            found = solver.find_races()
+        except UnsupportedTTIR as e:
+            return ("unsupported", f"{e.kind}: {e}")
+        except UnsupportedSymbolicRaceQuery as e:
+            return ("unsupported", f"solver: {e}")
+        except Exception as e:  # noqa: BLE001
+            return ("unsupported", f"{type(e).__name__}: {e}")
+        # Uncertainty discipline: a report touching a widened record
+        # (dropped mask / unmodeled branch) is not a certifiable witness —
+        # same rule as the sanitizer's check_graph.
+        exact = []
+        widened = 0
+        for rep in found:
+            ids = {rep.first.event_id, rep.second.event_id}
+            if ids & enc.uncertain_event_ids:
+                widened += 1
+            else:
+                exact.append(rep)
+        if exact or widened:
+            return ("races", exact, widened)
+        return ("proved", "T1")
+
+    @staticmethod
+    def _t0_premises_hold_for_launch(graph: AccessGraph, tensors: dict) -> bool:
+        """A T0 proof partitions accesses per base pointer — the
+        NON-ALIASING premise. It may stand in for THIS launch's verdict only
+        when the launch demonstrably satisfies it: every accessed base has
+        captured, contiguous metadata and the allocation intervals
+        [data_ptr, data_ptr + numel·elem) are pairwise disjoint. An aliased
+        (e.g. in-place) or unverifiable launch falls through to T1, which
+        uses the real bases — reporting the aliased race — or fails closed."""
+        intervals = []
+        for name in {a.base_param for a in graph.accesses}:
+            meta = tensors.get(name)
+            if meta is None or not meta.contiguous:
+                return False
+            intervals.append(
+                (meta.data_ptr, meta.data_ptr + meta.numel * meta.elem_size)
+            )
+        intervals.sort()
+        return all(s2 >= e1 for (_, e1), (s2, _) in zip(intervals, intervals[1:]))
+
+    def _try_t0(self, graph: AccessGraph) -> bool:
+        """True only when EVERY per-tensor T0 group is UNSAT under symbolic
+        params. Any SAT, unknown, timeout, or encoding limit (e.g. a loop
+        bound referencing a param) falls back to T1 — never a report."""
+        from z3 import set_param
+
+        try:
+            t0_groups = encode_graph_t0(graph)
+        except Exception:  # noqa: BLE001
+            return False
+        set_param("timeout", self.T0_TIMEOUT_MS)
+        try:
+            for _name, enc in t0_groups:
+                solver = TwoCopySymbolicHBSolver(
+                    enc.records, grid=symbolic_grid(enc), arange_dict=enc.arange_dict
+                )
+                if solver.find_races():
+                    return False
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            set_param("timeout", self._Z3_DEFAULT_TIMEOUT)
+        return True
 
     def _report_global_cli(self) -> None:
         s = self.last_global_status
@@ -335,9 +433,15 @@ class CompiledRaceDetector(Client):
                 f"{len(self.last_global_reports)} report(s)"
             )
         elif s == "ok":
+            claim = (
+                "race-free for ANY scalar params (this specialization, "
+                "non-aliased args)"
+                if self.last_global_provenance == "proved@T0"
+                else "race-free for this input"
+            )
             print(
-                f"[{self.LOG_TAG}] global memory: race-free for this input "
-                "on every grid (T1 proof)"
+                f"[{self.LOG_TAG}] global memory: {claim} on every grid "
+                f"along the axes read ({self.last_global_provenance})"
             )
         else:
             print(f"[{self.LOG_TAG}] global memory: {s} — {self.last_global_reason}")
