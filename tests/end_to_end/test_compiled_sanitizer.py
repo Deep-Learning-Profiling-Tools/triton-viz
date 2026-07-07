@@ -299,12 +299,14 @@ def test_second_launch_recomputes_per_launch_metadata():
 
 
 @requires_cuda
-def test_branch_guarded_access_abstains_no_false_witness():
+def test_modeled_branch_condition_proves_no_false_witness():
     """`if t > 0: load(p + offs - B)` never reads offset -1: the t == 0
-    iteration takes the other branch. The line-based reader cannot attach the
-    branch condition to the access, so it must abstain (unsupported) — NOT
-    report a SAT "witness" at an unreachable t == 0 state. This is the
-    TritonBench diag_ssm_triton backward-kernel shape."""
+    iteration takes the other branch. The condition (Param - LoopVar > 0) is
+    modelable, so the branch load carries it as a path constraint and the
+    launch gets a PRECISE proof — no abstention, and certainly no false
+    witness at the unreachable t == 0 state. This is the TritonBench
+    diag_ssm_triton backward-kernel shape (pre-S2 this abstained as
+    'branch-guarded unsupported')."""
     det = Sanitizer(compile=True, abort_on_error=False)
 
     @triton_viz.trace(det)
@@ -326,6 +328,35 @@ def test_branch_guarded_access_abstains_no_false_witness():
     x = torch.randn(n_steps * n_cols, device="cuda")
     out = torch.empty(n_cols, device="cuda")
     guarded_scan[(1,)](x, out, n_steps, n_cols, BLOCK=8)
+    assert det.last_status == "ok"
+    assert det.records == []  # proved: the guarded load never reaches -1
+
+
+@requires_cuda
+def test_data_dependent_branch_still_abstains():
+    """A branch condition derived from loaded DATA cannot be modeled. A
+    potential OOB behind it must abstain (unsupported) — never a witness
+    from a possibly-untaken branch, never a silent 'ok'."""
+    det = Sanitizer(compile=True, abort_on_error=False)
+
+    @triton_viz.trace(det)
+    @triton.jit
+    def flag_gated(flag_ptr, x_ptr, out_ptr, n_cols, BLOCK: tl.constexpr):
+        offs = tl.arange(0, BLOCK)
+        mask = offs < n_cols
+        flag = tl.load(flag_ptr)
+        acc = tl.zeros((BLOCK,), tl.float32)
+        if flag > 0:
+            # offs - n_cols is negative for every active lane: definite OOB
+            # if the branch runs — but whether it runs depends on data.
+            acc = tl.load(x_ptr + offs - n_cols, mask=mask, other=0)
+        tl.store(out_ptr + offs, acc, mask=mask)
+
+    n_cols = 8
+    flag = torch.zeros(1, dtype=torch.int32, device="cuda")
+    x = torch.randn(n_cols, device="cuda")
+    out = torch.empty(n_cols, device="cuda")
+    flag_gated[(1,)](flag, x, out, n_cols, BLOCK=8)
     assert det.last_status == "unsupported"
     assert "branch-guarded" in (det.unsupported_reason or "")
     assert det.records == []  # no false witness from the untaken branch

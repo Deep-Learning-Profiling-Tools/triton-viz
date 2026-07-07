@@ -9,7 +9,10 @@ import pytest
 from triton_viz.clients.sanitizer.compiled.ttir_reader import (
     Arange,
     Bin,
+    Cmp,
+    Const,
     IterArgOffset,
+    Pid,
     UnsupportedTTIR,
     parse_ttir,
 )
@@ -169,13 +172,13 @@ def test_min_max_rem_arith_are_modeled():
     assert {"%", "min", "max"} <= ops, f"swizzle ops lost in parsing: {ops}"
 
 
-def test_scf_if_marks_accesses_guarded():
+def test_scf_if_modeled_condition_becomes_path_not_guarded():
     """An access inside an scf.if region executes only when the branch is
-    taken. The condition is not modeled, so the access must be tagged
-    ``guarded`` — check_graph may then use it for a proof but never as a SAT
-    witness (TritonBench's diag_ssm guards `load(y + offs - B*D)` behind
-    `if t > 0`; an unguarded scan would "witness" the unreachable t == 0 at
-    offset -1). Accesses outside the region keep full witness validity."""
+    taken. A pid-derived condition IS modelable, so the access carries it as
+    ``path`` (checked precisely: UNSAT is a proof, SAT a reachable witness)
+    and is NOT pessimistically ``guarded``. Accesses outside the region carry
+    no path. Unmodelable (data-dependent) conditions keep the guarded
+    pessimism — covered in test_ttir_reader_scf_if.py."""
     text = _read("add_sm80.ttir").replace(
         "%x_5 = tt.load %x_4, %mask_3 : tensor<1024x!tt.ptr<f32>> loc(#loc25)",
         "%c = arith.cmpi sgt, %offs, %c1024_i32 : i32 loc(#loc25)\n"
@@ -185,10 +188,12 @@ def test_scf_if_marks_accesses_guarded():
         "    } loc(#loc25)",
     )
     g = parse_ttir(text)
-    by_param = {(a.base_param, a.kind): a.guarded for a in g.accesses}
-    assert by_param[("x_ptr", "load")] is True  # inside the scf.if
-    assert by_param[("y_ptr", "load")] is False  # after the region closed
-    assert by_param[("out_ptr", "store")] is False
+    by_key = {(a.base_param, a.kind): a for a in g.accesses}
+    branch_load = by_key[("x_ptr", "load")]
+    assert branch_load.guarded is False
+    assert branch_load.path == Cmp("sgt", Bin("*", Pid(0), Const(1024)), Const(1024))
+    assert by_key[("y_ptr", "load")].path is None  # after the region closed
+    assert by_key[("out_ptr", "store")].path is None
 
 
 def test_store_of_multi_result_value_is_recorded():

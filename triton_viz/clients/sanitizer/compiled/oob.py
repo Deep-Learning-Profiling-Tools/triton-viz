@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from z3 import And, ArithRef, BoolRef, If, Int, IntVal, Or, Solver, is_bool, sat
+from z3 import Not as Z3Not
 
 from ...common.ttir_reader import (
     AccessEvent,
@@ -39,6 +40,7 @@ from ...common.ttir_reader import (
     DataDep,
     IterArgOffset,
     LoopVar,
+    Not,
     Param,
     Pid,
     Select,
@@ -204,6 +206,8 @@ def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
     if isinstance(term, Select):
         return If(_as_bool(_eval(term.cond, env, graph)), _eval(term.t, env, graph),
                   _eval(term.f, env, graph))  # fmt: skip
+    if isinstance(term, Not):
+        return Z3Not(_as_bool(_eval(term.a, env, graph)))
     if isinstance(term, DataDep):
         raise UnsupportedTTIR(f"data-dependent term ({term.why})")
     raise UnsupportedTTIR(f"unhandled term {type(term).__name__}")
@@ -262,6 +266,10 @@ def check_access(
         solver.add(c)
     if access.mask is not None:
         solver.add(_as_bool(_eval(access.mask, env, graph)))
+    if access.path is not None:
+        # Modeled branch condition: the access only executes when its
+        # scf.if path holds, so a SAT model under it is a REAL witness.
+        solver.add(_as_bool(_eval(access.path, env, graph)))
     # OOB: element offset escapes [0, numel-1].
     solver.add(Or(offset < 0, offset >= meta.numel))
 
@@ -299,12 +307,15 @@ def check_graph(graph: AccessGraph, ctx: LaunchContext) -> list[CompiledOOB]:
     modeled (the client converts that into an ``unsupported`` verdict with
     empty records — it does not auto-fall back to interpreted checking).
 
-    Branch-guarded accesses (inside an scf.if region) are checked as if
-    unconditional: UNSAT on that over-approximation is still a sound proof.
-    A SAT hit on one, however, may sit in a branch the launch never takes —
-    not a certifiable witness — so it raises ``unsupported`` instead of
-    being reported. SAT on an unguarded access is always a real witness and
-    takes precedence over guarded uncertainty."""
+    An access under a MODELED scf.if condition carries it as ``path`` and is
+    checked precisely (the path constrains the query, so SAT is a real,
+    reachable witness). ``guarded`` now only marks accesses under an
+    UNMODELABLE condition (derived from loaded data): those are checked as
+    if unconditional — UNSAT on that over-approximation is still a sound
+    proof, but a SAT hit may sit in a branch the launch never takes, so it
+    raises ``unsupported`` instead of being reported. SAT on an unguarded
+    access is always a real witness and takes precedence over guarded
+    uncertainty."""
     out: list[CompiledOOB] = []
     uncertain: AccessEvent | None = None
     for access in graph.accesses:

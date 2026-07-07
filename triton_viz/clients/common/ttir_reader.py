@@ -118,6 +118,13 @@ class Select:
     f: "Term"
 
 
+@dataclass(frozen=True)
+class Not:
+    """Boolean negation — the path condition of an scf.if else-region."""
+
+    a: "Term"
+
+
 # Sentinel for a value loaded from memory (tt.load result) or computed from
 # loaded data (arith.*f, tt.dot, ...). If one ever reaches an address or mask
 # it means data-dependent addressing → unsupported.
@@ -137,6 +144,7 @@ Term = (
     | Cmp
     | BoolBin
     | Select
+    | Not
     | DataDep
 )
 
@@ -186,12 +194,17 @@ class AccessEvent:
     elem_bits: int
     loc: SourceLoc | None
     line_no: int
-    # True when the access sits inside an scf.if region. The branch condition
-    # is not modeled: checking the access as unconditional over-approximates
-    # the reachable states, so UNSAT is still a sound proof — but a SAT model
-    # may sit in a branch the launch never takes, so it must not be reported
-    # as a witness (check_graph turns it into ``unsupported``).
+    # True when some enclosing scf.if condition could NOT be modeled (it
+    # derives from loaded data). The access is then checked as if
+    # unconditional: UNSAT stays a sound proof, but a SAT model may sit in a
+    # branch the launch never takes, so it must not be reported as a witness
+    # (check_graph turns it into ``unsupported``). Modeled conditions ride
+    # in ``path`` instead and do not set this flag.
     guarded: bool = False
+    # Conjunction of the MODELED enclosing branch conditions, with
+    # else-regions negated (Not). The access executes iff path ∧ mask, so a
+    # SAT model under both constraints is a real, reachable witness.
+    path: Term | None = None
     # Present iff kind is atomic_*: an atomic is a read AND a write of its
     # footprint (RMW), which is what is_read/is_write encode for consumers
     # that build read/write event pairs (the race detector front-end).
@@ -300,6 +313,38 @@ _RE_SCF_FOR = re.compile(
     rf"(?: iter_args\((.*?)\))?\s*(?:->|:)"
 )
 _RE_SCF_YIELD = re.compile(r"^scf\.yield (.*?)\s*:")
+_RE_SCF_IF = re.compile(rf"^scf\.if ({_SSA})")
+
+
+@dataclass
+class _IfFrame:
+    """Walker state for one open scf.if region."""
+
+    cond: "Term | None"  # modeled condition; None → accesses stay `guarded`
+    res: str | None  # single-result SSA name ("%r"), if the if yields
+    branch: str = "then"
+    # Yield VALUES resolved at the yield line — then/else regions legally
+    # reuse the same SSA names, so resolving at close time would read the
+    # else-region's overwrites.
+    then_vals: "list[object] | None" = None
+    else_vals: "list[object] | None" = None
+
+
+def _branch_state(frames: list) -> "tuple[bool, Term | None]":
+    """(guarded, path) for an access under the currently open frames:
+    ``guarded`` if any enclosing condition is unmodeled; ``path`` is the
+    conjunction of the modeled ones (else-regions negated)."""
+    guarded = False
+    path: Term | None = None
+    for f in frames:
+        if not isinstance(f, _IfFrame):
+            continue
+        if f.cond is None:
+            guarded = True
+            continue
+        c: Term = f.cond if f.branch == "then" else Not(f.cond)
+        path = c if path is None else BoolBin("and", path, c)
+    return guarded, path
 
 
 def _elem_bits(type_str: str) -> int:
@@ -392,11 +437,13 @@ def parse_ttir(text: str) -> AccessGraph:
         return fa.elem_bits if fa else 0
 
     # ── body parse (single function; loop handled inline) ──
-    # Region stack: "for" | "if". Tracking scf.if frames keeps the walker's
-    # brace accounting honest (an if's closing brace inside a loop must not
-    # be mistaken for the loop's close, nor its scf.yield for the loop's
-    # yield) and marks the accesses inside as ``guarded``.
-    frames: list[str] = []
+    # Region stack: "for" | _IfFrame. Tracking scf.if frames keeps the
+    # walker's brace accounting honest (an if's closing brace inside a loop
+    # must not be mistaken for the loop's close, nor its scf.yield for the
+    # loop's yield), carries the modeled branch condition for the accesses
+    # inside (``path``), and marks accesses under an UNMODELED condition as
+    # ``guarded``.
+    frames: list = []
     loop_body_yields: list[str] = []
     loop_iter_arg_ssa: list[tuple[str, str]] = []  # (arg_ssa, init_ssa)
     loop_meta: dict[str, object] = {}
@@ -465,9 +512,20 @@ def parse_ttir(text: str) -> AccessGraph:
             frames.append("for")
             continue
 
-        # ---- scf.if: track the region, do not model the condition ----
+        # ---- scf.if: track the region and model its condition ----
         if body.startswith("scf.if"):
-            frames.append("if")
+            im = _RE_SCF_IF.match(body)
+            cond_t: Term | None = None
+            if im:
+                cv = val(im.group(1))
+                # A pointer can't be a condition; loaded data (DataDep)
+                # can't be modeled → the region stays pessimistically
+                # ``guarded`` exactly as before this feature.
+                if not isinstance(cv, (DataDep, PtrValue)):
+                    cond_t = cv  # type: ignore[assignment]
+            frames.append(_IfFrame(cond=cond_t, res=res))
+            # Fallback binding; upgraded to Select at the closing brace when
+            # the condition and both branches' single yield are modelable.
             if res is not None:
                 env[res] = DataDep("scf.if result")
             continue
@@ -477,11 +535,33 @@ def parse_ttir(text: str) -> AccessGraph:
         ):
             if line.startswith("} else"):
                 # The then-region closes and the else-region opens: the same
-                # if frame stays on the stack (else is just as guarded).
-                if frames[-1] != "if":
+                # if frame stays on the stack with its condition negated for
+                # the accesses that follow.
+                top = frames[-1]
+                if not isinstance(top, _IfFrame):
                     raise UnsupportedTTIR(f"line {line_no}: unexpected `else`")
+                top.branch = "else"
                 continue
-            if frames.pop() == "if":
+            popped = frames.pop()
+            if isinstance(popped, _IfFrame):
+                if (
+                    popped.res is not None
+                    and popped.cond is not None
+                    and popped.then_vals is not None
+                    and popped.else_vals is not None
+                    and len(popped.then_vals) == 1
+                    and len(popped.else_vals) == 1
+                ):
+                    tv, ev = popped.then_vals[0], popped.else_vals[0]
+                    # Yielded pointers or loaded data keep the DataDep
+                    # fallback (a stored VALUE never enters address math;
+                    # an address use of the result then fails closed).
+                    if not any(isinstance(x, (DataDep, PtrValue)) for x in (tv, ev)):
+                        env[popped.res] = Select(
+                            popped.cond,
+                            as_term(tv, "scf.if yield"),
+                            as_term(ev, "scf.if yield"),
+                        )
                 continue
             # A "for" frame closed: resolve deltas from the yields, positionally.
             ptr_idx = 0
@@ -520,6 +600,17 @@ def parse_ttir(text: str) -> AccessGraph:
             # yield inside the loop body must not clobber it.
             loop_body_yields = _split_ssa(ym.group(1))
             continue
+        if ym and frames and isinstance(frames[-1], _IfFrame):
+            # Resolve yield VALUES here, not at the closing brace: then/else
+            # regions legally reuse the same SSA names, so a close-time
+            # lookup would read the else-region's overwrites.
+            fr = frames[-1]
+            vals = [val(s) for s in _split_ssa(ym.group(1))]
+            if fr.branch == "then":
+                fr.then_vals = vals
+            else:
+                fr.else_vals = vals
+            continue
 
         # ---- other control flow: fail closed ----
         # scf.for and scf.if are region-tracked above. Anything else that
@@ -541,43 +632,48 @@ def parse_ttir(text: str) -> AccessGraph:
         # ---- accesses ----
         lm = _RE_LOAD.match(body)
         if lm:
+            guarded, path = _branch_state(frames)
             _record_access(
                 "load",
                 lm.group(1),
                 lm.group(2),
-                "if" in frames,
+                guarded,
                 env,
                 val,
                 accesses,
                 base_elem_bits,
                 loc,
                 line_no,
+                path=path,
             )
             if res is not None:
                 env[res] = DataDep("loaded value")
             continue
         sm = _RE_STORE.match(body)
         if sm:
+            guarded, path = _branch_state(frames)
             _record_access(
                 "store",
                 sm.group(1),
                 sm.group(3),
-                "if" in frames,
+                guarded,
                 env,
                 val,
                 accesses,
                 base_elem_bits,
                 loc,
                 line_no,
+                path=path,
             )
             continue
         am = _RE_ATOMIC_RMW.match(body)
         if am:
+            guarded, path = _branch_state(frames)
             _record_access(
                 "atomic_rmw",
                 am.group(4),
                 am.group(6),  # the mask operand; val (group 5) is data only
-                "if" in frames,
+                guarded,
                 env,
                 val,
                 accesses,
@@ -585,17 +681,19 @@ def parse_ttir(text: str) -> AccessGraph:
                 loc,
                 line_no,
                 atomic=AtomicInfo(am.group(1), am.group(2), am.group(3)),
+                path=path,
             )
             if res is not None:
                 env[res] = DataDep("atomic result")
             continue
         am = _RE_ATOMIC_CAS.match(body)
         if am:
+            guarded, path = _branch_state(frames)
             _record_access(
                 "atomic_cas",
                 am.group(3),
                 "",  # CAS has no mask operand: unconditional footprint
-                "if" in frames,
+                guarded,
                 env,
                 val,
                 accesses,
@@ -603,6 +701,7 @@ def parse_ttir(text: str) -> AccessGraph:
                 loc,
                 line_no,
                 atomic=AtomicInfo(None, am.group(1), am.group(2)),
+                path=path,
             )
             if res is not None:
                 env[res] = DataDep("atomic result")
@@ -686,6 +785,8 @@ def _set_arange_dim(v: object, dim: int) -> object:
             _set_arange_dim(v.t, dim),  # type: ignore[arg-type]
             _set_arange_dim(v.f, dim),  # type: ignore[arg-type]
         )
+    if isinstance(v, Not):
+        return Not(_set_arange_dim(v.a, dim))  # type: ignore[arg-type]
     return v
 
 
@@ -834,6 +935,7 @@ def _record_access(
     loc,
     line_no,
     atomic=None,
+    path=None,
 ) -> None:
     ptr = val(ptr_ssa)
     if not isinstance(ptr, PtrValue):
@@ -862,5 +964,6 @@ def _record_access(
             line_no=line_no,
             guarded=guarded,
             atomic=atomic,
+            path=path,
         )
     )

@@ -524,18 +524,28 @@ sanitizer OOB now also checks atomics (side benefit) and its suite stays green.
 ### S2 — scf.if condition modeling + per-term DataDep policy (≈1 week — the core new work)
 
 - Capture the branch condition's Term chain; every access in the region carries a path
-  condition (conjunction across nested ifs); **both branches are encoded**.
-- scf.if results upgrade from `DataDep` to ite Terms when the condition is modelable
-  (condition itself a `DataDep` → status quo).
+  condition (conjunction across nested ifs); **both branches are encoded**. **Done** —
+  `AccessEvent.path` (new `Not` term for else-regions), `_IfFrame` walker state;
+  `guarded` now means only "condition unmodelable (loaded data)" and keeps the pre-S2
+  pessimism.
+- scf.if results upgrade from `DataDep` to ite Terms when the condition is modelable.
+  **Done, with a scope discovery**: triton canonicalizes pure-scalar if/else into
+  `arith.select` before TTIR (already in the vocabulary), so the value-yielding scf.if
+  that actually survives is the side-effect kind whose results are loaded data —
+  correctly left as `DataDep`. The Select upgrade covers the remaining single-result
+  case; yields are resolved at the yield line because then/else regions legally reuse
+  SSA names. Multi-result ifs stay fail-closed.
 - Per-term DataDep policy (feeds the selector, §I.3): `DataDep` in a mask chain →
   free variable; `DataDep` in an address chain → marker that routes the kernel to the
-  interpreter front-end.
-- Side benefit, landed and tested separately: the sanitizer's `guarded` accesses become
-  provable instead of pessimistic — this step edits the shared reader, both clients
-  gain.
+  interpreter front-end. **(open — next in S2)**
+- Side benefit: **done in the same change** (not separately) — `check_access` adds the
+  path constraint, so sanitizer accesses under modelable conditions are proved
+  precisely and a SAT under the path is a real, reachable witness.
 
-*Exit (headline acceptance)*: kernels the dynamic mode marks unsupported for
-pid-dependent branches now encode completely.
+*Exit (headline acceptance)*: **met for the condition-modeling part** — the
+`pid_branch` golden (a store only block 0 executes, the dynamic mode's classic
+unsupported case) now gets a path-precise proof, and the too-small-tensor variant a
+witness pinned to pid 0 (`tests/unit/test_ttir_reader_scf_if.py`).
 
 ### S3 — T1 evaluation + solver hookup (≈1 week)
 

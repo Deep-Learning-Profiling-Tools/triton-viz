@@ -163,6 +163,47 @@ def cas_kernel(lock_ptr, out_ptr):
 
 
 @triton.jit
+def pid_branch_kernel(x_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
+    """pid-dependent branch, no results: only block 0 stores (scf.if with a
+    single then-region — the dynamic mode's biggest unsupported source)."""
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    v = tl.load(x_ptr + offs, mask=mask)
+    if pid == 0:
+        tl.store(out_ptr + offs, v, mask=mask)
+
+
+@triton.jit
+def if_else_offset_kernel(x_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
+    """if/else yielding a scalar used in address math: the scf.if result
+    must become a Select term, not an opaque DataDep."""
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    if pid == 0:
+        base = 0
+    else:
+        base = n_elements
+    v = tl.load(x_ptr + base + offs)
+    tl.store(out_ptr + base + offs, v)
+
+
+@triton.jit
+def if_else_load_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
+    """Branches with side effects survive canonicalization as a real scf.if
+    with then AND else regions: block 0 reads x, the rest read y. Exercises
+    path conditions on both sides (cond and its negation)."""
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    if pid == 0:
+        v = tl.load(x_ptr + offs, mask=mask)
+    else:
+        v = tl.load(y_ptr + offs, mask=mask)
+    tl.store(out_ptr + offs, v, mask=mask)
+
+
+@triton.jit
 def gather_kernel(idx_ptr, src_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
     """Indirect/gather: a loaded value feeds the second load's address —
     the data-dependent pattern the compiled sanitizer marks unsupported."""
@@ -291,6 +332,49 @@ if __name__ == "__main__":
         },  # fmt: skip
         {"BLOCK": 256},
         {(i,): [["tt.divisibility", 16]] for i in range(3)},
+        num_stages=1,
+        num_warps=4,
+    )
+    dump(
+        "pid_branch",
+        pid_branch_kernel,
+        {
+            "x_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n_elements": "i32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 256},
+        {(i,): [["tt.divisibility", 16]] for i in range(3)},
+        num_stages=1,
+        num_warps=4,
+    )
+    dump(
+        "if_else_offset",
+        if_else_offset_kernel,
+        {
+            "x_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n_elements": "i32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 256},
+        {(i,): [["tt.divisibility", 16]] for i in range(3)},
+        num_stages=1,
+        num_warps=4,
+    )
+    dump(
+        "if_else_load",
+        if_else_load_kernel,
+        {
+            "x_ptr": "*fp32",
+            "y_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n_elements": "i32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 256},
+        {(i,): [["tt.divisibility", 16]] for i in range(4)},
         num_stages=1,
         num_warps=4,
     )
