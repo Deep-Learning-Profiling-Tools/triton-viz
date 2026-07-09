@@ -45,9 +45,13 @@ Build order:
       documented boundaries: indirect ×3, nested-loop ×2, dd-mask
       race-unconfirmed ×1), witness-matched 16/16, ladder audit PASS
       (ladder-unsound = replay-unsound = 0), all seven terminal buckets
-      populated (proved@T0=7, T1=5, T1+assumes-termination=3,
-      race-confirmed=8, race-unconfirmed=1, races-unclassified=11,
-      unsupported=5). C3 now reports replay-failure as channel-unavailable
+      populated. CURRENT reproducible distribution (after the 5ad7a72
+      soundness fix narrowed trb015 from T0 to T1; independently verified
+      2026-07-09, two terminal-identical runs): proved@T0=6, T1=6,
+      T1+assumes-termination=3, race-confirmed=9, race-unconfirmed=1,
+      races-unclassified=10, unsupported=5. (The original commit
+      message's 8/11 confirmed/unclassified split was a stale pre-final
+      count.) C3 now reports replay-failure as channel-unavailable
       rather than a fake mismatch (numpy-2 scalar-bound loops).
 - [x] (3, ~1 day) Phase B — landed (`evaluation/kernels/tutorials.py`,
       `--corpus tutorials`): triton 3.6 tutorials 01/02/03/04/05/07 vendored
@@ -171,6 +175,12 @@ Build order:
 
 ## Decision points (not tasks)
 
-- PR layout: `race-detector-z3-demo` carries the plan-doc restructure plus
-  S1–S4 as seven commits; decide whether to merge as one PR or split per step
-  before opening against main.
+- PR layout: `race-detector-z3-demo` now carries the plan-doc restructure
+  plus S1–S6, the evaluation phases (A–C, mutation, RQ instrumentation),
+  and the docs commits; decide whether to merge as one PR, split per step,
+  or split detector-core / evaluation-harness before opening against main.
+
+Independent verification stamp: all checked items above re-verified from a
+clean run at 5ad7a72 (2026-07-09): 217 race-detector tests; TritonRaceBench,
+tutorials, liger, scaling, ablation, and headline all reproduce; benchmark
+determinism confirmed by terminal-identical back-to-back runs.
