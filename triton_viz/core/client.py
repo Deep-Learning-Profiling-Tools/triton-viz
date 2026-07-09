@@ -261,6 +261,7 @@ class ClientManager:
         self._iter_overrider: Callable | None = None
         self._range_wrapper_factory: Callable | None = None
         self._after: list[Callable] = []
+        self._abandoned: list[Callable] = []
 
     def _populate_loop_hooks(self, callbacks_list: list[ForLoopCallbacks]) -> None:
         self._clear_loop_hooks()
@@ -281,6 +282,8 @@ class ClientManager:
                 self._range_wrapper_factory = cb.range_wrapper_factory
             if cb.after_loop_callback is not None:
                 self._after.append(cb.after_loop_callback)
+            if cb.abandoned_loop_callback is not None:
+                self._abandoned.append(cb.abandoned_loop_callback)
 
     def range_type(self, lineno: int, range_type: str) -> None:
         for hook in self._range_type_hooks:
@@ -304,6 +307,10 @@ class ClientManager:
     def after_loop(self, lineno: int) -> None:
         for hook in self._after:
             hook(lineno)
+
+    def abandoned_loop(self, lineno: int, exc_type) -> None:
+        for hook in self._abandoned:
+            hook(lineno, exc_type)
 
     def loop_iter_wrapper(
         self,

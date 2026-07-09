@@ -19,6 +19,7 @@ from triton_viz.clients.race_detector.race_detector import (
 from triton_viz.clients.symbolic_engine import (
     ConstSymbolicExpr,
     LoadSymbolicExpr,
+    RangeWrapper,
     SymbolicExpr,
     _triton_frame_dirs,
 )
@@ -368,6 +369,61 @@ def test_null_race_detector_reports_disabled_status():
     assert detector.last_status == "disabled"
     assert detector.last_reports == []
     assert detector.unsupported_reason == "race detector disabled"
+
+
+# ======== Loop Lifecycle ========
+
+
+def _range_wrapper(start: int, stop: int) -> RangeWrapper:
+    return RangeWrapper(
+        range(start, stop),
+        length=len(range(start, stop)),
+        start=start,
+        stop=stop,
+        step=1,
+    )
+
+
+def test_abandoned_loop_pops_context_and_marks_unsupported():
+    """An abandoned loop (break / early return) must pop its context — a
+    stale entry would swallow all later accesses — and the launch must not
+    read as a clean verdict because the deferred events were never flushed.
+    """
+    detector = SymbolicRaceDetector()
+    lineno = 7
+    detector._loop_hook_before(lineno, _range_wrapper(0, 4))
+    assert len(detector.loop_stack) == 1
+
+    detector._loop_hook_abandoned(lineno, None)
+
+    assert detector.loop_stack == []
+    assert detector._suspended_iter_subs == []
+    assert detector.last_status == "unsupported"
+    assert "loop exited early" in (detector.unsupported_reason or "")
+
+
+def test_abandoned_loop_policy_respects_abort_and_inflight_exception():
+    """abort_on_error raises on a plain break, but never raises while an
+    exception is already unwinding through the loop (that would mask the
+    original failure) — it only marks the launch unsupported."""
+    detector = SymbolicRaceDetector(abort_on_error=True)
+    lineno = 9
+
+    detector._loop_hook_before(lineno, _range_wrapper(0, 4))
+    detector._loop_hook_abandoned(lineno, ValueError)  # exception in flight
+    assert detector.loop_stack == []
+    assert detector.last_status == "unsupported"
+
+    detector.grid_callback((1, 1, 1))
+    try:
+        detector._loop_hook_before(lineno, _range_wrapper(0, 4))
+        with pytest.raises(UnsupportedSymbolicRaceQuery, match="loop exited early"):
+            detector._loop_hook_abandoned(lineno, None)
+        # Bookkeeping stays balanced even when the policy raises.
+        assert detector.loop_stack == []
+        assert detector._suspended_iter_subs == []
+    finally:
+        detector._clear_launch_runtime()
 
 
 # ======== Launch lifecycle — capture slot and eval-scoped hooks ========

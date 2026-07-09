@@ -311,6 +311,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # (idx_z3, IntVal(final iteration value)). See _apply_finished_iter_subs
         # for why leftover iterator references must be concretized at record time.
         self._finished_loop_iter_subs: dict[Any, tuple[Any, Any]] = {}
+        # tl.assume / tl.device_assert conditions captured this launch,
+        # fed to the two-copy solver as per-copy assumption templates.
+        self._launch_assumptions: list[Any] = []
         # Stash of the substitution entry popped when a loop re-enters,
         # restored on a zero-iteration exit (a zero-trip loop leaves the
         # leftover Python variable — and thus its final value — unchanged).
@@ -496,6 +499,44 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             "instance (program id, tl.arange, or loaded data) is "
             "unsupported by one-shot symbolic capture"
         )
+
+    def _handle_assumption(self, condition: Any) -> None:
+        """Collect ``tl.assume`` / ``tl.device_assert`` conditions.
+
+        Every feasible real execution satisfies these, so they are sound
+        constraints on the two-copy model (instantiated once per program
+        copy by the solver). Without this the interpreter's ``assert`` was
+        object-truthy on the symbolic condition and the hint/check was
+        silently dropped.
+        """
+        if self._unsupported_capture or not self._capture_active():
+            return
+        if self.loop_stack:
+            self._raise_or_mark(
+                "tl.assume / tl.device_assert inside a loop is unsupported "
+                "by one-shot symbolic capture"
+            )
+            return
+        cond_sym = SymbolicExpr.from_value(condition)
+        if not isinstance(cond_sym, SymbolicExpr):
+            self._raise_or_mark(
+                "tl.assume / tl.device_assert on a non-tensor condition is "
+                "unsupported"
+            )
+            return
+        result = self._safe_eval(cond_sym, "assumption eval")
+        if result is None:
+            return
+        z3_cond, _ = result
+        z3_cond = self._apply_finished_iter_subs(z3_cond)
+        if self._refs_unresolved_iter_var((z3_cond,), ()):
+            self._raise_or_mark(
+                "assumption references a finished loop iterator with no "
+                "stable final value"
+            )
+            return
+        lanes = z3_cond if isinstance(z3_cond, list) else [z3_cond]
+        self._launch_assumptions.extend(_constraint_to_bool(lane) for lane in lanes)
 
     def _on_data_dependent_value(self, expr: Any = None) -> None:
         """Loop bounds / materialized operands that depend on loads or pids
@@ -824,6 +865,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     self.records,
                     grid=self._launch_grid,
                     arange_dict=self._arange_dict_snapshot,
+                    extra_assumptions=tuple(self._launch_assumptions),
                 ).find_races()
                 self.last_status = "ok"
             except UnsupportedSymbolicRaceQuery as exc:
@@ -892,6 +934,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._known_iter_var_keys = set()
         self._unstable_iter_var_keys = set()
         self._loop_flush_signatures = set()
+        self._launch_assumptions = []
         SymbolicExpr.ARANGE_DICT.clear()
         # SymbolicClient.grid_callback also clears loop_stack, so a launch
         # that aborted mid-loop cannot poison this one.
@@ -1055,6 +1098,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self._known_iter_var_keys = set()
         self._unstable_iter_var_keys = set()
         self._loop_flush_signatures = set()
+        self._launch_assumptions = []
         if SymbolicExpr._load_value_provider_owner == id(self):
             SymbolicExpr._load_value_provider = None
             SymbolicExpr._load_value_provider_owner = None
@@ -1218,6 +1262,40 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             self._unstable_iter_var_keys.add(var_key)
             return
         self._finished_loop_iter_subs[lineno] = (ctx.idx_z3, final)
+
+    def _loop_hook_abandoned(self, lineno: Any, exc_type: Any) -> None:
+        if not self._capture_active():
+            return
+        if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            # Keep the suspended-substitution stash in lockstep with the pop
+            # in the base hook — before the policy hook, which may raise
+            # under abort_on_error. No substitution is re-registered: the
+            # leftover variable's value at an early exit is not the loop's
+            # final value, and the launch is marked unsupported anyway.
+            stashed_lineno, _stashed = self._suspended_iter_subs.pop()
+            assert stashed_lineno == lineno
+        SymbolicClient._loop_hook_abandoned(self, lineno, exc_type)
+
+    def _process_abandoned_loop(self, ctx: LoopContext, exc_type: Any) -> None:
+        """A loop exited early (break / early return / exception). Part of
+        its iteration space never ran, so flushing the deferred events with
+        their full-range iterator constraints would model accesses that did
+        not execute, while dropping them would hide accesses that DID — the
+        only sound verdict is unsupported.
+
+        When an exception is already unwinding through the loop, only mark:
+        raising here (abort_on_error) would mask the original failure.
+        """
+        if self._unsupported_capture:
+            return
+        reason = (
+            "loop exited early (break/early return/exception); its deferred "
+            "accesses cannot be modeled by one-shot symbolic capture"
+        )
+        if exc_type is not None:
+            self._mark_unsupported(reason)
+            return
+        self._raise_or_mark(reason)
 
     def _apply_finished_iter_subs(self, value: Any) -> Any:
         if not self._finished_loop_iter_subs:
