@@ -158,11 +158,11 @@ def test_c2_witness_replay_direct():
     focus = (int(out.data_ptr()), "store")
     v1, _ = confirm_witness(
         dd_mask_kernel, (flags1, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0),
-        focus_a=focus, focus_b=focus,
+        (4,), focus_a=focus, focus_b=focus,
     )  # fmt: skip
     v0, _ = confirm_witness(
         dd_mask_kernel, (flags0, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0),
-        focus_a=focus, focus_b=focus,
+        (4,), focus_a=focus, focus_b=focus,
     )  # fmt: skip
     assert (v1, v0) == ("confirmed", "unconfirmed")
 
@@ -170,17 +170,37 @@ def test_c2_witness_replay_direct():
 def test_c2_unfocused_or_intra_instance_is_unavailable():
     """No foci → unavailable (a whole-block check can fabricate
     confirmations); same pid twice → unavailable (duplicate lanes collapse
-    in an address set)."""
+    in an address set); witness pids outside the launch grid, an unknown
+    (callable) grid, and rmw∩rmw foci → unavailable."""
     flags = torch.ones(64, dtype=torch.int32)
     x, out = torch.randn(256), torch.zeros(64)
     v, _ = confirm_witness(
-        dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0)
+        dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0), (4,)
     )
     assert v == "unavailable"
     focus = (int(out.data_ptr()), "store")
     v, _ = confirm_witness(
         dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (1, 0, 0), (1, 0, 0),
-        focus_a=focus, focus_b=focus,
+        (4,), focus_a=focus, focus_b=focus,
+    )  # fmt: skip
+    assert v == "unavailable"
+    # witness block does not exist on this launch's grid
+    v, why = confirm_witness(
+        dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0),
+        (1,), focus_a=focus, focus_b=focus,
+    )  # fmt: skip
+    assert v == "unavailable" and "do not exist" in (why or "")
+    # callable grid cannot parameterize a faithful replay
+    v, _ = confirm_witness(
+        dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0),
+        lambda meta: (4,), focus_a=focus, focus_b=focus,
+    )  # fmt: skip
+    assert v == "unavailable"
+    # rmw∩rmw: scope/width live outside the footprint
+    rmw_focus = (int(out.data_ptr()), "atomic_rmw")
+    v, _ = confirm_witness(
+        dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0),
+        (4,), focus_a=rmw_focus, focus_b=rmw_focus,
     )  # fmt: skip
     assert v == "unavailable"
 
@@ -228,6 +248,127 @@ def test_c2_focus_blocks_fabricated_upgrade():
     assert all("aux_ptr" not in pair for pair in names), names
     # the withheld aux possibility is noted, not reported
     assert "withheld" in (det.last_global_reason or "")
+
+
+# ────────────── adversarial regressions (2nd verification round) ──────────────
+
+
+@triton.jit
+def np_mask_kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
+    """The mask observes the GRID via tl.num_programs (an unmodeled op →
+    DataDep → widened, NOT unsupported). At the real launch grid (4,) the
+    mask is dead; a synthetic max(pid)+1 replay grid would flip it alive
+    and fabricate a confirmed race."""
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + pid * BLOCK + offs)
+    limit = tl.where(tl.num_programs(0) == 4, 0, BLOCK)
+    keep = offs < limit
+    tl.store(out_ptr + offs, v, mask=keep)
+
+
+def test_c2_replays_at_the_launch_grid():
+    ttir = _ttir_of(
+        np_mask_kernel,
+        {"x_ptr": "*fp32", "out_ptr": "*fp32", "BLOCK": "constexpr"},
+        {"BLOCK": 64},
+    )
+    det = CompiledRaceDetector()
+    x, out = torch.randn(256), torch.zeros(64)
+    _launch(det, np_mask_kernel, (x, out), {"grid": (4,), "BLOCK": 64}, ttir)
+    # This launch performs ZERO stores: never a definite race.
+    assert det.last_global_status == "unsupported"
+    assert det.last_global_reports == []
+    assert "race-unconfirmed" in (det.last_global_reason or "")
+
+
+@triton.jit
+def same_tensor_kernel(m_ptr, x_ptr, out_ptr, BLOCK: tl.constexpr):
+    """An exact WAW on out[0:64] and a dead widened store on out[64:128]:
+    SAME tensor, SAME kind — the two sites share one footprint bucket, so
+    the widened report is unclassifiable (ambiguous), never confirmed on
+    the strength of the exact store's overlap."""
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + pid * BLOCK + offs)
+    tl.store(out_ptr + offs, v)
+    keep = tl.load(m_ptr + offs) > 0
+    tl.store(out_ptr + BLOCK + offs, v, mask=keep)
+
+
+def test_c2_same_tensor_bucket_is_ambiguous():
+    ttir = _ttir_of(
+        same_tensor_kernel,
+        {
+            "m_ptr": "*i32",
+            "x_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 64},
+    )
+    det = CompiledRaceDetector()
+    m0 = torch.zeros(64, dtype=torch.int32)  # the widened store never runs
+    _launch(
+        det,
+        same_tensor_kernel,
+        (m0, torch.randn(256), torch.zeros(128)),
+        {"grid": (4,), "BLOCK": 64},
+        ttir,
+    )
+    assert det.last_global_status == "races"  # the exact WAW is real
+    # exactly ONE definite report — the dead widened store must not ride
+    # the exact store's shared bucket into a fabricated second race
+    assert len(det.last_global_reports) == 1
+    assert "withheld" in (det.last_global_reason or "")
+
+
+def test_c2_no_graduation_outside_the_launch_grid():
+    """grid=(1,): a single program instance cannot cross-block race. The
+    solver's witnesses (grid-generic by design) do not exist on this
+    launch, so the widened report must stay a withheld abstention — the
+    'on this launch's data' graduation claim would be false."""
+    ttir = _ttir_of(dd_mask_kernel, _DD_SIG, {"BLOCK": 64})
+    det = CompiledRaceDetector()
+    flags = torch.ones(64, dtype=torch.int32)
+    _launch(
+        det,
+        dd_mask_kernel,
+        (flags, torch.randn(64), torch.zeros(64)),
+        {"grid": (1,), "BLOCK": 64},
+        ttir,
+    )
+    assert det.last_global_status == "unsupported"
+    assert det.last_global_reports == []
+    # NOT the race-unconfirmed claim: the replay never classified anything
+    assert "race-unconfirmed" not in (det.last_global_reason or "")
+
+
+def test_c3_exact_sibling_of_widened_access_not_diffed():
+    """Symmetric exclusion: a tensor with BOTH an exact and a widened store
+    must not produce a fabricated static-only divergence (the widened
+    access has no static footprint, but its exact sibling does — one-sided
+    deletion made C3 cry lowering-divergence on a correct kernel)."""
+    ttir = _ttir_of(
+        same_tensor_kernel,
+        {
+            "m_ptr": "*i32",
+            "x_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 64},
+    )
+    det = CompiledRaceDetector(confirm_races=False, differential_check=True)
+    m1 = torch.ones(64, dtype=torch.int32)
+    _launch(
+        det,
+        same_tensor_kernel,
+        (m1, torch.randn(256), torch.zeros(128)),
+        {"grid": (4,), "BLOCK": 64},
+        ttir,
+    )
+    assert det.last_differential == [], det.last_differential
 
 
 # ─────────────────────── C3: differential cross-check ───────────────────────

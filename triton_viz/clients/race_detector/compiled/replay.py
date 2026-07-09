@@ -238,16 +238,13 @@ def run_replay(
 
 
 def _kinds_conflict(kind_a: str, kind_b: str) -> bool:
-    """write∩(read|write|rmw) or rmw∩(read|write) conflict; rmw∩rmw at the
-    same element is mutually atomic (v1 ignores width mismatches at replay
-    granularity — the static side already reports torn pairs as definite)."""
+    """write∩(read|write|rmw) or rmw∩(read|write) conflict. rmw∩rmw pairs
+    never reach this check — whether two atomics conflict depends on
+    scope/width, which a footprint cannot express, so confirm_witness
+    classifies them unavailable up front."""
     a_writes = kind_a in _WRITES or kind_a in _RMW
     b_writes = kind_b in _WRITES or kind_b in _RMW
-    if not (a_writes or b_writes):
-        return False
-    if kind_a in _RMW and kind_b in _RMW:
-        return False
-    return True
+    return a_writes or b_writes
 
 
 def _focused_overlap(
@@ -270,21 +267,45 @@ def _focused_overlap(
     return False
 
 
+# Replaying a launch grid with more blocks than this is declined (skipped
+# blocks still cost the grid-loop iteration, ~µs each).
+REPLAY_MAX_BLOCKS = 1_000_000
+
+
+def _concrete_grid(launch_grid: Any) -> tuple[int, int, int] | None:
+    """The captured launch grid as a concrete 3-tuple, or None (callable
+    grids / missing capture cannot parameterize a faithful replay)."""
+    if not isinstance(launch_grid, (tuple, list)) or not launch_grid:
+        return None
+    try:
+        dims = [int(d) for d in launch_grid]
+    except Exception:  # noqa: BLE001
+        return None
+    dims += [1] * (3 - len(dims))
+    return (dims[0], dims[1], dims[2])
+
+
 def confirm_witness(
     jit_fn: Any,
     args: tuple,
     kwargs: dict,
     pid_a: tuple[int, int, int],
     pid_b: tuple[int, int, int],
+    launch_grid: Any,
     focus_a: tuple[int, str] | None = None,
     focus_b: tuple[int, str] | None = None,
 ) -> tuple[str, str | None]:
     """C2: replay the two witness blocks concretely and classify the
-    report. ``focus_x`` = (ORIGINAL tensor base, kind bucket) of the
-    report's two accesses; the overlap check is restricted to that pair.
-    Without both foci — or for an intra-instance report (same pid twice:
-    duplicate lanes collapse in an address SET) — the classification is
-    honestly unavailable. Returns ``("confirmed", None)``,
+    report. The replay runs under the REAL launch grid — a synthetic
+    max(pid)+1 grid changes the meaning of every grid-observing construct
+    (``tl.num_programs`` in a dropped mask flips its value and fabricates
+    confirmations) — so witness pids outside the launch grid, a
+    non-concrete grid, or an oversized grid classify as unavailable.
+    ``focus_x`` = (SNAPSHOT tensor base, kind bucket) of the report's two
+    accesses; the overlap check is restricted to that pair. Also
+    unavailable: missing foci, rmw∩rmw pairs (scope/width live outside the
+    footprint), and intra-instance reports (same pid twice — duplicate
+    lanes collapse in an address SET). Returns ``("confirmed", None)``,
     ``("unconfirmed", why)``, or ``("unavailable", why)``."""
     if pid_a == pid_b:
         return (
@@ -293,7 +314,22 @@ def confirm_witness(
         )
     if focus_a is None or focus_b is None:
         return ("unavailable", "report accesses could not be resolved to tensors")
-    grid = tuple(max(a, b) + 1 for a, b in zip(pid_a, pid_b))
+    if focus_a[1] in _RMW and focus_b[1] in _RMW:
+        return (
+            "unavailable",
+            "atomic-atomic conflicts depend on scope/width, which footprints "
+            "cannot express",
+        )
+    grid = _concrete_grid(launch_grid)
+    if grid is None:
+        return ("unavailable", "the launch grid is not concretely known")
+    if any(p >= g or p < 0 for pid in (pid_a, pid_b) for p, g in zip(pid, grid)):
+        return (
+            "unavailable",
+            "the witness blocks do not exist on this launch's grid",
+        )
+    if grid[0] * grid[1] * grid[2] > REPLAY_MAX_BLOCKS:
+        return ("unavailable", "launch grid too large to replay")
     result = run_replay(jit_fn, args, kwargs, grid, {pid_a, pid_b})
     if result.error is not None:
         return ("unavailable", f"replay failed: {result.error}")
@@ -330,7 +366,7 @@ def cross_check(
     mismatches (empty = the lowering and the interpreter agree). Static
     over-approximated accesses are excluded from both sides' comparison
     scope (they have no exact static footprint)."""
-    from .differential import diff_footprints, static_footprints
+    from .differential import KIND_BUCKET, diff_footprints, static_footprints
 
     result = run_replay(jit_fn, args, kwargs, grid, set(pids))
     if result.error is not None:
@@ -353,15 +389,24 @@ def cross_check(
             name = base_to_name[orig_base]
             delta = orig_base - clone_base
             dyn.setdefault((name, kind), set()).update(a + delta for a in addrs)
-        # drop buckets whose static side was over-approximated
+        # Drop buckets containing ANY over-approximated access from BOTH
+        # sides: the static side has no exact footprint for the widened
+        # access, but its exact SIBLINGS in the same (tensor, kind) bucket
+        # are still enumerated — a one-sided deletion fabricates a
+        # static-only divergence for the common exact+widened-same-tensor
+        # pattern. Symmetric exclusion means these buckets are simply
+        # outside the diff's scope (reported via `skipped`).
         skipped_kinds = {
-            (a.base_param, a.kind)
+            (a.base_param, KIND_BUCKET[a.kind])
             for a in graph.accesses
             if a.mask_dropped or a.guarded
         }
         for key in list(dyn):
             if key in skipped_kinds:
                 del dyn[key]
+        for key in list(static.footprints):
+            if key in skipped_kinds:
+                del static.footprints[key]
         for m in diff_footprints(static.footprints, dyn):
             issues.append(f"pid {pid}: {m}")
     return issues

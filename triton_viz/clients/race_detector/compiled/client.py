@@ -187,7 +187,7 @@ class CompiledRaceDetector(Client):
                     self._launch_params[name] = value
                 # floats / other objects: not representable in the integer
                 # model; a Param lookup on one aborts to unsupported.
-            if self.confirm_races:
+            if self.confirm_races or self.differential_check:
                 self._snapshot_launch(jit_fn, args, kwargs)
         except Exception as e:  # noqa: BLE001
             self._capture_error = f"{type(e).__name__}: {e}"
@@ -403,13 +403,15 @@ class CompiledRaceDetector(Client):
                 # Foci resolve against the SNAPSHOT clones' bases: the
                 # replay's base_map is keyed by them (originals were cloned
                 # at pre_warmup, and run_replay clones once more).
-                confirmation, upgraded = self._confirm_reports(
+                confirmation, upgraded, widened_unclassified = self._confirm_reports(
                     replay_jit_fn,
                     snapshot_args,
                     snapshot_kwargs or {},
                     reports,
                     widened_all,
                     snapshot_tensors or {},
+                    launch_grid,
+                    self._ambiguous_focus_buckets(),
                 )
                 # A CONFIRMED widened report is a real race on this launch's
                 # data: it graduates from the uncertain channel.
@@ -432,9 +434,12 @@ class CompiledRaceDetector(Client):
             self.last_global_reason = "; ".join(notes) or None
         elif widened_all:
             self.last_global_status = "unsupported"
-            if confirmation is not None:
-                # Replay ran and did NOT reproduce any widened SAT: the
-                # race-unconfirmed terminal state (potential, never definite).
+            if confirmation is not None and widened_unclassified == 0:
+                # EVERY widened SAT was replayed and none reproduced: the
+                # race-unconfirmed terminal state (potential, never
+                # definite). The claim is only made when the replay actually
+                # established it for all of them — a capped or unavailable
+                # replay keeps the generic abstention below.
                 self.last_global_reason = (
                     "race-unconfirmed: possible race under over-approximation "
                     "(data-dependent mask / unmodeled branch); the interpreter "
@@ -532,6 +537,24 @@ class CompiledRaceDetector(Client):
             kind = "load"
         return (meta.data_ptr, kind)
 
+    def _ambiguous_focus_buckets(self) -> set[tuple[str, str]]:
+        """(tensor_name, kind bucket) pairs with MORE THAN ONE access site
+        across this launch's graphs. Replay footprints merge all same-kind
+        accesses to one tensor into a single bucket, so a report in an
+        ambiguous bucket cannot be classified: an unrelated site's real
+        overlap would confirm a widened report whose own access never
+        executes (adversarial repro in test_replay_channels)."""
+        from .differential import KIND_BUCKET
+
+        counts: dict[tuple[str, str], int] = {}
+        for graph in self.last_ttir_graphs:
+            if graph is None:
+                continue
+            for a in graph.accesses:
+                key = (a.base_param, KIND_BUCKET[a.kind])
+                counts[key] = counts.get(key, 0) + 1
+        return {k for k, n in counts.items() if n > 1}
+
     def _confirm_reports(
         self,
         jit_fn: Any,
@@ -540,41 +563,62 @@ class CompiledRaceDetector(Client):
         exact: list[Any],
         widened: list[Any],
         tensors: dict,
-    ) -> tuple[str | None, list[Any]]:
+        launch_grid: Any,
+        ambiguous: set[tuple[str, str]],
+    ) -> tuple[str | None, list[Any], int]:
         """C2 (plan §I.4): replay each report's witness block pair on the
-        snapshot clones and classify. Returns the aggregate
-        ("confirmed" / "unconfirmed" / "partial" / None when every replay
-        was unavailable) and the widened reports whose races DID reproduce
-        (to be upgraded to definite)."""
+        snapshot clones and classify. WIDENED reports replay first — they
+        are what the channel exists to classify; exact reports are already
+        definite and only gain a label. Returns (aggregate, upgraded
+        widened reports, number of widened reports left UNCLASSIFIED by
+        cap/ambiguity/unavailability — the race-unconfirmed claim is only
+        honest when that count is zero)."""
         from .replay import confirm_witness
 
         widened_ids = {id(w) for w in widened}
         cache: dict[tuple, tuple[str, str | None]] = {}
         confirmed = unconfirmed = 0
         upgraded: list[Any] = []
-        for rep in (exact + widened)[: self.REPLAY_MAX_REPORTS]:
+        widened_classified = 0
+        for rep in (widened + exact)[: self.REPLAY_MAX_REPORTS]:
             pids = (tuple(rep.witness_grid_a), tuple(rep.witness_grid_b))
             focus_a = self._report_focus(rep.first_record, tensors)
             focus_b = self._report_focus(rep.second_record, tensors)
+            names = (
+                (rep.first_record.tensor_name, focus_a[1]) if focus_a else None,
+                (rep.second_record.tensor_name, focus_b[1]) if focus_b else None,
+            )
+            if any(n is not None and n in ambiguous for n in names):
+                continue  # unclassifiable: shared footprint bucket
             key = (pids, focus_a, focus_b)
             if key not in cache:
                 cache[key] = confirm_witness(
-                    jit_fn, args, kwargs, *pids, focus_a=focus_a, focus_b=focus_b
+                    jit_fn,
+                    args,
+                    kwargs,
+                    *pids,
+                    launch_grid,
+                    focus_a=focus_a,
+                    focus_b=focus_b,
                 )
             verdict, _why = cache[key]
             if verdict == "confirmed":
                 confirmed += 1
                 if id(rep) in widened_ids:
+                    widened_classified += 1
                     upgraded.append(rep)
             elif verdict == "unconfirmed":
                 unconfirmed += 1
+                if id(rep) in widened_ids:
+                    widened_classified += 1
+        widened_unclassified = len(widened) - widened_classified
         if confirmed and unconfirmed:
-            return ("partial", upgraded)
+            return ("partial", upgraded, widened_unclassified)
         if confirmed:
-            return ("confirmed", upgraded)
+            return ("confirmed", upgraded, widened_unclassified)
         if unconfirmed:
-            return ("unconfirmed", upgraded)
-        return (None, upgraded)
+            return ("unconfirmed", upgraded, widened_unclassified)
+        return (None, upgraded, widened_unclassified)
 
     # T0 backstop: the linearity gate should keep queries decidable, but an
     # unexpected hard query must cost bounded time before falling to T1.

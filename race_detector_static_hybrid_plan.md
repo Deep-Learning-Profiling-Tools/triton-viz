@@ -662,6 +662,27 @@ previously died at parse now prove or abstain
   the S2 abstention becomes a verdict on this launch's data — and an
   unreproduced widened SAT becomes the explicit `race-unconfirmed` terminal
   state. All five §I.1 terminal states are now materialized.
+  **Second adversarial round — three fabrication holes fixed** (each with an
+  end-to-end repro pinned in `test_replay_channels.py`):
+  1. *Replay runs at the LAUNCH grid*, never a synthetic `max(pid)+1` grid:
+     `tl.num_programs` is an unmodeled op (DataDep → widened, NOT unsupported),
+     and a grid-observing dropped mask flips value under a different grid —
+     fabricating a confirmed race for a launch that stores nothing. Also kills
+     the replay-cost DoS (solver-chosen witness pids no longer size the grid;
+     `REPLAY_MAX_BLOCKS` caps pathological launch grids).
+  2. *Witness pids must exist on the launch grid* — a grid=(1,) launch cannot
+     have its widened abstention graduated by a fabricated second block (the
+     grid-generic T1 "races" claim for exact reports is unchanged; only the
+     "on this launch's data" graduation demands launch-grid witnesses).
+  3. *Focus buckets must be unambiguous*: footprints key on (tensor, kind), so
+     two same-kind access SITES on one tensor share a bucket and an unrelated
+     exact overlap would confirm a dead widened report. Reports in ambiguous
+     buckets classify `unavailable` (per-site keying, e.g. by source line, is
+     the noted refinement). rmw∩rmw pairs are `unavailable` too (scope/width
+     live outside a footprint — the misleading "unconfirmed" label is gone),
+     the `race-unconfirmed` claim is made only when EVERY widened report was
+     actually replayed (cap honesty), and widened reports replay before exact
+     ones (they are what the channel exists to classify).
 - **C3 — done** (`compiled/differential.py` + `cross_check` in `replay.py`;
   opt-in `differential_check=True` → `last_differential`): the static side is a
   numpy-only CONCRETE enumerator of the AccessGraph (deliberately independent of
@@ -670,7 +691,10 @@ previously died at parse now prove or abstain
   element-start byte granularity masked-off lanes are naturally absent from
   BOTH sides, so no masked-lane convention alignment was needed after all.
   Over-approximated accesses are excluded (no exact static footprint) and
-  reported as skipped. Both sides speak the snapshot clones' addresses.
+  reported as skipped — SYMMETRICALLY: the widened access's exact same-bucket
+  siblings leave the diff scope on both sides (one-sided deletion fabricated a
+  static-only divergence for the common exact+widened-same-tensor pattern;
+  second adversarial round). Both sides speak the snapshot clones' addresses.
 - Provenance on every report and status: terminal state (five states, §I.1) × track
   (global/TTIR vs shared/TTGIR).
 - Mutation suite: wrong pid stride, dropped mask term, atomic → plain store — each must
