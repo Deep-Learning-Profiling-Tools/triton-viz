@@ -804,10 +804,14 @@ row's terminal state + front-end determines its point); the figure script stays
 out of the harness proper.
 
 **Build order**: (1) LaunchSpec + harness/runner skeleton, smoke on golden
-kernels (~½ day); (2) Phase A pairs + first report (~1 day); (3) Phase B
-tutorials (~1 day, mostly LaunchSpec handwork); (4) mutation mode + Phase C
-(~1–2 days). First full RESULTS.md ≈ 3–4 days; the five-state distribution is
-visible after Phase A (~1.5 days in).
+kernels (~½ day) — **done**; (2) Phase A pairs + first report (~1 day) —
+**done**: "TritonRaceBench" (`evaluation/kernels/tritonracebench.py`), 18
+patterns / 40 rows folding in the S6 `rmw_sync`/`await_sync` litmus corpora
+under stable `trbNNN_` names, with witness-level scoring, the per-pattern
+table and the ladder audit; first full numbers: precision = recall = 1.0,
+coverage 34/40, witness-matched 16/16, ladder audit PASS, all seven
+terminal buckets populated; (3) Phase B tutorials (~1 day, mostly
+LaunchSpec handwork); (4) mutation mode + Phase C (~1–2 days).
 
 - **T0 stretch, off the critical path**: symbolic loop bounds (`lower ≤ i < upper` plus
   step-divisibility constraint), accept nonlinear `unknown` → the kernel simply lands

@@ -298,9 +298,16 @@ CORPUS.add(
         make_args=_lookback_args,
         grid=(4,),
         expected="race",
+        # Acceptable endpoints (witness matching is subset-based): the
+        # look-back read races the PREDECESSOR's publish — the pid-0
+        # predecessor stores in the else branch, pid>0 predecessors in the
+        # then branch. The two-copy closed world can only source the
+        # adjacent-to-pid-0 variant (a pid>=2 chain needs a third
+        # instance), so the reported pair uses the else-branch store.
         race_pair=(
             "prev = tl.load(out_ptr + pid - 1)",
             "tl.store(out_ptr + pid, prev + 1)",
+            "tl.store(out_ptr + pid, 1)",
         ),
         pattern="lookback-chain",
         params_note="cta scope cannot order cross-CTA neighbors",

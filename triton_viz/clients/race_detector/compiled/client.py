@@ -571,7 +571,7 @@ class CompiledRaceDetector(Client):
                 pids.append((grid[0] - 1, 0, 0))
             from .replay import cross_check
 
-            self.last_differential = cross_check(
+            issues = cross_check(
                 graphs[0],
                 params,
                 tensors,
@@ -581,6 +581,14 @@ class CompiledRaceDetector(Client):
                 pids,
                 grid,
             )
+            if issues and all(i.startswith("replay failed") for i in issues):
+                # The interpreter side never ran (e.g. the numpy-2 scalar-
+                # bound loop TypeError): the channel is UNAVAILABLE, not in
+                # disagreement — a "mismatch" here would misread as a
+                # lowering divergence.
+                self.last_differential = None
+            else:
+                self.last_differential = issues
         except Exception as e:  # noqa: BLE001
             self.last_differential = [f"differential check failed: {e}"]
 

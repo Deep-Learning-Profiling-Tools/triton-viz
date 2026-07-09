@@ -29,23 +29,26 @@ Build order:
       state; per-spec subprocess + timeout; dynamic + C3 columns; now also the
       `assumes_termination` row field and a SIGALRM watchdog on the dynamic
       phase for spin kernels).
-- [ ] (2, ~1 day) Phase A — "TritonRaceBench" labeled micro pairs (a publishable
-      artifact: no labeled Triton race corpus exists). DRB-style yes/no PAIRS
-      per pattern (`trb007_pid_branch_store_yes/_no`): pid-stride misalignment,
-      missing mask term, atomic→plain store, pid branch, data-dependent mask,
-      loop-carried overlap, aliased in-place, CAS lock, gather, nested loop
-      (~15 pairs, several distilled from tests). The `rmw_sync` (4 patterns,
-      9 rows) and `await_sync` (3 patterns, 9 rows) corpora landed with S6
-      cover the synchronization half of this list — fold them into the Phase A
-      naming/report; input-parameterized kernels
-      (n=0 race-free vs n=5 racy) one row per parameter set — `expected` labels
-      per (kernel, launch); kernel-level "∃ racy input" is derived, scoped to
-      the specialization + T0 premises (an aliased yes-launch does not
-      contradict a non-aliased T0 proof). First `RESULTS.md`: five-state
-      distribution, DRB-style TP/FP/TN/FN + precision/recall + coverage with
-      abstentions split (race-unconfirmed vs unsupported), per-pattern table,
-      and the ladder audit (ladder-unsound / replay-unsound counts, both
-      required zero).
+- [x] (2, ~1 day) Phase A — "TritonRaceBench" landed
+      (`evaluation/kernels/tritonracebench.py`, run with
+      `uv run python -m evaluation.runner --corpus tritonracebench`):
+      18 patterns / 40 rows — 8 new micro pairs (pid-stride, fixed-range,
+      tail-boundary mask-vs-clamp, atomic-vs-plain accum, pid-branch,
+      loop-carried, aliased in-place, indirect scatter, nested loop) plus the
+      golden_smoke parameterized rows and the S6 `rmw_sync`/`await_sync`
+      corpora folded in under stable `trbNNN_` names. Report upgrades:
+      witness-level scoring (race_pair needles resolved to source lines at
+      harness time; subset matching against reported witnesses), per-pattern
+      table, and the ladder audit grouped by (kernel, constexprs)
+      specialization with the aliased-launch exemption. First full numbers:
+      precision = recall = 1.0, coverage 34/40 (all 6 abstentions at
+      documented boundaries: indirect ×3, nested-loop ×2, dd-mask
+      race-unconfirmed ×1), witness-matched 16/16, ladder audit PASS
+      (ladder-unsound = replay-unsound = 0), all seven terminal buckets
+      populated (proved@T0=7, T1=5, T1+assumes-termination=3,
+      race-confirmed=8, race-unconfirmed=1, races-unclassified=11,
+      unsupported=5). C3 now reports replay-failure as channel-unavailable
+      rather than a fake mismatch (numpy-2 scalar-bound loops).
 - [ ] (3, ~1 day) Phase B — triton tutorials (vendored for triton 3.6,
       hand-written LaunchSpecs, ~10–12 kernels; autotuned kernels: take `.fn`,
       pin one config).

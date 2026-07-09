@@ -34,6 +34,10 @@ class LaunchSpec:
     pattern: str = ""
     # free-form note (e.g. which parameter makes this launch racy)
     params_note: str = ""
+    # True when make_args aliases pointer arguments (e.g. in-place). Such a
+    # yes-launch violates the T0 non-aliasing premise, so the ladder audit
+    # must NOT count it against a proved@T0 of the same specialization.
+    aliased: bool = False
 
     def spec_id(self) -> str:
         return self.name

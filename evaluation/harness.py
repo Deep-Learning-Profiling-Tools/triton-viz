@@ -166,15 +166,46 @@ def _classify(static: dict[str, Any]) -> tuple[str, str]:
     return ("abstain", status or "unknown")
 
 
+def _resolve_race_pair_lines(spec: LaunchSpec) -> list[int | None] | None:
+    """Resolve the spec's race_pair NEEDLES to kernel source line numbers
+    (witness-level scoring compares them against reported witnesses)."""
+    if not spec.race_pair:
+        return None
+    import inspect
+
+    fn = getattr(spec.kernel_fn, "fn", spec.kernel_fn)
+    try:
+        lines, start = inspect.getsourcelines(fn)
+    except (OSError, TypeError):
+        return [None for _ in spec.race_pair]
+    out: list[int | None] = []
+    for needle in spec.race_pair:
+        for i, line in enumerate(lines):
+            if needle in line:
+                out.append(start + i)
+                break
+        else:
+            out.append(None)
+    return out
+
+
 def run_one(spec: LaunchSpec, seed: int) -> dict[str, Any]:
+    kernel_fn = getattr(spec.kernel_fn, "fn", spec.kernel_fn)
     row: dict[str, Any] = {
         "name": spec.name,
         "pattern": spec.pattern,
         "expected": spec.expected,
         "race_pair": list(spec.race_pair) if spec.race_pair else None,
+        "race_pair_lines": _resolve_race_pair_lines(spec),
         "params_note": spec.params_note,
         "grid": list(spec.grid),
         "seed": seed,
+        # Kernel identity: the ladder audit groups rows of one
+        # SPECIALIZATION (kernel, constexprs) to derive the kernel-level
+        # "∃ racy input" truth that proved@T0 claims are checked against.
+        "kernel": getattr(kernel_fn, "__name__", str(kernel_fn)),
+        "constexprs": dict(spec.constexprs),
+        "aliased": spec.aliased,
     }
     try:
         t0 = time.perf_counter()
