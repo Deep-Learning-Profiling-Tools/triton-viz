@@ -17,7 +17,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import signal
+import threading
 import time
+from contextlib import contextmanager
 from typing import Any
 
 from evaluation.spec import LaunchSpec
@@ -80,8 +83,43 @@ def _static_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
         "parse_unsupported": [r for r in det.last_ttir_unsupported if r],
         "differential": det.last_differential,
         "t0_gate": t0_gate,
+        "assumes_termination": det.last_global_assumes_termination,
         "time_s": round(elapsed, 4),
     }
+
+
+# The dynamic comparison runs a CONCRETE interpreter: a spin loop whose
+# producer block is sequenced after the spinning one never terminates.
+# The watchdog turns that into an honest "timeout" status — itself a
+# dynamic-comparison data point for await-bearing kernels.
+DYNAMIC_TIMEOUT_S = 60
+
+
+@contextmanager
+def _watchdog(seconds: float):
+    if (
+        not hasattr(signal, "SIGALRM")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    def _fire(signum, frame):  # noqa: ARG001
+        raise TimeoutError(f"dynamic track exceeded {seconds}s")
+
+    old_handler = signal.signal(signal.SIGALRM, _fire)
+    old_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        # Re-arm an enclosing SIGALRM timer with its remaining time — a
+        # nested watchdog must not permanently defuse the outer one.
+        if old_timer and old_timer[0] > 0:
+            remaining = old_timer[0] - (time.monotonic() - started)
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining), old_timer[1])
 
 
 def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
@@ -92,14 +130,19 @@ def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     args = spec.make_args(seed)  # fresh tensors; the interpreter mutates them
     t0 = time.perf_counter()
     error = None
+    timed_out = False
     try:
         traced = triton_viz.trace(det)(spec.kernel_fn)
-        traced[spec.grid](*args, **spec.constexprs)
+        with _watchdog(DYNAMIC_TIMEOUT_S):
+            traced[spec.grid](*args, **spec.constexprs)
+    except TimeoutError as e:
+        error = str(e)
+        timed_out = True
     except Exception as e:  # noqa: BLE001
         error = f"{type(e).__name__}: {e}"
     elapsed = time.perf_counter() - t0
     return {
-        "status": getattr(det, "last_status", None),
+        "status": "timeout" if timed_out else getattr(det, "last_status", None),
         "reason": getattr(det, "unsupported_reason", None),
         "n_reports": len(getattr(det, "last_reports", []) or []),
         "error": error,

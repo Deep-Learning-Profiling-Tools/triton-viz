@@ -1159,7 +1159,11 @@ def test_atomic_in_loop_with_abort_on_error_raises(
         traced[(2,)](p, 3)
 
 
-# ======== AtomicRMW return-value downstream is unsupported (Issue 5) ========
+# ======== AtomicRMW return-value modeling (spec part B) ========
+# Integer RMW returns are value-modeled since part B: the downstream use
+# below is analyzed (winner-gated read, disjoint per-pid stores → clean)
+# instead of aborting to unsupported. The float-typed return keeps the
+# sentinel boundary — covered in test_race_detector_rmw.py.
 
 
 @triton.jit
@@ -1170,19 +1174,20 @@ def _rmw_return_used_downstream_kernel(p_ptr, q_ptr, out_ptr):
     tl.store(out_ptr + pid, val)
 
 
-def test_atomic_rmw_return_used_downstream_is_unsupported(
+def test_atomic_rmw_return_used_downstream_is_modeled(
     _isolate_race_detector_atomic_cfg,
 ):
     p = torch.zeros(1, dtype=torch.int32)
     q = torch.zeros(1, dtype=torch.int32)
     out = torch.zeros(2, dtype=torch.int32)
     detector = _run_detector(_rmw_return_used_downstream_kernel, (2,), p, q, out)
+    assert detector.last_status == "ok"
+    assert detector.unsupported_reason is None
     assert detector.last_reports == []
-    assert detector.last_status == "unsupported"
-    assert detector.unsupported_reason is not None
-    # Reason mentions either "rmw" or "return"
-    reason = detector.unsupported_reason.lower()
-    assert "rmw" in reason or "return" in reason
+    rmw_records = [r for r in detector.records if r.atomic_kind == "rmw"]
+    assert len(rmw_records) == 1
+    assert rmw_records[0].rmw_op == "add"
+    assert rmw_records[0].old_value is not None
 
 
 @triton.jit

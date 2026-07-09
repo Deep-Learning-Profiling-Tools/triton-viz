@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 from z3 import And, If, IntVal, Or, simplify
 from z3 import Not as Z3Not
 
-from ....core.data import AtomicRMW, Load, Store
+from ....core.data import AtomicCas, AtomicRMW, Load, Store
 from ...common.ttir_reader import (
     AccessEvent,
     AccessGraph,
@@ -58,14 +58,27 @@ from ...common.ttir_reader import (
     IterArgOffset,
     LoopVar,
     Not,
+    NumPrograms,
+    Observed,
     Param,
     Pid,
     Select,
     Term,
     UnsupportedTTIR,
+    observed_indices,
 )
 
 _KNOWN_SEMS = ("relaxed", "acquire", "release", "acq_rel")
+
+# TTIR printer spellings → the solver's canonical RMW op names.
+_RMW_OP_ALIASES = {"exch": "xchg"}
+
+
+def _normalize_rmw_op(op: str | None) -> str | None:
+    if not op:
+        return None
+    op = op.lower()
+    return _RMW_OP_ALIASES.get(op, op)
 
 
 @dataclass(frozen=True)
@@ -80,6 +93,43 @@ class GlobalTensor:
     # numel would be deactivated — a false proof). Non-contiguous tensors
     # therefore fail closed.
     contiguous: bool = True
+    # PRE-LAUNCH element values for small integer tensors (spec part B):
+    # captured at pre_warmup — before the real kernel mutates the storage —
+    # so the solver's rf-init machinery and counting axiom see launch-time
+    # initial values. None when uncaptured (float dtype, too large, or a
+    # non-contiguous view): the solver then falls back to rf_unknown /
+    # omits the counting axiom, the over-report direction.
+    init_values: tuple[int, ...] | None = None
+
+
+class _InitValueTensor:
+    """Duck-typed stand-in satisfying exactly the tensor surface
+    ``_initial_atomic_source`` / ``_initial_value_at`` touch: the ORIGINAL
+    launch base address with the PRE-LAUNCH values (finalize runs after the
+    real kernel already mutated the original tensors, so the live objects
+    must not be read)."""
+
+    def __init__(self, meta: GlobalTensor) -> None:
+        self._meta = meta
+
+    def data_ptr(self) -> int:
+        return self._meta.data_ptr
+
+    def element_size(self) -> int:
+        return self._meta.elem_size
+
+    def numel(self) -> int:
+        return self._meta.numel
+
+    def is_contiguous(self) -> bool:
+        return self._meta.contiguous
+
+    def reshape(self, *_shape: Any) -> "_InitValueTensor":
+        return self
+
+    def tolist(self) -> list[int]:
+        assert self._meta.init_values is not None
+        return list(self._meta.init_values)
 
 
 @dataclass
@@ -89,6 +139,10 @@ class GlobalEncoding:
     # event_ids of records built from over-approximated accesses
     # (mask_dropped / guarded): SAT reports touching them are not witnesses.
     uncertain_event_ids: set[int] = field(default_factory=set)
+    # True when an await record's exit predicate is asserted (spec C1.2):
+    # the verdict is then CONDITIONAL ON TERMINATION of the spin loop —
+    # surfaced in the client's provenance as "+assumes-termination".
+    assumes_termination: bool = False
     # pid axes with a parsed tt.get_program_id (AccessGraph.pid_axes — the
     # PARSE-time set, never the axes that merely survive into modeled
     # terms: a pid read into a stored value, a dropped mask or an unmodeled
@@ -128,6 +182,12 @@ class _RaceEnv:
         self._param_vars: dict[str, Any] = {}
         self.arange_dict: dict[Any, Any] = {}
         self._arange_vars: dict[tuple[str, int], Any] = {}
+        # One observation var per atomic access index (spec part B). An
+        # index lands in modeled_obs when its record carries the var as
+        # old_value (rf-justified); Observed leaves of UNMODELED indices
+        # are free symbols — proof-only, and rejected in address position.
+        self._observed_vars: dict[int, Any] = {}
+        self.modeled_obs: set[int] = set()
         self.loop_var: Any = None  # the symbolic iteration INDEX k
         self.loop_premises: tuple[Any, ...] = ()
         self.zero_trip = False
@@ -167,6 +227,15 @@ class _RaceEnv:
         self._loop_bounds = (lower, step, n_iters)
 
     # ── leaves ───────────────────────────────────────────────────────
+    def observed(self, access_index: int) -> Any:
+        from z3 import Int
+
+        var = self._observed_vars.get(access_index)
+        if var is None:
+            var = Int(f"ttir_obs_{access_index}")
+            self._observed_vars[access_index] = var
+        return var
+
     def _arange(self, ar: Arange) -> Any:
         from z3 import Int
 
@@ -202,6 +271,15 @@ class _RaceEnv:
             return IntVal(self.params[term.name])
         if isinstance(term, Pid):
             return self._pids[term.axis]
+        if isinstance(term, NumPrograms):
+            from z3 import Int
+
+            # The SAME grid var symbolic_grid() interns by name (the reader
+            # put the axis in pid_axes, so the dim is never pinned to 1);
+            # the solver bounds it with pid < grid and grid >= 1. This is
+            # what lets a last-block gate `o == num_programs(0) - 1` prove
+            # for EVERY grid instead of only the launch's.
+            return Int(f"grid_{term.axis}")
         if isinstance(term, Arange):
             return self._arange(term)
         if isinstance(term, LoopVar):
@@ -246,6 +324,8 @@ class _RaceEnv:
             )
         if isinstance(term, Not):
             return Z3Not(_as_bool(self.eval(term.a)))
+        if isinstance(term, Observed):
+            return self.observed(term.access_index)
         if isinstance(term, DataDep):
             raise UnsupportedTTIR(f"data-dependent term ({term.why})")
         raise UnsupportedTTIR(f"unhandled term {type(term).__name__}")
@@ -265,17 +345,57 @@ def _trunc_div(a: Any, b: Any) -> Any:
     return If((a >= 0) == (b >= 0), q, -q)
 
 
+def _await_premises(
+    graph: AccessGraph, env: _RaceEnv
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    """The await abstraction's termination premises (spec C1.2), attached
+    to EVERY record of the encoding.
+
+    For each recognized spin loop, "reach(await) → o == exit-value" is an
+    EXECUTION-LEVEL invariant of any terminating run (the final iteration's
+    read observed the exit value). It must hold in every record's activity
+    — asserting it only on the awaited event would let a model set
+    o ≠ expected, deactivate the await, and dissolve the po→sw→po bridge
+    while the post-loop accesses stay active (a SAT escape adversarial
+    testing caught). Guarded awaits (unmodeled enclosing condition) emit NO
+    premise: asserting their exit for instances that never reach the loop
+    could over-constrain — omission is the over-report direction.
+
+    Returns (premises, observation vars) — the vars ride copy_local_vars of
+    every record so each program copy gets its own observation."""
+    from z3 import Implies
+
+    premises: list[Any] = []
+    obs_vars: list[Any] = []
+    for seq, access in enumerate(graph.accesses):
+        if not access.awaited or access.exit_pred is None or access.guarded:
+            continue
+        exit_z3 = _as_bool(env.eval(access.exit_pred))
+        guard: list[Any] = []
+        if access.mask is not None:
+            guard.append(_as_bool(env.eval(access.mask)))
+        if access.path is not None:
+            guard.append(_as_bool(env.eval(access.path)))
+        premises.append(Implies(And(*guard), exit_z3) if guard else exit_z3)
+        obs_vars.append(env.observed(seq))
+    return tuple(premises), tuple(obs_vars)
+
+
 def _record_for(
     access: AccessEvent,
     seq: int,
     env: _RaceEnv,
     kernel_name: str,
     meta: GlobalTensor | None,
+    await_premises: tuple[Any, ...] = (),
+    await_obs: tuple[Any, ...] = (),
 ) -> Any:
     """One solver record. ``meta`` present = T1 (real base address and the
     in-bounds premise); ``meta=None`` = T0, where addresses are byte offsets
     from the tensor's own base and conflicts are confined to that tensor's
-    group by construction (see encode_graph_t0)."""
+    group by construction (see encode_graph_t0). ``await_premises`` /
+    ``await_obs`` are the termination invariants of the graph's spin loops
+    (see _await_premises) — conjoined into every record."""
     from ..data import AccessEventRecord
 
     elem = access.elem_bits // 8
@@ -283,6 +403,64 @@ def _record_for(
         raise UnsupportedTTIR(
             f"unknown element width for {access.base_param!r} "
             f"(elem_bits={access.elem_bits})"
+        )
+    # Spec part B: the RMW observation is modeled for an integer-typed,
+    # non-loop atomic (one observation var cannot stand for one-per-
+    # iteration values; loops stay footprint-only). MUST happen before any
+    # term evaluation below so downstream Observed uses of THIS access see
+    # it as modeled.
+    old_value: Any = None
+    rmw_op: str | None = None
+    rmw_operand: Any = None
+    cas_cmp: Any = None
+    cas_new: Any = None
+    if access.kind == "atomic_rmw" and not access.elem_float and not access.in_loop:
+        old_value = env.observed(seq)
+        env.modeled_obs.add(seq)
+        assert access.atomic is not None
+        rmw_op = _normalize_rmw_op(access.atomic.rmw_op)
+        if access.atomic_val is not None:
+            try:
+                rmw_operand = env.eval(access.atomic_val)
+            except UnsupportedTTIR:
+                rmw_operand = None  # unmodelable operand: write stays open
+    elif access.kind == "atomic_cas":
+        # Only the AWAITED CAS reaches here (encode_graph refuses the
+        # rest); the solver's CAS lowering needs all three value pieces.
+        if access.in_loop:
+            raise UnsupportedTTIR(
+                f"line {access.line_no}: awaited CAS inside scf.for "
+                "(one observation cannot stand for one per iteration)",
+                kind="control-flow",
+            )
+        if access.elem_float:
+            raise UnsupportedTTIR(
+                f"line {access.line_no}: float-typed CAS is outside the "
+                "integer value model",
+                kind="spin-shape",
+            )
+        if access.atomic_cmp is None or access.atomic_val is None:
+            raise UnsupportedTTIR(
+                f"line {access.line_no}: CAS cmp/val operands are not " "modelable",
+                kind="spin-shape",
+            )
+        old_value = env.observed(seq)
+        env.modeled_obs.add(seq)
+        cas_cmp = env.eval(access.atomic_cmp)
+        cas_new = env.eval(access.atomic_val)
+
+    # An address may reference an observation only when that observation is
+    # value-modeled (the solver then requires its counting axiom, B.1.5);
+    # a free observation in an address would alias everything.
+    unmodeled_in_addr = {
+        i for i in observed_indices(access.offset) if i not in env.modeled_obs
+    }
+    if unmodeled_in_addr:
+        raise UnsupportedTTIR(
+            f"line {access.line_no}: address depends on an atomic "
+            "observation that is not value-modeled (float-typed or "
+            "loop-carried atomic)",
+            kind="indirect-address",
         )
     bounds: tuple[Any, ...]
     if meta is not None:
@@ -307,7 +485,6 @@ def _record_for(
     if access.path is not None:
         path_z3 = _as_bool(env.eval(access.path))
         active = path_z3 if active is True else And(active, path_z3)
-
     access_mode: Literal["read", "write"]
     atomic_kind: "AtomicKind"
     sem: "MemorySem"
@@ -324,6 +501,20 @@ def _record_for(
         reads: Any = True
         writes: Any = True
         scope: str | None = access.atomic.scope
+    elif access.kind == "atomic_cas":
+        assert access.atomic is not None
+        sem = (
+            access.atomic.sem  # type: ignore[assignment]
+            if access.atomic.sem in _KNOWN_SEMS
+            else "relaxed"
+        )
+        op_type = AtomicCas
+        is_atomic, atomic_kind = True, "cas"
+        access_mode = "read"
+        # The solver's CAS lowering recomputes reads/writes/written_value
+        # per copy from old/cmp/new (writes fire only on success).
+        reads, writes = True, None
+        scope = access.atomic.scope
     else:
         sem = "plain"
         op_type = Store if access.kind == "store" else Load
@@ -332,21 +523,46 @@ def _record_for(
         reads, writes = None, None
         scope = None
 
-    copy_local = (env.loop_var,) if env.loop_var is not None else ()
+    copy_local: tuple[Any, ...] = (env.loop_var,) if env.loop_var is not None else ()
+    # Observations are per-program-instance nondeterminism: alpha-renamed
+    # per copy exactly like the interpreter track's CAS/RMW return vars.
+    # EVERY referenced observation is listed — not just this record's own —
+    # because the solver unions copy_local_vars only over the records it is
+    # given: a T0 per-tensor group (or a zero-trip-skipped RMW) would
+    # otherwise leave a referenced var un-renamed, silently SHARING one
+    # observation between the two copies and manufacturing UNSAT (a false
+    # proof) for masks like ``o == 0`` vs ``o == 2``.
+    ref_obs = observed_indices(access.offset)
+    for t in (access.mask, access.path, access.exit_pred):
+        if t is not None:
+            ref_obs |= observed_indices(t)
+    for i in sorted(ref_obs):
+        copy_local = copy_local + (env.observed(i),)
+    if old_value is not None:
+        copy_local = copy_local + (old_value,)
+    copy_local = copy_local + tuple(await_obs)
     source = (
         (access.loc.file, access.loc.line, kernel_name)
         if access.loc is not None
+        else None
+    )
+    # rf-init needs the pre-launch values at the ORIGINAL base; only an
+    # atomic's observation ever consumes them.
+    tensor = (
+        _InitValueTensor(meta)
+        if (old_value is not None and meta is not None and meta.init_values is not None)
         else None
     )
 
     return AccessEventRecord(
         op_type=op_type,
         access_mode=access_mode,
-        tensor=None,
+        tensor=tensor,
         tensor_name=access.base_param,
         addr_expr=addr,
-        # The iteration range constrains only the accesses that iterate.
-        premises=env.loop_premises if access.in_loop else (),
+        # The iteration range constrains only the accesses that iterate;
+        # the spin-termination invariants constrain every record.
+        premises=(env.loop_premises if access.in_loop else ()) + await_premises,
         local_constraints=bounds,
         source_location=source,
         program_seq=seq,
@@ -358,6 +574,11 @@ def _record_for(
         atomic_kind=atomic_kind,
         sem=sem,
         scope=scope,
+        old_value=old_value,
+        rmw_op=rmw_op,
+        rmw_operand=rmw_operand,
+        cas_cmp_value=cas_cmp,
+        cas_new_value=cas_new,
         event_id=seq,
         elem_size=elem,
         copy_local_vars=copy_local,
@@ -374,10 +595,13 @@ def encode_graph(
     and loop iterations stay symbolic). Raises :class:`UnsupportedTTIR`
     (classified) when the kernel cannot be encoded."""
     for access in graph.accesses:
-        if access.kind == "atomic_cas":
-            # v1 has no static CAS synchronizes-with / coherence model (the
-            # solver's CAS machinery needs value modeling the IR front-end
-            # cannot provide). Route to the interpreter front-end.
+        if access.kind == "atomic_cas" and not access.awaited:
+            # A free-standing CAS has no static value model (its cmp/new
+            # may be data-dependent and its synchronization shape open-
+            # ended). The AWAITED CAS (spec C1) is the exception: the spin
+            # contract pins cmp/new/exit, so it lowers to the solver's full
+            # CAS machinery. Everything else routes to the interpreter
+            # front-end.
             raise UnsupportedTTIR(
                 f"line {access.line_no}: atomic_cas synchronization is not "
                 "modeled statically",
@@ -385,6 +609,7 @@ def encode_graph(
             )
 
     env = _RaceEnv(graph, params)
+    await_prems, await_obs = _await_premises(graph, env)
     records = []
     uncertain: set[int] = set()
     for seq, access in enumerate(graph.accesses):
@@ -403,15 +628,35 @@ def encode_graph(
                 f"non-contiguous tensor {access.base_param!r}: the in-bounds "
                 "premise needs the allocation extent (v1 assumes contiguous)"
             )
-        records.append(_record_for(access, seq, env, graph.kernel_name, meta))
+        records.append(
+            _record_for(
+                access, seq, env, graph.kernel_name, meta, await_prems, await_obs
+            )
+        )
         if access.mask_dropped or access.guarded:
+            uncertain.add(seq)
+        if _references_unmodeled_observation(access, env):
             uncertain.add(seq)
     return GlobalEncoding(
         records=records,
         arange_dict=env.arange_dict,
         uncertain_event_ids=uncertain,
         used_pid_axes=set(graph.pid_axes),
+        assumes_termination=any(a.awaited for a in graph.accesses),
     )
+
+
+def _references_unmodeled_observation(access: AccessEvent, env: _RaceEnv) -> bool:
+    """A mask/path referencing an observation WITHOUT value modeling (float
+    or loop-carried atomic) is a free symbol: UNSAT over it still proves,
+    but a SAT model may pick an observation the execution never yields —
+    the same uncertainty discipline as ``mask_dropped``."""
+    for t in (access.mask, access.path):
+        if t is None:
+            continue
+        if any(i not in env.modeled_obs for i in observed_indices(t)):
+            return True
+    return False
 
 
 def symbolic_grid(encoding: GlobalEncoding) -> tuple[Any, Any, Any]:
@@ -426,7 +671,11 @@ def symbolic_grid(encoding: GlobalEncoding) -> tuple[Any, Any, Any]:
 
 # ───────────────────── tier selector support (§I.3) ─────────────────────
 
-_SYMBOLIC_LEAVES = (Pid, Param, Arange, LoopVar, IterArgOffset)
+# Observed counts as symbolic: the observation var is free at T0, so a
+# product with another symbol is exactly the Z3-unknown bait the gate
+# exists to keep out. NumPrograms is a symbolic grid dim for the same
+# reason.
+_SYMBOLIC_LEAVES = (Pid, Param, Arange, LoopVar, IterArgOffset, Observed, NumPrograms)
 
 
 def _has_t0_symbols(term: Term) -> bool:
@@ -475,6 +724,8 @@ def t0_linearity_gate(graph: AccessGraph) -> bool:
             terms.append(a.mask)
         if a.path is not None:
             terms.append(a.path)
+        if a.exit_pred is not None:
+            terms.append(a.exit_pred)
     return all(_linear_at_t0(t, graph) for t in terms)
 
 
@@ -490,7 +741,7 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
     conflict). Raises UnsupportedTTIR when the kernel cannot be encoded at
     T0 (e.g. a loop bound referencing a scalar param)."""
     for access in graph.accesses:
-        if access.kind == "atomic_cas":
+        if access.kind == "atomic_cas" and not access.awaited:
             raise UnsupportedTTIR(
                 f"line {access.line_no}: atomic_cas synchronization is not "
                 "modeled statically",
@@ -498,6 +749,7 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
             )
 
     env = _RaceEnv(graph, {}, symbolic_params=True)
+    await_prems, await_obs = _await_premises(graph, env)
     groups: dict[str, list[tuple[int, AccessEvent]]] = {}
     for seq, access in enumerate(graph.accesses):
         if access.in_loop and env.zero_trip:
@@ -511,8 +763,14 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
         records = []
         uncertain: set[int] = set()
         for seq, access in items:
-            records.append(_record_for(access, seq, env, graph.kernel_name, None))
+            records.append(
+                _record_for(
+                    access, seq, env, graph.kernel_name, None, await_prems, await_obs
+                )
+            )
             if access.mask_dropped or access.guarded:
+                uncertain.add(seq)
+            if _references_unmodeled_observation(access, env):
                 uncertain.add(seq)
         out.append(
             (
@@ -522,6 +780,7 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
                     arange_dict=env.arange_dict,
                     uncertain_event_ids=uncertain,
                     used_pid_axes=set(graph.pid_axes),
+                    assumes_termination=any(a.awaited for a in graph.accesses),
                 ),
             )
         )

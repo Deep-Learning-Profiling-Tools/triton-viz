@@ -815,6 +815,141 @@ visible after Phase A (~1.5 days in).
   The harness records the tier-selector fields from day one, so the stretch's impact
   is a re-run diff.
 
+### S6 — RMW-return modeling (spec B) + the await abstraction (spec C1) — **done**
+
+The two extensions that unlock the advisor's synchronization-pattern list:
+B alone unlocks last-block-done reductions, single-fetch work queues and the
+non-spin half of split-k semaphores; C1 unlocks producer/consumer waiting,
+CAS mutexes and decoupled look-back chains. Landed in
+`two_copy_symbolic_hb_solver.py`, `race_detector.py` (interpreter mirror),
+`ttir_reader.py` + `global_records.py` + `client.py` (static wiring), with
+litmus corpora `evaluation/kernels/{rmw_sync,await_sync}.py` (18 rows,
+precision = recall = 1.0, every proof with a mutation twin that flips).
+
+**B — what the solver now models.** An integer RMW gets an observation
+symbol `o_r` (alpha-renamed per copy like the CAS return) and a modeled
+write part `f_op(o_r, v)` for `add/max/min/xchg`. Value-modeled atomics
+share the CAS rf/coherence machinery — one atomic-order position per
+operation makes RMW atomicity/immediacy STRUCTURAL (B.1.3 needed only the
+generalization of the CAS set, exactly as the audit predicted).
+`synchronizes-with` now rides READS-THROUGH (bounded rf chains over modeled
+RMW write parts — C11 release sequences restricted to RMWs). The guarded
+COUNTING AXIOM (B.1.5) gives per-copy rank variables with
+`o = init + c·rank`, rank↔coherence-order agreement, and an `rf_chain`
+source so races at non-adjacent ranks are not squeezed out of the closed
+world; all five guards checked on the template, any failure OMITS the axiom
+(over-report), never approximates it.
+
+**B.3.0 wiring decision**: extend the existing T1/T0 encoder rather than
+add a new route — the reader binds integer atomic results to a first-class
+`Observed(access_index)` term, `global_records` interns one Z3 var per
+index and ties it to the record's `old_value`, and the SAME solver core
+consumes both front-ends unchanged. Initial values ride
+`GlobalTensor.init_values` (captured at pre_warmup, BEFORE the real kernel
+mutates the tensors) through a duck-typed `_InitValueTensor` presenting the
+original base with pre-launch contents.
+
+**C1 — the await abstraction.** `scf.while` in the exact spin shape
+(argument-free/result-free; condition region = one re-read + comparison +
+`scf.condition`; body = `scf.yield`) collapses to ONE read event whose exit
+predicate is asserted as a TERMINATION PREMISE. Anything else refuses with
+`kind="spin-shape"` naming the broken clause. Memory order/scope stay as
+written — a relaxed spin yields no sw edge, which IS the missing-acquire
+bug. The awaited CAS is the one statically-modeled CAS (the spin contract
+pins cmp/new/exit); free-standing CAS still routes to the interpreter
+front-end. Verdicts are conditional on termination: provenance carries
+`+assumes-termination`, C2 replay is classified unavailable BEFORE any
+execution (a sequential replay would spin), C3 is excluded symmetrically,
+and both the replay path and the harness's dynamic phase carry SIGALRM
+watchdogs as defense in depth. The interpreter track keeps its fail-stop
+(host-level spin on a per-instance value) — the abstention-vs-verdict delta
+is visible in the evaluation's dynamic column.
+
+**Adversarial verification round (S6)** — 6 attack surfaces, 48 probes, 9
+findings, 5 independently confirmed blockers, all fixed and regression-
+tested (probe repros re-run green):
+
+- *Same-dynamic-op identification*: the same-instance query pins the two
+  copies' pids and copy-locals equal, but coherence still demanded two
+  DISTINCT order positions and rf sources for what is one real operation —
+  the rank-0 winner's world (the single-winner idiom the counting axiom
+  exists for) was structurally UNSAT and its duplicate-lane WAW silently
+  proved clean (CAS analogue included). Fix: a record's cross-copy twins
+  under coinciding pids are ONE dynamic op — they share the order
+  position, cannot rf from each other, and do not block each other's
+  rf_init.
+- *Torn-overlap escape*: a value-modeled atomic was excluded from the
+  rf_unknown escape wholesale, but rf candidacy needs exact address at
+  EQUAL WIDTH — an 8-byte modeled xchg over a 4-byte reader was in neither
+  channel and pinned the reader to the initial value (false proof). Fix:
+  only the rf-covered overlap is excluded; the residual torn overlap
+  (width mismatch, or same width at an unequal address) opens the escape.
+- *Mutating spin re-read*: `while atomic_add(flag, 1) != 1` terminates by
+  observing its OWN increments; dropping the intermediate writes and
+  attributing the exit value to a release writer fabricated an sw edge.
+  Fix: the await re-read must be side-effect-free — loads and CAS stay in
+  scope, an RMW only as add/or/xor with a constant-0 operand; everything
+  else refuses with kind="spin-shape".
+- *Machine-integer wraparound*: observations live in unbounded Z3 Int, so
+  an INT32_MAX-initialized counter "provably" never reaches the wrapped
+  value the hardware actually produces. Fixes: counting guard (f) —
+  init + c·|G| must stay inside the element's signed range, with symbolic
+  dims bounded by the CUDA launch caps (2^31−1 on x, 65535 on y/z);
+  an UNCERTIFIED nonzero-increment add writer counts as unmodeled for
+  overlapping readers (escape opens); unsigned dtypes are rejected from
+  the observation model on both capture fronts (modular wrap is defined
+  behavior there). Residual premise, documented: max/min/xchg/CAS writes
+  and certified adds never leave the dtype range, so no modeled value can
+  wrap.
+- *Nested SIGALRM watchdogs* (minor): an inner watchdog zeroed the outer
+  timer on exit; both watchdogs now re-arm the enclosing timer's remaining
+  time.
+
+Rejected findings (verified as inside documented boundaries): the
+closed-world value squeeze on uncounted/masked RMWs (invariant 1 is
+defined relative to the closed-world reads-from model), descending
+counters (axiom omitted, escape semantics as documented), and cta-scoped
+chain intermediates (per-pair suppression with the flag race still
+reported).
+
+**Soundness notes fixed during S6's own testing** (candidates for the
+threats-to-validity section):
+
+- *Exit-predicate placement*: asserting `o == expected` only on the awaited
+  event lets a model deactivate the await (pick `o ≠ expected`) and
+  dissolve the po→sw→po bridge while post-loop accesses stay active. The
+  termination invariant `reach(await) → o == exit-value` is execution-level
+  and is now conjoined into EVERY record's premises (per-copy renamed).
+- *Escape-hatch activity gating*: the unmodeled-overlapping-writer check
+  now includes both events' activity (masks, paths, in-bounds premises) —
+  without it, an address drifting arithmetically past its tensor under the
+  unbounded symbolic grid opened `rf_unknown` for writers of a different
+  tensor and killed the look-back proof.
+- *Counting guard (e) under observation-addressed stores*: checked under
+  the axiom's own provisional bounds `init ≤ o ≤ init + c·(|G|−1)` — sound
+  by first-violation induction over the location's coherence order.
+- *`tt.get_num_programs` is now a modeled term* mapped to the solver's own
+  `grid_<axis>` variable (and the axis joins `pid_axes`): a last-block gate
+  `old == num_programs(0) − 1` proves for EVERY grid, while a hardcoded
+  `old == 3` correctly RACES under the universal-grid claim (a real
+  grid-contract bug class the evaluation can now separate).
+- *Per-tensor T0 groups and skipped records*: every record lists ALL
+  referenced observation vars in `copy_local_vars`, or a group without the
+  RMW record would share one observation between the two copies and
+  manufacture UNSAT.
+
+**Deliberate boundaries kept** (B.5/C1 + deviations, all fail-closed):
+float-typed RMW returns keep the downstream-use sentinel; bitwise
+`and/or/xor` (needs bitvectors) and unsigned `umax/umin` (unsigned order ≠
+Int order) keep `written_value = None` — their writes stay in the
+rf_unknown escape; RMW/awaited-CAS inside `scf.for` keep observation
+modeling off (one var cannot stand for one per iteration); an observation
+in an ADDRESS is admitted exactly under the counting axiom (the work-queue
+pattern) and raises otherwise; the interpreter's address-position boundary
+is untouched (`work_queue` proves statically, dynamic abstains — spec B.4's
+plain-load racy twin abstains on BOTH tracks, recorded as an honest
+coverage miss rather than the spec table's aspirational "race").
+
 ## III.3 Timeline & risks
 
 Total ≈4.5–5.5 weeks; end-to-end capability lands at S3 (~2.5 weeks) so evaluation and

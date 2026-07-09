@@ -168,12 +168,35 @@ def minimal_atomic_read_from(
 ) -> BoolRef:
     """Minimal CAS read-from predicate.
 
-    CAS-only — generic RMW must not participate in CAS-style synchronisation.
+    CAS-only — kept for the single-copy demo ``HBSolver``, where generic RMW
+    has no value model and must not participate in CAS-style
+    synchronisation. The production two-copy solver uses
+    :func:`modeled_atomic_read_from`, which admits any VALUE-MODELED atomic
+    (CAS, or an RMW whose observation/write are modeled per spec part B).
     The address predicate is supplied by the caller (single-copy uses simple
     ``addr ==``; two-copy uses ``addr ==`` plus matching ``elem_size``).
     """
     if writer.atomic_kind != "cas" or reader.atomic_kind != "cas":
         return BoolVal(False)
+    return modeled_atomic_read_from(
+        writer, reader, same_atomic_addr_fn=same_atomic_addr_fn
+    )
+
+
+def modeled_atomic_read_from(
+    writer: Any,
+    reader: Any,
+    *,
+    same_atomic_addr_fn: Callable[[Any, Any], BoolRef],
+) -> BoolRef:
+    """Read-from predicate between two VALUE-MODELED atomic events.
+
+    Membership is field-presence-based: the writer must have a modeled
+    written value and the reader a modeled observation (CAS always has
+    both; an RMW has them exactly when its return value is modeled). An
+    atomic without value modeling never gets an rf edge — its write stays
+    in the unmodeled-writer set that opens the ``rf_unknown`` escape.
+    """
     if not writer.is_atomic or not reader.is_atomic:
         return BoolVal(False)
     if writer.written_value is None or reader.old_value is None:
@@ -232,6 +255,7 @@ __all__ = [
     "iter_lane",
     "lane_value",
     "minimal_atomic_read_from",
+    "modeled_atomic_read_from",
     "normalize_copy_local_vars",
     "to_lanes",
 ]

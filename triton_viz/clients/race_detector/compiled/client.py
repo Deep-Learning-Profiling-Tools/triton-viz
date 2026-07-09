@@ -127,8 +127,14 @@ class CompiledRaceDetector(Client):
         # params, any grid along the read axes — scoped to this
         # specialization and accepted only after the launch's captured
         # tensor intervals verified the non-aliasing premise;
-        # "proved@T1" = for this launch's params, any grid.
+        # "proved@T1" = for this launch's params, any grid. An
+        # await-bearing kernel's rung carries the "+assumes-termination"
+        # suffix (spec C1.2): the verdict is conditional on the spin
+        # loop(s) terminating.
         self.last_global_provenance: str | None = None
+        # True when this launch's verdict rides the await abstraction's
+        # exit-predicate assertion (conditional on spin termination).
+        self.last_global_assumes_termination: bool = False
         # C2 aggregate over the replayed reports when status is "races":
         # "confirmed" | "unconfirmed" | "partial" | None (replay off or
         # unavailable).
@@ -175,11 +181,13 @@ class CompiledRaceDetector(Client):
                     # in-bounds premise is only sound for contiguous storage
                     # (numel·elem understates a strided view's extent).
                     is_contig = getattr(value, "is_contiguous", None)
+                    contiguous = bool(is_contig()) if is_contig else False
                     self._launch_tensors[name] = GlobalTensor(
                         data_ptr=int(value.data_ptr()),
                         elem_size=int(value.element_size()),
                         numel=int(value.numel()),
-                        contiguous=bool(is_contig()) if is_contig else False,
+                        contiguous=contiguous,
+                        init_values=self._capture_init_values(value, contiguous),
                     )
                 elif isinstance(value, bool):
                     self._launch_params[name] = int(value)
@@ -191,6 +199,40 @@ class CompiledRaceDetector(Client):
                 self._snapshot_launch(jit_fn, args, kwargs)
         except Exception as e:  # noqa: BLE001
             self._capture_error = f"{type(e).__name__}: {e}"
+
+    # Pre-launch value capture for the RMW rf-init/counting machinery
+    # (spec part B): small integer tensors only — mirrors the solver's
+    # _MAX_INITIAL_ATOMIC_ELEMENTS cap.
+    INIT_VALUES_MAX_ELEMENTS: ClassVar[int] = 1024
+
+    @classmethod
+    def _capture_init_values(
+        cls, value: Any, contiguous: bool
+    ) -> tuple[int, ...] | None:
+        """PRE-LAUNCH element values, or None when outside the model (float
+        dtype, too large, non-contiguous). pre_warmup is the one hook that
+        still sees the unmutated tensors on the warmup-only path."""
+        try:
+            if not contiguous or int(value.numel()) > cls.INIT_VALUES_MAX_ELEMENTS:
+                return None
+            dt = getattr(value, "dtype", None)
+            if dt is None:
+                return None
+            if bool(getattr(dt, "is_floating_point", True)) or bool(
+                getattr(dt, "is_complex", False)
+            ):
+                return None
+            if "uint" in str(dt):
+                # Unsigned wraps by definition; the unbounded-Int value
+                # model must not certify chains over it (no init values →
+                # rf_unknown escape stays open, counting axiom omitted).
+                return None
+            vals = value.detach().cpu().reshape(-1).tolist()
+            if not all(isinstance(v, int) for v in vals):
+                return None
+            return tuple(int(v) for v in vals)
+        except Exception:  # noqa: BLE001
+            return None
 
     # Replay snapshot cap: cloning the launch tensors is the price of
     # confirmable witnesses; past this total the replay is marked
@@ -357,6 +399,7 @@ class CompiledRaceDetector(Client):
         self.last_global_reason = None
         self.last_global_provenance = None
         self.last_global_confirmation = None
+        self.last_global_assumes_termination = False
         self.last_differential = None
         if not self.last_ttir_graphs:
             self.last_global_status = "no_ttir"
@@ -372,6 +415,20 @@ class CompiledRaceDetector(Client):
             self.last_global_status = "unsupported"
             self.last_global_reason = f"launch capture failed: {capture_error}"
             return
+
+        # The await abstraction (spec C1): sequential concrete replay of a
+        # spin loop could never terminate (the producer block runs after
+        # the spinning consumer), so BOTH interpreter-backed channels are
+        # guarded up front — C2 classifies unavailable before any replay
+        # execution, C3 is excluded symmetrically. The verdict itself is
+        # conditional on termination (assumes_termination).
+        awaited_present = any(
+            a.awaited
+            for g in self.last_ttir_graphs
+            if g is not None
+            for a in g.accesses
+        )
+        self.last_global_assumes_termination = awaited_present
 
         reports: list[Any] = []
         widened_all: list[Any] = []
@@ -397,7 +454,14 @@ class CompiledRaceDetector(Client):
         confirmation: str | None = None
         replay_note: str | None = None
         if (reports or widened_all) and self.confirm_races:
-            if snapshot_args is None:
+            if awaited_present:
+                # MANDATORY pre-guard (C1.3.4): classified unavailable
+                # BEFORE any replay execution is attempted.
+                replay_note = (
+                    "await-bearing kernel: the sequential interpreter replay "
+                    "could spin forever — unavailable"
+                )
+            elif snapshot_args is None:
                 replay_note = snapshot_skipped or "replay snapshot unavailable"
             else:
                 # Foci resolve against the SNAPSHOT clones' bases: the
@@ -455,12 +519,15 @@ class CompiledRaceDetector(Client):
             self.last_global_status = status
             self.last_global_reason = reason
         else:
-            self.last_global_provenance = (
+            rung = (
                 "proved@T0" if rungs and all(r == "T0" for r in rungs) else "proved@T1"
             )
+            if awaited_present:
+                rung += "+assumes-termination"
+            self.last_global_provenance = rung
 
         # ── C3: opt-in differential cross-check ──
-        if self.differential_check:
+        if self.differential_check and not awaited_present:
             # NOTE: pass the SNAPSHOT tensor bases, not the originals — the
             # replay runs on the snapshot clones, so both sides of the diff
             # must speak clone addresses.

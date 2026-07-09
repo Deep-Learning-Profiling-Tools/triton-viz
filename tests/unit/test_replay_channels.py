@@ -255,10 +255,14 @@ def test_c2_focus_blocks_fabricated_upgrade():
 
 @triton.jit
 def np_mask_kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
-    """The mask observes the GRID via tl.num_programs (an unmodeled op →
-    DataDep → widened, NOT unsupported). At the real launch grid (4,) the
-    mask is dead; a synthetic max(pid)+1 replay grid would flip it alive
-    and fabricate a confirmed race."""
+    """The mask observes the GRID via tl.num_programs. At the real launch
+    grid (4,) the mask is dead; a synthetic max(pid)+1 replay grid would
+    flip it alive and fabricate a confirmed race. Since NumPrograms became
+    a modeled term (spec part B wiring) the static side reports a DEFINITE
+    race — the store is live on every grid other than 4, and the T1 claim
+    covers every grid — but the anti-fabrication property under test is
+    unchanged: the replay must run at the LAUNCH grid, where the mask is
+    dead, and must therefore never say "confirmed"."""
     pid = tl.program_id(0)
     offs = tl.arange(0, BLOCK)
     v = tl.load(x_ptr + pid * BLOCK + offs)
@@ -276,10 +280,16 @@ def test_c2_replays_at_the_launch_grid():
     det = CompiledRaceDetector()
     x, out = torch.randn(256), torch.zeros(64)
     _launch(det, np_mask_kernel, (x, out), {"grid": (4,), "BLOCK": 64}, ttir)
-    # This launch performs ZERO stores: never a definite race.
-    assert det.last_global_status == "unsupported"
-    assert det.last_global_reports == []
-    assert "race-unconfirmed" in (det.last_global_reason or "")
+    # A real race on every grid BUT the launch's: reported (universal-grid
+    # claim), with a witness grid other than 4...
+    assert det.last_global_status == "races"
+    assert det.last_global_reports
+    assert all(
+        r.model.get("grid_0") != "4" for r in det.last_global_reports
+    ), "the witness must live on a grid where the mask is alive"
+    # ...and the launch-grid replay (mask dead at grid 4) must never
+    # fabricate a confirmation.
+    assert det.last_global_confirmation != "confirmed"
 
 
 @triton.jit

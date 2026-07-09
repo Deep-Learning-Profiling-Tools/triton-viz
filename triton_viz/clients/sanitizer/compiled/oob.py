@@ -41,11 +41,14 @@ from ...common.ttir_reader import (
     IterArgOffset,
     LoopVar,
     Not,
+    NumPrograms,
+    Observed,
     Param,
     Pid,
     Select,
     Term,
     UnsupportedTTIR,
+    mentions_observed,
 )
 
 
@@ -99,9 +102,20 @@ class _Env:
         self._pid = [Int(f"pid_{i}") for i in range(3)]
         self._arange: dict[tuple[str, int], ArithRef] = {}
         self._loop: dict[str, ArithRef] = {}
+        self._observed: dict[int, ArithRef] = {}
         for i in range(3):
             self.constraints.append(self._pid[i] >= 0)
             self.constraints.append(self._pid[i] < ctx.grid[i])
+
+    def observed(self, access_index: int) -> ArithRef:
+        """An atomic observation as a FREE variable: sound widening for the
+        OOB proof (any value the atomic might return is admitted); the SAT
+        side rides the mask_dropped-style abstention in check_graph."""
+        v = self._observed.get(access_index)
+        if v is None:
+            v = Int(f"observed_{access_index}")
+            self._observed[access_index] = v
+        return v
 
     def pid(self, axis: int) -> ArithRef:
         return self._pid[axis]
@@ -163,6 +177,8 @@ def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
         return IntVal(env.ctx.params[term.name])
     if isinstance(term, Pid):
         return env.pid(term.axis)
+    if isinstance(term, NumPrograms):
+        return IntVal(env.ctx.grid[term.axis])  # concrete at launch
     if isinstance(term, Arange):
         return env.arange(term)
     if isinstance(term, LoopVar):
@@ -208,6 +224,8 @@ def _eval(term: Term, env: _Env, graph: AccessGraph) -> ArithRef:
                   _eval(term.f, env, graph))  # fmt: skip
     if isinstance(term, Not):
         return Z3Not(_as_bool(_eval(term.a, env, graph)))
+    if isinstance(term, Observed):
+        return env.observed(term.access_index)
     if isinstance(term, DataDep):
         raise UnsupportedTTIR(f"data-dependent term ({term.why})")
     raise UnsupportedTTIR(f"unhandled term {type(term).__name__}")
@@ -255,6 +273,14 @@ def check_access(
     if not meta.contiguous:
         raise UnsupportedTTIR(
             f"non-contiguous tensor {access.base_param} (v1 assumes contiguous)"
+        )
+    if mentions_observed(access.offset):
+        # A free observation in an ADDRESS would make the OOB query
+        # trivially SAT for any allocation — indirection through an atomic
+        # return stays outside the OOB model.
+        raise UnsupportedTTIR(
+            f"line {access.line_no}: address depends on an atomic " "observation",
+            kind="indirect-address",
         )
 
     loop_bounds = _loop_bounds(graph, ctx)
@@ -323,7 +349,7 @@ def check_graph(graph: AccessGraph, ctx: LaunchContext) -> list[CompiledOOB]:
         v = check_access(access, graph, ctx)
         if v is None:
             continue
-        if access.guarded or access.mask_dropped:
+        if access.guarded or access.mask_dropped or _observed_gated(access):
             uncertain = uncertain or access
             continue
         out.append(v)
@@ -341,10 +367,27 @@ def check_graph(graph: AccessGraph, ctx: LaunchContext) -> list[CompiledOOB]:
                 "witness may not be reachable",
                 kind="unmodelable-condition",
             )
+        if uncertain.mask_dropped:
+            raise UnsupportedTTIR(
+                f"{where}: possible OOB behind a data-dependent "
+                "mask — the mask was over-approximated as free, so the "
+                "witness may not be reachable",
+                kind="data-dependent-mask",
+            )
         raise UnsupportedTTIR(
-            f"{where}: possible OOB behind a data-dependent "
-            "mask — the mask was over-approximated as free, so the witness "
-            "may not be reachable",
+            f"{where}: possible OOB behind an atomic-observation-"
+            "dependent mask — the observation is a free variable here, so "
+            "the witness may not be reachable",
             kind="data-dependent-mask",
         )
     return out
+
+
+def _observed_gated(access: AccessEvent) -> bool:
+    """Mask/path referencing an atomic observation: for the OOB query the
+    observation is a FREE variable (sound widening), so a SAT witness may
+    sit at an observation the execution never yields — same abstention
+    discipline as ``mask_dropped``."""
+    return any(
+        t is not None and mentions_observed(t) for t in (access.mask, access.path)
+    )

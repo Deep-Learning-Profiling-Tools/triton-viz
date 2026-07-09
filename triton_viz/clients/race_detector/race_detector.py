@@ -229,11 +229,13 @@ class RaceDetector(Client):
 
 
 class _UnsupportedRMWReturn(SymbolicExpr):
-    """Sentinel SymbolicExpr returned by ``SymbolicRaceDetector`` for an
-    atomic-RMW result. The RMW return value's symbolic semantics are not
-    modeled by the two-copy solver; if a kernel consumes the return
-    downstream (e.g. ``mask = old == 0``), the eventual ``_to_z3_impl``
-    call raises :class:`UnsupportedSymbolicRaceQuery`, which the wrapping
+    """Sentinel SymbolicExpr returned by ``SymbolicRaceDetector`` for a
+    FLOAT-TYPED (or unknown-dtype) atomic-RMW result — integer RMW returns
+    are value-modeled since spec part B and return the event expression
+    instead. Outside the integer model, the return's symbolic semantics are
+    not modeled; if a kernel consumes it downstream (e.g. ``mask = old ==
+    0.0``), the eventual ``_to_z3_impl`` call raises
+    :class:`UnsupportedSymbolicRaceQuery`, which the wrapping
     ``_safe_eval`` in ``_handle_*_check`` converts into a clean
     ``_mark_unsupported`` so the launch finishes without raising.
 
@@ -1525,6 +1527,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         *,
         semantic_constraints: tuple[Any, ...] = (),
         active: Any = True,
+        old_value: Any = None,
+        rmw_op: str | None = None,
+        rmw_operand: Any = None,
     ) -> None:
         if self._unsupported_capture:
             return
@@ -1535,6 +1540,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
 
         addr_expr = self._apply_finished_iter_subs(addr_expr)
         active = self._apply_finished_iter_subs(active)
+        rmw_operand = self._apply_finished_iter_subs(rmw_operand)
         local = self._normalize_constraints(
             self._apply_finished_iter_subs(expr_constraints)
         )
@@ -1543,7 +1549,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         )
         loop_vars = self._current_loop_iter_vars()
         if self._refs_unresolved_iter_var(
-            (addr_expr, active, local, premises), loop_vars
+            (addr_expr, active, rmw_operand, local, premises), loop_vars
         ):
             self._raise_or_mark(
                 "atomic_rmw references a finished loop iterator with no "
@@ -1551,6 +1557,12 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             )
             return
 
+        # Raw symbolic template, mirroring the CAS record: old_value is the
+        # fresh observation var (returned to the kernel by the overrider, so
+        # downstream masks reference the SAME var), listed in
+        # copy_local_vars for the per-copy alpha-rename. None for an
+        # unmodeled (float-typed) RMW — the solver then keeps this write in
+        # the unmodeled-writer set.
         self.records.append(
             AccessEventRecord(
                 op_type=AtomicRMW,
@@ -1572,13 +1584,17 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 atomic_kind="rmw",
                 sem=self._normalize_sem(sem),
                 scope=self._normalize_scope(scope),
-                old_value=None,
+                old_value=old_value,
                 written_value=None,
+                rmw_op=rmw_op,
+                rmw_operand=rmw_operand,
                 event_id=self._next_event_id(),
                 elem_size=self._infer_elem_size(symbolic_expr),
                 cas_cmp_value=None,
                 cas_new_value=None,
-                copy_local_vars=normalize_copy_local_vars(loop_vars),
+                copy_local_vars=normalize_copy_local_vars(
+                    ((old_value,) if old_value is not None else ()) + loop_vars
+                ),
             )
         )
 
@@ -1750,7 +1766,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         expr: SymbolicExpr,
         sem: str | None,
         scope: str | None,
+        rmw_op: str | None = None,
     ) -> None:
+        """``rmw_op`` non-None means the return value is MODELED (spec part
+        B): the expression itself is evaluated to the fresh observation
+        var(s) — exactly like the CAS old value — and the operand is kept so
+        the solver can model the write part f_op(old, v). ``rmw_op=None``
+        keeps the legacy footprint-only record."""
         if self._unsupported_capture or not self._capture_active():
             return
         # Loop check FIRST — see _handle_atomic_cas_check for rationale.
@@ -1776,7 +1798,22 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         else:
             mask_z3, mask_constraints = None, None
 
-        expr_constraints = self._combine_constraints(addr_constraints, mask_constraints)
+        old_value: Any = None
+        rmw_operand: Any = None
+        operand_constraints: ConstraintConjunction = None
+        if rmw_op is not None:
+            old_result = self._safe_eval(expr, "atomic_rmw eval")
+            if old_result is None:
+                return
+            old_value, _ = old_result
+            operand_result = self._safe_eval(expr_rmw.val, "atomic_rmw val eval")
+            if operand_result is None:
+                return
+            rmw_operand, operand_constraints = operand_result
+
+        expr_constraints = self._combine_constraints(
+            addr_constraints, mask_constraints, operand_constraints
+        )
         active = mask_z3 if mask_z3 is not None else True
         source_location = capture_current_source_location()
 
@@ -1788,6 +1825,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             scope=scope,
             source_location=source_location,
             active=active,
+            old_value=old_value,
+            rmw_op=rmw_op,
+            rmw_operand=rmw_operand,
         )
 
     @staticmethod
@@ -1800,6 +1840,51 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         if elem_ty is not None:
             return elem_ty
         return getattr(val_sym, "dtype", None)
+
+    # tt.atomic_rmw op spellings differ between the interpreter enum
+    # (XCHG) and the TTIR printer (exch); both normalize to "xchg".
+    _RMW_OP_ALIASES: ClassVar[dict[str, str]] = {"exch": "xchg"}
+
+    @classmethod
+    def _normalize_rmw_op(cls, rmw_op: Any) -> str | None:
+        name = getattr(rmw_op, "name", None)
+        if name is None:
+            name = str(rmw_op) if rmw_op is not None else None
+        if not name:
+            return None
+        name = name.lower()
+        return cls._RMW_OP_ALIASES.get(name, name)
+
+    @staticmethod
+    def _is_integer_triton_dtype(dtype: Any) -> bool:
+        """True for element types the Int-sort observation model can carry
+        (spec B.5 keeps float-typed RMW returns on the sentinel; UNSIGNED
+        types stay unmodeled too — modular wraparound is defined behavior
+        there, and the unbounded-Int model would silently diverge from
+        it). The symbolic engine hands SymbolicScalarDType
+        (np_dtype-backed); raw triton dtypes (is_floating()/is_int()) are
+        accepted too. Unknown dtypes fail closed."""
+        if dtype is None:
+            return False
+        try:
+            np_dtype = getattr(dtype, "np_dtype", None)
+            if np_dtype is not None:
+                # numpy kinds: i=int, b=bool; u (uint: wraps), f/c fail.
+                return np_dtype.kind in ("i", "b")
+            is_floating = getattr(dtype, "is_floating", None)
+            if callable(is_floating) and is_floating():
+                return False
+            if str(getattr(dtype, "name", "") or "").startswith("uint"):
+                return False
+            is_int = getattr(dtype, "is_int", None)
+            if callable(is_int) and is_int():
+                return True
+            is_bool = getattr(dtype, "is_bool", None)
+            if callable(is_bool) and is_bool():
+                return True
+        except Exception:
+            return False
+        return False
 
     def _op_atomic_rmw_overrider(
         self,
@@ -1816,13 +1901,28 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         val_sym = SymbolicExpr.from_value(val)
         mask_sym = None if mask is None else SymbolicExpr.from_value(mask)
         event_expr = SymbolicExpr.create("atomic_rmw", ptr_sym, val_sym, mask_sym)
-        self._handle_atomic_rmw_check(event_expr, sem=sem, scope=scope)
-        # Return a sentinel rather than the event expr: the RMW return value's
-        # symbolic semantics are NOT modeled. Downstream use (mask = old == 0)
-        # triggers UnsupportedSymbolicRaceQuery via the sentinel's _to_z3_impl,
-        # which the wrapping _safe_eval translates into _mark_unsupported.
+        # Spec part B: an INTEGER-typed RMW return is modeled — the record
+        # carries a fresh observation var and the kernel gets the event
+        # expression back, so downstream uses (mask = old == 0) reference
+        # the same var. The op name is recorded even when only the
+        # observation is modelable (the solver models the write part for
+        # add/max/min/xchg and keeps the rest in the unmodeled-writer set).
+        # Addresses derived from the return still fail-stop via
+        # _reject_data_dependent_address — that boundary is untouched.
+        op_name = self._normalize_rmw_op(rmwOp)
+        dtype = self._atomic_rmw_return_dtype(ptr_sym, val_sym)
+        modeled = op_name is not None and self._is_integer_triton_dtype(dtype)
+        self._handle_atomic_rmw_check(
+            event_expr, sem=sem, scope=scope, rmw_op=op_name if modeled else None
+        )
+        if modeled:
+            return event_expr
+        # Float-typed (or unknown-dtype) RMW: the return value's symbolic
+        # semantics are NOT modeled. Downstream use triggers
+        # UnsupportedSymbolicRaceQuery via the sentinel's _to_z3_impl, which
+        # the wrapping _safe_eval converts into _mark_unsupported.
         return _UnsupportedRMWReturn(
-            dtype=self._atomic_rmw_return_dtype(ptr_sym, val_sym),
+            dtype=dtype,
             shape=getattr(ptr_sym, "shape", ()),
         )
 

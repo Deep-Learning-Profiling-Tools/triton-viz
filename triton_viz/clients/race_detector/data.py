@@ -51,6 +51,19 @@ class AccessEventRecord:
     cas_cmp_value: Any = None
     cas_new_value: Any = None
 
+    # RMW value modeling (spec part B). ``rmw_op`` is the canonical lowercase
+    # op name ("add", "max", "min", "xchg", ...; "exch" is normalized to
+    # "xchg" at capture). ``rmw_operand`` is the symbolic operand v so the
+    # write part can be modeled as f_op(old, v). Both stay None for a
+    # non-RMW record or an RMW whose value semantics are not modeled (float
+    # ops, bitwise and/or/xor, unsigned umax/umin) — the solver then keeps
+    # the record's write in the UNMODELED-writer set (rf_unknown escape),
+    # which is the over-report direction. When the return value is modeled,
+    # ``old_value`` holds the fresh observation var o_r (alpha-renamed per
+    # copy via ``copy_local_vars``, exactly like the CAS return).
+    rmw_op: str | None = None
+    rmw_operand: Any = None
+
     # Z3 vars representing per-program-instance nondeterminism for THIS record
     # (the fresh CAS return var, this record's loop iterator vars). The two-copy
     # solver collects these across all records and alpha-renames each ORIGINAL

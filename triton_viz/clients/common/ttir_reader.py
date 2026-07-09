@@ -28,7 +28,7 @@ the element offset escapes ``[0, numel)`` of its base tensor.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 class UnsupportedTTIR(Exception):
@@ -44,7 +44,11 @@ class UnsupportedTTIR(Exception):
     "indirect-address" | "data-dependent-bound" | "nested-loop" |
     "out-of-vocabulary" | "control-flow" | "block-pointer" |
     "unmodelable-condition" | "data-dependent-mask" |
-    "cas-synchronization" | "other".
+    "cas-synchronization" | "spin-shape" | "other".
+
+    "spin-shape" (spec C1.1): an ``scf.while`` that is not the recognized
+    await form — the reason string names exactly which clause broke
+    (carried values, extra memory ops, non-comparison condition, ...).
     """
 
     def __init__(self, msg: str, kind: str = "other") -> None:
@@ -66,6 +70,18 @@ class Const:
 @dataclass(frozen=True)
 class Pid:
     axis: int  # 0=x, 1=y, 2=z
+
+
+@dataclass(frozen=True)
+class NumPrograms:
+    """``tt.get_num_programs axis`` — the launch grid size along ``axis``.
+    Uniform across program instances, but it PARAMETERIZES the kernel's
+    behavior by the grid (last-block gates compare an atomic observation
+    against it), so parsing one records the axis in ``pid_axes``: the
+    verdict must stay symbolic along that dim. The race encoder lowers it
+    to the SAME ``grid_<axis>`` variable the solver's symbolic grid uses."""
+
+    axis: int
 
 
 @dataclass(frozen=True)
@@ -146,6 +162,52 @@ class DataDep:
     why: str = "value derived from loaded data"
 
 
+@dataclass(frozen=True)
+class Observed:
+    """The OLD value observed by the atomic at ``graph.accesses[access_index]``
+    (spec part B): a fresh per-program-instance symbol, NOT a function of
+    other leaves. The reader binds an INTEGER-typed ``tt.atomic_rmw`` /
+    ``tt.atomic_cas`` result to this instead of ``DataDep`` so downstream
+    masks and branch conditions stay modelable; float-typed atomic results
+    keep the DataDep fallback (the value model is Int-sort only).
+
+    Consumer policy (mechanism lives here, policy with each client):
+      * race-detector global encoder: interns one Z3 var per index, ties it
+        to the record's ``old_value`` (rf-justified) when the observation is
+        modelable, and fails closed on address uses of unmodeled ones;
+      * sanitizer OOB: a free variable — sound widening for proofs, with
+        the mask_dropped-style witness abstention;
+      * differential (C3): no concrete value exists — the access is
+        excluded SYMMETRICALLY from both sides of the diff.
+    """
+
+    access_index: int
+
+
+def mentions_observed(term: object) -> bool:
+    """True when ``term`` contains an :class:`Observed` leaf."""
+    if isinstance(term, Observed):
+        return True
+    for attr in ("a", "b", "cond", "t", "f"):
+        sub = getattr(term, attr, None)
+        if sub is not None and mentions_observed(sub):
+            return True
+    return False
+
+
+def observed_indices(term: object) -> set[int]:
+    """Access indices of every :class:`Observed` leaf in ``term``."""
+    out: set[int] = set()
+    if isinstance(term, Observed):
+        out.add(term.access_index)
+        return out
+    for attr in ("a", "b", "cond", "t", "f"):
+        sub = getattr(term, attr, None)
+        if sub is not None:
+            out |= observed_indices(sub)
+    return out
+
+
 # DataDep is also the generic unknown-value top (unresolved SSA, loop
 # accumulators, unmodeled ops, ...). Only these ``why`` prefixes mean the
 # value truly derives from MEMORY CONTENTS — the per-term policy classifies
@@ -169,6 +231,7 @@ def _from_memory(v: object) -> bool:
 Term = (
     Const
     | Pid
+    | NumPrograms
     | Arange
     | Param
     | IterArgOffset
@@ -179,6 +242,7 @@ Term = (
     | Select
     | Not
     | DataDep
+    | Observed
 )
 
 
@@ -200,6 +264,9 @@ class FuncArg:
     name: str
     is_ptr: bool
     elem_bits: int  # for ptr args: pointee width; 0 for scalars
+    # Float-typed pointee (f*/bf*): atomic results on it stay DataDep — the
+    # Int-sort observation model must not carry float values (spec B.5).
+    elem_float: bool = False
 
 
 @dataclass(frozen=True)
@@ -252,6 +319,25 @@ class AccessEvent:
     # model may pick a lane the real mask disables, so it follows the same
     # uncertainty discipline as ``guarded`` (never reported as a witness).
     mask_dropped: bool = False
+    # For atomics: the printed VALUE operand (tt.atomic_rmw val /
+    # tt.atomic_cas val) as a Term, or None when it is not modelable
+    # (loaded data). The race encoder models the RMW write part from it.
+    atomic_val: "Term | None" = None
+    # For tt.atomic_cas only: the compare operand.
+    atomic_cmp: "Term | None" = None
+    # Float-typed pointee: the observation is never modeled (spec B.5).
+    elem_float: bool = False
+    # The await abstraction (spec C1): True when this access is the single
+    # kept read of a recognized scf.while spin loop. ``exit_pred`` is the
+    # loop's EXIT predicate over Observed(this access) — asserted on the
+    # event, justified by termination (in any terminating execution the
+    # final iteration's read observed the exit value); dropped iterations
+    # lose no conflict pairs because every dropped event is a read of the
+    # same location with the same footprint as this one. Verdicts over
+    # await-bearing kernels are therefore conditional on termination
+    # (surfaced as ``assumes_termination``).
+    awaited: bool = False
+    exit_pred: "Term | None" = None
 
     @property
     def is_read(self) -> bool:
@@ -309,7 +395,9 @@ class AccessGraph:
 # never defines `%x#N` names, so val() resolves them to DataDep("unresolved
 # SSA") — sound in every consuming position (mask → dropped and flagged
 # ``mask_dropped``, i.e. proof-only; addptr/ptr → unsupported).
-_SSA = r"%[\w.]+(?:#\d+)?"
+# `-` is part of the token class: negative constants print as `%c-1_i32`,
+# and truncating at the hyphen made every kernel with one fail closed.
+_SSA = r"%[-\w.]+(?:#\d+)?"
 _DTYPE_BITS = {
     "f64": 64, "f32": 32, "f16": 16, "bf16": 16, "f8": 8,
     "i64": 64, "i32": 32, "i16": 16, "i8": 8, "i1": 1,
@@ -322,6 +410,7 @@ _RE_LOC_TRAILER = re.compile(r"loc\((#loc\d*|#loc)\)\s*$")
 _RE_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\((.*)\)\s*attributes")
 _RE_RESULT = re.compile(rf"^({_SSA})(?::\d+)?\s*=\s*(.*)$")
 _RE_GET_PID = re.compile(r"^tt\.get_program_id (\w+)")
+_RE_GET_NPROG = re.compile(r"^tt\.get_num_programs (\w+)")
 _RE_MAKE_RANGE = re.compile(
     r"^tt\.make_range \{end = (-?\d+) : i32, start = (-?\d+) : i32\}"
 )
@@ -342,7 +431,11 @@ _RE_CMPI = re.compile(rf"^arith\.cmpi (\w+), ({_SSA}), ({_SSA})")
 _RE_BOOLBIN = re.compile(rf"^arith\.(andi|ori) ({_SSA}), ({_SSA})\s*:\s*(\S+)")
 _RE_SELECT = re.compile(rf"^arith\.select ({_SSA}), ({_SSA}), ({_SSA})")
 _RE_EXT = re.compile(rf"^arith\.(extsi|trunci|extui) ({_SSA})")
-_RE_LOAD = re.compile(rf"^tt\.load ({_SSA})((?:, {_SSA})*)\s*(?::|loc|$)")
+# The optional trailing `{...}` matches attribute dicts (e.g. the
+# `{isVolatile = true}` of a spin-read `tl.load(..., volatile=True)`).
+_RE_LOAD = re.compile(
+    rf"^tt\.load ({_SSA})((?:, {_SSA})*)\s*(?:\{{[^}}]*\}})?\s*(?::|loc|$)"
+)
 _RE_STORE = re.compile(rf"^tt\.store ({_SSA}), ({_SSA})((?:, {_SSA})*)\s*(?::|loc|$)")
 # Atomic RMW prints (op, sem, scope, ptr, val, mask); an unmasked tl.atomic_*
 # still carries a mask operand (a dense<true> constant), so the group is
@@ -364,6 +457,10 @@ _RE_SCF_FOR = re.compile(
 )
 _RE_SCF_YIELD = re.compile(r"^scf\.yield (.*?)\s*:")
 _RE_SCF_IF = re.compile(rf"^scf\.if ({_SSA})")
+# The await shape (C1.1): only the argument-free, result-free spin form is
+# accepted; anything carrying values is refused as "spin-shape".
+_RE_SCF_WHILE_SPIN = re.compile(r"^scf\.while\s*:\s*\(\)\s*->\s*\(\)\s*\{")
+_RE_SCF_CONDITION = re.compile(rf"^scf\.condition\(({_SSA})\)")
 
 
 @dataclass
@@ -378,6 +475,21 @@ class _IfFrame:
     # else-region's overwrites.
     then_vals: "list[object] | None" = None
     else_vals: "list[object] | None" = None
+
+
+@dataclass
+class _WhileFrame:
+    """Walker state for one open scf.while spin candidate (C1.1).
+
+    The CONDITION region ("before") holds the awaited re-read plus its
+    address bookkeeping and ends at scf.condition; the BODY region ("do")
+    must be pure bookkeeping (scf.yield only). Any clause violation refuses
+    the kernel with kind="spin-shape" naming the clause."""
+
+    open_line: int
+    stage: str = "cond"  # "cond" → "body"
+    n_accesses_before: int = 0
+    cond_val: object | None = None  # resolved AT the scf.condition line
 
 
 def _branch_state(frames: list) -> "tuple[bool, Term | None, bool]":
@@ -407,6 +519,11 @@ def _elem_bits(type_str: str) -> int:
     if m:
         return _DTYPE_BITS.get(m.group(1), 0)
     return 0
+
+
+def _elem_is_float(type_str: str) -> bool:
+    m = _RE_PTR_ELEM.search(type_str)
+    return m is not None and m.group(1).startswith(("f", "bf"))
 
 
 def _split_ssa(text: str) -> list[str]:
@@ -482,7 +599,12 @@ def parse_ttir(text: str) -> AccessGraph:
             name, ty = m.group(1)[1:], m.group(2)
             is_ptr = ty.startswith("!tt.ptr")
             bits = _elem_bits(ty) if is_ptr else 0
-            fa = FuncArg(name=name, is_ptr=is_ptr, elem_bits=bits)
+            fa = FuncArg(
+                name=name,
+                is_ptr=is_ptr,
+                elem_bits=bits,
+                elem_float=_elem_is_float(ty) if is_ptr else False,
+            )
             func_args.append(fa)
             # Pointer args seed addptr chains; scalar args are Param leaves.
             env[f"%{name}"] = PtrValue(name, Const(0)) if is_ptr else Param(name)
@@ -490,6 +612,22 @@ def parse_ttir(text: str) -> AccessGraph:
     def base_elem_bits(param: str) -> int:
         fa = next((a for a in func_args if a.name == param), None)
         return fa.elem_bits if fa else 0
+
+    def base_elem_float(param: str) -> bool:
+        fa = next((a for a in func_args if a.name == param), None)
+        return fa.elem_float if fa else True  # unknown pointee: fail closed
+
+    def operand_term(v: object) -> "Term | None":
+        """An atomic cmp/val operand as a Term, or None when unmodelable."""
+        return None if isinstance(v, (DataDep, PtrValue)) else v  # type: ignore[return-value]
+
+    def observed_result_binding() -> object:
+        """The env value for the just-recorded access's result: Observed
+        for an integer-typed access (spec part B / the await re-read),
+        DataDep otherwise (float pointees stay outside the Int model)."""
+        if accesses and not accesses[-1].elem_float:
+            return Observed(len(accesses) - 1)
+        return DataDep("atomic result")
 
     # ── body parse (single function; loop handled inline) ──
     # Region stack: "for" | _IfFrame. Tracking scf.if frames keeps the
@@ -522,6 +660,65 @@ def parse_ttir(text: str) -> AccessGraph:
         rm = _RE_RESULT.match(line)
         res = rm.group(1) if rm else None
         body = rm.group(2) if rm else line
+
+        # ---- scf.while body region: pure bookkeeping only (C1.1) ----
+        # Placed FIRST so stray ops in the "do" region are refused before
+        # any other handler could record them; brace lines fall through to
+        # the region-close logic below.
+        if (
+            frames
+            and isinstance(frames[-1], _WhileFrame)
+            and frames[-1].stage == "body"
+            and not line.startswith("}")
+        ):
+            if body.startswith("scf.yield"):
+                continue
+            raise UnsupportedTTIR(
+                f"line {line_no}: spin-loop body must be pure bookkeeping "
+                f"(scf.yield), found: {body.split(' ', 1)[0]}",
+                kind="spin-shape",
+            )
+
+        # ---- scf.while (the await abstraction, C1) ----
+        if body.startswith("scf.while"):
+            if res is not None or not _RE_SCF_WHILE_SPIN.match(body):
+                raise UnsupportedTTIR(
+                    f"line {line_no}: scf.while carries values (iter args or "
+                    "results) — only the argument-free spin form is the "
+                    "await shape",
+                    kind="spin-shape",
+                )
+            if any(isinstance(f, _WhileFrame) for f in frames):
+                raise UnsupportedTTIR(
+                    f"line {line_no}: nested spin loops are not the await " "shape",
+                    kind="spin-shape",
+                )
+            frames.append(
+                _WhileFrame(open_line=line_no, n_accesses_before=len(accesses))
+            )
+            continue
+
+        cm = _RE_SCF_CONDITION.match(body)
+        if cm:
+            top = frames[-1] if frames else None
+            if not (isinstance(top, _WhileFrame) and top.stage == "cond"):
+                raise UnsupportedTTIR(
+                    f"line {line_no}: scf.condition outside a spin loop",
+                    kind="control-flow",
+                )
+            # Resolve NOW: region SSA names must not be re-read at close.
+            top.cond_val = val(cm.group(1))
+            continue
+
+        if line.startswith("} do") and frames and isinstance(frames[-1], _WhileFrame):
+            top = frames[-1]
+            if top.cond_val is None:
+                raise UnsupportedTTIR(
+                    f"line {line_no}: spin loop without scf.condition",
+                    kind="spin-shape",
+                )
+            top.stage = "body"
+            continue
 
         # ---- scf.for ----
         fm = _RE_SCF_FOR.match(body)
@@ -557,6 +754,14 @@ def parse_ttir(text: str) -> AccessGraph:
                     raise UnsupportedTTIR(
                         f"loop {label} bound: data-dependent ({bv.why})",
                         kind="data-dependent-bound" if _from_memory(bv) else "other",
+                    )
+                if mentions_observed(bv):
+                    # A trip count driven by an atomic observation is a
+                    # dynamic work-fetch loop — outside the single-loop
+                    # model (looped RMW fetch is a B+C1 stretch item).
+                    raise UnsupportedTTIR(
+                        f"loop {label} bound depends on an atomic observation",
+                        kind="data-dependent-bound",
                     )
                 bound_terms[label] = as_term(bv, f"loop {label}")
             loop_meta = {
@@ -619,6 +824,9 @@ def parse_ttir(text: str) -> AccessGraph:
                 top.branch = "else"
                 continue
             popped = frames.pop()
+            if isinstance(popped, _WhileFrame):
+                _finalize_await(popped, accesses, line_no)
+                continue
             if isinstance(popped, _IfFrame):
                 if (
                     popped.res is not None
@@ -689,8 +897,8 @@ def parse_ttir(text: str) -> AccessGraph:
             continue
 
         # ---- other control flow: fail closed ----
-        # scf.for and scf.if are region-tracked above. Anything else that
-        # steers control flow (scf.while spin loops, unstructured cf.*)
+        # scf.for, scf.if and the scf.while await shape are region-tracked
+        # above. Anything else that steers control flow (unstructured cf.*)
         # would be flat-scanned as if it executed unconditionally — reject
         # the kernel instead.
         if body.startswith(("scf.", "cf.")) and not body.startswith(
@@ -725,12 +933,29 @@ def parse_ttir(text: str) -> AccessGraph:
                 line_no,
                 path=path,
                 in_loop=in_loop,
+                base_elem_float=base_elem_float,
             )
             if res is not None:
-                env[res] = DataDep("loaded value")
+                in_while_cond = any(
+                    isinstance(f, _WhileFrame) and f.stage == "cond" for f in frames
+                )
+                # A spin re-read's value IS an observation (the await's
+                # exit predicate is asserted over it, C1.2); everywhere
+                # else a loaded value stays DataDep.
+                env[res] = (
+                    observed_result_binding()
+                    if in_while_cond
+                    else DataDep("loaded value")
+                )
             continue
         sm = _RE_STORE.match(body)
         if sm:
+            if any(isinstance(f, _WhileFrame) for f in frames):
+                raise UnsupportedTTIR(
+                    f"line {line_no}: store inside a spin loop is not the "
+                    "await shape",
+                    kind="spin-shape",
+                )
             guarded, path, in_loop = _branch_state(frames)
             _record_access(
                 "store",
@@ -753,7 +978,7 @@ def parse_ttir(text: str) -> AccessGraph:
             _record_access(
                 "atomic_rmw",
                 am.group(4),
-                am.group(6),  # the mask operand; val (group 5) is data only
+                am.group(6),  # the mask operand
                 guarded,
                 env,
                 val,
@@ -764,9 +989,11 @@ def parse_ttir(text: str) -> AccessGraph:
                 atomic=AtomicInfo(am.group(1), am.group(2), am.group(3)),
                 path=path,
                 in_loop=in_loop,
+                atomic_val=operand_term(val(am.group(5))),
+                base_elem_float=base_elem_float,
             )
             if res is not None:
-                env[res] = DataDep("atomic result")
+                env[res] = observed_result_binding()
             continue
         am = _RE_ATOMIC_CAS.match(body)
         if am:
@@ -785,9 +1012,12 @@ def parse_ttir(text: str) -> AccessGraph:
                 atomic=AtomicInfo(None, am.group(1), am.group(2)),
                 path=path,
                 in_loop=in_loop,
+                atomic_val=operand_term(val(am.group(5))),
+                atomic_cmp=operand_term(val(am.group(4))),
+                base_elem_float=base_elem_float,
             )
             if res is not None:
-                env[res] = DataDep("atomic result")
+                env[res] = observed_result_binding()
             continue
 
         # ---- fail closed on unrecognized memory ops ----
@@ -878,6 +1108,70 @@ def _set_arange_dim(v: object, dim: int) -> object:
     return v
 
 
+def _finalize_await(frame: _WhileFrame, accesses: list, line_no: int) -> None:
+    """Validate the C1.1 shape contract at the spin loop's closing brace and
+    stamp the kept read with ``awaited`` + the EXIT predicate.
+
+    ``scf.condition(c)`` continues WHILE c holds, so the exit predicate is
+    ``Not(c)`` — for ``while load(flag) != 1`` that is ``flag == 1``; for
+    the CAS form ``while cas(lock,0,1) != 0`` it is ``old == 0`` (success).
+    Memory order/scope stay exactly as the op was written: a relaxed spin
+    must yield no synchronizes-with edge — that IS the missing-acquire bug
+    the detector exists to find."""
+    where = f"line {frame.open_line} (scf.while)"
+    n_new = len(accesses) - frame.n_accesses_before
+    if n_new != 1:
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition must re-read exactly one location "
+            f"(found {n_new} memory accesses)",
+            kind="spin-shape",
+        )
+    idx = len(accesses) - 1
+    acc = accesses[idx]
+    if acc.elem_float:
+        raise UnsupportedTTIR(
+            f"{where}: the awaited location is float-typed (the observation "
+            "model is Int-sort only)",
+            kind="spin-shape",
+        )
+    # The await encoding keeps ONE read and drops every earlier iteration —
+    # sound only when the re-read is side-effect-free on the awaited
+    # location. A plain load never writes; a CAS writes exactly once (on
+    # success — the single modeled write). A mutating RMW re-read
+    # (atomic_add(flag, 1) spins) writes on EVERY dropped iteration: the
+    # loop can terminate by observing its OWN increments, and modeling the
+    # exit value as read-from a release writer fabricates a
+    # synchronizes-with edge (adversarial finding: self-satisfying spin
+    # proved a real data race away). Accept an RMW only when its written
+    # value provably equals the observation: add/or/xor with a constant 0.
+    if acc.kind == "atomic_rmw":
+        op = ((acc.atomic.rmw_op if acc.atomic else None) or "").lower()
+        identity = op in ("add", "or", "xor") and acc.atomic_val == Const(0)
+        if not identity:
+            raise UnsupportedTTIR(
+                f"{where}: the spin re-read MUTATES the awaited location "
+                f"(atomic {op or '?'} with a non-identity operand); dropped "
+                "iterations would lose real writes",
+                kind="spin-shape",
+            )
+    cv = frame.cond_val
+    if not isinstance(cv, Cmp):
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition is not a comparison over the " "awaited read",
+            kind="spin-shape",
+        )
+    a_is_obs = isinstance(cv.a, Observed) and cv.a.access_index == idx
+    b_is_obs = isinstance(cv.b, Observed) and cv.b.access_index == idx
+    expected = cv.b if a_is_obs else cv.a
+    if a_is_obs == b_is_obs or idx in observed_indices(expected):
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition must compare the awaited read "
+            "against a loop-invariant expected value",
+            kind="spin-shape",
+        )
+    accesses[idx] = replace(acc, awaited=True, exit_pred=Not(cv))
+
+
 def _extract_loop_delta(offset: Term, arg_id: int) -> Term | None:
     """From a yielded pointer offset of the shape
     ``IterArgOffset(arg_id) + delta`` (any association), pull out ``delta``."""
@@ -910,6 +1204,19 @@ def _parse_value_op(body, res, env, val, as_term, base_elem_bits, pid_axes) -> b
         # if this value never survives into a modeled term.
         pid_axes.add(axis)
         env[res] = Pid(axis)
+        return True
+    m = _RE_GET_NPROG.match(body)
+    if m:
+        axis = {"x": 0, "y": 1, "z": 2}.get(m.group(1))
+        if axis is None:
+            raise UnsupportedTTIR(
+                f"unknown num-programs axis {m.group(1)!r}",
+                kind="out-of-vocabulary",
+            )
+        # The verdict depends on this grid dim (see NumPrograms): keep the
+        # axis symbolic even when no pid read distinguishes blocks along it.
+        pid_axes.add(axis)
+        env[res] = NumPrograms(axis)
         return True
     m = _RE_MAKE_RANGE.match(body)
     if m:
@@ -1045,6 +1352,9 @@ def _record_access(
     atomic=None,
     path=None,
     in_loop=False,
+    atomic_val=None,
+    atomic_cmp=None,
+    base_elem_float=None,
 ) -> None:
     ptr = val(ptr_ssa)
     if not isinstance(ptr, PtrValue):
@@ -1083,5 +1393,8 @@ def _record_access(
             path=path,
             mask_dropped=mask_dropped,
             in_loop=in_loop,
+            atomic_val=atomic_val,
+            atomic_cmp=atomic_cmp,
+            elem_float=(base_elem_float(ptr.base_param) if base_elem_float else False),
         )
     )

@@ -26,9 +26,10 @@ class LaunchSpec:
     grid: tuple[int, ...]
     # ground truth, scoped to THIS launch
     expected: Literal["race", "race-free"] | None = None
-    # the planted racing access pair as source line numbers of the kernel
-    # function (witness-level scoring), when expected == "race"
-    race_pair: tuple[int, int] | None = None
+    # the planted racing access pair as source-line NEEDLES (substrings of
+    # the kernel's source lines, resolved to line numbers at scoring time —
+    # robust against edits shifting absolute numbers), when expected=="race"
+    race_pair: tuple[str, ...] | None = None
     # race-pattern taxonomy bucket (DRB-style)
     pattern: str = ""
     # free-form note (e.g. which parameter makes this launch racy)

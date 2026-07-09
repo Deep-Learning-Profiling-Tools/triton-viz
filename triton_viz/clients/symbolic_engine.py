@@ -2463,7 +2463,32 @@ class AtomicRmwSymbolicExpr(SymbolicExpr):
         self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+        # Mirrors AtomicCasSymbolicExpr: the RMW's value is the OLD value at
+        # the location — per-program-instance nondeterminism, so it lowers
+        # to a fresh variable. Var names derive from id(self), so repeated
+        # evaluation of the same expression yields the SAME Z3 vars (Z3
+        # interns by name) and a capture-side record's old_value stays
+        # identical to every downstream use. Whether the observation is
+        # actually value-modeled (integer dtype, spec part B) is the race
+        # detector's policy — its overrider returns the sentinel instead of
+        # this expression for float-typed RMWs.
+        ptr_z3, constraints_ptr = self.ptr._to_z3()
+        _, constraints_val = self.val._to_z3()
+        constraints_mask = None
+        if self.mask is not None:
+            _, constraints_mask = self.mask._to_z3()
+        constraints = _and_constraints(
+            constraints_ptr, constraints_val, constraints_mask
+        )
+
+        if isinstance(ptr_z3, list):
+            z3_expr = [
+                Int(f"atomic_rmw_old_{id(self)}_{idx}") for idx in range(len(ptr_z3))
+            ]
+        else:
+            z3_expr = Int(f"atomic_rmw_old_{id(self)}")
+
+        return z3_expr, constraints
 
 
 class TensorPointerSymbolicExpr(SymbolicExpr):

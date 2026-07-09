@@ -35,6 +35,10 @@ Model notes:
 
 from __future__ import annotations
 
+import signal
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -180,6 +184,44 @@ class ReplayResult:
     error: str | None = None
 
 
+# Hard wall-clock ceiling for one replay run. Await-bearing kernels are
+# classified unavailable BEFORE any replay is attempted (the client's
+# pre-guard), so this is defense in depth: replay must never be able to
+# hang, whatever the cause.
+REPLAY_TIMEOUT_S = 60
+
+
+@contextmanager
+def _replay_watchdog(seconds: float):
+    """SIGALRM-based interrupt for the replay. Only armable on the main
+    thread of a Unix process; elsewhere the replay runs unguarded (the
+    await pre-guard remains the deterministic protection). An enclosing
+    SIGALRM timer's remaining time is re-armed on exit (elapsed time
+    deducted) — a nested watchdog must not permanently defuse its outer
+    one."""
+    if (
+        not hasattr(signal, "SIGALRM")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    def _fire(signum, frame):  # noqa: ARG001
+        raise TimeoutError(f"replay watchdog fired after {seconds}s")
+
+    old_handler = signal.signal(signal.SIGALRM, _fire)
+    old_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        if old_timer and old_timer[0] > 0:
+            remaining = old_timer[0] - (time.monotonic() - started)
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining), old_timer[1])
+
+
 def run_replay(
     jit_fn: Any,
     args: tuple,
@@ -191,8 +233,8 @@ def run_replay(
     with every tensor argument CLONED (originals are never touched).
 
     Returns clone-based footprints plus the original→clone base mapping.
-    Never raises: replay is a best-effort classifier; on failure the caller
-    keeps the unconfirmed classification.
+    Never raises: replay is a best-effort classifier; on failure (including
+    the watchdog) the caller keeps the unconfirmed classification.
     """
     # NOTE: `from ....core import trace` resolves to the trace() FUNCTION
     # (the package re-exports shadow the submodule); import the module.
@@ -223,7 +265,8 @@ def run_replay(
         traced = trace_mod.TritonTrace(jit_fn, recorder)
         n_before = len(trace_mod.launches)
         try:
-            traced[grid](*cloned_args, **cloned_kwargs)
+            with _replay_watchdog(REPLAY_TIMEOUT_S):
+                traced[grid](*cloned_args, **cloned_kwargs)
         finally:
             # The replay is internal bookkeeping, not a user launch.
             del trace_mod.launches[n_before:]
@@ -351,6 +394,19 @@ def confirm_witness(
 # ─────────────────────── C3: differential cross-check ───────────────────────
 
 
+def _depends_on_observation(access: Any) -> bool:
+    """Static footprints for observation-dependent accesses are
+    interleaving-dependent (no single concrete enumeration): excluded from
+    BOTH sides, mirroring static_footprints' `skipped` (the symmetric
+    exclusion rule)."""
+    from ...common.ttir_reader import mentions_observed
+
+    return any(
+        t is not None and mentions_observed(t)
+        for t in (access.offset, access.mask, access.path)
+    )
+
+
 def cross_check(
     graph: Any,
     params: dict[str, int],
@@ -376,8 +432,10 @@ def cross_check(
     base_to_name = {meta.data_ptr: name for name, meta in tensors.items()}
 
     issues: list[str] = []
+    g = tuple(grid) + (1,) * (3 - len(grid))
+    grid3 = (int(g[0]), int(g[1]), int(g[2]))
     for pid in pids:
-        static = static_footprints(graph, params, bases, pid)
+        static = static_footprints(graph, params, bases, pid, grid3)
         # rebase the interpreter footprint from clone bases to names
         dyn: dict[tuple[str, str], set[int]] = {}
         clone_to_orig = {c: o for o, c in result.base_map.items()}
@@ -399,7 +457,7 @@ def cross_check(
         skipped_kinds = {
             (a.base_param, KIND_BUCKET[a.kind])
             for a in graph.accesses
-            if a.mask_dropped or a.guarded
+            if a.mask_dropped or a.guarded or _depends_on_observation(a)
         }
         for key in list(dyn):
             if key in skipped_kinds:

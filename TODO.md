@@ -3,7 +3,12 @@
 Companion to `race_detector_static_hybrid_plan.md` (Part III S1–S4 are landed:
 shared TTIR reader, scf.if path conditions, per-term DataDep policy, the T1
 global-memory track, the T0/T1 tier selector, and the C2/C3 channels — all five
-terminal states are materialized). What remains:
+terminal states are materialized. S6 — RMW-return modeling (spec part B) and
+the await abstraction (spec C1) — is landed too: observation symbols with
+rf/coherence justification, RMW immediacy, reads-through release sequences,
+the guarded counting axiom, `tt.get_num_programs` modeling, the scf.while
+await shape with termination premises, and the `rmw_sync` / `await_sync`
+litmus corpora, all at precision/recall 1.0). What remains:
 
 ## 1. S5 — Evaluation (the paper's data; plan Part III S5, revised)
 
@@ -19,23 +24,20 @@ the claim ladder itself: proved@T0 against a premise-compatible yes-launch is
 
 Build order:
 
-- [ ] (1, ~½ day) Harness skeleton: `evaluation/{kernels/,harness.py,runner.py,
-      report.py}`. `LaunchSpec(kernel_fn, signature, constexprs, make_args(seed),
-      grid, params, expected: "race"|"race-free", race_pair, pattern)`.
-      Driverless synthetic drive (host-compiled TTIR + CPU tensors + CPU
-      interpreter for C2/replay and the dynamic comparison); one subprocess per
-      kernel with hard timeout (timeout is a recorded outcome);
-      compile-before-interpret ordering inside each subprocess. Row schema:
-      five-state terminal + provenance + confirmation + unsupported kind +
-      tier-selector fields (t0_gate, T0 attempted/result — the T0 stretch shows
-      as a re-run diff) + dynamic-mode column + C3 result (built-in oracle;
-      mismatch = investigate) + per-phase wall-clock. Smoke on golden kernels.
+- [x] (1, ~½ day) Harness skeleton: `evaluation/{kernels/,harness.py,runner.py,
+      report.py}` — landed (golden_smoke corpus, 7 kernels, one per terminal
+      state; per-spec subprocess + timeout; dynamic + C3 columns; now also the
+      `assumes_termination` row field and a SIGALRM watchdog on the dynamic
+      phase for spin kernels).
 - [ ] (2, ~1 day) Phase A — "TritonRaceBench" labeled micro pairs (a publishable
       artifact: no labeled Triton race corpus exists). DRB-style yes/no PAIRS
       per pattern (`trb007_pid_branch_store_yes/_no`): pid-stride misalignment,
       missing mask term, atomic→plain store, pid branch, data-dependent mask,
       loop-carried overlap, aliased in-place, CAS lock, gather, nested loop
-      (~15 pairs, several distilled from tests); input-parameterized kernels
+      (~15 pairs, several distilled from tests). The `rmw_sync` (4 patterns,
+      9 rows) and `await_sync` (3 patterns, 9 rows) corpora landed with S6
+      cover the synchronization half of this list — fold them into the Phase A
+      naming/report; input-parameterized kernels
       (n=0 race-free vs n=5 racy) one row per parameter set — `expected` labels
       per (kernel, launch); kernel-level "∃ racy input" is derived, scoped to
       the specialization + T0 premises (an aliased yes-launch does not
@@ -82,6 +84,19 @@ Build order:
       (event ids, locs) as the interchange format; evaluation sweep (tutorials
       × `num_stages` × {sm80, sm90}: proofs, solve times, mutation-detection
       matrix); case studies from historical pipeliner bugs.
+
+## S6 stretch items (require B + C1 together; not part of either's DoD)
+
+- [ ] Ticket lock: needs the bounded reads-through chain OVER unmodeled grid
+      instances beyond the counting axiom's single-record guard (two RMW
+      records — next_ticket and now_serving — interact).
+- [ ] Looped work-queue fetch: RMW inside scf.for needs per-iteration
+      observation symbols (one var per iteration, or an uninterpreted
+      function of the loop index) before the counting axiom can extend.
+- [ ] pingpong_phase (await nested in scf.for with expected = f(LoopVar)):
+      parses and encodes today, but the awaited atomic keeps
+      old_value=None inside loops (no rf), so it lands on reports, not
+      proofs.
 
 ## Refinements noted during verification (small, non-blocking)
 

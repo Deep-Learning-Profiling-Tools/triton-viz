@@ -36,11 +36,14 @@ from ...common.ttir_reader import (
     IterArgOffset,
     LoopVar,
     Not,
+    NumPrograms,
+    Observed,
     Param,
     Pid,
     Select,
     Term,
     UnsupportedTTIR,
+    mentions_observed,
 )
 
 # kind → the footprint bucket shared with the replay client.
@@ -68,10 +71,12 @@ class _ConcreteEnv:
         graph: AccessGraph,
         params: dict[str, int],
         pid: tuple[int, int, int],
+        grid: tuple[int, int, int] | None = None,
     ) -> None:
         self.graph = graph
         self.params = params
         self.pid = pid
+        self.grid = grid
         # (ssa, dim) -> meshgrid axis index, assigned on first sight per access
         self.axes: dict[tuple[str, int], int] = {}
         self.arange_ranges: list[tuple[int, int]] = []
@@ -112,6 +117,10 @@ class _ConcreteEnv:
             return np.int64(self.params[term.name])
         if isinstance(term, Pid):
             return np.int64(self.pid[term.axis])
+        if isinstance(term, NumPrograms):
+            if self.grid is None:
+                raise UnsupportedTTIR("num_programs needs the launch grid")
+            return np.int64(self.grid[term.axis])
         if isinstance(term, Arange):
             return grids[self.axes[(term.ssa, term.dim)]]
         if isinstance(term, LoopVar):
@@ -164,6 +173,11 @@ class _ConcreteEnv:
             )
         if isinstance(term, Not):
             return ~(self.eval(term.a, grids) != 0)
+        if isinstance(term, Observed):
+            # An atomic observation has no concrete replay-independent
+            # value (it depends on the interleaving) — callers exclude such
+            # accesses SYMMETRICALLY before evaluation.
+            raise UnsupportedTTIR("atomic observation has no concrete value")
         if isinstance(term, DataDep):
             raise UnsupportedTTIR(f"data-dependent term ({term.why})")
         raise UnsupportedTTIR(f"unhandled term {type(term).__name__}")
@@ -186,10 +200,11 @@ def static_footprints(
     params: dict[str, int],
     tensor_bases: dict[str, tuple[int, int]],  # name -> (data_ptr, elem_size)
     pid: tuple[int, int, int],
+    grid: tuple[int, int, int] | None = None,
 ) -> StaticFootprints:
     """Enumerate one program instance's footprint from the STATIC model:
     every arange lane × every loop iteration, masks and path conditions
-    applied concretely."""
+    applied concretely. ``grid`` concretizes NumPrograms terms."""
     out = StaticFootprints()
     for access in graph.accesses:
         if access.mask_dropped or access.guarded:
@@ -198,9 +213,21 @@ def static_footprints(
                 "(dropped mask / unmodeled branch)"
             )
             continue
+        if any(
+            t is not None and mentions_observed(t)
+            for t in (access.offset, access.mask, access.path)
+        ):
+            # Interleaving-dependent footprint or activity: no single
+            # concrete enumeration exists — skipped, and the caller's
+            # bucket exclusion is symmetric (the 60d155b rule).
+            out.skipped.append(
+                f"line {access.line_no} ({access.kind}): depends on an "
+                "atomic observation (interleaving-dependent)"
+            )
+            continue
         base, elem = tensor_bases[access.base_param]
 
-        env = _ConcreteEnv(graph, params, pid)
+        env = _ConcreteEnv(graph, params, pid, grid)
         env.collect_aranges(access.offset)
         if access.mask is not None:
             env.collect_aranges(access.mask)
