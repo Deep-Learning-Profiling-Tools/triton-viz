@@ -702,17 +702,118 @@ previously died at parse now prove or abstain
 
 ### S5 — evaluation + T0 stretch (≈1.5–2 weeks, overlapping from S3)
 
-- Tutorials + real kernel libraries: distribution over the five terminal states;
-  unsupported reasons split by cause (indirect address / nested loop /
-  out-of-vocabulary / unmodelable condition).
-- Headline numbers: (a) kernels rescued from dynamic-unsupported by pid-branch
-  modeling (S2's acceptance, quantified); (b) kernels with all-grid `proved@T1` — a
-  claim the dynamic mode cannot make at all.
-- The 2-D concretization map (§I.2) with every benchmark kernel plotted on it — the
-  paper's core figure; the evaluation data fills the conceptual frame directly.
+Protocol modeled on DataRaceBench (Liao et al., SC'17) and the LLOV evaluation
+(three-outcome scoring for static tools), with three deliberate departures noted
+below.
+
+**Harness design decisions:**
+
+- *Driverless throughout.* TTIR via host-only `triton.compile(ASTSource,
+  GPUTarget("cuda", 80, 32))`; the client is driven synthetically
+  (`pre_warmup_callback(jit_fn, *args, grid=…)` → `post_warmup_callback(asm)` →
+  `finalize()`) with CPU tensors; C2 replay and the dynamic-mode comparison run on
+  the CPU interpreter. CI-runnable and reproducible; the cost is one hand-written
+  **LaunchSpec** per kernel (`kernel_fn, signature, constexprs, make_args(seed),
+  grid, params`, plus the ground-truth fields below) — which is also where the
+  reproducibility comes from. Autotuned kernels: take `.fn`, pin one config
+  (methodology note).
+- *One subprocess per kernel.* Hard wall-clock timeout (timeout is a recorded
+  outcome, not an accident); fixed compile-before-interpret ordering sidesteps the
+  interpreter-patching hazard documented in trace.py; a crash cannot take down the
+  sweep.
+- *The dynamic-mode comparison is a first-class column*, not an afterthought: each
+  subprocess runs the static track (`CompiledRaceDetector(confirm_races=True,
+  differential_check=True)`) AND the dynamic `RaceDetector()` on the same
+  kernel+launch — the "rescued from dynamic-unsupported" headline is a per-row diff.
+
+**Corpus (three phases):**
+
+1. *Phase A — labeled micro pairs ("TritonRaceBench", a publishable artifact in its
+   own right: no labeled Triton race corpus exists).* DRB-style yes/no PAIRS: each
+   race pattern contributes a racy variant and a fixed variant, ground truth by
+   construction, named with the label (e.g. `trb007_pid_branch_store_yes/_no`).
+   Patterns: pid-stride misalignment, missing mask term, atomic→plain store, pid
+   branch, data-dependent mask, loop-carried overlap, aliased in-place, CAS lock,
+   gather, nested loop, … (~15 pairs; several distilled from existing tests).
+   Input-parameterized kernels included (same kernel, n=0 race-free vs n=5 racy —
+   the T1 claim made concrete), one row per parameter set.
+2. *Phase B — triton tutorials* (vendored for triton 3.6, hand-written LaunchSpecs,
+   ~10–12 kernels): the "standard corpus" column.
+3. *Phase C — a real library* (liger-kernel or a TritonBench subset, 20+ kernels).
+   Expect `unsupported` to dominate (nested loops); that IS the data — the kind
+   distribution tells the paper where the next modeling investment pays.
+
+**Scoring (per row: kernel × launch-params):**
+
+- Terminal state (five states) + `provenance` + `confirmation` + unsupported
+  `kind`/reason; tier-selector detail (`t0_gate`, T0 attempted/result — so the T0
+  stretch shows up as a re-run delta); per-phase wall-clock; C3 result
+  (agree/mismatch/skipped) as the harness's built-in correctness oracle — any
+  mismatch is a red flag to investigate by hand.
+- DRB/LLOV-style table: TP/FP/TN/FN + precision/recall + **coverage**, with
+  abstentions as their OWN outcomes (SV-COMP-style), split into
+  `race-unconfirmed` (reported but not certified) vs `unsupported` (never entered
+  the pipeline). Mapping: proved@T0/T1 → "no"; race-confirmed → "yes".
+- Per-pattern breakdown (which bug classes the detector is strong/weak on) and the
+  static-vs-dynamic per-kernel matrix.
+- *Cross-row ladder audit* (departure 4): per kernel, derive "∃ racy launch"
+  from the yes-labels within each specialization and T0-premise scope; any
+  proved@T0 against it → `ladder-unsound` (its own severity class, above FP);
+  any race-confirmed on a no-labeled launch → `replay-unsound`. Both zero by
+  construction or the release is blocked.
+- *Mutation sensitivity mode*: for every kernel that PROVES, auto-mutate the TTIR
+  (pid-stride constant) and assert the verdict flips to races — proofs are not
+  vacuous; one broken constant is caught.
+
+**Four deliberate departures from DRB (paper differentiators):**
+
+1. *Witness-level scoring, not file-level binary.* DRB scores "reported a race
+   y/n" per file (its acknowledged weakness — any report counts, even the wrong
+   one). Our reports carry source-line pairs and witness pids; micro-pair ground
+   truth labels the RACING ACCESS PAIR (`race_pair` in the LaunchSpec), and
+   scoring distinguishes "found the planted race" from "found some race".
+2. *Deterministic protocol.* DRB needs N runs × M configs for nondeterministic
+   dynamic tools; our static side is deterministic and the replay is
+   deterministic given the seed — one run per row is the protocol, stated as
+   such.
+3. *Proof-strength dimension.* DRB's "no" is "did not report"; ours carries the
+   provenance ladder (proved@T0 = any input vs proved@T1 = this input, any grid)
+   — §I.1's claim ladder appears directly in the evaluation tables.
+4. *Scoped ground truth — the corpus audits the claim ladder itself.* DRB's
+   truth is a flat per-file yes/no; ours labels per (kernel, launch-params), so
+   a kernel with several differently-labeled launches acquires a DERIVED
+   kernel-level truth: "∃ input that races". If the detector answers proved@T0
+   (race-free for ANY input) on such a kernel, that is not an ordinary FP — it
+   is a LADDER-SOUNDNESS violation (a universal claim contradicted by a labeled
+   counterexample input), scored as its own severity class above FP.
+   Precision matters here or the auditor itself lies: the derivation only
+   counts yes-launches WITHIN the T0 claim's premises — same specialization
+   (constexpr set) and non-aliased, in-bounds launches. An aliased in-place
+   yes-label does NOT contradict a non-aliased T0 proof (the claim excludes
+   aliasing by stated premise); a yes under a different BLOCK constexpr is a
+   different specialization. Analogously, `race-confirmed` on a no-labeled
+   launch is a replay-soundness violation (worse than FP). Parameterized pairs
+   thus do double duty — detector benchmark AND provenance-hierarchy auditor —
+   the operational face of departure 3.
+
+**Outputs**: `evaluation/results/<corpus>.jsonl` (schema above, versions/seeds in
+the header) + generated `RESULTS.md` (five-state distribution by corpus, kind
+buckets, headline numbers, DRB-style table, per-pattern table, timing
+percentiles). The 2-D concretization map (§I.2) exports from the JSONL (each
+row's terminal state + front-end determines its point); the figure script stays
+out of the harness proper.
+
+**Build order**: (1) LaunchSpec + harness/runner skeleton, smoke on golden
+kernels (~½ day); (2) Phase A pairs + first report (~1 day); (3) Phase B
+tutorials (~1 day, mostly LaunchSpec handwork); (4) mutation mode + Phase C
+(~1–2 days). First full RESULTS.md ≈ 3–4 days; the five-state distribution is
+visible after Phase A (~1.5 days in).
+
 - **T0 stretch, off the critical path**: symbolic loop bounds (`lower ≤ i < upper` plus
   step-divisibility constraint), accept nonlinear `unknown` → the kernel simply lands
   on T1 per the ladder; whatever reaches T0 becomes the paper's "upper bound" section.
+  The harness records the tier-selector fields from day one, so the stretch's impact
+  is a re-run diff.
 
 ## III.3 Timeline & risks
 

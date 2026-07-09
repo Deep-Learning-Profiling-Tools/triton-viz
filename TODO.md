@@ -5,25 +5,62 @@ shared TTIR reader, scf.if path conditions, per-term DataDep policy, the T1
 global-memory track, the T0/T1 tier selector, and the C2/C3 channels — all five
 terminal states are materialized). What remains:
 
-## 1. S5 — Evaluation (the paper's data; plan Part III S5)
+## 1. S5 — Evaluation (the paper's data; plan Part III S5, revised)
 
-- [ ] Evaluation harness: run the triton tutorials + a real kernel corpus (e.g.
-      a TritonBench subset) through `CompiledRaceDetector`; record for each
-      kernel the terminal state — `proved@T0` / `proved@T1` / `race-confirmed`
-      / `race-unconfirmed` / `unsupported` — plus the `unsupported` kind bucket
-      (`UnsupportedTTIR.kind` taxonomy) and wall-clock. The provenance /
-      confirmation / kind surfaces all exist; the harness is collection and
-      aggregation.
+Protocol modeled on DataRaceBench / the LLOV three-outcome scoring; full design
+in the plan doc's S5 section. Departures from DRB (paper differentiators):
+witness-level scoring via labeled access pairs, a deterministic one-run
+protocol, the proof-strength (provenance) dimension DRB's binary "no" cannot
+express, and SCOPED ground truth — labels attach to (kernel, launch-params),
+so parameterized pairs derive a kernel-level "∃ racy input" truth that audits
+the claim ladder itself: proved@T0 against a premise-compatible yes-launch is
+`ladder-unsound` (a severity class above FP), race-confirmed on a no-launch is
+`replay-unsound`; both must be zero.
+
+Build order:
+
+- [ ] (1, ~½ day) Harness skeleton: `evaluation/{kernels/,harness.py,runner.py,
+      report.py}`. `LaunchSpec(kernel_fn, signature, constexprs, make_args(seed),
+      grid, params, expected: "race"|"race-free", race_pair, pattern)`.
+      Driverless synthetic drive (host-compiled TTIR + CPU tensors + CPU
+      interpreter for C2/replay and the dynamic comparison); one subprocess per
+      kernel with hard timeout (timeout is a recorded outcome);
+      compile-before-interpret ordering inside each subprocess. Row schema:
+      five-state terminal + provenance + confirmation + unsupported kind +
+      tier-selector fields (t0_gate, T0 attempted/result — the T0 stretch shows
+      as a re-run diff) + dynamic-mode column + C3 result (built-in oracle;
+      mismatch = investigate) + per-phase wall-clock. Smoke on golden kernels.
+- [ ] (2, ~1 day) Phase A — "TritonRaceBench" labeled micro pairs (a publishable
+      artifact: no labeled Triton race corpus exists). DRB-style yes/no PAIRS
+      per pattern (`trb007_pid_branch_store_yes/_no`): pid-stride misalignment,
+      missing mask term, atomic→plain store, pid branch, data-dependent mask,
+      loop-carried overlap, aliased in-place, CAS lock, gather, nested loop
+      (~15 pairs, several distilled from tests); input-parameterized kernels
+      (n=0 race-free vs n=5 racy) one row per parameter set — `expected` labels
+      per (kernel, launch); kernel-level "∃ racy input" is derived, scoped to
+      the specialization + T0 premises (an aliased yes-launch does not
+      contradict a non-aliased T0 proof). First `RESULTS.md`: five-state
+      distribution, DRB-style TP/FP/TN/FN + precision/recall + coverage with
+      abstentions split (race-unconfirmed vs unsupported), per-pattern table,
+      and the ladder audit (ladder-unsound / replay-unsound counts, both
+      required zero).
+- [ ] (3, ~1 day) Phase B — triton tutorials (vendored for triton 3.6,
+      hand-written LaunchSpecs, ~10–12 kernels; autotuned kernels: take `.fn`,
+      pin one config).
+- [ ] (4, ~1–2 days) Mutation sensitivity mode (every PROVED kernel: mutate the
+      TTIR pid-stride constant, assert the verdict flips — proofs are not
+      vacuous) + Phase C — real library (liger-kernel or TritonBench subset,
+      20+ kernels; `unsupported` dominating is itself the data).
 - [ ] Headline numbers for the paper:
-  - kernels reaching `proved@T0` (the "any input, any grid along read axes"
-    claim neither the dynamic mode nor T1 can make);
+  - kernels reaching `proved@T0` (the "any scalar params" claim neither the
+    dynamic mode nor T1 can make);
   - kernels the dynamic mode marks unsupported for pid-dependent branches that
     now get a static verdict (S2's acceptance criterion, quantified);
   - the `unsupported` kind distribution (guides where the next modeling
     investment pays).
-- [ ] The core figure: the 2-D concretization map (axis 1: what is concretized
-      — nothing / scalar params / memory contents / paths; axis 2: what stays
-      symbolic), every benchmark kernel plotted on it (plan §I.2).
+- [ ] The core figure: the 2-D concretization map (plan §I.2), exported from
+      the results JSONL (each row's terminal state + front-end determines its
+      point); figure script separate from the harness.
 
 ## 2. S5 — T0 stretch (off the critical path; interleave with evaluation)
 
