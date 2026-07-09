@@ -127,6 +127,50 @@ def _score(rows: list[dict]) -> dict:
     return out
 
 
+def _mutation_class(r: dict) -> str | None:
+    """'flip' (some mutant detects races) | 'degraded' (no mutant races,
+    but some breaks the proof into an abstention — the proof demonstrably
+    hinged on the mutated ingredient) | 'SURV' (every applicable mutant
+    still proves clean: a vacuity suspect, or a genuinely degenerate
+    launch) | 'n/a' | None (mutation mode off or row not proved)."""
+    m = r.get("mutation")
+    if not m or "error" in m:
+        return None
+    if not m.get("applicable"):
+        return "n/a"
+    statuses = [s for s in (m.get("results") or {}).values() if s != "n/a"]
+    if any(s == "races" for s in statuses):
+        return "flip"
+    if any(s != "ok" for s in statuses):
+        return "degraded"
+    return "SURV"
+
+
+def _mutation_cell(r: dict) -> str:
+    return _mutation_class(r) or "-"
+
+
+def _mutation_summary(rows: list[dict]) -> str | None:
+    classes = {r["name"]: _mutation_class(r) for r in rows}
+    ran = {n: c for n, c in classes.items() if c is not None}
+    if not ran:
+        return None
+    applicable = {n: c for n, c in ran.items() if c != "n/a"}
+    flipped = [n for n, c in applicable.items() if c == "flip"]
+    degraded = [n for n, c in applicable.items() if c == "degraded"]
+    survivors = [n for n, c in applicable.items() if c == "SURV"]
+    return (
+        f"**Mutation sensitivity**: {len(flipped)}/{len(applicable)} proofs "
+        f"flipped to a race by at least one mutant"
+        + (
+            f"; degraded to abstention (proof hinged on the ingredient): {degraded}"
+            if degraded
+            else ""
+        )
+        + (f"; SURVIVORS (vacuity suspects): {survivors}" if survivors else "")
+    )
+
+
 def _pattern_table(rows: list[dict]) -> list[str]:
     by_pattern: dict[str, list[dict]] = {}
     for r in rows:
@@ -160,9 +204,9 @@ def render(paths: list[Path]) -> str:
             f"torch {header.get('torch')}, numpy {header.get('numpy')}, "
             f"commit {header.get('commit')}, seed {header.get('seed')}",
             "",
-            "| kernel | pattern | expected | terminal | witness | dyn status "
-            "| C3 | wall s |",
-            "|---|---|---|---|---|---|---|---|",
+            "| kernel | pattern | expected | terminal | witness | mut | "
+            "dyn status | C3 | wall s |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
         for r in rows:
             dyn = r.get("dynamic") or {}
@@ -175,13 +219,10 @@ def render(paths: list[Path]) -> str:
             wm = _witness_match(r)
             witness = {"match": "✓", "mismatch": "≠", None: "-"}[wm]
             terminal = r.get("terminal", "?")
-            if (r.get("static") or {}).get("assumes_termination"):
-                # keep the row scannable; the suffix already rides terminal
-                # when the proof is conditional
-                pass
             lines.append(
                 f"| {r['name']} | {r.get('pattern', '')} | {r.get('expected', '')} "
-                f"| {terminal} | {witness} | {dyn.get('status', '-')}"
+                f"| {terminal} | {witness} | {_mutation_cell(r)} "
+                f"| {dyn.get('status', '-')}"
                 f"({dyn.get('n_reports', 0)}) | {c3} | {r.get('wall_s', '')} |"
             )
         lines += ["", "**Terminal states**: "]
@@ -192,6 +233,9 @@ def render(paths: list[Path]) -> str:
             )
         )
         lines += ["", "**Scores**: " + json.dumps(_score(rows)), ""]
+        mut = _mutation_summary(rows)
+        if mut:
+            lines += [mut, ""]
         lines += ["**Per-pattern**:", ""]
         lines += _pattern_table(rows)
         audit = ladder_audit(rows)

@@ -49,13 +49,34 @@ Build order:
       race-confirmed=8, race-unconfirmed=1, races-unclassified=11,
       unsupported=5). C3 now reports replay-failure as channel-unavailable
       rather than a fake mismatch (numpy-2 scalar-bound loops).
-- [ ] (3, ~1 day) Phase B — triton tutorials (vendored for triton 3.6,
-      hand-written LaunchSpecs, ~10–12 kernels; autotuned kernels: take `.fn`,
-      pin one config).
-- [ ] (4, ~1–2 days) Mutation sensitivity mode (every PROVED kernel: mutate the
-      TTIR pid-stride constant, assert the verdict flips — proofs are not
-      vacuous) + Phase C — real library (liger-kernel or TritonBench subset,
-      20+ kernels; `unsupported` dominating is itself the data).
+- [x] (3, ~1 day) Phase B — landed (`evaluation/kernels/tutorials.py`,
+      `--corpus tutorials`): triton 3.6 tutorials 01/02/03/04/05/07 vendored
+      verbatim (autotune stripped, one config pinned per spec; 8 kernels,
+      9 rows). 5/9 proved — including tut05's layer-norm backward LOCK
+      kernel (`proved@T1+assumes-termination`, ~45 s: the await abstraction
+      + awaited-CAS machinery on real tutorial code) and dropout (philox in
+      value position doesn't block the proof, proved@T0). 4 abstentions at
+      documented boundaries: persistent grid-stride loop (02), grouped-
+      swizzle //-% arithmetic hits the new T1 Z3 timeout → deterministic
+      `unsupported (solver: ...)` (03 ×2), multiple sequential loops (05
+      fwd).
+- [x] (4, ~1–2 days) Mutation mode + Phase C — landed.
+      Mutation (`--mutate`): three TTIR mutants per proved row — pid-pin
+      (per-pid disjointness), sem-relax (synchronization), atomic-to-store
+      (atomicity) — solver-only re-verdicts; report classes flip /
+      degraded / SURVIVOR. Across all corpora: 35/37 proofs flip, 1
+      degraded (work-queue: atomic→store lands unsupported — the proof
+      hinged on atomicity), 1 survivor (bounded n=0: a genuinely dead
+      launch).
+      Phase C (`evaluation/kernels/liger.py`, needs
+      `uv pip install liger-kernel`): 23 kernels across 15 liger ops —
+      **17/23 proved@T1, all 17 mutation-validated**; 5 abstentions
+      (pid-slab loop bounds ×2, nested loops ×2, cf.cond_br early-return
+      ×1), 1 compile-error (liger 0.8 `tl.float32(...)` call vs triton
+      3.6 — version skew is sweep data). The sweep also hardened the
+      reader (bare `cacheModifier = cs` attribute suffixes on load/store)
+      and the client's synthetic-launch binding (mid-signature constexpr
+      kwargs no longer shift positional capture).
 - [ ] Headline numbers for the paper:
   - kernels reaching `proved@T0` (the "any scalar params" claim neither the
     dynamic mode nor T1 can make);

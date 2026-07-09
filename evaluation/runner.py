@@ -41,7 +41,9 @@ def _versions() -> dict:
     }
 
 
-def run_corpus(corpus_name: str, only: str | None, seed: int, timeout: int) -> Path:
+def run_corpus(
+    corpus_name: str, only: str | None, seed: int, timeout: int, mutate: bool = False
+) -> Path:
     from evaluation.kernels import load
 
     corpus = load(corpus_name)
@@ -62,6 +64,8 @@ def run_corpus(corpus_name: str, only: str | None, seed: int, timeout: int) -> P
             "--corpus", corpus_name, "--spec", spec.name,
             "--seed", str(seed), "--out", tmp,
         ]  # fmt: skip
+        if mutate:
+            cmd.append("--mutate")
         row: dict
         try:
             proc = subprocess.run(
@@ -116,9 +120,15 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timeout", type=int, default=PER_SPEC_TIMEOUT_S)
     ap.add_argument("--no-report", action="store_true")
+    ap.add_argument(
+        "--mutate",
+        action="store_true",
+        help="mutation-sensitivity mode: pid-pin / sem-relax / atomic-to-"
+        "store mutants on every proved row (static solver only)",
+    )
     ns = ap.parse_args()
 
-    out = run_corpus(ns.corpus, ns.only, ns.seed, ns.timeout)
+    out = run_corpus(ns.corpus, ns.only, ns.seed, ns.timeout, mutate=ns.mutate)
     if not ns.no_report:
         from evaluation.report import render
 

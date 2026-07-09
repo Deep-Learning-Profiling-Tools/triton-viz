@@ -20,7 +20,9 @@ class LaunchSpec:
     kernel_fn: Any  # the @triton.jit function (NOT autotuner-wrapped)
     # compilation (host-only): triton signature dict incl. constexpr entries
     signature: dict[str, str]
-    constexprs: dict[str, int]
+    # constexpr values: ints/bools/strings/tl dtypes (whatever the kernel's
+    # specialization needs — e.g. ACTIVATION="leaky_relu", X_dtype=tl.float32)
+    constexprs: dict[str, Any]
     # launch
     make_args: Callable[[int], tuple]  # seed -> positional args (CPU tensors + scalars)
     grid: tuple[int, ...]

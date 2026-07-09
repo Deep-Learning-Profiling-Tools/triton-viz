@@ -810,8 +810,15 @@ patterns / 40 rows folding in the S6 `rmw_sync`/`await_sync` litmus corpora
 under stable `trbNNN_` names, with witness-level scoring, the per-pattern
 table and the ladder audit; first full numbers: precision = recall = 1.0,
 coverage 34/40, witness-matched 16/16, ladder audit PASS, all seven
-terminal buckets populated; (3) Phase B tutorials (~1 day, mostly
-LaunchSpec handwork); (4) mutation mode + Phase C (~1–2 days).
+terminal buckets populated; (3) Phase B tutorials — **done** (triton 3.6
+tutorials vendored, 9 rows: the layer-norm backward LOCK kernel proves at
+T1+assumes-termination through the await abstraction, dropout's philox
+proves at T0, the grouped-swizzle matmul lands on the new deterministic
+T1-timeout abstention); (4) mutation mode + Phase C — **done** (three
+TTIR mutants per proved row, flip/degraded/survivor classes: 35/37 proofs
+flip across all corpora; liger-kernel sweep: 17/23 production kernels
+proved@T1, every proof mutation-validated, abstention kinds = pid-slab
+loop bounds / nested loops / unstructured cf).
 
 - **T0 stretch, off the critical path**: symbolic loop bounds (`lower ≤ i < upper` plus
   step-divisibility constraint), accept nonlinear `unknown` → the kernel simply lands

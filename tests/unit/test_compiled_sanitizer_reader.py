@@ -132,14 +132,27 @@ def test_non_ttir_input_is_unsupported():
         parse_ttir("garbage\n.version 8.0\n")
 
 
-def test_unrecognized_store_syntax_fails_closed():
-    """A tt.store the store regex does not match (here: an attribute dict
-    before the ':') must raise, not be silently dropped. A store has no SSA
-    result, so without the fail-closed guard it would fall through unrecorded
-    and check_graph would prove "ok" while a real write went unchecked."""
+def test_attribute_suffixed_store_is_recognized():
+    """Attribute suffixes — dict form ({cache = ...}) or bare assignments
+    (cacheModifier = cs, liger's cache-hinted stores) — are legal TTIR the
+    reader must ACCEPT and ignore (they never change the footprint)."""
     text = _read("add_sm80.ttir").replace(
         "tt.store %1, %2, %mask_3 :",
-        "tt.store %1, %2, %mask_3 {cache = 1 : i32} :",
+        "tt.store %1, %2, %mask_3 cacheModifier = cs evictionPolicy = evict_last :",
+    )
+    g = parse_ttir(text)
+    assert [a.kind for a in g.accesses].count("store") == 1
+
+
+def test_unrecognized_store_syntax_fails_closed():
+    """A tt.store the store regex does not match (here: a subscripted
+    operand spelling) must raise, not be silently dropped. A store has no
+    SSA result, so without the fail-closed guard it would fall through
+    unrecorded and check_graph would prove "ok" while a real write went
+    unchecked."""
+    text = _read("add_sm80.ttir").replace(
+        "tt.store %1, %2, %mask_3 :",
+        "tt.store %1[%2], %mask_3 :",
     )
     with pytest.raises(UnsupportedTTIR, match="unsupported memory op"):
         parse_ttir(text)

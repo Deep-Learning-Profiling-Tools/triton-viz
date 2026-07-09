@@ -431,12 +431,17 @@ _RE_CMPI = re.compile(rf"^arith\.cmpi (\w+), ({_SSA}), ({_SSA})")
 _RE_BOOLBIN = re.compile(rf"^arith\.(andi|ori) ({_SSA}), ({_SSA})\s*:\s*(\S+)")
 _RE_SELECT = re.compile(rf"^arith\.select ({_SSA}), ({_SSA}), ({_SSA})")
 _RE_EXT = re.compile(rf"^arith\.(extsi|trunci|extui) ({_SSA})")
-# The optional trailing `{...}` matches attribute dicts (e.g. the
-# `{isVolatile = true}` of a spin-read `tl.load(..., volatile=True)`).
+# Trailing attributes print in TWO spellings: a dict (`{isVolatile =
+# true}` for volatile spin reads) or bare assignments (`cacheModifier =
+# ca` — liger's cache-hinted loads); both are irrelevant to the footprint.
 _RE_LOAD = re.compile(
-    rf"^tt\.load ({_SSA})((?:, {_SSA})*)\s*(?:\{{[^}}]*\}})?\s*(?::|loc|$)"
+    rf"^tt\.load ({_SSA})((?:, {_SSA})*)\s*"
+    rf"(?:\{{[^}}]*\}})?(?:\s+\w+\s*=\s*\w+)*\s*(?::|loc|$)"
 )
-_RE_STORE = re.compile(rf"^tt\.store ({_SSA}), ({_SSA})((?:, {_SSA})*)\s*(?::|loc|$)")
+_RE_STORE = re.compile(
+    rf"^tt\.store ({_SSA}), ({_SSA})((?:, {_SSA})*)\s*"
+    rf"(?:\{{[^}}]*\}})?(?:\s+\w+\s*=\s*\w+)*\s*(?::|loc|$)"
+)
 # Atomic RMW prints (op, sem, scope, ptr, val, mask); an unmasked tl.atomic_*
 # still carries a mask operand (a dense<true> constant), so the group is
 # always present. CAS prints (sem, scope, ptr, cmp, val) — no mask exists.

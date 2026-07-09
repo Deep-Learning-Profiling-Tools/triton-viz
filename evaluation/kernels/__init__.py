@@ -1,6 +1,13 @@
 """Evaluation corpora. Each module exposes CORPUS: evaluation.spec.Corpus."""
 
-CORPORA = ("golden_smoke", "rmw_sync", "await_sync", "tritonracebench")
+CORPORA = (
+    "golden_smoke",
+    "rmw_sync",
+    "await_sync",
+    "tritonracebench",
+    "tutorials",
+    "liger",
+)
 
 
 def load(name: str):

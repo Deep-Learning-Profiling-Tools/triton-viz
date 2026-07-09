@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import signal
 import threading
 import time
@@ -150,6 +151,101 @@ def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     }
 
 
+# ── mutation sensitivity mode (plan S5 build order step 4) ──────────
+# Every PROVED row gets its TTIR mutated in ways that PLANT a race the
+# proof's key ingredient was suppressing; a proof that survives every
+# applicable mutant is a vacuity suspect (or a genuinely degenerate
+# launch, e.g. n=0 disabling all accesses — the report lists survivors).
+
+_RE_MUT_PID = re.compile(r"^(\s*)(%[-\w.#]+) = tt\.get_program_id x : i32(.*)$", re.M)
+_RE_MUT_RMW = re.compile(
+    r"^(\s*)(?:%[-\w.#]+ = )?tt\.atomic_rmw \w+, \w+, \w+, "
+    r"(%[-\w.#]+), (%[-\w.#]+), (%[-\w.#]+)\s*:\s*\(([^,]+),.*$",
+    re.M,
+)
+
+
+def _mutate_pid_pin(ttir: str) -> str | None:
+    """Pin the x program id to 0 (keeping a dead read so the grid axis
+    stays symbolic): every per-pid-disjointness proof must flip."""
+
+    def repl(m: re.Match) -> str:
+        return (
+            f"{m.group(1)}%__mut_dead_pid = tt.get_program_id x : i32{m.group(3)}\n"
+            f"{m.group(1)}{m.group(2)} = arith.constant 0 : i32{m.group(3)}"
+        )
+
+    new, n = _RE_MUT_PID.subn(repl, ttir, count=1)
+    return new if n else None
+
+
+def _mutate_sem_relax(ttir: str) -> str | None:
+    """Drop every release/acquire to relaxed: every synchronization-based
+    proof must flip."""
+    out, changed = [], False
+    for line in ttir.splitlines():
+        if "tt.atomic_" in line:
+            new = (
+                line.replace(" acq_rel,", " relaxed,")
+                .replace(" acquire,", " relaxed,")
+                .replace(" release,", " relaxed,")
+            )
+            changed = changed or new != line
+            line = new
+        out.append(line)
+    return "\n".join(out) if changed else None
+
+
+def _mutate_atomic_to_store(ttir: str) -> str | None:
+    """Demote every atomic RMW to a plain store: every atomicity-based
+    proof must flip. (The dangling result SSA parses to DataDep — sound.)"""
+
+    def repl(m: re.Match) -> str:
+        return (
+            f"{m.group(1)}tt.store {m.group(2)}, {m.group(3)}, "
+            f"{m.group(4)} : {m.group(5)}"
+        )
+
+    new, n = _RE_MUT_RMW.subn(repl, ttir)
+    return new if n else None
+
+
+_MUTANTS = (
+    ("pid_pin", _mutate_pid_pin),
+    ("sem_relax", _mutate_sem_relax),
+    ("atomic_to_store", _mutate_atomic_to_store),
+)
+
+
+def _mutation_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
+    """Static-solver-only verdicts on each applicable mutant (no C2/C3:
+    the interpreter would run the UNMUTATED kernel)."""
+    from types import SimpleNamespace
+
+    from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetector
+
+    results: dict[str, str] = {}
+    for name, mutate in _MUTANTS:
+        mutant = mutate(ttir)
+        if mutant is None:
+            results[name] = "n/a"
+            continue
+        det = CompiledRaceDetector(confirm_races=False, differential_check=False)
+        args = spec.make_args(seed)
+        det.pre_warmup_callback(
+            spec.kernel_fn, *args, grid=spec.grid, **spec.constexprs
+        )
+        det.post_warmup_callback(spec.kernel_fn, SimpleNamespace(asm={"ttir": mutant}))
+        det.finalize()
+        results[name] = det.last_global_status
+    applicable = [s for s in results.values() if s != "n/a"]
+    return {
+        "results": results,
+        "flipped": any(s == "races" for s in applicable),
+        "applicable": len(applicable),
+    }
+
+
 def _classify(static: dict[str, Any]) -> tuple[str, str]:
     """(verdict, terminal) from the static track's surfaces."""
     status = static["status"]
@@ -189,7 +285,7 @@ def _resolve_race_pair_lines(spec: LaunchSpec) -> list[int | None] | None:
     return out
 
 
-def run_one(spec: LaunchSpec, seed: int) -> dict[str, Any]:
+def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]:
     kernel_fn = getattr(spec.kernel_fn, "fn", spec.kernel_fn)
     row: dict[str, Any] = {
         "name": spec.name,
@@ -203,8 +299,13 @@ def run_one(spec: LaunchSpec, seed: int) -> dict[str, Any]:
         # Kernel identity: the ladder audit groups rows of one
         # SPECIALIZATION (kernel, constexprs) to derive the kernel-level
         # "∃ racy input" truth that proved@T0 claims are checked against.
+        # Non-JSON constexpr values (e.g. tl.float32 dtype objects) are
+        # stringified for the row.
         "kernel": getattr(kernel_fn, "__name__", str(kernel_fn)),
-        "constexprs": dict(spec.constexprs),
+        "constexprs": {
+            k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
+            for k, v in spec.constexprs.items()
+        },
         "aliased": spec.aliased,
     }
     try:
@@ -236,6 +337,12 @@ def run_one(spec: LaunchSpec, seed: int) -> dict[str, Any]:
         row["dynamic"] = {"error": f"{type(e).__name__}: {e}"}
 
     row["verdict"], row["terminal"] = _classify(row["static"])
+
+    if mutate and row["static"].get("status") == "ok":
+        try:
+            row["mutation"] = _mutation_track(spec, ttir, seed)
+        except Exception as e:  # noqa: BLE001
+            row["mutation"] = {"error": f"{type(e).__name__}: {e}"}
     return row
 
 
@@ -245,13 +352,14 @@ def main() -> None:
     ap.add_argument("--spec", required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--mutate", action="store_true")
     ns = ap.parse_args()
 
     from evaluation.kernels import load
 
     corpus = load(ns.corpus)
     spec = next(s for s in corpus.specs if s.name == ns.spec)
-    row = run_one(spec, ns.seed)
+    row = run_one(spec, ns.seed, mutate=ns.mutate)
     row["corpus"] = ns.corpus
     with open(ns.out, "w") as f:
         json.dump(row, f)

@@ -172,7 +172,14 @@ class CompiledRaceDetector(Client):
             return  # ambiguous params; _analyze_global abstains
         try:
             names = list(getattr(jit_fn, "arg_names", None) or [])
-            bound: list[tuple[str, Any]] = list(zip(names, args))
+            # kwargs (typically the constexprs) may occupy MID-signature
+            # slots: positional args fill the REMAINING names in order, or
+            # a constexpr like X_dtype in the middle would shift every
+            # later binding by one (adversarially found via liger's
+            # rms_norm backward: rows_per_program landed under the wrong
+            # name and the launch aborted as uncaptured).
+            positional = [n for n in names if n not in kwargs]
+            bound: list[tuple[str, Any]] = list(zip(positional, args))
             bound += [(k, v) for k, v in kwargs.items() if k in names]
             self._launch_grid = kwargs.get("grid")
             for name, value in bound:
@@ -698,6 +705,11 @@ class CompiledRaceDetector(Client):
     # T0 backstop: the linearity gate should keep queries decidable, but an
     # unexpected hard query must cost bounded time before falling to T1.
     T0_TIMEOUT_MS: ClassVar[int] = 10_000
+    # T1 backstop: heavy pid-swizzle arithmetic (grouped matmul's //-%
+    # chains) can stall Z3; a bounded solve degrades to a DETERMINISTIC
+    # "unsupported (solver: Z3 could not decide ...)" verdict instead of an
+    # external process kill (the evaluation's one-run protocol).
+    T1_TIMEOUT_MS: ClassVar[int] = 120_000
     _Z3_DEFAULT_TIMEOUT: ClassVar[int] = 4294967295  # z3's own default
 
     def _solve_one_graph(self, graph: AccessGraph, params: dict, tensors: dict):
@@ -720,6 +732,9 @@ class CompiledRaceDetector(Client):
             t0_proved = False
         if t0_proved:
             return ("proved", "T0")
+        from z3 import set_param
+
+        set_param("timeout", self.T1_TIMEOUT_MS)
         try:
             enc = encode_graph(graph, params, tensors)
             solver = TwoCopySymbolicHBSolver(
@@ -729,9 +744,13 @@ class CompiledRaceDetector(Client):
         except UnsupportedTTIR as e:
             return ("unsupported", f"{e.kind}: {e}")
         except UnsupportedSymbolicRaceQuery as e:
+            # Includes Z3 `unknown` under the T1 timeout: never a silent
+            # clean verdict, always the honest abstention.
             return ("unsupported", f"solver: {e}")
         except Exception as e:  # noqa: BLE001
             return ("unsupported", f"{type(e).__name__}: {e}")
+        finally:
+            set_param("timeout", self._Z3_DEFAULT_TIMEOUT)
         # Uncertainty discipline: a report touching a widened record
         # (dropped mask / unmodeled branch) is not a certifiable witness —
         # same rule as the sanitizer's check_graph. Widened reports are
