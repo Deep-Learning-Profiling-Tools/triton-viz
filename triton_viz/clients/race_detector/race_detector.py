@@ -262,7 +262,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     # array snapshot.
     _MAX_LOAD_SOURCE_ELEMENTS: ClassVar[int] = 1024
 
-    def __init__(self, abort_on_error: bool = False, *, compile: bool = False):
+    def __init__(
+        self,
+        abort_on_error: bool = False,
+        *,
+        compile: bool = False,
+        ablations: tuple[str, ...] = (),
+    ):
         # ``compile`` is consumed by the RaceDetector factory (__new__) to pick
         # the backend; it only reaches this __init__ because Python re-invokes
         # __init__ on the factory-returned instance with the original kwargs.
@@ -270,6 +276,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # CompiledRaceDetector instead).
         del compile
         super().__init__(abort_on_error=abort_on_error)
+        # RQ5 ablation switches: "hb"/"coherence" forward to the two-copy
+        # solver; "load-values" replaces the snapshot Select with a single
+        # concrete observation (evaluation/ablation.py). Default: none.
+        self.ablations = frozenset(ablations)
         self.records: list[AccessEventRecord] = []
         self.last_reports: list[Any] = []
         # Status of the most recent finalize(): "ok" means the solver ran;
@@ -738,6 +748,20 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         addr_lanes = self._to_lane_list(ptr_z3)
         lane_count = len(addr_lanes)
 
+        if "load-values" in self.ablations:
+            # RQ5 ablation (iii): a SINGLE concrete observation stands in for
+            # the snapshot select — the loaded value no longer varies with
+            # the (symbolic) address, so any value-dependent mask collapses
+            # to one valuation. Predicted effect: data-dependent-mask litmus
+            # verdicts flip (the paper's no-load-value-semantics baseline).
+            host = tensor.detach() if hasattr(tensor, "detach") else tensor
+            host = host.cpu() if hasattr(host, "cpu") else host
+            single = IntVal(int(host.reshape(-1).tolist()[0]))
+            result_ablate: Z3Expr = (
+                single if len(addr_lanes) == 1 else [single] * len(addr_lanes)
+            )
+            return result_ablate, ptr_constraints
+
         if load_expr.mask is None:
             values = [Select(arr, a) for a in addr_lanes]
             domain_terms = [Or(*(a == k for k in known_addrs)) for a in addr_lanes]
@@ -826,6 +850,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     self.records,
                     grid=self._launch_grid,
                     arange_dict=self._arange_dict_snapshot,
+                    ablations=tuple(
+                        a for a in self.ablations if a in ("hb", "coherence")
+                    ),
                 ).find_races()
                 self.last_status = "ok"
             except UnsupportedSymbolicRaceQuery as exc:

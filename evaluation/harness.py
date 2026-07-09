@@ -85,6 +85,7 @@ def _static_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
         "differential": det.last_differential,
         "t0_gate": t0_gate,
         "assumes_termination": det.last_global_assumes_termination,
+        "verdict_attrs": det.last_global_verdict,
         "time_s": round(elapsed, 4),
     }
 

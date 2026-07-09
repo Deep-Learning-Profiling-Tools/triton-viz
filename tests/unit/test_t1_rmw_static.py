@@ -34,9 +34,13 @@ def _t(ptr, numel=4096, elem=4, init=None):
 
 
 def _solve(graph, params, tensors):
+    # Mirrors the client's T1 call: the launch grid sizes the unread axes
+    # of atomic-bearing graphs (read axes stay symbolic).
     enc = encode_graph(graph, params, tensors)
     solver = TwoCopySymbolicHBSolver(
-        enc.records, grid=symbolic_grid(enc), arange_dict=enc.arange_dict
+        enc.records,
+        grid=symbolic_grid(enc, (4, 1, 1)),
+        arange_dict=enc.arange_dict,
     )
     return enc, solver.find_races()
 

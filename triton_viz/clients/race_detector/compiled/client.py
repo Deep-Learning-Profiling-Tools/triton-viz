@@ -85,9 +85,13 @@ class CompiledRaceDetector(Client):
         collect_smtlib: bool = False,
         confirm_races: bool = True,
         differential_check: bool = False,
+        ablations: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
         self.collect_smtlib = collect_smtlib
+        # RQ5 ablation switches, forwarded verbatim to the two-copy solver
+        # ("hb" / "coherence"); production semantics are the empty tuple.
+        self.ablations = tuple(ablations)
         # C2: replay SAT witnesses under the interpreter to classify them
         # confirmed/unconfirmed. Costs a pre-launch tensor snapshot (capped)
         # and, only when a SAT exists, an interpreter run of two blocks.
@@ -139,6 +143,10 @@ class CompiledRaceDetector(Client):
         # "confirmed" | "unconfirmed" | "partial" | None (replay off or
         # unavailable).
         self.last_global_confirmation: str | None = None
+        # The verdict-attribute taxonomy (paper sec:verdicts), emitted
+        # DIRECTLY rather than left derivable from status+provenance —
+        # see _emit_verdict_attributes for the field vocabulary.
+        self.last_global_verdict: dict[str, Any] | None = None
         # C3 mismatches when differential_check is on ([] = agreement);
         # None when the check did not run (flag off, no graph, no snapshot).
         self.last_differential: list[str] | None = None
@@ -408,19 +416,23 @@ class CompiledRaceDetector(Client):
         self.last_global_confirmation = None
         self.last_global_assumes_termination = False
         self.last_differential = None
+        self.last_global_verdict = None
         if not self.last_ttir_graphs:
             self.last_global_status = "no_ttir"
             self.last_global_reason = "no TTIR captured from warmup"
+            self._emit_verdict_attributes([])
             return
         if warmups > 1:
             self.last_global_status = "unsupported"
             self.last_global_reason = (
                 f"{warmups} warmups in one launch: parameter capture is " "ambiguous"
             )
+            self._emit_verdict_attributes([])
             return
         if capture_error is not None:
             self.last_global_status = "unsupported"
             self.last_global_reason = f"launch capture failed: {capture_error}"
+            self._emit_verdict_attributes([])
             return
 
         # The await abstraction (spec C1): sequential concrete replay of a
@@ -447,7 +459,7 @@ class CompiledRaceDetector(Client):
             if graph is None:
                 status, reason = "unsupported", parse_reason
                 continue
-            outcome = self._solve_one_graph(graph, params, tensors)
+            outcome = self._solve_one_graph(graph, params, tensors, launch_grid)
             if outcome[0] == "proved":
                 rungs.append(outcome[1])
             elif outcome[0] == "races":
@@ -546,8 +558,76 @@ class CompiledRaceDetector(Client):
                 snapshot_kwargs,
                 launch_grid,
             )
+        self._emit_verdict_attributes(widened_all)
         if cfg.cli_active:
             self._report_global_cli()
+
+    def _emit_verdict_attributes(self, widened: list[Any]) -> None:
+        """The verdict-attribute taxonomy (paper sec:verdicts), carried
+        DIRECTLY on the verdict instead of left derivable from the
+        tri-state status plus provenance strings:
+
+          verdict            "race-free" | "race" | "potential-race" |
+                             "abstain"
+          proved_scope       for race-free: "any-params-any-grid" (T0) |
+                             "this-params-any-grid" (T1); None otherwise
+          race_evidence      for race: "confirmed" (C2 reproduced a
+                             witness) | "exact" (a precise-footprint SAT
+                             witness, replay unavailable/off) |
+                             "widened" for potential-race; None otherwise
+          conservative       True when over-approximation is IN PLAY for
+                             this outcome (widened SAT withheld or the
+                             abstention is uncertainty-driven) — a
+                             race-free verdict is never conservative: the
+                             proof would be unsound, not conservative
+          conditional        premises the verdict is conditional on
+                             (today: "termination" for await-bearing
+                             kernels; the in-bounds and non-aliasing
+                             premises are unconditional model boundaries
+                             documented with the claim, not per-launch
+                             conditions)
+          unsupported_kind   for abstain: the stable UnsupportedTTIR kind
+                             ("indirect-address", "nested-loop", ...)
+        """
+        status = self.last_global_status
+        conditional = ("termination",) if self.last_global_assumes_termination else ()
+        v: dict[str, Any] = {
+            "verdict": "abstain",
+            "proved_scope": None,
+            "race_evidence": None,
+            "conservative": False,
+            "conditional": conditional,
+            "unsupported_kind": None,
+        }
+        if status == "ok":
+            v["verdict"] = "race-free"
+            prov = self.last_global_provenance or "proved@T1"
+            v["proved_scope"] = (
+                "any-params-any-grid"
+                if prov.startswith("proved@T0")
+                else "this-params-any-grid"
+            )
+        elif status == "races":
+            v["verdict"] = "race"
+            v["race_evidence"] = (
+                "confirmed"
+                if self.last_global_confirmation in ("confirmed", "partial")
+                else "exact"
+            )
+            v["conservative"] = bool(widened)  # withheld widened SATs exist
+        elif status == "unsupported":
+            reason = self.last_global_reason or ""
+            if reason.startswith("race-unconfirmed") or widened:
+                v["verdict"] = "potential-race"
+                v["race_evidence"] = "widened"
+                v["conservative"] = True
+            else:
+                kind = reason.split(":", 1)[0].strip()
+                v["unsupported_kind"] = kind if kind and " " not in kind else "other"
+                v["conservative"] = True
+        else:  # no_ttir
+            v["unsupported_kind"] = status
+        self.last_global_verdict = v
 
     def _run_differential(
         self,
@@ -712,7 +792,13 @@ class CompiledRaceDetector(Client):
     T1_TIMEOUT_MS: ClassVar[int] = 120_000
     _Z3_DEFAULT_TIMEOUT: ClassVar[int] = 4294967295  # z3's own default
 
-    def _solve_one_graph(self, graph: AccessGraph, params: dict, tensors: dict):
+    def _solve_one_graph(
+        self,
+        graph: AccessGraph,
+        params: dict,
+        tensors: dict,
+        launch_grid: Any = None,
+    ):
         """The tier selector (plan §I.3) for one kernel specialization.
 
         Returns ``("proved", "T0"|"T1")``, ``("races", exact, widened)``, or
@@ -737,8 +823,16 @@ class CompiledRaceDetector(Client):
         set_param("timeout", self.T1_TIMEOUT_MS)
         try:
             enc = encode_graph(graph, params, tensors)
+            lg = (
+                tuple(int(d) for d in launch_grid)
+                if isinstance(launch_grid, (tuple, list))
+                else None
+            )
             solver = TwoCopySymbolicHBSolver(
-                enc.records, grid=symbolic_grid(enc), arange_dict=enc.arange_dict
+                enc.records,
+                grid=symbolic_grid(enc, lg),
+                arange_dict=enc.arange_dict,
+                ablations=self.ablations,
             )
             found = solver.find_races()
         except UnsupportedTTIR as e:
@@ -802,7 +896,10 @@ class CompiledRaceDetector(Client):
         try:
             for _name, enc in t0_groups:
                 solver = TwoCopySymbolicHBSolver(
-                    enc.records, grid=symbolic_grid(enc), arange_dict=enc.arange_dict
+                    enc.records,
+                    grid=symbolic_grid(enc),
+                    arange_dict=enc.arange_dict,
+                    ablations=self.ablations,
                 )
                 if solver.find_races():
                     return False

@@ -270,6 +270,16 @@ class TwoCopySymbolicHBSolver:
     invariants.
     """
 
+    # Ablation switches recognized by the RQ5 study (evaluation/ablation.py).
+    # Both default OFF; production semantics are the empty set.
+    #   "hb"        — assert NO happens-before at all (skip the transitive
+    #                 closure): isolates how much of the verdict quality is
+    #                 carried by ordering edges.
+    #   "coherence" — drop the per-location atomic order (coherence AND the
+    #                 counting axiom, which is a coherence-order axiom):
+    #                 isolates the immediacy/single-winner machinery.
+    ABLATIONS: tuple[str, ...] = ("hb", "coherence")
+
     def __init__(
         self,
         records: list[AccessEventRecord],
@@ -277,11 +287,16 @@ class TwoCopySymbolicHBSolver:
         grid: tuple[Any, ...],
         arange_dict: dict[Any, Any] | None = None,
         extra_assumptions: tuple[Any, ...] = (),
+        ablations: tuple[str, ...] = (),
     ) -> None:
         self.records = list(records)
         self.grid = self._normalize_grid(grid)
         self.arange_dict = dict(arange_dict or {})
         self.extra_assumptions = tuple(extra_assumptions)
+        unknown = set(ablations) - set(self.ABLATIONS)
+        if unknown:
+            raise ValueError(f"unknown ablations: {sorted(unknown)}")
+        self.ablations = frozenset(ablations)
 
         # 1. PID vars + substitutions for both copies.
         pid_a, pid_b = self._make_pid_vars()
@@ -341,15 +356,26 @@ class TwoCopySymbolicHBSolver:
         self.rf_constraints: list[BoolRef] = []
         self.atomic_coherence_constraints: list[BoolRef] = []
         self.counting_constraints: list[BoolRef] = []
-        self._counting: dict[int, _CountingInfo] = self._build_counting_axioms()
+        # RQ5 ablation "coherence": no per-location atomic order — the
+        # counting axiom (a coherence-order axiom) is omitted with it.
+        self._counting: dict[int, _CountingInfo] = (
+            {} if "coherence" in self.ablations else self._build_counting_axioms()
+        )
         self._build_read_from_choices()
-        self._build_atomic_coherence_constraints()
+        if "coherence" not in self.ablations:
+            self._build_atomic_coherence_constraints()
         self._assert_no_uncounted_observation_addresses()
         self.reads_through: dict[tuple[int, int], BoolRef] = self._build_reads_through()
 
         # 8. Build HB transitive closure (synchronizes_with reads
-        # reads_through).
-        self.hb = build_transitive_hb(self.events, self._edge)
+        # reads_through). RQ5 ablation "hb": no ordering edges exist at all
+        # — every conflicting aliasing pair becomes a report.
+        n_events = len(self.events)
+        self.hb = (
+            [[BoolVal(False) for _ in range(n_events)] for _ in range(n_events)]
+            if "hb" in self.ablations
+            else build_transitive_hb(self.events, self._edge)
+        )
 
     # ──────────────────────── Public API ────────────────────────
 
@@ -363,8 +389,13 @@ class TwoCopySymbolicHBSolver:
     )
 
     def find_races(self) -> list[RaceReport]:
+        import time as _time
+
         events_a = [e for e in self.events if e.copy == "a"]
         events_b = [e for e in self.events if e.copy == "b"]
+        # (kind, seconds, sat) per executed query — the RQ3 scaling sweep
+        # reads these for per-query mean/median/p95 and the SAT/UNSAT split.
+        self.query_stats: list[tuple[str, float, bool]] = []
 
         candidates: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]]
         candidates = []
@@ -372,7 +403,10 @@ class TwoCopySymbolicHBSolver:
             for b in events_b:
                 solver = self._new_solver()
                 solver.add(self._race_expr(a, b))
-                if self._race_query_is_sat(solver, a, b):
+                t0 = _time.perf_counter()
+                is_sat = self._race_query_is_sat(solver, a, b)
+                self.query_stats.append(("cross", _time.perf_counter() - t0, is_sat))
+                if is_sat:
                     candidates.append(
                         (a, b, solver.model(), self._CROSS_INSTANCE_REASON)
                     )
@@ -419,6 +453,8 @@ class TwoCopySymbolicHBSolver:
         of a single non-atomic store — plus record pairs the capture left
         genuinely unordered (equal or unset sequence numbers).
         """
+        import time as _time
+
         same_instance = self._same_instance_constraints()
         out: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]]
         out = []
@@ -432,7 +468,13 @@ class TwoCopySymbolicHBSolver:
                     solver.add(c)
                 solver.add(lane_cond)
                 solver.add(self._race_expr(a, b))
-                if self._race_query_is_sat(solver, a, b):
+                t0 = _time.perf_counter()
+                is_sat = self._race_query_is_sat(solver, a, b)
+                if hasattr(self, "query_stats"):
+                    self.query_stats.append(
+                        ("intra", _time.perf_counter() - t0, is_sat)
+                    )
+                if is_sat:
                     out.append((a, b, solver.model(), self._INTRA_INSTANCE_REASON))
         return out
 

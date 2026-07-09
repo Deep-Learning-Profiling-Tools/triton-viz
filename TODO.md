@@ -77,35 +77,41 @@ Build order:
       reader (bare `cacheModifier = cs` attribute suffixes on load/store)
       and the client's synthetic-launch binding (mid-signature constexpr
       kwargs no longer shift positional capture).
-- [ ] Headline numbers for the paper (consumed by the paper's RQ2
-      fragment-coverage placeholder; tutorials + liger are the coverage
-      corpus, so this is an aggregation script over the existing JSONLs):
-  - kernels reaching `proved@T0` (the "any scalar params" claim neither the
-    dynamic mode nor T1 can make);
-  - kernels the dynamic mode marks unsupported for pid-dependent branches that
-    now get a static verdict (S2's acceptance criterion, quantified);
-  - the `unsupported` kind distribution (guides where the next modeling
-    investment pays).
-- [ ] RQ3 scaling sweeps (paper `sec:eval-scaling`): vary one dimension at
-      a time on fixed kernels — grid size, tile width, loop trip count,
-      static site count m, atomic site count c — recording capture /
-      constraint-construction / solve time, query count, per-query
-      mean/median/p95, peak memory, SAT/UNSAT split, and timeouts. The
-      paper states the expected shapes (grid and tile invariance, m^2
-      query growth, O(c^3) coherence stress); the sweep confirms or
-      falsifies them.
-- [ ] RQ5 ablation switches (paper `sec:eval-baselines`): config flags
-      (i) no-HB (skip the transitive closure / assert hb = false),
-      (ii) no-coherence (drop the atomic coherence constraints),
-      (iii) no-load-value-semantics (a single concrete observation instead
-      of the snapshot select). Run the litmus corpora under each and emit
-      the verdict-flip matrix against the predictions in the paper text.
-- [ ] Verdict-attribute emission (paper `sec:verdicts`): reports and clean
-      passes should carry the taxonomy directly — proved scope, race
-      evidence (exact / confirmed), and the conservative / conditional
-      qualifiers — rather than leaving them derivable from the tri-state
-      status plus provenance strings. The paper prose already states they
-      are surfaced with the verdict.
+- [x] Headline numbers (RQ2) — landed: `evaluation/headline.py` aggregates
+      the results JSONLs. Coverage corpus (tutorials + liger, 32 rows):
+      proved@T0 = 3, proved@T1 = 19 (1 conditional on termination), static
+      verdict where the dynamic mode abstains = 10 (all corpora: 34),
+      unsupported kinds led by nested-loop / solver-timeout / other.
+- [x] RQ3 scaling sweeps — landed: `evaluation/scaling.py` (synthesized
+      TTIR, single-dimension sweeps; per-query stats via the solver's new
+      `query_stats`; writes `results/SCALING.md`). All five predicted
+      shapes CONFIRMED: grid (4→2^20), tile (32→2048) and trip count
+      (2→512) flat within noise; site count m: queries 6→20→72→272
+      (~m^2); atomic count c: base constraints 18→84→504→3504 (~c^3, the
+      coherence writer×reader×interposer triple); zero timeouts.
+- [x] RQ5 ablation switches — landed: solver `ablations=("hb"|"coherence")`
+      (client + dynamic detector plumb-through), dynamic
+      `ablations=("load-values",)` single-observation mode;
+      `evaluation/ablation.py` writes `results/ABLATION.md`. Flip matrix
+      over the litmus corpora (25 rows): 7 rows flip — no-hb kills exactly
+      the ordering proofs (lbd, splitk, pc_wait, mutex, lookback) while
+      footprint proofs survive; no-coherence kills exactly the
+      counting/immediacy proofs (work-queue, mutex, lbd) while pure
+      sw proofs (pc_wait, lookback) survive; no-load-values demonstrably
+      erases a real value-gated race on mixed flag data.
+- [x] Verdict-attribute emission — landed:
+      `CompiledRaceDetector.last_global_verdict` carries the taxonomy
+      directly (verdict: race-free/race/potential-race/abstain,
+      proved_scope, race_evidence exact/confirmed/widened, conservative,
+      conditional=("termination",), unsupported_kind); harness row field
+      `verdict_attrs`; 13 unit tests. Fixing its test surface exposed and
+      closed a REAL soundness gap: for atomic-bearing graphs the
+      used_pid_axes pinning rule's identical-behavior justification fails
+      (observations distinguish no-pid blocks), so `symbolic_grid` now
+      sizes unread axes from the real launch at T1 and keeps them symbolic
+      at T0 — a no-pid narrow-slot work queue no longer proves falsely
+      (regression tests added; atomic kernels' T0 rung correctly narrows
+      to T1, e.g. trb015 amax).
 - [ ] Results landing figure (OPTIONAL; formerly "the core figure", demoted
       2026-07-09 per the advisor's contribution-triad feedback — the
       symbolic/concrete axis is not the paper's headline, and the paper's

@@ -143,6 +143,13 @@ class GlobalEncoding:
     # the verdict is then CONDITIONAL ON TERMINATION of the spin loop —
     # surfaced in the client's provenance as "+assumes-termination".
     assumes_termination: bool = False
+    # True when the graph carries any atomic access. The used_pid_axes
+    # pinning rule's justification — blocks differing only in an UNREAD
+    # axis behave identically — FAILS for atomics: interleaving feeds back
+    # into observations, so two no-pid blocks doing atomic_add are NOT
+    # identical. symbolic_grid therefore sizes unread axes from the REAL
+    # launch (not 1) for atomic-bearing graphs.
+    has_atomics: bool = False
     # pid axes with a parsed tt.get_program_id (AccessGraph.pid_axes — the
     # PARSE-time set, never the axes that merely survive into modeled
     # terms: a pid read into a stored value, a dropped mask or an unmodeled
@@ -643,6 +650,7 @@ def encode_graph(
         uncertain_event_ids=uncertain,
         used_pid_axes=set(graph.pid_axes),
         assumes_termination=any(a.awaited for a in graph.accesses),
+        has_atomics=any(a.kind.startswith("atomic") for a in graph.accesses),
     )
 
 
@@ -659,14 +667,28 @@ def _references_unmodeled_observation(access: AccessEvent, env: _RaceEnv) -> boo
     return False
 
 
-def symbolic_grid(encoding: GlobalEncoding) -> tuple[Any, Any, Any]:
+def symbolic_grid(
+    encoding: GlobalEncoding, launch_grid: tuple[int, ...] | None = None
+) -> tuple[Any, Any, Any]:
     """The T0/T1 grid: symbolic (all sizes ≥ 1) along the pid axes the
-    kernel reads, pinned to 1 along the axes it ignores (used_pid_axes)."""
+    kernel reads; along UNREAD axes, pinned to 1 — except for
+    atomic-bearing graphs, where the identical-behavior justification
+    fails (see GlobalEncoding.has_atomics): those unread axes take the
+    REAL launch size when one is supplied (T1) and stay SYMBOLIC when not
+    (T0 — the sound direction; a resulting nonlinear counting product just
+    omits the axiom and the kernel falls to T1 per the ladder)."""
     from z3 import Int
 
-    return tuple(  # type: ignore[return-value]
-        Int(f"grid_{i}") if i in encoding.used_pid_axes else 1 for i in range(3)
-    )
+    def dim(i: int) -> Any:
+        if i in encoding.used_pid_axes:
+            return Int(f"grid_{i}")
+        if not encoding.has_atomics:
+            return 1
+        if launch_grid is not None:
+            return int(launch_grid[i]) if i < len(launch_grid) else 1
+        return Int(f"grid_{i}")
+
+    return (dim(0), dim(1), dim(2))
 
 
 # ───────────────────── tier selector support (§I.3) ─────────────────────
@@ -781,6 +803,9 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
                     uncertain_event_ids=uncertain,
                     used_pid_axes=set(graph.pid_axes),
                     assumes_termination=any(a.awaited for a in graph.accesses),
+                    has_atomics=any(
+                        a.kind.startswith("atomic") for a in graph.accesses
+                    ),
                 ),
             )
         )
