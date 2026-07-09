@@ -648,11 +648,29 @@ previously died at parse now prove or abstain
     param-stride kernels (tile2d, matmul) gate to T1
     (`tests/unit/test_t1_global_races.py`, 26 cases).
 - **C1** is already free (launch args → `LaunchContext`).
-- **C2**: interpreter replay with the witness grid dims and captured args, executing
-  only the two witness program ids via the designated-block slot; intersect the
-  concrete footprints → `race-confirmed` / `race-unconfirmed`.
-- **C3**: footprint diff against the dynamic launch's records, after aligning the
-  masked-lane convention.
+- **C2 — done** (`compiled/replay.py` + client wiring, `confirm_races=True` by
+  default): SAT witnesses replay under the INTERPRETER via a lightweight
+  `FootprintRecorder` client — a fresh nested trace that executes only the two
+  witness pids on PRE-launch tensor clones (finalize runs after the real kernel
+  already mutated the originals, so the snapshot happens at `pre_warmup`, capped
+  at 256 MB). Proofs never engage the interpreter (the in-process
+  interpreter-then-real-compile leak hazard documented in trace.py stays dormant
+  on the clean path). Footprints intersect at element granularity with mutual
+  atomicity honored; the aggregate lands in `last_global_confirmation`
+  (`confirmed`/`unconfirmed`/`partial`). Two upgrades over the plan:
+  a CONFIRMED widened (dropped-mask) report **graduates to a definite race** —
+  the S2 abstention becomes a verdict on this launch's data — and an
+  unreproduced widened SAT becomes the explicit `race-unconfirmed` terminal
+  state. All five §I.1 terminal states are now materialized.
+- **C3 — done** (`compiled/differential.py` + `cross_check` in `replay.py`;
+  opt-in `differential_check=True` → `last_differential`): the static side is a
+  numpy-only CONCRETE enumerator of the AccessGraph (deliberately independent of
+  the Z3 encoding — the diff compares two implementations that share only the
+  kernel), the dynamic side is the same interpreter footprint capture. At
+  element-start byte granularity masked-off lanes are naturally absent from
+  BOTH sides, so no masked-lane convention alignment was needed after all.
+  Over-approximated accesses are excluded (no exact static footprint) and
+  reported as skipped. Both sides speak the snapshot clones' addresses.
 - Provenance on every report and status: terminal state (five states, §I.1) × track
   (global/TTIR vs shared/TTGIR).
 - Mutation suite: wrong pid stride, dropped mask term, atomic → plain store — each must

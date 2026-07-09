@@ -80,9 +80,23 @@ class CompiledRaceDetector(Client):
     # the real kernel — the host script keeps its true semantics.
     WARMUP_ONLY: ClassVar[bool] = True
 
-    def __init__(self, collect_smtlib: bool = False) -> None:
+    def __init__(
+        self,
+        collect_smtlib: bool = False,
+        confirm_races: bool = True,
+        differential_check: bool = False,
+    ) -> None:
         super().__init__()
         self.collect_smtlib = collect_smtlib
+        # C2: replay SAT witnesses under the interpreter to classify them
+        # confirmed/unconfirmed. Costs a pre-launch tensor snapshot (capped)
+        # and, only when a SAT exists, an interpreter run of two blocks.
+        self.confirm_races = confirm_races
+        # C3: opt-in per-launch differential cross-check — the static
+        # model's concrete footprint vs the interpreter's, for a couple of
+        # program ids. Results land in last_differential ([] = the lowering
+        # and the interpreter agree).
+        self.differential_check = differential_check
         self.last_reports: list[Any] = []
         self.last_status: str = "ok"
         self.unsupported_reason: str | None = None
@@ -115,6 +129,13 @@ class CompiledRaceDetector(Client):
         # tensor intervals verified the non-aliasing premise;
         # "proved@T1" = for this launch's params, any grid.
         self.last_global_provenance: str | None = None
+        # C2 aggregate over the replayed reports when status is "races":
+        # "confirmed" | "unconfirmed" | "partial" | None (replay off or
+        # unavailable).
+        self.last_global_confirmation: str | None = None
+        # C3 mismatches when differential_check is on ([] = agreement);
+        # None when the check did not run (flag off, no graph, no snapshot).
+        self.last_differential: list[str] | None = None
         # Concrete launch capture (pre_warmup is the only hook that sees the
         # real args on the warmup-only path).
         self._launch_params: dict[str, int] = {}
@@ -122,6 +143,13 @@ class CompiledRaceDetector(Client):
         self._launch_grid: tuple[Any, ...] | None = None
         self._warmup_count: int = 0
         self._capture_error: str | None = None
+        # C2 snapshot: PRE-launch clones (finalize runs after the real
+        # kernel already mutated the originals).
+        self._replay_jit_fn: Any = None
+        self._snapshot_args: tuple | None = None
+        self._snapshot_kwargs: dict | None = None
+        self._snapshot_skipped: str | None = None
+        self._snapshot_tensors: dict[str, GlobalTensor] | None = None
 
     # ── compilation hooks ─────────────────────────────────────────────
 
@@ -159,8 +187,60 @@ class CompiledRaceDetector(Client):
                     self._launch_params[name] = value
                 # floats / other objects: not representable in the integer
                 # model; a Param lookup on one aborts to unsupported.
+            if self.confirm_races:
+                self._snapshot_launch(jit_fn, args, kwargs)
         except Exception as e:  # noqa: BLE001
             self._capture_error = f"{type(e).__name__}: {e}"
+
+    # Replay snapshot cap: cloning the launch tensors is the price of
+    # confirmable witnesses; past this total the replay is marked
+    # unavailable instead of surprising the user with a giant copy.
+    SNAPSHOT_CAP_BYTES: ClassVar[int] = 256 * 1024 * 1024
+    # At most this many reports are replayed per launch (same-pid-pair
+    # replays are cached).
+    REPLAY_MAX_REPORTS: ClassVar[int] = 8
+
+    def _snapshot_launch(self, jit_fn: Any, args: tuple, kwargs: dict) -> None:
+        values = list(args) + [
+            v for k, v in kwargs.items() if k not in ("grid", "warmup")
+        ]
+        total = sum(
+            int(v.numel()) * int(v.element_size())
+            for v in values
+            if hasattr(v, "data_ptr") and hasattr(v, "numel")
+        )
+        if total > self.SNAPSHOT_CAP_BYTES:
+            self._snapshot_skipped = (
+                f"tensor snapshot over cap ({total} bytes > "
+                f"{self.SNAPSHOT_CAP_BYTES})"
+            )
+            return
+
+        def clone(v: Any) -> Any:
+            if hasattr(v, "data_ptr") and hasattr(v, "clone"):
+                return v.detach().clone()
+            return v
+
+        self._replay_jit_fn = jit_fn
+        self._snapshot_args = tuple(clone(v) for v in args)
+        self._snapshot_kwargs = {
+            k: clone(v) for k, v in kwargs.items() if k not in ("grid", "warmup")
+        }
+        # C3 needs name → SNAPSHOT-clone bases: the diff compares the static
+        # enumeration against the replay, and both sides must speak clone
+        # addresses (the originals are mutated by the real launch).
+        names = list(getattr(jit_fn, "arg_names", None) or [])
+        snap_bound = list(zip(names, self._snapshot_args))
+        snap_bound += [(k, v) for k, v in self._snapshot_kwargs.items() if k in names]
+        self._snapshot_tensors = {
+            name: GlobalTensor(
+                data_ptr=int(v.data_ptr()),
+                elem_size=int(v.element_size()),
+                numel=int(v.numel()),
+            )
+            for name, v in snap_bound
+            if hasattr(v, "data_ptr")
+        }
 
     def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
         asm = getattr(ret, "asm", None)
@@ -259,14 +339,25 @@ class CompiledRaceDetector(Client):
         """
         params, tensors = self._launch_params, self._launch_tensors
         warmups, capture_error = self._warmup_count, self._capture_error
+        replay_jit_fn = self._replay_jit_fn
+        snapshot_args, snapshot_kwargs = self._snapshot_args, self._snapshot_kwargs
+        snapshot_skipped = self._snapshot_skipped
+        snapshot_tensors = self._snapshot_tensors
+        launch_grid = self._launch_grid
         self._launch_params, self._launch_tensors = {}, {}
         self._launch_grid = None
         self._warmup_count, self._capture_error = 0, None
+        self._replay_jit_fn = None
+        self._snapshot_args, self._snapshot_kwargs = None, None
+        self._snapshot_skipped = None
+        self._snapshot_tensors = None
 
         self.last_global_reports = []
         self.last_global_status = "ok"
         self.last_global_reason = None
         self.last_global_provenance = None
+        self.last_global_confirmation = None
+        self.last_differential = None
         if not self.last_ttir_graphs:
             self.last_global_status = "no_ttir"
             self.last_global_reason = "no TTIR captured from warmup"
@@ -283,8 +374,8 @@ class CompiledRaceDetector(Client):
             return
 
         reports: list[Any] = []
+        widened_all: list[Any] = []
         status, reason = "ok", None
-        total_widened = 0
         rungs: list[str] = []
         for graph, parse_reason in zip(
             self.last_ttir_graphs, self.last_ttir_unsupported
@@ -298,27 +389,63 @@ class CompiledRaceDetector(Client):
             elif outcome[0] == "races":
                 _, exact, widened = outcome
                 reports.extend(exact)
-                total_widened += widened
-                if widened and not exact:
-                    status = "unsupported"
-                    reason = (
-                        "possible race under over-approximation "
-                        "(data-dependent mask / unmodeled branch) — not a "
-                        "certifiable witness"
-                    )
+                widened_all.extend(widened)
             else:
                 status, reason = "unsupported", outcome[1]
+
+        # ── C2: replay SAT witnesses under the interpreter ──
+        confirmation: str | None = None
+        replay_note: str | None = None
+        if (reports or widened_all) and self.confirm_races:
+            if snapshot_args is None:
+                replay_note = snapshot_skipped or "replay snapshot unavailable"
+            else:
+                # Foci resolve against the SNAPSHOT clones' bases: the
+                # replay's base_map is keyed by them (originals were cloned
+                # at pre_warmup, and run_replay clones once more).
+                confirmation, upgraded = self._confirm_reports(
+                    replay_jit_fn,
+                    snapshot_args,
+                    snapshot_kwargs or {},
+                    reports,
+                    widened_all,
+                    snapshot_tensors or {},
+                )
+                # A CONFIRMED widened report is a real race on this launch's
+                # data: it graduates from the uncertain channel.
+                reports = reports + upgraded
+                upgraded_ids = {id(r) for r in upgraded}
+                widened_all = [w for w in widened_all if id(w) not in upgraded_ids]
 
         self.last_global_reports = reports
         if reports:
             self.last_global_status = "races"
-            # Never leak an unsupported-branch reason onto a definite-races
-            # verdict; note withheld uncertain possibilities instead.
-            self.last_global_reason = (
-                "additional possible races under over-approximation were " "withheld"
-                if total_widened
-                else None
-            )
+            self.last_global_confirmation = confirmation
+            notes = []
+            if widened_all:
+                notes.append(
+                    "additional possible races under over-approximation "
+                    "were withheld"
+                )
+            if replay_note:
+                notes.append(f"replay: {replay_note}")
+            self.last_global_reason = "; ".join(notes) or None
+        elif widened_all:
+            self.last_global_status = "unsupported"
+            if confirmation is not None:
+                # Replay ran and did NOT reproduce any widened SAT: the
+                # race-unconfirmed terminal state (potential, never definite).
+                self.last_global_reason = (
+                    "race-unconfirmed: possible race under over-approximation "
+                    "(data-dependent mask / unmodeled branch); the interpreter "
+                    "replay did not reproduce it on this launch's data"
+                )
+            else:
+                self.last_global_reason = (
+                    "possible race under over-approximation (data-dependent "
+                    "mask / unmodeled branch) — not a certifiable witness"
+                    + (f" (replay: {replay_note})" if replay_note else "")
+                )
         elif status != "ok":
             self.last_global_status = status
             self.last_global_reason = reason
@@ -326,8 +453,128 @@ class CompiledRaceDetector(Client):
             self.last_global_provenance = (
                 "proved@T0" if rungs and all(r == "T0" for r in rungs) else "proved@T1"
             )
+
+        # ── C3: opt-in differential cross-check ──
+        if self.differential_check:
+            # NOTE: pass the SNAPSHOT tensor bases, not the originals — the
+            # replay runs on the snapshot clones, so both sides of the diff
+            # must speak clone addresses.
+            self._run_differential(
+                params,
+                snapshot_tensors or {},
+                replay_jit_fn,
+                snapshot_args,
+                snapshot_kwargs,
+                launch_grid,
+            )
         if cfg.cli_active:
             self._report_global_cli()
+
+    def _run_differential(
+        self,
+        params: dict,
+        tensors: dict,
+        jit_fn: Any,
+        snapshot_args: tuple | None,
+        snapshot_kwargs: dict | None,
+        launch_grid: Any,
+    ) -> None:
+        """C3 (plan §I.4): compare the static model's concrete footprint
+        against the interpreter's for the first block(s) of the launch grid.
+        Requires the single-kernel case, a snapshot, and a concrete grid;
+        otherwise last_differential stays None. Never raises."""
+        try:
+            graphs = [g for g in self.last_ttir_graphs if g is not None]
+            if (
+                len(graphs) != 1
+                or snapshot_args is None
+                or jit_fn is None
+                or not isinstance(launch_grid, (tuple, list))
+            ):
+                return
+            grid = tuple(int(d) for d in launch_grid)
+            grid = grid + (1,) * (3 - len(grid))
+            pids: list[tuple[int, int, int]] = [(0, 0, 0)]
+            if grid[0] > 1:
+                pids.append((grid[0] - 1, 0, 0))
+            from .replay import cross_check
+
+            self.last_differential = cross_check(
+                graphs[0],
+                params,
+                tensors,
+                jit_fn,
+                snapshot_args,
+                snapshot_kwargs or {},
+                pids,
+                grid,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.last_differential = [f"differential check failed: {e}"]
+
+    @staticmethod
+    def _report_focus(record: Any, tensors: dict) -> tuple[int, str] | None:
+        """(original tensor base, footprint kind bucket) for one record of a
+        race report — the replay's overlap check is restricted to the
+        report's own access pair (a whole-block check would fabricate
+        confirmations for unrelated widened reports; adversarial repro in
+        test_replay_channels)."""
+        meta = tensors.get(record.tensor_name)
+        if meta is None:
+            return None
+        if record.atomic_kind == "rmw":
+            kind = "atomic_rmw"
+        elif record.atomic_kind == "cas":
+            kind = "atomic_cas"
+        elif record.access_mode == "write":
+            kind = "store"
+        else:
+            kind = "load"
+        return (meta.data_ptr, kind)
+
+    def _confirm_reports(
+        self,
+        jit_fn: Any,
+        args: tuple,
+        kwargs: dict,
+        exact: list[Any],
+        widened: list[Any],
+        tensors: dict,
+    ) -> tuple[str | None, list[Any]]:
+        """C2 (plan §I.4): replay each report's witness block pair on the
+        snapshot clones and classify. Returns the aggregate
+        ("confirmed" / "unconfirmed" / "partial" / None when every replay
+        was unavailable) and the widened reports whose races DID reproduce
+        (to be upgraded to definite)."""
+        from .replay import confirm_witness
+
+        widened_ids = {id(w) for w in widened}
+        cache: dict[tuple, tuple[str, str | None]] = {}
+        confirmed = unconfirmed = 0
+        upgraded: list[Any] = []
+        for rep in (exact + widened)[: self.REPLAY_MAX_REPORTS]:
+            pids = (tuple(rep.witness_grid_a), tuple(rep.witness_grid_b))
+            focus_a = self._report_focus(rep.first_record, tensors)
+            focus_b = self._report_focus(rep.second_record, tensors)
+            key = (pids, focus_a, focus_b)
+            if key not in cache:
+                cache[key] = confirm_witness(
+                    jit_fn, args, kwargs, *pids, focus_a=focus_a, focus_b=focus_b
+                )
+            verdict, _why = cache[key]
+            if verdict == "confirmed":
+                confirmed += 1
+                if id(rep) in widened_ids:
+                    upgraded.append(rep)
+            elif verdict == "unconfirmed":
+                unconfirmed += 1
+        if confirmed and unconfirmed:
+            return ("partial", upgraded)
+        if confirmed:
+            return ("confirmed", upgraded)
+        if unconfirmed:
+            return ("unconfirmed", upgraded)
+        return (None, upgraded)
 
     # T0 backstop: the linearity gate should keep queries decidable, but an
     # unexpected hard query must cost bounded time before falling to T1.
@@ -368,13 +615,15 @@ class CompiledRaceDetector(Client):
             return ("unsupported", f"{type(e).__name__}: {e}")
         # Uncertainty discipline: a report touching a widened record
         # (dropped mask / unmodeled branch) is not a certifiable witness —
-        # same rule as the sanitizer's check_graph.
-        exact = []
-        widened = 0
+        # same rule as the sanitizer's check_graph. Widened reports are
+        # KEPT (not just counted): C2 replays them, and a reproduced one
+        # graduates to a definite race.
+        exact: list[Any] = []
+        widened: list[Any] = []
         for rep in found:
             ids = {rep.first.event_id, rep.second.event_id}
             if ids & enc.uncertain_event_ids:
-                widened += 1
+                widened.append(rep)
             else:
                 exact.append(rep)
         if exact or widened:
@@ -428,9 +677,11 @@ class CompiledRaceDetector(Client):
     def _report_global_cli(self) -> None:
         s = self.last_global_status
         if s == "races":
+            conf = self.last_global_confirmation
+            suffix = f", replay: {conf}" if conf else ""
             print(
                 f"[{self.LOG_TAG}] global memory: RACE — "
-                f"{len(self.last_global_reports)} report(s)"
+                f"{len(self.last_global_reports)} report(s){suffix}"
             )
         elif s == "ok":
             claim = (
