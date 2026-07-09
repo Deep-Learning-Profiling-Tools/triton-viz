@@ -77,16 +77,43 @@ Build order:
       reader (bare `cacheModifier = cs` attribute suffixes on load/store)
       and the client's synthetic-launch binding (mid-signature constexpr
       kwargs no longer shift positional capture).
-- [ ] Headline numbers for the paper:
+- [ ] Headline numbers for the paper (consumed by the paper's RQ2
+      fragment-coverage placeholder; tutorials + liger are the coverage
+      corpus, so this is an aggregation script over the existing JSONLs):
   - kernels reaching `proved@T0` (the "any scalar params" claim neither the
     dynamic mode nor T1 can make);
   - kernels the dynamic mode marks unsupported for pid-dependent branches that
     now get a static verdict (S2's acceptance criterion, quantified);
   - the `unsupported` kind distribution (guides where the next modeling
     investment pays).
-- [ ] The core figure: the 2-D concretization map (plan §I.2), exported from
-      the results JSONL (each row's terminal state + front-end determines its
-      point); figure script separate from the harness.
+- [ ] RQ3 scaling sweeps (paper `sec:eval-scaling`): vary one dimension at
+      a time on fixed kernels — grid size, tile width, loop trip count,
+      static site count m, atomic site count c — recording capture /
+      constraint-construction / solve time, query count, per-query
+      mean/median/p95, peak memory, SAT/UNSAT split, and timeouts. The
+      paper states the expected shapes (grid and tile invariance, m^2
+      query growth, O(c^3) coherence stress); the sweep confirms or
+      falsifies them.
+- [ ] RQ5 ablation switches (paper `sec:eval-baselines`): config flags
+      (i) no-HB (skip the transitive closure / assert hb = false),
+      (ii) no-coherence (drop the atomic coherence constraints),
+      (iii) no-load-value-semantics (a single concrete observation instead
+      of the snapshot select). Run the litmus corpora under each and emit
+      the verdict-flip matrix against the predictions in the paper text.
+- [ ] Verdict-attribute emission (paper `sec:verdicts`): reports and clean
+      passes should carry the taxonomy directly — proved scope, race
+      evidence (exact / confirmed), and the conservative / conditional
+      qualifiers — rather than leaving them derivable from the tri-state
+      status plus provenance strings. The paper prose already states they
+      are surfaced with the verdict.
+- [ ] Results landing figure (OPTIONAL; formerly "the core figure", demoted
+      2026-07-09 per the advisor's contribution-triad feedback — the
+      symbolic/concrete axis is not the paper's headline, and the paper's
+      benchmark table already carries the data): the 2-D concretization map
+      of plan §I.2, exported from the results JSONL (each row's terminal
+      state + front-end determines its point), as an evaluation-section
+      figure; whether it enters the paper at all is pending the next
+      advisor alignment. Figure script separate from the harness.
 
 ## 2. S5 — T0 stretch (off the critical path; interleave with evaluation)
 
@@ -98,7 +125,8 @@ Build order:
 
 ## 3. Track 1 — M4/M5 (shared-memory track; plan Part II §7)
 
-- [ ] M4 — sm90/Hopper: `ttng.warp_group_dot_wait {pendings}` agent,
+- [ ] M4 — sm90/Hopper (submission scope — sm90 in or out — is the open
+      Q5 with the advisor; align before starting): `ttng.warp_group_dot_wait {pendings}` agent,
       `fence_async_shared`, nvmma layouts (formula already verified); then TMA
       descriptors + mbarrier phase/arrive-count modeling +
       `ttg.warp_specialize`. Needs fresh golden dumps from descriptor-based
