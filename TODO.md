@@ -220,6 +220,43 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       the first time — 763 passed, 0 failed, sequential AND -n auto
       (down from 34 baseline failures at the branch's start).
 
+## Corpus & experiment backlog (the paper's extension placeholders)
+
+Each item pairs a paper placeholder with the implementation work it
+needs; none blocks submission.
+
+- [ ] Pre-fix aiter scan (paper RQ2/RQ4): vendor the MoE-routing
+      kernel family at the repository state BEFORE the #3091 fix and
+      run the corpus protocol over it — the lowest-cost path to a
+      "previously undetected race" data point (the detector flagging
+      the bug class at the pre-discovery code state, plus any
+      neighbors). New corpus module per the aiter_originals pattern.
+- [ ] TorchInductor corpus (paper RQ2): dump kernels from a
+      torchbench sweep, author LaunchSpecs, run coverage — generated
+      code nobody hand-reviews is the second-best discovery ground.
+- [ ] vLLM / unsloth / flash-attention corpus modules (paper RQ2
+      scale; import-or-vendor per the liger/tutorials patterns).
+- [ ] Witness pretty-printer (paper RQ6 / case studies): format a
+      report (line pair, instances, byte, type, evidence,
+      qualifiers) from the JSONL/report objects; the case-study set
+      should include one conservative-flagged (trb023) and one
+      termination-conditional (any await row) witness. Tiny; mostly
+      unblocks writing.
+- [ ] External-baseline adapters (paper RQ5): GPU-GATED. Two of the
+      planned baselines are already covered by the ablation switches
+      (no-hb = the overlap checker, no-load-values = the concrete
+      replayer); the external ones (compute-sanitizer racecheck,
+      thread-level tools) need real hardware and an applicability
+      pass first (racecheck covers shared memory; our litmus corpus
+      is mostly global).
+- [ ] Address-position lifting (paper §4 placeholder + the three
+      doubly-undecided benchmark rows): select terms in ADDRESS
+      position with the read-only flow check extended to index
+      tensors and the witness side conditions revalidated — the one
+      remaining large feature; scatter litmus pair + benchmark row
+      flips + RQ5 complementarity refresh follow. Post-submission
+      unless prioritized.
+
 ## Decision points (not tasks)
 
 - PR layout: `race-detector-z3-demo` now carries the plan-doc
