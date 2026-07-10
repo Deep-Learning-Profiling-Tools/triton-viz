@@ -265,8 +265,20 @@ class TritonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
                 # ("Unsupported function referenced"). Only compiled-mode
                 # clients trigger this warmup; eager traces skip it. Present the
                 # raw jit_fns to the compiler, then restore the wrappers.
-                with _unwrap_traced_globals(self.base_fn):
-                    self.warmup_runner.warmup(*args, **kwargs)
+                try:
+                    with _unwrap_traced_globals(self.base_fn):
+                        self.warmup_runner.warmup(*args, **kwargs)
+                except RuntimeError as exc:
+                    # Driverless host (CPU-only CI): triton's warmup resolves
+                    # driver.active and dies with "0 active drivers". Warmup
+                    # is OPTIONAL for the eager clients (under
+                    # TRITON_INTERPRET it never ran at all — jit_fn is None
+                    # and this branch is skipped); compiled-mode clients that
+                    # NEED the artifacts surface their own honest
+                    # no_ttgir/no_ttir verdicts downstream. Anything other
+                    # than the driver-discovery failure still raises.
+                    if "active driver" not in str(exc):
+                        raise
 
         with self.client_manager.patch_run(self.base_fn, frontend_name="triton"):
             kwargs.update({"client_manager": self.client_manager})
