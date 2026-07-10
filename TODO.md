@@ -127,11 +127,25 @@ Build order:
 
 ## 2. S5 — T0 stretch (off the critical path; interleave with evaluation)
 
-- [ ] Symbolic loop bounds at T0: `lower ≤ i < upper` plus a step-divisibility
-      constraint instead of requiring concrete bounds; accept that
-      `pid × sym_stride`-style nonlinearity yields Z3 `unknown` → the kernel
-      simply lands on T1 per the ladder. Whatever reaches T0 feeds the paper's
-      "upper bound" section.
+- [x] Symbolic loop bounds at T0 — landed. Instead of a step-divisibility
+      constraint over the induction VALUE, the encoder keeps the iteration
+      INDEX k and swaps the concrete trip count for the iteration-existence
+      premise `k ≥ 0 ∧ lower + k·step < upper` (linear — the step must
+      still be a compile-time constant; a symbolic step is the k·step
+      nonlinearity and falls to T1 per the ladder, as does any
+      pid×param address via the existing linearity gate). Zero-trip
+      launches are SUBSUMED: upper ≤ lower makes the premise UNSAT, so
+      in-loop events are inactive with no phantom footprint. The T1 path
+      is byte-identical (pid-dependent bounds keep the 'not concrete at
+      launch' abstention the liger rows exercise). Corpus evidence:
+      `trb019_symbolic_trip_no` — a real triton kernel
+      (`for k in range(0, n): store(out + pid*SEG + k, mask=k<SEG)`) now
+      lands on **proved@T0 for ANY trip count**; the spilling twin
+      (mask k < 2·SEG) reports at n=128. 10 unit tests
+      (test_t0_symbolic_loop_bounds.py). Existing corpus rungs unchanged —
+      real kernels with symbolic bounds all carry pid×param addresses, so
+      the gate correctly holds them at T1; the stretch feeds the paper's
+      "upper bound" section with the linear-address family.
 
 ## 3. Track 1 — M4/M5 (shared-memory track; plan Part II §7)
 

@@ -198,40 +198,77 @@ class _RaceEnv:
         self.loop_var: Any = None  # the symbolic iteration INDEX k
         self.loop_premises: tuple[Any, ...] = ()
         self.zero_trip = False
-        self._loop_bounds: tuple[int, int, int] | None = None  # (lower, step, n)
+        # Induction value = _loop_lower (Z3 expr) + k * _loop_step (int).
+        self._loop_lower: Any = None
+        self._loop_step: int = 1
         if graph.loop is not None:
             self._bind_loop()
 
     # ── loop ─────────────────────────────────────────────────────────
-    def _concrete(self, term: Term, what: str) -> int:
-        v = simplify(self.eval(term))
+    @staticmethod
+    def _as_long(v: Any) -> int | None:
         try:
-            return v.as_long()
+            return simplify(v).as_long()
         except Exception:
-            raise UnsupportedTTIR(
-                f"loop {what} is not concrete at launch (T1 needs concrete "
-                "scalar params in loop bounds)"
-            )
+            return None
 
     def _bind_loop(self) -> None:
         from z3 import Int
 
         loop = self.graph.loop
         assert loop is not None
-        lower = self._concrete(loop.lower, "lower bound")
-        upper = self._concrete(loop.upper, "upper bound")
-        step = self._concrete(loop.step, "step")
-        if step <= 0:
-            raise UnsupportedTTIR(f"loop step {step} <= 0 (descending unsupported)")
-        n_iters = max(0, (upper - lower + step - 1) // step)
-        # A zero-trip loop has NO footprint: in-loop accesses are skipped
-        # entirely (encode_graph). The premise must stay the exact range —
-        # fabricating an iteration (max(1, n)) produced definite race
-        # reports for launches that never run the body.
-        self.zero_trip = n_iters == 0
+        lower_z3 = self.eval(loop.lower)
+        upper_z3 = self.eval(loop.upper)
+        step_z3 = self.eval(loop.step)
+        lower_c = self._as_long(lower_z3)
+        upper_c = self._as_long(upper_z3)
+        step_c = self._as_long(step_z3)
+
+        # The step must be a concrete positive constant in BOTH modes:
+        # symbolic k·step is the nonlinear Z3-unknown bait the linearity
+        # gate exists to keep out (real kernels' steps are constexpr
+        # blocks, folded to constants in TTIR), and MLIR scf.for requires
+        # a positive step (a violating launch is UB, outside every claim).
+        if step_c is None:
+            raise UnsupportedTTIR(
+                "loop step is not a compile-time constant (symbolic k·step "
+                "is nonlinear; T0 falls back per the ladder)"
+            )
+        if step_c <= 0:
+            raise UnsupportedTTIR(f"loop step {step_c} <= 0 (descending unsupported)")
+
         self.loop_var = Int("ttir_loop_k")
-        self.loop_premises = (And(self.loop_var >= 0, self.loop_var < n_iters),)
-        self._loop_bounds = (lower, step, n_iters)
+        if lower_c is not None and upper_c is not None:
+            n_iters = max(0, (upper_c - lower_c + step_c - 1) // step_c)
+            # A zero-trip loop has NO footprint: in-loop accesses are
+            # skipped entirely (encode_graph). The premise must stay the
+            # exact range — fabricating an iteration (max(1, n)) produced
+            # definite race reports for launches that never run the body.
+            self.zero_trip = n_iters == 0
+            self.loop_premises = (And(self.loop_var >= 0, self.loop_var < n_iters),)
+        else:
+            if not self.symbolic_params:
+                what = "lower bound" if lower_c is None else "upper bound"
+                raise UnsupportedTTIR(
+                    f"loop {what} is not concrete at launch (T1 needs "
+                    "concrete scalar params in loop bounds)"
+                )
+            # T0 SYMBOLIC LOOP BOUNDS (the S5 stretch): instead of a
+            # concrete trip count, the k-th iteration EXISTS iff its
+            # induction value stays below the (symbolic) upper bound:
+            #   k >= 0  ∧  lower + k·step < upper
+            # Linear (step is a constant), and it subsumes the zero-trip
+            # rule: upper <= lower makes the premise UNSAT, so in-loop
+            # events are inactive — no phantom footprint to skip.
+            self.zero_trip = False
+            self.loop_premises = (
+                And(
+                    self.loop_var >= 0,
+                    lower_z3 + self.loop_var * IntVal(step_c) < upper_z3,
+                ),
+            )
+        self._loop_lower = lower_z3
+        self._loop_step = step_c
 
     # ── leaves ───────────────────────────────────────────────────────
     def observed(self, access_index: int) -> Any:
@@ -290,8 +327,7 @@ class _RaceEnv:
         if isinstance(term, Arange):
             return self._arange(term)
         if isinstance(term, LoopVar):
-            lower, step, _ = self._loop_bounds  # type: ignore[misc]
-            return IntVal(lower) + self.loop_var * IntVal(step)
+            return self._loop_lower + self.loop_var * IntVal(self._loop_step)
         if isinstance(term, IterArgOffset):
             info = self.graph.iter_args[term.arg_id]
             return self.eval(info.offset0) + self.loop_var * self.eval(info.delta)
@@ -760,8 +796,12 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
     pointer's group, and addresses are byte offsets from that base.
     Aliased-argument launches sit outside the T0 claim — T1 covers them
     with the real bases. Read-only groups are skipped (read/read cannot
-    conflict). Raises UnsupportedTTIR when the kernel cannot be encoded at
-    T0 (e.g. a loop bound referencing a scalar param)."""
+    conflict). SYMBOLIC LOOP BOUNDS are supported (the S5 stretch): a
+    param-valued lower/upper becomes the iteration-existence premise
+    ``k >= 0 ∧ lower + k·step < upper``, so the T0 claim quantifies over
+    every trip count too. Raises UnsupportedTTIR when the kernel cannot be
+    encoded at T0 (e.g. a non-constant loop STEP — symbolic k·step is
+    nonlinear)."""
     for access in graph.accesses:
         if access.kind == "atomic_cas" and not access.awaited:
             raise UnsupportedTTIR(

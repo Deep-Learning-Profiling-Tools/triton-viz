@@ -820,11 +820,16 @@ flip across all corpora; liger-kernel sweep: 17/23 production kernels
 proved@T1, every proof mutation-validated, abstention kinds = pid-slab
 loop bounds / nested loops / unstructured cf).
 
-- **T0 stretch, off the critical path**: symbolic loop bounds (`lower ≤ i < upper` plus
-  step-divisibility constraint), accept nonlinear `unknown` → the kernel simply lands
-  on T1 per the ladder; whatever reaches T0 becomes the paper's "upper bound" section.
-  The harness records the tier-selector fields from day one, so the stretch's impact
-  is a re-run diff.
+- **T0 stretch, off the critical path** — **done**: symbolic loop bounds via the
+  iteration-existence premise `k ≥ 0 ∧ lower + k·step < upper` on the iteration
+  INDEX (linear; supersedes the sketched value-domain divisibility constraint —
+  the index form needs no `%`). The step stays a compile-time constant (symbolic
+  k·step is nonlinear → T1 per the ladder), zero-trip launches are subsumed
+  (upper ≤ lower ⇒ premise UNSAT ⇒ no phantom footprint), and the T1 path is
+  unchanged. Corpus evidence: `trb019_symbolic_trip_no` proves at T0 for ANY
+  trip count; real symbolic-bound kernels with pid×param addresses correctly
+  stay at T1 through the linearity gate — the T0 upper bound is the
+  linear-address family.
 
 ### S6 — RMW-return modeling (spec B) + the await abstraction (spec C1) — **done**
 

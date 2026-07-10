@@ -580,3 +580,52 @@ for _corpus, _renames in _FOLD:
     _by_name = {s.name: s for s in _corpus.specs}
     for _orig, _trb in _renames.items():
         CORPUS.add(replace(_by_name[_orig], name=_trb))
+
+
+# ── trb019: symbolic trip count (the T0 symbolic-loop-bounds stretch) ─
+
+
+@triton.jit
+def trb019_seg_walk_kernel(out_ptr, n, SEG: tl.constexpr, MASK: tl.constexpr):
+    pid = tl.program_id(0)
+    for k in range(0, n):
+        tl.store(out_ptr + pid * SEG + k, 1, mask=k < MASK)
+
+
+_TRB019_SIG = {"out_ptr": "*i32", "n": "i32", "SEG": "constexpr", "MASK": "constexpr"}
+
+
+def _trb019_args(seed: int) -> tuple:
+    return (torch.zeros(16 * BLOCK, dtype=torch.int32), 128)
+
+
+CORPUS.add(
+    LaunchSpec(
+        name="trb019_symbolic_trip_no",
+        kernel_fn=trb019_seg_walk_kernel,
+        signature=_TRB019_SIG,
+        constexprs={"SEG": BLOCK, "MASK": BLOCK},
+        make_args=_trb019_args,
+        grid=GRID,
+        expected="race-free",
+        pattern="symbolic-trip-count",
+        params_note="mask k < SEG pins every iteration inside the pid's own "
+        "segment: proved@T0 for ANY trip count n (the symbolic-loop-bounds "
+        "stretch — the concrete-bounds encoder could only reach T1)",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb019_symbolic_trip_yes",
+        kernel_fn=trb019_seg_walk_kernel,
+        signature=_TRB019_SIG,
+        constexprs={"SEG": BLOCK, "MASK": 2 * BLOCK},
+        make_args=_trb019_args,
+        grid=GRID,
+        expected="race",
+        race_pair=("tl.store(out_ptr + pid * SEG + k, 1, mask=k < MASK)",),
+        pattern="symbolic-trip-count",
+        params_note="mask k < 2*SEG: iterations SEG..n-1 spill into the "
+        "next pid's segment (n=128)",
+    )
+)

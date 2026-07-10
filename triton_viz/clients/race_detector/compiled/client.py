@@ -884,8 +884,10 @@ class CompiledRaceDetector(Client):
 
     def _try_t0(self, graph: AccessGraph) -> bool:
         """True only when EVERY per-tensor T0 group is UNSAT under symbolic
-        params. Any SAT, unknown, timeout, or encoding limit (e.g. a loop
-        bound referencing a param) falls back to T1 — never a report."""
+        params — including symbolic LOOP BOUNDS (the iteration-existence
+        premise quantifies the claim over every trip count). Any SAT,
+        unknown, timeout, or encoding limit (e.g. a non-constant loop step)
+        falls back to T1 — never a report."""
         from z3 import set_param
 
         try:
