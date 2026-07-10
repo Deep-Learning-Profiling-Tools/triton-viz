@@ -25,14 +25,27 @@ DESCOPED 2026-07-10 per the advisor: sell the idea with z3py; the
 per-query SMT-LIB2 emission / interchange-format deliverable is
 dropped (z3's native to_smt2 covers any future need). Remaining:
 
-- [ ] Evaluation sweep: tutorials × `num_stages ∈ {1..4}` × {sm80,
-      sm90}: proofs, solve times, mutation-detection matrix. The
-      sm80 half does NOT depend on M4 and can start now; it feeds
-      the paper's "Compiled-Mode Evaluation" and §7 pipeline
-      placeholders.
-- [ ] Case studies from historical pipeliner bugs (missing
-      `async_wait`; insufficient `num_stages` letting a producer
-      overwrite a buffer still being read).
+- [x] Evaluation sweep, sm80 half — landed
+      (`evaluation/shared_track.py`, writes `results/SHARED_TRACK.md`):
+      tutorial matmul (inner strides folded to 1, mirroring real JIT
+      specialization — a runtime inner stride defeats the contiguity
+      proof and the pipeliner never emits cp.async) and the persistent
+      softmax, × `num_stages ∈ {1..4}` at sm80. Matmul proves at every
+      stage count (4/6/8 async copies at 2/3/4; ~10 ms analyze);
+      softmax abstains honestly (conditional region inside the
+      pipelined tl.range loop — the documented Track 1 boundary);
+      stage 1 is the no-pipeline trivial row. Mutation-detection
+      matrix: weaken-wait, delete-wait, single-buffer — every
+      applicable cell DETECTED (single-buffer n/a at stages=2, where
+      the rotation is already depth 1). sm90 column stays gated on M4
+      (advisor Q5).
+- [x] Case studies — both captured from the matrix with solver
+      witnesses: CS1 missing `async_wait` (matmul @2: 4 RAW reports;
+      prologue prefetch vs k_load=0, slot 0) and CS2 insufficient
+      buffering (matmul @3 single-buffered under unchanged prefetch
+      distance: 4 RAW reports — the producer's cp.async targets the
+      slot the consumer still reads). Narratives in SHARED_TRACK.md
+      feed the paper's §7 pipeline placeholders.
 
 ## 2. Benchmark corpus growth (feeds the paper's rq1 tag)
 
