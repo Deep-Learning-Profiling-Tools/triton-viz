@@ -11,7 +11,6 @@ from ..clients.race_detector.race_detector import NullRaceDetector
 from .client import ClientManager, Client
 from .data import Launch
 import types
-import inspect
 
 
 launches: list[Launch] = []
@@ -106,14 +105,73 @@ class LaunchInterface:
         )
 
 
-class TritonTrace(LaunchInterface, TraceInterface):
+class KernelTraceSupport:
+    @staticmethod
+    def _is_autotuner(runner: Any) -> bool:
+        from triton.runtime import Autotuner
+
+        return isinstance(runner, Autotuner)
+
+    @staticmethod
+    def _is_heuristics(runner: Any) -> bool:
+        from triton.runtime.autotuner import Heuristics
+
+        return isinstance(runner, Heuristics)
+
+    @staticmethod
+    def dummy_benchmarker(fn, quantiles):
+        fn()
+        return (1.0, 1.0, 1.0)
+
+    def _interpreter_runner(self, runner: Any, interpreted_fn: Any) -> Any:
+        if self._is_autotuner(runner):
+            runner.fn = interpreted_fn
+            # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
+            runner._do_bench = self.dummy_benchmarker
+            return runner
+        if self._is_heuristics(runner):
+            runner.fn = interpreted_fn
+            return runner
+        return interpreted_fn
+
+    def _warmup_runner(self, runner: Any, jit_fn: Any | None) -> Any | None:
+        if not (self._is_autotuner(runner) or self._is_heuristics(runner)):
+            return jit_fn
+        if jit_fn is None:
+            return None
+        warmup_runner = deepcopy(runner)
+        warmup_runner.fn = jit_fn
+        return warmup_runner
+
+    def _copy_callable_attrs(
+        self,
+        runner: Any,
+        base_fn: Callable | None = None,
+        *,
+        src_fallback: Any = None,
+    ) -> None:
+        for attr in ("__name__", "__module__", "__doc__", "__qualname__"):
+            if hasattr(runner, attr):
+                setattr(self, attr, getattr(runner, attr))
+            elif base_fn is not None and hasattr(base_fn, attr):
+                setattr(self, attr, getattr(base_fn, attr))
+
+        if not hasattr(self, "__name__"):
+            self.__name__ = "<unknown>"
+
+        if hasattr(runner, "src"):
+            self.src = runner.src
+        elif src_fallback is not None and hasattr(src_fallback, "src"):
+            self.src = src_fallback.src
+
+
+class TritonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
     def __init__(
         self,
         runner: Any,
         client: str | Client,
     ) -> None:
         from triton import JITFunction
-        from triton.runtime import Autotuner
         from triton.runtime.autotuner import Heuristics
         from triton.runtime.interpreter import InterpretedFunction
 
@@ -136,34 +194,14 @@ class TritonTrace(LaunchInterface, TraceInterface):
                 return unpack_kernel(source.fn)
             raise TypeError(f"Unsupported runner type: {type(source)}")
 
-        if isinstance(runner, Autotuner):
+        if self._is_autotuner(runner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
-
-            # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
-            def dummy_benchmarker(fn, quantiles):
-                fn()
-                return (1.0, 1.0, 1.0)
-
-            runner._do_bench = dummy_benchmarker
-            runner.fn = self.interpreted_fn
-            self.runner = runner
-        elif isinstance(runner, Heuristics):
+        elif self._is_heuristics(runner):
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner.fn)
-            runner.fn = self.interpreted_fn
-            self.runner = runner
         else:
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner)
-            self.runner = self.interpreted_fn
-
-        if isinstance(runner, (Autotuner, Heuristics)):
-            if self.jit_fn is not None:
-                warmup_runner = deepcopy(runner)
-                warmup_runner.fn = self.jit_fn
-                self.warmup_runner = warmup_runner
-            else:
-                self.warmup_runner = None
-        else:
-            self.warmup_runner = self.jit_fn
+        self.runner = self._interpreter_runner(runner, self.interpreted_fn)
+        self.warmup_runner = self._warmup_runner(runner, self.jit_fn)
 
         self.arg_names = runner.arg_names
 
@@ -171,35 +209,7 @@ class TritonTrace(LaunchInterface, TraceInterface):
 
         TraceInterface.__init__(self, client)
 
-        # Preserve common function attributes for compatibility
-        # with code that expects to access these attributes on the kernel
-        if hasattr(runner, "__name__"):
-            self.__name__ = runner.__name__
-        elif self.base_fn and hasattr(self.base_fn, "__name__"):
-            self.__name__ = self.base_fn.__name__
-        else:
-            self.__name__ = "<unknown>"
-
-        if hasattr(runner, "__module__"):
-            self.__module__ = runner.__module__
-        elif self.base_fn and hasattr(self.base_fn, "__module__"):
-            self.__module__ = self.base_fn.__module__
-
-        if hasattr(runner, "__doc__"):
-            self.__doc__ = runner.__doc__
-        elif self.base_fn and hasattr(self.base_fn, "__doc__"):
-            self.__doc__ = self.base_fn.__doc__
-
-        if hasattr(runner, "__qualname__"):
-            self.__qualname__ = runner.__qualname__
-        elif self.base_fn and hasattr(self.base_fn, "__qualname__"):
-            self.__qualname__ = self.base_fn.__qualname__
-
-        # Preserve Triton-specific attributes (like src for JITFunction)
-        if hasattr(runner, "src"):
-            self.src = runner.src
-        elif self.jit_fn and hasattr(self.jit_fn, "src"):
-            self.src = self.jit_fn.src
+        self._copy_callable_attrs(runner, self.base_fn, src_fallback=self.jit_fn)
 
         # Register for _unwrapped_jit_globals: real-compile windows unwind
         # this trace's module-global binding to the raw JITFunction so the
@@ -413,9 +423,11 @@ class NKITrace(LaunchInterface, TraceInterface):
             return ret
 
 
-class GluonTrace(LaunchInterface, TraceInterface):
+class GluonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
     def __init__(self, runner: Any, client: str | Client) -> None:
         from triton.experimental import gluon
+        from triton.runtime.autotuner import Heuristics
+        from .simulation.gluon import GluonInterpretedFunction
 
         # Gluon has exposed different JIT class names across Triton versions.
         # Treat an object that already has the JIT runner protocol as compiled,
@@ -423,44 +435,25 @@ class GluonTrace(LaunchInterface, TraceInterface):
         if not all(hasattr(runner, attr) for attr in ("fn", "run", "arg_names")):
             runner = gluon.jit(runner)
 
-        self.runner = runner
+        def unpack_kernel(source: Any) -> tuple[Callable, Any]:
+            if isinstance(source, GluonTrace):
+                return source.base_fn, source.interpreted_fn
+            if isinstance(source, Heuristics):
+                return unpack_kernel(source.fn)
+            if all(hasattr(source, attr) for attr in ("fn", "arg_names")):
+                base_fn = source.fn
+                return base_fn, GluonInterpretedFunction(base_fn, source.arg_names)
+            raise TypeError(f"Unsupported runner type: {type(source)}")
+
+        self.base_fn, self.interpreted_fn = unpack_kernel(
+            runner.fn if self._is_autotuner(runner) else runner
+        )
         self.fn = runner
-        self.base_fn = runner.fn
         self.arg_names = runner.arg_names
+        self.runner = self._interpreter_runner(runner, self.interpreted_fn)
 
         TraceInterface.__init__(self, client)
-
-        for attr in ("__name__", "__module__", "__doc__", "__qualname__"):
-            if hasattr(runner, attr):
-                setattr(self, attr, getattr(runner, attr))
-            elif hasattr(self.base_fn, attr):
-                setattr(self, attr, getattr(self.base_fn, attr))
-
-        if hasattr(runner, "src"):
-            self.src = runner.src
-
-    def _bound_call_args(
-        self, args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> dict[str, Any]:
-        try:
-            return inspect.getcallargs(self.base_fn, *args, **kwargs)
-        except TypeError:
-            bound = {name: arg for name, arg in zip(self.arg_names, args)}
-            bound.update(kwargs)
-            return bound
-
-    @staticmethod
-    def _canonical_grid(grid: Any, bound_args: dict[str, Any]) -> tuple[int, int, int]:
-        if callable(grid):
-            grid = grid(bound_args)
-        if isinstance(grid, int):
-            grid = (grid,)
-        grid = tuple(int(dim) for dim in grid)
-        if len(grid) > 3:
-            raise ValueError(
-                f"Expected Gluon launch grid with at most 3 dims, got {grid}"
-            )
-        return grid + (1,) * (3 - len(grid))
+        self._copy_callable_attrs(runner, self.base_fn)
 
     def run(self, *args, **kwargs):
         grid = kwargs.get("grid")
@@ -469,27 +462,20 @@ class GluonTrace(LaunchInterface, TraceInterface):
                 "GluonTrace.run() missing required keyword argument: 'grid'"
             )
 
-        launch_kwargs = dict(kwargs)
-        launch_kwargs.pop("warmup", None)
-        launch_kwargs.pop("grid", None)
-        bound_args = self._bound_call_args(args, launch_kwargs)
-        canonical_grid = self._canonical_grid(grid, bound_args)
-
-        for name, arg in bound_args.items():
-            self.client_manager.arg_callback(name, arg, None)
-        self.client_manager.grid_callback(canonical_grid)
-        self.client_manager.grid_idx_callback((0, 0, 0))
-
         with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
             try:
-                ret = self.runner.run(*args, **kwargs)
+                ret = self.runner.run(
+                    *args,
+                    **kwargs,
+                    client_manager=self.client_manager,
+                )
             finally:
                 self.client_manager.post_run_callback(self.base_fn)
             self.finalize()
             return ret
 
     def __call__(self, *args, **kwargs):
-        return self.runner(*args, **kwargs)
+        return self.fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
         return self.run(*args, warmup=True, **kwargs)

@@ -1,8 +1,8 @@
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, cast
+from typing import Any
 
 from triton_viz.core.data import Op
 
@@ -11,49 +11,24 @@ _MISSING = object()
 
 
 class _LangPatchScope:
-    """Tracks patched attributes and mapping items so they can be restored."""
+    """Tracks patched attributes so they can be restored."""
 
     def __init__(self) -> None:
-        self._changes: list[tuple[str, object, str, object]] = []
+        self._changes: list[tuple[object, str, object]] = []
 
     def set_attr(self, obj: object, name: str, value: object) -> None:
         original = getattr(obj, name, _MISSING)
-        self._changes.append(("attr", obj, name, original))
+        self._changes.append((obj, name, original))
         setattr(obj, name, value)
 
     def save_attr(self, obj: object, name: str) -> None:
         original = getattr(obj, name, _MISSING)
-        self._changes.append(("attr", obj, name, original))
-
-    def set_item(self, mapping: dict[str, Any], key: str, value: object) -> None:
-        original = mapping.get(key, _MISSING)
-        self._changes.append(("item", mapping, key, original))
-        mapping[key] = value
-
-    def mark_removed(self, obj: object, name: str) -> None:
-        """Record that ``name`` is currently absent on ``obj`` so ``restore``
-        deletes it if a later patch adds it. Unlike ``set_attr`` this does not
-        modify ``obj`` now — it only schedules the removal. Needed because the
-        interpreter installs attributes that do not exist natively (e.g.
-        ``tensor.__bool__`` / ``__index__``); snapshotting only pre-existing
-        attrs would leave those installed, corrupting subsequent real
-        compilation."""
-        self._changes.append(("attr", obj, name, _MISSING))
+        self._changes.append((obj, name, original))
 
     def restore(self) -> None:
         while self._changes:
-            kind, obj, name, original = self._changes.pop()
-            if kind == "item":
-                mapping = cast(MutableMapping[str, Any], obj)
-                if original is _MISSING:
-                    del mapping[name]
-                else:
-                    mapping[name] = original
-            elif original is _MISSING:
-                # Guard: the same target object can be scheduled for removal
-                # more than once (e.g. tl.tensor is tl.core.tensor), and a
-                # marked attribute may never have been added. delattr only when
-                # present so restore stays idempotent.
+            obj, name, original = self._changes.pop()
+            if original is _MISSING:
                 if hasattr(obj, name):
                     delattr(obj, name)
             else:
@@ -101,6 +76,8 @@ class Frontend:
     name: str
     builder: Any
     original_ops: dict[Any, dict[str, Callable]]
+    # Default adapters keyed by operation type. These handle the common
+    # signature for all callables that map to the same normalized Op.
     adapters: dict[type[Op], Callable[..., AdapterResult]]
     namespaces: dict[Any, dict[str, type[Op]]]
 

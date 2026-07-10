@@ -319,7 +319,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # load-value provider raises unsupported on subsequent loads because
         # the unknown write may alias a snapshotted load source.
         self._unknown_written_region_seen: bool = False
-        # Finished-loop iterator substitutions, keyed by loop hook lineno:
+        # Finished-loop iterator substitutions, keyed by LoopSite:
         # (idx_z3, IntVal(final iteration value)). See _apply_finished_iter_subs
         # for why leftover iterator references must be concretized at record time.
         self._finished_loop_iter_subs: dict[Any, tuple[Any, Any]] = {}
@@ -1195,38 +1195,43 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     # exists to prevent. _wrap_range stays ungated: every running block
     # still needs its loop bounds materialized.
 
-    def _loop_hook_iter_overrider(self, lineno: Any, idx: Any) -> Any:
+    # Loop hooks are keyed by LoopSite since #435 (lineno + file_token —
+    # two loops at the same function-relative line in different files must
+    # not share bookkeeping); LoopSite is a hashable NamedTuple, so it
+    # serves directly as the _finished_loop_iter_subs key.
+
+    def _loop_hook_iter_overrider(self, loop_site: Any, idx: Any) -> Any:
         if not self._capture_active():
             return idx
-        return SymbolicClient._loop_hook_iter_overrider(self, lineno, idx)
+        return SymbolicClient._loop_hook_iter_overrider(self, loop_site, idx)
 
-    def _loop_hook_before(self, lineno: int, iterable: Any) -> None:
+    def _loop_hook_before(self, loop_site: Any, iterable: Any) -> None:
         if not self._capture_active():
             return
-        SymbolicClient._loop_hook_before(self, lineno, iterable)
-        if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+        SymbolicClient._loop_hook_before(self, loop_site, iterable)
+        if self.loop_stack and self.loop_stack[-1].loop_site == loop_site:
             ctx = self.loop_stack[-1]
             self._known_iter_var_keys.add(self._iter_var_key(ctx.idx_z3))
             # Reactivation: suspend the finished-value substitution so this
             # loop's own deferred records keep the symbolic var for per-copy
             # renaming. Restored on a zero-iteration exit.
             self._suspended_iter_subs.append(
-                (lineno, self._finished_loop_iter_subs.pop(lineno, None))
+                (loop_site, self._finished_loop_iter_subs.pop(loop_site, None))
             )
 
-    def _loop_hook_after(self, lineno: int) -> None:
+    def _loop_hook_after(self, loop_site: Any) -> None:
         if not self._capture_active():
             return
         ctx = (
             self.loop_stack[-1]
-            if self.loop_stack and self.loop_stack[-1].lineno == lineno
+            if self.loop_stack and self.loop_stack[-1].loop_site == loop_site
             else None
         )
-        SymbolicClient._loop_hook_after(self, lineno)
+        SymbolicClient._loop_hook_after(self, loop_site)
         if ctx is None:
             return
-        stashed_lineno, stashed = self._suspended_iter_subs.pop()
-        assert stashed_lineno == lineno
+        stashed_site, stashed = self._suspended_iter_subs.pop()
+        assert stashed_site == loop_site
         var_key = self._iter_var_key(ctx.idx_z3)
         if var_key in self._unstable_iter_var_keys:
             return
@@ -1234,7 +1239,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             # Zero-trip activation: the leftover variable still holds the
             # previous activation's final value — restore its substitution.
             if stashed is not None:
-                self._finished_loop_iter_subs[lineno] = stashed
+                self._finished_loop_iter_subs[loop_site] = stashed
             return
         # Register AFTER the super() flush so the loop's own records (which
         # are recorded during the flush) keep their symbolic iterator; only
@@ -1246,7 +1251,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             # the differing activations, so no constant is correct.
             self._unstable_iter_var_keys.add(var_key)
             return
-        self._finished_loop_iter_subs[lineno] = (ctx.idx_z3, final)
+        self._finished_loop_iter_subs[loop_site] = (ctx.idx_z3, final)
 
     def _apply_finished_iter_subs(self, value: Any) -> Any:
         if not self._finished_loop_iter_subs:

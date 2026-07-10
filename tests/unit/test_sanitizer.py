@@ -24,6 +24,7 @@ from triton_viz.clients.sanitizer.sanitizer import (
 from triton_viz.clients.sanitizer.range_summary import IntRange, access_interval_summary
 from triton_viz.clients.symbolic_engine import LoopContext, PendingCheck, SymbolicExpr
 from triton_viz.clients.symbolic_engine import symbolic_tensor_descriptor_access
+from triton_viz.core.patch import LoopSite, loop_file_token
 
 
 # ======== Init Tests ===========
@@ -393,7 +394,7 @@ def _make_loop_affine_access(
     idx_z3 = Int("loop_i_123")
     idx_sym = SymbolicExpr.create("const", 0, INT32)
     ctx = LoopContext(
-        lineno=123,
+        loop_site=LoopSite(123, loop_file_token(__file__)),
         length=len(range(start, stop, step)),
         idx=idx_sym,
         idx_z3=idx_z3,

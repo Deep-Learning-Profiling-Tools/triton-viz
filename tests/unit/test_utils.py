@@ -8,6 +8,7 @@ from z3 import Int
 
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.clients.symbolic_engine import LoopContext
+from triton_viz.core.patch import LoopSite, loop_file_token
 from triton_viz.clients.tracer.tracer import Tracer
 from triton_viz.clients.utils import (
     check_inner_stride_equal_to_one,
@@ -58,7 +59,7 @@ def _capture_sanitizer_traceback(
     sanitizer = SymbolicSanitizer(abort_on_error=False)
     sanitizer.loop_stack.append(
         LoopContext(
-            lineno=1,
+            loop_site=LoopSite(1, loop_file_token(__file__)),
             length=1,
             idx=0,
             idx_z3=Int("loop_idx"),

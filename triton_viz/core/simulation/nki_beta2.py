@@ -426,7 +426,6 @@ def nc_transpose(
         engine: Requested execution engine token.
         name: Optional kernel op name retained for API parity.
     """
-    del name
     value = _array(data)
     data_par, data_free = _partition_and_free(value)
     _require(
@@ -496,13 +495,6 @@ def nc_matmul(
         perf_mode: Unused beta2 performance-mode token.
         name: Optional kernel op name retained for API parity.
     """
-    del (
-        is_stationary_onezero,
-        is_moving_onezero,
-        is_transpose,
-        perf_mode,
-        name,
-    )
     _require(
         _buffer_name(dst) == "psum",
         f"nc_matmul requires dst in PSUM, received dst buffer {_buffer_name(dst)}",
@@ -593,7 +585,6 @@ def reciprocal(dst: NDArray, data: NDArray, name: str | None = None) -> NDArray:
         data: Source tensor providing reciprocal inputs.
         name: Optional kernel op name retained for API parity.
     """
-    del name
     return _store(dst, np.reciprocal(_array(data, dtype=np.float32)))
 
 
@@ -615,7 +606,6 @@ def exponential(
         reduce_cmd: Unused beta2 reduction token kept for API parity.
         reduce_init: Unused beta2 reduction init value kept for API parity.
     """
-    del reduce_cmd, reduce_init
     _require(
         _nc_version_value(nki_builder.nc_version)
         >= _nc_version_value(nisa.nc_version.gen4),
@@ -742,7 +732,6 @@ def dma_copy(
         unique_indices: Unused beta2 uniqueness flag kept for API parity.
         name: Optional kernel op name retained for API parity.
     """
-    del oob_mode, dge_mode, unique_indices, name
     _require(
         _buffer_name(dst) in ("hbm", "sbuf") and _buffer_name(src) in ("hbm", "sbuf"),
         "dma_copy only supports HBM/SBUF source and destination, received "
@@ -776,7 +765,6 @@ def tensor_copy(
         engine: Requested execution engine token.
         name: Optional kernel op name retained for API parity.
     """
-    del name
     dst_buffer, src_buffer = _buffer_name(dst), _buffer_name(src)
     _require(
         dst_buffer in ("sbuf", "psum") and src_buffer in ("sbuf", "psum"),
@@ -815,7 +803,6 @@ def tensor_tensor(
         engine: Requested execution engine token.
         name: Optional kernel op name retained for API parity.
     """
-    del name
     _require(isinstance(op, SubOp), f"Unsupported op: {op}")
     dst_buffer, lhs_buffer, rhs_buffer = map(_buffer_name, (dst, data1, data2))
     _require(
@@ -879,7 +866,6 @@ def tensor_reduce(
         keepdims: Whether to preserve reduced dimensions as size-1 axes.
         name: Optional kernel op name retained for API parity.
     """
-    del name
     _require(isinstance(op, SubOp), f"Unsupported op: {op}")
     source = _array(data)
     axis_tuple = (axis,) if isinstance(axis, int) else tuple(axis)
@@ -952,7 +938,6 @@ def tensor_scalar(
         engine: Requested execution engine token.
         name: Optional kernel op name retained for API parity.
     """
-    del name
     if not isinstance(op0, SubOp):
         raise ValueError(f"Unsupported op: {op0}")
     if not (op1 is None or isinstance(op1, SubOp)):
@@ -1034,7 +1019,6 @@ def activation(
         reduce_cmd: Unused beta2 reduction command token kept for API parity.
         name: Optional kernel op name retained for API parity.
     """
-    del reduce_cmd, name
     _require(isinstance(op, SubOp), f"Unsupported op: {op}")
     _require(
         _buffer_name(dst) in ("sbuf", "psum")
@@ -1114,7 +1098,6 @@ class Builder:
             y: Grid index for axis 1.
             z: Grid index for axis 2.
         """
-        del y, z
         self.grid_idx = [x]
 
 

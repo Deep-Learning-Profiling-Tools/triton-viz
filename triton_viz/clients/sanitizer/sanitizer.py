@@ -627,7 +627,6 @@ class SymbolicSanitizer(Sanitizer, SymbolicClient):
         pending: PendingCheck,
         iter_constraints: list[BoolRef],
     ) -> None:
-        del ctx, iter_constraints  # verbose logging is handled by the base
         if self._range_summary_proves_safe(pending.symbolic_expr):
             return
         self._check_range_satisfiable(

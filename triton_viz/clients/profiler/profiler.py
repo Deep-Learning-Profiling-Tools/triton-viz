@@ -4,6 +4,7 @@ from ...core.client import Client
 from ...core.callbacks import OpCallbacks, ForLoopCallbacks
 from ...core.data import Op, Load, Store, AddPtr, Dot
 from ...core.config import config as cfg
+from ...core.patch import LoopSite
 from .data import LoadStoreBytes
 from ...utils.traceback_utils import (
     extract_user_frames,
@@ -330,18 +331,20 @@ class Profiler(Client):
 
     def register_for_loop_callback(self):
         @self.lock_fn
-        def loop_hook_range_type(lineno: int, range_type: str) -> None:
+        def loop_hook_range_type(loop_site: LoopSite, range_type: str) -> None:
+            lineno = loop_site.lineno
             cur = self.loop_info.get(lineno, LoopInfo())
             self.loop_info[lineno] = replace(cur, range_type=range_type)
 
         @self.lock_fn
-        def loop_hook_before(lineno, iterable):
+        def loop_hook_before(loop_site: LoopSite, iterable):
             if self.disable_for_loop_unroll_check:
                 return
 
             if not isinstance(iterable, range):
                 return
 
+            lineno = loop_site.lineno
             # Only record each unique loop (by line number) once
             # Different blocks will execute the same loop, so we deduplicate by lineno
             if self.loop_info[lineno].length is not None:
@@ -354,7 +357,7 @@ class Profiler(Client):
             self.loop_info[lineno] = replace(cur, length=length)
 
         @self.lock_fn
-        def loop_hook_after(lineno: int) -> None:
+        def loop_hook_after(loop_site: LoopSite) -> None:
             # No action needed after loop for profiler
             pass
 

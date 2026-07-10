@@ -27,7 +27,6 @@ except ModuleNotFoundError:
 def _nki_beta2_dot_adapter(
     dst: Any, stationary: Any, moving: Any, *_args: Any, **kwargs: Any
 ) -> AdapterResult:
-    del dst
     assert NDArray is not None
     x = NDArray(value=stationary.data.T)
     return AdapterResult(x, moving)

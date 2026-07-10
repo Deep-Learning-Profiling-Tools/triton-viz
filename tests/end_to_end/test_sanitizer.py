@@ -17,7 +17,19 @@ from triton_viz.core.symbolic_metadata import is_pointer_dtype
 from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
 from triton_viz.core.callbacks import ForLoopCallbacks
 from triton_viz.core.config import config
+from triton_viz.core.patch import LoopSite, loop_file_token
 from z3.z3 import BoolRef
+
+from .loop_site_cross_file_kernel import (
+    cross_file_loop_sanitizer,
+    cross_file_outer_loop_kernel,
+)
+
+
+def _loop_var_name(lineno: int) -> str:
+    """Expected symbolic iterator name for a loop in this test file."""
+    token = loop_file_token(_loop_var_name.__code__.co_filename)
+    return f"loop_i_{LoopSite(lineno, token)}"
 
 
 @pytest.fixture
@@ -124,9 +136,9 @@ class LoopBoundsChecker(SymbolicSanitizer):
         callbacks = super().register_for_loop_callback()
         orig_before = callbacks.before_loop_callback
 
-        def _before_loop(lineno, iterable):
+        def _before_loop(loop_site, iterable):
             if orig_before is not None:
-                orig_before(lineno, iterable)
+                orig_before(loop_site, iterable)
             if isinstance(iterable, RangeWrapper):
                 self._bounds.append((iterable.start, iterable.stop, iterable.step))
 
@@ -170,9 +182,9 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
         callbacks = super().register_for_loop_callback()
         orig_after = callbacks.after_loop_callback
 
-        def _after_loop(lineno: int) -> None:
+        def _after_loop(loop_site: LoopSite) -> None:
             pending = 0
-            if self.loop_stack and self.loop_stack[-1].lineno == lineno:
+            if self.loop_stack and self.loop_stack[-1].loop_site == loop_site:
                 ctx = self.loop_stack[-1]
                 pending = len(ctx.pending_checks)
                 self.iterator_constraints.append(
@@ -181,7 +193,7 @@ class LoopDeferredCheckRecorder(SymbolicSanitizer):
                     )
                 )
             if orig_after is not None:
-                orig_after(lineno)
+                orig_after(loop_site)
             self.after_loop_pending.append(pending)
 
         return ForLoopCallbacks(
@@ -345,13 +357,41 @@ def test_loop_deferred_checks_after_context():
 
     assert loop_deferred_check_recorder.after_loop_pending == [1]
     addr_expr, _ = loop_deferred_check_recorder.check_inside_loop[0]
-    assert "4*loop_i_2" in str(addr_expr)
+    loop_var = _loop_var_name(2)
+    assert f"4*{loop_var}" in str(addr_expr)
     iterator_constraints_str = " ".join(
         str(c) for c in loop_deferred_check_recorder.iterator_constraints
     )
-    assert "loop_i_2 >= 0" in iterator_constraints_str
-    assert "loop_i_2 < 4" in iterator_constraints_str
+    assert f"{loop_var} >= 0" in iterator_constraints_str
+    assert f"{loop_var} < 4" in iterator_constraints_str
     assert loop_deferred_check_recorder.records
+
+
+def test_cross_file_same_relative_lineno_loops_detect_oob():
+    """A cross-file nested-loop OOB must be reported regardless of how loop
+    identity is keyed.
+
+    The outer loop (i in [0, 8), kernel file) and the inner loop (j in [0, 2),
+    helper file) both sit at function-relative line 2. The store touches
+    elements 2*i + j, up to 15, while ``out`` has only 8 elements — a real
+    OOB.
+
+    Today device jit functions run un-rewritten (``_jit_function_call``
+    executes the raw fn), so j stays concrete and each unrolled address is
+    checked against the outer iterator alone — the OOB is found. If device
+    function loops are ever wired into the symbolic loop hooks, bare-lineno
+    identity would collapse both iterators into one variable v < 2, turning
+    the address into 3*v (max element 3) and silently missing the OOB;
+    LoopSite identity keeps the iterators distinct. Either way this test must
+    keep reporting the OOB.
+    """
+    cross_file_loop_sanitizer.records.clear()
+
+    out = torch.empty((8,), dtype=torch.int32)
+
+    cross_file_outer_loop_kernel[(1,)](out)
+
+    assert cross_file_loop_sanitizer.records
 
 
 def test_loop_deferred_checks_simplify():
