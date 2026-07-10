@@ -20,6 +20,37 @@ RESULTS_DIR = Path(__file__).parent / "results"
 PER_SPEC_TIMEOUT_S = 180
 
 
+# Upstream commits of the liger-kernel PyPI releases we evaluate against
+# (PyPI wheels embed no VCS info). Each entry is the commit the GitHub
+# release tag points to, resolved via
+# api.github.com/repos/linkedin/Liger-Kernel/git/refs/tags/v<version>.
+_LIGER_RELEASE_COMMITS = {
+    "0.8.0": "c4b16d43f9d8f69068e6a15bd879dfc6a63b2449",  # tag v0.8.0
+}
+
+
+def _liger_provenance() -> dict:
+    """liger-kernel version + best-effort git commit for the results
+    fingerprint (the liger corpus analyzes the package AS INSTALLED, so
+    the artifact record must pin exactly which source that was). The
+    commit comes from pip's direct_url.json for git installs, else from
+    the release→tag-commit table above; unknown releases record None —
+    extend the table rather than guess."""
+    from importlib import metadata
+
+    try:
+        dist = metadata.distribution("liger-kernel")
+    except metadata.PackageNotFoundError:
+        return {}
+    commit = None
+    raw = dist.read_text("direct_url.json")
+    if raw:
+        commit = json.loads(raw).get("vcs_info", {}).get("commit_id")
+    if commit is None:
+        commit = _LIGER_RELEASE_COMMITS.get(dist.version)
+    return {"liger_kernel": dist.version, "liger_kernel_commit": commit}
+
+
 def _versions() -> dict:
     import numpy
     import torch
@@ -38,6 +69,7 @@ def _versions() -> dict:
         "numpy": numpy.__version__,
         "z3": z3.get_version_string(),
         "commit": git,
+        **_liger_provenance(),
     }
 
 

@@ -212,7 +212,13 @@ def render(paths: list[Path]) -> str:
             "",
             f"versions: triton {header.get('triton')}, z3 {header.get('z3')}, "
             f"torch {header.get('torch')}, numpy {header.get('numpy')}, "
-            f"commit {header.get('commit')}, seed {header.get('seed')}",
+            f"commit {header.get('commit')}, seed {header.get('seed')}"
+            + (
+                f", liger-kernel {header['liger_kernel']}"
+                f" (upstream {header.get('liger_kernel_commit') or 'unknown'})"
+                if header.get("liger_kernel")
+                else ""
+            ),
             "",
             "| kernel | pattern | expected | terminal | witness | mut | "
             "dyn status | C3 | wall s |",
