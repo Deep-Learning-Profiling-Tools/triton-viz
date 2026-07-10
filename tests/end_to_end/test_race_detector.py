@@ -2365,3 +2365,69 @@ def test_sort_derived_pointer_is_unsupported_not_silent_ok():
     assert detector.last_status == "unsupported"
     assert "sort" in (detector.unsupported_reason or "")
     assert detector.last_reports == []
+
+
+# ======== Acquire-on-failure: rf-val is reader-success-independent ========
+
+
+@triton.jit
+def _cas_acquire_on_failure_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+
+    tl.store(data_ptr, 1, mask=is_prod)
+    # The consumer's cmp=7 can never match (flag stays in {0,1}): its CAS
+    # always FAILS — but a failed acquire-CAS still READS the location,
+    # and reading the released value is what establishes the sw edge.
+    cmp = tl.where(is_prod, 0, 7)
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+@triton.jit
+def _cas_acquire_on_failure_relaxed_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+
+    tl.store(data_ptr, 1, mask=is_prod)
+    cmp = tl.where(is_prod, 0, 7)
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="relaxed", scope="gpu")
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+def test_cas_acquire_on_failure_synchronizes(_isolate_race_detector_atomic_cfg):
+    """A consumer CAS that always fails still acquires through its READ:
+    rf-val (writer.written == reader.old) is independent of the reader's
+    own success, so the guarded load is ordered — no race."""
+    flag = torch.zeros(1, dtype=torch.int32)
+    data = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(2, dtype=torch.int32)
+    detector = _run_detector(_cas_acquire_on_failure_kernel, (2,), flag, data, out)
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
+def test_cas_acquire_on_failure_relaxed_races(_isolate_race_detector_atomic_cfg):
+    """Mutation twin: the same failed-CAS gate at relaxed carries the
+    value but no ordering — the guarded load must race."""
+    flag = torch.zeros(1, dtype=torch.int32)
+    data = torch.zeros(1, dtype=torch.int32)
+    out = torch.zeros(2, dtype=torch.int32)
+    detector = _run_detector(
+        _cas_acquire_on_failure_relaxed_kernel, (2,), flag, data, out
+    )
+    assert len(detector.last_reports) == 1
+    _assert_report_lines(
+        detector.last_reports[0],
+        _cas_acquire_on_failure_relaxed_kernel,
+        (
+            "tl.store(data_ptr, 1, mask=is_prod)",
+            "x = tl.load(data_ptr, mask=cons_mask, other=0)",
+        ),
+    )

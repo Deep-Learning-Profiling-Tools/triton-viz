@@ -629,3 +629,321 @@ CORPUS.add(
         "next pid's segment (n=128)",
     )
 )
+
+
+# ── trb020: partially overlapping masks (parameterized labels) ───
+
+
+@triton.jit
+def trb020_masked_halves_kernel(out_ptr, k1, k2, BLOCK: tl.constexpr):
+    """Exactly ONE writer per branch on EVERY grid (the T1 claim covers
+    all grids along the read axes): a parity split would put two
+    same-branch blocks on one masked range for any grid >= 3 and the
+    same-branch WAW would drown the mask-overlap question."""
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    if pid == 0:
+        tl.store(out_ptr + offs, 1, mask=offs < k1)
+    if pid == 1:
+        tl.store(out_ptr + offs, 2, mask=offs >= k2)
+
+
+_TRB020_SIG = {"out_ptr": "*i32", "k1": "i32", "k2": "i32", "BLOCK": "constexpr"}
+
+
+def _trb020_args(k1: int, k2: int):
+    def make(seed: int) -> tuple:
+        return (torch.zeros(BLOCK, dtype=torch.int32), k1, k2)
+
+    return make
+
+
+CORPUS.add(
+    LaunchSpec(
+        name="trb020_mask_overlap_no",
+        kernel_fn=trb020_masked_halves_kernel,
+        signature=_TRB020_SIG,
+        constexprs={"BLOCK": BLOCK},
+        make_args=_trb020_args(32, 32),
+        grid=(2,),
+        expected="race-free",
+        pattern="partial-mask-overlap",
+        params_note="k1=k2=32: even blocks own [0,32), odd blocks own "
+        "[32,64) — the masks tile the range exactly",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb020_mask_overlap_yes",
+        kernel_fn=trb020_masked_halves_kernel,
+        signature=_TRB020_SIG,
+        constexprs={"BLOCK": BLOCK},
+        make_args=_trb020_args(40, 24),
+        grid=(2,),
+        expected="race",
+        race_pair=(
+            "tl.store(out_ptr + offs, 1, mask=offs < k1)",
+            "tl.store(out_ptr + offs, 2, mask=offs >= k2)",
+        ),
+        pattern="partial-mask-overlap",
+        params_note="k1=40, k2=24: the masks overlap on [24,40) — same "
+        "kernel, labels flip with the scalar params",
+    )
+)
+
+
+# ── trb021: one-sided synchronizes-with (CAS-guarded P/C) ────────
+
+
+@triton.jit
+def trb021_acq_rel_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+    tl.store(data_ptr, 1, mask=is_prod)
+    cmp = tl.where(is_prod, 0, 1)
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+@triton.jit
+def trb021_release_only_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+    tl.store(data_ptr, 1, mask=is_prod)
+    cmp = tl.where(is_prod, 0, 1)
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="release", scope="gpu")
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+@triton.jit
+def trb021_acquire_only_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+    tl.store(data_ptr, 1, mask=is_prod)
+    cmp = tl.where(is_prod, 0, 1)
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acquire", scope="gpu")
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+_TRB021_SIG = {"flag_ptr": "*i32", "data_ptr": "*i32", "out_ptr": "*i32"}
+_TRB021_PAIR = (
+    "tl.store(data_ptr, 1, mask=is_prod)",
+    "x = tl.load(data_ptr, mask=cons_mask, other=0)",
+)
+
+
+def _trb021_args(seed: int) -> tuple:
+    return (
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(2, dtype=torch.int32),
+    )
+
+
+for _name, _fn, _exp, _note in (
+    (
+        "trb021_guarded_acq_rel_no",
+        trb021_acq_rel_kernel,
+        "race-free",
+        "both halves of the sw edge present (control row)",
+    ),
+    (
+        "trb021_release_only_yes",
+        trb021_release_only_kernel,
+        "race",
+        "release-only: the consumer's read side never acquires — half an "
+        "sw edge is no sw edge",
+    ),
+    (
+        "trb021_acquire_only_yes",
+        trb021_acquire_only_kernel,
+        "race",
+        "acquire-only: the producer's write side never releases",
+    ),
+):
+    CORPUS.add(
+        LaunchSpec(
+            name=_name,
+            kernel_fn=_fn,
+            signature=_TRB021_SIG,
+            constexprs={},
+            make_args=_trb021_args,
+            grid=(2,),
+            expected=_exp,  # type: ignore[arg-type]
+            race_pair=None if _exp == "race-free" else _TRB021_PAIR,
+            pattern="one-sided-sw",
+            params_note=_note,
+        )
+    )
+
+
+# ── trb022: acquire-on-failure (reader-success-independence) ─────
+
+
+@triton.jit
+def trb022_failed_cas_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+    tl.store(data_ptr, 1, mask=is_prod)
+    # Producer publishes via a SUCCESSFUL CAS 0->1. The consumer's cmp=7
+    # can never match (flag stays in {0,1}), so its CAS always FAILS —
+    # but a failed acquire-CAS still READS the location, and reading the
+    # released value establishes the sw edge (rf-val is independent of
+    # the reader's own success).
+    cmp = tl.where(is_prod, 0, 7)
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+@triton.jit
+def trb022_failed_cas_relaxed_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+    tl.store(data_ptr, 1, mask=is_prod)
+    cmp = tl.where(is_prod, 0, 7)
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="relaxed", scope="gpu")
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+CORPUS.add(
+    LaunchSpec(
+        name="trb022_acquire_on_failure_no",
+        kernel_fn=trb022_failed_cas_kernel,
+        signature=_TRB021_SIG,
+        constexprs={},
+        make_args=_trb021_args,
+        grid=(2,),
+        expected="race-free",
+        pattern="acquire-on-failure",
+        params_note="the consumer's CAS always fails (cmp=7 never matches) "
+        "yet its acquire read of the released value synchronizes — the "
+        "positive case for rf-val's reader-success-independence",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb022_acquire_on_failure_relaxed_yes",
+        kernel_fn=trb022_failed_cas_relaxed_kernel,
+        signature=_TRB021_SIG,
+        constexprs={},
+        make_args=_trb021_args,
+        grid=(2,),
+        expected="race",
+        race_pair=_TRB021_PAIR,
+        pattern="acquire-on-failure",
+        params_note="same failed-CAS gate, relaxed: no sw — the guard value "
+        "arrives but nothing orders the data",
+    )
+)
+
+
+# ── trb023: oversized flag (the over-report direction, on purpose) ─
+
+
+def _trb023_args(seed: int) -> tuple:
+    # flag lives in a 2048-element tensor: PAST the solver's rf-init cap
+    # (_MAX_INITIAL_ATOMIC_ELEMENTS = 1024), so the CAS reader falls to
+    # rf_unknown, which deliberately does NOT enable synchronizes-with.
+    return (
+        torch.zeros(2048, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(2, dtype=torch.int32),
+    )
+
+
+CORPUS.add(
+    LaunchSpec(
+        name="trb023_oversized_flag_conservative",
+        kernel_fn=trb021_acq_rel_kernel,
+        signature=_TRB021_SIG,
+        constexprs={},
+        make_args=_trb023_args,
+        grid=(2,),
+        # GROUND TRUTH is race-free (identical to trb021_guarded_acq_rel_no
+        # up to the flag allocation size), but the row is deliberately
+        # UNLABELED: the solver cannot snapshot a >1024-element flag, the
+        # closed world opens, and the guarded pair is reported
+        # CONSERVATIVELY — the over-report direction of the monotonicity
+        # lemma, demonstrated. Labeling it race-free would score the
+        # designed behavior as a false positive.
+        expected=None,
+        pattern="oversized-flag-demo",
+        params_note="monotonicity-lemma demo: rf-init cap exceeded → "
+        "rf_unknown (no sw) → conservative race report on a race-free "
+        "program; ground truth race-free, row excluded from P/R scoring",
+    )
+)
+
+
+# ── trb024: cta-scope atomic pair (moral strength, with the ──────
+# conflict-predicate refinement record in test_moral_strength_scopes)
+
+
+@triton.jit
+def trb024_cta_add_kernel(ctr_ptr, out_ptr):
+    pid = tl.program_id(0)
+    tl.atomic_add(ctr_ptr, 1, sem="relaxed", scope="cta")
+    tl.store(out_ptr + pid, 1)
+
+
+@triton.jit
+def trb024_gpu_add_kernel(ctr_ptr, out_ptr):
+    pid = tl.program_id(0)
+    tl.atomic_add(ctr_ptr, 1, sem="relaxed", scope="gpu")
+    tl.store(out_ptr + pid, 1)
+
+
+_TRB024_SIG = {"ctr_ptr": "*i32", "out_ptr": "*i32"}
+
+
+def _trb024_args(seed: int) -> tuple:
+    return (
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(4, dtype=torch.int32),
+    )
+
+
+CORPUS.add(
+    LaunchSpec(
+        name="trb024_cta_scope_pair_yes",
+        kernel_fn=trb024_cta_add_kernel,
+        signature=_TRB024_SIG,
+        constexprs={},
+        make_args=_trb024_args,
+        grid=GRID,
+        expected="race",
+        race_pair=('tl.atomic_add(ctr_ptr, 1, sem="relaxed", scope="cta")',),
+        pattern="cta-scope-pair",
+        params_note="PTX .cta scope covers one CTA only: cross-CTA adds at "
+        "one cell are scope-mismatched (not morally strong) — torn, racy",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb024_gpu_scope_pair_no",
+        kernel_fn=trb024_gpu_add_kernel,
+        signature=_TRB024_SIG,
+        constexprs={},
+        make_args=_trb024_args,
+        grid=GRID,
+        expected="race-free",
+        pattern="cta-scope-pair",
+        params_note="gpu scope covers the peer CTA: the pair is mutually "
+        "atomic (inclusive scopes, same width, same address)",
+    )
+)

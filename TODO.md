@@ -60,30 +60,41 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
 
 ## 2. Benchmark corpus growth (feeds the paper's rq1 tag)
 
-- [ ] Author the four planned litmus variants as TritonRaceBench
-      pairs: partially overlapping masks (racy + race-free);
-      release-only and acquire-only guarded producer/consumer (both
-      expected racy: one side of the sw edge missing);
-      acquire-on-failure positive case (a consumer CAS that FAILS —
-      cmp never matches — but reads the released value and guards
-      on it: expected no race, exercising the
-      reader-success-independence of rf-val); an oversized (>K)
-      flag variant of the guarded idiom (expected: conservative
-      race report, demonstrating the over-report direction of the
-      monotonicity lemma).
-- [ ] cta-scope atomic-pair litmus (lands together with item 3).
+- [x] Four litmus variants — landed as trb020–023 (TritonRaceBench now
+      52 rows / 24 patterns, precision = recall = 1.0, witness 19/19,
+      ladder audit PASS):
+      trb020 partially overlapping masks (same kernel, labels flip with
+      the k1/k2 scalars; single-writer pid==0/pid==1 branches — a parity
+      split would put two same-branch blocks on one range for any grid
+      ≥ 3 under the every-grid claim, a corpus-design bug the solver's
+      own witness caught); trb021 release-only / acquire-only guarded
+      P/C (both racy in the dynamic column, acq_rel control clean;
+      static abstains honestly with cas-synchronization);
+      trb022 acquire-on-failure positive (consumer CAS with cmp=7 never
+      succeeds, yet its acquire READ of the released value synchronizes
+      — dynamic proves clean, relaxed twin races; e2e pair pinned in
+      test_race_detector.py); trb023 oversized (2048 > 1024 cap) flag —
+      deliberately UNLABELED: rf-init cap exceeded → rf_unknown (no sw)
+      → conservative race report on a race-free program, the
+      monotonicity-lemma over-report demo (labeling it would score the
+      designed behavior as an FP).
+- [x] cta-scope atomic-pair litmus — trb024: cross-CTA cta-scoped adds
+      at one cell report (STATIC-track verdict, races-unclassified);
+      the gpu-scoped twin proves at T1 (mutually atomic).
 
 ## 3. Moral-strength conflict refinement (feeds the paper's memory-model tag)
 
-- [ ] Tile IR alignment: the conflict predicate currently exempts
-      ALL atomic pairs, while Tile IR's moral strength classifies
-      scope-mismatched atomic pairs as racy. Implement the
-      moral-strength check in the solver's conflict predicate
-      (`two_copy_symbolic_hb_solver.py`): a conflicting atomic pair
-      is exempt only when the scopes are inclusive (for cross-CTA
-      pairs: both in {gpu, sys}). Adds reports only, preserving the
-      over-report direction. The paper then updates Def. conflict
-      and drops its divergence caveat.
+- [x] AUDIT RESULT: the implementation already matches Tile IR moral
+      strength — `hb_common.conflicting_access_modes` exempts an
+      atomic pair only under inclusive scopes (both non-cta for the
+      cross-CTA queries), same width, and the exact same address; the
+      TODO's "exempts ALL atomic pairs" described the PAPER's Def.
+      conflict, not the code. Semantics now pinned by
+      tests/unit/test_moral_strength_scopes.py (9 tests: gpu/sys
+      inclusive-exemption cells ×3, cta-mismatch raciness ×4,
+      width/address-torn raciness ×2) plus the trb024 corpus pair.
+      The paper can update Def. conflict and drop the divergence
+      caveat, citing these tests as the implemented-semantics record.
 
 ## 4. M4 — sm90/Hopper (GATED on Q5 with the advisor; align before starting)
 
