@@ -104,10 +104,43 @@ def softmax_kernel(
         tl.store(output_ptrs, softmax_output, mask=mask)
 
 
+@triton.jit
+def matmul_tma_kernel(
+    a_ptr, b_ptr, c_ptr, M, N, K,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):  # fmt: skip
+    """Descriptor-based matmul (`tl.make_tensor_descriptor`): the sm90
+    pipeliner lowers the loads to ttng.async_tma_copy_global_to_local
+    completing through mbarrier phase waits — the M4 tranche-2 protocol.
+    Matches tests/golden/ttgir/generate_golden.py."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[M, K], strides=[K, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[K, N], strides=[N, 1], block_shape=[BLOCK_K, BLOCK_N]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[N, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_K)):
+        a = a_desc.load([pid_m * BLOCK_M, k * BLOCK_K])
+        b = b_desc.load([k * BLOCK_K, pid_n * BLOCK_N])
+        acc += tl.dot(a, b)
+    c_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], acc.to(tl.float16))
+
+
 _MATMUL_SIG = {
     "a_ptr": "*fp16", "b_ptr": "*fp16", "c_ptr": "*fp16",
     "M": "i32", "N": "i32", "K": "i32",
     "stride_am": "i32", "stride_bk": "i32", "stride_cm": "i32",
+    "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "BLOCK_K": "constexpr",
+}  # fmt: skip
+_MATMUL_TMA_SIG = {
+    "a_ptr": "*fp16", "b_ptr": "*fp16", "c_ptr": "*fp16",
+    "M": "i32", "N": "i32", "K": "i32",
     "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "BLOCK_K": "constexpr",
 }  # fmt: skip
 _SOFTMAX_SIG = {
@@ -123,11 +156,12 @@ _SOFTMAX_SIG = {
 # vectorized loads the pipeliner turns into cp.async (without it the
 # sweep silently measures unpipelined code: 0 async copies everywhere).
 _MATMUL_ATTRS = {(i,): [["tt.divisibility", 16]] for i in range(9)}
+_MATMUL_TMA_ATTRS = {(i,): [["tt.divisibility", 16]] for i in range(6)}
 _SOFTMAX_ATTRS = {(i,): [["tt.divisibility", 16]] for i in range(6)}
 
 
-def _kernels(stages: int):
-    return (
+def _kernels(stages: int, cc: int):
+    kernels = [
         (
             "tut03_matmul",
             matmul_kernel,
@@ -144,7 +178,19 @@ def _kernels(stages: int):
             {"num_stages": stages, "num_warps": 4},
             _SOFTMAX_ATTRS,
         ),
-    )
+    ]
+    if cc >= 90:  # TMA needs Hopper
+        kernels.append(
+            (
+                "tut03_matmul_tma",
+                matmul_tma_kernel,
+                _MATMUL_TMA_SIG,
+                {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32},
+                {"num_stages": stages, "num_warps": 4},
+                _MATMUL_TMA_ATTRS,
+            )
+        )
+    return kernels
 
 
 ARCHS = (80, 90)
@@ -193,9 +239,16 @@ def _mut_single_buffer(ttgir: str) -> str | None:
     depth = int(m.group(1))
     if depth < 2:
         return None
-    out = ttgir.replace(f"memdesc<{depth}x", "memdesc<1x")
-    # rotation wrap: `cmpi sge, %idx, %cD_i32` guards the modular reset
-    out = re.sub(rf"(arith\.cmpi sge, %[\w.#]+, %c){depth}(_i32)", r"\g<1>1\g<2>", out)
+    # rotation wrap: `cmpi sge, %idx, %cD_i32` guards the modular reset —
+    # no wrap means the buffer is not actually staged (e.g. the leading
+    # memdesc dim is a tile dim of an un-staged alloc): n/a, not a
+    # malformed shrink.
+    out, n_wrap = re.subn(
+        rf"(arith\.cmpi sge, %[\w.#]+, %c){depth}(_i32)", r"\g<1>1\g<2>", ttgir
+    )
+    if not n_wrap:
+        return None
+    out = out.replace(f"memdesc<{depth}x", "memdesc<1x")
     # prologue prefetches into slots 1..D-1: a depth-1 buffer has only 0
     out = re.sub(r"\[%c[1-9]\d*_i32\]", "[%c0_i32]", out)
     return out if out != ttgir else None
@@ -224,12 +277,54 @@ def _mut_delete_dot_wait(ttgir: str) -> str | None:
     return "\n".join(kept) if len(kept) != len(lines) else None
 
 
+_RE_EXPECT_BYTES = re.compile(r"(ttng\.barrier_expect (%[\w#.]+), )(\d+)")
+_RE_XORI_FLIP = re.compile(r"(arith\.xori (%[\w#.]+), )%c1_i32")
+
+
+def _mut_delete_wait_barrier(ttgir: str) -> str | None:
+    """TMA: the forgotten mbarrier phase wait — reads run unguarded
+    against in-flight arrivals."""
+    lines = ttgir.splitlines()
+    kept = [ln for ln in lines if "ttng.wait_barrier" not in ln]
+    return "\n".join(kept) if len(kept) != len(lines) else None
+
+
+def _mut_break_phase(ttgir: str) -> str | None:
+    """TMA: kill the parity flip (xori 1 → 0): from the second rotation
+    period on the wait targets an already-completed phase."""
+    new, n = _RE_XORI_FLIP.subn(r"\g<1>%c0_i32", ttgir)
+    return new if n else None
+
+
+def _mut_expect_undercount(ttgir: str) -> str | None:
+    """TMA: halve every barrier_expect byte count — the phase completes
+    with arrivals still in flight."""
+
+    def repl(m: re.Match) -> str:
+        return f"{m.group(1)}{int(m.group(3)) // 2}"
+
+    new, n = _RE_EXPECT_BYTES.subn(repl, ttgir)
+    return new if n else None
+
+
+def _mut_delete_fence(ttgir: str) -> str | None:
+    """Drop fence_async_shared: a generic-proxy store feeding an
+    async-proxy read (wgmma / TMA store) loses its ordering."""
+    lines = ttgir.splitlines()
+    kept = [ln for ln in lines if "ttng.fence_async_shared" not in ln]
+    return "\n".join(kept) if len(kept) != len(lines) else None
+
+
 _MUTATIONS = (
     ("weaken_wait", _mut_weaken_wait),
     ("delete_wait", _mut_delete_wait),
     ("single_buffer", _mut_single_buffer),
     ("weaken_pendings", _mut_weaken_pendings),
     ("delete_dot_wait", _mut_delete_dot_wait),
+    ("delete_wait_barrier", _mut_delete_wait_barrier),
+    ("break_phase", _mut_break_phase),
+    ("expect_undercount", _mut_expect_undercount),
+    ("delete_fence", _mut_delete_fence),
 )
 
 
@@ -255,22 +350,23 @@ def sweep() -> str:
         "",
         "## Sweep",
         "",
-        "| kernel | arch | stages | async copies | wgmma | verdict | reports | analyze s |",
-        "|---|---|---|---|---|---|---|---|",
+        "| kernel | arch | stages | async copies | tma | wgmma | verdict | reports | analyze s |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     proved: list[tuple[str, int, int, str]] = []
     for cc in ARCHS:
         for stages in STAGES:
-            for name, fn, sig, consts, opts, attrs in _kernels(stages):
+            for name, fn, sig, consts, opts, attrs in _kernels(stages, cc):
                 try:
                     ttgir = _ttgir(fn, sig, consts, opts, attrs, cc)
                 except Exception as e:  # noqa: BLE001
                     lines.append(
-                        f"| {name} | sm{cc} | {stages} | - | - | compile-error "
-                        f"({type(e).__name__}) | - | - |"
+                        f"| {name} | sm{cc} | {stages} | - | - | - | "
+                        f"compile-error ({type(e).__name__}) | - | - |"
                     )
                     continue
                 n_async = ttgir.count("ttg.async_copy_global_to_local")
+                n_tma = ttgir.count("ttng.async_tma_copy_global_to_local")
                 n_wgmma = ttgir.count("ttng.warp_group_dot ")
                 status, n_reports, reason, dt, _ = _analyze(ttgir)
                 verdict = (
@@ -279,10 +375,10 @@ def sweep() -> str:
                     else f"unsupported: {(reason or '')[:60]}"
                 )
                 lines.append(
-                    f"| {name} | sm{cc} | {stages} | {n_async} | {n_wgmma} "
-                    f"| {verdict} | {n_reports} | {dt:.3f} |"
+                    f"| {name} | sm{cc} | {stages} | {n_async} | {n_tma} "
+                    f"| {n_wgmma} | {verdict} | {n_reports} | {dt:.3f} |"
                 )
-                if status == "ok" and n_reports == 0 and n_async > 0:
+                if status == "ok" and n_reports == 0 and n_async + n_tma + n_wgmma > 0:
                     proved.append((name, cc, stages, ttgir))
 
     lines += [
@@ -309,8 +405,14 @@ def sweep() -> str:
                     case_studies["CS1"] = (name, cc, stages, reports)
                 if mut_name == "single_buffer" and "CS2" not in case_studies:
                     case_studies["CS2"] = (name, cc, stages, reports)
-                if mut_name == "weaken_pendings" and "CS3" not in case_studies:
+                if (
+                    mut_name == "weaken_pendings"
+                    and stages >= 2  # the narration is about the rotation
+                    and "CS3" not in case_studies
+                ):
                     case_studies["CS3"] = (name, cc, stages, reports)
+                if mut_name == "delete_wait_barrier" and "CS4" not in case_studies:
+                    case_studies["CS4"] = (name, cc, stages, reports)
             elif status == "ok":
                 row.append("MISSED")
                 matrix_ok = False
@@ -346,8 +448,16 @@ def sweep() -> str:
             "race on the wgmma async agent, a bug class the sm80 model "
             "cannot even express."
         ),
+        "CS4": (
+            "Missing mbarrier phase wait (sm90 TMA): without "
+            "`wait_barrier`, the consumer reads a slot whose "
+            "`async_tma_copy_global_to_local` arrivals may still be in "
+            "flight — the descriptor-pipeline analog of the forgotten "
+            "`async_wait`, guarded by expect-tx byte counting instead of "
+            "commit groups."
+        ),
     }
-    for cs in ("CS1", "CS2", "CS3"):
+    for cs in ("CS1", "CS2", "CS3", "CS4"):
         if cs not in case_studies:
             lines += [f"### {cs}: NOT CAPTURED — investigate", ""]
             continue
