@@ -78,6 +78,41 @@ def test_generic_only_model():
     assert m.generic_only
 
 
+def test_sm90_tma_protocol_model():
+    """The mbarrier protocol on the TMA golden dump: the loop arming
+    chain rotates two ahead of the consumer's wait chain, prologue
+    armings cover exactly the slots the loop chain first reaches one
+    period late, the phase chain simulates to ((k + b_w) div S) mod 2,
+    and every arming is byte-exact."""
+    g = _graph("matmul_tma_s3_sm90.ttgir")
+    m = build_pipeline_model(g)
+
+    assert len(m.barrier_waits) == 1
+    bw = m.barrier_waits[0]
+    assert bw.phase_valid
+    assert bw.slot == RotatingSlot(base=0, modulus=3)
+
+    assert len(m.tma_copies) == 6
+    assert all(c.arming_valid for c in m.tma_copies)
+    loop_copies = [c for c in m.tma_copies if c.segment == "loop"]
+    assert len(loop_copies) == 2
+    assert {c.barrier_slot for c in loop_copies} == {RotatingSlot(base=2, modulus=3)}
+    assert {c.slot for c in loop_copies} == {RotatingSlot(base=2, modulus=3)}
+    prologue_slots = {c.barrier_slot for c in m.tma_copies if c.segment == "prologue"}
+    assert prologue_slots == {ConstSlot(0), ConstSlot(1)}
+
+    # Consumer reads are barrier-guarded (no cp.async machinery at all).
+    assert m.prologue_commits == 0 and m.commits_per_iter == 0
+    assert len(m.loads) == 2 and all(ld.via_dot for ld in m.loads)
+    assert all(ld.barrier_guards == (bw,) for ld in m.loads)
+    assert all(ld.wait_num is None for ld in m.loads)
+    assert not bw.one_shot  # persistent rotating protocol here
+
+    from triton_viz.clients.race_detector.compiled.hb import validate_reuse_drain
+
+    assert validate_reuse_drain(g, m) is None
+
+
 def test_sm90_wgmma_counting_model():
     """The wgmma agent on the sm90 golden dump: one async warp_group_dot
     per iteration reading both allocations at slot (k mod 3), retired by

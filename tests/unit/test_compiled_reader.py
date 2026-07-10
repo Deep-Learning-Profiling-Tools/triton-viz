@@ -95,6 +95,36 @@ def test_sm90_wgmma_parses_into_dot_events():
     assert any("nvmma_shared" in v for v in g.layouts.values())
 
 
+def test_sm90_tma_dump_parses_into_protocol_events():
+    """The descriptor pipeline parses: barrier alloc identified via
+    init_barrier, expects/waits/TMA copies with their predicates, the
+    epilogue TMA store and the proxy fence; descriptor plumbing
+    (tensormap_create etc.) and global_scratch_alloc are non-events."""
+    g = parse_ttgir(_read("matmul_tma_s3_sm90.ttgir"))
+    assert g.barrier_allocs == {"%acc"}
+    assert [(e.segment, e.bytes) for e in g.expects] == [
+        ("prologue", 8192),
+        ("prologue", 8192),
+        ("loop", 8192),
+    ]
+    assert [(w.segment, w.phase_ssa) for w in g.barrier_waits] == [("loop", "%acc_28")]
+    assert [(c.segment, c.alloc) for c in g.tma_copies] == [
+        ("prologue", "%a_7"),
+        ("prologue", "%b_8"),
+        ("prologue", "%a_7"),
+        ("prologue", "%b_8"),
+        ("loop", "%a_7"),
+        ("loop", "%b_8"),
+    ]
+    assert all(c.barrier_alloc == "%acc" for c in g.tma_copies)
+    assert all(c.pred_ssa is not None for c in g.tma_copies)
+    assert [(t.segment, t.alloc) for t in g.tma_stores] == [("epilogue", "%3")]
+    assert [f.segment for f in g.fences] == ["epilogue"]
+    # The reused epilogue allocation is flagged for the drain check.
+    assert g.allocations["%3"].post_dealloc
+    assert not g.allocations["%3"].memdesc.mutable
+
+
 def test_explicit_barrier_is_unsupported():
     text = _read("matmul_s3_sm80.ttgir").replace(
         "%a_96 = ttg.async_wait", "gpu.barrier\n      %a_96 = ttg.async_wait"

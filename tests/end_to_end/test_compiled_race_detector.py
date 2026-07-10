@@ -73,31 +73,30 @@ def test_sm90_fence_async_shared_is_accepted():
     assert r.reports == []
 
 
-def test_sm90_tma_ops_stay_unsupported_not_silent():
-    """ttng ops outside the modeled sm90 subset (TMA/mbarrier — plan M4
-    tranche 2) must still degrade to an honest unsupported."""
+def test_warp_specialized_tma_dump_is_unsupported_not_silent():
+    """The warp-specialized pipeline (tl.range(..., warp_specialize=True))
+    is a cross-warp-group protocol: producer default region + consumer
+    partitions synchronized by count-128 arrive barriers. Outside the
+    tranche-2 model — must fail closed (here on the first thread-arrival
+    barrier, before even reaching ttg.warp_specialize)."""
+    r = analyze_ttgir(_read("matmul_tma_ws_s3_sm90.ttgir"))
+    assert r.status == "unsupported"
+    reason = r.unsupported_reason or ""
+    assert "count 128" in reason or "warp_specialize" in reason
+
+
+def test_sm90_ops_outside_subset_stay_unsupported_not_silent():
+    """ttng ops outside the modeled sm90 subset (warp specialization,
+    Blackwell tcgen5) must still degrade to an honest unsupported."""
     stock = _read("matmul_s3_sm90.ttgir")
     mutated = stock.replace(
         "%acc_71 = ttg.async_wait {num = 0 : i32} loc(#loc89)",
         "%acc_71 = ttg.async_wait {num = 0 : i32} loc(#loc89)\n"
-        "    ttng.async_tma_copy_global_to_local %desc, %bar loc(#loc89)",
+        "    ttng.tc_gen5_mma %a, %b, %acc loc(#loc89)",
     )
     r = analyze_ttgir(mutated)
     assert r.status == "unsupported"
-    assert "ttng.async_tma_copy_global_to_local" in (r.unsupported_reason or "")
-
-
-def test_sm90_tma_golden_dump_is_unsupported_not_silent():
-    """The real descriptor-based pipeline (tl.make_tensor_descriptor →
-    async_tma_copy + mbarrier phase waits) is tranche-2 territory: until
-    the mbarrier agent is modeled, the whole dump must degrade to an
-    honest unsupported on its first out-of-vocabulary op (currently the
-    ttg.global_scratch_alloc TMA workspace, before any ttng op)."""
-    r = analyze_ttgir(_read("matmul_tma_s3_sm90.ttgir"))
-    assert r.status == "unsupported"
-    assert "unmodeled op" in (r.unsupported_reason or "") or "ttng." in (
-        r.unsupported_reason or ""
-    )
+    assert "ttng.tc_gen5_mma" in (r.unsupported_reason or "")
 
 
 # ──────────────────────── analyzer-level: mutations ────────────────────────
@@ -108,15 +107,21 @@ def test_sm90_tma_golden_dump_is_unsupported_not_silent():
 def _assert_races(
     text: str, expect_min: int = 1, kind: RaceType = RaceType.RAW
 ) -> list:
+    """At least ``expect_min`` reports of ``kind`` with sane witnesses.
+    Other kinds may accompany them: a weakened/deleted wait leaves the
+    writes unretired too, so the same mutation legitimately surfaces
+    WAW alongside the RAW/WAR it was aimed at."""
     r = analyze_ttgir(text)
     assert r.status == "ok", r.unsupported_reason
-    assert len(r.reports) >= expect_min, "mutation not detected"
-    iter_key = "k_load" if kind is RaceType.RAW else "k_copy"
-    for rep in r.reports:
-        assert rep.race_type == kind
-        assert rep.witness[iter_key] >= 0
-        assert rep.witness["slot"] >= 0
-    return r.reports
+    matching = [rep for rep in r.reports if rep.race_type == kind]
+    assert len(matching) >= expect_min, (
+        f"mutation not detected as {kind.name}: "
+        f"{[(rep.race_type.name, rep.message[:60]) for rep in r.reports]}"
+    )
+    for rep in matching:
+        if rep.witness:
+            assert rep.witness["slot"] >= 0
+    return matching
 
 
 def test_mutation_weakened_wait_num():
@@ -212,6 +217,142 @@ def test_sm90_mutation_weakened_async_wait_reports_wgmma_raw():
     assert any("warp_group_dot" in r.message for r in reports)
 
 
+# ─────────────── analyzer-level: sm90 TMA/mbarrier (tranche 2) ───────────────
+# The descriptor pipeline: barrier_expect arms an mbarrier slot with the
+# byte count of BOTH TMA copies of that round; the consumer's wait_barrier
+# targets arming (k + b_w) div S of slot (b_w + k) mod S with parity
+# ((k + b_w) div S) mod 2; the copy at k' belongs to arming
+# (k' + b_e) div S. Coverage collapses to the linear k' + b_e ≤ k + b_w.
+
+
+def test_stock_sm90_tma_pipeline_is_proven_race_free():
+    r = analyze_ttgir(_read("matmul_tma_s3_sm90.ttgir"))
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+
+def test_stock_sm90_tma_one_shot_is_proven_race_free():
+    """num_stages=1 lowers to the ONE-SHOT protocol: a fresh in-loop
+    barrier per iteration (init → expect → copy → wait phase 0 → inval),
+    one per input buffer. The wgmma read is guarded by BOTH waits — a
+    copy is covered when ANY matching guard orders it, and its own
+    iteration's wait forces same-or-earlier-iteration completion."""
+    r = analyze_ttgir(_read("matmul_tma_s1_sm90.ttgir"))
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+
+def test_tma_one_shot_mutation_deleted_wait_barrier():
+    stock = _read("matmul_tma_s1_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "ttng.wait_barrier" not in line
+    )
+    _assert_races(mutated)
+
+
+def test_tma_one_shot_mutation_wrong_phase_constant():
+    """Waiting parity 1 on a fresh phase-0 barrier returns before the
+    arrivals land — a coverage hole, reported."""
+    stock = _read("matmul_tma_s1_sm90.ttgir")
+    mutated = stock.replace(
+        "ttng.wait_barrier %a_10, %c0_i32", "ttng.wait_barrier %a_10, %c1_i32"
+    )
+    reports = _assert_races(mutated)
+    assert all(r.alloc == "%a_9" for r in reports)
+
+
+def test_tma_mutation_deleted_wait_barrier():
+    """No phase wait at all: every read runs unguarded against in-flight
+    TMA arrivals."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "ttng.wait_barrier" not in line
+    )
+    reports = _assert_races(mutated)
+    assert any("no wait_barrier guards the read" in r.message for r in reports)
+
+
+def test_tma_mutation_phase_never_flips():
+    """Breaking the parity flip (xori 1 → 0) makes the wait target an
+    already-completed phase from the second rotation period on — a real
+    coverage hole, reported as RAW, not abstained."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace("arith.xori %arg10, %c1_i32", "arith.xori %arg10, %c0_i32")
+    reports = _assert_races(mutated)
+    assert any("phase chain" in r.message for r in reports)
+
+
+def test_tma_mutation_expect_undercount():
+    """barrier_expect 8192 → 4096: the phase completes after ~one of the
+    two copies, so the wait orders neither — both allocations report."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace(
+        "ttng.barrier_expect %acc_39, 8192", "ttng.barrier_expect %acc_39, 4096"
+    )
+    reports = _assert_races(mutated)
+    assert any("undercounts" in r.message for r in reports)
+
+
+def test_tma_mutation_expect_overcount_is_deadlock_unsupported():
+    """barrier_expect larger than its arrivals never completes: a hang,
+    not a race — honest unsupported."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace(
+        "ttng.barrier_expect %acc_39, 8192", "ttng.barrier_expect %acc_39, 16384"
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "deadlock" in (r.unsupported_reason or "")
+
+
+def test_tma_mutation_deleted_dot_wait_is_war():
+    """The WAR direction survives under TMA writers: without the wgmma
+    drain, the next round's TMA copy overwrites a slot a pending
+    warp_group_dot still reads."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "warp_group_dot_wait" not in line
+    )
+    reports = _assert_races(mutated, kind=RaceType.WAR)
+    assert any("async_tma_copy_global_to_local" in r.message for r in reports)
+
+
+def test_tma_mutation_deleted_fence_is_raw():
+    """The epilogue TMA store reads a generically-initialized immutable
+    allocation; dropping the fence_async_shared between them is the
+    stale-read proxy-crossing bug."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "fence_async_shared" not in line
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "ok", r.unsupported_reason
+    assert len(r.reports) == 1
+    assert r.reports[0].race_type == RaceType.RAW
+    assert "fence_async_shared" in r.reports[0].message
+
+
+def test_tma_mutation_wrong_barrier_slot_is_deadlock_unsupported():
+    """A copy signaling the consumer's slot chain instead of its arming
+    chain leaves the armed slot starving — deadlock, honest unsupported."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace("%a_40, %acc_39, %acc_23", "%a_40, %acc_29, %acc_23")
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "no matching barrier_expect" in (r.unsupported_reason or "")
+
+
+def test_tma_mutation_weakened_prefetch_stop_fails_the_drain():
+    """Prefetch predicate iv < trip-1 instead of trip-2: the last arming
+    can still be in flight when the epilogue reuses the freed storage —
+    the reuse drain is no longer provable."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace("arith.subi %1, %c2_i32", "arith.subi %1, %c1_i32")
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "drain" in (r.unsupported_reason or "")
+
+
 def test_const_slot_out_of_range_is_unsupported():
     """Shrinking the memdesc to depth 1 WITHOUT fixing the prologue leaves a
     constant slot-1 access into a 1-stage buffer — inconsistent geometry. The
@@ -245,6 +386,8 @@ def test_mutation_dropped_commit_group():
         "%a_117 = ttg.async_commit_group",
     )
     reports = _assert_races(mutated)
+    # exactly the one (uncommitted copy, load) RAW pair; the same
+    # uncommitted copy also shows up as WAW (nothing ever retires it)
     assert len(reports) == 1
 
 
@@ -313,16 +456,44 @@ def test_conditional_region_in_loop_is_unsupported():
     assert "region" in (r.unsupported_reason or "")
 
 
-def test_local_alloc_after_dealloc_is_unsupported():
-    """A local_alloc following a local_dealloc may reuse the freed storage —
-    allocation aliasing the v1 model does not track. It must degrade to
-    unsupported (the terminal epilogue deallocs in the stock IR, with no
-    later alloc, stay a clean proof — see the stock test)."""
+def test_local_alloc_after_dealloc_epilogue_reuse_needs_a_proven_drain():
+    """Epilogue storage reuse (local_alloc after local_dealloc) is allowed
+    only under a proven drain of every async agent. The sm80 stock
+    epilogue drains with ``async_wait {num=0}``, so an injected reuse
+    still analyzes ok; DELETING that drain flips the same kernel to an
+    honest unsupported — never a silent proof over reused storage."""
     stock = _read("matmul_s3_sm80.ttgir")
+    reuse_line = (
+        "ttg.local_dealloc %b : !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)\n"
+        "    %reuse = ttg.local_alloc : () -> !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)"
+    )
     mutated = stock.replace(
         "ttg.local_dealloc %b : !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)",
+        reuse_line,
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+    undrained = "\n".join(
+        line
+        for line in mutated.splitlines()
+        if "ttg.async_wait {num = 0 : i32}" not in line
+    )
+    r2 = analyze_ttgir(undrained)
+    assert r2.status == "unsupported"
+    assert "drain" in (r2.unsupported_reason or "")
+
+
+def test_local_alloc_after_dealloc_outside_epilogue_is_unsupported():
+    """Reuse before the epilogue (here: dealloc+alloc injected in the
+    prologue) has no drain story at all — fail closed."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "%acc = arith.cmpi sgt, %1, %c0_i32 : i32 loc(#loc89)",
         "ttg.local_dealloc %b : !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)\n"
-        "    %reuse = ttg.local_alloc : () -> !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)",
+        "    %reuse = ttg.local_alloc : () -> !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)\n"
+        "    %acc = arith.cmpi sgt, %1, %c0_i32 : i32 loc(#loc89)",
     )
     r = analyze_ttgir(mutated)
     assert r.status == "unsupported"

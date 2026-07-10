@@ -65,6 +65,14 @@ class Allocation:
     # the indexing op, not ``stages > 1``, so a depth-1 staged buffer is not
     # mistaken for an un-staged one.
     has_stage_dim: bool = False
+    # Where the alloc op sits: segment + a snapshot of the segment's event
+    # counter (events with body_pos ≤ the snapshot precede the alloc).
+    segment: str = "prologue"
+    body_pos: int = 0
+    # True when this alloc follows a local_dealloc — potential storage reuse.
+    # The reader permits the pattern only in the epilogue; analyze_graph then
+    # requires a proven drain of every async agent (see smt_encoder).
+    post_dealloc: bool = False
 
     @property
     def buffer_dims(self) -> tuple[int, ...]:
@@ -172,6 +180,86 @@ class DotWaitEvent:
 
 
 @dataclass
+class ExpectEvent:
+    """``ttng.barrier_expect %bar, bytes, %pred`` — arms one phase of an
+    mbarrier slot with an expected transaction byte count. The phase
+    completes (and waits on it return) once TMA arrivals totaling
+    ``bytes`` land on the slot."""
+
+    barrier_alloc: str
+    index_ssa: str | None
+    bytes: int
+    pred_ssa: str | None
+    segment: str
+    body_pos: int
+    line_no: int
+
+
+@dataclass
+class BarrierWaitEvent:
+    """``ttng.wait_barrier %bar, %phase`` — blocks until the mbarrier slot
+    completes the phase with the given parity."""
+
+    barrier_alloc: str
+    index_ssa: str | None
+    phase_ssa: str
+    segment: str
+    body_pos: int
+    line_no: int
+
+
+@dataclass
+class TmaCopyEvent:
+    """``ttng.async_tma_copy_global_to_local %desc[..] %view, %bar, %pred``
+    — an async-proxy smem write whose completion is signaled by arriving
+    its byte count on the mbarrier slot (no commit-group token)."""
+
+    alloc: str
+    index_ssa: str | None
+    barrier_alloc: str
+    barrier_index_ssa: str | None
+    pred_ssa: str | None
+    segment: str
+    body_pos: int
+    loc: SourceLoc | None
+    line_no: int
+
+
+@dataclass
+class TmaStoreEvent:
+    """``ttng.async_tma_copy_local_to_global %desc[..] %src`` — an
+    async-proxy smem READ (drained by ``async_tma_store_wait``)."""
+
+    alloc: str
+    index_ssa: str | None
+    segment: str
+    body_pos: int
+    loc: SourceLoc | None
+    line_no: int
+
+
+@dataclass
+class TmaStoreWaitEvent:
+    """``ttng.async_tma_store_wait {pendings=N}`` — drains outstanding
+    TMA local→global stores down to at most N."""
+
+    pendings: int
+    segment: str
+    body_pos: int
+    line_no: int
+
+
+@dataclass
+class FenceEvent:
+    """``ttng.fence_async_shared`` — orders preceding generic-proxy smem
+    writes before subsequent async-proxy reads (wgmma / TMA)."""
+
+    segment: str
+    body_pos: int
+    line_no: int
+
+
+@dataclass
 class WaitEvent:
     """``ttg.async_wait %tok0, %tok1, ... {num=N}``.
 
@@ -222,6 +310,23 @@ class EventGraph:
     waits: list[WaitEvent] = field(default_factory=list)
     dots: list[DotEvent] = field(default_factory=list)
     dot_waits: list[DotWaitEvent] = field(default_factory=list)
+    expects: list[ExpectEvent] = field(default_factory=list)
+    barrier_waits: list[BarrierWaitEvent] = field(default_factory=list)
+    tma_copies: list[TmaCopyEvent] = field(default_factory=list)
+    tma_stores: list[TmaStoreEvent] = field(default_factory=list)
+    tma_store_waits: list[TmaStoreWaitEvent] = field(default_factory=list)
+    fences: list[FenceEvent] = field(default_factory=list)
+    # Allocations that init_barrier turned into mbarrier storage: sync
+    # objects, excluded from data-race pairs (a data access on one is
+    # unsupported).
+    barrier_allocs: set[str] = field(default_factory=set)
+    # Where each barrier alloc is initialized: (segment, body_pos). An
+    # in-loop init is the ONE-SHOT protocol: a fresh phase-0 barrier per
+    # iteration (expect → copy → wait phase 0 → inval), vs the persistent
+    # rotating protocol of prologue-initialized barriers. The position
+    # lets the validator require init BEFORE the first protocol event —
+    # mbarrier ops on uninitialized storage are UB.
+    barrier_init: dict[str, tuple[str, int]] = field(default_factory=dict)
     kernel_name: str = ""
 
     def iter_arg_init(self, arg_name: str) -> str | None:
@@ -257,6 +362,8 @@ _RE_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\(")
 _RE_RESULT = re.compile(rf"^({_SSA})(?::(\d+))?\s*=\s*(.*)$")
 _RE_CONST_INT = re.compile(r"^arith\.constant (-?\d+) : i\d+")
 _RE_ADDI = re.compile(rf"^arith\.addi ({_SSA}), ({_SSA}) : i32")
+_RE_SUBI = re.compile(rf"^arith\.subi ({_SSA}), ({_SSA}) : i32")
+_RE_XORI = re.compile(rf"^arith\.xori ({_SSA}), ({_SSA}) : i32")
 _RE_CMPI = re.compile(rf"^arith\.cmpi (\w+), ({_SSA}), ({_SSA}) : i32")
 _RE_SELECT = re.compile(rf"^arith\.select ({_SSA}), ({_SSA}), ({_SSA}) : i32")
 _RE_LOCAL_ALLOC = re.compile(
@@ -279,6 +386,22 @@ _RE_LOCAL_STORE = re.compile(rf"^ttg\.local_store ({_SSA}), ({_SSA})")
 _RE_WARP_GROUP_DOT = re.compile(rf"^ttng\.warp_group_dot ((?:{_SSA},?\s*)+)\{{")
 _RE_WARP_GROUP_DOT_WAIT = re.compile(
     rf"^ttng\.warp_group_dot_wait ((?:{_SSA},?\s*)*)\{{pendings = (\d+) : i32\}}"
+)
+_RE_INIT_BARRIER = re.compile(rf"^ttng\.init_barrier ({_SSA}), (\d+)")
+_RE_INVAL_BARRIER = re.compile(rf"^ttng\.inval_barrier ({_SSA})")
+_RE_BARRIER_EXPECT = re.compile(
+    rf"^ttng\.barrier_expect ({_SSA}), (\d+)(?:, ({_SSA}))?\s*:"
+)
+_RE_WAIT_BARRIER = re.compile(rf"^ttng\.wait_barrier ({_SSA}), ({_SSA})(, {_SSA})?\s*:")
+_RE_TMA_G2L = re.compile(
+    rf"^ttng\.async_tma_copy_global_to_local ({_SSA})\[[^\]]*\] "
+    rf"({_SSA}), ({_SSA})(?:, ({_SSA}))?\s*:"
+)
+_RE_TMA_L2G = re.compile(
+    rf"^ttng\.async_tma_copy_local_to_global ({_SSA})\[[^\]]*\] ({_SSA})\s*:"
+)
+_RE_TMA_STORE_WAIT = re.compile(
+    r"^ttng\.async_tma_store_wait \{pendings = (\d+) : i32\}"
 )
 _RE_SCF_FOR = re.compile(
     rf"^(?:({_SSA})(?::\d+)?\s*=\s*)?scf\.for ({_SSA}) = ({_SSA}) to ({_SSA}) "
@@ -303,17 +426,29 @@ _KNOWN_TTG_OPS = {
     "ttg.async_commit_group",
     "ttg.async_wait",
     "ttg.convert_layout",  # smem scratch is internal; ordered by Membar
+    "ttg.global_scratch_alloc",  # per-instance global scratch, not smem
 }
 
-# The sm90 subset (M4 tranche 1): the wgmma agent and its counting wait.
-# fence_async_shared only ADDS ordering (generic→async proxy); the model
-# never relies on it for a proof, and the shapes where ignoring it could
-# hide one behind a report (generic stores mixed with async ops on one
-# allocation) are already gated unsupported in analyze_graph.
+# The sm90 subset (M4): tranche 1 is the wgmma agent and its counting
+# wait; tranche 2 adds the TMA/mbarrier protocol (expect-tx arming, phase
+# waits, TMA copies/stores) and the descriptor plumbing. tensormap_create
+# and its fence/reinterpret write only the per-instance global scratch
+# (never shared memory), and global_scratch_alloc allocates it — non-events
+# for the smem race model.
 _KNOWN_TTNG_OPS = {
     "ttng.warp_group_dot",
     "ttng.warp_group_dot_wait",
     "ttng.fence_async_shared",
+    "ttng.init_barrier",
+    "ttng.inval_barrier",
+    "ttng.barrier_expect",
+    "ttng.wait_barrier",
+    "ttng.async_tma_copy_global_to_local",
+    "ttng.async_tma_copy_local_to_global",
+    "ttng.async_tma_store_wait",
+    "ttng.tensormap_create",
+    "ttng.tensormap_fenceproxy_acquire",
+    "ttng.reinterpret_tensor_descriptor",
 }
 
 _DTYPE_BITS = {
@@ -416,6 +551,19 @@ def parse_ttgir(text: str) -> EventGraph:
     waits: list[WaitEvent] = []
     dots: list[DotEvent] = []
     dot_waits: list[DotWaitEvent] = []
+    expects: list[ExpectEvent] = []
+    barrier_waits: list[BarrierWaitEvent] = []
+    tma_copies: list[TmaCopyEvent] = []
+    tma_stores: list[TmaStoreEvent] = []
+    tma_store_waits: list[TmaStoreWaitEvent] = []
+    fences: list[FenceEvent] = []
+    barrier_allocs: set[str] = set()
+    # Barriers freed by inval_barrier: later protocol events on them are
+    # use-after-invalidation — outside the model (terminal invals are the
+    # stock teardown and harmless).
+    invalidated_barriers: set[str] = set()
+    barrier_init: dict[str, tuple[str, int]] = {}
+    barrier_init_slots: set[tuple[str, str]] = set()
 
     segment = "prologue"
     loop_depth = 0
@@ -565,6 +713,14 @@ def parse_ttgir(text: str) -> EventGraph:
         if am and results:
             defs[results[0]] = SsaDef("addi", am.groups(), {}, line_no, segment)
             continue
+        am = _RE_SUBI.match(body)
+        if am and results:
+            defs[results[0]] = SsaDef("subi", am.groups(), {}, line_no, segment)
+            continue
+        am = _RE_XORI.match(body)
+        if am and results:
+            defs[results[0]] = SsaDef("xori", am.groups(), {}, line_no, segment)
+            continue
         am = _RE_CMPI.match(body)
         if am and results:
             defs[results[0]] = SsaDef(
@@ -587,7 +743,7 @@ def parse_ttgir(text: str) -> EventGraph:
             continue
 
         if op_kind == "ttg.local_alloc":
-            if seen_dealloc:
+            if seen_dealloc and segment != "epilogue":
                 raise UnsupportedTTGIR(
                     f"line {line_no}: local_alloc after local_dealloc — buffer "
                     "reuse / allocation aliasing is not modeled in v1"
@@ -597,7 +753,14 @@ def parse_ttgir(text: str) -> EventGraph:
                 raise UnsupportedTTGIR(f"line {line_no}: unparsable local_alloc")
             operand, memdesc_body = lm.group(1), lm.group(2)
             memdesc = _parse_memdesc(memdesc_body)
-            allocations[results[0]] = Allocation(results[0], memdesc, loc)
+            allocations[results[0]] = Allocation(
+                results[0],
+                memdesc,
+                loc,
+                segment=segment,
+                body_pos=body_pos[segment],
+                post_dealloc=seen_dealloc,
+            )
             if operand is not None:
                 stores.append(
                     StoreEvent(results[0], None, segment, next_pos(), loc, line_no)
@@ -773,15 +936,182 @@ def parse_ttgir(text: str) -> EventGraph:
             continue
 
         if op_kind == "ttng.fence_async_shared":
-            # Proxy fence: adds generic→async ordering. Never load-bearing
-            # for the modeled proofs (see _KNOWN_TTNG_OPS note); no event.
+            # Proxy fence: orders preceding generic-proxy smem writes before
+            # subsequent async-proxy reads. Recorded — it is load-bearing for
+            # the immutable-allocation shapes (local_alloc-with-operand read
+            # by wgmma / TMA store); see analyze_graph.
+            fences.append(FenceEvent(segment, next_pos(), line_no))
+            continue
+
+        if op_kind == "ttng.init_barrier":
+            bm = _RE_INIT_BARRIER.match(body)
+            if not bm:
+                raise UnsupportedTTGIR(f"line {line_no}: unparsable init_barrier")
+            alloc, _idx = resolve_view(bm.group(1), line_no)
+            if int(bm.group(2)) != 1:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: init_barrier count {bm.group(2)} != 1 — "
+                    "thread-arrival counting is not modeled (only the TMA "
+                    "expect-tx protocol)"
+                )
+            slot_key = (alloc, _idx or "")
+            if slot_key in barrier_init_slots:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: re-initialized barrier slot {slot_key} "
+                    "— repeated barrier protocols are not modeled"
+                )
+            barrier_init_slots.add(slot_key)
+            prev = barrier_init.get(alloc)
+            pos = next_pos()
+            if prev is not None and prev[0] != segment:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: init_barrier on {alloc} in {segment} "
+                    f"after an init in {prev[0]} — mixed barrier protocols"
+                )
+            # keep the LATEST init position: every init must precede every
+            # protocol use (validated in hb).
+            barrier_init[alloc] = (segment, pos)
+            barrier_allocs.add(alloc)
+            continue
+
+        if op_kind == "ttng.inval_barrier":
+            bm = _RE_INVAL_BARRIER.match(body)
+            if not bm:
+                raise UnsupportedTTGIR(f"line {line_no}: unparsable inval_barrier")
+            alloc, _idx = resolve_view(bm.group(1), line_no)
+            invalidated_barriers.add(alloc)
+            continue
+
+        if op_kind == "ttng.barrier_expect":
+            bm = _RE_BARRIER_EXPECT.match(body)
+            if not bm:
+                raise UnsupportedTTGIR(f"line {line_no}: unparsable barrier_expect")
+            alloc, idx = resolve_view(bm.group(1), line_no)
+            if alloc in invalidated_barriers:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: barrier_expect after inval_barrier"
+                )
+            expects.append(
+                ExpectEvent(
+                    barrier_alloc=alloc,
+                    index_ssa=idx,
+                    bytes=int(bm.group(2)),
+                    pred_ssa=bm.group(3),
+                    segment=segment,
+                    body_pos=next_pos(),
+                    line_no=line_no,
+                )
+            )
+            continue
+
+        if op_kind == "ttng.wait_barrier":
+            bm = _RE_WAIT_BARRIER.match(body)
+            if not bm:
+                raise UnsupportedTTGIR(f"line {line_no}: unparsable wait_barrier")
+            if bm.group(3):
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: predicated wait_barrier is not modeled"
+                )
+            alloc, idx = resolve_view(bm.group(1), line_no)
+            if alloc in invalidated_barriers:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: wait_barrier after inval_barrier"
+                )
+            barrier_waits.append(
+                BarrierWaitEvent(
+                    barrier_alloc=alloc,
+                    index_ssa=idx,
+                    phase_ssa=bm.group(2),
+                    segment=segment,
+                    body_pos=next_pos(),
+                    line_no=line_no,
+                )
+            )
+            continue
+
+        if op_kind == "ttng.async_tma_copy_global_to_local":
+            bm = _RE_TMA_G2L.match(body)
+            if not bm:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: unparsable async_tma_copy_global_to_local"
+                )
+            alloc, idx = resolve_view(bm.group(2), line_no)
+            bar_alloc, bar_idx = resolve_view(bm.group(3), line_no)
+            if bar_alloc in invalidated_barriers:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: TMA copy signals an invalidated barrier"
+                )
+            tma_copies.append(
+                TmaCopyEvent(
+                    alloc=alloc,
+                    index_ssa=idx,
+                    barrier_alloc=bar_alloc,
+                    barrier_index_ssa=bar_idx,
+                    pred_ssa=bm.group(4),
+                    segment=segment,
+                    body_pos=next_pos(),
+                    loc=loc,
+                    line_no=line_no,
+                )
+            )
+            if segment == "loop":
+                seen_loop_with_events = True
+            continue
+
+        if op_kind == "ttng.async_tma_copy_local_to_global":
+            bm = _RE_TMA_L2G.match(body)
+            if not bm:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: unparsable async_tma_copy_local_to_global"
+                )
+            alloc, idx = resolve_view(bm.group(2), line_no)
+            tma_stores.append(
+                TmaStoreEvent(
+                    alloc=alloc,
+                    index_ssa=idx,
+                    segment=segment,
+                    body_pos=next_pos(),
+                    loc=loc,
+                    line_no=line_no,
+                )
+            )
+            if segment == "loop":
+                seen_loop_with_events = True
+            continue
+
+        if op_kind == "ttng.async_tma_store_wait":
+            swm = _RE_TMA_STORE_WAIT.match(body)
+            if not swm:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: unparsable async_tma_store_wait"
+                )
+            tma_store_waits.append(
+                TmaStoreWaitEvent(int(swm.group(1)), segment, next_pos(), line_no)
+            )
+            continue
+
+        if op_kind in (
+            "ttng.tensormap_create",
+            "ttng.tensormap_fenceproxy_acquire",
+            "ttng.reinterpret_tensor_descriptor",
+        ):
+            # Descriptor plumbing over per-instance global scratch — no smem
+            # effect (see _KNOWN_TTNG_OPS note).
             continue
 
         # ttg.convert_layout / tt.* / arith.* on tensors: not events in the v1
         # model. (ttg.local_dealloc is handled above.)
 
     # Resolve loc ids (aliases live at the bottom of the file).
-    event_lists: list[list[Any]] = [copies, loads, stores, waits, dots]
+    event_lists: list[list[Any]] = [
+        copies,
+        loads,
+        stores,
+        waits,
+        dots,
+        tma_copies,
+        tma_stores,
+    ]
     for ev_list in event_lists:
         for ev in ev_list:
             if isinstance(ev.loc, str):
@@ -806,5 +1136,13 @@ def parse_ttgir(text: str) -> EventGraph:
         waits=waits,
         dots=dots,
         dot_waits=dot_waits,
+        expects=expects,
+        barrier_waits=barrier_waits,
+        tma_copies=tma_copies,
+        tma_stores=tma_stores,
+        tma_store_waits=tma_store_waits,
+        fences=fences,
+        barrier_allocs=barrier_allocs,
+        barrier_init=barrier_init,
         kernel_name=kernel_name,
     )

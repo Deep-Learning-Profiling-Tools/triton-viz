@@ -141,6 +141,42 @@ def matmul_tma_kernel(
 
 
 @triton.jit
+def matmul_tma_ws_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N,
+    K,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Warp-specialized TMA matmul (`tl.range(..., warp_specialize=True)`):
+    lowers to ttg.warp_specialize with a producer default region and
+    consumer partitions synchronized by count-128 arrive barriers — the
+    cross-warp-group protocol OUTSIDE the tranche-2 model (M4 tranche 3
+    scoping artifact; must stay honest-unsupported until then)."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[M, K], strides=[K, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[K, N], strides=[N, 1], block_shape=[BLOCK_K, BLOCK_N]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[N, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in tl.range(0, tl.cdiv(K, BLOCK_K), warp_specialize=True):
+        a = a_desc.load([pid_m * BLOCK_M, k * BLOCK_K])
+        b = b_desc.load([k * BLOCK_K, pid_n * BLOCK_N])
+        acc += tl.dot(a, b)
+    c_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], acc.to(tl.float16))
+
+
+@triton.jit
 def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -345,6 +381,29 @@ if __name__ == "__main__":
     dump(
         "matmul_tma_s3",
         matmul_tma_kernel,
+        TMA_SIG,
+        MATMUL_CONST,
+        TMA_ATTRS,
+        num_stages=3,
+        num_warps=4,
+        caps=(90,),
+    )
+    # stage-1: the ONE-SHOT mbarrier protocol (in-loop init, constant
+    # phase 0, inval after the wait) — no pipelining, fresh barrier per
+    # iteration.
+    dump(
+        "matmul_tma_s1",
+        matmul_tma_kernel,
+        TMA_SIG,
+        MATMUL_CONST,
+        TMA_ATTRS,
+        num_stages=1,
+        num_warps=4,
+        caps=(90,),
+    )
+    dump(
+        "matmul_tma_ws_s3",
+        matmul_tma_ws_kernel,
         TMA_SIG,
         MATMUL_CONST,
         TMA_ATTRS,
