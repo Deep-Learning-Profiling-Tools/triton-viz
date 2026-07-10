@@ -48,8 +48,19 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       stage 1 is the no-pipeline trivial row. Mutation-detection
       matrix: weaken-wait, delete-wait, single-buffer — every
       applicable cell DETECTED (single-buffer n/a at stages=2, where
-      the rotation is already depth 1). sm90 column stays gated on M4
-      (advisor Q5).
+      the rotation is already depth 1).
+- [x] Evaluation sweep, sm90 half — landed with M4 tranche 1
+      (2026-07-10): matmul proves at stages 2..4 (RAW via async_wait
+      counting AND the new WAR via warp_group_dot_wait pendings
+      counting, both UNSAT); stages=1 abstains honestly (generic
+      local_alloc store feeding a wgmma read crosses the generic→async
+      proxy boundary — the documented model gate); softmax rows
+      unchanged. Matrix gains weaken_pendings + delete_dot_wait
+      columns: every applicable sm90 cell DETECTED, single_buffer at
+      sm90 stages=2 now applicable (depth = num_stages) and caught as
+      WAR. CS3 case study: pendings+1 leaves the previous iteration's
+      wgmma read pending on exactly the slot the next cp.async
+      overwrites — a WAR the sm80 model cannot express.
 - [x] Case studies — both captured from the matrix with solver
       witnesses: CS1 missing `async_wait` (matmul @2: 4 RAW reports;
       prologue prefetch vs k_load=0, slot 0) and CS2 insufficient
@@ -96,26 +107,53 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       The paper can update Def. conflict and drop the divergence
       caveat, citing these tests as the implemented-semantics record.
 
-## 4. M4 — sm90/Hopper (GATED on Q5 with the advisor; align before starting)
+## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
-- [ ] `ttng.warp_group_dot_wait {pendings}` agent,
-      `fence_async_shared`, nvmma layouts (formula already
-      verified); then TMA descriptors + mbarrier phase/arrive-count
+- [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands
+      are async reads (they join the RAW machinery as pseudo-loads
+      guarded by the cp.async wait; a memdesc operand that does not
+      resolve to a local_alloc fails closed), and
+      `ttng.warp_group_dot_wait {pendings=N}` is a per-agent counting
+      wait that opens the WAR direction — a copy must not overwrite a
+      slot while a wgmma read of it can still be pending (all waits in
+      effect at the copy constrain; sm80's lockstep argument does not
+      retire the async MMA agent, so WAR is genuinely new here).
+      `fence_async_shared` is vocabulary-accepted (only ADDS ordering
+      the model never relies on; the generic-store-into-async-read
+      shape it orders is gated unsupported). nvmma_shared layouts
+      landed in layouts.py from the recon closed form (8×(8W/E) core
+      tile, vec=128/E, perPhase=128/W, maxPhase=W/16, inner-first tile
+      repetition); the LinearLayout oracle still aborts on shared
+      encodings in the 3.7.1 wheel, so the differential test
+      cross-checks closed form vs the independent basis construction
+      (bijectivity + inverse consistency, 7 cases incl. transposed,
+      col-repetition, W=0). Stock sm90 golden dump: proved race-free
+      (was unsupported); pendings=2 already races (stock is exactly
+      tight at 1). Mutation pins: off-by-one/weakened/deleted dot-wait
+      → WAR; weakened async_wait → RAW naming the wgmma reader.
+- [ ] Tranche 2 — TMA descriptors + mbarrier phase/arrive-count
       modeling + `ttg.warp_specialize`. Needs fresh golden dumps
       from descriptor-based kernels (`tl.make_tensor_descriptor`
-      sources — block-ptr kernels get rewritten to plain pointers).
+      sources — block-ptr kernels get rewritten to plain pointers);
+      ttng TMA/mbarrier ops outside the tranche-1 subset still
+      degrade to honest unsupported (pinned by test).
 
-## 5. Optional: results landing figure (GATED on advisor alignment)
+## 5. Results landing figure — script landed (paper inclusion still an
+## advisor call)
 
-- [ ] The 2-D concretization map of plan §I.2, exported from the
-      results JSONL (each row's terminal state + front-end
-      determines its point), as an evaluation-section figure.
-      Formerly "the core figure"; demoted 2026-07-09 per the
-      contribution-triad feedback — the symbolic/concrete axis is
-      not the paper's headline and the benchmark table already
-      carries the data. Whether it enters the paper at all is
-      pending the next advisor alignment. Figure script separate
-      from the harness.
+- [x] `evaluation/concretization_map.py` (separate from the harness)
+      exports the plan §I.2 map from the results JSONLs: terminal
+      state → (concretized, stays-symbolic) point; proofs /
+      conditional proofs / static reports / confirmed / unconfirmed
+      classes; abstentions in a residual table. Artifacts:
+      CONCRETIZATION_MAP.{md,csv,svg} — the SVG is dependency-free
+      (no matplotlib in the env), the CSV is pgfplots-ready, and the
+      unreachable memory-without-paths column is hatched with the
+      §I.2 asymmetry note. Current 109 rows: 11 at T0, 31+7 at T1,
+      18 static reports, 17 confirmed + 2 unconfirmed on the
+      interpreter point, 18 residual. Whether it enters the paper is
+      pending the next advisor alignment; demoted from "core figure"
+      2026-07-09 per the contribution-triad feedback.
 
 ## 6. S6 stretch items (require B + C1 together; none block the paper)
 
