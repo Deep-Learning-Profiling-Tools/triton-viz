@@ -36,6 +36,7 @@ Model notes:
 from __future__ import annotations
 
 import signal
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -45,6 +46,7 @@ from typing import Any
 import numpy as np
 
 from ....core.callbacks import ForLoopCallbacks, OpCallbacks
+from ....utils.traceback_utils import _is_framework_frame
 from ....core.client import Client
 from ....core.data import (
     AtomicCas,
@@ -77,9 +79,9 @@ class FootprintRecorder(Client):
         self.target_pids = target_pids
         self._current_pid: tuple[int, int, int] = (0, 0, 0)
         self._active = True
-        # pid -> (base data_ptr, kind) -> set of byte addresses
+        # pid -> (base data_ptr, kind, user line) -> set of byte addresses
         self.footprints: dict[
-            tuple[int, int, int], dict[tuple[int, str], set[int]]
+            tuple[int, int, int], dict[tuple[int, str, int | None], set[int]]
         ] = {}
         # tensor bases seen via arg_callback, sorted for base resolution
         self._bases: list[int] = []
@@ -138,7 +140,27 @@ class FootprintRecorder(Client):
             return
         per_pid = self.footprints.setdefault(self._current_pid, {})
         base = self._base_of(int(flat[0]))
-        per_pid.setdefault((base, kind), set()).update(int(a) for a in flat)
+        line = self._user_site_line()
+        per_pid.setdefault((base, kind, line), set()).update(int(a) for a in flat)
+
+    @staticmethod
+    def _user_site_line() -> int | None:
+        """The INNERMOST user frame's line — the kernel-body access site.
+
+        Per-SITE keying: this line matches the reports' TTIR loc lines
+        (both are user-file line numbers), so C2 foci no longer collapse a
+        tensor's same-kind sites into one bucket.
+        ``capture_current_source_location`` is the wrong tool here: it
+        resolves the OUTERMOST user frame (the launch call site — one
+        constant line for the whole run). None (no user frame, e.g. a
+        rewritten-source kernel with a synthetic filename) stays a valid
+        key that consumers treat as unattributable."""
+        frame: Any = sys._getframe(2)
+        while frame is not None:
+            if not _is_framework_frame(frame):
+                return frame.f_lineno
+            frame = frame.f_back
+        return None
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def pre_load(ptr, mask, keys):
@@ -178,7 +200,7 @@ class FootprintRecorder(Client):
 
 @dataclass
 class ReplayResult:
-    footprints: dict[tuple[int, int, int], dict[tuple[int, str], set[int]]]
+    footprints: dict[tuple[int, int, int], dict[tuple[int, str, int | None], set[int]]]
     # original tensor data_ptr -> clone data_ptr (footprints use CLONE bases)
     base_map: dict[int, int] = field(default_factory=dict)
     error: str | None = None
@@ -291,15 +313,17 @@ def _kinds_conflict(kind_a: str, kind_b: str) -> bool:
 
 
 def _focused_overlap(
-    fp_a: dict[tuple[int, str], set[int]],
-    fp_b: dict[tuple[int, str], set[int]],
-    focus_a: tuple[int, str],
-    focus_b: tuple[int, str],
+    fp_a: dict[tuple[int, str, int | None], set[int]],
+    fp_b: dict[tuple[int, str, int | None], set[int]],
+    focus_a: tuple[int, str, int | None],
+    focus_b: tuple[int, str, int | None],
 ) -> bool:
     """Conflicting overlap RESTRICTED to the report's own access pair
     (either direction). A whole-block intersection is not sound for
     classification: two blocks racing on tensor X would 'confirm' an
-    unrelated widened report on tensor Y whose accesses never execute."""
+    unrelated widened report on tensor Y whose accesses never execute.
+    Foci are per SITE — (clone base, kind, user source line) — so two
+    same-kind sites on one tensor no longer share a bucket."""
     for fa, fb in ((focus_a, focus_b), (focus_b, focus_a)):
         if fa[0] != fb[0]:
             continue  # distinct clone bases cannot overlap
@@ -335,8 +359,8 @@ def confirm_witness(
     pid_a: tuple[int, int, int],
     pid_b: tuple[int, int, int],
     launch_grid: Any,
-    focus_a: tuple[int, str] | None = None,
-    focus_b: tuple[int, str] | None = None,
+    focus_a: tuple[int, str, int | None] | None = None,
+    focus_b: tuple[int, str, int | None] | None = None,
 ) -> tuple[str, str | None]:
     """C2: replay the two witness blocks concretely and classify the
     report. The replay runs under the REAL launch grid — a synthetic
@@ -344,12 +368,14 @@ def confirm_witness(
     (``tl.num_programs`` in a dropped mask flips its value and fabricates
     confirmations) — so witness pids outside the launch grid, a
     non-concrete grid, or an oversized grid classify as unavailable.
-    ``focus_x`` = (SNAPSHOT tensor base, kind bucket) of the report's two
-    accesses; the overlap check is restricted to that pair. Also
-    unavailable: missing foci, rmw∩rmw pairs (scope/width live outside the
-    footprint), and intra-instance reports (same pid twice — duplicate
-    lanes collapse in an address SET). Returns ``("confirmed", None)``,
-    ``("unconfirmed", why)``, or ``("unavailable", why)``."""
+    ``focus_x`` = (SNAPSHOT tensor base, kind bucket, user source line) of
+    the report's two accesses; the overlap check is restricted to that
+    pair, per SITE. Also unavailable: missing foci or source lines (an
+    unattributable site cannot be matched to a replay bucket), rmw∩rmw
+    pairs (scope/width live outside the footprint), and intra-instance
+    reports (same pid twice — duplicate lanes collapse in an address SET).
+    Returns ``("confirmed", None)``, ``("unconfirmed", why)``, or
+    ``("unavailable", why)``."""
     if pid_a == pid_b:
         return (
             "unavailable",
@@ -357,6 +383,11 @@ def confirm_witness(
         )
     if focus_a is None or focus_b is None:
         return ("unavailable", "report accesses could not be resolved to tensors")
+    if focus_a[2] is None or focus_b[2] is None:
+        return (
+            "unavailable",
+            "report accesses carry no source line to key the replay site by",
+        )
     if focus_a[1] in _RMW and focus_b[1] in _RMW:
         return (
             "unavailable",
@@ -382,7 +413,12 @@ def confirm_witness(
         return ("unavailable", "witness tensors were not cloned for replay")
     fp_a = result.footprints.get(pid_a, {})
     fp_b = result.footprints.get(pid_b, {})
-    if _focused_overlap(fp_a, fp_b, (clone_a, focus_a[1]), (clone_b, focus_b[1])):
+    if _focused_overlap(
+        fp_a,
+        fp_b,
+        (clone_a, focus_a[1], focus_a[2]),
+        (clone_b, focus_b[1], focus_b[2]),
+    ):
         return ("confirmed", None)
     return (
         "unconfirmed",
@@ -439,7 +475,11 @@ def cross_check(
         # rebase the interpreter footprint from clone bases to names
         dyn: dict[tuple[str, str], set[int]] = {}
         clone_to_orig = {c: o for o, c in result.base_map.items()}
-        for (clone_base, kind), addrs in result.footprints.get(pid, {}).items():
+        # The recorder keys per SITE (base, kind, line); C3 compares at
+        # (tensor, kind) granularity — line attribution can differ between
+        # compiler locs and runtime frames, and a phantom line mismatch
+        # must not read as a lowering divergence. Aggregate over sites.
+        for (clone_base, kind, _line), addrs in result.footprints.get(pid, {}).items():
             orig_base = clone_to_orig.get(clone_base)
             if orig_base is None or orig_base not in base_to_name:
                 issues.append(f"pid {pid}: unknown tensor base {clone_base:#x}")

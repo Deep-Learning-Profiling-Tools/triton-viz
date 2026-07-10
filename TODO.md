@@ -134,31 +134,53 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
 
 ## 7. Small refinements (non-blocking)
 
-- [ ] C2 footprint precision: key replay footprints per access SITE
-      (e.g. by user source line, matching the TTIR loc) instead of
-      (tensor, kind) — the current ambiguity gate declines to
-      classify reports on tensors with multiple same-kind access
-      sites; site-level keying would recover those confirmations.
-- [ ] Interpreter × numpy 2.x: `range(0, n_scalar_arg, BLOCK)` in a
-      kernel raises `TypeError` under the interpreter (triton wraps
-      scalars as shape-(1,) arrays; numpy 2 refuses `__index__` on
-      them), so C2/C3 replay degrades to `unavailable` for
-      scalar-bound loop kernels. Sound but loses coverage;
-      upstream-shaped fix or a scalar unwrap shim in the replay
-      path.
+- [x] C2 per-site footprint keying — landed. Replay footprints and
+      report foci key by (base, kind, USER SOURCE LINE); the recorder
+      resolves the INNERMOST user frame (capture_current_source_location
+      resolves the OUTERMOST — the launch call site — and keyed every
+      access to one constant line), which matches the reports' TTIR loc
+      lines exactly. The ambiguity gate narrows to same-line/no-loc
+      collisions only; missing lines classify unavailable (sound).
+      Recovery demonstrated both ways on the same-tensor two-site
+      kernel: dead widened site → classified unconfirmed (partial)
+      instead of declined; LIVE widened site → graduates to a
+      replay-confirmed second report (previously unclassifiable). C3
+      keeps (tensor, kind) granularity by aggregating over sites — line
+      attribution noise must not read as a lowering divergence.
+- [x] Interpreter × numpy 2.x — landed as a shim over triton's
+      interpreter patch (upstream's `_patch_lang_tensor` installs
+      `__index__ = int(handle.data)`, which numpy 2 rejects for the
+      shape-(1,) wrappers of scalar args): both patch paths (the triton
+      frontend's patch_lang and the gluon simulation) re-install a
+      size-1-safe `__index__` AFTER triton's. Recovered coverage:
+      scalar-bound loop kernels' C2/C3 came back alive —
+      trb008/trb019 racy rows upgraded races-unclassified →
+      race-confirmed, C3 'agree' where it was unavailable, and the
+      gluon scalar-range test passed. Two more gluon version-skew fixes
+      rode along (tcgen05_commit pred optional for 3.6; the TMA example
+      falls back when tensor_descriptor.nbytes_per_cta is absent).
 
-## 8. Repo hygiene: pre-existing test-isolation bugs (full-suite only; the race-detector suites are unaffected)
+## 8. Repo hygiene: pre-existing test-isolation bugs — ALL RESOLVED
 
-- [ ] `tests/unit/test_multithreading.py` sets TRITON_INTERPRET=1
-      at module level, poisoning the jit kernels of any module
-      imported after it during collection (14 replay-channel tests
-      fail in full-suite runs); fixture-scope the env var.
-- [ ] `triton_viz/visualizer/draw.py` raises the process recursion
-      limit at import, defeating
-      `test_deep_term_chain_never_escapes_finalize`; move the bump
-      out of import.
-- [ ] Five wrapper/CLI test failures are environmental
-      (FileNotFoundError on the console script); diagnose or mark.
+- [x] TRITON_INTERPRET at module level in test_multithreading —
+      REMOVED outright: the trace machinery constructs
+      InterpretedFunction itself (trace.py), so the env var was
+      redundant; verified by import-order probe (later modules keep
+      JITFunction kernels) and the module's own 10 tests. This was
+      also the true root of the local "compiled sanitizer/detector
+      environment family": those real-compile tests were being fed
+      poisoned kernels at collection.
+- [x] draw.py sys.setrecursionlimit(100000) at import — moved into
+      collect_grid() (both public entries route through it), so the
+      process-wide bump no longer defeats recursion-exhaustion tests.
+- [x] Wrapper/CLI failures — NOT REPRODUCIBLE here: console scripts
+      present (uv sync installs the project), 5/5 pass sequential and
+      xdist. The failures were another environment's missing project
+      install; nothing to fix in-repo.
+
+      Net effect of §7+§8 together: the FULL local suite is green for
+      the first time — 763 passed, 0 failed, sequential AND -n auto
+      (down from 34 baseline failures at the branch's start).
 
 ## Decision points (not tasks)
 

@@ -12,8 +12,6 @@ import sys
 import torch
 import uuid
 
-sys.setrecursionlimit(100000)
-
 
 LAST_RECORD_ONLY = True
 
@@ -21,6 +19,13 @@ LAST_RECORD_ONLY = True
 
 
 def collect_grid():
+    # Deep record graphs (large launches) exceed the default recursion
+    # limit during collection. The bump lives HERE, not at import: an
+    # import-time process-wide bump silently defeated every test that
+    # relies on recursion exhaustion (visualizer imports leak into
+    # unrelated suites through triton_viz/__init__).
+    if sys.getrecursionlimit() < 100000:
+        sys.setrecursionlimit(100000)
     # If imported at module level, it may capture an empty launches list before trace.py completes initialization.
     # By importing here, we ensure we get the current state of launches with all traced kernel executions.
     from ..core.trace import launches as current_launches

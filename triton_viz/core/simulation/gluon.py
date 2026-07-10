@@ -2371,8 +2371,13 @@ class Builder(interpreter_builder.__class__):
         self._signal_mbarriers(mbarriers, mbarrier_preds)
         return None
 
-    def create_tcgen05_commit(self, barrier: Any, pred: TensorHandle, *args: Any):
-        if bool(np.asarray(pred.data).reshape(-1)[0]):
+    def create_tcgen05_commit(
+        self, barrier: Any, pred: TensorHandle | None = None, *args: Any
+    ):
+        # triton 3.6.0's blackwell frontend calls this WITHOUT a predicate;
+        # 3.7 nightlies pass one. Optional keeps both working (no pred =
+        # unconditional commit, matching 3.6 semantics).
+        if pred is None or bool(np.asarray(pred.data).reshape(-1)[0]):
             self._signal_barrier(barrier)
         return None
 
@@ -2625,6 +2630,19 @@ def patch_lang(fn: Callable) -> _LangPatchScope:
 
     _patch_lang_tensor(gluon_core.tensor, scope)
     _patch_lang_core(gluon_core, scope)
+
+    # numpy-2 shim over _patch_lang_tensor's `__index__ = int(handle.data)`:
+    # numpy 2 refuses int() on the shape-(1,) arrays scalar kernel args are
+    # wrapped in, so `range(0, n_scalar)` inside a kernel dies. Size-1-safe
+    # override, installed AFTER triton's patch (same shim as the triton
+    # frontend's _patch_numpy2_scalar_index).
+    def _np2_safe_index(self: Any) -> int:
+        data = self.handle.data
+        if getattr(data, "size", None) == 1 and hasattr(data, "item"):
+            return int(data.item())
+        return int(data)
+
+    scope.set_attr(gluon_core.tensor, "__index__", _np2_safe_index)
     return scope
 
 

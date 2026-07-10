@@ -680,12 +680,14 @@ class CompiledRaceDetector(Client):
             self.last_differential = [f"differential check failed: {e}"]
 
     @staticmethod
-    def _report_focus(record: Any, tensors: dict) -> tuple[int, str] | None:
-        """(original tensor base, footprint kind bucket) for one record of a
-        race report — the replay's overlap check is restricted to the
-        report's own access pair (a whole-block check would fabricate
-        confirmations for unrelated widened reports; adversarial repro in
-        test_replay_channels)."""
+    def _report_focus(record: Any, tensors: dict) -> tuple[int, str, int | None] | None:
+        """(original tensor base, footprint kind bucket, user source line)
+        for one record of a race report — the replay's overlap check is
+        restricted to the report's own access SITE (a whole-block check
+        would fabricate confirmations for unrelated widened reports;
+        adversarial repro in test_replay_channels). The line keys the
+        replay's per-site footprints: the record's TTIR loc and the
+        interpreter's frame both resolve to user-file line numbers."""
         meta = tensors.get(record.tensor_name)
         if meta is None:
             return None
@@ -697,25 +699,31 @@ class CompiledRaceDetector(Client):
             kind = "store"
         else:
             kind = "load"
-        return (meta.data_ptr, kind)
+        loc = record.source_location
+        line = loc[1] if loc else None
+        return (meta.data_ptr, kind, line)
 
-    def _ambiguous_focus_buckets(self) -> set[tuple[str, str]]:
-        """(tensor_name, kind bucket) pairs with MORE THAN ONE access site
-        across this launch's graphs. Replay footprints merge all same-kind
-        accesses to one tensor into a single bucket, so a report in an
-        ambiguous bucket cannot be classified: an unrelated site's real
-        overlap would confirm a widened report whose own access never
-        executes (adversarial repro in test_replay_channels)."""
+    def _ambiguous_focus_buckets(self) -> set[tuple[str, str, int | None]]:
+        """(tensor_name, kind bucket, user line) triples with MORE THAN ONE
+        access site across this launch's graphs. Footprints key per SITE
+        (source line), so two same-kind accesses to one tensor at
+        DIFFERENT lines are no longer ambiguous — the gate now only
+        declines when two accesses share one line (`a, b = load(x),
+        load(y)`) or carry no loc, where an unrelated same-line site's
+        real overlap could still confirm a widened report whose own
+        access never executes (adversarial repro in
+        test_replay_channels)."""
         from .differential import KIND_BUCKET
 
-        counts: dict[tuple[str, str], int] = {}
+        counts: dict[tuple[str, str, int | None], int] = {}
         for graph in self.last_ttir_graphs:
             if graph is None:
                 continue
             for a in graph.accesses:
-                key = (a.base_param, KIND_BUCKET[a.kind])
+                line = a.loc.line if a.loc is not None else None
+                key = (a.base_param, KIND_BUCKET[a.kind], line)
                 counts[key] = counts.get(key, 0) + 1
-        return {k for k, n in counts.items() if n > 1}
+        return {k for k, n in counts.items() if n > 1 or k[2] is None}
 
     def _confirm_reports(
         self,
@@ -726,7 +734,7 @@ class CompiledRaceDetector(Client):
         widened: list[Any],
         tensors: dict,
         launch_grid: Any,
-        ambiguous: set[tuple[str, str]],
+        ambiguous: set[tuple[str, str, int | None]],
     ) -> tuple[str | None, list[Any], int]:
         """C2 (plan §I.4): replay each report's witness block pair on the
         snapshot clones and classify. WIDENED reports replay first — they
@@ -747,11 +755,15 @@ class CompiledRaceDetector(Client):
             focus_a = self._report_focus(rep.first_record, tensors)
             focus_b = self._report_focus(rep.second_record, tensors)
             names = (
-                (rep.first_record.tensor_name, focus_a[1]) if focus_a else None,
-                (rep.second_record.tensor_name, focus_b[1]) if focus_b else None,
+                (rep.first_record.tensor_name, focus_a[1], focus_a[2])
+                if focus_a
+                else None,
+                (rep.second_record.tensor_name, focus_b[1], focus_b[2])
+                if focus_b
+                else None,
             )
             if any(n is not None and n in ambiguous for n in names):
-                continue  # unclassifiable: shared footprint bucket
+                continue  # unclassifiable: shared same-line footprint bucket
             key = (pids, focus_a, focus_b)
             if key not in cache:
                 cache[key] = confirm_witness(

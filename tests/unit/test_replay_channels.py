@@ -79,6 +79,19 @@ def _ttir_of(fn, signature, constexprs):
     return triton.compile(src, target=GPUTarget("cuda", 80, 32)).asm["ttir"]
 
 
+def _store_line(kernel) -> int:
+    """The kernel's tl.store source line — per-site foci key replay
+    buckets by (base, kind, user line)."""
+    import inspect
+
+    fn = kernel.fn if hasattr(kernel, "fn") else kernel
+    lines, start = inspect.getsourcelines(fn)
+    for i, line in enumerate(lines):
+        if "tl.store(out_ptr" in line:
+            return start + i
+    raise AssertionError("no store line found")
+
+
 def _launch(det, jit_fn, args, kwargs, ttir_text):
     det.pre_warmup_callback(jit_fn, *args, **kwargs)
     det.post_warmup_callback(None, SimpleNamespace(asm={"ttir": ttir_text}))
@@ -164,7 +177,7 @@ def test_c2_witness_replay_direct():
     flags1 = torch.ones(64, dtype=torch.int32)
     flags0 = torch.zeros(64, dtype=torch.int32)
     x, out = torch.randn(256), torch.zeros(64)
-    focus = (int(out.data_ptr()), "store")
+    focus = (int(out.data_ptr()), "store", _store_line(dd_mask_kernel))
     v1, _ = confirm_witness(
         dd_mask_kernel, (flags1, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0),
         (4,), focus_a=focus, focus_b=focus,
@@ -187,7 +200,7 @@ def test_c2_unfocused_or_intra_instance_is_unavailable():
         dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0), (4,)
     )
     assert v == "unavailable"
-    focus = (int(out.data_ptr()), "store")
+    focus = (int(out.data_ptr()), "store", _store_line(dd_mask_kernel))
     v, _ = confirm_witness(
         dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (1, 0, 0), (1, 0, 0),
         (4,), focus_a=focus, focus_b=focus,
@@ -206,7 +219,7 @@ def test_c2_unfocused_or_intra_instance_is_unavailable():
     )  # fmt: skip
     assert v == "unavailable"
     # rmw∩rmw: scope/width live outside the footprint
-    rmw_focus = (int(out.data_ptr()), "atomic_rmw")
+    rmw_focus = (int(out.data_ptr()), "atomic_rmw", _store_line(dd_mask_kernel))
     v, _ = confirm_witness(
         dd_mask_kernel, (flags, x, out), {"BLOCK": 64}, (0, 0, 0), (1, 0, 0),
         (4,), focus_a=rmw_focus, focus_b=rmw_focus,
@@ -315,7 +328,7 @@ def same_tensor_kernel(m_ptr, x_ptr, out_ptr, BLOCK: tl.constexpr):
     tl.store(out_ptr + BLOCK + offs, v, mask=keep)
 
 
-def test_c2_same_tensor_bucket_is_ambiguous():
+def test_c2_same_tensor_sites_are_classified_separately():
     ttir = _ttir_of(
         same_tensor_kernel,
         {
@@ -337,9 +350,43 @@ def test_c2_same_tensor_bucket_is_ambiguous():
     )
     assert det.last_global_status == "races"  # the exact WAW is real
     # exactly ONE definite report — the dead widened store must not ride
-    # the exact store's shared bucket into a fabricated second race
+    # the exact store's overlap into a fabricated second race. Per-SITE
+    # footprint keying (base, kind, line) now CLASSIFIES the widened
+    # report instead of declining it as ambiguous: its own site's
+    # footprint is empty (mask dead), so it stays an unconfirmed
+    # withheld abstention while the exact site confirms.
     assert len(det.last_global_reports) == 1
+    assert det.last_global_confirmation == "partial"
     assert "withheld" in (det.last_global_reason or "")
+
+
+def test_c2_same_tensor_live_widened_site_graduates():
+    """The recovery the per-site keying exists for: with the mask DATA
+    live, the widened store's OWN site overlaps across blocks and the
+    report graduates to a definite race — previously unclassifiable
+    because both stores shared the (tensor, kind) bucket."""
+    ttir = _ttir_of(
+        same_tensor_kernel,
+        {
+            "m_ptr": "*i32",
+            "x_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "BLOCK": "constexpr",
+        },  # fmt: skip
+        {"BLOCK": 64},
+    )
+    det = CompiledRaceDetector()
+    m1 = torch.ones(64, dtype=torch.int32)  # the widened store RUNS
+    _launch(
+        det,
+        same_tensor_kernel,
+        (m1, torch.randn(256), torch.zeros(128)),
+        {"grid": (4,), "BLOCK": 64},
+        ttir,
+    )
+    assert det.last_global_status == "races"
+    assert len(det.last_global_reports) == 2  # exact WAW + graduated widened
+    assert det.last_global_confirmation == "confirmed"
 
 
 def test_c2_no_graduation_outside_the_launch_grid():
