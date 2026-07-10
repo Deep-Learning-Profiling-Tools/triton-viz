@@ -131,12 +131,70 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       (was unsupported); pendings=2 already races (stock is exactly
       tight at 1). Mutation pins: off-by-one/weakened/deleted dot-wait
       → WAR; weakened async_wait → RAW naming the wgmma reader.
-- [ ] Tranche 2 — TMA descriptors + mbarrier phase/arrive-count
-      modeling + `ttg.warp_specialize`. Needs fresh golden dumps
-      from descriptor-based kernels (`tl.make_tensor_descriptor`
-      sources — block-ptr kernels get rewritten to plain pointers);
-      ttng TMA/mbarrier ops outside the tranche-1 subset still
-      degrade to honest unsupported (pinned by test).
+- [x] Tranche 2 — TMA descriptors + mbarrier expect-tx modeling.
+      Two protocols, both proved on fresh golden dumps
+      (matmul_tma_s3/s1_sm90 from `tl.make_tensor_descriptor`
+      sources): PERSISTENT (prologue-initialized rotating barriers:
+      the wait at iteration k targets arming (k+b_w) div S of slot
+      (b_w+k) mod S with parity ((k+b_w) div S) mod 2 — the parity
+      chain is SIMULATED over 4S+4 steps advancing all constant-init
+      iter_args in lockstep, and coverage collapses to the linear
+      k'+b_e ≤ k+b_w given slot equality) and ONE-SHOT (in-loop
+      init: fresh phase-0 barrier per iteration; a copy issued
+      before its same-body wait is covered for all same-or-later
+      reads). A read holds ALL its preceding wait_barriers as
+      guards (one per input buffer); coverage is any-guard. Arming
+      validation: expect/copy predicate equality, prologue armings
+      = exactly slots 0..b_e-1, expect bytes vs arrivals (under ⇒
+      uncovered ⇒ RAW; over ⇒ deadlock ⇒ unsupported). The
+      generic→async proxy gate refined: an IMMUTABLE
+      (single-assignment) alloc read by wgmma/TMA-store is ordered
+      iff a fence_async_shared sits between store and read —
+      missing fence is a RAW report (and the in-loop immutable
+      store joins the WAR writers: its storage is reused across
+      iterations). Storage reuse after dealloc (the stock TMA
+      epilogue) is allowed only under a PROVEN drain: epilogue
+      pendings=0 / num=0 waits before the reuse plus the TMA
+      prefetch-stop predicate d ≥ b_e - b_w (parsed from
+      iv < upper - d), checked AFTER the race queries so a racy
+      pipeline reports races rather than hiding behind the reuse
+      abstention. Mutation battery (all pinned e2e): delete
+      wait_barrier / break the parity flip / expect undercount →
+      RAW; delete dot-wait → WAR; delete fence → RAW; expect
+      overcount / wrong barrier slot → honest deadlock-unsupported;
+      weakened prefetch stop → honest drain-unsupported. Sweep:
+      TMA matmul proves at stages 1–4 (incl. the one-shot cell that
+      first exposed a guard-matching false positive — fixed by the
+      any-guard rule), CS4 case study (missing mbarrier phase wait).
+      ADVERSARIALLY VERIFIED (2026-07-10, 5 attack agents + independent
+      cross-check, 18 agents total): 12 findings confirmed (11
+      soundness, 1 precision), ALL FIXED and pinned in
+      tests/end_to_end/test_tma_adversarial_regressions.py — the big
+      ones: a WAW query now covers async-writer pairs (two byte-exact
+      co-armed TMA copies to one buffer used to prove clean; stock
+      pipelines still prove because every same-slot writer pair is
+      retired by the wait in effect before the later write);
+      init_barrier must precede every protocol op on its barrier
+      (use-before-init is UB — the one-shot init-after-wait and the
+      never-initialized-protocol attacks both proved clean before);
+      finite-window chain validation gained a periodicity guard (all
+      constants reachable from a phase/slot chain must fit the
+      simulation window — an out-of-window constant is exactly what
+      defers divergence past the window); the reuse drain now requires
+      lower=0/step=1, drains the TMA-store agent via
+      async_tma_store_wait {pendings=0}, and uses the b_w-aware
+      prologue-arming bound; a loop fence is no longer credited with
+      ordering prologue→epilogue pairs (trip 0 skips it); the one-shot
+      phase accepts provably-zero loop-carried chains (precision); and
+      _simulate_chain advances only dependent iter_args.
+- [ ] Tranche 3 — `ttg.warp_specialize`: cross-warp-group
+      producer/consumer regions synchronized by count-128 ARRIVE
+      barriers (thread-arrival counting, ttng.arrive_barrier,
+      per-region phase chains) — a different HB model from
+      expect-tx. Scoping artifact landed: matmul_tma_ws_s3_sm90
+      golden dump (`tl.range(..., warp_specialize=True)`); stays
+      honest-unsupported (pinned: fails closed on the first
+      count-128 init_barrier).
 
 ## 5. Results landing figure — script landed (paper inclusion still an
 ## advisor call)
