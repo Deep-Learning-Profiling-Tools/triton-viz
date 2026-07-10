@@ -1,26 +1,30 @@
 """M5 — the shared-memory (Track 1) evaluation sweep (plan Part II §7).
 
 Sweeps the pipelined tutorial kernels across ``num_stages ∈ {1..4}`` at
-sm80, recording per cell: the TTGIR verdict (proof / reports /
+sm80 AND sm90, recording per cell: the TTGIR verdict (proof / reports /
 unsupported+kind), analyze wall-time, and async-op counts. Every PROVED
-cell then enters the MUTATION-DETECTION MATRIX: the three pipeliner-bug
-mutations (weakened wait, deleted wait, single-buffered rotation) are
-applied to its TTGIR and the verdict must flip to RAW reports.
+cell then enters the MUTATION-DETECTION MATRIX: the pipeliner-bug
+mutations (weakened wait, deleted wait, single-buffered rotation, and at
+sm90 the wgmma-agent pair weakened/deleted warp_group_dot_wait) are
+applied to its TTGIR and the verdict must flip to race reports.
 
-The two M5 case studies fall out of the matrix and are narrated with
-their solver witnesses:
+The M5 case studies fall out of the matrix and are narrated with their
+solver witnesses:
 
   CS1 "missing async_wait"      — the deleted-wait mutation: the loop's
-                                  local_loads run with no wait coverage
+                                  smem reads run with no wait coverage
                                   at all (the classic forgotten-wait bug).
   CS2 "insufficient buffering"  — the single-buffer mutation: rotation
                                   depth 1 under a 2-deep prefetch, i.e. a
                                   producer cp.async overwrites the slot a
                                   consumer is still reading (the
                                   insufficient-num_stages bug class).
-
-sm90 is GATED on M4 (advisor Q5); this sweep is the sm80 half the paper's
-Compiled-Mode Evaluation placeholder consumes.
+  CS3 "weakened wgmma drain"    — sm90 only: warp_group_dot_wait
+                                  pendings+1 leaves the previous
+                                  iteration's async MMA read pending on
+                                  exactly the slot the next cp.async
+                                  overwrites — a WAR the sm80 model
+                                  cannot even express.
 
 Usage:  uv run python -m evaluation.shared_track
 Writes results/SHARED_TRACK.md.
@@ -143,9 +147,12 @@ def _kernels(stages: int):
     )
 
 
-def _ttgir(fn, sig, consts, opts, attrs) -> str:
+ARCHS = (80, 90)
+
+
+def _ttgir(fn, sig, consts, opts, attrs, cc: int = 80) -> str:
     src = ASTSource(fn=fn, signature=sig, constexprs=consts, attrs=attrs)
-    k = triton.compile(src, target=GPUTarget("cuda", 80, 32), options=opts)
+    k = triton.compile(src, target=GPUTarget("cuda", cc, 32), options=opts)
     return k.asm["ttgir"]
 
 
@@ -194,10 +201,35 @@ def _mut_single_buffer(ttgir: str) -> str | None:
     return out if out != ttgir else None
 
 
+_RE_PENDINGS = re.compile(r"\{pendings = (\d+) : i32\}")
+
+
+def _mut_weaken_pendings(ttgir: str) -> str | None:
+    """CS3 — sm90 wgmma agent: warp_group_dot_wait tolerating one MORE
+    pending MMA than the rotation distance provides. n/a at sm80 (no
+    wgmma agent)."""
+
+    def repl(m: re.Match) -> str:
+        return f"{{pendings = {int(m.group(1)) + 1} : i32}}"
+
+    new, n = _RE_PENDINGS.subn(repl, ttgir)
+    return new if n else None
+
+
+def _mut_delete_dot_wait(ttgir: str) -> str | None:
+    """sm90: the forgotten warp_group_dot_wait — every issued async MMA
+    stays pending while the copies rotate over its operands."""
+    lines = ttgir.splitlines()
+    kept = [ln for ln in lines if "warp_group_dot_wait" not in ln]
+    return "\n".join(kept) if len(kept) != len(lines) else None
+
+
 _MUTATIONS = (
     ("weaken_wait", _mut_weaken_wait),
     ("delete_wait", _mut_delete_wait),
     ("single_buffer", _mut_single_buffer),
+    ("weaken_pendings", _mut_weaken_pendings),
+    ("delete_dot_wait", _mut_delete_dot_wait),
 )
 
 
@@ -213,52 +245,57 @@ def _analyze(ttgir: str) -> tuple[str, int, str | None, float, list]:
 
 def sweep() -> str:
     lines = [
-        "# M5 — shared-memory track evaluation (sm80)",
+        "# M5 — shared-memory track evaluation (sm80 + sm90)",
         "",
         "Track 1 (`analyze_ttgir`) over the pipelined tutorials at",
-        "`num_stages ∈ {1..4}`, GPUTarget(cuda, 80). sm90 is gated on M4.",
+        "`num_stages ∈ {1..4}`, GPUTarget(cuda, {80, 90}). The sm90 cells",
+        "exercise the M4 wgmma agent: cp.async writers vs asynchronous",
+        "`warp_group_dot` readers — RAW via async_wait counting, WAR via",
+        "`warp_group_dot_wait` pendings counting.",
         "",
         "## Sweep",
         "",
-        "| kernel | stages | async copies | verdict | reports | analyze s |",
-        "|---|---|---|---|---|---|",
+        "| kernel | arch | stages | async copies | wgmma | verdict | reports | analyze s |",
+        "|---|---|---|---|---|---|---|---|",
     ]
-    proved: list[tuple[str, int, str]] = []
-    for stages in STAGES:
-        for name, fn, sig, consts, opts, attrs in _kernels(stages):
-            try:
-                ttgir = _ttgir(fn, sig, consts, opts, attrs)
-            except Exception as e:  # noqa: BLE001
-                lines.append(
-                    f"| {name} | {stages} | - | compile-error "
-                    f"({type(e).__name__}) | - | - |"
+    proved: list[tuple[str, int, int, str]] = []
+    for cc in ARCHS:
+        for stages in STAGES:
+            for name, fn, sig, consts, opts, attrs in _kernels(stages):
+                try:
+                    ttgir = _ttgir(fn, sig, consts, opts, attrs, cc)
+                except Exception as e:  # noqa: BLE001
+                    lines.append(
+                        f"| {name} | sm{cc} | {stages} | - | - | compile-error "
+                        f"({type(e).__name__}) | - | - |"
+                    )
+                    continue
+                n_async = ttgir.count("ttg.async_copy_global_to_local")
+                n_wgmma = ttgir.count("ttng.warp_group_dot ")
+                status, n_reports, reason, dt, _ = _analyze(ttgir)
+                verdict = (
+                    status
+                    if status != "unsupported"
+                    else f"unsupported: {(reason or '')[:60]}"
                 )
-                continue
-            n_async = ttgir.count("ttg.async_copy_global_to_local")
-            status, n_reports, reason, dt, _ = _analyze(ttgir)
-            verdict = (
-                status
-                if status != "unsupported"
-                else f"unsupported: {(reason or '')[:60]}"
-            )
-            lines.append(
-                f"| {name} | {stages} | {n_async} | {verdict} | {n_reports} "
-                f"| {dt:.3f} |"
-            )
-            if status == "ok" and n_reports == 0 and n_async > 0:
-                proved.append((name, stages, ttgir))
+                lines.append(
+                    f"| {name} | sm{cc} | {stages} | {n_async} | {n_wgmma} "
+                    f"| {verdict} | {n_reports} | {dt:.3f} |"
+                )
+                if status == "ok" and n_reports == 0 and n_async > 0:
+                    proved.append((name, cc, stages, ttgir))
 
     lines += [
         "",
         "## Mutation-detection matrix (every proved pipelined cell)",
         "",
-        "| kernel | stages | " + " | ".join(n for n, _ in _MUTATIONS) + " |",
-        "|---|---|" + "---|" * len(_MUTATIONS),
+        "| kernel | arch | stages | " + " | ".join(n for n, _ in _MUTATIONS) + " |",
+        "|---|---|---|" + "---|" * len(_MUTATIONS),
     ]
     matrix_ok = True
-    case_studies: dict[str, tuple[str, int, list]] = {}
-    for name, stages, ttgir in proved:
-        row = [name, str(stages)]
+    case_studies: dict[str, tuple[str, int, int, list]] = {}
+    for name, cc, stages, ttgir in proved:
+        row = [name, f"sm{cc}", str(stages)]
         for mut_name, mut in _MUTATIONS:
             mutated = mut(ttgir)
             if mutated is None:
@@ -266,11 +303,14 @@ def sweep() -> str:
                 continue
             status, n_reports, reason, _, reports = _analyze(mutated)
             if status == "ok" and n_reports > 0:
-                row.append(f"detected ({n_reports})")
+                kinds = sorted({r.race_type.name for r in reports})
+                row.append(f"detected ({n_reports} {'/'.join(kinds)})")
                 if mut_name == "delete_wait" and "CS1" not in case_studies:
-                    case_studies["CS1"] = (name, stages, reports)
+                    case_studies["CS1"] = (name, cc, stages, reports)
                 if mut_name == "single_buffer" and "CS2" not in case_studies:
-                    case_studies["CS2"] = (name, stages, reports)
+                    case_studies["CS2"] = (name, cc, stages, reports)
+                if mut_name == "weaken_pendings" and "CS3" not in case_studies:
+                    case_studies["CS3"] = (name, cc, stages, reports)
             elif status == "ok":
                 row.append("MISSED")
                 matrix_ok = False
@@ -288,7 +328,7 @@ def sweep() -> str:
     narr = {
         "CS1": (
             "Missing `async_wait` (the forgotten-wait bug): every loop "
-            "`local_load` runs with no commit-group coverage at all — each "
+            "smem read runs with no commit-group coverage at all — each "
             "prefetch's cp.async may still be in flight when its slot is "
             "read."
         ),
@@ -298,29 +338,41 @@ def sweep() -> str:
             "unchanged prefetch distance, so the producer's next cp.async "
             "targets the very slot the consumer is still reading."
         ),
+        "CS3": (
+            "Weakened wgmma drain (sm90): `warp_group_dot_wait` tolerating "
+            "one extra pending MMA leaves the PREVIOUS iteration's "
+            "asynchronous `warp_group_dot` read unretired — and the "
+            "rotation puts the next cp.async on exactly that slot. A WAR "
+            "race on the wgmma async agent, a bug class the sm80 model "
+            "cannot even express."
+        ),
     }
-    for cs in ("CS1", "CS2"):
+    for cs in ("CS1", "CS2", "CS3"):
         if cs not in case_studies:
             lines += [f"### {cs}: NOT CAPTURED — investigate", ""]
             continue
-        name, stages, reports = case_studies[cs]
+        name, cc, stages, reports = case_studies[cs]
         rep = reports[0]
         w = rep.witness
+        if "k_load" in w:
+            reader_bits = (
+                f"copy "
+                f"{'prologue prefetch' if w.get('k_copy', -1) < 0 else 'iteration k_copy=' + str(w['k_copy'])}, "
+                f"read iteration k_load={w['k_load']}"
+            )
+        else:
+            reader_bits = (
+                f"copy iteration k_copy={w['k_copy']}, pending wgmma "
+                f"{'prologue' if w.get('k_dot', -1) < 0 else 'iteration k_dot=' + str(w['k_dot'])}"
+            )
         lines += [
-            f"### {cs} — {name} @ num_stages={stages}",
+            f"### {cs} — {name} @ sm{cc}, num_stages={stages}",
             "",
             narr[cs],
             "",
-            f"- verdict: RAW race, {len(reports)} report(s)",
-            f"- witness: copy "
-            f"{'prologue prefetch' if w.get('k_copy', -1) < 0 else 'iteration k_copy=' + str(w['k_copy'])}, "
-            f"load iteration k_load={w['k_load']}, shared-memory slot "
-            f"{w['slot']}"
-            + (
-                f", byte offset {rep.byte_offset}"
-                if getattr(rep, "byte_offset", None) is not None
-                else ""
-            ),
+            f"- verdict: {rep.race_type.name} race, {len(reports)} report(s)",
+            f"- witness: {reader_bits}, shared-memory slot {w['slot']}"
+            + (f", byte offset {w['byte_offset']}" if "byte_offset" in w else ""),
             "",
         ]
     return "\n".join(lines)
