@@ -10,7 +10,10 @@ import pytest
 
 from triton_viz.clients.race_detector.compiled.layouts import (
     BlockedLayout,
+    NVMMASharedLayout,
     SwizzledSharedLayout,
+    nvmma_offset_bases,
+    parse_shared_layout,
     swizzled_offset_bases,
     xor_linear_apply,
 )
@@ -51,6 +54,82 @@ def test_swizzled_closed_form_matches_basis_construction(
             seen.add(got)
     # The swizzle is a bijection over one stage buffer.
     assert seen == set(range(num_rows * num_cols))
+
+
+# (swizzlingByteWidth, elementBitWidth, transposed, shape) — the two golden
+# sm90 layouts plus stress variants: 32B swizzle, 8-bit elements, a shape
+# wider than one swizzle tile (col-repetition bits), and transposed order.
+NVMMA_CASES = [
+    (64, 16, False, (64, 32)),  # matmul A, sm90 golden
+    (128, 16, False, (32, 64)),  # matmul B, sm90 golden
+    (32, 16, False, (16, 16)),
+    (128, 8, False, (16, 128)),
+    (128, 16, False, (16, 128)),  # numCols 128 > tileCols 64: col-rep bits
+    (64, 16, True, (32, 64)),  # transposed: dim0 is the inner dim
+    (0, 16, False, (16, 32)),  # no swizzle: plain row-major
+]
+
+
+@pytest.mark.parametrize("w,e,transposed,shape", NVMMA_CASES)
+def test_nvmma_closed_form_matches_basis_construction(w, e, transposed, shape):
+    """The closed form maps (row, col) → offset; the basis construction
+    (transcribed from nvmmaSharedToLinearLayout) maps offset bits → (row,
+    col). Composing them must be the identity, and the map must be a
+    bijection over one stage buffer. The upstream LinearLayout binding
+    still aborts on shared encodings (LinearEncodingAttr is
+    distributed-only in the 3.7.1 wheel), so two independent
+    transcriptions cross-check each other, as for swizzled_shared."""
+    layout = NVMMASharedLayout(w, transposed, e)
+    total = shape[0] * shape[1]
+
+    seen = set()
+    for r0 in range(shape[0]):
+        for c1 in range(shape[1]):
+            off = layout.element_offset((r0, c1), shape)
+            assert 0 <= off < total, ((r0, c1), off)
+            seen.add(off)
+    assert seen == set(range(total)), "not a bijection over the stage buffer"
+
+    if w == 0:
+        return  # no bases construction for the unswizzled form
+    bases = nvmma_offset_bases(layout, shape)
+    assert len(bases) == total.bit_length() - 1
+    col_dim = 0 if transposed else 1
+    for off in range(total):
+        row, col = xor_linear_apply(bases, off, 2)
+        coords = [0, 0]
+        coords[1 - col_dim], coords[col_dim] = row, col
+        assert layout.element_offset(tuple(coords), shape) == off, (off, row, col)
+
+
+def test_nvmma_parse_and_dispatch():
+    attr = (
+        "#ttg.nvmma_shared<{swizzlingByteWidth = 64, transposed = false, "
+        "elementBitWidth = 16}>"
+    )
+    layout = parse_shared_layout(attr)
+    assert isinstance(layout, NVMMASharedLayout)
+    assert (layout.swizzle_byte_width, layout.elem_bits, layout.transposed) == (
+        64,
+        16,
+        False,
+    )
+    swz = parse_shared_layout(
+        "#ttg.swizzled_shared<{vec = 8, perPhase = 2, maxPhase = 4, order = [1, 0]}>"
+    )
+    assert isinstance(swz, SwizzledSharedLayout)
+
+
+def test_nvmma_fp4_padded_is_unsupported():
+    from triton_viz.clients.race_detector.compiled.ttgir_reader import (
+        UnsupportedTTGIR,
+    )
+
+    with pytest.raises(UnsupportedTTGIR):
+        NVMMASharedLayout.parse(
+            "#ttg.nvmma_shared<{swizzlingByteWidth = 64, transposed = false, "
+            "elementBitWidth = 16, fp4Padded = true}>"
+        )
 
 
 BLOCKED_CASES = [

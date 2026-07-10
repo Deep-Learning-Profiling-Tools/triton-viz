@@ -49,11 +49,55 @@ def test_generic_only_and_no_smem_kernels_are_ok():
         assert r.reports == []
 
 
-def test_sm90_wgmma_is_unsupported_not_silent():
+def test_stock_sm90_wgmma_pipeline_is_proven_race_free():
+    """The sm90 pipeline (cp.async writers + async warp_group_dot readers):
+    every RAW query (copy vs wgmma read, async_wait counting) AND every WAR
+    query (copy overwriting a slot vs a possibly-pending wgmma read,
+    warp_group_dot_wait pendings counting) is UNSAT."""
     r = analyze_ttgir(_read("matmul_s3_sm90.ttgir"))
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+
+def test_sm90_fence_async_shared_is_accepted():
+    """fence_async_shared only ADDS generic→async ordering the model never
+    relies on for a proof; its presence must not degrade the analysis."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    mutated = stock.replace(
+        "%a_97 = ttg.async_wait %a_88, %b_90 {num = 2 : i32} loc(#loc72)",
+        "ttng.fence_async_shared {bCluster = false} loc(#loc72)\n"
+        "      %a_97 = ttg.async_wait %a_88, %b_90 {num = 2 : i32} loc(#loc72)",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+
+def test_sm90_tma_ops_stay_unsupported_not_silent():
+    """ttng ops outside the modeled sm90 subset (TMA/mbarrier — plan M4
+    tranche 2) must still degrade to an honest unsupported."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    mutated = stock.replace(
+        "%acc_71 = ttg.async_wait {num = 0 : i32} loc(#loc89)",
+        "%acc_71 = ttg.async_wait {num = 0 : i32} loc(#loc89)\n"
+        "    ttng.async_tma_copy_global_to_local %desc, %bar loc(#loc89)",
+    )
+    r = analyze_ttgir(mutated)
     assert r.status == "unsupported"
-    assert r.unsupported_reason is not None
-    assert "ttng" in r.unsupported_reason
+    assert "ttng.async_tma_copy_global_to_local" in (r.unsupported_reason or "")
+
+
+def test_sm90_tma_golden_dump_is_unsupported_not_silent():
+    """The real descriptor-based pipeline (tl.make_tensor_descriptor →
+    async_tma_copy + mbarrier phase waits) is tranche-2 territory: until
+    the mbarrier agent is modeled, the whole dump must degrade to an
+    honest unsupported on its first out-of-vocabulary op (currently the
+    ttg.global_scratch_alloc TMA workspace, before any ttng op)."""
+    r = analyze_ttgir(_read("matmul_tma_s3_sm90.ttgir"))
+    assert r.status == "unsupported"
+    assert "unmodeled op" in (r.unsupported_reason or "") or "ttng." in (
+        r.unsupported_reason or ""
+    )
 
 
 # ──────────────────────── analyzer-level: mutations ────────────────────────
@@ -61,13 +105,16 @@ def test_sm90_wgmma_is_unsupported_not_silent():
 # manifest; the detector must produce a RAW report with a valid witness.
 
 
-def _assert_races(text: str, expect_min: int = 1) -> list:
+def _assert_races(
+    text: str, expect_min: int = 1, kind: RaceType = RaceType.RAW
+) -> list:
     r = analyze_ttgir(text)
     assert r.status == "ok", r.unsupported_reason
     assert len(r.reports) >= expect_min, "mutation not detected"
+    iter_key = "k_load" if kind is RaceType.RAW else "k_copy"
     for rep in r.reports:
-        assert rep.race_type == RaceType.RAW
-        assert rep.witness["k_load"] >= 0
+        assert rep.race_type == kind
+        assert rep.witness[iter_key] >= 0
         assert rep.witness["slot"] >= 0
     return r.reports
 
@@ -118,6 +165,51 @@ def test_mutation_shrunk_stage_dim():
     still reads."""
     stock = _read("matmul_s3_sm80.ttgir")
     _assert_races(_shrink_to_single_buffer(stock))
+
+
+# ─────────────────── analyzer-level: sm90 wgmma mutations ───────────────────
+# The WAR direction is new at sm90: the copy must not overwrite a slot while
+# a warp-group MMA read of it can still be pending. The stock kernel is
+# exactly tight at pendings=1.
+
+
+def test_sm90_mutation_pendings_off_by_one():
+    """pendings=2 leaves the PREVIOUS iteration's wgmma possibly pending —
+    and that is exactly the wgmma whose slot the current copy overwrites
+    (rotation distance 2 at 3 stages). Both allocations must be reported."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    reports = _assert_races(
+        stock.replace("{pendings = 1 : i32}", "{pendings = 2 : i32}"),
+        kind=RaceType.WAR,
+    )
+    assert {r.alloc for r in reports} == {"%a", "%b"}
+
+
+def test_sm90_mutation_weakened_pendings():
+    stock = _read("matmul_s3_sm90.ttgir")
+    _assert_races(
+        stock.replace("{pendings = 1 : i32}", "{pendings = 3 : i32}"),
+        kind=RaceType.WAR,
+    )
+
+
+def test_sm90_mutation_deleted_dot_wait():
+    """No warp_group_dot_wait at all: every issued wgmma stays pending —
+    the copies overwrite slots with reads in flight."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "warp_group_dot_wait" not in line
+    )
+    _assert_races(mutated, kind=RaceType.WAR)
+
+
+def test_sm90_mutation_weakened_async_wait_reports_wgmma_raw():
+    """The RAW direction survives the reader swap: weakening the cp.async
+    wait must report the WGMMA reads (not local_loads) as the racing
+    readers."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    reports = _assert_races(stock.replace("{num = 2 : i32}", "{num = 4 : i32}"))
+    assert any("warp_group_dot" in r.message for r in reports)
 
 
 def test_const_slot_out_of_range_is_unsupported():

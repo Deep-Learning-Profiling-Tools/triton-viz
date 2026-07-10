@@ -18,7 +18,15 @@ copy must be covered by the wait that guards the load reading its slot.
 This catches the real mutation classes: wrong/deleted wait nums, shrunk
 stage dims, rotation off-by-one, dropped commit groups. WAR (a far-ahead
 copy overwriting a slot mid-read) is barrier-protected under the same
-assumption and is not checked in v1.
+assumption and is not checked for generic-proxy reads (local_load).
+
+sm90 adds a second async agent: ``ttng.warp_group_dot`` reads its smem
+operands asynchronously and stays PENDING until a
+``ttng.warp_group_dot_wait {pendings=N}`` retires it (all but the N most
+recent wgmma complete) — Membar barriers do NOT retire it, so here the WAR
+direction IS checkable and checked: an async copy must not overwrite a slot
+while a wgmma read of it can still be pending. RAW for wgmma reads reuses
+the load machinery (the read starts after the guarding async_wait).
 
 Everything extracted here is *checked, not trusted*: rotation closed forms
 are validated by exhaustive simulation of the parsed select chain.
@@ -30,6 +38,7 @@ from dataclasses import dataclass
 
 from .ttgir_reader import (
     EventGraph,
+    LoadEvent,
     SourceLoc,
     UnsupportedTTGIR,
 )
@@ -239,6 +248,10 @@ class ModelCopy:
     loc: SourceLoc | None
     line_no: int
     committed: bool
+    # Program-order position within its segment — the WAR direction needs
+    # to know whether a wgmma / dot-wait precedes the copy in the body.
+    segment: str = "prologue"
+    body_pos: int = 0
 
 
 @dataclass(frozen=True)
@@ -258,6 +271,46 @@ class ModelLoad:
     issued_before_wait: int
     loc: SourceLoc | None
     line_no: int
+    # True when this "load" is really a warp_group_dot smem read joined to
+    # the RAW machinery (reports should name the wgmma, not a local_load).
+    via_dot: bool = False
+
+
+@dataclass(frozen=True)
+class ModelDotRead:
+    """One smem operand of an async ``warp_group_dot``, with its slot and
+    wgmma rank.
+
+    Rank counts async wgmma issues: prologue dots have constant ranks
+    1..D in program order; a loop-body dot at iteration k has rank
+    ``D + w*k + pos`` (w async dots per iteration, pos 1-based). A
+    ``warp_group_dot_wait {pendings=N}`` that has seen ``issued`` wgmma
+    guarantees ranks ≤ issued - N are complete.
+    """
+
+    alloc: str
+    slot: SlotExpr
+    const_rank: int | None  # for prologue dots
+    loop_pos: int | None  # 1-based async-dot position within the loop body
+    body_pos: int
+    loc: SourceLoc | None
+    line_no: int
+
+
+@dataclass(frozen=True)
+class ModelDotWait:
+    """One ``warp_group_dot_wait {pendings=N}`` with its counting context.
+
+    ``issued_before`` counts async wgmma issued earlier in the same segment
+    body; total issued when the wait at loop iteration k returns is
+    ``D + w*k + issued_before`` (for a prologue wait, ``issued_before``
+    alone).
+    """
+
+    pendings: int
+    segment: str
+    body_pos: int
+    issued_before: int
 
 
 @dataclass
@@ -267,6 +320,16 @@ class PipelineModel:
     copies: list[ModelCopy]
     loads: list[ModelLoad]
     generic_only: bool  # no async machinery at all
+    prologue_dots: int = 0  # D — async wgmma issued in the prologue
+    dots_per_iter: int = 0  # w
+    dot_reads: list[ModelDotRead] = None  # type: ignore[assignment]
+    dot_waits: list[ModelDotWait] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.dot_reads is None:
+            self.dot_reads = []
+        if self.dot_waits is None:
+            self.dot_waits = []
 
 
 def _token_allocs(
@@ -351,7 +414,7 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
     Raises UnsupportedTTGIR when the async structure falls outside the
     shapes the model can describe soundly.
     """
-    if not graph.copies:
+    if not graph.copies and not graph.dots:
         return PipelineModel(0, 0, [], [], generic_only=True)
 
     # Commit ranks. Token -> commit mapping first.
@@ -399,6 +462,61 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
                 loc=ce.loc,
                 line_no=ce.line_no,
                 committed=committed,
+                segment=ce.segment,
+                body_pos=ce.body_pos,
+            )
+        )
+
+    # ── wgmma agent (sm90): async-dot ranks and dot-wait counting ──
+    # A SYNC warp_group_dot completes before it returns — its reads join the
+    # RAW load machinery below but never stay pending, so it takes no rank.
+    prologue_dot_rank = 0
+    dot_loop_pos = 0
+    dot_reads: list[ModelDotRead] = []
+    dot_waits: list[ModelDotWait] = []
+    for de in graph.dots:
+        if not de.is_async:
+            continue
+        if de.segment == "prologue":
+            prologue_dot_rank += 1
+            drank: tuple[int | None, int | None] = (prologue_dot_rank, None)
+        elif de.segment == "loop":
+            dot_loop_pos += 1
+            drank = (None, dot_loop_pos)
+        else:
+            raise UnsupportedTTGIR(
+                f"line {de.line_no}: async warp_group_dot in the epilogue is "
+                "outside the modeled pipeline shapes"
+            )
+        for alloc, idx in de.reads:
+            slot = resolve_slot(graph, idx)
+            _validate_slot(slot, graph.allocations[alloc].stages, alloc, de.line_no)
+            dot_reads.append(
+                ModelDotRead(
+                    alloc=alloc,
+                    slot=slot,
+                    const_rank=drank[0],
+                    loop_pos=drank[1],
+                    body_pos=de.body_pos,
+                    loc=de.loc,
+                    line_no=de.line_no,
+                )
+            )
+    D = prologue_dot_rank
+    w = dot_loop_pos
+
+    for dw in graph.dot_waits:
+        issued_before = sum(
+            1
+            for de in graph.dots
+            if de.is_async and de.segment == dw.segment and de.body_pos < dw.body_pos
+        )
+        dot_waits.append(
+            ModelDotWait(
+                pendings=dw.pendings,
+                segment=dw.segment,
+                body_pos=dw.body_pos,
+                issued_before=issued_before,
             )
         )
 
@@ -420,9 +538,32 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
 
     # Wait guarding each load: prefer the token edge; otherwise the nearest
     # preceding wait in the same segment; otherwise uncovered.
+    # wgmma smem reads (sync or async) join as pseudo-loads for the RAW
+    # direction: the read starts after the guarding async_wait, so the
+    # counting contract is identical to a local_load's. The WAR direction
+    # (the read possibly still pending when a later copy lands) is handled
+    # separately via dot_reads/dot_waits.
+    raw_read_events: list[tuple[LoadEvent, bool]] = [(le, False) for le in graph.loads]
+    for de in graph.dots:
+        for alloc, idx in de.reads:
+            raw_read_events.append(
+                (
+                    LoadEvent(
+                        alloc=alloc,
+                        index_ssa=idx,
+                        token=None,
+                        result_layout="",
+                        segment=de.segment,
+                        body_pos=de.body_pos,
+                        loc=de.loc,
+                        line_no=de.line_no,
+                    ),
+                    True,
+                )
+            )
     wait_by_result = {w.result: w for w in graph.waits if w.result}
     loads: list[ModelLoad] = []
-    for le in graph.loads:
+    for le, via_dot in raw_read_events:
         slot = resolve_slot(graph, le.index_ssa)
         _validate_slot(slot, graph.allocations[le.alloc].stages, le.alloc, le.line_no)
         wait = None
@@ -465,6 +606,7 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
                 issued_before_wait=issued_before_wait,
                 loc=le.loc,
                 line_no=le.line_no,
+                via_dot=via_dot,
             )
         )
 
@@ -474,4 +616,8 @@ def build_pipeline_model(graph: EventGraph) -> PipelineModel:
         copies=copies,
         loads=loads,
         generic_only=False,
+        prologue_dots=D,
+        dots_per_iter=w,
+        dot_reads=dot_reads,
+        dot_waits=dot_waits,
     )

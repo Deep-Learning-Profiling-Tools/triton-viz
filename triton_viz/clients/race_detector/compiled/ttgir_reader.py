@@ -141,6 +141,37 @@ class CommitEvent:
 
 
 @dataclass
+class DotEvent:
+    """``ttng.warp_group_dot`` (sm90 wgmma) — smem reads of its memdesc
+    operands.
+
+    ``reads`` lists the (allocation, index_ssa) of every memdesc operand
+    (a and/or b may instead be register-resident and then do not appear).
+    ``is_async`` mirrors the printed ``isAsync = true`` attribute: an async
+    wgmma's reads stay pending until a ``warp_group_dot_wait`` retires it;
+    a sync one completes before the op returns.
+    """
+
+    reads: tuple[tuple[str, str | None], ...]
+    is_async: bool
+    segment: str
+    body_pos: int
+    loc: SourceLoc | None
+    line_no: int
+
+
+@dataclass
+class DotWaitEvent:
+    """``ttng.warp_group_dot_wait {pendings=N}`` — wgmma-agent counting wait:
+    at most N warp-group MMAs remain pending after it returns."""
+
+    pendings: int
+    segment: str
+    body_pos: int
+    line_no: int
+
+
+@dataclass
 class WaitEvent:
     """``ttg.async_wait %tok0, %tok1, ... {num=N}``.
 
@@ -189,6 +220,8 @@ class EventGraph:
     stores: list[StoreEvent] = field(default_factory=list)
     commits: list[CommitEvent] = field(default_factory=list)
     waits: list[WaitEvent] = field(default_factory=list)
+    dots: list[DotEvent] = field(default_factory=list)
+    dot_waits: list[DotWaitEvent] = field(default_factory=list)
     kernel_name: str = ""
 
     def iter_arg_init(self, arg_name: str) -> str | None:
@@ -243,6 +276,10 @@ _RE_LOCAL_LOAD = re.compile(
     rf"^ttg\.local_load ({_SSA})(?: token ({_SSA}))?\s*:.*->\s*tensor<[^,>]+,\s*(.+?)>\s*(?:loc|$)"
 )
 _RE_LOCAL_STORE = re.compile(rf"^ttg\.local_store ({_SSA}), ({_SSA})")
+_RE_WARP_GROUP_DOT = re.compile(rf"^ttng\.warp_group_dot ((?:{_SSA},?\s*)+)\{{")
+_RE_WARP_GROUP_DOT_WAIT = re.compile(
+    rf"^ttng\.warp_group_dot_wait ((?:{_SSA},?\s*)*)\{{pendings = (\d+) : i32\}}"
+)
 _RE_SCF_FOR = re.compile(
     rf"^(?:({_SSA})(?::\d+)?\s*=\s*)?scf\.for ({_SSA}) = ({_SSA}) to ({_SSA}) "
     rf"step ({_SSA})(?: iter_args\((.*?)\))?\s*->"
@@ -266,6 +303,17 @@ _KNOWN_TTG_OPS = {
     "ttg.async_commit_group",
     "ttg.async_wait",
     "ttg.convert_layout",  # smem scratch is internal; ordered by Membar
+}
+
+# The sm90 subset (M4 tranche 1): the wgmma agent and its counting wait.
+# fence_async_shared only ADDS ordering (generic→async proxy); the model
+# never relies on it for a proof, and the shapes where ignoring it could
+# hide one behind a report (generic stores mixed with async ops on one
+# allocation) are already gated unsupported in analyze_graph.
+_KNOWN_TTNG_OPS = {
+    "ttng.warp_group_dot",
+    "ttng.warp_group_dot_wait",
+    "ttng.fence_async_shared",
 }
 
 _DTYPE_BITS = {
@@ -366,6 +414,8 @@ def parse_ttgir(text: str) -> EventGraph:
     stores: list[StoreEvent] = []
     commits: list[CommitEvent] = []
     waits: list[WaitEvent] = []
+    dots: list[DotEvent] = []
+    dot_waits: list[DotWaitEvent] = []
 
     segment = "prologue"
     loop_depth = 0
@@ -492,12 +542,12 @@ def parse_ttgir(text: str) -> EventGraph:
 
         op_kind = body.split(" ")[0].rstrip(",")
 
-        # Vocabulary guard: any ttng op, or a ttg/gpu op outside the known
-        # set, is outside the v1 model.
-        if op_kind.startswith("ttng."):
+        # Vocabulary guard: any ttng op outside the modeled sm90 subset, or
+        # a ttg/gpu op outside the known set, is outside the model.
+        if op_kind.startswith("ttng.") and op_kind not in _KNOWN_TTNG_OPS:
             raise UnsupportedTTGIR(
-                f"line {line_no}: {op_kind} is not modeled in v1 "
-                "(Hopper/Blackwell path — see plan M4)"
+                f"line {line_no}: {op_kind} is not modeled "
+                "(Hopper TMA/mbarrier / Blackwell path — see plan M4)"
             )
         if op_kind == "gpu.barrier":
             raise UnsupportedTTGIR(
@@ -672,11 +722,66 @@ def parse_ttgir(text: str) -> EventGraph:
                 seen_loop_with_events = True
             continue
 
+        if op_kind == "ttng.warp_group_dot":
+            dm = _RE_WARP_GROUP_DOT.match(body)
+            if not dm:
+                raise UnsupportedTTGIR(f"line {line_no}: unparsable warp_group_dot")
+            operands = _split_ssa_list(dm.group(1))
+            reads: list[tuple[str, str | None]] = []
+            for name in operands:
+                if name in views or name in allocations:
+                    reads.append(resolve_view(name, line_no))
+            # Every memdesc operand must have resolved to a local_alloc view;
+            # one produced some other way (memdesc_trans, subslice, ...) would
+            # otherwise silently drop a real smem read from the model. The
+            # operand types sit between ':' and '->' in the printed op.
+            type_sig = body.split(" : ", 1)[1] if " : " in body else ""
+            n_memdesc = type_sig.split("->", 1)[0].count("memdesc")
+            if n_memdesc != len(reads):
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: warp_group_dot has {n_memdesc} memdesc "
+                    f"operands but only {len(reads)} resolve to local_allocs"
+                )
+            dots.append(
+                DotEvent(
+                    reads=tuple(reads),
+                    is_async="isAsync = true" in body,
+                    segment=segment,
+                    body_pos=next_pos(),
+                    loc=loc,
+                    line_no=line_no,
+                )
+            )
+            if segment == "loop" and reads:
+                seen_loop_with_events = True
+            continue
+
+        if op_kind == "ttng.warp_group_dot_wait":
+            wm2 = _RE_WARP_GROUP_DOT_WAIT.match(body)
+            if not wm2:
+                raise UnsupportedTTGIR(
+                    f"line {line_no}: unparsable warp_group_dot_wait"
+                )
+            dot_waits.append(
+                DotWaitEvent(
+                    pendings=int(wm2.group(2)),
+                    segment=segment,
+                    body_pos=next_pos(),
+                    line_no=line_no,
+                )
+            )
+            continue
+
+        if op_kind == "ttng.fence_async_shared":
+            # Proxy fence: adds generic→async ordering. Never load-bearing
+            # for the modeled proofs (see _KNOWN_TTNG_OPS note); no event.
+            continue
+
         # ttg.convert_layout / tt.* / arith.* on tensors: not events in the v1
         # model. (ttg.local_dealloc is handled above.)
 
     # Resolve loc ids (aliases live at the bottom of the file).
-    event_lists: list[list[Any]] = [copies, loads, stores, waits]
+    event_lists: list[list[Any]] = [copies, loads, stores, waits, dots]
     for ev_list in event_lists:
         for ev in ev_list:
             if isinstance(ev.loc, str):
@@ -699,5 +804,7 @@ def parse_ttgir(text: str) -> EventGraph:
         stores=stores,
         commits=commits,
         waits=waits,
+        dots=dots,
+        dot_waits=dot_waits,
         kernel_name=kernel_name,
     )

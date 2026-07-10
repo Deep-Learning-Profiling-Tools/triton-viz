@@ -78,6 +78,46 @@ def test_generic_only_model():
     assert m.generic_only
 
 
+def test_sm90_wgmma_counting_model():
+    """The wgmma agent on the sm90 golden dump: one async warp_group_dot
+    per iteration reading both allocations at slot (k mod 3), retired by
+    the in-body pendings=1 wait; its smem reads also join the RAW load
+    machinery, guarded by the leading async_wait num=2."""
+    g = _graph("matmul_s3_sm90.ttgir")
+    m = build_pipeline_model(g)
+
+    assert m.prologue_dots == 0
+    assert m.dots_per_iter == 1
+    assert m.prologue_commits == 4
+    assert m.commits_per_iter == 2
+
+    # One wgmma × two memdesc operands (a and b), same rotating slot.
+    assert len(m.dot_reads) == 2
+    assert {d.alloc for d in m.dot_reads} == {"%a", "%b"}
+    for d in m.dot_reads:
+        assert d.loop_pos == 1 and d.const_rank is None
+        assert d.slot == RotatingSlot(base=0, modulus=3)
+
+    # Loop wait pendings=1 with the dot issued before it; the epilogue
+    # pendings=0 drain is recorded but never guards a loop copy.
+    loop_waits = [w for w in m.dot_waits if w.segment == "loop"]
+    assert len(loop_waits) == 1
+    assert loop_waits[0].pendings == 1 and loop_waits[0].issued_before == 1
+    assert [w.pendings for w in m.dot_waits if w.segment == "epilogue"] == [0]
+
+    # RAW side: the wgmma reads are pseudo-loads guarded by the num=2 wait.
+    assert len(m.loads) == 2
+    assert all(ld.via_dot for ld in m.loads)
+    assert all(ld.wait_num == 2 and ld.issued_before_wait == 0 for ld in m.loads)
+
+    # Copies rotate two slots ahead of the dot reads (base 2 vs base 0).
+    loop_copies = [c for c in m.copies if c.loop_pos is not None]
+    assert {c.slot for c in loop_copies} == {RotatingSlot(base=2, modulus=3)}
+    assert all(
+        c.body_pos > loop_waits[0].body_pos for c in loop_copies
+    ), "in-body copies follow the dot wait"
+
+
 def test_cyclic_scalar_chain_is_unsupported_not_recursion_error():
     """Adversarial use-before-def SSA cycles must degrade to unsupported."""
     from triton_viz.clients.race_detector.compiled import analyze_ttgir

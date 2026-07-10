@@ -78,9 +78,21 @@ def test_elementwise_has_no_smem_events():
     assert not g.copies and not g.loads and not g.stores
 
 
-def test_sm90_wgmma_is_unsupported():
-    with pytest.raises(UnsupportedTTGIR, match="ttng"):
-        parse_ttgir(_read("matmul_s3_sm90.ttgir"))
+def test_sm90_wgmma_parses_into_dot_events():
+    """The M4 sm90 subset: warp_group_dot smem reads and the pendings
+    waits become first-class events; ttng ops OUTSIDE the subset (TMA,
+    mbarrier) still degrade to unsupported (see the e2e pin)."""
+    g = parse_ttgir(_read("matmul_s3_sm90.ttgir"))
+    assert len(g.dots) == 1
+    dot = g.dots[0]
+    assert dot.is_async and dot.segment == "loop"
+    assert {alloc for alloc, _ in dot.reads} == {"%a", "%b"}
+    assert [(w.segment, w.pendings) for w in g.dot_waits] == [
+        ("loop", 1),
+        ("epilogue", 0),
+    ]
+    # nvmma layout aliases are captured like any other layout attribute.
+    assert any("nvmma_shared" in v for v in g.layouts.values())
 
 
 def test_explicit_barrier_is_unsupported():
