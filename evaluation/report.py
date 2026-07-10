@@ -94,13 +94,23 @@ def ladder_audit(rows: list[dict]) -> dict:
     replay_unsound: list[str] = []
     for group in by_spec.values():
         # Premise-compatible derived truth: an ALIASED yes-launch violates
-        # the T0 non-aliasing premise and cannot contradict a T0 proof.
-        exists_racy_compatible = any(
-            g.get("expected") == "race" and not g.get("aliased") for g in group
-        )
+        # the T0 non-aliasing premise and cannot contradict a T0 proof;
+        # likewise a yes-launch with a DIFFERENT grid geometry cannot,
+        # because the T0 claim keeps the launch's extent along unread pid
+        # axes (symbolic_grid enforces the launch contract instead of
+        # assuming it), so grid extents are part of the T0 premises.
+        def _racy_compatible(g: dict, proved_row: dict) -> bool:
+            return (
+                g.get("expected") == "race"
+                and not g.get("aliased")
+                and list(g.get("grid") or []) == list(proved_row.get("grid") or [])
+            )
+
         for g in group:
             terminal = g.get("terminal") or ""
-            if terminal.startswith("proved@T0") and exists_racy_compatible:
+            if terminal.startswith("proved@T0") and any(
+                _racy_compatible(other, g) for other in group
+            ):
                 ladder_unsound.append(g["name"])
             if terminal == "race-confirmed" and g.get("expected") == "race-free":
                 replay_unsound.append(g["name"])

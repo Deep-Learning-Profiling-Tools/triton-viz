@@ -7,6 +7,7 @@ CORPORA = (
     "tritonracebench",
     "tutorials",
     "liger",
+    "aiter_originals",
 )
 
 

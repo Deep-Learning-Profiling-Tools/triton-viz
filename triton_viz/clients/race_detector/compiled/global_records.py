@@ -704,25 +704,39 @@ def _references_unmodeled_observation(access: AccessEvent, env: _RaceEnv) -> boo
 
 
 def symbolic_grid(
-    encoding: GlobalEncoding, launch_grid: tuple[int, ...] | None = None
+    encoding: GlobalEncoding,
+    launch_grid: tuple[int, ...] | None = None,
+    t0: bool = False,
 ) -> tuple[Any, Any, Any]:
     """The T0/T1 grid: symbolic (all sizes ≥ 1) along the pid axes the
-    kernel reads; along UNREAD axes, pinned to 1 — except for
-    atomic-bearing graphs, where the identical-behavior justification
-    fails (see GlobalEncoding.has_atomics): those unread axes take the
-    REAL launch size when one is supplied (T1) and stay SYMBOLIC when not
-    (T0 — the sound direction; a resulting nonlinear counting product just
-    omits the axiom and the kernel falls to T1 per the ladder)."""
+    kernel reads; along UNREAD axes, the REAL launch extent. The previous
+    rule pinned unread axes to 1 under the launch-contract premise ("the
+    launch only extends along axes the kernel reads"), but a premise must
+    be CHECKED against the launch, not assumed: a launch that parallelizes
+    an axis the kernel ignores is exactly the aiter#3091 caller bug (the
+    fused caller runs _sum_bitmatrix_rows_fused's unpartitioned stores on
+    every pid), and pinning below the real extent fabricated race-freedom
+    proofs for it — a no-pid broadcast store at grid (4,) proved clean
+    while the interpreter reported the WAW. Flooring unread axes at the
+    launch extent keeps every contract-respecting launch unchanged (their
+    unread extents are 1) and reports the violation otherwise. The T0
+    claim is scoped accordingly: any grid along the read axes, the
+    launch's extent along unread ones (a T0 premise the ladder audit
+    treats as part of premise compatibility). Atomic-bearing graphs keep
+    unread axes SYMBOLIC at T0 (see GlobalEncoding.has_atomics: the
+    identical-behavior argument fails outright for atomics, and symbolic
+    is the sound direction there; a nonlinear counting product just omits
+    the axiom and the kernel falls to T1 per the ladder)."""
     from z3 import Int
 
     def dim(i: int) -> Any:
         if i in encoding.used_pid_axes:
             return Int(f"grid_{i}")
-        if not encoding.has_atomics:
-            return 1
+        if encoding.has_atomics and (t0 or launch_grid is None):
+            return Int(f"grid_{i}")
         if launch_grid is not None:
             return int(launch_grid[i]) if i < len(launch_grid) else 1
-        return Int(f"grid_{i}")
+        return 1
 
     return (dim(0), dim(1), dim(2))
 

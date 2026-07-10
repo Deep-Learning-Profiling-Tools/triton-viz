@@ -806,11 +806,16 @@ class CompiledRaceDetector(Client):
         input) is attempted only behind the syntactic linearity gate; any T0
         SAT falls through to T1 because a T0 witness carries parameter
         values that need not match this launch."""
+        lg = (
+            tuple(int(d) for d in launch_grid)
+            if isinstance(launch_grid, (tuple, list))
+            else None
+        )
         try:
             t0_proved = (
                 self._t0_premises_hold_for_launch(graph, tensors)
                 and t0_linearity_gate(graph)
-                and self._try_t0(graph)
+                and self._try_t0(graph, lg)
             )
         except Exception:  # noqa: BLE001
             # Even the gate walk must not escape finalize (deep-but-legal
@@ -823,11 +828,6 @@ class CompiledRaceDetector(Client):
         set_param("timeout", self.T1_TIMEOUT_MS)
         try:
             enc = encode_graph(graph, params, tensors)
-            lg = (
-                tuple(int(d) for d in launch_grid)
-                if isinstance(launch_grid, (tuple, list))
-                else None
-            )
             solver = TwoCopySymbolicHBSolver(
                 enc.records,
                 grid=symbolic_grid(enc, lg),
@@ -882,12 +882,16 @@ class CompiledRaceDetector(Client):
         intervals.sort()
         return all(s2 >= e1 for (_, e1), (s2, _) in zip(intervals, intervals[1:]))
 
-    def _try_t0(self, graph: AccessGraph) -> bool:
+    def _try_t0(
+        self, graph: AccessGraph, launch_grid: tuple[int, ...] | None = None
+    ) -> bool:
         """True only when EVERY per-tensor T0 group is UNSAT under symbolic
         params — including symbolic LOOP BOUNDS (the iteration-existence
         premise quantifies the claim over every trip count). Any SAT,
         unknown, timeout, or encoding limit (e.g. a non-constant loop step)
-        falls back to T1 — never a report."""
+        falls back to T1 — never a report. The launch grid floors UNREAD
+        pid axes at their real extents (see symbolic_grid): the T0 claim
+        ranges over every grid along the READ axes only."""
         from z3 import set_param
 
         try:
@@ -899,7 +903,7 @@ class CompiledRaceDetector(Client):
             for _name, enc in t0_groups:
                 solver = TwoCopySymbolicHBSolver(
                     enc.records,
-                    grid=symbolic_grid(enc),
+                    grid=symbolic_grid(enc, launch_grid, t0=True),
                     arange_dict=enc.arange_dict,
                     ablations=self.ablations,
                 )

@@ -14,8 +14,19 @@ back-to-back runs), tutorials and liger corpora, mutation mode
 attributable flips), verdict-attribute emission (whose tests exposed
 and closed the atomic grid-pinning soundness gap), and T0 symbolic
 loop bounds (iteration-existence premise; trb019 proves for every
-trip count). 227 race-detector tests pass. The checked-item
-histories live in this file's git log and the commit messages.
+trip count). Post-b2d279c: the unread-pid-axis grid pinning for
+non-atomic graphs was found unsound by running the ORIGINAL
+aiter#3091 kernel (`--corpus aiter_originals`): the distillation's
+phase-2 pid read had masked the class, and a no-pid broadcast store
+at grid (4,) was falsely proved while the interpreter reported the
+WAW. symbolic_grid now ENFORCES the launch contract instead of
+assuming it (unread axes floor at the real launch extent, T0 and
+T1; atomic T0 stays symbolic), the ladder audit gained
+grid-geometry premise compatibility, and the flipped regression
+test documents the new semantics. Zero collateral: benchmark,
+tutorials, and liger terminals are unchanged line for line; 228
+race-detector tests pass. The checked-item histories live in this
+file's git log and the commit messages.
 
 What remains, ordered by paper impact:
 

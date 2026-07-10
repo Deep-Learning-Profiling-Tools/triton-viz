@@ -266,14 +266,31 @@ def test_no_pid_atomic_kernel_good_version_still_proves():
     assert det.last_global_status == "ok"
 
 
-def test_non_atomic_no_pid_kernel_keeps_pinned_grid():
-    """The identical-behavior pinning rule is UNCHANGED for non-atomic
-    kernels: a no-pid fixed-range store still proves (duplicate identical
-    writes = the documented launch-contract scoping)."""
+def test_non_atomic_no_pid_kernel_reports_at_violating_launch():
+    """The launch-contract premise is ENFORCED, not assumed: a no-pid
+    store launched with grid (4,) parallelizes an axis the kernel never
+    reads — the aiter#3091 caller-bug shape — and the identical writes
+    are a real cross-instance WAW. Pinning the unread axis to 1 used to
+    fabricate a race-freedom proof here while the interpreter reported
+    the race (found on the ORIGINAL _sum_bitmatrix_rows_fused)."""
     text = _module(
         "%out_ptr: !tt.ptr<i32>",
         "%c1 = arith.constant 1 : i32",
         "tt.store %out_ptr, %c1 : !tt.ptr<i32>",
     )
     det = _run(text, (torch.zeros(1, dtype=torch.int32),), ["out_ptr"], grid=(4,))
+    assert (
+        det.last_global_status != "ok"
+    ), "a grid-(4,) launch of a no-pid store is a cross-instance WAW"
+
+
+def test_non_atomic_no_pid_kernel_proves_at_respecting_launch():
+    """The same kernel at grid (1,) respects the contract and proves; the
+    unread-axis floor equals the launch extent, so nothing is invented."""
+    text = _module(
+        "%out_ptr: !tt.ptr<i32>",
+        "%c1 = arith.constant 1 : i32",
+        "tt.store %out_ptr, %c1 : !tt.ptr<i32>",
+    )
+    det = _run(text, (torch.zeros(1, dtype=torch.int32),), ["out_ptr"], grid=(1,))
     assert det.last_global_status == "ok"
