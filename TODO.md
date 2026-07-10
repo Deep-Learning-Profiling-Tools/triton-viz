@@ -156,10 +156,13 @@ Build order:
       `ttg.warp_specialize`. Needs fresh golden dumps from descriptor-based
       kernels (`tl.make_tensor_descriptor` sources — block-ptr kernels get
       rewritten to plain pointers).
-- [ ] M5 — paper artifacts: per-query SMT-LIB2 emission with a metadata header
-      (event ids, locs) as the interchange format; evaluation sweep (tutorials
-      × `num_stages` × {sm80, sm90}: proofs, solve times, mutation-detection
-      matrix); case studies from historical pipeliner bugs.
+- [ ] M5 — paper artifacts (DESCOPED 2026-07-10 per the advisor: sell the
+      idea with z3py, do not lean on SMT-LIB; the per-query SMT-LIB2
+      emission / interchange-format deliverable is dropped — z3's native
+      to_smt2 covers any future need). Remaining content: evaluation sweep
+      (tutorials × `num_stages` × {sm80, sm90}: proofs, solve times,
+      mutation-detection matrix); case studies from historical pipeliner
+      bugs. The sm80-only half does not depend on M4.
 
 ## S6 stretch items (require B + C1 together; not part of either's DoD)
 
