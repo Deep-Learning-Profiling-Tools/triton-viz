@@ -32,9 +32,13 @@ def _host_compile_ttir(spec: LaunchSpec) -> str:
     from triton.backends.compiler import GPUTarget
     from triton.compiler import ASTSource
 
-    src = ASTSource(
-        fn=spec.kernel_fn, signature=spec.signature, constexprs=spec.constexprs
-    )
+    fn = spec.kernel_fn
+    # Under TRITON_INTERPRET, @triton.jit yields InterpretedFunction, which
+    # triton >= 3.7 ASTSource.hash() rejects (no .cache_key) — rebuild the
+    # real JITFunction from the raw callable for the host compile.
+    if not hasattr(fn, "cache_key") and hasattr(fn, "fn"):
+        fn = triton.runtime.jit.JITFunction(fn.fn)
+    src = ASTSource(fn=fn, signature=spec.signature, constexprs=spec.constexprs)
     k = triton.compile(src, target=GPUTarget("cuda", 80, 32))
     return k.asm["ttir"]
 

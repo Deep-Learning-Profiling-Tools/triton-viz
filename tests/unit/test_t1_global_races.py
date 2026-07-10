@@ -501,7 +501,16 @@ def test_unverifiable_capture_blocks_t0():
 def test_deep_term_chain_never_escapes_finalize():
     """A legal TTIR with a very deep offset chain exhausts recursion in the
     gate/eval walks; that must degrade to 'unsupported', never crash the
-    user's launch teardown."""
+    user's launch teardown.
+
+    The recursion limit is PINNED for the duration: the default limit
+    varies by environment and co-resident tests (xdist workers, z3), and a
+    high enough limit lets the depth-1500 walk COMPLETE — the store then
+    legitimately races (fixed range from every block) and the expected
+    abstention flips to reports. The test's subject is the exhaustion
+    path, so make exhaustion deterministic."""
+    import sys
+
     lines = [
         "%pid = tt.get_program_id x : i32",
         "%r = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32>",
@@ -516,13 +525,21 @@ def test_deep_term_chain_never_escapes_finalize():
         "tt.store %q, %c1 : tensor<64x!tt.ptr<f32>>",
     ]
     det = CompiledRaceDetector()
-    _launch(
-        det,
-        ["x_ptr", "out_ptr"],
-        (torch.zeros(64, dtype=torch.float32), torch.zeros(4096, dtype=torch.float32)),
-        {"grid": (2,)},
-        _mini(*lines),
-    )  # must not raise
+    prev_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1200)
+    try:
+        _launch(
+            det,
+            ["x_ptr", "out_ptr"],
+            (
+                torch.zeros(64, dtype=torch.float32),
+                torch.zeros(4096, dtype=torch.float32),
+            ),
+            {"grid": (2,)},
+            _mini(*lines),
+        )  # must not raise
+    finally:
+        sys.setrecursionlimit(prev_limit)
     assert det.last_global_status == "unsupported"
 
 

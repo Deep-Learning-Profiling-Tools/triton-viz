@@ -66,6 +66,15 @@ def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
 
 
 def _ttir_of(fn, signature, constexprs):
+    # Robust under TRITON_INTERPRET pollution: another test module
+    # (test_multithreading) sets the env var at IMPORT time, so this
+    # module's @triton.jit kernels become InterpretedFunction whenever it
+    # is imported later in the same process (alphabetical collection,
+    # sequential or xdist). triton >= 3.7 ASTSource.hash() requires
+    # fn.cache_key, which InterpretedFunction lacks — rebuild the real
+    # JITFunction from the raw callable for host compilation.
+    if not hasattr(fn, "cache_key") and hasattr(fn, "fn"):
+        fn = triton.runtime.jit.JITFunction(fn.fn)
     src = ASTSource(fn=fn, signature=signature, constexprs=constexprs)
     return triton.compile(src, target=GPUTarget("cuda", 80, 32)).asm["ttir"]
 
