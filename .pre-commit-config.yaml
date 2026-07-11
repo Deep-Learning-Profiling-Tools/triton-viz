@@ -12,8 +12,8 @@
 #
 # See https://github.com/pre-commit/pre-commit
 
-# extern content
-exclude: extern
+# extern content + vendored corpora (byte-identical to upstream)
+exclude: (extern|evaluation/kernels/tritonbench_g_v1/)
 
 repos:
 
