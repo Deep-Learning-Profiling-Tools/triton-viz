@@ -280,6 +280,23 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
 
 ## Corpus & experiment backlog (the paper's extension placeholders)
 
+- [ ] M4 tranche 4 — Blackwell tensor memory (tcgen05): model
+      ttng.tmem_alloc/load/store and tc_gen5_mma completion, TMEM
+      descriptor ALIASING (the smem allocation-aliasing analog:
+      aliased descriptors over one tmem region), and warp-to-chunk
+      mappings as layout closed forms. Definition of done: a
+      distilled reproduction of the TMEM Membar gap
+      (facebookexperimental/triton #1993 — a P store through an
+      aliased descriptor vs pending qkT reads, warp-vs-warp inside
+      one task, no barrier between them; the full kernel also needs
+      the TLX dialect and warp_specialize/tranche 3, so the
+      distillation targets plain-dialect tmem aliasing first).
+      Verified 2026-07-11: the current track fail-stops on sm100
+      TTGIR with "ttng.tmem_alloc is not modeled" — the honest
+      refusal, exactly the paper's named boundary. The triton 3.6
+      wheel host-compiles sm100 (tl.dot lowers to tc_gen5_mma +
+      tmem), so golden dumps need no hardware.
+
 Each item pairs a paper placeholder with the implementation work it
 needs; none blocks submission.
 
