@@ -174,15 +174,21 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
 
 ## 3d. Address-position lifting (PRIORITIZED 2026-07-11, Hao)
 
-Promoted from the backlog on the TritonBench evidence: 36 of 202
-rows abstain on indirect addressing, the single largest class, and
-the interpreter currently refuses them too. The model already
+Promoted from the backlog on the TritonBench evidence: 37 of 202
+rows abstain on indirect addressing (36× arith-over-loaded-data +
+1× direct loaded value), the single largest class, and the
+interpreter currently refuses them too. The model already
 covers the lifting (paper §4: the same select machinery as
 value/mask position); what is missing is validation, because
 address position has NO sound fallback direction (a free address
 makes every query SAT; a wrong one breaks witness soundness AND
-can hide real overlaps). A hand-off spec in the impl-spec style is
-the first deliverable.
+can hide real overlaps). The hand-off spec LANDED as
+`address_position_lifting_spec.md` (2026-07-11, adversarially
+verified 6/6 against the code): the lift is interpreter-front-end
+only per the §I.3 placement rule, the entire snapshot/domain/
+read-only machinery already exists for value position, and the
+happy path needs only the `_VALUE_DEPENDENT_ADDRESS_OPS` gate
+change — the spec's work items below are validation + tests.
 
 - [ ] (i) select(A_T, t) terms in event ADDRESS expressions with
       per-lane lowering (an index TILE means lane λ addresses
@@ -212,7 +218,8 @@ the first deliverable.
 
 ## 3e. Small fragment extensions (approved 2026-07-11, Hao; independent, any order)
 
-- [ ] Snapshot-lifted loop bounds (7 TritonBench rows): a loop
+- [ ] Snapshot-lifted loop bounds (8 TritonBench rows — 7 upper
+      bounds + tb_block_sparse_attn's lower bound): a loop
       bound loaded from a read-only tensor becomes a select term
       inside the iteration-existence premise (the T0-stretch
       machinery shape); per-instance bounds are then sound where a
