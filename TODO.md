@@ -92,6 +92,21 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
 - [x] cta-scope atomic-pair litmus — trb024: cross-CTA cta-scoped adds
       at one cell report (STATIC-track verdict, races-unclassified);
       the gpu-scoped twin proves at T1 (mutually atomic).
+- [ ] Category 8a — communication kernels, single-GPU half (Keren
+      2026-07-11): comm/comp SM-partition semaphore, DeepSeek-V3
+      style. Kernel shape: pid range split into a comm role and a
+      comp role; the comm side publishes through a global-memory
+      payload + semaphore (atomic release add / store), the comp
+      side polls the semaphore (await) before reading the payload.
+      Expressible TODAY with the shipped B+C1 machinery: this is the
+      guarded producer/consumer family with a role split on pid
+      instead of pid parity. Racy twins: drop the acquire on the
+      poll, poll the wrong counter value, or skip the poll on one
+      branch of the role split. Reference shapes: upstream gsan's
+      `_single_cta_atomic_sync_kernel` / `_single_cta_no_atomic_sync_kernel`
+      (python/test/gsan/test_symmetric_memory.py), re-cut at gpu
+      scope on one device. Lands as a new TritonRaceBench pattern
+      family (2-3 pairs) plus e2e pins.
 
 ## 3. Moral-strength conflict refinement (feeds the paper's memory-model tag)
 
@@ -427,6 +442,27 @@ needs; none blocks submission.
       should include one conservative-flagged (trb023) and one
       termination-conditional (any await row) witness. Tiny; mostly
       unblocks writing.
+- [ ] Category 8b — communication kernels, cross-device half (Keren
+      2026-07-11): symmetric-memory / UVM peer-GPU access without
+      NCCL. gsan's symmetric-memory tests are the reference litmus
+      source: sys-scope `atomic_add` + `atomic_poll` spin on a
+      rendezvous'd buffer, then a peer-payload load; the racy twin
+      omits the sync. Model extension needed before any of it runs:
+      a rank coordinate next to pid (two-copy across ranks; the
+      alpha-renaming argument is unchanged), sys scope in the
+      mutual-inclusion table (already in the vocabulary), and
+      symmetric-buffer identity (peer pointer on rank r = local
+      buffer on rank r', same abstract location). `atomic_poll` maps
+      onto the await abstraction as-is. Scope as Tier E in the paper
+      catalog; single-GPU miniatures (map a "peer" buffer to a
+      second region of one device) can precede real multi-GPU.
+- [ ] gsan as an external baseline (paper RQ5, alongside racecheck):
+      upstream `triton.experimental.gsan` is execution-based
+      GLOBAL-memory detection (TritonInstrument pass, vector-clock +
+      shadow-memory runtime), i.e. the direct dynamic counterpart of
+      our global track. Applicability pass first: which of our 52
+      rows it accepts, whether it runs single-GPU, and what its
+      per-launch overhead is vs our 34 ms. GPU-gated like racecheck.
 - [ ] External-baseline adapters (paper RQ5): GPU-GATED. Two of the
       planned baselines are already covered by the ablation switches
       (no-hb = the overlap checker, no-load-values = the concrete
