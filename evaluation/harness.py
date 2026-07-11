@@ -27,6 +27,22 @@ from typing import Any
 from evaluation.spec import LaunchSpec
 
 
+def _launch_binding(spec, args) -> dict:
+    """Bind the launch entirely BY NAME.
+
+    ``make_args`` returns the non-constexpr parameters in declaration
+    order (the corpus convention), but a positional call misbinds any
+    runtime parameter declared AFTER a constexpr (its value lands in the
+    constexpr's slot) and collides with constexpr-None optional pointers.
+    Zipping against the kernel's own arg_names sidesteps both."""
+    names = [n for n in spec.kernel_fn.arg_names if n not in spec.constexprs]
+    if len(names) != len(args):
+        raise RuntimeError(
+            f"launch binding mismatch: {len(args)} args for params {names}"
+        )
+    return {**dict(zip(names, args)), **spec.constexprs}
+
+
 def _host_compile_ttir(spec: LaunchSpec) -> str:
     import triton
     from triton.backends.compiler import GPUTarget
@@ -51,7 +67,9 @@ def _static_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
     det = CompiledRaceDetector(confirm_races=True, differential_check=True)
     args = spec.make_args(seed)
     t0 = time.perf_counter()
-    det.pre_warmup_callback(spec.kernel_fn, *args, grid=spec.grid, **spec.constexprs)
+    det.pre_warmup_callback(
+        spec.kernel_fn, grid=spec.grid, **_launch_binding(spec, args)
+    )
     det.post_warmup_callback(spec.kernel_fn, SimpleNamespace(asm={"ttir": ttir}))
     det.finalize()
     elapsed = time.perf_counter() - t0
@@ -140,7 +158,7 @@ def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     try:
         traced = triton_viz.trace(det)(spec.kernel_fn)
         with _watchdog(DYNAMIC_TIMEOUT_S):
-            traced[spec.grid](*args, **spec.constexprs)
+            traced[spec.grid](**_launch_binding(spec, args))
     except TimeoutError as e:
         error = str(e)
         timed_out = True
@@ -238,7 +256,7 @@ def _mutation_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
         det = CompiledRaceDetector(confirm_races=False, differential_check=False)
         args = spec.make_args(seed)
         det.pre_warmup_callback(
-            spec.kernel_fn, *args, grid=spec.grid, **spec.constexprs
+            spec.kernel_fn, grid=spec.grid, **_launch_binding(spec, args)
         )
         det.post_warmup_callback(spec.kernel_fn, SimpleNamespace(asm={"ttir": mutant}))
         det.finalize()

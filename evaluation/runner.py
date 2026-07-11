@@ -84,7 +84,13 @@ def run_corpus(
     out_path = RESULTS_DIR / f"{corpus_name}.jsonl"
 
     rows: list[dict] = []
-    header = {"header": True, "corpus": corpus_name, "seed": seed, **_versions()}
+    header = {
+        "header": True,
+        "corpus": corpus_name,
+        "seed": seed,
+        **_versions(),
+        **corpus.provenance,
+    }
     print(f"[runner] {corpus_name}: {len(specs)} specs -> {out_path}")
 
     for spec in specs:

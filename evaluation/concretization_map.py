@@ -50,7 +50,7 @@ POINTS: dict[str, tuple[int, int, str]] = {
     "race-confirmed": (3, 0, "confirmed race"),
     "race-unconfirmed": (3, 0, "unconfirmed report"),
 }
-RESIDUAL = ("unsupported", "compile-error")
+RESIDUAL = ("unsupported", "compile-error", "crash", "timeout")
 
 
 def load_rows(paths: list[Path]) -> list[dict]:

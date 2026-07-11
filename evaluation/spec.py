@@ -49,6 +49,9 @@ class LaunchSpec:
 class Corpus:
     name: str
     specs: list[LaunchSpec] = field(default_factory=list)
+    # Extra provenance merged into the results-JSONL header by the runner
+    # (e.g. a vendored corpus's upstream commit).
+    provenance: dict = field(default_factory=dict)
 
     def add(self, spec: LaunchSpec) -> LaunchSpec:
         assert spec.name not in {s.name for s in self.specs}, spec.name
