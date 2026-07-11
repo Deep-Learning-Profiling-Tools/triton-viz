@@ -107,6 +107,56 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       The paper can update Def. conflict and drop the divergence
       caveat, citing these tests as the implemented-semantics record.
 
+## 3b. Real-kernel corpus growth: TritonBench_G_v1 (landed 2026-07-10)
+
+- [x] thunlp/TritonBench `data/TritonBench_G_v1` (184 real-world
+      GitHub-crawled operator files, Apache-2.0) VENDORED under
+      evaluation/kernels/tritonbench_g_v1/ (byte-identical, LICENSE +
+      README pinning upstream commit 603e28a5; excluded from repo
+      formatters) — vendored rather than submodule/pip for artifact
+      self-containment (archived tarballs keep it, runs offline).
+      Launches captured ONCE on a CUDA box by
+      evaluation/tritonbench_capture.py (test blocks execute at import
+      on GPU): a JITFunction.run hook records per (file, kernel) the
+      first real launch — name→value binding split into runtime args /
+      constexprs, tensor descriptors (shape/dtype/init class incl.
+      observed int ranges so index tensors stay in-bounds/contiguity/
+      alias groups), exact scalars, resolved grid → 202 launches from
+      179/184 files (5 genuine failures: 2× removed triton.ops, 2×
+      smem over hardware limit, 1× autotune timeout; 24 kernels
+      skipped with reasons: 14× non-contiguous, 6× tl-dtype constexpr,
+      rest misc). evaluation/kernels/tritonbench_g.py rebuilds CPU
+      launches anywhere: execs only pre-separator kernel sections,
+      None-valued optional pointers stay positional placeholders and
+      double as constexpr None for the static signature (the harness
+      dedupes the kwarg — the middle-None shift bug broke the dynamic
+      column before), Autotuner/Heuristics unwrapped BY TYPE (the
+      wrappers proxy arg_names). Corpus.provenance carries the
+      upstream commit into the results header (liger's version+commit
+      recording landed alongside).
+- [x] Sweep (202 rows): 99 proofs (69 proved@T1 + 30 proved@T0, 49%
+      on unfiltered real code), 77 honest abstentions (36 indirect
+      addressing — the documented DataDep boundary — 7 data-dependent
+      bounds, 4 nested loops, 2 unstructured cf), 23
+      races-unclassified, 3 kernels that no longer compile upstream.
+      The 23 flagged rows were triaged by a 23-agent workflow with
+      independent cross-checks: 46/46 verdicts agree — ALL are the
+      T1 any-grid semantics meeting wrapper-coupled launches (the
+      kernel is safe only because grid = cdiv(dim, TILE); the any-grid
+      witness pids exceed the captured grid, e.g. (0,10,0) vs (2,2,4)),
+      not corpus artifacts and not detector bugs; the dynamic column
+      is clean on every one.
+
+## 3c. Decision point (advisor): launch-scoped verdict tier
+
+- [ ] For wrapper-coupled real-world kernels the honest composite
+      "any-grid SAT + launch-grid clean" lands on races-unclassified.
+      Proposal: when static witness pids exceed the captured grid,
+      re-solve with read axes pinned to the launch extents; UNSAT ⇒ a
+      new terminal "proved@T1-launch" with an any-grid caveat
+      (grid-contract finding), converting most of the 23 into
+      launch-scoped proofs. Changes verdict semantics — align first.
+
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
 - [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands
