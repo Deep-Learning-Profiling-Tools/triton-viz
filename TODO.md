@@ -157,6 +157,66 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       (grid-contract finding), converting most of the 23 into
       launch-scoped proofs. Changes verdict semantics — align first.
 
+## 3d. Address-position lifting (PRIORITIZED 2026-07-11, Hao)
+
+Promoted from the backlog on the TritonBench evidence: 36 of 202
+rows abstain on indirect addressing, the single largest class, and
+the interpreter currently refuses them too. The model already
+covers the lifting (paper §4: the same select machinery as
+value/mask position); what is missing is validation, because
+address position has NO sound fallback direction (a free address
+makes every query SAT; a wrong one breaks witness soundness AND
+can hide real overlaps). A hand-off spec in the impl-spec style is
+the first deliverable.
+
+- [ ] (i) select(A_T, t) terms in event ADDRESS expressions with
+      per-lane lowering (an index TILE means lane λ addresses
+      dst + select(A_T, base+λ)) and domain constraints
+      t ∈ dom(T) so out-of-domain indices cannot fabricate or hide
+      overlaps.
+- [ ] (ii) read-only flow check extended to INDEX-source tensors,
+      exactly like value sources (region tracking; a kernel that
+      writes an index tensor fail-stops — stale snapshots in
+      address position are wrong in both directions).
+- [ ] (iii) the byte-overlap query over select-containing
+      addresses (arrays + linear integer arithmetic; validate the
+      encoding shape and cost over the m² query loop).
+- [ ] (iv) witness-soundness revalidation: re-walk the A1/A2
+      transport of Theorem thm:witness with select in addresses;
+      the acceptance tests ARE the backing — written-index
+      fail-stop, OOB-index domain tests, index/data tensor
+      aliasing, masked-gather default interplay.
+- [ ] (v) Definition of done: scatter litmus pair (racy overlap +
+      disjoint-index control) with confirmed/exact witnesses; the
+      three doubly-undecided benchmark rows (trb010 gather/scatter,
+      trb013 plain-fetch) flip from unsupported to verdicts; a
+      sample of the 36 TritonBench indirect rows decides through
+      the composed dispatcher (per-launch scope; the captured
+      launches record observed index ranges precisely so snapshots
+      stay in-bounds); RQ5 complementarity numbers refresh.
+
+## 3e. Small fragment extensions (approved 2026-07-11, Hao; independent, any order)
+
+- [ ] Snapshot-lifted loop bounds (7 TritonBench rows): a loop
+      bound loaded from a read-only tensor becomes a select term
+      inside the iteration-existence premise (the T0-stretch
+      machinery shape); per-instance bounds are then sound where a
+      single concrete bound from the analyzed instance would not
+      be. Same read-only side condition and fail-stop as value
+      sources.
+- [ ] Nested-loop support in the TTIR reader (4 TritonBench rows +
+      the trb011 pair): the interpreter already handles nested
+      loops (trb011 decides correctly in the dynamic column), so
+      the composed dispatcher rescues these today; reader support
+      moves them into the static track's scope with grid-generic
+      claims.
+- [ ] Unstructured control flow (2 TritonBench rows): encode
+      cf.cond_br / early-return as path conditions per the
+      existing scf.if machinery (structurize or gate records on
+      the branch condition). Note the interpreter CANNOT rescue
+      these (instance-dependent control flow breaks the
+      full-template assumption), so the reader is the only route.
+
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
 - [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands
@@ -374,13 +434,6 @@ needs; none blocks submission.
       thread-level tools) need real hardware and an applicability
       pass first (racecheck covers shared memory; our litmus corpus
       is mostly global).
-- [ ] Address-position lifting (paper §4 placeholder + the three
-      doubly-undecided benchmark rows): select terms in ADDRESS
-      position with the read-only flow check extended to index
-      tensors and the witness side conditions revalidated — the one
-      remaining large feature; scatter litmus pair + benchmark row
-      flips + RQ5 complementarity refresh follow. Post-submission
-      unless prioritized.
 
 ## Decision points (not tasks)
 
