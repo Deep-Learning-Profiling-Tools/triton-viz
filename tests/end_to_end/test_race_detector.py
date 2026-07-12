@@ -514,11 +514,14 @@ def test_2d_tile_disjoint_blocks_no_race():
 
 def test_raw_waw_histogram():
     """Non-atomic load-modify-store on ``bins_ptr + bin_indices`` — the
-    target address itself depends on a loaded value (``bin_indices``). The
-    symbolic race detector marks this scatter pattern as unsupported rather
-    than detecting races by first-block concretisation, which was the prior
-    behaviour but unsound (the first block's concrete indices were taken as
-    a template for every symbolic PID).
+    target address depends on a loaded value. Since the address-position
+    lifting the detector DECIDES this launch: bin_indices lower to selects
+    over the read-only input snapshot (per-launch + contents-snapshot
+    scope), and with more inputs than bins two instances must collide —
+    RAW/WAW reports. (The pre-lifting behavior was an honest abstention;
+    the ancient first-block concretisation this test once guarded against
+    stays gone — the snapshot semantics is per-instance-exact, not a
+    first-block template.)
     """
 
     detector = SymbolicRaceDetector()
@@ -539,10 +542,11 @@ def test_raw_waw_histogram():
     bins = torch.zeros(n_bins, dtype=torch.int32)
     kernel[(triton.cdiv(n, bs),)](inp, bins, n, n_bins, bs)
 
-    assert detector.last_status == "unsupported"
-    assert detector.unsupported_reason is not None
-    assert "data-dependent" in detector.unsupported_reason
-    assert detector.last_reports == []
+    assert detector.last_status == "ok"
+    assert detector.last_premises == ("contents-snapshot",)
+    assert any(
+        r.race_type in (RaceType.RAW, RaceType.WAW) for r in detector.last_reports
+    )
 
 
 # ======== Correct vector_add (No Race) ========
@@ -1326,24 +1330,25 @@ def test_store_elem_size_is_four_for_float32_store(
 def _data_dependent_atomic_addr_kernel(idx_ptr, flag_ptr):
     pid = tl.program_id(0)
     idx = tl.load(idx_ptr + pid)
-    # Atomic CAS at a data-dependent address — the symbolic engine retains
-    # the load in the pointer expression, so the value-dependent-op guard
-    # fires.
+    # Atomic CAS at a plain-loaded address — lifted to a snapshot select
+    # (address-position spec §1, the co-admitted atomic surface).
     tl.atomic_cas(flag_ptr + idx, 0, 1, sem="acq_rel", scope="gpu")
 
 
-def test_data_dependent_atomic_address_is_unsupported(
+def test_data_dependent_atomic_address_is_decided(
     _isolate_race_detector_atomic_cfg,
 ):
+    """The co-admitted atomic surface of the address-position lifting:
+    a CAS whose address is a plain-loaded index is DECIDED — the all-zero
+    index sends both pids to flag[0], where gpu-scope CASes are mutually
+    atomic (inclusive scopes, same width, same address) — clean, with the
+    contents-snapshot premise recorded."""
     idx = torch.zeros(2, dtype=torch.int32)
     flag = torch.zeros(4, dtype=torch.int32)
     detector = _run_detector(_data_dependent_atomic_addr_kernel, (2,), idx, flag)
-    # The atomic CAS handler runs before the load result gets concretized,
-    # so _reject_data_dependent_address fires and marks unsupported.
-    assert detector.last_status == "unsupported"
-    assert detector.unsupported_reason is not None
-    assert "data-dependent" in detector.unsupported_reason
+    assert detector.last_status == "ok"
     assert detector.last_reports == []
+    assert detector.last_premises == ("contents-snapshot",)
 
 
 # ======== tl.static_range — concrete unrolling ========
@@ -1531,12 +1536,17 @@ def test_reject_data_dependent_address_marks_unsupported(
     # Initialize launch state without running a kernel.
     detector.grid_callback((2, 1, 1))
 
-    # Build a synthetic load expression (op == "load") whose mere presence
-    # in any outer pointer expression must trigger rejection.
     const = SymbolicExpr.from_value(0)
-    load_expr = SymbolicExpr.create("load", const, None, None)
 
-    rejected = detector._reject_data_dependent_address(load_expr)
+    # Plain tl.load in a pointer is LIFTED now (address-position spec):
+    # the gate must NOT fire on it.
+    load_expr = SymbolicExpr.create("load", const, None, None)
+    assert detector._reject_data_dependent_address(load_expr) is False
+
+    # Snapshot-UNSTABLE ops keep rejecting (kernel-computed permutations
+    # of runtime data have no snapshot semantics).
+    cumsum_expr = SymbolicExpr.create("cumsum", load_expr, 0, False, None)
+    rejected = detector._reject_data_dependent_address(cumsum_expr)
     assert rejected is True
     assert detector.last_status == "unsupported"
     assert detector.unsupported_reason is not None

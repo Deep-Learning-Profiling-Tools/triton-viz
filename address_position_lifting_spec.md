@@ -1,6 +1,12 @@
 # Address-position lifting — hand-off spec (TODO §3d)
 
-Status: hand-off spec, 2026-07-11, ADVERSARIALLY VERIFIED — every
+Status: IMPLEMENTED 2026-07-11 (§8 steps 1-6; step 7's TritonBench
+migration + RQ5 refresh follow the corpus rerun). The six acceptance
+families live in tests/end_to_end/test_address_position_lifting.py;
+composed-dispatcher terminals race@interp / proved@interp landed in
+evaluation/harness.py with dynamic-witness serialization and the
+interp-disagreement audit bucket. Originally: hand-off spec,
+2026-07-11, ADVERSARIALLY VERIFIED — every
 factual anchor below was independently checked against the code at
 commit `7e71ac0` (6/6 claims confirmed; the §1 co-admitted-atomics
 note, the CAS constraint-discard fragility, and the §4 latent-trap
@@ -338,16 +344,22 @@ named families, concretely:
    - `trb013_work_queue_no` / `_narrow_yes` (atomic fetch): UNCHANGED
      — counting-axiom path; regression-pin that their terminals do
      not move.
-3. **TritonBench sample through the composed dispatcher**: rerun the
-   corpus; report the terminal migration of the 37 indirect rows.
-   Expected buckets: (a) dynamic verdicts (the KV-cache scatter and
-   index-select family — captured launches record observed index
-   ranges precisely, so snapshots are in-bounds by construction);
-   (b) snapshot-cap abstentions with the new distinct reason (tables
-   > 1024 elements — likely the attention block-table rows); (c)
-   other interpreter boundaries (e.g. `tb_attention_fwd_triton3`'s
-   SymbolicExprDataWrapper coercion) unchanged. No target percentage
-   is promised; the DELIVERABLE is the bucket table with reasons.
+3. **TritonBench sample through the composed dispatcher** — DONE
+   2026-07-11, the measured migration of the 37 indirect rows:
+   7× proved@interp + 4× race@interp (11 decided), 10× host-side
+   pid-divergent control flow (the interpreter's structural
+   boundary), 7× per-instance loop bounds, 5× the snapshot cap (the
+   new distinct reason), 3× masked load without `other`, 1×
+   SymbolicExprDataWrapper coercion. Corpus-wide: unsupported
+   76 → 55, +15 proved@interp, +6 race@interp (the composed
+   terminals also rescued rows outside the indirect set). The 6
+   race@interp-on-race-free rows are the audit's
+   interp-disagreements bucket: descriptor-rebuilt randint index
+   tables collide where the real workload's indices were unique —
+   a RECONSTRUCTION-fidelity artifact, not detector unsoundness;
+   the capture-side fix (record observed index uniqueness, rebuild
+   unique tables via randperm sampling, needs a GPU re-capture) is
+   queued in TODO §3d as the follow-up.
 4. **RQ5 complementarity refresh** (`evaluation/ablation.py`): the
    `no-load-values` ablation must now also erase the address-position
    verdicts (both the trb010 confirmations and the trb013 plain-fetch

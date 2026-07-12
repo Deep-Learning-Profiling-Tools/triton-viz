@@ -6,9 +6,11 @@ the RMW observation model (counting axiom + reads-through), each racy twin
 obtained by breaking exactly the synchronization the proof depends on.
 
 `work_queue_plain_fetch_yes` is the spec's plain-load twin: a LOADED head
-value in the address is data-dependent indirection, outside the model on
-both tracks — the honest outcome is abstention (unsupported), recorded as a
-coverage miss rather than a verdict.
+value in the address. Since the address-position lifting
+(address_position_lifting_spec.md) the interpreter front-end DECIDES it:
+the read-only head snapshot gives every instance the same slot, so the
+plain stores collide — race@interp with the contents-snapshot premise
+(formerly an abstention recorded as a coverage miss).
 """
 
 import torch

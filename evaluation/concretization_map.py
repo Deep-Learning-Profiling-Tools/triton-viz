@@ -49,6 +49,12 @@ POINTS: dict[str, tuple[int, int, str]] = {
     # memory contents and paths are concretized together.
     "race-confirmed": (3, 0, "confirmed race"),
     "race-unconfirmed": (3, 0, "unconfirmed report"),
+    # Composed-dispatcher decisions on static-abstained rows: the
+    # interpreter front-end's own verdicts (per-launch scope, optionally
+    # + contents-snapshot). A proof can now live on the interpreter
+    # point too.
+    "race@interp": (3, 0, "report"),
+    "proved@interp": (3, 0, "proof"),
 }
 RESIDUAL = ("unsupported", "compile-error", "crash", "timeout")
 

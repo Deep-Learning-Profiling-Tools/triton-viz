@@ -165,10 +165,21 @@ def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         error = f"{type(e).__name__}: {e}"
     elapsed = time.perf_counter() - t0
+    witnesses = [
+        {
+            "first": rep.first_record.source_location,
+            "second": rep.second_record.source_location,
+            "race_type": rep.race_type.name,
+            "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
+        }
+        for rep in (getattr(det, "last_reports", []) or [])
+    ]
     return {
         "status": "timeout" if timed_out else getattr(det, "last_status", None),
         "reason": getattr(det, "unsupported_reason", None),
         "n_reports": len(getattr(det, "last_reports", []) or []),
+        "premises": list(getattr(det, "last_premises", ()) or ()),
+        "witnesses": witnesses,
         "error": error,
         "time_s": round(elapsed, 4),
     }
@@ -269,8 +280,19 @@ def _mutation_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
     }
 
 
-def _classify(static: dict[str, Any]) -> tuple[str, str]:
-    """(verdict, terminal) from the static track's surfaces."""
+def _classify(
+    static: dict[str, Any], dynamic: dict[str, Any] | None = None
+) -> tuple[str, str]:
+    """(verdict, terminal) from the composed dispatcher.
+
+    The static track decides when it can; when it ABSTAINS and the
+    interpreter track ran to completion, the interpreter's verdict is
+    the decision — the plan's §I.3 composition (within each front-end's
+    reachable region, the least concretization that decides). Those
+    terminals live on the interpreter point of the concretization map:
+    ``race@interp`` / ``proved@interp``, scoped per-launch (+ the
+    contents-snapshot premise when an event address lowered through a
+    load snapshot — carried in dynamic["premises"])."""
     status = static["status"]
     if status == "ok":
         return ("race-free", static["provenance"] or "proved@T1")
@@ -281,6 +303,11 @@ def _classify(static: dict[str, Any]) -> tuple[str, str]:
     if status == "unsupported":
         if "race-unconfirmed" in (static["reason"] or ""):
             return ("abstain", "race-unconfirmed")
+        dyn = dynamic or {}
+        if dyn.get("status") == "ok" and not dyn.get("error"):
+            if (dyn.get("n_reports") or 0) > 0:
+                return ("race", "race@interp")
+            return ("race-free", "proved@interp")
         return ("abstain", "unsupported")
     return ("abstain", status or "unknown")
 
@@ -359,7 +386,7 @@ def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]
     except Exception as e:  # noqa: BLE001
         row["dynamic"] = {"error": f"{type(e).__name__}: {e}"}
 
-    row["verdict"], row["terminal"] = _classify(row["static"])
+    row["verdict"], row["terminal"] = _classify(row["static"], row.get("dynamic"))
 
     if mutate and row["static"].get("status") == "ok":
         try:

@@ -282,6 +282,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         self.ablations = frozenset(ablations)
         self.records: list[AccessEventRecord] = []
         self.last_reports: list[Any] = []
+        # Premise tracking for the address-position lifting: launches
+        # where an event ADDRESS chain embeds a plain load lower through
+        # the contents snapshot, so their verdicts carry the
+        # "contents-snapshot" premise (spec §6). Detection is SYNTACTIC
+        # on the pointer expr (cache-independent — a counter on provider
+        # serves would miss cache-hit lowerings and under-mark).
+        self._address_snapshot_used = False
         # Status of the most recent finalize(): "ok" means the solver ran;
         # "unsupported" means the launch hit a feature the solver doesn't
         # model (atomic-in-loop, RMW return downstream, data-dependent
@@ -422,8 +429,16 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     # record a wrong or unmodelable footprint — scatter/histogram patterns
     # where the destination index comes from a runtime value. Flag these as
     # unsupported until value semantics are properly modeled.
+    # Ops whose RESULT may not appear in an event ADDRESS. Plain tl.load
+    # is deliberately absent (the address-position lifting,
+    # address_position_lifting_spec.md): a plain load of a READ-ONLY
+    # tensor lowers to a Select over the launch snapshot with its domain
+    # facts, which is exact within the per-launch + contents-snapshot
+    # scope. Atomic returns stay out — they are interleaving-dependent,
+    # not snapshot-stable — and remain admissible only under the counting
+    # axiom; sort/cumsum have no snapshot semantics; block-ptr loads
+    # (tensor_pointer_load) are a different lowering path (spec §7).
     _VALUE_DEPENDENT_ADDRESS_OPS: ClassVar[tuple[str, ...]] = (
-        "load",
         "tensor_pointer_load",
         "atomic_cas",
         "atomic_rmw",
@@ -445,6 +460,17 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             except Exception:
                 continue
         return None
+
+    def _note_address_snapshot(self, ptr_expr: "SymbolicExpr | None") -> None:
+        """Mark the launch's contents-snapshot premise when the event
+        pointer chain embeds a plain load (the lifted-address case)."""
+        if ptr_expr is None:
+            return
+        try:
+            if ptr_expr.has_op("load"):
+                self._address_snapshot_used = True
+        except Exception:  # noqa: BLE001 — premise marking must not break capture
+            pass
 
     def _reject_data_dependent_address(self, ptr_expr: SymbolicExpr | None) -> bool:
         """If ``ptr_expr`` depends on a runtime value, mark the launch
@@ -654,9 +680,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 "tl.load value from an empty tensor is unsupported"
             )
         if numel > self._MAX_LOAD_SOURCE_ELEMENTS:
+            # Named "snapshot cap" so results bucketing can distinguish
+            # table-size abstentions (incl. address-position index tables,
+            # spec §2) from flow violations.
             raise UnsupportedSymbolicRaceQuery(
-                f"tl.load value source tensor exceeds size cap "
-                f"({numel} > {self._MAX_LOAD_SOURCE_ELEMENTS})"
+                f"tl.load source tensor exceeds the "
+                f"{self._MAX_LOAD_SOURCE_ELEMENTS}-element snapshot cap "
+                f"({numel} elements)"
             )
         if not self._is_modelable_dtype(getattr(tensor, "dtype", None)):
             raise UnsupportedSymbolicRaceQuery(
@@ -802,6 +832,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         SymbolicClient.grid_idx_callback(self, grid_idx)
         # Capture is one-shot: program_seq spans a single symbolic pass over
         # all records, so we only reset it on grid_callback, not per block.
+
+    @property
+    def last_premises(self) -> tuple[str, ...]:
+        """Premises the last launch's verdict is conditioned on (beyond
+        the per-launch scope): ``contents-snapshot`` when any event
+        ADDRESS lowered through a load-value snapshot."""
+        return ("contents-snapshot",) if self._address_snapshot_used else ()
 
     def finalize(self) -> list:
         """Run the two-copy symbolic HB solver and return any detected races.
@@ -1642,25 +1679,30 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         enclosing loop's flush point, with ``_make_event_signature`` used to
         dedupe events that repeat across iterations of the same loop.
 
-        The pointer and mask expressions are evaluated separately: the
-        address-of-the-event is ``expr.ptr._to_z3()`` (independent of any
-        load-value provider that may give ``LoadSymbolicExpr`` value
-        semantics), and the mask becomes the event's ``active`` condition so
-        ``_lower_record`` can take per-lane lane-values rather than ``And``-
-        collapsing a vector mask into a scalar local constraint. Block-
-        pointer accesses are the exception: their ``ptr`` is an unlowerable
-        descriptor, so the access expr itself supplies the tile footprint.
+        The pointer and mask expressions are evaluated separately, BOTH
+        under the load-value provider: an embedded plain ``tl.load`` in the
+        pointer chain lowers to a ``Select`` over the read-only launch
+        snapshot (the address-position lifting — its domain facts ride the
+        pointer's constraint conjunction into ``active``), and the mask
+        becomes the event's ``active`` condition so ``_lower_record`` can
+        take per-lane lane-values rather than ``And``-collapsing a vector
+        mask into a scalar local constraint. CAS/RMW returns and
+        sort/cumsum results in a pointer still reject (snapshot-unstable).
+        Block-pointer accesses are the exception: their ``ptr`` is an
+        unlowerable descriptor, so the access expr itself supplies the
+        tile footprint.
         """
         if self._unsupported_capture or not self._capture_active():
             return
-        # Reject scatter/histogram-style addressing where the pointer itself
-        # depends on a runtime value — the current model conflates e.g. a
-        # load's pointer with its loaded value.
+        # Reject addressing through snapshot-UNSTABLE runtime values
+        # (atomic returns, sort/cumsum); plain-load indirection is admitted
+        # and lowers to snapshot selects under the provider.
         ptr_attr = getattr(expr, "ptr", None)
         if self._reject_data_dependent_address(ptr_attr):
             return
         if ptr_attr is None:
             return
+        self._note_address_snapshot(ptr_attr)
         if isinstance(expr, TensorPointerSymbolicExpr):
             # Block pointers: expr.ptr is a make_block_ptr/advance descriptor
             # with no address lowering of its own — the access expr itself
@@ -1746,6 +1788,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         expr_atomic = cast(AtomicCasSymbolicExpr, expr)
         if self._reject_data_dependent_address(expr_atomic.ptr):
             return
+        self._note_address_snapshot(expr_atomic.ptr)
         result = self._safe_eval(expr, "atomic_cas eval")
         if result is None:
             return
@@ -1753,15 +1796,23 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         result = self._safe_eval(expr_atomic.ptr, "atomic_cas ptr eval")
         if result is None:
             return
-        addr_expr, _ = result
+        # Keep the sub-eval constraint conjunctions explicitly (matching
+        # the RMW site) — the full-CAS eval above already folded them via
+        # the per-node cache, but that rescue is a coincidence of caching,
+        # not a contract (address_position_lifting_spec.md §1). Snapshot
+        # domain facts for a lifted pointer MUST reach the query.
+        addr_expr, addr_constraints = result
         result = self._safe_eval(expr_atomic.cmp, "atomic_cas cmp eval")
         if result is None:
             return
-        cmp_value, _ = result
+        cmp_value, cmp_constraints = result
         result = self._safe_eval(expr_atomic.val, "atomic_cas val eval")
         if result is None:
             return
-        value, _ = result
+        value, val_constraints = result
+        expr_constraints = self._combine_constraints(
+            expr_constraints, addr_constraints, cmp_constraints, val_constraints
+        )
 
         source_location = capture_current_source_location()
         self._record_atomic_cas_event(
@@ -1817,6 +1868,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         expr_rmw = cast(AtomicRmwSymbolicExpr, expr)
         if self._reject_data_dependent_address(expr_rmw.ptr):
             return
+        self._note_address_snapshot(expr_rmw.ptr)
         ptr_result = self._safe_eval(expr_rmw.ptr, "atomic_rmw ptr eval")
         if ptr_result is None:
             return

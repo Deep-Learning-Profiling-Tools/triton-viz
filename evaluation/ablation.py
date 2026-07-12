@@ -26,6 +26,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _ablation_scatter_kernel(idx_ptr, x_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    i = tl.load(idx_ptr + offs)
+    v = tl.load(x_ptr + offs)
+    tl.store(out_ptr + i, v)
+
 
 RESULTS_DIR = Path(__file__).parent / "results"
 STATIC_CONFIGS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -133,11 +145,60 @@ def load_value_ablation(seed: int = 0) -> list[str]:
     ]
 
 
+def address_position_ablation(seed: int = 0) -> list[str]:
+    """The address-position mirror of the load-values ablation
+    (address_position_lifting_spec.md §5.4). In ADDRESS position the
+    single-observation collapse errs in the FABRICATION direction: the
+    identity-permutation scatter is clean under the snapshot Select
+    (every slot written once), but collapsing the index load to one
+    concrete observation sends every lane of every pid to the same slot
+    — a fabricated cross-pid WAW. The racy all-zero twin stays racy
+    either way (its single observation happens to be the truth)."""
+    import triton_viz
+    from triton_viz.clients import RaceDetector
+
+    def run(idx: torch.Tensor, ablations: tuple[str, ...]) -> tuple[str, int]:
+        triton_viz.clear()
+        det = RaceDetector(ablations=ablations)
+        g = torch.Generator().manual_seed(seed)
+        args = (idx.clone(), torch.randn(8, generator=g), torch.zeros(8))
+        traced = triton_viz.trace(det)(_ablation_scatter_kernel)
+        traced[(2,)](*args, BLOCK=4)
+        return det.last_status, len(det.last_reports)
+
+    identity = torch.arange(8, dtype=torch.int32)
+    base_status, base_n = run(identity, ())
+    abl_status, abl_n = run(identity, ("load-values",))
+    fabricated = base_n == 0 and abl_n > 0
+    return [
+        "## Dynamic-track ablation: no-load-value-semantics in ADDRESS position",
+        "",
+        "identity-permutation scatter (every slot written once), grid (2,):",
+        "",
+        f"- baseline (snapshot Select address): status={base_status}, "
+        f"reports={base_n}",
+        f"- no-load-values (single observation): status={abl_status}, "
+        f"reports={abl_n}",
+        "",
+        (
+            "**FABRICATION demonstrated** — collapsing the index load to one "
+            "observation aliases every lane onto one slot: address position "
+            "has no sound one-directional fallback (the spec's central "
+            "premise), unlike mask position where the erasure direction is "
+            "at least proof-sound."
+            if fabricated
+            else f"fabrication={'yes' if abl_n > base_n else 'NO — investigate'}"
+        ),
+        "",
+    ]
+
+
 def main() -> None:
     t0 = time.perf_counter()
     lines = ["# RQ5 ablation study", ""]
     lines += static_matrix()
     lines += load_value_ablation()
+    lines += address_position_ablation()
     lines.append(f"(generated in {time.perf_counter() - t0:.1f}s)")
     out = "\n".join(lines)
     RESULTS_DIR.mkdir(exist_ok=True)

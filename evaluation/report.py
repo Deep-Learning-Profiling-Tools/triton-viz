@@ -67,7 +67,10 @@ def _witness_match(r: dict) -> str | None:
     expected = {ln for ln in (r.get("race_pair_lines") or []) if ln is not None}
     if not expected or r.get("verdict") != "race":
         return None
-    witnesses = (r.get("static") or {}).get("witnesses") or []
+    # interpreter-decided rows carry their witnesses on the dynamic track
+    witnesses = (r.get("static") or {}).get("witnesses") or (
+        (r.get("dynamic") or {}).get("witnesses") or []
+    )
     for w in witnesses:
         first, second = w.get("first"), w.get("second")
         got = {loc[1] for loc in (first, second) if loc}
@@ -92,6 +95,7 @@ def ladder_audit(rows: list[dict]) -> dict:
 
     ladder_unsound: list[str] = []
     replay_unsound: list[str] = []
+    interp_disagreements: list[str] = []
     for group in by_spec.values():
         # Premise-compatible derived truth: an ALIASED yes-launch violates
         # the T0 non-aliasing premise and cannot contradict a T0 proof;
@@ -114,9 +118,18 @@ def ladder_audit(rows: list[dict]) -> dict:
                 ladder_unsound.append(g["name"])
             if terminal == "race-confirmed" and g.get("expected") == "race-free":
                 replay_unsound.append(g["name"])
+            # Interpreter-point verdicts are per-launch (+ contents-snapshot)
+            # scoped evidence (address_position_lifting_spec.md §6): a
+            # disagreement with a race-free label is surfaced for review —
+            # on descriptor-rebuilt corpora it can be a reconstruction-
+            # fidelity artifact rather than unsoundness — but is not part
+            # of the required-zero audit.
+            if terminal == "race@interp" and g.get("expected") == "race-free":
+                interp_disagreements.append(g["name"])
     return {
         "ladder_unsound": sorted(ladder_unsound),
         "replay_unsound": sorted(replay_unsound),
+        "interp_disagreements": sorted(interp_disagreements),
     }
 
 
@@ -263,7 +276,14 @@ def render(paths: list[Path]) -> str:
             f"{audit['ladder_unsound'] or ''}, "
             f"replay-unsound={len(audit['replay_unsound'])} "
             f"{audit['replay_unsound'] or ''} "
-            f"→ {'PASS' if ok else 'FAIL'}",
+            f"→ {'PASS' if ok else 'FAIL'}"
+            + (
+                "; interp-disagreements (launch/contents-scoped, review) = "
+                f"{len(audit['interp_disagreements'])} "
+                f"{audit['interp_disagreements']}"
+                if audit["interp_disagreements"]
+                else ""
+            ),
             "",
         ]
     return "\n".join(lines)
