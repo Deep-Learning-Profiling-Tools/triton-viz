@@ -231,6 +231,12 @@ def render(paths: list[Path]) -> str:
                 f" (upstream {header.get('liger_kernel_commit') or 'unknown'})"
                 if header.get("liger_kernel")
                 else ""
+            )
+            + (
+                f", fla-core {header['fla_core']}"
+                f" (upstream {header.get('fla_core_commit') or 'unknown'})"
+                if header.get("fla_core")
+                else ""
             ),
             "",
             "| kernel | pattern | expected | terminal | witness | mut | "

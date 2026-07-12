@@ -60,6 +60,9 @@ repos:
   rev: "v4.5.0"
   hooks:
   - id: check-added-large-files
+    # captured-launch spec JSONs (evaluation/kernels/*_specs.json) carry
+    # exact int/bool value snapshots and legitimately exceed 500 KB
+    args: ["--maxkb=1500"]
   - id: check-case-conflict
   - id: check-docstring-first
   - id: check-merge-conflict

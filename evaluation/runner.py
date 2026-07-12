@@ -29,17 +29,24 @@ _LIGER_RELEASE_COMMITS = {
 }
 
 
-def _liger_provenance() -> dict:
-    """liger-kernel version + best-effort git commit for the results
-    fingerprint (the liger corpus analyzes the package AS INSTALLED, so
-    the artifact record must pin exactly which source that was). The
-    commit comes from pip's direct_url.json for git installs, else from
-    the release→tag-commit table above; unknown releases record None —
-    extend the table rather than guess."""
+# Same for fla-core (the flash-linear-attention kernel package); tags at
+# github.com/fla-org/flash-linear-attention.
+_FLA_RELEASE_COMMITS = {
+    "0.5.1": "2e38c1fab332174d056928feaf29f8c5fd5ac550",  # tag v0.5.1
+}
+
+
+def _package_provenance(package: str, key: str, release_commits: dict) -> dict:
+    """Version + best-effort git commit of an AS-INSTALLED corpus package
+    for the results fingerprint (the corpus analyzes whatever is
+    installed, so the artifact record must pin exactly which source that
+    was). The commit comes from pip's direct_url.json for git installs,
+    else from the release→tag-commit table; unknown releases record None
+    — extend the table rather than guess."""
     from importlib import metadata
 
     try:
-        dist = metadata.distribution("liger-kernel")
+        dist = metadata.distribution(package)
     except metadata.PackageNotFoundError:
         return {}
     commit = None
@@ -47,8 +54,16 @@ def _liger_provenance() -> dict:
     if raw:
         commit = json.loads(raw).get("vcs_info", {}).get("commit_id")
     if commit is None:
-        commit = _LIGER_RELEASE_COMMITS.get(dist.version)
-    return {"liger_kernel": dist.version, "liger_kernel_commit": commit}
+        commit = release_commits.get(dist.version)
+    return {key: dist.version, f"{key}_commit": commit}
+
+
+def _liger_provenance() -> dict:
+    return _package_provenance("liger-kernel", "liger_kernel", _LIGER_RELEASE_COMMITS)
+
+
+def _fla_provenance() -> dict:
+    return _package_provenance("fla-core", "fla_core", _FLA_RELEASE_COMMITS)
 
 
 def _versions() -> dict:
@@ -70,11 +85,69 @@ def _versions() -> dict:
         "z3": z3.get_version_string(),
         "commit": git,
         **_liger_provenance(),
+        **_fla_provenance(),
     }
 
 
+def _run_one(spec, corpus_name: str, seed: int, timeout: int, mutate: bool) -> dict:
+    t0 = time.perf_counter()
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+        tmp = tf.name
+    cmd = [
+        sys.executable, "-m", "evaluation.harness",
+        "--corpus", corpus_name, "--spec", spec.name,
+        "--seed", str(seed), "--out", tmp,
+    ]  # fmt: skip
+    if mutate:
+        cmd.append("--mutate")
+    row: dict
+    try:
+        proc = subprocess.run(
+            cmd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent,
+        )
+        if os.path.getsize(tmp) > 0:
+            with open(tmp) as f:
+                row = json.load(f)
+            if proc.returncode != 0:
+                row.setdefault("harness_error", proc.stderr[-500:])
+        else:
+            row = {
+                "name": spec.name,
+                "corpus": corpus_name,
+                "expected": spec.expected,
+                "pattern": spec.pattern,
+                "verdict": "error",
+                "terminal": "crash",
+                "harness_error": (proc.stderr or proc.stdout)[-500:],
+            }
+    except subprocess.TimeoutExpired:
+        row = {
+            "name": spec.name,
+            "corpus": corpus_name,
+            "expected": spec.expected,
+            "pattern": spec.pattern,
+            "verdict": "error",
+            "terminal": "timeout",
+            "harness_error": f"exceeded {timeout}s",
+        }
+    finally:
+        os.unlink(tmp)
+    row["wall_s"] = round(time.perf_counter() - t0, 2)
+    print(f"  {spec.name:40s} {row.get('terminal', '?'):20s} {row['wall_s']}s")
+    return row
+
+
 def run_corpus(
-    corpus_name: str, only: str | None, seed: int, timeout: int, mutate: bool = False
+    corpus_name: str,
+    only: str | None,
+    seed: int,
+    timeout: int,
+    mutate: bool = False,
+    jobs: int = 1,
 ) -> Path:
     from evaluation.kernels import load
 
@@ -83,7 +156,6 @@ def run_corpus(
     RESULTS_DIR.mkdir(exist_ok=True)
     out_path = RESULTS_DIR / f"{corpus_name}.jsonl"
 
-    rows: list[dict] = []
     header = {
         "header": True,
         "corpus": corpus_name,
@@ -91,58 +163,20 @@ def run_corpus(
         **_versions(),
         **corpus.provenance,
     }
-    print(f"[runner] {corpus_name}: {len(specs)} specs -> {out_path}")
+    print(f"[runner] {corpus_name}: {len(specs)} specs -> {out_path} (jobs={jobs})")
 
-    for spec in specs:
-        t0 = time.perf_counter()
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
-            tmp = tf.name
-        cmd = [
-            sys.executable, "-m", "evaluation.harness",
-            "--corpus", corpus_name, "--spec", spec.name,
-            "--seed", str(seed), "--out", tmp,
-        ]  # fmt: skip
-        if mutate:
-            cmd.append("--mutate")
-        row: dict
-        try:
-            proc = subprocess.run(
-                cmd,
-                timeout=timeout,
-                capture_output=True,
-                text=True,
-                cwd=Path(__file__).parent.parent,
+    if jobs == 1:
+        rows = [_run_one(s, corpus_name, seed, timeout, mutate) for s in specs]
+    else:
+        # rows are subprocess-isolated, so concurrency only affects wall_s
+        # (near-watchdog rows can flip to timeout under load — keep the
+        # definitive paper sweeps at jobs=1); output order stays spec order
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            rows = list(
+                ex.map(lambda s: _run_one(s, corpus_name, seed, timeout, mutate), specs)
             )
-            if os.path.getsize(tmp) > 0:
-                with open(tmp) as f:
-                    row = json.load(f)
-                if proc.returncode != 0:
-                    row.setdefault("harness_error", proc.stderr[-500:])
-            else:
-                row = {
-                    "name": spec.name,
-                    "corpus": corpus_name,
-                    "expected": spec.expected,
-                    "pattern": spec.pattern,
-                    "verdict": "error",
-                    "terminal": "crash",
-                    "harness_error": (proc.stderr or proc.stdout)[-500:],
-                }
-        except subprocess.TimeoutExpired:
-            row = {
-                "name": spec.name,
-                "corpus": corpus_name,
-                "expected": spec.expected,
-                "pattern": spec.pattern,
-                "verdict": "error",
-                "terminal": "timeout",
-                "harness_error": f"exceeded {timeout}s",
-            }
-        finally:
-            os.unlink(tmp)
-        row["wall_s"] = round(time.perf_counter() - t0, 2)
-        rows.append(row)
-        print(f"  {spec.name:40s} {row.get('terminal', '?'):20s} {row['wall_s']}s")
 
     with open(out_path, "w") as f:
         f.write(json.dumps(header) + "\n")
@@ -157,6 +191,7 @@ def main() -> None:
     ap.add_argument("--only")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timeout", type=int, default=PER_SPEC_TIMEOUT_S)
+    ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--no-report", action="store_true")
     ap.add_argument(
         "--mutate",
@@ -166,7 +201,9 @@ def main() -> None:
     )
     ns = ap.parse_args()
 
-    out = run_corpus(ns.corpus, ns.only, ns.seed, ns.timeout, mutate=ns.mutate)
+    out = run_corpus(
+        ns.corpus, ns.only, ns.seed, ns.timeout, mutate=ns.mutate, jobs=ns.jobs
+    )
     if not ns.no_report:
         from evaluation.report import render
 
