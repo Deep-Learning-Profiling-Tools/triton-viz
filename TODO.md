@@ -92,7 +92,7 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
 - [x] cta-scope atomic-pair litmus — trb024: cross-CTA cta-scoped adds
       at one cell report (STATIC-track verdict, races-unclassified);
       the gpu-scoped twin proves at T1 (mutually atomic).
-- [ ] Category 8a — communication kernels, single-GPU half (Keren
+- [x] Category 8a — communication kernels, single-GPU half (Keren
       2026-07-11): comm/comp SM-partition semaphore, DeepSeek-V3
       style. Kernel shape: pid range split into a comm role and a
       comp role; the comm side publishes through a global-memory
@@ -105,8 +105,17 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       branch of the role split. Reference shapes: upstream gsan's
       `_single_cta_atomic_sync_kernel` / `_single_cta_no_atomic_sync_kernel`
       (python/test/gsan/test_symmetric_memory.py), re-cut at gpu
-      scope on one device. Lands as a new TritonRaceBench pattern
-      family (2-3 pairs) plus e2e pins.
+      scope on one device. LANDED 2026-07-11 as trb025 (pattern
+      "comm-comp", control + 3 racy twins, tritonracebench 56 rows)
+      plus 4 static-track e2e pins (test_comm_comp_pattern.py):
+      control proves at T1+assumes-termination, relaxed-poll /
+      poll-initial-value / role-branch-skips-poll all report on the
+      payload pair with needle-exact witnesses. One machinery note
+      recorded in the corpus: the arrive is a release XCHG — a
+      release ADD-arrive plus the add(0) acquire poll puts two
+      value-interacting RMW records on the semaphore (the S6
+      ticket-lock boundary) and the control then reports; the true
+      multi-arrival counting arrive lands with the S6 stretch.
 
 ## 3. Moral-strength conflict refinement (feeds the paper's memory-model tag)
 
@@ -190,24 +199,42 @@ read-only machinery already exists for value position, and the
 happy path needs only the `_VALUE_DEPENDENT_ADDRESS_OPS` gate
 change — the spec's work items below are validation + tests.
 
-- [ ] (i) select(A_T, t) terms in event ADDRESS expressions with
+- [x] (i) select(A_T, t) terms in event ADDRESS expressions with
       per-lane lowering (an index TILE means lane λ addresses
       dst + select(A_T, base+λ)) and domain constraints
       t ∈ dom(T) so out-of-domain indices cannot fabricate or hide
       overlaps.
-- [ ] (ii) read-only flow check extended to INDEX-source tensors,
+- [x] (ii) read-only flow check extended to INDEX-source tensors,
       exactly like value sources (region tracking; a kernel that
       writes an index tensor fail-stops — stale snapshots in
       address position are wrong in both directions).
-- [ ] (iii) the byte-overlap query over select-containing
+- [x] (iii) the byte-overlap query over select-containing
       addresses (arrays + linear integer arithmetic; validate the
       encoding shape and cost over the m² query loop).
-- [ ] (iv) witness-soundness revalidation: re-walk the A1/A2
+- [x] (iv) witness-soundness revalidation: re-walk the A1/A2
       transport of Theorem thm:witness with select in addresses;
       the acceptance tests ARE the backing — written-index
       fail-stop, OOB-index domain tests, index/data tensor
       aliasing, masked-gather default interplay.
-- [ ] (v) Definition of done: scatter litmus pair (racy overlap +
+- [x] (v) Definition of done — ALL LANDED 2026-07-11: scatter
+      litmus pair race@interp/proved@interp with needle-exact
+      witnesses; trb013 plain-fetch flipped (counting-axiom rows
+      pinned unchanged); tritonracebench 56 rows at
+      precision=recall=1.0, witness 25/25, audit zero; TritonBench
+      37-row migration measured (11 decided: 7 proved@interp +
+      4 race@interp; abstention buckets: 10 pid-divergent host
+      control flow, 7 per-instance bounds, 5 snapshot cap, 3
+      missing-other, 1 wrapper coercion; corpus unsupported
+      76→55); RQ5 refreshed with BOTH directions (mask-position
+      erasure + the new ADDRESS-position FABRICATION demo — the
+      no-sound-fallback premise, empirically). Composed-dispatcher
+      terminals race@interp/proved@interp landed with
+      dynamic-witness serialization and the interp-disagreements
+      audit bucket (6 on TritonBench: randint index-table rebuild
+      collisions — reconstruction fidelity, not unsoundness).
+      FOLLOW-UP queued: capture records index-tensor uniqueness and
+      rebuilds unique tables via randperm (GPU re-capture needed) to
+      retire that bucket. Original definition: scatter litmus pair (racy overlap +
       disjoint-index control) with confirmed/exact witnesses; the
       three doubly-undecided benchmark rows (trb010 gather/scatter,
       trb013 plain-fetch) flip from unsupported to verdicts; a
