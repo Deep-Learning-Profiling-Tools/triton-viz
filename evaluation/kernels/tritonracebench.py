@@ -947,3 +947,182 @@ CORPUS.add(
         "atomic (inclusive scopes, same width, same address)",
     )
 )
+
+
+# ── trb025: communication kernels, single-GPU half (category 8a) ──
+# DeepSeek-V3-style SM partition: the pid range splits into a COMM role
+# (publish a global-memory payload, then arrive on a semaphore with a
+# release add) and a COMP role (await the arrival with an acquire poll,
+# then read the payload). The guarded producer/consumer family with a
+# role split on pid instead of pid parity — expressible with the shipped
+# B+C1 machinery. Reference shape: gsan's _single_cta_atomic_sync_kernel
+# re-cut at gpu scope on one device (advisor positioning 2026-07-11).
+#
+# The arrive is a release XCHG (the "release store" arm of the pattern):
+# a release ADD-arrive with an add(0) acquire poll puts TWO
+# value-interacting RMW records on the semaphore — the S6 ticket-lock
+# boundary (the counting axiom's single-record guard) — and the sw edge
+# cannot be derived today; probed 2026-07-11, the control then reports.
+# The counting arrive (true multi-arrival DeepSeek shape) lands with the
+# S6 stretch, not here.
+
+
+@triton.jit
+def trb025_comm_comp_kernel(
+    sem_ptr, payload_ptr, out_ptr, N_COMM: tl.constexpr, BLOCK: tl.constexpr
+):
+    pid = tl.program_id(0)
+    if pid < N_COMM:
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.atomic_xchg(sem_ptr, 1, sem="release")
+    else:
+        while tl.atomic_add(sem_ptr, 0, sem="acquire") != N_COMM:
+            pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(payload_ptr + offs)
+        tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
+
+
+@triton.jit
+def trb025_relaxed_poll_kernel(
+    sem_ptr, payload_ptr, out_ptr, N_COMM: tl.constexpr, BLOCK: tl.constexpr
+):
+    pid = tl.program_id(0)
+    if pid < N_COMM:
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.atomic_xchg(sem_ptr, 1, sem="release")
+    else:
+        # racy twin (a): the poll observes the arrival but at relaxed —
+        # the value carries, the ordering does not
+        while tl.atomic_add(sem_ptr, 0, sem="relaxed") != N_COMM:
+            pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(payload_ptr + offs)
+        tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
+
+
+@triton.jit
+def trb025_poll_initial_kernel(
+    sem_ptr, payload_ptr, out_ptr, N_COMM: tl.constexpr, BLOCK: tl.constexpr
+):
+    pid = tl.program_id(0)
+    if pid < N_COMM:
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.atomic_xchg(sem_ptr, 1, sem="release")
+    else:
+        # racy twin (b): polls the WRONG counter value — the initial 0
+        # satisfies the exit immediately, so the acquire never observes
+        # the release arrival and no sw edge forms
+        while tl.atomic_add(sem_ptr, 0, sem="acquire") != 0:
+            pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(payload_ptr + offs)
+        tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
+
+
+@triton.jit
+def trb025_role_skip_kernel(
+    sem_ptr, payload_ptr, out_ptr, N_COMM: tl.constexpr, BLOCK: tl.constexpr
+):
+    pid = tl.program_id(0)
+    if pid < N_COMM:
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.atomic_xchg(sem_ptr, 1, sem="release")
+    else:
+        # racy twin (c): only the FIRST comp pid polls; the role split's
+        # other branch reads the payload without any synchronization
+        if pid == N_COMM:
+            while tl.atomic_add(sem_ptr, 0, sem="acquire") != N_COMM:
+                pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(payload_ptr + offs)
+        tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
+
+
+_TRB025_SIG = {
+    "sem_ptr": "*i32", "payload_ptr": "*fp32", "out_ptr": "*fp32",
+    "N_COMM": "constexpr", "BLOCK": "constexpr",
+}  # fmt: skip
+_TRB025_CONST = {"N_COMM": 1, "BLOCK": 16}
+
+
+def _trb025_args(seed: int) -> tuple:
+    return (
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(16, dtype=torch.float32),
+        torch.zeros(32, dtype=torch.float32),
+    )
+
+
+CORPUS.add(
+    LaunchSpec(
+        name="trb025_comm_comp_no",
+        kernel_fn=trb025_comm_comp_kernel,
+        signature=_TRB025_SIG,
+        constexprs=_TRB025_CONST,
+        make_args=_trb025_args,
+        grid=(3,),
+        expected="race-free",
+        pattern="comm-comp",
+        params_note="release arrive + acquire poll: every comp read of the "
+        "payload is ordered after the comm publish",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb025_relaxed_poll_yes",
+        kernel_fn=trb025_relaxed_poll_kernel,
+        signature=_TRB025_SIG,
+        constexprs=_TRB025_CONST,
+        make_args=_trb025_args,
+        grid=(3,),
+        expected="race",
+        race_pair=(
+            "tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))",
+            "v = tl.load(payload_ptr + offs)",
+        ),
+        pattern="comm-comp",
+        params_note="relaxed poll: the arrival value carries, the ordering "
+        "does not — payload read unordered vs the comm publish",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb025_poll_initial_yes",
+        kernel_fn=trb025_poll_initial_kernel,
+        signature=_TRB025_SIG,
+        constexprs=_TRB025_CONST,
+        make_args=_trb025_args,
+        grid=(3,),
+        expected="race",
+        race_pair=(
+            "tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))",
+            "v = tl.load(payload_ptr + offs)",
+        ),
+        pattern="comm-comp",
+        params_note="polls the wrong counter value: the initial 0 exits the "
+        "spin immediately — no acquire of the release arrival, no sw edge",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb025_role_skip_yes",
+        kernel_fn=trb025_role_skip_kernel,
+        signature=_TRB025_SIG,
+        constexprs=_TRB025_CONST,
+        make_args=_trb025_args,
+        grid=(3,),
+        expected="race",
+        race_pair=(
+            "tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))",
+            "v = tl.load(payload_ptr + offs)",
+        ),
+        pattern="comm-comp",
+        params_note="one branch of the role split skips the poll: the second "
+        "comp pid reads the payload with no synchronization at all",
+    )
+)
