@@ -232,9 +232,34 @@ change — the spec's work items below are validation + tests.
       dynamic-witness serialization and the interp-disagreements
       audit bucket (6 on TritonBench: randint index-table rebuild
       collisions — reconstruction fidelity, not unsoundness).
-      FOLLOW-UP queued: capture records index-tensor uniqueness and
-      rebuilds unique tables via randperm (GPU re-capture needed) to
-      retire that bucket. Original definition: scatter litmus pair (racy overlap +
+      FOLLOW-UP LANDED 2026-07-12: int/bool tensors ≤8192 elements
+      now carry exact VALUE SNAPSHOTS at capture
+      (evaluation/capture_common.py; supersedes the randperm design
+      — snapshots also preserve legitimate duplicates and monotone
+      offset tables, which randperm would have destroyed). GPU
+      re-capture + re-sweep outcome for the 6-row bucket: 2 retired
+      (tb_token_softmax_bloom/llama → proved@interp), 4 fully
+      triaged — 2 GENUINE races in the crawled corpus
+      (tb_nested_loops_processing: kernel never reads program_id
+      under grid=(2,), all-pairs WAW; tb_quantize_kv_copy:
+      snapshot-faithful duplicate scatter destinations, witness pids
+      match the duplicated Dest_loc positions), 1 interpreter
+      semantic divergence (tb_masked_select: Python `and` on block
+      tensors — interpreter truthiness drops the select_mask store
+      predicate; compiled lowering is elementwise logical_and, so
+      the GPU kernel is race-free), 1 DETECTOR BUG FIXED
+      (tb_cache_transform: ReduceSymbolicExpr folds over ONE
+      symbolic lane, so tl.max in an address degenerated to a
+      solver-chosen element and fabricated 0/1/2 WARs
+      nondeterministically at a fixed seed; the reduce family —
+      sum/max/min/xor_sum/reduce_or/argmax/argmin — is now gated in
+      _VALUE_DEPENDENT_ADDRESS_OPS, flipping the row to a
+      deterministic honest abstention; lift only with a true
+      per-lane fold). The tb_triton_argmax crash row is the SAME
+      `and`-truthiness divergence inside the C3 differential
+      replay: the all-True mask sends the interpreter's native
+      masked load ~533MB past a 4MB tensor → SIGSEGV with empty
+      stderr. Original definition: scatter litmus pair (racy overlap +
       disjoint-index control) with confirmed/exact witnesses; the
       three doubly-undecided benchmark rows (trb010 gather/scatter,
       trb013 plain-fetch) flip from unsupported to verdicts; a
@@ -265,6 +290,72 @@ change — the spec's work items below are validation + tests.
       the branch condition). Note the interpreter CANNOT rescue
       these (instance-dependent control flow breaks the
       full-template assumption), so the reader is the only route.
+
+## 3f. Real-kernel corpus growth: flash-linear-attention (landed 2026-07-12)
+
+- [x] fla-org/flash-linear-attention as the THIRD real-code corpus:
+      pip-pinned fla-core==0.5.1 per the liger pattern (upstream tag
+      v0.5.1 = 2e38c1fa, recorded in every results header via
+      runner._fla_provenance); evaluation/kernels/fla.py HARD-FAILS
+      on version drift (installed != captured) and on any unresolved
+      kernel — never a silently shrunken corpus. Capture:
+      evaluation/fla_capture.py drives 64 GPU-validated cases (23 op
+      families × chunk/fused_recurrent/parallel × fwd+bwd, dense +
+      varlen cu_seqlens) under the shared hook layer
+      (evaluation/capture_common.py, extracted from the TritonBench
+      capture; autotune left ON — benchmark launches are real
+      launches, first config captured). 378 kernel specializations.
+      Sweep (jobs=8): 122 static proofs (107 proved@T1 + 15
+      proved@T0), 12 proved@interp, 1 race@interp — triaged GENUINE:
+      fused_chunk_based_fwd_kernel's z store omits the `if i_v==0:`
+      guard its own bwd twin applies at 8 sites, giving a benign
+      same-value inter-program WAW (seed-independent, pid pair
+      (0,0,0)/(1,0,0), addresses pid-only) — a label-error row, not
+      an FP; 9 races-unclassified (the §3c launch-scoped class); 227
+      unsupported = indirect-address 147 + control-flow 31 +
+      nested-loop 20 + data-dependent-bound 19 + other 7 + solver 1;
+      5 timeouts (fused_recurrent T-loop T1 cost); 2 compile-errors
+      (path_attn cumprod_householder_bwd). Ladder audit PASS.
+- [x] KEY DISCOVERY (corrects the plan's premise): tl.make_block_ptr
+      NEVER reaches the shared TTIR reader — triton's make_ttir
+      pipeline runs rewrite_tensor_pointer, so block pointers arrive
+      as plain addptr arithmetic. The 91-of-153-files block-ptr
+      prevalence is IRRELEVANT for ASTSource corpora; the real fla
+      coverage lever is §3e-style lifting in the COMPILED track —
+      147 indirect-address rows are dominated by varlen
+      cu_seqlens/chunk_indices load chains (small read-only int
+      tensors: exactly the snapshot-select shape §3d proved out on
+      the interpreter track), plus nested loops (20) and scf
+      control flow (31). This multiplies §3e's row support by ~10×.
+- [x] Capture-layer hardening (adversarial review, 7 confirmed
+      findings, all fixed + re-captured): launch-opt kwargs that
+      name DECLARED kernel params bind as args (recovered
+      fused_recurrent kda/gdn2 fwd kernels — `num_stages:
+      tl.constexpr` shadowing); dedup fingerprints cover the FULL
+      record incl. scalar values/snapshots/aliases (un-merged gsa's
+      scale=1 chunk_gla_bwd twins); InterpretedFunction accepted in
+      kernel resolution (TRITON_INTERPRET=1); mkstemp + guarded
+      parse in both capture drivers (shared-/tmp collisions).
+      runner --jobs N landed for parallel sweeps (~35 min vs ~5 h at
+      367 rows; keep DEFINITIVE paper sweeps at jobs=1 — wall_s and
+      near-watchdog rows shift under load).
+- [ ] Interpreter `and`-truthiness divergence class (advisor
+      review): Python `and`/`or` on block tensors silently drops
+      mask terms under the interpreter (upstream patches
+      tensor.__bool__ → True), while compiled lowering is
+      elementwise logical_and — fabricates tb_masked_select's WAW
+      and SIGSEGVs the C3 differential replay on tb_triton_argmax
+      (all-True mask → native masked load ~533MB OOB, empty-stderr
+      crash row). Candidate: pre-trace AST scan for BoolOp over
+      tensor expressions → mark the row interp-divergence-suspect
+      and refuse replay (fail-closed), vs. an upstream interpreter
+      fix.
+- [ ] Reduce per-lane fold (lifts the new reduce gate): fold
+      reduces lane-wise over the arange/snapshot domain instead of
+      the current single-symbolic-lane collapse, then re-admit
+      reduce results into event addresses — decides
+      tb_cache_transform-class rows (max-of-prefix-cumsum
+      addressing) instead of abstaining.
 
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
