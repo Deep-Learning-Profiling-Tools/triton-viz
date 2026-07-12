@@ -438,12 +438,25 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     # not snapshot-stable — and remain admissible only under the counting
     # axiom; sort/cumsum have no snapshot semantics; block-ptr loads
     # (tensor_pointer_load) are a different lowering path (spec §7).
+    # Reduce results are gated because ReduceSymbolicExpr folds over a
+    # SINGLE symbolic lane (an arange is one symbolic variable), so
+    # tl.max(...) in an address degenerates to a solver-chosen element —
+    # tb_cache_transform fabricated WARs nondeterministically (report
+    # count varied 0/1/2 at a fixed seed with allocator layout) until
+    # this fail-closed gate; lift only with a true per-lane fold.
     _VALUE_DEPENDENT_ADDRESS_OPS: ClassVar[tuple[str, ...]] = (
         "tensor_pointer_load",
         "atomic_cas",
         "atomic_rmw",
         "sort",
         "cumsum",
+        "sum",
+        "max",
+        "min",
+        "xor_sum",
+        "reduce_or",
+        "argmax",
+        "argmin",
     )
 
     @classmethod

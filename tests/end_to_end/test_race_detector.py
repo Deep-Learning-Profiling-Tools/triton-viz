@@ -1552,6 +1552,21 @@ def test_reject_data_dependent_address_marks_unsupported(
     assert detector.unsupported_reason is not None
     assert "data-dependent" in detector.unsupported_reason
 
+    # Reduce results in an address keep rejecting too: the engine folds a
+    # reduce over ONE symbolic lane (an arange is a single symbolic
+    # variable), so tl.max(...) in a pointer chain degenerates to a
+    # solver-chosen element — tb_cache_transform fabricated
+    # NONDETERMINISTIC WARs (0/1/2 reports at a fixed seed) before this
+    # gate. Lift only with a true per-lane fold.
+    from triton_viz.core.symbolic_metadata import INT32
+
+    detector2 = SymbolicRaceDetector()
+    detector2.grid_callback((2, 1, 1))
+    arange_expr = SymbolicExpr.create("arange", INT32, 0, 8)
+    max_expr = SymbolicExpr.create("max", arange_expr, 0, False)
+    assert detector2._reject_data_dependent_address(max_expr) is True
+    assert detector2.last_status == "unsupported"
+
 
 # ======== last_status sanity for an ordinary launch (Patch 3) ========
 
