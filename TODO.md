@@ -339,6 +339,20 @@ change — the spec's work items below are validation + tests.
       runner --jobs N landed for parallel sweeps (~35 min vs ~5 h at
       367 rows; keep DEFINITIVE paper sweeps at jobs=1 — wall_s and
       near-watchdog rows shift under load).
+- [x] Upstream fixes for the three genuine races filed 2026-07-12
+      (PR text describes mechanism + repro only — no tool/paper
+      mention, double-blind): fla-org/flash-linear-attention#1018
+      (fused_chunk based fwd z store guarded to i_v==0, matching the
+      bwd twin's own convention; upstream test_based 5 passed;
+      patched row re-checked 4→0 reports), thunlp/TritonBench#10
+      (nested3 grid clamped to min(n_cols//4, 1) — byte-identical
+      outputs incl. the n_cols=2 empty-grid case),
+      thunlp/TritonBench#11 (DestLoc randint→randperm, unique
+      KV-cache slots; Case-4 invalid input untouched — assert fires
+      pre-launch). Our vendored TB copy and the fla-core 0.5.1 pin
+      stay UNCHANGED (the racy versions are the evaluation
+      evidence); on upstream merge the paper gains
+      "confirmed/fixed upstream" citations.
 - [ ] Interpreter `and`-truthiness divergence class (advisor
       review): Python `and`/`or` on block tensors silently drops
       mask terms under the interpreter (upstream patches
