@@ -1,0 +1,255 @@
+"""Shared launch-capture machinery + descriptor rebuild for real-code corpora.
+
+Capture side (GPU machine): ``LaunchRecorder`` hooks ``JITFunction.run``
+and records, per kernel (dedup key configurable), the FIRST real launch:
+the full name→value binding split into runtime args and constexprs,
+tensor descriptors (shape / dtype / init class / contiguity / alias
+group), exact scalars, and the resolved grid.
+
+Small integer and bool tensors additionally carry a VALUE SNAPSHOT (the
+exact flattened values): by-range ``randint`` rebuilds fabricate invalid
+inputs for value-coupled tensors — non-monotone ``cu_seqlens``,
+repeated entries in permutation/index tables, masks that no longer keep
+stores disjoint — which is exactly the TritonBench interp-disagreement
+class. Float tensors stay by-descriptor (their values only reach
+addresses through comparisons, and seeded randn keeps them generic).
+
+Rebuild side (any machine, CPU-only): ``make_tensor`` / ``make_args_fn``
+reconstruct launch args from the descriptors, values-exact when a
+snapshot is present.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import Any, Callable
+
+import torch
+
+# int/bool tensors up to this many elements are snapshotted exactly
+VALUE_SNAPSHOT_CAP = 8192
+
+# launch-config kwargs that are not kernel parameters
+LAUNCH_OPTS = {
+    "num_warps",
+    "num_stages",
+    "num_ctas",
+    "enable_fp_fusion",
+    "extern_libs",
+    "stream",
+    "device",
+    "device_type",
+    "debug",
+    "maxnreg",
+    "warmup",
+    "launch_cooperative_grid",
+    "launch_pdl",
+}
+
+SIG_FOR_DTYPE = {
+    "torch.float32": "*fp32",
+    "torch.float16": "*fp16",
+    "torch.bfloat16": "*bf16",
+    "torch.float64": "*fp64",
+    "torch.int64": "*i64",
+    "torch.int32": "*i32",
+    "torch.int16": "*i16",
+    "torch.int8": "*i8",
+    "torch.uint8": "*u8",
+    "torch.bool": "*i1",
+}
+TORCH_DTYPE = {name: getattr(torch, name.split(".", 1)[1]) for name in SIG_FOR_DTYPE}
+
+
+# ── capture side ─────────────────────────────────────────────────
+
+
+def describe_tensor(t: torch.Tensor) -> dict:
+    d = {
+        "kind": "tensor",
+        "shape": list(t.shape),
+        "dtype": str(t.dtype),
+        "contiguous": bool(t.is_contiguous()),
+    }
+    if t.numel() == 0:
+        d["init"] = "zeros"
+    elif t.dtype.is_floating_point:
+        d["init"] = "zeros" if bool((t == 0).all()) else "randn"
+    elif t.dtype == torch.bool:
+        d["init"] = "randbool"
+        if t.numel() <= VALUE_SNAPSHOT_CAP:
+            d["values"] = [int(x) for x in t.flatten().tolist()]
+    else:
+        lo = int(t.min().item())
+        hi = int(t.max().item())
+        d["init"] = "randint"
+        d["low"], d["high"] = lo, hi + 1
+        if t.numel() <= VALUE_SNAPSHOT_CAP:
+            d["values"] = t.flatten().tolist()
+    return d
+
+
+def describe(v: Any) -> dict:
+    if isinstance(v, torch.Tensor):
+        return describe_tensor(v)
+    if isinstance(v, bool):
+        return {"kind": "scalar", "sig": "i1", "value": v}
+    if isinstance(v, int):
+        sig = "i64" if abs(v) >= 2**31 else "i32"
+        return {"kind": "scalar", "sig": sig, "value": v}
+    if isinstance(v, float):
+        return {"kind": "scalar", "sig": "fp32", "value": v}
+    if v is None:
+        return {"kind": "none"}
+    return {"kind": "unsupported", "type": type(v).__name__}
+
+
+class LaunchRecorder:
+    """Records the first real launch per dedup key while hooked.
+
+    ``key(fn)`` names the capture slot (default: the kernel's plain
+    name, right for one-file-per-subprocess corpora); records land in
+    ``captured[key]``, rejects in ``skipped[key]`` with a reason. A
+    capture error never breaks the hooked run.
+    """
+
+    def __init__(self, key: Callable[[Any], str] | None = None):
+        self.captured: dict[str, dict] = {}
+        self.skipped: dict[str, str] = {}
+        self._key = key or (lambda fn: fn.__name__)
+
+    @contextmanager
+    def hooked(self):
+        from triton.runtime.jit import JITFunction
+
+        real_run = JITFunction.run
+        recorder = self
+
+        def hooked_run(self, *args, **kwargs):
+            try:
+                recorder._record(self, args, dict(kwargs))
+            except Exception as exc:  # noqa: BLE001 — capture must not break the run
+                recorder.skipped.setdefault(
+                    recorder._key(self), f"capture error: {exc}"
+                )
+            return real_run(self, *args, **kwargs)
+
+        JITFunction.run = hooked_run
+        try:
+            yield self
+        finally:
+            JITFunction.run = real_run
+
+    def _record(self, fn, args, kwargs) -> None:
+        slot = self._key(fn)
+        if slot in self.captured or slot in self.skipped:
+            return
+        if kwargs.get("warmup"):
+            return
+        grid = kwargs.pop("grid", None)
+        if grid is None:
+            return
+        meta = dict(zip(fn.arg_names, args))
+        declared = set(fn.arg_names)
+        for k, v in kwargs.items():
+            # a kwarg naming a DECLARED parameter is a kernel arg even when
+            # it collides with a launch option (fla's fused_recurrent kda /
+            # gdn2 kernels declare `num_stages: tl.constexpr` and feed it
+            # to tl.range) — triton's own binder resolves it the same way
+            if k not in LAUNCH_OPTS or k in declared:
+                meta[k] = v
+        params = {p.name: p for p in fn.params}
+        for n in fn.arg_names:
+            if n not in meta and params[n].has_default:
+                meta[n] = params[n].default
+        unbound = [n for n in fn.arg_names if n not in meta]
+        if unbound:
+            self.skipped[slot] = f"unbound params {unbound}"
+            return
+        g = grid(meta) if callable(grid) else grid
+        g = tuple(int(x) for x in (g if isinstance(g, (tuple, list)) else (g,)))
+
+        # alias groups over tensor args (in-place ops pass one tensor twice)
+        ptrs: dict[int, str] = {}
+        aliases: dict[str, str] = {}
+        runtime_args = []
+        constexprs = {}
+        for name in fn.arg_names:
+            v = meta[name]
+            if params[name].is_constexpr:
+                cv = getattr(v, "value", v)
+                if not isinstance(cv, (int, float, bool, str, type(None))):
+                    self.skipped[
+                        slot
+                    ] = f"non-literal constexpr {name}={type(cv).__name__}"
+                    return
+                constexprs[name] = cv
+                continue
+            d = describe(v)
+            if d["kind"] == "unsupported":
+                self.skipped[slot] = f"arg {name}: {d['type']}"
+                return
+            if d["kind"] == "tensor":
+                if not d["contiguous"]:
+                    self.skipped[slot] = f"non-contiguous arg {name}"
+                    return
+                p = v.data_ptr()
+                if p in ptrs:
+                    aliases[name] = ptrs[p]
+                else:
+                    ptrs[p] = name
+            d["name"] = name
+            runtime_args.append(d)
+
+        self.captured[slot] = {
+            "kernel": fn.__name__,
+            "module": getattr(fn.fn, "__module__", None),
+            "args": runtime_args,
+            "constexprs": constexprs,
+            "grid": list(g),
+            "aliases": aliases,
+        }
+
+
+# ── rebuild side ─────────────────────────────────────────────────
+
+
+def make_tensor(desc: dict, gen: torch.Generator) -> torch.Tensor:
+    shape = tuple(desc["shape"])
+    dtype = TORCH_DTYPE[desc["dtype"]]
+    if "values" in desc:  # exact snapshot beats any by-descriptor init
+        return torch.tensor(desc["values"], dtype=dtype).reshape(shape)
+    if desc["init"] == "zeros":
+        return torch.zeros(shape, dtype=dtype)
+    if desc["init"] == "randn":
+        return torch.randn(shape, generator=gen).to(dtype)
+    if desc["init"] == "randbool":
+        return torch.rand(shape, generator=gen) > 0.5
+    if desc["init"] == "randint":
+        lo, hi = desc["low"], max(desc["high"], desc["low"] + 1)
+        return torch.randint(lo, hi, shape, generator=gen, dtype=dtype)
+    raise ValueError(f"unknown init {desc['init']!r}")
+
+
+def make_args_fn(arg_descs: list[dict], aliases: dict[str, str]):
+    """None-valued args are NOT emitted — they live in ``constexprs``
+    (triton specializes them away) and the harness launches all-kwargs,
+    so declaration slots never shift."""
+
+    def make_args(seed: int) -> tuple:
+        gen = torch.Generator().manual_seed(seed)
+        by_name: dict[str, Any] = {}
+        out: list[Any] = []
+        for d in arg_descs:
+            if d["kind"] == "none":
+                continue  # constexpr-None; the harness binds it by name
+            if d["kind"] == "scalar":
+                v: Any = d["value"]
+            else:  # tensor
+                src = aliases.get(d["name"])
+                v = by_name[src] if src is not None else make_tensor(d, gen)
+            by_name[d["name"]] = v
+            out.append(v)
+        return tuple(out)
+
+    return make_args

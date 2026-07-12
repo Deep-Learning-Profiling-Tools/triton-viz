@@ -7,10 +7,11 @@ Launches were captured ONCE on a CUDA machine by
 ``evaluation/tritonbench_capture.py`` (the files' test blocks execute at
 import time on GPU); this module rebuilds them on ANY machine: it execs
 only each file's pre-separator kernel section (never the test block) and
-reconstructs CPU args from the captured descriptors — float tensors as
-seeded randn/zeros, int tensors as randint over the OBSERVED value range
-(index tensors stay in-bounds), aliased pointer args (in-place ops) from
-one tensor with ``LaunchSpec.aliased=True``, scalars exactly.
+reconstructs CPU args from the captured descriptors (capture_common.py)
+— float tensors as seeded randn/zeros, int tensors value-exact when the
+capture carries a snapshot else randint over the OBSERVED value range,
+aliased pointer args (in-place ops) from one tensor with
+``LaunchSpec.aliased=True``, scalars exactly.
 
 Like the liger corpus, every row is labeled race-free (production code);
 the point is the ladder distribution on real kernels, and "unsupported
@@ -23,27 +24,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-import torch
-
+from evaluation.capture_common import SIG_FOR_DTYPE, make_args_fn
 from evaluation.spec import Corpus, LaunchSpec
 
 VENDOR_DIR = Path(__file__).parent / "tritonbench_g_v1"
 SPECS_PATH = Path(__file__).parent / "tritonbench_g_specs.json"
 SEPARATOR_PREFIX = "#" * 100
-
-_SIG_FOR_DTYPE = {
-    "torch.float32": "*fp32",
-    "torch.float16": "*fp16",
-    "torch.bfloat16": "*bf16",
-    "torch.float64": "*fp64",
-    "torch.int64": "*i64",
-    "torch.int32": "*i32",
-    "torch.int16": "*i16",
-    "torch.int8": "*i8",
-    "torch.uint8": "*u8",
-    "torch.bool": "*i1",
-}
-_TORCH_DTYPE = {name: getattr(torch, name.split(".", 1)[1]) for name in _SIG_FOR_DTYPE}
 
 
 def _kernel_section(source: str) -> str:
@@ -66,45 +52,6 @@ def _resolve_kernel(namespace: dict, name: str) -> Any:
             return None
         obj = obj.fn
     return obj
-
-
-def _make_tensor(desc: dict, gen: torch.Generator) -> torch.Tensor:
-    shape = tuple(desc["shape"])
-    dtype = _TORCH_DTYPE[desc["dtype"]]
-    if desc["init"] == "zeros":
-        return torch.zeros(shape, dtype=dtype)
-    if desc["init"] == "randn":
-        return torch.randn(shape, generator=gen).to(dtype)
-    if desc["init"] == "randbool":
-        return torch.rand(shape, generator=gen) > 0.5
-    if desc["init"] == "randint":
-        lo, hi = desc["low"], max(desc["high"], desc["low"] + 1)
-        return torch.randint(lo, hi, shape, generator=gen, dtype=dtype)
-    raise ValueError(f"unknown init {desc['init']!r}")
-
-
-def _make_args_fn(arg_descs: list[dict], aliases: dict[str, str]):
-    """None-valued args are NOT emitted — they live in ``constexprs``
-    (triton specializes them away) and the harness launches all-kwargs,
-    so declaration slots never shift."""
-
-    def make_args(seed: int) -> tuple:
-        gen = torch.Generator().manual_seed(seed)
-        by_name: dict[str, Any] = {}
-        out: list[Any] = []
-        for d in arg_descs:
-            if d["kind"] == "none":
-                continue  # constexpr-None; the harness binds it by name
-            if d["kind"] == "scalar":
-                v: Any = d["value"]
-            else:  # tensor
-                src = aliases.get(d["name"])
-                v = by_name[src] if src is not None else _make_tensor(d, gen)
-            by_name[d["name"]] = v
-            out.append(v)
-        return tuple(out)
-
-    return make_args
 
 
 def _build() -> Corpus:
@@ -143,7 +90,7 @@ def _build() -> Corpus:
 
             sig_by_name = {
                 d["name"]: (
-                    _SIG_FOR_DTYPE[d["dtype"]] if d["kind"] == "tensor" else d["sig"]
+                    SIG_FOR_DTYPE[d["dtype"]] if d["kind"] == "tensor" else d["sig"]
                 )
                 for d in spec["args"]
                 if d["kind"] != "none"
@@ -172,7 +119,7 @@ def _build() -> Corpus:
                     kernel_fn=kernel,
                     signature=signature,
                     constexprs=constexprs,
-                    make_args=_make_args_fn(spec["args"], spec["aliases"]),
+                    make_args=make_args_fn(spec["args"], spec["aliases"]),
                     grid=tuple(spec["grid"]),
                     expected="race-free",
                     pattern="tritonbench_g",
