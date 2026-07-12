@@ -2015,7 +2015,10 @@ def main() -> None:
         "cases": merged,
         "capture_failures": failures,
     }
-    SPECS_PATH.write_text(json.dumps(payload, indent=1) + "\n")
+    # compact + sorted: value snapshots dominate the size (checked-in file)
+    SPECS_PATH.write_text(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+    )
     total = sum(len(r["kernels"]) for r in merged.values())
     print(
         f"\ncaptured {total} kernel specializations from "
