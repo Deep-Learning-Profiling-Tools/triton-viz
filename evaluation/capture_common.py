@@ -63,6 +63,11 @@ SIG_FOR_DTYPE = {
     "torch.int8": "*i8",
     "torch.uint8": "*u8",
     "torch.bool": "*i1",
+    # triton's own canonicalisation for the fp8 families (torchao quant
+    # kernels take fp8 tensors as args); e8m0 has NO triton mapping as
+    # of 3.6 — a kernel launched with an e8m0 arg fails upstream too
+    "torch.float8_e4m3fn": "*fp8e4nv",
+    "torch.float8_e5m2": "*fp8e5",
 }
 TORCH_DTYPE = {name: getattr(torch, name.split(".", 1)[1]) for name in SIG_FOR_DTYPE}
 
@@ -77,10 +82,16 @@ def describe_tensor(t: torch.Tensor) -> dict:
         "dtype": str(t.dtype),
         "contiguous": bool(t.is_contiguous()),
     }
+    if not d["contiguous"]:
+        # column-major and transposed-view args (torchao's blockwise fp8
+        # quant family) rebuild via empty_strided + copy_
+        d["strides"] = list(t.stride())
     if t.numel() == 0:
         d["init"] = "zeros"
     elif t.dtype.is_floating_point:
-        d["init"] = "zeros" if bool((t == 0).all()) else "randn"
+        # fp8 tensors don't implement eager comparison — widen first
+        z = t.float() if t.dtype.itemsize == 1 else t
+        d["init"] = "zeros" if bool((z == 0).all()) else "randn"
     elif t.dtype == torch.bool:
         d["init"] = "randbool"
         if t.numel() <= VALUE_SNAPSHOT_CAP:
@@ -108,6 +119,25 @@ def describe(v: Any) -> dict:
     if v is None:
         return {"kind": "none"}
     return {"kind": "unsupported", "type": type(v).__name__}
+
+
+_UNSUPPORTED_CONSTEXPR = object()
+
+
+def encode_constexpr(cv: Any) -> Any:
+    """JSON-able encoding of a constexpr value; dtype OBJECTS (torchao
+    quant kernels take tl.float8e4nv / torch.float8_e4m3fn as constexpr
+    params) round-trip through tagged dicts, decoded by the corpus
+    builder. Returns _UNSUPPORTED_CONSTEXPR for anything else."""
+    if isinstance(cv, (int, float, bool, str, type(None))):
+        return cv
+    import triton.language as tl
+
+    if isinstance(cv, tl.core.dtype):
+        return {"__tl_dtype__": str(cv)}
+    if isinstance(cv, torch.dtype):
+        return {"__torch_dtype__": str(cv)}
+    return _UNSUPPORTED_CONSTEXPR
 
 
 class LaunchRecorder:
@@ -175,8 +205,10 @@ class LaunchRecorder:
         g = grid(meta) if callable(grid) else grid
         g = tuple(int(x) for x in (g if isinstance(g, (tuple, list)) else (g,)))
 
-        # alias groups over tensor args (in-place ops pass one tensor twice)
-        ptrs: dict[int, str] = {}
+        # alias groups over tensor args (in-place ops pass one tensor twice);
+        # value = (first arg name, layout) so later same-ptr args can verify
+        # they are the SAME view before joining the alias group
+        ptrs: dict[int, tuple[str, tuple[Any, Any, Any]]] = {}
         aliases: dict[str, str] = {}
         runtime_args = []
         constexprs = {}
@@ -184,26 +216,35 @@ class LaunchRecorder:
             v = meta[name]
             if params[name].is_constexpr:
                 cv = getattr(v, "value", v)
-                if not isinstance(cv, (int, float, bool, str, type(None))):
+                enc = encode_constexpr(cv)
+                if enc is _UNSUPPORTED_CONSTEXPR:
                     self.skipped[
                         slot
                     ] = f"non-literal constexpr {name}={type(cv).__name__}"
                     return
-                constexprs[name] = cv
+                constexprs[name] = enc
                 continue
             d = describe(v)
             if d["kind"] == "unsupported":
                 self.skipped[slot] = f"arg {name}: {d['type']}"
                 return
             if d["kind"] == "tensor":
-                if not d["contiguous"]:
-                    self.skipped[slot] = f"non-contiguous arg {name}"
-                    return
                 p = v.data_ptr()
+                layout = (d["shape"], d["dtype"], d.get("strides"))
                 if p in ptrs:
-                    aliases[name] = ptrs[p]
+                    first_name, first_layout = ptrs[p]
+                    if layout != first_layout:
+                        # two DIFFERENT views of one buffer can't rebuild
+                        # from independent tensors (the alias map hands the
+                        # source tensor to the alias verbatim)
+                        self.skipped[slot] = (
+                            f"args {first_name}/{name} are distinct views "
+                            "of one buffer"
+                        )
+                        return
+                    aliases[name] = first_name
                 else:
-                    ptrs[p] = name
+                    ptrs[p] = (name, layout)
             d["name"] = name
             runtime_args.append(d)
 
@@ -223,6 +264,25 @@ class LaunchRecorder:
 def make_tensor(desc: dict, gen: torch.Generator) -> torch.Tensor:
     shape = tuple(desc["shape"])
     dtype = TORCH_DTYPE[desc["dtype"]]
+    t = _make_contiguous(desc, shape, dtype, gen)
+    strides = desc.get("strides")
+    if strides is not None:
+        out = torch.empty_strided(shape, tuple(strides), dtype=dtype)
+        if 0 in strides:
+            # broadcast-expanded arg (torchao bsr passes beta*input
+            # expanded): copy_ refuses overlapping writes — write the
+            # de-overlapped slice, the zero strides replicate it
+            sel = tuple(slice(0, 1) if s == 0 else slice(None) for s in strides)
+            out[sel].copy_(t[sel])
+        else:
+            out.copy_(t)
+        return out
+    return t
+
+
+def _make_contiguous(
+    desc: dict, shape: tuple, dtype: torch.dtype, gen: torch.Generator
+) -> torch.Tensor:
     if "values" in desc:  # exact snapshot beats any by-descriptor init
         return torch.tensor(desc["values"], dtype=dtype).reshape(shape)
     if desc["init"] == "zeros":

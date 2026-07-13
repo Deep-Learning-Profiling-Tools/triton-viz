@@ -178,8 +178,10 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       Proposal: when static witness pids exceed the captured grid,
       re-solve with read axes pinned to the launch extents; UNSAT ⇒ a
       new terminal "proved@T1-launch" with an any-grid caveat
-      (grid-contract finding), converting most of the 23 into
-      launch-scoped proofs. Changes verdict semantics — align first.
+      (grid-contract finding), converting most of the now-50 rows
+      (across 5 corpora, incl. torchao's 8 — every witness checked is
+      out-of-extent) into launch-scoped proofs. Changes verdict
+      semantics — align first.
 
 ## 3d. Address-position lifting (PRIORITIZED 2026-07-11, Hao)
 
@@ -482,6 +484,47 @@ change — the spec's work items below are validation + tests.
       SOURCE in the capture record (tritonbench-style exec at rebuild)
       to admit pointwise_dynamic/scatter-codegen kernels — today 3
       such kernels are filtered per run with visible skip reasons.
+
+## 3i. Real-kernel corpus growth: torchao (landed 2026-07-13)
+
+Record: 67 rows from pytorch/ao @ `bfbc842` (git-pinned `USE_CPP=0
+--no-build-isolation` install — Triton kernels are pure Python, no
+torch-ABI coupling; provenance via direct_url.json, version string
+embeds the sha). Reality check: the repo holds ~102 hand-written
+`@triton.jit` kernels (not the rumored 2000+ — that figure can only
+count inductor-generated kernels, the codegen class we exclude by
+design). 44/44 capture cases, 67 specializations, zero skips; the
+sm89-unreachable families (fp8_sdpa: torch-2.11 init; nvfp4/mxfp8-CUDA
+/mx-dim0/dim1: sm100 gates; comms: torch.distributed; one dead-code
+kernel; common-matmul fp8 path: upstream KeyError) are documented in
+torchao_capture.py's docstring.
+
+Corpus-driven extensions landed with it (all generic, older corpora
+byte-identical): strides capture + empty_strided rebuild for
+non-contiguous args (17 skips unlocked; stride-0 broadcast handled via
+de-overlapped slice copy); tl.dtype/torch.dtype constexpr round-trip
+as tagged JSON (19 skips unlocked); _resolve_kernel namespace-scan
+fallback + torchao corpus module publishes lazy-init closure kernels
+(CustomOpDef closes over the gemm autotuner). Detector/harness fixes
+it surfaced: MLIR fp8 spellings in the shared reader's _DTYPE_BITS
+(15 pseudo-abstentions), host-compile GPU target now the real device
+capability (fp8 false compile-errors).
+
+Sweep: 23 decided-clean (5 T0 / 9 T1 / 9 interp), 36 abstain, 8
+races-unclassified — all 8 witness-out-of-extent (§3c class), zero
+genuine races.
+
+- [ ] Scalar-pointer atomic_rmw reader shape (2 rows abstain with
+      "atomic_rmw of a non-pointer value"): tl.atomic_max/min on a
+      single-element global scalar — the fp8 global-amax idiom
+      (f8nc _amax_atomic, moe 3d-transpose scales atomic_min). The
+      reader only lifts tensor-of-pointer RMWs today.
+- [ ] Non-contiguous in-bounds premise (11 rows): the T1 in-bounds
+      premise assumes dense layout; column-major quant outputs need a
+      strided-footprint premise (capture side already rebuilds them).
+- [ ] Runtime-scalar loop bounds (8 rows: "loop upper bound is not
+      concrete at launch"): bind non-constexpr scalar args to their
+      captured values under the launch-scoped tier — rides §3c.
 
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 

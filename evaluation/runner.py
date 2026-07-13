@@ -78,6 +78,13 @@ def _flaggems_provenance() -> dict:
     return _package_provenance("flag_gems", "flag_gems", {})
 
 
+def _torchao_provenance() -> dict:
+    # git-pinned USE_CPP=0 install (the Triton kernels are pure Python,
+    # so the C++ extension is skipped); direct_url.json carries the
+    # commit and the version string itself embeds it (0.18.0+git<sha>)
+    return _package_provenance("torchao", "torchao", {})
+
+
 def _versions() -> dict:
     import numpy
     import torch
@@ -100,6 +107,7 @@ def _versions() -> dict:
         **_fla_provenance(),
         **_flagattn_provenance(),
         **_flaggems_provenance(),
+        **_torchao_provenance(),
     }
 
 

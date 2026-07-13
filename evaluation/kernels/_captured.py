@@ -43,15 +43,51 @@ def _resolve_kernel(module_name: str, kernel_name: str) -> Any:
         mod = importlib.import_module(module_name)
     except Exception:  # noqa: BLE001 — caller reports, with version context
         return None
-    obj = getattr(mod, kernel_name, None)
-    # unwrap @triton.autotune / @triton.heuristics stacks to the JITFunction
-    # (the wrappers proxy arg_names, so unwrap by TYPE, not by attribute)
     types = _kernel_types()
-    while obj is not None and not isinstance(obj, types):
-        if not hasattr(obj, "fn"):
-            return None
-        obj = obj.fn
-    return obj
+
+    def unwrap(obj: Any) -> Any:
+        # unwrap @triton.autotune / @triton.heuristics stacks to the
+        # JITFunction (the wrappers proxy arg_names, so unwrap by TYPE,
+        # not by attribute); depth-capped so arbitrary .fn chains found
+        # by the namespace scan below can't loop
+        for _ in range(8):
+            if obj is None or isinstance(obj, types):
+                return obj
+            if not hasattr(obj, "fn"):
+                return None
+            obj = obj.fn
+        return None
+
+    direct = unwrap(getattr(mod, kernel_name, None))
+    if direct is not None:
+        return direct
+    # some packages publish a kernel under a DIFFERENT module-global name
+    # (torchao.kernel.blockwise_quantization defines its kernels inside a
+    # lazy-init closure and stores blockwise_fp8_gemm_kernel as
+    # _blockwise_fp8_gemm_impl): scan the namespace for a def-name match,
+    # refusing ambiguity so a wrong kernel can never resolve silently
+    matches: dict[int, Any] = {}
+    for value in vars(mod).values():
+        k = unwrap(value)
+        if k is not None and getattr(k.fn, "__name__", None) == kernel_name:
+            matches[id(k)] = k
+    if len(matches) == 1:
+        return next(iter(matches.values()))
+    return None
+
+
+def _decode_constexpr(v: Any) -> Any:
+    """Inverse of capture_common.encode_constexpr: tagged dicts back to
+    dtype objects (triton binds dtype constexprs by object, not name)."""
+    if isinstance(v, dict) and "__tl_dtype__" in v:
+        import triton.language as tl
+
+        return tl.core.dtype(v["__tl_dtype__"])
+    if isinstance(v, dict) and "__torch_dtype__" in v:
+        import torch
+
+        return getattr(torch, v["__torch_dtype__"].removeprefix("torch."))
+    return v
 
 
 def build_captured_corpus(
@@ -101,7 +137,9 @@ def build_captured_corpus(
             # None-valued optional pointers (initial states, cu_seqlens on
             # dense launches) are constexpr-specialized away by triton.
             none_args = {d["name"] for d in spec["args"] if d["kind"] == "none"}
-            constexprs = dict(spec["constexprs"])
+            constexprs = {
+                k: _decode_constexpr(v) for k, v in spec["constexprs"].items()
+            }
             constexprs.update({n: None for n in none_args})
             signature: dict[str, str] = {}
             usable = True

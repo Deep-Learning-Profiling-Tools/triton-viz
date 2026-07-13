@@ -249,6 +249,12 @@ def render(paths: list[Path]) -> str:
                 f" (upstream {header.get('flag_gems_commit') or 'unknown'})"
                 if header.get("flag_gems")
                 else ""
+            )
+            + (
+                f", torchao {header['torchao']}"
+                f" (upstream {header.get('torchao_commit') or 'unknown'})"
+                if header.get("torchao")
+                else ""
             ),
             "",
             "| kernel | pattern | expected | terminal | witness | mut | "

@@ -44,6 +44,7 @@ def _launch_binding(spec, args) -> dict:
 
 
 def _host_compile_ttir(spec: LaunchSpec) -> str:
+    import torch
     import triton
     from triton.backends.compiler import GPUTarget
     from triton.compiler import ASTSource
@@ -55,7 +56,14 @@ def _host_compile_ttir(spec: LaunchSpec) -> str:
     if not hasattr(fn, "cache_key") and hasattr(fn, "fn"):
         fn = triton.runtime.jit.JITFunction(fn.fn)
     src = ASTSource(fn=fn, signature=spec.signature, constexprs=spec.constexprs)
-    k = triton.compile(src, target=GPUTarget("cuda", 80, 32))
+    # sm80 suffices for every pre-fp8 corpus and keeps the host compile
+    # GPU-free, but fp8e4nv args (torchao) fail triton's frontend check
+    # below cc 89 — target the real device capability when one exists
+    cc = 80
+    if torch.cuda.is_available():
+        major, minor = torch.cuda.get_device_capability()
+        cc = major * 10 + minor
+    k = triton.compile(src, target=GPUTarget("cuda", cc, 32))
     return k.asm["ttir"]
 
 

@@ -11,6 +11,7 @@ CORPORA = (
     "fla",
     "flagattn",
     "flaggems",
+    "torchao",
     "aiter_originals",
 )
 

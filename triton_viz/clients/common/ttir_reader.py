@@ -402,6 +402,10 @@ _DTYPE_BITS = {
     "f64": 64, "f32": 32, "f16": 16, "bf16": 16, "f8": 8,
     "i64": 64, "i32": 32, "i16": 16, "i8": 8, "i1": 1,
     "u64": 64, "u32": 32,
+    # MLIR spells the fp8 families out (torchao's quant kernels take
+    # fp8 pointers); all are one byte wide
+    "f8E4M3FN": 8, "f8E5M2": 8, "f8E4M3FNUZ": 8, "f8E5M2FNUZ": 8,
+    "f8E4M3B11FNUZ": 8, "f8E8M0FNU": 8,
 }  # fmt: skip
 
 _RE_LOC_FILE = re.compile(r'^(#loc\d*) = loc\("([^"]+)":(\d+):(\d+)\)')
