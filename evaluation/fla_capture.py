@@ -28,9 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
 
 SPECS_PATH = Path(__file__).parent / "kernels" / "fla_specs.json"
@@ -1872,158 +1869,33 @@ CASES: dict = {
 # ── capture driver ───────────────────────────────────────────────
 
 
-def _capture_one(case_name: str) -> dict:
-    os.environ.setdefault("FLA_USE_TMA", "0")  # sm90-only path, keep off
-    import torch
-    import triton
-
-    from evaluation.capture_common import LaunchRecorder
-
-    family, bwd, run = CASES[case_name]
-    torch.manual_seed(0)
-    recorder = LaunchRecorder(key=lambda fn: f"{fn.fn.__module__}.{fn.__name__}")
-    error = None
-    with recorder.hooked():
-        try:
-            outs = [
-                o
-                for o in run(torch, "cuda", torch.float32)
-                if isinstance(o, torch.Tensor)
-            ]
-            if bwd:
-                grads = [o.float().sum() for o in outs if o.grad_fn is not None]
-                if grads:
-                    sum(grads).backward()
-            torch.cuda.synchronize()
-        except Exception as exc:  # noqa: BLE001
-            error = f"{type(exc).__name__}: {exc}"
-
-    return {
-        "case": case_name,
-        "family": family,
-        "error": error,
-        "kernels": recorder.captured,
-        "skipped_kernels": recorder.skipped,
-        "triton": triton.__version__,
-    }
-
-
-def _fingerprint(rec: dict) -> str:
-    """The FULL rebuild-relevant record: two launches merge only when the
-    corpus rows they would rebuild into are identical. Arg descriptors
-    carry scalar values and int/bool snapshots, and aliases drive the
-    spec's ``aliased`` flag — families share kernels but call them with
-    different scalars (gsa's chunk_gla_bwd v-pass hardcodes scale=1 while
-    gla passes K**-0.5), and shape-only fingerprints merged those."""
-    return json.dumps(
-        [
-            rec["module"],
-            rec["kernel"],
-            rec["constexprs"],
-            rec["grid"],
-            rec["args"],
-            rec["aliases"],
-        ],
-        sort_keys=True,
-        default=str,
-    )
-
-
 def main() -> None:
+    from evaluation.capture_common import capture_one_case, run_case_capture
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--one")
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
 
     if args.one:
-        result = _capture_one(args.one)
+        os.environ.setdefault("FLA_USE_TMA", "0")  # sm90-only path, keep off
+        result = capture_one_case(CASES, args.one, dtype_name="float32")
         args.out.write_text(json.dumps(result, indent=1))
         return
-
-    merged: dict[str, dict] = {}
-    failures: dict[str, str] = {}
-    seen: dict[str, str] = {}  # specialization fingerprint -> first case
-    for i, case in enumerate(sorted(CASES), 1):
-        # private per-run temp file: /tmp is shared and sticky, a fixed
-        # path can collide with a concurrent sweep or another user's stale
-        # file and merge records under the wrong run's provenance
-        fd, tmp = tempfile.mkstemp(suffix=".json", prefix=f"fla_capture_{case}_")
-        os.close(fd)
-        out = Path(tmp)
-        try:
-            proc = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "evaluation.fla_capture",
-                    "--one",
-                    case,
-                    "--out",
-                    str(out),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=PER_CASE_TIMEOUT_S,
-                cwd=Path(__file__).parent.parent,
-            )
-            if proc.returncode != 0:
-                failures[case] = (proc.stderr or "").strip()[-300:]
-                print(f"[{i}/{len(CASES)}] {case}: CRASH")
-                continue
-            result = json.loads(out.read_text())
-        except subprocess.TimeoutExpired:
-            failures[case] = f"timeout after {PER_CASE_TIMEOUT_S}s"
-            print(f"[{i}/{len(CASES)}] {case}: TIMEOUT")
-            continue
-        except (OSError, json.JSONDecodeError) as exc:
-            failures[case] = f"capture output unreadable: {exc}"
-            print(f"[{i}/{len(CASES)}] {case}: UNREADABLE")
-            continue
-        finally:
-            out.unlink(missing_ok=True)
-        if result["error"] and not result["kernels"]:
-            failures[case] = result["error"][:300]
-            print(f"[{i}/{len(CASES)}] {case}: ERROR ({result['error'][:80]})")
-            continue
-
-        kept, dropped = {}, []
-        for slot, rec in result["kernels"].items():
-            fp = _fingerprint(rec)
-            if fp in seen:
-                dropped.append(f"{rec['kernel']} (first: {seen[fp]})")
-            else:
-                seen[fp] = case
-                kept[slot] = rec
-        result["kernels"] = kept
-        result["dedup_dropped"] = dropped
-        merged[case] = result
-        note = f", {len(dropped)} shared" if dropped else ""
-        err = (
-            f" (+error after capture: {result['error'][:60]})"
-            if result["error"]
-            else ""
-        )
-        print(f"[{i}/{len(CASES)}] {case}: {len(kept)} kernel(s){note}{err}")
 
     from evaluation.runner import _fla_provenance
 
     prov = _fla_provenance()
-    payload = {
-        "upstream": UPSTREAM,
-        "fla_core": prov.get("fla_core"),
-        "upstream_commit": prov.get("fla_core_commit"),
-        "cases": merged,
-        "capture_failures": failures,
-    }
-    # compact + sorted: value snapshots dominate the size (checked-in file)
-    SPECS_PATH.write_text(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
-    )
-    total = sum(len(r["kernels"]) for r in merged.values())
-    print(
-        f"\ncaptured {total} kernel specializations from "
-        f"{len(merged)}/{len(CASES)} cases ({len(failures)} failures) "
-        f"-> {SPECS_PATH}"
+    run_case_capture(
+        "evaluation.fla_capture",
+        CASES,
+        SPECS_PATH,
+        payload_meta={
+            "upstream": UPSTREAM,
+            "fla_core": prov.get("fla_core"),
+            "upstream_commit": prov.get("fla_core_commit"),
+        },
+        per_case_timeout_s=PER_CASE_TIMEOUT_S,
     )
 
 

@@ -21,7 +21,13 @@ snapshot is present.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -253,3 +259,143 @@ def make_args_fn(arg_descs: list[dict], aliases: dict[str, str]):
         return tuple(out)
 
     return make_args
+
+
+# ── case-driven capture drivers (fla_capture, flagattn_capture) ──
+# A driver contributes CASES = {name: (family, bwd, run)} where
+# run(torch, device, dtype) calls one public op and returns its output
+# tensors; everything else — per-case subprocess isolation, first-launch
+# recording, full-record dedup, compact specs writing — is shared here.
+
+
+def capture_one_case(cases: dict, case_name: str, dtype_name: str) -> dict:
+    import triton
+
+    family, bwd, run = cases[case_name]
+    torch.manual_seed(0)
+    recorder = LaunchRecorder(key=lambda fn: f"{fn.fn.__module__}.{fn.__name__}")
+    error = None
+    with recorder.hooked():
+        try:
+            outs = [
+                o
+                for o in run(torch, "cuda", getattr(torch, dtype_name))
+                if isinstance(o, torch.Tensor)
+            ]
+            if bwd:
+                grads = [o.float().sum() for o in outs if o.grad_fn is not None]
+                if grads:
+                    sum(grads).backward()
+            torch.cuda.synchronize()
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "case": case_name,
+        "family": family,
+        "error": error,
+        "kernels": recorder.captured,
+        "skipped_kernels": recorder.skipped,
+        "triton": triton.__version__,
+    }
+
+
+def fingerprint(rec: dict) -> str:
+    """The FULL rebuild-relevant record: two launches merge only when the
+    corpus rows they would rebuild into are identical. Arg descriptors
+    carry scalar values and int/bool snapshots, and aliases drive the
+    spec's ``aliased`` flag — families share kernels but call them with
+    different scalars (gsa's chunk_gla_bwd v-pass hardcodes scale=1 while
+    gla passes K**-0.5), and shape-only fingerprints merged those."""
+    return json.dumps(
+        [
+            rec["module"],
+            rec["kernel"],
+            rec["constexprs"],
+            rec["grid"],
+            rec["args"],
+            rec["aliases"],
+        ],
+        sort_keys=True,
+        default=str,
+    )
+
+
+def run_case_capture(
+    runner_module: str,
+    cases: dict,
+    specs_path: Path,
+    payload_meta: dict,
+    per_case_timeout_s: int = 600,
+) -> None:
+    """Drive every case in its own subprocess (crash isolation) via
+    ``python -m {runner_module} --one <case> --out <tmp>`` and merge the
+    results into ``specs_path`` with cross-case full-record dedup."""
+    merged: dict[str, dict] = {}
+    failures: dict[str, str] = {}
+    seen: dict[str, str] = {}  # specialization fingerprint -> first case
+    for i, case in enumerate(sorted(cases), 1):
+        # private per-run temp file: /tmp is shared and sticky, a fixed
+        # path can collide with a concurrent sweep or another user's stale
+        # file and merge records under the wrong run's provenance
+        fd, tmp = tempfile.mkstemp(suffix=".json", prefix=f"capture_{case}_")
+        os.close(fd)
+        out = Path(tmp)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", runner_module, "--one", case, "--out", str(out)],
+                capture_output=True,
+                text=True,
+                timeout=per_case_timeout_s,
+                cwd=Path(__file__).parent.parent,
+            )
+            if proc.returncode != 0:
+                failures[case] = (proc.stderr or "").strip()[-300:]
+                print(f"[{i}/{len(cases)}] {case}: CRASH")
+                continue
+            result = json.loads(out.read_text())
+        except subprocess.TimeoutExpired:
+            failures[case] = f"timeout after {per_case_timeout_s}s"
+            print(f"[{i}/{len(cases)}] {case}: TIMEOUT")
+            continue
+        except (OSError, json.JSONDecodeError) as exc:
+            failures[case] = f"capture output unreadable: {exc}"
+            print(f"[{i}/{len(cases)}] {case}: UNREADABLE")
+            continue
+        finally:
+            out.unlink(missing_ok=True)
+        if result["error"] and not result["kernels"]:
+            failures[case] = result["error"][:300]
+            print(f"[{i}/{len(cases)}] {case}: ERROR ({result['error'][:80]})")
+            continue
+
+        kept, dropped = {}, []
+        for slot, rec in result["kernels"].items():
+            fp = fingerprint(rec)
+            if fp in seen:
+                dropped.append(f"{rec['kernel']} (first: {seen[fp]})")
+            else:
+                seen[fp] = case
+                kept[slot] = rec
+        result["kernels"] = kept
+        result["dedup_dropped"] = dropped
+        merged[case] = result
+        note = f", {len(dropped)} shared" if dropped else ""
+        err = (
+            f" (+error after capture: {result['error'][:60]})"
+            if result["error"]
+            else ""
+        )
+        print(f"[{i}/{len(cases)}] {case}: {len(kept)} kernel(s){note}{err}")
+
+    payload = {**payload_meta, "cases": merged, "capture_failures": failures}
+    # compact + sorted: value snapshots dominate the size (checked-in file)
+    specs_path.write_text(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+    )
+    total = sum(len(r["kernels"]) for r in merged.values())
+    print(
+        f"\ncaptured {total} kernel specializations from "
+        f"{len(merged)}/{len(cases)} cases ({len(failures)} failures) "
+        f"-> {specs_path}"
+    )
