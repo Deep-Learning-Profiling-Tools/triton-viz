@@ -419,6 +419,70 @@ change — the spec's work items below are validation + tests.
       The causal-attention inner loop is the canonical shape; expect
       most of the 14 rows to flip to proved@T1.
 
+## 3h. Real-kernel corpus growth: FlagGems (landed 2026-07-12)
+
+- [x] flagos-ai/FlagGems as the FIFTH real-code corpus and the
+      race-relevant one: production ATen operators in Triton with ~150
+      tl.atomic_* sites (scatter/index/histogram/embedding-bwd/loss),
+      cumsum-addressed stores (unique/masked_select), and mm_streamk's
+      inter-CTA spinlock. Git-pinned pip install @1051e56c (PyPI lags
+      master by 1000+ commits; --no-deps dodges its numpy==1.26.4 pin;
+      sqlalchemy added to the venv). 66 GPU-validated cases across 10
+      families -> 82 specializations, 0 failures. Runtime-CODEGEN
+      kernels (pointwise_dynamic modules under ~/.flaggems/code_cache
+      with process-dependent names) are filtered to skipped_kernels via
+      capture_one_case(module_prefix=...) — un-importable at rebuild;
+      a tritonbench-style source-embedding scheme could recover them
+      (backlog).
+- [x] Sweep (82 rows, audit PASS): 42 decided-clean — proved@T1 22 +
+      proved@T0 11 + proved@interp 9 (51% coverage, best of the real
+      corpora; the counting axiom's first at-scale field test:
+      vdot's atomic scalar accumulate proves at T0, bincount/histc/
+      scatter_reduce/index_reduce duplicate-index variants all clean).
+      36 unsupported = indirect-address 12 + pid-affine bounds ("other")
+      12 + nested-loop 6 + control-flow 3 + solver 1 + spin-shape 1 +
+      data-dependent-bound 1. 1 races-unclassified (bmm — witness
+      pid_1=8 outside grid=[8,8,4], the §3c any-grid class). 1 timeout
+      (mm_streamk's classic_mm sibling, 180s cap).
+- [x] mm_streamk first_wave — the S6 PRODUCTION INSTANCE: static track
+      abstains "spin-shape: scf.while carries values (iter args or
+      results) — only the argument-free spin form is the await shape".
+      Stream-K's spin (atomic_xchg arrive + atomic_cas busy-wait +
+      partial-sum handoff) carries loop state, exactly outside C1.1's
+      argument-free domain — first production motivation for the
+      carried-value spin extension (S6 stretch).
+- [x] Both race@interp rows triaged INTERPRETER-ARTIFACT, each naming
+      a distinct toolchain defect:
+      * weight_norm_kernel_first — the `and`-truthiness class, THIRD
+        instance (weightnorm.py:83/93 `col_offset < N and row_mask`
+        collapses to row_mask under the interpreter; store broadcasts
+        over 2048 cols instead of 128; empirically pinned with an
+        interpreter probe). The §3f BoolOp gate item now has three
+        manifestations across two corpora. Cosmetic upstream PR
+        candidate: `and` -> `&` (flag_gems's own convention in
+        aminmax/svd/index_put).
+      * embedding_dup — NEW DETECTOR BUG (two-copy solver lane model):
+        _lane_identity_differs (two_copy_symbolic_hb_solver.py:507-530)
+        treats ANY arange var differing across copies as two distinct
+        lanes, but a kernel calling tl.arange twice on the SAME axis
+        (embedding.py:27 mask arange, :28 cols arange) has both vars
+        bound to the SAME lane coordinate physically; Z3 picks
+        l27-differs + l28-equal -> phantom intra-instance same-address
+        WAW (seed-independent, reproduced with a minimal two-arange
+        twin). FIX QUEUED below.
+- [ ] Two-copy lane-model coupling (detector bug, from embedding_dup):
+      group a record's arange vars by the tile axis they span and
+      constrain same-axis vars EQUAL within each copy (a lane has one
+      coordinate per axis); "any arange differs" stays correct only
+      ACROSS axes. Until then, intra-instance same-address claims on
+      multi-arange records are fabrication-prone; consider gating
+      records with >1 same-extent arange in address/mask as
+      interp-divergence-suspect (fail-closed interim).
+- [ ] Codegen-kernel recovery (backlog): embed the generated module
+      SOURCE in the capture record (tritonbench-style exec at rebuild)
+      to admit pointwise_dynamic/scatter-codegen kernels — today 3
+      such kernels are filtered per run with visible skip reasons.
+
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
 - [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands
