@@ -1,6 +1,6 @@
 # Sweep Report — Triton Race Detector Evaluation
 
-**Date**: 2026-07-13 · **Detector**: `race-detector-z3-demo` @ `d468e4e` + torchao-corpus patches (committed with this report) · **Env**: triton 3.6.0, torch 2.10.0+cu128, z3 4.15.3, numpy 2.4.2, Python 3.12 · **Capture GPU**: RTX 4090 (sm89); sweeps TTIR-host-compile at the device capability when present, sm80 fallback (fp8 kernels need ≥89) · **Seed**: 0 · sweeps run at `--jobs 8` (definitive paper runs to be re-done at `jobs=1`)
+**Date**: 2026-07-13 · **Detector**: `race-detector-z3-demo` @ `c848c2b` + torchao/tritonbench corpus patches (committed with this report) · **Env**: triton 3.6.0, torch 2.10.0+cu128, z3 4.15.3, numpy 2.4.2, Python 3.12 · **Capture GPU**: RTX 4090 (sm89); sweeps TTIR-host-compile at the device capability when present, sm80 fallback (fp8 kernels need ≥89) · **Seed**: 0 · sweeps run at `--jobs 8` (definitive paper runs to be re-done at `jobs=1`)
 
 ---
 
@@ -16,10 +16,14 @@
 | flagattn | 28 | flag_attn git-pin `41fc31d` (no PyPI) | real code |
 | flaggems | 82 | flag_gems git-pin `1051e56c` (PyPI stale) | real code, atomic-heavy |
 | torchao | 67 | torchao git-pin `bfbc842` (`USE_CPP=0`, pure-Python Triton) | real code, fp8-quant + atomics |
+| tritonbench_meta | 41 | meta-pytorch/tritonbench git-pin `1edaf3e` (harness-driven capture) | real code, benchmark ops |
+| aiter_originals | 2 | ROCm/aiter#3091 pre-fix kernel, vendored | RQ4 known-race reproduction |
 
 All real-code rows carry heuristic `race-free` labels (production code); the micro-benchmark carries ground-truth yes/no labels with planted witness lines. Captured launches rebuild deterministically: int/bool tensors ≤8192 elements are value-exact snapshots; non-contiguous (column-major / broadcast-expanded) args rebuild from recorded strides; `tl.dtype`/`torch.dtype` constexpr objects round-trip as tagged JSON; every results header pins package versions + upstream commits.
 
 torchao coverage note: 44/44 capture cases succeeded (67 kernel specializations). Structurally out of reach on this rig, recorded in `torchao_capture.py`: fp8_sdpa_inference (torch-2.11 package init), nvfp4 + mxfp8-CUDA + mx dim0/dim1 (sm100 gates), distributed comms kernels, one dead-code kernel, and the fp8 path of the common matmul (upstream KeyError as installed).
+
+tritonbench_meta coverage note: capture DRIVES the suite's own `BenchmarkOperator` harness (`--only <impl> --num-inputs 1 --input-id 0 --test-only --force`) rather than a case table, with `module_prefix="tritonbench."` keeping only the suite's own kernels (its liger/inductor/vendor backends are excluded — liger is already a corpus, inductor is codegen). 43 cases → 41 specializations. Removed with a verified structural reason (recorded in `tritonbench_meta_capture.py`): sm90/sm100-only tlx/gluon/autows/TMA-persistent attention + gemm families, stream-k's host-side TensorDescriptor args (M4 track, 13-min autotune), and impls needing uninstalled deps (xformers/cutlass-ck/fbgemm/mslk/generative_recommenders). This is meta-pytorch/tritonbench (Meta's benchmark suite), distinct from thunlp/TritonBench = the `tritonbench_g` corpus. Its ~102-of-repo own kernels are hand-written (not the rumored 2000+, which counts only inductor codegen).
 
 ## 2. Ground-truth scorecard (tritonracebench, 56 rows)
 
@@ -27,7 +31,7 @@ torchao coverage note: 44/44 capture cases succeeded (67 kernel specializations)
 
 Terminals: race-confirmed 12, races-unclassified 13, race@interp 7, race-unconfirmed 1, proved@T0 7, proved@T1 8, proved@T1+assumes-termination 4, proved@interp 4. Companion micro-suites: golden_smoke 7 (3 race-confirmed / 3 proofs / 1 abstain), rmw_sync 9, await_sync 9 (3 conditional proofs + 6 detected races).
 
-## 3. Real-code corpora (789 rows)
+## 3. Real-code corpora (830 rows)
 
 | Corpus | Rows | Decided-clean | — static (T0/T1) | — interp | Abstain | Races-unclassified¹ | race@interp | Other² |
 |---|---|---|---|---|---|---|---|---|
@@ -38,9 +42,10 @@ Terminals: race-confirmed 12, races-unclassified 13, race@interp 7, race-unconfi
 | flagattn | 28 | 1 (4%) | 0/0 | 1 | 17 | 10 | 0 | 0 |
 | flaggems | 82 | 42 (51%) | 11/22 | 9 | 36 | 1 | 2 | 1 |
 | torchao | 67 | 23 (34%) | 5/9 | 9 | 36 | 8 | 0 | 0 |
-| **Total** | **789** | **338 (43%)** | 64/226 | 48 | 382 | 50 | 6 | 13 |
+| tritonbench_meta | 41 | 20 (49%) | 5/8 | 7 | 20 | 1 | 0 | 0 |
+| **Total** | **830** | **358 (43%)** | 69/234 | 55 | 402 | 51 | 6 | 13 |
 
-¹ static-track SAT verdicts whose witnesses lie OUTSIDE the launch grid (T1 any-grid semantics vs wrapper-coupled launches) — every instance checked has out-of-extent witness pids; resolved by the queued launch-scoped verdict tier (TODO §3c).
+¹ static-track SAT verdicts whose witnesses lie OUTSIDE the launch grid (T1 any-grid semantics vs wrapper-coupled launches) — every instance checked has out-of-extent witness pids; resolved by the queued launch-scoped verdict tier (TODO §3c). (An IN-extent SAT with a genuine cross-block conflict is `race-confirmed`, not this bucket — see the aiter_originals row and §6.8.)
 ² compile-error / timeout / crash.
 
 Ladder audits: **PASS on every corpus** (ladder-unsound = replay-unsound = 0 everywhere).
@@ -53,7 +58,9 @@ Ladder audits: **PASS on every corpus** (ladder-unsound = replay-unsound = 0 eve
 | 2 | `tb_quantize_kv_copy` | scatter through `Dest_loc` with real duplicate destinations (snapshot-faithful; witness pids match duplicate positions) | global, inter-CTA, data-dependent | [TritonBench#11](https://github.com/thunlp/TritonBench/pull/11) |
 | 3 | `fla_based_fused_chunk` fwd | `z` store address omits the `i_v` grid axis → NV programs write identical values unsynchronized; bwd twin guards with `if i_v == 0`, fwd omits it | global, inter-CTA, same-value WAW | [fla#1018](https://github.com/fla-org/flash-linear-attention/pull/1018) |
 
-All three: machine-generated witnesses first (detector-found), seed-independent, triage only adjudicated the heuristic labels. FlagAttention, FlagGems, and torchao: zero genuine races on every decidable row — notably the atomic-heavy FlagGems families (bincount/histc/scatter_reduce/index_reduce with duplicate indices) all PROVE clean, `vdot`'s atomic accumulate at T0; torchao's float8nocompile scale/cast kernels prove at T0 and all 8 of its SAT rows are wrapper-coupled any-grid artifacts (every witness pid out of extent).
+All three: machine-generated witnesses first (detector-found), seed-independent, triage only adjudicated the heuristic labels. FlagAttention, FlagGems, torchao, and tritonbench_meta: zero genuine races on every decidable row — notably the atomic-heavy FlagGems families (bincount/histc/scatter_reduce/index_reduce with duplicate indices) all PROVE clean, `vdot`'s atomic accumulate at T0; torchao's float8nocompile scale/cast kernels prove at T0 and all 8 of its SAT rows are wrapper-coupled any-grid artifacts (every witness pid out of extent); tritonbench_meta's gdpa atomics and layer_norm/softmax/rms_norm backward lock-reductions all decide clean, its one SAT row being another out-of-extent flash-TMA artifact.
+
+Separately, the **`aiter_originals`** RQ4 corpus (ROCm/aiter#3091, the MoE-routing `_sum_bitmatrix_rows_fused` at its pre-fix state) is `race-confirmed`: every program writes the full histogram with no pid partitioning — an in-extent cross-block WAW the detector reports and the interpreter reproduces. This is a real, previously-reported race (issue closed COMPLETED with upstream barrier fix), the paper's "detector flags the bug at the pre-discovery code state" data point. Its confirmation was restored this round (§6.8).
 
 ## 5. Triage ledger — every surviving race report accounted
 
@@ -77,6 +84,7 @@ All three: machine-generated witnesses first (detector-found), seed-independent,
 5. **fp8 element width missing in the shared TTIR reader** (`_DTYPE_BITS` had bare `f8` but not MLIR's `f8E4M3FN`-family spellings) — **FIXED** this round; 15 torchao rows were pseudo-abstaining with `elem_bits=0`, 11 of them now decide (proved@T0/T1) or classify.
 6. **TTIR host-compile target hardcoded to sm80** (`evaluation/harness.py`) — every fp8-arg kernel false-failed with `fp8e4nv not supported in this architecture`; **FIXED**: target the real device capability, sm80 fallback.
 7. **Scalar-pointer atomic_rmw shape gap** — `tl.atomic_max/min` on a single-element global scalar (the fp8 global-amax idiom) abstains with `atomic_rmw of a non-pointer value`; 2 torchao rows (f8nc `_amax_atomic`, moe `_..._transpose_scales_rhs`). Queued reader extension.
+8. **Confirmation gate over-declined exact races at unrolled same-line stores** — **FIXED** this round. The C2 ambiguous-site gate (which stops a dropped-mask WIDENED report from riding an unrelated same-line access's overlap) also skipped EXACT reports whose store is unrolled by `tl.static_range` onto one source line (`count>1` ⇒ ambiguous). The aiter#3091 kernel is exactly that shape, so its genuine in-extent WAW landed on `races-unclassified` instead of `race-confirmed`. Fix: gate WIDENED reports only — an exact report is a definite SAT witness whose access is live by construction, so the same-line bucket is its own real footprint. Pinned by `test_c2_confirms_exact_waw_at_unrolled_ambiguous_site`; ground-truth scorecard and all out-of-extent §3-¹ artifacts unchanged.
 
 ## 7. Abstention taxonomy → queued lifts
 
@@ -85,7 +93,7 @@ All three: machine-generated witnesses first (detector-found), seed-independent,
 | indirect-address (loaded values in addresses; varlen `cu_seqlens`/`chunk_indices`, `block_tables`) | fla 147 + flaggems 12 + torchao 6 + TB + liger | §3d snapshot-select extension to the COMPILED track |
 | pid-affine loop bounds (`(pid+1)*BLOCK`-style, flash-attention causal loops) | flagattn 14 + flaggems 12 | §3g lift — bounds affine in pid enter the iteration-existence premise |
 | runtime-scalar loop bounds (bound is a non-constexpr scalar arg; T1 wants launch-concrete) | torchao 8 | launch-scoped scalar binding, rides the §3c tier |
-| wrapper-coupled any-grid (races-unclassified) | 50 rows across 5 corpora | §3c launch-scoped verdict tier (advisor decision) |
+| wrapper-coupled any-grid (races-unclassified) | 51 rows across 6 corpora (+tritonbench_meta 1) | §3c launch-scoped verdict tier (advisor decision) |
 | nested loops | fla 20 + flaggems 6 + torchao 4 + TB 4 | §3e reader support (interp already rescues some) |
 | data-dependent loop bounds (paged attention `context_lens`, jagged group offsets) | fla 19 + flagattn 1 + flaggems 1 + torchao 3 | §3e snapshot-lifted loop bounds |
 | unstructured control flow (`cf.cond_br`) | flagattn 2 + flaggems 3 + TB 2 | §3e path-condition encoding |
@@ -102,4 +110,4 @@ uv run python -m evaluation.report                              # regenerate RES
 uv run python -m evaluation.<corpus>_capture                    # GPU re-capture (one-time)
 ```
 
-Corpus packages: `liger-kernel==0.8.0`, `fla-core==0.5.1`, `flag_attn @ git+FlagOpen/FlagAttention@41fc31d`, `flag_gems @ git+flagos-ai/FlagGems@1051e56c` (`--no-deps` + `sqlalchemy`), `torchao @ git+pytorch/ao@bfbc842` (`USE_CPP=0` + `--no-build-isolation`). Detailed per-row tables: `evaluation/results/RESULTS.md`; raw rows with serialized witnesses: `evaluation/results/*.jsonl`.
+Corpus packages: `liger-kernel==0.8.0`, `fla-core==0.5.1`, `flag_attn @ git+FlagOpen/FlagAttention@41fc31d`, `flag_gems @ git+flagos-ai/FlagGems@1051e56c` (`--no-deps` + `sqlalchemy`), `torchao @ git+pytorch/ao@bfbc842` (`USE_CPP=0` + `--no-build-isolation`), `tritonbench @ git+meta-pytorch/tritonbench@1edaf3e` (+ `pynvml`, `transformers`). Detailed per-row tables: `evaluation/results/RESULTS.md`; raw rows with serialized witnesses: `evaluation/results/*.jsonl`.

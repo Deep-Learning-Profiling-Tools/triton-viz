@@ -255,6 +255,12 @@ def render(paths: list[Path]) -> str:
                 f" (upstream {header.get('torchao_commit') or 'unknown'})"
                 if header.get("torchao")
                 else ""
+            )
+            + (
+                f", tritonbench {header['tritonbench_meta']}"
+                f" (upstream {header.get('tritonbench_meta_commit') or 'unknown'})"
+                if header.get("tritonbench_meta")
+                else ""
             ),
             "",
             "| kernel | pattern | expected | terminal | witness | mut | "

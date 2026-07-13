@@ -64,10 +64,20 @@ def _resolve_kernel(module_name: str, kernel_name: str) -> Any:
     # some packages publish a kernel under a DIFFERENT module-global name
     # (torchao.kernel.blockwise_quantization defines its kernels inside a
     # lazy-init closure and stores blockwise_fp8_gemm_kernel as
-    # _blockwise_fp8_gemm_impl): scan the namespace for a def-name match,
-    # refusing ambiguity so a wrong kernel can never resolve silently
+    # _blockwise_fp8_gemm_impl) or as a CLASS attribute (tritonbench's
+    # softmax Operator carries @triton.jit kernels in its class body):
+    # scan the namespace — one level into module-level classes — for a
+    # def-name match, refusing ambiguity so a wrong kernel can never
+    # resolve silently
+    candidates = list(vars(mod).values())
+    candidates += [
+        v
+        for cls in vars(mod).values()
+        if isinstance(cls, type) and cls.__module__ == module_name
+        for v in vars(cls).values()
+    ]
     matches: dict[int, Any] = {}
-    for value in vars(mod).values():
+    for value in candidates:
         k = unwrap(value)
         if k is not None and getattr(k.fn, "__name__", None) == kernel_name:
             matches[id(k)] = k

@@ -526,6 +526,55 @@ genuine races.
       concrete at launch"): bind non-constexpr scalar args to their
       captured values under the launch-scoped tier — rides §3c.
 
+## 3j. Real-kernel corpus growth: tritonbench_meta (landed 2026-07-13)
+
+Record: 41 rows from meta-pytorch/tritonbench @ `1edaf3e` (Meta's own
+benchmark suite — DISTINCT from thunlp/TritonBench = the tritonbench_g
+corpus). Git-pinned pip install; the dist version is a constant 0.0.1,
+so the corpus module hard-checks the installed direct_url.json commit
+directly. Reality check: ~102 hand-written @triton.jit in-repo (not
+2000+; that counts only inductor codegen, our excluded class).
+
+Capture is HARNESS-DRIVEN, not a case table: each case instantiates the
+suite's own `BenchmarkOperator` with `--only <impl> --num-inputs 1
+--input-id 0 --test-only --force` and runs it once, with
+`module_prefix="tritonbench."` keeping only the suite's own kernels
+(its liger/inductor/vendor backends are filtered — liger is already a
+corpus, inductor is codegen). Registry-disabled impls were each tried
+under `--force` and dropped only on a verified structural failure
+(xformers/cutlass-ck/fbgemm/mslk deps, stream-k TensorDescriptor TMA
+args, multi_cta cluster launch) — all documented in the capture
+docstring. Generic reader extension it needed: `_resolve_kernel` now
+also scans module-level CLASS bodies (tritonbench's softmax Operator
+carries its @triton.jit kernels as class attributes).
+
+Sweep: 20 decided-clean (5 T0 / 8 T1 / 7 interp), 20 abstain, 1
+races-unclassified (out-of-extent flash-TMA artifact), zero genuine
+races. gdpa atomics + layer_norm/softmax/rms_norm backward
+lock-reductions all decide clean.
+
+- [ ] Stream-k / TMA-descriptor operators (addmm+gemm streamk, TMA
+      persistent matmuls): host-side TensorDescriptor args — capture,
+      rebuild, and reader support are the M4 track; ~13-min autotune
+      each, so excluded from the sweep for now.
+
+## 3k. Detector fix: exact-race confirmation at unrolled same-line stores (landed 2026-07-13)
+
+- [x] The C2 ambiguous-site gate (stops a dropped-mask WIDENED report
+      riding an unrelated same-line access's overlap into a fabricated
+      confirmation — test_c2_focus_blocks_fabricated_upgrade) also
+      skipped EXACT reports whose store is unrolled by tl.static_range
+      onto one source line (count>1 ⇒ ambiguous bucket). The aiter#3091
+      kernel is that shape, so its genuine in-extent cross-block WAW
+      landed on races-unclassified instead of race-confirmed. Fix: gate
+      WIDENED reports only (`is_widened and any(... in ambiguous)`) — an
+      exact report is a definite SAT witness whose access is live by
+      construction, so the same-line bucket is its OWN real footprint
+      and confirming it is sound. Pinned by
+      test_c2_confirms_exact_waw_at_unrolled_ambiguous_site; the
+      tritonracebench ground-truth scorecard and every out-of-extent
+      §3c artifact (torchao 8, tritonbench_meta 1) are unchanged.
+
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
 - [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands

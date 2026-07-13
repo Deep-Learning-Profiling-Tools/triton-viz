@@ -751,6 +751,7 @@ class CompiledRaceDetector(Client):
         upgraded: list[Any] = []
         widened_classified = 0
         for rep in (widened + exact)[: self.REPLAY_MAX_REPORTS]:
+            is_widened = id(rep) in widened_ids
             pids = (tuple(rep.witness_grid_a), tuple(rep.witness_grid_b))
             focus_a = self._report_focus(rep.first_record, tensors)
             focus_b = self._report_focus(rep.second_record, tensors)
@@ -762,7 +763,16 @@ class CompiledRaceDetector(Client):
                 if focus_b
                 else None,
             )
-            if any(n is not None and n in ambiguous for n in names):
+            # The ambiguous-site gate exists to stop a WIDENED report
+            # (possibly dropped-mask, its own access maybe dead) from
+            # riding an unrelated same-line access's overlap into a
+            # fabricated confirmation (test_c2_focus_blocks_fabricated_
+            # upgrade). An EXACT report is a definite SAT witness whose
+            # access is live by construction, so a same-line bucket —
+            # e.g. one store unrolled by tl.static_range onto a single
+            # source line, the aiter#3091 shape — is its OWN real
+            # footprint; confirming it is sound. Gate widened only.
+            if is_widened and any(n is not None and n in ambiguous for n in names):
                 continue  # unclassifiable: shared same-line footprint bucket
             key = (pids, focus_a, focus_b)
             if key not in cache:

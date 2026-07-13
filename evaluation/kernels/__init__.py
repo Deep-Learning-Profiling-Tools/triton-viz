@@ -12,6 +12,7 @@ CORPORA = (
     "flagattn",
     "flaggems",
     "torchao",
+    "tritonbench_meta",
     "aiter_originals",
 )
 

@@ -85,6 +85,13 @@ def _torchao_provenance() -> dict:
     return _package_provenance("torchao", "torchao", {})
 
 
+def _tritonbench_meta_provenance() -> dict:
+    # meta-pytorch/tritonbench, git-pinned; dist version is a constant
+    # 0.0.1, so the direct_url.json commit is the real pin (the corpus
+    # module hard-checks it)
+    return _package_provenance("tritonbench", "tritonbench_meta", {})
+
+
 def _versions() -> dict:
     import numpy
     import torch
@@ -108,6 +115,7 @@ def _versions() -> dict:
         **_flagattn_provenance(),
         **_flaggems_provenance(),
         **_torchao_provenance(),
+        **_tritonbench_meta_provenance(),
     }
 
 

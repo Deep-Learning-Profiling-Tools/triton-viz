@@ -360,6 +360,41 @@ def test_c2_same_tensor_sites_are_classified_separately():
     assert "withheld" in (det.last_global_reason or "")
 
 
+@triton.jit
+def unrolled_store_kernel(out_ptr, BLOCK: tl.constexpr, N_BLKS: tl.constexpr):
+    """The aiter#3091 shape: every program writes the full output with no
+    pid partitioning, and the store is UNROLLED by tl.static_range onto a
+    single source line. The two unrolled iterations collapse to one
+    (out_ptr, store, line) footprint bucket — count > 1, so the bucket is
+    'ambiguous'. But this is an EXACT cross-block WAW whose access is live
+    by construction; the ambiguous gate (which exists to stop dropped-mask
+    WIDENED reports riding an unrelated same-line overlap) must NOT decline
+    it. Regression pin for the aiter races-unclassified→race-confirmed fix."""
+    offs = tl.arange(0, BLOCK)
+    for i in tl.static_range(N_BLKS):
+        tl.store(out_ptr + i * BLOCK + offs, offs)
+
+
+def test_c2_confirms_exact_waw_at_unrolled_ambiguous_site():
+    ttir = _ttir_of(
+        unrolled_store_kernel,
+        {"out_ptr": "*i32", "BLOCK": "constexpr", "N_BLKS": "constexpr"},
+        {"BLOCK": 32, "N_BLKS": 2},
+    )
+    det = CompiledRaceDetector()
+    _launch(
+        det,
+        unrolled_store_kernel,
+        (torch.zeros(64, dtype=torch.int32),),
+        {"grid": (4,), "BLOCK": 32, "N_BLKS": 2},
+        ttir,
+    )
+    assert det.last_global_status == "races"  # cross-block WAW is real
+    # the exact report confirms despite the unrolled same-line bucket —
+    # before the fix this stayed None (=> races-unclassified terminal)
+    assert det.last_global_confirmation == "confirmed"
+
+
 def test_c2_same_tensor_live_widened_site_graduates():
     """The recovery the per-site keying exists for: with the mask DATA
     live, the widened store's OWN site overlaps across blocks and the
