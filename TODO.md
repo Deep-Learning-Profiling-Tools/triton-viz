@@ -371,6 +371,54 @@ change — the spec's work items below are validation + tests.
       tb_cache_transform-class rows (max-of-prefix-cumsum
       addressing) instead of abstaining.
 
+## 3g. Real-kernel corpus growth: FlagAttention (landed 2026-07-12)
+
+- [x] FlagOpen/FlagAttention as the FOURTH real-code corpus (13
+      kernels: flash/piecewise fwd+3-bwd, split-kv pair, paged +
+      v2-reduce, total-attention; Apache-2.0, active upstream, runs
+      UNMODIFIED on triton 3.6). No PyPI release → git-pinned pip
+      install (flag_attn @ git+...@41fc31d); provenance flows from
+      pip's direct_url.json through _package_provenance, no release
+      table. Shared plumbing extracted on the rule of two:
+      capture_common.run_case_capture/capture_one_case/fingerprint
+      (case-driven capture main, was fla_capture-private) and
+      kernels/_captured.build_captured_corpus (version hard-check +
+      fail-loud unresolved + name disambiguation, was fla.py-private)
+      — fla regression-checked at 378/378 with identical provenance.
+      Capture: 10 fp16 cases (causal/non-causal, GQA, dropout/philox,
+      non-divisible seqlen, aux outputs, split-kv decode, paged ×2,
+      piecewise), 28 specializations, 0 failures, no autotune (sm89
+      falls back to the hand-written 32x32 config).
+- [x] Sweep (28 rows): proved@interp 1 (split-kv combine — interp
+      rescues its nested loops), races-unclassified 10, unsupported
+      17, audit PASS. ALL 28 attributed:
+      * NEW abstention class, 14 rows — PID-AFFINE LOOP BOUNDS
+        ("other: loop bound is not concrete at launch"): the flash
+        causal inner loop runs to (pid_m+1)*BLOCK_M-style bounds,
+        affine in pid, which T1 refuses (wants concrete scalars) and
+        one-shot symbolic capture concretizes. Distinct from
+        data-dependent bounds and representable in the existing
+        affine machinery — lift candidate below.
+      * 10 races-unclassified: all witnesses have a pid OUTSIDE the
+        launch extent (grid=[4,2,2] vs witness pid_0=4/12, pid_1=3/5
+        — symbolic pid overflow walks into the next head/batch slice
+        via flat strides). The §3c wrapper-coupled any-grid class,
+        joining TritonBench's 22 and fla's 9.
+      * paged lands EXACTLY on two queued §3e fragments:
+        single-split → loaded context_lens loop bound
+        (snapshot-lifted loop bounds), v2 → cf.cond_br. Both tracks
+        abstain today; §3e now has attention-serving rows behind it.
+      * flash_dropout bwd dynamic track aborts with
+        "NotImplementedError: Patching math ops not yet supported" —
+        philox/math interp front-end gap (small, separate).
+- [ ] Pid-affine loop bounds lift (advisor review; NEW, motivated by
+      14/28 flagattn rows + every flash-attention-style kernel): T1
+      loop iteration-existence premises already quantify over pid —
+      admit loop bounds affine in pid (and in concrete scalars) into
+      the same premise instead of requiring launch-concrete bounds.
+      The causal-attention inner loop is the canonical shape; expect
+      most of the 14 rows to flip to proved@T1.
+
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
 - [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands
