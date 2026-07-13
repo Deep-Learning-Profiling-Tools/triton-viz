@@ -10,6 +10,7 @@ CORPORA = (
     "tritonbench_g",
     "fla",
     "flagattn",
+    "flaggems",
     "aiter_originals",
 )
 

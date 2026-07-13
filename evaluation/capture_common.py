@@ -268,7 +268,12 @@ def make_args_fn(arg_descs: list[dict], aliases: dict[str, str]):
 # recording, full-record dedup, compact specs writing — is shared here.
 
 
-def capture_one_case(cases: dict, case_name: str, dtype_name: str) -> dict:
+def capture_one_case(
+    cases: dict,
+    case_name: str,
+    dtype_name: str,
+    module_prefix: str | None = None,
+) -> dict:
     import triton
 
     family, bwd, run = cases[case_name]
@@ -290,12 +295,28 @@ def capture_one_case(cases: dict, case_name: str, dtype_name: str) -> dict:
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
 
+    captured = recorder.captured
+    skipped = recorder.skipped
+    if module_prefix is not None:
+        # runtime-CODEGEN kernels (FlagGems pointwise_dynamic writes
+        # generated modules under ~/.flaggems/code_cache with
+        # process-dependent names) cannot be re-imported at rebuild time
+        # — keep them out of the corpus, visibly
+        kept = {}
+        for slot, rec in captured.items():
+            mod = rec.get("module") or ""
+            if mod.startswith(module_prefix):
+                kept[slot] = rec
+            else:
+                skipped[slot] = f"runtime-codegen kernel (module {mod!r})"
+        captured = kept
+
     return {
         "case": case_name,
         "family": family,
         "error": error,
-        "kernels": recorder.captured,
-        "skipped_kernels": recorder.skipped,
+        "kernels": captured,
+        "skipped_kernels": skipped,
         "triton": triton.__version__,
     }
 

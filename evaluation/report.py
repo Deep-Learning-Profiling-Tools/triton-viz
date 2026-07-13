@@ -243,6 +243,12 @@ def render(paths: list[Path]) -> str:
                 f" (upstream {header.get('flag_attn_commit') or 'unknown'})"
                 if header.get("flag_attn")
                 else ""
+            )
+            + (
+                f", flag_gems {header['flag_gems']}"
+                f" (upstream {header.get('flag_gems_commit') or 'unknown'})"
+                if header.get("flag_gems")
+                else ""
             ),
             "",
             "| kernel | pattern | expected | terminal | witness | mut | "

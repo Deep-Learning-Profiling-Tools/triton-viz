@@ -72,6 +72,12 @@ def _flagattn_provenance() -> dict:
     return _package_provenance("flag_attn", "flag_attn", {})
 
 
+def _flaggems_provenance() -> dict:
+    # git-pinned (PyPI lags upstream by months); direct_url.json carries
+    # the commit
+    return _package_provenance("flag_gems", "flag_gems", {})
+
+
 def _versions() -> dict:
     import numpy
     import torch
@@ -93,6 +99,7 @@ def _versions() -> dict:
         **_liger_provenance(),
         **_fla_provenance(),
         **_flagattn_provenance(),
+        **_flaggems_provenance(),
     }
 
 
