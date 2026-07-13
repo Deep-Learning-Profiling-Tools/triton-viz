@@ -66,6 +66,12 @@ def _fla_provenance() -> dict:
     return _package_provenance("fla-core", "fla_core", _FLA_RELEASE_COMMITS)
 
 
+def _flagattn_provenance() -> dict:
+    # installed from git (no PyPI release), so the commit always comes
+    # from pip's direct_url.json — no release table needed
+    return _package_provenance("flag_attn", "flag_attn", {})
+
+
 def _versions() -> dict:
     import numpy
     import torch
@@ -86,6 +92,7 @@ def _versions() -> dict:
         "commit": git,
         **_liger_provenance(),
         **_fla_provenance(),
+        **_flagattn_provenance(),
     }
 
 

@@ -9,6 +9,7 @@ CORPORA = (
     "liger",
     "tritonbench_g",
     "fla",
+    "flagattn",
     "aiter_originals",
 )
 

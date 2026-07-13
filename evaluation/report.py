@@ -237,6 +237,12 @@ def render(paths: list[Path]) -> str:
                 f" (upstream {header.get('fla_core_commit') or 'unknown'})"
                 if header.get("fla_core")
                 else ""
+            )
+            + (
+                f", flag_attn {header['flag_attn']}"
+                f" (upstream {header.get('flag_attn_commit') or 'unknown'})"
+                if header.get("flag_attn")
+                else ""
             ),
             "",
             "| kernel | pattern | expected | terminal | witness | mut | "
