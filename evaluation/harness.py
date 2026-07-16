@@ -7,7 +7,10 @@ reverse order trips the interpreter-patching hazard documented in
 core/trace.py.
 
 Verdict mapping for DRB-style scoring (plan S5):
-  static ok            -> "race-free"  (terminal = provenance rung)
+  static ok            -> "race-free"  (terminal = provenance rung; the §3c
+                          proved@T1-launch rung carries its any-grid
+                          evidence in static["grid_fragile"] — an
+                          independent attribute, never a race count)
   static races         -> "race"       (terminal = race-confirmed | races-unclassified)
   static unsupported   -> "abstain"    (terminal = race-unconfirmed | unsupported)
 """
@@ -104,6 +107,18 @@ def _static_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
+    # §3c guardrail 1: fragility evidence is carried as its own attribute
+    # next to the launch-scoped proof — hazard wording, never "race"
+    grid_fragile = [
+        {
+            "first": rep.first_record.source_location,
+            "second": rep.second_record.source_location,
+            "hazard": rep.race_type.name,
+            "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
+        }
+        for rep in (getattr(det, "last_grid_fragile", []) or [])
+    ]
+
     return {
         "status": det.last_global_status,
         "provenance": det.last_global_provenance,
@@ -111,6 +126,7 @@ def _static_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
         "reason": det.last_global_reason,
         "n_reports": len(det.last_global_reports),
         "witnesses": witnesses,
+        "grid_fragile": grid_fragile,
         "parse_unsupported": [r for r in det.last_ttir_unsupported if r],
         "differential": det.last_differential,
         "t0_gate": t0_gate,

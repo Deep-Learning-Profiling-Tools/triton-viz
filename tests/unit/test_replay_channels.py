@@ -293,7 +293,15 @@ def np_mask_kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
     tl.store(out_ptr + offs, v, mask=keep)
 
 
-def test_c2_replays_at_the_launch_grid():
+def test_out_of_extent_exact_sat_lands_launch_scoped_proof():
+    """np_mask_kernel's store is live on every grid EXCEPT the launch's
+    (4,) — the §3c shape. Historically this pinned the anti-fabrication
+    property (C2 must replay at the LAUNCH grid, where the mask is dead,
+    and never confirm); the launch-scoped rung now retires the scenario
+    one step earlier: the pinned re-query is UNSAT at extent 4, so the
+    verdict is a launch-scoped PROOF and the any-grid evidence rides the
+    independent grid-fragile attribute — C2 never runs, so there is
+    nothing left to fabricate."""
     ttir = _ttir_of(
         np_mask_kernel,
         {"x_ptr": "*fp32", "out_ptr": "*fp32", "BLOCK": "constexpr"},
@@ -302,16 +310,18 @@ def test_c2_replays_at_the_launch_grid():
     det = CompiledRaceDetector()
     x, out = torch.randn(256), torch.zeros(64)
     _launch(det, np_mask_kernel, (x, out), {"grid": (4,), "BLOCK": 64}, ttir)
-    # A real race on every grid BUT the launch's: reported (universal-grid
-    # claim), with a witness grid other than 4...
-    assert det.last_global_status == "races"
-    assert det.last_global_reports
+    assert det.last_global_status == "ok"
+    assert det.last_global_provenance == "proved@T1-launch"
+    assert det.last_global_reports == []
+    assert det.last_global_confirmation is None  # C2 never engaged
+    assert det.last_grid_fragile, "any-grid evidence must be carried"
     assert all(
-        r.model.get("grid_0") != "4" for r in det.last_global_reports
-    ), "the witness must live on a grid where the mask is alive"
-    # ...and the launch-grid replay (mask dead at grid 4) must never
-    # fabricate a confirmation.
-    assert det.last_global_confirmation != "confirmed"
+        r.model.get("grid_0") != "4" for r in det.last_grid_fragile
+    ), "the fragility witness lives on a grid where the mask is alive"
+    v = det.last_global_verdict
+    assert v["verdict"] == "race-free"
+    assert v["proved_scope"] == "this-params-this-grid"
+    assert v["grid_fragile"] is True
 
 
 @triton.jit
@@ -424,11 +434,14 @@ def test_c2_same_tensor_live_widened_site_graduates():
     assert det.last_global_confirmation == "confirmed"
 
 
-def test_c2_no_graduation_outside_the_launch_grid():
-    """grid=(1,): a single program instance cannot cross-block race. The
-    solver's witnesses (grid-generic by design) do not exist on this
-    launch, so the widened report must stay a withheld abstention — the
-    'on this launch's data' graduation claim would be false."""
+def test_widened_out_of_extent_sat_lands_launch_scoped_proof():
+    """grid=(1,): a single program instance cannot cross-block race, so
+    the widened any-grid SAT has no witness on this launch. Previously a
+    withheld abstention; the §3c rung now proves it AS LAUNCHED — sound
+    even from widened evidence, because widening only ENLARGES
+    footprints: extent-UNSAT of the over-approximation implies
+    extent-UNSAT of the real footprints. The widened evidence rides the
+    grid-fragile attribute, never a graduation claim."""
     ttir = _ttir_of(dd_mask_kernel, _DD_SIG, {"BLOCK": 64})
     det = CompiledRaceDetector()
     flags = torch.ones(64, dtype=torch.int32)
@@ -439,8 +452,10 @@ def test_c2_no_graduation_outside_the_launch_grid():
         {"grid": (1,), "BLOCK": 64},
         ttir,
     )
-    assert det.last_global_status == "unsupported"
+    assert det.last_global_status == "ok"
+    assert det.last_global_provenance == "proved@T1-launch"
     assert det.last_global_reports == []
+    assert det.last_grid_fragile
     # NOT the race-unconfirmed claim: the replay never classified anything
     assert "race-unconfirmed" not in (det.last_global_reason or "")
 

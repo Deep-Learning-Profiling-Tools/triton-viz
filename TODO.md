@@ -171,17 +171,47 @@ dropped (z3's native to_smt2 covers any future need). Remaining:
       not corpus artifacts and not detector bugs; the dynamic column
       is clean on every one.
 
-## 3c. Decision point (advisor): launch-scoped verdict tier
+## 3c. Launch-scoped verdict tier (LANDED 2026-07-15)
 
-- [ ] For wrapper-coupled real-world kernels the honest composite
-      "any-grid SAT + launch-grid clean" lands on races-unclassified.
-      Proposal: when static witness pids exceed the captured grid,
-      re-solve with read axes pinned to the launch extents; UNSAT ⇒ a
-      new terminal "proved@T1-launch" with an any-grid caveat
-      (grid-contract finding), converting most of the now-50 rows
-      (across 5 corpora, incl. torchao's 8 — every witness checked is
-      out-of-extent) into launch-scoped proofs. Changes verdict
-      semantics — align first.
+Decision (Hao): (c)-semantics on (b)-machinery with three guardrails —
+scope is per-verdict, not a global binary (the taxonomy already had
+per-scope proofs; this adds the missing rung).
+
+- [x] Machinery: after any any-grid SAT, `_launch_scoped_requery`
+      re-asks the SAME encoding with every grid axis pinned to the
+      launch extent (generalizing symbolic_grid's unread-axis pinning
+      to all axes; `tl.num_programs` interns `grid_i` by name, so the
+      pin is an `extra_assumptions` equality — no re-encode, zero
+      solver changes). Extent-UNSAT ⇒ `proved@T1-launch` +
+      `grid_fragile` attribute carrying the any-grid evidence (hazard
+      wording, never "race"); extent-SAT ⇒ the race path continues
+      with the PINNED reports (witnesses in-extent by construction —
+      C2-replayable); Z3-unknown ⇒ fall back to the any-grid reports,
+      fail-closed on the claim. Sound from widened evidence too:
+      widening only enlarges footprints, so over-approx extent-UNSAT
+      implies real extent-UNSAT.
+- [x] Guardrail 1 (wording pair): verdict attrs gain
+      proved_scope="this-params-this-grid" + independent grid_fragile
+      bool; evidence in static["grid_fragile"], never in witnesses.
+- [x] Guardrail 2 (counting): SWEEP_REPORT §3 splits decided-clean by
+      scope (any-grid vs launch-scoped), grid-fragile its own column;
+      findings stay 3. Concretization map gained the
+      "pid + trip (grid = launch)" y-row.
+- [x] Guardrail 3 (order, (c) ⊃ (b)): pinned-UNSAT relabels; the
+      in-extent boundary keeps carrying race-confirmed (aiter
+      unchanged on the re-sweep).
+- [x] Full 14-corpus re-sweep at the landed state: ground-truth
+      scorecard IDENTICAL (precision=recall=1.0, 12 race-confirmed,
+      13 races-unclassified all in-extent, ZERO grid-fragile rows in
+      GT — no claim inflation); 51/52 wrapper-coupled rows →
+      proved@T1-launch (+3 borderline rows joined; net T1-launch=52);
+      the 1 holdout (torchao common split-k matmul) stays
+      races-unclassified because the pinned query is Z3-undecidable
+      even at 120s (nonlinear split-k scheduler arithmetic) — the
+      terminal now precisely MEANS "any-grid SAT + launch-scoped
+      undecidable". Pins:
+      test_out_of_extent_exact_sat_lands_launch_scoped_proof,
+      test_widened_out_of_extent_sat_lands_launch_scoped_proof.
 
 ## 3d. Address-position lifting (PRIORITIZED 2026-07-11, Hao)
 
@@ -574,6 +604,57 @@ lock-reductions all decide clean.
       test_c2_confirms_exact_waw_at_unrolled_ambiguous_site; the
       tritonracebench ground-truth scorecard and every out-of-extent
       §3c artifact (torchao 8, tritonbench_meta 1) are unchanged.
+
+## 3l. Real-kernel corpus growth: tilebench (landed 2026-07-15)
+
+Record: 56 rows (45 operators) from the group's own TileBench
+(Deep-Learning-Profiling-Tools/Tilebench @ `224ec81`, branch
+exp/llm_and_analysis_code_only). First LOCAL-CHECKOUT corpus: TileBench
+has no packaging metadata, so `TILEBENCH_ROOT` (default
+~/workspace/Tilebench, env-overridable) goes on sys.path and the
+checkout HEAD commit is the pin — capture refuses tracked-dirty trees,
+and `build_captured_corpus` grew an `installed_version=` parameter so
+non-pip corpora ride the same drift guard.
+
+Capture is harness-driven (tritonbench_meta pattern): each case runs
+the suite's own `core.engine.run_benchmark_suite(op)` with
+`case_indices=[0]` and `report_benchmark` monkeypatched out, so the
+ONLY Triton launch is the engine's verification run on a normal stream
+(the Proton/CUDA-graph timing path never executes — keeps recorder
+tensor reads off a capturing stream). `autotune` stays False → every
+impl calls its raw @triton.jit kernel with `_DEFAULT_CONFIG`, one
+deterministic launch. 45/45 cases, 56 specializations, zero failures.
+
+Strategic point: every operator also ships a cuTile twin
+(impl_cutile.py) — this corpus is the Triton-side baseline for the
+planned cuTile frontend (same-operator cross-DSL differential).
+
+Sweep: 41 decided-clean (21 T0 / 15 T1 / 5 interp) = 73%, the highest
+clean rate of any real-code corpus (small single-purpose benchmark
+kernels). 11 abstain, 3 timeout (bitonic XOR-pair math, gaussian_blur
+div/mod stencil — Z3-hard shapes; batched_matmul's bmm is a borderline
+row that flips between the loop-accumulator abstain and the 180s
+watchdog run-to-run), 1 races-unclassified
+(linear_self_attention `_kv_kernel`: witness pid (0,32,0) outside
+grid [32,32] — §3c out-of-extent artifact, 52nd instance), zero
+genuine races. Notable proof: top_k_selection's bitonic exchange
+network PROVES at T1 (div/mod pair-partition disjointness across
+CTAs). destindex (duplicate-destination scatter, the quantize_kv_copy
+family) abstains honestly on both tracks (indirect address; dest_loc
+2048 elements > 1024 interp snapshot cap) rather than silently
+passing. streamk first_wave is spin-shape (S6 production instance #2,
+after flaggems mm_streamk).
+
+- [x] Detector defect: interpreter-track `tl.cumsum` overrider required
+      `axis` while the tl-module patch intercepts before triton binds
+      tl.cumsum's own defaults — bare `tl.cumsum(x)` (radix_sort)
+      aborted the dynamic track. FIXED: overrider mirrors the tl
+      signature defaults; pinned by
+      test_cumsum_overrider_defaults_axis_like_tl_cumsum
+      (SWEEP_REPORT §6.9). radix_sort dyn now abstains cleanly.
+- [ ] destindex value-aware check: raise (or premise-gate) the interp
+      contents-snapshot cap so 2048-element index tensors replay —
+      would turn the honest abstain into a values-clean/race verdict.
 
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 

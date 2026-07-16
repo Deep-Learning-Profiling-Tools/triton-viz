@@ -131,11 +131,18 @@ class CompiledRaceDetector(Client):
         # params, any grid along the read axes — scoped to this
         # specialization and accepted only after the launch's captured
         # tensor intervals verified the non-aliasing premise;
-        # "proved@T1" = for this launch's params, any grid. An
+        # "proved@T1" = for this launch's params, any grid;
+        # "proved@T1-launch" = for this launch's params AND grid (the §3c
+        # launch-scoped rung: any-grid SAT, launch-pinned UNSAT — the
+        # any-grid evidence lands in last_grid_fragile). An
         # await-bearing kernel's rung carries the "+assumes-termination"
         # suffix (spec C1.2): the verdict is conditional on the spin
         # loop(s) terminating.
         self.last_global_provenance: str | None = None
+        # §3c: the any-grid SAT reports behind a "proved@T1-launch" rung —
+        # grid-fragility evidence (out-of-extent witnesses), NOT race
+        # reports; independent of last_global_reports by design.
+        self.last_grid_fragile: list[Any] = []
         # True when this launch's verdict rides the await abstraction's
         # exit-predicate assertion (conditional on spin termination).
         self.last_global_assumes_termination: bool = False
@@ -417,6 +424,7 @@ class CompiledRaceDetector(Client):
         self.last_global_assumes_termination = False
         self.last_differential = None
         self.last_global_verdict = None
+        self.last_grid_fragile = []
         if not self.last_ttir_graphs:
             self.last_global_status = "no_ttir"
             self.last_global_reason = "no TTIR captured from warmup"
@@ -462,6 +470,11 @@ class CompiledRaceDetector(Client):
             outcome = self._solve_one_graph(graph, params, tensors, launch_grid)
             if outcome[0] == "proved":
                 rungs.append(outcome[1])
+            elif outcome[0] == "proved-launch":
+                # clean at the launch extent; the any-grid SAT evidence
+                # rides along as the independent grid-fragile attribute
+                rungs.append("T1-launch")
+                self.last_grid_fragile.extend(outcome[1])
             elif outcome[0] == "races":
                 _, exact, widened = outcome
                 reports.extend(exact)
@@ -538,9 +551,14 @@ class CompiledRaceDetector(Client):
             self.last_global_status = status
             self.last_global_reason = reason
         else:
-            rung = (
-                "proved@T0" if rungs and all(r == "T0" for r in rungs) else "proved@T1"
-            )
+            # weakest rung across graphs scopes the whole claim: any
+            # launch-pinned graph narrows the kernel's proof to this grid
+            if rungs and all(r == "T0" for r in rungs):
+                rung = "proved@T0"
+            elif "T1-launch" in rungs:
+                rung = "proved@T1-launch"
+            else:
+                rung = "proved@T1"
             if awaited_present:
                 rung += "+assumes-termination"
             self.last_global_provenance = rung
@@ -570,7 +588,14 @@ class CompiledRaceDetector(Client):
           verdict            "race-free" | "race" | "potential-race" |
                              "abstain"
           proved_scope       for race-free: "any-params-any-grid" (T0) |
-                             "this-params-any-grid" (T1); None otherwise
+                             "this-params-any-grid" (T1) |
+                             "this-params-this-grid" (T1-launch, the §3c
+                             launch-scoped rung); None otherwise
+          grid_fragile       independent attribute (§3c guardrail 1): the
+                             launch-scoped proof coexists with an any-grid
+                             SAT whose witnesses lie outside the launch
+                             extent — the kernel's safety depends on the
+                             wrapper's grid contract. Never a race claim.
           race_evidence      for race: "confirmed" (C2 reproduced a
                              witness) | "exact" (a precise-footprint SAT
                              witness, replay unavailable/off) |
@@ -598,15 +623,17 @@ class CompiledRaceDetector(Client):
             "conservative": False,
             "conditional": conditional,
             "unsupported_kind": None,
+            "grid_fragile": bool(self.last_grid_fragile),
         }
         if status == "ok":
             v["verdict"] = "race-free"
             prov = self.last_global_provenance or "proved@T1"
-            v["proved_scope"] = (
-                "any-params-any-grid"
-                if prov.startswith("proved@T0")
-                else "this-params-any-grid"
-            )
+            if prov.startswith("proved@T0"):
+                v["proved_scope"] = "any-params-any-grid"
+            elif prov.startswith("proved@T1-launch"):
+                v["proved_scope"] = "this-params-this-grid"
+            else:
+                v["proved_scope"] = "this-params-any-grid"
         elif status == "races":
             v["verdict"] = "race"
             v["race_evidence"] = (
@@ -881,8 +908,61 @@ class CompiledRaceDetector(Client):
             else:
                 exact.append(rep)
         if exact or widened:
+            # §3c launch-scoped rung: the SAT above is ANY-grid (read pid
+            # axes symbolic). Re-ask the same encoding with every grid
+            # axis pinned to the launch extent — generalizing
+            # symbolic_grid's unread-axis pinning to all axes. UNSAT at
+            # the launch extent is a proof AS LAUNCHED; the any-grid
+            # reports become grid-fragility evidence (an independent
+            # attribute, never worded as a race). Still-SAT keeps the
+            # race path with the PINNED reports, whose witnesses are
+            # in-extent by construction (replayable by C2).
+            scoped = self._launch_scoped_requery(enc, lg)
+            if scoped is not None:
+                if not scoped:
+                    return ("proved-launch", exact + widened)
+                exact, widened = [], []
+                for rep in scoped:
+                    ids = {rep.first.event_id, rep.second.event_id}
+                    if ids & enc.uncertain_event_ids:
+                        widened.append(rep)
+                    else:
+                        exact.append(rep)
             return ("races", exact, widened)
         return ("proved", "T1")
+
+    def _launch_scoped_requery(self, enc: Any, lg: tuple[int, ...] | None):
+        """Re-run the two-copy query with the grid pinned to the launch
+        extent. symbolic_grid's symbolic dims are interned by name
+        (``grid_i``) and NumPrograms terms in the already-encoded records
+        reference the same names, so pinning is an equality ASSUMPTION on
+        the same encoding, not a re-encode. Returns the pinned report
+        list ([] = UNSAT at the launch extent), or None when no launch
+        grid is available or the pinned query cannot decide (Z3 unknown /
+        solver error) — the caller then keeps the any-grid reports:
+        fail-closed, never a silent launch-scoped claim."""
+        if lg is None:
+            return None
+        from z3 import IntVal, set_param
+
+        grid = symbolic_grid(enc, lg)
+        lg3 = tuple(int(d) for d in lg) + (1, 1, 1)
+        pins = tuple(
+            d == IntVal(lg3[i]) for i, d in enumerate(grid) if not isinstance(d, int)
+        )
+        set_param("timeout", self.T1_TIMEOUT_MS)
+        try:
+            return TwoCopySymbolicHBSolver(
+                enc.records,
+                grid=grid,
+                arange_dict=enc.arange_dict,
+                extra_assumptions=pins,
+                ablations=self.ablations,
+            ).find_races()
+        except Exception:  # noqa: BLE001 — includes Z3 unknown (Unsupported…)
+            return None
+        finally:
+            set_param("timeout", self._Z3_DEFAULT_TIMEOUT)
 
     @staticmethod
     def _t0_premises_hold_for_launch(graph: AccessGraph, tensors: dict) -> bool:

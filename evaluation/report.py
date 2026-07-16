@@ -261,6 +261,11 @@ def render(paths: list[Path]) -> str:
                 f" (upstream {header.get('tritonbench_meta_commit') or 'unknown'})"
                 if header.get("tritonbench_meta")
                 else ""
+            )
+            + (
+                f", tilebench checkout {header['tilebench']}"
+                if header.get("tilebench")
+                else ""
             ),
             "",
             "| kernel | pattern | expected | terminal | witness | mut | "
@@ -278,6 +283,8 @@ def render(paths: list[Path]) -> str:
             wm = _witness_match(r)
             witness = {"match": "✓", "mismatch": "≠", None: "-"}[wm]
             terminal = r.get("terminal", "?")
+            if (r.get("static") or {}).get("grid_fragile"):
+                terminal += " +grid-fragile"
             lines.append(
                 f"| {r['name']} | {r.get('pattern', '')} | {r.get('expected', '')} "
                 f"| {terminal} | {witness} | {_mutation_cell(r)} "

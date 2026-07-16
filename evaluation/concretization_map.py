@@ -32,6 +32,7 @@ RESULTS_DIR = Path(__file__).parent / "results"
 AXIS_X = ("nothing", "scalar params", "memory contents", "+ paths")
 AXIS_Y = (
     "pid (interleaving)",
+    "pid + trip (grid = launch)",
     "pid + grid≥launch + trip",
     "params + pid + grid + trip",
 )
@@ -39,12 +40,18 @@ AXIS_Y = (
 # terminal state → (x, y, class). Conditional proofs share the proof
 # point; the marker records the premise.
 POINTS: dict[str, tuple[int, int, str]] = {
-    "proved@T0": (0, 2, "proof"),
-    "proved@T0+assumes-termination": (0, 2, "conditional proof"),
-    "proved@T1": (1, 1, "proof"),
-    "proved@T1+assumes-termination": (1, 1, "conditional proof"),
+    "proved@T0": (0, 3, "proof"),
+    "proved@T0+assumes-termination": (0, 3, "conditional proof"),
+    "proved@T1": (1, 2, "proof"),
+    "proved@T1+assumes-termination": (1, 2, "conditional proof"),
+    # The §3c launch-scoped rung: params concretized AND the grid pinned
+    # to the launch extent — one step more concrete than T1 on the y
+    # axis, still on the IR front-end. Its grid-fragile attribute is
+    # per-row metadata, not a separate point.
+    "proved@T1-launch": (1, 1, "launch-scoped proof"),
+    "proved@T1-launch+assumes-termination": (1, 1, "conditional proof"),
     # A static-track race verdict is decided on the IR front-end at T1.
-    "races-unclassified": (1, 1, "report"),
+    "races-unclassified": (1, 2, "report"),
     # Confirmation/refutation happen on the interpreter front-end, where
     # memory contents and paths are concretized together.
     "race-confirmed": (3, 0, "confirmed race"),
@@ -133,6 +140,7 @@ _CLASS_STYLE = {
     # (fill, stroke, shape) — shapes: circle / diamond / square
     "proof": ("#2e7d32", "#1b5e20", "circle"),
     "conditional proof": ("#9ccc65", "#558b2f", "circle"),
+    "launch-scoped proof": ("#00838f", "#006064", "circle"),
     "report": ("#ef6c00", "#e65100", "diamond"),
     "confirmed race": ("#c62828", "#8e0000", "square"),
     "unconfirmed report": ("#757575", "#424242", "diamond"),
@@ -209,6 +217,7 @@ def to_svg(points: Counter) -> str:
     offsets = {
         "proof": (-38, 0),
         "conditional proof": (14, 0),
+        "launch-scoped proof": (-38, 0),
         "report": (52, 0),
         "confirmed race": (-20, 0),
         "unconfirmed report": (30, 0),
