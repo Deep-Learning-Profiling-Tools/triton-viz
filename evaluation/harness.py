@@ -118,6 +118,16 @@ def _static_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
         }
         for rep in (getattr(det, "last_grid_fragile", []) or [])
     ]
+    # §3n: the faithfully-refuted widened hazard's site pairs — evidence
+    # for the composed dispatcher's content-fragile upgrade
+    content_fragile = [
+        {
+            "first": rep.first_record.source_location,
+            "second": rep.second_record.source_location,
+            "hazard": rep.race_type.name,
+        }
+        for rep in (getattr(det, "last_content_hazard", []) or [])
+    ]
 
     return {
         "status": det.last_global_status,
@@ -127,6 +137,7 @@ def _static_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
         "n_reports": len(det.last_global_reports),
         "witnesses": witnesses,
         "grid_fragile": grid_fragile,
+        "content_fragile": content_fragile,
         "parse_unsupported": [r for r in det.last_ttir_unsupported if r],
         "differential": det.last_differential,
         "t0_gate": t0_gate,
@@ -290,6 +301,7 @@ def _static_track_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
         "n_reports": len(reports),
         "witnesses": [dict(_witness(r), race_type=r.race_type.name) for r in reports],
         "grid_fragile": [dict(_witness(r), hazard=r.race_type.name) for r in fragile],
+        "content_fragile": [],  # no replay channel: the demotion never fires
         "parse_unsupported": [],
         "differential": None,
         "t0_gate": None,
@@ -491,10 +503,25 @@ def _classify(
             return ("race", "race-confirmed")
         return ("race", "races-unclassified")
     if status == "unsupported":
-        if "race-unconfirmed" in (static["reason"] or ""):
-            return ("abstain", "race-unconfirmed")
         dyn = dynamic or {}
-        if dyn.get("status") == "ok" and not dyn.get("error"):
+        dyn_clean = dyn.get("status") == "ok" and not dyn.get("error")
+        if "race-unconfirmed" in (static["reason"] or ""):
+            # §3n (decision (b)): this reason is set ONLY when every
+            # widened SAT was faithfully replayed on this launch's data
+            # and none reproduced. When the interpreter ALSO ran this
+            # launch clean, the composition owes it the launch-scoped
+            # proof — the refuted hazard rides as the content-fragile
+            # attribute (stamped by run_one), never as an abstention.
+            # Capped / unavailable / unclassifiable demotions carry the
+            # GENERIC reason, so they can never enter this upgrade.
+            if dyn_clean:
+                if (dyn.get("n_reports") or 0) > 0:
+                    # concrete interp reports subsume the widened hazard
+                    return ("race", "race@interp")
+                return ("race-free", "proved@interp")
+            # no proof exists — fail closed exactly as before
+            return ("abstain", "race-unconfirmed")
+        if dyn_clean:
             if (dyn.get("n_reports") or 0) > 0:
                 return ("race", "race@interp")
             return ("race-free", "proved@interp")
@@ -579,6 +606,16 @@ def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]
         row["dynamic"] = {"error": f"{type(e).__name__}: {e}"}
 
     row["verdict"], row["terminal"] = _classify(row["static"], row.get("dynamic"))
+    if row["terminal"] == "proved@interp" and "race-unconfirmed" in (
+        row["static"].get("reason") or ""
+    ):
+        # §3n guardrail 1: the attribute fires ONLY here — faithful
+        # replay refuted every widened SAT AND the interpreter proved
+        # this launch clean; the proof carries the contents-snapshot
+        # premise the dynamic track reports (guardrail 2)
+        va = dict(row["static"].get("verdict_attrs") or {})
+        va["content_fragile"] = True
+        row["static"]["verdict_attrs"] = va
 
     if mutate and row["static"].get("status") == "ok":
         try:

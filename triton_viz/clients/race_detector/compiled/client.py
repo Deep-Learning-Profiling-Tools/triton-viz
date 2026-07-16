@@ -143,6 +143,11 @@ class CompiledRaceDetector(Client):
         # grid-fragility evidence (out-of-extent witnesses), NOT race
         # reports; independent of last_global_reports by design.
         self.last_grid_fragile: list[Any] = []
+        # §3n: the widened reports a FAITHFUL replay refuted on this
+        # launch's data (the race-unconfirmed demotion) — content-
+        # fragility evidence for the composed dispatcher; hazard wording,
+        # never a race claim.
+        self.last_content_hazard: list[Any] = []
         # True when this launch's verdict rides the await abstraction's
         # exit-predicate assertion (conditional on spin termination).
         self.last_global_assumes_termination: bool = False
@@ -425,6 +430,7 @@ class CompiledRaceDetector(Client):
         self.last_differential = None
         self.last_global_verdict = None
         self.last_grid_fragile = []
+        self.last_content_hazard = []
         if not self.last_ttir_graphs:
             self.last_global_status = "no_ttir"
             self.last_global_reason = "no TTIR captured from warmup"
@@ -541,6 +547,16 @@ class CompiledRaceDetector(Client):
                     "(data-dependent mask / unmodeled branch); the interpreter "
                     "replay did not reproduce it on this launch's data"
                 )
+                # §3n: the faithfully-refuted hazard is EVIDENCE, not a
+                # report — the composed dispatcher may pair it with a
+                # clean interpreter run into proved@interp +
+                # content-fragile ("some memory contents enable an
+                # overlap"; widening only enlarges footprints, so the
+                # hazard reading is sound — the grid-fragile argument
+                # applied to contents). Only THIS branch populates it:
+                # capped/unavailable/unclassifiable demotions (the
+                # generic reason below) never earn the attribute.
+                self.last_content_hazard = list(widened_all)
             else:
                 self.last_global_reason = (
                     "possible race under over-approximation (data-dependent "
@@ -596,6 +612,14 @@ class CompiledRaceDetector(Client):
                              SAT whose witnesses lie outside the launch
                              extent — the kernel's safety depends on the
                              wrapper's grid contract. Never a race claim.
+          content_fragile    independent attribute (§3n): always False
+                             HERE — the client cannot decide it (the
+                             upgrade needs the DYNAMIC track's clean run,
+                             which only the composed dispatcher sees);
+                             the harness stamps True when a faithfully-
+                             refuted widened hazard (last_content_hazard)
+                             composes with a clean interpreter run into
+                             proved@interp. Hazard wording only.
           race_evidence      for race: "confirmed" (C2 reproduced a
                              witness) | "exact" (a precise-footprint SAT
                              witness, replay unavailable/off) |
@@ -624,6 +648,7 @@ class CompiledRaceDetector(Client):
             "conditional": conditional,
             "unsupported_kind": None,
             "grid_fragile": bool(self.last_grid_fragile),
+            "content_fragile": False,
         }
         if status == "ok":
             v["verdict"] = "race-free"

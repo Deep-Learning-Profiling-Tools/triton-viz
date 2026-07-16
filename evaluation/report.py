@@ -285,6 +285,12 @@ def render(paths: list[Path]) -> str:
             terminal = r.get("terminal", "?")
             if (r.get("static") or {}).get("grid_fragile"):
                 terminal += " +grid-fragile"
+            # marker keyed on the ATTRIBUTE (dispatcher-stamped), not the
+            # raw evidence — a failed-closed demotion stays unmarked
+            if ((r.get("static") or {}).get("verdict_attrs") or {}).get(
+                "content_fragile"
+            ):
+                terminal += " +content-fragile"
             lines.append(
                 f"| {r['name']} | {r.get('pattern', '')} | {r.get('expected', '')} "
                 f"| {terminal} | {witness} | {_mutation_cell(r)} "

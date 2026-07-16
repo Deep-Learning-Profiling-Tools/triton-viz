@@ -140,14 +140,20 @@ _DD_SIG = {
 }
 
 
-def _dd_launch(flag_value: int):
+def _dd_launch(flag_value: int, **det_kwargs):
     ttir = _ttir_of(dd_mask_kernel, _DD_SIG, {"BLOCK": 64})
-    det = CompiledRaceDetector()
+    det = CompiledRaceDetector(**det_kwargs)
     flags = torch.full((64,), flag_value, dtype=torch.int32)
     x = torch.randn(256)
     out = torch.zeros(64)
     _launch(det, dd_mask_kernel, (flags, x, out), {"grid": (4,), "BLOCK": 64}, ttir)
     return det
+
+
+def _dd_launch_no_replay(flag_value: int):
+    # replay channel OFF: the widened SAT lands the GENERIC abstention
+    # (confirmation never ran), the capped/unavailable-demotion shape
+    return _dd_launch(flag_value, confirm_races=False)
 
 
 def test_c2_upgrades_a_confirmed_widened_race():
@@ -163,11 +169,28 @@ def test_c2_upgrades_a_confirmed_widened_race():
 def test_c2_classifies_race_unconfirmed():
     """flags all zero: the real mask kills every lane; the widened SAT does
     not reproduce — the race-unconfirmed terminal state (potential, never a
-    definite report)."""
+    definite report). §3n: the faithfully-refuted hazard is retained as
+    content-fragility EVIDENCE (for the composed dispatcher's
+    proof-plus-attribute upgrade), and the client-side attribute stays
+    False — only the dispatcher, which sees the dynamic track, may
+    stamp it."""
     det = _dd_launch(flag_value=0)
     assert det.last_global_status == "unsupported"
     assert "race-unconfirmed" in (det.last_global_reason or "")
     assert det.last_global_reports == []
+    assert det.last_content_hazard, "refuted hazard must be carried as evidence"
+    assert det.last_global_verdict["content_fragile"] is False
+
+
+def test_capped_demotion_carries_no_content_hazard():
+    """the generic over-approximation abstention (replay unavailable /
+    unclassifiable) must NOT populate the content-fragility evidence —
+    §3n guardrail (i): only the faithful all-refuted demotion earns the
+    upgrade path."""
+    det = _dd_launch_no_replay(flag_value=0)
+    assert det.last_global_status == "unsupported"
+    assert "race-unconfirmed" not in (det.last_global_reason or "")
+    assert det.last_content_hazard == []
 
 
 def test_c2_witness_replay_direct():
