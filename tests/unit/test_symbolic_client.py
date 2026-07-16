@@ -162,6 +162,25 @@ def test_reduce_expr_eval(op: str, data):
     assert cast(IntNumRef, result).as_long() == getattr(builtins, op)(data)
 
 
+def test_cumsum_overrider_defaults_axis_like_tl_cumsum():
+    # tilebench radix_sort regression: the tl-module patch intercepts
+    # BEFORE triton binds tl.cumsum's own defaults, so a bare
+    # tl.cumsum(x) reaches the overrider as a single positional arg —
+    # the overrider must carry axis=0/reverse=False/dtype=None itself
+    # instead of requiring axis (which aborted the dynamic track with
+    # "missing 1 required positional argument: 'axis'").
+    import numpy as np
+
+    client = _LoopSiteSymbolicClient()
+    input_arr = SymbolicExpr.create(
+        "const", np.array([1, 0, 1, 1]), block_type(INT32, [4])
+    )
+    expr = client._op_cumsum_overrider(input_arr)
+    assert expr.op == "cumsum"
+    assert int(expr.axis.to_py()) == 0
+    assert np.array_equal(expr.concretize().data, [1, 1, 2, 3])
+
+
 # ======== Basic Symbolic Expr Operations Tests =========
 
 

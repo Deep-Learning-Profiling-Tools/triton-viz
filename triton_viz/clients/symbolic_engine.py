@@ -3047,7 +3047,10 @@ class SymbolicClient(Client):
             SymbolicExpr.from_value(rhs),
         )
 
-    def _op_cumsum_overrider(self, input, axis, reverse=False, dtype=None):
+    # defaults mirror tl.cumsum(input, axis=0, reverse=False, dtype=None):
+    # the tl-module patch intercepts BEFORE triton binds its own defaults,
+    # so a bare tl.cumsum(x) call reaches us with one positional arg
+    def _op_cumsum_overrider(self, input, axis=0, reverse=False, dtype=None):
         return SymbolicExpr.create(
             "cumsum",
             SymbolicExpr.from_value(input),
