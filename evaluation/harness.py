@@ -170,6 +170,172 @@ def _watchdog(seconds: float):
             signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining), old_timer[1])
 
 
+def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
+    """(params, tensors, aliased) from captured cuTile arg descriptors.
+
+    Scalars bind under their python names; an array param ``p`` also
+    binds its FLATTENED metadata slots (``p_1..p_r`` shape dims,
+    ``p_{r+1}..p_{2r}`` strides — the cuTile calling convention the IR
+    references). Tensor base addresses are synthesized: distinct alias
+    groups get disjoint fake allocations (the solver only needs interval
+    disjointness/overlap structure, which the capture recorded), aliased
+    args share one base."""
+    from triton_viz.clients.race_detector.compiled.global_records import GlobalTensor
+
+    params: dict[str, int] = {}
+    tensors: dict[str, GlobalTensor] = {}
+    group_base: dict[int, int] = {}
+    next_base = 1 << 40
+    aliased = False
+    for d in args:
+        if d["kind"] == "scalar":
+            v = d["value"]
+            if isinstance(v, (bool, int)):
+                params[d["name"]] = int(v)
+        elif d["kind"] == "tensor":
+            nm, rank = d["name"], len(d["shape"])
+            for i, s in enumerate(d["shape"]):
+                params[f"{nm}_{i + 1}"] = int(s)
+            for i, s in enumerate(d["strides"]):
+                params[f"{nm}_{rank + 1 + i}"] = int(s)
+            group = d.get("alias", nm)
+            if group in group_base:
+                aliased = True
+                base = group_base[group]
+            else:
+                base = next_base
+                group_base[group] = base
+                next_base += (d["numel"] * d["elem_size"] + 4095) & ~4095
+                next_base += 4096  # guard gap between allocations
+            tensors[nm] = GlobalTensor(
+                data_ptr=base,
+                numel=d["numel"],
+                elem_size=d["elem_size"],
+                contiguous=bool(d["contiguous"]),
+            )
+    return params, tensors, aliased
+
+
+def _static_track_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
+    """The compiled static track over the captured CuTile IR: the same
+    tier selector (T0 gate → T1 → §3c launch-scoped rung) via
+    ``_solve_one_graph``, with NO confirmation channel — cuda.tile has no
+    interpreter, so race SATs terminate at races-unclassified and proofs
+    carry their scope rungs exactly like the Triton track."""
+    from triton_viz.clients.common.cutile_ir_reader import parse_cutile_ir
+    from triton_viz.clients.common.ttir_reader import UnsupportedTTIR
+    from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetector
+
+    info = spec.cutile or {}
+    kname = info.get("kernel", spec.name)
+    det = CompiledRaceDetector(confirm_races=False, differential_check=False)
+    t0 = time.perf_counter()
+    status, reason, prov = "ok", None, None
+    reports: list[Any] = []
+    widened: list[Any] = []
+    fragile: list[Any] = []
+    try:
+        graph = parse_cutile_ir(info["ir"], kname)
+    except UnsupportedTTIR as e:
+        graph, status, reason = None, "unsupported", f"{e.kind}: {e}"
+    if graph is not None:
+        params, tensors, _ = _cutile_bindings(info["args"])
+        outcome = det._solve_one_graph(graph, params, tensors, tuple(spec.grid))
+        if outcome[0] == "proved":
+            prov = f"proved@{outcome[1]}"
+        elif outcome[0] == "proved-launch":
+            prov = "proved@T1-launch"
+            fragile = list(outcome[1])
+        elif outcome[0] == "races":
+            _, exact, widened = outcome
+            reports = list(exact)
+            if reports:
+                status = "races"
+                if widened:
+                    reason = (
+                        "additional possible races under over-approximation "
+                        "were withheld"
+                    )
+            elif widened:
+                status = "unsupported"
+                reason = (
+                    "possible race under over-approximation (data-dependent "
+                    "mask / unmodeled branch) — not a certifiable witness "
+                    "(no cuTile replay channel)"
+                )
+        else:
+            status, reason = "unsupported", outcome[1]
+    det.last_global_status = status
+    det.last_global_reason = reason
+    det.last_global_provenance = prov
+    det.last_global_reports = reports
+    det.last_grid_fragile = fragile
+    det.last_global_confirmation = None
+    det.last_global_assumes_termination = False
+    det._emit_verdict_attributes(list(widened))
+    elapsed = time.perf_counter() - t0
+
+    def _witness(rep: Any) -> dict:
+        return {
+            "first": rep.first_record.source_location,
+            "second": rep.second_record.source_location,
+            "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
+        }
+
+    return {
+        "status": status,
+        "provenance": prov,
+        "confirmation": None,
+        "reason": reason,
+        "n_reports": len(reports),
+        "witnesses": [dict(_witness(r), race_type=r.race_type.name) for r in reports],
+        "grid_fragile": [dict(_witness(r), hazard=r.race_type.name) for r in fragile],
+        "parse_unsupported": [],
+        "differential": None,
+        "t0_gate": None,
+        "assumes_termination": False,
+        "verdict_attrs": det.last_global_verdict,
+        "time_s": round(elapsed, 4),
+    }
+
+
+def _run_one_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
+    info = spec.cutile or {}
+    row: dict[str, Any] = {
+        "name": spec.name,
+        "pattern": spec.pattern,
+        "expected": spec.expected,
+        "race_pair_lines": None,
+        "params_note": spec.params_note,
+        "grid": list(spec.grid),
+        "seed": seed,
+        "kernel": info.get("kernel", spec.name),
+        "constexprs": dict(spec.constexprs),
+        "aliased": spec.aliased,
+        "frontend": "cutile",
+    }
+    try:
+        row["static"] = _static_track_cutile(spec, seed)
+    except Exception as e:  # noqa: BLE001
+        row.update(
+            verdict="error",
+            terminal="harness-error",
+            harness_error=f"cutile static track: {type(e).__name__}: {e}",
+        )
+        return row
+    row["dynamic"] = {
+        "status": "unsupported",
+        "reason": "cuda.tile has no interpreter — static track only (v1)",
+        "n_reports": 0,
+        "premises": [],
+        "witnesses": [],
+        "error": None,
+        "time_s": 0.0,
+    }
+    row["verdict"], row["terminal"] = _classify(row["static"], None)
+    return row
+
+
 def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     import triton_viz
     from triton_viz.clients import RaceDetector
@@ -360,6 +526,8 @@ def _resolve_race_pair_lines(spec: LaunchSpec) -> list[int | None] | None:
 
 
 def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]:
+    if spec.frontend == "cutile":
+        return _run_one_cutile(spec, seed)
     kernel_fn = getattr(spec.kernel_fn, "fn", spec.kernel_fn)
     row: dict[str, Any] = {
         "name": spec.name,

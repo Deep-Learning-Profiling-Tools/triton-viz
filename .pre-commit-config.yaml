@@ -120,6 +120,9 @@ repos:
   rev: "v2.2.6"
   hooks:
   - id: codespell
+    # machine-generated capture payloads (embedded IR text carries SSA
+    # names codespell misreads as typos)
+    exclude: ^evaluation/kernels/.*_specs\.json$
 
 # Check for common shell mistakes
 - repo: https://github.com/shellcheck-py/shellcheck-py

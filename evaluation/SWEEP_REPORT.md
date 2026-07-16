@@ -18,6 +18,7 @@
 | torchao | 67 | torchao git-pin `bfbc842` (`USE_CPP=0`, pure-Python Triton) | real code, fp8-quant + atomics |
 | tritonbench_meta | 41 | meta-pytorch/tritonbench git-pin `1edaf3e` (harness-driven capture) | real code, benchmark ops |
 | tilebench | 56 | Deep-Learning-Profiling-Tools/Tilebench local checkout `224ec81` (harness-driven capture) | real code, cuTile-twin benchmark |
+| tilebench_cutile | 61 | same checkout — the cuTile (cuda.tile) twins, captured CuTile IR | real code, FIRST non-Triton corpus |
 | aiter_originals | 2 | ROCm/aiter#3091 pre-fix kernel, vendored | RQ4 known-race reproduction |
 
 All real-code rows carry heuristic `race-free` labels (production code); the micro-benchmark carries ground-truth yes/no labels with planted witness lines. Captured launches rebuild deterministically: int/bool tensors ≤8192 elements are value-exact snapshots; non-contiguous (column-major / broadcast-expanded) args rebuild from recorded strides; `tl.dtype`/`torch.dtype` constexpr objects round-trip as tagged JSON; every results header pins package versions + upstream commits.
@@ -27,6 +28,8 @@ torchao coverage note: 44/44 capture cases succeeded (67 kernel specializations)
 tritonbench_meta coverage note: capture DRIVES the suite's own `BenchmarkOperator` harness (`--only <impl> --num-inputs 1 --input-id 0 --test-only --force`) rather than a case table, with `module_prefix="tritonbench."` keeping only the suite's own kernels (its liger/inductor/vendor backends are excluded — liger is already a corpus, inductor is codegen). 43 cases → 41 specializations. Removed with a verified structural reason (recorded in `tritonbench_meta_capture.py`): sm90/sm100-only tlx/gluon/autows/TMA-persistent attention + gemm families, stream-k's host-side TensorDescriptor args (M4 track, 13-min autotune), and impls needing uninstalled deps (xformers/cutlass-ck/fbgemm/mslk/generative_recommenders). This is meta-pytorch/tritonbench (Meta's benchmark suite), distinct from thunlp/TritonBench = the `tritonbench_g` corpus. Its ~102-of-repo own kernels are hand-written (not the rumored 2000+, which counts only inductor codegen).
 
 tilebench coverage note: the group's own multi-backend tile-DSL benchmark; every operator ships structurally-equivalent Triton AND cuTile implementations, so this corpus doubles as the Triton-side baseline for the planned cuTile frontend (same-operator cross-DSL differential). First local-checkout corpus (no packaging metadata): `TILEBENCH_ROOT` on sys.path, checkout HEAD commit as the pin (capture refuses tracked-dirty trees; `build_captured_corpus(installed_version=)` reuses the shared drift guard). Harness-driven capture through the suite's `core.engine` with `case_indices=[0]` and `report_benchmark` stubbed out — the only launch recorded is the engine's plain-stream verification run; `autotune` stays False so every impl fires its raw @triton.jit kernel once with its `_DEFAULT_CONFIG`. 45/45 operators captured (56 specializations), zero failures/skips.
+
+tilebench_cutile coverage note — the cuTile front-end: rows carry CuTile IR TEXT compiled at capture (`compile_tile(return_final_ir=True)`, pure-Python — rebuild needs neither cuda-tile nor a GPU), consumed by the new reader (`clients/common/cutile_ir_reader.py`) which emits the SAME AccessGraph/Term algebra as the TTIR reader — the encoder, two-copy solver, tier selector and §3c launch-scoped rung run UNCHANGED. Semantic mapping: tile-space `tile_load/store(view, index)` lowers to `index*tile_shape + arange` affine terms with the implicit OOB-clip materialized as ordinary mask terms; `pointer_offset + tile_atomic_rmw / load_pointer / store_pointer` are exactly the TTIR raw-pointer shapes; python floor-division lowers to `c_mod` + a boolean-xor sign-fix the reader models exactly ((a∧¬b)∨(¬a∧b)); integer xor (bitonic partner indexing) and while-form `loop`/`if` blocks abstain honestly. Capture drove all 45 operators (385 specializations, zero failures); the corpus keeps ≤2 specializations per (case, kernel) with the drop count in provenance (bitonic-network operators bake one ct.Constant per host-loop step). v1 has NO confirmation channel (cuda.tile ships no interpreter) — race SATs would terminate at races-unclassified; none did.
 
 ## 2. Ground-truth scorecard (tritonracebench, 56 rows)
 
@@ -59,10 +62,36 @@ unconditional-clean count, and the genuine-finding count (§4) stays 3.
 | torchao | 67 | 14 (5/9) | 16 (7/9) | 7 | 36 | 1 | 0 | 0 |
 | tritonbench_meta | 41 | 13 (5/8) | 8 (1/7) | 1 | 19 | 0 | 0 | 1 |
 | tilebench | 56 | 36 (21/15) | 6 (1/5) | 1 | 11 | 0 | 0 | 3 |
-| **Total** | **886** | **340 (38%)** | **114 (52/62)** | **52** | 411 | 1 | 6 | 14 |
+| tilebench_cutile | 61 | 36 (17/19) | 2 (2/0) | 2 | 23 | 0 | 0 | 0 |
+| **Total** | **947** | **376 (40%)** | **116 (54/62)** | **54** | 434 | 1 | 6 | 14 |
 
-Decided-clean across both scopes: 454/886 = 51% (each scope stated
+Decided-clean across both scopes: 492/947 = 52% (each scope stated
 separately above; the two are not interchangeable claims).
+
+### 3b. Cross-DSL differential (TileBench twins: same operator, two DSLs)
+
+45 operators ship structurally-equivalent Triton AND cuTile
+implementations; verdict classes AGREE on 30/45 — including identical
+abstention kinds where both are data-dependent (destindex's duplicate-
+destination scatter, histogramming's value-indexed atomic, matmul_int8's
+nested loops). The 15 divergences all attribute cleanly:
+
+- **cuTile ahead (4)**: `batched_matmul` (Triton TIMED OUT on swizzled
+  pointer arithmetic; cuTile's structured tile indices prove @T1),
+  `matmul_fp32_fp16_fp8` (Triton Z3-undecided; cuTile proves @T1),
+  `rope` and `flash_decode` (the cuTile twins avoid the loop shapes the
+  Triton twins abstain on). Structured tile addressing is genuinely
+  EASIER for Z3 than flat-pointer arithmetic on the matmul family.
+- **cuTile behind (10)**: 7 nested-loop abstentions (the cuTile twins
+  are multi-pass loops where Triton twins are single-pass or rescued by
+  proved@interp — a channel cuTile lacks entirely, no interpreter),
+  plus cross_entropy (interp-rescued on the Triton side only) and
+  linear_self_attention ×1 case + block_sparse (while-form `loop`
+  constructs, v1 unmodeled).
+- **scope split (1)**: `top_k_selection` — Triton proves @T1 (any-grid);
+  the cuTile twin's per-step launches prove only @T1-launch with the
+  grid-fragile attribute (witness pid (2,0,0) outside grid [2,1,1]) —
+  the §3c rung working unchanged through the new front-end.
 
 ¹ was: static any-grid SAT with every checked witness OUTSIDE the launch
 extent (52 rows across 7 corpora). The §3c launch-scoped tier resolved
@@ -122,13 +151,13 @@ Counting discipline: the 52 grid-fragile rows are NOT findings — they are laun
 
 | Class | Rows (attributed) | Lift |
 |---|---|---|
-| indirect-address (loaded values in addresses; varlen `cu_seqlens`/`chunk_indices`, `block_tables`) | fla 147 + flaggems 12 + torchao 6 + tilebench 3 + TB + liger | §3d snapshot-select extension to the COMPILED track |
+| indirect-address (loaded values in addresses; varlen `cu_seqlens`/`chunk_indices`, `block_tables`) | fla 147 + flaggems 12 + torchao 6 + tilebench 3 + tilebench_cutile 8 (incl. integer-xor bitonic partner indexing) + TB + liger | §3d snapshot-select extension to the COMPILED track |
 | pid-affine loop bounds (`(pid+1)*BLOCK`-style, flash-attention causal loops) | flagattn 14 + flaggems 12 | §3g lift — bounds affine in pid enter the iteration-existence premise |
 | runtime-scalar loop bounds (bound is a non-constexpr scalar arg; T1 wants launch-concrete) | torchao 8 + tilebench 1 | launch-scoped scalar binding, rides the §3c tier |
 | wrapper-coupled any-grid | **LANDED**: §3c launch-scoped tier — 51/52 rows → proved@T1-launch + grid-fragile; 1 holdout (split-k, launch query Z3-undecidable) stays races-unclassified | done 2026-07-15 |
-| nested loops | fla 20 + flaggems 6 + torchao 4 + TB 4 + tilebench 1 | §3e reader support (interp already rescues some) |
+| nested loops | fla 20 + flaggems 6 + torchao 4 + TB 4 + tilebench 1 + tilebench_cutile 9 | §3e reader support (interp already rescues some); the cuTile 9 include multi-pass loops the single-loop slot rejects |
 | data-dependent loop bounds (paged attention `context_lens`, jagged group offsets) | fla 19 + flagattn 1 + flaggems 1 + torchao 3 + tilebench 2 | §3e snapshot-lifted loop bounds |
-| unstructured control flow (`cf.cond_br`) | flagattn 2 + flaggems 3 + TB 2 + tilebench 1 | §3e path-condition encoding |
+| unstructured control flow (`cf.cond_br`; cuTile while-form `loop`/`if` blocks) | flagattn 2 + flaggems 3 + TB 2 + tilebench 1 + tilebench_cutile 6 | §3e path-condition encoding; cuTile if/while block support |
 | carried-value `scf.while` (spin: `mm_streamk`, tilebench streamk `first_wave`; plain iteration: torchao mx swizzles) | flaggems 1 + torchao 2 + tilebench 1 | S6 await-abstraction extension; the torchao pair shows the gate also catches NON-spin carried whiles |
 | non-contiguous tensor args (in-bounds premise needs dense layout; column-major quant outputs) | torchao 11 | strided-layout in-bounds premise (new; unlocked by the strides-capture extension) |
 | scalar-pointer atomic_rmw (fp8 global-amax idiom) | torchao 2 | reader shape extension (§6.7) |

@@ -40,6 +40,13 @@ class LaunchSpec:
     # yes-launch violates the T0 non-aliasing premise, so the ladder audit
     # must NOT count it against a proved@T0 of the same specialization.
     aliased: bool = False
+    # Front-end selector. "triton" rows host-compile TTIR from kernel_fn;
+    # "cutile" rows carry their captured CuTile IR + arg descriptors in
+    # ``cutile`` (kernel_fn is None, make_args unused, no dynamic track —
+    # cuda.tile has no interpreter). The registering corpus owns the
+    # payload shape; the harness only dispatches on the tag.
+    frontend: str = "triton"
+    cutile: dict | None = None
 
     def spec_id(self) -> str:
         return self.name

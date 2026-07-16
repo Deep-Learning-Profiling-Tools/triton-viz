@@ -656,6 +656,53 @@ after flaggems mm_streamk).
       contents-snapshot cap so 2048-element index tensors replay —
       would turn the honest abstain into a values-clean/race verdict.
 
+## 3m. cuTile front-end: first non-Triton DSL (LANDED 2026-07-16)
+
+Record: the detector now analyzes NVIDIA cuTile (cuda.tile) kernels.
+Architecture bet paid off exactly as designed — new FRONT-END, zero
+core changes: `clients/common/cutile_ir_reader.py` parses the final
+CuTile IR text into the SAME AccessGraph/Term algebra as the TTIR
+reader; encode_graph, the two-copy solver, tier selector, and the §3c
+launch-scoped rung run unchanged.
+
+- Toolchain: cuda-tile 1.5.0 (+[tileiras]) in the project venv; sm89
+  works (only fp8/fp4 dtypes are arch-gated). IR captured AT LAUNCH by
+  evaluation/tilebench_cutile_capture (patches ct.launch, records then
+  runs; engine verify validates the recorded launch) and compiled to
+  text in-record — corpus rebuild needs neither cuda-tile nor a GPU.
+- Key semantic mappings: tile addressing → index*tile_shape+arange
+  affine terms + implicit OOB-clip AS mask terms; pointer_offset +
+  tile_atomic_rmw / load_pointer / store_pointer ≡ TTIR raw-pointer
+  shapes; python floor-div lowers to c_mod + BOOLEAN-xor sign-fix
+  (modeled exactly as (a∧¬b)∨(¬a∧b)); ct.Constant params surface as
+  typed_const with python names; array params flatten to
+  p_0/base + p_1..p_r shapes + p_{r+1}..p_2r strides (harness binds
+  from captured descriptors).
+- Sweep (tilebench_cutile, 61 rows): 17 T0 / 19 T1 / 2 T1-launch
+  (+grid-fragile — §3c working through the new front-end) / 23 abstain
+  (9 nested-loop, 8 indirect-address, 6 control-flow), zero crashes,
+  zero races-unclassified. Cross-DSL differential vs the Triton twins:
+  30/45 operators agree (incl. identical abstention kinds on the
+  data-dependent ones); cuTile AHEAD on 4 (both matmuls prove @T1
+  where Triton timed out / Z3-undecided — structured tile indices beat
+  flat-pointer arithmetic), behind on 10 (7 multi-pass-loop shapes +
+  no interpreter channel), scope-split on 1 (top_k @T1 vs @T1-launch).
+- Pins: tests/unit/test_cutile_reader.py (7 — proof AND detection
+  directions end-to-end, atomic lowering, bool-xor floor fix, int-xor
+  abstention, load_pointer, while-form refusal).
+
+Queued lifts (v2):
+- [ ] multi-loop support (7 rows) — sequential + nested loop slots.
+- [ ] while-form `loop` / `if` blocks (6 rows) — path conditions.
+- [ ] integer xor in addresses (bitonic partner indexing) — bitvector
+      side-channel or pattern lift.
+- [ ] C2 confirmation: mini tile-op evaluator (29-op numpy-like
+      surface) or real-launch replay on the 4090 — restores the
+      confirmed/unconfirmed distinction for cuTile race SATs.
+- [ ] LLM-generated cuTile kernels (TileBench benchmarks/llm_generated,
+      51 @ct.kernel) as a second cuTile corpus — race detection of
+      LLM-authored tile kernels ties into the group's pipeline paper.
+
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
 - [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands
