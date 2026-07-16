@@ -12,8 +12,10 @@ from triton_viz.core.config import config as cfg
 
 # Command names
 SANITIZER_COMMAND = "triton-sanitizer"
+SANITIZER_COMPILED_COMMAND = "triton-sanitizer-compiled"
 PROFILER_COMMAND = "triton-profiler"
 RACE_DETECTOR_COMMAND = "triton-race-detector"
+COMPILED_RACE_DETECTOR_COMMAND = "triton-compiled-race-detector"
 
 # store the original triton.jit
 _original_jit = triton.jit
@@ -30,6 +32,20 @@ def sanitizer_wrapper(kernel, *, frontend: str = "triton"):
     return tracer(kernel)
 
 
+def sanitizer_compiled_wrapper(kernel, *, frontend: str = "triton"):
+    # Compiled-mode sanitizer: statically checks out-of-bounds from the
+    # kernel's TTIR (captured via the real compilation warmup) instead of
+    # interpreting the kernel. A SAT witness aborts like the eager sanitizer;
+    # unsupported constructs (data-dependent addressing, block pointers,
+    # nested loops, ...) are reported as unsupported rather than aborting.
+    abort_on_error = True
+    tracer = triton_viz.trace(
+        client=Sanitizer(compile=True, abort_on_error=abort_on_error),
+        frontend=frontend,
+    )
+    return tracer(kernel)
+
+
 def profiler_wrapper(kernel, *, frontend: str = "triton"):
     tracer = triton_viz.trace(client=Profiler(), frontend=frontend)
     return tracer(kernel)
@@ -37,6 +53,13 @@ def profiler_wrapper(kernel, *, frontend: str = "triton"):
 
 def race_detector_wrapper(kernel, *, frontend: str = "triton"):
     tracer = triton_viz.trace(client=RaceDetector(), frontend=frontend)
+    return tracer(kernel)
+
+
+def compiled_race_detector_wrapper(kernel, *, frontend: str = "triton"):
+    # Compiled mode: static shared-memory race analysis over the warmup TTGIR.
+    # Standalone — runs on its own trace (ClientManager rejects composition).
+    tracer = triton_viz.trace(client=RaceDetector(compile=True), frontend=frontend)
     return tracer(kernel)
 
 
@@ -147,6 +170,20 @@ def apply_sanitizer():
     )
 
 
+def apply_sanitizer_compiled():
+    """
+    Apply the compiled-mode sanitizer wrapper to triton.jit and run the user
+    script. Unlike triton-sanitizer (which interprets the kernel), this warms
+    up the real compilation to capture TTIR and checks out-of-bounds
+    statically.
+    """
+    _apply_wrapper(
+        sanitizer_compiled_wrapper,
+        SANITIZER_COMPILED_COMMAND,
+        f"Usage: {SANITIZER_COMPILED_COMMAND} <script.py> [args...]",
+    )
+
+
 def apply_profiler():
     """
     Apply the profiler wrapper to triton.jit and run the user script.
@@ -166,4 +203,18 @@ def apply_race_detector():
         race_detector_wrapper,
         RACE_DETECTOR_COMMAND,
         f"Usage: {RACE_DETECTOR_COMMAND} <script.py> [args...]",
+    )
+
+
+def apply_compiled_race_detector():
+    """
+    Apply the compiled-mode race detector wrapper to triton.jit and run the
+    user script. Acquires each kernel specialization's TTGIR through the real
+    compilation warmup and statically checks the cp.async shared-memory
+    pipeline for races (proof / witness / unsupported per kernel).
+    """
+    _apply_wrapper(
+        compiled_race_detector_wrapper,
+        COMPILED_RACE_DETECTOR_COMMAND,
+        f"Usage: {COMPILED_RACE_DETECTOR_COMMAND} <script.py> [args...]",
     )

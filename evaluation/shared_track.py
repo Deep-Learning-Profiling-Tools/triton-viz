@@ -1,0 +1,499 @@
+"""M5 — the shared-memory (Track 1) evaluation sweep (plan Part II §7).
+
+Sweeps the pipelined tutorial kernels across ``num_stages ∈ {1..4}`` at
+sm80 AND sm90, recording per cell: the TTGIR verdict (proof / reports /
+unsupported+kind), analyze wall-time, and async-op counts. Every PROVED
+cell then enters the MUTATION-DETECTION MATRIX: the pipeliner-bug
+mutations (weakened wait, deleted wait, single-buffered rotation, and at
+sm90 the wgmma-agent pair weakened/deleted warp_group_dot_wait) are
+applied to its TTGIR and the verdict must flip to race reports.
+
+The M5 case studies fall out of the matrix and are narrated with their
+solver witnesses:
+
+  CS1 "missing async_wait"      — the deleted-wait mutation: the loop's
+                                  smem reads run with no wait coverage
+                                  at all (the classic forgotten-wait bug).
+  CS2 "insufficient buffering"  — the single-buffer mutation: rotation
+                                  depth 1 under a 2-deep prefetch, i.e. a
+                                  producer cp.async overwrites the slot a
+                                  consumer is still reading (the
+                                  insufficient-num_stages bug class).
+  CS3 "weakened wgmma drain"    — sm90 only: warp_group_dot_wait
+                                  pendings+1 leaves the previous
+                                  iteration's async MMA read pending on
+                                  exactly the slot the next cp.async
+                                  overwrites — a WAR the sm80 model
+                                  cannot even express.
+
+Usage:  uv run python -m evaluation.shared_track
+Writes results/SHARED_TRACK.md.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from pathlib import Path
+
+import torch  # noqa: F401  (imported for parity with the harness env)
+import triton
+import triton.language as tl
+from triton.backends.compiler import GPUTarget
+from triton.compiler import ASTSource
+
+from triton_viz.clients.race_detector.compiled.smt_encoder import analyze_ttgir
+
+RESULTS_DIR = Path(__file__).parent / "results"
+STAGES = (1, 2, 3, 4)
+
+
+# ── kernels (the pipelined tutorials; vendored shapes from tutorials.py) ──
+
+
+@triton.jit
+def matmul_kernel(
+    a_ptr, b_ptr, c_ptr, M, N, K,
+    stride_am, stride_bk, stride_cm,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):  # fmt: skip
+    """The tutorial matmul with the INNER strides folded to 1 (row-major),
+    mirroring the real JIT's specialization of contiguous tensors — a
+    runtime inner stride defeats the contiguity proof the pipeliner needs
+    to emit cp.async, and the sweep would silently measure unpipelined
+    code. Matches tests/golden/ttgir/generate_golden.py."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :]
+    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_K)):
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+        acc += tl.dot(a, b)
+        a_ptrs += BLOCK_K
+        b_ptrs += BLOCK_K * stride_bk
+    c = acc.to(tl.float16)
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :]
+    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(c_ptrs, c, mask=c_mask)
+
+
+@triton.jit
+def softmax_kernel(
+    output_ptr, input_ptr, input_row_stride, output_row_stride, n_rows, n_cols,
+    BLOCK_SIZE: tl.constexpr, num_stages: tl.constexpr,
+):  # fmt: skip
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
+        row_start_ptr = input_ptr + row_idx * input_row_stride
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        input_ptrs = row_start_ptr + col_offsets
+        mask = col_offsets < n_cols
+        row = tl.load(input_ptrs, mask=mask, other=-float("inf"))
+        row_minus_max = row - tl.max(row, axis=0)
+        numerator = tl.exp(row_minus_max)
+        denominator = tl.sum(numerator, axis=0)
+        softmax_output = numerator / denominator
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        output_ptrs = output_row_start_ptr + col_offsets
+        tl.store(output_ptrs, softmax_output, mask=mask)
+
+
+@triton.jit
+def matmul_tma_kernel(
+    a_ptr, b_ptr, c_ptr, M, N, K,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):  # fmt: skip
+    """Descriptor-based matmul (`tl.make_tensor_descriptor`): the sm90
+    pipeliner lowers the loads to ttng.async_tma_copy_global_to_local
+    completing through mbarrier phase waits — the M4 tranche-2 protocol.
+    Matches tests/golden/ttgir/generate_golden.py."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr, shape=[M, K], strides=[K, 1], block_shape=[BLOCK_M, BLOCK_K]
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr, shape=[K, N], strides=[N, 1], block_shape=[BLOCK_K, BLOCK_N]
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr, shape=[M, N], strides=[N, 1], block_shape=[BLOCK_M, BLOCK_N]
+    )
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_K)):
+        a = a_desc.load([pid_m * BLOCK_M, k * BLOCK_K])
+        b = b_desc.load([k * BLOCK_K, pid_n * BLOCK_N])
+        acc += tl.dot(a, b)
+    c_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], acc.to(tl.float16))
+
+
+_MATMUL_SIG = {
+    "a_ptr": "*fp16", "b_ptr": "*fp16", "c_ptr": "*fp16",
+    "M": "i32", "N": "i32", "K": "i32",
+    "stride_am": "i32", "stride_bk": "i32", "stride_cm": "i32",
+    "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "BLOCK_K": "constexpr",
+}  # fmt: skip
+_MATMUL_TMA_SIG = {
+    "a_ptr": "*fp16", "b_ptr": "*fp16", "c_ptr": "*fp16",
+    "M": "i32", "N": "i32", "K": "i32",
+    "BLOCK_M": "constexpr", "BLOCK_N": "constexpr", "BLOCK_K": "constexpr",
+}  # fmt: skip
+_SOFTMAX_SIG = {
+    "output_ptr": "*fp32", "input_ptr": "*fp32",
+    "input_row_stride": "i32", "output_row_stride": "i32",
+    "n_rows": "i32", "n_cols": "i32",
+    "BLOCK_SIZE": "constexpr", "num_stages": "constexpr",
+}  # fmt: skip
+
+
+# divisibility-16 on pointers + shape/stride scalars: mirrors the real
+# JIT's specialization of well-aligned tensors — REQUIRED for the
+# vectorized loads the pipeliner turns into cp.async (without it the
+# sweep silently measures unpipelined code: 0 async copies everywhere).
+_MATMUL_ATTRS = {(i,): [["tt.divisibility", 16]] for i in range(9)}
+_MATMUL_TMA_ATTRS = {(i,): [["tt.divisibility", 16]] for i in range(6)}
+_SOFTMAX_ATTRS = {(i,): [["tt.divisibility", 16]] for i in range(6)}
+
+
+def _kernels(stages: int, cc: int):
+    kernels = [
+        (
+            "tut03_matmul",
+            matmul_kernel,
+            _MATMUL_SIG,
+            {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32},
+            {"num_stages": stages, "num_warps": 4},
+            _MATMUL_ATTRS,
+        ),
+        (
+            "tut02_softmax",
+            softmax_kernel,
+            _SOFTMAX_SIG,
+            {"BLOCK_SIZE": 128, "num_stages": stages},
+            {"num_stages": stages, "num_warps": 4},
+            _SOFTMAX_ATTRS,
+        ),
+    ]
+    if cc >= 90:  # TMA needs Hopper
+        kernels.append(
+            (
+                "tut03_matmul_tma",
+                matmul_tma_kernel,
+                _MATMUL_TMA_SIG,
+                {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32},
+                {"num_stages": stages, "num_warps": 4},
+                _MATMUL_TMA_ATTRS,
+            )
+        )
+    return kernels
+
+
+ARCHS = (80, 90)
+
+
+def _ttgir(fn, sig, consts, opts, attrs, cc: int = 80) -> str:
+    src = ASTSource(fn=fn, signature=sig, constexprs=consts, attrs=attrs)
+    k = triton.compile(src, target=GPUTarget("cuda", cc, 32), options=opts)
+    return k.asm["ttgir"]
+
+
+# ── the pipeliner-bug mutations (matching the e2e mutation tests) ──
+
+_RE_WAIT_NUM = re.compile(r"\{num = (\d+) : i32\}")
+
+
+def _mut_weaken_wait(ttgir: str) -> str | None:
+    """async_wait tolerating one MORE outstanding group than the rotation
+    provides — the off-by-one pipeliner bug."""
+
+    def repl(m: re.Match) -> str:
+        return f"{{num = {int(m.group(1)) + 1} : i32}}"
+
+    new, n = _RE_WAIT_NUM.subn(repl, ttgir)
+    return new if n else None
+
+
+def _mut_delete_wait(ttgir: str) -> str | None:
+    """CS1 — the forgotten async_wait: loop local_loads run uncovered."""
+    lines = ttgir.splitlines()
+    kept = [ln for ln in lines if "ttg.async_wait %" not in ln]
+    return "\n".join(kept) if len(kept) != len(lines) else None
+
+
+def _mut_single_buffer(ttgir: str) -> str | None:
+    """CS2 — insufficient buffering: shrink the rotation to depth 1 under
+    the same prefetch distance, so the producer's next cp.async targets
+    the very slot the consumer still reads (the insufficient-num_stages
+    bug class). Well-formed shrink (generic form of the golden test's
+    _shrink_to_single_buffer): buffer memdesc depth D→1, the rotation-wrap
+    compare's D→1, every constant slot index →0. n/a when the pipeline is
+    already single-buffered (num_stages=2 ⇒ depth 1)."""
+    m = re.search(r"ttg\.local_alloc[^\n]*!ttg\.memdesc<(\d+)x", ttgir)
+    if not m:
+        return None
+    depth = int(m.group(1))
+    if depth < 2:
+        return None
+    # rotation wrap: `cmpi sge, %idx, %cD_i32` guards the modular reset —
+    # no wrap means the buffer is not actually staged (e.g. the leading
+    # memdesc dim is a tile dim of an un-staged alloc): n/a, not a
+    # malformed shrink.
+    out, n_wrap = re.subn(
+        rf"(arith\.cmpi sge, %[\w.#]+, %c){depth}(_i32)", r"\g<1>1\g<2>", ttgir
+    )
+    if not n_wrap:
+        return None
+    out = out.replace(f"memdesc<{depth}x", "memdesc<1x")
+    # prologue prefetches into slots 1..D-1: a depth-1 buffer has only 0
+    out = re.sub(r"\[%c[1-9]\d*_i32\]", "[%c0_i32]", out)
+    return out if out != ttgir else None
+
+
+_RE_PENDINGS = re.compile(r"\{pendings = (\d+) : i32\}")
+
+
+def _mut_weaken_pendings(ttgir: str) -> str | None:
+    """CS3 — sm90 wgmma agent: warp_group_dot_wait tolerating one MORE
+    pending MMA than the rotation distance provides. n/a at sm80 (no
+    wgmma agent)."""
+
+    def repl(m: re.Match) -> str:
+        return f"{{pendings = {int(m.group(1)) + 1} : i32}}"
+
+    new, n = _RE_PENDINGS.subn(repl, ttgir)
+    return new if n else None
+
+
+def _mut_delete_dot_wait(ttgir: str) -> str | None:
+    """sm90: the forgotten warp_group_dot_wait — every issued async MMA
+    stays pending while the copies rotate over its operands."""
+    lines = ttgir.splitlines()
+    kept = [ln for ln in lines if "warp_group_dot_wait" not in ln]
+    return "\n".join(kept) if len(kept) != len(lines) else None
+
+
+_RE_EXPECT_BYTES = re.compile(r"(ttng\.barrier_expect (%[\w#.]+), )(\d+)")
+_RE_XORI_FLIP = re.compile(r"(arith\.xori (%[\w#.]+), )%c1_i32")
+
+
+def _mut_delete_wait_barrier(ttgir: str) -> str | None:
+    """TMA: the forgotten mbarrier phase wait — reads run unguarded
+    against in-flight arrivals."""
+    lines = ttgir.splitlines()
+    kept = [ln for ln in lines if "ttng.wait_barrier" not in ln]
+    return "\n".join(kept) if len(kept) != len(lines) else None
+
+
+def _mut_break_phase(ttgir: str) -> str | None:
+    """TMA: kill the parity flip (xori 1 → 0): from the second rotation
+    period on the wait targets an already-completed phase."""
+    new, n = _RE_XORI_FLIP.subn(r"\g<1>%c0_i32", ttgir)
+    return new if n else None
+
+
+def _mut_expect_undercount(ttgir: str) -> str | None:
+    """TMA: halve every barrier_expect byte count — the phase completes
+    with arrivals still in flight."""
+
+    def repl(m: re.Match) -> str:
+        return f"{m.group(1)}{int(m.group(3)) // 2}"
+
+    new, n = _RE_EXPECT_BYTES.subn(repl, ttgir)
+    return new if n else None
+
+
+def _mut_delete_fence(ttgir: str) -> str | None:
+    """Drop fence_async_shared: a generic-proxy store feeding an
+    async-proxy read (wgmma / TMA store) loses its ordering."""
+    lines = ttgir.splitlines()
+    kept = [ln for ln in lines if "ttng.fence_async_shared" not in ln]
+    return "\n".join(kept) if len(kept) != len(lines) else None
+
+
+_MUTATIONS = (
+    ("weaken_wait", _mut_weaken_wait),
+    ("delete_wait", _mut_delete_wait),
+    ("single_buffer", _mut_single_buffer),
+    ("weaken_pendings", _mut_weaken_pendings),
+    ("delete_dot_wait", _mut_delete_dot_wait),
+    ("delete_wait_barrier", _mut_delete_wait_barrier),
+    ("break_phase", _mut_break_phase),
+    ("expect_undercount", _mut_expect_undercount),
+    ("delete_fence", _mut_delete_fence),
+)
+
+
+# ── the sweep ─────────────────────────────────────────────────────
+
+
+def _analyze(ttgir: str) -> tuple[str, int, str | None, float, list]:
+    t0 = time.perf_counter()
+    r = analyze_ttgir(ttgir)
+    dt = time.perf_counter() - t0
+    return r.status, len(r.reports), r.unsupported_reason, dt, r.reports
+
+
+def sweep() -> str:
+    lines = [
+        "# M5 — shared-memory track evaluation (sm80 + sm90)",
+        "",
+        "Track 1 (`analyze_ttgir`) over the pipelined tutorials at",
+        "`num_stages ∈ {1..4}`, GPUTarget(cuda, {80, 90}). The sm90 cells",
+        "exercise the M4 wgmma agent: cp.async writers vs asynchronous",
+        "`warp_group_dot` readers — RAW via async_wait counting, WAR via",
+        "`warp_group_dot_wait` pendings counting.",
+        "",
+        "## Sweep",
+        "",
+        "| kernel | arch | stages | async copies | tma | wgmma | verdict | reports | analyze s |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    proved: list[tuple[str, int, int, str]] = []
+    for cc in ARCHS:
+        for stages in STAGES:
+            for name, fn, sig, consts, opts, attrs in _kernels(stages, cc):
+                try:
+                    ttgir = _ttgir(fn, sig, consts, opts, attrs, cc)
+                except Exception as e:  # noqa: BLE001
+                    lines.append(
+                        f"| {name} | sm{cc} | {stages} | - | - | - | "
+                        f"compile-error ({type(e).__name__}) | - | - |"
+                    )
+                    continue
+                n_async = ttgir.count("ttg.async_copy_global_to_local")
+                n_tma = ttgir.count("ttng.async_tma_copy_global_to_local")
+                n_wgmma = ttgir.count("ttng.warp_group_dot ")
+                status, n_reports, reason, dt, _ = _analyze(ttgir)
+                verdict = (
+                    status
+                    if status != "unsupported"
+                    else f"unsupported: {(reason or '')[:60]}"
+                )
+                lines.append(
+                    f"| {name} | sm{cc} | {stages} | {n_async} | {n_tma} "
+                    f"| {n_wgmma} | {verdict} | {n_reports} | {dt:.3f} |"
+                )
+                if status == "ok" and n_reports == 0 and n_async + n_tma + n_wgmma > 0:
+                    proved.append((name, cc, stages, ttgir))
+
+    lines += [
+        "",
+        "## Mutation-detection matrix (every proved pipelined cell)",
+        "",
+        "| kernel | arch | stages | " + " | ".join(n for n, _ in _MUTATIONS) + " |",
+        "|---|---|---|" + "---|" * len(_MUTATIONS),
+    ]
+    matrix_ok = True
+    case_studies: dict[str, tuple[str, int, int, list]] = {}
+    for name, cc, stages, ttgir in proved:
+        row = [name, f"sm{cc}", str(stages)]
+        for mut_name, mut in _MUTATIONS:
+            mutated = mut(ttgir)
+            if mutated is None:
+                row.append("n/a")
+                continue
+            status, n_reports, reason, _, reports = _analyze(mutated)
+            if status == "ok" and n_reports > 0:
+                kinds = sorted({r.race_type.name for r in reports})
+                row.append(f"detected ({n_reports} {'/'.join(kinds)})")
+                if mut_name == "delete_wait" and "CS1" not in case_studies:
+                    case_studies["CS1"] = (name, cc, stages, reports)
+                if mut_name == "single_buffer" and "CS2" not in case_studies:
+                    case_studies["CS2"] = (name, cc, stages, reports)
+                if (
+                    mut_name == "weaken_pendings"
+                    and stages >= 2  # the narration is about the rotation
+                    and "CS3" not in case_studies
+                ):
+                    case_studies["CS3"] = (name, cc, stages, reports)
+                if mut_name == "delete_wait_barrier" and "CS4" not in case_studies:
+                    case_studies["CS4"] = (name, cc, stages, reports)
+            elif status == "ok":
+                row.append("MISSED")
+                matrix_ok = False
+            else:
+                row.append(f"abstained ({(reason or '')[:24]})")
+        lines.append("| " + " | ".join(row) + " |")
+    lines += [
+        "",
+        f"Matrix: {'every applicable mutation DETECTED' if matrix_ok else 'MISSES present — investigate'}.",
+        "",
+    ]
+
+    # ── case studies ──
+    lines += ["## Case studies (historical pipeliner bug classes)", ""]
+    narr = {
+        "CS1": (
+            "Missing `async_wait` (the forgotten-wait bug): every loop "
+            "smem read runs with no commit-group coverage at all — each "
+            "prefetch's cp.async may still be in flight when its slot is "
+            "read."
+        ),
+        "CS2": (
+            "Insufficient buffering (the insufficient-`num_stages` bug "
+            "class): the rotation is shrunk to a single slot under an "
+            "unchanged prefetch distance, so the producer's next cp.async "
+            "targets the very slot the consumer is still reading."
+        ),
+        "CS3": (
+            "Weakened wgmma drain (sm90): `warp_group_dot_wait` tolerating "
+            "one extra pending MMA leaves the PREVIOUS iteration's "
+            "asynchronous `warp_group_dot` read unretired — and the "
+            "rotation puts the next cp.async on exactly that slot. A WAR "
+            "race on the wgmma async agent, a bug class the sm80 model "
+            "cannot even express."
+        ),
+        "CS4": (
+            "Missing mbarrier phase wait (sm90 TMA): without "
+            "`wait_barrier`, the consumer reads a slot whose "
+            "`async_tma_copy_global_to_local` arrivals may still be in "
+            "flight — the descriptor-pipeline analog of the forgotten "
+            "`async_wait`, guarded by expect-tx byte counting instead of "
+            "commit groups."
+        ),
+    }
+    for cs in ("CS1", "CS2", "CS3", "CS4"):
+        if cs not in case_studies:
+            lines += [f"### {cs}: NOT CAPTURED — investigate", ""]
+            continue
+        name, cc, stages, reports = case_studies[cs]
+        rep = reports[0]
+        w = rep.witness
+        if "k_load" in w:
+            reader_bits = (
+                f"copy "
+                f"{'prologue prefetch' if w.get('k_copy', -1) < 0 else 'iteration k_copy=' + str(w['k_copy'])}, "
+                f"read iteration k_load={w['k_load']}"
+            )
+        else:
+            reader_bits = (
+                f"copy iteration k_copy={w['k_copy']}, pending wgmma "
+                f"{'prologue' if w.get('k_dot', -1) < 0 else 'iteration k_dot=' + str(w['k_dot'])}"
+            )
+        lines += [
+            f"### {cs} — {name} @ sm{cc}, num_stages={stages}",
+            "",
+            narr[cs],
+            "",
+            f"- verdict: {rep.race_type.name} race, {len(reports)} report(s)",
+            f"- witness: {reader_bits}, shared-memory slot {w['slot']}"
+            + (f", byte offset {w['byte_offset']}" if "byte_offset" in w else ""),
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def main() -> None:
+    out = sweep()
+    RESULTS_DIR.mkdir(exist_ok=True)
+    (RESULTS_DIR / "SHARED_TRACK.md").write_text(out)
+    print(out)
+
+
+if __name__ == "__main__":
+    main()

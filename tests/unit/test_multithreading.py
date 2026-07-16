@@ -10,10 +10,7 @@ import triton.language as tl
 import triton_viz
 from triton_viz.clients.profiler.profiler import Profiler
 from triton_viz.core.config import config as cfg
-import os
 
-# TODO: remove this fixture once we unpatch triton-viz properly
-os.environ["TRITON_INTERPRET"] = "1"
 trace_state = importlib.import_module("triton_viz.core.trace")
 
 
@@ -223,6 +220,24 @@ def test_profiler_counts_serial(one_sm, _no_profiler_sampling):
 
 def test_profiler_counts_concurrent(two_sms, _no_profiler_sampling):
     """Profiler load/store mask counts should match concurrent execution."""
+    load_total, store_total = _run_profiler_load_store()
+    assert load_total == 16
+    assert store_total == 16
+
+
+def test_profiler_runs_on_driverless_host(one_sm, _no_profiler_sampling, monkeypatch):
+    """CPU-only CI has no GPU driver: triton's warmup resolves
+    driver.active and dies with "0 active drivers". Warmup is OPTIONAL for
+    the eager clients (under TRITON_INTERPRET it never ran at all), so the
+    trace must skip it gracefully and the interpreted run must proceed."""
+    # triton replaces the triton.runtime.driver MODULE with the
+    # DriverConfig instance itself; patch `active` on its class.
+    import triton.runtime.driver as _drv
+
+    def _no_driver(_self):
+        raise RuntimeError("0 active drivers ([]). There should only be one.")
+
+    monkeypatch.setattr(type(_drv), "active", property(_no_driver))
     load_total, store_total = _run_profiler_load_store()
     assert load_total == 16
     assert store_total == 16

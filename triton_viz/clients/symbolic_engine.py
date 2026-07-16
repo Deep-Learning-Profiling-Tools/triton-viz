@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+import os
+import sys
 import warnings
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import reduce
+from types import FrameType
 from typing import (
     Any,
     ClassVar,
@@ -230,6 +233,99 @@ class LoopContext:
     pending_checks: list[PendingCheck] = field(default_factory=list)
 
 
+# Frame classification for scalar truthiness/concretization: triton's own
+# frontend does truthiness on scalar tensors as None-guard plumbing (e.g.
+# semantic.py's ``if mask and mask.type.is_block():``), which must not be
+# confused with value-level control flow like ``if pid == 0:``.
+_TRITON_VIZ_PKG_DIR = (
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
+)
+_TRITON_FRAME_DIRS: tuple[str, str, frozenset[str]] | None = None
+
+
+def _triton_frame_dirs() -> tuple[str, str, frozenset[str]]:
+    """(triton package dir, triton interpreter file, frontend plumbing
+    files), resolved lazily.
+
+    The plumbing files are the frontend's canonicalization layer — the
+    modules that in compiled Triton execute at compile time, where
+    ``bool(tensor)`` is plain object truthiness. @jit modules that also
+    live under the triton package (language/standard.py, language/random.py,
+    tools/...) are deliberately NOT in this set: their ``if`` statements
+    compile to control flow on the value.
+    """
+    global _TRITON_FRAME_DIRS
+    if _TRITON_FRAME_DIRS is None:
+        import triton
+
+        pkg_dir = os.path.dirname(os.path.abspath(triton.__file__)) + os.sep
+        _TRITON_FRAME_DIRS = (
+            pkg_dir,
+            os.path.join(pkg_dir, "runtime", "interpreter.py"),
+            frozenset(
+                (
+                    os.path.join(pkg_dir, "language", "semantic.py"),
+                    os.path.join(pkg_dir, "language", "core.py"),
+                )
+            ),
+        )
+    return _TRITON_FRAME_DIRS
+
+
+def innermost_user_site() -> tuple[str, int] | None:
+    """(filename, lineno) of the nearest frame outside triton/triton_viz.
+
+    Unlike traceback_utils' CODE_KEYS-based extraction, this is a plain
+    package-boundary walk, so it identifies the user call line regardless of
+    how the executing kernel's code object was recompiled (a kernel defined
+    inside a function executes with qualname ``kernel``, not
+    ``outer.<locals>.kernel``, which defeats code-key matching). Used for
+    stable per-callsite identities (e.g. arange interning), not for
+    user-facing tracebacks.
+    """
+    triton_pkg_dir, _, _ = _triton_frame_dirs()
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        filename = frame.f_code.co_filename
+        if filename.startswith(_TRITON_VIZ_PKG_DIR) or filename.startswith(
+            triton_pkg_dir
+        ):
+            frame = frame.f_back
+            continue
+        return (filename, frame.f_lineno)
+    return None
+
+
+def scalar_truthiness_from_user_code() -> bool:
+    """True when the in-flight scalar truthiness/read was initiated by
+    kernel-level code rather than the triton frontend's plumbing.
+
+    Walk outward from the caller, skipping triton_viz frames (wrapper and
+    client mechanics) and triton's interpreter (pure truthiness plumbing:
+    ``_get_bool`` and its lambdas sit between any initiator and
+    ``__bool__``). The first remaining frame is the initiator. Only the
+    frontend's canonicalization modules (see ``_triton_frame_dirs``) count
+    as internal: there ``if mask and ...`` None-guards must see "present"
+    — compiled Triton runs them at compile time with object truthiness.
+    Everything else, INCLUDING @jit code that happens to live under the
+    triton package tree, is kernel code whose branches compile to control
+    flow on the value, so it keeps the interpreter's concrete-value
+    semantics.
+    """
+    _, triton_interpreter_file, plumbing_files = _triton_frame_dirs()
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        filename = frame.f_code.co_filename
+        if (
+            filename.startswith(_TRITON_VIZ_PKG_DIR)
+            or filename == triton_interpreter_file
+        ):
+            frame = frame.f_back
+            continue
+        return filename not in plumbing_files
+    return False
+
+
 class SymbolicExprDataWrapper:
     """
     This wrapper is used as a workaround for frontend tensor truthiness code.
@@ -271,6 +367,9 @@ class SymbolicExprDataWrapper:
             raise ValueError(
                 f"Expected scalar symbolic data, got shape {self.symbolic_expr.shape}"
             )
+        observer = SymbolicExpr._scalar_concretize_observer
+        if observer is not None:
+            observer(self.symbolic_expr)
         concrete = self.symbolic_expr.concretize()
         if not isinstance(concrete, SymbolicTensorValue):
             raise TypeError(f"Expected symbolic tensor value, got {type(concrete)}")
@@ -312,6 +411,21 @@ class SymbolicExprDataWrapper:
         return self.coerce_int(int_val)
 
     def __bool__(self) -> bool:
+        # Frontend plumbing (semantic.py / core.py) evaluates `if tensor:`
+        # at compile time in compiled Triton, i.e. via plain object
+        # truthiness — always True for a present tensor. Its None-guards
+        # (`if mask and mask.type.is_block():`, `other.handle if other else
+        # None`) must therefore see "present", not a concretized data value:
+        # concretizing there would drop a user-provided falsy `other` and is
+        # not even defined for value-less ops such as a symbolic atomic_cas
+        # result. Every OTHER initiator — user host-side control flow and
+        # any kernel code, even files under the triton package tree —
+        # branches on the VALUE, so it keeps the interpreter's
+        # concrete-value semantics (symbolic clients observe it via the
+        # scalar-concretize hook in _scalar_data and own the
+        # unsupported-marking policy).
+        if not scalar_truthiness_from_user_code():
+            return True
         return bool(self._scalar_data().item())
 
     def __str__(self) -> str:
@@ -444,6 +558,30 @@ class SymbolicExpr:
     ] = {}
     _OP_CLASS_MAP: ClassVar[dict[str, type[SymbolicExpr]]] = {}
     _CONCRETE_FNS: ClassVar[dict[str, Callable[..., Any]]] = {}
+
+    # Narrow extension hook: a client (currently SymbolicRaceDetector) can
+    # install a load-value provider to give tl.load value semantics in Z3
+    # (e.g. Select(arr, addr) over a per-launch snapshot). When the slot is
+    # None, LoadSymbolicExpr falls back to the legacy pointer-as-value
+    # behaviour from IndirectSymbolicExprBase, which preserves sanitizer
+    # semantics. The provider owns ALL policy (mask/other handling, dtype
+    # guards, unsupported boundaries) — this module just dispatches.
+    _load_value_provider: ClassVar[
+        Callable[["LoadSymbolicExpr"], tuple[Z3Expr, ConstraintConjunction]] | None
+    ] = None
+    _load_value_provider_owner: ClassVar[int | None] = None
+
+    # Narrow extension hook: a client (currently SymbolicRaceDetector) can
+    # observe scalar concretizations driven by host-side control flow —
+    # SymbolicExprDataWrapper._scalar_data, i.e. Python truthiness on a
+    # scalar symbolic value (`if pid == 0:`). The observer owns ALL policy
+    # (e.g. marking a one-shot capture unsupported when the value varies
+    # per program instance); this module just dispatches before
+    # concretizing.
+    _scalar_concretize_observer: ClassVar[
+        Callable[["SymbolicExpr"], None] | None
+    ] = None
+    _scalar_concretize_observer_owner: ClassVar[int | None] = None
 
     @classmethod
     def register_op_class(
@@ -1019,14 +1157,39 @@ class ArangeSymbolicExpr(SymbolicExpr):
         end_const = cast(ConstSymbolicExpr, self.end)
         self.dtype = INT32
         self.shape = (end_const.value - start_const.value,)
+        # Where this arange was created in user code. Part of the interning
+        # key: semantically independent arange instances must not share a summary var
+        # (see _to_z3_impl), while re-executions of the same source line
+        # (loop iterations) must keep reusing one var so loop signature
+        # dedup keeps working. A plain package-boundary frame walk, NOT
+        # capture_current_source_location: code-key matching fails for
+        # kernels defined inside functions (recompiled code objects lose the
+        # <locals> qualname), which would collapse every site to the launch
+        # line.
+        self.creation_site = innermost_user_site()
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         start = self.start.to_py()
         end = self.end.to_py()
-        key = (start, end)
+        # Two independent arange instances with equal (start, end) — e.g. the row and
+        # column index vectors of a square tile, combined via broadcasting —
+        # must lower to DISTINCT summary vars: a shared var pins row == col
+        # and the modeled footprint collapses to the tile diagonal, silently
+        # missing every race whose witness needs row != col. Keying by
+        # creation site keeps them apart. Limitations: two same-range
+        # arange instances created on a single source line still collapse, and ONE
+        # arange broadcast against itself (offs[:, None] + offs[None, :])
+        # is inherently a single summary var taking two roles — both remain
+        # diagonal-only under-approximations.
+        site = self.creation_site
+        if site is None:
+            key: tuple[Any, ...] = (start, end)
+            name = f"arange_{start}_{end}"
+        else:
+            key = (start, end, site[0], site[1])
+            name = f"arange_{start}_{end}_l{site[1]}_{len(SymbolicExpr.ARANGE_DICT)}"
         if key in SymbolicExpr.ARANGE_DICT:
             return SymbolicExpr.ARANGE_DICT[key]
-        name = f"arange_{start}_{end}"
         v = Int(name)
         constraints = _and_constraints(v >= start, v < end)
         SymbolicExpr.ARANGE_DICT[key] = (v, constraints)
@@ -1087,6 +1250,12 @@ class LoadSymbolicExpr(IndirectSymbolicExprBase):
         self.dtype = pointee_dtype(ptr_dtype)
         self.shape = self.ptr.shape
 
+    def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
+        provider = SymbolicExpr._load_value_provider
+        if provider is None:
+            return super()._to_z3_impl()
+        return provider(self)
+
 
 class StoreSymbolicExpr(IndirectSymbolicExprBase):
     value: SymbolicExpr
@@ -1104,6 +1273,14 @@ class StoreSymbolicExpr(IndirectSymbolicExprBase):
         self.add_child("value", value)
         self.add_child("mask", mask)
         self.add_child("other", other)
+        # Set dtype/shape so consumers (e.g. race-detector elem_size inference)
+        # can introspect the access width without walking back to ptr.
+        ptr_dtype = self.ptr.dtype
+        if is_pointer_dtype(ptr_dtype):
+            self.dtype = pointee_dtype(ptr_dtype)
+        else:
+            self.dtype = getattr(self.value, "dtype", ptr_dtype)
+        self.shape = self.ptr.shape
 
 
 class UnarySymbolicExpr(SymbolicExpr):
@@ -2254,7 +2431,23 @@ class AtomicCasSymbolicExpr(SymbolicExpr):
         self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError("atomic_cas operation is not implemented yet")
+        ptr_z3, constraints_ptr = self.ptr._to_z3()
+        cmp_z3, constraints_cmp = self.cmp._to_z3()
+        val_z3, constraints_val = self.val._to_z3()
+        constraints = _and_constraints(
+            constraints_ptr, constraints_cmp, constraints_val
+        )
+
+        del cmp_z3, val_z3
+
+        if isinstance(ptr_z3, list):
+            z3_expr = [
+                Int(f"atomic_cas_old_{id(self)}_{idx}") for idx in range(len(ptr_z3))
+            ]
+        else:
+            z3_expr = Int(f"atomic_cas_old_{id(self)}")
+
+        return z3_expr, constraints
 
 
 class AtomicRmwSymbolicExpr(SymbolicExpr):
@@ -2271,7 +2464,32 @@ class AtomicRmwSymbolicExpr(SymbolicExpr):
         self.shape = self.val.shape
 
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
-        raise NotImplementedError(f"Eval for op {self.op} is not implemented")
+        # Mirrors AtomicCasSymbolicExpr: the RMW's value is the OLD value at
+        # the location — per-program-instance nondeterminism, so it lowers
+        # to a fresh variable. Var names derive from id(self), so repeated
+        # evaluation of the same expression yields the SAME Z3 vars (Z3
+        # interns by name) and a capture-side record's old_value stays
+        # identical to every downstream use. Whether the observation is
+        # actually value-modeled (integer dtype, spec part B) is the race
+        # detector's policy — its overrider returns the sentinel instead of
+        # this expression for float-typed RMWs.
+        ptr_z3, constraints_ptr = self.ptr._to_z3()
+        _, constraints_val = self.val._to_z3()
+        constraints_mask = None
+        if self.mask is not None:
+            _, constraints_mask = self.mask._to_z3()
+        constraints = _and_constraints(
+            constraints_ptr, constraints_val, constraints_mask
+        )
+
+        if isinstance(ptr_z3, list):
+            z3_expr = [
+                Int(f"atomic_rmw_old_{id(self)}_{idx}") for idx in range(len(ptr_z3))
+            ]
+        else:
+            z3_expr = Int(f"atomic_rmw_old_{id(self)}")
+
+        return z3_expr, constraints
 
 
 class TensorPointerSymbolicExpr(SymbolicExpr):
@@ -2321,6 +2539,17 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
             return base, shapes, strides, new_offsets, bs
         raise TypeError(f"Expected block pointer, got {type(ptr)}")
 
+    def tile_index_vars(self) -> tuple[Any, ...]:
+        """Free Z3 vars quantifying the tile footprint lowered by
+        ``_to_z3_impl`` — one per block dimension, range-bound in the
+        returned constraints. Exposed so clients reasoning over the
+        footprint (e.g. per-program-copy renaming) can identify the vars
+        without parsing names out of the lowered expression.
+        """
+        return tuple(
+            Int(f"blk_k_{d}") for d in range(len(self._resolve_block_shape(self.ptr)))
+        )
+
     def _to_z3_impl(self) -> tuple[Z3Expr, ConstraintConjunction]:
         (
             base,
@@ -2338,8 +2567,9 @@ class TensorPointerSymbolicExpr(SymbolicExpr):
         if c_base:
             parts.append(c_base)
 
+        k_vars = self.tile_index_vars()
         for d in range(len(block_shape)):
-            k_d = Int(f"blk_k_{d}")
+            k_d = k_vars[d]
             off_z3, c_off = offsets[d]._to_z3()
             stride_z3, c_stride = strides[d]._to_z3()
 
@@ -2661,6 +2891,16 @@ class SymbolicClient(Client):
         other_sym = SymbolicExpr.from_value(other)
         if op is np.where:
             return SymbolicExpr.create("where", lhs_sym, rhs_sym, other_sym)
+        if op is np.clip:
+            # tl.clamp(x, lo, hi) == minimum(maximum(x, lo), hi). np.clip
+            # tolerates one open bound; tl.clamp always passes both, but
+            # keep the composition robust either way.
+            clipped = lhs_sym
+            if rhs is not None:
+                clipped = SymbolicExpr.create("maximum", clipped, rhs_sym)
+            if other is not None:
+                clipped = SymbolicExpr.create("minimum", clipped, other_sym)
+            return clipped
         raise NotImplementedError(f"Unsupported ternary operation: {op}")
 
     def _op_fma_overrider(self, x, y, z):
@@ -2807,7 +3047,10 @@ class SymbolicClient(Client):
             SymbolicExpr.from_value(rhs),
         )
 
-    def _op_cumsum_overrider(self, input, axis, reverse=False, dtype=None):
+    # defaults mirror tl.cumsum(input, axis=0, reverse=False, dtype=None):
+    # the tl-module patch intercepts BEFORE triton binds its own defaults,
+    # so a bare tl.cumsum(x) call reaches us with one positional arg
+    def _op_cumsum_overrider(self, input, axis=0, reverse=False, dtype=None):
         return SymbolicExpr.create(
             "cumsum",
             SymbolicExpr.from_value(input),
@@ -2829,7 +3072,9 @@ class SymbolicClient(Client):
             ptr, value, None, cache_modifier, eviction_policy
         )
 
-    def _op_atomic_cas_overrider(self, ptr, cmp, val, sem, scope):
+    def _op_atomic_cas_overrider(
+        self, ptr, cmp, val, sem=None, scope=None, *args, **kwargs
+    ):
         ptr_sym = SymbolicExpr.from_value(ptr)
         cmp_sym = SymbolicExpr.from_value(cmp)
         val_sym = SymbolicExpr.from_value(val)
@@ -2903,8 +3148,14 @@ class SymbolicClient(Client):
 
     # ── For-loop infrastructure ───────────────────────────────────
 
-    def _on_data_dependent_value(self) -> None:
-        """Hook called when a data-dependent value forces concretization."""
+    def _on_data_dependent_value(self, expr: Any = None) -> None:
+        """Hook called when a data-dependent value forces concretization.
+
+        ``expr`` is the symbolic value being concretized when the call site
+        has one; clients may inspect it to refine their policy (e.g. a value
+        built only from enclosing loop iterators concretizes per iteration
+        and stays sound under one-shot capture).
+        """
         self.need_full_grid = True
 
     def _materialize_memory_operand(self, expr: Any) -> Any:
@@ -2918,7 +3169,7 @@ class SymbolicClient(Client):
                 expr = expr.replace_subtree(anchor_op)
 
         if materialized:
-            self._on_data_dependent_value()
+            self._on_data_dependent_value(expr)
             if expr.has_vector_const():
                 expr = expr.replace_subtree()
             return expr
@@ -2943,7 +3194,7 @@ class SymbolicClient(Client):
             if expr.op == "const":
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
             elif expr.has_op("load"):
-                self._on_data_dependent_value()
+                self._on_data_dependent_value(expr)
                 expr = expr.replace_subtree("load")
                 # replace_subtree("load") only concretizes load nodes, so the
                 # result may still be a compound op
@@ -2958,7 +3209,7 @@ class SymbolicClient(Client):
                 z3_expr, _ = expr.eval()
                 if isinstance(z3_expr, IntNumRef):
                     return z3_expr.as_long()
-                self._on_data_dependent_value()
+                self._on_data_dependent_value(expr)
                 expr = expr.replace_subtree()
                 return SymbolicExprDataWrapper.coerce_int(expr.to_py())
         return int(expr)
@@ -2973,6 +3224,13 @@ class SymbolicClient(Client):
         _iter_callable=None,
     ):
         if self._should_skip_loop_hooks():
+            return None
+        # tl.static_range is compile-time unrolled: every iteration runs
+        # with a CONCRETE index, and host-side consumers depend on that
+        # (e.g. indexing a pointer tuple, ptrs[i], needs a real __index__).
+        # Wrapping it with a symbolic iterator both breaks those consumers
+        # and mismodels the unrolled semantics — iterate it concretely.
+        if _range_type == "tl_static_range":
             return None
         iter_args = tuple(iter_args or ())
         iter_kwargs = iter_kwargs or {}
@@ -3276,10 +3534,11 @@ class SymbolicClient(Client):
     ) -> None:
         """Handle a single pending check when a loop is flushed.
 
-        ``ctx`` is passed in even though the two current consumers don't need
-        it — reserving it keeps the base signature stable for Step 2
-        loop-aware reasoning (outer-loop introspection, nested-loop
-        diagnostics, etc.).
+        ``ctx`` is the LoopContext that was just popped off ``loop_stack`` —
+        it is the only way an impl can reach the flushed loop's own iterator
+        (``ctx.idx_z3``), since ``loop_stack`` now holds only the still-active
+        outer loops. The race detector relies on this for per-copy iterator
+        renaming; the sanitizer doesn't need it.
         """
         raise NotImplementedError
 
@@ -3349,6 +3608,7 @@ class SymbolicClient(Client):
         self.tensor_names.clear()
         self.addr_ok_cache.clear()
         self.access_check_cache.clear()
+        self.loop_stack.clear()
 
     # ── Client callbacks with shared defaults ─────────────────────────
 
@@ -3382,6 +3642,17 @@ class SymbolicClient(Client):
         self._active_blocks = 0
         self._launch_should_stop = False
         self._pending_launch_clear = False
+        # Defensive: a previous launch that aborted mid-loop must not leak its
+        # contexts into this launch — a stale context would swallow every
+        # access into a pending queue that is never flushed.
+        self.loop_stack.clear()
+        # Same invariant for the class-level scalar-concretize observer: only
+        # one symbolic client runs per launch, so any observer still installed
+        # at launch start belongs to a launch that died before finalize()
+        # could uninstall it. Reclaim the slot unconditionally; the owning
+        # client re-installs its own hook after this base call.
+        SymbolicExpr._scalar_concretize_observer = None
+        SymbolicExpr._scalar_concretize_observer_owner = None
         self.addr_ok = None
         self.pid_ok = cast(
             BoolRef,
