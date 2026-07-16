@@ -92,6 +92,21 @@ def _tritonbench_meta_provenance() -> dict:
     return _package_provenance("tritonbench", "tritonbench_meta", {})
 
 
+def _tilebench_provenance() -> dict:
+    # local git checkout (TileBench has no packaging metadata); the
+    # corpus module pins the HEAD commit and refuses tracked-dirty trees
+    from evaluation.tilebench_capture import TILEBENCH_ROOT
+
+    if not TILEBENCH_ROOT.is_dir():
+        return {}
+    head = subprocess.run(
+        ["git", "-C", str(TILEBENCH_ROOT), "rev-parse", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return {"tilebench": head, "tilebench_commit": head} if head else {}
+
+
 def _versions() -> dict:
     import numpy
     import torch
@@ -116,6 +131,7 @@ def _versions() -> dict:
         **_flaggems_provenance(),
         **_torchao_provenance(),
         **_tritonbench_meta_provenance(),
+        **_tilebench_provenance(),
     }
 
 

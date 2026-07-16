@@ -14,6 +14,7 @@ CORPORA = (
     "torchao",
     "tritonbench_meta",
     "aiter_originals",
+    "tilebench",
 )
 
 

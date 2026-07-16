@@ -106,10 +106,14 @@ def build_captured_corpus(
     dist_name: str,
     version_field: str,
     install_hint: str,
+    installed_version: str | None = None,
 ) -> Corpus:
     """``version_field`` is the payload key carrying the captured package
     version (also the provenance key prefix); ``dist_name`` is the
-    installed distribution to hard-check it against."""
+    installed distribution to hard-check it against. Corpora that are not
+    pip-installed (local git checkouts, e.g. tilebench) pass
+    ``installed_version`` instead and ``dist_name`` is only used in the
+    drift message."""
     from importlib import metadata
 
     corpus = Corpus(corpus_name)
@@ -119,7 +123,11 @@ def build_captured_corpus(
         f"{corpus_name}_captured_version": payload[version_field],
         f"{corpus_name}_upstream_commit": payload["upstream_commit"],
     }
-    installed = metadata.version(dist_name)
+    installed = (
+        installed_version
+        if installed_version is not None
+        else metadata.version(dist_name)
+    )
     if installed != payload[version_field]:
         raise ImportError(
             f"{corpus_name} corpus was captured against {dist_name} "
