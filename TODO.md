@@ -703,6 +703,66 @@ Queued lifts (v2):
       51 @ct.kernel) as a second cuTile corpus — race detection of
       LLM-authored tile kernels ties into the group's pipeline paper.
 
+## 3n. Content-fragile attribute: launch-scoped philosophy for widened evidence (DECIDED (b), Hao 2026-07-16)
+
+Provenance: the 2026-07-16 paper-vs-implementation comparison found
+the composed dispatcher's short-circuit at `harness.py:494` — when a
+static WIDENED report is demoted by replay (reason contains
+`race-unconfirmed`), the dispatcher returns abstain BEFORE consulting
+the interpreter, even when the interpreter ran clean and holds the
+launch-scoped proof (dd_mask_dead: dyn ok(0), terminal
+race-unconfirmed). Paper §2 says the dead launch must not be reported
+and C1 owes it a proof. The short-circuit is principled (the widened
+SAT is an any-contents hazard a launch-scoped proof cannot refute)
+but uses the blunt instrument; 3c's proof-plus-attribute pattern is
+the elegant one. Decision (b): compose to `proved@interp` and carry
+the demoted hazard as a `content_fragile` attribute.
+
+- [ ] Dispatcher (`evaluation/harness.py`, `_classify`): in the
+      static-unsupported branch, when the reason is the demoted
+      widened report AND the dynamic track ran ok:
+      n_reports == 0 ⇒ ("race-free", "proved@interp") with
+      `content_fragile=True` (today: abstain/race-unconfirmed);
+      n_reports > 0 ⇒ ("race", "race@interp") as today (the concrete
+      interp reports subsume the widened hazard). When the dynamic
+      track did not run or was unsupported ⇒ UNCHANGED
+      ("abstain", "race-unconfirmed"): no proof exists, fail closed.
+- [ ] Attribute plumbing: `verdict_attrs` gains `content_fragile`
+      (exactly parallel to `grid_fragile`): evidence = the demoted
+      report's site pair + which terms were widened; wording is
+      hazard-only ("some memory contents enable an overlap"), never a
+      race claim. Soundness note for the docstring: widening only
+      enlarges footprints, so the hazard reading is sound from
+      widened evidence — the same argument 3c recorded for
+      grid_fragile.
+- [ ] Guardrails (mirror 3c's three): (i) the attribute fires ONLY
+      when replay ran faithfully and found no overlap AND the
+      interpreter proved clean at the same launch — a demotion in the
+      structurally-unconfirmable classes (duplicate-lane, RMW pairs,
+      widened same-line, await-bearing) must NOT become a proof;
+      (ii) premises compose: the proved@interp carries the
+      contents-snapshot premise exactly as dynamic["premises"]
+      reports it; (iii) Z3-unknown or replay-declined anywhere ⇒
+      today's behavior, fail-closed on the claim.
+- [ ] Scope: composed dispatcher only; encoders and the two-copy
+      solver untouched.
+- [ ] Tests to pin: trb006_dd_mask_dead_no ⇒ proved@interp +
+      content_fragile (and its live twin unchanged at
+      race-confirmed); a structurally-unconfirmable demotion does NOT
+      upgrade; dyn-absent demotion unchanged; two-run determinism.
+- [ ] Scorecard impact to verify on the re-sweep (expected):
+      benchmark TN 23 -> 24, abstain-unconfirmed 1 -> 0, coverage
+      54/56 -> 55/56, precision = recall = 1.0 unchanged, ladder
+      audits zero; grep the real-code corpora for other
+      race-unconfirmed-with-dyn-ok(0) rows and record how many flip.
+- [ ] SWEEP_REPORT + RESULTS regeneration with the new column note.
+- [ ] Paper linkage (tracked in the paper repo's TODO): fig:ddmask's
+      caption and C1 then hold strictly; §4.4 gains the
+      content-fragile sentence next to grid-fragile; §6.1's
+      "demotion caught the false positive" narrative becomes the
+      fragility-attribute narrative (rides the rq1/rq2 realignment).
+
+
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
 - [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands
