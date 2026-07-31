@@ -501,6 +501,15 @@ class TwoCopySymbolicHBSolver:
         # numbers) can be concurrently in flight.
         if a.event_id > b.event_id:
             return None  # symmetric duplicate
+        if (a.record.pre_exit or b.record.pre_exit) and a.program_seq == b.program_seq:
+            # The pre-exit representative vs its OWN awaited record (they
+            # share the poll's seq): a thread's poll does not race its own
+            # failed iterations. Do NOT rely on the conflict exemption —
+            # for a cta-scoped poll it is void and the equal-seq pair
+            # would surface as a same-instance race against itself; for
+            # device-scoped polls the pair is exempt-UNSAT anyway, so
+            # skipping is uniform and cheaper.
+            return None
         if a.program_seq >= 0 and b.program_seq >= 0 and a.program_seq != b.program_seq:
             return None
         return BoolVal(True)
@@ -694,8 +703,15 @@ class TwoCopySymbolicHBSolver:
                 written_value: Any = written
             elif record.is_atomic:
                 # AtomicRMW: always reads and always writes when active.
+                # Exception: the pre-exit representative of a CAS poll
+                # carries record-level statically-False writes (a FAILED
+                # CAS writes nothing) — honor it.
                 reads = active
-                writes = active
+                writes = (
+                    BoolVal(False)
+                    if (record.pre_exit and record.writes is False)
+                    else active
+                )
                 old_value = None
                 written_value = None
                 if record.old_value is not None:
@@ -954,11 +970,21 @@ class TwoCopySymbolicHBSolver:
         4-byte reader was excluded from BOTH channels and pinned the reader
         to the initial value — a false proof).
         """
+        # Pre-exit representatives are excluded (load-bearing: the
+        # identity-RMW rep's write half sits AT the awaited location and
+        # would otherwise open rf_unknown for its own poll, flipping clean
+        # producer-consumer baselines to false data races). Soundness of
+        # the exclusion: an identity write-back republishes only a value
+        # some other write already put there; if that value's writer is
+        # weak, THAT writer opens the escape itself. The CAS-poll and
+        # plain-load reps are excluded by the feasibility check anyway
+        # (their writes are statically False).
         candidates = [
             e
             for e in self.events
             if ((not e.is_atomic and e.record.access_mode == "write") or e.is_atomic)
             and e.idx != r.idx
+            and not e.record.pre_exit
             and self._can_be_rf_candidate(e, r)
         ]
         if not candidates:

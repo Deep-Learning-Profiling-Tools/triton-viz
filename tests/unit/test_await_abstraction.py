@@ -490,6 +490,233 @@ def test_identity_add_zero_spin_still_accepted():
     assert any(a.awaited for a in g.accesses)
 
 
+# ──────────── pre-exit representative (await-collapse repair) ────────────
+#
+# The collapse keeps ONE poll whose termination premise pins its
+# observation to the exit value; races living only on the dropped failed
+# iterations survive on the value-model-free pre-exit representative.
+# The existing clean canaries above (producer-consumer, mutex, lookback)
+# double as the escape regression: the rep must not reopen rf_unknown for
+# its own poll (hardening (b) in _has_unmodeled_overlapping_writer).
+
+
+def _pc_reset_ttir(*, reset):
+    """Producer/consumer wait with an extra access to the awaited flag
+    po-before the release publish (the pid-0 branch)."""
+    reset_lines = {
+        "atomic-cta": [
+            "%r = tt.atomic_rmw exch, relaxed, cta, %flag_ptr, %c0, %true : "
+            "(!tt.ptr<i32>, i32, i1) -> i32",
+        ],
+        "atomic-gpu": [
+            "%r = tt.atomic_rmw exch, relaxed, gpu, %flag_ptr, %c0, %true : "
+            "(!tt.ptr<i32>, i32, i1) -> i32",
+        ],
+        "plain-store": ["tt.store %flag_ptr, %c0 : !tt.ptr<i32>"],
+        "plain-read": ["%fv = tt.load %flag_ptr : !tt.ptr<i32>"],
+    }[reset]
+    return _module(
+        "%flag_ptr: !tt.ptr<i32>, %data_ptr: !tt.ptr<i32>, %out_ptr: !tt.ptr<i32>",
+        "%true = arith.constant true",
+        "%c0 = arith.constant 0 : i32",
+        "%c1 = arith.constant 1 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%isp = arith.cmpi eq, %pid, %c0 : i32",
+        "scf.if %isp {",
+        "tt.store %data_ptr, %c1 : !tt.ptr<i32>",
+        *reset_lines,
+        "%x = tt.atomic_rmw exch, release, gpu, %flag_ptr, %c1, %true : "
+        "(!tt.ptr<i32>, i32, i1) -> i32",
+        "} else {",
+        "scf.while : () -> () {",
+        "%o = tt.atomic_rmw add, acquire, gpu, %flag_ptr, %c0, %true : "
+        "(!tt.ptr<i32>, i32, i1) -> i32",
+        "%c = arith.cmpi ne, %o, %c1 : i32",
+        "scf.condition(%c)",
+        "} do {",
+        "scf.yield",
+        "}",
+        "%v = tt.load %data_ptr : !tt.ptr<i32>",
+        "%op = tt.addptr %out_ptr, %pid : !tt.ptr<i32>, i32",
+        "tt.store %op, %v : !tt.ptr<i32>",
+        "}",
+    )
+
+
+def _endpoint_records(report):
+    return (report.first_record, report.second_record)
+
+
+def test_cta_scoped_atomic_reset_before_publish_reports_via_rep():
+    """Corner A: a VALUE-MODELED weak atomic write of the awaited flag —
+    an equal-width relaxed cta-scoped xchg reset po-before the gpu release
+    publish. Before the pre-exit representative this kernel silently
+    PROVED: the reset's written value is modeled (no escape opens), and
+    the termination premise forces the poll's rf from the publisher, which
+    orders the reset behind the poll in every model. The rep restores the
+    failed iterations: one WAW between the reset and the ``:pre-exit``
+    event (cta scope voids mutual atomicity across CTAs)."""
+    enc, reports = _solve(
+        parse_ttir(_pc_reset_ttir(reset="atomic-cta")), {}, _PC_TENSORS
+    )
+    assert enc.assumes_termination
+    assert len(reports) == 1
+    (report,) = reports
+    recs = _endpoint_records(report)
+    assert any(r.pre_exit and r.debug_name.endswith(":pre-exit") for r in recs)
+    (reset_rec,) = [r for r in recs if not r.pre_exit]
+    assert reset_rec.scope == "cta"
+    from triton_viz.clients.race_detector.data import RaceType
+
+    assert report.race_type is RaceType.WAW
+
+
+def test_plain_read_of_awaited_flag_reports_via_rep_write_half():
+    """Corner B: a plain READ of the awaited location po-before the
+    publish. Reads open no escape, so this was a silent under-report too;
+    unrolled, the read races the identity write-backs of the failed RMW
+    iterations — carried by the rep's write half as one WAR."""
+    enc, reports = _solve(
+        parse_ttir(_pc_reset_ttir(reset="plain-read")), {}, _PC_TENSORS
+    )
+    assert len(reports) == 1
+    (report,) = reports
+    recs = _endpoint_records(report)
+    assert any(r.pre_exit for r in recs)
+    (read_rec,) = [r for r in recs if not r.pre_exit]
+    assert read_rec.access_mode == "read" and not read_rec.is_atomic
+    from triton_viz.clients.race_detector.data import RaceType
+
+    assert report.race_type is RaceType.WAR
+
+
+def test_gpu_atomic_reset_before_publish_stays_clean():
+    """The morally-strong twin: a gpu-scoped relaxed xchg reset. The
+    modeled 0-writer is excluded from the poll's rf by the termination
+    premise, and it is mutually atomic with both the poll and the rep
+    (device scope, equal width, same address) — no conflict, no report."""
+    _, reports = _solve(parse_ttir(_pc_reset_ttir(reset="atomic-gpu")), {}, _PC_TENSORS)
+    assert reports == []
+
+
+def test_plain_store_reset_verdict_unchanged_by_rep():
+    """A plain-store reset of the awaited flag reports via the rf_unknown
+    escape (the store is an unmodeled overlapping writer, so the sw bridge
+    is optional): the flag pair and the ordering-dependent data pair both
+    surface. The rep must keep that verdict — it may add its own flag
+    endpoint but must not lose either pre-existing pair."""
+    _, reports = _solve(
+        parse_ttir(_pc_reset_ttir(reset="plain-store")), {}, _PC_TENSORS
+    )
+    pairs = [{r.first_record.tensor_name, r.second_record.tensor_name} for r in reports]
+    assert {"flag_ptr"} in pairs
+    assert {"data_ptr"} in pairs
+    # the pre-existing pairs survive with non-rep endpoints on both sides
+    non_rep_flag = [
+        r
+        for r in reports
+        if {r.first_record.tensor_name, r.second_record.tensor_name} == {"flag_ptr"}
+        and not (r.first_record.pre_exit or r.second_record.pre_exit)
+    ]
+    assert non_rep_flag
+
+
+def test_guarded_await_rep_inherits_uncertainty():
+    """A spin under an UNMODELED enclosing condition is ``guarded``: its
+    poll record lands in uncertain_event_ids and its reports classify
+    widened. The rep must inherit that membership (and the poll's exact
+    activity), or a guarded-await rep report would surface as a definite
+    race from an over-approximated record."""
+    text = _module(
+        "%flag_ptr: !tt.ptr<i32>, %gate_ptr: !tt.ptr<i32>",
+        "%true = arith.constant true",
+        "%c0 = arith.constant 0 : i32",
+        "%c1 = arith.constant 1 : i32",
+        "%g = tt.load %gate_ptr : !tt.ptr<i32>",
+        "%cnd = arith.cmpi ne, %g, %c0 : i32",
+        "scf.if %cnd {",
+        "scf.while : () -> () {",
+        "%o = tt.atomic_rmw add, acquire, gpu, %flag_ptr, %c0, %true : "
+        "(!tt.ptr<i32>, i32, i1) -> i32",
+        "%c = arith.cmpi ne, %o, %c1 : i32",
+        "scf.condition(%c)",
+        "} do {",
+        "scf.yield",
+        "}",
+        "}",
+    )
+    g = parse_ttir(text)
+    (poll_seq,) = [i for i, a in enumerate(g.accesses) if a.awaited]
+    assert g.accesses[poll_seq].guarded
+    enc = encode_graph(
+        g,
+        {},
+        {
+            "flag_ptr": _t(0x2000, numel=1, init=(0,)),
+            "gate_ptr": _t(0x3000, numel=1),
+        },
+    )
+    (rep,) = [r for r in enc.records if r.pre_exit]
+    (poll_rec,) = [
+        r for r in enc.records if r.program_seq == poll_seq and not r.pre_exit
+    ]
+    assert poll_seq in enc.uncertain_event_ids
+    assert rep.event_id in enc.uncertain_event_ids
+    assert rep.active is poll_rec.active
+
+
+def test_cas_poll_rep_is_read_only_and_keeps_escape_closed():
+    """The CAS-poll rep (mutex): a failed CAS writes nothing, so the rep
+    is a read-only atomic (atomic_kind "rmw" with statically-False
+    record-level writes, honored by the solver's lowering). Behavior pin:
+    the rep must not open the rf_unknown escape for its own closed-world
+    lock poll — today the candidate filter excludes every pre_exit record
+    outright, and the statically-False writes independently guarantee it
+    (the feasibility check conjoins e.writes), so the pin survives either
+    mechanism."""
+    from z3 import is_false, simplify
+
+    g = parse_ttir(_mutex_ttir())
+    enc = encode_graph(g, {}, _MUTEX_TENSORS)
+    (rep,) = [r for r in enc.records if r.pre_exit]
+    assert rep.atomic_kind == "rmw"
+    assert rep.writes is False
+    assert rep.old_value is None and rep.cas_cmp_value is None
+    solver = TwoCopySymbolicHBSolver(
+        enc.records,
+        grid=symbolic_grid(enc, (4, 1, 1)),
+        arange_dict=enc.arange_dict,
+    )
+    for e in solver.events:
+        if e.record.pre_exit:
+            assert is_false(simplify(e.writes))
+    # the closed world of the lock poll stays closed: no rf_unknown choice
+    assert solver.rf_unknown_source == {}
+    assert solver.find_races() == []
+
+
+def test_exactly_one_rep_per_await_and_never_in_graph_accesses():
+    """Structural: encode_graph emits exactly one rep per awaited access,
+    with a fresh event_id above the dense seq range and the poll's seq;
+    graph.accesses itself is untouched (the reader-side ``(await_acc,) =``
+    unpacks stay valid)."""
+    g = parse_ttir(_prod_cons_ttir())
+    n_awaited = sum(1 for a in g.accesses if a.awaited)
+    assert n_awaited == 1
+    enc = encode_graph(g, {}, _PC_TENSORS)
+    reps = [r for r in enc.records if r.pre_exit]
+    assert len(reps) == n_awaited
+    (rep,) = reps
+    (poll_seq,) = [i for i, a in enumerate(g.accesses) if a.awaited]
+    assert rep.program_seq == poll_seq
+    assert rep.event_id >= len(g.accesses)
+    assert rep.debug_name.endswith(":pre-exit")
+    assert rep.old_value is None and rep.rmw_op is None and rep.rmw_operand is None
+    assert len(enc.records) == len(g.accesses) + 1
+    # identity-RMW rep keeps the reads-AND-writes footprint
+    assert rep.is_atomic and rep.reads is True and rep.writes is True
+
+
 def test_nested_watchdog_restores_outer_timer():
     """Adversarial minor: an inner watchdog must re-arm the enclosing
     SIGALRM timer's remaining time instead of permanently defusing it."""

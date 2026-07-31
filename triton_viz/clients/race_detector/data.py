@@ -47,6 +47,17 @@ class AccessEventRecord:
     event_id: int = -1  # stable dedup key (per launch)
     elem_size: int = 1  # for byte-overlap when > 1
 
+    # Pre-exit representative (the await abstraction, spec C1): True for
+    # the value-model-free twin of an awaited poll that stands for ALL
+    # FAILED iterations of the spin. It mirrors the poll's footprint,
+    # activity and program_seq (equal seq = mutually po-unordered with the
+    # poll) under a fresh event_id, and carries NO value model — so no
+    # rf/sw edge can enter or leave it, preserving the failed iterations'
+    # unorderedness. The solver excludes it from the unmodeled-
+    # overlapping-writer escape and skips the (rep, own poll)
+    # intra-instance pair.
+    pre_exit: bool = False
+
     # CAS-specific raw symbolic pieces. None for non-CAS records.
     cas_cmp_value: Any = None
     cas_new_value: Any = None

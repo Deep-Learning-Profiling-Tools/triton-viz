@@ -331,11 +331,13 @@ class AccessEvent:
     # kept read of a recognized scf.while spin loop. ``exit_pred`` is the
     # loop's EXIT predicate over Observed(this access) — asserted on the
     # event, justified by termination (in any terminating execution the
-    # final iteration's read observed the exit value); dropped iterations
-    # lose no conflict pairs because every dropped event is a read of the
-    # same location with the same footprint as this one. Verdicts over
-    # await-bearing kernels are therefore conditional on termination
-    # (surfaced as ``assumes_termination``).
+    # final iteration's read observed the exit value). Dropped iterations
+    # lose no conflict pairs because the race encoder emits a PRE-EXIT
+    # REPRESENTATIVE alongside the poll: a value-model-free twin carrying
+    # each failed iteration's footprint and modes with a subset of its
+    # happens-before edges (global_records._pre_exit_representative).
+    # Verdicts over await-bearing kernels are therefore conditional on
+    # termination (surfaced as ``assumes_termination``).
     awaited: bool = False
     exit_pred: "Term | None" = None
 

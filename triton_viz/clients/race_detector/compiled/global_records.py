@@ -628,6 +628,61 @@ def _record_for(
     )
 
 
+def _pre_exit_representative(poll: Any, access: AccessEvent, event_id: int) -> Any:
+    """The pre-exit representative of an awaited poll: ONE value-model-free
+    record standing for all FAILED iterations of the spin.
+
+    The await abstraction keeps a single poll event whose termination
+    premise pins its observation to the exit value; the failed iterations
+    are dropped. For accesses that keep the closed world intact (a
+    value-modeled weak atomic write, a plain read of the awaited location)
+    that collapse silently LOSES races that exist only on the dropped
+    iterations. The representative restores them: it mirrors the poll's
+    footprint, activity, sem/scope and program_seq (equal seq = mutually
+    po-unordered with the poll, po-ordered against everything else exactly
+    like the poll), under a fresh event_id and with NO value model — rf
+    sources need ``written_value``, readers need ``old_value``, so no
+    rf/sw edge can touch it and the publisher's sw edge still targets the
+    poll only: the failed iterations' unorderedness is preserved. Any
+    unrolled race on a failed iteration maps to a race on the rep with the
+    same footprint and modes and no more ordering (over-report direction);
+    rep-vs-atomic pairs stay conflict-exempt exactly when the unrolled
+    failed iterations are morally strong (exemption parity).
+    """
+    from dataclasses import replace
+
+    overrides: dict[str, Any]
+    if access.kind == "atomic_cas":
+        # A FAILED CAS reads but writes nothing: the rep is a read-only
+        # atomic. atomic_kind "rmw", NOT "cas" — the CAS lowering demands
+        # the value triple the rep deliberately lacks — with record-level
+        # statically-False writes, which the solver's RMW branch honors
+        # for pre_exit records.
+        overrides = dict(op_type=AtomicRMW, atomic_kind="rmw", reads=True, writes=False)
+    elif access.kind == "atomic_rmw":
+        # Identity-RMW poll: every failed iteration RE-WRITES the value it
+        # read, so the rep keeps the RMW reads-and-writes footprint (the
+        # write half is what catches plain readers of the awaited
+        # location).
+        overrides = dict(reads=True, writes=True)
+    else:
+        # Plain-load poll: a non-atomic read; the solver's plain path
+        # lowers writes to And(active, False) from access_mode.
+        overrides = dict(reads=None, writes=None)
+    return replace(
+        poll,
+        event_id=event_id,
+        debug_name=f"{poll.debug_name}:pre-exit",
+        pre_exit=True,
+        old_value=None,
+        rmw_op=None,
+        rmw_operand=None,
+        cas_cmp_value=None,
+        cas_new_value=None,
+        **overrides,
+    )
+
+
 def encode_graph(
     graph: AccessGraph,
     params: dict[str, int],
@@ -655,6 +710,11 @@ def encode_graph(
     await_prems, await_obs = _await_premises(graph, env)
     records = []
     uncertain: set[int] = set()
+    # Fresh event ids for pre-exit representatives live ABOVE the dense
+    # access-seq range so they can never collide with a poll's seq (the
+    # solver dedups reports on event_id and the client splits exact vs
+    # widened by it).
+    next_rep_id = len(graph.accesses)
     for seq, access in enumerate(graph.accesses):
         if access.in_loop and env.zero_trip:
             # The launch's trip count is zero: these accesses never execute.
@@ -671,15 +731,27 @@ def encode_graph(
                 f"non-contiguous tensor {access.base_param!r}: the in-bounds "
                 "premise needs the allocation extent (v1 assumes contiguous)"
             )
-        records.append(
-            _record_for(
-                access, seq, env, graph.kernel_name, meta, await_prems, await_obs
-            )
+        rec = _record_for(
+            access, seq, env, graph.kernel_name, meta, await_prems, await_obs
         )
-        if access.mask_dropped or access.guarded:
+        records.append(rec)
+        is_uncertain = (
+            access.mask_dropped
+            or access.guarded
+            or _references_unmodeled_observation(access, env)
+        )
+        if is_uncertain:
             uncertain.add(seq)
-        if _references_unmodeled_observation(access, env):
-            uncertain.add(seq)
+        if access.awaited:
+            records.append(_pre_exit_representative(rec, access, next_rep_id))
+            if is_uncertain:
+                # Uncertainty inheritance: the client splits exact vs
+                # widened reports by event_id — a rep built from an
+                # over-approximated poll (guarded / dropped mask) must
+                # classify widened too, or its reports would surface as
+                # definite races from an over-approximated record.
+                uncertain.add(next_rep_id)
+            next_rep_id += 1
     return GlobalEncoding(
         records=records,
         arange_dict=env.arange_dict,
@@ -826,6 +898,14 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
 
     env = _RaceEnv(graph, {}, symbolic_params=True)
     await_prems, await_obs = _await_premises(graph, env)
+    # NO pre-exit representative at T0 — sound for a verified reason: T0
+    # has no launch, hence no initial values, so the closed-world escape
+    # (rf_unknown) is ALWAYS open for an awaited poll and no await corner
+    # can silently prove at T0 (probe-verified: the corner kernels' flag
+    # group SATs at T0 and falls to T1, where the rep lives). Trigger that
+    # invalidates this argument: T0 gaining initial values
+    # (GlobalTensor.init_values exists) — then mirror the rep emission of
+    # encode_graph here.
     groups: dict[str, list[tuple[int, AccessEvent]]] = {}
     for seq, access in enumerate(graph.accesses):
         if access.in_loop and env.zero_trip:
