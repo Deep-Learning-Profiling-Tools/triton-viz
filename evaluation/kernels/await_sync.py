@@ -151,6 +151,126 @@ for name, fn, expected, note in _PC_SPECS:
     )
 
 
+# ── flag resets / reads before the publish (pre-exit representative) ──
+#
+# The await collapse drops the spin's failed iterations; the pre-exit
+# representative record carries their footprint. These rows pin the two
+# corners that used to prove silently — a value-modeled weak atomic write
+# (scope-mismatched reset) and a plain read of the awaited flag — plus the
+# morally-strong reset twin that must keep proving.
+
+
+@triton.jit
+def pc_wait_cta_reset_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    if pid == 0:
+        offs = tl.arange(0, BLOCK)
+        tl.store(data_ptr + offs, offs)
+        tl.atomic_xchg(flag_ptr, 0, sem="relaxed", scope="cta")
+        tl.atomic_xchg(flag_ptr, 1, sem="release")
+    else:
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:
+            pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(data_ptr + offs)
+        tl.store(out_ptr + pid * BLOCK + offs, v)
+
+
+@triton.jit
+def pc_wait_atomic_reset_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    if pid == 0:
+        offs = tl.arange(0, BLOCK)
+        tl.store(data_ptr + offs, offs)
+        tl.atomic_xchg(flag_ptr, 0, sem="relaxed")
+        tl.atomic_xchg(flag_ptr, 1, sem="release")
+    else:
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:
+            pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(data_ptr + offs)
+        tl.store(out_ptr + pid * BLOCK + offs, v)
+
+
+@triton.jit
+def pc_wait_flag_read_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    if pid == 0:
+        offs = tl.arange(0, BLOCK)
+        tl.store(data_ptr + offs, offs)
+        fv = tl.load(flag_ptr)
+        tl.store(out_ptr, fv)
+        tl.atomic_xchg(flag_ptr, 1, sem="release")
+    else:
+        while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:
+            pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(data_ptr + offs)
+        tl.store(out_ptr + pid * BLOCK + offs, v)
+
+
+_PC_POLL_NEEDLE = 'while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:'
+
+CORPUS.add(
+    LaunchSpec(
+        name="pc_wait_cta_reset_yes",
+        kernel_fn=pc_wait_cta_reset_kernel,
+        signature=_PC_SIG,
+        constexprs={"BLOCK": BLOCK},
+        make_args=_pc_args,
+        grid=(2,),
+        expected="race",
+        # The representative's designed demonstration: the reset is a
+        # VALUE-MODELED weak atomic write (equal width, mismatched scope)
+        # — it opens no rf_unknown escape and the termination premise pins
+        # the poll to the publisher, so the kernel silently proved before
+        # the pre-exit representative. The WAW lands on the reset line vs
+        # the poll line (the rep carries the poll's source location).
+        race_pair=(
+            'tl.atomic_xchg(flag_ptr, 0, sem="relaxed", scope="cta")',
+            _PC_POLL_NEEDLE,
+        ),
+        pattern="producer-consumer-wait",
+        params_note="cta-scoped relaxed reset po-before the gpu publish "
+        "races the spin's failed iterations",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="pc_wait_atomic_reset_no",
+        kernel_fn=pc_wait_atomic_reset_kernel,
+        signature=_PC_SIG,
+        constexprs={"BLOCK": BLOCK},
+        make_args=_pc_args,
+        grid=(2,),
+        expected="race-free",
+        pattern="producer-consumer-wait",
+        params_note="gpu-scoped relaxed reset is morally strong with the "
+        "poll and its representative: mutually atomic, no conflict",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="pc_wait_flag_read_yes",
+        kernel_fn=pc_wait_flag_read_kernel,
+        signature=_PC_SIG,
+        constexprs={"BLOCK": BLOCK},
+        make_args=_pc_args,
+        grid=(2,),
+        expected="race",
+        # Corner B: the plain read races the identity write-backs of the
+        # spin's failed iterations — the WAR rides the rep's write half.
+        race_pair=(
+            "fv = tl.load(flag_ptr)",
+            _PC_POLL_NEEDLE,
+        ),
+        pattern="producer-consumer-wait",
+        params_note="plain read of the awaited flag po-before the publish "
+        "races the failed iterations' write-backs",
+    )
+)
+
+
 # ── mutex via CAS loop ───────────────────────────────────────────
 
 
