@@ -91,6 +91,36 @@ def pc_wait_cta_scope_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
         tl.store(out_ptr + pid * BLOCK + offs, v)
 
 
+@triton.jit
+def pc_wait_or_poll_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    if pid == 0:
+        offs = tl.arange(0, BLOCK)
+        tl.store(data_ptr + offs, offs)
+        tl.atomic_xchg(flag_ptr, 1, sem="release")
+    else:
+        while tl.atomic_or(flag_ptr, 0, sem="acquire") != 1:
+            pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(data_ptr + offs)
+        tl.store(out_ptr + pid * BLOCK + offs, v)
+
+
+@triton.jit
+def pc_wait_xor_poll_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    if pid == 0:
+        offs = tl.arange(0, BLOCK)
+        tl.store(data_ptr + offs, offs)
+        tl.atomic_xchg(flag_ptr, 1, sem="release")
+    else:
+        while tl.atomic_xor(flag_ptr, 0, sem="acquire") != 1:
+            pass
+        offs = tl.arange(0, BLOCK)
+        v = tl.load(data_ptr + offs)
+        tl.store(out_ptr + pid * BLOCK + offs, v)
+
+
 def _pc_args(seed: int) -> tuple:
     return (
         torch.zeros(1, dtype=torch.int32),
@@ -131,6 +161,20 @@ _PC_SPECS: tuple[tuple[str, Any, _Expected, str], ...] = (
         pc_wait_cta_scope_kernel,
         "race",
         "cta scope does not cover the peer CTA",
+    ),
+    (
+        "pc_wait_or_poll_no",
+        pc_wait_or_poll_kernel,
+        "race-free",
+        "identity atomic_or(0) poll: the write-back republishes the "
+        "observation, same proof as the add(0) poll",
+    ),
+    (
+        "pc_wait_xor_poll_no",
+        pc_wait_xor_poll_kernel,
+        "race-free",
+        "identity atomic_xor(0) poll: the write-back republishes the "
+        "observation, same proof as the add(0) poll",
     ),
 )
 

@@ -252,6 +252,20 @@ def test_producer_consumer_mutations_race(mutation):
     assert data
 
 
+@pytest.mark.parametrize("poll_op", ["or", "xor"])
+def test_identity_or_xor_poll_proved(poll_op):
+    """An identity or/xor-of-zero poll must prove exactly like add(0):
+    its write-back is value-modeled (republishing the observation), so
+    the poll's cross-copy twin is not an unmodeled overlapping writer
+    and the rf_unknown escape stays closed. Adversarial finding: before
+    the identity carve-in, or(0)/xor(0) polls flipped the clean guarded
+    baseline to a RAW false positive on the data cell."""
+    text = _prod_cons_ttir().replace("tt.atomic_rmw add,", f"tt.atomic_rmw {poll_op},")
+    enc, reports = _solve(parse_ttir(text), {}, _PC_TENSORS)
+    assert enc.assumes_termination
+    assert reports == []
+
+
 # ─────────────────── mutex via CAS loop ───────────────────
 
 

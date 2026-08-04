@@ -570,6 +570,8 @@ _FOLD = (
             "pc_wait_cta_reset_yes": "trb016_pc_wait_cta_reset_yes",
             "pc_wait_atomic_reset_no": "trb016_pc_wait_atomic_reset_no",
             "pc_wait_flag_read_yes": "trb016_pc_wait_flag_read_yes",
+            "pc_wait_or_poll_no": "trb016_pc_wait_or_poll_no",
+            "pc_wait_xor_poll_no": "trb016_pc_wait_xor_poll_no",
             "mutex_cas_no": "trb017_mutex_cas_no",
             "mutex_plain_unlock_yes": "trb017_mutex_plain_unlock_yes",
             "mutex_relaxed_cas_yes": "trb017_mutex_relaxed_cas_yes",

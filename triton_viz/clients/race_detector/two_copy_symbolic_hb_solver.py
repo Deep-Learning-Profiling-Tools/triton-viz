@@ -202,10 +202,14 @@ class _CountingInfo:
 
 def _rmw_written_value(op: str | None, old: Any, v: Any) -> Any:
     """The modeled write part f_op(old, v) of an RMW, or ``None`` when the
-    op has no Int-sort model: bitwise and/or/xor need bitvectors, unsigned
-    umax/umin diverge from the signed Int order, and float ops are outside
-    the integer model. ``None`` keeps the record's write in the
-    unmodeled-writer set (rf_unknown escape) — the over-report direction."""
+    op has no Int-sort model: non-identity bitwise and/or/xor need
+    bitvectors, unsigned umax/umin diverge from the signed Int order, and
+    float ops are outside the integer model. The one bitwise case with an
+    exact Int model is the identity or/xor of a provably-zero operand
+    (f(old, 0) = old), the write-back shape of an identity-RMW await poll;
+    a symbolic or nonzero operand keeps ``None``. ``None`` keeps the
+    record's write in the unmodeled-writer set (rf_unknown escape) — the
+    over-report direction."""
     if op is None or old is None or v is None:
         return None
     if op == "add":
@@ -216,6 +220,8 @@ def _rmw_written_value(op: str | None, old: Any, v: Any) -> Any:
         return If(old <= v, old, v)
     if op == "xchg":
         return v
+    if op in ("or", "xor") and _as_numeral(v) == 0:
+        return old
     return None
 
 
@@ -946,8 +952,9 @@ class TwoCopySymbolicHBSolver:
 
     def _has_unmodeled_overlapping_writer(self, r: SymbolicMemoryEvent) -> bool:
         """True when a write the rf model does not include — a plain store,
-        or an atomic whose WRITTEN VALUE is not modeled (float/bitwise/
-        unsigned RMW) — can overlap the location ``r`` reads.
+        or an atomic whose WRITTEN VALUE is not modeled (float RMW,
+        non-identity bitwise RMW, unsigned umax/umin) — can overlap the
+        location ``r`` reads.
 
         Such a writer can publish a value the closed-world choice set
         excludes; without an escape hatch the reader's ``old_value`` would be
@@ -1030,9 +1037,11 @@ class TwoCopySymbolicHBSolver:
         # Closed-world atomic source model.
         # If the initial scalar source is identifiable, source choices are
         # closed over: (initial source) + (value-modeled atomic writers —
-        # CAS and modeled RMW write parts, spec B.1.2). If the initial
+        # CAS and modeled RMW write parts incl. identity or/xor-of-zero,
+        # spec B.1.2). If the initial
         # source is not identifiable — or an UNMODELED write (plain store,
-        # float/bitwise RMW) can overlap the location, publishing a value
+        # float RMW, non-identity bitwise RMW) can overlap the location,
+        # publishing a value
         # the closed world does not contain — rf_unknown is introduced and
         # does NOT enable synchronizes-with. This is intentionally NOT a
         # full coherence/read-from model over all program instances; the
