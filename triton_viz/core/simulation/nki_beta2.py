@@ -37,6 +37,53 @@ TensorOrScalar: TypeAlias = "NDArray | ArrayLike | ScalarLike"
 BufferLike: TypeAlias = Any
 
 
+class ParDim:
+    """Partition-dimension shape marker compatible with ``nl.par_dim``.
+
+    The public ``nki.language`` compatibility package used by Triton-Viz does
+    not currently expose ``par_dim``.  The real Neuron token stores an integer
+    ``value`` but is not directly accepted by NumPy as a shape.  This marker
+    preserves the annotation long enough for ``ndarray`` to record which shape
+    axis is the SBUF partition axis, while ``int(marker)`` provides the concrete
+    extent used by the interpreter.
+    """
+
+    def __init__(self, value: int) -> None:
+        value = int(value)
+        _require(value > 0, f"par_dim must be positive, received {value}")
+        self.value = value
+
+    def __int__(self) -> int:
+        return self.value
+
+    def __index__(self) -> int:
+        return self.value
+
+    def __repr__(self) -> str:
+        return f"par_dim({self.value})"
+
+
+def par_dim(value: int) -> ParDim:
+    """Mark one tensor shape axis as the NKI partition dimension."""
+    return ParDim(value)
+
+
+def _normalize_shape(shape: Any) -> tuple[tuple[int, ...], int | None]:
+    """Return concrete shape integers and the explicitly marked partition axis."""
+    dimensions = tuple(shape)
+    axes = [index for index, dim in enumerate(dimensions) if isinstance(dim, ParDim)]
+    _require(
+        len(axes) <= 1,
+        f"shape may contain at most one par_dim, received {dimensions}",
+    )
+    concrete = tuple(int(dim) for dim in dimensions)
+    _require(
+        all(dim > 0 for dim in concrete),
+        f"tensor shape dimensions must be positive, received {concrete}",
+    )
+    return concrete, axes[0] if axes else None
+
+
 def _storage_dtype(dtype: DTypeLike) -> np.dtype[Any] | None:
     """Resolve a logical dtype to concrete NumPy storage dtype."""
     try:
@@ -130,12 +177,20 @@ def _is_integer_dtype(dtype: DTypeLike) -> bool:
 
 def _partition_and_free(value: TensorLike) -> tuple[int, int]:
     """Return partition size and flattened free size."""
-    shape = (
-        cast(tuple[int, ...], value.shape)
-        if isinstance(value, np.ndarray)
-        else cast(tuple[int, ...], value.data.shape)
+    if isinstance(value, NDArray):
+        shape = cast(tuple[int, ...], value.data.shape)
+        axis = 0 if value.partition_axis is None else value.partition_axis
+    else:
+        shape = cast(tuple[int, ...], value.shape)
+        axis = 0
+    partitions = shape[axis]
+    free = int(
+        np.prod(
+            tuple(dim for index, dim in enumerate(shape) if index != axis),
+            dtype=np.int64,
+        )
     )
-    return shape[0], int(np.prod(shape[1:], dtype=np.int64)) if len(shape) > 1 else 1
+    return partitions, free
 
 
 def _nc_version_value(version: Any) -> int:
@@ -175,6 +230,7 @@ class NDArray:
         parent_ndim: int | None = None,
         defined: bool | None = None,
         parent: NDArray | None = None,
+        partition_axis: int | None = None,
     ) -> None:
         """Initialize an interpreter tensor backed by NumPy storage.
 
@@ -194,7 +250,15 @@ class NDArray:
         self.buffer = buffer
         self._origin = origin
         self._parent = parent
-        storage_shape = tuple(shape) if shape is not None else None
+        storage_shape, marked_axis = (
+            _normalize_shape(shape) if shape is not None else (None, None)
+        )
+        if partition_axis is None:
+            partition_axis = (
+                marked_axis
+                if marked_axis is not None
+                else (0 if buffer in ("sbuf", "psum") else None)
+            )
         storage_dtype = _storage_dtype(dtype)
         assert value is not None or storage_shape is not None
         if value is None:
@@ -215,6 +279,7 @@ class NDArray:
             value is not None or origin != "tensor" if defined is None else defined
         )
         self._parent_ndim = self.data.ndim if parent_ndim is None else parent_ndim
+        self.partition_axis = partition_axis
         self.dtype = self.data.dtype if dtype is None else dtype
 
     @property
@@ -259,9 +324,22 @@ class NDArray:
         """Implement slicing operations for NDArray."""
         if not isinstance(keys, tuple):
             keys = (keys,)
-        if isinstance(keys[0], int) and self.buffer in ("sbuf", "psum"):
+        expanded_keys = list(keys) + [slice(None)] * (self.data.ndim - len(keys))
+        if (
+            self.partition_axis is not None
+            and isinstance(expanded_keys[self.partition_axis], int)
+            and self.buffer in ("sbuf", "psum")
+        ):
             raise ValueError("SBUF/PSUM indexing must preserve the partition dim")
         sliced_value = self.data[keys]
+        new_partition_axis = self.partition_axis
+        if new_partition_axis is not None:
+            if isinstance(expanded_keys[new_partition_axis], int):
+                new_partition_axis = None
+            else:
+                new_partition_axis -= sum(
+                    isinstance(key, int) for key in expanded_keys[:new_partition_axis]
+                )
         return NDArray(
             value=sliced_value,
             buffer=self.buffer,
@@ -269,6 +347,7 @@ class NDArray:
             parent_ndim=self._parent_ndim,
             defined=self._defined,
             parent=self,
+            partition_axis=new_partition_axis,
         )
 
     def __setitem__(self, keys: Any, value: Any) -> NDArray:
@@ -277,7 +356,12 @@ class NDArray:
             raise RuntimeError(_ERR_TENSOR_MUTATION)
         if not isinstance(keys, tuple):
             keys = (keys,)
-        if isinstance(keys[0], int) and self.buffer in ("sbuf", "psum"):
+        expanded_keys = list(keys) + [slice(None)] * (self.data.ndim - len(keys))
+        if (
+            self.partition_axis is not None
+            and isinstance(expanded_keys[self.partition_axis], int)
+            and self.buffer in ("sbuf", "psum")
+        ):
             raise ValueError("SBUF/PSUM indexing must preserve the partition dim")
         target = self.data[keys]
         if isinstance(value, NDArray):
@@ -294,7 +378,12 @@ class NDArray:
 
     def reshape(self, *args: Any, **kwargs: Any) -> NDArray:
         """Return a reshaped tensor view."""
-        return NDArray(value=self.data.reshape(*args), buffer=self.buffer, **kwargs)
+        return NDArray(
+            value=self.data.reshape(*args),
+            buffer=self.buffer,
+            partition_axis=kwargs.pop("partition_axis", None),
+            **kwargs,
+        )
 
     def __neg__(self) -> "NDArray":
         raise TypeError("cannot negate values of this type")
@@ -366,7 +455,7 @@ sbuf, hbm, psum = map(Buffer, ("sbuf", "hbm", "psum"))
 
 
 def ndarray(
-    shape: tuple[int, ...],
+    shape: tuple[int | ParDim, ...],
     dtype: DTypeLike,
     *,
     buffer: BufferLike = None,
@@ -386,15 +475,20 @@ def ndarray(
         if not isinstance(buffer, Buffer):
             raise TypeError(f"Unsupported buffer type: {type(buffer).__name__}")
     if value is not None:
+        concrete_shape, partition_axis = _normalize_shape(shape)
         return NDArray(
             buffer=buffer.buffer,
-            shape=shape,
+            shape=concrete_shape,
             dtype=dtype,
             value=value,
             origin="tensor",
-            parent_ndim=len(shape),
+            parent_ndim=len(concrete_shape),
+            partition_axis=partition_axis,
         )
-    return buffer.view(dtype, shape, origin="tensor")
+    concrete_shape, partition_axis = _normalize_shape(shape)
+    tensor = buffer.view(dtype, concrete_shape, origin="tensor")
+    tensor.partition_axis = partition_axis
+    return tensor
 
 
 def zeros(shape: tuple[int, ...], dtype: DTypeLike, *, buffer: Any = None) -> NDArray:
@@ -751,6 +845,36 @@ def dma_copy(
     return _store(dst, _array(dst_rmw_op.run(dst.data, src_value)))
 
 
+def dma_transpose(
+    dst: NDArray,
+    src: NDArray,
+    axes: Any = None,
+    priority: Any = None,
+    dge_mode: Any = nisa.dge_mode.unknown,
+    oob_mode: Any = nisa.oob_mode.error,
+    name: str | None = None,
+) -> NDArray:
+    """Transpose one HBM tile into SBUF using the DMA-transpose path."""
+    del priority, dge_mode, oob_mode, name
+    _require(
+        _buffer_name(src) == "hbm" and _buffer_name(dst) == "sbuf",
+        "dma_transpose requires HBM -> SBUF, received "
+        f"src buffer {_buffer_name(src)} and dst buffer {_buffer_name(dst)}",
+    )
+    source = _array(src)
+    permutation = tuple(reversed(range(source.ndim))) if axes is None else tuple(axes)
+    _require(
+        sorted(permutation) == list(range(source.ndim)),
+        f"invalid dma_transpose axes {permutation} for rank {source.ndim}",
+    )
+    transposed = np.transpose(source, permutation)
+    _require(
+        transposed.shape == dst.shape,
+        f"{_ERR_AP_MISMATCH}: transposed src shape {transposed.shape}, dst shape {dst.shape}",
+    )
+    return _store(dst, transposed)
+
+
 def tensor_copy(
     dst: NDArray,
     src: NDArray,
@@ -828,7 +952,9 @@ def tensor_tensor(
         "tensor_tensor doesn't broadcast scalars/vectors; use tensor_scalar, "
         f"received lhs shape {lhs.shape} and rhs shape {rhs.shape}",
     )
-    lhs_pf_size, rhs_pf_size, dst_pf_size = map(_partition_and_free, (lhs, rhs, dst))
+    lhs_pf_size, rhs_pf_size, dst_pf_size = map(
+        _partition_and_free, (data1, data2, dst)
+    )
     _require(
         lhs_pf_size == rhs_pf_size == dst_pf_size,
         "tensor_tensor doesn't broadcast scalars/vectors; use tensor_scalar, "
@@ -1144,6 +1270,7 @@ def nki_patch_lang(scope: Any = None) -> None:
     set_attr(nl, "exp", SubOp(np.exp, False, False))
     set_attr(nl, "reciprocal", SubOp(np.reciprocal, False, False))
     set_attr(nl, "tile_size", tile_size)
+    set_attr(nl, "par_dim", par_dim)
     set_attr(nl, "sbuf", sbuf)
     set_attr(nl, "hbm", hbm)
     set_attr(nl, "psum", psum)
@@ -1157,6 +1284,7 @@ def nki_patch_lang(scope: Any = None) -> None:
     set_attr(nisa, "exponential", exponential)
     set_attr(nisa, "reciprocal", reciprocal)
     set_attr(nisa, "dma_copy", dma_copy)
+    set_attr(nisa, "dma_transpose", dma_transpose)
     set_attr(nisa, "tensor_copy", tensor_copy)
     set_attr(nisa, "tensor_tensor", tensor_tensor)
     set_attr(nisa, "tensor_reduce", tensor_reduce)

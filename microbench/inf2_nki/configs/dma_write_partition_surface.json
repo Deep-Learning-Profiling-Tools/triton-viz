@@ -1,0 +1,19 @@
+{
+  "suite": "inf2_nki_dma_write_partition_surface",
+  "description": "Directional SBUF-to-HBM DMA write calibration over partition count and free bytes.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "dma_write_partition_surface",
+      "kind": "dma_bandwidth",
+      "dtype": "float32",
+      "repeat": 16,
+      "modes": ["sbuf_to_hbm_stream"],
+      "matrix": {
+        "p": [1, 2, 4, 8, 16, 32, 64, 128],
+        "f": [32, 64, 128, 256, 512, 1024, 2048, 4096, 6144, 8192]
+      }
+    }
+  ]
+}

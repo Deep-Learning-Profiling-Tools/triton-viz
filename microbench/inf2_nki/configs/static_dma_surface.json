@@ -1,0 +1,19 @@
+{
+  "suite": "inf2_nki_static_dma_surface",
+  "description": "Paired latency surface for scalar SBUF scatter lowered to Static DMA.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "static_dma_surface",
+      "kind": "static_dma_scatter",
+      "dtype": "float32",
+      "modes": ["hbm_roundtrip_baseline", "sbuf_transpose_scatter"],
+      "matrix": {
+        "p": [1, 8, 32, 128],
+        "x": [4, 8, 16],
+        "y": [8, 16]
+      }
+    }
+  ]
+}

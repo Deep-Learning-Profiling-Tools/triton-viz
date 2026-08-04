@@ -76,6 +76,15 @@ class Transfer(Op):
     mem_dst: str
     bytes: int = 0
     time_idx: int = 0
+    src_partition_axis: int | None = None
+    dst_partition_axis: int | None = None
+    dma_pattern: str = "copy"
+
+
+class DmaTranspose(Transfer):
+    """Normalized DMA-transpose operation."""
+
+    name: ClassVar[str] = "dma_transpose"
 
 
 @dataclass
@@ -89,6 +98,9 @@ class BinaryOp(Op):
     op: str
     input_shape: tuple
     output_shape: tuple
+    other_shape: tuple = ()
+    input_ptrs: tuple[int, ...] = ()
+    output_ptr: int | None = None
 
 
 @dataclass
@@ -112,6 +124,13 @@ class Dot(Op):
     intermediate_results: dict[tuple[int, int], float] = field(
         default_factory=dict
     )  # Only storing the result now
+    # Base pointers of the two operands and the destination tile. These let a
+    # downstream cost model resolve TensorE's true data dependency on the DMAs
+    # that filled its SBUF inputs (and the store that drains its output) by
+    # exact pointer matching, instead of a conservative "wait for every prior
+    # transfer" heuristic. Defaulted so existing constructors stay valid.
+    input_ptrs: tuple[int, ...] = ()
+    output_ptr: int | None = None
 
     def update_intermediate(self, row: int, col: int, result: float):
         # Store only the result as a float
@@ -123,6 +142,21 @@ class MakeRange(Op):
     name: ClassVar[str] = "make_range"
     start: int
     end: int
+
+
+@dataclass
+class NkiCompute(Op):
+    """Catch-all record for NKI compute APIs (elementwise, reductions, etc.)."""
+    name: ClassVar[str] = "nki_compute"
+    api_op: str
+    engine: str
+    input_ptrs: tuple[int, ...]
+    output_ptrs: tuple[int, ...]
+    input_shapes: tuple[tuple[int, ...], ...]
+    output_shapes: tuple[tuple[int, ...], ...]
+    input_dtypes: tuple[str, ...]
+    output_dtype: str
+    attrs: dict
 
 
 @dataclass
@@ -150,6 +184,11 @@ class Reduce(Op):
     index: int
     keep_dims: bool
     output_shape: tuple
+    # Optional base-pointer linkage so a dependency-aware scheduler can resolve
+    # cross-engine RAW/WAR/WAW edges through this reduction. Defaulted so all
+    # existing positional constructors (triton/gluon/nki) remain valid.
+    input_ptrs: tuple[int, ...] = ()
+    output_ptr: int | None = None
 
 
 @dataclass

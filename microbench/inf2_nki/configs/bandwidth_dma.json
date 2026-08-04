@@ -1,0 +1,13 @@
+{
+  "suite": "inf2_nki_dma_bandwidth",
+  "description": "Bulk DMA bandwidth sweep. Analyze bytes/time and DmaPacket throughput; these are not latency tests.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 256, "repeat": 4, "modes": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 1024, "repeat": 4, "modes": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 4096, "repeat": 4, "modes": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "modes": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float16", "p": 128, "f": 4096, "repeat": 4, "modes": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"]}
+  ]
+}

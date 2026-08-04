@@ -1,7 +1,15 @@
 from collections.abc import Callable
 from typing import Any
 
-from triton_viz.core.data import Allocate, Dot, Op, ProgramId, Transfer
+from triton_viz.core.data import (
+    Allocate,
+    BinaryOp,
+    DmaTranspose,
+    Dot,
+    Op,
+    ProgramId,
+    Transfer,
+)
 
 from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
 
@@ -28,8 +36,19 @@ def _nki_beta2_dot_adapter(
     dst: Any, stationary: Any, moving: Any, *_args: Any, **kwargs: Any
 ) -> AdapterResult:
     assert NDArray is not None
-    x = NDArray(value=stationary.data.T)
-    return AdapterResult(x, moving)
+    # Do NOT materialize a transposed copy here: building ``NDArray(value=...T)``
+    # allocates fresh NumPy storage, so the recorded stationary ``data_ptr()``
+    # would differ from the SBUF address the producing DMA wrote, breaking
+    # ``Dot.input_ptrs`` <-> ``Transfer.dst_ptr`` dependency matching. Pass the
+    # original ``stationary`` object through and flag that the tracer/consumer
+    # should treat it as transposed, so the pointer is preserved.
+    return AdapterResult(stationary, moving, transpose_input=True)
+
+
+def _nki_beta2_binary_adapter(
+    dst: Any, data1: Any, data2: Any, op: Any, *_args: Any, **kwargs: Any
+) -> AdapterResult:
+    return AdapterResult(data1, data2, op, dst)
 
 
 NKI_BETA2_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
@@ -43,7 +62,9 @@ if HAS_NKI_BETA2:
             "ndarray": Allocate,
             "nc_matmul": Dot,
             "dma_copy": Transfer,
+            "dma_transpose": DmaTranspose,
             "tensor_copy": Transfer,
+            "tensor_tensor": BinaryOp,
         },
     }
 
@@ -56,6 +77,15 @@ if HAS_NKI_BETA2:
             dst,
             src.buffer,
             dst.buffer,
+            "copy",
+        ),
+        BinaryOp: _nki_beta2_binary_adapter,
+        DmaTranspose: lambda dst, src, *_args, **_kwargs: AdapterResult(
+            src,
+            dst,
+            src.buffer,
+            dst.buffer,
+            "transpose",
         ),
     }
 

@@ -1,0 +1,13 @@
+{
+  "suite": "inf2_nki_bandwidth_grid",
+  "description": "Compare serial SPMD grids with explicit two-logical-NeuronCore placement at fixed per-program work.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 1, "placement": "serial", "modes": ["roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 2, "placement": "serial", "modes": ["roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 2, "placement": "logical_nc", "modes": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 4, "placement": "logical_nc", "modes": ["roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 8, "placement": "logical_nc", "modes": ["roundtrip_stream"]}
+  ]
+}

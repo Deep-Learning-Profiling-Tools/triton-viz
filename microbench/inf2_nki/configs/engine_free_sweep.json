@@ -1,0 +1,10 @@
+{
+  "suite": "inf2_nki_engine_free_sweep",
+  "description": "VectorE (two-input add) and ScalarE (exp) single-instruction cost vs free dimension, FP32. Level-B calibration for the lowering-aware compute model.",
+  "warmup": 10,
+  "iters": 50,
+  "benchmarks": [
+    {"name": "vector_add", "kind": "vector_add", "dtype": "float32", "p": 128, "repeat": 16, "modes": ["independent_stream"], "matrix": {"f": [128, 512, 1024, 2048]}},
+    {"name": "scalar_exp", "kind": "scalar_exp", "dtype": "float32", "p": 128, "repeat": 16, "modes": ["independent_stream"], "matrix": {"f": [128, 512, 1024, 2048]}}
+  ]
+}

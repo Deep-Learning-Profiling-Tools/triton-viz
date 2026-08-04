@@ -1,0 +1,15 @@
+{
+  "suite": "inf2_nki_additional_coverage",
+  "description": "Previously missing VectorE, matched-work overlap, and larger program-grid coverage.",
+  "warmup": 10,
+  "iters": 50,
+  "benchmarks": [
+    {"name": "vector_add", "kind": "vector_add", "dtype": "float32", "p": 128, "f": 2048, "repeat": 1, "modes": ["dependent_chain", "independent_stream"]},
+    {"name": "vector_add", "kind": "vector_add", "dtype": "float32", "p": 128, "f": 2048, "repeat": 4, "modes": ["dependent_chain", "independent_stream"]},
+    {"name": "vector_add", "kind": "vector_add", "dtype": "float32", "p": 128, "f": 2048, "repeat": 8, "modes": ["dependent_chain", "independent_stream"]},
+    {"name": "vector_add", "kind": "vector_add", "dtype": "float32", "p": 128, "f": 2048, "repeat": 32, "modes": ["dependent_chain"]},
+    {"name": "tensor_dma_overlap", "kind": "tensor_dma_overlap", "dtype": "bfloat16", "m": 128, "k": 128, "n": 512, "f": 8192, "repeat": 4, "modes": ["tensor_only", "dma_only", "independent_overlap", "forced_serial"]},
+    {"name": "tensor_dma_overlap_balanced", "kind": "tensor_dma_overlap", "dtype": "float32", "m": 128, "k": 128, "n": 512, "f": 256, "repeat": 8, "modes": ["tensor_only", "dma_only", "independent_overlap", "forced_serial"]},
+    {"name": "program_mapping", "kind": "program_mapping", "dtype": "float32", "p": 128, "f": 2048, "repeat": 1, "modes": ["grid_1", "grid_2", "grid_4", "grid_8"]}
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_nki_all",
+  "description": "Canonical passing validation suite; capability probes and multi-process experiments are separate.",
+  "configs": [
+    "latency_pointer_chase.json",
+    "bandwidth_dma.json",
+    "dma_free_dimension.json",
+    "dma_partition_surface.json",
+    "dma_partition_large_free.json",
+    "dma_write_partition_surface.json",
+    "dma_transpose_surface.json",
+    "dma_transpose_pipeline.json",
+    "static_dma_surface.json",
+    "engine_compute.json",
+    "engine_lowering_sweep.json",
+    "additional_coverage.json"
+  ]
+}

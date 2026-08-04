@@ -276,11 +276,13 @@ class NKITrace(LaunchInterface, TraceInterface):
         if self.frontend_name == "nki_beta2" and pre_trace:
             import nki
 
+            compiler_trace = getattr(nki, "trace", None)
             kwargs.pop("warmup", None)
             grid = kwargs.pop("grid", None)
-            nki.trace(self.func, grid=grid, platform_target=platform_target).specialize(
-                *args, **kwargs
-            )
+            if compiler_trace is not None:
+                compiler_trace(
+                    self.func, grid=grid, platform_target=platform_target
+                ).specialize(*args, **kwargs)
             kwargs["grid"] = grid
         with self.client_manager.patch_run(
             self.func,

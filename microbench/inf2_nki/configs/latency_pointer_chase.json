@@ -1,0 +1,21 @@
+{
+  "suite": "inf2_nki_latency_pointer_chase",
+  "description": "Repeat/ring-length sweep for NKI-visible dependent HBM latency. Fit latency from slope versus repeat; do not report aggregate bandwidth.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {"name": "ptr_chase", "kind": "pointer_chase", "dtype": "uint32", "ring_length": 1024, "stride": 1, "repeat": 1, "modes": ["hbm_index_chain"]},
+    {"name": "ptr_chase", "kind": "pointer_chase", "dtype": "uint32", "ring_length": 1024, "stride": 1, "repeat": 2, "modes": ["hbm_index_chain"]},
+    {"name": "ptr_chase", "kind": "pointer_chase", "dtype": "uint32", "ring_length": 1024, "stride": 1, "repeat": 4, "modes": ["hbm_index_chain"]},
+    {"name": "ptr_chase", "kind": "pointer_chase", "dtype": "uint32", "ring_length": 1024, "stride": 1, "repeat": 8, "modes": ["hbm_index_chain"]},
+    {"name": "ptr_chase", "kind": "pointer_chase", "dtype": "uint32", "ring_length": 1024, "stride": 1, "repeat": 16, "modes": ["hbm_index_chain"]},
+    {"name": "ptr_chase", "kind": "pointer_chase", "dtype": "uint32", "ring_length": 1024, "stride": 1, "repeat": 32, "modes": ["hbm_index_chain"]},
+    {"name": "ptr_chase", "kind": "pointer_chase", "dtype": "uint32", "ring_length": 4096, "stride": 17, "repeat": 16, "modes": ["hbm_index_chain"]},
+    {"name": "dma_roundtrip_latency", "kind": "dma_roundtrip_latency", "dtype": "float32", "p": 128, "f": 16, "repeat": 1, "modes": ["serialized_roundtrip"]},
+    {"name": "dma_roundtrip_latency", "kind": "dma_roundtrip_latency", "dtype": "float32", "p": 128, "f": 16, "repeat": 2, "modes": ["serialized_roundtrip"]},
+    {"name": "dma_roundtrip_latency", "kind": "dma_roundtrip_latency", "dtype": "float32", "p": 128, "f": 16, "repeat": 4, "modes": ["serialized_roundtrip"]},
+    {"name": "dma_roundtrip_latency", "kind": "dma_roundtrip_latency", "dtype": "float32", "p": 128, "f": 16, "repeat": 8, "modes": ["serialized_roundtrip"]}
+    ,{"name": "dma_roundtrip_latency", "kind": "dma_roundtrip_latency", "dtype": "float32", "p": 128, "f": 16, "repeat": 16, "modes": ["serialized_roundtrip"]}
+    ,{"name": "dma_roundtrip_latency", "kind": "dma_roundtrip_latency", "dtype": "float32", "p": 128, "f": 16, "repeat": 32, "modes": ["serialized_roundtrip"]}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "suite": "inf2_nki_serial_grid_bandwidth",
+  "description": "Two-program plain-grid serialization control. This does not distribute work to two physical NeuronCores on the current Inf2 toolchain.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 2, "placement": "serial", "modes": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"]}
+  ]
+}

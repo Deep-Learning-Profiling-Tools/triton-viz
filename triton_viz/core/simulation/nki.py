@@ -290,8 +290,18 @@ class Builder:
         value = loaded.data.astype(dtype) if dtype is not None else loaded.data
         return NDArray(value=value.T, name=f"{src.name}_load_transpose2d", **kwargs)
 
+    @staticmethod
+    def _tag(nd: "NDArray", api: str, engine: str, inputs) -> "NDArray":
+        """Annotate a result NDArray so the tracer can emit an NkiCompute event."""
+        nd._nki_api = api
+        nd._nki_engine = engine
+        nd._nki_inputs = tuple(i for i in inputs if isinstance(i, NDArray))
+        return nd
+
     def _unary_op(self, x: NDArray, np_func, op_name, **kwargs):
-        return NDArray(value=np_func(x.data), name=f"{x.name}_{op_name}", **kwargs)
+        # Activation-class unary ops run on the ScalarE (activation) engine.
+        nd = NDArray(value=np_func(x.data), name=f"{x.name}_{op_name}", **kwargs)
+        return self._tag(nd, op_name, "scalar", (x,))
 
     # Elementwise operator implementations
     def exp(self, x: NDArray, **kwargs):
@@ -330,17 +340,19 @@ class Builder:
 
     def pow(self, x: NDArray, exponent, **kwargs):
         if isinstance(exponent, NDArray):
-            return NDArray(
+            nd = NDArray(
                 value=np.power(x.data, exponent.data),
                 name=f"{x.name}_pow_{exponent.name}",
                 **kwargs,
             )
+            return self._tag(nd, "pow", "scalar", (x, exponent))
         elif np.isscalar(exponent):
-            return NDArray(
+            nd = NDArray(
                 value=np.power(x.data, exponent),
                 name=f"{x.name}_pow_{exponent}",
                 **kwargs,
             )
+            return self._tag(nd, "pow", "scalar", (x,))
         else:
             raise TypeError(f"Unsupported exponent type: {type(exponent)}")
 
@@ -374,19 +386,98 @@ class Builder:
 
     def multiply(self, x: NDArray, y: NDArray, **kwargs):
         if isinstance(y, NDArray):
-            return NDArray(
+            nd = NDArray(
                 value=np.multiply(x.data, y.data),
                 name=f"{x.name}_multiply_{y.name}",
                 **kwargs,
             )
+            return self._tag(nd, "multiply", "vector", (x, y))
         elif np.isscalar(y):
-            return NDArray(
+            nd = NDArray(
                 value=np.multiply(x.data, y),
                 name=f"{x.name}_multiply_scalar",
                 **kwargs,
             )
+            return self._tag(nd, "multiply", "vector", (x,))
         else:
             raise TypeError(f"Unsupported type for multiply: {type(y)}")
+
+    # ------------------------------------------------------------------
+    # Additional nl.* ops needed by real Tilebench kernels (softmax,
+    # rmsnorm, layernorm, ...). These give correct NumPy semantics so the
+    # exact same @nki.jit kernel that runs on hardware can also be traced.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _as_np(value):
+        """Return the raw NumPy payload for an NDArray or a passthrough scalar."""
+        return value.data if isinstance(value, NDArray) else value
+
+    def _binary(self, x, y, np_func, op_name, *, dtype=None, **_kwargs):
+        result = np_func(self._as_np(x), self._as_np(y))
+        if dtype is not None:
+            result = result.astype(dtype)
+        xn = x.name if isinstance(x, NDArray) else "scalar"
+        yn = y.name if isinstance(y, NDArray) else "scalar"
+        nd = NDArray(value=result, name=f"{xn}_{op_name}_{yn}")
+        return self._tag(nd, op_name, "vector", (x, y))
+
+    def add(self, x, y, *, dtype=None, mask=None, **kwargs):
+        return self._binary(x, y, np.add, "add", dtype=dtype)
+
+    def subtract(self, x, y, *, dtype=None, mask=None, **kwargs):
+        return self._binary(x, y, np.subtract, "subtract", dtype=dtype)
+
+    def divide(self, x, y, *, dtype=None, mask=None, **kwargs):
+        return self._binary(x, y, np.divide, "divide", dtype=dtype)
+
+    def maximum(self, x, y, *, dtype=None, mask=None, **kwargs):
+        return self._binary(x, y, np.maximum, "maximum", dtype=dtype)
+
+    def minimum(self, x, y, *, dtype=None, mask=None, **kwargs):
+        return self._binary(x, y, np.minimum, "minimum", dtype=dtype)
+
+    def greater(self, x, y, *, dtype=None, mask=None, **kwargs):
+        return self._binary(x, y, np.greater, "greater", dtype=dtype)
+
+    def _reduce(self, x: NDArray, np_func, op_name, *, axis=None, keepdims=False,
+                dtype=None, mask=None, **kwargs):
+        data = x.data
+        if mask is not None:
+            # Reductions over masked tiles ignore out-of-range lanes; callers
+            # supply an identity fill via nl.where, so honoring the mask here is
+            # belt-and-suspenders and keeps parity with the real API surface.
+            data = np.where(self._as_np(mask), data, data)
+        result = np_func(data, axis=axis, keepdims=keepdims)
+        if dtype is not None:
+            result = result.astype(dtype)
+        nd = NDArray(value=result, name=f"{x.name}_{op_name}")
+        return self._tag(nd, op_name, "vector", (x,))
+
+    def max(self, x: NDArray, *, axis=None, keepdims=False, dtype=None, mask=None, **kwargs):
+        return self._reduce(x, np.max, "max", axis=axis, keepdims=keepdims, dtype=dtype, mask=mask)
+
+    def min(self, x: NDArray, *, axis=None, keepdims=False, dtype=None, mask=None, **kwargs):
+        return self._reduce(x, np.min, "min", axis=axis, keepdims=keepdims, dtype=dtype, mask=mask)
+
+    def mean(self, x: NDArray, *, axis=None, keepdims=False, dtype=None, mask=None, **kwargs):
+        return self._reduce(x, np.mean, "mean", axis=axis, keepdims=keepdims, dtype=dtype, mask=mask)
+
+    def where(self, condition, x, y, *, dtype=None, **kwargs):
+        result = np.where(self._as_np(condition), self._as_np(x), self._as_np(y))
+        if dtype is not None:
+            result = result.astype(dtype)
+        nd = NDArray(value=result, name="where")
+        return self._tag(nd, "where", "vector", (condition, x, y))
+
+    def full(self, shape, fill_value, dtype=None, *, buffer=None, name=None, **kwargs):
+        value = np.full(shape, self._as_np(fill_value), dtype=dtype)
+        return self.ndarray(shape, value.dtype, buffer=buffer, name=name, value=value)
+
+    def broadcast_to(self, x: NDArray, shape, **kwargs):
+        return NDArray(value=np.broadcast_to(x.data, shape), name=f"{x.name}_broadcast_to")
+
+    def static_cast(self, x: NDArray, dtype, **kwargs):
+        return NDArray(value=x.data.astype(dtype), name=f"{x.name}_static_cast")
 
     def range(self, stop):
         return range(stop)
@@ -425,12 +516,26 @@ def nki_patch_lang(scope=None):
     _set_attr(nl, "rsqrt", nki_builder.rsqrt)
     _set_attr(nl, "multiply", nki_builder.multiply)
 
+    # Reductions and elementwise binaries used by real Tilebench kernels.
+    _set_attr(nl, "max", nki_builder.max)
+    _set_attr(nl, "min", nki_builder.min)
+    _set_attr(nl, "mean", nki_builder.mean)
+    _set_attr(nl, "add", nki_builder.add)
+    _set_attr(nl, "subtract", nki_builder.subtract)
+    _set_attr(nl, "divide", nki_builder.divide)
+    _set_attr(nl, "maximum", nki_builder.maximum)
+    _set_attr(nl, "minimum", nki_builder.minimum)
+    _set_attr(nl, "greater", nki_builder.greater)
+    _set_attr(nl, "where", nki_builder.where)
+    _set_attr(nl, "full", nki_builder.full)
+    _set_attr(nl, "broadcast_to", nki_builder.broadcast_to)
+    _set_attr(nl, "static_cast", nki_builder.static_cast)
+
     # attention-specific
     _set_attr(nl, "load_transpose2d", nki_builder.load_transpose2d)
     # nisa.affine_select
     # nl.tensor_reduce
     # nisa.activation
-    nl.broadcast_to
     # nisa.nc_transpose
 
     # Elementwise operators
@@ -520,6 +625,7 @@ class NKIInterpretedFunction:
             ret = arg
             client_manager.arg_callback(name, arg, ret)
 
+        ret_val = None
         for x in range(grid_dims[0]):
             for y in range(grid_dims[1]):
                 for z in range(grid_dims[2]):
@@ -530,7 +636,8 @@ class NKIInterpretedFunction:
                         client_manager.grid_idx_callback((x, y, z))
 
                     if not client_manager.pre_run_callback(self.fn):
-                        return
-                    self.fn(*args, **kwargs)
+                        return ret_val
+                    ret_val = self.fn(*args, **kwargs)
                     if not client_manager.post_run_callback(self.fn):
-                        return
+                        return ret_val
+        return ret_val

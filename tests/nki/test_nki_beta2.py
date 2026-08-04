@@ -378,6 +378,19 @@ def test_language_helpers_and_ops(patched_scope):
     b2.nki_builder.grid_idx = [1, 2, 3]
     assert nl.program_id(0) == 1
     assert list(nl.affine_range(4)) == [0, 1, 2, 3]
+
+
+def test_par_dim_marks_nonleading_partition_axis(patched_scope):
+    """par_dim should preserve a partition axis beyond shape[0]."""
+    del patched_scope
+    tile = nl.ndarray((3, nl.par_dim(8), 16), dtype=nl.float32, buffer=nl.sbuf)
+    assert tile.shape == (3, 8, 16)
+    assert tile.partition_axis == 1
+    assert b2._partition_and_free(tile) == (8, 48)
+    view = tile[1]
+    assert view.shape == (8, 16)
+    assert view.partition_axis == 0
+    assert b2._partition_and_free(view) == (8, 16)
     assert list(nl.affine_range(1, 6, 2)) == [1, 3, 5]
     assert list(nl.affine_range(start=1, stop=6, step=2)) == [1, 3, 5]
     assert nl.ds(2, 3) == slice(2, 5, None)

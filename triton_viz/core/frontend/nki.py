@@ -10,8 +10,8 @@ from triton_viz.core.data import (
     ProgramId,
     ReduceSum,
     Store,
-    UnaryOp,
 )
+from triton_viz.core.data import NkiCompute
 
 from .base import AdapterResult, Frontend, _LangPatchScope, register_frontend
 
@@ -28,8 +28,12 @@ except ModuleNotFoundError:
 
 def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
     assert HAS_NKI
+    # Preserve the original operand object (and thus its ``data_ptr()``) instead
+    # of materializing a transposed copy, so the recorded ``Dot.input_ptrs`` can
+    # be matched against the producing transfer's ``dst_ptr``. The transpose is
+    # applied downstream for shape/value rendering only.
     if _kwargs.get("transpose_x", False):
-        x = NDArray(value=x.data.T, name=x.name)
+        return AdapterResult(x, y, transpose_input=True)
     return AdapterResult(x, y)
 
 
@@ -53,9 +57,36 @@ if HAS_NKI:
             "load": Load,
             "store": Store,
             "matmul": Dot,
-            "_unary_op": UnaryOp,
             "sum": ReduceSum,
             "arange": MakeRange,
+            # Elementwise/reduction/activation compute APIs -> one general record.
+            # (These are the events the old frontend silently dropped, so real
+            # nl.* kernels such as softmax/rmsnorm now trace their compute ops.)
+            "exp": NkiCompute,
+            "relu": NkiCompute,
+            "sigmoid": NkiCompute,
+            "tanh": NkiCompute,
+            "silu": NkiCompute,
+            "gelu": NkiCompute,
+            "sqrt": NkiCompute,
+            "abs": NkiCompute,
+            "log": NkiCompute,
+            "pow": NkiCompute,
+            "reciprocal": NkiCompute,
+            "square": NkiCompute,
+            "rsqrt": NkiCompute,
+            "copy": NkiCompute,
+            "multiply": NkiCompute,
+            "add": NkiCompute,
+            "subtract": NkiCompute,
+            "divide": NkiCompute,
+            "maximum": NkiCompute,
+            "minimum": NkiCompute,
+            "greater": NkiCompute,
+            "where": NkiCompute,
+            "max": NkiCompute,
+            "min": NkiCompute,
+            "mean": NkiCompute,
         }
     }
 
@@ -74,6 +105,9 @@ if HAS_NKI:
         ),
         Dot: _nki_dot_adapter,
         ReduceSum: _nki_reduce_sum_adapter,
+        # NkiCompute uses the default passthrough adapter: the tracer reconstructs
+        # operands/engine from metadata attached to the result NDArray, so it does
+        # not depend on each op's positional signature.
     }
 
 

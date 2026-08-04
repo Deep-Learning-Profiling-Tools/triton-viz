@@ -1,0 +1,17 @@
+{
+  "suite": "inf2_nki_dma_transpose_pipeline",
+  "description": "Isolate transpose, store, and dependent transpose-to-store handoff versus free dimension.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "dma_transpose_pipeline",
+      "kind": "dma_transpose_pipeline",
+      "dtype": "float32",
+      "p": 128,
+      "repeat": 1,
+      "modes": ["transpose_only", "store_only", "transpose_then_store"],
+      "matrix": {"f": [32, 64, 128, 256, 512, 1024, 2048, 4096, 6144, 8192]}
+    }
+  ]
+}

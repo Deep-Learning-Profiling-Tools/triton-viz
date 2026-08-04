@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_nki_engine_compute",
+  "description": "Compute-dominant engine sweep. Dependent EXP and matmul reuse SBUF inputs so HBM traffic is fixed while repeat increases.",
+  "warmup": 10,
+  "iters": 50,
+  "benchmarks": [
+    {"name": "scalar_exp", "kind": "scalar_exp", "dtype": "float32", "p": 128, "f": 2048, "repeat": 1, "modes": ["dependent_chain", "independent_stream"]},
+    {"name": "scalar_exp", "kind": "scalar_exp", "dtype": "float32", "p": 128, "f": 2048, "repeat": 4, "modes": ["dependent_chain", "independent_stream"]},
+    {"name": "scalar_exp", "kind": "scalar_exp", "dtype": "float32", "p": 128, "f": 2048, "repeat": 16, "modes": ["dependent_chain", "independent_stream"]},
+    {"name": "scalar_exp", "kind": "scalar_exp", "dtype": "float32", "p": 128, "f": 2048, "repeat": 32, "modes": ["dependent_chain"]},
+    {"name": "tensor_matmul", "kind": "tensor_matmul", "dtype": "float32", "m": 128, "k": 128, "n": 512, "repeat": 1, "modes": ["dependent_accumulate", "independent_stream"]},
+    {"name": "tensor_matmul", "kind": "tensor_matmul", "dtype": "float32", "m": 128, "k": 128, "n": 512, "repeat": 4, "modes": ["dependent_accumulate", "independent_stream"]},
+    {"name": "tensor_matmul", "kind": "tensor_matmul", "dtype": "float32", "m": 128, "k": 128, "n": 512, "repeat": 16, "modes": ["dependent_accumulate"]},
+    {"name": "tensor_matmul", "kind": "tensor_matmul", "dtype": "bfloat16", "m": 128, "k": 128, "n": 512, "repeat": 1, "modes": ["dependent_accumulate", "independent_stream"]},
+    {"name": "tensor_matmul", "kind": "tensor_matmul", "dtype": "bfloat16", "m": 128, "k": 128, "n": 512, "repeat": 4, "modes": ["dependent_accumulate", "independent_stream"]},
+    {"name": "tensor_matmul", "kind": "tensor_matmul", "dtype": "bfloat16", "m": 128, "k": 128, "n": 512, "repeat": 16, "modes": ["dependent_accumulate"]}
+  ]
+}

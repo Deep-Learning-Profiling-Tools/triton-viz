@@ -1,0 +1,9 @@
+{
+  "suite": "inf2_nki_bandwidth_core_concurrent",
+  "description": "One-core long-duration roundtrip case, intended to run simultaneously in two processes pinned with NEURON_RT_VISIBLE_CORES=0 and 1.",
+  "warmup": 100,
+  "iters": 10000,
+  "benchmarks": [
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 1, "placement": "serial", "modes": ["roundtrip_stream"]}
+  ]
+}

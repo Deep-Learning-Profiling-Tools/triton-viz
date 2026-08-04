@@ -1,0 +1,69 @@
+{
+  "suite": "inf2_nki_full_template",
+  "description": "Template for wider Inf2 microbenchmark sweeps. Expand in batches; profile-export parquet is slow but needed for instruction-level ground truth.",
+  "warmup": 10,
+  "iters": 100,
+  "sweeps": {
+    "pointer_chase": {
+      "dtype": ["uint32"],
+      "ring_length": [1024, 4096, 16384, 65536],
+      "stride": [1, 17, 257],
+      "repeat": [1, 2, 4, 8, 16, 32, 64],
+      "mode": ["hbm_index_chain"]
+    },
+    "dma_roundtrip_latency": {
+      "dtype": ["float32", "float16"],
+      "p": [1, 8, 16, 32, 64, 128],
+      "f": [1, 4, 16, 64, 256, 1024],
+      "repeat": [1, 2, 4, 8, 16, 32],
+      "mode": ["serialized_roundtrip"],
+      "dge_mode": ["none", "unknown", "hwdge", "swdge"]
+    },
+    "dma_bandwidth": {
+      "dtype": ["float32", "float16", "bfloat16", "int8", "int32"],
+      "p": [1, 2, 4, 8, 16, 32, 64, 96, 128],
+      "f": [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+      "repeat": [1, 2, 4, 8, 16, 32],
+      "mode": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"],
+      "dge_mode": ["none", "unknown", "hwdge", "swdge"]
+    },
+    "vector_add": {
+      "dtype": ["float32", "float16", "bfloat16", "int32"],
+      "p": [1, 2, 4, 8, 16, 32, 64, 96, 128],
+      "f": [1, 8, 16, 64, 256, 1024, 4096, 8192],
+      "repeat": [1, 2, 4, 8, 16, 32, 64],
+      "mode": ["dependent_chain", "independent_stream"]
+    },
+    "scalar_exp": {
+      "dtype": ["float32"],
+      "p": [1, 8, 16, 32, 64, 128],
+      "f": [1, 8, 16, 64, 256, 512, 1024, 2048],
+      "repeat": [1, 2, 4, 8, 16, 32],
+      "mode": ["dependent_chain", "independent_stream"]
+    },
+    "tensor_matmul": {
+      "dtype": ["float32", "float16", "bfloat16"],
+      "m": [16, 32, 64, 128],
+      "k": [16, 32, 64, 128],
+      "n": [64, 128, 256, 512],
+      "repeat": [1, 2, 4, 8, 16],
+      "mode": ["dependent_accumulate", "independent_stream"]
+    },
+    "tensor_dma_overlap": {
+      "dtype": ["float32", "float16", "bfloat16"],
+      "m": [128],
+      "k": [128],
+      "n": [512],
+      "f": [512, 1024, 2048, 4096, 8192],
+      "repeat": [1, 2, 4, 8],
+      "mode": ["independent_overlap", "forced_serial"]
+    },
+    "program_mapping": {
+      "dtype": ["float32"],
+      "p": [128],
+      "f": [256, 1024],
+      "repeat": [1],
+      "mode": ["grid_1", "grid_2"]
+    }
+  }
+}

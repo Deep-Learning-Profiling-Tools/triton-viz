@@ -1,0 +1,16 @@
+{
+  "suite": "inf2_nki_microbench_quick",
+  "description": "True microbenchmark smoke/calibration suite for AWS inf2.xlarge / NeuronCore-v2. Separates latency pointer-chasing, DMA bandwidth, engine instruction streams, overlap, and program/core mapping.",
+  "warmup": 2,
+  "iters": 10,
+  "benchmarks": [
+    {"name": "ptr_chase", "kind": "pointer_chase", "dtype": "uint32", "ring_length": 1024, "stride": 1, "repeat": 8, "modes": ["hbm_index_chain"]},
+    {"name": "dma_roundtrip_latency", "kind": "dma_roundtrip_latency", "dtype": "float32", "p": 128, "f": 256, "repeat": 4, "modes": ["serialized_roundtrip"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 2048, "repeat": 4, "modes": ["hbm_to_sbuf_stream", "sbuf_to_hbm_stream", "roundtrip_stream"]},
+    {"name": "vector_add", "kind": "vector_add", "dtype": "float32", "p": 128, "f": 2048, "repeat": 8, "modes": ["dependent_chain", "independent_stream"]},
+    {"name": "scalar_exp", "kind": "scalar_exp", "dtype": "float32", "p": 128, "f": 512, "repeat": 4, "modes": ["dependent_chain", "independent_stream"]},
+    {"name": "tensor_matmul", "kind": "tensor_matmul", "dtype": "float32", "m": 128, "k": 128, "n": 512, "repeat": 2, "modes": ["dependent_accumulate", "independent_stream"]},
+    {"name": "tensor_dma_overlap", "kind": "tensor_dma_overlap", "dtype": "float32", "m": 128, "k": 128, "n": 512, "f": 2048, "repeat": 2, "modes": ["independent_overlap", "forced_serial"]},
+    {"name": "program_mapping", "kind": "program_mapping", "dtype": "float32", "p": 128, "f": 256, "repeat": 1, "modes": ["grid_1", "grid_2"]}
+  ]
+}

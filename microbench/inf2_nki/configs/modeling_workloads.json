@@ -1,0 +1,36 @@
+{
+  "suite": "inf2_nki_modeling_workloads",
+  "description": "Diverse single-core FP32 workloads for trace-driven DMA model validation.",
+  "cases": [
+    {
+      "kind": "tensor_add",
+      "matrix": {
+        "p": [1, 8, 16, 32, 64, 128],
+        "f": [32, 128, 512, 1024]
+      }
+    },
+    {
+      "kind": "dma_transpose",
+      "matrix": {
+        "p": [1, 8, 16, 32, 64, 128],
+        "f": [32, 128, 512, 1024]
+      }
+    },
+    {
+      "kind": "sbuf_transpose",
+      "matrix": {
+        "p": [1, 8, 32, 128],
+        "x": [4, 8, 16],
+        "y": [8, 16]
+      }
+    },
+    {
+      "kind": "sbuf_transpose",
+      "matrix": {
+        "p": [2, 16, 64],
+        "x": [6, 12],
+        "y": [10, 12]
+      }
+    }
+  ]
+}

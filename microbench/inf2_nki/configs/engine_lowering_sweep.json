@@ -1,0 +1,11 @@
+{
+  "suite": "inf2_nki_engine_lowering_sweep",
+  "description": "Level-B one/two-input x FP32/BF16 compute calibration with instruction-count auditing.",
+  "warmup": 10,
+  "iters": 50,
+  "benchmarks": [
+    {"name": "vector_one_input", "kind": "vector_add", "p": 128, "repeat": 16, "modes": ["independent_stream"], "matrix": {"dtype": ["float32", "bfloat16"], "f": [128, 512, 1024, 2048]}},
+    {"name": "vector_two_input", "kind": "vector_add", "p": 128, "repeat": 16, "modes": ["independent_two_input"], "matrix": {"dtype": ["float32", "bfloat16"], "f": [128, 512, 1024, 2048]}},
+    {"name": "scalar_one_input", "kind": "scalar_exp", "p": 128, "repeat": 16, "modes": ["independent_stream"], "matrix": {"dtype": ["float32", "bfloat16"], "f": [128, 512, 1024, 2048]}}
+  ]
+}

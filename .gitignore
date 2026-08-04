@@ -167,6 +167,8 @@ uv.lock
 
 # Benchmark output
 benchmarks/*.json
+microbench/inf2_nki/results/*
+!microbench/inf2_nki/results/.gitkeep
 
 # Auto-generated version file
 triton_viz/version.py

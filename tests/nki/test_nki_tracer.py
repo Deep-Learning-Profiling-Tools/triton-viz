@@ -11,6 +11,7 @@ import math
 try:
     import neuronxcc.nki.language as nl
     from triton_viz.core.simulation.nki import NDArray
+    from triton_viz.tools.nki_trace_dump import records_to_events, summarize_events
 except ModuleNotFoundError:
     pytest.skip(
         "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
@@ -59,6 +60,8 @@ def test_tracer_records_masked_load_store():
     assert all(r.offsets.shape == r.masks.shape for r in all_records)
     assert all(r.ptr in input_ptrs for r in load_records)
     assert all(r.ptr == out.data_ptr() for r in store_records)
+    assert [r.bytes for r in load_records] == [16, 16, 8, 8]
+    assert [r.bytes for r in store_records] == [16, 8]
 
 
 def copy_kernel(x_ptr, out_ptr):
@@ -68,6 +71,31 @@ def copy_kernel(x_ptr, out_ptr):
     mask = offs < x_ptr.shape[0]
     x = nl.load(x_ptr[offs], mask=mask)
     nl.store(out_ptr[offs], x, mask=mask)
+
+
+def test_tracer_records_masked_bytes_for_float16():
+    triton_viz.clear()
+
+    traced = triton_viz.trace(client=Tracer(), frontend="nki")(copy_kernel)
+    x = NDArray(value=np.arange(6, dtype=np.float16))
+    out = NDArray(value=np.empty_like(x.data))
+
+    traced[(2,)](x, out)
+
+    loads = [r for r in launches[-1].records if isinstance(r, Load)]
+    stores = [r for r in launches[-1].records if isinstance(r, Store)]
+    assert [r.bytes for r in loads] == [8, 4]
+    assert [r.bytes for r in stores] == [8, 4]
+
+    events = records_to_events(launches[-1].records)
+    load_events = [event for event in events if event["op"] == "load"]
+    summary = summarize_events(events)
+    assert [event["active_lanes"] for event in load_events] == [4, 2]
+    assert [event["bytes"] for event in load_events] == [8, 4]
+    assert summary["bytes_by_edge"] == {
+        "HBM->SBUF": 12,
+        "SBUF->HBM": 12,
+    }
 
 
 def test_tracer_grid_idx_sampling():

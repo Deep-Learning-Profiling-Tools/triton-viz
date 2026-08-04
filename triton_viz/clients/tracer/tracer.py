@@ -7,10 +7,13 @@ from ...core.data import (
     Load,
     Store,
     Transfer,
+    DmaTranspose,
+    BinaryOp,
     ReduceSum,
     Dot,
     Grid,
     Allocate,
+    NkiCompute,
 )
 from ...utils.traceback_utils import extract_user_frames
 from triton_viz.core.masked_load_store import masked_load
@@ -27,6 +30,16 @@ def _convert_grid_idx(grid_idx) -> tuple[int, int, int] | None:
     elif len(grid_idx) == 2:
         grid_idx = (grid_idx[0], grid_idx[1], 0)
     return grid_idx
+
+
+def _moved_bytes(mask: np.ndarray, tensor) -> int:
+    """Return logical bytes transferred by a masked load or store.
+
+    This matches the profiler's byte-counting semantics: every active mask
+    element contributes one tensor element. It is a logical traffic count, not
+    a model of cache-line fetches, coalescing, or repeated-address deduplication.
+    """
+    return int(np.count_nonzero(mask)) * int(tensor.element_size())
 
 
 class Tracer(Client):
@@ -108,7 +121,12 @@ class Tracer(Client):
                 offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
                 tensor = ptr
 
-            rec = Load(tensor.data_ptr(), offsets, mask.data)
+            rec = Load(
+                tensor.data_ptr(),
+                offsets,
+                mask.data,
+                bytes=_moved_bytes(mask.data, tensor),
+            )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
@@ -132,12 +150,17 @@ class Tracer(Client):
                     offsets = masked_load(ptr.get_offsets().data, keys, mask=mask_data)
                 tensor = ptr
 
-            rec = Store(tensor.data_ptr(), offsets, mask_data)
+            rec = Store(
+                tensor.data_ptr(),
+                offsets,
+                mask_data,
+                bytes=_moved_bytes(mask_data, tensor),
+            )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
         @self.lock_fn
-        def pre_transfer_callback(src, dst, mem_src, mem_dst):
+        def pre_transfer_callback(src, dst, mem_src, mem_dst, dma_pattern="copy"):
             # TODO: currently only works with NKI Beta 2. Make DSL-agnostic by
             # making tensor interface so we can safely call data_ptr/data/...
             if not self.sample:
@@ -176,6 +199,9 @@ class Tracer(Client):
                 mem_src=mem_src,
                 mem_dst=mem_dst,
                 bytes=np.prod(dst.shape) * dst.element_size(),
+                src_partition_axis=getattr(src, "partition_axis", None),
+                dst_partition_axis=getattr(dst, "partition_axis", None),
+                dma_pattern=str(dma_pattern),
             )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
@@ -192,17 +218,106 @@ class Tracer(Client):
                 output_data = getattr(ret, "data", None)
             input_shape = input_data.shape if input_data is not None else ()
             output_shape = output_data.shape if output_data is not None else ()
-            self.records.append(ReduceSum(input_shape, axis, keep_dims, output_shape))
+            input_ptrs = (
+                (int(input.data_ptr()),) if hasattr(input, "data_ptr") else ()
+            )
+            output_ptr = int(ret.data_ptr()) if hasattr(ret, "data_ptr") else None
+            self.records.append(
+                ReduceSum(
+                    input_shape,
+                    axis,
+                    keep_dims,
+                    output_shape,
+                    input_ptrs=input_ptrs,
+                    output_ptr=output_ptr,
+                )
+            )
 
         @self.lock_fn
-        def post_dot_callback(ret, input, other):
+        def post_dot_callback(ret, input, other, transpose_input=False):
             if not self.sample:
                 return
-            input_shape = input.data.shape
+            # ``transpose_input`` means the matmul consumes ``input`` transposed
+            # (stationary.T @ moving). We transpose only the recorded shape/value
+            # for rendering; ``input.data_ptr()`` is kept as the original SBUF
+            # address so the dependency on the producing transfer still matches.
+            input_data = input.data.T if transpose_input else input.data
+            input_shape = input_data.shape
             other_shape = other.data.shape
             ret_shape = ret.data.shape
             # Pass input/other raw arrays so draw.py can render MatMul
-            rec = Dot(input_shape, other_shape, ret_shape, input.data, other.data)
+            # Capture operand/destination base pointers when the frontend exposes
+            # them so the cost model can resolve TensorE's DMA dependencies by
+            # exact pointer matching (see Dot.input_ptrs/output_ptr).
+            input_ptrs = tuple(
+                int(value.data_ptr())
+                for value in (input, other)
+                if hasattr(value, "data_ptr")
+            )
+            output_ptr = int(ret.data_ptr()) if hasattr(ret, "data_ptr") else None
+            rec = Dot(
+                input_shape,
+                other_shape,
+                ret_shape,
+                input_data,
+                other.data,
+                input_ptrs=input_ptrs,
+                output_ptr=output_ptr,
+            )
+            rec.call_path = extract_user_frames(num_frames=1)
+            self.records.append(rec)
+
+        @self.lock_fn
+        def post_binary_callback(ret, input, other, op, dst):
+            if not self.sample:
+                return
+            input_shape = tuple(getattr(input, "shape", ()))
+            other_shape = tuple(getattr(other, "shape", ()))
+            output_shape = tuple(getattr(ret, "shape", getattr(dst, "shape", ())))
+            op_name = getattr(op, "name", getattr(op, "__name__", str(op)))
+            rec = BinaryOp(
+                op=str(op_name),
+                input_shape=input_shape,
+                output_shape=output_shape,
+                other_shape=other_shape,
+                input_ptrs=tuple(
+                    int(value.data_ptr())
+                    for value in (input, other)
+                    if hasattr(value, "data_ptr")
+                ),
+                output_ptr=(
+                    int(dst.data_ptr()) if hasattr(dst, "data_ptr") else None
+                ),
+            )
+            rec.call_path = extract_user_frames(num_frames=1)
+            self.records.append(rec)
+
+        @self.lock_fn
+        def post_nki_compute_callback(ret, *args, **kwargs):
+            if not self.sample:
+                return
+            # The frontend builder _tag method attaches the true op info to the
+            # returned NDArray. The adapter passes ret to the post_callback.
+            if not hasattr(ret, "_nki_api"):
+                return
+            inputs = getattr(ret, "_nki_inputs", ())
+            input_ptrs = tuple(int(x.data_ptr()) for x in inputs if hasattr(x, "data_ptr"))
+            output_ptr = int(ret.data_ptr()) if hasattr(ret, "data_ptr") else None
+            input_shapes = tuple(tuple(x.shape) for x in inputs if hasattr(x, "shape"))
+            output_shape = tuple(ret.shape) if hasattr(ret, "shape") else ()
+            input_dtypes = tuple(str(x.dtype) for x in inputs if hasattr(x, "dtype"))
+            output_dtype = str(ret.dtype) if hasattr(ret, "dtype") else ""
+            rec = NkiCompute(
+                api_op=str(ret._nki_api),
+                engine=str(getattr(ret, "_nki_engine", "vector")),
+                input_ptrs=input_ptrs,
+                output_ptrs=(output_ptr,) if output_ptr is not None else (),
+                input_shapes=input_shapes,
+                output_shapes=(output_shape,) if output_shape else (),
+                input_dtypes=input_dtypes,
+                output_dtype=output_dtype,
+                attrs={},
+            )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
@@ -211,8 +326,11 @@ class Tracer(Client):
             Load: OpCallbacks(before_callback=pre_load_callback),
             Store: OpCallbacks(before_callback=pre_store_callback),
             Transfer: OpCallbacks(before_callback=pre_transfer_callback),
+            DmaTranspose: OpCallbacks(before_callback=pre_transfer_callback),
             ReduceSum: OpCallbacks(after_callback=post_reduce_sum_callback),
             Dot: OpCallbacks(after_callback=post_dot_callback),
+            BinaryOp: OpCallbacks(after_callback=post_binary_callback),
+            NkiCompute: OpCallbacks(after_callback=post_nki_compute_callback),
         }
         return callbacks.get(op_type, OpCallbacks())
 

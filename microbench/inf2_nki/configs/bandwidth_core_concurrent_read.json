@@ -1,0 +1,9 @@
+{
+  "suite": "inf2_nki_bandwidth_core_concurrent_read",
+  "description": "One-core long-duration read stream, intended for two simultaneous processes pinned to physical cores 0 and 1.",
+  "warmup": 20,
+  "iters": 1000,
+  "benchmarks": [
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 1, "placement": "serial", "modes": ["hbm_to_sbuf_stream"]}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "suite": "inf2_nki_bandwidth_dge",
+  "description": "Compare compiler/default, no-DGE, software-DGE, and hardware-DGE on the largest one-core roundtrip tile.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 1, "placement": "serial", "dge_mode": "none", "modes": ["roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 1, "placement": "serial", "dge_mode": "swdge", "modes": ["roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 1, "placement": "serial", "dge_mode": "hwdge", "modes": ["roundtrip_stream"]},
+    {"name": "dma_bandwidth", "kind": "dma_bandwidth", "dtype": "float32", "p": 128, "f": 8192, "repeat": 4, "programs": 1, "placement": "serial", "dge_mode": "unknown", "modes": ["roundtrip_stream"]}
+  ]
+}
