@@ -8,7 +8,7 @@
 
 | Corpus | Rows | Source pin | Kind |
 |---|---|---|---|
-| tritonracebench (+golden_smoke/rmw_sync/await_sync) | 59 (+7+9+12) | in-repo, hand-labeled yes/no pairs | labeled micro-benchmark |
+| tritonracebench (+golden_smoke/rmw_sync/await_sync) | 61 (+7+9+14) | in-repo, hand-labeled yes/no pairs | labeled micro-benchmark |
 | tutorials | 9 | triton 3.6 tutorials, vendored | real code, race-free labels |
 | liger | 23 | liger-kernel 0.8.0 (PyPI pin, upstream `c4b16d4`) | real code |
 | tritonbench_g | 202 | thunlp/TritonBench `603e28a`, vendored | real code (GitHub-crawled) |
@@ -31,11 +31,13 @@ tilebench coverage note: the group's own multi-backend tile-DSL benchmark; every
 
 tilebench_cutile coverage note — the cuTile front-end: rows carry CuTile IR TEXT compiled at capture (`compile_tile(return_final_ir=True)`, pure-Python — rebuild needs neither cuda-tile nor a GPU), consumed by the new reader (`clients/common/cutile_ir_reader.py`) which emits the SAME AccessGraph/Term algebra as the TTIR reader — the encoder, two-copy solver, tier selector and §3c launch-scoped rung run UNCHANGED. Semantic mapping: tile-space `tile_load/store(view, index)` lowers to `index*tile_shape + arange` affine terms with the implicit OOB-clip materialized as ordinary mask terms; `pointer_offset + tile_atomic_rmw / load_pointer / store_pointer` are exactly the TTIR raw-pointer shapes; python floor-division lowers to `c_mod` + a boolean-xor sign-fix the reader models exactly ((a∧¬b)∨(¬a∧b)); integer xor (bitonic partner indexing) and while-form `loop`/`if` blocks abstain honestly. Capture drove all 45 operators (385 specializations, zero failures); the corpus keeps ≤2 specializations per (case, kernel) with the drop count in provenance (bitonic-network operators bake one ct.Constant per host-loop step). v1 has NO confirmation channel (cuda.tile ships no interpreter) — race SATs would terminate at races-unclassified; none did.
 
-## 2. Ground-truth scorecard (tritonracebench, 59 rows)
+## 2. Ground-truth scorecard (tritonracebench, 61 rows)
 
 **precision = recall = 1.0 · witness-matched 27/27 · ladder audit zero (ladder-unsound=0, replay-unsound=0) · mutation sensitivity: all applicable proofs flip under at least one mutant.**
 
-Terminals: race-confirmed 12, races-unclassified 15, race@interp 7, proved@T0 7, proved@T1 8, proved@T1+assumes-termination 5, proved@interp 5 (one carrying the §3n content-fragile attribute). Companion micro-suites: golden_smoke 7 (3 race-confirmed / 4 proofs), rmw_sync 9, await_sync 12 (4 conditional proofs + 8 detected races).
+Terminals: race-confirmed 12, races-unclassified 15, race@interp 7, proved@T0 7, proved@T1 8, proved@T1+assumes-termination 7, proved@interp 5 (one carrying the §3n content-fragile attribute). Companion micro-suites: golden_smoke 7 (3 race-confirmed / 4 proofs), rmw_sync 9, await_sync 14 (6 conditional proofs + 8 detected races).
+
+Identity or/xor polls (rows 59→61, TN 25→27): the value model's identity carve-in (or/xor of a provably-zero operand write back the observation) closes the rf_unknown escape that the poll's own cross-copy twin held open, so `trb016_pc_wait_or_poll_no` / `trb016_pc_wait_xor_poll_no` prove at `proved@T1+assumes-termination` exactly like the add(0) poll. jobs=1 re-sweeps of await_sync and tritonracebench against saved pre-patch baselines: ZERO verdict flips on every pre-existing row.
 
 Content-fragile composition (§3n, TN 23→24, coverage 54/56→55/56): `trb006_dd_mask_dead_no` — the data-dependent-mask launch whose mask is dead — previously short-circuited at the race-unconfirmed abstention even though the interpreter ran the launch clean. The composed dispatcher now pairs the faithfully-refuted widened hazard (every widened SAT replayed on this launch's data, none reproduced) with the interpreter's clean run into `proved@interp` + the independent `content_fragile` attribute ("some memory contents enable an overlap" — sound from widened evidence for the same reason as grid-fragile: widening only enlarges footprints). Guardrails mirror §3c: capped/unavailable/unclassifiable demotions keep the generic abstention and can never enter the upgrade; a missing or failed dynamic track keeps race-unconfirmed, fail-closed; the live twin (`trb006_dd_mask_live_yes`) stays race-confirmed. No real-code corpus row carried the demotion, so §3's tables are unchanged.
 
