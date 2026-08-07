@@ -28,6 +28,39 @@ def elementwise_two_kernel(x, y, chain):
 
 
 @nki.jit
+def elementwise_maximum_kernel(x, y):
+    """Unary threshold control for activation-style VectorE lowering."""
+    p, f = x.shape
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(f)[None, :]
+    value = nl.load(x[pi, fi])
+    nl.store(out[pi, fi], value=nl.maximum(value, 0.0))
+    return out
+
+
+@nki.jit
+def elementwise_multiply_kernel(x, y):
+    """Single scalar multiply control for ScalarE instruction selection."""
+    p, f = x.shape
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(f)[None, :]
+    value = nl.load(x[pi, fi])
+    nl.store(out[pi, fi], value=nl.multiply(value, 2.0, dtype=x.dtype))
+    return out
+
+
+@nki.jit
+def elementwise_sigmoid_kernel(x, y):
+    """Unary transcendental control for activation-engine lowering."""
+    p, f = x.shape
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(f)[None, :]
+    value = nl.load(x[pi, fi])
+    nl.store(out[pi, fi], value=nl.sigmoid(value))
+    return out
+
+
+@nki.jit
 def elementwise_multiply2_kernel(x, y):
     """Two dependent multiplies: the rmsnorm epilogue's minimal grammar."""
     p, f = x.shape
@@ -280,6 +313,9 @@ def elementwise_two_bf16_kernel(x, y, chain):
 KERNELS = {
     "elementwise_one": elementwise_one_kernel,
     "elementwise_two": elementwise_two_kernel,
+    "elementwise_maximum": elementwise_maximum_kernel,
+    "elementwise_multiply": elementwise_multiply_kernel,
+    "elementwise_sigmoid": elementwise_sigmoid_kernel,
     "elementwise_multiply2": elementwise_multiply2_kernel,
     "broadcast_multiply2": broadcast_multiply2_kernel,
     "broadcast_affine": broadcast_affine_kernel,

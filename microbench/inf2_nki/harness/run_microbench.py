@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import json
 import itertools
+import json
 import os
 import platform
 import shutil
@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 from neuronxcc import nki
 
 from microbench.inf2_nki.common.inputs import make_input, make_pointer_ring
@@ -28,26 +27,34 @@ from microbench.inf2_nki.tests.bandwidth_dma.kernels import (
     transpose_pipeline_factory,
     transpose_pipeline_work_bytes,
     transpose_work_bytes,
+)
+from microbench.inf2_nki.tests.bandwidth_dma.kernels import (
     work_bytes as dma_work_bytes,
 )
 from microbench.inf2_nki.tests.engine_ops.kernels import (
     scalar_exp_factory,
     tensor_matmul_factory,
     vector_add_factory,
+)
+from microbench.inf2_nki.tests.engine_ops.kernels import (
     work_units as engine_work_units,
 )
 from microbench.inf2_nki.tests.latency_pointer_chase.kernels import (
     dma_roundtrip_factory,
     pointer_chase_factory,
+)
+from microbench.inf2_nki.tests.latency_pointer_chase.kernels import (
     work_units as latency_work_units,
 )
 from microbench.inf2_nki.tests.overlap.kernels import tensor_dma_overlap_factory
 from microbench.inf2_nki.tests.program_mapping.kernels import program_mapping_factory
 from microbench.inf2_nki.tests.static_dma.kernels import (
     static_dma_scatter_factory,
+)
+from microbench.inf2_nki.tests.static_dma.kernels import (
     work_units as static_dma_work_units,
 )
-
+from triton_viz.tools.nki_provenance import collect_compiler_fingerprint
 
 BENCHMARKS = {
     # True latency microbenchmarks: loop-carried dependencies; analyze by
@@ -140,10 +147,14 @@ def _text(value: Any) -> str:
     return str(value)
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int | None = None) -> dict[str, Any]:
+def _run(
+    cmd: list[str], cwd: Path | None = None, timeout: int | None = None
+) -> dict[str, Any]:
     start = time.time()
     try:
-        proc = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False)
+        proc = subprocess.run(
+            cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False
+        )
         return {
             "cmd": cmd,
             "returncode": proc.returncode,
@@ -152,7 +163,13 @@ def _run(cmd: list[str], cwd: Path | None = None, timeout: int | None = None) ->
             "elapsed_s": round(time.time() - start, 3),
         }
     except FileNotFoundError as exc:
-        return {"cmd": cmd, "returncode": 127, "stdout": "", "stderr": str(exc), "elapsed_s": round(time.time() - start, 3)}
+        return {
+            "cmd": cmd,
+            "returncode": 127,
+            "stdout": "",
+            "stderr": str(exc),
+            "elapsed_s": round(time.time() - start, 3),
+        }
     except subprocess.TimeoutExpired as exc:
         return {
             "cmd": cmd,
@@ -170,7 +187,7 @@ def _latency_percentiles_from_metric(metric: Any) -> dict[str, float] | None:
     for p in (0, 1, 10, 25, 50, 90, 99, 100):
         try:
             out[f"p{p}_us"] = float(metric.get_latency_percentile(p))
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - SDK metrics vary by release.
             pass
     return out or None
 
@@ -190,7 +207,9 @@ def _latency_percentiles(bench_func: Any) -> dict[str, Any] | None:
         for name in ("nc_latency", "latency", "cc_latency"):
             raw = full_results.get(name)
             if isinstance(raw, dict):
-                out[name] = {f"p{k}_us": float(v) for k, v in raw.items() if v is not None}
+                out[name] = {
+                    f"p{k}_us": float(v) for k, v in raw.items() if v is not None
+                }
         for name in ("throughput", "inference_count", "input_type", "tensor_placement"):
             if name in full_results:
                 out[name] = full_results[name]
@@ -207,7 +226,7 @@ def _collect_versions() -> dict[str, Any]:
         try:
             mod = __import__(mod_name)
             versions[mod_name] = getattr(mod, "__version__", "unknown")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - optional package boundary.
             versions[mod_name] = f"unavailable: {exc}"
     for tool in ("neuron-ls", "neuron-explorer", "neuron-profile", "neuronx-cc"):
         versions[f"{tool}_path"] = shutil.which(tool)
@@ -217,10 +236,13 @@ def _collect_versions() -> dict[str, Any]:
         "stdout": neuron_ls["stdout"],
         "stderr": neuron_ls["stderr"],
     }
+    versions["compiler_fingerprint"] = collect_compiler_fingerprint(Path.cwd())
     return versions
 
 
-def _export_profile(bench_dir: Path, export: str, timeout_s: int) -> dict[str, Any] | None:
+def _export_profile(
+    bench_dir: Path, export: str, timeout_s: int
+) -> dict[str, Any] | None:
     if export == "none":
         return None
     neff = bench_dir / "file.neff"
@@ -284,7 +306,9 @@ def _export_profile(bench_dir: Path, export: str, timeout_s: int) -> dict[str, A
     res["output"] = str(output)
     if output.exists():
         if output.is_dir():
-            res["output_files"] = [str(p.relative_to(output)) for p in output.rglob("*") if p.is_file()]
+            res["output_files"] = [
+                str(p.relative_to(output)) for p in output.rglob("*") if p.is_file()
+            ]
         else:
             res["output_size_bytes"] = output.stat().st_size
     return res
@@ -294,7 +318,9 @@ def _instantiate(spec: dict[str, Any]):
     kind = spec["kind"]
     info = BENCHMARKS[kind]
     factory = info["factory"]
-    params = {k: v for k, v in spec.items() if k not in {"name", "kind", "modes", "mode"}}
+    params = {
+        k: v for k, v in spec.items() if k not in {"name", "kind", "modes", "mode"}
+    }
     if "dtype" in params:
         params["dtype_name"] = params.pop("dtype")
     mode = spec["mode"]
@@ -315,7 +341,22 @@ def _bench_id(spec: dict[str, Any]) -> str:
     name = spec.get("name", spec["kind"])
     mode = spec["mode"]
     parts = [name, mode]
-    for key in ("dtype", "p", "f", "x", "y", "m", "k", "n", "ring_length", "stride", "repeat", "programs", "placement", "dge_mode"):
+    for key in (
+        "dtype",
+        "p",
+        "f",
+        "x",
+        "y",
+        "m",
+        "k",
+        "n",
+        "ring_length",
+        "stride",
+        "repeat",
+        "programs",
+        "placement",
+        "dge_mode",
+    ):
         if key in spec:
             parts.append(f"{key}{spec[key]}")
     return "__".join(str(p).replace("/", "_") for p in parts)
@@ -330,16 +371,20 @@ def _work_metadata(spec: dict[str, Any]) -> dict[str, Any]:
         params["dtype_name"] = params.pop("dtype")
     try:
         return dict(work_fn(**params))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - benchmark work callbacks are plugins.
         return {"work_metadata_error": repr(exc)}
 
 
-def _make_inputs(spec: dict[str, Any], shapes: list[tuple[int, ...]]) -> list[np.ndarray]:
+def _make_inputs(
+    spec: dict[str, Any], shapes: list[tuple[int, ...]]
+) -> list[np.ndarray]:
     input_kind = BENCHMARKS[spec["kind"]].get("input", "default")
     if input_kind == "pointer_ring":
         return [make_pointer_ring(int(spec["ring_length"]), int(spec.get("stride", 1)))]
     dtype_name = spec.get("dtype", "float32")
-    return [make_input(tuple(shape), dtype_name, seed=i) for i, shape in enumerate(shapes)]
+    return [
+        make_input(tuple(shape), dtype_name, seed=i) for i, shape in enumerate(shapes)
+    ]
 
 
 LEGACY_MODE_ALIASES = {
@@ -351,7 +396,10 @@ LEGACY_MODE_ALIASES = {
     ("scalar_exp", "independent"): ("scalar_exp", "independent_stream"),
     ("tensor_matmul", "dependent"): ("tensor_matmul", "dependent_accumulate"),
     ("tensor_matmul", "independent"): ("tensor_matmul", "independent_stream"),
-    ("tensor_dma_overlap", "independent"): ("tensor_dma_overlap", "independent_overlap"),
+    ("tensor_dma_overlap", "independent"): (
+        "tensor_dma_overlap",
+        "independent_overlap",
+    ),
 }
 
 
@@ -360,7 +408,11 @@ def expand_config(config: dict[str, Any]) -> list[dict[str, Any]]:
     for spec in config.get("benchmarks", []):
         matrix = spec.get("matrix") or {}
         matrix_keys = list(matrix)
-        combinations = itertools.product(*(matrix[key] for key in matrix_keys)) if matrix_keys else [()]
+        combinations = (
+            itertools.product(*(matrix[key] for key in matrix_keys))
+            if matrix_keys
+            else [()]
+        )
         for combination in combinations:
             base = {key: value for key, value in spec.items() if key != "matrix"}
             base.update(dict(zip(matrix_keys, combination)))
@@ -378,7 +430,15 @@ def expand_config(config: dict[str, Any]) -> list[dict[str, Any]]:
     return expanded
 
 
-def run_one(spec: dict[str, Any], run_dir: Path, warmup: int, iters: int, profile_export: str, explorer_timeout_s: int, skip_existing: bool = False) -> dict[str, Any]:
+def run_one(
+    spec: dict[str, Any],
+    run_dir: Path,
+    warmup: int,
+    iters: int,
+    profile_export: str,
+    explorer_timeout_s: int,
+    skip_existing: bool = False,
+) -> dict[str, Any]:
     # The runner changes cwd below because nki.benchmark writes some artifacts
     # relative to it.  Resolve first so profile post-processing does not look
     # for ``<bench_dir>/<relative bench_dir>/file.neff`` afterwards.
@@ -426,7 +486,8 @@ def run_one(spec: dict[str, Any], run_dir: Path, warmup: int, iters: int, profil
             {
                 "status": "ok",
                 "elapsed_s": round(elapsed, 3),
-                "latency_percentiles": _latency_percentiles(invoked) or _latency_percentiles(bench),
+                "latency_percentiles": _latency_percentiles(invoked)
+                or _latency_percentiles(bench),
                 "grid": grid,
                 "input_shapes": [list(a.shape) for a in inputs],
                 "input_dtypes": [str(a.dtype) for a in inputs],
@@ -436,20 +497,26 @@ def run_one(spec: dict[str, Any], run_dir: Path, warmup: int, iters: int, profil
         )
         (bench_dir / "stdout.txt").write_text(stdout.getvalue(), encoding="utf-8")
         (bench_dir / "stderr.txt").write_text(stderr.getvalue(), encoding="utf-8")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - persist per-case SDK failures.
         row.update({"status": "error", "error": repr(exc)})
         try:
-            (bench_dir / "stdout.txt").write_text(locals().get("stdout", io.StringIO()).getvalue(), encoding="utf-8")
-            (bench_dir / "stderr.txt").write_text(locals().get("stderr", io.StringIO()).getvalue(), encoding="utf-8")
-        except Exception:
+            (bench_dir / "stdout.txt").write_text(
+                locals().get("stdout", io.StringIO()).getvalue(), encoding="utf-8"
+            )
+            (bench_dir / "stderr.txt").write_text(
+                locals().get("stderr", io.StringIO()).getvalue(), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001, S110 - preserve the original failure.
             pass
     else:
         # Profile export is a post-processing step: a profiler failure (e.g. a
         # parquet-export timeout) must not flip a successful kernel run to
         # "error", otherwise we would discard valid latency/artifact data.
         try:
-            row["profile_export"] = _export_profile(bench_dir, profile_export, explorer_timeout_s)
-        except Exception as exc:
+            row["profile_export"] = _export_profile(
+                bench_dir, profile_export, explorer_timeout_s
+            )
+        except Exception as exc:  # noqa: BLE001 - optional profiler boundary.
             row["profile_export"] = {"status": "error", "error": repr(exc)}
     finally:
         row["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -461,21 +528,34 @@ def run_one(spec: dict[str, Any], run_dir: Path, warmup: int, iters: int, profil
                 "compiler_artifacts": str(artifacts_dir),
             },
         }
-        (bench_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        (bench_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
         os.chdir(old_cwd)
     return row
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("microbench/inf2_nki/configs/quick.json"))
-    parser.add_argument("--output-root", type=Path, default=Path("microbench/inf2_nki/results"))
-    parser.add_argument("--run-id", default=None, help="Default: UTC timestamp plus config suite name")
+    parser.add_argument(
+        "--config", type=Path, default=Path("microbench/inf2_nki/configs/quick.json")
+    )
+    parser.add_argument(
+        "--output-root", type=Path, default=Path("microbench/inf2_nki/results")
+    )
+    parser.add_argument(
+        "--run-id", default=None, help="Default: UTC timestamp plus config suite name"
+    )
     parser.add_argument("--warmup", type=int, default=None)
     parser.add_argument("--iters", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--filter-kind", default=None)
-    parser.add_argument("--profile-export", choices=["none", "summary-json", "json", "parquet"], default="none")
+    parser.add_argument(
+        "--profile-export",
+        choices=["none", "summary-json", "json", "parquet"],
+        default="none",
+    )
     parser.add_argument("--explorer-timeout-s", type=int, default=180)
     parser.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args(argv)
@@ -492,7 +572,10 @@ def main(argv: list[str] | None = None) -> int:
 
     warmup = args.warmup if args.warmup is not None else int(config.get("warmup", 2))
     iters = args.iters if args.iters is not None else int(config.get("iters", 10))
-    run_id = args.run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}__{config.get('suite', 'inf2_nki')}"
+    run_id = (
+        args.run_id
+        or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}__{config.get('suite', 'inf2_nki')}"
+    )
     run_dir = args.output_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -506,14 +589,27 @@ def main(argv: list[str] | None = None) -> int:
         "versions": _collect_versions(),
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
-    (run_dir / "run_manifest.json").write_text(json.dumps(metadata, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True, default=str), encoding="utf-8"
+    )
 
     results_path = run_dir / "results.jsonl"
     ok = 0
     with results_path.open("a", encoding="utf-8") as f:
         for i, spec in enumerate(specs, start=1):
-            print(f"[{i}/{len(specs)}] {spec['kind']} mode={spec['mode']} spec={spec}", flush=True)
-            row = run_one(spec, run_dir, warmup, iters, args.profile_export, args.explorer_timeout_s, args.skip_existing)
+            print(
+                f"[{i}/{len(specs)}] {spec['kind']} mode={spec['mode']} spec={spec}",
+                flush=True,
+            )
+            row = run_one(
+                spec,
+                run_dir,
+                warmup,
+                iters,
+                args.profile_export,
+                args.explorer_timeout_s,
+                args.skip_existing,
+            )
             f.write(json.dumps(row, sort_keys=True, default=str) + "\n")
             f.flush()
             print(f"  -> {row['status']} {row.get('latency_percentiles')}", flush=True)
@@ -522,7 +618,9 @@ def main(argv: list[str] | None = None) -> int:
     metadata["finished_at"] = datetime.now(timezone.utc).isoformat()
     metadata["num_benchmarks"] = len(specs)
     metadata["num_ok"] = ok
-    (run_dir / "run_manifest.json").write_text(json.dumps(metadata, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True, default=str), encoding="utf-8"
+    )
     print(f"Wrote {results_path}")
     return 0 if ok == len(specs) else 1
 

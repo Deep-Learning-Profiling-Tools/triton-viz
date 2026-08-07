@@ -10,18 +10,26 @@ from pathlib import Path
 
 import numpy as np
 
-
 FIELDS = [
-    "engine", "dtype", "input_stream_count", "startup_ns",
-    "ns_per_free_elem", "instruction_count_min", "instruction_count_max",
-    "points", "source",
+    "engine",
+    "dtype",
+    "input_stream_count",
+    "startup_ns",
+    "ns_per_free_elem",
+    "instruction_count_min",
+    "instruction_count_max",
+    "points",
+    "run_ids",
+    "source",
 ]
 
 
-def fit_rows(path: Path) -> list[dict]:
+def fit_rows(path: Path, run_ids: set[str] | None = None) -> list[dict]:
     groups: dict[tuple[str, str, int], list[tuple[int, float, int]]] = defaultdict(list)
     with path.open(encoding="utf-8", newline="") as file:
         for row in csv.DictReader(file):
+            if run_ids is not None and row.get("run_id") not in run_ids:
+                continue
             kind = row.get("kind")
             engine = {"vector_add": "vector", "scalar_exp": "scalar"}.get(kind)
             if not engine or row.get("status") != "ok":
@@ -54,25 +62,40 @@ def fit_rows(path: Path) -> list[dict]:
             continue
         slope, intercept = np.polyfit(
             np.asarray([point[0] for point in points], dtype=float),
-            np.asarray([point[1] for point in points], dtype=float), 1,
+            np.asarray([point[1] for point in points], dtype=float),
+            1,
         )
         if not all(math.isfinite(value) and value >= 0 for value in (intercept, slope)):
             continue
-        output.append({
-            "engine": engine, "dtype": dtype, "input_stream_count": streams,
-            "startup_ns": intercept, "ns_per_free_elem": slope,
-            "instruction_count_min": min(counts), "instruction_count_max": max(counts),
-            "points": len(points), "source": str(path),
-        })
+        output.append(
+            {
+                "engine": engine,
+                "dtype": dtype,
+                "input_stream_count": streams,
+                "startup_ns": intercept,
+                "ns_per_free_elem": slope,
+                "instruction_count_min": min(counts),
+                "instruction_count_max": max(counts),
+                "points": len(points),
+                "run_ids": ";".join(sorted(run_ids)) if run_ids else "all",
+                "source": str(path),
+            }
+        )
     return output
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv", type=Path)
+    parser.add_argument(
+        "--run-id",
+        action="append",
+        default=None,
+        help="Calibration run ID to include; repeat for multiple intentional inputs.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    rows = fit_rows(args.csv)
+    rows = fit_rows(args.csv, set(args.run_id or ["engine_lowering_sweep"]))
     if not rows:
         raise SystemExit("No stable instruction-count compute groups found")
     args.output.parent.mkdir(parents=True, exist_ok=True)

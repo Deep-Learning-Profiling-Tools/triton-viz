@@ -1,0 +1,30 @@
+{
+  "suite": "inf2_nki_dma_directional_dtype_canary",
+  "description": "Repeat-one directional DMA points for dtype and setup validation without operator holdout fitting.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "dma_partition_surface",
+      "kind": "dma_bandwidth",
+      "repeat": 1,
+      "modes": ["hbm_to_sbuf_stream"],
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "p": [1, 128],
+        "f": [64, 128, 256, 512, 1024, 2048, 4096]
+      }
+    },
+    {
+      "name": "dma_write_partition_surface",
+      "kind": "dma_bandwidth",
+      "repeat": 1,
+      "modes": ["sbuf_to_hbm_stream"],
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "p": [1, 128],
+        "f": [64, 128, 256, 512, 1024, 2048, 4096]
+      }
+    }
+  ]
+}

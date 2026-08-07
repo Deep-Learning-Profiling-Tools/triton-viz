@@ -10,7 +10,6 @@ from typing import Any
 
 from microbench.inf2_nki.profile_parser.fit_latency import fit_results
 
-
 IDENTITY_COLUMNS = [
     "row_type",
     "run_id",
@@ -39,7 +38,10 @@ def _run_id(path: Path, root: Path) -> str:
         manifest = parent / "run_manifest.json"
         if manifest.is_file():
             try:
-                return str(json.loads(manifest.read_text(encoding="utf-8")).get("run_id") or parent.name)
+                return str(
+                    json.loads(manifest.read_text(encoding="utf-8")).get("run_id")
+                    or parent.name
+                )
             except (OSError, json.JSONDecodeError):
                 return parent.name
         if parent == root:
@@ -74,6 +76,7 @@ def _add_derived(row: dict[str, Any]) -> None:
     read = _number(row, "profile.hbm_read_bytes")
     write = _number(row, "profile.hbm_write_bytes")
     dma_time = _number(row, "profile.dma_active_time")
+    dynamic_dma_time = _number(row, "profile.software_dynamic_dma_active_time")
     exec_time = _number(row, "profile.total_exec_time")
     if read is not None and write is not None:
         total = read + write
@@ -86,10 +89,20 @@ def _add_derived(row: dict[str, Any]) -> None:
             engines = min(16.0, partitions) if partitions and partitions > 0 else None
             if engines and engines > 0:
                 row["derived.dma_engines_active"] = int(engines)
-                row["derived.partitions_per_dma_engine"] = int((partitions + engines - 1) // engines)
+                row["derived.partitions_per_dma_engine"] = int(
+                    (partitions + engines - 1) // engines
+                )
                 peak = engines * 17.0
                 row["derived.dma_engine_peak_gbps"] = peak
-                row["derived.read_dma_engine_utilization"] = (read / dma_time / 1e9) / peak
+                row["derived.read_dma_engine_utilization"] = (
+                    read / dma_time / 1e9
+                ) / peak
+        if dynamic_dma_time and dynamic_dma_time > 0:
+            row["derived.hbm_gbps_dynamic_dma_active"] = total / dynamic_dma_time / 1e9
+            row["derived.read_gbps_dynamic_dma_active"] = read / dynamic_dma_time / 1e9
+            row["derived.write_gbps_dynamic_dma_active"] = (
+                write / dynamic_dma_time / 1e9
+            )
         if exec_time and exec_time > 0:
             row["derived.hbm_gbps_total_exec"] = total / exec_time / 1e9
     for direction in ("read", "write"):
@@ -113,7 +126,9 @@ def _add_derived(row: dict[str, Any]) -> None:
         row["derived.static_dma_gbps_active"] = static_bytes / static_time / 1e9
     elements = _number(row, "work.elements")
     engine = {"scalar_exp": "scalar", "vector_add": "vector"}.get(str(row.get("kind")))
-    engine_time = _number(row, f"profile.{engine}_engine_active_time") if engine else None
+    engine_time = (
+        _number(row, f"profile.{engine}_engine_active_time") if engine else None
+    )
     if elements is not None and engine_time and engine_time > 0:
         row[f"derived.{engine}_gelem_s_active"] = elements / engine_time / 1e9
 
@@ -148,8 +163,11 @@ def collect_rows(root: Path) -> list[dict[str, Any]]:
         profile_export = manifest.get("profile_export") or {}
         _flatten(
             "profile_export",
-            {key: profile_export[key] for key in ("returncode", "elapsed_s", "output", "output_size_bytes")
-             if key in profile_export},
+            {
+                key: profile_export[key]
+                for key in ("returncode", "elapsed_s", "output", "output_size_bytes")
+                if key in profile_export
+            },
             row,
         )
         _flatten("profile", _profile_values(path.parent / "explorer_summary.json"), row)
@@ -162,13 +180,19 @@ def collect_rows(root: Path) -> list[dict[str, Any]]:
         for index, fit in enumerate(fit_data["fits"]):
             group = fit.get("group") or {}
             row = {
-                "row_type": "latency_fit", "run_id": run_id,
+                "row_type": "latency_fit",
+                "run_id": run_id,
                 "id": f"{run_id}__latency_fit_{index}",
                 "status": "error" if "error" in fit else "ok",
-                "kind": group.get("kind", ""), "mode": group.get("mode", ""),
-                "microbench_class": "latency", "error": fit.get("error", ""),
-                "fit.source": fit_data["source"], "fit.percentile": fit_data["percentile"],
-                "fit.slope_ns": float(fit["slope_us"]) * 1000 if "slope_us" in fit else "",
+                "kind": group.get("kind", ""),
+                "mode": group.get("mode", ""),
+                "microbench_class": "latency",
+                "error": fit.get("error", ""),
+                "fit.source": fit_data["source"],
+                "fit.percentile": fit_data["percentile"],
+                "fit.slope_ns": float(fit["slope_us"]) * 1000
+                if "slope_us" in fit
+                else "",
             }
             _flatten("spec", group, row)
             for key in ("points", "intercept_us", "r2", "x", "y_us"):
@@ -183,7 +207,9 @@ def export_csv(root: Path, output: Path) -> list[dict[str, Any]]:
     extra = sorted({key for row in rows for key in row} - set(IDENTITY_COLUMNS))
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=IDENTITY_COLUMNS + extra, extrasaction="ignore")
+        writer = csv.DictWriter(
+            file, fieldnames=IDENTITY_COLUMNS + extra, extrasaction="ignore"
+        )
         writer.writeheader()
         writer.writerows(rows)
     return rows
@@ -191,7 +217,9 @@ def export_csv(root: Path, output: Path) -> list[dict[str, Any]]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", type=Path, help="Run or suite directory to scan recursively")
+    parser.add_argument(
+        "root", type=Path, help="Run or suite directory to scan recursively"
+    )
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args(argv)
     output = args.output or args.root / "all_results.csv"

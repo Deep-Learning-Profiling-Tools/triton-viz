@@ -170,6 +170,15 @@ benchmarks/*.json
 microbench/inf2_nki/results/*
 !microbench/inf2_nki/results/.gitkeep
 
+# Local profiler/compiler artifacts (paper tables are exported as CSV/JSON).
+*.neff
+*.ntff
+compiler_artifacts/
+explorer_parquet/
+
+# Visualizer-local DuckDB state; never part of a reproducible experiment.
+tables/
+
 # Auto-generated version file
 triton_viz/version.py
 .subagents/

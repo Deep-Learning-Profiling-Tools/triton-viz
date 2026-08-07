@@ -137,6 +137,12 @@ python -m microbench.inf2_nki.profile_parser.fit_compute_calibration \
   --output /tmp/compute_calibration_v2.csv
 ```
 
+When the input is a combined canonical `all_results.csv`, the fitter selects
+`run_id=engine_lowering_sweep` by default so same-named diagnostic kernels from
+other suites cannot contaminate Level-B. Use repeated `--run-id` only when
+combining calibration runs intentionally; selected run IDs are written into the
+output CSV provenance.
+
 The fitted Level-B table models the cost of one target-engine instruction as a
 startup term plus a free-dimension slope, keyed by engine, dtype, and input
 stream count. Do not refit this table on application operators.

@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
-
-from triton_viz.tools.nki_region_ir import build_region_ir
 
 from triton_viz.core.data import (
     BinaryOp,
@@ -29,6 +28,7 @@ from triton_viz.core.data import (
     Store,
     Transfer,
 )
+from triton_viz.tools.nki_region_ir import build_region_ir
 
 
 def _jsonable(value: Any) -> Any:
@@ -174,8 +174,12 @@ def _annotate_fusion_signature(events: list[dict[str, Any]]) -> None:
             "grid_idx": grid_idx,
             "ordinal": group_id,
             "signature": signature,
-            "shapes": [event.get("output_shape") or event.get("input_shape") for event in group],
-            "dtypes": [event.get("output_dtype") or event.get("dtype") for event in group],
+            "shapes": [
+                event.get("output_shape") or event.get("input_shape") for event in group
+            ],
+            "dtypes": [
+                event.get("output_dtype") or event.get("dtype") for event in group
+            ],
         }
         digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -190,7 +194,7 @@ def _annotate_fusion_signature(events: list[dict[str, Any]]) -> None:
         # Only the adjacent memory window belongs to this region. Passing the
         # whole kernel confuses a later 1-partition weight load with an earlier
         # reduction region's layout.
-        region_ir = build_region_ir(group, events[left + 1:index] + events[end:right])
+        region_ir = build_region_ir(group, events[left + 1 : index] + events[end:right])
         for group_index, event in enumerate(group):
             event.update(
                 {
@@ -211,22 +215,33 @@ def _annotate_fusion_signature(events: list[dict[str, Any]]) -> None:
     # the local grammar composable, but expose immediate region context so a
     # measured two-pass control can model that interaction without an
     # operator/full-signature key.
-    leaders = [event for event in events if event.get("fusion_group_index") == 0 and event.get("region_ir")]
-    from triton_viz.tools.nki_region_ir import structural_family
+    leaders = [
+        event
+        for event in events
+        if event.get("fusion_group_index") == 0 and event.get("region_ir")
+    ]
+    from triton_viz.tools.nki_region_ir import (
+        region_ir_structural_key,
+        structural_family,
+    )
+
     for ordinal in range(1, len(leaders)):
         if leaders[ordinal - 1]["region_ir"].get("has_mask_or_tail"):
             leaders[ordinal]["region_ir"]["has_mask_or_tail"] = True
     bases = [structural_family(event["region_ir"]) for event in leaders]
     for ordinal, leader in enumerate(leaders):
         ir = leader["region_ir"]
-        if ordinal: ir["previous_family"] = bases[ordinal - 1]
-        if ordinal + 1 < len(bases): ir["next_family"] = bases[ordinal + 1]
-        canonical = json.dumps({k: v for k, v in ir.items() if k != "structural_key"}, sort_keys=True, separators=(",", ":"))
-        ir["structural_key"] = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        if ordinal:
+            ir["previous_family"] = bases[ordinal - 1]
+        if ordinal + 1 < len(bases):
+            ir["next_family"] = bases[ordinal + 1]
+        ir["structural_key"] = region_ir_structural_key(ir)
         group = leader["fusion_group"]
         for event in events:
             if event.get("fusion_group") == group:
-                event["region_ir"] = ir; event["region_ir_key"] = ir["structural_key"]
+                event["region_ir"] = ir
+                event["region_ir_key"] = ir["structural_key"]
+
 
 def _annotate_static_dma_groups(events: list[dict[str, Any]]) -> None:
     """Describe consecutive scalar SBUF scatter groups for calibrated costing.
@@ -271,7 +286,11 @@ def _annotate_static_dma_groups(events: list[dict[str, Any]]) -> None:
         itemsize = int(event.get("free_bytes_per_partition") or 0)
         dst_offsets = [member.get("dst_offset_first") for member in group]
         x = y = 0
-        if itemsize > 0 and copies > 0 and all(offset is not None for offset in dst_offsets):
+        if (
+            itemsize > 0
+            and copies > 0
+            and all(offset is not None for offset in dst_offsets)
+        ):
             normalized = [int(offset) // itemsize for offset in dst_offsets]
             if copies == 1:
                 x = y = 1
@@ -303,7 +322,9 @@ def _annotate_static_dma_groups(events: list[dict[str, Any]]) -> None:
         index = end
 
 
-def record_to_event(record: Any, sequence: int, grid_idx: tuple[int, ...] | None) -> dict[str, Any]:
+def record_to_event(
+    record: Any, sequence: int, grid_idx: tuple[int, ...] | None
+) -> dict[str, Any]:
     """Convert one Triton-Viz record into a compact JSON event dictionary."""
     base: dict[str, Any] = {
         "seq": int(sequence),
@@ -405,7 +426,9 @@ def record_to_event(record: Any, sequence: int, grid_idx: tuple[int, ...] | None
     if isinstance(record, NkiCompute):
         out_shape = list(record.output_shapes[0]) if record.output_shapes else []
         in_shape = list(record.input_shapes[0]) if record.input_shapes else []
-        free_dim = int(out_shape[-1]) if out_shape else (int(in_shape[-1]) if in_shape else 0)
+        free_dim = (
+            int(out_shape[-1]) if out_shape else (int(in_shape[-1]) if in_shape else 0)
+        )
         elements = int(np.prod(out_shape, dtype=np.int64)) if out_shape else 0
         return {
             **base,
@@ -485,7 +508,9 @@ def write_jsonl(records: Iterable[Any], path: str | Path) -> list[dict[str, Any]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         for event in events:
-            f.write(json.dumps(_jsonable(event), sort_keys=True, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(_jsonable(event), sort_keys=True, ensure_ascii=False) + "\n"
+            )
     return events
 
 
@@ -503,7 +528,9 @@ def summarize_events(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
         summary["op_counts"][op] = summary["op_counts"].get(op, 0) + 1
         if "bytes" in event:
             key = f"{event.get('mem_src', '?')}->{event.get('mem_dst', '?')}"
-            summary["bytes_by_edge"][key] = summary["bytes_by_edge"].get(key, 0) + int(event["bytes"])
+            summary["bytes_by_edge"][key] = summary["bytes_by_edge"].get(key, 0) + int(
+                event["bytes"]
+            )
         if event.get("flops") is not None:
             summary["flops"] += int(event["flops"])
     return summary

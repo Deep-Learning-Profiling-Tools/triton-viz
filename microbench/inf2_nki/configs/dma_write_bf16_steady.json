@@ -1,0 +1,19 @@
+{
+  "suite": "inf2_nki_dma_write_bf16_steady",
+  "description": "BF16 steady-state write slope; independent DMA calibration for dtype-specific validation.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "dma_write_partition_surface",
+      "kind": "dma_bandwidth",
+      "dtype": "bfloat16",
+      "repeat": 16,
+      "modes": ["sbuf_to_hbm_stream"],
+      "matrix": {
+        "p": [1, 128],
+        "f": [64, 128, 256, 512, 1024, 2048, 4096]
+      }
+    }
+  ]
+}

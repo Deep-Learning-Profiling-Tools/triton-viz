@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import ml_dtypes
 import numpy as np
 
 DTYPE_TO_NUMPY = {
     "float32": np.float32,
     "float16": np.float16,
-    "bfloat16": np.dtype("bfloat16"),
+    "bfloat16": np.dtype(ml_dtypes.bfloat16),
     "int8": np.int8,
     "int32": np.int32,
     "uint32": np.uint32,
