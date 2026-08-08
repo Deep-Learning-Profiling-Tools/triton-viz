@@ -44,6 +44,7 @@ from triton_viz.tools.nki_cost_model import (
     LoweringExpansionCalibration,
     NcLatencyCalibration,
     StructuralStaticDmaCalibration,
+    StridedDmaCalibration,
     StructuredControlCalibration,
     eliminate_redundant_hbm_loads,
     simulate,
@@ -426,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dma-affine-write-csv", type=Path, default=None)
     parser.add_argument("--kernel-overhead-us", type=float, default=0.0)
     parser.add_argument("--nc-latency-csv", type=Path, default=None)
+    parser.add_argument("--strided-dma-csv", type=Path, default=None)
     parser.add_argument("--dma-queue-count", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
@@ -515,6 +517,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.nc_latency_csv
         else None
     )
+    strided_dma = (
+        StridedDmaCalibration.from_csv(args.strided_dma_csv)
+        if args.strided_dma_csv
+        else None
+    )
     if bool(args.dma_affine_read_csv) != bool(args.dma_affine_write_csv):
         parser.error("--dma-affine-read-csv and --dma-affine-write-csv are paired")
     dma_affine = (
@@ -534,6 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         structural_static_dma=structural_static_dma,
         dma_affine_calibration=dma_affine,
         nc_latency_calibration=nc_latency,
+        strided_dma_calibration=strided_dma,
         kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),
         dma_queue_count=max(1, args.dma_queue_count),
     )

@@ -25,6 +25,8 @@ KINDS = [
     "elementwise_maximum",
     "elementwise_multiply",
     "elementwise_sigmoid",
+    "masked_log_reduction",
+    "softmax_reduction",
     "elementwise_multiply2",
     "broadcast_multiply2",
     "broadcast_affine",
@@ -289,6 +291,16 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
             tokens, arities = ["multiply"], [1]
         elif kind == "elementwise_sigmoid":
             tokens, arities = ["sigmoid"], [1]
+        elif kind == "masked_log_reduction":
+            tokens, arities = (
+                ["greater", "log", "where", "subtract", "multiply", "reduce_sum"],
+                [1, 1, 3, 2, 2, 1],
+            )
+        elif kind == "softmax_reduction":
+            tokens, arities = (
+                ["max", "subtract", "exp", "reduce_sum", "divide", "add"],
+                [1, 2, 1, 1, 2, 1],
+            )
         elif kind == "elementwise_multiply2":
             tokens, arities = ["multiply", "multiply"], [2, 2]
         elif kind == "broadcast_multiply2":

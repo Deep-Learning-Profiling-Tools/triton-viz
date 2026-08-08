@@ -23,6 +23,8 @@ from neuronxcc import nki
 from microbench.inf2_nki.common.inputs import make_input, make_pointer_ring
 from microbench.inf2_nki.tests.bandwidth_dma.kernels import (
     bulk_copy_factory,
+    strided_store_pair_factory,
+    strided_store_pair_work_bytes,
     transpose_copy_factory,
     transpose_pipeline_factory,
     transpose_pipeline_work_bytes,
@@ -77,6 +79,12 @@ BENCHMARKS = {
         "folder": "bandwidth_dma",
         "factory": bulk_copy_factory,
         "work": dma_work_bytes,
+        "input": "default",
+    },
+    "dma_strided_store": {
+        "folder": "bandwidth_dma",
+        "factory": strided_store_pair_factory,
+        "work": strided_store_pair_work_bytes,
         "input": "default",
     },
     # Backward-compatible alias for the initial simple suite name.

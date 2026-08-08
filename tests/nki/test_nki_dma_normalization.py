@@ -1,15 +1,18 @@
 import csv
 
+import numpy as np
 import pytest
 
 from triton_viz.tools.nki_cost_model import (
     CostModel,
     DmaAffineCalibration,
     NcLatencyCalibration,
+    StridedDmaCalibration,
     eliminate_redundant_hbm_loads,
     simulate,
 )
 from triton_viz.tools.nki_region_ir import structural_calibration_key
+from triton_viz.tools.nki_trace_dump import _offset_geometry
 
 
 def _load(seq, *, grid=(0,), storage=10, span=(0, 1024), shape=(128, 2)):
@@ -156,3 +159,64 @@ def test_nc_latency_calibration_adds_dispatch_residual_to_engine_busy():
     assert result.predicted_latency_ns == pytest.approx(
         result.engine_busy_ns["vector"] + 7000.0
     )
+
+
+def test_offset_geometry_uses_active_mask_and_detects_stride_two():
+    offsets = np.array([[0, 8, 16, 24], [64, 72, 80, 88]])
+    masks = np.array([[True, True, False, False], [True, True, False, False]])
+    geometry = _offset_geometry(offsets, masks, nbytes=16)
+    assert geometry["dma_pattern"] == "strided"
+    assert geometry["item_bytes"] == 4
+    assert geometry["free_stride_items"] == 2
+    assert geometry["active_access_count"] == 4
+
+
+def test_dma_resource_tokens_serialize_full_width_but_overlap_narrow_transfers():
+    def transfers(partitions):
+        return [
+            {
+                "seq": index,
+                "op": "load",
+                "engine": "dma_or_vector_load",
+                "partition_count": partitions,
+                "bytes": 100,
+                "src_ptr": index,
+            }
+            for index in (1, 2)
+        ]
+
+    model = CostModel(
+        dma_startup_ns=0,
+        dma_bytes_per_ns=1,
+        dma_resource_count=16,
+    )
+    full = simulate(transfers(128), model)
+    narrow = simulate(transfers(1), model)
+    assert full.predicted_latency_ns == pytest.approx(200)
+    assert narrow.predicted_latency_ns == pytest.approx(100)
+    assert full.engine_busy_ns["dma"] == narrow.engine_busy_ns["dma"] == 200
+
+
+def test_strided_dma_calibration_overrides_packet_train_and_completion():
+    calibration = StridedDmaCalibration(
+        {("float32", 2, 128): [(512, 600_000.0, 90_000.0)]}
+    )
+    events = [
+        {
+            "seq": index,
+            "op": "store",
+            "engine": "dma_or_vector_store",
+            "mem_src": "SBUF",
+            "mem_dst": "HBM",
+            "bytes": 128 * 512 * 4,
+            "partition_count": 128,
+            "active_access_count": 128 * 512,
+            "free_stride_items": 2,
+            "item_bytes": 4,
+            "dma_pattern": "strided",
+        }
+        for index in (1, 2)
+    ]
+    result = simulate(events, CostModel(strided_dma_calibration=calibration))
+    assert result.engine_busy_ns["dma"] == 600_000.0
+    assert result.predicted_latency_ns == 690_000.0

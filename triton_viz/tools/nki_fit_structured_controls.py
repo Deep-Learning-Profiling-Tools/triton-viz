@@ -85,7 +85,7 @@ def collect(
         for group, members in groups.items():
             region = members[0]["region_ir"]
             match = match_structural_family(region)
-            free_dim = int(region["free_dim"])
+            free_dim = int(region.get("logical_free_dim") or region["free_dim"])
             for engine, streams in (("vector", 2), ("scalar", 1)):
                 engine_audit = audit["engines"][engine]
                 active_ns = float(engine_audit["regions"].get(str(group), 0))

@@ -14,6 +14,7 @@ from triton_viz.tools.nki_cost_model import (
     DmaAffineCalibration,
     NcLatencyCalibration,
     StructuralStaticDmaCalibration,
+    StridedDmaCalibration,
     StructuredControlCalibration,
     eliminate_redundant_hbm_loads,
     simulate,
@@ -33,6 +34,12 @@ FIELDS = [
     "predicted_vector_us",
     "predicted_scalar_us",
     "predicted_total_us",
+    "predicted_compute_only_us",
+    "predicted_compute_dma_us",
+    "predicted_resource_overlap_us",
+    "compute_only_error_pct",
+    "compute_dma_error_pct",
+    "resource_overlap_error_pct",
     "hardware_nc_p50_us",
     "nc_error_pct",
     "hardware_total_dma_us",
@@ -49,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--structured-control-csv", type=Path, required=True)
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
     parser.add_argument("--nc-latency-csv", type=Path)
+    parser.add_argument("--strided-dma-csv", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     source_rows = list(csv.DictReader((args.root / "operator_results.csv").open()))
@@ -77,6 +85,11 @@ def main(argv: list[str] | None = None) -> int:
                     if args.nc_latency_csv
                     else None
                 ),
+                strided_dma_calibration=(
+                    StridedDmaCalibration.from_csv(args.strided_dma_csv)
+                    if args.strided_dma_csv
+                    else None
+                ),
             )
         case_name = (
             f"{source['op']}__r{source['rows']}__c{source['cols']}__{source['dtype']}"
@@ -91,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         hardware_us = float(source["hardware_dma_active_us"])
         predicted_total_us = result.predicted_latency_ns / 1000.0
         hardware_nc_us = float(source["hardware_nc_p50_us"])
+        components = result.components_ns
         out.append(
             {
                 "case": case_name,
@@ -108,6 +122,21 @@ def main(argv: list[str] | None = None) -> int:
                 "predicted_scalar_us": result.engine_busy_ns.get("scalar", 0.0)
                 / 1000.0,
                 "predicted_total_us": predicted_total_us,
+                "predicted_compute_only_us": components["compute_only"] / 1000.0,
+                "predicted_compute_dma_us": components["compute_plus_dma"] / 1000.0,
+                "predicted_resource_overlap_us": components["resource_overlap_makespan"]
+                / 1000.0,
+                "compute_only_error_pct": (components["compute_only"] / 1000.0 - hardware_nc_us)
+                / hardware_nc_us
+                * 100,
+                "compute_dma_error_pct": (components["compute_plus_dma"] / 1000.0 - hardware_nc_us)
+                / hardware_nc_us
+                * 100,
+                "resource_overlap_error_pct": (
+                    components["resource_overlap_makespan"] / 1000.0 - hardware_nc_us
+                )
+                / hardware_nc_us
+                * 100,
                 "hardware_nc_p50_us": hardware_nc_us,
                 "nc_error_pct": (predicted_total_us - hardware_nc_us)
                 / hardware_nc_us

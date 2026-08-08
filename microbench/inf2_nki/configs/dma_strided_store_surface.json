@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_nki_dma_strided_store_surface",
+  "description": "Independent paired stride-2 SBUF-to-HBM store controls.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "dma_strided_store_surface",
+      "kind": "dma_strided_store",
+      "dtype": "float32",
+      "stride": 2,
+      "matrix": {
+        "p": [16, 128],
+        "f": [128, 512, 2048, 4096]
+      }
+    }
+  ]
+}

@@ -203,8 +203,18 @@ def test_parallel_dma_queues_overlap_independent_transfers():
         {"seq": 1, "op": "transfer", "engine": "dma", "bytes": 10,
          "src_ptr": 2, "dst_ptr": 102},
     ]
-    serial = CostModel(dma_startup_ns=0, dma_bytes_per_ns=1, dma_queue_count=1)
-    parallel = CostModel(dma_startup_ns=0, dma_bytes_per_ns=1, dma_queue_count=2)
+    serial = CostModel(
+        dma_startup_ns=0,
+        dma_bytes_per_ns=1,
+        dma_queue_count=1,
+        dma_resource_count=0,
+    )
+    parallel = CostModel(
+        dma_startup_ns=0,
+        dma_bytes_per_ns=1,
+        dma_queue_count=2,
+        dma_resource_count=0,
+    )
     serial_res = simulate(events, serial)
     parallel_res = simulate(events, parallel)
     # Serial: 10 + 10 = 20. Parallel: both start at 0, finish at 10.
@@ -234,6 +244,7 @@ def test_binary_event_waits_for_both_inputs_and_store_waits_for_output():
     model = CostModel(
         dma_startup_ns=0,
         dma_bytes_per_ns=1,
+        dma_resource_count=0,
         vector_startup_ns=0,
         vector_elements_per_ns=1,
     )

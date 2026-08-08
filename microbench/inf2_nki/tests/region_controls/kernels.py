@@ -61,6 +61,36 @@ def elementwise_sigmoid_kernel(x, y):
 
 
 @nki.jit
+def masked_log_reduction_kernel(x, y):
+    """Masked log/where/arithmetic/reduction compiler control."""
+    p, f = x.shape
+    out = nl.ndarray((p, 1), dtype=nl.float32, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(f)[None, :]
+    lhs = nl.load(x[pi, fi], dtype=nl.float32)
+    rhs = nl.load(y[pi, fi], dtype=nl.float32)
+    zero = nl.zeros(rhs.shape, dtype=nl.float32, buffer=nl.sbuf)
+    safe_log = nl.where(nl.greater(rhs, 0.0), nl.log(rhs), zero)
+    term = nl.multiply(rhs, nl.subtract(safe_log, lhs))
+    nl.store(out[pi, nl.arange(1)[None, :]], value=nl.sum(term, axis=1, keepdims=True))
+    return out
+
+
+@nki.jit
+def softmax_reduction_kernel(x, y):
+    """Two-reduction transcendental normalization control."""
+    p, f = x.shape
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(f)[None, :]
+    value = nl.load(x[pi, fi], dtype=nl.float32)
+    maximum = nl.max(value, axis=1, keepdims=True)
+    exponent = nl.exp(nl.subtract(value, maximum))
+    total = nl.sum(exponent, axis=1, keepdims=True)
+    normalized = nl.divide(exponent, total)
+    nl.store(out[pi, fi], value=nl.add(normalized, 0.0, dtype=x.dtype))
+    return out
+
+
+@nki.jit
 def elementwise_multiply2_kernel(x, y):
     """Two dependent multiplies: the rmsnorm epilogue's minimal grammar."""
     p, f = x.shape
@@ -316,6 +346,8 @@ KERNELS = {
     "elementwise_maximum": elementwise_maximum_kernel,
     "elementwise_multiply": elementwise_multiply_kernel,
     "elementwise_sigmoid": elementwise_sigmoid_kernel,
+    "masked_log_reduction": masked_log_reduction_kernel,
+    "softmax_reduction": softmax_reduction_kernel,
     "elementwise_multiply2": elementwise_multiply2_kernel,
     "broadcast_multiply2": broadcast_multiply2_kernel,
     "broadcast_affine": broadcast_affine_kernel,

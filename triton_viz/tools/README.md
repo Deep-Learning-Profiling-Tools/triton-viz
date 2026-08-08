@@ -68,6 +68,10 @@ trace + parquet
   traces and hardware counters without recompilation or holdout fitting.
 - `nki_fit_nc_latency.py`: fits kernel-level dispatch/sequencer residuals from
   independent structural controls for NC-p50 prediction.
+- `nki_fit_strided_dma.py`: fits compiler-generated strided/Static-DMA packet
+  trains and completion residuals from independent stride controls.
+- `nki_cost_model_pipeline.py`: three-stage `collect`, `fit`, and `evaluate`
+  entry point for calibration, Tilebench holdouts, MAPE and ablation reports.
 - `nki_region_control_experiments.py`: compiles and profiles minimal lowering
   controls, exports parquet, and invokes source mapping.
 - `nki_operator_experiments.py`: traces and profiles the same external

@@ -743,6 +743,50 @@ class NcLatencyCalibration:
         return min(rows, key=lambda row: abs(math.log2(max(1, row[0]) / free)))[1]
 
 
+@dataclass
+class StridedDmaCalibration:
+    """Kernel-level DMA and completion calibration for affine strided stores."""
+
+    points: dict[tuple[str, int, int], list[tuple[int, float, float]]]
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> StridedDmaCalibration:
+        points: dict[tuple[str, int, int], list[tuple[int, float, float]]] = {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                key = (
+                    ComputeCalibration._norm_dtype(row["dtype"]),
+                    int(row["stride_items"]),
+                    int(row["partition_count"]),
+                )
+                points.setdefault(key, []).append(
+                    (
+                        int(row["free_dim"]),
+                        float(row["dma_active_ns"]),
+                        float(row["completion_residual_ns"]),
+                    )
+                )
+        return cls(points)
+
+    def predict(self, events: Iterable[dict[str, Any]]) -> tuple[float, float] | None:
+        stores = [event for event in events if event.get("dma_pattern") == "strided"]
+        if not stores:
+            return None
+        first = stores[0]
+        stride = int(first.get("free_stride_items") or 0)
+        partitions = int(first.get("partition_count") or 1)
+        active = sum(int(event.get("active_access_count") or 0) for event in stores)
+        free = max(1, active // max(1, partitions * len(stores)))
+        dtype = ComputeCalibration._norm_dtype(
+            first.get("dtype") or ("float16" if int(first.get("item_bytes") or 4) == 2 else "float32")
+        )
+        rows = self.points.get((dtype, stride, partitions), [])
+        if not rows:
+            return None
+        nearest = min(rows, key=lambda row: abs(math.log2(max(1, row[0]) / free)))
+        return nearest[1], nearest[2]
+
+
 def _canonical_engine(raw_engine: str, op: str) -> str:
     """Map a coarse dumper engine tag onto a concrete NeuronCore engine.
 
@@ -861,6 +905,7 @@ class CostModel:
     compositional_lowering: CompositionalLoweringCalibration | None = None
     structured_control_lowering: StructuredControlCalibration | None = None
     nc_latency_calibration: NcLatencyCalibration | None = None
+    strided_dma_calibration: StridedDmaCalibration | None = None
 
     # On-chip copy (VectorE/ScalarE moving PSUM<->SBUF): cheaper per byte.
     onchip_startup_ns: float = 100.0
@@ -912,6 +957,15 @@ class CostModel:
     # transfers still serialize through the RAW/WAR/WAW hazard logic. Compute
     # engines stay single-slot. Default 1 preserves prior behavior/tests.
     dma_queue_count: int = 1
+    # NCv2 exposes 16 DMA engines. A transfer consumes min(partitions, 16)
+    # tokens for its lifetime; only disjoint remaining tokens may issue other
+    # transfers concurrently. ``dma_queue_count`` remains a compatibility
+    # fallback when this is set to zero.
+    dma_resource_count: int = 16
+    # Aggregate HBM cap shared by all DMA engines. The analytical path applies
+    # it to per-transfer bandwidth; calibrated aggregate slopes already include
+    # the cap and are therefore not rescaled.
+    hbm_bandwidth_bytes_per_ns: float = 272.0
 
     def _dma_cost_ns(self, event: dict[str, Any], nbytes: int) -> float:
         if self.dma_affine_calibration is not None:
@@ -945,9 +999,15 @@ class CostModel:
             # Inf2 parquet shows contiguous partitions striped by engine index:
             # p<=16 activates p engines; p=128 gives eight partitions/engine.
             engines = min(self.dma_max_engines, partitions)
-            bandwidth = engines * self.dma_engine_bytes_per_ns
+            bandwidth = min(
+                engines * self.dma_engine_bytes_per_ns,
+                self.hbm_bandwidth_bytes_per_ns,
+            )
         else:
-            bandwidth = self.dma_max_engines * self.dma_engine_bytes_per_ns
+            bandwidth = min(
+                self.dma_max_engines * self.dma_engine_bytes_per_ns,
+                self.hbm_bandwidth_bytes_per_ns,
+            )
         return self.dma_startup_ns + nbytes / bandwidth
 
     def cost_ns(self, event: dict[str, Any]) -> float:
@@ -1026,11 +1086,13 @@ class SimulationResult:
     predicted_latency_ns: float
     timeline: dict[str, list[TimelineEntry]] = field(default_factory=dict)
     engine_busy_ns: dict[str, float] = field(default_factory=dict)
+    components_ns: dict[str, float] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "predicted_latency_ns": round(self.predicted_latency_ns, 3),
             "engine_busy_ns": {k: round(v, 3) for k, v in self.engine_busy_ns.items()},
+            "components_ns": {k: round(v, 3) for k, v in self.components_ns.items()},
             "engine_utilization": {
                 k: (
                     round(v / self.predicted_latency_ns, 4)
@@ -1363,9 +1425,15 @@ def simulate(
         if model.structural_static_dma is not None
         else 0.0
     )
+    strided_dma_prediction = (
+        model.strided_dma_calibration.predict(source_events)
+        if model.strided_dma_calibration is not None
+        else None
+    )
     events = _expand_lowering_groups(source_events, model)
     sync_ns = max(0.0, model.cross_engine_sync_ns)
     dma_queue_count = max(1, int(model.dma_queue_count))
+    dma_resource_count = max(0, int(model.dma_resource_count))
     # Each engine owns a list of per-slot free times. Most engines are a single
     # serial slot; the DMA engine owns ``dma_queue_count`` parallel slots.
     engine_slots: dict[str, list[float]] = {}
@@ -1394,7 +1462,9 @@ def simulate(
 
     def _slots_for(engine: str) -> list[float]:
         if engine not in engine_slots:
-            width = dma_queue_count if engine == ENGINE_DMA else 1
+            width = (
+                dma_resource_count or dma_queue_count if engine == ENGINE_DMA else 1
+            )
             engine_slots[engine] = [0.0] * width
         return engine_slots[engine]
 
@@ -1412,8 +1482,14 @@ def simulate(
         # op takes the slot that frees earliest, letting independent transfers
         # overlap; a single-slot engine keeps strict program order.
         slots = _slots_for(engine)
-        slot_index = min(range(len(slots)), key=lambda i: slots[i])
-        earliest = slots[slot_index]
+        if engine == ENGINE_DMA and dma_resource_count:
+            partitions = max(1, int(event.get("partition_count") or 1))
+            demand = min(dma_resource_count, partitions)
+            slot_indices = sorted(range(len(slots)), key=lambda i: slots[i])[:demand]
+            earliest = max(slots[index] for index in slot_indices)
+        else:
+            slot_indices = [min(range(len(slots)), key=lambda i: slots[i])]
+            earliest = slots[slot_indices[0]]
 
         # RAW: wait for prior writers whose range overlaps a buffer we read.
         for key, _ptr, lo, hi in reads:
@@ -1439,7 +1515,8 @@ def simulate(
         start = earliest
         end = start + duration
 
-        slots[slot_index] = end
+        for slot_index in slot_indices:
+            slots[slot_index] = end
 
         # Publish this op's effects for downstream dependency resolution.
         for key, _ptr, lo, hi in reads:
@@ -1477,14 +1554,41 @@ def simulate(
 
     if structural_static_ns > 0:
         engine_busy[ENGINE_STATIC_DMA] = structural_static_ns
+    if strided_dma_prediction is not None:
+        # The control measures the whole paired-load/store kernel, avoiding a
+        # false decomposition of compiler-generated Static DMA packet trains.
+        engine_busy[ENGINE_DMA] = strided_dma_prediction[0]
     calibrated_nc_ns = None
+    if strided_dma_prediction is not None:
+        calibrated_nc_ns = (
+            engine_busy.get(ENGINE_DMA, 0.0)
+            + max(
+                engine_busy.get(ENGINE_VECTOR, 0.0),
+                engine_busy.get(ENGINE_SCALAR, 0.0),
+                engine_busy.get(ENGINE_TENSOR, 0.0),
+            )
+            + strided_dma_prediction[1]
+        )
     if model.nc_latency_calibration is not None:
         region = next(
             (event.get("region_ir") for event in source_events if event.get("region_ir")),
             None,
         )
+        if region and str(region.get("dtype", "")).lower() in {"bool", "boolean"}:
+            region = dict(region)
+            value_dtypes = [
+                str(value)
+                for event in source_events
+                if event.get("region_ir_key") == region.get("structural_key")
+                for value in (
+                    [event.get("output_dtype")] + list(event.get("input_dtypes") or [])
+                )
+                if value and str(value).lower() not in {"bool", "boolean"}
+            ]
+            if value_dtypes:
+                region["dtype"] = Counter(value_dtypes).most_common(1)[0][0]
         residual_ns = model.nc_latency_calibration.predict_ns(region) if region else None
-        if residual_ns is not None:
+        if residual_ns is not None and calibrated_nc_ns is None:
             calibrated_nc_ns = (
                 engine_busy.get(ENGINE_DMA, 0.0)
                 + engine_busy.get(ENGINE_STATIC_DMA, 0.0)
@@ -1495,14 +1599,31 @@ def simulate(
                 )
                 + residual_ns
             )
+    compute_critical_ns = max(
+        engine_busy.get(ENGINE_VECTOR, 0.0),
+        engine_busy.get(ENGINE_SCALAR, 0.0),
+        engine_busy.get(ENGINE_TENSOR, 0.0),
+    )
+    dma_busy_ns = engine_busy.get(ENGINE_DMA, 0.0) + engine_busy.get(
+        ENGINE_STATIC_DMA, 0.0
+    )
+    phase_critical_ns = dma_busy_ns + compute_critical_ns
+    final_ns = (
+        calibrated_nc_ns
+        if calibrated_nc_ns is not None
+        else makespan + max(0.0, model.kernel_overhead_ns)
+    )
     return SimulationResult(
-        predicted_latency_ns=(
-            calibrated_nc_ns
-            if calibrated_nc_ns is not None
-            else makespan + max(0.0, model.kernel_overhead_ns)
-        ),
+        predicted_latency_ns=final_ns,
         timeline=timeline,
         engine_busy_ns=engine_busy,
+        components_ns={
+            "compute_only": compute_critical_ns,
+            "compute_plus_dma": phase_critical_ns,
+            "resource_overlap_makespan": makespan,
+            "structural_fixed_completion": final_ns - phase_critical_ns,
+            "final": final_ns,
+        },
     )
 
 

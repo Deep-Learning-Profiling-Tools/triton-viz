@@ -101,6 +101,45 @@ def work_bytes(*, p: int, f: int, repeat: int, mode: str, dtype_name: str = "flo
     return {**geometry, "total_hbm_bytes": 0}
 
 
+def strided_store_pair_factory(
+    *, p: int, f: int, stride: int = 2, dtype_name: str = "float32", **_: object
+):
+    """Minimal paired strided HBM stores, independent of any operator kernel."""
+    if stride < 2:
+        raise ValueError("strided-store control requires stride >= 2")
+    kernel_dtype_name = dtype_name
+
+    @nki.jit
+    def kernel(x, y):
+        kdtype = dtype_for_load(kernel_dtype_name, x.dtype)
+        pi, fi = nl.arange(p)[:, None], nl.arange(f)[None, :]
+        left = nl.load(x[pi, fi], dtype=kdtype)
+        right = nl.load(y[pi, fi], dtype=kdtype)
+        out = nl.ndarray((p, f * stride), dtype=kdtype, buffer=nl.shared_hbm)
+        nl.store(out[pi, fi * stride], value=left)
+        nl.store(out[pi, fi * stride + 1], value=right)
+        return out
+
+    return kernel, [(p, f), (p, f)], (1,)
+
+
+def strided_store_pair_work_bytes(
+    *, p: int, f: int, stride: int = 2, dtype_name: str = "float32", **_: object
+) -> dict[str, int | float]:
+    itemsize = {"float32": 4, "float16": 2, "bfloat16": 2}[dtype_name]
+    payload = p * f * itemsize
+    return {
+        "partition_count": p,
+        "free_dimension_elements": f,
+        "free_bytes_per_partition": f * itemsize,
+        "hbm_read_bytes": 2 * payload,
+        "hbm_write_bytes": 2 * payload,
+        "total_hbm_bytes": 4 * payload,
+        "store_stride_items": stride,
+        "store_access_density": 1.0 / stride,
+    }
+
+
 def transpose_copy_factory(*, p: int, f: int, repeat: int = 1, mode: str,
                            dtype_name: str = "float32"):
     """Return one HBM[f,p] -> SBUF[p,f] DMA-transpose benchmark."""

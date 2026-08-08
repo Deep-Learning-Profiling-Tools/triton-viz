@@ -124,6 +124,61 @@ def _byte_span(offsets: Any, nbytes: int, sides: int = 1) -> list[int] | None:
     return [lo, hi + stride]
 
 
+def _offset_geometry(offsets: Any, masks: Any, nbytes: int) -> dict[str, Any]:
+    """Describe affine/strided HBM access geometry without dumping offsets.
+
+    Offsets are byte offsets.  Masked padding must be excluded: Tilebench often
+    allocates a 16K free tile while only the first 128--2048 columns are active.
+    """
+    array = np.asarray(offsets)
+    mask = np.asarray(masks, dtype=bool)
+    if not array.size or array.shape != mask.shape:
+        return {"dma_pattern": "unknown"}
+    active = array[mask]
+    if not active.size:
+        return {"dma_pattern": "empty", "active_access_count": 0}
+    item_bytes = max(1, int(nbytes // active.size))
+
+    def axis_stride(axis: int) -> int | None:
+        if array.ndim <= axis or array.shape[axis] < 2:
+            return None
+        left = [slice(None)] * array.ndim
+        right = [slice(None)] * array.ndim
+        left[axis], right[axis] = slice(None, -1), slice(1, None)
+        valid = mask[tuple(left)] & mask[tuple(right)]
+        diffs = (array[tuple(right)] - array[tuple(left)])[valid]
+        if not diffs.size or np.any(diffs != diffs.reshape(-1)[0]):
+            return None
+        return int(diffs.reshape(-1)[0])
+
+    partition_stride = axis_stride(0)
+    free_stride = axis_stride(array.ndim - 1)
+    free_stride_items = (
+        free_stride // item_bytes
+        if free_stride is not None and free_stride % item_bytes == 0
+        else None
+    )
+    if free_stride_items == 1:
+        pattern = "contiguous"
+    elif free_stride_items is not None and free_stride_items > 1:
+        pattern = "strided"
+    elif free_stride_items is not None and free_stride_items < 0:
+        pattern = "reverse"
+    else:
+        pattern = "irregular"
+    span = int(active.max()) - int(active.min()) + item_bytes
+    return {
+        "dma_pattern": pattern,
+        "active_access_count": int(active.size),
+        "item_bytes": item_bytes,
+        "free_stride_bytes": free_stride,
+        "free_stride_items": free_stride_items,
+        "partition_stride_bytes": partition_stride,
+        "access_span_bytes": span,
+        "access_density": float(nbytes / span) if span > 0 else 0.0,
+    }
+
+
 def _fusion_op_name(event: dict[str, Any]) -> str:
     """Return a stable lowering-pattern token for a source compute event."""
     op = str(event.get("op") or "unknown")
@@ -463,6 +518,7 @@ def record_to_event(
             "src_ptr": int(record.ptr),
             "src_storage": int(record.ptr),
             "src_range": _byte_span(record.offsets, int(record.bytes)),
+            **_offset_geometry(record.offsets, record.masks, int(record.bytes)),
             **_dma_geometry(shape, int(record.bytes)),
         }
 
@@ -482,6 +538,7 @@ def record_to_event(
             "dst_ptr": int(record.ptr),
             "dst_storage": int(record.ptr),
             "dst_range": _byte_span(record.offsets, int(record.bytes)),
+            **_offset_geometry(record.offsets, record.masks, int(record.bytes)),
             **_dma_geometry(shape, int(record.bytes)),
         }
 

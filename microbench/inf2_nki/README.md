@@ -6,6 +6,23 @@ DMA transpose behavior, ScalarE/VectorE/TensorE throughput, engine overlap,
 program placement, compiler lowering, and the controls used by the Triton-Viz
 NKI cost model.
 
+## End-to-end cost-model pipeline
+
+From the repository root, the complete paper path is three commands. Collection
+is intentionally long-running and keeps calibration controls separate from
+Tilebench holdouts; evaluation writes per-case ablations and
+`evaluation/report.json`.
+
+```bash
+source /opt/aws_neuronx_venv_pytorch_2_9/bin/activate
+python -m triton_viz.tools.nki_cost_model_pipeline collect --root /tmp/nki_cost_model_run
+python -m triton_viz.tools.nki_cost_model_pipeline fit --root /tmp/nki_cost_model_run
+python -m triton_viz.tools.nki_cost_model_pipeline evaluate --root /tmp/nki_cost_model_run
+```
+
+Pass `--tilebench-dir /path/to/Tilebench/benchmarks/operators` to `collect`
+when needed. Every stage accepts `--dry-run` to print its underlying commands.
+
 The suite is designed for modeling rather than application-level benchmarking.
 Every hardware case records declared work, Neuron Explorer counters, compiler
 artifacts, and enough metadata to audit byte counts and instruction ownership.
