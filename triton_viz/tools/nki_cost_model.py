@@ -1156,37 +1156,85 @@ def _access_range(event: dict[str, Any], range_key: str) -> tuple[float, float]:
     return 0.0, _RANGE_INF
 
 
-def _read_accesses(event: dict[str, Any]) -> list[tuple[int, int, float, float]]:
-    """Return read accesses as ``(storage_key, ptr, lo, hi)`` tuples.
+def _read_accesses(
+    event: dict[str, Any],
+) -> list[tuple[int, int | None, int, float, float]]:
+    """Return ``(storage, version, ptr, lo, hi)`` read accesses.
 
     ``storage_key`` identifies the underlying allocation for hazard matching. It
     defaults to the base pointer, but an explicit ``storage`` field lets a view
     that records a distinct pointer still alias its parent allocation.
     """
-    accesses: list[tuple[int, int, float, float]] = []
+    accesses: list[tuple[int, int | None, int, float, float]] = []
     src = event.get("src_ptr")
-    if src is not None:
-        key = int(event.get("src_storage", src))
+    src_storage = event.get("src_storage")
+    if src is not None or src_storage is not None:
+        key = int(src_storage if src_storage is not None else src)
+        ptr = int(src if src is not None else key)
         lo, hi = _access_range(event, "src_range")
-        accesses.append((key, int(src), lo, hi))
-    # Compute-operand inputs are recorded as whole-tile base pointers.
-    for ptr in event.get("input_ptrs", ()) or ():
+        version = event.get("src_version")
+        accesses.append((key, int(version) if version is not None else None, ptr, lo, hi))
+    storages = event.get("input_storages") or ()
+    pointers = event.get("input_ptrs") or ()
+    ranges = event.get("input_ranges") or ()
+    versions = event.get("input_versions") or ()
+    if storages:
+        for index, storage in enumerate(storages):
+            ptr = pointers[index] if index < len(pointers) else storage
+            rng = ranges[index] if index < len(ranges) else None
+            lo, hi = _access_range({"range": rng}, "range")
+            version = versions[index] if index < len(versions) else None
+            accesses.append((int(storage), int(version) if version is not None else None, int(ptr), lo, hi))
+        return accesses
+    for ptr in pointers:
         if ptr is not None:
-            accesses.append((int(ptr), int(ptr), 0.0, _RANGE_INF))
+            accesses.append((int(ptr), None, int(ptr), 0.0, _RANGE_INF))
     return accesses
 
 
-def _write_accesses(event: dict[str, Any]) -> list[tuple[int, int, float, float]]:
-    """Return write accesses as ``(storage_key, ptr, lo, hi)`` tuples."""
-    accesses: list[tuple[int, int, float, float]] = []
+def _write_accesses(
+    event: dict[str, Any],
+) -> list[tuple[int, int | None, int, float, float]]:
+    """Return ``(storage, version, ptr, lo, hi)`` write accesses."""
+    accesses: list[tuple[int, int | None, int, float, float]] = []
     dst = event.get("dst_ptr")
-    if dst is not None:
-        key = int(event.get("dst_storage", dst))
+    dst_storage = event.get("dst_storage")
+    if dst is not None or dst_storage is not None:
+        key = int(dst_storage if dst_storage is not None else dst)
+        ptr = int(dst if dst is not None else key)
         lo, hi = _access_range(event, "dst_range")
-        accesses.append((key, int(dst), lo, hi))
+        version = event.get("dst_version")
+        accesses.append((key, int(version) if version is not None else None, ptr, lo, hi))
+    storages = event.get("output_storages") or ()
+    pointers = event.get("output_ptrs") or ()
+    ranges = event.get("output_ranges") or ()
+    versions = event.get("output_versions") or ()
+    if storages:
+        for index, output_storage in enumerate(storages):
+            ptr = pointers[index] if index < len(pointers) else output_storage
+            rng = ranges[index] if index < len(ranges) else None
+            lo, hi = _access_range({"range": rng}, "range")
+            version = versions[index] if index < len(versions) else None
+            accesses.append(
+                (
+                    int(output_storage),
+                    int(version) if version is not None else None,
+                    int(ptr),
+                    lo,
+                    hi,
+                )
+            )
+        return accesses
+    storage = event.get("output_storage")
+    if storage is not None:
+        ptr = event.get("output_ptr") or storage
+        lo, hi = _access_range(event, "output_range")
+        version = event.get("output_version")
+        accesses.append((int(storage), int(version) if version is not None else None, int(ptr), lo, hi))
+        return accesses
     out = event.get("output_ptr")
     if out is not None:
-        accesses.append((int(out), int(out), 0.0, _RANGE_INF))
+        accesses.append((int(out), None, int(out), 0.0, _RANGE_INF))
     return accesses
 
 
@@ -1332,7 +1380,35 @@ def _expand_lowering_groups(
             continue
 
         first_inputs = list(members[0].get("input_ptrs") or ())
+        first_input_storages = list(members[0].get("input_storages") or ())
+        first_input_ranges = list(members[0].get("input_ranges") or ())
+        first_input_versions = list(members[0].get("input_versions") or ())
+        if any(member.get("input_storages") for member in members):
+            external: dict[tuple[int, int | None], tuple[int, Any, int | None]] = {}
+            produced: set[tuple[int, int | None]] = set()
+            for member in members:
+                storages = member.get("input_storages") or ()
+                ptrs = member.get("input_ptrs") or ()
+                ranges = member.get("input_ranges") or ()
+                versions = member.get("input_versions") or ()
+                for item_index, storage in enumerate(storages):
+                    version = versions[item_index] if item_index < len(versions) else None
+                    identity = (int(storage), version)
+                    if identity not in produced:
+                        ptr = ptrs[item_index] if item_index < len(ptrs) else storage
+                        rng = ranges[item_index] if item_index < len(ranges) else None
+                        external.setdefault(identity, (int(ptr), rng, version))
+                output_storage = member.get("output_storage")
+                if output_storage is not None:
+                    produced.add((int(output_storage), member.get("output_version")))
+            first_input_storages = [identity[0] for identity in external]
+            first_inputs = [value[0] for value in external.values()]
+            first_input_ranges = [value[1] for value in external.values()]
+            first_input_versions = [value[2] for value in external.values()]
         final_output = members[-1].get("output_ptr")
+        final_output_storage = members[-1].get("output_storage")
+        final_output_range = members[-1].get("output_range")
+        final_output_version = members[-1].get("output_version")
         for target_index, (engine, (count, streams)) in enumerate(
             sorted(targets.items())
         ):
@@ -1347,6 +1423,9 @@ def _expand_lowering_groups(
                     "free_dim": lowering_free_dim,
                     "output_dtype": dtype,
                     "input_ptrs": first_inputs,
+                    "input_storages": first_input_storages,
+                    "input_ranges": first_input_ranges,
+                    "input_versions": first_input_versions,
                     "input_stream_count": streams,
                     "lowering_expansion": count,
                     "lowering_fixed_ns": (
@@ -1364,6 +1443,15 @@ def _expand_lowering_groups(
                     # Publish the logical result only once; otherwise parallel
                     # target engines would create artificial WAW hazards.
                     "output_ptr": final_output
+                    if target_index == len(targets) - 1
+                    else None,
+                    "output_storage": final_output_storage
+                    if target_index == len(targets) - 1
+                    else None,
+                    "output_range": final_output_range
+                    if target_index == len(targets) - 1
+                    else None,
+                    "output_version": final_output_version
                     if target_index == len(targets) - 1
                     else None,
                 }
@@ -1430,6 +1518,21 @@ def simulate(
         if model.strided_dma_calibration is not None
         else None
     )
+    if strided_dma_prediction is not None:
+        dma_indices = [
+            index
+            for index, event in enumerate(source_events)
+            if event.get("op") in {"load", "store", "transfer"}
+        ]
+        raw_costs = [model.cost_ns(source_events[index]) for index in dma_indices]
+        raw_total = sum(raw_costs)
+        if raw_total > 0:
+            scale = strided_dma_prediction[0] / raw_total
+            source_events = [dict(event) for event in source_events]
+            for index, raw_cost in zip(dma_indices, raw_costs):
+                source_events[index]["scheduler_duration_override_ns"] = (
+                    raw_cost * scale
+                )
     events = _expand_lowering_groups(source_events, model)
     sync_ns = max(0.0, model.cross_engine_sync_ns)
     dma_queue_count = max(1, int(model.dma_queue_count))
@@ -1442,8 +1545,8 @@ def simulate(
     # just base-pointer equality: disjoint tiles of one allocation run in
     # parallel, while overlapping ranges (even via different view pointers that
     # share a storage id) still serialize with the correct RAW/WAR/WAW edge.
-    writers: dict[int, list[tuple[float, float, float, str]]] = {}
-    readers: dict[int, list[tuple[float, float, float, str]]] = {}
+    writers: dict[int, list[tuple[float, float, float, str, int | None]]] = {}
+    readers: dict[int, list[tuple[float, float, float, str, int | None]]] = {}
     timeline: dict[str, list[TimelineEntry]] = {}
     engine_busy: dict[str, float] = {}
     makespan = 0.0
@@ -1473,7 +1576,9 @@ def simulate(
         if op in (None, "grid", "unknown"):
             continue
         engine = _canonical_engine(event.get("engine", ""), op)
-        duration = model.cost_ns(event)
+        duration = float(
+            event.get("scheduler_duration_override_ns", model.cost_ns(event))
+        )
 
         reads = _read_accesses(event)
         writes = _write_accesses(event)
@@ -1492,18 +1597,21 @@ def simulate(
             earliest = slots[slot_indices[0]]
 
         # RAW: wait for prior writers whose range overlaps a buffer we read.
-        for key, _ptr, lo, hi in reads:
-            for w_lo, w_hi, w_end, w_eng in writers.get(key, ()):
-                if _ranges_overlap(lo, hi, w_lo, w_hi):
+        for key, version, _ptr, lo, hi in reads:
+            for w_lo, w_hi, w_end, w_eng, w_version in writers.get(key, ()):
+                version_matches = (
+                    version is None or w_version is None or version == w_version
+                )
+                if version_matches and _ranges_overlap(lo, hi, w_lo, w_hi):
                     earliest = _dep(earliest, w_end, w_eng, engine)
 
         # WAW + WAR: a write waits for prior overlapping writers and readers of
         # that storage (buffer-reuse hazards across engines).
-        for key, _ptr, lo, hi in writes:
-            for w_lo, w_hi, w_end, w_eng in writers.get(key, ()):
+        for key, _version, _ptr, lo, hi in writes:
+            for w_lo, w_hi, w_end, w_eng, _w_version in writers.get(key, ()):
                 if _ranges_overlap(lo, hi, w_lo, w_hi):
                     earliest = _dep(earliest, w_end, w_eng, engine)
-            for r_lo, r_hi, r_end, r_eng in readers.get(key, ()):
+            for r_lo, r_hi, r_end, r_eng, _r_version in readers.get(key, ()):
                 if _ranges_overlap(lo, hi, r_lo, r_hi):
                     earliest = _dep(earliest, r_end, r_eng, engine)
 
@@ -1519,9 +1627,9 @@ def simulate(
             slots[slot_index] = end
 
         # Publish this op's effects for downstream dependency resolution.
-        for key, _ptr, lo, hi in reads:
-            readers.setdefault(key, []).append((lo, hi, end, engine))
-        for key, _ptr, lo, hi in writes:
+        for key, version, _ptr, lo, hi in reads:
+            readers.setdefault(key, []).append((lo, hi, end, engine, version))
+        for key, version, _ptr, lo, hi in writes:
             # A new write to a range supersedes prior writers/readers that it
             # fully covers; keep only the non-overlapping history so later
             # disjoint accesses are not spuriously serialized against stale
@@ -1531,7 +1639,7 @@ def simulate(
                 for entry in writers.get(key, ())
                 if not _ranges_overlap(lo, hi, entry[0], entry[1])
             ]
-            writers[key].append((lo, hi, end, engine))
+            writers[key].append((lo, hi, end, engine, version))
             readers[key] = [
                 entry
                 for entry in readers.get(key, ())
@@ -1554,27 +1662,29 @@ def simulate(
 
     if structural_static_ns > 0:
         engine_busy[ENGINE_STATIC_DMA] = structural_static_ns
-    if strided_dma_prediction is not None:
-        # The control measures the whole paired-load/store kernel, avoiding a
-        # false decomposition of compiler-generated Static DMA packet trains.
-        engine_busy[ENGINE_DMA] = strided_dma_prediction[0]
     calibrated_nc_ns = None
     if strided_dma_prediction is not None:
-        calibrated_nc_ns = (
-            engine_busy.get(ENGINE_DMA, 0.0)
-            + max(
-                engine_busy.get(ENGINE_VECTOR, 0.0),
-                engine_busy.get(ENGINE_SCALAR, 0.0),
-                engine_busy.get(ENGINE_TENSOR, 0.0),
-            )
-            + strided_dma_prediction[1]
-        )
+        calibrated_nc_ns = makespan + strided_dma_prediction[1]
     if model.nc_latency_calibration is not None:
         region = next(
             (event.get("region_ir") for event in source_events if event.get("region_ir")),
             None,
         )
-        if region and str(region.get("dtype", "")).lower() in {"bool", "boolean"}:
+        load_dtypes = [
+            str(event["src_dtype"])
+            for event in source_events
+            if event.get("op") == "load" and event.get("src_dtype")
+        ]
+        store_dtypes = [
+            str(event["src_dtype"])
+            for event in source_events
+            if event.get("op") == "store" and event.get("src_dtype")
+        ]
+        kernel_dtypes = load_dtypes or store_dtypes
+        if region and kernel_dtypes:
+            region = dict(region)
+            region["dtype"] = Counter(kernel_dtypes).most_common(1)[0][0]
+        elif region and str(region.get("dtype", "")).lower() in {"bool", "boolean"}:
             region = dict(region)
             value_dtypes = [
                 str(value)
@@ -1589,16 +1699,7 @@ def simulate(
                 region["dtype"] = Counter(value_dtypes).most_common(1)[0][0]
         residual_ns = model.nc_latency_calibration.predict_ns(region) if region else None
         if residual_ns is not None and calibrated_nc_ns is None:
-            calibrated_nc_ns = (
-                engine_busy.get(ENGINE_DMA, 0.0)
-                + engine_busy.get(ENGINE_STATIC_DMA, 0.0)
-                + max(
-                    engine_busy.get(ENGINE_VECTOR, 0.0),
-                    engine_busy.get(ENGINE_SCALAR, 0.0),
-                    engine_busy.get(ENGINE_TENSOR, 0.0),
-                )
-                + residual_ns
-            )
+            calibrated_nc_ns = makespan + residual_ns
     compute_critical_ns = max(
         engine_busy.get(ENGINE_VECTOR, 0.0),
         engine_busy.get(ENGINE_SCALAR, 0.0),
@@ -1621,7 +1722,7 @@ def simulate(
             "compute_only": compute_critical_ns,
             "compute_plus_dma": phase_critical_ns,
             "resource_overlap_makespan": makespan,
-            "structural_fixed_completion": final_ns - phase_critical_ns,
+            "structural_fixed_completion": final_ns - makespan,
             "final": final_ns,
         },
     )

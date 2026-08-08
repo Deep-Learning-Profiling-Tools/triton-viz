@@ -56,8 +56,25 @@ def _factory(**kwargs):
 
 def _trace(kernel, inputs, path: Path):
     triton_viz.clear()
-    tv_trace(client=Tracer(), frontend="nki_beta2")(kernel.func)[(1,)](*inputs)
+    tv_trace(client=Tracer(), frontend="nki")(kernel.func)[(1,)](*inputs)
     return write_jsonl(launches[-1].records, path)
+
+
+def refresh_dependency_trace(root: Path, row: dict) -> int:
+    """Recreate only the runtime dependency artifact for an existing case."""
+    kind = str(row["kind"])
+    p, f, chain = (int(row[name]) for name in ("p", "f", "chain"))
+    dtype = str(row["dtype"])
+    kernel, shapes, extras = _factory(
+        kind=kind, p=p, f=f, chain=chain, dtype_name=dtype
+    )
+    inputs = [
+        make_input(shape, dtype, seed=index)
+        for index, shape in enumerate(shapes)
+    ]
+    inputs.extend(extras)
+    case = (root / str(row["case"])).resolve()
+    return len(_trace(kernel, inputs, case / "dependency_trace.jsonl"))
 
 
 def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Path):
@@ -544,6 +561,11 @@ def run_case(
         make_input(shape, dtype, seed=index) for index, shape in enumerate(shapes)
     ]
     inputs.extend(extras)
+    # Keep the exact declared source grammar for compiler-lowering calibration,
+    # and a separate runtime trace carrying physical SBUF dependency identity.
+    # The two artifacts answer different questions and must not overwrite one
+    # another.
+    dependency_events = _trace(kernel, inputs, case / "dependency_trace.jsonl")
     # Nested nl.* expressions are intentionally flattened by Python syntax but
     # the simulator records only the outer call. Use the exact factory grammar
     # declaration so source-op count matches the written kernel; Penguin still
@@ -558,6 +580,8 @@ def run_case(
         "chain": chain,
         "dtype": dtype,
         "trace_source": trace_source,
+        "dependency_trace_source": "runtime_nki",
+        "dependency_trace_events": len(dependency_events),
         "trace_hbm_read_bytes": sum(
             int(e.get("bytes", 0)) for e in events if e.get("op") == "load"
         ),
@@ -614,6 +638,11 @@ def main(argv=None):
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--no-hardware", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--refresh-dependency-traces",
+        action="store_true",
+        help="With --resume, retrace completed cases without rerunning hardware.",
+    )
     args = parser.parse_args(argv)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_experiment_manifest(
@@ -650,6 +679,18 @@ def main(argv=None):
                 for chain in chains:
                     case_name = _case_name(kind, args.p, f, chain, dtype)
                     if case_name in completed:
+                        if args.refresh_dependency_traces:
+                            existing = next(
+                                row for row in rows if row.get("case") == case_name
+                            )
+                            count = refresh_dependency_trace(args.output_dir, existing)
+                            existing["dependency_trace_source"] = "runtime_nki"
+                            existing["dependency_trace_events"] = count
+                            print(
+                                f"REFRESH dependency trace {case_name} ({count} events)",
+                                flush=True,
+                            )
+                            continue
                         print(f"SKIP completed {case_name}", flush=True)
                         continue
                     rows = [row for row in rows if row.get("case") != case_name]

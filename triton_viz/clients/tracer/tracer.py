@@ -107,8 +107,24 @@ class Tracer(Client):
                 return tuple(_convert_keys_to_numpy(k) for k in keys)
             return keys.data if hasattr(keys, "data") else keys
 
+        def _storage(value):
+            return (
+                int(value.storage_id())
+                if hasattr(value, "storage_id")
+                else int(value.data_ptr())
+            )
+
+        def _range(value):
+            if hasattr(value, "byte_range"):
+                return tuple(int(item) for item in value.byte_range())
+            size = int(np.prod(value.shape)) * int(value.element_size())
+            return (0, size)
+
+        def _version(value):
+            return int(value.tensor_version()) if hasattr(value, "tensor_version") else 0
+
         @self.lock_fn
-        def pre_load_callback(ptr, mask, keys):
+        def post_load_callback(ret, ptr, mask, keys):
             if not self.sample:
                 return
 
@@ -116,22 +132,41 @@ class Tracer(Client):
                 first_ptr = np.reshape(ptr.data, (-1))[0]
                 tensor = self._get_tensor(first_ptr)
                 offsets = ptr.data - tensor.data_ptr()
+                mask_data = (
+                    mask.data
+                    if mask is not None
+                    else np.ones(np.asarray(offsets).shape, dtype=bool)
+                )
             else:
                 keys = _convert_keys_to_numpy(keys)
-                offsets = masked_load(ptr.get_offsets().data, keys, mask=mask.data)
+                if mask is None:
+                    offsets = masked_load(ptr.get_offsets().data, keys)
+                    mask_data = np.ones(np.asarray(offsets).shape, dtype=bool)
+                else:
+                    mask_data = mask.data
+                    offsets = masked_load(
+                        ptr.get_offsets().data, keys, mask=mask_data
+                    )
                 tensor = ptr
 
             rec = Load(
                 tensor.data_ptr(),
                 offsets,
-                mask.data,
-                bytes=_moved_bytes(mask.data, tensor),
+                mask_data,
+                bytes=_moved_bytes(mask_data, tensor),
+                src_storage=_storage(tensor),
+                src_version=_version(tensor),
+                src_dtype=str(tensor.dtype),
+                dst_ptr=int(ret.data_ptr()),
+                dst_storage=_storage(ret),
+                dst_range=_range(ret),
+                dst_version=_version(ret),
             )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
 
         @self.lock_fn
-        def pre_store_callback(ptr, mask, keys):
+        def pre_store_callback(ptr, mask, keys, value):
             if not self.sample:
                 return
 
@@ -155,6 +190,13 @@ class Tracer(Client):
                 offsets,
                 mask_data,
                 bytes=_moved_bytes(mask_data, tensor),
+                src_ptr=int(value.data_ptr()),
+                src_storage=_storage(value),
+                src_range=_range(value),
+                src_version=_version(value),
+                src_dtype=str(value.dtype),
+                dst_storage=_storage(tensor),
+                dst_version=_version(tensor) + 1,
             )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
@@ -222,16 +264,23 @@ class Tracer(Client):
                 (int(input.data_ptr()),) if hasattr(input, "data_ptr") else ()
             )
             output_ptr = int(ret.data_ptr()) if hasattr(ret, "data_ptr") else None
-            self.records.append(
-                ReduceSum(
-                    input_shape,
-                    axis,
-                    keep_dims,
-                    output_shape,
-                    input_ptrs=input_ptrs,
-                    output_ptr=output_ptr,
-                )
+            rec = ReduceSum(
+                input_shape,
+                axis,
+                keep_dims,
+                output_shape,
+                input_ptrs=input_ptrs,
+                output_ptr=output_ptr,
+                input_storages=(_storage(input),),
+                input_ranges=(_range(input),),
+                input_versions=(_version(input),),
+                output_storage=_storage(ret),
+                output_range=_range(ret),
+                output_version=_version(ret),
             )
+            rec.call_path = extract_user_frames(num_frames=1)
+            ret._trace_record = rec
+            self.records.append(rec)
 
         @self.lock_fn
         def post_dot_callback(ret, input, other, transpose_input=False):
@@ -263,8 +312,15 @@ class Tracer(Client):
                 other.data,
                 input_ptrs=input_ptrs,
                 output_ptr=output_ptr,
+                input_storages=tuple(_storage(value) for value in (input, other)),
+                input_ranges=tuple(_range(value) for value in (input, other)),
+                input_versions=tuple(_version(value) for value in (input, other)),
+                output_storage=_storage(ret),
+                output_range=_range(ret),
+                output_version=_version(ret),
             )
             rec.call_path = extract_user_frames(num_frames=1)
+            ret._trace_record = rec
             self.records.append(rec)
 
         @self.lock_fn
@@ -288,8 +344,31 @@ class Tracer(Client):
                 output_ptr=(
                     int(dst.data_ptr()) if hasattr(dst, "data_ptr") else None
                 ),
+                input_storages=tuple(
+                    _storage(value)
+                    for value in (input, other)
+                    if hasattr(value, "data_ptr")
+                ),
+                input_ranges=tuple(
+                    _range(value)
+                    for value in (input, other)
+                    if hasattr(value, "data_ptr")
+                ),
+                input_versions=tuple(
+                    _version(value)
+                    for value in (input, other)
+                    if hasattr(value, "data_ptr")
+                ),
+                output_storage=(
+                    _storage(dst) if hasattr(dst, "data_ptr") else None
+                ),
+                output_range=(_range(dst) if hasattr(dst, "data_ptr") else None),
+                output_version=(
+                    _version(dst) if hasattr(dst, "data_ptr") else None
+                ),
             )
             rec.call_path = extract_user_frames(num_frames=1)
+            ret._trace_record = rec
             self.records.append(rec)
 
         @self.lock_fn
@@ -317,13 +396,20 @@ class Tracer(Client):
                 input_dtypes=input_dtypes,
                 output_dtype=output_dtype,
                 attrs={},
+                input_storages=tuple(_storage(x) for x in inputs),
+                input_ranges=tuple(_range(x) for x in inputs),
+                input_versions=tuple(_version(x) for x in inputs),
+                output_storages=(_storage(ret),),
+                output_ranges=(_range(ret),),
+                output_versions=(_version(ret),),
             )
             rec.call_path = extract_user_frames(num_frames=1)
+            ret._trace_record = rec
             self.records.append(rec)
 
         callbacks = {
             Allocate: OpCallbacks(after_callback=post_allocate_callback),
-            Load: OpCallbacks(before_callback=pre_load_callback),
+            Load: OpCallbacks(after_callback=post_load_callback),
             Store: OpCallbacks(before_callback=pre_store_callback),
             Transfer: OpCallbacks(before_callback=pre_transfer_callback),
             DmaTranspose: OpCallbacks(before_callback=pre_transfer_callback),

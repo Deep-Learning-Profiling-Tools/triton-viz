@@ -44,6 +44,13 @@ class Store(Op):
     frontend: str = "nki"
     bytes: int = 0
     time_idx: int = 0
+    src_ptr: int | None = None
+    src_storage: int | None = None
+    src_range: tuple[int, int] | None = None
+    src_version: int | None = None
+    src_dtype: str | None = None
+    dst_storage: int | None = None
+    dst_version: int | None = None
 
 
 @dataclass
@@ -63,6 +70,13 @@ class Load(Op):
     frontend: str = "nki"
     bytes: int = 0
     time_idx: int = 0
+    src_storage: int | None = None
+    src_version: int | None = None
+    src_dtype: str | None = None
+    dst_ptr: int | None = None
+    dst_storage: int | None = None
+    dst_range: tuple[int, int] | None = None
+    dst_version: int | None = None
 
 
 @dataclass
@@ -101,6 +115,12 @@ class BinaryOp(Op):
     other_shape: tuple = ()
     input_ptrs: tuple[int, ...] = ()
     output_ptr: int | None = None
+    input_storages: tuple[int, ...] = ()
+    input_ranges: tuple[tuple[int, int], ...] = ()
+    input_versions: tuple[int, ...] = ()
+    output_storage: int | None = None
+    output_range: tuple[int, int] | None = None
+    output_version: int | None = None
 
 
 @dataclass
@@ -131,6 +151,12 @@ class Dot(Op):
     # transfer" heuristic. Defaulted so existing constructors stay valid.
     input_ptrs: tuple[int, ...] = ()
     output_ptr: int | None = None
+    input_storages: tuple[int, ...] = ()
+    input_ranges: tuple[tuple[int, int], ...] = ()
+    input_versions: tuple[int, ...] = ()
+    output_storage: int | None = None
+    output_range: tuple[int, int] | None = None
+    output_version: int | None = None
 
     def update_intermediate(self, row: int, col: int, result: float):
         # Store only the result as a float
@@ -157,6 +183,12 @@ class NkiCompute(Op):
     input_dtypes: tuple[str, ...]
     output_dtype: str
     attrs: dict
+    input_storages: tuple[int, ...] = ()
+    input_ranges: tuple[tuple[int, int], ...] = ()
+    input_versions: tuple[int, ...] = ()
+    output_storages: tuple[int, ...] = ()
+    output_ranges: tuple[tuple[int, int], ...] = ()
+    output_versions: tuple[int, ...] = ()
 
 
 @dataclass
@@ -189,6 +221,12 @@ class Reduce(Op):
     # existing positional constructors (triton/gluon/nki) remain valid.
     input_ptrs: tuple[int, ...] = ()
     output_ptr: int | None = None
+    input_storages: tuple[int, ...] = ()
+    input_ranges: tuple[tuple[int, int], ...] = ()
+    input_versions: tuple[int, ...] = ()
+    output_storage: int | None = None
+    output_range: tuple[int, int] | None = None
+    output_version: int | None = None
 
 
 @dataclass

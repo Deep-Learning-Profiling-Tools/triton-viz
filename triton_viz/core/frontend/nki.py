@@ -102,6 +102,7 @@ if HAS_NKI:
             dst,
             mask,
             keys,
+            value,
         ),
         Dot: _nki_dot_adapter,
         ReduceSum: _nki_reduce_sum_adapter,

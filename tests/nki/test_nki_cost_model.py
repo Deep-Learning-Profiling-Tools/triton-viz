@@ -14,6 +14,7 @@ try:
         ComputeCalibration,
         DmaCalibrationSurface,
         LoweringExpansionCalibration,
+        NcLatencyCalibration,
         StaticDmaCalibrationSurface,
         simulate,
     )
@@ -419,6 +420,83 @@ def test_view_pointer_aliases_parent_storage_via_storage_key():
     result = simulate(events, model)
     consumer = [e for e in result.timeline["dma"] if e.seq == 1][0]
     assert consumer.start == pytest.approx(10)
+
+
+def test_versioned_load_compute_store_forms_cross_engine_critical_path():
+    model = CostModel(
+        dma_startup_ns=0,
+        dma_bytes_per_ns=1,
+        vector_startup_ns=0,
+        vector_elements_per_ns=1,
+        cross_engine_sync_ns=0,
+    )
+    events = [
+        {"seq": 0, "op": "load", "engine": "dma", "bytes": 10,
+         "src_storage": 1, "src_range": [0, 10], "src_version": 0,
+         "dst_storage": 100, "dst_range": [0, 10], "dst_version": 0},
+        {"seq": 1, "op": "compute", "engine": "vector",
+         "elements": 10, "input_storages": [100],
+         "input_ranges": [[0, 10]], "input_versions": [0],
+         "output_storages": [200], "output_ranges": [[0, 10]],
+         "output_versions": [0]},
+        {"seq": 2, "op": "store", "engine": "dma", "bytes": 10,
+         "src_storage": 200, "src_range": [0, 10], "src_version": 0,
+         "dst_storage": 2, "dst_range": [0, 10], "dst_version": 1},
+    ]
+    result = simulate(events, model)
+    load = next(e for e in result.timeline["dma"] if e.seq == 0)
+    compute = result.timeline["vector"][0]
+    store = next(e for e in result.timeline["dma"] if e.seq == 2)
+
+    assert compute.start == pytest.approx(load.end)
+    assert store.start == pytest.approx(compute.end)
+    assert result.predicted_latency_ns == pytest.approx(30)
+
+
+def test_nc_completion_uses_hbm_input_dtype_and_adds_to_scheduler_makespan():
+    from triton_viz.tools.nki_region_ir import structural_calibration_key
+
+    region = {
+        "tokens": ["multiply"],
+        "op_histogram": {"multiply": 1},
+        "dtype": "float32",
+        "free_dim": 10,
+        "logical_free_dim": 10,
+        "reduction_count": 0,
+    }
+    key = structural_calibration_key(region)
+    calibration = NcLatencyCalibration(
+        {
+            (key, "float32"): [(10, 100.0)],
+            (key, "bfloat16"): [(10, 7.0)],
+        }
+    )
+    events = [
+        {"seq": 0, "op": "load", "engine": "dma", "bytes": 10,
+         "src_storage": 1, "src_range": [0, 10], "src_dtype": "bfloat16",
+         "dst_storage": 100, "dst_range": [0, 10], "dst_version": 0},
+        {"seq": 1, "op": "compute", "engine": "vector", "elements": 10,
+         "region_ir": region, "input_storages": [100],
+         "input_ranges": [[0, 10]], "input_versions": [0],
+         "output_storages": [200], "output_ranges": [[0, 10]],
+         "output_versions": [0]},
+        {"seq": 2, "op": "store", "engine": "dma", "bytes": 10,
+         "src_storage": 200, "src_range": [0, 10], "src_version": 0,
+         "src_dtype": "float32", "dst_storage": 2,
+         "dst_range": [0, 10], "dst_version": 1},
+    ]
+    model = CostModel(
+        dma_startup_ns=0,
+        dma_bytes_per_ns=1,
+        vector_startup_ns=0,
+        vector_elements_per_ns=1,
+        nc_latency_calibration=calibration,
+    )
+    result = simulate(events, model)
+
+    assert result.components_ns["resource_overlap_makespan"] == pytest.approx(30)
+    assert result.components_ns["structural_fixed_completion"] == pytest.approx(7)
+    assert result.predicted_latency_ns == pytest.approx(37)
 
 
 def test_lowering_calibration_expands_one_fusion_group_across_engines():

@@ -19,7 +19,12 @@ class NKITransformer(ast.NodeTransformer):
         new_call = self._rewrite_nl_slice_call(node.value)
         if new_call is None:
             return self.generic_visit(node)
-        return ast.Expr(value=new_call)
+        return ast.Expr(value=cast(ast.expr, self.generic_visit(new_call)))
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        """Rewrite nl.load/store at any expression depth, not only statements."""
+        node = cast(ast.Call, self.generic_visit(node))
+        return self._rewrite_nl_slice_call(node) or node
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
         node.decorator_list = []
@@ -32,11 +37,12 @@ class NKITransformer(ast.NodeTransformer):
         new_call = self._rewrite_nl_slice_call(node.value)
         if new_call is None:
             return self.generic_visit(node)
-        return ast.Assign(
+        rewritten = ast.Assign(
             targets=node.targets,
             value=new_call,
             type_comment=getattr(node, "type_comment", None),
         )
+        return self.generic_visit(rewritten)
 
     def _rewrite_nl_slice_call(self, call_node: ast.Call) -> ast.Call | None:
         if not (

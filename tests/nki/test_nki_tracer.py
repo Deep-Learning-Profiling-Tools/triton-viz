@@ -4,7 +4,7 @@ from pathlib import Path
 
 import triton_viz
 from triton_viz.clients import Tracer
-from triton_viz.core.data import Grid, Load, Store, ReduceSum, Dot
+from triton_viz.core.data import Grid, Load, Store, ReduceSum, Dot, NkiCompute
 from triton_viz.core.trace import launches
 import math
 
@@ -62,6 +62,65 @@ def test_tracer_records_masked_load_store():
     assert all(r.ptr == out.data_ptr() for r in store_records)
     assert [r.bytes for r in load_records] == [16, 16, 8, 8]
     assert [r.bytes for r in store_records] == [16, 8]
+
+
+def test_nl_storage_identity_builds_versioned_load_compute_store_chain():
+    triton_viz.clear()
+
+    @triton_viz.trace(client=Tracer(), frontend="nki")
+    def kernel(x_ptr, out_ptr):
+        offs = nl.arange(8)
+        value = nl.load(x_ptr[offs])
+        view = nl.broadcast_to(value[0:1], shape=(8,))
+        result = nl.add(value, view, dtype=x_ptr.dtype)
+        nl.store(out_ptr[offs], result)
+
+    x = NDArray(value=np.arange(8, dtype=np.float32))
+    out = NDArray(value=np.empty_like(x.data))
+    kernel[(1,)](x, out)
+
+    records = launches[-1].records
+    load = next(record for record in records if isinstance(record, Load))
+    compute = next(record for record in records if isinstance(record, NkiCompute))
+    store = next(record for record in records if isinstance(record, Store))
+
+    assert load.dst_storage == compute.input_storages[0]
+    assert load.dst_version == compute.input_versions[0] == 0
+    assert compute.input_storages[1] == load.dst_storage
+    assert compute.input_ranges[1][1] <= load.dst_range[1]
+    assert compute.output_storages[0] == store.src_storage
+    assert compute.output_versions[0] == store.src_version == 0
+
+    from triton_viz.tools.nki_cost_model import CostModel, simulate
+
+    result = simulate(records_to_events(records), CostModel(cross_engine_sync_ns=0))
+    load_timing = result.timeline["dma"][0]
+    compute_timing = result.timeline["vector"][0]
+    store_timing = result.timeline["dma"][1]
+    assert compute_timing.start >= load_timing.end
+    assert store_timing.start >= compute_timing.end
+
+
+def test_inplace_assignment_retargets_compute_to_new_tensor_version():
+    triton_viz.clear()
+
+    @triton_viz.trace(client=Tracer(), frontend="nki")
+    def kernel(x_ptr, out_ptr):
+        offs = nl.arange(8)
+        acc = nl.load(x_ptr[offs])
+        acc[...] = nl.add(acc, 1.0, dtype=x_ptr.dtype)
+        result = nl.multiply(acc, 2.0, dtype=x_ptr.dtype)
+        nl.store(out_ptr[offs], result)
+
+    x = NDArray(value=np.arange(8, dtype=np.float32))
+    out = NDArray(value=np.empty_like(x.data))
+    kernel[(1,)](x, out)
+    computes = [r for r in launches[-1].records if isinstance(r, NkiCompute)]
+
+    assert len(computes) == 2
+    writer, consumer = computes
+    assert writer.output_storages[0] == consumer.input_storages[0]
+    assert writer.output_versions[0] == consumer.input_versions[0] == 1
 
 
 def copy_kernel(x_ptr, out_ptr):

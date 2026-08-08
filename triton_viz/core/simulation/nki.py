@@ -11,8 +11,15 @@ except (
     ) from exc
 import inspect
 import textwrap
+from dataclasses import dataclass
 from ..frontend.nki_transform import transform_code
 from ..masked_load_store import masked_load, masked_store
+
+
+@dataclass
+class _StorageState:
+    identity: int
+    version: int = 0
 
 
 class NDArray:
@@ -30,8 +37,10 @@ class NDArray:
             # can rely on ndarray attributes like `.ctypes`, `.shape`, `.dtype`, `.strides`.
             assert val is None or val.shape == kwargs["value"].shape
             val = kwargs["value"]
+        storage_state = kwargs.pop("_storage_state", None)
         self._data_ptr = None
         self.data = val
+        self._storage_state = storage_state or _StorageState(self._root_data_ptr())
 
     @property
     def shape(self):
@@ -45,6 +54,40 @@ class NDArray:
         if self._data_ptr is None:
             self._data_ptr = self.data.ctypes.data
         return self._data_ptr
+
+    def _root_data_ptr(self):
+        if self.data is None or not hasattr(self.data, "ctypes"):
+            return id(self)
+        root = self.data
+        while isinstance(getattr(root, "base", None), np.ndarray):
+            root = root.base
+        return int(root.ctypes.data)
+
+    def storage_id(self):
+        return self._storage_state.identity
+
+    def tensor_version(self):
+        return self._storage_state.version
+
+    def mark_write(self):
+        self._storage_state.version += 1
+        return self._storage_state.version
+
+    def byte_range(self):
+        """Inclusive-exclusive byte range relative to the root allocation."""
+        if self.data is None or not self.data.size:
+            return (0, 0)
+        origin = int(self.data.ctypes.data) - self.storage_id()
+        low = high = origin
+        for size, stride in zip(self.data.shape, self.data.strides):
+            extent = (int(size) - 1) * int(stride)
+            low += min(0, extent)
+            high += max(0, extent)
+        return (low, high + int(self.data.dtype.itemsize))
+
+    def _view_or_copy(self, value, name):
+        state = self._storage_state if np.shares_memory(value, self.data) else None
+        return NDArray(value=value, name=name, _storage_state=state)
 
     def stride(self):
         return self.data.strides
@@ -87,7 +130,7 @@ class NDArray:
         sliced_value = self.data[tuple(new_keys)]
 
         # Create a new NDArray with the sliced data
-        return NDArray(value=sliced_value, name=f"{self.name}_slice")
+        return self._view_or_copy(sliced_value, f"{self.name}_slice")
 
     def __setitem__(self, keys, value):
         if not isinstance(keys, tuple):
@@ -96,6 +139,24 @@ class NDArray:
         # Apply the slicing to the underlying numpy array
         new_keys = [k.data if isinstance(k, NDArray) else k for k in keys]
         self.data[tuple(new_keys)] = value.data
+        version = self.mark_write()
+        # The compute callback fires before Python executes ``dst[...] = value``.
+        # Retarget that already-emitted mutable record to the physical SBUF
+        # allocation/version written by the assignment, preserving SSA value
+        # identity without inventing a separate zero-time copy event.
+        record = getattr(value, "_trace_record", None)
+        if record is not None:
+            byte_range = self.byte_range()
+            if hasattr(record, "output_storages"):
+                record.output_ptrs = (self.data_ptr(),)
+                record.output_storages = (self.storage_id(),)
+                record.output_ranges = (byte_range,)
+                record.output_versions = (version,)
+            elif hasattr(record, "output_storage"):
+                record.output_ptr = self.data_ptr()
+                record.output_storage = self.storage_id()
+                record.output_range = byte_range
+                record.output_version = version
 
         return self
 
@@ -171,15 +232,11 @@ class NDArray:
         return self._binary_op(other, lambda a, b: a | b, "or", "|")
 
     def reshape(self, *args, **kwargs):
-        return NDArray(
-            value=self.data.reshape(*args), name=f"{self.name}_reshape", **kwargs
-        )
+        return self._view_or_copy(self.data.reshape(*args), f"{self.name}_reshape")
 
     def broadcast_to(self, *args, **kwargs):
-        return NDArray(
-            value=np.broadcast_to(self.data, *args),
-            name=f"{self.name}_broadcast_to",
-            **kwargs,
+        return self._view_or_copy(
+            np.broadcast_to(self.data, *args), f"{self.name}_broadcast_to"
         )
 
 
@@ -264,7 +321,12 @@ class Builder:
         result = masked_load(ndarray, numpy_keys, mask=mask_value)
 
         # Convert result back to NDArray
-        return NDArray(value=result, name=f"{src.name}_masked_load", **kwargs)
+        return NDArray(
+            value=result,
+            name=f"{src.name}_masked_load",
+            buffer=nl.sbuf,
+            **kwargs,
+        )
 
     def store(self, dst: NDArray, keys, value: NDArray, *, mask=None, **kwargs):
         """Store array elements with masking for out-of-bounds errors."""
@@ -278,6 +340,7 @@ class Builder:
 
         # Call the actual masked_store function
         masked_store(ndarray, numpy_keys, value_array, mask=mask_value)
+        dst.mark_write()
 
         return dst
 
@@ -474,7 +537,7 @@ class Builder:
         return self.ndarray(shape, value.dtype, buffer=buffer, name=name, value=value)
 
     def broadcast_to(self, x: NDArray, shape, **kwargs):
-        return NDArray(value=np.broadcast_to(x.data, shape), name=f"{x.name}_broadcast_to")
+        return x.broadcast_to(shape)
 
     def static_cast(self, x: NDArray, dtype, **kwargs):
         return NDArray(value=x.data.astype(dtype), name=f"{x.name}_static_cast")
@@ -506,6 +569,8 @@ def nki_patch_lang(scope=None):
     # nl.shared_hbm
     # nl.psum
     _set_attr(nl, "affine_range", nki_builder.range)
+    _set_attr(nl, "static_range", nki_builder.range)
+    _set_attr(nl, "sequential_range", nki_builder.range)
     nl.par_dim
     _set_attr(nl, "zeros", nki_builder.zeros)
     _set_attr(nl, "mgrid", NDArray(value=np.mgrid, buffer=nl.sbuf, name="mgrid"))

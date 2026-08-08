@@ -443,6 +443,14 @@ def record_to_event(
                 if getattr(record, "output_ptr", None) is not None
                 else None
             ),
+            "input_storages": [int(value) for value in record.input_storages],
+            "input_ranges": [list(value) for value in record.input_ranges],
+            "input_versions": [int(value) for value in record.input_versions],
+            "output_storage": record.output_storage,
+            "output_range": (
+                list(record.output_range) if record.output_range is not None else None
+            ),
+            "output_version": record.output_version,
         }
 
     if isinstance(record, BinaryOp):
@@ -459,6 +467,14 @@ def record_to_event(
             "output_ptr": (
                 int(record.output_ptr) if record.output_ptr is not None else None
             ),
+            "input_storages": [int(value) for value in record.input_storages],
+            "input_ranges": [list(value) for value in record.input_ranges],
+            "input_versions": [int(value) for value in record.input_versions],
+            "output_storage": record.output_storage,
+            "output_range": (
+                list(record.output_range) if record.output_range is not None else None
+            ),
+            "output_version": record.output_version,
         }
 
     if isinstance(record, ReduceSum):
@@ -476,6 +492,14 @@ def record_to_event(
                 if getattr(record, "output_ptr", None) is not None
                 else None
             ),
+            "input_storages": [int(value) for value in record.input_storages],
+            "input_ranges": [list(value) for value in record.input_ranges],
+            "input_versions": [int(value) for value in record.input_versions],
+            "output_storage": record.output_storage,
+            "output_range": (
+                list(record.output_range) if record.output_range is not None else None
+            ),
+            "output_version": record.output_version,
         }
 
     if isinstance(record, NkiCompute):
@@ -497,6 +521,18 @@ def record_to_event(
             "elements": elements,
             "input_ptrs": [int(ptr) for ptr in record.input_ptrs],
             "output_ptr": (int(record.output_ptrs[0]) if record.output_ptrs else None),
+            "input_storages": [int(value) for value in record.input_storages],
+            "input_ranges": [list(value) for value in record.input_ranges],
+            "input_versions": [int(value) for value in record.input_versions],
+            "output_storage": (
+                int(record.output_storages[0]) if record.output_storages else None
+            ),
+            "output_range": (
+                list(record.output_ranges[0]) if record.output_ranges else None
+            ),
+            "output_version": (
+                int(record.output_versions[0]) if record.output_versions else None
+            ),
             "input_dtypes": list(record.input_dtypes),
             "output_dtype": record.output_dtype,
         }
@@ -513,11 +549,17 @@ def record_to_event(
             "bytes": int(record.bytes),
             "active_lanes": active,
             "offsets_shape": shape,
-            # HBM source pointer + range so HBM-side hazards resolve. The SBUF
-            # destination tile pointer is not yet recorded by the nl.* frontend.
             "src_ptr": int(record.ptr),
-            "src_storage": int(record.ptr),
+            "src_storage": int(record.src_storage or record.ptr),
             "src_range": _byte_span(record.offsets, int(record.bytes)),
+            "src_version": record.src_version,
+            "src_dtype": record.src_dtype,
+            "dst_ptr": record.dst_ptr,
+            "dst_storage": record.dst_storage,
+            "dst_range": (
+                list(record.dst_range) if record.dst_range is not None else None
+            ),
+            "dst_version": record.dst_version,
             **_offset_geometry(record.offsets, record.masks, int(record.bytes)),
             **_dma_geometry(shape, int(record.bytes)),
         }
@@ -534,10 +576,17 @@ def record_to_event(
             "bytes": int(record.bytes),
             "active_lanes": active,
             "offsets_shape": shape,
-            # HBM destination pointer + range so HBM-side hazards resolve.
             "dst_ptr": int(record.ptr),
-            "dst_storage": int(record.ptr),
+            "dst_storage": int(record.dst_storage or record.ptr),
             "dst_range": _byte_span(record.offsets, int(record.bytes)),
+            "dst_version": record.dst_version,
+            "src_ptr": record.src_ptr,
+            "src_storage": record.src_storage,
+            "src_range": (
+                list(record.src_range) if record.src_range is not None else None
+            ),
+            "src_version": record.src_version,
+            "src_dtype": record.src_dtype,
             **_offset_geometry(record.offsets, record.masks, int(record.bytes)),
             **_dma_geometry(shape, int(record.bytes)),
         }
