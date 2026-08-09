@@ -1550,6 +1550,11 @@ class TwoCopySymbolicHBSolver:
             solver.add(c)
         for c in self.extra_assumptions:
             solver.add(as_bool(c))
+        # HB irreflexivity: H = TC(po ∪ sw) must be acyclic in any valuation
+        # that models an execution; without Not(H[i][i]) the solver may
+        # witness race queries with cyclic po ∪ sw valuations.
+        for i in range(len(self.events)):
+            solver.add(Not(self.hb[i][i]))
         return solver
 
     def _new_solver(self) -> Solver:
