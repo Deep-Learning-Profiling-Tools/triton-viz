@@ -127,15 +127,17 @@ def build_transitive_hb(
 
 
 def conflicting_access_modes(first: Any, second: Any) -> BoolRef:
-    """``(write,read|write)`` conflict, minus mutually-atomic pairs.
+    """``(write,read|write)`` conflict, minus morally strong pairs.
 
     An atomic-vs-atomic pair is race-free only when the two operations are
-    actually atomic with respect to EACH OTHER: both at least device scope
-    (callers only query cross-block pairs, so a ``"cta"``-scoped atomic
-    never covers the peer block — PTX ``.cta`` scope guarantees atomicity
-    within one CTA only), same access width, and the exact same address.
-    Byte-overlapping atomics at different addresses or widths are torn
-    accesses, which race like plain writes.
+    actually atomic with respect to EACH OTHER: mutually inclusive scopes,
+    same access width, and the exact same address. Scope inclusion is
+    symbolic: a pair involving a ``"cta"`` scope is mutually inclusive
+    exactly when the two events share a block (PTX ``.cta`` scope
+    guarantees atomicity within one CTA only), which cross-copy queries
+    falsify via their different-blocks assertion while same-instance
+    queries satisfy. Byte-overlapping atomics at different addresses or
+    widths are torn accesses, which race like plain writes.
 
     Built with explicit ``And``/``Or`` to avoid Python operator-precedence
     pitfalls between Z3 expressions and Python booleans.
@@ -147,17 +149,31 @@ def conflicting_access_modes(first: Any, second: Any) -> BoolRef:
     if not (first.is_atomic and second.is_atomic):
         return access_conflict
 
-    device_scope = (getattr(first, "scope", None) or "gpu") != "cta" and (
-        getattr(second, "scope", None) or "gpu"
-    ) != "cta"
     elem_first = getattr(first, "elem_size", None)
     elem_second = getattr(second, "elem_size", None)
     # Events without width metadata (demo HBSolver) keep address-equality
     # semantics for mutual atomicity.
     same_width = elem_first is None or elem_second is None or elem_first == elem_second
-    if not (device_scope and same_width):
+    if not same_width:
         return access_conflict
-    return And(access_conflict, Not(first.addr == second.addr))
+
+    cta_involved = (getattr(first, "scope", None) or "gpu") == "cta" or (
+        getattr(second, "scope", None) or "gpu"
+    ) == "cta"
+    if not cta_involved:
+        return And(access_conflict, Not(first.addr == second.addr))
+    pid_first = getattr(first, "pid", None)
+    pid_second = getattr(second, "pid", None)
+    if pid_first is None or pid_second is None:
+        # Demo events carry no block coordinates: no exemption for
+        # cta-involving pairs, as before.
+        return access_conflict
+    scope_ok = And(
+        pid_first[0] == pid_second[0],
+        pid_first[1] == pid_second[1],
+        pid_first[2] == pid_second[2],
+    )
+    return And(access_conflict, Not(And(scope_ok, first.addr == second.addr)))
 
 
 def minimal_atomic_read_from(
