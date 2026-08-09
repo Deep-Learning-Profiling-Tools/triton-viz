@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_nki_runtime_overhead",
+  "description": "Orthogonal launch, engine activation, and dependency controls.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "runtime_overhead",
+      "kind": "runtime_overhead",
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "p": [1, 16, 64, 128],
+        "f": [128, 512, 2048],
+        "mode": ["empty", "dma_only", "vector", "scalar", "vector_scalar_chain", "scalar_vector_chain"]
+      }
+    }
+  ]
+}

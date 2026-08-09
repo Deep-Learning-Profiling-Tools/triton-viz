@@ -23,9 +23,11 @@ import json
 import math
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
+
+from triton_viz.tools.nki_features import AccessPattern, ComputeRegion
 
 # ---------------------------------------------------------------------------
 # Engine model
@@ -744,6 +746,63 @@ class NcLatencyCalibration:
 
 
 @dataclass
+class RuntimeOverheadCalibration:
+    """Mechanism-level NC runtime costs fitted from orthogonal controls."""
+
+    sequencer_base_ns: float
+    vector_activation_ns: float = 0.0
+    scalar_activation_ns: float = 0.0
+    tensor_activation_ns: float = 0.0
+    cross_engine_sync_ns: float = 0.0
+    partition_log2_ns: float = 0.0
+    dma_packet_log2_ns: float = 0.0
+    partition_min: float = 1.0
+    partition_max: float = 128.0
+    free_access_min: float = 128.0
+    free_access_max: float = 2048.0
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> RuntimeOverheadCalibration:
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            rows = list(csv.DictReader(file))
+        if len(rows) != 1:
+            raise ValueError("runtime calibration CSV must contain exactly one row")
+        row = rows[0]
+        return cls(
+            **{
+                field.name: float(row.get(field.name) or 0.0)
+                for field in fields(cls)
+            }
+        )
+
+    def predict_ns(
+        self,
+        engine_busy_ns: dict[str, float],
+        cross_engine_edges: int,
+        partition_count: int,
+        free_access_count: int,
+    ) -> float:
+        return max(
+            0.0,
+            self.sequencer_base_ns
+            + self.vector_activation_ns * int(ENGINE_VECTOR in engine_busy_ns)
+            + self.scalar_activation_ns * int(ENGINE_SCALAR in engine_busy_ns)
+            + self.tensor_activation_ns * int(ENGINE_TENSOR in engine_busy_ns)
+            + self.cross_engine_sync_ns * max(0, cross_engine_edges)
+            + self.partition_log2_ns * math.log2(max(1, partition_count))
+            + self.dma_packet_log2_ns
+            * math.log2(max(1, free_access_count) / 128.0),
+        )
+
+    def in_domain(self, partition_count: int, free_access_count: int) -> bool:
+        """Whether runtime geometry lies inside the measured control box."""
+        return (
+            self.partition_min <= partition_count <= self.partition_max
+            and self.free_access_min <= free_access_count <= self.free_access_max
+        )
+
+
+@dataclass
 class StridedDmaCalibration:
     """Kernel-level DMA and completion calibration for affine strided stores."""
 
@@ -769,22 +828,40 @@ class StridedDmaCalibration:
         return cls(points)
 
     def predict(self, events: Iterable[dict[str, Any]]) -> tuple[float, float] | None:
-        stores = [event for event in events if event.get("dma_pattern") == "strided"]
-        if not stores:
+        patterns = [
+            (event, pattern)
+            for event in events
+            if (pattern := AccessPattern.from_event(event)) is not None
+            and pattern.dst_space == "hbm"
+            and pattern.layout_family == "strided"
+        ]
+        if not patterns:
             return None
-        first = stores[0]
-        stride = int(first.get("free_stride_items") or 0)
-        partitions = int(first.get("partition_count") or 1)
-        active = sum(int(event.get("active_access_count") or 0) for event in stores)
-        free = max(1, active // max(1, partitions * len(stores)))
+        first, first_pattern = patterns[0]
+        stride = first_pattern.free_stride_items
+        partitions = first_pattern.partition_count
+        active = sum(pattern.active_access_count for _, pattern in patterns)
+        free = max(1, active // max(1, partitions * len(patterns)))
         dtype = ComputeCalibration._norm_dtype(
-            first.get("dtype") or ("float16" if int(first.get("item_bytes") or 4) == 2 else "float32")
+            first.get("dtype")
+            or ("float16" if first_pattern.item_bytes == 2 else "float32")
         )
         rows = self.points.get((dtype, stride, partitions), [])
         if not rows:
             return None
-        nearest = min(rows, key=lambda row: abs(math.log2(max(1, row[0]) / free)))
-        return nearest[1], nearest[2]
+        rows = sorted(rows)
+        lower = max((row for row in rows if row[0] <= free), default=rows[0])
+        upper = min((row for row in rows if row[0] >= free), default=rows[-1])
+        if lower[0] == upper[0]:
+            return lower[1], lower[2]
+        # Interpolate only between independent control sizes. Values outside
+        # their measured range remain clamped and are reported as OOD by the
+        # experiment layer rather than silently extrapolated.
+        weight = (free - lower[0]) / (upper[0] - lower[0])
+        return (
+            lower[1] + weight * (upper[1] - lower[1]),
+            lower[2] + weight * (upper[2] - lower[2]),
+        )
 
 
 def _canonical_engine(raw_engine: str, op: str) -> str:
@@ -905,6 +982,7 @@ class CostModel:
     compositional_lowering: CompositionalLoweringCalibration | None = None
     structured_control_lowering: StructuredControlCalibration | None = None
     nc_latency_calibration: NcLatencyCalibration | None = None
+    runtime_overhead_calibration: RuntimeOverheadCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
 
     # On-chip copy (VectorE/ScalarE moving PSUM<->SBUF): cheaper per byte.
@@ -1353,6 +1431,13 @@ def _expand_lowering_groups(
             and event.get("region_ir")
         ):
             region_ir = dict(event["region_ir"])
+            # Normalize the lowering input through the shared, operator-agnostic
+            # schema. This keeps partition/free geometry independent of an
+            # operator name or structural calibration key.
+            compute_region = ComputeRegion.from_event(event)
+            if compute_region is not None:
+                region_ir["partition_count"] = compute_region.partition_count
+                region_ir["logical_free_dim"] = compute_region.logical_free_dim
             if str(region_ir.get("dtype", "")).lower() in {"bool", "boolean"}:
                 value_dtypes = [
                     str(value)
@@ -1550,6 +1635,7 @@ def simulate(
     timeline: dict[str, list[TimelineEntry]] = {}
     engine_busy: dict[str, float] = {}
     makespan = 0.0
+    cross_engine_edges = 0
     # Running high-water mark of all memory-transfer completions, used as a
     # conservative dependency floor for compute ops that lack pointer linkage.
     prior_transfer_end = 0.0
@@ -1558,8 +1644,10 @@ def simulate(
         earliest: float, producer_end: float, producer_engine: str, consumer_engine: str
     ) -> float:
         """Fold one dependency edge in, adding sync cost if it crosses engines."""
+        nonlocal cross_engine_edges
         ready = producer_end
         if producer_engine != consumer_engine:
+            cross_engine_edges += 1
             ready += sync_ns
         return max(earliest, ready)
 
@@ -1665,7 +1753,31 @@ def simulate(
     calibrated_nc_ns = None
     if strided_dma_prediction is not None:
         calibrated_nc_ns = makespan + strided_dma_prediction[1]
-    if model.nc_latency_calibration is not None:
+    if model.runtime_overhead_calibration is not None:
+        max_partitions = max(
+            (int(event.get("partition_count") or 1) for event in source_events),
+            default=1,
+        )
+        max_free_access = max(
+            (
+                max(1, pattern.active_access_count // pattern.partition_count)
+                for event in source_events
+                if (pattern := AccessPattern.from_event(event)) is not None
+            ),
+            default=1,
+        )
+        calibrated_nc_ns = max(
+            makespan,
+            model.runtime_overhead_calibration.predict_ns(
+                engine_busy, cross_engine_edges, max_partitions, max_free_access
+            ),
+        )
+        runtime_control_in_domain = model.runtime_overhead_calibration.in_domain(
+            max_partitions, max_free_access
+        )
+    else:
+        runtime_control_in_domain = None
+    if model.runtime_overhead_calibration is None and model.nc_latency_calibration is not None:
         region = next(
             (event.get("region_ir") for event in source_events if event.get("region_ir")),
             None,
@@ -1723,6 +1835,11 @@ def simulate(
             "compute_plus_dma": phase_critical_ns,
             "resource_overlap_makespan": makespan,
             "structural_fixed_completion": final_ns - makespan,
+            "runtime_control_in_domain": (
+                float(runtime_control_in_domain)
+                if runtime_control_in_domain is not None
+                else -1.0
+            ),
             "final": final_ns,
         },
     )

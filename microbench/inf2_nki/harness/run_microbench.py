@@ -50,6 +50,10 @@ from microbench.inf2_nki.tests.latency_pointer_chase.kernels import (
 )
 from microbench.inf2_nki.tests.overlap.kernels import tensor_dma_overlap_factory
 from microbench.inf2_nki.tests.program_mapping.kernels import program_mapping_factory
+from microbench.inf2_nki.tests.runtime_overhead.kernels import (
+    runtime_overhead_factory,
+    work_units as runtime_overhead_work_units,
+)
 from microbench.inf2_nki.tests.static_dma.kernels import (
     static_dma_scatter_factory,
 )
@@ -142,6 +146,12 @@ BENCHMARKS = {
         "folder": "static_dma",
         "factory": static_dma_scatter_factory,
         "work": static_dma_work_units,
+        "input": "default",
+    },
+    "runtime_overhead": {
+        "folder": "runtime_overhead",
+        "factory": runtime_overhead_factory,
+        "work": runtime_overhead_work_units,
         "input": "default",
     },
 }

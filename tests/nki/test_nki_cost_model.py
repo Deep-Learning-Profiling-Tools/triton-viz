@@ -15,7 +15,9 @@ try:
         DmaCalibrationSurface,
         LoweringExpansionCalibration,
         NcLatencyCalibration,
+        RuntimeOverheadCalibration,
         StaticDmaCalibrationSurface,
+        StridedDmaCalibration,
         simulate,
     )
 except ModuleNotFoundError:
@@ -497,6 +499,90 @@ def test_nc_completion_uses_hbm_input_dtype_and_adds_to_scheduler_makespan():
     assert result.components_ns["resource_overlap_makespan"] == pytest.approx(30)
     assert result.components_ns["structural_fixed_completion"] == pytest.approx(7)
     assert result.predicted_latency_ns == pytest.approx(37)
+
+
+def test_strided_dma_interpolates_between_independent_control_sizes():
+    calibration = StridedDmaCalibration(
+        {("float32", 2, 128): [(512, 600.0, 100.0), (2048, 2600.0, 300.0)]}
+    )
+    events = [{
+        "op": "store",
+        "dma_pattern": "strided",
+        "free_stride_items": 2,
+        "partition_count": 128,
+        "active_access_count": 128 * 1024,
+        "item_bytes": 4,
+    }]
+
+    assert calibration.predict(events) == pytest.approx(
+        (1266.6666667, 166.6666667)
+    )
+
+
+def test_tilebench_matmul_builder_uses_rows_as_square_output_and_cols_as_k():
+    from triton_viz.tools.nki_operator_experiments import _matmul_inputs
+
+    lhs, rhs, tile_m, tile_n, tile_k, cores, double_row = _matmul_inputs(
+        512, 1024, "float32"
+    )
+    assert lhs.shape == (512, 1024)
+    assert rhs.shape == (1024, 512)
+    assert (tile_m, tile_n, tile_k, cores, double_row) == (4, 1, 8, 1, False)
+
+
+def test_operator_agnostic_access_and_compute_feature_schema():
+    from triton_viz.tools.nki_features import AccessPattern, ComputeRegion
+
+    access = AccessPattern.from_event({
+        "op": "store", "mem_src": "SBUF", "mem_dst": "HBM",
+        "bytes": 64, "partition_count": 16, "free_stride_items": 2,
+        "active_access_count": 16, "access_span_bytes": 128,
+        "item_bytes": 4,
+    })
+    assert access is not None
+    assert access.layout_family == "strided"
+    assert access.density == pytest.approx(0.5)
+
+    region = ComputeRegion.from_event({"region_ir": {
+        "dtype": "float32", "partition_count": 16,
+        "logical_free_dim": 512, "op_histogram": {"add": 2},
+        "reduction_count": 1, "broadcast_edge_count": 1,
+        "has_mask_or_tail": True,
+    }})
+    assert region is not None
+    assert region.op_histogram == (("add", 2),)
+    assert region.partition_count == 16
+
+
+def test_runtime_overhead_is_a_concurrent_path_and_reports_control_domain():
+    calibration = RuntimeOverheadCalibration(
+        sequencer_base_ns=100,
+        vector_activation_ns=20,
+        partition_log2_ns=10,
+        dma_packet_log2_ns=5,
+        partition_min=1,
+        partition_max=128,
+        free_access_min=128,
+        free_access_max=2048,
+    )
+    events = [{
+        "seq": 0, "op": "compute", "engine": "vector", "elements": 500,
+        "partition_count": 16, "free_dim": 128,
+    }]
+    result = simulate(
+        events,
+        CostModel(
+            vector_startup_ns=0,
+            vector_elements_per_ns=1,
+            runtime_overhead_calibration=calibration,
+        ),
+    )
+    # Runtime setup overlaps engine work: it is max(500, 100+20+4*10),
+    # never an additive residual on top of the scheduler result.
+    assert result.predicted_latency_ns == pytest.approx(500)
+    assert result.components_ns["runtime_control_in_domain"] == 0.0
+    assert calibration.in_domain(16, 512)
+    assert not calibration.in_domain(16, 4096)
 
 
 def test_lowering_calibration_expands_one_fusion_group_across_engines():

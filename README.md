@@ -21,6 +21,7 @@ Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to
       <ul>
         <li><a href="#prerequisites">Prerequisites</a></li>
         <li><a href="#installation-of-triton-viz">Installation of Triton-Viz</a></li>
+        <li><a href="#reproducing-the-inf2-nki-cost-model">Reproducing the Inf2 NKI cost model</a></li>
       </ul>
     </li>
     <li>
@@ -91,6 +92,61 @@ Note that you need to specify all features that you want _in one statement_ when
 uv sync --extra nki # NKI support but no testing
 uv sync --extra test # tests but no NKI support
 ```
+
+### Reproducing the Inf2 NKI cost model
+
+The paper-oriented cost-model pipeline runs on an AWS Inferentia2 (Inf2) host
+with an idle NeuronCore. The reported results were collected with the AWS
+Neuron PyTorch 2.9 virtual environment at
+`/opt/aws_neuronx_venv_pytorch_2_9`, `neuronx-cc 2.26.6360.0+6f180f47`, and a
+separate Tilebench checkout. Compiler behavior is version-sensitive, so record
+the output of `python -c "import neuronxcc; print(neuronxcc.__version__)"` when
+reproducing or comparing results. The `nki` extra in this repository supplies
+the Python-side NKI dependencies, but exact paper-number reproduction requires
+the compiler version above.
+
+From the repository root, activate the Neuron environment, put the repository
+on `PYTHONPATH`, and run the three top-level stages:
+
+```sh
+source /opt/aws_neuronx_venv_pytorch_2_9/bin/activate
+export PYTHONPATH="$PWD"
+
+python -m triton_viz.tools.nki_cost_model_pipeline collect --root /tmp/nki_cost_model_run \
+  --tilebench-dir /path/to/Tilebench/benchmarks/operators
+python -m triton_viz.tools.nki_cost_model_pipeline fit --root /tmp/nki_cost_model_run
+python -m triton_viz.tools.nki_cost_model_pipeline evaluate --root /tmp/nki_cost_model_run
+```
+
+`collect` is the long-running hardware stage. It writes independent
+microbenchmark/region controls under `microbench/` and `controls/`, and writes
+Tilebench measurements under `holdouts/`. `fit` reads only the control trees;
+it must not read `holdouts/`. `evaluate` loads the frozen calibration and only
+then replays the holdouts. This directory separation is an intentional
+train/holdout boundary, not merely an output convention. Use `--dry-run` on any
+stage to inspect its commands without executing them.
+
+The main artifacts under the selected root are:
+
+- `calibration/runtime_overhead.csv`: orthogonally fitted launch/sequencer,
+  engine-activation, partition, packet, and synchronization terms.
+- `calibration/compute.csv`, `structured_compute.csv`, DMA CSVs, and
+  `static_dma.csv`: the remaining control-only calibration surfaces.
+- `evaluation/*.csv`: per-case predictions, hardware measurements, and the
+  compute-only, compute-plus-DMA, scheduler-overlap, and final ablations.
+- `evaluation/report.json`: aggregate holdout MAPE and the worst retained case.
+
+The formal FP32 holdout contains 35 points at `rows=128` across eight operators:
+`interleave`, `kl_divergence`, `layernorm`, `mul2`, `relu`, `rmsnorm`,
+`sigmoid`, and `softmax`. All eight use free dimensions
+`F={128,512,1024,2048}`; `interleave`, `layernorm`, and `rmsnorm` additionally
+use `F=4096`, giving 35 points in total. No high-error point is removed, no
+Level-B single-instruction constant is tuned on these points, and fitting does
+not consume their measurements. With the compiler/environment above, the
+mechanism-level runtime model reports 14.171% NC-p50 MAPE on this formal set.
+
+See `microbench/inf2_nki/README.md` for individual microbenchmark commands,
+schema details, and lower-level troubleshooting.
 
 ### Testing
 * To run core Triton-viz tests, run `pytest tests/`.

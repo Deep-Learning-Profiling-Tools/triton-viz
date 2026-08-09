@@ -30,6 +30,7 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
     root.mkdir(parents=True, exist_ok=True)
     configs = [
         "engine_lowering_sweep.json",
+        "runtime_overhead.json",
         "dma_directional_dtype_canary.json",
         "dma_write_partition_surface.json",
         "dma_write_bf16_steady.json",
@@ -191,10 +192,16 @@ def fit(root: Path, dry_run: bool) -> None:
     )
     _run(
         _module(
-            "triton_viz.tools.nki_fit_nc_latency",
-            root / "controls",
+            "triton_viz.tools.nki_fit_runtime_overhead",
+            root / "microbench" / "runtime_overhead" / "results.jsonl",
+            "--dma-affine-read-csv",
+            calibration / "dma_directional.csv",
+            "--dma-affine-write-csv",
+            calibration / "dma_write_fp32.csv",
+            "--compute-calibration-csv",
+            compute,
             "--output",
-            calibration / "nc_latency.csv",
+            calibration / "runtime_overhead.csv",
         ),
         dry_run,
     )
@@ -229,8 +236,8 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         calibration / "structured_compute.csv",
         "--structural-static-dma-csv",
         calibration / "static_dma.csv",
-        "--nc-latency-csv",
-        calibration / "nc_latency.csv",
+        "--runtime-overhead-csv",
+        calibration / "runtime_overhead.csv",
         "--output",
         output,
     )

@@ -43,6 +43,7 @@ from triton_viz.tools.nki_cost_model import (
     DmaCalibrationSurface,
     LoweringExpansionCalibration,
     NcLatencyCalibration,
+    RuntimeOverheadCalibration,
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
@@ -75,6 +76,27 @@ _DTYPES = {
 
 def _randn(shape: tuple[int, ...], dtype: str) -> np.ndarray:
     return np.random.randn(*shape).astype(_DTYPES[dtype])
+
+
+def _matmul_inputs(m: int, k: int, dtype: str) -> list[Any]:
+    """Square-output Tilebench matmul inputs plus frozen compile-time tiles."""
+    tile_m, tile_n, tile_k = 128, 512, 128
+
+    def tiles(dim: int, tile: int, preferred: int) -> int:
+        return next(
+            (count for count in range(preferred, 0, -1) if dim % (tile * count) == 0),
+            1,
+        )
+
+    return [
+        _randn((m, k), dtype),
+        _randn((k, m), dtype),
+        tiles(m, tile_m, 4),
+        tiles(m, tile_n, 2),
+        tiles(k, tile_k, 8),
+        1,  # One Inf2 NeuronCore; Tilebench's wrapper selects cores by platform.
+        False,  # Double-row is only applicable to FP8.
+    ]
 
 
 # Each operator: kernel attribute in impl_nki.py + a builder producing the
@@ -127,6 +149,12 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "matrix_transpose": {
         "kernel": "transpose_kernel",
         "inputs": lambda r, c, dt: [_randn((r, c), dt)],
+    },
+    "matmul_fp32_fp16_fp8": {
+        "kernel": "matmul_kernel",
+        # Interpret rows=M=N and cols=K so the common rows/cols sweep also
+        # spans contraction sizes without adding operator-specific CLI flags.
+        "inputs": _matmul_inputs,
     },
     "mean_reduction": {
         "kernel": "mean_rowwise_kernel",
@@ -427,6 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dma-affine-write-csv", type=Path, default=None)
     parser.add_argument("--kernel-overhead-us", type=float, default=0.0)
     parser.add_argument("--nc-latency-csv", type=Path, default=None)
+    parser.add_argument("--runtime-overhead-csv", type=Path, default=None)
     parser.add_argument("--strided-dma-csv", type=Path, default=None)
     parser.add_argument("--dma-queue-count", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=10)
@@ -517,6 +546,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.nc_latency_csv
         else None
     )
+    runtime_overhead = (
+        RuntimeOverheadCalibration.from_csv(args.runtime_overhead_csv)
+        if args.runtime_overhead_csv
+        else None
+    )
     strided_dma = (
         StridedDmaCalibration.from_csv(args.strided_dma_csv)
         if args.strided_dma_csv
@@ -541,6 +575,7 @@ def main(argv: list[str] | None = None) -> int:
         structural_static_dma=structural_static_dma,
         dma_affine_calibration=dma_affine,
         nc_latency_calibration=nc_latency,
+        runtime_overhead_calibration=runtime_overhead,
         strided_dma_calibration=strided_dma,
         kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),
         dma_queue_count=max(1, args.dma_queue_count),
