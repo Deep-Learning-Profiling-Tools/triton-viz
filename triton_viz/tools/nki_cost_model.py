@@ -715,37 +715,6 @@ class StructuredControlCalibration:
 
 
 @dataclass
-class NcLatencyCalibration:
-    """Kernel-level dispatch residual keyed by structural lowering evidence."""
-
-    points: dict[tuple[str, str], list[tuple[int, float]]]
-
-    @classmethod
-    def from_csv(cls, path: str | Path) -> NcLatencyCalibration:
-        points: dict[tuple[str, str], list[tuple[int, float]]] = {}
-        with Path(path).open(encoding="utf-8", newline="") as file:
-            for row in csv.DictReader(file):
-                key = (row["calibration_key"], ComputeCalibration._norm_dtype(row["dtype"]))
-                points.setdefault(key, []).append(
-                    (int(row["free_dim"]), float(row["residual_ns"]))
-                )
-        return cls(points)
-
-    def predict_ns(self, region_ir: dict[str, Any]) -> float | None:
-        from triton_viz.tools.nki_region_ir import structural_calibration_key
-
-        key = (
-            structural_calibration_key(region_ir),
-            ComputeCalibration._norm_dtype(region_ir.get("dtype")),
-        )
-        rows = sorted(self.points.get(key, []))
-        if not rows:
-            return None
-        free = int(region_ir.get("logical_free_dim") or region_ir.get("free_dim") or 1)
-        return min(rows, key=lambda row: abs(math.log2(max(1, row[0]) / free)))[1]
-
-
-@dataclass
 class RuntimeOverheadCalibration:
     """Mechanism-level NC runtime costs fitted from orthogonal controls."""
 
@@ -804,13 +773,13 @@ class RuntimeOverheadCalibration:
 
 @dataclass
 class StridedDmaCalibration:
-    """Kernel-level DMA and completion calibration for affine strided stores."""
+    """Access-geometry DMA busy-time calibration for affine strided stores."""
 
-    points: dict[tuple[str, int, int], list[tuple[int, float, float]]]
+    points: dict[tuple[str, int, int], list[tuple[int, float]]]
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StridedDmaCalibration:
-        points: dict[tuple[str, int, int], list[tuple[int, float, float]]] = {}
+        points: dict[tuple[str, int, int], list[tuple[int, float]]] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 key = (
@@ -822,12 +791,11 @@ class StridedDmaCalibration:
                     (
                         int(row["free_dim"]),
                         float(row["dma_active_ns"]),
-                        float(row["completion_residual_ns"]),
                     )
                 )
         return cls(points)
 
-    def predict(self, events: Iterable[dict[str, Any]]) -> tuple[float, float] | None:
+    def predict(self, events: Iterable[dict[str, Any]]) -> float | None:
         patterns = [
             (event, pattern)
             for event in events
@@ -853,15 +821,12 @@ class StridedDmaCalibration:
         lower = max((row for row in rows if row[0] <= free), default=rows[0])
         upper = min((row for row in rows if row[0] >= free), default=rows[-1])
         if lower[0] == upper[0]:
-            return lower[1], lower[2]
+            return lower[1]
         # Interpolate only between independent control sizes. Values outside
         # their measured range remain clamped and are reported as OOD by the
         # experiment layer rather than silently extrapolated.
         weight = (free - lower[0]) / (upper[0] - lower[0])
-        return (
-            lower[1] + weight * (upper[1] - lower[1]),
-            lower[2] + weight * (upper[2] - lower[2]),
-        )
+        return lower[1] + weight * (upper[1] - lower[1])
 
 
 def _canonical_engine(raw_engine: str, op: str) -> str:
@@ -981,7 +946,6 @@ class CostModel:
     lowering_calibration: LoweringExpansionCalibration | None = None
     compositional_lowering: CompositionalLoweringCalibration | None = None
     structured_control_lowering: StructuredControlCalibration | None = None
-    nc_latency_calibration: NcLatencyCalibration | None = None
     runtime_overhead_calibration: RuntimeOverheadCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
 
@@ -1612,7 +1576,7 @@ def simulate(
         raw_costs = [model.cost_ns(source_events[index]) for index in dma_indices]
         raw_total = sum(raw_costs)
         if raw_total > 0:
-            scale = strided_dma_prediction[0] / raw_total
+            scale = strided_dma_prediction / raw_total
             source_events = [dict(event) for event in source_events]
             for index, raw_cost in zip(dma_indices, raw_costs):
                 source_events[index]["scheduler_duration_override_ns"] = (
@@ -1751,8 +1715,6 @@ def simulate(
     if structural_static_ns > 0:
         engine_busy[ENGINE_STATIC_DMA] = structural_static_ns
     calibrated_nc_ns = None
-    if strided_dma_prediction is not None:
-        calibrated_nc_ns = makespan + strided_dma_prediction[1]
     if model.runtime_overhead_calibration is not None:
         max_partitions = max(
             (int(event.get("partition_count") or 1) for event in source_events),
@@ -1777,41 +1739,6 @@ def simulate(
         )
     else:
         runtime_control_in_domain = None
-    if model.runtime_overhead_calibration is None and model.nc_latency_calibration is not None:
-        region = next(
-            (event.get("region_ir") for event in source_events if event.get("region_ir")),
-            None,
-        )
-        load_dtypes = [
-            str(event["src_dtype"])
-            for event in source_events
-            if event.get("op") == "load" and event.get("src_dtype")
-        ]
-        store_dtypes = [
-            str(event["src_dtype"])
-            for event in source_events
-            if event.get("op") == "store" and event.get("src_dtype")
-        ]
-        kernel_dtypes = load_dtypes or store_dtypes
-        if region and kernel_dtypes:
-            region = dict(region)
-            region["dtype"] = Counter(kernel_dtypes).most_common(1)[0][0]
-        elif region and str(region.get("dtype", "")).lower() in {"bool", "boolean"}:
-            region = dict(region)
-            value_dtypes = [
-                str(value)
-                for event in source_events
-                if event.get("region_ir_key") == region.get("structural_key")
-                for value in (
-                    [event.get("output_dtype")] + list(event.get("input_dtypes") or [])
-                )
-                if value and str(value).lower() not in {"bool", "boolean"}
-            ]
-            if value_dtypes:
-                region["dtype"] = Counter(value_dtypes).most_common(1)[0][0]
-        residual_ns = model.nc_latency_calibration.predict_ns(region) if region else None
-        if residual_ns is not None and calibrated_nc_ns is None:
-            calibrated_nc_ns = makespan + residual_ns
     compute_critical_ns = max(
         engine_busy.get(ENGINE_VECTOR, 0.0),
         engine_busy.get(ENGINE_SCALAR, 0.0),
@@ -1834,7 +1761,7 @@ def simulate(
             "compute_only": compute_critical_ns,
             "compute_plus_dma": phase_critical_ns,
             "resource_overlap_makespan": makespan,
-            "structural_fixed_completion": final_ns - makespan,
+            "runtime_critical_path_extension": final_ns - makespan,
             "runtime_control_in_domain": (
                 float(runtime_control_in_domain)
                 if runtime_control_in_domain is not None

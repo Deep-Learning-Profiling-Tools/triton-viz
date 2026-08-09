@@ -42,7 +42,6 @@ from triton_viz.tools.nki_cost_model import (
     DmaAffineCalibration,
     DmaCalibrationSurface,
     LoweringExpansionCalibration,
-    NcLatencyCalibration,
     RuntimeOverheadCalibration,
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
@@ -454,7 +453,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dma-affine-read-csv", type=Path, default=None)
     parser.add_argument("--dma-affine-write-csv", type=Path, default=None)
     parser.add_argument("--kernel-overhead-us", type=float, default=0.0)
-    parser.add_argument("--nc-latency-csv", type=Path, default=None)
     parser.add_argument("--runtime-overhead-csv", type=Path, default=None)
     parser.add_argument("--strided-dma-csv", type=Path, default=None)
     parser.add_argument("--dma-queue-count", type=int, default=1)
@@ -541,11 +539,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.structural_static_dma_csv
         else None
     )
-    nc_latency = (
-        NcLatencyCalibration.from_csv(args.nc_latency_csv)
-        if args.nc_latency_csv
-        else None
-    )
     runtime_overhead = (
         RuntimeOverheadCalibration.from_csv(args.runtime_overhead_csv)
         if args.runtime_overhead_csv
@@ -574,7 +567,6 @@ def main(argv: list[str] | None = None) -> int:
         structured_control_lowering=structured_controls,
         structural_static_dma=structural_static_dma,
         dma_affine_calibration=dma_affine,
-        nc_latency_calibration=nc_latency,
         runtime_overhead_calibration=runtime_overhead,
         strided_dma_calibration=strided_dma,
         kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),

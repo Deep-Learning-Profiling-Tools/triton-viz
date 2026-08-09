@@ -1,4 +1,4 @@
-"""Fit stride-aware DMA busy and completion residual from microbench controls."""
+"""Fit stride-aware DMA busy time from independent microbench controls."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ FIELDS = [
     "partition_count",
     "free_dim",
     "dma_active_ns",
-    "completion_residual_ns",
     "case",
     "compiler_version",
 ]
@@ -27,13 +26,7 @@ def collect(results_jsonl: Path) -> list[dict]:
             continue
         case = Path(result["dir"])
         profile = next(iter(json.loads((case / "explorer_summary.json").read_text()).values()))
-        nc_us = float(result["latency_percentiles"]["nc_latency"]["p50_us"])
         dma_ns = float(profile["dma_active_time"]) * 1e9
-        compute_ns = max(
-            float(profile.get("vector_engine_active_time", 0)),
-            float(profile.get("scalar_engine_active_time", 0)),
-            float(profile.get("tensor_engine_active_time", 0)),
-        ) * 1e9
         spec = result["spec"]
         rows.append(
             {
@@ -42,7 +35,6 @@ def collect(results_jsonl: Path) -> list[dict]:
                 "partition_count": spec["p"],
                 "free_dim": spec["f"],
                 "dma_active_ns": dma_ns,
-                "completion_residual_ns": max(0.0, nc_us * 1000 - dma_ns - compute_ns),
                 "case": case.name,
                 "compiler_version": profile.get("compiler_version", ""),
             }

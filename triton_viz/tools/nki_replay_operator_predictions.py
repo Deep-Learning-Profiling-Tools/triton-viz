@@ -12,7 +12,6 @@ from triton_viz.tools.nki_cost_model import (
     ComputeCalibration,
     CostModel,
     DmaAffineCalibration,
-    NcLatencyCalibration,
     RuntimeOverheadCalibration,
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
@@ -56,7 +55,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--structured-control-csv", type=Path, required=True)
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
-    parser.add_argument("--nc-latency-csv", type=Path)
     parser.add_argument("--runtime-overhead-csv", type=Path)
     parser.add_argument("--strided-dma-csv", type=Path)
     parser.add_argument("--output", type=Path, required=True)
@@ -81,11 +79,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 structural_static_dma=StructuralStaticDmaCalibration.from_csv(
                     args.structural_static_dma_csv
-                ),
-                nc_latency_calibration=(
-                    NcLatencyCalibration.from_csv(args.nc_latency_csv)
-                    if args.nc_latency_csv
-                    else None
                 ),
                 runtime_overhead_calibration=(
                     RuntimeOverheadCalibration.from_csv(args.runtime_overhead_csv)

@@ -6,12 +6,10 @@ import pytest
 from triton_viz.tools.nki_cost_model import (
     CostModel,
     DmaAffineCalibration,
-    NcLatencyCalibration,
     StridedDmaCalibration,
     eliminate_redundant_hbm_loads,
     simulate,
 )
-from triton_viz.tools.nki_region_ir import structural_calibration_key
 from triton_viz.tools.nki_trace_dump import _offset_geometry
 
 
@@ -128,39 +126,6 @@ def test_affine_dma_charges_kernel_startup_once_and_directional_slopes(tmp_path)
     assert result.engine_busy_ns["dma"] == pytest.approx(90)
 
 
-def test_nc_latency_calibration_adds_dispatch_residual_to_engine_busy():
-    region = {
-        "schema_version": 2,
-        "dtype": "float32",
-        "free_dim": 128,
-        "logical_free_dim": 128,
-        "reduction_count": 0,
-        "op_histogram": {"maximum": 1},
-        "one_input_elementwise_count": 1,
-        "two_input_elementwise_count": 0,
-    }
-    calibration = NcLatencyCalibration(
-        {(structural_calibration_key(region), "float32"): [(128, 7000.0)]}
-    )
-    result = simulate(
-        [
-            {
-                "seq": 1,
-                "op": "compute",
-                "api_op": "maximum",
-                "engine": "vector",
-                "output_shape": [128, 128],
-                "output_dtype": "float32",
-                "region_ir": region,
-            }
-        ],
-        CostModel(nc_latency_calibration=calibration),
-    )
-    assert result.predicted_latency_ns == pytest.approx(
-        result.engine_busy_ns["vector"] + 7000.0
-    )
-
-
 def test_offset_geometry_uses_active_mask_and_detects_stride_two():
     offsets = np.array([[0, 8, 16, 24], [64, 72, 80, 88]])
     masks = np.array([[True, True, False, False], [True, True, False, False]])
@@ -197,9 +162,9 @@ def test_dma_resource_tokens_serialize_full_width_but_overlap_narrow_transfers()
     assert full.engine_busy_ns["dma"] == narrow.engine_busy_ns["dma"] == 200
 
 
-def test_strided_dma_calibration_overrides_packet_train_and_completion():
+def test_strided_dma_calibration_overrides_packet_train_busy_time_only():
     calibration = StridedDmaCalibration(
-        {("float32", 2, 128): [(512, 600_000.0, 90_000.0)]}
+        {("float32", 2, 128): [(512, 600_000.0)]}
     )
     events = [
         {
@@ -219,4 +184,4 @@ def test_strided_dma_calibration_overrides_packet_train_and_completion():
     ]
     result = simulate(events, CostModel(strided_dma_calibration=calibration))
     assert result.engine_busy_ns["dma"] == 600_000.0
-    assert result.predicted_latency_ns == 690_000.0
+    assert result.predicted_latency_ns == 600_000.0

@@ -30,7 +30,6 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     fit_output = capsys.readouterr().out
     assert "nki_fit_strided_dma" in fit_output
     assert "nki_fit_runtime_overhead" in fit_output
-    assert "nki_fit_nc_latency" not in fit_output
 
     assert main(["evaluate", "--root", str(root), "--dry-run"]) == 0
     evaluate_output = capsys.readouterr().out
@@ -38,4 +37,3 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "dma_write_bf16.csv" in evaluate_output
     assert "--strided-dma-csv" in evaluate_output
     assert "--runtime-overhead-csv" in evaluate_output
-    assert "--nc-latency-csv" not in evaluate_output

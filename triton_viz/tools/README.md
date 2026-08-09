@@ -66,10 +66,11 @@ trace + parquet
   free dimension; it never keys on operator names.
 - `nki_replay_operator_predictions.py`: replays calibrated predictions on saved
   traces and hardware counters without recompilation or holdout fitting.
-- `nki_fit_nc_latency.py`: fits kernel-level dispatch/sequencer residuals from
-  independent structural controls for NC-p50 prediction.
+- `nki_fit_runtime_overhead.py`: fits mechanism-level sequencer, engine
+  activation, partition, packet, and synchronization costs from orthogonal
+  controls for NC-p50 prediction.
 - `nki_fit_strided_dma.py`: fits compiler-generated strided/Static-DMA packet
-  trains and completion residuals from independent stride controls.
+  train busy time from independent access-geometry controls.
 - `nki_cost_model_pipeline.py`: three-stage `collect`, `fit`, and `evaluate`
   entry point for calibration, Tilebench holdouts, MAPE and ablation reports.
 - `nki_region_control_experiments.py`: compiles and profiles minimal lowering
