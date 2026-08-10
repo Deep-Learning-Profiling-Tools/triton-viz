@@ -370,6 +370,14 @@ class TwoCopySymbolicHBSolver:
         self._build_read_from_choices()
         if "coherence" not in self.ablations:
             self._build_atomic_coherence_constraints()
+        # wf-vc (value causality / no out-of-thin-air): its own family,
+        # NOT keyed under "coherence" — coherence is per-location order,
+        # value causality is a cross-location well-formedness axiom of the
+        # value model itself, so it is unconditional (no ablation key).
+        self.vc_read_rank: dict[int, Any] = {}
+        self.vc_write_rank: dict[int, Any] = {}
+        self.value_causality_constraints: list[BoolRef] = []
+        self._build_value_causality_constraints()
         self._assert_no_uncounted_observation_addresses()
         self.reads_through: dict[tuple[int, int], BoolRef] = self._build_reads_through()
 
@@ -1313,6 +1321,100 @@ class TwoCopySymbolicHBSolver:
                     )
                 )
 
+    # ──────────────────── value causality (wf-vc) ────────────────────
+
+    def _build_value_causality_constraints(self) -> None:
+        """wf-vc: value-causality axiom (no out-of-thin-air values).
+
+        Rationale (PTX causality / Tile-IR no-thin-air): the hardware
+        memory model never lets a relaxed atomic load observe a value whose
+        only justification is a write that itself depends on that very
+        observation — two relaxed reads each observing the value the other
+        thread's dependent write produced is forbidden even without any
+        acquire/release ordering. Formally the model requires rf ∪ vdep to
+        be acyclic, where vdep(r, e) holds when read r's observation
+        reaches event e's written value, operand, activity, or address.
+
+        Encoding: every value-modeled atomic event e (the per-location
+        atomic-order membership set) gets a PAIR of fresh Int causality
+        ranks vc_r(e) <= vc_w(e) — value flows read-to-write within one
+        operation, which also orders an identity write-back after its own
+        observation. Two edge families then rule the cycles out:
+
+          * rf edge: for each MODELED-writer selector rf(w, r), assert
+            rf(w, r) -> vc_w(w) < vc_r(r): a read's value exists only
+            after its source write produced it. rf_init / rf_unknown /
+            rf_chain sources get NO edge — a reader sourced there has an
+            unconstrained vc_r and roots the graph, so cycles through the
+            initial value, the open world, or the counted chain are NOT
+            excluded (conservative: those values may be justified outside
+            the two modeled copies).
+          * static vdep edge: if r's observation symbol occurs in another
+            value-modeled event e's written value or RMW operand (a CAS's
+            cmp/new terms live inside its written_value If-term), assert
+            vc_r(r) < vc_w(e); if it occurs in e's activity (reads/writes
+            exprs) or address, assert vc_r(r) < vc_r(e) — the value is
+            needed before e's read part can even issue.
+
+        Gating: vdep edges are asserted UNCONDITIONALLY, unlike co-hb's
+        activity gating. Syntactic dependence is a static fact; the static
+        vdep graph is acyclic by construction (a record's lowered terms can
+        only mention observation symbols captured earlier in its own copy,
+        and alpha-renaming separates the copies), so the vdep edges alone
+        are always satisfiable, and every cycle-closing rf edge is already
+        activity-gated through its selector (_build_read_from_choices
+        forces all selectors false when the reader is inactive). An
+        activity gate would only weaken the axiom without excluding any
+        additional execution.
+
+        Occurrence is checked on GENUINE observation symbols only: the keys
+        of r.old_value intersected with the copy-local rename targets (the
+        observation vars live in copy_local_vars, like the CAS return).
+        Anything that leaks other vars into old_value yields an empty key
+        set and simply drops the vdep edge — the over-report direction.
+
+        Plain stores and non-value-modeled atomics carry no ranks: a
+        causality cycle through them would need an rf edge FROM them, which
+        the closed world never provides (they open the rf_unknown escape
+        instead), so their omission is conservative.
+        """
+        atomic_events = self._modeled_atomic_events()
+        if not atomic_events:
+            return
+        cons = self.value_causality_constraints
+        for e in atomic_events:
+            self.vc_read_rank[e.idx] = Int(f"vc_r_{e.idx}")
+            self.vc_write_rank[e.idx] = Int(f"vc_w_{e.idx}")
+            cons.append(self.vc_read_rank[e.idx] <= self.vc_write_rank[e.idx])
+
+        # rf edges: modeled-writer selectors only (never rf_init /
+        # rf_unknown / rf_chain — those readers root the graph).
+        for (w_idx, r_idx), rf in self.rf_source.items():
+            cons.append(
+                Implies(rf, self.vc_write_rank[w_idx] < self.vc_read_rank[r_idx])
+            )
+
+        # Static vdep edges, by observation-symbol occurrence.
+        copy_local_targets = {
+            _z3_var_key(var)
+            for subs in (
+                self.ctx_a.copy_local_substitutions,
+                self.ctx_b.copy_local_substitutions,
+            )
+            for (_, var) in subs
+        }
+        for r in atomic_events:
+            obs_keys = _collect_z3_var_keys((r.old_value,)) & copy_local_targets
+            if not obs_keys:
+                continue
+            for e in atomic_events:
+                if e.idx == r.idx:
+                    continue
+                if obs_keys & _collect_z3_var_keys((e.written_value, e.rmw_operand)):
+                    cons.append(self.vc_read_rank[r.idx] < self.vc_write_rank[e.idx])
+                if obs_keys & _collect_z3_var_keys((e.reads, e.writes, e.addr)):
+                    cons.append(self.vc_read_rank[r.idx] < self.vc_read_rank[e.idx])
+
     # ──────────────────── counting axiom (B.1.5) ────────────────────
 
     def _build_counting_axioms(self) -> dict[int, _CountingInfo]:
@@ -1589,6 +1691,8 @@ class TwoCopySymbolicHBSolver:
         for c in self.atomic_coherence_constraints:
             solver.add(c)
         for c in self.counting_constraints:
+            solver.add(c)
+        for c in self.value_causality_constraints:
             solver.add(c)
         for c in self.extra_assumptions:
             solver.add(as_bool(c))
