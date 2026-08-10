@@ -383,6 +383,12 @@ class TwoCopySymbolicHBSolver:
             else build_transitive_hb(self.events, self._edge)
         )
 
+        # 9. Coherence hb-consistency axiom (co-hb) — needs self.hb, hence
+        # after step 8; appended to atomic_coherence_constraints, which is
+        # consumed only at query time in _base_solver.
+        if "coherence" not in self.ablations:
+            self._build_coherence_hb_constraints()
+
     # ──────────────────────── Public API ────────────────────────
 
     _CROSS_INSTANCE_REASON: str = (
@@ -1270,6 +1276,42 @@ class TwoCopySymbolicHBSolver:
                             Or(ord_v < ord_w, ord_r < ord_v),
                         )
                     )
+
+    def _build_coherence_hb_constraints(self) -> None:
+        """Coherence hb-consistency axiom (co-hb): hb-ordered distinct
+        same-location value-modeled atomics take increasing per-location
+        positions. This generalizes co-po's antecedent from same-copy
+        program order to the full hb closure (po lies inside hb, so this
+        strictly strengthens co-po). Without it, a relaxed atomic read that
+        is hb-after a same-location write can still source the initial
+        value (the message-passing counterexample). Together with the
+        no-intervening-writer clauses of rf/rf_init, the four C++
+        coherence shapes (write-write, read-write, write-read, read-read)
+        follow. Gating mirrors co-po (activity via ``reads``, location via
+        the exact-atomic-address predicate); cross-copy twins under
+        pinned-equal pids denote ONE operation sharing a position and are
+        exempt, as in the uniqueness clause."""
+        atomic_events = self._modeled_atomic_events()
+        cons = self.atomic_coherence_constraints
+        for e in atomic_events:
+            ord_e = self.atomic_order[e.idx]
+            for f in atomic_events:
+                if f.idx == e.idx:
+                    continue
+                if e.copy == f.copy and 0 <= e.program_seq < f.program_seq:
+                    continue  # co-po already asserts this pair without the hb antecedent
+                cons.append(
+                    Implies(
+                        And(
+                            self.hb[e.idx][f.idx],
+                            e.reads,
+                            f.reads,
+                            self._exact_atomic_addr(e, f),
+                            Not(self._same_dynamic_op(e, f)),
+                        ),
+                        ord_e < self.atomic_order[f.idx],
+                    )
+                )
 
     # ──────────────────── counting axiom (B.1.5) ────────────────────
 
