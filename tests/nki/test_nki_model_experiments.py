@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from triton_viz.tools.nki_model_experiments import load_cases, write_csv
+from triton_viz.tools.nki_workload_cases import load_cases, write_csv
 
 pytestmark = pytest.mark.nki
 

@@ -42,11 +42,8 @@ trace + parquet
   ownership evidence; writes mapping CSV and an audit JSON.
 - `nki_cost_model.py`: DMA calibration surfaces, Level-B compute calibration,
   structured Level-A expansion, dependency-aware scheduling, and simulation.
-- `nki_fit_lowering_calibration.py`: mapping-aware signature/fingerprint fitter,
-  useful for focused source-mapping studies and softmax seed calibration.
 - `nki_fit_structured_controls.py`: exports the operator-independent grammar,
   dtype, shape, engine, instruction-count, effective-count, and fixed-work table.
-- `nki_fit_compositional_lowering.py`: experimental additive feature fitter.
 - `nki_grammar_report.py`: exports the machine-readable rule catalog and one
   coverage row per source region, retaining OOD regions in the denominator.
 - `nki_compare_lowering.py`: aligns mapped region/engine opcode fingerprints
@@ -77,8 +74,8 @@ trace + parquet
   controls, exports parquet, and invokes source mapping.
 - `nki_operator_experiments.py`: traces and profiles the same external
   Tilebench kernel source for softmax/rmsnorm/layernorm validation.
-- `nki_model_experiments.py`: validates DMA and scheduler behavior on declarative
-  modeled workloads.
+- `nki_workload_cases.py`: shared workload-case helpers (`load_cases`,
+  `write_csv`, profiling helpers) used by the operator driver and tests.
 
 ## Environment
 

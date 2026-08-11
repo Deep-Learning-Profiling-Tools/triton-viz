@@ -1,7 +1,7 @@
 """Validate the NKI cost model against real Tilebench operators.
 
-Unlike ``nki_model_experiments`` (which builds separate hand-written trace and
-hardware kernels), this driver traces and benchmarks the *exact same*
+Unlike legacy hand-written workload drivers (removed with
+``nki_model_experiments``), this driver traces and benchmarks the *exact same*
 ``@nki.jit`` kernel source shipped in Tilebench. That closes Status.md issue 1
 (trace vs hardware kernel divergence): the CPU trace and the on-device NEFF are
 produced from one Python function.
@@ -51,7 +51,7 @@ from triton_viz.tools.nki_cost_model import (
 )
 from triton_viz.tools.nki_explorer import export_parquet
 from triton_viz.tools.nki_instruction_source_mapping import write_case as write_mapping
-from triton_viz.tools.nki_model_experiments import (
+from triton_viz.tools.nki_workload_cases import (
     _nc_p50,
     _percent_error,
     _profile_summary,
