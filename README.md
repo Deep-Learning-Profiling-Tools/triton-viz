@@ -95,7 +95,7 @@ uv sync --extra test # tests but no NKI support
 
 ### Reproducing the Inf2 NKI cost model
 
-The paper-oriented cost-model pipeline runs on an AWS Inferentia2 (Inf2) host
+The cost-model pipeline runs on an AWS Inferentia2 (Inf2) host
 with an idle NeuronCore. The reported results were collected with the AWS
 Neuron PyTorch 2.9 virtual environment at
 `/opt/aws_neuronx_venv_pytorch_2_9`, `neuronx-cc 2.26.6360.0+6f180f47`, and a
