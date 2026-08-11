@@ -120,21 +120,39 @@ python -m triton_viz.tools.nki_cost_model_pipeline evaluate --root /tmp/nki_cost
 
 `collect` is the long-running hardware stage. It writes independent
 microbenchmark/region controls under `microbench/` and `controls/`, and writes
-Tilebench measurements under `holdouts/`. `fit` reads only the control trees;
-it must not read `holdouts/`. `evaluate` loads the frozen calibration and only
-then replays the holdouts. This directory separation is an intentional
-train/holdout boundary, not merely an output convention. Use `--dry-run` on any
-stage to inspect its commands without executing them.
+Tilebench measurements under `holdouts/`. Both `collect` and `fit` use
+`--skip-existing` / `--resume` so interrupted long runs can be continued.
+`fit` reads only the control trees; it must not read `holdouts/`. `evaluate`
+loads the frozen calibration and only then replays the holdouts. This
+directory separation is an intentional train/holdout boundary, not merely an
+output convention. Use `--dry-run` on any stage to inspect its commands
+without executing them. `evaluate` asserts the formal FP32 holdout produces
+exactly 35 rows before writing `report.json`.
 
 The main artifacts under the selected root are:
 
 - `calibration/runtime_overhead.csv`: orthogonally fitted launch/sequencer,
   engine-activation, partition, packet, and synchronization terms.
-- `calibration/compute.csv`, `structured_compute.csv`, DMA CSVs, and
-  `static_dma.csv`: the remaining control-only calibration surfaces.
+- `calibration/dma_read_surface.csv`, `dma_write_fp32.csv`,
+  `dma_read_large_free.csv`, `dma_transpose_surface.csv`: directional DMA
+  calibration surfaces keyed by `(partition_count, free_bytes_per_partition)`.
+- `calibration/compute.csv`, `structured_compute.csv`, and `static_dma.csv`:
+  the remaining control-only calibration surfaces.
 - `evaluation/*.csv`: per-case predictions, hardware measurements, and the
   compute-only, compute-plus-DMA, scheduler-overlap, and final ablations.
-- `evaluation/report.json`: aggregate holdout MAPE and the worst retained case.
+- `evaluation/report.json`: aggregate holdout MAPE, per-operator MAPE, the
+  worst retained case, and a DMA-surface hit audit (`exact`/`interpolated`/
+  `ood_clamped`/`affine_fallback` event counts).
+
+The DMA cost path is **surface-first**: the scheduler prices transfers from
+the measured `(partition_count, free_bytes)` bandwidth surfaces, keeping the
+partition and free-dimension geometry explicit. A simple `startup + ns/byte`
+affine fit is retained only as an explicit fallback and ablation baseline; the
+`report.json` audit reports how many events hit `exact`, `interpolated`,
+`ood_clamped`, or `affine_fallback` so the path is auditable. Out-of-domain
+accesses are flagged (`ood_clamped`) instead of being silently claimed as
+in-domain. Compiler load CSE (`eliminate_redundant_hbm_loads`) and strided
+DMA geometry are modeled independently of the surface and remain enabled.
 
 The formal FP32 holdout contains 35 points at `rows=128` across eight operators:
 `interleave`, `kl_divergence`, `layernorm`, `mul2`, `relu`, `rmsnorm`,
@@ -143,7 +161,11 @@ The formal FP32 holdout contains 35 points at `rows=128` across eight operators:
 use `F=4096`, giving 35 points in total. No high-error point is removed, no
 Level-B single-instruction constant is tuned on these points, and fitting does
 not consume their measurements. With the compiler/environment above, the
-mechanism-level runtime model reports 14.722% NC-p50 MAPE on this formal set.
+surface-based model reports 14.722% NC-p50 MAPE on this formal set (an
+`affine` ablation on the same data measures 15.422%). A separate 56-point
+exploratory set at `rows=1/16` (partition-count extrapolation) is evaluated
+but kept out of the formal headline; it currently measures 22.04% and is the
+known next frontier (small-partition pure-dynamic DMA controls).
 
 See `microbench/inf2_nki/README.md` for individual microbenchmark commands,
 schema details, and lower-level troubleshooting.
