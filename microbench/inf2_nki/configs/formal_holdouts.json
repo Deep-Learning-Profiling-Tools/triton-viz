@@ -1,0 +1,27 @@
+{
+  "schema": "triton-viz.nki-formal-holdouts-v1",
+  "splits": {
+    "formal_fp32_v1": {
+      "rows": 128,
+      "dtype": "float32",
+      "operators": {
+        "interleave": [128, 512, 1024, 2048, 4096],
+        "kl_divergence": [128, 512, 1024, 2048],
+        "layernorm": [128, 512, 1024, 2048, 4096],
+        "mul2": [128, 512, 1024, 2048],
+        "relu": [128, 512, 1024, 2048],
+        "rmsnorm": [128, 512, 1024, 2048, 4096],
+        "sigmoid": [128, 512, 1024, 2048],
+        "softmax": [128, 512, 1024, 2048]
+      }
+    },
+    "auxiliary_bf16_v1": {
+      "rows": 128,
+      "dtype": "bfloat16",
+      "operators": {
+        "layernorm": [512, 2048],
+        "rmsnorm": [512, 2048]
+      }
+    }
+  }
+}

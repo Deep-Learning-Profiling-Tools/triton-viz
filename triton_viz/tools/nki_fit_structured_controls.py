@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import statistics
 from pathlib import Path
 
 from triton_viz.tools.nki_cost_model import ComputeCalibration
@@ -28,6 +30,10 @@ FIELDS = [
     "fixed_ns",
     "case",
     "compiler_version",
+    "opcode_fingerprint",
+    "replicate_count",
+    "effective_count_variance",
+    "fixed_ns_variance",
 ]
 EXCLUDED_RUNTIME_OPCODES = {
     "DRAIN",
@@ -49,6 +55,14 @@ def _compiler_version(case: Path) -> str:
     summary = _load_json(summary_path)
     profile = next(iter(summary.values()), {})
     return str(profile.get("compiler_version", ""))
+
+
+def _opcode_fingerprint(rows: list[dict]) -> str:
+    payload = ";".join(
+        f"{row.get('engine','')}:{row.get('opcode','')}:{row.get('source_opcode','')}"
+        for row in rows
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def collect(
@@ -123,6 +137,10 @@ def collect(
                         "fixed_ns": fixed_ns,
                         "case": case.name,
                         "compiler_version": compiler_version,
+                        "opcode_fingerprint": _opcode_fingerprint(selected),
+                        "replicate_count": 1,
+                        "effective_count_variance": 0.0,
+                        "fixed_ns_variance": 0.0,
                     }
                 )
     return rows
@@ -150,9 +168,65 @@ def collect_legacy(paths: list[Path]) -> list[dict]:
                     "fixed_ns": 0.0,
                     "case": Path(row.get("case_dir", path.stem)).name,
                     "compiler_version": "legacy-mapped",
+                    "opcode_fingerprint": "legacy",
+                    "replicate_count": 1,
+                    "effective_count_variance": 0.0,
+                    "fixed_ns_variance": 0.0,
                 }
             )
     return rows
+
+
+def aggregate_rows(rows: list[dict]) -> list[dict]:
+    """Median repeated controls and reject incompatible compiler lowerings."""
+    grouped: dict[tuple, list[dict]] = {}
+    for row in rows:
+        key = (
+            row["calibration_key"] or row["family"],
+            row["engine"],
+            row["dtype"],
+            int(row["free_dim"]),
+        )
+        grouped.setdefault(key, []).append(row)
+    result = []
+    for key, group in grouped.items():
+        compiler_versions = {row["compiler_version"] for row in group}
+        opcode_fingerprints = {row["opcode_fingerprint"] for row in group}
+        if len(compiler_versions) > 1 or len(opcode_fingerprints) > 1:
+            raise ValueError(
+                "Incompatible structured controls for "
+                f"{key}: compiler_versions={sorted(compiler_versions)}, "
+                f"opcode_fingerprints={sorted(opcode_fingerprints)}"
+            )
+        effective = [float(row["effective_count"]) for row in group]
+        fixed = [float(row["fixed_ns"]) for row in group]
+        instructions = [int(row["instruction_count"]) for row in group]
+        row = dict(group[0])
+        row.update(
+            {
+                "effective_count": statistics.median(effective),
+                "instruction_count": round(statistics.median(instructions)),
+                "fixed_ns": statistics.median(fixed),
+                "case": ";".join(sorted(str(item["case"]) for item in group)),
+                "replicate_count": len(group),
+                "effective_count_variance": (
+                    statistics.pvariance(effective) if len(effective) > 1 else 0.0
+                ),
+                "fixed_ns_variance": (
+                    statistics.pvariance(fixed) if len(fixed) > 1 else 0.0
+                ),
+            }
+        )
+        result.append(row)
+    return sorted(
+        result,
+        key=lambda row: (
+            row["calibration_key"] or row["family"],
+            row["engine"],
+            row["dtype"],
+            int(row["free_dim"]),
+        ),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -167,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     level_b = ComputeCalibration.from_csv(args.compute_calibration_csv)
     rows = collect(args.roots, level_b, tuple(args.include_case_prefix))
     rows.extend(collect_legacy(args.legacy_level_a_csv))
+    rows = aggregate_rows(rows)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=FIELDS)

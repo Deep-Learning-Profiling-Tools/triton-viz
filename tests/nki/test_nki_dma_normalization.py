@@ -136,6 +136,44 @@ def test_offset_geometry_uses_active_mask_and_detects_stride_two():
     assert geometry["active_access_count"] == 4
 
 
+def test_access_pattern_preserves_reverse_stride_and_distinguishes_stride_zero():
+    from triton_viz.tools.nki_features import AccessPattern
+
+    reverse = AccessPattern.from_event(
+        {
+            "op": "load",
+            "free_stride_items": -1,
+            "active_access_count": 4,
+            "access_span_bytes": 16,
+            "bytes": 16,
+            "item_bytes": 4,
+        }
+    )
+    broadcast = AccessPattern.from_event(
+        {
+            "op": "load",
+            "free_stride_items": 0,
+            "active_access_count": 4,
+            "access_span_bytes": 4,
+            "bytes": 16,
+            "item_bytes": 4,
+        }
+    )
+    irregular = AccessPattern.from_event(
+        {
+            "op": "load",
+            "free_stride_items": None,
+            "active_access_count": 4,
+            "access_span_bytes": 20,
+            "bytes": 16,
+            "item_bytes": 4,
+        }
+    )
+    assert reverse.layout_family == "reverse"
+    assert broadcast.layout_family == "broadcast_stride0"
+    assert irregular.layout_family == "irregular"
+
+
 def test_dma_resource_tokens_serialize_full_width_but_overlap_narrow_transfers():
     def transfers(partitions):
         return [

@@ -12,8 +12,8 @@ class AccessPattern:
     dst_space: str
     bytes: int
     partition_count: int
-    free_stride_items: int
-    partition_stride_bytes: int
+    free_stride_items: int | None
+    partition_stride_bytes: int | None
     active_access_count: int
     access_span_bytes: int
     density: float
@@ -37,9 +37,15 @@ class AccessPattern:
             dst_space=str(event.get("mem_dst") or default_dst).lower(),
             bytes=max(0, int(event.get("bytes") or 0)),
             partition_count=max(1, int(event.get("partition_count") or 1)),
-            free_stride_items=max(0, int(event.get("free_stride_items") or 0)),
-            partition_stride_bytes=max(
-                0, int(event.get("partition_stride_bytes") or 0)
+            free_stride_items=(
+                int(event["free_stride_items"])
+                if event.get("free_stride_items") is not None
+                else None
+            ),
+            partition_stride_bytes=(
+                int(event["partition_stride_bytes"])
+                if event.get("partition_stride_bytes") is not None
+                else None
             ),
             active_access_count=max(0, active),
             access_span_bytes=max(0, span),
@@ -51,9 +57,15 @@ class AccessPattern:
     def layout_family(self) -> str:
         if self.active_access_count == 0:
             return "empty"
-        if self.free_stride_items in (0, 1) and self.density >= 0.999:
+        if self.free_stride_items == 1 and self.density >= 0.999:
             return "contiguous"
-        return "strided"
+        if self.free_stride_items == 0:
+            return "broadcast_stride0"
+        if self.free_stride_items is None:
+            return "irregular"
+        if self.free_stride_items < 0:
+            return "reverse"
+        return "strided_positive"
 
 
 @dataclass(frozen=True)

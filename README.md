@@ -143,7 +143,7 @@ The formal FP32 holdout contains 35 points at `rows=128` across eight operators:
 use `F=4096`, giving 35 points in total. No high-error point is removed, no
 Level-B single-instruction constant is tuned on these points, and fitting does
 not consume their measurements. With the compiler/environment above, the
-mechanism-level runtime model reports 14.171% NC-p50 MAPE on this formal set.
+mechanism-level runtime model reports 14.979% NC-p50 MAPE on this formal set.
 
 See `microbench/inf2_nki/README.md` for individual microbenchmark commands,
 schema details, and lower-level troubleshooting.

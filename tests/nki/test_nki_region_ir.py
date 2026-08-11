@@ -104,6 +104,28 @@ def test_calibration_key_separates_primitives_with_same_grammar_family():
     assert "maximum:1" in structural_calibration_key(maximum)
 
 
+def test_calibration_key_separates_mask_context_blocks_and_partition_geometry():
+    base = {
+        "schema_version": REGION_IR_SCHEMA_VERSION,
+        "op_histogram": {"add": 1},
+        "one_input_elementwise_count": 1,
+        "two_input_elementwise_count": 0,
+        "partition_count": 128,
+        "free_block_count": 1,
+    }
+    variants = [
+        {**base, "has_mask_or_tail": True},
+        {**base, "previous_family": "reduction_broadcast"},
+        {**base, "next_family": "elementwise_one_n1"},
+        {**base, "free_block_count": 2},
+        {**base, "partition_broadcast_input_count": 1},
+        {**base, "partition_count": 64},
+    ]
+    keys = {structural_calibration_key(base)}
+    keys.update(structural_calibration_key(region) for region in variants)
+    assert len(keys) == len(variants) + 1
+
+
 def test_region_ir_v2_provenance_is_excluded_from_structural_key():
     region = build_region_ir(
         [{"op": "compute", "api_op": "relu", "input_ptrs": [1], "output_ptr": 2}]

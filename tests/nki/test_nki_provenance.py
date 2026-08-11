@@ -5,6 +5,8 @@ from triton_viz.tools.nki_provenance import (
     compare_fingerprints,
     make_compiler_fingerprint,
     write_experiment_manifest,
+    validate_model_manifest,
+    write_model_manifest,
 )
 
 
@@ -73,3 +75,30 @@ def test_experiment_manifest_has_canonical_config_hash(tmp_path, monkeypatch):
         first_data["compiler_fingerprint"]["fingerprint"]
         == _fingerprint()["fingerprint"]
     )
+
+
+def test_model_manifest_checks_source_fingerprints_and_file_hashes(tmp_path):
+    calibration = tmp_path / "calibration"
+    calibration.mkdir()
+    table = calibration / "compute.csv"
+    table.write_text("engine,dtype\nvector,float32\n")
+    source = tmp_path / "experiment_manifest.json"
+    source.write_text(json.dumps({"compiler_fingerprint": _fingerprint()}))
+    manifest = write_model_manifest(
+        calibration,
+        calibration_files=[table],
+        source_manifests=[source],
+    )
+    manifest_data = json.loads(manifest.read_text())
+    assert manifest_data["calibration_source_fingerprint"] == _fingerprint()
+    assert "model_builder_fingerprint" in manifest_data
+    validate_model_manifest(
+        manifest,
+        calibration_files=[table],
+        current_fingerprint=manifest_data["model_builder_fingerprint"],
+    )
+    table.write_text("tampered\n")
+    import pytest
+
+    with pytest.raises(ValueError, match="hash mismatch"):
+        validate_model_manifest(manifest, calibration_files=[table])

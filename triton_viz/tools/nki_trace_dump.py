@@ -30,6 +30,8 @@ from triton_viz.core.data import (
 )
 from triton_viz.tools.nki_region_ir import build_region_ir
 
+MAX_EXACT_BYTE_RANGES = 1024
+
 
 def _jsonable(value: Any) -> Any:
     """Convert NumPy/dataclass values into JSON-serializable primitives."""
@@ -104,24 +106,75 @@ def _first_offset(offsets: Any) -> int | None:
     return int(array.reshape(-1)[0])
 
 
-def _byte_span(offsets: Any, nbytes: int, sides: int = 1) -> list[int] | None:
-    """Return an inclusive-exclusive ``[lo, hi)`` byte range for an access.
-
-    ``offsets`` holds per-element byte offsets from the base tensor pointer; the
-    span is ``[min_offset, max_offset + element_stride)``. When ``offsets`` is
-    contiguous this collapses to ``[base_off, base_off + nbytes)``. We only need
-    a conservative bounding range for hazard overlap, not exact element sets, so
-    ``max_offset + bytes/count`` is a safe upper bound without dumping the tile.
-    """
+def _active_offsets(offsets: Any, masks: Any | None = None) -> np.ndarray:
+    """Return flattened active byte offsets, excluding masked sentinel lanes."""
     array = np.asarray(offsets)
     if not array.size:
+        return np.asarray([], dtype=np.int64)
+    if masks is None:
+        return array.reshape(-1)
+    mask = np.asarray(masks, dtype=bool)
+    if mask.shape != array.shape:
+        return np.asarray([], dtype=np.int64)
+    return array[mask].reshape(-1)
+
+
+def _item_bytes(
+    offsets: Any, nbytes: int, masks: Any | None = None, item_bytes: int | None = None
+) -> int:
+    if item_bytes is not None:
+        return max(1, int(item_bytes))
+    active = _active_offsets(offsets, masks)
+    return max(1, int(nbytes // max(1, active.size)))
+
+
+def _byte_ranges(
+    offsets: Any,
+    nbytes: int,
+    masks: Any | None = None,
+    item_bytes: int | None = None,
+) -> list[list[int]]:
+    """Coalesce active element offsets into exact half-open byte segments."""
+    active = _active_offsets(offsets, masks)
+    if not active.size:
+        return []
+    width = _item_bytes(offsets, nbytes, masks, item_bytes)
+    ordered = np.unique(active.astype(np.int64, copy=False))
+    if ordered.size == 1:
+        value = int(ordered[0])
+        return [[value, value + width]]
+    breaks = np.flatnonzero(np.diff(ordered) > width)
+    starts = np.concatenate((np.asarray([0]), breaks + 1))
+    ends = np.concatenate((breaks, np.asarray([ordered.size - 1])))
+    segment_count = int(starts.size)
+    if segment_count > MAX_EXACT_BYTE_RANGES:
+        # A fully interleaved tile can contain hundreds of thousands of
+        # one-element segments. Emitting all of them makes JSONL enormous and
+        # turns interval-history updates quadratic. Keep exact segments for
+        # normal/tail accesses and use the conservative bounding span for these
+        # very large affine scatters; access geometry still records stride,
+        # density, and active count for the DMA calibration path.
+        return []
+    return [
+        [int(ordered[start]), int(ordered[end]) + width]
+        for start, end in zip(starts, ends)
+    ]
+
+
+def _byte_span(
+    offsets: Any,
+    nbytes: int,
+    masks: Any | None = None,
+    item_bytes: int | None = None,
+) -> list[int] | None:
+    """Return the bounding range of active lanes, ignoring masked sentinels."""
+    active = _active_offsets(offsets, masks)
+    if not active.size:
         return None
-    flat = array.reshape(-1)
+    flat = active.reshape(-1)
     lo = int(flat.min())
     hi = int(flat.max())
-    count = int(flat.size)
-    stride = max(1, int(nbytes // max(1, count)))
-    return [lo, hi + stride]
+    return [lo, hi + _item_bytes(offsets, nbytes, masks, item_bytes)]
 
 
 def _offset_geometry(offsets: Any, masks: Any, nbytes: int) -> dict[str, Any]:
@@ -424,7 +477,9 @@ def record_to_event(
             "src_storage": int(record.src_ptr),
             "dst_storage": int(record.dst_ptr),
             "src_range": _byte_span(record.src_offsets, int(record.bytes)),
+            "src_ranges": _byte_ranges(record.src_offsets, int(record.bytes)),
             "dst_range": _byte_span(record.dst_offsets, int(record.bytes)),
+            "dst_ranges": _byte_ranges(record.dst_offsets, int(record.bytes)),
             **_dma_geometry(shape, int(record.bytes), partition_axis),
         }
 
@@ -551,7 +606,12 @@ def record_to_event(
             "offsets_shape": shape,
             "src_ptr": int(record.ptr),
             "src_storage": int(record.src_storage or record.ptr),
-            "src_range": _byte_span(record.offsets, int(record.bytes)),
+            "src_range": _byte_span(
+                record.offsets, int(record.bytes), record.masks
+            ),
+            "src_ranges": _byte_ranges(
+                record.offsets, int(record.bytes), record.masks
+            ),
             "src_version": record.src_version,
             "src_dtype": record.src_dtype,
             "dst_ptr": record.dst_ptr,
@@ -578,7 +638,12 @@ def record_to_event(
             "offsets_shape": shape,
             "dst_ptr": int(record.ptr),
             "dst_storage": int(record.dst_storage or record.ptr),
-            "dst_range": _byte_span(record.offsets, int(record.bytes)),
+            "dst_range": _byte_span(
+                record.offsets, int(record.bytes), record.masks
+            ),
+            "dst_ranges": _byte_ranges(
+                record.offsets, int(record.bytes), record.masks
+            ),
             "dst_version": record.dst_version,
             "src_ptr": record.src_ptr,
             "src_storage": record.src_storage,

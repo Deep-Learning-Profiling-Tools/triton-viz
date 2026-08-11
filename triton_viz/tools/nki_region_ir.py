@@ -490,7 +490,18 @@ def structural_calibration_key(region: dict[str, Any]) -> str:
     )
     one = int(region.get("one_input_elementwise_count", 0))
     two = int(region.get("two_input_elementwise_count", 0))
-    return f"{match.rule_id}|ops={ops or 'none'}|arity={one}:{two}"
+    previous = str(region.get("previous_family") or "none")
+    following = str(region.get("next_family") or "none")
+    partition_count = max(1, int(region.get("partition_count") or 1))
+    partition_bucket = 1 << (partition_count.bit_length() - 1)
+    return (
+        f"{match.rule_id}|ops={ops or 'none'}|arity={one}:{two}"
+        f"|mask={int(bool(region.get('has_mask_or_tail')))}"
+        f"|context={previous}>{following}"
+        f"|blocks={max(1, int(region.get('free_block_count') or 1))}"
+        f"|pbcast={max(0, int(region.get('partition_broadcast_input_count') or 0))}"
+        f"|p={partition_count}|pbucket={partition_bucket}"
+    )
 
 
 def grammar_catalog() -> dict[str, Any]:

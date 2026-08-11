@@ -403,6 +403,85 @@ def test_overlapping_ranges_same_base_serialize():
     assert result.predicted_latency_ns == pytest.approx(20)
 
 
+def test_partial_overwrite_preserves_uncovered_writer_history():
+    model = CostModel(
+        dma_startup_ns=0,
+        dma_bytes_per_ns=1,
+        dma_queue_count=4,
+        dma_resource_count=0,
+    )
+    events = [
+        {
+            "seq": 0,
+            "op": "transfer",
+            "engine": "dma",
+            "bytes": 100,
+            "src_storage": 1,
+            "src_range": [0, 100],
+            "dst_storage": 100,
+            "dst_range": [0, 100],
+        },
+        {
+            "seq": 1,
+            "op": "transfer",
+            "engine": "dma",
+            "bytes": 10,
+            "src_storage": 2,
+            "src_range": [0, 10],
+            "dst_storage": 100,
+            "dst_range": [0, 10],
+        },
+        {
+            "seq": 2,
+            "op": "transfer",
+            "engine": "dma",
+            "bytes": 10,
+            "src_storage": 100,
+            "src_range": [50, 60],
+            "dst_storage": 3,
+            "dst_range": [0, 10],
+        },
+    ]
+    result = simulate(events, model)
+    read = next(entry for entry in result.timeline["dma"] if entry.seq == 2)
+    assert read.start == pytest.approx(100)
+
+
+def test_disjoint_exact_segments_do_not_serialize_despite_overlapping_bounds():
+    model = CostModel(
+        dma_startup_ns=0,
+        dma_bytes_per_ns=1,
+        dma_queue_count=2,
+        dma_resource_count=0,
+    )
+    events = [
+        {
+            "seq": 0,
+            "op": "transfer",
+            "engine": "dma",
+            "bytes": 8,
+            "src_storage": 1,
+            "src_range": [0, 8],
+            "dst_storage": 100,
+            "dst_range": [0, 12],
+            "dst_ranges": [[0, 4], [8, 12]],
+        },
+        {
+            "seq": 1,
+            "op": "transfer",
+            "engine": "dma",
+            "bytes": 4,
+            "src_storage": 2,
+            "src_range": [0, 4],
+            "dst_storage": 100,
+            "dst_range": [4, 8],
+            "dst_ranges": [[4, 8]],
+        },
+    ]
+    result = simulate(events, model)
+    assert result.predicted_latency_ns == pytest.approx(8)
+
+
 def test_view_pointer_aliases_parent_storage_via_storage_key():
     # A consumer whose src pointer differs from the producer's dst pointer, but
     # shares a storage id with overlapping range, must still see the RAW edge.
@@ -491,7 +570,7 @@ def test_operator_agnostic_access_and_compute_feature_schema():
         "item_bytes": 4,
     })
     assert access is not None
-    assert access.layout_family == "strided"
+    assert access.layout_family == "strided_positive"
     assert access.density == pytest.approx(0.5)
 
     region = ComputeRegion.from_event({"region_ir": {
@@ -574,6 +653,53 @@ def test_lowering_calibration_adds_instruction_audited_fixed_work():
              "output_dtype": "float32", "fusion_signature": "add", "fusion_group": 0}
     result = simulate([event], CostModel(compute_calibration=level_b, lowering_calibration=level_a))
     assert result.engine_busy_ns["vector"] == pytest.approx(250.0)
+
+
+def test_strict_compute_calibration_uses_value_dtype_for_bool_predicates():
+    calibration = ComputeCalibration({("vector", "float32", 2): (10.0, 1.0)})
+    result = simulate(
+        [
+            {
+                "op": "compute",
+                "api_op": "greater",
+                "engine": "vector",
+                "input_shape": [128, 100],
+                "output_shape": [128, 100],
+                "input_dtypes": ["float32"],
+                "output_dtype": "bool",
+                "region_ir": {"dtype": "float32"},
+            }
+        ],
+        CostModel(compute_calibration=calibration, strict_calibration=True),
+    )
+    assert result.engine_busy_ns["vector"] == pytest.approx(110.0)
+
+
+def test_compute_calibration_strict_dtype_rejects_silent_fp32_fallback():
+    calibration = ComputeCalibration({("vector", "float32", 1): (10.0, 1.0)})
+    assert calibration.instruction_ns("vector", "bfloat16", 1, 100) == 110.0
+    assert (
+        calibration.instruction_ns(
+            "vector", "bfloat16", 1, 100, strict_dtype=True
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="Missing exact compute calibration"):
+        simulate(
+            [
+                {
+                    "op": "compute",
+                    "engine": "vector",
+                    "input_shape": [128, 100],
+                    "output_shape": [128, 100],
+                    "output_dtype": "bfloat16",
+                }
+            ],
+            CostModel(
+                compute_calibration=calibration,
+                strict_calibration=True,
+            ),
+        )
 
 
 def test_compositional_lowering_uses_region_features_without_signature_row():

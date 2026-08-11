@@ -145,6 +145,28 @@ def test_square_dma_transpose_is_explicitly_marked():
     assert transfer["dma_pattern"] == "transpose"
 
 
+def test_masked_byte_ranges_ignore_sentinel_and_preserve_disjoint_segments():
+    from triton_viz.tools.nki_trace_dump import _byte_ranges, _byte_span
+
+    sentinel = np.iinfo(np.int64).max
+    offsets = np.array([0, 4, sentinel, 12], dtype=np.int64)
+    mask = np.array([True, True, False, True])
+    assert _byte_span(offsets, 12, mask) == [0, 16]
+    assert _byte_ranges(offsets, 12, mask) == [[0, 8], [12, 16]]
+
+
+def test_large_interleaved_byte_ranges_fall_back_to_compact_bounding_span():
+    from triton_viz.tools.nki_trace_dump import (
+        MAX_EXACT_BYTE_RANGES,
+        _byte_ranges,
+        _byte_span,
+    )
+
+    offsets = np.arange(MAX_EXACT_BYTE_RANGES + 1, dtype=np.int64) * 8
+    assert _byte_ranges(offsets, offsets.size * 4) == []
+    assert _byte_span(offsets, offsets.size * 4) == [0, int(offsets[-1]) + 4]
+
+
 def test_sbuf_scalar_scatter_is_grouped_as_static_dma():
     triton_viz.clear()
 

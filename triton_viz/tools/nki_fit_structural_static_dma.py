@@ -18,6 +18,13 @@ FIELDS = [
 ]
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("roots", nargs="+", type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    return parser
+
+
 def collect_case(case: Path) -> dict[str, object] | None:
     trace = case / "trace.jsonl"
     summary = case / "hardware/explorer_summary.json"
@@ -58,10 +65,7 @@ def collect_case(case: Path) -> dict[str, object] | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("roots", nargs="+", type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    args = parser.parse_args(argv)
+    args = build_parser().parse_args(argv)
     rows = [
         row
         for root in args.roots

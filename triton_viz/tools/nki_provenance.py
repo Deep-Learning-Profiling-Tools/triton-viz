@@ -235,3 +235,101 @@ def write_experiment_manifest(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return path
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_model_manifest(
+    calibration_dir: Path,
+    *,
+    calibration_files: list[Path],
+    source_manifests: list[Path],
+    split_file: Path | None = None,
+) -> Path:
+    """Create a frozen calibration bundle manifest with strict provenance."""
+    fingerprints = []
+    sources = []
+    for manifest_path in source_manifests:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        fingerprint = data.get("compiler_fingerprint") or (
+            data.get("versions") or {}
+        ).get("compiler_fingerprint")
+        if not fingerprint:
+            raise ValueError(f"Manifest has no compiler_fingerprint: {manifest_path}")
+        fingerprints.append(fingerprint)
+        sources.append(
+            {"path": str(manifest_path), "sha256": _file_sha256(manifest_path)}
+        )
+    reference = fingerprints[0]
+    for candidate in fingerprints[1:]:
+        comparison = compare_fingerprints(reference, candidate)
+        if comparison["status"] != "exact":
+            raise ValueError(
+                "Calibration sources have incompatible compiler fingerprints: "
+                f"{comparison}"
+            )
+    files = {}
+    for path in calibration_files:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        files[path.name] = _file_sha256(path)
+    payload = {
+        "schema": "triton-viz.nki-model-bundle-v1",
+        "compatibility_policy": "exact",
+        # Hardware/control artifacts must agree with each other. The code that
+        # fits and consumes those frozen artifacts is a separate compatibility
+        # boundary: a trace/evaluation fix after collection must not require
+        # recompiling hardware, but evaluate must exactly match the builder.
+        "calibration_source_fingerprint": reference,
+        "model_builder_fingerprint": collect_compiler_fingerprint(
+            Path(__file__).resolve().parents[2]
+        ),
+        # Compatibility alias for v1 readers.
+        "compiler_fingerprint": reference,
+        "region_ir_schema_version": REGION_IR_SCHEMA_VERSION,
+        "calibration_files": files,
+        "source_manifests": sources,
+    }
+    if split_file is not None:
+        payload["train_split"] = {
+            "path": str(split_file),
+            "sha256": _file_sha256(split_file),
+        }
+    path = calibration_dir / "model_manifest.json"
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def validate_model_manifest(
+    path: Path,
+    *,
+    calibration_files: list[Path],
+    current_fingerprint: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reject missing, tampered, or compiler-incompatible calibration bundles."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema") != "triton-viz.nki-model-bundle-v1":
+        raise ValueError(f"Unsupported model manifest schema: {path}")
+    expected = data.get("calibration_files") or {}
+    for file_path in calibration_files:
+        digest = expected.get(file_path.name)
+        if not digest:
+            raise ValueError(f"{file_path.name} is not declared in {path}")
+        if _file_sha256(file_path) != digest:
+            raise ValueError(f"Calibration hash mismatch: {file_path}")
+    if current_fingerprint is not None:
+        reference = data.get("model_builder_fingerprint") or data[
+            "compiler_fingerprint"
+        ]
+        comparison = compare_fingerprints(reference, current_fingerprint)
+        if comparison["status"] != "exact":
+            raise ValueError(f"Incompatible model bundle: {comparison}")
+    return data

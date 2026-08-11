@@ -71,6 +71,15 @@ def test_matrix_config_expands_cartesian_product_and_modes():
     assert all("matrix" not in spec for spec in specs)
 
 
+def test_runtime_overhead_config_excludes_compiler_invalid_empty_kernel():
+    config = json.loads(
+        Path("microbench/inf2_nki/configs/runtime_overhead.json").read_text()
+    )
+    specs = expand_config(config)
+    assert specs
+    assert all(spec["mode"] != "empty" for spec in specs)
+
+
 def test_run_one_uses_per_test_folder_and_work_metadata(tmp_path):
     spec = {
         "name": "ptr_chase",
@@ -88,6 +97,57 @@ def test_run_one_uses_per_test_folder_and_work_metadata(tmp_path):
     row = run_one(spec, tmp_path, warmup=1, iters=1, profile_export="none", explorer_timeout_s=1, skip_existing=True)
     assert row["status"] == "skipped_existing"
     assert "latency_pointer_chase" in row["dir"]
+
+
+def test_skip_existing_counts_as_success_for_resumable_runs(tmp_path, monkeypatch):
+    from microbench.inf2_nki.harness import run_microbench
+
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "suite": "resume",
+                "benchmarks": [
+                    {
+                        "name": "ptr",
+                        "kind": "pointer_chase",
+                        "dtype": "uint32",
+                        "ring_length": 16,
+                        "stride": 1,
+                        "repeat": 1,
+                        "modes": ["hbm_index_chain"],
+                    }
+                ],
+            }
+        )
+    )
+    output = tmp_path / "results"
+    run_id = "resume"
+    bench_dir = (
+        output
+        / run_id
+        / "latency_pointer_chase"
+        / "ptr__hbm_index_chain__dtypeuint32__ring_length16__stride1__repeat1"
+    )
+    bench_dir.mkdir(parents=True)
+    (bench_dir / "manifest.json").write_text("{}")
+    monkeypatch.setattr(run_microbench, "_collect_versions", lambda: {})
+    assert (
+        run_microbench.main(
+            [
+                "--config",
+                str(config),
+                "--output-root",
+                str(output),
+                "--run-id",
+                run_id,
+                "--skip-existing",
+            ]
+        )
+        == 0
+    )
+    manifest = json.loads((output / run_id / "run_manifest.json").read_text())
+    assert manifest["num_ok"] == manifest["num_benchmarks"] == 1
 
 
 def test_dma_work_metadata_counts_observable_keepalive_stores():

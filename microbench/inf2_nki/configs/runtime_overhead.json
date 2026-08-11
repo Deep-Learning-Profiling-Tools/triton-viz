@@ -11,7 +11,7 @@
         "dtype": ["float32", "bfloat16"],
         "p": [1, 16, 64, 128],
         "f": [128, 512, 2048],
-        "mode": ["empty", "dma_only", "vector", "scalar", "vector_scalar_chain", "scalar_vector_chain"]
+        "mode": ["dma_only", "vector", "scalar", "vector_scalar_chain", "scalar_vector_chain"]
       }
     }
   ]

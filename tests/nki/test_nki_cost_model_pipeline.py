@@ -1,4 +1,12 @@
-from triton_viz.tools.nki_cost_model_pipeline import main
+import json
+
+import pytest
+
+from triton_viz.tools.nki_cost_model_pipeline import (
+    _split_case_count,
+    _validate_command_contract,
+    main,
+)
 
 
 def test_pipeline_dry_run_keeps_controls_and_holdouts_separate(tmp_path, capsys):
@@ -19,9 +27,11 @@ def test_pipeline_dry_run_keeps_controls_and_holdouts_separate(tmp_path, capsys)
     )
     output = capsys.readouterr().out
     assert "/controls" in output
-    assert "/holdouts/elementwise_fp32" in output
+    assert "/holdouts/formal_fp32_v1" in output
     assert "dma_strided_store_surface.json" in output
     assert "runtime_overhead.json" in output
+    assert "--skip-existing" in output
+    assert "--resume" in output
 
 
 def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, capsys):
@@ -37,3 +47,31 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "dma_write_bf16.csv" in evaluate_output
     assert "--strided-dma-csv" in evaluate_output
     assert "--runtime-overhead-csv" in evaluate_output
+    assert evaluate_output.count("--strict-calibration") == 3
+
+
+def test_formal_split_is_exactly_the_documented_35_cases():
+    data = json.loads(
+        open("microbench/inf2_nki/configs/formal_holdouts.json").read()
+    )
+    formal = data["splits"]["formal_fp32_v1"]
+    assert _split_case_count(formal) == 35
+    assert formal["operators"]["interleave"][-1] == 4096
+    assert formal["operators"]["layernorm"][-1] == 4096
+    assert formal["operators"]["rmsnorm"][-1] == 4096
+
+
+def test_pipeline_child_parser_contract_rejects_old_static_dma_arguments():
+    command = [
+        "python",
+        "-m",
+        "triton_viz.tools.nki_fit_structural_static_dma",
+        "/tmp/controls",
+        "--output",
+        "/tmp/static.csv",
+    ]
+    _validate_command_contract(command)
+    with pytest.raises(SystemExit):
+        _validate_command_contract(
+            command + ["--compute-calibration-csv", "/tmp/compute.csv"]
+        )

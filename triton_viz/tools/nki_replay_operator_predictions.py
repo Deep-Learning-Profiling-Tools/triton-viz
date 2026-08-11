@@ -16,6 +16,11 @@ from triton_viz.tools.nki_cost_model import (
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
+    _canonical_engine,
+    _compute_value_dtype,
+    _expand_lowering_groups,
+    _free_dim,
+    _input_stream_count,
     eliminate_redundant_hbm_loads,
     simulate,
 )
@@ -44,6 +49,7 @@ FIELDS = [
     "nc_error_pct",
     "hardware_total_dma_us",
     "dma_error_pct",
+    "calibration_match",
 ]
 
 
@@ -57,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
     parser.add_argument("--runtime-overhead-csv", type=Path)
     parser.add_argument("--strided-dma-csv", type=Path)
+    parser.add_argument("--strict-calibration", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     source_rows = list(csv.DictReader((args.root / "operator_results.csv").open()))
@@ -90,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.strided_dma_csv
                     else None
                 ),
+                strict_calibration=args.strict_calibration,
             )
         case_name = (
             f"{source['op']}__r{source['rows']}__c{source['cols']}__{source['dtype']}"
@@ -98,6 +106,29 @@ def main(argv: list[str] | None = None) -> int:
         events = [json.loads(line) for line in trace.read_text().splitlines() if line]
         model_events, cse = eliminate_redundant_hbm_loads(events)
         result = simulate(model_events, models[dtype])
+        # Audit the lowered compute events that CostModel actually prices.
+        # Raw source primitives may have been replaced by structured lowering.
+        matches = set()
+        audit_events = _expand_lowering_groups(model_events, models[dtype])
+        for event in audit_events:
+            if event.get("op") not in {"binary", "compute", "reduce_sum"}:
+                continue
+            engine = _canonical_engine(
+                str(event.get("engine") or ""), str(event.get("op") or "")
+            )
+            streams = _input_stream_count(event)
+            free_dim = _free_dim(event)
+            if free_dim is None:
+                matches.add("missing_geometry")
+                continue
+            _, match = models[dtype].compute_calibration.instruction_lookup(
+                engine,
+                _compute_value_dtype(event),
+                streams,
+                free_dim,
+                strict_dtype=args.strict_calibration,
+            )
+            matches.add(match)
         dynamic_us = result.engine_busy_ns.get("dma", 0.0) / 1000.0
         static_us = result.engine_busy_ns.get("static_dma", 0.0) / 1000.0
         predicted_us = dynamic_us + static_us
@@ -143,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                 * 100,
                 "hardware_total_dma_us": hardware_us,
                 "dma_error_pct": (predicted_us - hardware_us) / hardware_us * 100,
+                "calibration_match": ";".join(sorted(matches)) or "not_applicable",
             }
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)

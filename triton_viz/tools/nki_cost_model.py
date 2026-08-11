@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import statistics
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field, fields
@@ -436,22 +437,47 @@ class ComputeCalibration:
             return "bfloat16"
         return d or "float32"
 
-    def instruction_ns(self, engine, dtype, input_streams, free_dim):
-        """Return one lowered instruction's cost, or None if uncalibrated."""
+    def instruction_lookup(
+        self, engine, dtype, input_streams, free_dim, *, strict_dtype=False
+    ):
+        """Return ``(nanoseconds, match_kind)`` for one lowered instruction."""
         engine = (engine or "").lower()
         dtype = self._norm_dtype(dtype)
         streams = max(1, int(input_streams))
-        for key in (
-            (engine, dtype, streams),
-            (engine, dtype, 2 if streams >= 2 else 1),
-            (engine, "float32", streams),
-            (engine, "float32", 2 if streams >= 2 else 1),
-        ):
+        stream_class = 2 if streams >= 2 else 1
+        candidates = [
+            ((engine, dtype, streams), "exact"),
+            ((engine, dtype, stream_class), "streams_fallback"),
+        ]
+        if not strict_dtype:
+            candidates.extend(
+                [
+                    ((engine, "float32", streams), "dtype_fallback"),
+                    ((engine, "float32", stream_class), "dtype_streams_fallback"),
+                ]
+            )
+        seen = set()
+        for key, match in candidates:
+            if key in seen:
+                continue
+            seen.add(key)
             hit = self.points.get(key)
             if hit is not None:
                 startup, per_elem = hit
-                return startup + max(0, int(free_dim)) * per_elem
-        return None
+                return startup + max(0, int(free_dim)) * per_elem, match
+        return None, "missing"
+
+    def instruction_ns(
+        self, engine, dtype, input_streams, free_dim, *, strict_dtype=False
+    ):
+        """Return one lowered instruction's cost, or None if uncalibrated."""
+        return self.instruction_lookup(
+            engine,
+            dtype,
+            input_streams,
+            free_dim,
+            strict_dtype=strict_dtype,
+        )[0]
 
 
 @dataclass
@@ -678,7 +704,12 @@ class StructuredControlCalibration:
                 continue
             exact = [row for row in rows if row[0] == free]
             if exact:
-                row = exact[0]
+                row = (
+                    free,
+                    statistics.median(value[1] for value in exact),
+                    round(statistics.median(value[2] for value in exact)),
+                    statistics.median(value[3] for value in exact),
+                )
             else:
                 lower = max(
                     (row for row in rows if row[0] <= free),
@@ -801,7 +832,7 @@ class StridedDmaCalibration:
             for event in events
             if (pattern := AccessPattern.from_event(event)) is not None
             and pattern.dst_space == "hbm"
-            and pattern.layout_family == "strided"
+            and pattern.layout_family == "strided_positive"
         ]
         if not patterns:
             return None
@@ -886,6 +917,22 @@ def _free_dim(event: dict[str, Any]) -> int | None:
     return free
 
 
+def _compute_value_dtype(event: dict[str, Any]) -> str:
+    """Return the calibrated value dtype, not a predicate result dtype."""
+    output = str(event.get("output_dtype") or "").lower()
+    if output not in {"bool", "boolean"}:
+        return str(event.get("output_dtype") or "float32")
+    value_dtypes = [
+        str(value)
+        for value in event.get("input_dtypes") or ()
+        if value and str(value).lower() not in {"bool", "boolean"}
+    ]
+    region_dtype = (event.get("region_ir") or {}).get("dtype")
+    if region_dtype and str(region_dtype).lower() not in {"bool", "boolean"}:
+        value_dtypes.append(str(region_dtype))
+    return Counter(value_dtypes).most_common(1)[0][0] if value_dtypes else output
+
+
 def _input_stream_count(event):
     """Number of distinct tile inputs a compute op streams (1-input vs 2-input).
 
@@ -948,6 +995,7 @@ class CostModel:
     structured_control_lowering: StructuredControlCalibration | None = None
     runtime_overhead_calibration: RuntimeOverheadCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
+    strict_calibration: bool = False
 
     # On-chip copy (VectorE/ScalarE moving PSUM<->SBUF): cheaper per byte.
     onchip_startup_ns: float = 100.0
@@ -1067,11 +1115,20 @@ class CostModel:
             # this engine). Default expansion is 1 (one source op -> one
             # instruction) until a richer expansion table is supplied.
             if free_dim is not None and self.compute_calibration is not None:
-                dtype = str(event.get("output_dtype") or "float32")
+                dtype = _compute_value_dtype(event)
                 streams = _input_stream_count(event)
                 per_instr = self.compute_calibration.instruction_ns(
-                    engine, dtype, streams, free_dim
+                    engine,
+                    dtype,
+                    streams,
+                    free_dim,
+                    strict_dtype=self.strict_calibration,
                 )
+                if per_instr is None and self.strict_calibration:
+                    raise ValueError(
+                        "Missing exact compute calibration for "
+                        f"engine={engine}, dtype={dtype}, streams={streams}"
+                    )
                 if per_instr is not None:
                     expansion = float(event.get("lowering_expansion") or 1.0)
                     fixed_ns = float(event.get("lowering_fixed_ns") or 0.0)
@@ -1198,6 +1255,24 @@ def _access_range(event: dict[str, Any], range_key: str) -> tuple[float, float]:
     return 0.0, _RANGE_INF
 
 
+def _access_ranges(
+    event: dict[str, Any], range_key: str
+) -> list[tuple[float, float]]:
+    """Return exact segments when present, otherwise one conservative span."""
+    plural_key = f"{range_key}s"
+    ranges = event.get(plural_key)
+    if isinstance(ranges, (list, tuple)):
+        valid = []
+        for rng in ranges:
+            if isinstance(rng, (list, tuple)) and len(rng) == 2:
+                lo, hi = float(rng[0]), float(rng[1])
+                if hi > lo:
+                    valid.append((lo, hi))
+        if valid:
+            return valid
+    return [_access_range(event, range_key)]
+
+
 def _read_accesses(
     event: dict[str, Any],
 ) -> list[tuple[int, int | None, int, float, float]]:
@@ -1213,9 +1288,11 @@ def _read_accesses(
     if src is not None or src_storage is not None:
         key = int(src_storage if src_storage is not None else src)
         ptr = int(src if src is not None else key)
-        lo, hi = _access_range(event, "src_range")
         version = event.get("src_version")
-        accesses.append((key, int(version) if version is not None else None, ptr, lo, hi))
+        for lo, hi in _access_ranges(event, "src_range"):
+            accesses.append(
+                (key, int(version) if version is not None else None, ptr, lo, hi)
+            )
     storages = event.get("input_storages") or ()
     pointers = event.get("input_ptrs") or ()
     ranges = event.get("input_ranges") or ()
@@ -1244,9 +1321,11 @@ def _write_accesses(
     if dst is not None or dst_storage is not None:
         key = int(dst_storage if dst_storage is not None else dst)
         ptr = int(dst if dst is not None else key)
-        lo, hi = _access_range(event, "dst_range")
         version = event.get("dst_version")
-        accesses.append((key, int(version) if version is not None else None, ptr, lo, hi))
+        for lo, hi in _access_ranges(event, "dst_range"):
+            accesses.append(
+                (key, int(version) if version is not None else None, ptr, lo, hi)
+            )
     storages = event.get("output_storages") or ()
     pointers = event.get("output_ptrs") or ()
     ranges = event.get("output_ranges") or ()
@@ -1283,6 +1362,23 @@ def _write_accesses(
 def _ranges_overlap(a_lo: float, a_hi: float, b_lo: float, b_hi: float) -> bool:
     """True when two half-open byte ranges intersect."""
     return a_lo < b_hi and b_lo < a_hi
+
+
+def _subtract_interval(
+    entry: tuple[float, float, float, str, int | None],
+    cut_lo: float,
+    cut_hi: float,
+) -> list[tuple[float, float, float, str, int | None]]:
+    """Subtract ``[cut_lo, cut_hi)`` while preserving uncovered history."""
+    lo, hi, end, engine, version = entry
+    if not _ranges_overlap(lo, hi, cut_lo, cut_hi):
+        return [entry]
+    result = []
+    if lo < cut_lo:
+        result.append((lo, min(hi, cut_lo), end, engine, version))
+    if cut_hi < hi:
+        result.append((max(lo, cut_hi), hi, end, engine, version))
+    return result
 
 
 def eliminate_redundant_hbm_loads(
@@ -1687,15 +1783,15 @@ def simulate(
             # disjoint accesses are not spuriously serialized against stale
             # entries, while overlapping history is replaced by this write.
             writers[key] = [
-                entry
+                remainder
                 for entry in writers.get(key, ())
-                if not _ranges_overlap(lo, hi, entry[0], entry[1])
+                for remainder in _subtract_interval(entry, lo, hi)
             ]
             writers[key].append((lo, hi, end, engine, version))
             readers[key] = [
-                entry
+                remainder
                 for entry in readers.get(key, ())
-                if not _ranges_overlap(lo, hi, entry[0], entry[1])
+                for remainder in _subtract_interval(entry, lo, hi)
             ]
         if op in ("transfer", "load", "store"):
             prior_transfer_end = max(prior_transfer_end, end)

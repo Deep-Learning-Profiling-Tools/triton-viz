@@ -631,7 +631,7 @@ def main(argv: list[str] | None = None) -> int:
             f.write(json.dumps(row, sort_keys=True, default=str) + "\n")
             f.flush()
             print(f"  -> {row['status']} {row.get('latency_percentiles')}", flush=True)
-            ok += row.get("status") == "ok"
+            ok += row.get("status") in {"ok", "skipped_existing"}
 
     metadata["finished_at"] = datetime.now(timezone.utc).isoformat()
     metadata["num_benchmarks"] = len(specs)

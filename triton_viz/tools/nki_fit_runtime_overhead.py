@@ -113,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("results_jsonl", type=Path)
     parser.add_argument("--dma-affine-read-csv", type=Path, required=True)
     parser.add_argument("--dma-affine-write-csv", type=Path, required=True)
+    parser.add_argument("--dma-affine-write-bf16-csv", type=Path)
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--diagnostics", type=Path)
@@ -128,10 +129,15 @@ def main(argv: list[str] | None = None) -> int:
             continue
         dtype = str(spec["dtype"])
         if dtype not in models:
+            write_csv = (
+                args.dma_affine_write_bf16_csv
+                if dtype == "bfloat16" and args.dma_affine_write_bf16_csv
+                else args.dma_affine_write_csv
+            )
             models[dtype] = CostModel(
                 dma_affine_calibration=DmaAffineCalibration.from_csvs(
                     args.dma_affine_read_csv,
-                    args.dma_affine_write_csv,
+                    write_csv,
                     dtype,
                 ),
                 compute_calibration=ComputeCalibration.from_csv(
