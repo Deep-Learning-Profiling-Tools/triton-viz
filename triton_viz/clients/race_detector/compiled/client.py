@@ -123,7 +123,8 @@ class CompiledRaceDetector(Client):
         # Global-memory verdict (independent of the TTGIR shared-memory
         # last_status): "ok" = proved race-free (see last_global_provenance
         # for the rung); "races" = definite reports in last_global_reports;
-        # "unsupported"; "no_ttir".
+        # "unsupported"; "no_ttir"; "vacuous" = all race queries UNSAT but
+        # the base system too (Feasible# failed) — certificate withheld.
         self.last_global_status: str = "ok"
         self.last_global_reason: str | None = None
         self.last_global_reports: list[Any] = []
@@ -485,6 +486,10 @@ class CompiledRaceDetector(Client):
                 _, exact, widened = outcome
                 reports.extend(exact)
                 widened_all.extend(widened)
+            elif outcome[0] == "vacuous":
+                # Feasible# failed for this graph: withhold the
+                # certificate; never let a vacuous all-UNSAT read as ok.
+                status, reason = "vacuous", outcome[1]
             else:
                 status, reason = "unsupported", outcome[1]
 
@@ -875,7 +880,9 @@ class CompiledRaceDetector(Client):
     ):
         """The tier selector (plan §I.3) for one kernel specialization.
 
-        Returns ``("proved", "T0"|"T1")``, ``("races", exact, widened)``, or
+        Returns ``("proved", "T0"|"T1")``, ``("races", exact, widened)``,
+        ``("vacuous", reason)`` (all race queries UNSAT but the base
+        system too — Feasible# failed, certificate withheld), or
         ``("unsupported", reason)``. T0 (params symbolic — race-free for ANY
         input) is attempted only behind the syntactic linearity gate; any T0
         SAT falls through to T1 because a T0 witness carries parameter
@@ -954,6 +961,25 @@ class CompiledRaceDetector(Client):
                     else:
                         exact.append(rep)
             return ("races", exact, widened)
+        set_param("timeout", self.T1_TIMEOUT_MS)
+        try:
+            # Certificate discipline: Feasible# AND RaceFree#. All-UNSAT
+            # race queries over an unsatisfiable base system would be a
+            # vacuous proof (an await's termination premise no execution
+            # can meet); one satisfiability query of the base constraints
+            # discharges Feasible# before "proved" is claimed.
+            feasible = solver.check_feasibility()
+        except UnsupportedSymbolicRaceQuery as e:
+            return ("unsupported", f"solver: {e}")
+        finally:
+            set_param("timeout", self._Z3_DEFAULT_TIMEOUT)
+        if not feasible:
+            return (
+                "vacuous",
+                "premises unsatisfiable: the base system admits no "
+                "execution, so the race-freedom certificate is withheld "
+                "(vacuous proof)",
+            )
         return ("proved", "T1")
 
     def _launch_scoped_requery(self, enc: Any, lg: tuple[int, ...] | None):

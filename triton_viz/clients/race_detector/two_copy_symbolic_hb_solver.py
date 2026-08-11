@@ -299,6 +299,15 @@ class TwoCopySymbolicHBSolver:
         self.grid = self._normalize_grid(grid)
         self.arange_dict = dict(arange_dict or {})
         self.extra_assumptions = tuple(extra_assumptions)
+        # The launch's premises after per-copy substitution (loop-iterator
+        # ranges and, decisively, the awaited exit predicates): the
+        # feasibility query asserts them, because activity gating folds
+        # them into every event, so the bare base system is always
+        # satisfiable through the all-inactive (non-terminating)
+        # valuation — which is NOT a member of WF# (the paper's analysis
+        # tier ranges over executions satisfying the premises). Filled
+        # during record lowering, before any constraint family is built.
+        self.launch_premises: list[BoolRef] = []
         unknown = set(ablations) - set(self.ABLATIONS)
         if unknown:
             raise ValueError(f"unknown ablations: {sorted(unknown)}")
@@ -433,6 +442,44 @@ class TwoCopySymbolicHBSolver:
 
         candidates.extend(self._find_intra_instance_candidates(events_a, events_b))
         return self._dedupe_reports(candidates)
+
+    def check_feasibility(self) -> bool:
+        """Feasible# of the race-freedom certificate (paper, launch
+        verdicts): does the base system admit any execution at all?
+
+        The m^2 per-pair race queries are all UNSAT even when the
+        premises themselves are unsatisfiable (an await's termination
+        premise no execution can meet), and a proof claimed over an
+        empty set of executions would be vacuous. The certificate is
+        CertifiedRaceFree = Feasible# AND RaceFree#, and this one
+        satisfiability query of the base constraints WITH the launch's
+        premises asserted discharges the first conjunct. The premises
+        must be asserted explicitly: activity gating folds them into
+        every event, so the bare base system always admits the
+        all-inactive valuation (the non-terminating execution, outside
+        WF#), and a bare check would be trivially satisfiable.
+        Deliberately WITHOUT ``different_blocks``: a
+        single-instance launch is feasible even though the
+        cross-instance constraint is unsatisfiable on its grid.
+
+        Z3 ``unknown`` must not certify feasibility — escalate to
+        :class:`UnsupportedSymbolicRaceQuery` exactly like a race
+        query, so the caller reports the launch as unsupported rather
+        than certified.
+        """
+        solver = self._base_solver()
+        for p in self.launch_premises:
+            solver.add(p)
+        result = solver.check()
+        if result == sat:
+            return True
+        if result == unsat:
+            return False
+        detail = solver.reason_unknown()
+        raise UnsupportedSymbolicRaceQuery(
+            "Z3 could not decide the feasibility query"
+            + (f" ({detail})" if detail else "")
+        )
 
     @staticmethod
     def _race_query_is_sat(
@@ -697,6 +744,7 @@ class TwoCopySymbolicHBSolver:
         # record.reads / record.writes.
         local_terms = tuple(as_bool(c) for c in iter_constraints(local_all))
         prem_terms = tuple(as_bool(c) for c in iter_constraints(prem_all))
+        self.launch_premises.extend(prem_terms)
 
         out: list[SymbolicMemoryEvent] = []
         for lane, addr in enumerate(addr_lanes):

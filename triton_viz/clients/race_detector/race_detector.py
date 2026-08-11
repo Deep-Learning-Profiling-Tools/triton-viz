@@ -863,6 +863,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         :attr:`last_status` and :attr:`unsupported_reason`.
         ``last_status == "aborted"`` means an exception cut the launch short
         before the capture (or the solver) completed, so no verdict exists.
+        ``last_status == "vacuous"`` means every race query was UNSAT but
+        so was the base system itself (Feasible# failed): the premises
+        admit no execution, and the race-freedom certificate is withheld
+        rather than claimed vacuously.
         ``last_status == "disabled"`` is set by :class:`NullRaceDetector`
         when the backend is off.
 
@@ -896,15 +900,32 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     self.last_status = "aborted"
                 return []
             try:
-                reports = TwoCopySymbolicHBSolver(
+                solver = TwoCopySymbolicHBSolver(
                     self.records,
                     grid=self._launch_grid,
                     arange_dict=self._arange_dict_snapshot,
                     ablations=tuple(
                         a for a in self.ablations if a in ("hb", "coherence")
                     ),
-                ).find_races()
-                self.last_status = "ok"
+                )
+                reports = solver.find_races()
+                if reports or solver.check_feasibility():
+                    self.last_status = "ok"
+                else:
+                    # Feasible# failed: every pair query was vacuously
+                    # UNSAT because the premises admit no execution at
+                    # all (e.g. an await polls for a value no modeled
+                    # source can supply). "ok" here would publish a
+                    # vacuous race-freedom certificate; the certificate
+                    # is Feasible# AND RaceFree#, so it is withheld.
+                    # (A non-empty report list needs no check: a SAT
+                    # race query is itself a feasibility witness.)
+                    self.last_status = "vacuous"
+                    self.unsupported_reason = (
+                        "premises unsatisfiable: the base system admits "
+                        "no execution, so the race-freedom certificate "
+                        "is withheld (vacuous proof)"
+                    )
             except UnsupportedSymbolicRaceQuery as exc:
                 self._mark_unsupported(str(exc))
                 if self.abort_on_error:

@@ -312,6 +312,63 @@ def test_mutex_cas_proved():
     assert reports == []
 
 
+def test_vacuous_premises_withhold_certificate():
+    """Feasible# (the certificate's first conjunct, paper launch
+    verdicts): a CAS spin expecting 0 over a lock initialized to 7 can
+    never observe its compare value — the closed world offers only the
+    init (7), the winner's exchanged 1, and an unlock rewritten to
+    republish 1 — so the termination premise is unsatisfiable, every
+    race query is vacuously UNSAT, and the certificate must be
+    withheld rather than claimed."""
+    text = _mutex_ttir().replace(
+        "exch, release, gpu, %lock_ptr, %c0",
+        "exch, release, gpu, %lock_ptr, %c1",
+    )
+    tensors = {
+        "lock_ptr": _t(0x2000, numel=1, init=(7,)),
+        "x_ptr": _t(0x3000, numel=1),
+    }
+    enc = encode_graph(parse_ttir(text), {}, tensors)
+    solver = TwoCopySymbolicHBSolver(
+        enc.records,
+        grid=symbolic_grid(enc, (4, 1, 1)),
+        arange_dict=enc.arange_dict,
+    )
+    assert solver.find_races() == []
+    assert solver.check_feasibility() is False
+
+
+def test_satisfiable_premises_pass_feasibility():
+    """Control for the vacuity check: the standard mutex (lock init 0)
+    proves clean AND feasible — the certificate's two conjuncts are
+    independent, and the feasibility query must not reject a genuine
+    proof."""
+    enc = encode_graph(parse_ttir(_mutex_ttir()), {}, _MUTEX_TENSORS)
+    solver = TwoCopySymbolicHBSolver(
+        enc.records,
+        grid=symbolic_grid(enc, (4, 1, 1)),
+        arange_dict=enc.arange_dict,
+    )
+    assert solver.find_races() == []
+    assert solver.check_feasibility() is True
+
+
+def test_client_vacuous_status():
+    """Client wiring: an infeasible launch surfaces last_global_status
+    == "vacuous" with the premises-unsatisfiable reason, never a clean
+    "ok" (which would publish a vacuous certificate)."""
+    det = CompiledRaceDetector(confirm_races=False)
+    lock = torch.full((1,), 7, dtype=torch.int32)
+    x = torch.zeros(1, dtype=torch.int32)
+    text = _mutex_ttir().replace(
+        "exch, release, gpu, %lock_ptr, %c0",
+        "exch, release, gpu, %lock_ptr, %c1",
+    )
+    _drive_client(det, text, (lock, x), ["lock_ptr", "x_ptr"])
+    assert det.last_global_status == "vacuous"
+    assert "premises unsatisfiable" in (det.last_global_reason or "")
+
+
 def test_mutex_plain_store_unlock_races():
     """Unlock as a plain store: the release sequence is gone (and the lock
     word gains an unmodeled writer) — the critical section must race."""
