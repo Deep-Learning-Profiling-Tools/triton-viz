@@ -56,7 +56,7 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "--dma-transpose-surface-csv" in evaluate_output
     assert "--strided-dma-csv" in evaluate_output
     assert "--runtime-overhead-csv" in evaluate_output
-    assert evaluate_output.count("--strict-calibration") == 3
+    assert evaluate_output.count("--strict-calibration") == 6
 
 
 def test_formal_split_is_exactly_the_documented_35_cases():

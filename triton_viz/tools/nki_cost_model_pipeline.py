@@ -332,6 +332,7 @@ def fit(root: Path, dry_run: bool) -> None:
                 calibration / "dma_directional.csv",
                 calibration / "dma_read_surface.csv",
                 calibration / "dma_read_large_free.csv",
+                calibration / "dma_transpose_surface.csv",
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
                 compute,
@@ -379,6 +380,11 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         "--output",
         output,
     )
+    if dtype == "float32":
+        args[args.index("--compute-calibration-csv"):args.index("--compute-calibration-csv")] = [
+            "--dma-transpose-surface-csv",
+            str(calibration / "dma_transpose_surface.csv"),
+        ]
     return args
 
 
@@ -443,6 +449,7 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "dma_directional.csv",
                 calibration / "dma_read_surface.csv",
                 calibration / "dma_read_large_free.csv",
+                calibration / "dma_transpose_surface.csv",
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
                 calibration / "compute.csv",
