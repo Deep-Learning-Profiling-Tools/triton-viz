@@ -155,6 +155,16 @@ def test_masked_byte_ranges_ignore_sentinel_and_preserve_disjoint_segments():
     assert _byte_ranges(offsets, 12, mask) == [[0, 8], [12, 16]]
 
 
+def test_dma_geometry_uses_active_mask_partitions():
+    from triton_viz.tools.nki_trace_dump import _dma_geometry
+
+    mask = np.zeros((128, 16), dtype=bool)
+    mask[:16, :8] = True
+    geometry = _dma_geometry([128, 16], 16 * 8 * 4, masks=mask)
+    assert geometry["partition_count"] == 16
+    assert geometry["free_bytes_per_partition"] == 8 * 4
+
+
 def test_large_interleaved_byte_ranges_fall_back_to_compact_bounding_span():
     from triton_viz.tools.nki_trace_dump import (
         MAX_EXACT_BYTE_RANGES,

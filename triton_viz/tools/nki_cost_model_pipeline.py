@@ -131,6 +131,9 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
     configs = [
         "engine_lowering_sweep.json",
         "runtime_overhead.json",
+        "dma_partition_surface.json",
+        "dma_partition_large_free.json",
+        "dma_transpose_surface.json",
         "dma_directional_dtype_canary.json",
         "dma_write_partition_surface.json",
         "dma_write_bf16_steady.json",
@@ -211,6 +214,8 @@ def fit(root: Path, dry_run: bool) -> None:
     )
     dma_exports = {
         "dma_directional.csv": "dma_directional_dtype_canary",
+        "dma_read_surface.csv": "dma_partition_surface",
+        "dma_transpose_surface.csv": "dma_transpose_surface",
         "dma_write_fp32.csv": "dma_write_partition_surface",
         "dma_write_bf16.csv": "dma_write_bf16_steady",
     }
@@ -224,6 +229,15 @@ def fit(root: Path, dry_run: bool) -> None:
             ),
             dry_run,
         )
+    _run(
+        _module(
+            "microbench.inf2_nki.profile_parser.export_csv",
+            root / "microbench" / "dma_partition_large_free",
+            "--output",
+            calibration / "dma_read_large_free.csv",
+        ),
+        dry_run,
+    )
     compute = calibration / "compute.csv"
     _run(
         _module(
@@ -265,10 +279,35 @@ def fit(root: Path, dry_run: bool) -> None:
             calibration / "dma_write_fp32.csv",
             "--dma-affine-write-bf16-csv",
             calibration / "dma_write_bf16.csv",
+            "--dma-read-surface-csv",
+            calibration / "microbench.csv",
+            "--dma-read-bf16-surface-csv",
+            calibration / "dma_directional.csv",
+            "--dma-write-surface-csv",
+            calibration / "dma_write_fp32.csv",
+            "--dma-write-bf16-surface-csv",
+            calibration / "dma_write_bf16.csv",
             "--compute-calibration-csv",
             compute,
             "--output",
             calibration / "runtime_overhead.csv",
+        ),
+        dry_run,
+    )
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_runtime_overhead",
+            root / "microbench" / "runtime_overhead" / "results.jsonl",
+            "--dma-affine-read-csv",
+            calibration / "dma_directional.csv",
+            "--dma-affine-write-csv",
+            calibration / "dma_write_fp32.csv",
+            "--dma-affine-write-bf16-csv",
+            calibration / "dma_write_bf16.csv",
+            "--compute-calibration-csv",
+            compute,
+            "--output",
+            calibration / "runtime_overhead_affine.csv",
         ),
         dry_run,
     )
@@ -291,12 +330,15 @@ def fit(root: Path, dry_run: bool) -> None:
             calibration_files=[
                 canonical,
                 calibration / "dma_directional.csv",
+                calibration / "dma_read_surface.csv",
+                calibration / "dma_read_large_free.csv",
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
                 compute,
                 structured,
                 calibration / "static_dma.csv",
                 calibration / "runtime_overhead.csv",
+                calibration / "runtime_overhead_affine.csv",
                 calibration / "strided_dma.csv",
             ],
             source_manifests=source_manifests,
@@ -318,6 +360,14 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         calibration / "dma_directional.csv",
         "--dma-affine-write-csv",
         write_csv,
+        "--dma-read-surface-csv",
+        (
+            calibration / "dma_directional.csv"
+            if dtype == "bfloat16"
+            else calibration / "microbench.csv"
+        ),
+        "--dma-write-surface-csv",
+        write_csv,
         "--compute-calibration-csv",
         calibration / "compute.csv",
         "--structured-control-csv",
@@ -332,29 +382,15 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
     return args
 
 
-def evaluate(root: Path, dry_run: bool) -> None:
-    replay_dir = root / "evaluation"
-    replay_dir.mkdir(parents=True, exist_ok=True)
-    if not dry_run:
-        calibration = root / "calibration"
-        validate_model_manifest(
-            calibration / "model_manifest.json",
-            calibration_files=[
-                calibration / "microbench.csv",
-                calibration / "dma_directional.csv",
-                calibration / "dma_write_fp32.csv",
-                calibration / "dma_write_bf16.csv",
-                calibration / "compute.csv",
-                calibration / "structured_compute.csv",
-                calibration / "static_dma.csv",
-                calibration / "runtime_overhead.csv",
-                calibration / "strided_dma.csv",
-            ],
-            current_fingerprint=collect_compiler_fingerprint(
-                Path(__file__).resolve().parents[2]
-            ),
-        )
-    splits = _load_splits()
+def _evaluate_replays(
+    root: Path,
+    replay_dir: Path,
+    splits: dict,
+    *,
+    model_name: str,
+    dma_model: str,
+    dry_run: bool,
+) -> list[tuple[str, Path]]:
     outputs: list[tuple[str, Path]] = []
     for split_name, split in splits.items():
         holdout_dirs = sorted((root / "holdouts").glob(f"{split_name}*"))
@@ -368,10 +404,22 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 )
             ]
         for holdout in holdout_dirs:
-            output = replay_dir / f"{holdout.name}.csv"
+            output = replay_dir / f"{model_name}_{holdout.name}.csv"
             args = _replay_args(root, holdout, output, split["dtype"])
+            runtime_index = args.index("--runtime-overhead-csv") + 1
+            args[runtime_index] = str(
+                root
+                / "calibration"
+                / (
+                    "runtime_overhead_affine.csv"
+                    if dma_model == "affine"
+                    else "runtime_overhead.csv"
+                )
+            )
             args[args.index("--output"):args.index("--output")] = [
                 "--strict-calibration",
+                "--dma-model",
+                dma_model,
             ]
             if split_name == "formal_fp32_v1":
                 args[args.index("--output"):args.index("--output")] = [
@@ -380,6 +428,51 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 ]
             _run(args, dry_run)
             outputs.append((split_name, output))
+    return outputs
+
+
+def evaluate(root: Path, dry_run: bool) -> None:
+    replay_dir = root / "evaluation"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        calibration = root / "calibration"
+        validate_model_manifest(
+            calibration / "model_manifest.json",
+            calibration_files=[
+                calibration / "microbench.csv",
+                calibration / "dma_directional.csv",
+                calibration / "dma_read_surface.csv",
+                calibration / "dma_read_large_free.csv",
+                calibration / "dma_write_fp32.csv",
+                calibration / "dma_write_bf16.csv",
+                calibration / "compute.csv",
+                calibration / "structured_compute.csv",
+                calibration / "static_dma.csv",
+                calibration / "runtime_overhead.csv",
+                calibration / "runtime_overhead_affine.csv",
+                calibration / "strided_dma.csv",
+            ],
+            current_fingerprint=collect_compiler_fingerprint(
+                Path(__file__).resolve().parents[2]
+            ),
+        )
+    splits = _load_splits()
+    outputs = _evaluate_replays(
+        root,
+        replay_dir,
+        splits,
+        model_name="surface",
+        dma_model="surface",
+        dry_run=dry_run,
+    )
+    affine_outputs = _evaluate_replays(
+        root,
+        replay_dir,
+        splits,
+        model_name="affine",
+        dma_model="affine",
+        dry_run=dry_run,
+    )
     if dry_run:
         return
 
@@ -387,6 +480,15 @@ def evaluate(root: Path, dry_run: bool) -> None:
         split_name: [
             row
             for name, path in outputs
+            if name == split_name
+            for row in csv.DictReader(path.open())
+        ]
+        for split_name in splits
+    }
+    affine_rows_by_split = {
+        split_name: [
+            row
+            for name, path in affine_outputs
             if name == split_name
             for row in csv.DictReader(path.open())
         ]
@@ -409,6 +511,10 @@ def evaluate(root: Path, dry_run: bool) -> None:
         "formal_fp32_cases": len(formal_rows),
         "auxiliary_bf16_cases": len(auxiliary_rows),
     }
+    affine_formal = affine_rows_by_split["formal_fp32_v1"]
+    report["affine_baseline_nc_p50_mape_pct"] = statistics.mean(
+        abs(float(row["nc_error_pct"])) for row in affine_formal
+    )
     if auxiliary_rows:
         report["auxiliary_bf16_nc_p50_mape_pct"] = statistics.mean(
             abs(float(row["nc_error_pct"])) for row in auxiliary_rows
@@ -417,6 +523,10 @@ def evaluate(root: Path, dry_run: bool) -> None:
         report[name] = statistics.mean(
             abs(float(row[field])) for row in formal_rows
         )
+    report["surface_vs_affine_mape_delta_pct"] = (
+        report["final_nc_p50_mape_pct"]
+        - report["affine_baseline_nc_p50_mape_pct"]
+    )
     report["formal_fp32_operator_mape_pct"] = {
         operator: statistics.mean(
             abs(float(row["nc_error_pct"]))

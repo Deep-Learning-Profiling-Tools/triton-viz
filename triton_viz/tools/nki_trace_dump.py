@@ -55,7 +55,10 @@ def _shape(value: Any) -> list[int]:
 
 
 def _dma_geometry(
-    shape: list[int], nbytes: int, partition_axis: int | None = None
+    shape: list[int],
+    nbytes: int,
+    partition_axis: int | None = None,
+    masks: Any | None = None,
 ) -> dict[str, int]:
     """Expose the SBUF partition geometry needed by the DMA cost model."""
     if len(shape) < 2:
@@ -64,6 +67,18 @@ def _dma_geometry(
     if not 0 <= axis < len(shape) or shape[axis] <= 0:
         return {}
     partitions = int(shape[axis])
+    if masks is not None:
+        mask = np.asarray(masks, dtype=bool)
+        if list(mask.shape) == shape:
+            reduce_axes = tuple(index for index in range(mask.ndim) if index != axis)
+            active_partitions = np.any(mask, axis=reduce_axes) if reduce_axes else mask
+            partitions = int(np.count_nonzero(active_partitions))
+    if partitions <= 0:
+        return {
+            "partition_count": 0,
+            "free_bytes_per_partition": 0,
+            "partition_axis": axis,
+        }
     return {
         "partition_count": partitions,
         "free_bytes_per_partition": int(nbytes // partitions),
@@ -621,7 +636,7 @@ def record_to_event(
             ),
             "dst_version": record.dst_version,
             **_offset_geometry(record.offsets, record.masks, int(record.bytes)),
-            **_dma_geometry(shape, int(record.bytes)),
+            **_dma_geometry(shape, int(record.bytes), masks=record.masks),
         }
 
     if isinstance(record, Store):
@@ -653,7 +668,7 @@ def record_to_event(
             "src_version": record.src_version,
             "src_dtype": record.src_dtype,
             **_offset_geometry(record.offsets, record.masks, int(record.bytes)),
-            **_dma_geometry(shape, int(record.bytes)),
+            **_dma_geometry(shape, int(record.bytes), masks=record.masks),
         }
 
     return {**base, "op": "unknown", "payload": _jsonable(record)}

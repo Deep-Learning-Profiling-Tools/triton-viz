@@ -12,6 +12,7 @@ from triton_viz.tools.nki_cost_model import (
     ComputeCalibration,
     CostModel,
     DmaAffineCalibration,
+    DmaCalibrationSurface,
     RuntimeOverheadCalibration,
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
@@ -50,6 +51,10 @@ FIELDS = [
     "hardware_total_dma_us",
     "dma_error_pct",
     "calibration_match",
+    "dma_calibration_path",
+    "dma_surface_match",
+    "dma_surface_ood_count",
+    "dma_surface_max_log_distance",
 ]
 
 
@@ -58,6 +63,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("root", type=Path)
     parser.add_argument("--dma-affine-read-csv", type=Path, required=True)
     parser.add_argument("--dma-affine-write-csv", type=Path, required=True)
+    parser.add_argument("--dma-read-surface-csv", type=Path)
+    parser.add_argument("--dma-write-surface-csv", type=Path)
+    parser.add_argument("--dma-transpose-surface-csv", type=Path)
+    parser.add_argument(
+        "--dma-model",
+        choices=["surface", "affine"],
+        default="surface",
+        help="Surface is the production model; affine is retained as an ablation.",
+    )
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--structured-control-csv", type=Path, required=True)
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
@@ -74,7 +88,39 @@ def main(argv: list[str] | None = None) -> int:
             continue
         dtype = source["dtype"]
         if dtype not in models:
+            use_surface = args.dma_model == "surface"
             models[dtype] = CostModel(
+                dma_calibration=(
+                    DmaCalibrationSurface.from_csv(
+                        args.dma_read_surface_csv,
+                        bandwidth_column="derived.read_gbps_dynamic_dma_active",
+                        dtype_name=dtype,
+                        duplicate_policy="median",
+                    )
+                    if use_surface and args.dma_read_surface_csv
+                    else None
+                ),
+                dma_write_calibration=(
+                    DmaCalibrationSurface.from_csv(
+                        args.dma_write_surface_csv,
+                        "dma_write_partition_surface",
+                        "derived.write_gbps_dynamic_dma_active",
+                        dtype,
+                        required_repeat=16,
+                    )
+                    if use_surface and args.dma_write_surface_csv
+                    else None
+                ),
+                dma_transpose_calibration=(
+                    DmaCalibrationSurface.from_csv(
+                        args.dma_transpose_surface_csv,
+                        "dma_transpose_surface",
+                        "derived.read_gbps_dynamic_dma_active",
+                        dtype,
+                    )
+                    if use_surface and args.dma_transpose_surface_csv
+                    else None
+                ),
                 dma_affine_calibration=DmaAffineCalibration.from_csvs(
                     args.dma_affine_read_csv, args.dma_affine_write_csv, dtype
                 ),
@@ -136,6 +182,14 @@ def main(argv: list[str] | None = None) -> int:
         predicted_total_us = result.predicted_latency_ns / 1000.0
         hardware_nc_us = float(source["hardware_nc_p50_us"])
         components = result.components_ns
+        dma_paths = set()
+        dma_matches = set()
+        for event in model_events:
+            if event.get("op") not in {"load", "store", "transfer"}:
+                continue
+            lookup = models[dtype].dma_lookup(event)
+            dma_paths.add(str(lookup["path"]))
+            dma_matches.add(str(lookup["match"]))
         out.append(
             {
                 "case": case_name,
@@ -175,6 +229,16 @@ def main(argv: list[str] | None = None) -> int:
                 "hardware_total_dma_us": hardware_us,
                 "dma_error_pct": (predicted_us - hardware_us) / hardware_us * 100,
                 "calibration_match": ";".join(sorted(matches)) or "not_applicable",
+                "dma_calibration_path": ";".join(sorted(dma_paths))
+                or "not_applicable",
+                "dma_surface_match": ";".join(sorted(dma_matches))
+                or "not_applicable",
+                "dma_surface_ood_count": int(
+                    components.get("dma_surface_ood_count", 0)
+                ),
+                "dma_surface_max_log_distance": components.get(
+                    "dma_surface_max_log_distance", 0.0
+                ),
             }
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)

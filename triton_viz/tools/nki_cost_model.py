@@ -51,21 +51,39 @@ class DmaCalibrationSurface:
 
     points: dict[tuple[int, int], float]
 
+    @dataclass(frozen=True)
+    class Lookup:
+        bandwidth_gbps: float
+        match: str
+        requested_partitions: int
+        requested_free_bytes: int
+        lookup_partitions: int
+        lookup_free_bytes: int
+        log_distance: float
+
     @classmethod
     def from_csv(
         cls,
         path: str | Path,
         benchmark_name: str = "dma_partition_surface",
-        bandwidth_column: str = "derived.read_gbps_dma_active",
+        bandwidth_column: str = "derived.read_gbps_dynamic_dma_active",
         dtype_name: str | None = None,
+        required_repeat: int | None = None,
+        duplicate_policy: str = "error",
     ) -> DmaCalibrationSurface:
-        points: dict[tuple[int, int], float] = {}
+        samples: dict[tuple[int, int], list[float]] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 if row.get("row_type") != "benchmark" or row.get("status") != "ok":
                     continue
                 if row.get("spec.name") != benchmark_name:
                     continue
+                if required_repeat is not None:
+                    try:
+                        if int(float(row.get("spec.repeat", 0))) != required_repeat:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
                 if dtype_name is not None:
                     expected = {
                         "bf16": "bfloat16",
@@ -96,15 +114,23 @@ class DmaCalibrationSurface:
                     or bandwidth <= 0
                 ):
                     continue
-                previous = points.get(key)
-                if previous is not None and not math.isclose(
-                    previous, bandwidth, rel_tol=1e-9, abs_tol=1e-9
-                ):
-                    raise ValueError(
-                        f"Conflicting calibration rows for {key}: "
-                        f"{previous} versus {bandwidth}"
-                    )
-                points[key] = bandwidth
+                samples.setdefault(key, []).append(bandwidth)
+        if duplicate_policy not in {"error", "median"}:
+            raise ValueError(f"Unknown duplicate policy: {duplicate_policy}")
+        points: dict[tuple[int, int], float] = {}
+        for key, values in samples.items():
+            if duplicate_policy == "error" and any(
+                not math.isclose(values[0], value, rel_tol=1e-9, abs_tol=1e-9)
+                for value in values[1:]
+            ):
+                raise ValueError(
+                    f"Conflicting calibration rows for {key}: {values}"
+                )
+            points[key] = (
+                statistics.median(values)
+                if duplicate_policy == "median"
+                else values[0]
+            )
         if not points:
             raise ValueError(
                 f"No {benchmark_name} calibration rows with {bandwidth_column}"
@@ -112,11 +138,19 @@ class DmaCalibrationSurface:
             )
         return cls(points)
 
-    def bandwidth_gbps(self, partitions: int, free_bytes: int) -> float:
-        """Log-space inverse-distance interpolation, clamped to measured bounds."""
+    def lookup(self, partitions: int, free_bytes: int) -> Lookup:
+        """Return bandwidth plus explicit exact/interpolated/OOD provenance."""
         exact = self.points.get((partitions, free_bytes))
         if exact is not None:
-            return exact
+            return self.Lookup(
+                exact,
+                "exact",
+                partitions,
+                free_bytes,
+                partitions,
+                free_bytes,
+                0.0,
+            )
         if partitions <= 0 or free_bytes <= 0:
             raise ValueError(
                 f"DMA geometry must be positive, received "
@@ -124,10 +158,6 @@ class DmaCalibrationSurface:
             )
         measured_p = [point[0] for point in self.points]
         measured_f = [point[1] for point in self.points]
-        # Clamp extrapolation to the measured rectangle. This keeps the
-        # interpolation stable for workload shapes slightly outside the sweep,
-        # while still exposing that those shapes are not exact calibration
-        # points to callers through ``points``.
         clamped_p = min(max(partitions, min(measured_p)), max(measured_p))
         clamped_f = min(max(free_bytes, min(measured_f)), max(measured_f))
         target_p = math.log2(clamped_p)
@@ -146,7 +176,26 @@ class DmaCalibrationSurface:
             weight = 1.0 / max(distance, 1e-9)
             weighted += weight * bandwidth
             weight_sum += weight
-        return weighted / weight_sum
+        requested_distance = math.hypot(
+            math.log2(partitions) - target_p,
+            math.log2(free_bytes) - target_f,
+        )
+        return self.Lookup(
+            weighted / weight_sum,
+            "interpolated" if requested_distance == 0 else "ood_clamped",
+            partitions,
+            free_bytes,
+            clamped_p,
+            clamped_f,
+            requested_distance,
+        )
+
+    def bandwidth_gbps(self, partitions: int, free_bytes: int) -> float:
+        """Backward-compatible numeric lookup."""
+        return self.lookup(partitions, free_bytes).bandwidth_gbps
+
+    def in_domain(self, partitions: int, free_bytes: int) -> bool:
+        return self.lookup(partitions, free_bytes).match != "ood_clamped"
 
 
 @dataclass(frozen=True)
@@ -1057,7 +1106,45 @@ class CostModel:
     # the cap and are therefore not rescaled.
     hbm_bandwidth_bytes_per_ns: float = 272.0
 
+    def _dma_surface(
+        self, event: dict[str, Any]
+    ) -> DmaCalibrationSurface | None:
+        if event.get("dma_pattern") == "transpose":
+            return self.dma_transpose_calibration
+        if (
+            str(event.get("mem_src", "")).lower() == "sbuf"
+            and str(event.get("mem_dst", "")).lower() == "hbm"
+        ):
+            return self.dma_write_calibration
+        return self.dma_calibration
+
+    def dma_lookup(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Describe the selected DMA calibration path without changing cost."""
+        partitions = int(event.get("partition_count") or 0)
+        free_bytes = int(event.get("free_bytes_per_partition") or 0)
+        surface = self._dma_surface(event)
+        if partitions > 0 and free_bytes > 0 and surface is not None:
+            point = surface.lookup(partitions, free_bytes)
+            return {
+                "path": "surface",
+                "match": point.match,
+                "bandwidth_gbps": point.bandwidth_gbps,
+                "log_distance": point.log_distance,
+                "lookup_partitions": point.lookup_partitions,
+                "lookup_free_bytes": point.lookup_free_bytes,
+            }
+        if self.dma_affine_calibration is not None:
+            return {"path": "affine_fallback", "match": "fallback"}
+        return {"path": "analytical_fallback", "match": "fallback"}
+
     def _dma_cost_ns(self, event: dict[str, Any], nbytes: int) -> float:
+        partitions = int(event.get("partition_count") or 0)
+        free_bytes = int(event.get("free_bytes_per_partition") or 0)
+        surface = self._dma_surface(event)
+        startup = float(event.get("dma_kernel_startup_ns") or 0.0)
+        if partitions > 0 and free_bytes > 0 and surface is not None:
+            bandwidth = surface.lookup(partitions, free_bytes).bandwidth_gbps
+            return startup + nbytes / bandwidth
         if self.dma_affine_calibration is not None:
             is_write = (
                 str(event.get("mem_src", "")).lower() == "sbuf"
@@ -1068,21 +1155,7 @@ class CostModel:
                 if is_write
                 else self.dma_affine_calibration.read_ns_per_byte
             )
-            return nbytes * slope + float(event.get("dma_kernel_startup_ns") or 0.0)
-        partitions = int(event.get("partition_count") or 0)
-        free_bytes = int(event.get("free_bytes_per_partition") or 0)
-        if event.get("dma_pattern") == "transpose":
-            calibration = self.dma_transpose_calibration
-        elif (
-            str(event.get("mem_src", "")).lower() == "sbuf"
-            and str(event.get("mem_dst", "")).lower() == "hbm"
-        ):
-            calibration = self.dma_write_calibration or self.dma_calibration
-        else:
-            calibration = self.dma_calibration
-        if partitions > 0 and free_bytes > 0 and calibration is not None:
-            bandwidth = calibration.bandwidth_gbps(partitions, free_bytes)
-            return nbytes / bandwidth  # GB/s is numerically bytes/ns
+            return startup + nbytes * slope
         if self.dma_bytes_per_ns is not None:
             bandwidth = self.dma_bytes_per_ns
         elif partitions > 0:
@@ -1098,7 +1171,7 @@ class CostModel:
                 self.dma_max_engines * self.dma_engine_bytes_per_ns,
                 self.hbm_bandwidth_bytes_per_ns,
             )
-        return self.dma_startup_ns + nbytes / bandwidth
+        return startup + self.dma_startup_ns + nbytes / bandwidth
 
     def cost_ns(self, event: dict[str, Any]) -> float:
         """Return the estimated duration in ns for one trace event."""
@@ -1694,6 +1767,9 @@ def simulate(
     readers: dict[int, list[tuple[float, float, float, str, int | None]]] = {}
     timeline: dict[str, list[TimelineEntry]] = {}
     engine_busy: dict[str, float] = {}
+    dma_surface_matches: Counter[str] = Counter()
+    dma_calibration_paths: Counter[str] = Counter()
+    dma_surface_max_log_distance = 0.0
     makespan = 0.0
     cross_engine_edges = 0
     # Running high-water mark of all memory-transfer completions, used as a
@@ -1724,6 +1800,14 @@ def simulate(
         if op in (None, "grid", "unknown"):
             continue
         engine = _canonical_engine(event.get("engine", ""), op)
+        if op in ("transfer", "load", "store") and engine == ENGINE_DMA:
+            lookup = model.dma_lookup(event)
+            dma_calibration_paths[str(lookup["path"])] += 1
+            dma_surface_matches[str(lookup["match"])] += 1
+            dma_surface_max_log_distance = max(
+                dma_surface_max_log_distance,
+                float(lookup.get("log_distance") or 0.0),
+            )
         duration = float(
             event.get("scheduler_duration_override_ns", model.cost_ns(event))
         )
@@ -1863,6 +1947,19 @@ def simulate(
                 if runtime_control_in_domain is not None
                 else -1.0
             ),
+            "dma_surface_ood_count": float(
+                dma_surface_matches.get("ood_clamped", 0)
+            ),
+            "dma_surface_interpolated_count": float(
+                dma_surface_matches.get("interpolated", 0)
+            ),
+            "dma_surface_exact_count": float(
+                dma_surface_matches.get("exact", 0)
+            ),
+            "dma_surface_max_log_distance": dma_surface_max_log_distance,
+            "dma_affine_fallback_count": float(
+                dma_calibration_paths.get("affine_fallback", 0)
+            ),
             "final": final_ns,
         },
     )
@@ -1909,14 +2006,17 @@ def main() -> None:  # pragma: no cover - thin CLI wrapper
         DmaCalibrationSurface.from_csv(
             args.dma_write_calibration_csv,
             "dma_write_partition_surface",
-            "derived.write_gbps_dma_active",
+            "derived.write_gbps_dynamic_dma_active",
+            required_repeat=16,
         )
         if args.dma_write_calibration_csv
         else None
     )
     transpose_calibration = (
         DmaCalibrationSurface.from_csv(
-            args.dma_transpose_calibration_csv, "dma_transpose_surface"
+            args.dma_transpose_calibration_csv,
+            "dma_transpose_surface",
+            "derived.read_gbps_dynamic_dma_active",
         )
         if args.dma_transpose_calibration_csv
         else None

@@ -89,6 +89,43 @@ def test_dma_cost_uses_partition_geometry_and_calibration():
     assert directional.cost_ns(load_event) == pytest.approx(819.2)
 
 
+def test_dma_surface_precedes_affine_and_charges_startup_once():
+    surface = DmaCalibrationSurface({(8, 1024): 10.0})
+    from triton_viz.tools.nki_cost_model import DmaAffineCalibration
+
+    affine = DmaAffineCalibration(
+        startup_ns=20.0,
+        read_ns_per_byte=9.0,
+        write_ns_per_byte=9.0,
+    )
+    events = [
+        {
+            "seq": index,
+            "op": "load",
+            "engine": "dma",
+            "mem_src": "hbm",
+            "mem_dst": "sbuf",
+            "bytes": 100,
+            "partition_count": 8,
+            "free_bytes_per_partition": 1024,
+            "src_ptr": index,
+            "dst_ptr": index + 100,
+        }
+        for index in (1, 2)
+    ]
+    result = simulate(
+        events,
+        CostModel(
+            dma_calibration=surface,
+            dma_affine_calibration=affine,
+            dma_resource_count=0,
+        ),
+    )
+    assert result.engine_busy_ns["dma"] == pytest.approx(40.0)
+    assert result.components_ns["dma_affine_fallback_count"] == 0
+    assert result.components_ns["dma_surface_exact_count"] == 2
+
+
 def test_simulate_produces_timeline_and_latency():
     result = simulate(_events())
     # Positive predicted latency.
@@ -269,12 +306,98 @@ def test_binary_event_waits_for_both_inputs_and_store_waits_for_output():
     assert result.predicted_latency_ns == pytest.approx(42)
 
 
-def test_dma_calibration_clamps_boundaries_and_rejects_invalid_geometry():
+def test_dma_calibration_marks_ood_clamp_and_rejects_invalid_geometry():
     calibration = DmaCalibrationSurface({(2, 128): 2.0, (8, 512): 8.0})
     assert calibration.bandwidth_gbps(1, 64) == pytest.approx(2.0)
     assert calibration.bandwidth_gbps(16, 1024) == pytest.approx(8.0)
+    assert calibration.lookup(1, 64).match == "ood_clamped"
+    assert calibration.lookup(4, 256).match == "interpolated"
+    assert calibration.lookup(2, 128).match == "exact"
+    assert not calibration.in_domain(1, 64)
+    assert calibration.in_domain(4, 256)
     with pytest.raises(ValueError, match="must be positive"):
         calibration.bandwidth_gbps(0, 128)
+
+
+def test_dma_surface_csv_uses_dynamic_time_and_steady_write_rows(tmp_path):
+    path = tmp_path / "dma.csv"
+    fields = [
+        "row_type",
+        "status",
+        "spec.name",
+        "spec.dtype",
+        "spec.repeat",
+        "work.partition_count",
+        "work.free_bytes_per_partition",
+        "derived.write_gbps_dma_active",
+        "derived.write_gbps_dynamic_dma_active",
+    ]
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow({
+            "row_type": "benchmark",
+            "status": "ok",
+            "spec.name": "dma_write_partition_surface",
+            "spec.dtype": "float32",
+            "spec.repeat": 1,
+            "work.partition_count": 8,
+            "work.free_bytes_per_partition": 512,
+            "derived.write_gbps_dma_active": 1,
+            "derived.write_gbps_dynamic_dma_active": 2,
+        })
+        writer.writerow({
+            "row_type": "benchmark",
+            "status": "ok",
+            "spec.name": "dma_write_partition_surface",
+            "spec.dtype": "float32",
+            "spec.repeat": 16,
+            "work.partition_count": 8,
+            "work.free_bytes_per_partition": 512,
+            "derived.write_gbps_dma_active": 3,
+            "derived.write_gbps_dynamic_dma_active": 4,
+        })
+    surface = DmaCalibrationSurface.from_csv(
+        path,
+        "dma_write_partition_surface",
+        "derived.write_gbps_dynamic_dma_active",
+        "float32",
+        required_repeat=16,
+    )
+    assert surface.points == {(8, 512): 4.0}
+
+
+def test_dma_surface_does_not_treat_static_dma_as_dynamic(tmp_path):
+    path = tmp_path / "dma.csv"
+    fields = [
+        "row_type",
+        "status",
+        "spec.name",
+        "spec.dtype",
+        "work.partition_count",
+        "work.free_bytes_per_partition",
+        "work.hbm_read_bytes",
+        "profile.software_dynamic_dma_active_time",
+        "profile.static_dma_active_time",
+        "derived.read_gbps_dynamic_dma_active",
+    ]
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow({
+            "row_type": "benchmark",
+            "status": "ok",
+            "spec.name": "dma_partition_surface",
+            "spec.dtype": "float32",
+            "work.partition_count": 1,
+            "work.free_bytes_per_partition": 512,
+            "work.hbm_read_bytes": 512,
+            "profile.software_dynamic_dma_active_time": 0,
+            "profile.static_dma_active_time": 256e-9,
+            "derived.read_gbps_dynamic_dma_active": "",
+        })
+    with pytest.raises(ValueError, match="No dma_partition_surface"):
+        DmaCalibrationSurface.from_csv(path, dtype_name="float32")
 
 
 def test_dma_calibration_csv_rejects_empty_and_conflicting_points(tmp_path):
@@ -289,7 +412,9 @@ def test_dma_calibration_csv_rejects_empty_and_conflicting_points(tmp_path):
         )
         writer.writeheader()
     with pytest.raises(ValueError, match="No dma_partition_surface"):
-        DmaCalibrationSurface.from_csv(empty)
+        DmaCalibrationSurface.from_csv(
+            empty, bandwidth_column="derived.read_gbps_dma_active"
+        )
 
     conflicting = tmp_path / "conflicting.csv"
     with conflicting.open("w", newline="") as file:
@@ -311,7 +436,9 @@ def test_dma_calibration_csv_rejects_empty_and_conflicting_points(tmp_path):
                 "derived.read_gbps_dma_active": bandwidth,
             })
     with pytest.raises(ValueError, match="Conflicting calibration rows"):
-        DmaCalibrationSurface.from_csv(conflicting)
+        DmaCalibrationSurface.from_csv(
+            conflicting, bandwidth_column="derived.read_gbps_dma_active"
+        )
 
 
 def test_kernel_overhead_changes_makespan_not_engine_busy_time():

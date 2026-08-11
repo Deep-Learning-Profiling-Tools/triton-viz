@@ -431,12 +431,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dma-write-calibration-csv", type=Path, default=None)
     parser.add_argument(
         "--dma-bandwidth-column",
-        default="derived.read_gbps_dma_active",
+        default="derived.read_gbps_dynamic_dma_active",
         help="Measured read bandwidth column; use dynamic-active columns to exclude static DMA.",
     )
     parser.add_argument(
         "--dma-write-bandwidth-column",
-        default="derived.write_gbps_dma_active",
+        default="derived.write_gbps_dynamic_dma_active",
         help="Measured write bandwidth column.",
     )
     parser.add_argument(
@@ -510,6 +510,8 @@ def main(argv: list[str] | None = None) -> int:
             args.dma_write_calibration_csv,
             "dma_write_partition_surface",
             args.dma_write_bandwidth_column,
+            args.dtype,
+            required_repeat=16,
         )
         if args.dma_write_calibration_csv
         else None

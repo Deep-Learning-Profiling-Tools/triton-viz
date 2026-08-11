@@ -19,6 +19,7 @@ from triton_viz.tools.nki_cost_model import (
     ComputeCalibration,
     CostModel,
     DmaAffineCalibration,
+    DmaCalibrationSurface,
     simulate,
 )
 from triton_viz.tools.nki_trace_dump import records_to_events
@@ -114,6 +115,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dma-affine-read-csv", type=Path, required=True)
     parser.add_argument("--dma-affine-write-csv", type=Path, required=True)
     parser.add_argument("--dma-affine-write-bf16-csv", type=Path)
+    parser.add_argument("--dma-read-surface-csv", type=Path)
+    parser.add_argument("--dma-read-bf16-surface-csv", type=Path)
+    parser.add_argument("--dma-write-surface-csv", type=Path)
+    parser.add_argument("--dma-write-bf16-surface-csv", type=Path)
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--diagnostics", type=Path)
@@ -135,6 +140,45 @@ def main(argv: list[str] | None = None) -> int:
                 else args.dma_affine_write_csv
             )
             models[dtype] = CostModel(
+                dma_calibration=(
+                    DmaCalibrationSurface.from_csv(
+                        (
+                            args.dma_read_bf16_surface_csv
+                            if dtype == "bfloat16"
+                            and args.dma_read_bf16_surface_csv
+                            else args.dma_read_surface_csv
+                        ),
+                        bandwidth_column="derived.read_gbps_dynamic_dma_active",
+                        dtype_name=dtype,
+                        duplicate_policy="median",
+                    )
+                    if args.dma_read_surface_csv
+                    or (
+                        dtype == "bfloat16"
+                        and args.dma_read_bf16_surface_csv
+                    )
+                    else None
+                ),
+                dma_write_calibration=(
+                    DmaCalibrationSurface.from_csv(
+                        (
+                            args.dma_write_bf16_surface_csv
+                            if dtype == "bfloat16"
+                            and args.dma_write_bf16_surface_csv
+                            else args.dma_write_surface_csv
+                        ),
+                        "dma_write_partition_surface",
+                        "derived.write_gbps_dynamic_dma_active",
+                        dtype,
+                        required_repeat=16,
+                    )
+                    if args.dma_write_surface_csv
+                    or (
+                        dtype == "bfloat16"
+                        and args.dma_write_bf16_surface_csv
+                    )
+                    else None
+                ),
                 dma_affine_calibration=DmaAffineCalibration.from_csvs(
                     args.dma_affine_read_csv,
                     write_csv,
