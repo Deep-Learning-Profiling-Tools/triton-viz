@@ -3273,3 +3273,107 @@ correctness 和可 resume 三阶段 pipeline 均已完成。当前可复现的�
 
 > **35-point formal FP32 NC-p50 MAPE = 14.979%**，最大单点绝对误差
 > **38.941%**（`layernorm`, F=128）。
+
+---
+
+# 十九、2026-08-11 DMA surface 路径重启验收
+
+本节记录 commit `1a275a8` 之后，从空 root
+`/tmp/nki_surface_final` 运行的 partition-aware DMA surface 增量验收。
+
+## 19.1 实现与红线
+
+- `_dma_cost_ns()` 的生产优先级改为 directional surface：read / write /
+  transpose 独立；`DmaAffineCalibration` 仅作为显式 ablation 或缺 surface fallback。
+- read/write surface 使用 `software_dynamic_dma_active_time` 派生的
+  `derived.*_gbps_dynamic_dma_active`；不把 total DMA active 当纯 dynamic。
+- write surface 只接受 `repeat=16` steady rows。
+- kernel DMA startup 只标注到第一个 DMA event，surface 和 affine 均不逐事件重复收费。
+- surface lookup 返回 `exact` / `interpolated` / `ood_clamped` 和 log-distance；
+  clamp 不再被宣称为 in-domain。
+- Load/Store partition geometry 使用 active mask partition 数，而不是固定 allocation
+  tile 的 128；因此 rows=1/16 trace 分别记录 p=1/p=16。
+- load CSE 与 strided DMA override 保留在 surface 外层，保持正交。
+- 未删除高误差点、未修改 Level-B constants、未从 holdout 拟合、strict
+  calibration 保持。
+
+## 19.2 从空 root 的完整采集
+
+采集前先提交 surface 代码，commit 为 `1a275a8`；随后从空 root 运行三阶段。
+所有 calibration source manifest 的 fingerprint 均为
+`d801fb0471b4af0896a8`。
+
+| Suite | 成功/总数 |
+|---|---:|
+| Level-B engine lowering | 24/24 |
+| Runtime overhead | 120/120 |
+| DMA copy partition surface | 88/88 |
+| DMA copy large-free extension | 24/24 |
+| DMA transpose surface | 88/88 |
+| Directional dtype canary | 56/56 |
+| FP32 steady write surface | 80/80 |
+| BF16 steady write surface | 14/14 |
+| Strided DMA surface | 8/8 |
+| Structured controls | 44/44 |
+| Formal FP32 | 35/35 |
+| Auxiliary BF16 | 4/4 |
+
+Formal 35 点强断言 `expected == actual == 35` 通过。
+
+## 19.3 Formal FP32：surface vs affine
+
+同一批新采集硬件 holdout 上：
+
+- **Surface production NC-p50 MAPE：14.7215462549%**。
+- Affine ablation NC-p50 MAPE：`15.4215780946%`。
+- Surface 相对同批 affine 改善：`0.7000318397` 个百分点。
+- 相对上一轮 affine headline `14.9794749449%` 改善：`0.2579286900`
+  个百分点。
+
+分算子 surface NC-p50 MAPE：
+
+| Operator | Cases | Surface MAPE |
+|---|---:|---:|
+| interleave | 5 | 10.6117736500% |
+| kl_divergence | 4 | 14.9992241408% |
+| layernorm | 5 | 27.4957568545% |
+| mul2 | 4 | 5.2210565320% |
+| relu | 4 | 8.1260836473% |
+| rmsnorm | 5 | 21.8477513844% |
+| sigmoid | 4 | 10.7697954268% |
+| softmax | 4 | 14.7532676222% |
+
+最大单点绝对误差：
+
+- case：`softmax__r128__c2048__float32`；
+- signed error：`-38.2094936163%`；
+- predicted：`15.4476265959 us`；
+- measured NC p50：`25.0 us`。
+
+Formal DMA event 命中审计（CSE 后）：
+
+- surface exact：84 events；
+- surface interpolated：0 events；
+- explicit OOD-clamped：22 events；
+- affine fallback（surface production）：0 events；
+- max OOD log-distance：5.0。
+
+主要 OOD 是：norm 的 partition-broadcast p=1 loads，以及 KL divergence 的
+4-byte/partition irregular result store；它们被明确标记，不再静默宣称 in-domain。
+
+## 19.4 rows=1/16 跨 partition 探索集
+
+探索集为 7 operators × rows={1,16} × F={128,512,1024,2048}，共 56 点；
+只用于 evaluate，不进入 fit。
+
+| Split | Surface NC MAPE | Affine NC MAPE | Surface 改善 |
+|---|---:|---:|---:|
+| rows=1（28 点） | 26.4915237145% | 26.5658729766% | 0.0743492621 pp |
+| rows=16（28 点） | 17.5879152383% | 17.9022252956% | 0.3143100573 pp |
+| 合计（56 点） | 22.0397194764% | 22.2340491361% | 0.1943296597 pp |
+
+结论：跨 partition 泛化方向上有一致改善，但幅度小于预期。审计解释了原因：
+rows=1 的 72 个 DMA events 全部处于 pure-dynamic surface 缺失区并显式
+`ood_clamped`；rows=16 中多数 full-row accesses exact 命中，但 16 个
+partition-broadcast/极小 write events 仍 OOD。下一步若要显著改善 p=1，需要独立的
+small-partition pure-dynamic controls，而不能把 Static DMA time 混入 dynamic surface。

@@ -53,8 +53,11 @@ FIELDS = [
     "calibration_match",
     "dma_calibration_path",
     "dma_surface_match",
+    "dma_surface_exact_count",
+    "dma_surface_interpolated_count",
     "dma_surface_ood_count",
     "dma_surface_max_log_distance",
+    "dma_affine_fallback_count",
 ]
 
 
@@ -236,8 +239,17 @@ def main(argv: list[str] | None = None) -> int:
                 "dma_surface_ood_count": int(
                     components.get("dma_surface_ood_count", 0)
                 ),
+                "dma_surface_exact_count": int(
+                    components.get("dma_surface_exact_count", 0)
+                ),
+                "dma_surface_interpolated_count": int(
+                    components.get("dma_surface_interpolated_count", 0)
+                ),
                 "dma_surface_max_log_distance": components.get(
                     "dma_surface_max_log_distance", 0.0
+                ),
+                "dma_affine_fallback_count": int(
+                    components.get("dma_affine_fallback_count", 0)
                 ),
             }
         )

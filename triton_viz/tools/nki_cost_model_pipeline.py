@@ -527,6 +527,23 @@ def evaluate(root: Path, dry_run: bool) -> None:
         report["final_nc_p50_mape_pct"]
         - report["affine_baseline_nc_p50_mape_pct"]
     )
+    report["formal_fp32_dma_surface_event_counts"] = {
+        "exact": sum(
+            int(row["dma_surface_exact_count"]) for row in formal_rows
+        ),
+        "interpolated": sum(
+            int(row["dma_surface_interpolated_count"]) for row in formal_rows
+        ),
+        "ood_clamped": sum(
+            int(row["dma_surface_ood_count"]) for row in formal_rows
+        ),
+        "affine_fallback": sum(
+            int(row["dma_affine_fallback_count"]) for row in formal_rows
+        ),
+    }
+    report["formal_fp32_dma_surface_max_log_distance"] = max(
+        float(row["dma_surface_max_log_distance"]) for row in formal_rows
+    )
     report["formal_fp32_operator_mape_pct"] = {
         operator: statistics.mean(
             abs(float(row["nc_error_pct"]))
