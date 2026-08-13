@@ -17,8 +17,10 @@ try:
         RuntimeOverheadCalibration,
         StaticDmaCalibrationSurface,
         StridedDmaCalibration,
+        StructuredControlCalibration,
         simulate,
     )
+    from triton_viz.tools.nki_region_ir import structural_calibration_key
 except ModuleNotFoundError:
     pytest.skip(
         "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
@@ -89,15 +91,8 @@ def test_dma_cost_uses_partition_geometry_and_calibration():
     assert directional.cost_ns(load_event) == pytest.approx(819.2)
 
 
-def test_dma_surface_precedes_affine_and_charges_startup_once():
+def test_dma_surface_is_the_only_calibrated_dma_path():
     surface = DmaCalibrationSurface({(8, 1024): 10.0})
-    from triton_viz.tools.nki_cost_model import DmaAffineCalibration
-
-    affine = DmaAffineCalibration(
-        startup_ns=20.0,
-        read_ns_per_byte=9.0,
-        write_ns_per_byte=9.0,
-    )
     events = [
         {
             "seq": index,
@@ -117,12 +112,10 @@ def test_dma_surface_precedes_affine_and_charges_startup_once():
         events,
         CostModel(
             dma_calibration=surface,
-            dma_affine_calibration=affine,
             dma_resource_count=0,
         ),
     )
-    assert result.engine_busy_ns["dma"] == pytest.approx(40.0)
-    assert result.components_ns["dma_affine_fallback_count"] == 0
+    assert result.engine_busy_ns["dma"] == pytest.approx(20.0)
     assert result.components_ns["dma_surface_exact_count"] == 2
 
 
@@ -662,7 +655,7 @@ def test_versioned_load_compute_store_forms_cross_engine_critical_path():
 
 def test_strided_dma_interpolates_between_independent_control_sizes():
     calibration = StridedDmaCalibration(
-        {("float32", 2, 128): [(512, 600.0), (2048, 2600.0)]}
+        {("float32", 2, 128): [(512, 600.0, 900.0), (2048, 2600.0, 3300.0)]}
     )
     events = [{
         "op": "store",
@@ -673,7 +666,39 @@ def test_strided_dma_interpolates_between_independent_control_sizes():
         "item_bytes": 4,
     }]
 
-    assert calibration.predict(events) == pytest.approx(1266.6666667)
+    assert calibration.predict(events) == pytest.approx((1266.6666667, 1700.0))
+
+
+def test_structured_multi_reduction_completion_is_operator_agnostic_floor():
+    region = {
+        "dtype": "float32",
+        "free_dim": 512,
+        "logical_free_dim": 512,
+        "partition_count": 128,
+        "reduction_count": 2,
+        "reduction_kind": "reduce_sum",
+        "op_histogram": {"reduce_sum": 2, "multiply": 3},
+        "two_input_elementwise_count": 3,
+    }
+    key = structural_calibration_key(region)
+    calibration = StructuredControlCalibration(
+        points={}, completion_points={(key, "float32"): [(512, 53_000.0)]}
+    )
+    events = [{
+        "seq": 1,
+        "op": "compute",
+        "engine": "vector",
+        "elements": 512,
+        "region_ir": region,
+    }]
+
+    result = simulate(
+        events, CostModel(structured_control_lowering=calibration)
+    )
+    assert result.predicted_latency_ns == 53_000.0
+
+    non_reduction = {**region, "reduction_count": 0}
+    assert calibration.predict_completion_ns(non_reduction) == 0.0
 
 
 def test_tilebench_matmul_builder_uses_rows_as_square_output_and_cols_as_k():

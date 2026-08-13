@@ -6,6 +6,7 @@ import argparse
 import csv
 import math
 from collections import defaultdict
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,7 @@ FIELDS = [
     "instruction_count_min",
     "instruction_count_max",
     "points",
+    "excluded_branch_points",
     "run_ids",
     "source",
 ]
@@ -56,13 +58,21 @@ def fit_rows(path: Path, run_ids: set[str] | None = None) -> list[dict]:
         if len(points) < 2:
             continue
         counts = [point[2] for point in points]
-        # A shape-dependent instruction count means the source pattern changed;
-        # it must be represented by Level A instead of folded into Level B.
-        if min(counts) != max(counts):
+        if run_ids is None and min(counts) != max(counts):
+            continue
+        count_histogram = Counter(counts)
+        stable_count, stable_points = count_histogram.most_common(1)[0]
+        # Level B prices one instruction. A minority shape-specific lowering
+        # branch belongs to Level A and must not change the per-instruction fit.
+        # Require an unambiguous majority and report every excluded point.
+        if stable_points * 2 <= len(points):
+            continue
+        fit_points = [point for point in points if point[2] == stable_count]
+        if len(fit_points) < 2:
             continue
         slope, intercept = np.polyfit(
-            np.asarray([point[0] for point in points], dtype=float),
-            np.asarray([point[1] for point in points], dtype=float),
+            np.asarray([point[0] for point in fit_points], dtype=float),
+            np.asarray([point[1] for point in fit_points], dtype=float),
             1,
         )
         if not all(math.isfinite(value) and value >= 0 for value in (intercept, slope)):
@@ -74,9 +84,10 @@ def fit_rows(path: Path, run_ids: set[str] | None = None) -> list[dict]:
                 "input_stream_count": streams,
                 "startup_ns": intercept,
                 "ns_per_free_elem": slope,
-                "instruction_count_min": min(counts),
-                "instruction_count_max": max(counts),
-                "points": len(points),
+                "instruction_count_min": stable_count,
+                "instruction_count_max": stable_count,
+                "points": len(fit_points),
+                "excluded_branch_points": len(points) - len(fit_points),
                 "run_ids": ";".join(sorted(run_ids)) if run_ids else "all",
                 "source": str(path),
             }

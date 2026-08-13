@@ -11,7 +11,6 @@ from pathlib import Path
 from triton_viz.tools.nki_cost_model import (
     ComputeCalibration,
     CostModel,
-    DmaAffineCalibration,
     DmaCalibrationSurface,
     RuntimeOverheadCalibration,
     StructuralStaticDmaCalibration,
@@ -57,24 +56,15 @@ FIELDS = [
     "dma_surface_interpolated_count",
     "dma_surface_ood_count",
     "dma_surface_max_log_distance",
-    "dma_affine_fallback_count",
 ]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
-    parser.add_argument("--dma-affine-read-csv", type=Path, required=True)
-    parser.add_argument("--dma-affine-write-csv", type=Path, required=True)
-    parser.add_argument("--dma-read-surface-csv", type=Path)
-    parser.add_argument("--dma-write-surface-csv", type=Path)
+    parser.add_argument("--dma-read-surface-csv", type=Path, required=True)
+    parser.add_argument("--dma-write-surface-csv", type=Path, required=True)
     parser.add_argument("--dma-transpose-surface-csv", type=Path)
-    parser.add_argument(
-        "--dma-model",
-        choices=["surface", "affine"],
-        default="surface",
-        help="Surface is the production model; affine is retained as an ablation.",
-    )
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--structured-control-csv", type=Path, required=True)
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
@@ -91,7 +81,6 @@ def main(argv: list[str] | None = None) -> int:
             continue
         dtype = source["dtype"]
         if dtype not in models:
-            use_surface = args.dma_model == "surface"
             models[dtype] = CostModel(
                 dma_calibration=(
                     DmaCalibrationSurface.from_csv(
@@ -100,8 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                         dtype_name=dtype,
                         duplicate_policy="median",
                     )
-                    if use_surface and args.dma_read_surface_csv
-                    else None
+                    if args.dma_read_surface_csv else None
                 ),
                 dma_write_calibration=(
                     DmaCalibrationSurface.from_csv(
@@ -111,8 +99,7 @@ def main(argv: list[str] | None = None) -> int:
                         dtype,
                         required_repeat=16,
                     )
-                    if use_surface and args.dma_write_surface_csv
-                    else None
+                    if args.dma_write_surface_csv else None
                 ),
                 dma_transpose_calibration=(
                     DmaCalibrationSurface.from_csv(
@@ -121,11 +108,7 @@ def main(argv: list[str] | None = None) -> int:
                         "derived.read_gbps_dynamic_dma_active",
                         dtype,
                     )
-                    if use_surface and args.dma_transpose_surface_csv
-                    else None
-                ),
-                dma_affine_calibration=DmaAffineCalibration.from_csvs(
-                    args.dma_affine_read_csv, args.dma_affine_write_csv, dtype
+                    if args.dma_transpose_surface_csv else None
                 ),
                 compute_calibration=ComputeCalibration.from_csv(
                     args.compute_calibration_csv
@@ -247,9 +230,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "dma_surface_max_log_distance": components.get(
                     "dma_surface_max_log_distance", 0.0
-                ),
-                "dma_affine_fallback_count": int(
-                    components.get("dma_affine_fallback_count", 0)
                 ),
             }
         )

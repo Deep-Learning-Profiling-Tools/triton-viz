@@ -40,3 +40,24 @@ def test_compute_fit_does_not_mix_same_kind_from_non_calibration_suites(tmp_path
     assert fitted[0]["run_ids"] == "engine_lowering_sweep"
 
     assert fit_rows(path) == []
+
+
+def test_compute_fit_excludes_minority_lowering_branch_and_reports_it(tmp_path):
+    path = tmp_path / "all_results.csv"
+    rows = [
+        _row("engine_lowering_sweep", 128, 36, 36 * (50 + 0.5 * 128)),
+        _row("engine_lowering_sweep", 512, 33, 33 * (90 + 0.2 * 512)),
+        _row("engine_lowering_sweep", 1024, 36, 36 * (50 + 0.5 * 1024)),
+        _row("engine_lowering_sweep", 2048, 36, 36 * (50 + 0.5 * 2048)),
+    ]
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=rows[0])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    fitted = fit_rows(path, {"engine_lowering_sweep"})
+    assert len(fitted) == 1
+    assert fitted[0]["points"] == 3
+    assert fitted[0]["excluded_branch_points"] == 1
+    assert fitted[0]["startup_ns"] == pytest.approx(50)
+    assert fitted[0]["ns_per_free_elem"] == pytest.approx(0.5)

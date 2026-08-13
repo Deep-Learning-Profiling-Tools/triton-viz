@@ -126,6 +126,18 @@ def test_calibration_key_separates_mask_context_blocks_and_partition_geometry():
     assert len(keys) == len(variants) + 1
 
 
+def test_structural_key_buckets_multiple_partition_broadcasts():
+    base = {
+        "op_histogram": {"multiply": 2},
+        "two_input_elementwise_count": 2,
+        "partition_count": 128,
+        "partition_broadcast_input_count": 2,
+    }
+    assert structural_calibration_key(base) == structural_calibration_key(
+        {**base, "partition_broadcast_input_count": 4}
+    )
+
+
 def test_region_ir_v2_provenance_is_excluded_from_structural_key():
     region = build_region_ir(
         [{"op": "compute", "api_op": "relu", "input_ptrs": [1], "output_ptr": 2}]

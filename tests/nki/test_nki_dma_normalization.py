@@ -1,11 +1,9 @@
-import csv
-
 import numpy as np
 import pytest
 
 from triton_viz.tools.nki_cost_model import (
     CostModel,
-    DmaAffineCalibration,
+    DmaCalibrationSurface,
     StridedDmaCalibration,
     eliminate_redundant_hbm_loads,
     simulate,
@@ -56,54 +54,7 @@ def test_overlapping_hbm_store_invalidates_cached_load():
     assert audit["eliminated_load_count"] == 0
 
 
-def _write_dma_fit_csv(path, name, dtype, byte_column, samples):
-    fields = [
-        "row_type",
-        "status",
-        "spec.name",
-        "spec.dtype",
-        "work.partition_count",
-        byte_column,
-        "profile.software_dynamic_dma_active_time",
-    ]
-    with path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
-        writer.writeheader()
-        for nbytes, time_ns in samples:
-            writer.writerow(
-                {
-                    "row_type": "benchmark",
-                    "status": "ok",
-                    "spec.name": name,
-                    "spec.dtype": dtype,
-                    "work.partition_count": 128,
-                    byte_column: nbytes,
-                    "profile.software_dynamic_dma_active_time": time_ns / 1e9,
-                }
-            )
-
-
-def test_affine_dma_charges_kernel_startup_once_and_directional_slopes(tmp_path):
-    read = tmp_path / "read.csv"
-    write = tmp_path / "write.csv"
-    _write_dma_fit_csv(
-        read,
-        "dma_partition_surface",
-        "float32",
-        "work.hbm_read_bytes",
-        [(100, 70), (200, 120)],
-    )
-    _write_dma_fit_csv(
-        write,
-        "dma_write_partition_surface",
-        "float32",
-        "work.hbm_write_bytes",
-        [(100, 30), (200, 50)],
-    )
-    calibration = DmaAffineCalibration.from_csvs(read, write, "float32")
-    assert calibration.startup_ns == pytest.approx(20)
-    assert calibration.read_ns_per_byte == pytest.approx(0.5)
-    assert calibration.write_ns_per_byte == pytest.approx(0.2)
+def test_directional_surfaces_price_read_and_write_without_affine_state():
     events = [
         {
             "seq": 1,
@@ -111,7 +62,9 @@ def test_affine_dma_charges_kernel_startup_once_and_directional_slopes(tmp_path)
             "engine": "dma_or_vector_load",
             "mem_src": "HBM",
             "mem_dst": "SBUF",
-            "bytes": 100,
+            "bytes": 800,
+            "partition_count": 8,
+            "free_bytes_per_partition": 100,
         },
         {
             "seq": 2,
@@ -119,11 +72,19 @@ def test_affine_dma_charges_kernel_startup_once_and_directional_slopes(tmp_path)
             "engine": "dma_or_vector_store",
             "mem_src": "SBUF",
             "mem_dst": "HBM",
-            "bytes": 100,
+            "bytes": 800,
+            "partition_count": 8,
+            "free_bytes_per_partition": 100,
         },
     ]
-    result = simulate(events, CostModel(dma_affine_calibration=calibration))
-    assert result.engine_busy_ns["dma"] == pytest.approx(90)
+    result = simulate(
+        events,
+        CostModel(
+            dma_calibration=DmaCalibrationSurface({(8, 100): 10.0}),
+            dma_write_calibration=DmaCalibrationSurface({(8, 100): 20.0}),
+        ),
+    )
+    assert result.engine_busy_ns["dma"] == 120.0
 
 
 def test_offset_geometry_uses_active_mask_and_detects_stride_two():
@@ -200,9 +161,9 @@ def test_dma_resource_tokens_serialize_full_width_but_overlap_narrow_transfers()
     assert full.engine_busy_ns["dma"] == narrow.engine_busy_ns["dma"] == 200
 
 
-def test_strided_dma_calibration_overrides_packet_train_busy_time_only():
+def test_strided_dma_calibration_sets_busy_time_and_completion_floor():
     calibration = StridedDmaCalibration(
-        {("float32", 2, 128): [(512, 600_000.0)]}
+        {("float32", 2, 128): [(512, 600_000.0, 700_000.0)]}
     )
     events = [
         {
@@ -222,4 +183,4 @@ def test_strided_dma_calibration_overrides_packet_train_busy_time_only():
     ]
     result = simulate(events, CostModel(strided_dma_calibration=calibration))
     assert result.engine_busy_ns["dma"] == 600_000.0
-    assert result.predicted_latency_ns == 600_000.0
+    assert result.predicted_latency_ns == 700_000.0

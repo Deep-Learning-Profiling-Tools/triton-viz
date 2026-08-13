@@ -142,14 +142,12 @@ The main artifacts under the selected root are:
   compute-only, compute-plus-DMA, scheduler-overlap, and final ablations.
 - `evaluation/report.json`: aggregate holdout MAPE, per-operator MAPE, the
   worst retained case, and a DMA-surface hit audit (`exact`/`interpolated`/
-  `ood_clamped`/`affine_fallback` event counts).
+  `ood_clamped` event counts).
 
-The DMA cost path is **surface-first**: the scheduler prices transfers from
+The DMA cost path is **surface-only**: the scheduler prices transfers from
 the measured `(partition_count, free_bytes)` bandwidth surfaces, keeping the
-partition and free-dimension geometry explicit. A simple `startup + ns/byte`
-affine fit is retained only as an explicit fallback and ablation baseline; the
-`report.json` audit reports how many events hit `exact`, `interpolated`,
-`ood_clamped`, or `affine_fallback` so the path is auditable. Out-of-domain
+partition and free-dimension geometry explicit. The `report.json` audit reports
+how many events hit `exact`, `interpolated`, or `ood_clamped`. Out-of-domain
 accesses are flagged (`ood_clamped`) instead of being silently claimed as
 in-domain. Compiler load CSE (`eliminate_redundant_hbm_loads`) and strided
 DMA geometry are modeled independently of the surface and remain enabled.
@@ -161,11 +159,10 @@ The formal FP32 holdout contains 35 points at `rows=128` across eight operators:
 use `F=4096`, giving 35 points in total. No high-error point is removed, no
 Level-B single-instruction constant is tuned on these points, and fitting does
 not consume their measurements. With the compiler/environment above, the
-surface-based model reports 14.722% NC-p50 MAPE on this formal set (an
-`affine` ablation on the same data measures 15.422%). A separate 56-point
-exploratory set at `rows=1/16` (partition-count extrapolation) is evaluated
-but kept out of the formal headline; it currently measures 22.04% and is the
-known next frontier (small-partition pure-dynamic DMA controls).
+surface-only model reports 15.280% NC-p50 MAPE on this formal set. The formal
+report also evaluates all 120 successful points across `rows={1,16,128}` and
+`F={128,512,1024,2048,4096}`; that full-matrix metric is kept separate from
+the pre-registered 35-point headline; its current NC-p50 MAPE is 25.630%.
 
 See `microbench/inf2_nki/README.md` for individual microbenchmark commands,
 schema details, and lower-level troubleshooting.

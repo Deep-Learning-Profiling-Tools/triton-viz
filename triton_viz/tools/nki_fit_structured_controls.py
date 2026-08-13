@@ -28,6 +28,7 @@ FIELDS = [
     "effective_count",
     "instruction_count",
     "fixed_ns",
+    "nc_completion_ns",
     "case",
     "compiler_version",
     "opcode_fingerprint",
@@ -72,6 +73,18 @@ def collect(
 ) -> list[dict]:
     """Collect audited Level-A points; incomplete cases remain excluded explicitly."""
     rows: list[dict] = []
+    completion_by_case = {}
+    for root in roots:
+        results_path = root / "control_results.csv"
+        if results_path.is_file():
+            with results_path.open(encoding="utf-8", newline="") as file:
+                completion_by_case.update(
+                    {
+                        row["case"]: float(row["hardware_nc_p50_us"]) * 1000.0
+                        for row in csv.DictReader(file)
+                        if row.get("case") and row.get("hardware_nc_p50_us")
+                    }
+                )
     traces = sorted(trace for root in roots for trace in root.glob("*/trace.jsonl"))
     for trace in traces:
         case = trace.parent
@@ -135,6 +148,7 @@ def collect(
                         else 0,
                         "instruction_count": len(selected),
                         "fixed_ns": fixed_ns,
+                        "nc_completion_ns": completion_by_case.get(case.name, 0.0),
                         "case": case.name,
                         "compiler_version": compiler_version,
                         "opcode_fingerprint": _opcode_fingerprint(selected),
@@ -166,6 +180,7 @@ def collect_legacy(paths: list[Path]) -> list[dict]:
                     "effective_count": float(row["effective_instruction_count"]),
                     "instruction_count": int(float(row["hardware_instruction_count"])),
                     "fixed_ns": 0.0,
+                    "nc_completion_ns": 0.0,
                     "case": Path(row.get("case_dir", path.stem)).name,
                     "compiler_version": "legacy-mapped",
                     "opcode_fingerprint": "legacy",
@@ -200,6 +215,7 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
             )
         effective = [float(row["effective_count"]) for row in group]
         fixed = [float(row["fixed_ns"]) for row in group]
+        completion = [float(row.get("nc_completion_ns") or 0.0) for row in group]
         instructions = [int(row["instruction_count"]) for row in group]
         row = dict(group[0])
         row.update(
@@ -207,6 +223,7 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
                 "effective_count": statistics.median(effective),
                 "instruction_count": round(statistics.median(instructions)),
                 "fixed_ns": statistics.median(fixed),
+                "nc_completion_ns": statistics.median(completion),
                 "case": ";".join(sorted(str(item["case"]) for item in group)),
                 "replicate_count": len(group),
                 "effective_count_variance": (

@@ -13,6 +13,7 @@ FIELDS = [
     "partition_count",
     "free_dim",
     "dma_active_ns",
+    "nc_completion_ns",
     "case",
     "compiler_version",
 ]
@@ -35,6 +36,10 @@ def collect(results_jsonl: Path) -> list[dict]:
                 "partition_count": spec["p"],
                 "free_dim": spec["f"],
                 "dma_active_ns": dma_ns,
+                "nc_completion_ns": float(
+                    result["latency_percentiles"]["nc_latency"]["p50_us"]
+                )
+                * 1000.0,
                 "case": case.name,
                 "compiler_version": profile.get("compiler_version", ""),
             }

@@ -494,12 +494,20 @@ def structural_calibration_key(region: dict[str, Any]) -> str:
     following = str(region.get("next_family") or "none")
     partition_count = max(1, int(region.get("partition_count") or 1))
     partition_bucket = 1 << (partition_count.bit_length() - 1)
+    partition_broadcast_count = max(
+        0, int(region.get("partition_broadcast_input_count") or 0)
+    )
+    # Instruction selection distinguishes no broadcast, a single broadcast,
+    # and a multi-broadcast grammar.  The exact number of broadcast operands
+    # within the latter is source-DAG bookkeeping and otherwise prevents the
+    # independent controls from matching equivalent compiler paths.
+    partition_broadcast_bucket = min(partition_broadcast_count, 2)
     return (
         f"{match.rule_id}|ops={ops or 'none'}|arity={one}:{two}"
         f"|mask={int(bool(region.get('has_mask_or_tail')))}"
         f"|context={previous}>{following}"
         f"|blocks={max(1, int(region.get('free_block_count') or 1))}"
-        f"|pbcast={max(0, int(region.get('partition_broadcast_input_count') or 0))}"
+        f"|pbcast={partition_broadcast_bucket}"
         f"|p={partition_count}|pbucket={partition_bucket}"
     )
 

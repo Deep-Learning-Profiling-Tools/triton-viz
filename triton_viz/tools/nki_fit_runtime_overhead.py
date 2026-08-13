@@ -18,7 +18,6 @@ from triton_viz.core.trace import launches
 from triton_viz.tools.nki_cost_model import (
     ComputeCalibration,
     CostModel,
-    DmaAffineCalibration,
     DmaCalibrationSurface,
     simulate,
 )
@@ -112,12 +111,9 @@ def _trace(spec: dict) -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_jsonl", type=Path)
-    parser.add_argument("--dma-affine-read-csv", type=Path, required=True)
-    parser.add_argument("--dma-affine-write-csv", type=Path, required=True)
-    parser.add_argument("--dma-affine-write-bf16-csv", type=Path)
-    parser.add_argument("--dma-read-surface-csv", type=Path)
+    parser.add_argument("--dma-read-surface-csv", type=Path, required=True)
     parser.add_argument("--dma-read-bf16-surface-csv", type=Path)
-    parser.add_argument("--dma-write-surface-csv", type=Path)
+    parser.add_argument("--dma-write-surface-csv", type=Path, required=True)
     parser.add_argument("--dma-write-bf16-surface-csv", type=Path)
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -134,11 +130,6 @@ def main(argv: list[str] | None = None) -> int:
             continue
         dtype = str(spec["dtype"])
         if dtype not in models:
-            write_csv = (
-                args.dma_affine_write_bf16_csv
-                if dtype == "bfloat16" and args.dma_affine_write_bf16_csv
-                else args.dma_affine_write_csv
-            )
             models[dtype] = CostModel(
                 dma_calibration=(
                     DmaCalibrationSurface.from_csv(
@@ -178,11 +169,6 @@ def main(argv: list[str] | None = None) -> int:
                         and args.dma_write_bf16_surface_csv
                     )
                     else None
-                ),
-                dma_affine_calibration=DmaAffineCalibration.from_csvs(
-                    args.dma_affine_read_csv,
-                    write_csv,
-                    dtype,
                 ),
                 compute_calibration=ComputeCalibration.from_csv(
                     args.compute_calibration_csv

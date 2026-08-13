@@ -39,7 +39,6 @@ from triton_viz.tools.nki_cost_model import (
     CompositionalLoweringCalibration,
     ComputeCalibration,
     CostModel,
-    DmaAffineCalibration,
     DmaCalibrationSurface,
     LoweringExpansionCalibration,
     RuntimeOverheadCalibration,
@@ -450,8 +449,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Control-derived compiler Static DMA busy-time calibration.",
     )
-    parser.add_argument("--dma-affine-read-csv", type=Path, default=None)
-    parser.add_argument("--dma-affine-write-csv", type=Path, default=None)
     parser.add_argument("--kernel-overhead-us", type=float, default=0.0)
     parser.add_argument("--runtime-overhead-csv", type=Path, default=None)
     parser.add_argument("--strided-dma-csv", type=Path, default=None)
@@ -551,15 +548,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.strided_dma_csv
         else None
     )
-    if bool(args.dma_affine_read_csv) != bool(args.dma_affine_write_csv):
-        parser.error("--dma-affine-read-csv and --dma-affine-write-csv are paired")
-    dma_affine = (
-        DmaAffineCalibration.from_csvs(
-            args.dma_affine_read_csv, args.dma_affine_write_csv, args.dtype
-        )
-        if args.dma_affine_read_csv
-        else None
-    )
     model = CostModel(
         dma_calibration=calib,
         dma_write_calibration=write_calib,
@@ -568,7 +556,6 @@ def main(argv: list[str] | None = None) -> int:
         compositional_lowering=compositional,
         structured_control_lowering=structured_controls,
         structural_static_dma=structural_static_dma,
-        dma_affine_calibration=dma_affine,
         runtime_overhead_calibration=runtime_overhead,
         strided_dma_calibration=strided_dma,
         kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),

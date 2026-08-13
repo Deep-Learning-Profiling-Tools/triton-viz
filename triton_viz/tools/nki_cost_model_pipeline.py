@@ -90,7 +90,8 @@ def _load_splits(path: Path = FORMAL_SPLITS) -> dict:
 
 
 def _split_case_count(split: dict) -> int:
-    return sum(len(dims) for dims in split["operators"].values())
+    rows = split["rows"] if isinstance(split["rows"], list) else [split["rows"]]
+    return len(rows) * sum(len(dims) for dims in split["operators"].values())
 
 
 def _collect_split_commands(root: Path, tilebench: Path, name: str, split: dict):
@@ -99,10 +100,13 @@ def _collect_split_commands(root: Path, tilebench: Path, name: str, split: dict)
     for op, dims in split["operators"].items():
         groups.setdefault(tuple(int(dim) for dim in dims), []).append(op)
     commands = []
-    for index, (dims, ops) in enumerate(sorted(groups.items())):
-        output_name = name if len(groups) == 1 else f"{name}_{index}"
-        commands.append(
-            _module(
+    rows_values = split["rows"] if isinstance(split["rows"], list) else [split["rows"]]
+    command_count = len(groups) * len(rows_values)
+    index = 0
+    for rows in rows_values:
+        for dims, ops in sorted(groups.items()):
+            output_name = name if command_count == 1 else f"{name}_{index}"
+            commands.append(_module(
                 "triton_viz.tools.nki_operator_experiments",
                 "--output-dir",
                 root / "holdouts" / output_name,
@@ -111,7 +115,7 @@ def _collect_split_commands(root: Path, tilebench: Path, name: str, split: dict)
                 "--ops",
                 *ops,
                 "--rows",
-                int(split["rows"]),
+                int(rows),
                 "--cols",
                 *dims,
                 "--dtype",
@@ -121,8 +125,8 @@ def _collect_split_commands(root: Path, tilebench: Path, name: str, split: dict)
                 "--iters",
                 100,
                 "--resume",
-            )
-        )
+            ))
+            index += 1
     return commands
 
 
@@ -273,12 +277,6 @@ def fit(root: Path, dry_run: bool) -> None:
         _module(
             "triton_viz.tools.nki_fit_runtime_overhead",
             root / "microbench" / "runtime_overhead" / "results.jsonl",
-            "--dma-affine-read-csv",
-            calibration / "dma_directional.csv",
-            "--dma-affine-write-csv",
-            calibration / "dma_write_fp32.csv",
-            "--dma-affine-write-bf16-csv",
-            calibration / "dma_write_bf16.csv",
             "--dma-read-surface-csv",
             calibration / "microbench.csv",
             "--dma-read-bf16-surface-csv",
@@ -291,23 +289,6 @@ def fit(root: Path, dry_run: bool) -> None:
             compute,
             "--output",
             calibration / "runtime_overhead.csv",
-        ),
-        dry_run,
-    )
-    _run(
-        _module(
-            "triton_viz.tools.nki_fit_runtime_overhead",
-            root / "microbench" / "runtime_overhead" / "results.jsonl",
-            "--dma-affine-read-csv",
-            calibration / "dma_directional.csv",
-            "--dma-affine-write-csv",
-            calibration / "dma_write_fp32.csv",
-            "--dma-affine-write-bf16-csv",
-            calibration / "dma_write_bf16.csv",
-            "--compute-calibration-csv",
-            compute,
-            "--output",
-            calibration / "runtime_overhead_affine.csv",
         ),
         dry_run,
     )
@@ -339,7 +320,6 @@ def fit(root: Path, dry_run: bool) -> None:
                 structured,
                 calibration / "static_dma.csv",
                 calibration / "runtime_overhead.csv",
-                calibration / "runtime_overhead_affine.csv",
                 calibration / "strided_dma.csv",
             ],
             source_manifests=source_manifests,
@@ -357,10 +337,6 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
     args = _module(
         "triton_viz.tools.nki_replay_operator_predictions",
         holdout,
-        "--dma-affine-read-csv",
-        calibration / "dma_directional.csv",
-        "--dma-affine-write-csv",
-        write_csv,
         "--dma-read-surface-csv",
         (
             calibration / "dma_directional.csv"
@@ -394,7 +370,6 @@ def _evaluate_replays(
     splits: dict,
     *,
     model_name: str,
-    dma_model: str,
     dry_run: bool,
 ) -> list[tuple[str, Path]]:
     outputs: list[tuple[str, Path]] = []
@@ -412,22 +387,10 @@ def _evaluate_replays(
         for holdout in holdout_dirs:
             output = replay_dir / f"{model_name}_{holdout.name}.csv"
             args = _replay_args(root, holdout, output, split["dtype"])
-            runtime_index = args.index("--runtime-overhead-csv") + 1
-            args[runtime_index] = str(
-                root
-                / "calibration"
-                / (
-                    "runtime_overhead_affine.csv"
-                    if dma_model == "affine"
-                    else "runtime_overhead.csv"
-                )
-            )
             args[args.index("--output"):args.index("--output")] = [
                 "--strict-calibration",
-                "--dma-model",
-                dma_model,
             ]
-            if split_name == "formal_fp32_v1":
+            if split_name in {"formal_fp32_v1", "full_fp32_v1"}:
                 args[args.index("--output"):args.index("--output")] = [
                     "--strided-dma-csv",
                     str(root / "calibration" / "strided_dma.csv"),
@@ -456,7 +419,6 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "structured_compute.csv",
                 calibration / "static_dma.csv",
                 calibration / "runtime_overhead.csv",
-                calibration / "runtime_overhead_affine.csv",
                 calibration / "strided_dma.csv",
             ],
             current_fingerprint=collect_compiler_fingerprint(
@@ -469,15 +431,6 @@ def evaluate(root: Path, dry_run: bool) -> None:
         replay_dir,
         splits,
         model_name="surface",
-        dma_model="surface",
-        dry_run=dry_run,
-    )
-    affine_outputs = _evaluate_replays(
-        root,
-        replay_dir,
-        splits,
-        model_name="affine",
-        dma_model="affine",
         dry_run=dry_run,
     )
     if dry_run:
@@ -492,20 +445,17 @@ def evaluate(root: Path, dry_run: bool) -> None:
         ]
         for split_name in splits
     }
-    affine_rows_by_split = {
-        split_name: [
-            row
-            for name, path in affine_outputs
-            if name == split_name
-            for row in csv.DictReader(path.open())
-        ]
-        for split_name in splits
-    }
     formal_rows = rows_by_split["formal_fp32_v1"]
     expected = _split_case_count(splits["formal_fp32_v1"])
     if len(formal_rows) != expected:
         raise ValueError(
             f"formal_fp32_v1 expected {expected} successful cases, got {len(formal_rows)}"
+        )
+    full_rows = rows_by_split["full_fp32_v1"]
+    full_expected = _split_case_count(splits["full_fp32_v1"])
+    if len(full_rows) != full_expected or full_expected != 120:
+        raise ValueError(
+            f"full_fp32_v1 expected exactly 120 successful cases, got {len(full_rows)}"
         )
     stages = {
         "compute_only_mape_pct": "compute_only_error_pct",
@@ -516,12 +466,28 @@ def evaluate(root: Path, dry_run: bool) -> None:
     auxiliary_rows = rows_by_split.get("auxiliary_bf16_v1", [])
     report = {
         "formal_fp32_cases": len(formal_rows),
+        "full_fp32_cases": len(full_rows),
         "auxiliary_bf16_cases": len(auxiliary_rows),
     }
-    affine_formal = affine_rows_by_split["formal_fp32_v1"]
-    report["affine_baseline_nc_p50_mape_pct"] = statistics.mean(
-        abs(float(row["nc_error_pct"])) for row in affine_formal
+    report["full_fp32_nc_p50_mape_pct"] = statistics.mean(
+        abs(float(row["nc_error_pct"])) for row in full_rows
     )
+    report["full_fp32_rows_mape_pct"] = {
+        str(rows): statistics.mean(
+            abs(float(row["nc_error_pct"]))
+            for row in full_rows
+            if int(row["rows"]) == rows
+        )
+        for rows in (1, 16, 128)
+    }
+    report["full_fp32_dma_surface_event_counts"] = {
+        match: sum(int(row[field]) for row in full_rows)
+        for match, field in {
+            "exact": "dma_surface_exact_count",
+            "interpolated": "dma_surface_interpolated_count",
+            "ood_clamped": "dma_surface_ood_count",
+        }.items()
+    }
     if auxiliary_rows:
         report["auxiliary_bf16_nc_p50_mape_pct"] = statistics.mean(
             abs(float(row["nc_error_pct"])) for row in auxiliary_rows
@@ -530,10 +496,6 @@ def evaluate(root: Path, dry_run: bool) -> None:
         report[name] = statistics.mean(
             abs(float(row[field])) for row in formal_rows
         )
-    report["surface_vs_affine_mape_delta_pct"] = (
-        report["final_nc_p50_mape_pct"]
-        - report["affine_baseline_nc_p50_mape_pct"]
-    )
     report["formal_fp32_dma_surface_event_counts"] = {
         "exact": sum(
             int(row["dma_surface_exact_count"]) for row in formal_rows
@@ -543,9 +505,6 @@ def evaluate(root: Path, dry_run: bool) -> None:
         ),
         "ood_clamped": sum(
             int(row["dma_surface_ood_count"]) for row in formal_rows
-        ),
-        "affine_fallback": sum(
-            int(row["dma_affine_fallback_count"]) for row in formal_rows
         ),
     }
     report["formal_fp32_dma_surface_max_log_distance"] = max(

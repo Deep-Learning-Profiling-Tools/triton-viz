@@ -198,88 +198,6 @@ class DmaCalibrationSurface:
         return self.lookup(partitions, free_bytes).match != "ood_clamped"
 
 
-@dataclass(frozen=True)
-class DmaAffineCalibration:
-    """Kernel-level DMA startup plus directional byte slopes."""
-
-    startup_ns: float
-    read_ns_per_byte: float
-    write_ns_per_byte: float
-
-    @staticmethod
-    def _fit_direction(
-        path: str | Path,
-        benchmark_name: str,
-        dtype_name: str,
-        byte_column: str,
-        partition_count: int = 128,
-    ) -> tuple[float, float]:
-        expected_dtype = {
-            "bf16": "bfloat16",
-            "fp32": "float32",
-            "fp16": "float16",
-        }.get(dtype_name, dtype_name)
-        samples: list[tuple[float, float]] = []
-        with Path(path).open(encoding="utf-8", newline="") as file:
-            for row in csv.DictReader(file):
-                if (
-                    row.get("row_type") != "benchmark"
-                    or row.get("status") != "ok"
-                    or row.get("spec.name") != benchmark_name
-                    or row.get("spec.dtype") != expected_dtype
-                ):
-                    continue
-                try:
-                    if int(float(row["work.partition_count"])) != partition_count:
-                        continue
-                    samples.append(
-                        (
-                            float(row[byte_column]),
-                            float(row["profile.software_dynamic_dma_active_time"])
-                            * 1e9,
-                        )
-                    )
-                except (KeyError, TypeError, ValueError):
-                    continue
-        if len(samples) < 2:
-            raise ValueError(
-                f"Need at least two {benchmark_name}/{expected_dtype}/p{partition_count} "
-                f"dynamic DMA samples in {path}"
-            )
-        count = float(len(samples))
-        sum_x = sum(x for x, _ in samples)
-        sum_y = sum(y for _, y in samples)
-        sum_xx = sum(x * x for x, _ in samples)
-        sum_xy = sum(x * y for x, y in samples)
-        denominator = count * sum_xx - sum_x * sum_x
-        if denominator <= 0:
-            raise ValueError(f"Degenerate DMA affine samples in {path}")
-        slope = (count * sum_xy - sum_x * sum_y) / denominator
-        intercept = (sum_y - slope * sum_x) / count
-        return max(0.0, intercept), max(0.0, slope)
-
-    @classmethod
-    def from_csvs(
-        cls,
-        read_path: str | Path,
-        write_path: str | Path,
-        dtype_name: str,
-    ) -> DmaAffineCalibration:
-        read_startup, read_slope = cls._fit_direction(
-            read_path,
-            "dma_partition_surface",
-            dtype_name,
-            "work.hbm_read_bytes",
-        )
-        _, write_slope = cls._fit_direction(
-            write_path,
-            "dma_write_partition_surface",
-            dtype_name,
-            "work.hbm_write_bytes",
-        )
-        return cls(read_startup, read_slope, write_slope)
-
-
 @dataclass
 class StaticDmaCalibrationSurface:
     """Measured incremental SBUF scatter latency indexed by ``(p, x, y)``."""
@@ -699,10 +617,12 @@ class StructuredControlCalibration:
     """Interpolated points keyed by reusable structural grammar families."""
 
     points: dict[tuple[str, str, str], list[tuple[int, float, int, float]]]
+    completion_points: dict[tuple[str, str], list[tuple[int, float]]]
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StructuredControlCalibration:
         points = {}
+        completion_points = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 key = (
@@ -718,7 +638,35 @@ class StructuredControlCalibration:
                         float(row["fixed_ns"]),
                     )
                 )
-        return cls(points)
+                completion_ns = float(row.get("nc_completion_ns") or 0.0)
+                if completion_ns > 0:
+                    completion_points.setdefault((key[0], key[2]), []).append(
+                        (int(row["free_dim"]), completion_ns)
+                    )
+        return cls(points, completion_points)
+
+    def predict_completion_ns(self, region_ir: dict[str, Any]) -> float:
+        """Interpolate an independent control's multi-reduction NC floor."""
+        from triton_viz.tools.nki_region_ir import structural_calibration_key
+
+        if int(region_ir.get("reduction_count") or 0) <= 0:
+            return 0.0
+        key = (
+            structural_calibration_key(region_ir),
+            ComputeCalibration._norm_dtype(region_ir.get("dtype")),
+        )
+        rows = sorted(set(self.completion_points.get(key, [])))
+        if not rows:
+            return 0.0
+        free = int(region_ir.get("logical_free_dim") or region_ir.get("free_dim") or 1)
+        lower = max((row for row in rows if row[0] <= free), default=rows[0])
+        upper = min((row for row in rows if row[0] >= free), default=rows[-1])
+        if lower[0] == upper[0]:
+            return lower[1]
+        weight = (math.log2(free) - math.log2(lower[0])) / (
+            math.log2(upper[0]) - math.log2(lower[0])
+        )
+        return lower[1] + weight * (upper[1] - lower[1])
 
     def predict_points(
         self, region_ir: dict[str, Any]
@@ -853,13 +801,13 @@ class RuntimeOverheadCalibration:
 
 @dataclass
 class StridedDmaCalibration:
-    """Access-geometry DMA busy-time calibration for affine strided stores."""
+    """Access-geometry busy-time and completion calibration for strided stores."""
 
-    points: dict[tuple[str, int, int], list[tuple[int, float]]]
+    points: dict[tuple[str, int, int], list[tuple[int, float, float]]]
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StridedDmaCalibration:
-        points: dict[tuple[str, int, int], list[tuple[int, float]]] = {}
+        points: dict[tuple[str, int, int], list[tuple[int, float, float]]] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 key = (
@@ -871,11 +819,14 @@ class StridedDmaCalibration:
                     (
                         int(row["free_dim"]),
                         float(row["dma_active_ns"]),
+                        float(row.get("nc_completion_ns") or 0.0),
                     )
                 )
         return cls(points)
 
-    def predict(self, events: Iterable[dict[str, Any]]) -> float | None:
+    def predict(
+        self, events: Iterable[dict[str, Any]]
+    ) -> tuple[float, float] | None:
         patterns = [
             (event, pattern)
             for event in events
@@ -901,12 +852,15 @@ class StridedDmaCalibration:
         lower = max((row for row in rows if row[0] <= free), default=rows[0])
         upper = min((row for row in rows if row[0] >= free), default=rows[-1])
         if lower[0] == upper[0]:
-            return lower[1]
+            return lower[1], lower[2]
         # Interpolate only between independent control sizes. Values outside
         # their measured range remain clamped and are reported as OOD by the
         # experiment layer rather than silently extrapolated.
         weight = (free - lower[0]) / (upper[0] - lower[0])
-        return lower[1] + weight * (upper[1] - lower[1])
+        return (
+            lower[1] + weight * (upper[1] - lower[1]),
+            lower[2] + weight * (upper[2] - lower[2]),
+        )
 
 
 def _canonical_engine(raw_engine: str, op: str) -> str:
@@ -1032,7 +986,6 @@ class CostModel:
     dma_calibration: DmaCalibrationSurface | None = None
     dma_write_calibration: DmaCalibrationSurface | None = None
     dma_transpose_calibration: DmaCalibrationSurface | None = None
-    dma_affine_calibration: DmaAffineCalibration | None = None
     static_dma_calibration: StaticDmaCalibrationSurface | None = None
     structural_static_dma: StructuralStaticDmaCalibration | None = None
     # Level-B per-instruction compute cost (VectorE/ScalarE). When present,
@@ -1133,29 +1086,15 @@ class CostModel:
                 "lookup_partitions": point.lookup_partitions,
                 "lookup_free_bytes": point.lookup_free_bytes,
             }
-        if self.dma_affine_calibration is not None:
-            return {"path": "affine_fallback", "match": "fallback"}
         return {"path": "analytical_fallback", "match": "fallback"}
 
     def _dma_cost_ns(self, event: dict[str, Any], nbytes: int) -> float:
         partitions = int(event.get("partition_count") or 0)
         free_bytes = int(event.get("free_bytes_per_partition") or 0)
         surface = self._dma_surface(event)
-        startup = float(event.get("dma_kernel_startup_ns") or 0.0)
         if partitions > 0 and free_bytes > 0 and surface is not None:
             bandwidth = surface.lookup(partitions, free_bytes).bandwidth_gbps
-            return startup + nbytes / bandwidth
-        if self.dma_affine_calibration is not None:
-            is_write = (
-                str(event.get("mem_src", "")).lower() == "sbuf"
-                and str(event.get("mem_dst", "")).lower() == "hbm"
-            )
-            slope = (
-                self.dma_affine_calibration.write_ns_per_byte
-                if is_write
-                else self.dma_affine_calibration.read_ns_per_byte
-            )
-            return startup + nbytes * slope
+            return nbytes / bandwidth
         if self.dma_bytes_per_ns is not None:
             bandwidth = self.dma_bytes_per_ns
         elif partitions > 0:
@@ -1171,7 +1110,7 @@ class CostModel:
                 self.dma_max_engines * self.dma_engine_bytes_per_ns,
                 self.hbm_bandwidth_bytes_per_ns,
             )
-        return startup + self.dma_startup_ns + nbytes / bandwidth
+        return self.dma_startup_ns + nbytes / bandwidth
 
     def cost_ns(self, event: dict[str, Any]) -> float:
         """Return the estimated duration in ns for one trace event."""
@@ -1716,19 +1655,21 @@ def simulate(
     """
     model = cost_model or CostModel()
     source_events = list(events)
-    if model.dma_affine_calibration is not None:
-        startup_pending = True
-        annotated_events = []
-        for source_event in source_events:
-            event = dict(source_event)
-            if startup_pending and event.get("op") in {"load", "store", "transfer"}:
-                event["dma_kernel_startup_ns"] = model.dma_affine_calibration.startup_ns
-                startup_pending = False
-            annotated_events.append(event)
-        source_events = annotated_events
     structural_static_ns = (
         model.structural_static_dma.predict_ns(source_events)
         if model.structural_static_dma is not None
+        else 0.0
+    )
+    structured_completion_ns = (
+        max(
+            (
+                model.structured_control_lowering.predict_completion_ns(event["region_ir"])
+                for event in source_events
+                if event.get("region_ir")
+            ),
+            default=0.0,
+        )
+        if model.structured_control_lowering is not None
         else 0.0
     )
     strided_dma_prediction = (
@@ -1736,7 +1677,9 @@ def simulate(
         if model.strided_dma_calibration is not None
         else None
     )
+    strided_completion_ns = 0.0
     if strided_dma_prediction is not None:
+        strided_dma_busy_ns, strided_completion_ns = strided_dma_prediction
         dma_indices = [
             index
             for index, event in enumerate(source_events)
@@ -1745,7 +1688,7 @@ def simulate(
         raw_costs = [model.cost_ns(source_events[index]) for index in dma_indices]
         raw_total = sum(raw_costs)
         if raw_total > 0:
-            scale = strided_dma_prediction / raw_total
+            scale = strided_dma_busy_ns / raw_total
             source_events = [dict(event) for event in source_events]
             for index, raw_cost in zip(dma_indices, raw_costs):
                 source_events[index]["scheduler_duration_override_ns"] = (
@@ -1933,6 +1876,10 @@ def simulate(
         if calibrated_nc_ns is not None
         else makespan + max(0.0, model.kernel_overhead_ns)
     )
+    # Independent strided controls expose a packet/queue completion tail that
+    # is not represented by DMA active time.  It is a geometry-keyed lower
+    # bound on end-to-end completion, not an additive operator residual.
+    final_ns = max(final_ns, strided_completion_ns, structured_completion_ns)
     return SimulationResult(
         predicted_latency_ns=final_ns,
         timeline=timeline,
@@ -1957,9 +1904,6 @@ def simulate(
                 dma_surface_matches.get("exact", 0)
             ),
             "dma_surface_max_log_distance": dma_surface_max_log_distance,
-            "dma_affine_fallback_count": float(
-                dma_calibration_paths.get("affine_fallback", 0)
-            ),
             "final": final_ns,
         },
     )

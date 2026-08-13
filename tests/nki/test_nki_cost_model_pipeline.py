@@ -46,6 +46,8 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "dma_read_surface.csv" in fit_output
     assert "dma_read_large_free.csv" in fit_output
     assert "dma_transpose_surface.csv" in fit_output
+    assert "dma-affine" not in fit_output
+    assert "runtime_overhead_affine.csv" not in fit_output
 
     assert main(["evaluate", "--root", str(root), "--dry-run"]) == 0
     evaluate_output = capsys.readouterr().out
@@ -57,6 +59,8 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "--strided-dma-csv" in evaluate_output
     assert "--runtime-overhead-csv" in evaluate_output
     assert evaluate_output.count("--strict-calibration") == 6
+    assert "--dma-model" not in evaluate_output
+    assert "dma-affine" not in evaluate_output
 
 
 def test_formal_split_is_exactly_the_documented_35_cases():
@@ -68,6 +72,7 @@ def test_formal_split_is_exactly_the_documented_35_cases():
     assert formal["operators"]["interleave"][-1] == 4096
     assert formal["operators"]["layernorm"][-1] == 4096
     assert formal["operators"]["rmsnorm"][-1] == 4096
+    assert _split_case_count(data["splits"]["full_fp32_v1"]) == 120
 
 
 def test_pipeline_child_parser_contract_rejects_old_static_dma_arguments():

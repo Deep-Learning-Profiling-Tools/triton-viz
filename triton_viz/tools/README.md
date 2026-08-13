@@ -247,9 +247,8 @@ mapping is incomplete.
 
 For DMA evaluation, distinguish source events from compiler-issued transfers.
 `--compiler-load-cse` applies only exact same-storage/range/shape load reuse and
-records eliminated count/bytes. The affine DMA path fits one kernel startup and
-directional byte slopes from `software_dynamic_dma_active_time`; use
-`--dma-affine-read-csv` and `--dma-affine-write-csv` together. Add
+records eliminated count/bytes. Directional DMA timing comes exclusively from
+the partition/free-byte calibration surfaces. Add
 `--structural-static-dma-csv` when comparing against Explorer's total
 `dma_active_time`, which includes compiler-generated Static DMA.
 
