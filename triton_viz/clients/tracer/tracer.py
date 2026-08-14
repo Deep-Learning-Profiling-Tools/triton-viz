@@ -13,6 +13,7 @@ from ...core.data import (
     Dot,
     Grid,
     Allocate,
+    LoadTranspose,
     NkiCompute,
 )
 from ...utils.traceback_utils import extract_user_frames
@@ -124,7 +125,7 @@ class Tracer(Client):
             return int(value.tensor_version()) if hasattr(value, "tensor_version") else 0
 
         @self.lock_fn
-        def post_load_callback(ret, ptr, mask, keys):
+        def post_load_callback(ret, ptr, mask, keys, dma_pattern="copy"):
             if not self.sample:
                 return
 
@@ -149,7 +150,8 @@ class Tracer(Client):
                     )
                 tensor = ptr
 
-            rec = Load(
+            record_type = LoadTranspose if dma_pattern == "transpose" else Load
+            rec = record_type(
                 tensor.data_ptr(),
                 offsets,
                 mask_data,
@@ -161,6 +163,8 @@ class Tracer(Client):
                 dst_storage=_storage(ret),
                 dst_range=_range(ret),
                 dst_version=_version(ret),
+                dst_shape=tuple(ret.shape),
+                dma_pattern=dma_pattern,
             )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
@@ -318,6 +322,12 @@ class Tracer(Client):
                 output_storage=_storage(ret),
                 output_range=_range(ret),
                 output_version=_version(ret),
+                input_dtypes=tuple(
+                    str(value.dtype)
+                    for value in (input, other)
+                    if hasattr(value, "dtype")
+                ),
+                output_dtype=str(ret.dtype) if hasattr(ret, "dtype") else None,
             )
             rec.call_path = extract_user_frames(num_frames=1)
             ret._trace_record = rec
@@ -410,6 +420,7 @@ class Tracer(Client):
         callbacks = {
             Allocate: OpCallbacks(after_callback=post_allocate_callback),
             Load: OpCallbacks(after_callback=post_load_callback),
+            LoadTranspose: OpCallbacks(after_callback=post_load_callback),
             Store: OpCallbacks(before_callback=pre_store_callback),
             Transfer: OpCallbacks(before_callback=pre_transfer_callback),
             DmaTranspose: OpCallbacks(before_callback=pre_transfer_callback),

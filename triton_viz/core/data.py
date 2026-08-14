@@ -77,6 +77,21 @@ class Load(Op):
     dst_storage: int | None = None
     dst_range: tuple[int, int] | None = None
     dst_version: int | None = None
+    dst_shape: tuple[int, ...] | None = None
+    dma_pattern: str = "copy"
+
+
+@dataclass
+class LoadTranspose(Load):
+    """PF-transposed HBM load (``nl.load_transpose2d`` / DMA transpose).
+
+    The destination SBUF tile has the transposed layout, so the DMA surface
+    lookup must use the SBUF-side partition/free geometry while the HBM access
+    offsets still describe the source-side layout.
+    """
+
+    name: ClassVar[str] = "load_transpose"
+    dma_pattern: str = "transpose"
 
 
 @dataclass
@@ -157,6 +172,8 @@ class Dot(Op):
     output_storage: int | None = None
     output_range: tuple[int, int] | None = None
     output_version: int | None = None
+    input_dtypes: tuple[str, ...] = ()
+    output_dtype: str | None = None
 
     def update_intermediate(self, row: int, col: int, result: float):
         # Store only the result as a float

@@ -143,6 +143,7 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
         "dma_write_partition_surface.json",
         "dma_write_bf16_steady.json",
         "dma_strided_store_surface.json",
+        "tensor_matmul_tiled_surface.json",
     ]
     for config in configs:
         run_id = Path(config).stem
@@ -244,6 +245,15 @@ def fit(root: Path, dry_run: bool) -> None:
         ),
         dry_run,
     )
+    _run(
+        _module(
+            "microbench.inf2_nki.profile_parser.export_csv",
+            root / "microbench" / "tensor_matmul_tiled_surface",
+            "--output",
+            calibration / "tensor_matmul_tiled.csv",
+        ),
+        dry_run,
+    )
     compute = calibration / "compute.csv"
     _run(
         _module(
@@ -322,6 +332,7 @@ def fit(root: Path, dry_run: bool) -> None:
                 calibration / "dma_transpose_surface.csv",
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
+                calibration / "tensor_matmul_tiled.csv",
                 compute,
                 structured,
                 calibration / "static_dma.csv",
@@ -356,6 +367,8 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         calibration / "compute.csv",
         "--structured-control-csv",
         calibration / "structured_compute.csv",
+        "--tensor-calibration-csv",
+        calibration / "tensor_matmul_tiled.csv",
         "--structural-static-dma-csv",
         calibration / "static_dma.csv",
         "--runtime-overhead-csv",
@@ -367,11 +380,14 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         "--output",
         output,
     )
-    if dtype == "float32":
-        args[args.index("--compute-calibration-csv"):args.index("--compute-calibration-csv")] = [
-            "--dma-transpose-surface-csv",
-            str(calibration / "dma_transpose_surface.csv"),
-        ]
+    # The transpose surface CSV contains both FP32 and BF16 rows; the reader
+    # filters by the dtype of the split being replayed.
+    args[
+        args.index("--compute-calibration-csv"):args.index("--compute-calibration-csv")
+    ] = [
+        "--dma-transpose-surface-csv",
+        str(calibration / "dma_transpose_surface.csv"),
+    ]
     return args
 
 
@@ -427,6 +443,7 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "dma_transpose_surface.csv",
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
+                calibration / "tensor_matmul_tiled.csv",
                 calibration / "compute.csv",
                 calibration / "structured_compute.csv",
                 calibration / "static_dma.csv",
@@ -477,6 +494,34 @@ def evaluate(root: Path, dry_run: bool) -> None:
             f"full_bf16_v1 expected exactly 120 successful cases, "
             f"got {len(full_bf16_rows)}"
         )
+    tensor_rows = [
+        row
+        for split_name in ("tensor_fp32_v1", "tensor_bf16_v1")
+        for row in rows_by_split.get(split_name, [])
+    ]
+    tensor_expected = sum(
+        _split_case_count(splits[name])
+        for name in ("tensor_fp32_v1", "tensor_bf16_v1")
+        if name in splits
+    )
+    if len(tensor_rows) != tensor_expected:
+        raise ValueError(
+            f"TensorE holdouts expected {tensor_expected} successful cases, "
+            f"got {len(tensor_rows)}"
+        )
+    attention_fp32_rows = rows_by_split.get("attention_fp32_v1", [])
+    attention_bf16_rows = rows_by_split.get("attention_bf16_v1", [])
+    attention_rows = attention_fp32_rows + attention_bf16_rows
+    attention_expected = sum(
+        _split_case_count(splits[name])
+        for name in ("attention_fp32_v1", "attention_bf16_v1")
+        if name in splits
+    )
+    if len(attention_rows) != attention_expected or attention_expected != 18:
+        raise ValueError(
+            f"attention holdouts expected exactly 18 successful cases, "
+            f"got {len(attention_rows)}"
+        )
     invalid_bf16_matches = sorted(
         {
             row["calibration_match"]
@@ -501,6 +546,8 @@ def evaluate(root: Path, dry_run: bool) -> None:
         "formal_fp32_cases": len(formal_rows),
         "full_fp32_cases": len(full_rows),
         "full_bf16_cases": len(full_bf16_rows),
+        "tensor_cases": len(tensor_rows),
+        "attention_cases": len(attention_rows),
         "auxiliary_bf16_cases": len(auxiliary_rows),
     }
     report["full_fp32_nc_p50_mape_pct"] = statistics.mean(
@@ -552,6 +599,68 @@ def evaluate(root: Path, dry_run: bool) -> None:
     report["full_bf16_compute_calibration_matches"] = sorted(
         {row["calibration_match"] for row in full_bf16_rows}
     )
+    report["tensor_nc_p50_mape_pct"] = statistics.mean(
+        abs(float(row["nc_error_pct"])) for row in tensor_rows
+    )
+    report["tensor_busy_mape_pct"] = statistics.mean(
+        abs(float(row["tensor_error_pct"])) for row in tensor_rows
+    )
+    report["tensor_operator_mape_pct"] = {
+        f"{operator}/{dtype}": statistics.mean(
+            abs(float(row["nc_error_pct"]))
+            for row in tensor_rows
+            if row["op"] == operator and row["dtype"] == dtype
+        )
+        for operator, dtype in {
+            (row["op"], row["dtype"]) for row in tensor_rows
+        }
+    }
+    report["attention_nc_p50_mape_pct"] = {
+        dtype: statistics.mean(
+            abs(float(row["nc_error_pct"]))
+            for row in attention_rows
+            if row["dtype"] == dtype
+        )
+        for dtype in ("float32", "bfloat16")
+    }
+    report["attention_tensor_busy_mape_pct"] = {
+        dtype: statistics.mean(
+            abs(float(row["tensor_error_pct"]))
+            for row in attention_rows
+            if row["dtype"] == dtype and row.get("tensor_error_pct") not in (None, "")
+        )
+        for dtype in ("float32", "bfloat16")
+    }
+    report["attention_dma_error_mape_pct"] = {
+        dtype: statistics.mean(
+            abs(float(row["dma_error_pct"]))
+            for row in attention_rows
+            if row["dtype"] == dtype
+        )
+        for dtype in ("float32", "bfloat16")
+    }
+    report["attention_dma_surface_event_counts"] = {
+        dtype: {
+            match: sum(int(row[field]) for row in attention_rows if row["dtype"] == dtype)
+            for match, field in {
+                "exact": "dma_surface_exact_count",
+                "interpolated": "dma_surface_interpolated_count",
+                "ood_clamped": "dma_surface_ood_count",
+            }.items()
+        }
+        for dtype in ("float32", "bfloat16")
+    }
+    report["attention_structural_coverage"] = {
+        "cases_with_unmatched_region_family": sum(
+            int(row.get("unmatched_region_family_count", 0)) > 0
+            for row in attention_rows
+        ),
+        "unmatched_region_family_count": sum(
+            int(row.get("unmatched_region_family_count", 0))
+            for row in attention_rows
+        ),
+        "total_cases": len(attention_rows),
+    }
     if auxiliary_rows:
         report["auxiliary_bf16_nc_p50_mape_pct"] = statistics.mean(
             abs(float(row["nc_error_pct"])) for row in auxiliary_rows

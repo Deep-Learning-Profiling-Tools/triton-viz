@@ -5,6 +5,7 @@ from triton_viz.core.data import (
     Allocate,
     Dot,
     Load,
+    LoadTranspose,
     MakeRange,
     Op,
     ProgramId,
@@ -28,6 +29,13 @@ except ModuleNotFoundError:
 
 def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
     assert HAS_NKI
+    # Tilebench TensorE kernels use ``nisa.nc_matmul(stationary=..., moving=...)``,
+    # which is lowered onto ``nki_builder.nc_matmul``.  That operation already
+    # carries the transpose in its definition, so flag it for the tracer.
+    stationary = _kwargs.get("stationary")
+    moving = _kwargs.get("moving")
+    if stationary is not None and moving is not None:
+        return AdapterResult(stationary, moving, transpose_input=True)
     # Preserve the original operand object (and thus its ``data_ptr()``) instead
     # of materializing a transposed copy, so the recorded ``Dot.input_ptrs`` can
     # be matched against the producing transfer's ``dst_ptr``. The transpose is
@@ -45,6 +53,17 @@ def _nki_reduce_sum_adapter(
     return AdapterResult(input_tensor, axis, keep_dims)
 
 
+def _nki_load_transpose2d_adapter(
+    src: Any, keys: Any = None, *, mask: Any = None, **_kwargs: Any
+) -> AdapterResult:
+    # ``nl.load_transpose2d`` is a whole-tile API in the SDK; the simulator
+    # accepts the same source-only spelling. Normalize the missing subscript
+    # to full slices so the Load callback records the concrete HBM offsets.
+    if keys is None:
+        keys = tuple(slice(None) for _ in range(len(src.shape)))
+    return AdapterResult(src, mask, keys, dma_pattern="transpose")
+
+
 NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
 NKI_NAMESPACES: dict[Any, dict[str, type[Op]]] = {}
 if HAS_NKI:
@@ -55,8 +74,10 @@ if HAS_NKI:
             "program_id": ProgramId,
             "ndarray": Allocate,
             "load": Load,
+            "load_transpose2d": LoadTranspose,
             "store": Store,
             "matmul": Dot,
+            "nc_matmul": Dot,
             "sum": ReduceSum,
             "arange": MakeRange,
             # Elementwise/reduction/activation compute APIs -> one general record.
@@ -106,6 +127,7 @@ if HAS_NKI:
         ),
         Dot: _nki_dot_adapter,
         ReduceSum: _nki_reduce_sum_adapter,
+        LoadTranspose: _nki_load_transpose2d_adapter,
         # NkiCompute uses the default passthrough adapter: the tracer reconstructs
         # operands/engine from metadata attached to the result NDArray, so it does
         # not depend on each op's positional signature.

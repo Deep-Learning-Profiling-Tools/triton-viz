@@ -199,6 +199,278 @@ class DmaCalibrationSurface:
 
 
 @dataclass
+class TensorCalibrationSurface:
+    """Measured TensorE throughput and per-kernel startup keyed by value dtype.
+
+    TensorE has very different FLOP rates for FP32, BF16/FP16, and FP8/packed
+    modes, and a single ``nc_matmul`` instruction's cost also depends on its
+    stationary free dimension (M) and moving free dimension (N).  For the
+    plain ``tensor_matmul`` control it fits
+    ``tensor_engine_active_time = startup + flops / throughput``.  The tiled
+    ``tensor_matmul_tiled`` control fits an effective cost per source Dot for
+    the 128x128 stationary / 128x512 moving tile family, while the independent
+    ``tensor_matmul_small`` control does the same for attention-sized single
+    tiles.  All shape keys are (dtype, M, N) geometry only: no operator name,
+    case id, or holdout measurement is ever used.
+    """
+
+    points: dict[str, tuple[float, float, float | None]]
+    shape_points: dict[tuple[str, int, int], tuple[float, float, float | None]]
+
+    def __init__(
+        self,
+        points: dict[str, tuple[float, float, float | None]],
+        shape_points: dict[
+            tuple[str, int, int], tuple[float, float, float | None]
+        ] | None = None,
+    ) -> None:
+        self.points = points
+        self.shape_points = shape_points or {}
+
+    @staticmethod
+    def _normalize_dtype(dtype: str) -> str:
+        value = str(dtype or "").strip().lower()
+        aliases = {
+            "float32": "float32",
+            "fp32": "float32",
+            "float16": "float16",
+            "fp16": "float16",
+            "bfloat16": "bfloat16",
+            "bf16": "bfloat16",
+            "float8_e5m2": "float8_e5m2",
+            "fp8_e5m2": "float8_e5m2",
+            "float8_e4m3fn": "float8_e4m3fn",
+            "fp8_e4m3fn": "float8_e4m3fn",
+        }
+        return aliases.get(value, value)
+
+    @classmethod
+    def from_csv(
+        cls,
+        path: str | Path,
+        benchmark_name: str = "tensor_matmul",
+        duplicate_policy: str = "median",
+    ) -> "TensorCalibrationSurface":
+        samples: dict[str, dict[int, list[float]]] = {}
+        samples_by_dot: dict[str, dict[int, list[float]]] = {}
+        shape_samples: dict[
+            tuple[str, int, int], dict[int, list[float]]
+        ] = {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                if row.get("row_type") not in (None, "benchmark"):
+                    continue
+                if row.get("status") != "ok":
+                    continue
+                kind = row.get("kind")
+                if kind not in {
+                    benchmark_name,
+                    "tensor_matmul_tiled",
+                    "tensor_matmul_small",
+                }:
+                    continue
+                dtype = cls._normalize_dtype(row.get("spec.dtype") or "")
+                if not dtype:
+                    continue
+                try:
+                    flops = int(float(row["work.matmul_flops"]))
+                    active_ns = (
+                        float(row["profile.tensor_engine_active_time"]) * 1e9
+                    )
+                    dot_count = (
+                        int(float(row["work.dot_count"]))
+                        if row.get("work.dot_count") not in (None, "")
+                        else 0
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if (
+                    flops <= 0
+                    or not math.isfinite(active_ns)
+                    or active_ns <= 0
+                ):
+                    continue
+                if kind == benchmark_name and kind == "tensor_matmul":
+                    samples.setdefault(dtype, {}).setdefault(flops, []).append(
+                        active_ns
+                    )
+                if dot_count > 0:
+                    if kind == "tensor_matmul_tiled":
+                        samples_by_dot.setdefault(dtype, {}).setdefault(
+                            dot_count, []
+                        ).append(active_ns)
+                        shape_key = (dtype, 128, 512)
+                        shape_samples.setdefault(shape_key, {}).setdefault(
+                            dot_count, []
+                        ).append(active_ns)
+                    elif kind == "tensor_matmul_small":
+                        try:
+                            m = int(float(row["spec.m"]))
+                            n = int(float(row["spec.n"]))
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        shape_key = (dtype, m, n)
+                        shape_samples.setdefault(shape_key, {}).setdefault(
+                            dot_count, []
+                        ).append(active_ns)
+        if duplicate_policy not in {"error", "median"}:
+            raise ValueError(f"Unknown duplicate policy: {duplicate_policy}")
+        points: dict[str, tuple[float, float, float | None]] = {}
+
+        def _median_active(values: list[float], label: str) -> float:
+            if duplicate_policy == "error" and any(
+                not math.isclose(values[0], value, rel_tol=1e-9, abs_tol=1e-9)
+                for value in values[1:]
+            ):
+                raise ValueError(f"Conflicting TensorE calibration rows for {label}")
+            return statistics.median(values) if duplicate_policy == "median" else values[0]
+
+        for dtype, by_dot in samples_by_dot.items():
+            dot_counts = sorted(by_dot)
+            active_times = [
+                _median_active(by_dot[count], f"{dtype}/{count}")
+                for count in dot_counts
+            ]
+            if len(dot_counts) >= 2:
+                slope, intercept = statistics.linear_regression(
+                    dot_counts, active_times
+                )
+                if slope > 0 and math.isfinite(slope):
+                    points[dtype] = (0.0, max(0.0, intercept), slope)
+                    continue
+            points[dtype] = (0.0, 0.0, active_times[0] / dot_counts[0])
+
+        for dtype, by_flops in samples.items():
+            if dtype in points:
+                continue
+            measured_flops = sorted(by_flops)
+            active_times = []
+            for flops in measured_flops:
+                active_times.append(
+                    _median_active(by_flops[flops], f"{dtype}/{flops}")
+                )
+            if len(measured_flops) >= 2:
+                slope, intercept = statistics.linear_regression(
+                    measured_flops, active_times
+                )
+                if slope > 0 and math.isfinite(slope):
+                    points[dtype] = (1.0 / slope, max(0.0, intercept), None)
+                    continue
+            flops_per_ns = measured_flops[0] / active_times[0]
+            points[dtype] = (flops_per_ns, 0.0, None)
+        shape_points: dict[
+            tuple[str, int, int], tuple[float, float, float | None]
+        ] = {}
+        for shape_key, by_dot in shape_samples.items():
+            dot_counts = sorted(by_dot)
+            active_times = [
+                _median_active(by_dot[count], f"{shape_key}/{count}")
+                for count in dot_counts
+            ]
+            if len(dot_counts) >= 2:
+                slope, intercept = statistics.linear_regression(
+                    dot_counts, active_times
+                )
+                if slope > 0 and math.isfinite(slope):
+                    shape_points[shape_key] = (
+                        0.0,
+                        max(0.0, intercept),
+                        slope,
+                    )
+                    continue
+            shape_points[shape_key] = (
+                0.0,
+                0.0,
+                active_times[0] / dot_counts[0],
+            )
+        if not points and not shape_points:
+            raise ValueError(f"No tensor_matmul calibration rows in {path}")
+        return cls(points, shape_points)
+
+    def _lookup(
+        self, dtype: str, *, strict: bool
+    ) -> tuple[float, float, float | None]:
+        dtype = self._normalize_dtype(dtype)
+        exact = self.points.get(dtype)
+        if exact is not None:
+            return exact
+        if strict:
+            raise ValueError(f"Missing exact TensorE calibration for dtype={dtype}")
+        fallback = self.points.get("float32")
+        if fallback is None and self.points:
+            fallback = next(iter(self.points.values()))
+        if fallback is None:
+            return 90000.0, 0.0, None
+        return fallback
+
+    def flops_per_ns(self, dtype: str, *, strict: bool = False) -> float:
+        """Return calibrated steady-state TensorE throughput in FLOPs/ns."""
+        return self._lookup(dtype, strict=strict)[0]
+
+    def _shape_lookup(
+        self,
+        dtype: str,
+        m: int,
+        n: int,
+        *,
+        strict: bool,
+    ) -> tuple[float, float, float | None] | None:
+        dtype = self._normalize_dtype(dtype)
+        exact = self.shape_points.get((dtype, int(m), int(n)))
+        if exact is not None:
+            return exact
+        if strict:
+            raise ValueError(
+                "Missing exact TensorE calibration for "
+                f"dtype={dtype} shape=({int(m)},{int(n)})"
+            )
+        return None
+
+    def startup_ns(
+        self,
+        dtype: str,
+        *,
+        m: int | None = None,
+        n: int | None = None,
+        strict: bool = False,
+    ) -> float:
+        """Return the once-per-kernel TensorE startup intercept.
+
+        When a source Dot's (M, N) geometry is available, prefer that shape
+        family's measured intercept; the plain dtype-keyed intercept remains
+        the backward-compatible fallback.
+        """
+        if m is not None and n is not None:
+            exact = self._shape_lookup(dtype, m, n, strict=strict)
+            if exact is not None:
+                return exact[1]
+            if not strict:
+                return self._lookup(dtype, strict=False)[1]
+        return self._lookup(dtype, strict=strict)[1]
+
+    def ns_per_dot(
+        self,
+        dtype: str,
+        *,
+        m: int | None = None,
+        n: int | None = None,
+        strict: bool = False,
+    ) -> float | None:
+        """Return the optional effective cost per source TensorE Dot.
+
+        ``m`` and ``n`` are the stationary/moving free dimensions recorded by
+        the trace. They are pure tile geometry and never operator identity.
+        """
+        if m is not None and n is not None:
+            exact = self._shape_lookup(dtype, m, n, strict=strict)
+            if exact is not None:
+                return exact[2]
+            if not strict:
+                return self._lookup(dtype, strict=False)[2]
+        return self._lookup(dtype, strict=strict)[2]
+
+
+@dataclass
 class StaticDmaCalibrationSurface:
     """Measured incremental SBUF scatter latency indexed by ``(p, x, y)``."""
 
@@ -938,6 +1210,16 @@ def _compute_value_dtype(event: dict[str, Any]) -> str:
     return Counter(value_dtypes).most_common(1)[0][0] if value_dtypes else output
 
 
+def _tensor_dtype(event: dict[str, Any]) -> str:
+    """Return the TensorE operand dtype, ignoring bool predicates/accumulators."""
+    input_dtypes = [
+        str(value)
+        for value in event.get("input_dtypes") or ()
+        if value and str(value).lower() not in {"bool", "boolean"}
+    ]
+    return input_dtypes[0] if input_dtypes else _compute_value_dtype(event)
+
+
 def _input_stream_count(event):
     """Number of distinct tile inputs a compute op streams (1-input vs 2-input).
 
@@ -990,6 +1272,7 @@ class CostModel:
     dma_transpose_calibration: DmaCalibrationSurface | None = None
     static_dma_calibration: StaticDmaCalibrationSurface | None = None
     structural_static_dma: StructuralStaticDmaCalibration | None = None
+    tensor_calibration: TensorCalibrationSurface | None = None
     # Level-B per-instruction compute cost (VectorE/ScalarE). When present,
     # NkiCompute/binary/reduce events cost their lowered-instruction count times
     # the measured single-instruction cost instead of the hardcoded VectorE fit.
@@ -1120,6 +1403,28 @@ class CostModel:
         engine = _canonical_engine(event.get("engine", ""), op or "")
         if op == "dot":
             flops = event.get("flops") or 0
+            if self.tensor_calibration is not None:
+                dtype = _tensor_dtype(event)
+                m = n = None
+                input_shape = event.get("input_shape") or ()
+                other_shape = event.get("other_shape") or ()
+                if len(input_shape) >= 1 and len(other_shape) >= 2:
+                    m = int(input_shape[0])
+                    n = int(other_shape[1])
+                per_dot = self.tensor_calibration.ns_per_dot(
+                    dtype,
+                    m=m,
+                    n=n,
+                    strict=self.strict_calibration,
+                )
+                if per_dot is not None:
+                    return per_dot
+                flops_per_ns = self.tensor_calibration.flops_per_ns(
+                    dtype, strict=self.strict_calibration
+                )
+                # The calibration slope is steady-state TensorE throughput. Its
+                # fitted intercept is charged once per kernel in simulate().
+                return flops / flops_per_ns
             return self.tensor_startup_ns + flops / self.tensor_flops_per_ns
         if op in ("binary", "compute", "reduce_sum"):
             free_dim = _free_dim(event)
@@ -1697,6 +2002,40 @@ def simulate(
                     raw_cost * scale
                 )
     events = _expand_lowering_groups(source_events, model)
+    tensor_engine_startup_ns = 0.0
+    if model.tensor_calibration is not None:
+        tensor_events = [
+            event
+            for event in events
+            if _canonical_engine(event.get("engine", ""), event.get("op"))
+            == ENGINE_TENSOR
+        ]
+        if tensor_events:
+            dtype = Counter(
+                _tensor_dtype(event) for event in tensor_events
+            ).most_common(1)[0][0]
+
+            def _shape_key(event: dict[str, Any]) -> tuple[int, int] | None:
+                input_shape = event.get("input_shape") or ()
+                other_shape = event.get("other_shape") or ()
+                if len(input_shape) >= 1 and len(other_shape) >= 2:
+                    return (int(input_shape[0]), int(other_shape[1]))
+                return None
+
+            shape = Counter(
+                key for key in (_shape_key(event) for event in tensor_events)
+                if key is not None
+            ).most_common(1)
+            m, n = shape[0][0] if shape else (None, None)
+            tensor_engine_startup_ns = max(
+                0.0,
+                model.tensor_calibration.startup_ns(
+                    dtype,
+                    m=m,
+                    n=n,
+                    strict=model.strict_calibration,
+                ),
+            )
     sync_ns = max(0.0, model.cross_engine_sync_ns)
     dma_queue_count = max(1, int(model.dma_queue_count))
     dma_resource_count = max(0, int(model.dma_resource_count))
@@ -1711,11 +2050,13 @@ def simulate(
     writers: dict[int, list[tuple[float, float, float, str, int | None]]] = {}
     readers: dict[int, list[tuple[float, float, float, str, int | None]]] = {}
     timeline: dict[str, list[TimelineEntry]] = {}
-    engine_busy: dict[str, float] = {}
+    engine_busy: dict[str, float] = {
+        ENGINE_TENSOR: tensor_engine_startup_ns
+    } if tensor_engine_startup_ns else {}
     dma_surface_matches: Counter[str] = Counter()
     dma_calibration_paths: Counter[str] = Counter()
     dma_surface_max_log_distance = 0.0
-    makespan = 0.0
+    makespan = tensor_engine_startup_ns
     cross_engine_edges = 0
     # Running high-water mark of all memory-transfer completions, used as a
     # conservative dependency floor for compute ops that lack pointer linkage.
@@ -1737,7 +2078,8 @@ def simulate(
             width = (
                 dma_resource_count or dma_queue_count if engine == ENGINE_DMA else 1
             )
-            engine_slots[engine] = [0.0] * width
+            initial = tensor_engine_startup_ns if engine == ENGINE_TENSOR else 0.0
+            engine_slots[engine] = [initial] * width
         return engine_slots[engine]
 
     for event in events:
@@ -1934,6 +2276,7 @@ def main() -> None:  # pragma: no cover - thin CLI wrapper
     parser.add_argument("--dma-write-calibration-csv", type=Path, default=None)
     parser.add_argument("--dma-transpose-calibration-csv", type=Path, default=None)
     parser.add_argument("--static-dma-calibration-csv", type=Path, default=None)
+    parser.add_argument("--tensor-calibration-csv", type=Path, default=None)
     parser.add_argument("--compute-calibration-csv", type=Path, default=None)
     parser.add_argument("--lowering-calibration-csv", type=Path, default=None)
     parser.add_argument(
@@ -1972,6 +2315,13 @@ def main() -> None:  # pragma: no cover - thin CLI wrapper
         if args.static_dma_calibration_csv
         else None
     )
+    tensor_calibration = (
+        TensorCalibrationSurface.from_csv(
+            args.tensor_calibration_csv, benchmark_name="tensor_matmul_tiled"
+        )
+        if args.tensor_calibration_csv
+        else None
+    )
     compute_calibration = (
         ComputeCalibration.from_csv(args.compute_calibration_csv)
         if args.compute_calibration_csv
@@ -1989,6 +2339,7 @@ def main() -> None:  # pragma: no cover - thin CLI wrapper
             dma_write_calibration=write_calibration,
             dma_transpose_calibration=transpose_calibration,
             static_dma_calibration=static_dma_calibration,
+            tensor_calibration=tensor_calibration,
             compute_calibration=compute_calibration,
             lowering_calibration=lowering_calibration,
             kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),

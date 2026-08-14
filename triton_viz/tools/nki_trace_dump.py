@@ -23,6 +23,7 @@ from triton_viz.core.data import (
     Dot,
     Grid,
     Load,
+    LoadTranspose,
     NkiCompute,
     ReduceSum,
     Store,
@@ -521,6 +522,8 @@ def record_to_event(
                 list(record.output_range) if record.output_range is not None else None
             ),
             "output_version": record.output_version,
+            "input_dtypes": [str(value) for value in record.input_dtypes],
+            "output_dtype": record.output_dtype,
         }
 
     if isinstance(record, BinaryOp):
@@ -610,7 +613,7 @@ def record_to_event(
     if isinstance(record, Load):
         active = int(np.count_nonzero(record.masks))
         shape = _shape(record.offsets.shape)
-        return {
+        event = {
             **base,
             "op": "load",
             "engine": "dma_or_vector_load",
@@ -638,6 +641,18 @@ def record_to_event(
             **_offset_geometry(record.offsets, record.masks, int(record.bytes)),
             **_dma_geometry(shape, int(record.bytes), masks=record.masks),
         }
+        if isinstance(record, LoadTranspose):
+            # The HBM access offsets still use the source layout, but the DMA
+            # transpose surface is keyed by the destination SBUF tile geometry.
+            dst_shape = (
+                _shape(record.dst_shape)
+                if record.dst_shape is not None
+                else shape
+            )
+            event["dma_pattern"] = "transpose"
+            event["dst_shape"] = dst_shape
+            event.update(_dma_geometry(dst_shape, int(record.bytes)))
+        return event
 
     if isinstance(record, Store):
         active = int(np.count_nonzero(record.masks))

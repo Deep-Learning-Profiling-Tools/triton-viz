@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import os
 from pathlib import Path
 
 import triton_viz
@@ -334,6 +335,32 @@ def test_tracer_records_dot_transpose_x_kwarg():
     assert record.input_shape == (3, 2)
     assert record.other_shape == (2, 4)
     assert record.output_shape == (3, 4)
+
+
+def test_tilebench_tensor_engine_matmul_kernel_traces():
+    ops_dir = Path(
+        os.environ.get("TILEBENCH_OPS_DIR", "/home/ubuntu/Tilebench/benchmarks/operators")
+    )
+    impl = ops_dir / "matmul_fp32_fp16_fp8" / "impl_nki.py"
+    if not impl.is_file():
+        pytest.skip("Tilebench operators are not available")
+    os.environ.setdefault("TILEBENCH_OPS_DIR", str(ops_dir))
+
+    from triton_viz.tools.nki_operator_experiments import _load_kernel, _matmul_inputs
+
+    kernel = _load_kernel("matmul_fp32_fp16_fp8")
+    inputs = _matmul_inputs(512, 1024, "float32")
+    triton_viz.clear()
+    traced = triton_viz.trace(client=Tracer(), frontend="nki")(kernel.func)
+    traced[(1,)](*inputs)
+
+    records = launches[-1].records
+    dot_records = [record for record in records if isinstance(record, Dot)]
+
+    assert dot_records, "Tensor Engine Tilebench matmul must emit Dot records"
+    assert all(record.input_ptrs and record.output_ptr for record in dot_records)
+    assert all(record.input_dtypes for record in dot_records)
+    assert all(record.output_dtype == "float32" for record in dot_records)
 
 
 def test_nki_trace_save_load_roundtrip(tmp_path: Path):

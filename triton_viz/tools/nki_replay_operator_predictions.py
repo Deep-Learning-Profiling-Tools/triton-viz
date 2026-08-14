@@ -16,6 +16,7 @@ from triton_viz.tools.nki_cost_model import (
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
+    TensorCalibrationSurface,
     _canonical_engine,
     _compute_value_dtype,
     _expand_lowering_groups,
@@ -38,6 +39,7 @@ FIELDS = [
     "predicted_total_dma_us",
     "predicted_vector_us",
     "predicted_scalar_us",
+    "predicted_tensor_us",
     "predicted_total_us",
     "predicted_compute_only_us",
     "predicted_compute_dma_us",
@@ -47,6 +49,8 @@ FIELDS = [
     "resource_overlap_error_pct",
     "hardware_nc_p50_us",
     "nc_error_pct",
+    "hardware_tensor_active_us",
+    "tensor_error_pct",
     "hardware_total_dma_us",
     "dma_error_pct",
     "calibration_match",
@@ -56,6 +60,7 @@ FIELDS = [
     "dma_surface_interpolated_count",
     "dma_surface_ood_count",
     "dma_surface_max_log_distance",
+    "unmatched_region_family_count",
 ]
 
 
@@ -67,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dma-transpose-surface-csv", type=Path)
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--structured-control-csv", type=Path, required=True)
+    parser.add_argument("--tensor-calibration-csv", type=Path)
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
     parser.add_argument("--runtime-overhead-csv", type=Path)
     parser.add_argument("--strided-dma-csv", type=Path)
@@ -116,6 +122,14 @@ def main(argv: list[str] | None = None) -> int:
                 structured_control_lowering=StructuredControlCalibration.from_csv(
                     args.structured_control_csv
                 ),
+                tensor_calibration=(
+                    TensorCalibrationSurface.from_csv(
+                        args.tensor_calibration_csv,
+                        benchmark_name="tensor_matmul_tiled",
+                    )
+                    if args.tensor_calibration_csv
+                    else None
+                ),
                 structural_static_dma=StructuralStaticDmaCalibration.from_csv(
                     args.structural_static_dma_csv
                 ),
@@ -140,9 +154,20 @@ def main(argv: list[str] | None = None) -> int:
         result = simulate(model_events, models[dtype])
         # Audit the lowered compute events that CostModel actually prices.
         # Raw source primitives may have been replaced by structured lowering.
+        from triton_viz.tools.nki_region_ir import structural_family
+
         matches = set()
+        seen_regions: set[str] = set()
+        unmatched_region_families = 0
         audit_events = _expand_lowering_groups(model_events, models[dtype])
         for event in audit_events:
+            region_ir = event.get("region_ir")
+            if region_ir:
+                region_key = str(region_ir.get("structural_key") or id(region_ir))
+                if region_key not in seen_regions:
+                    seen_regions.add(region_key)
+                    if not structural_family(region_ir):
+                        unmatched_region_families += 1
             if event.get("op") not in {"binary", "compute", "reduce_sum"}:
                 continue
             engine = _canonical_engine(
@@ -165,7 +190,9 @@ def main(argv: list[str] | None = None) -> int:
         static_us = result.engine_busy_ns.get("static_dma", 0.0) / 1000.0
         predicted_us = dynamic_us + static_us
         hardware_us = float(source["hardware_dma_active_us"])
+        hardware_tensor_us = float(source.get("hardware_tensor_active_us") or 0.0)
         predicted_total_us = result.predicted_latency_ns / 1000.0
+        predicted_tensor_us = result.engine_busy_ns.get("tensor", 0.0) / 1000.0
         hardware_nc_us = float(source["hardware_nc_p50_us"])
         components = result.components_ns
         dma_paths = set()
@@ -192,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
                 / 1000.0,
                 "predicted_scalar_us": result.engine_busy_ns.get("scalar", 0.0)
                 / 1000.0,
+                "predicted_tensor_us": predicted_tensor_us,
                 "predicted_total_us": predicted_total_us,
                 "predicted_compute_only_us": components["compute_only"] / 1000.0,
                 "predicted_compute_dma_us": components["compute_plus_dma"] / 1000.0,
@@ -212,6 +240,14 @@ def main(argv: list[str] | None = None) -> int:
                 "nc_error_pct": (predicted_total_us - hardware_nc_us)
                 / hardware_nc_us
                 * 100,
+                "hardware_tensor_active_us": hardware_tensor_us,
+                "tensor_error_pct": (
+                    (predicted_tensor_us - hardware_tensor_us)
+                    / hardware_tensor_us
+                    * 100
+                    if hardware_tensor_us
+                    else ""
+                ),
                 "hardware_total_dma_us": hardware_us,
                 "dma_error_pct": (predicted_us - hardware_us) / hardware_us * 100,
                 "calibration_match": ";".join(sorted(matches)) or "not_applicable",
@@ -231,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
                 "dma_surface_max_log_distance": components.get(
                     "dma_surface_max_log_distance", 0.0
                 ),
+                "unmatched_region_family_count": unmatched_region_families,
             }
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -239,7 +276,18 @@ def main(argv: list[str] | None = None) -> int:
         writer.writeheader()
         writer.writerows(out)
     mape = statistics.mean(abs(float(row["dma_error_pct"])) for row in out)
-    print(f"Replayed {len(out)} cases; combined DMA MAPE={mape:.6f}%")
+    tensor_rows = [
+        row for row in out if row.get("hardware_tensor_active_us")
+    ]
+    tensor_mape = (
+        statistics.mean(abs(float(row["tensor_error_pct"])) for row in tensor_rows)
+        if tensor_rows
+        else ""
+    )
+    print(
+        f"Replayed {len(out)} cases; combined DMA MAPE={mape:.6f}%; "
+        f"TensorE busy MAPE={tensor_mape if tensor_mape != '' else 'n/a'}"
+    )
     return 0
 
 
