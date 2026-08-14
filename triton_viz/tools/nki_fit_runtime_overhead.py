@@ -118,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--diagnostics", type=Path)
+    parser.add_argument("--dtype", choices=["float32", "bfloat16"])
     args = parser.parse_args(argv)
 
     models: dict[str, CostModel] = {}
@@ -129,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         if result.get("status") != "ok" or mode == "empty":
             continue
         dtype = str(spec["dtype"])
+        if args.dtype and dtype != args.dtype:
+            continue
         if dtype not in models:
             models[dtype] = CostModel(
                 dma_calibration=(

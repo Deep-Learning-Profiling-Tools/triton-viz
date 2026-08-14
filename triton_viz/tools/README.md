@@ -63,9 +63,9 @@ trace + parquet
   free dimension; it never keys on operator names.
 - `nki_replay_operator_predictions.py`: replays calibrated predictions on saved
   traces and hardware counters without recompilation or holdout fitting.
-- `nki_fit_runtime_overhead.py`: fits mechanism-level sequencer, engine
-  activation, partition, packet, and synchronization costs from orthogonal
-  controls for NC-p50 prediction.
+- `nki_fit_runtime_overhead.py`: fits dtype-isolated mechanism-level sequencer,
+  engine activation, partition, packet, and synchronization costs from
+  orthogonal controls for NC-p50 prediction.
 - `nki_fit_strided_dma.py`: fits compiler-generated strided/Static-DMA packet
   train busy time from independent access-geometry controls.
 - `nki_cost_model_pipeline.py`: three-stage `collect`, `fit`, and `evaluate`
@@ -150,7 +150,7 @@ python -m triton_viz.tools.nki_region_control_experiments \
   --output-dir /tmp/controls_bf16 \
   --kinds elementwise_one elementwise_two \
           two_pass_reduce_multiply two_pass_reduce_affine \
-  --dtypes bfloat16 --free-dims 512 2048
+  --dtypes bfloat16 --free-dims 128 512 1024 2048 4096
 
 python -m triton_viz.tools.nki_fit_structured_controls \
   /tmp/controls_fp32 /tmp/controls_bf16 \

@@ -127,13 +127,16 @@ loads the frozen calibration and only then replays the holdouts. This
 directory separation is an intentional train/holdout boundary, not merely an
 output convention. Use `--dry-run` on any stage to inspect its commands
 without executing them. `evaluate` asserts the formal FP32 holdout produces
-exactly 35 rows before writing `report.json`.
+exactly 35 rows and each FP32/BF16 full split produces exactly 120 rows before
+writing `report.json`.
 
 The main artifacts under the selected root are:
 
 - `calibration/runtime_overhead.csv`: orthogonally fitted launch/sequencer,
   engine-activation, partition, packet, and synchronization terms.
-- `calibration/dma_read_surface.csv`, `dma_write_fp32.csv`,
+- `calibration/runtime_overhead_bf16.csv`: the independently fitted BF16
+  runtime path; runtime coefficients are not shared across dtypes.
+- `calibration/dma_read_surface.csv`, `dma_read_bf16_surface.csv`, `dma_write_fp32.csv`,
   `dma_read_large_free.csv`, `dma_transpose_surface.csv`: directional DMA
   calibration surfaces keyed by `(partition_count, free_bytes_per_partition)`.
 - `calibration/compute.csv`, `structured_compute.csv`, and `static_dma.csv`:
@@ -159,10 +162,11 @@ The formal FP32 holdout contains 35 points at `rows=128` across eight operators:
 use `F=4096`, giving 35 points in total. No high-error point is removed, no
 Level-B single-instruction constant is tuned on these points, and fitting does
 not consume their measurements. With the compiler/environment above, the
-surface-only model reports 15.280% NC-p50 MAPE on this formal set. The formal
-report also evaluates all 120 successful points across `rows={1,16,128}` and
-`F={128,512,1024,2048,4096}`; that full-matrix metric is kept separate from
-the pre-registered 35-point headline; its current NC-p50 MAPE is 25.630%.
+dual-dtype surface model reports 3.428% NC-p50 MAPE on this formal set. The
+report also evaluates separate 120-point FP32 and BF16 matrices across
+`rows={1,16,128}` and `F={128,512,1024,2048,4096}`. Their current NC-p50
+MAPEs are 14.315% and 13.918%, respectively; BF16 strict evaluation rejects
+missing or cross-dtype compute fallback.
 
 See `microbench/inf2_nki/README.md` for individual microbenchmark commands,
 schema details, and lower-level troubleshooting.

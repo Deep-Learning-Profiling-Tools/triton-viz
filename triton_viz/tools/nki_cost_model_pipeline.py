@@ -137,6 +137,7 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
         "runtime_overhead.json",
         "dma_partition_surface.json",
         "dma_partition_large_free.json",
+        "dma_read_bf16_surface.json",
         "dma_transpose_surface.json",
         "dma_directional_dtype_canary.json",
         "dma_write_partition_surface.json",
@@ -219,6 +220,7 @@ def fit(root: Path, dry_run: bool) -> None:
     dma_exports = {
         "dma_directional.csv": "dma_directional_dtype_canary",
         "dma_read_surface.csv": "dma_partition_surface",
+        "dma_read_bf16_surface.csv": "dma_read_bf16_surface",
         "dma_transpose_surface.csv": "dma_transpose_surface",
         "dma_write_fp32.csv": "dma_write_partition_surface",
         "dma_write_bf16.csv": "dma_write_bf16_steady",
@@ -273,14 +275,17 @@ def fit(root: Path, dry_run: bool) -> None:
         ),
         dry_run,
     )
-    _run(
-        _module(
+    for dtype, output_name in (
+        ("float32", "runtime_overhead.csv"),
+        ("bfloat16", "runtime_overhead_bf16.csv"),
+    ):
+        _run(_module(
             "triton_viz.tools.nki_fit_runtime_overhead",
             root / "microbench" / "runtime_overhead" / "results.jsonl",
             "--dma-read-surface-csv",
             calibration / "microbench.csv",
             "--dma-read-bf16-surface-csv",
-            calibration / "dma_directional.csv",
+            calibration / "dma_read_bf16_surface.csv",
             "--dma-write-surface-csv",
             calibration / "dma_write_fp32.csv",
             "--dma-write-bf16-surface-csv",
@@ -288,10 +293,10 @@ def fit(root: Path, dry_run: bool) -> None:
             "--compute-calibration-csv",
             compute,
             "--output",
-            calibration / "runtime_overhead.csv",
-        ),
-        dry_run,
-    )
+            calibration / output_name,
+            "--dtype",
+            dtype,
+        ), dry_run)
     _run(
         _module(
             "triton_viz.tools.nki_fit_strided_dma",
@@ -312,6 +317,7 @@ def fit(root: Path, dry_run: bool) -> None:
                 canonical,
                 calibration / "dma_directional.csv",
                 calibration / "dma_read_surface.csv",
+                calibration / "dma_read_bf16_surface.csv",
                 calibration / "dma_read_large_free.csv",
                 calibration / "dma_transpose_surface.csv",
                 calibration / "dma_write_fp32.csv",
@@ -320,6 +326,7 @@ def fit(root: Path, dry_run: bool) -> None:
                 structured,
                 calibration / "static_dma.csv",
                 calibration / "runtime_overhead.csv",
+                calibration / "runtime_overhead_bf16.csv",
                 calibration / "strided_dma.csv",
             ],
             source_manifests=source_manifests,
@@ -339,7 +346,7 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         holdout,
         "--dma-read-surface-csv",
         (
-            calibration / "dma_directional.csv"
+            calibration / "dma_read_bf16_surface.csv"
             if dtype == "bfloat16"
             else calibration / "microbench.csv"
         ),
@@ -352,7 +359,11 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         "--structural-static-dma-csv",
         calibration / "static_dma.csv",
         "--runtime-overhead-csv",
-        calibration / "runtime_overhead.csv",
+        (
+            calibration / "runtime_overhead_bf16.csv"
+            if dtype == "bfloat16"
+            else calibration / "runtime_overhead.csv"
+        ),
         "--output",
         output,
     )
@@ -390,7 +401,7 @@ def _evaluate_replays(
             args[args.index("--output"):args.index("--output")] = [
                 "--strict-calibration",
             ]
-            if split_name in {"formal_fp32_v1", "full_fp32_v1"}:
+            if split_name in {"formal_fp32_v1", "full_fp32_v1", "full_bf16_v1"}:
                 args[args.index("--output"):args.index("--output")] = [
                     "--strided-dma-csv",
                     str(root / "calibration" / "strided_dma.csv"),
@@ -411,6 +422,7 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "microbench.csv",
                 calibration / "dma_directional.csv",
                 calibration / "dma_read_surface.csv",
+                calibration / "dma_read_bf16_surface.csv",
                 calibration / "dma_read_large_free.csv",
                 calibration / "dma_transpose_surface.csv",
                 calibration / "dma_write_fp32.csv",
@@ -419,6 +431,7 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "structured_compute.csv",
                 calibration / "static_dma.csv",
                 calibration / "runtime_overhead.csv",
+                calibration / "runtime_overhead_bf16.csv",
                 calibration / "strided_dma.csv",
             ],
             current_fingerprint=collect_compiler_fingerprint(
@@ -457,6 +470,26 @@ def evaluate(root: Path, dry_run: bool) -> None:
         raise ValueError(
             f"full_fp32_v1 expected exactly 120 successful cases, got {len(full_rows)}"
         )
+    full_bf16_rows = rows_by_split["full_bf16_v1"]
+    full_bf16_expected = _split_case_count(splits["full_bf16_v1"])
+    if len(full_bf16_rows) != full_bf16_expected or full_bf16_expected != 120:
+        raise ValueError(
+            f"full_bf16_v1 expected exactly 120 successful cases, "
+            f"got {len(full_bf16_rows)}"
+        )
+    invalid_bf16_matches = sorted(
+        {
+            row["calibration_match"]
+            for row in full_bf16_rows
+            if "fallback" in row["calibration_match"]
+            or "missing" in row["calibration_match"]
+        }
+    )
+    if invalid_bf16_matches:
+        raise ValueError(
+            "BF16 strict evaluation used invalid compute calibration matches: "
+            f"{invalid_bf16_matches}"
+        )
     stages = {
         "compute_only_mape_pct": "compute_only_error_pct",
         "compute_plus_dma_mape_pct": "compute_dma_error_pct",
@@ -467,6 +500,7 @@ def evaluate(root: Path, dry_run: bool) -> None:
     report = {
         "formal_fp32_cases": len(formal_rows),
         "full_fp32_cases": len(full_rows),
+        "full_bf16_cases": len(full_bf16_rows),
         "auxiliary_bf16_cases": len(auxiliary_rows),
     }
     report["full_fp32_nc_p50_mape_pct"] = statistics.mean(
@@ -488,6 +522,36 @@ def evaluate(root: Path, dry_run: bool) -> None:
             "ood_clamped": "dma_surface_ood_count",
         }.items()
     }
+    report["full_bf16_nc_p50_mape_pct"] = statistics.mean(
+        abs(float(row["nc_error_pct"])) for row in full_bf16_rows
+    )
+    report["full_bf16_rows_mape_pct"] = {
+        str(rows): statistics.mean(
+            abs(float(row["nc_error_pct"]))
+            for row in full_bf16_rows
+            if int(row["rows"]) == rows
+        )
+        for rows in (1, 16, 128)
+    }
+    report["full_bf16_operator_mape_pct"] = {
+        operator: statistics.mean(
+            abs(float(row["nc_error_pct"]))
+            for row in full_bf16_rows
+            if row["op"] == operator
+        )
+        for operator in sorted({row["op"] for row in full_bf16_rows})
+    }
+    report["full_bf16_dma_surface_event_counts"] = {
+        match: sum(int(row[field]) for row in full_bf16_rows)
+        for match, field in {
+            "exact": "dma_surface_exact_count",
+            "interpolated": "dma_surface_interpolated_count",
+            "ood_clamped": "dma_surface_ood_count",
+        }.items()
+    }
+    report["full_bf16_compute_calibration_matches"] = sorted(
+        {row["calibration_match"] for row in full_bf16_rows}
+    )
     if auxiliary_rows:
         report["auxiliary_bf16_nc_p50_mape_pct"] = statistics.mean(
             abs(float(row["nc_error_pct"])) for row in auxiliary_rows

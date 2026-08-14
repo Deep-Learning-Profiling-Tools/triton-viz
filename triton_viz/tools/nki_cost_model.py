@@ -843,6 +843,8 @@ class StridedDmaCalibration:
         free = max(1, active // max(1, partitions * len(patterns)))
         dtype = ComputeCalibration._norm_dtype(
             first.get("dtype")
+            or first.get("src_dtype")
+            or first.get("dst_dtype")
             or ("float16" if first_pattern.item_bytes == 2 else "float32")
         )
         rows = self.points.get((dtype, stride, partitions), [])

@@ -660,11 +660,7 @@ def main(argv=None):
         row.get("case") for row in rows if row.get("case") and not row.get("error")
     }
     for dtype in args.dtypes:
-        dims = (
-            args.free_dims
-            if dtype == "float32"
-            else [f for f in args.free_dims if f in (512, 2048)]
-        )
+        dims = args.free_dims
         for kind in args.kinds:
             chains = (
                 args.chains if kind in {"elementwise_one", "elementwise_two"} else [1]

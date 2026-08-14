@@ -44,6 +44,7 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "nki_fit_strided_dma" in fit_output
     assert "nki_fit_runtime_overhead" in fit_output
     assert "dma_read_surface.csv" in fit_output
+    assert "dma_read_bf16_surface.csv" in fit_output
     assert "dma_read_large_free.csv" in fit_output
     assert "dma_transpose_surface.csv" in fit_output
     assert "dma-affine" not in fit_output
@@ -58,7 +59,8 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "--dma-transpose-surface-csv" in evaluate_output
     assert "--strided-dma-csv" in evaluate_output
     assert "--runtime-overhead-csv" in evaluate_output
-    assert evaluate_output.count("--strict-calibration") == 6
+    assert "runtime_overhead_bf16.csv" in evaluate_output
+    assert evaluate_output.count("--strict-calibration") == 9
     assert "--dma-model" not in evaluate_output
     assert "dma-affine" not in evaluate_output
 

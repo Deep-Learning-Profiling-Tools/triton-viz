@@ -669,6 +669,25 @@ def test_strided_dma_interpolates_between_independent_control_sizes():
     assert calibration.predict(events) == pytest.approx((1266.6666667, 1700.0))
 
 
+def test_strided_dma_uses_explicit_bfloat16_transfer_dtype():
+    calibration = StridedDmaCalibration(
+        {("bfloat16", 2, 1): [(512, 400.0, 900.0)]}
+    )
+    events = [{
+        "op": "store",
+        "mem_src": "SBUF",
+        "mem_dst": "HBM",
+        "dma_pattern": "strided",
+        "free_stride_items": 2,
+        "partition_count": 1,
+        "active_access_count": 512,
+        "item_bytes": 2,
+        "src_dtype": "bfloat16",
+    }]
+
+    assert calibration.predict(events) == (400.0, 900.0)
+
+
 def test_structured_multi_reduction_completion_is_operator_agnostic_floor():
     region = {
         "dtype": "float32",
