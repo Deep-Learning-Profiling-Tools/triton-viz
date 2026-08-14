@@ -6,8 +6,11 @@ from triton_viz.core.data import (
     BinaryOp,
     DmaTranspose,
     Dot,
+    NkiCompute,
     Op,
     ProgramId,
+    ReduceSum,
+    TensorTranspose,
     Transfer,
 )
 
@@ -51,6 +54,27 @@ def _nki_beta2_binary_adapter(
     return AdapterResult(data1, data2, op, dst)
 
 
+def _nki_beta2_reduce_adapter(
+    dst: Any,
+    op: Any,
+    data: Any,
+    axis: Any,
+    negate: bool = False,
+    keepdims: bool = False,
+    *_args: Any,
+    **_kwargs: Any,
+) -> AdapterResult:
+    del dst, op, negate
+    return AdapterResult(data, axis, keepdims)
+
+
+def _nki_beta2_transpose_adapter(
+    dst: Any, data: Any, engine: Any = None, *_args: Any, **_kwargs: Any
+) -> AdapterResult:
+    del dst
+    return AdapterResult(data, engine)
+
+
 NKI_BETA2_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
 NKI_BETA2_NAMESPACES: dict[Any, dict[str, type[Op]]] = {}
 if HAS_NKI_BETA2:
@@ -61,10 +85,15 @@ if HAS_NKI_BETA2:
             "program_id": ProgramId,
             "ndarray": Allocate,
             "nc_matmul": Dot,
+            "nc_transpose": TensorTranspose,
             "dma_copy": Transfer,
             "dma_transpose": DmaTranspose,
             "tensor_copy": Transfer,
             "tensor_tensor": BinaryOp,
+            "tensor_reduce": ReduceSum,
+            "tensor_scalar": NkiCompute,
+            "activation": NkiCompute,
+            "reciprocal": NkiCompute,
         },
     }
 
@@ -80,6 +109,10 @@ if HAS_NKI_BETA2:
             "copy",
         ),
         BinaryOp: _nki_beta2_binary_adapter,
+        ReduceSum: _nki_beta2_reduce_adapter,
+        TensorTranspose: _nki_beta2_transpose_adapter,
+        # NkiCompute uses the passthrough adapter: the tracer reconstructs
+        # operands/engine from metadata attached to the returned NDArray.
         DmaTranspose: lambda dst, src, *_args, **_kwargs: AdapterResult(
             src,
             dst,

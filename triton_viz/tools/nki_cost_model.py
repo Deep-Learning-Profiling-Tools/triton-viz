@@ -358,6 +358,134 @@ class StructuralStaticDmaCalibration:
 
 
 @dataclass
+class TensorCalibrationSurface:
+    """Control-only TensorE throughput calibration keyed by operand dtype.
+
+    TensorE active time is fit as ``startup + flops / throughput`` across every
+    measured FLOP value of one dtype. The calibration has no per-source-Dot
+    table and no tile-shape key: an unseen Dot (for example a small attention
+    tile) is priced by its FLOPs through the fitted line, and its FLOP-domain
+    position is exposed so replay can flag below/above-domain extrapolation
+    instead of silently claiming an in-domain match. All samples come from
+    independent control microbenchmarks; operator traces are never accepted.
+    """
+
+    points: dict[str, tuple[float, float]]
+    flops_domain: dict[str, tuple[float, float]]
+
+    @staticmethod
+    def _normalize_dtype(dtype: str) -> str:
+        value = str(dtype or "").strip().lower()
+        aliases = {
+            "float32": "float32",
+            "fp32": "float32",
+            "float16": "float16",
+            "fp16": "float16",
+            "bfloat16": "bfloat16",
+            "bf16": "bfloat16",
+            "float8_e5m2": "float8_e5m2",
+            "fp8_e5m2": "float8_e5m2",
+            "float8_e4m3fn": "float8_e4m3fn",
+            "fp8_e4m3fn": "float8_e4m3fn",
+        }
+        return aliases.get(value, value)
+
+    @classmethod
+    def from_csv(
+        cls,
+        path: str | Path,
+        benchmark_name: str = "tensor_matmul",
+        duplicate_policy: str = "median",
+    ) -> "TensorCalibrationSurface":
+        samples: dict[str, dict[int, list[float]]] = {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                if row.get("row_type") not in (None, "benchmark"):
+                    continue
+                if row.get("status") != "ok" or row.get("kind") != benchmark_name:
+                    continue
+                dtype = cls._normalize_dtype(row.get("spec.dtype") or "")
+                if not dtype:
+                    continue
+                try:
+                    flops = int(float(row["work.matmul_flops"]))
+                    active_ns = (
+                        float(row["profile.tensor_engine_active_time"]) * 1e9
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if (
+                    flops <= 0
+                    or not math.isfinite(active_ns)
+                    or active_ns <= 0
+                ):
+                    continue
+                samples.setdefault(dtype, {}).setdefault(flops, []).append(
+                    active_ns
+                )
+        if duplicate_policy not in {"error", "median"}:
+            raise ValueError(f"Unknown duplicate policy: {duplicate_policy}")
+        points: dict[str, tuple[float, float]] = {}
+        flops_domain: dict[str, tuple[float, float]] = {}
+        for dtype, by_flops in samples.items():
+            measured_flops = sorted(by_flops)
+            active_times = [
+                statistics.median(by_flops[flops])
+                if duplicate_policy == "median"
+                else by_flops[flops][0]
+                for flops in measured_flops
+            ]
+            if len(measured_flops) >= 2:
+                slope, intercept = statistics.linear_regression(
+                    measured_flops, active_times
+                )
+                if slope > 0 and math.isfinite(slope):
+                    points[dtype] = (1.0 / slope, max(0.0, intercept))
+                    flops_domain[dtype] = (measured_flops[0], measured_flops[-1])
+                    continue
+            points[dtype] = (measured_flops[0] / active_times[0], 0.0)
+            flops_domain[dtype] = (measured_flops[0], measured_flops[-1])
+        if not points:
+            raise ValueError(f"No tensor_matmul calibration rows in {path}")
+        return cls(points, flops_domain)
+
+    def _lookup(self, dtype: str, *, strict: bool) -> tuple[float, float]:
+        dtype = self._normalize_dtype(dtype)
+        exact = self.points.get(dtype)
+        if exact is not None:
+            return exact
+        if strict:
+            raise ValueError(f"Missing exact TensorE calibration for dtype={dtype}")
+        fallback = self.points.get("float32")
+        if fallback is None and self.points:
+            fallback = next(iter(self.points.values()))
+        if fallback is None:
+            return 90000.0, 0.0
+        return fallback
+
+    def flops_per_ns(self, dtype: str, *, strict: bool = False) -> float:
+        """Return calibrated steady-state TensorE throughput in FLOPs/ns."""
+        return self._lookup(dtype, strict=strict)[0]
+
+    def startup_ns(self, dtype: str, *, strict: bool = False) -> float:
+        """Return the once-per-kernel TensorE startup intercept."""
+        return self._lookup(dtype, strict=strict)[1]
+
+    def domain_match(self, dtype: str, flops: float) -> str:
+        """Classify one Dot's FLOPs against the fitted control domain."""
+        dtype = self._normalize_dtype(dtype)
+        domain = self.flops_domain.get(dtype) or self.flops_domain.get("float32")
+        if domain is None:
+            return "missing_domain"
+        low, high = domain
+        if flops < low:
+            return "below_domain"
+        if flops > high:
+            return "above_domain"
+        return "in_domain"
+
+
+@dataclass
 class ComputeCalibration:
     """Measured per-*instruction* cost for VectorE/ScalarE compute engines.
 
@@ -938,6 +1066,16 @@ def _compute_value_dtype(event: dict[str, Any]) -> str:
     return Counter(value_dtypes).most_common(1)[0][0] if value_dtypes else output
 
 
+def _tensor_dtype(event: dict[str, Any]) -> str:
+    """Return the TensorE operand dtype, ignoring bool predicates/accumulators."""
+    input_dtypes = [
+        str(value)
+        for value in event.get("input_dtypes") or ()
+        if value and str(value).lower() not in {"bool", "boolean"}
+    ]
+    return input_dtypes[0] if input_dtypes else _compute_value_dtype(event)
+
+
 def _input_stream_count(event):
     """Number of distinct tile inputs a compute op streams (1-input vs 2-input).
 
@@ -949,6 +1087,10 @@ def _input_stream_count(event):
     explicit = event.get("input_stream_count")
     if explicit is not None:
         return max(1, int(explicit))
+    if str(event.get("api_op") or "") == "activation":
+        # An activation instruction streams one data tile; its bias/scale are
+        # scalar or per-partition epilogue operands, not extra input streams.
+        return 1
     ptrs = event.get("input_ptrs")
     if isinstance(ptrs, (list, tuple)) and len(ptrs) >= 1:
         return 2 if len(ptrs) >= 2 else 1
@@ -999,6 +1141,7 @@ class CostModel:
     structured_control_lowering: StructuredControlCalibration | None = None
     runtime_overhead_calibration: RuntimeOverheadCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
+    tensor_calibration: TensorCalibrationSurface | None = None
     strict_calibration: bool = False
 
     # On-chip copy (VectorE/ScalarE moving PSUM<->SBUF): cheaper per byte.
@@ -1064,6 +1207,14 @@ class CostModel:
     def _dma_surface(
         self, event: dict[str, Any]
     ) -> DmaCalibrationSurface | None:
+        memories = {
+            str(event.get("mem_src", "")).lower(),
+            str(event.get("mem_dst", "")).lower(),
+        }
+        if memories and "" not in memories and "hbm" not in memories:
+            # On-chip PSUM<->SBUF copies are priced by the vector/static-DMA
+            # path, not by the HBM bandwidth surfaces.
+            return None
         if event.get("dma_pattern") == "transpose":
             return self.dma_transpose_calibration
         if (
@@ -1118,8 +1269,14 @@ class CostModel:
         """Return the estimated duration in ns for one trace event."""
         op = event.get("op")
         engine = _canonical_engine(event.get("engine", ""), op or "")
-        if op == "dot":
+        if op in ("dot", "tensor_transpose"):
             flops = event.get("flops") or 0
+            if self.tensor_calibration is not None:
+                dtype = _tensor_dtype(event)
+                flops_per_ns = self.tensor_calibration.flops_per_ns(
+                    dtype, strict=self.strict_calibration
+                )
+                return flops / flops_per_ns
             return self.tensor_startup_ns + flops / self.tensor_flops_per_ns
         if op in ("binary", "compute", "reduce_sum"):
             free_dim = _free_dim(event)
@@ -1697,12 +1854,42 @@ def simulate(
                     raw_cost * scale
                 )
     events = _expand_lowering_groups(source_events, model)
+    tensor_events = [
+        event
+        for event in events
+        if _canonical_engine(event.get("engine", ""), event.get("op"))
+        == ENGINE_TENSOR
+    ]
+    tensor_startup_ns = 0.0
+    tensor_domain_ood = 0
+    if model.tensor_calibration is not None:
+        if tensor_events:
+            dtype = Counter(
+                _tensor_dtype(event) for event in tensor_events
+            ).most_common(1)[0][0]
+            tensor_startup_ns = max(
+                0.0,
+                model.tensor_calibration.startup_ns(
+                    dtype, strict=model.strict_calibration
+                ),
+            )
+        tensor_domain_ood = sum(
+            1
+            for event in tensor_events
+            if (flops := int(event.get("flops") or 0)) > 0
+            and model.tensor_calibration.domain_match(
+                _tensor_dtype(event), flops
+            )
+            != "in_domain"
+        )
     sync_ns = max(0.0, model.cross_engine_sync_ns)
     dma_queue_count = max(1, int(model.dma_queue_count))
     dma_resource_count = max(0, int(model.dma_resource_count))
     # Each engine owns a list of per-slot free times. Most engines are a single
     # serial slot; the DMA engine owns ``dma_queue_count`` parallel slots.
     engine_slots: dict[str, list[float]] = {}
+    if tensor_startup_ns > 0:
+        engine_slots[ENGINE_TENSOR] = [tensor_startup_ns]
     # Per-storage hazard tracking keyed by storage id. Each writer/reader entry
     # is (lo, hi, end_time, engine) so we can test *address-range* overlap, not
     # just base-pointer equality: disjoint tiles of one allocation run in
@@ -1715,7 +1902,9 @@ def simulate(
     dma_surface_matches: Counter[str] = Counter()
     dma_calibration_paths: Counter[str] = Counter()
     dma_surface_max_log_distance = 0.0
-    makespan = 0.0
+    if tensor_startup_ns > 0:
+        engine_busy[ENGINE_TENSOR] = tensor_startup_ns
+    makespan = tensor_startup_ns
     cross_engine_edges = 0
     # Running high-water mark of all memory-transfer completions, used as a
     # conservative dependency floor for compute ops that lack pointer linkage.
@@ -1792,7 +1981,7 @@ def simulate(
                 if _ranges_overlap(lo, hi, r_lo, r_hi):
                     earliest = _dep(earliest, r_end, r_eng, engine)
 
-        if op == "dot" and not reads:
+        if op in ("dot", "tensor_transpose") and not reads:
             # Compute op without pointer linkage: conservatively depend on all
             # memory transfers issued so far (older traces without Dot pointers).
             earliest = max(earliest, prior_transfer_end + (sync_ns if sync_ns else 0.0))
@@ -1906,6 +2095,7 @@ def simulate(
                 dma_surface_matches.get("exact", 0)
             ),
             "dma_surface_max_log_distance": dma_surface_max_log_distance,
+            "tensor_flops_domain_ood_count": float(tensor_domain_ood),
             "final": final_ns,
         },
     )

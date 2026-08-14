@@ -28,10 +28,12 @@ def test_pipeline_dry_run_keeps_controls_and_holdouts_separate(tmp_path, capsys)
     output = capsys.readouterr().out
     assert "/controls" in output
     assert "/holdouts/formal_fp32_v1" in output
+    assert "/holdouts/attention_fp32_v1" in output
     assert "dma_strided_store_surface.json" in output
     assert "dma_partition_surface.json" in output
     assert "dma_partition_large_free.json" in output
     assert "dma_transpose_surface.json" in output
+    assert "tensor_matmul_tiled_surface.json" in output
     assert "runtime_overhead.json" in output
     assert "--skip-existing" in output
     assert "--resume" in output
@@ -60,7 +62,7 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "--strided-dma-csv" in evaluate_output
     assert "--runtime-overhead-csv" in evaluate_output
     assert "runtime_overhead_bf16.csv" in evaluate_output
-    assert evaluate_output.count("--strict-calibration") == 9
+    assert evaluate_output.count("--strict-calibration") == 12
     assert "--dma-model" not in evaluate_output
     assert "dma-affine" not in evaluate_output
 
@@ -75,6 +77,9 @@ def test_formal_split_is_exactly_the_documented_35_cases():
     assert formal["operators"]["layernorm"][-1] == 4096
     assert formal["operators"]["rmsnorm"][-1] == 4096
     assert _split_case_count(data["splits"]["full_fp32_v1"]) == 120
+    assert _split_case_count(data["splits"]["tensor_fp32_v1"]) == 5
+    assert _split_case_count(data["splits"]["tensor_bf16_v1"]) == 5
+    assert _split_case_count(data["splits"]["attention_fp32_v1"]) == 4
 
 
 def test_pipeline_child_parser_contract_rejects_old_static_dma_arguments():

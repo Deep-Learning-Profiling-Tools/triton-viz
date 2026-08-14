@@ -143,6 +143,7 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
         "dma_write_partition_surface.json",
         "dma_write_bf16_steady.json",
         "dma_strided_store_surface.json",
+        "tensor_matmul_tiled_surface.json",
     ]
     for config in configs:
         run_id = Path(config).stem
@@ -244,6 +245,15 @@ def fit(root: Path, dry_run: bool) -> None:
         ),
         dry_run,
     )
+    _run(
+        _module(
+            "microbench.inf2_nki.profile_parser.export_csv",
+            root / "microbench" / "tensor_matmul_tiled_surface",
+            "--output",
+            calibration / "tensor_matmul_tiled.csv",
+        ),
+        dry_run,
+    )
     compute = calibration / "compute.csv"
     _run(
         _module(
@@ -322,6 +332,7 @@ def fit(root: Path, dry_run: bool) -> None:
                 calibration / "dma_transpose_surface.csv",
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
+                calibration / "tensor_matmul_tiled.csv",
                 compute,
                 structured,
                 calibration / "static_dma.csv",
@@ -356,6 +367,8 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         calibration / "compute.csv",
         "--structured-control-csv",
         calibration / "structured_compute.csv",
+        "--tensor-calibration-csv",
+        calibration / "tensor_matmul_tiled.csv",
         "--structural-static-dma-csv",
         calibration / "static_dma.csv",
         "--runtime-overhead-csv",
@@ -427,6 +440,7 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "dma_transpose_surface.csv",
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
+                calibration / "tensor_matmul_tiled.csv",
                 calibration / "compute.csv",
                 calibration / "structured_compute.csv",
                 calibration / "static_dma.csv",
@@ -477,6 +491,28 @@ def evaluate(root: Path, dry_run: bool) -> None:
             f"full_bf16_v1 expected exactly 120 successful cases, "
             f"got {len(full_bf16_rows)}"
         )
+    tensor_rows = [
+        row
+        for split_name in ("tensor_fp32_v1", "tensor_bf16_v1")
+        for row in rows_by_split.get(split_name, [])
+    ]
+    tensor_expected = sum(
+        _split_case_count(splits[name])
+        for name in ("tensor_fp32_v1", "tensor_bf16_v1")
+        if name in splits
+    )
+    if len(tensor_rows) != tensor_expected:
+        raise ValueError(
+            f"TensorE holdouts expected {tensor_expected} successful cases, "
+            f"got {len(tensor_rows)}"
+        )
+    attention_rows = rows_by_split.get("attention_fp32_v1", [])
+    attention_expected = _split_case_count(splits["attention_fp32_v1"])
+    if len(attention_rows) != attention_expected:
+        raise ValueError(
+            f"attention_fp32_v1 expected {attention_expected} successful cases, "
+            f"got {len(attention_rows)}"
+        )
     invalid_bf16_matches = sorted(
         {
             row["calibration_match"]
@@ -501,6 +537,8 @@ def evaluate(root: Path, dry_run: bool) -> None:
         "formal_fp32_cases": len(formal_rows),
         "full_fp32_cases": len(full_rows),
         "full_bf16_cases": len(full_bf16_rows),
+        "tensor_cases": len(tensor_rows),
+        "attention_cases": len(attention_rows),
         "auxiliary_bf16_cases": len(auxiliary_rows),
     }
     report["full_fp32_nc_p50_mape_pct"] = statistics.mean(
@@ -552,6 +590,52 @@ def evaluate(root: Path, dry_run: bool) -> None:
     report["full_bf16_compute_calibration_matches"] = sorted(
         {row["calibration_match"] for row in full_bf16_rows}
     )
+    report["tensor_nc_p50_mape_pct"] = statistics.mean(
+        abs(float(row["nc_error_pct"])) for row in tensor_rows
+    )
+    report["tensor_busy_mape_pct"] = statistics.mean(
+        abs(float(row["tensor_error_pct"])) for row in tensor_rows
+    )
+    report["tensor_operator_mape_pct"] = {
+        f"{operator}/{dtype}": statistics.mean(
+            abs(float(row["nc_error_pct"]))
+            for row in tensor_rows
+            if row["op"] == operator and row["dtype"] == dtype
+        )
+        for operator, dtype in {
+            (row["op"], row["dtype"]) for row in tensor_rows
+        }
+    }
+    report["tensor_flops_domain_ood_count"] = sum(
+        int(row["tensor_flops_domain_ood_count"]) for row in tensor_rows
+    )
+    report["attention_nc_p50_mape_pct"] = statistics.mean(
+        abs(float(row["nc_error_pct"])) for row in attention_rows
+    )
+    report["attention_tensor_busy_mape_pct"] = statistics.mean(
+        abs(float(row["tensor_error_pct"]))
+        for row in attention_rows
+        if row.get("tensor_error_pct") not in (None, "")
+    )
+    report["attention_dma_error_mape_pct"] = statistics.mean(
+        abs(float(row["dma_error_pct"])) for row in attention_rows
+    )
+    report["attention_operator_mape_pct"] = {
+        operator: statistics.mean(
+            abs(float(row["nc_error_pct"]))
+            for row in attention_rows
+            if row["op"] == operator
+        )
+        for operator in sorted({row["op"] for row in attention_rows})
+    }
+    report["attention_tensor_flops_domain_ood_count"] = sum(
+        int(row["tensor_flops_domain_ood_count"]) for row in attention_rows
+    )
+    report["attention_coverage"] = {
+        "beta2_frontend": "nki_beta2",
+        "unsupported_bfloat16": "mixed-precision PV matmul rejected by the beta2 interpreter",
+        "nc_reference": "median of framework device-side latency samples",
+    }
     if auxiliary_rows:
         report["auxiliary_bf16_nc_p50_mape_pct"] = statistics.mean(
             abs(float(row["nc_error_pct"])) for row in auxiliary_rows

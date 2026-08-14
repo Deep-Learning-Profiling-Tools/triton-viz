@@ -192,6 +192,33 @@ class NkiCompute(Op):
 
 
 @dataclass
+class TensorTranspose(Op):
+    """On-chip TensorE PF-transpose (``nisa.nc_transpose``).
+
+    A TensorE PF-transpose is implemented as a matrix multiply of the source
+    tile against an identity matrix. The record keeps the source/destination
+    storage identity so cross-engine dependencies resolve exactly, and the
+    trace dumper derives the equivalent identity-matmul FLOPs from the source
+    partition/free geometry.
+    """
+
+    name: ClassVar[str] = "tensor_transpose"
+    input_shape: tuple
+    output_shape: tuple
+    input_ptrs: tuple[int, ...] = ()
+    output_ptr: int | None = None
+    input_storages: tuple[int, ...] = ()
+    input_ranges: tuple[tuple[int, int], ...] = ()
+    input_versions: tuple[int, ...] = ()
+    output_storage: int | None = None
+    output_range: tuple[int, int] | None = None
+    output_version: int | None = None
+    input_dtypes: tuple[str, ...] = ()
+    output_dtype: str | None = None
+    engine: str = "tensor"
+
+
+@dataclass
 class AddPtr(Op):
     name: ClassVar[str] = "addptr"
 

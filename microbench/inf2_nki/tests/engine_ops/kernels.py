@@ -124,6 +124,111 @@ def tensor_matmul_factory(*, m: int, k: int, n: int, repeat: int, mode: str, dty
     return kernel, [(k, m), (k, n)], (1,)
 
 
+def tensor_matmul_tiled_factory(
+    *,
+    m: int,
+    k: int,
+    n: int,
+    mode: str = "independent",
+    dtype_name: str = "float32",
+):
+    """Tilebench-shaped TensorE pipeline control.
+
+    This is intentionally not a copy of the Tilebench source: it is an
+    independent control kernel with the same TensorE tile geometry
+    (128x128 stationary, 128x512 moving), the same block loops, and the same
+    on-chip ``nc_transpose`` staging pattern. It is used only for calibration;
+    Tilebench's ``matmul_fp32_fp16_fp8`` kernel remains the holdout. The fit
+    is dtype-keyed throughput (startup + flops / throughput): there is no
+    per-shape lookup table.
+    """
+    kernel_dtype_name = dtype_name
+    tile_m = tile_k = 128
+    tile_n = 512
+    tib_m = m // tile_m
+    tib_k = k // tile_k
+    tib_n = n // tile_n
+
+    @nki.jit
+    def kernel(lhs, rhs):
+        kdtype = dtype_for_load(kernel_dtype_name, lhs.dtype)
+        out = nl.ndarray((m, n), dtype=kdtype, buffer=nl.shared_hbm)
+
+        for bm in nl.affine_range(tib_m):
+            lhs_tiles = nl.ndarray(
+                (tib_k, nl.par_dim(tile_k), tile_m),
+                dtype=kdtype,
+                buffer=nl.sbuf,
+            )
+            i_lhs = nl.mgrid[0:tile_m, 0:tile_k]
+            for bk in nl.affine_range(tib_k):
+                lhs_tile = nl.ndarray(
+                    (tile_m, tile_k), dtype=kdtype, buffer=nl.sbuf
+                )
+                lhs_tile[...] = nl.load(
+                    lhs[
+                        bm * tile_m + i_lhs.p,
+                        bk * tile_k + i_lhs.x,
+                    ]
+                )
+                lhs_tiles[bk] = nisa.nc_transpose(lhs_tile)
+
+            for bn in nl.affine_range(tib_n):
+                rhs_tiles = nl.ndarray(
+                    (tib_k, nl.par_dim(tile_k), tile_n),
+                    dtype=kdtype,
+                    buffer=nl.sbuf,
+                )
+                i_rhs = nl.mgrid[0:tile_k, 0:tile_n]
+                for bk in nl.affine_range(tib_k):
+                    rhs_tiles[bk] = nl.load(
+                        rhs[
+                            bk * tile_k + i_rhs.p,
+                            bn * tile_n + i_rhs.x,
+                        ]
+                    )
+
+                res_psum = nl.zeros(
+                    (tile_m, tile_n), dtype=nl.float32, buffer=nl.psum
+                )
+                for bk in nl.affine_range(tib_k):
+                    res_psum += nisa.nc_matmul(
+                        stationary=lhs_tiles[bk],
+                        moving=rhs_tiles[bk],
+                        name=f"tile_mm_{bm}_{bn}_{bk}",
+                    )
+
+                res_sbuf = nisa.tensor_copy(
+                    res_psum, dtype=kdtype, engine=nisa.engine.vector
+                )
+                i_out = nl.mgrid[0:tile_m, 0:tile_n]
+                nl.store(
+                    out[
+                        bm * tile_m + i_out.p,
+                        bn * tile_n + i_out.x,
+                    ],
+                    value=res_sbuf,
+                )
+        return out
+
+    return kernel, [(m, k), (k, n)], (1,)
+
+
+def tensor_matmul_tiled_work_units(
+    *,
+    m: int,
+    k: int,
+    n: int,
+    mode: str = "independent",
+    dtype_name: str = "float32",
+) -> dict[str, int]:
+    return {
+        "matmul_flops": 2 * m * n * k,
+        "logical_instructions": (m // 128) * (n // 512) * (k // 128),
+        "dot_count": (m // 128) * (n // 512) * (k // 128),
+    }
+
+
 def work_units(*, p: int | None = None, f: int | None = None, m: int | None = None, k: int | None = None, n: int | None = None, repeat: int, mode: str = "", **_: object) -> dict[str, int]:
     if m is not None and k is not None and n is not None:
         return {"matmul_flops": 2 * m * n * k * repeat, "logical_instructions": repeat}

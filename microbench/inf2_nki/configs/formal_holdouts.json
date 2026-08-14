@@ -50,6 +50,27 @@
         "layernorm": [512, 2048],
         "rmsnorm": [512, 2048]
       }
+    },
+    "tensor_fp32_v1": {
+      "rows": [512],
+      "dtype": "float32",
+      "operators": {
+        "matmul_fp32_fp16_fp8": [512, 1024, 2048, 4096, 8192]
+      }
+    },
+    "tensor_bf16_v1": {
+      "rows": [512],
+      "dtype": "bfloat16",
+      "operators": {
+        "matmul_fp32_fp16_fp8": [512, 1024, 2048, 4096, 8192]
+      }
+    },
+    "attention_fp32_v1": {
+      "rows": [128],
+      "dtype": "float32",
+      "operators": {
+        "tiled_attention": [64, 128, 256, 512]
+      }
     }
   }
 }

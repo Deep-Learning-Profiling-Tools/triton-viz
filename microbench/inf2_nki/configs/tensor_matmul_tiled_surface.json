@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_nki_tensor_matmul_tiled_surface",
+  "description": "TensorE tiled-pipeline calibration controls matching Tilebench's 128x128 stationary and 128x512 moving tile geometry; dtype-keyed throughput only.",
+  "warmup": 2,
+  "iters": 10,
+  "benchmarks": [
+    {
+      "name": "tensor_matmul_tiled",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "m": [256, 512],
+        "n": [1024],
+        "k": [1024, 2048, 4096]
+      }
+    }
+  ]
+}

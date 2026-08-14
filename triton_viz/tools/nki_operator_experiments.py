@@ -45,6 +45,7 @@ from triton_viz.tools.nki_cost_model import (
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
+    TensorCalibrationSurface,
     eliminate_redundant_hbm_loads,
     simulate,
 )
@@ -61,6 +62,7 @@ from triton_viz.tools.nki_trace_dump import write_jsonl
 TILEBENCH_OPS = Path(
     os.environ.get("TILEBENCH_OPS_DIR", "/home/ubuntu/Tilebench/benchmarks/operators")
 )
+EXAMPLES_ROOT = Path(__file__).resolve().parents[2] / "examples"
 
 _DTYPES = {
     "float32": np.float32,
@@ -94,6 +96,37 @@ def _matmul_inputs(m: int, k: int, dtype: str) -> list[Any]:
         tiles(k, tile_k, 8),
         1,  # One Inf2 NeuronCore; Tilebench's wrapper selects cores by platform.
         False,  # Double-row is only applicable to FP8.
+    ]
+
+
+def _tiled_attention_inputs(m_size: int, dv_size: int, dtype: str) -> list[Any]:
+    """Canonical inputs for ``examples/nki_beta2/tiled_attention.py``.
+
+    ``rows`` is the query length ``m_size`` and ``cols`` is the value head
+    dimension ``dv_size``, the two free shape knobs the kernel exposes besides
+    the fixed ``d_size == 128`` and the KV length ``n_size``. Batch and head
+    counts are one: the holdout targets the per-head tile-loop attention
+    structure, not an SPMD multi-program launch.
+    """
+    batch = num_heads = num_heads_k = num_heads_v = 1
+    d_size = 128
+    n_size = 128
+    return [
+        _randn((batch, num_heads, m_size, d_size), dtype),
+        _randn((batch, num_heads_k, n_size, d_size), dtype),
+        _randn((batch, num_heads_v, n_size, dv_size), dtype),
+        np.empty(
+            (batch, num_heads, m_size, dv_size),
+            dtype=_DTYPES[dtype],
+        ),
+        batch,
+        num_heads,
+        num_heads_k,
+        num_heads_v,
+        m_size,
+        n_size,
+        d_size,
+        dv_size,
     ]
 
 
@@ -199,6 +232,13 @@ OPERATORS: dict[str, dict[str, Any]] = {
             1e-5,
         ],
     },
+    "tiled_attention": {
+        "kernel": "tiled_attention_kernel",
+        "source": "examples/nki_beta2/tiled_attention.py",
+        "frontend": "nki_beta2",
+        "hardware": "nki_framework",
+        "inputs": _tiled_attention_inputs,
+    },
 }
 
 
@@ -213,6 +253,7 @@ CSV_COLUMNS = [
     "load_count",
     "store_count",
     "compute_count",
+    "dot_count",
     "trace_hbm_read_bytes",
     "trace_hbm_write_bytes",
     "compiler_elided_load_count",
@@ -221,22 +262,29 @@ CSV_COLUMNS = [
     "predicted_dma_busy_us",
     "predicted_vector_busy_us",
     "predicted_scalar_busy_us",
+    "predicted_tensor_busy_us",
     "hardware_nc_p50_us",
     "hardware_total_active_us",
     "hardware_dma_active_us",
     "hardware_vector_active_us",
     "hardware_scalar_active_us",
+    "hardware_tensor_active_us",
     "error_vs_nc_pct",
     "dma_busy_error_pct",
     "vector_busy_error_pct",
     "scalar_busy_error_pct",
+    "tensor_busy_error_pct",
     "vector_mapping_coverage_pct",
     "scalar_mapping_coverage_pct",
 ]
 
 
 def _load_kernel(op: str):
-    impl = TILEBENCH_OPS / op / "impl_nki.py"
+    source = OPERATORS[op].get("source")
+    if source:
+        impl = EXAMPLES_ROOT / Path(source).relative_to("examples")
+    else:
+        impl = TILEBENCH_OPS / op / "impl_nki.py"
     spec = importlib.util.spec_from_file_location(f"tilebench_{op}", impl)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -248,7 +296,10 @@ def _trace_events(
 ) -> list[dict[str, Any]]:
     kernel = _load_kernel(op)
     triton_viz.clear()
-    traced = tv_trace(client=Tracer(), frontend="nki")(kernel.func)
+    frontend = OPERATORS[op].get("frontend", "nki")
+    traced = tv_trace(client=Tracer(), frontend=frontend)(
+        kernel.func if frontend == "nki" else kernel
+    )
     traced[(1,)](*inputs)
     return write_jsonl(launches[-1].records, jsonl)
 
@@ -256,9 +307,16 @@ def _trace_events(
 def _hbm_bytes(events: list[dict[str, Any]]) -> tuple[int, int]:
     read = write = 0
     for e in events:
-        if e.get("op") == "load":
+        op = e.get("op")
+        mem_src = str(e.get("mem_src", "")).lower()
+        mem_dst = str(e.get("mem_dst", "")).lower()
+        if op == "load" or (
+            op == "transfer" and "hbm" in mem_src and "sbuf" in mem_dst
+        ):
             read += int(e.get("bytes", 0))
-        elif e.get("op") == "store":
+        elif op == "store" or (
+            op == "transfer" and "sbuf" in mem_src and "hbm" in mem_dst
+        ):
             write += int(e.get("bytes", 0))
     return read, write
 
@@ -296,6 +354,107 @@ def _run_hardware(
         os.chdir(old)
 
 
+def _run_hardware_framework(
+    op: str,
+    inputs: list[np.ndarray],
+    artifact_dir: Path,
+    warmup: int,
+    iters: int,
+    kernel=None,
+) -> tuple[float | None, dict[str, Any]]:
+    """Benchmark a beta2-API kernel through the top-level NKI framework.
+
+    ``examples/nki_beta2/tiled_attention.py`` uses the ``nki.isa`` beta2 API,
+    which is not accepted by ``neuronxcc.nki.benchmark``. The standalone NKI
+    framework compiles the same function to a NEFF for Inf2 and exposes
+    device-side timing plus an NTFF profile. The resulting NEFF/NTFF are the
+    same artifacts ``_profile_summary`` consumes, so engine-active breakdowns
+    stay on the identical Explorer-based path as the legacy operators.
+
+    The device-side benchmark has no NeuronCore-cycle percentile API, so the
+    reported NC reference is the median of the framework's device-latency
+    samples. This is an honest, documented approximation of the legacy NC-p50
+    reference for the beta2 frontend.
+    """
+    import inspect
+
+    from nki.compiler.ncc_driver import CompileOptions, compile_bir_to_neff
+    from nki.framework.compiled import compile_kernel_to_nir
+    import nki as nki_framework
+
+    kernel = kernel or _load_kernel(op)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    kernel_obj = nki_framework.jit(kernel)[1]
+    parameters = inspect.signature(kernel).parameters
+    bound = {name: value for name, value in zip(parameters, inputs)}
+    opts = CompileOptions(
+        target="inf2",
+        lnc=1,
+        artifacts_dir=str(artifact_dir),
+        output_path=str(artifact_dir / "file.neff"),
+    )
+    nir = compile_kernel_to_nir(
+        kernel_obj, inputs=bound, compile_opts=opts, enable_cache=False
+    )
+    argument_names = [spec.name for spec in nir.descriptor.input_specs]
+    output_arg_names = [spec.name for spec in nir.descriptor.output_specs]
+    compiled = compile_bir_to_neff(
+        opts,
+        nir,
+        input_arrays=[value for value in bound.values() if isinstance(value, np.ndarray)],
+        argument_names=argument_names,
+        output_arg_names=output_arg_names,
+    )
+    exec_inputs = compiled.prepare_inputs(bound)
+    # Guard against benchmarking a silently wrong kernel: run once and compare
+    # the device output with the example's own NumPy reference implementation.
+    verification = compiled.run(profile=False, **exec_inputs)
+    expected = kernel.__globals__["_numpy_tiled_attention"](
+        bound["q"], bound["k"], bound["v"]
+    )
+    actual = next(iter(verification.outputs.values()))
+    if not np.allclose(
+        np.asarray(actual, dtype=np.float32),
+        np.asarray(expected, dtype=np.float32),
+        rtol=1e-3,
+        atol=1e-4,
+    ):
+        raise RuntimeError(
+            "tiled_attention device output does not match the NumPy reference"
+        )
+    from nki.runtime import SpikeTensor
+
+    model = compiled._ensure_loaded()
+    spike_inputs = {
+        name: SpikeTensor.from_numpy(value, name)
+        for name, value in exec_inputs.items()
+    }
+    spike_outputs = {
+        name: SpikeTensor.from_numpy(value, name)
+        for name, value in compiled.prepare_outputs().items()
+    }
+    bench = model.benchmark(
+        spike_inputs,
+        outputs=spike_outputs,
+        warmup_iter=warmup,
+        benchmark_iter=iters,
+        mode="device",
+    )
+    compiled.run(profile=True, **exec_inputs)
+    summary = _profile_summary(
+        artifact_dir / "file.neff",
+        artifact_dir / "profile.ntff",
+        artifact_dir / "explorer_summary.json",
+    )
+    durations_us = sorted(float(item) * 1000.0 for item in bench.durations_ms)
+    nc_p50_us = (
+        durations_us[len(durations_us) // 2]
+        if durations_us
+        else bench.mean_ms * 1000.0
+    )
+    return nc_p50_us, summary
+
+
 def run_case(
     op: str,
     rows: int,
@@ -325,6 +484,9 @@ def run_case(
         art.mkdir(parents=True, exist_ok=True)
         inputs = OPERATORS[op]["inputs"](rows, cols, dtype)
         events = _trace_events(op, inputs, art / "trace.jsonl")
+        dot_count = sum(
+            1 for e in events if e.get("op") in ("dot", "tensor_transpose")
+        )
         read, write = _hbm_bytes(events)
         model_events = events
         cse_audit = {"eliminated_load_count": 0, "eliminated_load_bytes": 0}
@@ -335,8 +497,10 @@ def run_case(
             load_count=sum(e.get("op") == "load" for e in events),
             store_count=sum(e.get("op") == "store" for e in events),
             compute_count=sum(
-                e.get("op") in ("compute", "binary", "reduce_sum") for e in events
+                e.get("op") in ("compute", "binary", "reduce_sum")
+                for e in events
             ),
+            dot_count=dot_count,
             trace_hbm_read_bytes=read,
             trace_hbm_write_bytes=write,
             compiler_elided_load_count=cse_audit["eliminated_load_count"],
@@ -350,11 +514,19 @@ def run_case(
         ) / 1000.0
         row["predicted_vector_busy_us"] = busy.get("vector", 0.0) / 1000.0
         row["predicted_scalar_busy_us"] = busy.get("scalar", 0.0) / 1000.0
+        row["predicted_tensor_busy_us"] = busy.get("tensor", 0.0) / 1000.0
         (art / "prediction.json").write_text(
             json.dumps(sim.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         if hardware:
-            nc_p50, prof = _run_hardware(op, inputs, art / "hardware", warmup, iters)
+            if OPERATORS[op].get("hardware") == "nki_framework":
+                nc_p50, prof = _run_hardware_framework(
+                    op, inputs, art / "hardware", warmup, iters
+                )
+            else:
+                nc_p50, prof = _run_hardware(
+                    op, inputs, art / "hardware", warmup, iters
+                )
             row["hardware_nc_p50_us"] = nc_p50
             row["hardware_total_active_us"] = (
                 float(prof.get("total_active_time", 0)) * 1e6
@@ -366,6 +538,9 @@ def run_case(
             row["hardware_scalar_active_us"] = (
                 float(prof.get("scalar_engine_active_time", 0)) * 1e6
             )
+            row["hardware_tensor_active_us"] = (
+                float(prof.get("tensor_engine_active_time", 0)) * 1e6
+            )
             row["error_vs_nc_pct"] = _percent_error(row["predicted_total_us"], nc_p50)
             row["dma_busy_error_pct"] = _percent_error(
                 row["predicted_dma_busy_us"], row["hardware_dma_active_us"]
@@ -375,6 +550,9 @@ def run_case(
             )
             row["scalar_busy_error_pct"] = _percent_error(
                 row["predicted_scalar_busy_us"], row["hardware_scalar_active_us"]
+            )
+            row["tensor_busy_error_pct"] = _percent_error(
+                row["predicted_tensor_busy_us"], row["hardware_tensor_active_us"]
             )
             if source_mapping:
                 export_parquet(art / "hardware")
@@ -486,6 +664,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Structural-family control points (no operator signatures).",
     )
+    parser.add_argument(
+        "--tensor-calibration-csv",
+        type=Path,
+        default=None,
+        help="Control-only dtype-keyed TensorE throughput calibration.",
+    )
     args = parser.parse_args(argv)
     if args.source_mapping and args.no_hardware:
         parser.error("--source-mapping requires hardware; remove --no-hardware")
@@ -533,6 +717,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.structured_control_csv
         else None
     )
+    tensor_calibration = (
+        TensorCalibrationSurface.from_csv(
+            args.tensor_calibration_csv,
+            benchmark_name="tensor_matmul_tiled",
+        )
+        if args.tensor_calibration_csv
+        else None
+    )
     structural_static_dma = (
         StructuralStaticDmaCalibration.from_csv(args.structural_static_dma_csv)
         if args.structural_static_dma_csv
@@ -558,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
         structural_static_dma=structural_static_dma,
         runtime_overhead_calibration=runtime_overhead,
         strided_dma_calibration=strided_dma,
+        tensor_calibration=tensor_calibration,
         kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),
         dma_queue_count=max(1, args.dma_queue_count),
     )

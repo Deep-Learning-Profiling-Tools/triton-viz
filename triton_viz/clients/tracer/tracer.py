@@ -14,6 +14,7 @@ from ...core.data import (
     Grid,
     Allocate,
     NkiCompute,
+    TensorTranspose,
 )
 from ...utils.traceback_utils import extract_user_frames
 from triton_viz.core.masked_load_store import masked_load
@@ -407,6 +408,29 @@ class Tracer(Client):
             ret._trace_record = rec
             self.records.append(rec)
 
+        @self.lock_fn
+        def post_tensor_transpose_callback(ret, data, engine="tensor"):
+            if not self.sample:
+                return
+            rec = TensorTranspose(
+                input_shape=tuple(data.shape),
+                output_shape=tuple(ret.shape),
+                input_ptrs=(int(data.data_ptr()),),
+                output_ptr=int(ret.data_ptr()) if hasattr(ret, "data_ptr") else None,
+                input_storages=(_storage(data),),
+                input_ranges=(_range(data),),
+                input_versions=(_version(data),),
+                output_storage=_storage(ret),
+                output_range=_range(ret),
+                output_version=_version(ret),
+                input_dtypes=(str(data.dtype),),
+                output_dtype=str(ret.dtype),
+                engine=str(getattr(engine, "name", engine) or "tensor"),
+            )
+            rec.call_path = extract_user_frames(num_frames=1)
+            ret._trace_record = rec
+            self.records.append(rec)
+
         callbacks = {
             Allocate: OpCallbacks(after_callback=post_allocate_callback),
             Load: OpCallbacks(after_callback=post_load_callback),
@@ -417,6 +441,9 @@ class Tracer(Client):
             Dot: OpCallbacks(after_callback=post_dot_callback),
             BinaryOp: OpCallbacks(after_callback=post_binary_callback),
             NkiCompute: OpCallbacks(after_callback=post_nki_compute_callback),
+            TensorTranspose: OpCallbacks(
+                after_callback=post_tensor_transpose_callback
+            ),
         }
         return callbacks.get(op_type, OpCallbacks())
 

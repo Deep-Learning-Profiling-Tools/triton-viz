@@ -26,6 +26,7 @@ from triton_viz.core.data import (
     NkiCompute,
     ReduceSum,
     Store,
+    TensorTranspose,
     Transfer,
 )
 from triton_viz.tools.nki_region_ir import build_region_ir
@@ -266,7 +267,7 @@ def _annotate_fusion_signature(events: list[dict[str, Any]]) -> None:
     from different program instances or separated by an explicit transfer are
     never grouped together.
     """
-    compute_ops = {"binary", "compute", "dot", "reduce_sum"}
+    compute_ops = {"binary", "compute", "dot", "reduce_sum", "tensor_transpose"}
     index = 0
     group_id = 0
     while index < len(events):
@@ -604,6 +605,44 @@ def record_to_event(
                 int(record.output_versions[0]) if record.output_versions else None
             ),
             "input_dtypes": list(record.input_dtypes),
+            "output_dtype": record.output_dtype,
+        }
+
+    if isinstance(record, TensorTranspose):
+        input_shape = _shape(record.input_shape)
+        output_shape = _shape(record.output_shape)
+        # A TensorE PF-transpose is an identity matmul: stationary.T @ I.
+        # For a source tile (P, F) the identity operand is (P, P), so the
+        # equivalent FLOPs are 2 * F * P * P.
+        flops = None
+        if len(input_shape) == 2:
+            par, free = input_shape
+            flops = 2 * int(free) * int(par) * int(par)
+        return {
+            **base,
+            "op": "tensor_transpose",
+            "engine": "tensor",
+            "input_shape": input_shape,
+            "other_shape": [input_shape[0], input_shape[0]]
+            if len(input_shape) == 2
+            else [],
+            "output_shape": output_shape,
+            "flops": flops,
+            "input_ptrs": [int(ptr) for ptr in record.input_ptrs],
+            "output_ptr": (
+                int(record.output_ptr)
+                if record.output_ptr is not None
+                else None
+            ),
+            "input_storages": [int(value) for value in record.input_storages],
+            "input_ranges": [list(value) for value in record.input_ranges],
+            "input_versions": [int(value) for value in record.input_versions],
+            "output_storage": record.output_storage,
+            "output_range": (
+                list(record.output_range) if record.output_range is not None else None
+            ),
+            "output_version": record.output_version,
+            "input_dtypes": [str(value) for value in record.input_dtypes],
             "output_dtype": record.output_dtype,
         }
 

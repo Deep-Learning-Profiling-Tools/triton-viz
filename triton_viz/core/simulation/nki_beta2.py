@@ -679,7 +679,11 @@ def reciprocal(dst: NDArray, data: NDArray, name: str | None = None) -> NDArray:
         data: Source tensor providing reciprocal inputs.
         name: Optional kernel op name retained for API parity.
     """
-    return _store(dst, np.reciprocal(_array(data, dtype=np.float32)))
+    result = _store(dst, np.reciprocal(_array(data, dtype=np.float32)))
+    result._nki_api = "reciprocal"
+    result._nki_engine = "scalar"
+    result._nki_inputs = (data,)
+    return result
 
 
 def exponential(
@@ -1035,7 +1039,8 @@ def tensor_reduce(
             f"reduced shape {reduced.shape} and dst shape {dst.shape}",
         )
         reduced = reduced.reshape(dst.shape)
-    return _store(dst, reduced)
+    result = _store(dst, reduced)
+    return result
 
 
 def tensor_scalar(
@@ -1118,7 +1123,14 @@ def tensor_scalar(
         result = _array(
             op.run(*(operand_value, result) if reverse else (result, operand_value))
         )
-    return _store(dst, result.reshape(dst.shape))
+    tagged = _store(dst, result.reshape(dst.shape))
+    tagged._nki_api = "tensor_scalar"
+    tagged._nki_engine = "vector"
+    tagged._nki_inputs = tuple(
+        item for item in (data, operand0, operand1)
+        if isinstance(item, NDArray)
+    )
+    return tagged
 
 
 def activation(
@@ -1174,7 +1186,15 @@ def activation(
     scale_value = _activation_operand(scale, data_value.shape, "scale")
     bias_value = _activation_operand(bias, data_value.shape, "bias")
     output_value = _array(op.run(data_value * scale_value + bias_value))
-    _store(dst, output_value.reshape(dst.shape))
+    tagged = _store(dst, output_value.reshape(dst.shape))
+    tagged._nki_api = "activation"
+    tagged._nki_engine = "scalar"
+    # Keep bias/scale in the recorded inputs so cross-engine dependencies
+    # resolve correctly. The cost model treats an activation as one data
+    # stream (see ``_input_stream_count``), matching its Level-B calibration.
+    tagged._nki_inputs = tuple(
+        item for item in (data, bias, scale) if isinstance(item, NDArray)
+    )
     if reduce_res is not None and reduce_op is not None:
         _require(
             reduce_res.shape == (data_par, 1),
@@ -1186,7 +1206,7 @@ def activation(
             keepdims=True,
         )
         _store(reduce_res, reduced)
-    return dst
+    return tagged
 
 
 class Builder:

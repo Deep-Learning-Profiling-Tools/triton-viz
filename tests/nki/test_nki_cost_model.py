@@ -18,6 +18,7 @@ try:
         StaticDmaCalibrationSurface,
         StridedDmaCalibration,
         StructuredControlCalibration,
+        TensorCalibrationSurface,
         simulate,
     )
     from triton_viz.tools.nki_region_ir import structural_calibration_key
@@ -886,3 +887,58 @@ def test_compositional_lowering_uses_region_features_without_signature_row():
                            "two_input_elementwise_count": 2}}
     result = simulate([event], CostModel(compute_calibration=level_b, compositional_lowering=structured))
     assert result.engine_busy_ns["vector"] == pytest.approx(557.0)
+
+
+def test_tensor_calibration_is_dtype_throughput_without_shape_lookup(tmp_path):
+    path = tmp_path / "tensor.csv"
+    fields = [
+        "row_type",
+        "status",
+        "kind",
+        "spec.dtype",
+        "work.matmul_flops",
+        "profile.tensor_engine_active_time",
+    ]
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        for dtype, startup_ns, flops_per_ns in (
+            ("float32", 1000.0, 20_000.0),
+            ("bfloat16", 500.0, 80_000.0),
+        ):
+            for flops in (5e8, 1e9, 2e9, 4e9):
+                active_ns = startup_ns + flops / flops_per_ns
+                writer.writerow({
+                    "row_type": "benchmark",
+                    "status": "ok",
+                    "kind": "tensor_matmul_tiled",
+                    "spec.dtype": dtype,
+                    "work.matmul_flops": flops,
+                    "profile.tensor_engine_active_time": active_ns * 1e-9,
+                })
+
+    calibration = TensorCalibrationSurface.from_csv(
+        path, benchmark_name="tensor_matmul_tiled"
+    )
+    assert calibration.flops_per_ns("float32") == pytest.approx(20_000.0)
+    assert calibration.flops_per_ns("bf16") == pytest.approx(80_000.0)
+    assert calibration.startup_ns("float32") == pytest.approx(1000.0)
+    assert calibration.startup_ns("bf16") == pytest.approx(500.0)
+    # Throughput-only: no per-dot table and no tile-shape key may exist.
+    assert not hasattr(calibration, "ns_per_dot")
+    assert not hasattr(calibration, "shape_points")
+    assert calibration.domain_match("float32", 5e8) == "in_domain"
+    assert calibration.domain_match("float32", 4e6) == "below_domain"
+    assert calibration.domain_match("float32", 5e9) == "above_domain"
+
+    model = CostModel(tensor_calibration=calibration)
+    small_attention_dot = {
+        "op": "dot",
+        "engine": "tensor",
+        "flops": 2 * 128 * 128 * 128,
+        "input_dtypes": ["float32", "float32"],
+        "output_dtype": "float32",
+    }
+    assert model.cost_ns(small_attention_dot) == pytest.approx(
+        small_attention_dot["flops"] / 20_000.0
+    )
