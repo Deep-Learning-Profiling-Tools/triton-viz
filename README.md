@@ -141,13 +141,11 @@ The main artifacts under the selected root are:
   calibration surfaces keyed by `(partition_count, free_bytes_per_partition)`.
 - `calibration/compute.csv`, `structured_compute.csv`, and `static_dma.csv`:
   the remaining control-only calibration surfaces.
-- `calibration/tensor_matmul_tiled.csv`: control-only TensorE pipeline
-  calibration used for the Tilebench matmul holdouts.
 - `evaluation/*.csv`: per-case predictions, hardware measurements, and the
   compute-only, compute-plus-DMA, scheduler-overlap, and final ablations.
 - `evaluation/report.json`: aggregate holdout MAPE, per-operator MAPE, the
-  TensorE holdout MAPE, the worst retained case, and a DMA-surface hit audit
-  (`exact`/`interpolated`/`ood_clamped` event counts).
+  worst retained case, and a DMA-surface hit audit (`exact`/`interpolated`/
+  `ood_clamped` event counts).
 
 The DMA cost path is **surface-only**: the scheduler prices transfers from
 the measured `(partition_count, free_bytes)` bandwidth surfaces, keeping the
@@ -168,59 +166,7 @@ dual-dtype surface model reports 3.428% NC-p50 MAPE on this formal set. The
 report also evaluates separate 120-point FP32 and BF16 matrices across
 `rows={1,16,128}` and `F={128,512,1024,2048,4096}`. Their current NC-p50
 MAPEs are 14.315% and 13.918%, respectively; BF16 strict evaluation rejects
-missing or cross-dtype compute fallback. Two additional five-point TensorE
-splits add the Tilebench `matmul_fp32_fp16_fp8` kernel in FP32 and BF16.
-
-### Reproducing every holdout MAPE point
-
-The existing operator holdouts are reproduced by the three-stage pipeline
-above. Its `evaluate` stage writes `evaluation/report.json`, which contains the
-per-split NC-p50 MAPE and per-operator breakdowns:
-
-```sh
-export TILEBENCH_OPS_DIR=/path/to/Tilebench/benchmarks/operators
-
-python -m triton_viz.tools.nki_cost_model_pipeline collect \
-  --root /tmp/nki_cost_model_run \
-  --tilebench-dir "$TILEBENCH_OPS_DIR"
-python -m triton_viz.tools.nki_cost_model_pipeline fit \
-  --root /tmp/nki_cost_model_run
-python -m triton_viz.tools.nki_cost_model_pipeline evaluate \
-  --root /tmp/nki_cost_model_run
-```
-
-The Tensor Engine Tilebench kernel (`matmul_fp32_fp16_fp8`) is part of the
-same pipeline, not a separate evaluation path. `collect` gathers an
-independent `tensor_matmul_tiled_surface` control sweep (same TensorE tile
-geometry but not the Tilebench kernel), then collects the FP32/BF16
-`matmul_fp32_fp16_fp8` holdouts defined in
-`microbench/inf2_nki/configs/formal_holdouts.json`. `fit` exports the control
-CSV to `calibration/tensor_matmul_tiled.csv`; the holdout directory is never
-read during fitting. `evaluate` replays those traces with the frozen control
-calibration and writes aggregate TensorE numbers into `evaluation/report.json`
-under `tensor_cases`, `tensor_nc_p50_mape_pct`, `tensor_busy_mape_pct`, and
-`tensor_operator_mape_pct`.
-
-For quick per-dtype debugging of one Tilebench operator run, use
-`nki_operator_experiments` directly and pass the **control** CSV produced by
-`fit`:
-
-```sh
-python -m triton_viz.tools.nki_operator_experiments \
-  --tilebench-ops-dir "$TILEBENCH_OPS_DIR" \
-  --output-dir /tmp/tensor_debug_fp32 \
-  --ops matmul_fp32_fp16_fp8 \
-  --rows 512 --cols 512 1024 2048 4096 8192 --dtype float32 \
-  --tensor-calibration-csv /tmp/nki_cost_model_run/calibration/tensor_matmul_tiled.csv \
-  --warmup 10 --iters 50
-```
-
-This debugging command is only for inspection; the formal all-points MAPE must
-come from `pipeline evaluate`, which enforces the control/holdout split.
-
-With the control CSV above, the stable 10-point FP32/BF16 matmul sweep on this
-Inf2 environment reports TensorE-busy MAPE of about 7.0% for FP32 and 8.5% for
-BF16, with NC-p50 MAPE of about 11.5% and 20.1% respectively.
+missing or cross-dtype compute fallback.
 
 See `microbench/inf2_nki/README.md` for individual microbenchmark commands,
 schema details, and lower-level troubleshooting.

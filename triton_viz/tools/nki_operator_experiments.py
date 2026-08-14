@@ -45,7 +45,6 @@ from triton_viz.tools.nki_cost_model import (
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
-    TensorCalibrationSurface,
     eliminate_redundant_hbm_loads,
     simulate,
 )
@@ -61,12 +60,6 @@ from triton_viz.tools.nki_trace_dump import write_jsonl
 
 TILEBENCH_OPS = Path(
     os.environ.get("TILEBENCH_OPS_DIR", "/home/ubuntu/Tilebench/benchmarks/operators")
-)
-HOLDOUT_OPS = (
-    Path(__file__).resolve().parents[2]
-    / "microbench"
-    / "inf2_nki"
-    / "holdout_operators"
 )
 
 _DTYPES = {
@@ -206,18 +199,6 @@ OPERATORS: dict[str, dict[str, Any]] = {
             1e-5,
         ],
     },
-    # Structural attention holdout. ``rows`` is the sequence length and
-    # ``cols`` is the head dimension, so the common rows/cols sweep spans the
-    # two attention tiles (seq x seq scores and seq x d output) without any
-    # operator-specific CLI flags.
-    "nki_scaled_dot_attention": {
-        "kernel": "nki_scaled_dot_attention_kernel",
-        "inputs": lambda r, c, dt: [
-            _randn((r, c), dt),
-            _randn((r, c), dt),
-            _randn((r, c), dt),
-        ],
-    },
 }
 
 
@@ -232,7 +213,6 @@ CSV_COLUMNS = [
     "load_count",
     "store_count",
     "compute_count",
-    "dot_count",
     "trace_hbm_read_bytes",
     "trace_hbm_write_bytes",
     "compiler_elided_load_count",
@@ -241,18 +221,15 @@ CSV_COLUMNS = [
     "predicted_dma_busy_us",
     "predicted_vector_busy_us",
     "predicted_scalar_busy_us",
-    "predicted_tensor_busy_us",
     "hardware_nc_p50_us",
     "hardware_total_active_us",
     "hardware_dma_active_us",
     "hardware_vector_active_us",
     "hardware_scalar_active_us",
-    "hardware_tensor_active_us",
     "error_vs_nc_pct",
     "dma_busy_error_pct",
     "vector_busy_error_pct",
     "scalar_busy_error_pct",
-    "tensor_busy_error_pct",
     "vector_mapping_coverage_pct",
     "scalar_mapping_coverage_pct",
 ]
@@ -260,15 +237,6 @@ CSV_COLUMNS = [
 
 def _load_kernel(op: str):
     impl = TILEBENCH_OPS / op / "impl_nki.py"
-    if not impl.is_file():
-        custom = HOLDOUT_OPS / op / "impl_nki.py"
-        if custom.is_file():
-            impl = custom
-        else:
-            raise FileNotFoundError(
-                f"No impl_nki.py found for operator {op!r} in "
-                f"{TILEBENCH_OPS} or {HOLDOUT_OPS}"
-            )
     spec = importlib.util.spec_from_file_location(f"tilebench_{op}", impl)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -304,16 +272,8 @@ def _run_hardware(
     kernel=None,
 ) -> tuple[float | None, dict[str, Any]]:
     from neuronxcc import nki
-    from neuronxcc.nki import language as nl
 
     kernel = kernel or _load_kernel(op)
-    if op == "matmul_fp32_fp16_fp8":
-        # Tilebench's matmul kernel is SPMD: it reads program_id(0) and expects
-        # an explicit nl.nc(NUM_CORES) launch grid.  All other operator kernels
-        # used by this driver are single-program and compile with the default
-        # grid, which is why the generic path below works for them.
-        num_cores = int(inputs[5])
-        kernel = kernel[nl.nc(num_cores)]
     artifact_dir.mkdir(parents=True, exist_ok=True)
     old = Path.cwd()
     try:
@@ -377,7 +337,6 @@ def run_case(
             compute_count=sum(
                 e.get("op") in ("compute", "binary", "reduce_sum") for e in events
             ),
-            dot_count=sum(e.get("op") == "dot" for e in events),
             trace_hbm_read_bytes=read,
             trace_hbm_write_bytes=write,
             compiler_elided_load_count=cse_audit["eliminated_load_count"],
@@ -391,7 +350,6 @@ def run_case(
         ) / 1000.0
         row["predicted_vector_busy_us"] = busy.get("vector", 0.0) / 1000.0
         row["predicted_scalar_busy_us"] = busy.get("scalar", 0.0) / 1000.0
-        row["predicted_tensor_busy_us"] = busy.get("tensor", 0.0) / 1000.0
         (art / "prediction.json").write_text(
             json.dumps(sim.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -408,9 +366,6 @@ def run_case(
             row["hardware_scalar_active_us"] = (
                 float(prof.get("scalar_engine_active_time", 0)) * 1e6
             )
-            row["hardware_tensor_active_us"] = (
-                float(prof.get("tensor_engine_active_time", 0)) * 1e6
-            )
             row["error_vs_nc_pct"] = _percent_error(row["predicted_total_us"], nc_p50)
             row["dma_busy_error_pct"] = _percent_error(
                 row["predicted_dma_busy_us"], row["hardware_dma_active_us"]
@@ -420,9 +375,6 @@ def run_case(
             )
             row["scalar_busy_error_pct"] = _percent_error(
                 row["predicted_scalar_busy_us"], row["hardware_scalar_active_us"]
-            )
-            row["tensor_busy_error_pct"] = _percent_error(
-                row["predicted_tensor_busy_us"], row["hardware_tensor_active_us"]
             )
             if source_mapping:
                 export_parquet(art / "hardware")
@@ -534,12 +486,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Structural-family control points (no operator signatures).",
     )
-    parser.add_argument(
-        "--tensor-calibration-csv",
-        type=Path,
-        default=None,
-        help="Control-only TensorE calibration CSV from tensor_matmul_tiled microbenchmarks.",
-    )
     args = parser.parse_args(argv)
     if args.source_mapping and args.no_hardware:
         parser.error("--source-mapping requires hardware; remove --no-hardware")
@@ -592,13 +538,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.structural_static_dma_csv
         else None
     )
-    tensor_calibration = (
-        TensorCalibrationSurface.from_csv(
-            args.tensor_calibration_csv, benchmark_name="tensor_matmul_tiled"
-        )
-        if args.tensor_calibration_csv
-        else None
-    )
     runtime_overhead = (
         RuntimeOverheadCalibration.from_csv(args.runtime_overhead_csv)
         if args.runtime_overhead_csv
@@ -617,7 +556,6 @@ def main(argv: list[str] | None = None) -> int:
         compositional_lowering=compositional,
         structured_control_lowering=structured_controls,
         structural_static_dma=structural_static_dma,
-        tensor_calibration=tensor_calibration,
         runtime_overhead_calibration=runtime_overhead,
         strided_dma_calibration=strided_dma,
         kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),
@@ -697,8 +635,6 @@ def main(argv: list[str] | None = None) -> int:
         _mape(rows, "vector_busy_error_pct"),
         " scalar-busy MAPE:",
         _mape(rows, "scalar_busy_error_pct"),
-        " tensor-busy MAPE:",
-        _mape(rows, "tensor_busy_error_pct"),
         " dma-busy MAPE:",
         _mape(rows, "dma_busy_error_pct"),
     )
