@@ -179,27 +179,36 @@ separate directory or standalone MAPE path):
 
 - `tensor_fp32_v1` and `tensor_bf16_v1` add the Tilebench
   `matmul_fp32_fp16_fp8` kernel (5 points each). With the dtype-keyed
-  throughput calibration above, NC-p50 MAPE is 25.484% (FP32) and 18.301%
-  (BF16); TensorE-busy MAPE is 13.926% across both. Every source Dot is
-  below the fitted kernel-FLOP domain and is therefore counted in
-  `tensor_flops_domain_ood_count` (992 events) rather than claimed in-domain.
+  startup+throughput calibration above, NC-p50 MAPE is 24.218% (FP32) and
+  19.323% (BF16); TensorE-busy MAPE is 12.266% across both. The shape-offset
+  small-tile controls extend the fitted FLOP domain down to attention-sized
+  dots, so `tensor_flops_domain_ood_count` is 0.
 - `attention_fp32_v1` uses the repository's real tiled attention kernel,
   `examples/nki_beta2/tiled_attention.py` (batch/head/M/KV tile loops, online
   softmax rescaling, and the full `dma_copy`/`nc_transpose`/`tensor_copy`/
   `nc_matmul` dataflow), not a simplified single-head matmul+softmax. It is
   traced by the `nki_beta2` frontend and benchmarked on Inf2 through the
   standalone NKI framework (NEFF + NTFF on the same Explorer path as the other
-  operators). Its 4-point NC-p50 MAPE is 69.092%, TensorE-busy MAPE is
-  59.595%, and all 20 TensorE events are below-domain OOD. This is reported as
-  an uncovered/OOD result rather than fitted away: the current model
-  extrapolates small attention tiles by FLOPs only and has no measured
-  attention-sized TensorE controls, and the attention softmax region is not
-  matched by a structured control grammar. BF16 attention is unsupported
-  because the example's second matmul mixes FP32 probabilities with BF16 V,
-  which the beta2 interpreter rejects (`trace_unsupported`); Inf2 PSUM
-  capacity additionally constrains the compilable sweep to `m_size=n_size=128`
-  with `dv_size={64,128,256,512}`. `report.json` carries these limits under
-  `attention_coverage` and the OOD event counts.
+  operators). Its 4-point NC-p50 MAPE is 3.00% (across repeated device-latency
+  samples it ranges 3.0-7.5%), and TensorE-busy MAPE is 12.51%. Two
+  control-backed mechanism fixes produce those numbers rather than tuning:
+  (a) the runtime critical path now receives concrete HBM access geometry for
+  beta2 `Transfer` events instead of a degenerate `free_access=1`, and
+  (b) an independent small-tile TensorE control with shapes disjoint from the
+  holdout (`m=64,k=64,n={96,192,320,448}` versus the holdout's
+  `m=128,k=128,n={64,128,256,512}`) refits the dtype-keyed
+  startup+throughput line, so small attention dots are in-domain FLOP-wise
+  (`tensor_flops_domain_ood_count` is 0). The online-softmax region is
+  canonicalized to the existing `reduction.with_transcendental` grammar.
+  Remaining busy-level gaps are reported as OOD/unsupported rather than
+  fitted away: compiler Static DMA packets (~6.5 us for on-chip `(128,1)`
+  copies), GpSimdE lowering (~3.8 us), and the uncalibrated beta2 softmax
+  scalar expansion. BF16 attention is unsupported because the example's
+  second matmul mixes FP32 probabilities with BF16 V, which the beta2
+  interpreter rejects (`trace_unsupported`); Inf2 PSUM capacity additionally
+  constrains the compilable sweep to `m_size=n_size=128` with
+  `dv_size={64,128,256,512}`. `report.json` carries these limits under
+  `attention_coverage`.
 
 The one-command MAPE summary for every collected holdout point (all existing
 operators plus TensorE and attention) is available from the frozen replays:
