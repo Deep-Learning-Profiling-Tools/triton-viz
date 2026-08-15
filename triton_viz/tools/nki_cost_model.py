@@ -402,7 +402,12 @@ class TensorCalibrationSurface:
             for row in csv.DictReader(file):
                 if row.get("row_type") not in (None, "benchmark"):
                     continue
-                if row.get("status") != "ok" or row.get("kind") != benchmark_name:
+                if row.get("status") != "ok":
+                    continue
+                if row.get("kind") not in {
+                    benchmark_name,
+                    "tensor_matmul_small",
+                }:
                     continue
                 dtype = cls._normalize_dtype(row.get("spec.dtype") or "")
                 if not dtype:

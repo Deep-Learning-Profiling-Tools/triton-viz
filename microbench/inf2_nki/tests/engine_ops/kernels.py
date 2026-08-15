@@ -229,6 +229,73 @@ def tensor_matmul_tiled_work_units(
     }
 
 
+def tensor_matmul_small_factory(
+    *,
+    m: int,
+    k: int,
+    n: int,
+    repeat: int,
+    mode: str = "independent",
+    dtype_name: str = "float32",
+):
+    """Small single-tile TensorE calibration control.
+
+    This independent control measures the TensorE ``startup + flops /
+    throughput`` regime for small tiles. It is deliberately disjoint from the
+    attention holdout geometry: the pipeline config uses
+    ``m=64, k=64, n={96,192,320,448}`` while the tiled-attention holdout uses
+    ``m=128, k=128, n={64,128,256,512}``. The fit remains keyed by operand
+    dtype only -- never by tile shape -- and ``repeat`` varies the number of
+    retained independent Dots so the per-kernel startup can be separated from
+    the steady-state slope. There is no softmax and no cross-Dot dependency:
+    every Dot writes a distinct output.
+    """
+    kernel_dtype_name = dtype_name
+
+    @nki.jit
+    def kernel(lhs, rhs):
+        kdtype = dtype_for_load(kernel_dtype_name, lhs.dtype)
+        out = nl.ndarray((repeat, m, n), dtype=kdtype, buffer=nl.shared_hbm)
+        lhs_tiles = nl.ndarray(
+            (repeat, nl.par_dim(k), m), dtype=kdtype, buffer=nl.sbuf
+        )
+        rhs_tiles = nl.ndarray(
+            (repeat, nl.par_dim(k), n), dtype=kdtype, buffer=nl.sbuf
+        )
+        for i in nl.static_range(repeat):
+            lhs_tiles[i] = nl.load(lhs[i])
+            rhs_tiles[i] = nl.load(rhs[i])
+            res_psum = nl.zeros((m, n), dtype=nl.float32, buffer=nl.psum)
+            res_psum += nisa.nc_matmul(
+                stationary=lhs_tiles[i],
+                moving=rhs_tiles[i],
+                name=f"small_mm_{i}",
+            )
+            res_sbuf = nisa.tensor_copy(
+                res_psum, dtype=kdtype, engine=nisa.engine.vector
+            )
+            nl.store(out[i], value=res_sbuf)
+        return out
+
+    return kernel, [(repeat, k, m), (repeat, k, n)], (1,)
+
+
+def tensor_matmul_small_work_units(
+    *,
+    m: int,
+    k: int,
+    n: int,
+    repeat: int,
+    mode: str = "independent",
+    dtype_name: str = "float32",
+) -> dict[str, int]:
+    return {
+        "matmul_flops": 2 * m * n * k * repeat,
+        "logical_instructions": repeat,
+        "dot_count": repeat,
+    }
+
+
 def work_units(*, p: int | None = None, f: int | None = None, m: int | None = None, k: int | None = None, n: int | None = None, repeat: int, mode: str = "", **_: object) -> dict[str, int]:
     if m is not None and k is not None and n is not None:
         return {"matmul_flops": 2 * m * n * k * repeat, "logical_instructions": repeat}

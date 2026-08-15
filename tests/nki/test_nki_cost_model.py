@@ -942,3 +942,52 @@ def test_tensor_calibration_is_dtype_throughput_without_shape_lookup(tmp_path):
     assert model.cost_ns(small_attention_dot) == pytest.approx(
         small_attention_dot["flops"] / 20_000.0
     )
+
+
+def test_tensor_calibration_mixed_small_and_tiled_controls_fit_startup(tmp_path):
+    """Small shape-offset controls supply the once-per-kernel startup.
+
+    The dtype-keyed fit is one regression across every control FLOP value; the
+    small controls anchor the low-FLOP end so the intercept is no longer
+    clamped to zero. There is still no per-shape key.
+    """
+    path = tmp_path / "tensor.csv"
+    fields = [
+        "row_type",
+        "status",
+        "kind",
+        "spec.dtype",
+        "work.matmul_flops",
+        "work.dot_count",
+        "profile.tensor_engine_active_time",
+    ]
+    startup_ns = 800.0
+    flops_per_ns = 20_000.0
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        for kind, flops_values in (
+            ("tensor_matmul_small", (786_432, 1_572_864, 3_145_728)),
+            ("tensor_matmul_tiled", (5e8, 1e9, 2e9, 4e9)),
+        ):
+            for flops in flops_values:
+                writer.writerow({
+                    "row_type": "benchmark",
+                    "status": "ok",
+                    "kind": kind,
+                    "spec.dtype": "float32",
+                    "work.matmul_flops": flops,
+                    "work.dot_count": 1,
+                    "profile.tensor_engine_active_time": (
+                        startup_ns + flops / flops_per_ns
+                    ) * 1e-9,
+                })
+
+    calibration = TensorCalibrationSurface.from_csv(
+        path, benchmark_name="tensor_matmul_tiled"
+    )
+    assert not hasattr(calibration, "ns_per_dot")
+    assert not hasattr(calibration, "shape_points")
+    assert calibration.flops_per_ns("float32") == pytest.approx(20_000.0, rel=1e-6)
+    assert calibration.startup_ns("float32") == pytest.approx(800.0, rel=1e-6)
+    assert calibration.domain_match("float32", 4_194_304) == "in_domain"
