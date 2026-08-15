@@ -141,6 +141,11 @@ The main artifacts under the selected root are:
   calibration surfaces keyed by `(partition_count, free_bytes_per_partition)`.
 - `calibration/compute.csv`, `structured_compute.csv`, and `static_dma.csv`:
   the remaining control-only calibration surfaces.
+- `calibration/tensor_matmul_tiled.csv`: control-only TensorE calibration
+  fitted as `tensor_engine_active_time = startup + flops / throughput` keyed
+  by operand dtype. There is deliberately no per-source-`Dot` table and no
+  tile-shape key: every unseen Dot is priced by its FLOPs through the fitted
+  line, and Dots outside the fitted FLOP domain are counted as OOD.
 - `evaluation/*.csv`: per-case predictions, hardware measurements, and the
   compute-only, compute-plus-DMA, scheduler-overlap, and final ablations.
 - `evaluation/report.json`: aggregate holdout MAPE, per-operator MAPE, the
@@ -167,6 +172,45 @@ report also evaluates separate 120-point FP32 and BF16 matrices across
 `rows={1,16,128}` and `F={128,512,1024,2048,4096}`. Their current NC-p50
 MAPEs are 14.315% and 13.918%, respectively; BF16 strict evaluation rejects
 missing or cross-dtype compute fallback.
+
+The same three-stage pipeline also evaluates two Tensor Engine splits and one
+structural attention split in the identical collect/fit/evaluate flow (no
+separate directory or standalone MAPE path):
+
+- `tensor_fp32_v1` and `tensor_bf16_v1` add the Tilebench
+  `matmul_fp32_fp16_fp8` kernel (5 points each). With the dtype-keyed
+  throughput calibration above, NC-p50 MAPE is 25.484% (FP32) and 18.301%
+  (BF16); TensorE-busy MAPE is 13.926% across both. Every source Dot is
+  below the fitted kernel-FLOP domain and is therefore counted in
+  `tensor_flops_domain_ood_count` (992 events) rather than claimed in-domain.
+- `attention_fp32_v1` uses the repository's real tiled attention kernel,
+  `examples/nki_beta2/tiled_attention.py` (batch/head/M/KV tile loops, online
+  softmax rescaling, and the full `dma_copy`/`nc_transpose`/`tensor_copy`/
+  `nc_matmul` dataflow), not a simplified single-head matmul+softmax. It is
+  traced by the `nki_beta2` frontend and benchmarked on Inf2 through the
+  standalone NKI framework (NEFF + NTFF on the same Explorer path as the other
+  operators). Its 4-point NC-p50 MAPE is 69.092%, TensorE-busy MAPE is
+  59.595%, and all 20 TensorE events are below-domain OOD. This is reported as
+  an uncovered/OOD result rather than fitted away: the current model
+  extrapolates small attention tiles by FLOPs only and has no measured
+  attention-sized TensorE controls, and the attention softmax region is not
+  matched by a structured control grammar. BF16 attention is unsupported
+  because the example's second matmul mixes FP32 probabilities with BF16 V,
+  which the beta2 interpreter rejects (`trace_unsupported`); Inf2 PSUM
+  capacity additionally constrains the compilable sweep to `m_size=n_size=128`
+  with `dv_size={64,128,256,512}`. `report.json` carries these limits under
+  `attention_coverage` and the OOD event counts.
+
+The one-command MAPE summary for every collected holdout point (all existing
+operators plus TensorE and attention) is available from the frozen replays:
+
+```sh
+python -m triton_viz.tools.nki_operator_mape \
+  /tmp/nki_cost_model_run/evaluation/*.csv
+```
+
+`evaluation/report.json` remains the authoritative per-split, per-operator
+breakdown; the helper is a convenience for the all-points number.
 
 See `microbench/inf2_nki/README.md` for individual microbenchmark commands,
 schema details, and lower-level troubleshooting.
