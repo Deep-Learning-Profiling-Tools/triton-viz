@@ -184,6 +184,10 @@ def main(argv: list[str] | None = None) -> int:
         hardware_nc_us = float(source["hardware_nc_p50_us"])
         hardware_tensor_us = float(source.get("hardware_tensor_active_us") or 0.0)
         components = result.components_ns
+        has_tensor_events = any(
+            event.get("op") in {"dot", "tensor_transpose"}
+            for event in model_events
+        )
         dma_paths = set()
         dma_matches = set()
         for event in model_events:
@@ -229,12 +233,14 @@ def main(argv: list[str] | None = None) -> int:
                 "nc_error_pct": (predicted_total_us - hardware_nc_us)
                 / hardware_nc_us
                 * 100,
-                "hardware_tensor_active_us": hardware_tensor_us,
+                "hardware_tensor_active_us": (
+                    hardware_tensor_us if has_tensor_events else ""
+                ),
                 "tensor_error_pct": (
                     (predicted_tensor_us - hardware_tensor_us)
                     / hardware_tensor_us
                     * 100
-                    if hardware_tensor_us
+                    if hardware_tensor_us and has_tensor_events
                     else ""
                 ),
                 "hardware_total_dma_us": hardware_us,
