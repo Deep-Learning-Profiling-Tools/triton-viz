@@ -476,7 +476,7 @@ def record_to_event(
             and src_shape != dst_shape
         ):
             dma_pattern = "transpose"
-        return {
+        event = {
             **base,
             "op": "transfer",
             "engine": _transfer_engine(record.mem_src, record.mem_dst, shape),
@@ -498,6 +498,25 @@ def record_to_event(
             "dst_ranges": _byte_ranges(record.dst_offsets, int(record.bytes)),
             **_dma_geometry(shape, int(record.bytes), partition_axis),
         }
+        # Access geometry on the HBM side of the transfer. The legacy Load/
+        # Store events always carry ``_offset_geometry``; beta2 Transfer
+        # records carry concrete source/destination byte offsets instead, so
+        # derive the same access features here. This is what the runtime
+        # DMA-packet term and the strided-DMA surface consume.
+        mem_src = str(record.mem_src or "").lower()
+        mem_dst = str(record.mem_dst or "").lower()
+        if "hbm" in mem_src:
+            offsets = np.asarray(record.src_offsets)
+        elif "hbm" in mem_dst:
+            offsets = np.asarray(record.dst_offsets)
+        else:
+            offsets = np.asarray([])
+        if offsets.size:
+            masks = np.ones(offsets.shape, dtype=bool)
+            geometry = _offset_geometry(offsets, masks, int(record.bytes))
+            event.update(geometry)
+        event["dma_pattern"] = dma_pattern
+        return event
 
     if isinstance(record, Dot):
         return {

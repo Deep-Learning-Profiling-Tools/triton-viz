@@ -2038,7 +2038,13 @@ def simulate(
             (
                 max(1, pattern.active_access_count // pattern.partition_count)
                 for event in source_events
-                if (pattern := AccessPattern.from_event(event)) is not None
+                if (
+                    pattern := AccessPattern.from_event(event)
+                ) is not None
+                and (
+                    "hbm" in pattern.src_space
+                    or "hbm" in pattern.dst_space
+                )
             ),
             default=1,
         )

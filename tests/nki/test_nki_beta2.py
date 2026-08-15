@@ -10,6 +10,7 @@ try:
     from triton_viz.clients import Tracer
     from triton_viz.core.data import Dot, Transfer
     from triton_viz.core.trace import launches
+    from triton_viz.tools.nki_trace_dump import records_to_events
     import nki.isa as nisa
     import nki.language as nl
     import triton_viz.core.simulation.nki_beta2 as b2
@@ -336,6 +337,40 @@ def test_trace_records_beta2_transfer_bytes_for_mixed_dtypes():
         out.nbytes,
         out.nbytes,
     ]
+
+
+def test_beta2_transfer_events_carry_hbm_access_geometry():
+    """Runtime DMA-packet accounting needs concrete HBM access geometry.
+
+    beta2 kernels record memory movement as ``Transfer`` records, so the JSONL
+    events must expose the same active-access/stride features the legacy Load/
+    Store path already provides. On-chip PSUM/SBUF copies must not be mistaken
+    for HBM accesses.
+    """
+    triton_viz.clear()
+
+    def kernel(src, out):
+        src_tile = nl.ndarray((128, 128), dtype=src.dtype, buffer=nl.sbuf)
+        psum_tile = nl.ndarray((128, 128), dtype=nl.float32, buffer=nl.psum)
+        out_tile = nl.ndarray((128, 128), dtype=out.dtype, buffer=nl.sbuf)
+        nisa.dma_copy(src_tile, src)
+        nisa.tensor_copy(psum_tile, src_tile)
+        nisa.tensor_copy(out_tile, psum_tile)
+        nisa.dma_copy(out, out_tile)
+
+    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
+    src = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
+    out = np.empty((128, 128), dtype=np.float32)
+    traced[(1,)](src, out)
+    events = records_to_events(launches[-1].records)
+    transfers = [event for event in events if event["op"] == "transfer"]
+    hbm = [event for event in transfers if "hbm" in str(event["mem_src"]).lower() or "hbm" in str(event["mem_dst"]).lower()]
+    on_chip = [event for event in transfers if "hbm" not in str(event["mem_src"]).lower() and "hbm" not in str(event["mem_dst"]).lower()]
+    assert len(hbm) == 2 and len(on_chip) == 2
+    assert all(event.get("active_access_count") == 128 * 128 for event in hbm)
+    assert all(event.get("item_bytes") == 4 for event in hbm)
+    assert all(event.get("free_stride_items") == 1 for event in hbm)
+    assert all(event.get("active_access_count") is None for event in on_chip)
 
 
 def test_trace_no_grid_needed():
