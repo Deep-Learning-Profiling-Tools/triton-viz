@@ -330,8 +330,16 @@ def _run_hardware(
     kernel=None,
 ) -> tuple[float | None, dict[str, Any]]:
     from neuronxcc import nki
+    from neuronxcc.nki import language as nl
 
     kernel = kernel or _load_kernel(op)
+    if op == "matmul_fp32_fp16_fp8":
+        # Tilebench's matmul kernel is SPMD: it reads program_id(0) and expects
+        # an explicit nl.nc(NUM_CORES) launch grid. All other operator kernels
+        # used by this driver are single-program and compile with the default
+        # grid, which is why the generic path below works for them.
+        num_cores = int(inputs[5])
+        kernel = kernel[nl.nc(num_cores)]
     artifact_dir.mkdir(parents=True, exist_ok=True)
     old = Path.cwd()
     try:
