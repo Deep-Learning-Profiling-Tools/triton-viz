@@ -70,6 +70,22 @@ def test_tiled_attention_trace_covers_full_attention_dataflow():
     assert all(event["engine"] == "tensor" for event in transposes)
     assert all(event["flops"] == 2 * 128 * 128 * 128 for event in transposes)
 
+    # The online-softmax region must classify with the existing
+    # reduction-with-transcendental grammar once the beta2 primitive names are
+    # canonicalized (tensor_scalar->multiply, activation->exp, tensor_reduce->
+    # max/reduce_sum). It is one fusion group, not a fragmented softmax.
+    from triton_viz.tools.nki_region_ir import structural_family
+
+    softmax_regions = [
+        event["region_ir"]
+        for event in events
+        if event.get("region_ir")
+        and int(event["region_ir"].get("reduction_count", 0)) >= 2
+    ]
+    assert len({id(region) for region in softmax_regions}) == 1
+    family = structural_family(softmax_regions[0])
+    assert family.startswith("reduction_transcendental")
+
 
 def test_attention_dot_shapes_have_no_shape_keyed_calibration_lookup(tmp_path):
     """The TensorE calibration must never expose a per-shape lookup table."""

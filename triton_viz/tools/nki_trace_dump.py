@@ -573,6 +573,7 @@ def record_to_event(
         return {
             **base,
             "op": "reduce_sum",
+            "api_op": record.api_op,
             "engine": "vector_or_scalar",
             "input_shape": _shape(record.input_shape),
             "axis": record.index,

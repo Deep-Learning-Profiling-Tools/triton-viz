@@ -1092,16 +1092,17 @@ def _input_stream_count(event):
     explicit = event.get("input_stream_count")
     if explicit is not None:
         return max(1, int(explicit))
-    if str(event.get("api_op") or "") == "activation":
-        # An activation instruction streams one data tile; its bias/scale are
-        # scalar or per-partition epilogue operands, not extra input streams.
+    api = str(event.get("api_op") or "")
+    if api in {"exp", "rsqrt", "sqrt", "log", "sin", "cos", "tanh", "sigmoid", "relu"}:
+        # Activation instructions stream one data tile; bias/scale are scalar
+        # or per-partition epilogue operands, not extra input streams. This
+        # matches the Level-B scalar one-input calibration.
         return 1
     ptrs = event.get("input_ptrs")
     if isinstance(ptrs, (list, tuple)) and len(ptrs) >= 1:
         return 2 if len(ptrs) >= 2 else 1
     if event.get("op") == "binary":
         return 2
-    api = str(event.get("api_op") or "")
     two_input = {
         "add",
         "subtract",

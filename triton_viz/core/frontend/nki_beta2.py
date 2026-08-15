@@ -64,8 +64,15 @@ def _nki_beta2_reduce_adapter(
     *_args: Any,
     **_kwargs: Any,
 ) -> AdapterResult:
-    del dst, op, negate
-    return AdapterResult(data, axis, keepdims)
+    del dst, negate
+    canonical = {
+        "maximum": "max",
+        "minimum": "min",
+        "add": "reduce_sum",
+        "subtract": "reduce_subtract",
+    }
+    api_op = canonical.get(getattr(op, "name", ""), getattr(op, "name", "reduce_sum"))
+    return AdapterResult(data, axis, keepdims, api_op=api_op)
 
 
 def _nki_beta2_transpose_adapter(

@@ -256,6 +256,7 @@ class Reduce(Op):
     output_storage: int | None = None
     output_range: tuple[int, int] | None = None
     output_version: int | None = None
+    api_op: str = "reduce_sum"
 
 
 @dataclass

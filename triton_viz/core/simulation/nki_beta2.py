@@ -1124,7 +1124,11 @@ def tensor_scalar(
             op.run(*(operand_value, result) if reverse else (result, operand_value))
         )
     tagged = _store(dst, result.reshape(dst.shape))
-    tagged._nki_api = "tensor_scalar"
+    tagged._nki_api = (
+        str(op0.name)
+        if op1 is None
+        else f"{op0.name}_{op1.name}"
+    )
     tagged._nki_engine = "vector"
     tagged._nki_inputs = tuple(
         item for item in (data, operand0, operand1)
@@ -1187,7 +1191,7 @@ def activation(
     bias_value = _activation_operand(bias, data_value.shape, "bias")
     output_value = _array(op.run(data_value * scale_value + bias_value))
     tagged = _store(dst, output_value.reshape(dst.shape))
-    tagged._nki_api = "activation"
+    tagged._nki_api = str(op.name)
     tagged._nki_engine = "scalar"
     # Keep bias/scale in the recorded inputs so cross-engine dependencies
     # resolve correctly. The cost model treats an activation as one data

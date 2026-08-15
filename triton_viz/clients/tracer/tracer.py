@@ -250,7 +250,9 @@ class Tracer(Client):
             self.records.append(rec)
 
         @self.lock_fn
-        def post_reduce_sum_callback(ret, input, axis=None, keep_dims=False):
+        def post_reduce_sum_callback(
+            ret, input, axis=None, keep_dims=False, api_op="reduce_sum"
+        ):
             if not self.sample:
                 return
             input_data = getattr(getattr(input, "handle", None), "data", None)
@@ -278,6 +280,7 @@ class Tracer(Client):
                 output_storage=_storage(ret),
                 output_range=_range(ret),
                 output_version=_version(ret),
+                api_op=str(api_op or "reduce_sum"),
             )
             rec.call_path = extract_user_frames(num_frames=1)
             ret._trace_record = rec
