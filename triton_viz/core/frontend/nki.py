@@ -28,6 +28,14 @@ except ModuleNotFoundError:
 
 def _nki_dot_adapter(x: Any, y: Any, *_args: Any, **_kwargs: Any) -> AdapterResult:
     assert HAS_NKI
+    # Tilebench TensorE kernels use
+    # ``nisa.nc_matmul(stationary=..., moving=...)``, which is lowered onto
+    # ``nki_builder.nc_matmul``. That operation already carries the transpose
+    # in its definition, so flag it for the tracer.
+    stationary = _kwargs.get("stationary")
+    moving = _kwargs.get("moving")
+    if stationary is not None and moving is not None:
+        return AdapterResult(stationary, moving, transpose_input=True)
     # Preserve the original operand object (and thus its ``data_ptr()``) instead
     # of materializing a transposed copy, so the recorded ``Dot.input_ptrs`` can
     # be matched against the producing transfer's ``dst_ptr``. The transpose is
@@ -57,6 +65,7 @@ if HAS_NKI:
             "load": Load,
             "store": Store,
             "matmul": Dot,
+            "nc_matmul": Dot,
             "sum": ReduceSum,
             "arange": MakeRange,
             # Elementwise/reduction/activation compute APIs -> one general record.

@@ -9,9 +9,19 @@ except (
     raise ModuleNotFoundError(
         "NeuronX dependencies are missing. Install triton-viz[nki] to enable the NKI interpreter."
     ) from exc
+try:
+    import neuronxcc.nki.isa as nisa
+except (  # pragma: no cover - only hit when optional deps missing
+    ModuleNotFoundError
+) as exc:
+    raise ModuleNotFoundError(
+        "NeuronX dependencies are missing. Install triton-viz[nki] to enable the NKI interpreter."
+    ) from exc
 import inspect
 import textwrap
 from dataclasses import dataclass
+from typing import Any
+
 from ..frontend.nki_transform import transform_code
 from ..masked_load_store import masked_load, masked_store
 
@@ -20,6 +30,57 @@ from ..masked_load_store import masked_load, masked_store
 class _StorageState:
     identity: int
     version: int = 0
+
+
+class ParDim:
+    """Partition-dimension shape marker compatible with ``nl.par_dim``."""
+
+    def __init__(self, value: int) -> None:
+        self.value = int(value)
+        if self.value <= 0:
+            raise ValueError(f"par_dim must be positive, received {value}")
+
+    def __int__(self) -> int:
+        return self.value
+
+    def __index__(self) -> int:
+        return self.value
+
+    def __repr__(self) -> str:
+        return f"par_dim({self.value})"
+
+
+def par_dim(value: int) -> ParDim:
+    """Return a partition-dimension shape marker."""
+    return ParDim(value)
+
+
+def ds(start: int, size: int) -> slice:
+    """Return a dynamic-slice equivalent accepted by NumPy indexing."""
+    return slice(int(start), int(start) + int(size))
+
+
+class MGridResult:
+    """Small compatibility object exposing ``.p`` and ``.x`` index arrays."""
+
+    def __init__(self, data: np.ndarray, p: "NDArray", x: "NDArray") -> None:
+        self.data = data
+        self.p = p
+        self.x = x
+
+
+class MGrid:
+    """Compatibility stand-in for ``nl.mgrid`` used by Tilebench kernels."""
+
+    def __getitem__(self, key: Any) -> MGridResult:
+        mesh = np.mgrid[key]
+        if getattr(mesh, "ndim", 0) < 2 or mesh.shape[0] != 2:
+            raise ValueError("NKI mgrid simulation expects exactly two index axes")
+        return MGridResult(
+            mesh,
+            NDArray(value=np.asarray(mesh[0]), name="mgrid_p"),
+            NDArray(value=np.asarray(mesh[1]), name="mgrid_x"),
+        )
 
 
 class NDArray:
@@ -173,6 +234,26 @@ class NDArray:
         raise TypeError(
             f"Unsupported operand type(s) for {op_symbol}: 'NDArray' and '{type(other).__name__}'"
         )
+
+    def __iadd__(self, other):
+        """Mutating add, matching TensorE/PSUM accumulation semantics."""
+        if isinstance(other, NDArray):
+            np.add(self.data, other.data, out=self.data, casting="unsafe")
+        elif np.isscalar(other):
+            np.add(self.data, other, out=self.data, casting="unsafe")
+        else:
+            return NotImplemented
+        version = self.mark_write()
+        # The frontend emits the Dot record before Python performs the in-place
+        # accumulation. Retarget the already-emitted record to the physical
+        # destination storage/version written by ``+=``.
+        record = getattr(other, "_trace_record", None)
+        if record is not None and hasattr(record, "output_storage"):
+            record.output_ptr = self.data_ptr()
+            record.output_storage = self.storage_id()
+            record.output_range = self.byte_range()
+            record.output_version = version
+        return self
 
     def _rbinary_op(self, other, op_func, op_name, op_symbol):
         if isinstance(other, NDArray):
@@ -432,7 +513,41 @@ class Builder:
         )
 
     def copy(self, x: NDArray, **kwargs):
-        return self._unary_op(x, np.copy, "copy", **kwargs)
+        dtype = kwargs.pop("dtype", None)
+        value = x.data.astype(dtype) if dtype is not None else np.copy(x.data)
+        nd = NDArray(value=value, name=f"{x.name}_copy", **kwargs)
+        return self._tag(nd, "copy", "vector", (x,))
+
+    def nc_transpose(self, src: NDArray, **kwargs):
+        """Functional TensorE nc_transpose for the legacy Tilebench interpreter.
+
+        ``nc_transpose`` operates on an on-chip tile and is frequently used as
+        ``dst[...] = nisa.nc_transpose(src[...])``. The returned view shares the
+        source storage, so later ``Dot``/load dependencies still resolve through
+        the same allocation identity.
+        """
+        return NDArray(value=src.data.T, name=f"{src.name}_nc_transpose", **kwargs)
+
+    def nc_matmul(
+        self,
+        stationary: NDArray,
+        moving: NDArray,
+        *,
+        dst: NDArray | None = None,
+        **kwargs,
+    ) -> NDArray:
+        """Functional ``nisa.nc_matmul``: computes ``stationary.T @ moving``."""
+        lhs = np.asarray(stationary.data).T
+        rhs = np.asarray(moving.data)
+        value = lhs @ rhs
+        if dst is not None:
+            dst.data[...] = np.asarray(dst.data) + value
+            return dst
+        return NDArray(
+            value=value,
+            name=f"{stationary.name}_{moving.name}_nc_matmul",
+            buffer=kwargs.pop("buffer", nl.psum),
+        )
 
     def sum(self, x: NDArray, *args, mask=None, **kwargs):
         if mask is not None:
@@ -571,9 +686,10 @@ def nki_patch_lang(scope=None):
     _set_attr(nl, "affine_range", nki_builder.range)
     _set_attr(nl, "static_range", nki_builder.range)
     _set_attr(nl, "sequential_range", nki_builder.range)
-    nl.par_dim
+    _set_attr(nl, "par_dim", par_dim)
+    _set_attr(nl, "ds", ds)
     _set_attr(nl, "zeros", nki_builder.zeros)
-    _set_attr(nl, "mgrid", NDArray(value=np.mgrid, buffer=nl.sbuf, name="mgrid"))
+    _set_attr(nl, "mgrid", MGrid())
     _set_attr(nl, "matmul", nki_builder.matmul)
     _set_attr(nl, "copy", nki_builder.copy)
     _set_attr(nl, "sum", nki_builder.sum)
@@ -598,6 +714,8 @@ def nki_patch_lang(scope=None):
 
     # attention-specific
     _set_attr(nl, "load_transpose2d", nki_builder.load_transpose2d)
+    _set_attr(nisa, "nc_matmul", nki_builder.nc_matmul)
+    _set_attr(nisa, "nc_transpose", nki_builder.nc_transpose)
     # nisa.affine_select
     # nl.tensor_reduce
     # nisa.activation

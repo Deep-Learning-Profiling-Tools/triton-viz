@@ -319,6 +319,12 @@ class Tracer(Client):
                 output_storage=_storage(ret),
                 output_range=_range(ret),
                 output_version=_version(ret),
+                input_dtypes=tuple(
+                    str(value.dtype)
+                    for value in (input, other)
+                    if hasattr(value, "dtype")
+                ),
+                output_dtype=str(ret.dtype) if hasattr(ret, "dtype") else None,
             )
             rec.call_path = extract_user_frames(num_frames=1)
             ret._trace_record = rec
