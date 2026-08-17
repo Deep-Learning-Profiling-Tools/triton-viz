@@ -65,9 +65,33 @@ def fit_rows(path: Path, run_ids: set[str] | None = None) -> list[dict]:
         # Level B prices one instruction. A minority shape-specific lowering
         # branch belongs to Level A and must not change the per-instruction fit.
         # Require an unambiguous majority and report every excluded point.
-        if stable_points * 2 <= len(points):
-            continue
-        fit_points = [point for point in points if point[2] == stable_count]
+        if stable_points * 2 > len(points):
+            fit_points = [point for point in points if point[2] == stable_count]
+        else:
+            # On newer targets/compiler stacks, bookkeeping instructions may
+            # vary by shape even when the target engine's per-instruction cost
+            # remains stable.  Keep the same mechanism-level fit by selecting
+            # the most self-consistent instruction-count branch: the subset
+            # whose per-instruction active time is best described by one
+            # non-negative affine line.  This uses control data only.
+            candidates = []
+            for count, _ in count_histogram.items():
+                branch = [point for point in points if point[2] == count]
+                if len(branch) < 2:
+                    continue
+                x = np.asarray([point[0] for point in branch], dtype=float)
+                y = np.asarray([point[1] for point in branch], dtype=float)
+                slope, intercept = np.polyfit(x, y, 1)
+                if not all(
+                    math.isfinite(value) and value >= 0
+                    for value in (intercept, slope)
+                ):
+                    continue
+                rmse = float(np.sqrt(np.square(y - (intercept + slope * x)).mean()))
+                candidates.append((rmse, -len(branch), count, branch))
+            if not candidates:
+                continue
+            _, _, stable_count, fit_points = min(candidates)
         if len(fit_points) < 2:
             continue
         slope, intercept = np.polyfit(

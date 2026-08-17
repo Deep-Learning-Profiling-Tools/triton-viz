@@ -362,6 +362,24 @@ def _run_hardware(
         os.chdir(old)
 
 
+def _resolve_platform_target() -> str:
+    """Resolve the NKI compile target for the current NeuronDevice host.
+
+    Delegates to NKI's own target resolver, which honors
+    ``NEURON_PLATFORM_TARGET_OVERRIDE`` (highest priority), then an explicit
+    target, then hardware auto-detection via ``neuron-ls``. This keeps the
+    framework benchmark path identical on Inf2 (NeuronCore-v2, canonical
+    ``trn1``) and Trn2 (NeuronCore-v3, ``trn2``). Falls back to the env var or
+    ``trn2`` only if the resolver is unavailable.
+    """
+    try:
+        from nki.compiler.target import resolve_target
+
+        return resolve_target()
+    except Exception:
+        return os.environ.get("NEURON_PLATFORM_TARGET_OVERRIDE") or "trn2"
+
+
 def _run_hardware_framework(
     op: str,
     inputs: list[np.ndarray],
@@ -396,7 +414,11 @@ def _run_hardware_framework(
     parameters = inspect.signature(kernel).parameters
     bound = {name: value for name, value in zip(parameters, inputs)}
     opts = CompileOptions(
-        target="inf2",
+        # Resolve the NKI compile target for the current host so the same path
+        # runs on both Inf2 (NeuronCore-v2 -> canonical "trn1") and Trn2
+        # (NeuronCore-v3 -> "trn2"). Honors NEURON_PLATFORM_TARGET_OVERRIDE,
+        # then NKI hardware auto-detection.
+        target=_resolve_platform_target(),
         lnc=1,
         artifacts_dir=str(artifact_dir),
         output_path=str(artifact_dir / "file.neff"),
@@ -413,6 +435,18 @@ def _run_hardware_framework(
         argument_names=argument_names,
         output_arg_names=output_arg_names,
     )
+    if not getattr(compiled, "input_specs", None):
+        compiled.input_specs = [
+            (spec.name, spec) for spec in nir.descriptor.input_specs
+        ]
+    if not getattr(compiled, "output_specs", None):
+        compiled.output_specs = [
+            (spec.name, spec) for spec in nir.descriptor.output_specs
+        ]
+    if not getattr(compiled, "input_output_aliases", None):
+        compiled.input_output_aliases = (
+            nir.descriptor.to_input_output_aliases_dict()
+        )
     exec_inputs = compiled.prepare_inputs(bound)
     # Guard against benchmarking a silently wrong kernel: run once and compare
     # the device output with the example's own NumPy reference implementation.
