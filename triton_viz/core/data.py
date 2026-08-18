@@ -51,6 +51,7 @@ class Store(Op):
     src_dtype: str | None = None
     dst_storage: int | None = None
     dst_version: int | None = None
+    mask_provided: bool = False
 
 
 @dataclass
@@ -77,6 +78,7 @@ class Load(Op):
     dst_storage: int | None = None
     dst_range: tuple[int, int] | None = None
     dst_version: int | None = None
+    mask_provided: bool = False
 
 
 @dataclass

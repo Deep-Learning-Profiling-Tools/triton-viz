@@ -40,7 +40,11 @@ def export_parquet(hardware_dir: Path, timeout_s: float = 45.0) -> Path:
         "--ignore-event-trace",
     ]
     process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        command,
+        cwd=hardware_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     deadline = time.monotonic() + timeout_s
     ready_since: float | None = None

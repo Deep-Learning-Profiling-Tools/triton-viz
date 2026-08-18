@@ -127,7 +127,16 @@ def _profile_summary(neff: Path, ntff: Path, output: Path) -> dict[str, Any]:
         "neuron-explorer", "view", "-n", str(neff), "-s", str(ntff),
         "--output-format", "summary-json", "--disable-ui", "--ignore-event-trace",
     ]
-    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+    # Neuron Explorer creates DuckDB metadata stores relative to its working
+    # directory.  Use the per-case hardware directory so concurrently profiled
+    # controls/holdouts never contend on repository-global ``tables/*.duckdb``.
+    completed = subprocess.run(
+        command,
+        cwd=output.parent,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     (output.parent / "explorer_stdout.txt").write_text(completed.stdout, encoding="utf-8")
     (output.parent / "explorer_stderr.txt").write_text(completed.stderr, encoding="utf-8")
     if completed.returncode:

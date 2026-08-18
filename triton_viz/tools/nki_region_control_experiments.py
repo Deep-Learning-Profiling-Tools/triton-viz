@@ -25,6 +25,9 @@ KINDS = [
     "elementwise_maximum",
     "elementwise_multiply",
     "elementwise_sigmoid",
+    "elementwise_maximum_masked",
+    "elementwise_multiply_masked",
+    "elementwise_sigmoid_masked",
     "masked_log_reduction",
     "softmax_reduction",
     "elementwise_multiply2",
@@ -79,6 +82,17 @@ def refresh_dependency_trace(root: Path, row: dict) -> int:
 
 def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Path):
     """Exact source-op declaration used when factory AST tracing is unavailable."""
+    explicit_mask_kinds = {
+        "elementwise_maximum_masked",
+        "elementwise_multiply_masked",
+        "elementwise_sigmoid_masked",
+        "mask_tail",
+        "two_pass_reduce_affine",
+        "two_pass_reduce_multiply",
+        "two_reductions_rsqrt_masked",
+        "elementwise_mixed_masked",
+    }
+    mask_provided = kind in explicit_mask_kinds
     tile = (
         min(2048, f)
         if kind == "mask_tail" or f > 2048
@@ -103,6 +117,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                     "offsets_shape": [load_p, 2048],
                     "mem_src": "HBM",
                     "mem_dst": "SBUF",
+                    "mask_provided": mask_provided,
                 }
             )
 
@@ -165,6 +180,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                     "offsets_shape": [p, 2048],
                     "mem_src": "SBUF",
                     "mem_dst": "HBM",
+                    "mask_provided": mask_provided,
                 }
             )
         _annotate_fusion_signature(events)
@@ -188,6 +204,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                     "offsets_shape": [load_p, 2048],
                     "mem_src": "HBM",
                     "mem_dst": "SBUF",
+                    "mask_provided": mask_provided,
                 }
             )
 
@@ -265,6 +282,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                     "offsets_shape": [p, 2048],
                     "mem_src": "SBUF",
                     "mem_dst": "HBM",
+                    "mask_provided": mask_provided,
                 }
             )
         _annotate_fusion_signature(events)
@@ -295,6 +313,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                     "offsets_shape": [load_p, tile],
                     "mem_src": "HBM",
                     "mem_dst": "SBUF",
+                    "mask_provided": mask_provided,
                 }
             )
         arities = None
@@ -307,6 +326,12 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
         elif kind == "elementwise_multiply":
             tokens, arities = ["multiply"], [1]
         elif kind == "elementwise_sigmoid":
+            tokens, arities = ["sigmoid"], [1]
+        elif kind == "elementwise_maximum_masked":
+            tokens, arities = ["maximum"], [1]
+        elif kind == "elementwise_multiply_masked":
+            tokens, arities = ["multiply"], [1]
+        elif kind == "elementwise_sigmoid_masked":
             tokens, arities = ["sigmoid"], [1]
         elif kind == "masked_log_reduction":
             tokens, arities = (
@@ -485,6 +510,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                         "offsets_shape": [load_p, tile],
                         "mem_src": "HBM",
                         "mem_dst": "SBUF",
+                        "mask_provided": mask_provided,
                     }
                 )
             previous = 5000 + block * 100
@@ -530,6 +556,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                 "offsets_shape": [p, tile],
                 "mem_src": "SBUF",
                 "mem_dst": "HBM",
+                "mask_provided": mask_provided,
             }
         )
     _annotate_fusion_signature(events)
@@ -633,7 +660,7 @@ def main(argv=None):
         default=["float32", "bfloat16"],
     )
     parser.add_argument("--chains", nargs="*", type=int, default=[1, 2, 4, 8])
-    parser.add_argument("--p", type=int, default=128)
+    parser.add_argument("--p", type=int, nargs="*", default=[128])
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--no-hardware", action="store_true")
@@ -659,64 +686,65 @@ def main(argv=None):
     completed = {
         row.get("case") for row in rows if row.get("case") and not row.get("error")
     }
-    for dtype in args.dtypes:
-        dims = args.free_dims
-        for kind in args.kinds:
-            chains = (
-                args.chains if kind in {"elementwise_one", "elementwise_two"} else [1]
-            )
-            for f in dims:
-                if f > 2048 and kind not in {
-                    "mask_tail",
-                    "two_pass_reduce_affine",
-                    "two_pass_reduce_multiply",
-                }:
-                    continue
-                for chain in chains:
-                    case_name = _case_name(kind, args.p, f, chain, dtype)
-                    if case_name in completed:
-                        if args.refresh_dependency_traces:
-                            existing = next(
-                                row for row in rows if row.get("case") == case_name
+    for p in args.p:
+        for dtype in args.dtypes:
+            dims = args.free_dims
+            for kind in args.kinds:
+                chains = (
+                    args.chains if kind in {"elementwise_one", "elementwise_two"} else [1]
+                )
+                for f in dims:
+                    if f > 2048 and kind not in {
+                        "mask_tail",
+                        "two_pass_reduce_affine",
+                        "two_pass_reduce_multiply",
+                    }:
+                        continue
+                    for chain in chains:
+                        case_name = _case_name(kind, p, f, chain, dtype)
+                        if case_name in completed:
+                            if args.refresh_dependency_traces:
+                                existing = next(
+                                    row for row in rows if row.get("case") == case_name
+                                )
+                                count = refresh_dependency_trace(args.output_dir, existing)
+                                existing["dependency_trace_source"] = "runtime_nki"
+                                existing["dependency_trace_events"] = count
+                                print(
+                                    f"REFRESH dependency trace {case_name} ({count} events)",
+                                    flush=True,
+                                )
+                                continue
+                            print(f"SKIP completed {case_name}", flush=True)
+                            continue
+                        rows = [row for row in rows if row.get("case") != case_name]
+                        print(kind, dtype, p, f, chain, flush=True)
+                        try:
+                            rows.append(
+                                run_case(
+                                    args.output_dir,
+                                    kind,
+                                    p,
+                                    f,
+                                    chain,
+                                    dtype,
+                                    args.warmup,
+                                    args.iters,
+                                    not args.no_hardware,
+                                )
                             )
-                            count = refresh_dependency_trace(args.output_dir, existing)
-                            existing["dependency_trace_source"] = "runtime_nki"
-                            existing["dependency_trace_events"] = count
+                        except Exception as exc:  # noqa: BLE001 - preserve all cases in the audit CSV
                             print(
-                                f"REFRESH dependency trace {case_name} ({count} events)",
+                                f"ERROR {kind} {dtype} p={p} F={f} chain={chain}: {exc!r}",
                                 flush=True,
                             )
-                            continue
-                        print(f"SKIP completed {case_name}", flush=True)
-                        continue
-                    rows = [row for row in rows if row.get("case") != case_name]
-                    print(kind, dtype, f, chain, flush=True)
-                    try:
-                        rows.append(
-                            run_case(
-                                args.output_dir,
-                                kind,
-                                args.p,
-                                f,
-                                chain,
-                                dtype,
-                                args.warmup,
-                                args.iters,
-                                not args.no_hardware,
-                            )
-                        )
-                    except Exception as exc:  # noqa: BLE001 - preserve all cases in the audit CSV
-                        print(
-                            f"ERROR {kind} {dtype} F={f} chain={chain}: {exc!r}",
-                            flush=True,
-                        )
-                        rows.append({"case": case_name, "error": repr(exc)})
-                    fields = sorted({key for row in rows for key in row})
-                    with results_path.open("w", newline="", encoding="utf-8") as file:
-                        writer = csv.DictWriter(file, fieldnames=fields)
-                        writer.writeheader()
-                        writer.writerows(rows)
-    return 1 if any("error" in row for row in rows) else 0
+                            rows.append({"case": case_name, "error": repr(exc)})
+                        fields = sorted({key for row in rows for key in row})
+                        with results_path.open("w", newline="", encoding="utf-8") as file:
+                            writer = csv.DictWriter(file, fieldnames=fields)
+                            writer.writeheader()
+                            writer.writerows(rows)
+    return 1 if any(row.get("error") for row in rows) else 0
 
 
 if __name__ == "__main__":

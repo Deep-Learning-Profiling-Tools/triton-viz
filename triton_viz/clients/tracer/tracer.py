@@ -162,6 +162,7 @@ class Tracer(Client):
                 dst_storage=_storage(ret),
                 dst_range=_range(ret),
                 dst_version=_version(ret),
+                mask_provided=mask is not None,
             )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)
@@ -198,6 +199,7 @@ class Tracer(Client):
                 src_dtype=str(value.dtype),
                 dst_storage=_storage(tensor),
                 dst_version=_version(tensor) + 1,
+                mask_provided=mask is not None,
             )
             rec.call_path = extract_user_frames(num_frames=1)
             self.records.append(rec)

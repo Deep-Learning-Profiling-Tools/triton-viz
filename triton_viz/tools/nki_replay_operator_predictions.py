@@ -95,6 +95,9 @@ FIELDS = [
     "micro_dag_timing_exact_count",
     "micro_dag_timing_interpolated_count",
     "micro_dag_timing_aggregate_count",
+    "micro_dag_source_region_count",
+    "micro_dag_exact_region_count",
+    "micro_dag_all_regions_covered",
 ]
 
 
@@ -507,6 +510,15 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "micro_dag_timing_aggregate_count": int(
                     components.get("micro_dag_timing_aggregate_count", 0)
+                ),
+                "micro_dag_source_region_count": int(
+                    components.get("micro_dag_source_region_count", 0)
+                ),
+                "micro_dag_exact_region_count": int(
+                    components.get("micro_dag_exact_region_count", 0)
+                ),
+                "micro_dag_all_regions_covered": int(
+                    components.get("micro_dag_all_regions_covered", 0)
                 ),
             }
         )

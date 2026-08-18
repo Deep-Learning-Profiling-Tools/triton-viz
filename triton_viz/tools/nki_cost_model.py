@@ -1879,7 +1879,13 @@ def _expand_lowering_groups(
                 engine: (value[0], value[1]) for engine, value in structured.items()
             }
         if not targets:
-            expanded.extend(members)
+            for member in members:
+                retained = dict(member)
+                retained["micro_dag_match"] = "missing"
+                retained["micro_dag_region"] = str(
+                    member.get("source_region_id") or group
+                )
+                expanded.append(retained)
             index = end
             continue
 
@@ -2055,6 +2061,9 @@ def _expand_lowering_groups(
                         "micro_event_id": node_id,
                         "micro_event_predecessors": predecessors[node_id],
                         "micro_dag_match": "exact",
+                        "micro_dag_region": str(
+                            event.get("source_region_id") or group
+                        ),
                         "micro_dag_order": node_index,
                         "micro_dag_timing_source": (
                             "opcode_control_surface"
@@ -2089,6 +2098,9 @@ def _expand_lowering_groups(
                     "micro_event_id": f"publish:{group}",
                     "micro_event_predecessors": sorted(sinks),
                     "micro_dag_match": "exact",
+                    "micro_dag_region": str(
+                        event.get("source_region_id") or group
+                    ),
                     "input_ptrs": [],
                     "input_storages": [],
                     "input_ranges": [],
@@ -2132,6 +2144,9 @@ def _expand_lowering_groups(
                     ),
                     "lowered_from_signature": signature,
                     "micro_dag_match": dag_match,
+                    "micro_dag_region": str(
+                        event.get("source_region_id") or group
+                    ),
                     "micro_dag_order": target_index,
                     # Publish the logical result only once; otherwise parallel
                     # target engines would create artificial WAW hazards.
@@ -2282,13 +2297,31 @@ def simulate(
     tensor_startup_ns = 0.0
     tensor_domain_ood = 0
     micro_dag_engine_coverage: set[str] = set()
+    source_compute_regions = {
+        str(event.get("source_region_id") or event.get("fusion_group"))
+        for event in source_events
+        if event.get("region_ir") is not None
+    }
+    exact_micro_dag_regions = {
+        str(event.get("micro_dag_region"))
+        for event in events
+        if event.get("micro_dag_match") == "exact"
+        and event.get("micro_dag_region") is not None
+    }
+    complete_micro_dag_coverage = (
+        bool(source_compute_regions)
+        and source_compute_regions.issubset(exact_micro_dag_regions)
+    )
     micro_dag_unsupported_engine_events = 0
     micro_dag_timing_matches: Counter[str] = Counter()
     for event in events:
         if event.get("micro_dag_match") != "exact":
             continue
         engine = _canonical_engine(event.get("engine", ""), event.get("op", ""))
-        if float(event.get("scheduler_duration_override_ns") or 0.0) > 0:
+        if (
+            complete_micro_dag_coverage
+            and float(event.get("scheduler_duration_override_ns") or 0.0) > 0
+        ):
             micro_dag_engine_coverage.add(engine)
         micro_dag_timing_matches[str(event.get("micro_dag_timing_match") or "")] += 1
         micro_dag_unsupported_engine_events += len(
@@ -2599,6 +2632,9 @@ def simulate(
             "micro_dag_unsupported_engine_events": float(
                 micro_dag_unsupported_engine_events
             ),
+            "micro_dag_source_region_count": float(len(source_compute_regions)),
+            "micro_dag_exact_region_count": float(len(exact_micro_dag_regions)),
+            "micro_dag_all_regions_covered": float(complete_micro_dag_coverage),
             "micro_dag_timing_exact_count": float(
                 micro_dag_timing_matches.get("exact", 0)
             ),

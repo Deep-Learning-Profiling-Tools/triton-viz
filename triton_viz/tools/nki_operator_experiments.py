@@ -122,6 +122,33 @@ def _write_input_manifest(path: Path, inputs: list[Any], seed: int) -> None:
     )
 
 
+def _input_manifest_matches(path: Path, seed: int) -> bool:
+    """Only resume cases with the current deterministic-input contract."""
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if (
+        payload.get("schema") != "triton-viz.nki-operator-inputs-v1"
+        or int(payload.get("seed", -1)) != seed
+    ):
+        return False
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        return False
+    return all(
+        item.get("kind") != "ndarray"
+        or (
+            item.get("shape") is not None
+            and item.get("dtype")
+            and len(str(item.get("sha256") or "")) == 64
+        )
+        for item in inputs
+    )
+
+
 def _matmul_inputs(m: int, k: int, dtype: str) -> list[Any]:
     """Square-output Tilebench matmul inputs plus frozen compile-time tiles."""
     tile_m, tile_n, tile_k = 128, 512, 128
@@ -904,9 +931,14 @@ def main(argv: list[str] | None = None) -> int:
                     / f"{op}__r{r}__c{c}__{args.dtype}"
                     / "hardware/source_mapping/instruction_mapping.csv"
                 )
+                input_manifest = (
+                    out_dir
+                    / f"{op}__r{r}__c{c}__{args.dtype}"
+                    / "inputs.json"
+                )
                 if key in completed and (
                     not args.source_mapping or mapping_path.is_file()
-                ):
+                ) and _input_manifest_matches(input_manifest, args.seed):
                     print(
                         f"SKIP completed {op} rows={r} cols={c} {args.dtype}",
                         flush=True,

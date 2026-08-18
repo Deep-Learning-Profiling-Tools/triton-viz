@@ -165,39 +165,45 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
 
     control_kinds = [
         "elementwise_maximum",
+        "elementwise_maximum_masked",
         "elementwise_multiply",
+        "elementwise_multiply_masked",
         "elementwise_sigmoid",
+        "elementwise_sigmoid_masked",
+        "broadcast_multiply2",
+        "broadcast_affine",
         "masked_log_reduction",
         "two_pass_reduce_affine",
         "two_pass_reduce_multiply",
         "softmax_reduction",
     ]
-    _run(
-        _module(
-            "triton_viz.tools.nki_region_control_experiments",
-            "--output-dir",
-            root / "controls",
-            "--kinds",
-            *control_kinds,
-            "--free-dims",
-            128,
-            512,
-            1024,
-            2048,
-            4096,
-            "--dtypes",
-            "float32",
-            "bfloat16",
-            "--p",
-            128,
-            "--warmup",
-            10,
-            "--iters",
-            100,
-            "--resume",
-        ),
-        dry_run,
-    )
+    for partition_count in (1, 16, 128):
+        _run(
+            _module(
+                "triton_viz.tools.nki_region_control_experiments",
+                "--output-dir",
+                root / f"controls_p{partition_count}",
+                "--kinds",
+                *control_kinds,
+                "--free-dims",
+                128,
+                512,
+                1024,
+                2048,
+                4096,
+                "--dtypes",
+                "float32",
+                "bfloat16",
+                "--p",
+                partition_count,
+                "--warmup",
+                10,
+                "--iters",
+                100,
+                "--resume",
+            ),
+            dry_run,
+        )
 
     splits = _load_splits()
     for name, split in splits.items():
@@ -265,10 +271,26 @@ def fit(root: Path, dry_run: bool) -> None:
         dry_run,
     )
     structured = calibration / "structured_compute.csv"
+    partitioned_control_roots = [
+        root / "controls_p1",
+        root / "controls_p16",
+        root / "controls_p128",
+    ]
+    if dry_run or any(path.is_dir() for path in partitioned_control_roots):
+        control_roots = partitioned_control_roots
+        if not dry_run:
+            missing = [path for path in control_roots if not path.is_dir()]
+            if missing:
+                raise FileNotFoundError(
+                    "Partition-aware controls are incomplete; missing "
+                    + ", ".join(str(path) for path in missing)
+                )
+    else:
+        control_roots = [root / "controls"]
     _run(
         _module(
             "triton_viz.tools.nki_fit_structured_controls",
-            root / "controls",
+            *control_roots,
             "--compute-calibration-csv",
             compute,
             "--audit-output",
@@ -281,7 +303,7 @@ def fit(root: Path, dry_run: bool) -> None:
     _run(
         _module(
             "triton_viz.tools.nki_fit_structural_static_dma",
-            root / "controls",
+            *control_roots,
             "--output",
             calibration / "static_dma.csv",
         ),
@@ -320,7 +342,10 @@ def fit(root: Path, dry_run: bool) -> None:
     )
     if not dry_run:
         source_manifests = [
-            root / "controls" / "experiment_manifest.json",
+            *[
+                control_root / "experiment_manifest.json"
+                for control_root in control_roots
+            ],
             *sorted((root / "microbench").glob("*/run_manifest.json")),
         ]
         write_model_manifest(

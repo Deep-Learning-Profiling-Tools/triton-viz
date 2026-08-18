@@ -61,6 +61,45 @@ def elementwise_sigmoid_kernel(x, y):
 
 
 @nki.jit
+def elementwise_maximum_masked_kernel(x, y):
+    p, f = x.shape
+    tile_f = 2048
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+    mask = (pi < p) & (fi < f)
+    value = nl.maximum(
+        nl.load(x[pi, fi], mask=mask),
+        0.0,
+    )
+    nl.store(out[pi, fi], value=value, mask=mask)
+    return out
+
+
+@nki.jit
+def elementwise_multiply_masked_kernel(x, y):
+    p, f = x.shape
+    tile_f = 2048
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+    mask = (pi < p) & (fi < f)
+    value = nl.multiply(nl.load(x[pi, fi], mask=mask), 2.0)
+    nl.store(out[pi, fi], value=value, mask=mask)
+    return out
+
+
+@nki.jit
+def elementwise_sigmoid_masked_kernel(x, y):
+    p, f = x.shape
+    tile_f = 2048
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+    mask = (pi < p) & (fi < f)
+    value = nl.sigmoid(nl.load(x[pi, fi], mask=mask))
+    nl.store(out[pi, fi], value=value, mask=mask)
+    return out
+
+
+@nki.jit
 def masked_log_reduction_kernel(x, y):
     """Masked log/where/arithmetic/reduction compiler control."""
     p, f = x.shape
@@ -346,6 +385,9 @@ KERNELS = {
     "elementwise_maximum": elementwise_maximum_kernel,
     "elementwise_multiply": elementwise_multiply_kernel,
     "elementwise_sigmoid": elementwise_sigmoid_kernel,
+    "elementwise_maximum_masked": elementwise_maximum_masked_kernel,
+    "elementwise_multiply_masked": elementwise_multiply_masked_kernel,
+    "elementwise_sigmoid_masked": elementwise_sigmoid_masked_kernel,
     "masked_log_reduction": masked_log_reduction_kernel,
     "softmax_reduction": softmax_reduction_kernel,
     "elementwise_multiply2": elementwise_multiply2_kernel,

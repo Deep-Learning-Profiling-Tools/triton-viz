@@ -150,6 +150,9 @@ def build_region_ir(
     )
     logical_free = min(free_dim, logical_free) if logical_free else free_dim
     tail = logical_free < free_dim
+    has_explicit_mask = any(
+        bool(event.get("mask_provided")) for event in loads + stores
+    )
     dtypes = [
         str(dtype)
         for event in members
@@ -193,6 +196,7 @@ def build_region_ir(
         "logical_free_dim": logical_free,
         "free_block_count": math.ceil(logical_free / block_elems),
         "has_mask_or_tail": tail
+        or has_explicit_mask
         or "where" in tokens
         or any(
             int(event.get("active_lanes", 0))
@@ -212,6 +216,8 @@ def build_region_ir(
             for event in loads + stores
         ),
         "dag_edges": edges,
+        "has_explicit_mask": has_explicit_mask,
+        "has_tail": tail,
     }
     result["structural_key"] = region_ir_structural_key(result)
     return result

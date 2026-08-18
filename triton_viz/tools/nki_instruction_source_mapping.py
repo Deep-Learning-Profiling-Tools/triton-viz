@@ -41,6 +41,13 @@ _RUNTIME_OPCODES = {
     "EVENT_SEMAPHORE",
     "EVENT_SEMAPHORE_RANGE_CLEAR",
     "SET_ORDERING_MODE",
+    # Compiler/runtime bookkeeping. These instructions remain in the mapping
+    # and total-active audit, but they are not source-region payload work and
+    # must not change Level-A opcode fingerprints or effective counts.
+    "COMPARE_BRANCH",
+    "MODIFY_POOL_CONFIG",
+    "NOP",
+    "WRITE",
 }
 _ACTIVATION_SOURCE_TOKENS = {
     "exp",
